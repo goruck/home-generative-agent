@@ -1,4 +1,4 @@
-"""Switch platform for integration_blueprint."""
+"""Switch platform for home_generative_agent."""
 
 from __future__ import annotations
 

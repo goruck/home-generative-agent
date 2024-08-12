@@ -1,8 +1,8 @@
-"""Constants for integration_blueprint."""
+"""Constants for home_generative_agent."""
 
 from logging import Logger, getLogger
 
 LOGGER: Logger = getLogger(__package__)
 
-DOMAIN = "integration_blueprint"
+DOMAIN = "home_generative_agent"
 ATTRIBUTION = "Data provided by http://jsonplaceholder.typicode.com/"

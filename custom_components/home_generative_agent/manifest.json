@@ -1,0 +1,12 @@
+{
+  "domain": "home_generative_agent",
+  "name": "Home Generative Agent",
+  "codeowners": [
+    "@goruck"
+  ],
+  "config_flow": true,
+  "documentation": "https://github.com/goruck/home_generative_agent",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/goruck/home_generative_agent/issues",
+  "version": "0.0.0"
+}
