@@ -1,101 +1,114 @@
-"""Sample API Client."""
+"""Home Generative Agent Dummy API."""
 
-from __future__ import annotations
+import logging
+from dataclasses import dataclass
+from enum import StrEnum
+from random import choice, randrange
 
-import socket
-from typing import Any
-
-import aiohttp
-import async_timeout
-
-
-class IntegrationBlueprintApiClientError(Exception):
-    """Exception to indicate a general API error."""
+_LOGGER = logging.getLogger(__name__)
 
 
-class IntegrationBlueprintApiClientCommunicationError(
-    IntegrationBlueprintApiClientError,
-):
-    """Exception to indicate a communication error."""
+class DeviceType(StrEnum):
+    """Device types."""
+
+    TEMP_SENSOR = "temp_sensor"
+    DOOR_SENSOR = "door_sensor"
+    OTHER = "other"
 
 
-class IntegrationBlueprintApiClientAuthenticationError(
-    IntegrationBlueprintApiClientError,
-):
-    """Exception to indicate an authentication error."""
+DEVICES = [
+    {"id": 1, "type": DeviceType.TEMP_SENSOR},
+    {"id": 2, "type": DeviceType.TEMP_SENSOR},
+    {"id": 3, "type": DeviceType.TEMP_SENSOR},
+    {"id": 4, "type": DeviceType.TEMP_SENSOR},
+    {"id": 1, "type": DeviceType.DOOR_SENSOR},
+    {"id": 2, "type": DeviceType.DOOR_SENSOR},
+    {"id": 3, "type": DeviceType.DOOR_SENSOR},
+    {"id": 4, "type": DeviceType.DOOR_SENSOR},
+]
 
 
-def _verify_response_or_raise(response: aiohttp.ClientResponse) -> None:
-    """Verify that the response is valid."""
-    if response.status in (401, 403):
-        msg = "Invalid credentials"
-        raise IntegrationBlueprintApiClientAuthenticationError(
-            msg,
-        )
-    response.raise_for_status()
+@dataclass
+class Device:
+    """API device."""
+
+    device_id: int
+    device_unique_id: str
+    device_type: DeviceType
+    name: str
+    state: int | bool
 
 
-class IntegrationBlueprintApiClient:
-    """Sample API Client."""
+class API:
+    """Class for example API."""
 
-    def __init__(
-        self,
-        username: str,
-        password: str,
-        session: aiohttp.ClientSession,
-    ) -> None:
-        """Sample API Client."""
-        self._username = username
-        self._password = password
-        self._session = session
+    def __init__(self, host: str, user: str, pwd: str) -> None:
+        """Initialise."""
+        self.host = host
+        self.user = user
+        self.pwd = pwd
+        self.connected: bool = False
 
-    async def async_get_data(self) -> Any:
-        """Get data from the API."""
-        return await self._api_wrapper(
-            method="get",
-            url="https://jsonplaceholder.typicode.com/posts/1",
-        )
+    @property
+    def controller_name(self) -> str:
+        """Return the name of the controller."""
+        return self.host.replace(".", "_")
 
-    async def async_set_title(self, value: str) -> Any:
-        """Get data from the API."""
-        return await self._api_wrapper(
-            method="patch",
-            url="https://jsonplaceholder.typicode.com/posts/1",
-            data={"title": value},
-            headers={"Content-type": "application/json; charset=UTF-8"},
-        )
+    def connect(self) -> bool:
+        """Connect to api."""
+        if self.user == "test" and self.pwd == "1234":
+            self.connected = True
+            return True
+        raise APIAuthError("Error connecting to api. Invalid username or password.")
 
-    async def _api_wrapper(
-        self,
-        method: str,
-        url: str,
-        data: dict | None = None,
-        headers: dict | None = None,
-    ) -> Any:
-        """Get information from the API."""
-        try:
-            async with async_timeout.timeout(10):
-                response = await self._session.request(
-                    method=method,
-                    url=url,
-                    headers=headers,
-                    json=data,
-                )
-                _verify_response_or_raise(response)
-                return await response.json()
+    def disconnect(self) -> bool:
+        """Disconnect from api."""
+        self.connected = False
+        return True
 
-        except TimeoutError as exception:
-            msg = f"Timeout error fetching information - {exception}"
-            raise IntegrationBlueprintApiClientCommunicationError(
-                msg,
-            ) from exception
-        except (aiohttp.ClientError, socket.gaierror) as exception:
-            msg = f"Error fetching information - {exception}"
-            raise IntegrationBlueprintApiClientCommunicationError(
-                msg,
-            ) from exception
-        except Exception as exception:  # pylint: disable=broad-except
-            msg = f"Something really wrong happened! - {exception}"
-            raise IntegrationBlueprintApiClientError(
-                msg,
-            ) from exception
+    def get_devices(self) -> list[Device]:
+        """Get devices on api."""
+        return [
+            Device(
+                device_id=device.get("id"),
+                device_unique_id=self.get_device_unique_id(
+                    device.get("id"), device.get("type")
+                ),
+                device_type=device.get("type"),
+                name=self.get_device_name(device.get("id"), device.get("type")),
+                state=self.get_device_value(device.get("id"), device.get("type")),
+            )
+            for device in DEVICES
+        ]
+
+    def get_device_unique_id(self, device_id: str, device_type: DeviceType) -> str:
+        """Return a unique device id."""
+        if device_type == DeviceType.DOOR_SENSOR:
+            return f"{self.controller_name}_D{device_id}"
+        if device_type == DeviceType.TEMP_SENSOR:
+            return f"{self.controller_name}_T{device_id}"
+        return f"{self.controller_name}_Z{device_id}"
+
+    def get_device_name(self, device_id: str, device_type: DeviceType) -> str:
+        """Return the device name."""
+        if device_type == DeviceType.DOOR_SENSOR:
+            return f"DoorSensor{device_id}"
+        if device_type == DeviceType.TEMP_SENSOR:
+            return f"TempSensor{device_id}"
+        return f"OtherSensor{device_id}"
+
+    def get_device_value(self, device_id: str, device_type: DeviceType) -> int | bool:
+        """Get device random value."""
+        if device_type == DeviceType.DOOR_SENSOR:
+            return choice([True, False])
+        if device_type == DeviceType.TEMP_SENSOR:
+            return randrange(15, 28)
+        return randrange(1, 10)
+
+
+class APIAuthError(Exception):
+    """Exception class for auth error."""
+
+
+class APIConnectionError(Exception):
+    """Exception class for connection error."""

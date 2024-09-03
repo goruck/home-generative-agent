@@ -1,61 +1,117 @@
-"""Binary sensor platform for integration_blueprint."""
+"""Home Generative Agent Dummy Binary Sensor."""
 
-from __future__ import annotations
-
-from typing import TYPE_CHECKING
+import logging
 
 from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
     BinarySensorEntity,
-    BinarySensorEntityDescription,
 )
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .entity import IntegrationBlueprintEntity
+from .api import Device, DeviceType
+from .const import DOMAIN
+from .coordinator import HomeGenerativeAgentCoordinator
 
-if TYPE_CHECKING:
-    from homeassistant.core import HomeAssistant
-    from homeassistant.helpers.entity_platform import AddEntitiesCallback
-
-    from .coordinator import BlueprintDataUpdateCoordinator
-    from .data import IntegrationBlueprintConfigEntry
-
-ENTITY_DESCRIPTIONS = (
-    BinarySensorEntityDescription(
-        key="integration_blueprint",
-        name="Integration Blueprint Binary Sensor",
-        device_class=BinarySensorDeviceClass.CONNECTIVITY,
-    ),
-)
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
-    hass: HomeAssistant,  # noqa: ARG001 Unused function argument: `hass`
-    entry: IntegrationBlueprintConfigEntry,
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up the binary_sensor platform."""
-    async_add_entities(
-        IntegrationBlueprintBinarySensor(
-            coordinator=entry.runtime_data.coordinator,
-            entity_description=entity_description,
-        )
-        for entity_description in ENTITY_DESCRIPTIONS
-    )
+    """Set up the Binary Sensors."""
+    # This gets the data update coordinator from hass.data as specified in __init__.py
+    coordinator: HomeGenerativeAgentCoordinator = hass.data[DOMAIN][
+        config_entry.entry_id
+    ].coordinator
+
+    # Enumerate all the binary sensors in your data value from your DataUpdateCoordinato
+    # and add an instance of your binary sensor class to a list for each one.
+    binary_sensors = [
+        ExampleBinarySensor(coordinator, device)
+        for device in coordinator.data.devices
+        if device.device_type == DeviceType.DOOR_SENSOR
+    ]
+
+    # Create the binary sensors.
+    async_add_entities(binary_sensors)
 
 
-class IntegrationBlueprintBinarySensor(IntegrationBlueprintEntity, BinarySensorEntity):
-    """integration_blueprint binary_sensor class."""
+class ExampleBinarySensor(CoordinatorEntity, BinarySensorEntity):
+    """Implementation of a sensor."""
 
     def __init__(
-        self,
-        coordinator: BlueprintDataUpdateCoordinator,
-        entity_description: BinarySensorEntityDescription,
-    ) -> None:
-        """Initialize the binary_sensor class."""
+            self,
+            coordinator: HomeGenerativeAgentCoordinator,
+            device: Device
+        ) -> None:
+        """Initialise sensor."""
         super().__init__(coordinator)
-        self.entity_description = entity_description
+        self.device = device
+        self.device_id = device.device_id
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Update sensor with latest data from coordinator."""
+        # This method is called by your DataUpdateCoordinator when a successful update runs.
+        self.device = self.coordinator.get_device_by_id(
+            self.device.device_type, self.device_id
+        )
+        _LOGGER.debug("Device: %s", self.device)
+        self.async_write_ha_state()
 
     @property
-    def is_on(self) -> bool:
-        """Return true if the binary_sensor is on."""
-        return self.coordinator.data.get("title", "") == "foo"
+    def device_class(self) -> str:
+        """Return device class."""
+        # https://developers.home-assistant.io/docs/core/entity/binary-sensor#available-device-classes
+        return BinarySensorDeviceClass.DOOR
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device information."""
+        # Identifiers are what group entities into the same device.
+        # If your device is created elsewhere, you can just specify the indentifiers parameter.
+        # If your device connects via another device, add via_device parameter with the indentifiers of that device.
+        return DeviceInfo(
+            name=f"ExampleDevice{self.device.device_id}",
+            manufacturer="ACME Manufacturer",
+            model="Door&Temp v1",
+            sw_version="1.0",
+            identifiers={
+                (
+                    DOMAIN,
+                    f"{self.coordinator.data.controller_name}-{self.device.device_id}",
+                )
+            },
+        )
+
+    @property
+    def name(self) -> str:
+        """Return the name of the sensor."""
+        return self.device.name
+
+    @property
+    def is_on(self) -> bool | None:
+        """Return if the binary sensor is on."""
+        # This needs to enumerate to true or false
+        return self.device.state
+
+    @property
+    def unique_id(self) -> str:
+        """Return unique id."""
+        # All entities must have a unique id.  Think carefully what you want this to be as
+        # changing it later will cause HA to create new entities.
+        return f"{DOMAIN}-{self.device.device_unique_id}"
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        """Return the extra state attributes."""
+        # Add any additional attributes you want on your sensor.
+        attrs = {}
+        attrs["extra_info"] = "Extra Info"
+        return attrs
