@@ -1,57 +1,128 @@
-"""Sensor platform for home_generative_agent."""
+"""Home Generative Agent Dummy Sensor."""
 
-from __future__ import annotations
+import logging
 
-from typing import TYPE_CHECKING
-
-from homeassistant.components.sensor import SensorEntity, SensorEntityDescription
-
-from .entity import IntegrationBlueprintEntity
-
-if TYPE_CHECKING:
-    from homeassistant.core import HomeAssistant
-    from homeassistant.helpers.entity_platform import AddEntitiesCallback
-
-    from .coordinator import BlueprintDataUpdateCoordinator
-    from .data import IntegrationBlueprintConfigEntry
-
-ENTITY_DESCRIPTIONS = (
-    SensorEntityDescription(
-        key="integration_blueprint",
-        name="Integration Sensor",
-        icon="mdi:format-quote-close",
-    ),
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorStateClass,
 )
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import UnitOfTemperature
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
+
+from .api import Device, DeviceType
+from .const import DOMAIN
+from .coordinator import HomeGenerativeAgentCoordinator
+
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
-    hass: HomeAssistant,  # noqa: ARG001 Unused function argument: `hass`
-    entry: IntegrationBlueprintConfigEntry,
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up the sensor platform."""
-    async_add_entities(
-        IntegrationBlueprintSensor(
-            coordinator=entry.runtime_data.coordinator,
-            entity_description=entity_description,
-        )
-        for entity_description in ENTITY_DESCRIPTIONS
-    )
+    """Set up the Sensors."""
+    # This gets the data update coordinator from hass.data as specified in your __init__.py
+    coordinator: HomeGenerativeAgentCoordinator = hass.data[DOMAIN][
+        config_entry.entry_id
+    ].coordinator
+
+    # Enumerate all the sensors in your data value from your DataUpdateCoordinator and add an instance of your sensor class
+    # to a list for each one.
+    # This maybe different in your specific case, depending on how your data is structured
+    sensors = [
+        ExampleSensor(coordinator, device)
+        for device in coordinator.data.devices
+        if device.device_type == DeviceType.TEMP_SENSOR
+    ]
+
+    # Create the sensors.
+    async_add_entities(sensors)
 
 
-class IntegrationBlueprintSensor(IntegrationBlueprintEntity, SensorEntity):
-    """integration_blueprint Sensor class."""
+class ExampleSensor(CoordinatorEntity, SensorEntity):
+    """Implementation of a sensor."""
 
-    def __init__(
-        self,
-        coordinator: BlueprintDataUpdateCoordinator,
-        entity_description: SensorEntityDescription,
-    ) -> None:
-        """Initialize the sensor class."""
+    def __init__(self, coordinator: HomeGenerativeAgentCoordinator, device: Device) -> None:
+        """Initialise sensor."""
         super().__init__(coordinator)
-        self.entity_description = entity_description
+        self.device = device
+        self.device_id = device.device_id
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Update sensor with latest data from coordinator."""
+        # This method is called by your DataUpdateCoordinator when a successful update runs.
+        self.device = self.coordinator.get_device_by_id(
+            self.device.device_type, self.device_id
+        )
+        _LOGGER.debug("Device: %s", self.device)
+        self.async_write_ha_state()
 
     @property
-    def native_value(self) -> str | None:
-        """Return the native value of the sensor."""
-        return self.coordinator.data.get("body")
+    def device_class(self) -> str:
+        """Return device class."""
+        # https://developers.home-assistant.io/docs/core/entity/sensor/#available-device-classes
+        return SensorDeviceClass.TEMPERATURE
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device information."""
+        # Identifiers are what group entities into the same device.
+        # If your device is created elsewhere, you can just specify the indentifiers parameter.
+        # If your device connects via another device, add via_device parameter with the indentifiers of that device.
+        return DeviceInfo(
+            name=f"ExampleDevice{self.device.device_id}",
+            manufacturer="ACME Manufacturer",
+            model="Door&Temp v1",
+            sw_version="1.0",
+            identifiers={
+                (
+                    DOMAIN,
+                    f"{self.coordinator.data.controller_name}-{self.device.device_id}",
+                )
+            },
+        )
+
+    @property
+    def name(self) -> str:
+        """Return the name of the sensor."""
+        return self.device.name
+
+    @property
+    def native_value(self) -> int | float:
+        """Return the state of the entity."""
+        # Using native value and native unit of measurement, allows you to change units
+        # in Lovelace and HA will automatically calculate the correct value.
+        return float(self.device.state)
+
+    @property
+    def native_unit_of_measurement(self) -> str | None:
+        """Return unit of temperature."""
+        return UnitOfTemperature.CELSIUS
+
+    @property
+    def state_class(self) -> str | None:
+        """Return state class."""
+        # https://developers.home-assistant.io/docs/core/entity/sensor/#available-state-classes
+        return SensorStateClass.MEASUREMENT
+
+    @property
+    def unique_id(self) -> str:
+        """Return unique id."""
+        # All entities must have a unique id.  Think carefully what you want this to be as
+        # changing it later will cause HA to create new entities.
+        return f"{DOMAIN}-{self.device.device_unique_id}"
+
+    @property
+    def extra_state_attributes(self):
+        """Return the extra state attributes."""
+        # Add any additional attributes you want on your sensor.
+        attrs = {}
+        attrs["extra_info"] = "Extra Info"
+        return attrs

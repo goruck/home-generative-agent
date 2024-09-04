@@ -6,7 +6,9 @@
   ],
   "config_flow": true,
   "documentation": "https://github.com/goruck/home_generative_agent",
+  "integration_type": "service",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/goruck/home_generative_agent/issues",
-  "version": "0.0.0"
+  "single_config_entry": false,
+  "version": "0.1.0"
 }
