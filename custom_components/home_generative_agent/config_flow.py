@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import voluptuous as vol
 from homeassistant.config_entries import (
@@ -13,28 +13,53 @@ from homeassistant.config_entries import (
     OptionsFlow,
 )
 from homeassistant.const import (
-    CONF_HOST,
-    CONF_PASSWORD,
-    CONF_SCAN_INTERVAL,
-    CONF_USERNAME,
+    CONF_API_KEY,
+    CONF_LLM_HASS_API,
 )
-from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import llm
+from homeassistant.helpers.httpx_client import get_async_client
+from homeassistant.helpers.selector import (
+    NumberSelector,
+    NumberSelectorConfig,
+    SelectOptionDict,
+    SelectSelector,
+    SelectSelectorConfig,
+    TemplateSelector,
+)
+from langchain_openai import ChatOpenAI
 
-from .api import API, APIAuthError, APIConnectionError
-from .const import DEFAULT_SCAN_INTERVAL, DOMAIN, MIN_SCAN_INTERVAL
+from .const import (
+    CONF_CHAT_MODEL,
+    CONF_MAX_TOKENS,
+    CONF_PROMPT,
+    CONF_RECOMMENDED,
+    CONF_TEMPERATURE,
+    CONF_TOP_P,
+    DOMAIN,
+    RECOMMENDED_CHAT_MODEL,
+    RECOMMENDED_MAX_TOKENS,
+    RECOMMENDED_TEMPERATURE,
+    RECOMMENDED_TOP_P,
+)
+
+if TYPE_CHECKING:
+    from types import MappingProxyType
+
+    from homeassistant.core import HomeAssistant
 
 _LOGGER = logging.getLogger(__name__)
 
-# TODO adjust the data schema to the data that you need
 STEP_USER_DATA_SCHEMA = vol.Schema(
     {
-        vol.Required(CONF_HOST, description={"suggested_value": "10.10.10.1"}): str,
-        vol.Required(CONF_USERNAME, description={"suggested_value": "test"}): str,
-        vol.Required(CONF_PASSWORD, description={"suggested_value": "1234"}): str,
+        vol.Required(CONF_API_KEY): str,
     }
 )
-
+RECOMMENDED_OPTIONS = {
+    CONF_RECOMMENDED: True,
+    CONF_LLM_HASS_API: llm.LLM_API_ASSIST,
+    CONF_PROMPT: llm.DEFAULT_INSTRUCTIONS_PROMPT,
+}
 
 async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str, Any]:
     """
@@ -42,149 +67,157 @@ async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str,
 
     Data has the keys from STEP_USER_DATA_SCHEMA with values provided by the user.
     """
-    # TODO validate the data can be used to set up a connection.
-
-    # If your PyPI package is not built with async, pass your methods
-    # to the executor:
-    # await hass.async_add_executor_job(
-    #     your_validate_func, data[CONF_USERNAME], data[CONF_PASSWORD]
-    # )
-
-    api = API(data[CONF_HOST], data[CONF_USERNAME], data[CONF_PASSWORD])
-    try:
-        await hass.async_add_executor_job(api.connect)
-        # If you cannot connect, raise CannotConnect
-        # If the authentication is wrong, raise InvalidAuth
-    except APIAuthError as err:
-        raise InvalidAuthError from err
-    except APIConnectionError as err:
-        raise CannotConnectError from err
-    return {"title": f"Home Generative Agent - {data[CONF_HOST]}"}
-
+    client = ChatOpenAI(
+        api_key=data[CONF_API_KEY], async_client=get_async_client(hass)
+    )
+    await hass.async_add_executor_job(client.bind(timeout=10).get_name)
 
 class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for Example Integration."""
+    """Handle a config flow for Home Generative Agent."""
 
     VERSION = 1
-
-    @staticmethod
-    @callback
-    def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
-        """Get the options flow for this handler."""
-        # Remove this method and the ExampleOptionsFlowHandler class
-        # if you do not want any options for your integration.
-        return HomeGenerativeAgentOptionsFlow(config_entry)
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Handle the initial step."""
-        # Called when you initiate adding an integration via the UI
-        errors: dict[str, str] = {}
+        if user_input is None:
+            return self.async_show_form(
+                step_id="user", data_schema=STEP_USER_DATA_SCHEMA
+            )
 
-        if user_input is not None:
-            # The form has been filled in and submitted, so process the data provided.
-            try:
-                # Validate that the setup data is valid and if not handle errors.
-                # The errors["base"] values match the values in your strings.json
-                # and translation files.
-                info = await validate_input(self.hass, user_input)
-            except CannotConnectError:
-                errors["base"] = "cannot_connect"
-            except InvalidAuthError:
-                errors["base"] = "invalid_auth"
-            except Exception:  # pylint: disable=broad-except
-                _LOGGER.exception("Unexpected exception")
-                errors["base"] = "unknown"
+        errors = {}
 
-            if "base" not in errors:
-                # Validation was successful, so create a unique id for this instance
-                # of the integration and create the config entry.
-                await self.async_set_unique_id(info.get("title"))
-                self._abort_if_unique_id_configured()
-                return self.async_create_entry(title=info["title"], data=user_input)
+        try:
+            await validate_input(self.hass, user_input)
+        # TODO: improve error handling
+        except Exception:
+            _LOGGER.exception("Unexpected exception")
+            errors["base"] = "unknown"
+        else:
+            return self.async_create_entry(
+                title="HGA",
+                data=user_input,
+                options=RECOMMENDED_OPTIONS,
+            )
 
-        # Show initial form.
         return self.async_show_form(
             step_id="user", data_schema=STEP_USER_DATA_SCHEMA, errors=errors
         )
 
-    async def async_step_reconfigure(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Add reconfigure step to allow to reconfigure a config entry."""
-        # This methid displays a reconfigure option in the integration and is
-        # different to options.
-        # It can be used to reconfigure any of the data submitted when first installed.
-        errors: dict[str, str] = {}
-        config_entry = self.hass.config_entries.async_get_entry(
-            self.context["entry_id"]
-        )
-
-        if user_input is not None:
-            try:
-                user_input[CONF_HOST] = config_entry.data[CONF_HOST]
-                await validate_input(self.hass, user_input)
-            except CannotConnectError:
-                errors["base"] = "cannot_connect"
-            except InvalidAuthError:
-                errors["base"] = "invalid_auth"
-            except Exception:  # pylint: disable=broad-except
-                _LOGGER.exception("Unexpected exception")
-                errors["base"] = "unknown"
-            else:
-                return self.async_update_reload_and_abort(
-                    config_entry,
-                    unique_id=config_entry.unique_id,
-                    data={**config_entry.data, **user_input},
-                    reason="reconfigure_successful",
-                )
-        return self.async_show_form(
-            step_id="reconfigure",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(
-                        CONF_USERNAME, default=config_entry.data[CONF_USERNAME]
-                    ): str,
-                    vol.Required(CONF_PASSWORD): str,
-                }
-            ),
-            errors=errors,
-        )
-
+    @staticmethod
+    def async_get_options_flow(
+        config_entry: ConfigEntry,
+    ) -> OptionsFlow:
+        """Create the options flow."""
+        return HomeGenerativeAgentOptionsFlow(config_entry)
 
 class HomeGenerativeAgentOptionsFlow(OptionsFlow):
-    """Handles the options flow."""
+    """Config flow options handler."""
 
     def __init__(self, config_entry: ConfigEntry) -> None:
         """Initialize options flow."""
         self.config_entry = config_entry
-        self.options = dict(config_entry.options)
-
-    async def async_step_init(self, user_input: dict | None = None) -> ConfigFlowResult:
-        """Handle options flow."""
-        if user_input is not None:
-            options = self.config_entry.options | user_input
-            return self.async_create_entry(title="", data=options)
-
-        # It is recommended to prepopulate options fields with default values if available.
-        # These will be the same default values you use on your coordinator for setting variable values
-        # if the option has not been set.
-        data_schema = vol.Schema(
-            {
-                vol.Required(
-                    CONF_SCAN_INTERVAL,
-                    default=self.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
-                ): (vol.All(vol.Coerce(int), vol.Clamp(min=MIN_SCAN_INTERVAL))),
-            }
+        self.last_rendered_recommended = config_entry.options.get(
+            CONF_RECOMMENDED, False
         )
 
-        return self.async_show_form(step_id="init", data_schema=data_schema)
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Manage the options."""
+        options: dict[str, Any] | MappingProxyType[str, Any] = self.config_entry.options
 
+        if user_input is not None:
+            if user_input[CONF_RECOMMENDED] == self.last_rendered_recommended:
+                if user_input[CONF_LLM_HASS_API] == "none":
+                    user_input.pop(CONF_LLM_HASS_API)
+                return self.async_create_entry(title="", data=user_input)
+
+            # Re-render the options again, now with the recommended options shown/hidden
+            self.last_rendered_recommended = user_input[CONF_RECOMMENDED]
+
+            options = {
+                CONF_RECOMMENDED: user_input[CONF_RECOMMENDED],
+                CONF_PROMPT: user_input[CONF_PROMPT],
+                CONF_LLM_HASS_API: user_input[CONF_LLM_HASS_API],
+            }
+
+        schema = config_option_schema(self.hass, options)
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(schema),
+        )
 
 class CannotConnectError(HomeAssistantError):
     """Error to indicate we cannot connect."""
 
-
 class InvalidAuthError(HomeAssistantError):
     """Error to indicate there is invalid auth."""
+
+def config_option_schema(
+    hass: HomeAssistant,
+    options: dict[str, Any] | MappingProxyType[str, Any],
+) -> dict:
+    """Return a schema for completion options."""
+    hass_apis: list[SelectOptionDict] = [
+        SelectOptionDict(
+            label="No control",
+            value="none",
+        )
+    ]
+    hass_apis.extend(
+        SelectOptionDict(
+            label=api.name,
+            value=api.id,
+        )
+        for api in llm.async_get_apis(hass)
+    )
+
+    schema = {
+        vol.Optional(
+            CONF_PROMPT,
+            description={
+                "suggested_value": options.get(
+                    CONF_PROMPT, llm.DEFAULT_INSTRUCTIONS_PROMPT
+                )
+            },
+        ): TemplateSelector(),
+        vol.Optional(
+            CONF_LLM_HASS_API,
+            description={"suggested_value": options.get(CONF_LLM_HASS_API)},
+            default="none",
+        ): SelectSelector(SelectSelectorConfig(options=hass_apis)),
+        vol.Required(
+            CONF_RECOMMENDED, default=options.get(CONF_RECOMMENDED, False)
+        ): bool,
+    }
+
+    if options.get(CONF_RECOMMENDED):
+        return schema
+
+    schema.update(
+        {
+            vol.Optional(
+                CONF_CHAT_MODEL,
+                description={"suggested_value": options.get(CONF_CHAT_MODEL)},
+                default=RECOMMENDED_CHAT_MODEL,
+            ): str,
+            vol.Optional(
+                CONF_MAX_TOKENS,
+                description={"suggested_value": options.get(CONF_MAX_TOKENS)},
+                default=RECOMMENDED_MAX_TOKENS,
+            ): int,
+            vol.Optional(
+                CONF_TOP_P,
+                description={"suggested_value": options.get(CONF_TOP_P)},
+                default=RECOMMENDED_TOP_P,
+            ): NumberSelector(NumberSelectorConfig(min=0, max=1, step=0.05)),
+            vol.Optional(
+                CONF_TEMPERATURE,
+                description={"suggested_value": options.get(CONF_TEMPERATURE)},
+                default=RECOMMENDED_TEMPERATURE,
+            ): NumberSelector(NumberSelectorConfig(min=0, max=2, step=0.05)),
+        }
+    )
+    return schema
