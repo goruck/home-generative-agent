@@ -1,8 +1,9 @@
-"""Conversation support for Home Generative Agent."""
+"""Conversation support for Home Generative Agent using langgraph."""
 from __future__ import annotations
 
 import json
 import logging
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
 import voluptuous as vol
@@ -10,25 +11,22 @@ from homeassistant.components import assist_pipeline, conversation
 from homeassistant.components.conversation import trace
 from homeassistant.const import CONF_LLM_HASS_API, MATCH_ALL
 from homeassistant.exceptions import (
-    ConfigEntryNotReady,
     HomeAssistantError,
     TemplateError,
 )
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import intent, llm, template
-from homeassistant.helpers.httpx_client import get_async_client
 from homeassistant.util import ulid
-from langchain.agents import (
-    AgentExecutor,
-    create_openai_tools_agent,
-    create_structured_chat_agent,
-)
 from langchain_core.messages import (
     AIMessage,
+    BaseMessage,
     HumanMessage,
     SystemMessage,
     ToolMessage,
+    trim_messages,
 )
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import START, MessagesState, StateGraph
 from voluptuous_openapi import convert
 
 from .const import (
@@ -50,13 +48,11 @@ if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
+    from langchain_openai import ChatOpenAI
 
     from . import HGAConfigEntry
 
 LOGGER = logging.getLogger(__name__)
-
-# Max number of back and forth with the LLM to generate a response
-MAX_TOOL_ITERATIONS = 10
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -78,6 +74,78 @@ def _format_tool(
     if tool.description:
         tool_spec["description"] = tool.description
     return {"type": "function", "function": tool_spec}
+
+def _state_modifier(state: MessagesState) -> list[BaseMessage]:
+    """Given the agent state, return a list of messages for the chat model."""
+    return trim_messages(
+        state["messages"],
+        token_counter=len,  # len will count the number of messages rather than tokens
+        max_tokens=5,  # allow up to 5 messages.
+        strategy="last",
+        # Most chat models expect that chat history starts with either:
+        # (1) a HumanMessage or
+        # (2) a SystemMessage followed by a HumanMessage
+        # start_on="human" makes sure we produce a valid chat history
+        start_on="human",
+        # Usually, we want to keep the SystemMessage
+        # if it's present in the original history.
+        # The SystemMessage has special instructions for the model.
+        include_system=True,
+        allow_partial=False,
+    )
+
+async def _call_tools(
+        state: MessagesState, api: llm.API
+    ) -> dict[str, list[ToolMessage]]:
+    """Coroutine to call Home Assistant LLM tools."""
+    # Tool calls will be the last message in state.
+    tool_calls = state["messages"][-1].tool_calls
+
+    tool_responses: list[ToolMessage] = []
+    for tool_call in tool_calls:
+        tool_input = llm.ToolInput(
+            tool_name=tool_call["name"],
+            tool_args= tool_call["args"],
+        )
+        LOGGER.debug(
+            "Tool call: %s(%s)", tool_input.tool_name, tool_input.tool_args
+        )
+
+        try:
+            tool_response = await api.async_call_tool(tool_input)
+        except (HomeAssistantError, vol.Invalid) as e:
+            tool_response = {"error": type(e).__name__}
+            if str(e):
+                tool_response["error_text"] = str(e)
+
+        LOGGER.debug("Tool response: %s", tool_response)
+        tool_responses.append(
+            ToolMessage(
+                content=json.dumps(tool_response),
+                tool_call_id=tool_call["id"],
+                name=tool_call["name"],
+            )
+        )
+    return {"messages": tool_responses}
+
+def _should_continue(state: MessagesState) -> Literal["action", "__end__"]:
+    """Return the next node in graph to execute."""
+    last_message = state["messages"][-1]
+    # If there is no function call, then we finish
+    if not last_message.tool_calls:
+        return "__end__"
+    # Otherwise if there is, we continue
+    return "action"
+
+def _call_model(
+        state: MessagesState, model: ChatOpenAI
+    ) -> dict[str, list[BaseMessage]]:
+    """Define function that calls the model."""
+    # Trim message history to manage context window length.
+    modified_state = _state_modifier(state)
+    response = model.invoke(modified_state)
+    # We return a list, because this will get added to the existing list
+    return {"messages": response}
 
 class HGAConversationEntity(
     conversation.ConversationEntity, conversation.AbstractConversationAgent
@@ -106,6 +174,7 @@ class HGAConversationEntity(
             self._attr_supported_features = (
                 conversation.ConversationEntityFeature.CONTROL
             )
+        self.memory = MemorySaver()
 
     async def async_added_to_hass(self) -> None:
         """When entity is added to Home Assistant."""
@@ -226,7 +295,7 @@ class HGAConversationEntity(
 
         prompt = "\n".join(prompt_parts)
 
-        # Create a copy of the variable because we attach it to the trace
+        # Create a copy of messages because we attach it to the trace
         messages = [
             SystemMessage(content=prompt),
             *messages[1:],
@@ -240,75 +309,68 @@ class HGAConversationEntity(
             {"messages": messages, "tools": llm_api.tools if llm_api else None},
         )
 
-        client = self.entry.runtime_data
+        model = self.entry.runtime_data
+        model_with_tools = model.bind_tools(tools)
 
-        # Interact with LLM and pass tools
-        for _iteration in range(MAX_TOOL_ITERATIONS):
-            try:
-                response = await client.bind_tools(tools).ainvoke(messages)
-            except HomeAssistantError as err:
-                LOGGER.error(err, exc_info=err)
-                intent_response = intent.IntentResponse(language=user_input.language)
-                intent_response.async_set_error(
-                    intent.IntentResponseErrorCode.UNKNOWN,
-                    f"Something went wrong: {err}",
-                )
-                return conversation.ConversationResult(
-                    response=intent_response, conversation_id=user_input.conversation_id
-                )
-            except Exception as err:
-                LOGGER.error(err, exc_info=err)
-                intent_response = intent.IntentResponse(language=user_input.language)
-                intent_response.async_set_error(
-                    intent.IntentResponseErrorCode.UNKNOWN,
-                    f"Something went wrong: {err}",
-                )
-                return conversation.ConversationResult(
-                    response=intent_response, conversation_id=user_input.conversation_id
-                )
+        # Define a new graph
+        workflow = StateGraph(MessagesState)
 
-            LOGGER.debug("Response: %s", response)
+        # Define the two nodes we will cycle between
+        workflow.add_node("agent", partial(_call_model, model=model_with_tools))
+        workflow.add_node("action", partial(_call_tools, api=llm_api))
 
-            self.history[conversation_id] = messages
+        # Set the entrypoint as `agent`
+        # This means that this node is the first one called
+        workflow.add_edge(START, "agent")
 
-            tool_calls = response.tool_calls
-            if not tool_calls or not llm_api:
-                break
+        # We now add a conditional edge
+        workflow.add_conditional_edges(
+            # First, we define the start node. We use `agent`.
+            # This means these are the edges taken after the `agent` node is called.
+            "agent",
+            # Next, we pass in the function that will determine which node is called next.
+            _should_continue,
+        )
 
-            messages.append(
-                AIMessage(
-                    content=response.content,
-                    tool_calls=tool_calls,
-                )
+        # We now add a normal edge from `tools` to `agent`.
+        # This means that after `tools` is called, `agent` node is called next.
+        workflow.add_edge("action", "agent")
+
+        # Complile graph into a LangChain Runnable.
+        app = workflow.compile(checkpointer=self.memory, debug=True)
+
+        app_config = {"configurable": {"thread_id": conversation_id}}
+
+        # Interact with app.
+        try:
+            response = await app.ainvoke({"messages": messages}, config=app_config)
+        except HomeAssistantError as err:
+            LOGGER.error(err, exc_info=err)
+            intent_response = intent.IntentResponse(language=user_input.language)
+            intent_response.async_set_error(
+                intent.IntentResponseErrorCode.UNKNOWN,
+                f"Something went wrong: {err}",
+            )
+            return conversation.ConversationResult(
+                response=intent_response, conversation_id=user_input.conversation_id
+            )
+        except Exception as err:
+            LOGGER.error(err, exc_info=err)
+            intent_response = intent.IntentResponse(language=user_input.language)
+            intent_response.async_set_error(
+                intent.IntentResponseErrorCode.UNKNOWN,
+                f"Something went wrong: {err}",
+            )
+            return conversation.ConversationResult(
+                response=intent_response, conversation_id=user_input.conversation_id
             )
 
-            for tool_call in tool_calls:
-                tool_input = llm.ToolInput(
-                    tool_name=tool_call["name"],
-                    tool_args= tool_call["args"],
-                )
-                LOGGER.debug(
-                    "Tool call: %s(%s)", tool_input.tool_name, tool_input.tool_args
-                )
+        LOGGER.debug("Response: %s", response)
 
-                try:
-                    tool_response = await llm_api.async_call_tool(tool_input)
-                except (HomeAssistantError, vol.Invalid) as e:
-                    tool_response = {"error": type(e).__name__}
-                    if str(e):
-                        tool_response["error_text"] = str(e)
-
-                LOGGER.debug("Tool response: %s", tool_response)
-                messages.append(
-                    ToolMessage(
-                        content=json.dumps(tool_response),
-                        tool_call_id=tool_call["id"],
-                        name=tool_call["name"],
-                    )
-                )
+        self.history[conversation_id] = messages
 
         intent_response = intent.IntentResponse(language=user_input.language)
-        intent_response.async_set_speech(response.content)
+        intent_response.async_set_speech(response["messages"][-1].content)
         return conversation.ConversationResult(
             response=intent_response, conversation_id=user_input.conversation_id
         )
