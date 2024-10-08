@@ -76,7 +76,7 @@ def _format_tool(
     return {"type": "function", "function": tool_spec}
 
 def _state_modifier(state: MessagesState) -> list[BaseMessage]:
-    """Given the agent state, return a list of messages for the chat model."""
+    """Given the agent state, return a list of trimmed messages for the chat model."""
     return trim_messages(
         state["messages"],
         token_counter=len,  # len will count the number of messages rather than tokens
@@ -137,16 +137,6 @@ def _should_continue(state: MessagesState) -> Literal["action", "__end__"]:
     # Otherwise if there is, we continue
     return "action"
 
-def _call_model(
-        state: MessagesState, model: ChatOpenAI
-    ) -> dict[str, list[BaseMessage]]:
-    """Define function that calls the model."""
-    # Trim message history to manage context window length.
-    modified_state = _state_modifier(state)
-    response = model.invoke(modified_state)
-    # We return a list, because this will get added to the existing list
-    return {"messages": response}
-
 class HGAConversationEntity(
     conversation.ConversationEntity, conversation.AbstractConversationAgent
 ):
@@ -158,10 +148,7 @@ class HGAConversationEntity(
     def __init__(self, entry: ConfigEntry) -> None:
         """Initialize the agent."""
         self.entry = entry
-        self.history: dict[
-            str,
-            list[AIMessage | SystemMessage | ToolMessage | HumanMessage]
-        ] = {}
+        self.app_config: dict[str, dict[str, str]] = {}
         self._attr_unique_id = entry.entry_id
         self._attr_device_info = dr.DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
@@ -174,6 +161,7 @@ class HGAConversationEntity(
             self._attr_supported_features = (
                 conversation.ConversationEntityFeature.CONTROL
             )
+        # TODO:Change memory to langgraph-checkpoint-postgres to make robust
         self.memory = MemorySaver()
 
     async def async_added_to_hass(self) -> None:
@@ -235,24 +223,20 @@ class HGAConversationEntity(
                _format_tool(tool, llm_api.custom_serializer) for tool in llm_api.tools
             ]
 
+        # Conversation IDs are ULIDs. Generate a new one if not provided.
+        # If an old ULID is passed in, generate a new one to indicate
+        # a new conversation was started. If the user picks their own, they
+        # want to track a conversation, so respect it.
         if user_input.conversation_id is None:
             conversation_id = ulid.ulid_now()
-            messages = []
-        elif user_input.conversation_id in self.history:
+        elif user_input.conversation_id in self.app_config["configurable"].values():
             conversation_id = user_input.conversation_id
-            messages = self.history[conversation_id]
         else:
-            # Conversation IDs are ULIDs. We generate a new one if not provided.
-            # If an old ULID is passed in, we will generate a new one to indicate
-            # a new conversation was started. If the user picks their own, they
-            # want to track a conversation and we respect it.
             try:
                 ulid.ulid_to_bytes(user_input.conversation_id)
                 conversation_id = ulid.ulid_now()
             except ValueError:
                 conversation_id = user_input.conversation_id
-
-            messages = []
 
         if (
             user_input.context
@@ -295,25 +279,31 @@ class HGAConversationEntity(
 
         prompt = "\n".join(prompt_parts)
 
-        # Create a copy of messages because we attach it to the trace
-        messages = [
-            SystemMessage(content=prompt),
-            *messages[1:],
-            HumanMessage(content=user_input.text),
-        ]
-
-        LOGGER.debug("Prompt: %s", messages)
         LOGGER.debug("Tools: %s", tools)
-        trace.async_conversation_trace_append(
-            trace.ConversationTraceEventType.AGENT_DETAIL,
-            {"messages": messages, "tools": llm_api.tools if llm_api else None},
-        )
 
         model = self.entry.runtime_data
         model_with_tools = model.bind_tools(tools)
 
+        # TODO: make graph creation a function and call here
+
         # Define a new graph
         workflow = StateGraph(MessagesState)
+
+        def _call_model(
+                state: MessagesState, model: ChatOpenAI
+            ) -> dict[str, list[BaseMessage]]:
+            """Define function that calls the model."""
+            messages = [SystemMessage(content=prompt)] + state["messages"]
+            LOGGER.debug("Messages: %s", messages)
+            trace.async_conversation_trace_append(
+                trace.ConversationTraceEventType.AGENT_DETAIL,
+                {"messages": messages, "tools": llm_api.tools if llm_api else None},
+            )
+            # Trim message history to manage context window length.
+            #modified_state = _state_modifier(state)
+            response = model.invoke(messages)
+            # Return a list, because it will get added to the existing list.
+            return {"messages": response}
 
         # Define the two nodes we will cycle between
         workflow.add_node("agent", partial(_call_model, model=model_with_tools))
@@ -325,25 +315,28 @@ class HGAConversationEntity(
 
         # We now add a conditional edge
         workflow.add_conditional_edges(
-            # First, we define the start node. We use `agent`.
+            # First, define the start node. We use `agent`.
             # This means these are the edges taken after the `agent` node is called.
             "agent",
-            # Next, we pass in the function that will determine which node is called next.
+            # Next, pass in the function that will determine which node is called next.
             _should_continue,
         )
 
-        # We now add a normal edge from `tools` to `agent`.
+        # Now add a normal edge from `tools` to `agent`.
         # This means that after `tools` is called, `agent` node is called next.
         workflow.add_edge("action", "agent")
 
         # Complile graph into a LangChain Runnable.
         app = workflow.compile(checkpointer=self.memory, debug=True)
 
-        app_config = {"configurable": {"thread_id": conversation_id}}
+        self.app_config = {"configurable": {"thread_id": conversation_id}}
 
         # Interact with app.
         try:
-            response = await app.ainvoke({"messages": messages}, config=app_config)
+            response = await app.ainvoke(
+                {"messages": [HumanMessage(content=user_input.text)]},
+                config=self.app_config
+            )
         except HomeAssistantError as err:
             LOGGER.error(err, exc_info=err)
             intent_response = intent.IntentResponse(language=user_input.language)
@@ -352,7 +345,7 @@ class HGAConversationEntity(
                 f"Something went wrong: {err}",
             )
             return conversation.ConversationResult(
-                response=intent_response, conversation_id=user_input.conversation_id
+                response=intent_response, conversation_id=conversation_id
             )
         except Exception as err:
             LOGGER.error(err, exc_info=err)
@@ -362,17 +355,15 @@ class HGAConversationEntity(
                 f"Something went wrong: {err}",
             )
             return conversation.ConversationResult(
-                response=intent_response, conversation_id=user_input.conversation_id
+                response=intent_response, conversation_id=conversation_id
             )
 
         LOGGER.debug("Response: %s", response)
 
-        self.history[conversation_id] = messages
-
         intent_response = intent.IntentResponse(language=user_input.language)
         intent_response.async_set_speech(response["messages"][-1].content)
         return conversation.ConversationResult(
-            response=intent_response, conversation_id=user_input.conversation_id
+            response=intent_response, conversation_id=conversation_id
         )
 
     async def _async_entry_update_listener(
