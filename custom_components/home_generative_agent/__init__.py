@@ -7,16 +7,8 @@ from typing import TYPE_CHECKING
 
 from homeassistant.const import CONF_API_KEY, Platform
 from homeassistant.helpers.httpx_client import get_async_client
+from langchain_core.runnables import ConfigurableField
 from langchain_openai import ChatOpenAI
-
-from .const import (
-    CONF_CHAT_MODEL,
-    CONF_MAX_TOKENS,
-    CONF_TEMPERATURE,
-    RECOMMENDED_CHAT_MODEL,
-    RECOMMENDED_MAX_TOKENS,
-    RECOMMENDED_TEMPERATURE,
-)
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -30,29 +22,26 @@ type HGAConfigEntry = ConfigEntry[ChatOpenAI]
 
 async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     """Set up Home generative Agent from a config entry."""
-    api_key = entry.data.get(CONF_API_KEY)
-    model_name = entry.data.get(CONF_CHAT_MODEL, RECOMMENDED_CHAT_MODEL)
-    temperature = entry.options.get(CONF_TEMPERATURE, RECOMMENDED_TEMPERATURE)
-    max_tokens = entry.options.get(CONF_MAX_TOKENS, RECOMMENDED_MAX_TOKENS)
-    client = ChatOpenAI( #TODO: fix blocking call
-        api_key=api_key,
-        model=model_name,
-        temperature=temperature,
-        max_tokens=max_tokens,
+    model = ChatOpenAI( #TODO: fix blocking call
+        api_key=entry.data.get(CONF_API_KEY),
+        cache=True,
+        timeout=10,
         http_async_client=get_async_client(hass)
+    ).configurable_fields(
+        model_name=ConfigurableField(id="model_name"),
+        temperature=ConfigurableField(id="temperature"),
+        max_tokens=ConfigurableField(id="max_tokens"),
+        top_p=ConfigurableField(id="top_p"),
     )
 
-    # Cache current platform data which gets added to each request (caching done by library)
-    #_ = await hass.async_add_executor_job(client.platform_headers)
-
     try:
-        await hass.async_add_executor_job(client.bind(timeout=10).get_name)
+        await hass.async_add_executor_job(model.get_name)
     # TODO: improve error handling.
     except Exception:
         _LOGGER.exception("Unexpected exception")
         return False
 
-    entry.runtime_data = client
+    entry.runtime_data = model
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
