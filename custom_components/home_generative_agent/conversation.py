@@ -17,8 +17,11 @@ from homeassistant.exceptions import (
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import intent, llm, template
 from homeassistant.util import ulid
+from langchain_core.caches import InMemoryCache
+from langchain_core.globals import set_llm_cache
 from langchain_core.messages import (
     AIMessage,
+    AnyMessage,
     BaseMessage,
     HumanMessage,
     SystemMessage,
@@ -31,12 +34,14 @@ from voluptuous_openapi import convert
 
 from .const import (
     CONF_CHAT_MODEL,
+    CONF_MAX_MESSAGES,
     CONF_MAX_TOKENS,
     CONF_PROMPT,
     CONF_TEMPERATURE,
     CONF_TOP_P,
     DOMAIN,
     RECOMMENDED_CHAT_MODEL,
+    RECOMMENDED_MAX_MESSAGES,
     RECOMMENDED_MAX_TOKENS,
     RECOMMENDED_TEMPERATURE,
     RECOMMENDED_TOP_P,
@@ -75,24 +80,55 @@ def _format_tool(
         tool_spec["description"] = tool.description
     return {"type": "function", "function": tool_spec}
 
-def _state_modifier(state: MessagesState) -> list[BaseMessage]:
+def _state_modifier(
+        state: MessagesState, max_messages: Literal["int"]
+    ) -> list[AnyMessage]:
     """Given the agent state, return a list of trimmed messages for the chat model."""
     return trim_messages(
-        state["messages"],
-        token_counter=len,  # len will count the number of messages rather than tokens
-        max_tokens=5,  # allow up to 5 messages.
+        state,
+        token_counter=len,
+        # When token_counter=len, each message will be counted as a single token.
+        max_tokens=max_messages,
+        # Keep the last <= n_count tokens of the messages.
         strategy="last",
         # Most chat models expect that chat history starts with either:
         # (1) a HumanMessage or
         # (2) a SystemMessage followed by a HumanMessage
         # start_on="human" makes sure we produce a valid chat history
         start_on="human",
+        # Most chat models expect that chat history ends with either:
+        # (1) a HumanMessage or
+        # (2) a ToolMessage
+        end_on=("human", "tool"),
         # Usually, we want to keep the SystemMessage
         # if it's present in the original history.
         # The SystemMessage has special instructions for the model.
         include_system=True,
         allow_partial=False,
     )
+
+async def _call_model(
+        state: MessagesState,
+        model: ChatOpenAI,
+        prompt: Literal["str"],
+        api: llm.API,
+        max_messages: Literal["int"]
+    ) -> dict[str, list[BaseMessage]]:
+    """Define function that calls the model."""
+    messages = [SystemMessage(content=prompt)] + state["messages"]
+    trace.async_conversation_trace_append(
+        trace.ConversationTraceEventType.AGENT_DETAIL,
+        {"messages": messages, "tools": api.tools if api else None},
+    )
+    # Trim message history to manage context window length.
+    trimmed_messages= _state_modifier(
+        state=messages,
+        max_messages=max_messages
+    )
+    LOGGER.debug("Trimmed messages: %s", trimmed_messages)
+    response = await model.ainvoke(trimmed_messages)
+    # Return a list, because it will get added to the existing list.
+    return {"messages": response}
 
 async def _call_tools(
         state: MessagesState, api: llm.API
@@ -163,6 +199,8 @@ class HGAConversationEntity(
             )
         # TODO:Change memory to langgraph-checkpoint-postgres to make robust
         self.memory = MemorySaver()
+
+        set_llm_cache(InMemoryCache())
 
     async def async_added_to_hass(self) -> None:
         """When entity is added to Home Assistant."""
@@ -277,36 +315,46 @@ class HGAConversationEntity(
         if llm_api:
             prompt_parts.append(llm_api.api_prompt)
 
-        prompt = "\n".join(prompt_parts)
+        prompt: Literal["str"] = "\n".join(prompt_parts)
 
         LOGGER.debug("Tools: %s", tools)
 
         model = self.entry.runtime_data
-        model_with_tools = model.bind_tools(tools)
+        model_with_config = model.with_config(
+            {"configurable":
+                {
+                    "model_name": self.entry.options.get(
+                        CONF_CHAT_MODEL, RECOMMENDED_CHAT_MODEL
+                    ),
+                    "temperature": self.entry.options.get(
+                        CONF_TEMPERATURE, RECOMMENDED_TEMPERATURE
+                    ),
+                    "max_tokens": self.entry.options.get(
+                        CONF_MAX_TOKENS, RECOMMENDED_MAX_TOKENS
+                    ),
+                    "top_p": self.entry.options.get(CONF_TOP_P, RECOMMENDED_TOP_P),
+                }
+            }
+        )
+        model_with_tools = model_with_config.bind_tools(tools)
 
         # TODO: make graph creation a function and call here
 
         # Define a new graph
         workflow = StateGraph(MessagesState)
 
-        def _call_model(
-                state: MessagesState, model: ChatOpenAI
-            ) -> dict[str, list[BaseMessage]]:
-            """Define function that calls the model."""
-            messages = [SystemMessage(content=prompt)] + state["messages"]
-            LOGGER.debug("Messages: %s", messages)
-            trace.async_conversation_trace_append(
-                trace.ConversationTraceEventType.AGENT_DETAIL,
-                {"messages": messages, "tools": llm_api.tools if llm_api else None},
-            )
-            # Trim message history to manage context window length.
-            #modified_state = _state_modifier(state)
-            response = model.invoke(messages)
-            # Return a list, because it will get added to the existing list.
-            return {"messages": response}
+        max_messages = self.entry.options.get(
+            CONF_MAX_MESSAGES, RECOMMENDED_MAX_MESSAGES
+        )
 
         # Define the two nodes we will cycle between
-        workflow.add_node("agent", partial(_call_model, model=model_with_tools))
+        workflow.add_node("agent", partial(
+            _call_model,
+            model=model_with_tools,
+            prompt=prompt,
+            api=llm_api,
+            max_messages=max_messages)
+        )
         workflow.add_node("action", partial(_call_tools, api=llm_api))
 
         # Set the entrypoint as `agent`
