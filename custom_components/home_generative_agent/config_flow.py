@@ -31,6 +31,7 @@ from langchain_openai import ChatOpenAI
 
 from .const import (
     CONF_CHAT_MODEL,
+    CONF_MAX_MESSAGES,
     CONF_MAX_TOKENS,
     CONF_PROMPT,
     CONF_RECOMMENDED,
@@ -38,6 +39,7 @@ from .const import (
     CONF_TOP_P,
     DOMAIN,
     RECOMMENDED_CHAT_MODEL,
+    RECOMMENDED_MAX_MESSAGES,
     RECOMMENDED_MAX_TOKENS,
     RECOMMENDED_TEMPERATURE,
     RECOMMENDED_TOP_P,
@@ -207,6 +209,11 @@ def config_option_schema(
                 CONF_MAX_TOKENS,
                 description={"suggested_value": options.get(CONF_MAX_TOKENS)},
                 default=RECOMMENDED_MAX_TOKENS,
+            ): int,
+            vol.Optional(
+                CONF_MAX_MESSAGES,
+                description={"suggested_value": options.get(CONF_MAX_MESSAGES)},
+                default=RECOMMENDED_MAX_MESSAGES,
             ): int,
             vol.Optional(
                 CONF_TOP_P,
