@@ -1,14 +1,20 @@
 {
   "domain": "home_generative_agent",
   "name": "Home Generative Agent",
-  "codeowners": [
-    "@goruck"
-  ],
+  "after_dependencies": ["assist_pipeline", "intent"],
+  "codeowners": ["@goruck"],
   "config_flow": true,
+  "dependencies": ["conversation"],
   "documentation": "https://github.com/goruck/home_generative_agent",
   "integration_type": "service",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/goruck/home_generative_agent/issues",
   "single_config_entry": false,
-  "version": "0.1.0"
+  "version": "0.1.0",
+  "requirements": [
+    "langchain==0.3.3",
+    "langchain-openai==0.2.2",
+    "langgraph==0.2.35",
+    "openai==1.35.7"
+  ]
 }
