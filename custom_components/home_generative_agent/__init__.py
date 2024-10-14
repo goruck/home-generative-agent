@@ -24,7 +24,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     """Set up Home generative Agent from a config entry."""
     model = ChatOpenAI( #TODO: fix blocking call
         api_key=entry.data.get(CONF_API_KEY),
-        cache=True,
         timeout=10,
         http_async_client=get_async_client(hass)
     ).configurable_fields(
