@@ -20,8 +20,8 @@ jobs:
       - name: "ZIP the integration directory"
         shell: "bash"
         run: |
-          cd "${{ github.workspace }}/custom_components/integration_blueprint"
-          zip integration_blueprint.zip -r ./
+          cd "${{ github.workspace }}/custom_components/home_generative_agent"
+          zip home_generative_agent.zip -r ./
 
       - name: "Upload the ZIP file to the release"
         uses: "softprops/action-gh-release@v2.0.8"
