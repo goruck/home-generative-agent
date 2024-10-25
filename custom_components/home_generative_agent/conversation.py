@@ -1,13 +1,14 @@
 """Conversation support for Home Generative Agent using langgraph."""
 from __future__ import annotations
 
+import base64
 import json
 import logging
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
 import voluptuous as vol
-from homeassistant.components import assist_pipeline, conversation
+from homeassistant.components import assist_pipeline, camera, conversation
 from homeassistant.components.conversation import trace
 from homeassistant.const import CONF_LLM_HASS_API, MATCH_ALL
 from homeassistant.exceptions import (
@@ -20,7 +21,6 @@ from homeassistant.util import ulid
 from langchain_core.caches import InMemoryCache
 from langchain_core.globals import set_llm_cache
 from langchain_core.messages import (
-    AIMessage,
     AnyMessage,
     BaseMessage,
     HumanMessage,
@@ -28,6 +28,7 @@ from langchain_core.messages import (
     ToolMessage,
     trim_messages,
 )
+from langchain_core.tools import tool
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import START, MessagesState, StateGraph
 from voluptuous_openapi import convert
@@ -59,19 +60,10 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
-async def async_setup_entry(
-    hass: HomeAssistant,
-    config_entry: HGAConfigEntry,
-    async_add_entities: AddEntitiesCallback,
-) -> None:
-    """Set up conversation entities."""
-    agent = HGAConversationEntity(config_entry)
-    async_add_entities([agent])
-
 def _format_tool(
     tool: llm.Tool, custom_serializer: Callable[[Any], Any] | None
 ) -> dict[str, Any]:
-    """Format tool specification."""
+    """Format Home Assistant LLM tools to be compatible with OpenAI."""
     tool_spec = {
         "name": tool.name,
         "parameters": convert(tool.parameters, custom_serializer=custom_serializer),
@@ -111,14 +103,14 @@ async def _call_model(
         state: MessagesState,
         model: ChatOpenAI,
         prompt: Literal["str"],
-        api: llm.API,
+        tools: list[Any],
         max_messages: Literal["int"]
     ) -> dict[str, list[BaseMessage]]:
-    """Define function that calls the model."""
+    """Coroutine to calls the model."""
     messages = [SystemMessage(content=prompt)] + state["messages"]
     trace.async_conversation_trace_append(
         trace.ConversationTraceEventType.AGENT_DETAIL,
-        {"messages": messages, "tools": api.tools if api else None},
+        {"messages": messages, "tools": tools if tools else None},
     )
     # Trim message history to manage context window length.
     trimmed_messages= _state_modifier(
@@ -131,37 +123,52 @@ async def _call_model(
     return {"messages": response}
 
 async def _call_tools(
-        state: MessagesState, api: llm.API
+        state: MessagesState, lc_tools: dict, api: llm.API
     ) -> dict[str, list[ToolMessage]]:
-    """Coroutine to call Home Assistant LLM tools."""
+    """Coroutine to call Home Assistant or langchain LLM tools."""
     # Tool calls will be the last message in state.
     tool_calls = state["messages"][-1].tool_calls
 
     tool_responses: list[ToolMessage] = []
     for tool_call in tool_calls:
-        tool_input = llm.ToolInput(
-            tool_name=tool_call["name"],
-            tool_args= tool_call["args"],
-        )
+        tool_name = tool_call["name"]
+        tool_args = tool_call["args"]
+
         LOGGER.debug(
-            "Tool call: %s(%s)", tool_input.tool_name, tool_input.tool_args
+            "Tool call: %s(%s)", tool_name, tool_args
         )
 
-        try:
-            tool_response = await api.async_call_tool(tool_input)
-        except (HomeAssistantError, vol.Invalid) as e:
-            tool_response = {"error": type(e).__name__}
-            if str(e):
-                tool_response["error_text"] = str(e)
+        # A langchain tool was requested.
+        if tool_name in lc_tools:
+            lc_tool = lc_tools[tool_name.lower()]
+            try:
+                tool_response = await lc_tool.ainvoke(tool_call)
+            except Exception as e:
+                tool_response = {"error": type(e).__name__}
+                if str(e):
+                    tool_response["error_text"] = str(e)
+        # A Home Assistant tool was requested.
+        else:
+            tool_input = llm.ToolInput(
+                tool_name=tool_name,
+                tool_args= tool_args,
+            )
 
-        LOGGER.debug("Tool response: %s", tool_response)
-        tool_responses.append(
-            ToolMessage(
+            try:
+                tool_response = await api.async_call_tool(tool_input)
+            except (HomeAssistantError, vol.Invalid) as e:
+                tool_response = {"error": type(e).__name__}
+                if str(e):
+                    tool_response["error_text"] = str(e)
+
+            tool_response = ToolMessage(
                 content=json.dumps(tool_response),
                 tool_call_id=tool_call["id"],
-                name=tool_call["name"],
+                name=tool_name,
             )
-        )
+
+        LOGGER.debug("Tool response: %s", tool_response)
+        tool_responses.append(tool_response)
     return {"messages": tool_responses}
 
 def _should_continue(state: MessagesState) -> Literal["action", "__end__"]:
@@ -172,6 +179,15 @@ def _should_continue(state: MessagesState) -> Literal["action", "__end__"]:
         return "__end__"
     # Otherwise if there is, we continue
     return "action"
+
+async def async_setup_entry(
+    hass: HomeAssistant,
+    config_entry: HGAConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    """Set up conversation entities."""
+    agent = HGAConversationEntity(config_entry)
+    async_add_entities([agent])
 
 class HGAConversationEntity(
     conversation.ConversationEntity, conversation.AbstractConversationAgent
@@ -261,6 +277,51 @@ class HGAConversationEntity(
                _format_tool(tool, llm_api.custom_serializer) for tool in llm_api.tools
             ]
 
+        # Add langchain tools to the list of HA tools.
+        @tool
+        def multiply(a: int, b: int) -> int:
+            """Multiply two numbers."""
+            return a * b
+
+        @tool
+        def add(a: int, b: int) -> int:
+            """Add two numbers."""
+            return a + b
+
+        @tool
+        async def analyze_camera_image(camera_name: str) -> dict[str, Any]:
+            """Analyze an image from a given camera."""
+            camera_entity_id: str = f"camera.{camera_name.lower()}"
+            width: int = 512
+            height: int = 512
+            try:
+                image = await camera.async_get_image(
+                    hass=self.hass,
+                    entity_id=camera_entity_id,
+                    width=width,
+                    height=height
+                )
+            except HomeAssistantError as err:
+                LOGGER.error(
+                    "Error getting image from camera '%s' with error: %s",
+                    camera_entity_id, err
+                )
+
+            base64_image = base64.b64encode(image.content).decode("utf-8")
+            return {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
+            }
+
+        lc_tools = {
+            "add": add,
+            "multiply": multiply,
+            "analyze_camera_image": analyze_camera_image
+        }
+        tools.extend(lc_tools.values())
+
+        LOGGER.debug("Tools: %s", tools)
+
         # Conversation IDs are ULIDs. Generate a new one if not provided.
         # If an old ULID is passed in, generate a new one to indicate
         # a new conversation was started. If the user picks their own, they
@@ -317,8 +378,6 @@ class HGAConversationEntity(
 
         prompt: Literal["str"] = "\n".join(prompt_parts)
 
-        LOGGER.debug("Tools: %s", tools)
-
         model = self.entry.runtime_data
         model_with_config = model.with_config(
             {"configurable":
@@ -352,10 +411,10 @@ class HGAConversationEntity(
             _call_model,
             model=model_with_tools,
             prompt=prompt,
-            api=llm_api,
+            tools=tools,
             max_messages=max_messages)
         )
-        workflow.add_node("action", partial(_call_tools, api=llm_api))
+        workflow.add_node("action", partial(_call_tools, lc_tools=lc_tools, api=llm_api))
 
         # Set the entrypoint as `agent`
         # This means that this node is the first one called
