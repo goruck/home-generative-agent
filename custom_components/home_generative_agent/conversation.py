@@ -33,6 +33,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import START, MessagesState, StateGraph
 from voluptuous_openapi import convert
 
+from . import HGAData
 from .const import (
     CONF_CHAT_MODEL,
     CONF_MAX_MESSAGES,
@@ -41,6 +42,16 @@ from .const import (
     CONF_TEMPERATURE,
     CONF_TOP_P,
     DOMAIN,
+    OLLAMA_MODEL,
+    OLLAMA_NUM_PREDICT,
+    OLLAMA_RECOMMENDED_MODEL,
+    OLLAMA_RECOMMENDED_NUM_PREDICT,
+    OLLAMA_RECOMMENDED_TEMPERATURE,
+    OLLAMA_RECOMMENDED_TOP_K,
+    OLLAMA_RECOMMENDED_TOP_P,
+    OLLAMA_TEMPERATURE,
+    OLLAMA_TOP_K,
+    OLLAMA_TOP_P,
     RECOMMENDED_CHAT_MODEL,
     RECOMMENDED_MAX_MESSAGES,
     RECOMMENDED_MAX_TOKENS,
@@ -180,6 +191,83 @@ def _should_continue(state: MessagesState) -> Literal["action", "__end__"]:
     # Otherwise if there is, we continue
     return "action"
 
+async def get_camera_image(hass: HomeAssistant, camera_name: str) -> bytes:
+    """Get an image from a given camera."""
+    camera_entity_id: str = f"camera.{camera_name.lower()}"
+    width: int = 672
+    height: int = 672
+    try:
+        image = await camera.async_get_image(
+            hass=hass,
+            entity_id=camera_entity_id,
+            width=width,
+            height=height
+        )
+    except HomeAssistantError as err:
+        LOGGER.error(
+            "Error getting image from camera '%s' with error: %s",
+            camera_entity_id, err
+        )
+
+    return image.content
+
+async def analyze_image(entry: ConfigEntry, image: bytes) -> str:
+    """Analyze an image."""
+    encoded_image = base64.b64encode(image).decode("utf-8")
+
+    def prompt_func(data: dict[str, Any]) -> list[HumanMessage]:
+        text = data["text"]
+        image = data["image"]
+
+        image_part = {
+            "type": "image_url",
+            "image_url": f"data:image/jpeg;base64,{image}",
+        }
+        text_part = {"type": "text", "text": text}
+
+        content_parts = []
+        content_parts.append(image_part)
+        content_parts.append(text_part)
+
+        return [HumanMessage(content=content_parts)]
+
+    edge_model = entry.edge_model
+    edge_model_with_config = edge_model.with_config(
+        {"configurable":
+            {
+                "model_name": entry.options.get(
+                    OLLAMA_MODEL, OLLAMA_RECOMMENDED_MODEL
+                ),
+                "temperature": entry.options.get(
+                    OLLAMA_TEMPERATURE, OLLAMA_RECOMMENDED_TEMPERATURE
+                ),
+                "num_predict": entry.options.get(
+                    OLLAMA_NUM_PREDICT, OLLAMA_RECOMMENDED_NUM_PREDICT
+                ),
+                "top_p": entry.options.get(
+                    OLLAMA_TOP_P, OLLAMA_RECOMMENDED_TOP_P
+                ),
+                "top_k": entry.options.get(
+                    OLLAMA_TOP_K, OLLAMA_RECOMMENDED_TOP_K
+                ),
+            }
+        }
+    )
+
+    chain = prompt_func | edge_model_with_config
+
+    try:
+        response =  await chain.ainvoke(
+            {
+                "text": "Describe this image in JSON format:",
+                "image": encoded_image
+            }
+        )
+    except HomeAssistantError as err:
+        LOGGER.error("Error analyzing image %s", err)
+
+    return response
+
 async def async_setup_entry(
     hass: HomeAssistant,
     config_entry: HGAConfigEntry,
@@ -277,46 +365,15 @@ class HGAConversationEntity(
                _format_tool(tool, llm_api.custom_serializer) for tool in llm_api.tools
             ]
 
+        @tool
+        async def get_and_analyze_camera_image(camera_name: str) -> str:
+            """Get an image from a given camera and analyze it."""
+            image = await get_camera_image(self.hass, camera_name)
+            return await analyze_image(self.entry, image)
+
         # Add langchain tools to the list of HA tools.
-        @tool
-        def multiply(a: int, b: int) -> int:
-            """Multiply two numbers."""
-            return a * b
-
-        @tool
-        def add(a: int, b: int) -> int:
-            """Add two numbers."""
-            return a + b
-
-        @tool
-        async def analyze_camera_image(camera_name: str) -> dict[str, Any]:
-            """Analyze an image from a given camera."""
-            camera_entity_id: str = f"camera.{camera_name.lower()}"
-            width: int = 512
-            height: int = 512
-            try:
-                image = await camera.async_get_image(
-                    hass=self.hass,
-                    entity_id=camera_entity_id,
-                    width=width,
-                    height=height
-                )
-            except HomeAssistantError as err:
-                LOGGER.error(
-                    "Error getting image from camera '%s' with error: %s",
-                    camera_entity_id, err
-                )
-
-            base64_image = base64.b64encode(image.content).decode("utf-8")
-            return {
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
-            }
-
         lc_tools = {
-            "add": add,
-            "multiply": multiply,
-            "analyze_camera_image": analyze_camera_image
+            "get_and_analyze_camera_image": get_and_analyze_camera_image,
         }
         tools.extend(lc_tools.values())
 
@@ -378,7 +435,7 @@ class HGAConversationEntity(
 
         prompt: Literal["str"] = "\n".join(prompt_parts)
 
-        model = self.entry.runtime_data
+        model = self.entry.model
         model_with_config = model.with_config(
             {"configurable":
                 {
