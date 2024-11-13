@@ -27,3 +27,10 @@ OLLAMA_TOP_P = "ollama_top_p"
 OLLAMA_RECOMMENDED_TOP_P = 0.9
 OLLAMA_TOP_K = "ollama_top_k"
 OLLAMA_RECOMMENDED_TOP_K = 40
+
+TOOL_CALL_ERROR_SYSTEM_MESSSAGE = (
+    "\nAlways call tools again with your mistakes corrected. Do not repeat mistakes."
+)
+TOOL_CALL_ERROR_TEMPLATE = (
+    "Error: {error}\n Call the tool again with your mistake corrected."
+)

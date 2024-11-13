@@ -11,6 +11,7 @@ import voluptuous as vol
 from homeassistant.components import assist_pipeline, camera, conversation
 from homeassistant.components.conversation import trace
 from homeassistant.const import CONF_LLM_HASS_API, MATCH_ALL
+from homeassistant.core import async_get_hass
 from homeassistant.exceptions import (
     HomeAssistantError,
     TemplateError,
@@ -18,6 +19,7 @@ from homeassistant.exceptions import (
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import intent, llm, template
 from homeassistant.util import ulid
+from langchain.globals import set_verbose
 from langchain_core.caches import InMemoryCache
 from langchain_core.globals import set_llm_cache
 from langchain_core.messages import (
@@ -28,12 +30,13 @@ from langchain_core.messages import (
     ToolMessage,
     trim_messages,
 )
+from langchain_core.messages.modifier import RemoveMessage
 from langchain_core.tools import tool
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import START, MessagesState, StateGraph
+from pydantic import ValidationError
 from voluptuous_openapi import convert
 
-from . import HGAData
 from .const import (
     CONF_CHAT_MODEL,
     CONF_MAX_MESSAGES,
@@ -57,6 +60,8 @@ from .const import (
     RECOMMENDED_MAX_TOKENS,
     RECOMMENDED_TEMPERATURE,
     RECOMMENDED_TOP_P,
+    TOOL_CALL_ERROR_SYSTEM_MESSSAGE,
+    TOOL_CALL_ERROR_TEMPLATE,
 )
 
 if TYPE_CHECKING:
@@ -70,6 +75,8 @@ if TYPE_CHECKING:
     from . import HGAConfigEntry
 
 LOGGER = logging.getLogger(__name__)
+
+set_verbose(True)
 
 def _format_tool(
     tool: llm.Tool, custom_serializer: Callable[[Any], Any] | None
@@ -128,7 +135,9 @@ async def _call_model(
         state=messages,
         max_messages=max_messages
     )
-    LOGGER.debug("Trimmed messages: %s", trimmed_messages)
+    LOGGER.debug("Model call messages: ")
+    for m in trimmed_messages:
+        LOGGER.debug(m.pretty_repr())
     response = await model.ainvoke(trimmed_messages)
     # Return a list, because it will get added to the existing list.
     return {"messages": response}
@@ -149,16 +158,22 @@ async def _call_tools(
             "Tool call: %s(%s)", tool_name, tool_args
         )
 
-        # A langchain tool was requested.
+        def _handle_tool_error(err:str, name:str, tid:str) -> ToolMessage:
+            return ToolMessage(
+                content=TOOL_CALL_ERROR_TEMPLATE.format(error=err),
+                name=name,
+                tool_call_id=tid,
+                status="error",
+            )
+
+        # A langchain tool was called.
         if tool_name in lc_tools:
             lc_tool = lc_tools[tool_name.lower()]
             try:
                 tool_response = await lc_tool.ainvoke(tool_call)
-            except Exception as e:
-                tool_response = {"error": type(e).__name__}
-                if str(e):
-                    tool_response["error_text"] = str(e)
-        # A Home Assistant tool was requested.
+            except (HomeAssistantError, ValidationError) as e:
+                tool_response = _handle_tool_error(repr(e), tool_name, tool_call["id"])
+        # A Home Assistant tool was called.
         else:
             tool_input = llm.ToolInput(
                 tool_name=tool_name,
@@ -166,17 +181,15 @@ async def _call_tools(
             )
 
             try:
-                tool_response = await api.async_call_tool(tool_input)
-            except (HomeAssistantError, vol.Invalid) as e:
-                tool_response = {"error": type(e).__name__}
-                if str(e):
-                    tool_response["error_text"] = str(e)
+                response = await api.async_call_tool(tool_input)
 
-            tool_response = ToolMessage(
-                content=json.dumps(tool_response),
-                tool_call_id=tool_call["id"],
-                name=tool_name,
-            )
+                tool_response = ToolMessage(
+                    content=json.dumps(response),
+                    tool_call_id=tool_call["id"],
+                    name=tool_name,
+                )
+            except (HomeAssistantError, vol.Invalid) as e:
+                tool_response = _handle_tool_error(repr(e), tool_name, tool_call["id"])
 
         LOGGER.debug("Tool response: %s", tool_response)
         tool_responses.append(tool_response)
@@ -185,13 +198,11 @@ async def _call_tools(
 def _should_continue(state: MessagesState) -> Literal["action", "__end__"]:
     """Return the next node in graph to execute."""
     last_message = state["messages"][-1]
-    # If there is no function call, then we finish
     if not last_message.tool_calls:
         return "__end__"
-    # Otherwise if there is, we continue
     return "action"
 
-async def get_camera_image(hass: HomeAssistant, camera_name: str) -> bytes:
+async def _get_camera_image(hass: HomeAssistant, camera_name: str) -> bytes:
     """Get an image from a given camera."""
     camera_entity_id: str = f"camera.{camera_name.lower()}"
     width: int = 672
@@ -211,7 +222,7 @@ async def get_camera_image(hass: HomeAssistant, camera_name: str) -> bytes:
 
     return image.content
 
-async def analyze_image(entry: ConfigEntry, image: bytes) -> str:
+async def _analyze_image(entry: ConfigEntry, image: bytes) -> str:
     """Analyze an image."""
     encoded_image = base64.b64encode(image).decode("utf-8")
 
@@ -331,6 +342,7 @@ class HGAConversationEntity(
         self, user_input: conversation.ConversationInput
     ) -> conversation.ConversationResult:
         """Process the user input."""
+        hass = self.hass
         options = self.entry.options
         intent_response = intent.IntentResponse(language=user_input.language)
         llm_api: llm.API | None = None
@@ -348,8 +360,8 @@ class HGAConversationEntity(
         if self.entry.options.get(CONF_LLM_HASS_API):
             try:
                 llm_api = await llm.async_get_api(
-                    self.hass,
-                    self.entry.options[CONF_LLM_HASS_API],
+                    hass,
+                    options[CONF_LLM_HASS_API],
                     llm_context,
                 )
             except HomeAssistantError as err:
@@ -368,16 +380,14 @@ class HGAConversationEntity(
         @tool
         async def get_and_analyze_camera_image(camera_name: str) -> str:
             """Get an image from a given camera and analyze it."""
-            image = await get_camera_image(self.hass, camera_name)
-            return await analyze_image(self.entry, image)
+            image = await _get_camera_image(hass, camera_name)
+            return await _analyze_image(self.entry, image)
 
         # Add langchain tools to the list of HA tools.
         lc_tools = {
             "get_and_analyze_camera_image": get_and_analyze_camera_image,
         }
         tools.extend(lc_tools.values())
-
-        LOGGER.debug("Tools: %s", tools)
 
         # Conversation IDs are ULIDs. Generate a new one if not provided.
         # If an old ULID is passed in, generate a new one to indicate
@@ -398,7 +408,7 @@ class HGAConversationEntity(
             user_input.context
             and user_input.context.user_id
             and (
-                user := await self.hass.auth.async_get_user(user_input.context.user_id)
+                user := await hass.auth.async_get_user(user_input.context.user_id)
             )
         ):
             user_name = user.name
@@ -406,8 +416,11 @@ class HGAConversationEntity(
         try:
             prompt_parts = [
                 template.Template(
-                    llm.BASE_PROMPT
-                    + options.get(CONF_PROMPT, llm.DEFAULT_INSTRUCTIONS_PROMPT),
+                    (
+                        llm.BASE_PROMPT
+                        + options.get(CONF_PROMPT, llm.DEFAULT_INSTRUCTIONS_PROMPT)
+                        + TOOL_CALL_ERROR_SYSTEM_MESSSAGE if tools else ""
+                    ),
                     self.hass,
                 ).async_render(
                     {
@@ -463,7 +476,7 @@ class HGAConversationEntity(
             CONF_MAX_MESSAGES, RECOMMENDED_MAX_MESSAGES
         )
 
-        # Define the two nodes we will cycle between
+        # Define nodes.
         workflow.add_node("agent", partial(
             _call_model,
             model=model_with_tools,
@@ -477,7 +490,8 @@ class HGAConversationEntity(
         # This means that this node is the first one called
         workflow.add_edge(START, "agent")
 
-        # We now add a conditional edge
+        # Add conditional edge for the agent node.
+        # This will deterine if a tool call is needed.
         workflow.add_conditional_edges(
             # First, define the start node. We use `agent`.
             # This means these are the edges taken after the `agent` node is called.
@@ -486,14 +500,15 @@ class HGAConversationEntity(
             _should_continue,
         )
 
-        # Now add a normal edge from `tools` to `agent`.
-        # This means that after `tools` is called, `agent` node is called next.
         workflow.add_edge("action", "agent")
 
         # Complile graph into a LangChain Runnable.
         app = workflow.compile(checkpointer=self.memory, debug=True)
 
-        self.app_config = {"configurable": {"thread_id": conversation_id}}
+        self.app_config = {
+            "configurable": {"thread_id": conversation_id},
+            "recursion_limit": 10
+        }
 
         # Interact with app.
         try:
@@ -522,7 +537,10 @@ class HGAConversationEntity(
                 response=intent_response, conversation_id=conversation_id
             )
 
-        LOGGER.debug("Response: %s", response)
+        LOGGER.debug("App response: ")
+        for m in response["messages"]:
+            LOGGER.debug(m.pretty_repr())
+        LOGGER.debug("====== End of run ======")
 
         intent_response = intent.IntentResponse(language=user_input.language)
         intent_response.async_set_speech(response["messages"][-1].content)
