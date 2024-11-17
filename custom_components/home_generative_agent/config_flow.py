@@ -31,18 +31,18 @@ from langchain_openai import ChatOpenAI
 
 from .const import (
     CONF_CHAT_MODEL,
-    CONF_MAX_MESSAGES,
-    CONF_MAX_TOKENS,
+    CONF_CHAT_MODEL_TEMPERATURE,
     CONF_PROMPT,
     CONF_RECOMMENDED,
-    CONF_TEMPERATURE,
-    CONF_TOP_P,
+    CONF_VISION_MODEL,
+    CONF_VISION_MODEL_NUM_PREDICT,
+    CONF_VISION_MODEL_TEMPERATURE,
     DOMAIN,
     RECOMMENDED_CHAT_MODEL,
-    RECOMMENDED_MAX_MESSAGES,
-    RECOMMENDED_MAX_TOKENS,
-    RECOMMENDED_TEMPERATURE,
-    RECOMMENDED_TOP_P,
+    RECOMMENDED_CHAT_MODEL_TEMPERATURE,
+    RECOMMENDED_VISION_MODEL,
+    RECOMMENDED_VISION_MODEL_NUM_PREDICT,
+    RECOMMENDED_VISION_MODEL_TEMPERATURE,
 )
 
 if TYPE_CHECKING:
@@ -206,25 +206,34 @@ def config_option_schema(
                 default=RECOMMENDED_CHAT_MODEL,
             ): str,
             vol.Optional(
-                CONF_MAX_TOKENS,
-                description={"suggested_value": options.get(CONF_MAX_TOKENS)},
-                default=RECOMMENDED_MAX_TOKENS,
-            ): int,
-            vol.Optional(
-                CONF_MAX_MESSAGES,
-                description={"suggested_value": options.get(CONF_MAX_MESSAGES)},
-                default=RECOMMENDED_MAX_MESSAGES,
-            ): int,
-            vol.Optional(
-                CONF_TOP_P,
-                description={"suggested_value": options.get(CONF_TOP_P)},
-                default=RECOMMENDED_TOP_P,
-            ): NumberSelector(NumberSelectorConfig(min=0, max=1, step=0.05)),
-            vol.Optional(
-                CONF_TEMPERATURE,
-                description={"suggested_value": options.get(CONF_TEMPERATURE)},
-                default=RECOMMENDED_TEMPERATURE,
+                CONF_CHAT_MODEL_TEMPERATURE,
+                description={
+                    "suggested_value":
+                    options.get(RECOMMENDED_CHAT_MODEL_TEMPERATURE)
+                },
+                default=RECOMMENDED_CHAT_MODEL_TEMPERATURE,
             ): NumberSelector(NumberSelectorConfig(min=0, max=2, step=0.05)),
+            vol.Optional(
+                CONF_VISION_MODEL,
+                description={"suggested_value": options.get(RECOMMENDED_VISION_MODEL)},
+                default=RECOMMENDED_VISION_MODEL,
+            ): str,
+            vol.Optional(
+                CONF_VISION_MODEL_TEMPERATURE,
+                description={
+                    "suggested_value":
+                    options.get(RECOMMENDED_VISION_MODEL_TEMPERATURE)
+                },
+                default=RECOMMENDED_VISION_MODEL_TEMPERATURE,
+            ): NumberSelector(NumberSelectorConfig(min=0, max=2, step=0.05)),
+            vol.Optional(
+                CONF_VISION_MODEL_NUM_PREDICT,
+                description={
+                    "suggested_value":
+                    options.get(RECOMMENDED_VISION_MODEL_NUM_PREDICT)
+                },
+                default=RECOMMENDED_VISION_MODEL_NUM_PREDICT,
+            ): int,
         }
     )
     return schema

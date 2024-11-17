@@ -19,7 +19,7 @@ from homeassistant.exceptions import (
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import intent, llm, template
 from homeassistant.util import ulid
-from langchain.globals import set_verbose
+from langchain.globals import set_debug, set_verbose
 from langchain_core.caches import InMemoryCache
 from langchain_core.globals import set_llm_cache
 from langchain_core.messages import (
@@ -39,27 +39,18 @@ from voluptuous_openapi import convert
 
 from .const import (
     CONF_CHAT_MODEL,
-    CONF_MAX_MESSAGES,
-    CONF_MAX_TOKENS,
+    CONF_CHAT_MODEL_TEMPERATURE,
     CONF_PROMPT,
-    CONF_TEMPERATURE,
-    CONF_TOP_P,
+    CONF_VISION_MODEL,
+    CONF_VISION_MODEL_NUM_PREDICT,
+    CONF_VISION_MODEL_TEMPERATURE,
+    CONTEXT_MAX_MESSAGES,
     DOMAIN,
-    OLLAMA_MODEL,
-    OLLAMA_NUM_PREDICT,
-    OLLAMA_RECOMMENDED_MODEL,
-    OLLAMA_RECOMMENDED_NUM_PREDICT,
-    OLLAMA_RECOMMENDED_TEMPERATURE,
-    OLLAMA_RECOMMENDED_TOP_K,
-    OLLAMA_RECOMMENDED_TOP_P,
-    OLLAMA_TEMPERATURE,
-    OLLAMA_TOP_K,
-    OLLAMA_TOP_P,
     RECOMMENDED_CHAT_MODEL,
-    RECOMMENDED_MAX_MESSAGES,
-    RECOMMENDED_MAX_TOKENS,
-    RECOMMENDED_TEMPERATURE,
-    RECOMMENDED_TOP_P,
+    RECOMMENDED_CHAT_MODEL_TEMPERATURE,
+    RECOMMENDED_VISION_MODEL,
+    RECOMMENDED_VISION_MODEL_NUM_PREDICT,
+    RECOMMENDED_VISION_MODEL_TEMPERATURE,
     TOOL_CALL_ERROR_SYSTEM_MESSSAGE,
     TOOL_CALL_ERROR_TEMPLATE,
 )
@@ -76,7 +67,8 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
-set_verbose(True)
+#set_verbose(True)
+set_debug(True)
 
 def _format_tool(
     tool: llm.Tool, custom_serializer: Callable[[Any], Any] | None
@@ -135,6 +127,7 @@ async def _call_model(
         state=messages,
         max_messages=max_messages
     )
+    #LOGGER.debug("Model call messages: %s", trimmed_messages)
     LOGGER.debug("Model call messages: ")
     for m in trimmed_messages:
         LOGGER.debug(m.pretty_repr())
@@ -242,30 +235,24 @@ async def _analyze_image(entry: ConfigEntry, image: bytes) -> str:
 
         return [HumanMessage(content=content_parts)]
 
-    edge_model = entry.edge_model
-    edge_model_with_config = edge_model.with_config(
+    vision_model = entry.vision_model
+    vision_model_with_config = vision_model.with_config(
         {"configurable":
             {
                 "model_name": entry.options.get(
-                    OLLAMA_MODEL, OLLAMA_RECOMMENDED_MODEL
+                    CONF_VISION_MODEL, RECOMMENDED_VISION_MODEL
                 ),
                 "temperature": entry.options.get(
-                    OLLAMA_TEMPERATURE, OLLAMA_RECOMMENDED_TEMPERATURE
+                    CONF_VISION_MODEL_TEMPERATURE, RECOMMENDED_VISION_MODEL_TEMPERATURE
                 ),
                 "num_predict": entry.options.get(
-                    OLLAMA_NUM_PREDICT, OLLAMA_RECOMMENDED_NUM_PREDICT
-                ),
-                "top_p": entry.options.get(
-                    OLLAMA_TOP_P, OLLAMA_RECOMMENDED_TOP_P
-                ),
-                "top_k": entry.options.get(
-                    OLLAMA_TOP_K, OLLAMA_RECOMMENDED_TOP_K
+                    CONF_VISION_MODEL_NUM_PREDICT, RECOMMENDED_VISION_MODEL_NUM_PREDICT
                 ),
             }
         }
     )
 
-    chain = prompt_func | edge_model_with_config
+    chain = prompt_func | vision_model_with_config
 
     try:
         response =  await chain.ainvoke(
@@ -448,41 +435,33 @@ class HGAConversationEntity(
 
         prompt: Literal["str"] = "\n".join(prompt_parts)
 
-        model = self.entry.model
-        model_with_config = model.with_config(
+        chat_model = self.entry.chat_model
+        chat_model_with_config = chat_model.with_config(
             {"configurable":
                 {
                     "model_name": self.entry.options.get(
                         CONF_CHAT_MODEL, RECOMMENDED_CHAT_MODEL
                     ),
                     "temperature": self.entry.options.get(
-                        CONF_TEMPERATURE, RECOMMENDED_TEMPERATURE
+                        CONF_CHAT_MODEL_TEMPERATURE, RECOMMENDED_CHAT_MODEL_TEMPERATURE
                     ),
-                    "max_tokens": self.entry.options.get(
-                        CONF_MAX_TOKENS, RECOMMENDED_MAX_TOKENS
-                    ),
-                    "top_p": self.entry.options.get(CONF_TOP_P, RECOMMENDED_TOP_P),
                 }
             }
         )
-        model_with_tools = model_with_config.bind_tools(tools)
+        chat_model_with_tools = chat_model_with_config.bind_tools(tools)
 
         # TODO: make graph creation a function and call here
 
         # Define a new graph
         workflow = StateGraph(MessagesState)
 
-        max_messages = self.entry.options.get(
-            CONF_MAX_MESSAGES, RECOMMENDED_MAX_MESSAGES
-        )
-
         # Define nodes.
         workflow.add_node("agent", partial(
             _call_model,
-            model=model_with_tools,
+            model=chat_model_with_tools,
             prompt=prompt,
             tools=tools,
-            max_messages=max_messages)
+            max_messages=CONTEXT_MAX_MESSAGES)
         )
         workflow.add_node("action", partial(_call_tools, lc_tools=lc_tools, api=llm_api))
 
