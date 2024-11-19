@@ -22,11 +22,26 @@ RECOMMENDED_VISION_MODEL_TEMPERATURE = 0.8
 CONF_VISION_MODEL_NUM_PREDICT = "vision_model_num_predict"
 RECOMMENDED_VISION_MODEL_NUM_PREDICT = 512
 
+# Maximum number of messages to keep in chat model context before deletion.
+CONTEXT_MAX_MESSAGES = 100
+
 # Ollama vision model server URL.
 VISION_MODEL_URL = "192.168.1.252:11434"
 
-# Maximum number of messages to keep in chat model context before deletion.
-CONTEXT_MAX_MESSAGES = 100
+# Ollama vision model prompts.
+VISION_MODEL_SYSTEM_PROMPT = """
+You are a bot that ONLY responds with an instance of JSON without any additional
+information. You have access to a JSON schema, which will determine how the JSON
+should be structured.
+"""
+VISION_MODEL_USER_PROMPT_TEMPLATE = """
+Make sure to return ONLY an instance of the JSON, NOT the schema itself.
+Do not add any additional information.
+JSON schema:
+{schema}
+
+Task: Describe this image:
+"""
 
 # Chat model tool error handeling.
 TOOL_CALL_ERROR_SYSTEM_MESSSAGE = (

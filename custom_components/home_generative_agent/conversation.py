@@ -11,7 +11,6 @@ import voluptuous as vol
 from homeassistant.components import assist_pipeline, camera, conversation
 from homeassistant.components.conversation import trace
 from homeassistant.const import CONF_LLM_HASS_API, MATCH_ALL
-from homeassistant.core import async_get_hass
 from homeassistant.exceptions import (
     HomeAssistantError,
     TemplateError,
@@ -30,11 +29,10 @@ from langchain_core.messages import (
     ToolMessage,
     trim_messages,
 )
-from langchain_core.messages.modifier import RemoveMessage
 from langchain_core.tools import tool
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import START, MessagesState, StateGraph
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 from voluptuous_openapi import convert
 
 from .const import (
@@ -53,6 +51,8 @@ from .const import (
     RECOMMENDED_VISION_MODEL_TEMPERATURE,
     TOOL_CALL_ERROR_SYSTEM_MESSSAGE,
     TOOL_CALL_ERROR_TEMPLATE,
+    VISION_MODEL_SYSTEM_PROMPT,
+    VISION_MODEL_USER_PROMPT_TEMPLATE,
 )
 
 if TYPE_CHECKING:
@@ -68,7 +68,7 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 #set_verbose(True)
-set_debug(True)
+#set_debug(True)
 
 def _format_tool(
     tool: llm.Tool, custom_serializer: Callable[[Any], Any] | None
@@ -198,8 +198,8 @@ def _should_continue(state: MessagesState) -> Literal["action", "__end__"]:
 async def _get_camera_image(hass: HomeAssistant, camera_name: str) -> bytes:
     """Get an image from a given camera."""
     camera_entity_id: str = f"camera.{camera_name.lower()}"
-    width: int = 672
-    height: int = 672
+    width: int = 1920
+    height: int = 1080
     try:
         image = await camera.async_get_image(
             hass=hass,
@@ -219,23 +219,25 @@ async def _analyze_image(entry: ConfigEntry, image: bytes) -> str:
     """Analyze an image."""
     encoded_image = base64.b64encode(image).decode("utf-8")
 
-    def prompt_func(data: dict[str, Any]) -> list[HumanMessage]:
+    def prompt_func(data: dict[str, Any]) -> list[AnyMessage]:
+        system = data["system"]
         text = data["text"]
         image = data["image"]
 
+        text_part = {"type": "text", "text": text}
         image_part = {
             "type": "image_url",
-            "image_url": f"data:image/jpeg;base64,{image}",
+            "image_url": {"url": f"data:image/jpeg;base64,{image}"},
         }
-        text_part = {"type": "text", "text": text}
 
         content_parts = []
-        content_parts.append(image_part)
         content_parts.append(text_part)
+        content_parts.append(image_part)
 
-        return [HumanMessage(content=content_parts)]
+        return [SystemMessage(content=system), HumanMessage(content=content_parts)]
 
     vision_model = entry.vision_model
+
     vision_model_with_config = vision_model.with_config(
         {"configurable":
             {
@@ -254,10 +256,44 @@ async def _analyze_image(entry: ConfigEntry, image: bytes) -> str:
 
     chain = prompt_func | vision_model_with_config
 
+    class ObjectTypeAndLocation(BaseModel):
+        """Get type and location of objects in image."""
+
+        object_type: str = Field(
+            description="the type of obect in the immage"
+        )
+        object_location: str = Field(
+            description="the location of the object in the image"
+        )
+
+    class ImageSceneAnalysis(BaseModel):
+        """
+        Get image scene analysis.
+
+        Includes a description of the image, type and location of objects present,
+        number of people present and number of animals present in the image.
+        """
+
+        description: str = Field(
+            description="description of the image scene"
+        )
+        objects: list[ObjectTypeAndLocation] = Field(
+            description="object type and location in image"
+        )
+        people: int = Field(
+            description="number of people in the image"
+        )
+        animals: int = Field(
+            description="number of aniamls in the image"
+        )
+
+    schema = json.dumps(ImageSceneAnalysis.model_json_schema())
+
     try:
         response =  await chain.ainvoke(
             {
-                "text": "Describe this image in JSON format:",
+                "system": VISION_MODEL_SYSTEM_PROMPT,
+                "text": VISION_MODEL_USER_PROMPT_TEMPLATE.format(schema=schema),
                 "image": encoded_image
             }
         )
