@@ -16,7 +16,7 @@ RECOMMENDED_CHAT_MODEL_TEMPERATURE = 1.0
 ### Ollama vision model parameters. ###
 # See https://github.com/ollama/ollama/blob/main/docs/modelfile.md#parameter
 CONF_VISION_MODEL = "vision_model"
-RECOMMENDED_VISION_MODEL = "llava"
+RECOMMENDED_VISION_MODEL = "llama3.2-vision"
 CONF_VISION_MODEL_TEMPERATURE = "vision_model_temperature"
 RECOMMENDED_VISION_MODEL_TEMPERATURE = 0.8
 CONF_VISION_MODEL_NUM_PREDICT = "vision_model_num_predict"
@@ -42,6 +42,10 @@ JSON schema:
 
 Task: Describe this image:
 """
+
+# Ollama vision model image size in pixels.
+VISION_MODEL_IMAGE_WIDTH = 1120
+VISION_MODEL_IMAGE_HEIGHT = 1120
 
 # Chat model tool error handeling.
 TOOL_CALL_ERROR_SYSTEM_MESSSAGE = (
