@@ -51,6 +51,8 @@ from .const import (
     RECOMMENDED_VISION_MODEL_TEMPERATURE,
     TOOL_CALL_ERROR_SYSTEM_MESSSAGE,
     TOOL_CALL_ERROR_TEMPLATE,
+    VISION_MODEL_IMAGE_HEIGHT,
+    VISION_MODEL_IMAGE_WIDTH,
     VISION_MODEL_SYSTEM_PROMPT,
     VISION_MODEL_USER_PROMPT_TEMPLATE,
 )
@@ -198,14 +200,12 @@ def _should_continue(state: MessagesState) -> Literal["action", "__end__"]:
 async def _get_camera_image(hass: HomeAssistant, camera_name: str) -> bytes:
     """Get an image from a given camera."""
     camera_entity_id: str = f"camera.{camera_name.lower()}"
-    width: int = 1920
-    height: int = 1080
     try:
         image = await camera.async_get_image(
             hass=hass,
             entity_id=camera_entity_id,
-            width=width,
-            height=height
+            width=VISION_MODEL_IMAGE_WIDTH,
+            height=VISION_MODEL_IMAGE_HEIGHT
         )
     except HomeAssistantError as err:
         LOGGER.error(
@@ -241,7 +241,7 @@ async def _analyze_image(entry: ConfigEntry, image: bytes) -> str:
     vision_model_with_config = vision_model.with_config(
         {"configurable":
             {
-                "model_name": entry.options.get(
+                "model": entry.options.get(
                     CONF_VISION_MODEL, RECOMMENDED_VISION_MODEL
                 ),
                 "temperature": entry.options.get(
