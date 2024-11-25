@@ -34,15 +34,16 @@ from .const import (
     CONF_CHAT_MODEL_TEMPERATURE,
     CONF_PROMPT,
     CONF_RECOMMENDED,
-    CONF_VISION_MODEL,
-    CONF_VISION_MODEL_NUM_PREDICT,
+    CONF_SUMMARIZATION_MODEL_TEMPERATURE,
     CONF_VISION_MODEL_TEMPERATURE,
+    CONF_VLM,
     DOMAIN,
     RECOMMENDED_CHAT_MODEL,
     RECOMMENDED_CHAT_MODEL_TEMPERATURE,
-    RECOMMENDED_VISION_MODEL,
-    RECOMMENDED_VISION_MODEL_NUM_PREDICT,
+    RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
     RECOMMENDED_VISION_MODEL_TEMPERATURE,
+    RECOMMENDED_VLM,
+    VLM_NUM_PREDICT,
 )
 
 if TYPE_CHECKING:
@@ -214,9 +215,9 @@ def config_option_schema(
                 default=RECOMMENDED_CHAT_MODEL_TEMPERATURE,
             ): NumberSelector(NumberSelectorConfig(min=0, max=2, step=0.05)),
             vol.Optional(
-                CONF_VISION_MODEL,
-                description={"suggested_value": options.get(RECOMMENDED_VISION_MODEL)},
-                default=RECOMMENDED_VISION_MODEL,
+                CONF_VLM,
+                description={"suggested_value": options.get(RECOMMENDED_VLM)},
+                default=RECOMMENDED_VLM,
             ): str,
             vol.Optional(
                 CONF_VISION_MODEL_TEMPERATURE,
@@ -227,13 +228,13 @@ def config_option_schema(
                 default=RECOMMENDED_VISION_MODEL_TEMPERATURE,
             ): NumberSelector(NumberSelectorConfig(min=0, max=2, step=0.05)),
             vol.Optional(
-                CONF_VISION_MODEL_NUM_PREDICT,
+                CONF_SUMMARIZATION_MODEL_TEMPERATURE,
                 description={
                     "suggested_value":
-                    options.get(RECOMMENDED_VISION_MODEL_NUM_PREDICT)
+                    options.get(RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE)
                 },
-                default=RECOMMENDED_VISION_MODEL_NUM_PREDICT,
-            ): int,
+                default=RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
+            ): NumberSelector(NumberSelectorConfig(min=0, max=2, step=0.05)),
         }
     )
     return schema

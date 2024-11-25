@@ -25,13 +25,14 @@ from langchain_core.messages import (
     AnyMessage,
     BaseMessage,
     HumanMessage,
+    RemoveMessage,
     SystemMessage,
     ToolMessage,
     trim_messages,
 )
 from langchain_core.tools import tool
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.graph import START, MessagesState, StateGraph
+from langgraph.graph import END, START, MessagesState, StateGraph
 from pydantic import BaseModel, Field, ValidationError
 from voluptuous_openapi import convert
 
@@ -39,22 +40,27 @@ from .const import (
     CONF_CHAT_MODEL,
     CONF_CHAT_MODEL_TEMPERATURE,
     CONF_PROMPT,
-    CONF_VISION_MODEL,
-    CONF_VISION_MODEL_NUM_PREDICT,
+    CONF_SUMMARIZATION_MODEL_TEMPERATURE,
     CONF_VISION_MODEL_TEMPERATURE,
+    CONF_VLM,
     CONTEXT_MAX_MESSAGES,
+    CONTEXT_SUMMARIZE_THRESHOLD,
     DOMAIN,
     RECOMMENDED_CHAT_MODEL,
     RECOMMENDED_CHAT_MODEL_TEMPERATURE,
-    RECOMMENDED_VISION_MODEL,
-    RECOMMENDED_VISION_MODEL_NUM_PREDICT,
+    RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
     RECOMMENDED_VISION_MODEL_TEMPERATURE,
+    RECOMMENDED_VLM,
+    SUMMARY_INITAL_PROMPT,
+    SUMMARY_PROMPT_TEMPLATE,
+    SUMMARY_SYSTEM_PROMPT,
     TOOL_CALL_ERROR_SYSTEM_MESSSAGE,
     TOOL_CALL_ERROR_TEMPLATE,
     VISION_MODEL_IMAGE_HEIGHT,
     VISION_MODEL_IMAGE_WIDTH,
     VISION_MODEL_SYSTEM_PROMPT,
     VISION_MODEL_USER_PROMPT_TEMPLATE,
+    VLM_NUM_PREDICT,
 )
 
 if TYPE_CHECKING:
@@ -70,7 +76,12 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 #set_verbose(True)
-#set_debug(True)
+set_debug(True)
+
+class State(MessagesState):
+    """Extend the MessagesState to include a summary key."""
+
+    summary: str
 
 def _format_tool(
     tool: llm.Tool, custom_serializer: Callable[[Any], Any] | None
@@ -84,61 +95,88 @@ def _format_tool(
         tool_spec["description"] = tool.description
     return {"type": "function", "function": tool_spec}
 
-def _state_modifier(
-        state: MessagesState, max_messages: Literal["int"]
-    ) -> list[AnyMessage]:
-    """Given the agent state, return a list of trimmed messages for the chat model."""
-    return trim_messages(
-        state,
-        token_counter=len,
-        # When token_counter=len, each message will be counted as a single token.
-        max_tokens=max_messages,
-        # Keep the last <= n_count tokens of the messages.
-        strategy="last",
-        # Most chat models expect that chat history starts with either:
-        # (1) a HumanMessage or
-        # (2) a SystemMessage followed by a HumanMessage
-        # start_on="human" makes sure we produce a valid chat history
-        start_on="human",
-        # Most chat models expect that chat history ends with either:
-        # (1) a HumanMessage or
-        # (2) a ToolMessage
-        end_on=("human", "tool"),
-        # Usually, we want to keep the SystemMessage
-        # if it's present in the original history.
-        # The SystemMessage has special instructions for the model.
-        include_system=True,
-        allow_partial=False,
-    )
-
 async def _call_model(
-        state: MessagesState,
+        state: State,
         model: ChatOpenAI,
         prompt: Literal["str"],
         tools: list[Any],
-        max_messages: Literal["int"]
     ) -> dict[str, list[BaseMessage]]:
-    """Coroutine to calls the model."""
-    messages = [SystemMessage(content=prompt)] + state["messages"]
+    """Coroutine to call the model."""
+    summary = state.get("summary", "")
+    if summary:
+        system_message = f"\nSummary of conversation earlier: {summary}"
+        messages = [
+            SystemMessage(content=(prompt + system_message))
+        ] + state["messages"]
+    else:
+        messages = [SystemMessage(content=prompt)] + state["messages"]
+
     trace.async_conversation_trace_append(
         trace.ConversationTraceEventType.AGENT_DETAIL,
         {"messages": messages, "tools": tools if tools else None},
     )
-    # Trim message history to manage context window length.
-    trimmed_messages= _state_modifier(
-        state=messages,
-        max_messages=max_messages
-    )
-    #LOGGER.debug("Model call messages: %s", trimmed_messages)
-    LOGGER.debug("Model call messages: ")
-    for m in trimmed_messages:
-        LOGGER.debug(m.pretty_repr())
-    response = await model.ainvoke(trimmed_messages)
-    # Return a list, because it will get added to the existing list.
+
+    #LOGGER.debug("Model call messages: ")
+    #for m in messages:
+        #LOGGER.debug(m.pretty_repr())
+
+    response = await model.ainvoke(messages)
     return {"messages": response}
 
+async def _summarize_and_trim(
+        state: State, entry: ConfigEntry
+    ) -> dict[str, list[AnyMessage]]:
+    """Coroutine to summarize and trim message history."""
+    summary = state.get("summary", "")
+
+    if summary:
+        summary_message = SUMMARY_PROMPT_TEMPLATE.format(summary=summary)
+    else:
+        summary_message = SUMMARY_INITAL_PROMPT
+
+    messages = (
+        [SystemMessage(content=SUMMARY_SYSTEM_PROMPT)] +
+        state["messages"] +
+        [HumanMessage(content=summary_message)]
+    )
+
+    model = entry.vision_model
+    model_with_config = model.with_config(
+        {"configurable":
+            {
+                "model": entry.options.get(
+                    CONF_VLM,
+                    RECOMMENDED_VLM,
+                ),
+                "format": "",
+                "temperature": entry.options.get(
+                    CONF_SUMMARIZATION_MODEL_TEMPERATURE,
+                    RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
+                ),
+                "num_predict": VLM_NUM_PREDICT,
+            }
+        }
+    )
+
+    response = await model_with_config.ainvoke(messages)
+
+    # Trim message history to manage context window length.
+    trimmed_messages = trim_messages(
+        messages=state["messages"],
+        token_counter=len,
+        max_tokens=CONTEXT_MAX_MESSAGES,
+        strategy="last",
+        start_on="human",
+        include_system=True,
+    )
+    messages_to_remove = [m for m in state["messages"] if m not in trimmed_messages]
+    LOGGER.debug("Messages to remove: %s", messages_to_remove)
+    remove_messages = [RemoveMessage(id=m.id) for m in messages_to_remove]
+
+    return {"summary": response.content, "messages": remove_messages}
+
 async def _call_tools(
-        state: MessagesState, lc_tools: dict, api: llm.API
+        state: State, lc_tools: dict, api: llm.API
     ) -> dict[str, list[ToolMessage]]:
     """Coroutine to call Home Assistant or langchain LLM tools."""
     # Tool calls will be the last message in state.
@@ -190,12 +228,20 @@ async def _call_tools(
         tool_responses.append(tool_response)
     return {"messages": tool_responses}
 
-def _should_continue(state: MessagesState) -> Literal["action", "__end__"]:
+def _should_continue(
+        state: State
+    ) -> Literal["action", "summarize_and_trim", "__end__"]:
     """Return the next node in graph to execute."""
-    last_message = state["messages"][-1]
-    if not last_message.tool_calls:
-        return "__end__"
-    return "action"
+    messages = state["messages"]
+
+    if messages[-1].tool_calls:
+        return "action"
+
+    if len(messages) > CONTEXT_SUMMARIZE_THRESHOLD:
+        LOGGER.debug("Summarizing conversation")
+        return "summarize_and_trim"
+
+    return "__end__"
 
 async def _get_camera_image(hass: HomeAssistant, camera_name: str) -> bytes:
     """Get an image from a given camera."""
@@ -236,26 +282,6 @@ async def _analyze_image(entry: ConfigEntry, image: bytes) -> str:
 
         return [SystemMessage(content=system), HumanMessage(content=content_parts)]
 
-    vision_model = entry.vision_model
-
-    vision_model_with_config = vision_model.with_config(
-        {"configurable":
-            {
-                "model": entry.options.get(
-                    CONF_VISION_MODEL, RECOMMENDED_VISION_MODEL
-                ),
-                "temperature": entry.options.get(
-                    CONF_VISION_MODEL_TEMPERATURE, RECOMMENDED_VISION_MODEL_TEMPERATURE
-                ),
-                "num_predict": entry.options.get(
-                    CONF_VISION_MODEL_NUM_PREDICT, RECOMMENDED_VISION_MODEL_NUM_PREDICT
-                ),
-            }
-        }
-    )
-
-    chain = prompt_func | vision_model_with_config
-
     class ObjectTypeAndLocation(BaseModel):
         """Get type and location of objects in image."""
 
@@ -289,6 +315,26 @@ async def _analyze_image(entry: ConfigEntry, image: bytes) -> str:
 
     schema = json.dumps(ImageSceneAnalysis.model_json_schema())
 
+    model = entry.vision_model
+    model_with_config = model.with_config(
+        {"configurable":
+            {
+                "model": entry.options.get(
+                    CONF_VLM,
+                    RECOMMENDED_VLM,
+                ),
+                "format": "json",
+                "temperature": entry.options.get(
+                    CONF_VISION_MODEL_TEMPERATURE,
+                    RECOMMENDED_VISION_MODEL_TEMPERATURE,
+                ),
+                "num_predict": VLM_NUM_PREDICT,
+            }
+        }
+    )
+
+    chain = prompt_func | model_with_config
+
     try:
         response =  await chain.ainvoke(
             {
@@ -297,7 +343,7 @@ async def _analyze_image(entry: ConfigEntry, image: bytes) -> str:
                 "image": encoded_image
             }
         )
-    except HomeAssistantError as err:
+    except HomeAssistantError as err: #TODO: add validation error handling and retry prompt
         LOGGER.error("Error analyzing image %s", err)
 
     return response
@@ -380,7 +426,7 @@ class HGAConversationEntity(
             device_id=user_input.device_id,
         )
 
-        if self.entry.options.get(CONF_LLM_HASS_API):
+        if options.get(CONF_LLM_HASS_API):
             try:
                 llm_api = await llm.async_get_api(
                     hass,
@@ -489,17 +535,21 @@ class HGAConversationEntity(
         # TODO: make graph creation a function and call here
 
         # Define a new graph
-        workflow = StateGraph(MessagesState)
+        workflow = StateGraph(State)
 
         # Define nodes.
         workflow.add_node("agent", partial(
             _call_model,
             model=chat_model_with_tools,
             prompt=prompt,
-            tools=tools,
-            max_messages=CONTEXT_MAX_MESSAGES)
+            tools=tools)
         )
-        workflow.add_node("action", partial(_call_tools, lc_tools=lc_tools, api=llm_api))
+        workflow.add_node("action", partial(
+            _call_tools, lc_tools=lc_tools, api=llm_api)
+        )
+        workflow.add_node("summarize_and_trim", partial(
+                _summarize_and_trim, entry=self.entry)
+        )
 
         # Set the entrypoint as `agent`
         # This means that this node is the first one called
@@ -516,6 +566,8 @@ class HGAConversationEntity(
         )
 
         workflow.add_edge("action", "agent")
+
+        workflow.add_edge("summarize_and_trim", END)
 
         # Complile graph into a LangChain Runnable.
         app = workflow.compile(checkpointer=self.memory, debug=True)
@@ -552,9 +604,9 @@ class HGAConversationEntity(
                 response=intent_response, conversation_id=conversation_id
             )
 
-        LOGGER.debug("App response: ")
-        for m in response["messages"]:
-            LOGGER.debug(m.pretty_repr())
+        #LOGGER.debug("App response: ")
+        #for m in response["messages"]:
+            #LOGGER.debug(m.pretty_repr())
         LOGGER.debug("====== End of run ======")
 
         intent_response = intent.IntentResponse(language=user_input.language)

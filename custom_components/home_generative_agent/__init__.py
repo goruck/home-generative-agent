@@ -13,7 +13,7 @@ from langchain_core.runnables import ConfigurableField
 from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
 
-from .const import RECOMMENDED_VISION_MODEL, VISION_MODEL_URL
+from .const import RECOMMENDED_VLM, VLM_URL
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -53,12 +53,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     entry.chat_model = chat_model
 
     vision_model = ChatOllama(
-        model=RECOMMENDED_VISION_MODEL,
-        base_url=VISION_MODEL_URL,
-        format="json",
+        model=RECOMMENDED_VLM,
+        base_url=VLM_URL,
         http_async_client=get_async_client(hass)
     ).configurable_fields(
         model=ConfigurableField(id="model"),
+        format=ConfigurableField(id="format"),
         temperature=ConfigurableField(id="temperature"),
         num_predict=ConfigurableField(id="num_predict"),
     )
