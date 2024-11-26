@@ -76,7 +76,7 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 #set_verbose(True)
-set_debug(True)
+#set_debug(True)
 
 class State(MessagesState):
     """Extend the MessagesState to include a summary key."""
@@ -368,7 +368,7 @@ class HGAConversationEntity(
     def __init__(self, entry: ConfigEntry) -> None:
         """Initialize the agent."""
         self.entry = entry
-        self.app_config: dict[str, dict[str, str]] = {}
+        self.app_config: dict[str, dict[str, str]] = {"configurable": {"thread_id": ""}}
         self._attr_unique_id = entry.entry_id
         self._attr_device_info = dr.DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
@@ -377,13 +377,17 @@ class HGAConversationEntity(
             model="HGA",
             entry_type=dr.DeviceEntryType.SERVICE,
         )
+
         if self.entry.options.get(CONF_LLM_HASS_API):
             self._attr_supported_features = (
                 conversation.ConversationEntityFeature.CONTROL
             )
+
+        # Create database for thread-based (short-term) memory.
         # TODO:Change memory to langgraph-checkpoint-postgres to make robust
         self.memory = MemorySaver()
 
+        # Use in-memory caching for calls to LLMs.
         set_llm_cache(InMemoryCache())
 
     async def async_added_to_hass(self) -> None:
@@ -548,7 +552,7 @@ class HGAConversationEntity(
             _call_tools, lc_tools=lc_tools, api=llm_api)
         )
         workflow.add_node("summarize_and_trim", partial(
-                _summarize_and_trim, entry=self.entry)
+            _summarize_and_trim, entry=self.entry)
         )
 
         # Set the entrypoint as `agent`
