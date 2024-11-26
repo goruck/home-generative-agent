@@ -24,13 +24,17 @@ CONF_SUMMARIZATION_MODEL_TEMPERATURE = "summarization_model_temperature"
 RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE = 0.8
 
 ### Chat model parameters. ###
-# Parameters to manage chat model context length.
+# Next two parameters manage chat model context length.
 # CONTEXT_MAX_MESSAGES should be set larger than CONTEXT_SUMMARIZE_THREHOLD.
-# Maximum number of mwssages to keep in context before deletion.
-CONTEXT_MAX_MESSAGES = 1000
-# Maximum number of messages to keep in context before summary analysis.
+# CONTEXT_MAX_MESSAGES is messages to keep in context before deletion.
+# 800 messages is about 24k tokens. Keep number of tokens below 30k otherwise
+# rate limits will be triggered by OpenAI (Tokens Per Minute). 24k allows for margin.
+# This assumes Tier 1 pricing (TPM < 30k, RPM < 500).
+CONTEXT_MAX_MESSAGES = 800
+# If number of messages in context > CONTEXT_SUMMARIZE_THRESHOLD, generate a summary.
+# After summary, messages will be trimmed to CONTEXT_MAX_MESSAGES.
 CONTEXT_SUMMARIZE_THRESHOLD = 100
-# Chat model tool error handling
+# Next two parameters are for chat model tool error handling.
 TOOL_CALL_ERROR_SYSTEM_MESSSAGE = """
 
 Always call tools again with your mistakes corrected. Do not repeat mistakes.
