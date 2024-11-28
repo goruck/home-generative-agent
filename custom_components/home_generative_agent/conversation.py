@@ -46,6 +46,7 @@ from .const import (
     CONTEXT_MAX_MESSAGES,
     CONTEXT_SUMMARIZE_THRESHOLD,
     DOMAIN,
+    LANGCHAIN_LOGGING_LEVEL,
     RECOMMENDED_CHAT_MODEL,
     RECOMMENDED_CHAT_MODEL_TEMPERATURE,
     RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
@@ -75,8 +76,15 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
-#set_verbose(True)
-#set_debug(True)
+if LANGCHAIN_LOGGING_LEVEL == "verbose":
+    set_verbose(True)
+    set_debug(False)
+elif LANGCHAIN_LOGGING_LEVEL == "debug":
+    set_verbose(False)
+    set_debug(True)
+else:
+    set_verbose(False)
+    set_debug(False)
 
 class State(MessagesState):
     """Extend the MessagesState to include a summary key."""
@@ -116,6 +124,8 @@ async def _call_model(
         {"messages": messages, "tools": tools if tools else None},
     )
 
+    LOGGER.debug("Model call messages: %s", messages)
+    LOGGER.debug("Model call messages length: %s", len(messages))
     #LOGGER.debug("Model call messages: ")
     #for m in messages:
         #LOGGER.debug(m.pretty_repr())

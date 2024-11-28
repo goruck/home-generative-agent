@@ -23,6 +23,11 @@ RECOMMENDED_VISION_MODEL_TEMPERATURE = 0.8
 CONF_SUMMARIZATION_MODEL_TEMPERATURE = "summarization_model_temperature"
 RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE = 0.8
 
+### langchain logging level ###
+# Options are "disable", "verbose" or "debug".
+# See https://python.langchain.com/docs/how_to/debugging/
+LANGCHAIN_LOGGING_LEVEL = "disable"
+
 ### Chat model parameters. ###
 # Next two parameters manage chat model context length.
 # CONTEXT_MAX_MESSAGES should be set larger than CONTEXT_SUMMARIZE_THREHOLD.
