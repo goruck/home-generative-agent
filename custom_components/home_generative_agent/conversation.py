@@ -2,15 +2,19 @@
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import logging
+import string
 from functools import partial
-from typing import TYPE_CHECKING, Any, Literal
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 import voluptuous as vol
 from homeassistant.components import assist_pipeline, camera, conversation
 from homeassistant.components.conversation import trace
 from homeassistant.const import CONF_LLM_HASS_API, MATCH_ALL
+from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import (
     HomeAssistantError,
     TemplateError,
@@ -30,10 +34,16 @@ from langchain_core.messages import (
     ToolMessage,
     trim_messages,
 )
-from langchain_core.tools import tool
+from langchain_core.runnables import RunnableConfig
+from langchain_core.tools import InjectedToolArg, tool
+from langchain_ollama import ChatOllama
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.prebuilt import InjectedState, InjectedStore
+from langgraph.store.base import BaseStore
+from langgraph.store.memory import InMemoryStore
 from pydantic import BaseModel, Field, ValidationError
+from ulid import ULID
 from voluptuous_openapi import convert
 
 from .const import (
@@ -68,9 +78,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from homeassistant.config_entries import ConfigEntry
-    from homeassistant.core import HomeAssistant
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
-    from langchain_openai import ChatOpenAI
 
     from . import HGAConfigEntry
 
@@ -104,25 +112,25 @@ def _format_tool(
     return {"type": "function", "function": tool_spec}
 
 async def _call_model(
-        state: State,
-        model: ChatOpenAI,
-        prompt: Literal["str"],
-        tools: list[Any],
+        state: State, config: RunnableConfig, *, store: BaseStore
     ) -> dict[str, list[BaseMessage]]:
     """Coroutine to call the model."""
-    summary = state.get("summary", "")
-    if summary:
-        system_message = f"\nSummary of conversation earlier: {summary}"
-        messages = [
-            SystemMessage(content=(prompt + system_message))
-        ] + state["messages"]
-    else:
-        messages = [SystemMessage(content=prompt)] + state["messages"]
+    model = config["configurable"]["chat_model"]
+    prompt = config["configurable"]["prompt"]
+    user_id = config["configurable"]["user_id"]
 
-    trace.async_conversation_trace_append(
-        trace.ConversationTraceEventType.AGENT_DETAIL,
-        {"messages": messages, "tools": tools if tools else None},
-    )
+    # Retrieve the most recent memories for context.
+    mems = await store.asearch(("memories", user_id), limit=10)
+    formatted_mems = "\n".join(f"[{mem.key}]: {mem.value}" for mem in mems)
+    mems_message = f"\n<memories>\n{formatted_mems}\n</memories>" if formatted_mems else ""
+
+    # Retrive the latest conversation summary.
+    summary = state.get("summary", "")
+    summary_message = f"\nSummary of conversation earlier: {summary}" if summary else ""
+
+    messages = [SystemMessage(
+        content=(prompt + mems_message + summary_message)
+    )] + state["messages"]
 
     LOGGER.debug("Model call messages: %s", messages)
     LOGGER.debug("Model call messages length: %s", len(messages))
@@ -134,7 +142,7 @@ async def _call_model(
     return {"messages": response}
 
 async def _summarize_and_trim(
-        state: State, entry: ConfigEntry
+        state: State, config: RunnableConfig, *, store: BaseStore
     ) -> dict[str, list[AnyMessage]]:
     """Coroutine to summarize and trim message history."""
     summary = state.get("summary", "")
@@ -150,16 +158,17 @@ async def _summarize_and_trim(
         [HumanMessage(content=summary_message)]
     )
 
-    model = entry.vision_model
+    model = config["configurable"]["vlm_model"]
+    options = config["configurable"]["options"]
     model_with_config = model.with_config(
         {"configurable":
             {
-                "model": entry.options.get(
+                "model": options.get(
                     CONF_VLM,
                     RECOMMENDED_VLM,
                 ),
                 "format": "",
-                "temperature": entry.options.get(
+                "temperature": options.get(
                     CONF_SUMMARIZATION_MODEL_TEMPERATURE,
                     RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
                 ),
@@ -168,6 +177,7 @@ async def _summarize_and_trim(
         }
     )
 
+    LOGGER.debug("Summary messages: %s", messages)
     response = await model_with_config.ainvoke(messages)
 
     # Trim message history to manage context window length.
@@ -186,11 +196,14 @@ async def _summarize_and_trim(
     return {"summary": response.content, "messages": remove_messages}
 
 async def _call_tools(
-        state: State, lc_tools: dict, api: llm.API
+        state: State, config: RunnableConfig, *, store: BaseStore
     ) -> dict[str, list[ToolMessage]]:
     """Coroutine to call Home Assistant or langchain LLM tools."""
     # Tool calls will be the last message in state.
     tool_calls = state["messages"][-1].tool_calls
+
+    langchain_tools = config["configurable"]["langchain_tools"]
+    ha_llm_api = config["configurable"]["ha_llm_api"]
 
     tool_responses: list[ToolMessage] = []
     for tool_call in tool_calls:
@@ -210,21 +223,31 @@ async def _call_tools(
             )
 
         # A langchain tool was called.
-        if tool_name in lc_tools:
-            lc_tool = lc_tools[tool_name.lower()]
+        if tool_name in langchain_tools:
+            lc_tool = langchain_tools[tool_name.lower()]
+
+            # Provide hidden args to tool at runtime.
+            tool_call_copy = copy.deepcopy(tool_call)
+            tool_call_copy["args"].update(
+                {
+                    "store": store,
+                    "config": config,
+                }
+            )
+
             try:
-                tool_response = await lc_tool.ainvoke(tool_call)
+                tool_response = await lc_tool.ainvoke(tool_call_copy)
             except (HomeAssistantError, ValidationError) as e:
                 tool_response = _handle_tool_error(repr(e), tool_name, tool_call["id"])
         # A Home Assistant tool was called.
         else:
             tool_input = llm.ToolInput(
                 tool_name=tool_name,
-                tool_args= tool_args,
+                tool_args=tool_args,
             )
 
             try:
-                response = await api.async_call_tool(tool_input)
+                response = await ha_llm_api.async_call_tool(tool_input)
 
                 tool_response = ToolMessage(
                     content=json.dumps(response),
@@ -271,7 +294,11 @@ async def _get_camera_image(hass: HomeAssistant, camera_name: str) -> bytes:
 
     return image.content
 
-async def _analyze_image(entry: ConfigEntry, image: bytes) -> str:
+async def _analyze_image(
+        vlm_model: ChatOllama,
+        options: dict[str, Any] | MappingProxyType[str, Any],
+        image: bytes
+    ) -> str:
     """Analyze an image."""
     encoded_image = base64.b64encode(image).decode("utf-8")
 
@@ -325,16 +352,16 @@ async def _analyze_image(entry: ConfigEntry, image: bytes) -> str:
 
     schema = json.dumps(ImageSceneAnalysis.model_json_schema())
 
-    model = entry.vision_model
+    model = vlm_model
     model_with_config = model.with_config(
         {"configurable":
             {
-                "model": entry.options.get(
+                "model": options.get(
                     CONF_VLM,
                     RECOMMENDED_VLM,
                 ),
                 "format": "json",
-                "temperature": entry.options.get(
+                "temperature": options.get(
                     CONF_VISION_MODEL_TEMPERATURE,
                     RECOMMENDED_VISION_MODEL_TEMPERATURE,
                 ),
@@ -357,6 +384,58 @@ async def _analyze_image(entry: ConfigEntry, image: bytes) -> str:
         LOGGER.error("Error analyzing image %s", err)
 
     return response
+
+@tool(parse_docstring=False)
+async def get_and_analyze_camera_image(
+        camera_name: str,
+        *,
+        # Hide these arguments from the model.
+        config: Annotated[RunnableConfig, InjectedToolArg()],
+        store: Annotated[BaseStore, InjectedStore()],
+    ) -> str:
+    """Get an image from a given camera and analyze it."""
+    hass = config["configurable"]["hass"]
+    vlm_model = config["configurable"]["vlm_model"]
+    options = config["configurable"]["options"]
+    image = await _get_camera_image(hass, camera_name)
+    return await _analyze_image(vlm_model, options, image)
+
+@tool(parse_docstring=False)
+async def upsert_memory(
+    content: str,
+    context: str,
+    *,
+    memory_id: ULID | None = None,
+    # Hide these arguments from the model.
+    config: Annotated[RunnableConfig, InjectedToolArg()],
+    store: Annotated[BaseStore, InjectedStore()],
+) -> str:
+    """
+    Upsert a memory in the database.
+
+    If a memory conflicts with an existing one, then just UPDATE the
+    existing one by passing in memory_id - don't create two memories
+    that are the same. If the user corrects a memory, UPDATE it.
+
+    Args:
+        content: The main content of the memory. For example:
+            "User expressed interest in learning about French."
+        context: Additional context for the memory. For example:
+            "This was mentioned while discussing career options in Europe."
+        memory_id: ONLY PROVIDE IF UPDATING AN EXISTING MEMORY.
+            The memory to overwrite
+
+    Returns:
+        A string containing the stored memory id.
+
+    """
+    mem_id = memory_id or ulid.ulid_now()
+    await store.aput(
+        ("memories", config["configurable"]["user_id"]),
+        key=str(mem_id),
+        value={"content": content, "context": context},
+    )
+    return f"Stored memory {mem_id}"
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -399,6 +478,8 @@ class HGAConversationEntity(
 
         # Use in-memory caching for calls to LLMs.
         set_llm_cache(InMemoryCache())
+
+        self.store = InMemoryStore()
 
     async def async_added_to_hass(self) -> None:
         """When entity is added to Home Assistant."""
@@ -460,17 +541,12 @@ class HGAConversationEntity(
                _format_tool(tool, llm_api.custom_serializer) for tool in llm_api.tools
             ]
 
-        @tool
-        async def get_and_analyze_camera_image(camera_name: str) -> str:
-            """Get an image from a given camera and analyze it."""
-            image = await _get_camera_image(hass, camera_name)
-            return await _analyze_image(self.entry, image)
-
         # Add langchain tools to the list of HA tools.
-        lc_tools = {
+        langchain_tools = {
             "get_and_analyze_camera_image": get_and_analyze_camera_image,
+            "upsert_memory": upsert_memory,
         }
-        tools.extend(lc_tools.values())
+        tools.extend(langchain_tools.values())
 
         # Conversation IDs are ULIDs. Generate a new one if not provided.
         # If an old ULID is passed in, generate a new one to indicate
@@ -529,7 +605,7 @@ class HGAConversationEntity(
         if llm_api:
             prompt_parts.append(llm_api.api_prompt)
 
-        prompt: Literal["str"] = "\n".join(prompt_parts)
+        prompt = "\n".join(prompt_parts)
 
         chat_model = self.entry.chat_model
         chat_model_with_config = chat_model.with_config(
@@ -552,18 +628,10 @@ class HGAConversationEntity(
         workflow = StateGraph(State)
 
         # Define nodes.
-        workflow.add_node("agent", partial(
-            _call_model,
-            model=chat_model_with_tools,
-            prompt=prompt,
-            tools=tools)
-        )
-        workflow.add_node("action", partial(
-            _call_tools, lc_tools=lc_tools, api=llm_api)
-        )
-        workflow.add_node("summarize_and_trim", partial(
-            _summarize_and_trim, entry=self.entry)
-        )
+        workflow.add_node("agent", _call_model)
+
+        workflow.add_node("action", _call_tools)
+        workflow.add_node("summarize_and_trim", _summarize_and_trim)
 
         # Set the entrypoint as `agent`
         # This means that this node is the first one called
@@ -584,10 +652,23 @@ class HGAConversationEntity(
         workflow.add_edge("summarize_and_trim", END)
 
         # Complile graph into a LangChain Runnable.
-        app = workflow.compile(checkpointer=self.memory, debug=True)
+        app = workflow.compile(store=self.store, checkpointer=self.memory, debug=True)
+
+        # Remove special characters since namespace labels cannot contain.
+        user_name_clean = user_name.translate(str.maketrans("", "", string.punctuation))
 
         self.app_config = {
-            "configurable": {"thread_id": conversation_id},
+            "configurable": {
+                "thread_id": conversation_id,
+                "user_id": user_name_clean,
+                "chat_model": chat_model_with_tools,
+                "prompt": prompt,
+                "options": options,
+                "vlm_model": self.entry.vision_model,
+                "langchain_tools": langchain_tools,
+                "ha_llm_api": llm_api,
+                "hass": hass,
+            },
             "recursion_limit": 10
         }
 
@@ -621,6 +702,12 @@ class HGAConversationEntity(
         #LOGGER.debug("App response: ")
         #for m in response["messages"]:
             #LOGGER.debug(m.pretty_repr())
+
+        trace.async_conversation_trace_append(
+            trace.ConversationTraceEventType.AGENT_DETAIL,
+            {"messages": response["messages"], "tools": tools if tools else None},
+        )
+
         LOGGER.debug("====== End of run ======")
 
         intent_response = intent.IntentResponse(language=user_input.language)
