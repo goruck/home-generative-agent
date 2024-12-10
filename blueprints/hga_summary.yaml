@@ -35,7 +35,7 @@ actions:
     metadata: {}
     data:
       agent_id: conversation.hga
-      text: !input Prompt
+      text: !input message
       conversation_id: hga_automation_summary
     response_variable: hga_automation_summary_output
 
