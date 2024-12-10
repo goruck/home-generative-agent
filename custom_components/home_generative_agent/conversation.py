@@ -108,14 +108,21 @@ class HGAConversationEntity(
 
         # Create database for thread-based (short-term) memory.
         # TODO: Use a DB-backed store in production use.
-        self.memory = MemorySaver()
+        memory = MemorySaver()
 
-        # Use in-memory caching for calls to LLMs.
-        set_llm_cache(InMemoryCache())
-
-        # InMemoryStore saves data to an in-memory dictionary.
+        # Create database for conversation- or session-based (long-term) memory.
         # TODO: Use a DB-backed store in production use.
-        self.store = InMemoryStore()
+        store = InMemoryStore()
+
+        # Complile graph into a LangChain Runnable.
+        self.app = workflow.compile(
+            store=store,
+            checkpointer=memory,
+            debug=LANGCHAIN_LOGGING_LEVEL=="debug"
+        )
+
+        # Use in-memory caching for langgraph calls to LLMs.
+        set_llm_cache(InMemoryCache())
 
     async def async_added_to_hass(self) -> None:
         """When entity is added to Home Assistant."""
@@ -258,13 +265,6 @@ class HGAConversationEntity(
         )
         chat_model_with_tools = chat_model_with_config.bind_tools(tools)
 
-        # Complile graph into a LangChain Runnable.
-        app = workflow.compile(
-            store=self.store,
-            checkpointer=self.memory,
-            debug=LANGCHAIN_LOGGING_LEVEL=="debug"
-        )
-
         # Remove special characters since memory namespace labels cannot contain.
         user_name_clean = user_name.translate(str.maketrans("", "", string.punctuation))
 
@@ -285,7 +285,7 @@ class HGAConversationEntity(
 
         # Interact with app.
         try:
-            response = await app.ainvoke(
+            response = await self.app.ainvoke(
                 {"messages": [HumanMessage(content=user_input.text)]},
                 config=self.app_config
             )
