@@ -1,0 +1,50 @@
+
+blueprint:
+  name: State of the home (Home Generative Agent v0.1)
+  author: goruck
+  description: >
+    Generative AI-powered summary of Homeassistant entities exposed to assistant agents.
+    Sends a persistant notification to the Homeassistant UI.
+  domain: automation
+  source_url: https://github.com/goruck/home-generative-agent/tree/main/blueprints/hga_summary.yaml
+  input:
+    trigger_interval:
+      name: Trigger based on time interval in minutes
+      description: 
+      default: 30
+      selector:
+        number:
+          min: 1
+          max: 1440
+    message:
+      name: Prompt
+      description: Model prompt for the video_analyzer action
+      default: "Provide the latest summary of the house's state and an analysis of the camera images. Draw conclusions from this data including presence of people and pets inside the house."
+      selector:
+        text:
+          multiline: true
+
+triggers:
+  - trigger: time_pattern
+    hours: /!input trigger_interval
+
+conditions: []
+
+actions:
+  - action: conversation.process
+    metadata: {}
+    data:
+      agent_id: conversation.hga
+      text: !input prompt
+      conversation_id: hga_automation_summary
+    response_variable: hga_automation_summary_output
+
+  - action: notify.persistent_notification
+    metadata: {}
+    data:
+      title: HGA Automation Summary
+      message: >-
+        {{ hga_automation_summary_output['response']['speech']['plain']['speech']
+        }}
+
+mode: single
