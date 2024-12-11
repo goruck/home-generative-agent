@@ -15,18 +15,23 @@ blueprint:
       selector:
         number:
           min: 1
-          max: 1440
+          max: 59
     message:
       name: Prompt
       description: Model prompt for the video_analyzer action
-      default: "Provide the latest summary of the house's state and an analysis of the camera images. Draw conclusions from this data including presence of people and pets inside the house."
+      default: >
+        Provide the latest summary of the house's state and an analysis of the camera images.
+        Draw conclusions from this data including presence of people and pets inside the house.
       selector:
         text:
           multiline: true
 
+variables:
+  trigger_interval: !input trigger_interval
+
 triggers:
   - trigger: time_pattern
-    minutes: /!input trigger_interval
+    minutes: "{{'/' ~ trigger_interval }}"
 
 conditions: []
 
@@ -43,8 +48,6 @@ actions:
     metadata: {}
     data:
       title: HGA Automation Summary
-      message: >-
-        {{ hga_automation_summary_output['response']['speech']['plain']['speech']
-        }}
+      message: "{{ hga_automation_summary_output['response']['speech']['plain']['speech'] }}"
 
 mode: single
