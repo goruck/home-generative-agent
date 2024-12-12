@@ -25,7 +25,7 @@ blueprint:
 
 triggers:
   - trigger: time_pattern
-    minutes: !time_pattern
+    minutes: !input time_pattern
 
 conditions: []
 
