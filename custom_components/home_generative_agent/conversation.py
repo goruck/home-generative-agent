@@ -36,7 +36,7 @@ from .const import (
     TOOL_CALL_ERROR_SYSTEM_MESSSAGE,
 )
 from .graph import workflow
-from .tools import get_and_analyze_camera_image, upsert_memory
+from .tools import add_automation, get_and_analyze_camera_image, upsert_memory
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -188,6 +188,7 @@ class HGAConversationEntity(
         langchain_tools = {
             "get_and_analyze_camera_image": get_and_analyze_camera_image,
             "upsert_memory": upsert_memory,
+            "add_automation": add_automation,
         }
         tools.extend(langchain_tools.values())
 

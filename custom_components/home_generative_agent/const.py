@@ -82,3 +82,5 @@ Task: Describe this image:
 # Ollama VLM model image size (in pixels).
 VISION_MODEL_IMAGE_WIDTH = 1120
 VISION_MODEL_IMAGE_HEIGHT = 1120
+
+EVENT_AUTOMATION_REGISTERED = "automation_registered_via_home_generative_agent"

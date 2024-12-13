@@ -4,9 +4,15 @@ from __future__ import annotations
 import base64
 import json
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
-from homeassistant.components import camera
+import aiofiles
+import yaml
+from homeassistant.components import automation, camera
+from homeassistant.components.automation.config import _async_validate_config_item
+from homeassistant.config import AUTOMATION_CONFIG_PATH
+from homeassistant.const import SERVICE_RELOAD
 from homeassistant.exceptions import (
     HomeAssistantError,
 )
@@ -27,6 +33,7 @@ from ulid import ULID  # noqa: TCH002
 from .const import (
     CONF_VISION_MODEL_TEMPERATURE,
     CONF_VLM,
+    EVENT_AUTOMATION_REGISTERED,
     RECOMMENDED_VISION_MODEL_TEMPERATURE,
     RECOMMENDED_VLM,
     VISION_MODEL_IMAGE_HEIGHT,
@@ -203,3 +210,65 @@ async def upsert_memory(
         value={"content": content, "context": context},
     )
     return f"Stored memory {mem_id}"
+
+@tool(parse_docstring=True)
+async def add_automation(  # noqa: D417
+    automation_yaml: str,
+    *,
+    # Hide these arguments from the model.
+    config: Annotated[RunnableConfig, InjectedToolArg()]
+) -> str:
+    """
+    Add an automation to Homeassistant.
+
+    Args:
+        automation_yaml: Automation in valid yaml format.
+
+    """
+    hass = config["configurable"]["hass"]
+
+    automation_parsed = yaml.safe_load(automation_yaml)
+    ha_automation_config = {"id": ulid.ulid_now()}
+    if isinstance(automation_parsed, list):
+        ha_automation_config.update(automation_parsed[0])
+    if isinstance(automation_parsed, dict):
+        ha_automation_config.update(automation_parsed)
+
+    try:
+        await _async_validate_config_item(
+            hass = hass,
+            config = ha_automation_config,
+            raise_on_errors = True,
+            warn_on_errors = False
+        )
+    except HomeAssistantError as err:
+        return f"Invalid automation configuration {err!r}"
+
+    async with aiofiles.open(
+        Path(hass.config.config_dir) / AUTOMATION_CONFIG_PATH,
+        encoding="utf-8"
+    ) as f:
+        ha_exsiting_automation_configs = await f.read()
+        ha_exsiting_automations_yaml = yaml.safe_load(ha_exsiting_automation_configs)
+
+    async with aiofiles.open(
+        Path(hass.config.config_dir) / AUTOMATION_CONFIG_PATH,
+        "a" if ha_exsiting_automations_yaml else "w",
+        encoding="utf-8"
+    ) as f:
+        ha_automation_config_raw = yaml.dump(
+            [ha_automation_config], allow_unicode=True, sort_keys=False
+        )
+        await f.write("\n" + ha_automation_config_raw)
+
+    await hass.services.async_call(automation.config.DOMAIN, SERVICE_RELOAD)
+
+    hass.bus.async_fire(
+        EVENT_AUTOMATION_REGISTERED,
+        {
+            "automation_config": ha_automation_config,
+            "raw_config": ha_automation_config_raw,
+        },
+    )
+
+    return f"Added automation {ha_automation_config['id']}"
