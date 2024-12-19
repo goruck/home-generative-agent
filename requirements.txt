@@ -3,7 +3,7 @@ homeassistant==2024.6.0
 pip>=21.3.1
 ruff==0.8.3
 langchain==0.3.13
-langchain-openai==0.2.2
+langchain-openai==0.2.13
 langgraph==0.2.59
 openai==1.35.7
 pydantic==2.9.2
