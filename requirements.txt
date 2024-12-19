@@ -5,5 +5,5 @@ ruff==0.8.3
 langchain==0.3.13
 langchain-openai==0.2.2
 langgraph==0.2.59
-openai==1.35.7
+openai==1.58.1
 pydantic==2.9.2
