@@ -277,12 +277,13 @@ class HGAConversationEntity(
         chat_model_with_tools = chat_model_with_config.bind_tools(tools)
 
         # Remove special characters since memory namespace labels cannot contain.
-        user_name_clean = user_name.translate(str.maketrans("", "", string.punctuation))
+        if user_name is not None:
+            user_name = user_name.translate(str.maketrans("", "", string.punctuation))
 
         self.app_config = {
             "configurable": {
                 "thread_id": conversation_id,
-                "user_id": user_name_clean,
+                "user_id": user_name,
                 "chat_model": chat_model_with_tools,
                 "prompt": prompt,
                 "options": options,
