@@ -4,15 +4,18 @@ from __future__ import annotations
 import base64
 import json
 import logging
+from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
 import aiofiles
+import homeassistant.util.dt as dt_util
 import yaml
-from homeassistant.components import automation, camera
+from homeassistant.components import automation, camera, recorder
 from homeassistant.components.automation.config import _async_validate_config_item
 from homeassistant.config import AUTOMATION_CONFIG_PATH
 from homeassistant.const import SERVICE_RELOAD
+from homeassistant.core import State
 from homeassistant.exceptions import (
     HomeAssistantError,
 )
@@ -44,11 +47,37 @@ from .const import (
 )
 
 if TYPE_CHECKING:
+    from datetime import datetime
     from types import MappingProxyType
 
     from homeassistant.core import HomeAssistant
 
 LOGGER = logging.getLogger(__name__)
+
+def _as_utc(dattim: str, default: datetime, error_message: str) -> datetime:
+        """
+        Convert a string representing a datetime into a datetime.datetime.
+
+        Args:
+            dattim: String representing a datetime.
+            default: datatime.datetime to use as default.
+            error_message: Message to raise in case of error.
+
+        Raises:
+            Homeassistant error if datetime cannot be parsed.
+
+        Returns:
+            A datetime.datetime of the string in UTC.
+
+        """
+        if dattim is None:
+            return default
+
+        parsed_datetime = dt_util.parse_datetime(dattim)
+        if parsed_datetime is None:
+            raise HomeAssistantError(error_message)
+
+        return dt_util.as_utc(parsed_datetime)
 
 async def _get_camera_image(hass: HomeAssistant, camera_name: str) -> bytes:
     """Get an image from a given camera."""
@@ -242,7 +271,7 @@ async def add_automation(  # noqa: D417
             warn_on_errors = False
         )
     except HomeAssistantError as err:
-        return f"Invalid automation configuration {err!r}"
+        return f"Invalid automation configuration {err}"
 
     async with aiofiles.open(
         Path(hass.config.config_dir) / AUTOMATION_CONFIG_PATH,
@@ -272,3 +301,90 @@ async def add_automation(  # noqa: D417
     )
 
     return f"Added automation {ha_automation_config['id']}"
+
+@tool(parse_docstring=True)
+async def get_entity_history(  # noqa: D417
+    entity_ids: list[str],
+    local_start_time: str,
+    local_end_time: str,
+    *,
+    # Hide these arguments from the model.
+    config: Annotated[RunnableConfig, InjectedToolArg()]
+) -> dict[str, list[dict[str, Any]]]:
+    """
+    Get entity state history from Homeassistant.
+
+    Args:
+        entity_ids: List of Homeassistant entity ids to retrive the history for.
+        local_start_time: Start of local time history period in "%Y-%m-%dT%H:%M:%S%z".
+        local_end_time: End of local time history period in "%Y-%m-%dT%H:%M:%S%z".
+
+    Returns:
+        Entity history in local time.
+
+    """
+    hass = config["configurable"]["hass"]
+
+    now = dt_util.utcnow()
+    one_day = timedelta(days=1)
+    try:
+        start_time = _as_utc(
+            dattim = local_start_time,
+            default = now - one_day,
+            error_message = "start_time not valid"
+        )
+        end_time = _as_utc(
+            dattim = local_end_time,
+            default = start_time + one_day,
+            error_message = "end_time not valid"
+        )
+    except HomeAssistantError as err:
+        return f"Invalid time {err}"
+
+    filters = None
+    include_start_time_state = True
+    significant_changes_only = True
+    minimal_response = True # If True filter out duplicate states
+    no_attributes = False
+    compressed_state_format = False
+
+    with recorder.util.session_scope(hass=hass, read_only=True) as session:
+        history = await recorder.get_instance(hass).async_add_executor_job(
+            recorder.history.get_significant_states_with_session,
+            hass,
+            session,
+            start_time,
+            end_time,
+            entity_ids,
+            filters,
+            include_start_time_state,
+            significant_changes_only,
+            minimal_response,
+            no_attributes,
+            compressed_state_format
+        )
+
+    if not history:
+        return {}
+
+    # Convert any State objects in history to dict.
+    history = {
+        e: [
+            s.as_dict() if isinstance(s, State) else s for s in v
+        ] for e, v in history.items()
+    }
+
+    # Convert history datetimes in UTC to local timezone.
+    for lst in history.values():
+        for d in lst:
+            for k, v in d.items():
+                try:
+                    dattim = dt_util.parse_datetime(v, raise_on_error=True)
+                    dattim_local = dt_util.as_local(dattim)
+                    d.update({k: dattim_local.strftime("%Y-%m-%dT%H:%M:%S%z")})
+                except (ValueError, TypeError):
+                    pass
+                except HomeAssistantError as err:
+                    return f"Unexpected datetime conversion error {err}"
+
+    return history

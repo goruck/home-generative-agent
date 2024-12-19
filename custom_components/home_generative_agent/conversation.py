@@ -5,6 +5,7 @@ import logging
 import string
 from typing import TYPE_CHECKING, Any, Literal
 
+import homeassistant.util.dt as dt_util
 from homeassistant.components import assist_pipeline, conversation
 from homeassistant.components.conversation import trace
 from homeassistant.const import CONF_LLM_HASS_API, MATCH_ALL
@@ -36,7 +37,12 @@ from .const import (
     TOOL_CALL_ERROR_SYSTEM_MESSSAGE,
 )
 from .graph import workflow
-from .tools import add_automation, get_and_analyze_camera_image, upsert_memory
+from .tools import (
+    add_automation,
+    get_and_analyze_camera_image,
+    get_entity_history,
+    upsert_memory,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -124,6 +130,8 @@ class HGAConversationEntity(
         # Use in-memory caching for langgraph calls to LLMs.
         set_llm_cache(InMemoryCache())
 
+        self.tz = dt_util.get_default_time_zone()
+
     async def async_added_to_hass(self) -> None:
         """When entity is added to Home Assistant."""
         await super().async_added_to_hass()
@@ -189,6 +197,7 @@ class HGAConversationEntity(
             "get_and_analyze_camera_image": get_and_analyze_camera_image,
             "upsert_memory": upsert_memory,
             "add_automation": add_automation,
+            "get_entity_history": get_entity_history,
         }
         tools.extend(langchain_tools.values())
 
@@ -222,6 +231,7 @@ class HGAConversationEntity(
                     (
                         llm.BASE_PROMPT
                         + options.get(CONF_PROMPT, llm.DEFAULT_INSTRUCTIONS_PROMPT)
+                        + f"\nYou are in the {self.tz} timezone."
                         + TOOL_CALL_ERROR_SYSTEM_MESSSAGE if tools else ""
                     ),
                     self.hass,
