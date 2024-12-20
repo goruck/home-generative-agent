@@ -4,16 +4,16 @@
   "after_dependencies": ["assist_pipeline", "intent"],
   "codeowners": ["@goruck"],
   "config_flow": true,
-  "dependencies": ["conversation"],
+  "dependencies": ["conversation", "recorder"],
   "documentation": "https://github.com/goruck/home_generative_agent",
   "integration_type": "service",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/goruck/home_generative_agent/issues",
   "requirements": [
-    "langchain==0.3.3",
-    "langchain-openai==0.2.2",
-    "langgraph==0.2.35",
-    "openai==1.35.7"
+    "langchain==0.3.13",
+    "langchain-openai==0.2.13",
+    "langgraph==0.2.60",
+    "openai==1.58.1"
   ],
   "version": "0.1.0"
 }
