@@ -234,7 +234,7 @@ async def upsert_memory(
     """
     mem_id = memory_id or ulid.ulid_now()
     await store.aput(
-        ("memories", config["configurable"]["user_id"]),
+        namespace=(config["configurable"]["user_id"], "memories"),
         key=str(mem_id),
         value={"content": content, "context": context},
     )

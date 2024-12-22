@@ -10,10 +10,15 @@ from homeassistant.const import CONF_API_KEY, Platform
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.httpx_client import get_async_client
 from langchain_core.runnables import ConfigurableField
-from langchain_ollama import ChatOllama
+from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_openai import ChatOpenAI
 
-from .const import RECOMMENDED_VLM, VLM_URL
+from .const import (
+    EMBEDDING_MODEL_URL,
+    RECOMMENDED_EMBEDDING_MODEL,
+    RECOMMENDED_VLM,
+    VLM_URL,
+)
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -66,10 +71,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     try:
         await hass.async_add_executor_job(vision_model.get_name)
     except HomeAssistantError as err:
-        LOGGER.error("Error setting up Ollama: %s", err)
+        LOGGER.error("Error setting up VLM: %s", err)
         return False
 
     entry.vision_model = vision_model
+
+    embedding_model = OllamaEmbeddings(
+        model=RECOMMENDED_EMBEDDING_MODEL,
+        base_url=EMBEDDING_MODEL_URL
+    )
+
+    #try:
+        #await hass.async_add_executor_job(embedding_model.get_name)
+    #except HomeAssistantError as err:
+        #LOGGER.error("Error setting up embedding model: %s", err)
+        #return False
+
+    entry.embedding_model = embedding_model
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 

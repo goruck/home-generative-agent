@@ -32,6 +32,7 @@ from langchain_openai import ChatOpenAI
 from .const import (
     CONF_CHAT_MODEL,
     CONF_CHAT_MODEL_TEMPERATURE,
+    CONF_EMBEDDING_MODEL,
     CONF_PROMPT,
     CONF_RECOMMENDED,
     CONF_SUMMARIZATION_MODEL_TEMPERATURE,
@@ -40,6 +41,7 @@ from .const import (
     DOMAIN,
     RECOMMENDED_CHAT_MODEL,
     RECOMMENDED_CHAT_MODEL_TEMPERATURE,
+    RECOMMENDED_EMBEDDING_MODEL,
     RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
     RECOMMENDED_VISION_MODEL_TEMPERATURE,
     RECOMMENDED_VLM,
@@ -234,6 +236,11 @@ def config_option_schema(
                 },
                 default=RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
             ): NumberSelector(NumberSelectorConfig(min=0, max=2, step=0.05)),
+            vol.Optional(
+                CONF_EMBEDDING_MODEL,
+                description={"suggested_value": options.get(CONF_EMBEDDING_MODEL)},
+                default=RECOMMENDED_EMBEDDING_MODEL,
+            ): str,
         }
     )
     return schema

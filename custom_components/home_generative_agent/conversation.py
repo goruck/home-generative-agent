@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import string
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
 import homeassistant.util.dt as dt_util
@@ -16,6 +17,7 @@ from homeassistant.exceptions import (
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import intent, llm, template
 from homeassistant.util import ulid
+from langchain.embeddings import init_embeddings
 from langchain.globals import set_debug, set_verbose
 from langchain_core.caches import InMemoryCache
 from langchain_core.globals import set_llm_cache
@@ -31,6 +33,7 @@ from .const import (
     CONF_CHAT_MODEL_TEMPERATURE,
     CONF_PROMPT,
     DOMAIN,
+    EMBEDDING_MODEL_DIMS,
     LANGCHAIN_LOGGING_LEVEL,
     RECOMMENDED_CHAT_MODEL,
     RECOMMENDED_CHAT_MODEL_TEMPERATURE,
@@ -43,6 +46,7 @@ from .tools import (
     get_entity_history,
     upsert_memory,
 )
+from .utilities import generate_embeddings
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -116,9 +120,15 @@ class HGAConversationEntity(
         # TODO: Use a DB-backed store in production use.
         memory = MemorySaver()
 
-        # Create database for conversation- or session-based (long-term) memory.
+        # Create database for session-based (long-term) memory with semantic search.
         # TODO: Use a DB-backed store in production use.
-        store = InMemoryStore()
+        store = InMemoryStore(
+            index={
+                "embed": partial(generate_embeddings, model=entry.embedding_model),
+                "dims": EMBEDDING_MODEL_DIMS,
+                "fields": ["content"]
+            }
+        )
 
         # Complile graph into a LangChain Runnable.
         self.app = workflow.compile(

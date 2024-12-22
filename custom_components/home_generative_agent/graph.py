@@ -30,6 +30,7 @@ from .const import (
     CONF_VLM,
     CONTEXT_MAX_MESSAGES,
     CONTEXT_SUMMARIZE_THRESHOLD,
+    EMBEDDING_MODEL_PROMPT_TEMPLATE,
     RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
     RECOMMENDED_VLM,
     SUMMARY_INITAL_PROMPT,
@@ -54,10 +55,20 @@ async def _call_model(
     prompt = config["configurable"]["prompt"]
     user_id = config["configurable"]["user_id"]
 
-    # Retrieve the most recent memories for context.
-    mems = await store.asearch(("memories", user_id), limit=10)
+    # Retrieve most recent or search for most relevant memories for context.
+    # Use semantic search if the last message was from the user.
+    msg = state["messages"][-1]
+    query_prompt = EMBEDDING_MODEL_PROMPT_TEMPLATE.format(
+        query=msg.content
+    ) if isinstance(msg, HumanMessage) else None
+    mems = await store.asearch(
+        (user_id, "memories"),
+        query=query_prompt,
+        limit=10
+    )
     formatted_mems = "\n".join(f"[{mem.key}]: {mem.value}" for mem in mems)
-    mems_message = f"\n<memories>\n{formatted_mems}\n</memories>" if formatted_mems else ""
+    mems_message = f"\n<memories>\n{formatted_mems}\n</memories>" \
+        if formatted_mems else ""
 
     # Retrive the latest conversation summary.
     summary = state.get("summary", "")

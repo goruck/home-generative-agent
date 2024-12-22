@@ -22,6 +22,10 @@ CONF_VISION_MODEL_TEMPERATURE = "vision_model_temperature"
 RECOMMENDED_VISION_MODEL_TEMPERATURE = 0.8
 CONF_SUMMARIZATION_MODEL_TEMPERATURE = "summarization_model_temperature"
 RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE = 0.8
+### Ollama embedding model parameters. ###
+# The embedding model is used for semantic search in long-term memory.
+CONF_EMBEDDING_MODEL = "embedding_model"
+RECOMMENDED_EMBEDDING_MODEL = "mxbai-embed-large"
 
 ### langchain logging level ###
 # Options are "disable", "verbose" or "debug".
@@ -51,7 +55,7 @@ Error: {error}
 Call the tool again with your mistake corrected.
 """
 
-### Ollma VLM parameters. ###
+### Ollama VLM parameters. ###
 # Ollama VLM server URL.
 VLM_URL = "192.168.1.252:11434"
 # Ollama VLM maximum nuber of output tokens to generate.
@@ -82,5 +86,12 @@ Task: Describe this image:
 # Ollama VLM model image size (in pixels).
 VISION_MODEL_IMAGE_WIDTH = 1120
 VISION_MODEL_IMAGE_HEIGHT = 1120
+
+### Ollama embedding model parameters. ###
+EMBEDDING_MODEL_URL = "192.168.1.252:11434"
+EMBEDDING_MODEL_DIMS = 512
+EMBEDDING_MODEL_PROMPT_TEMPLATE = """
+Represent this sentence for searching relevant passages: {query}
+"""
 
 EVENT_AUTOMATION_REGISTERED = "automation_registered_via_home_generative_agent"
