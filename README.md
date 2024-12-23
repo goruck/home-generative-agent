@@ -6,15 +6,26 @@
 
 ![Project Maintenance][maintenance-shield]
 
-The goal of this project is to create a generative AI agent integration for Home Assistant.
+The goal of this project is to create a generative AI agent integration for Home Assistant which allows you to converse with an AI agent that is capable of understanding the state of your home and taking action on your behalf both explicily and proactively. The AI agent is built using [LangChain](https://www.langchain.com/) and [LangGraph](https://www.langchain.com/langgraph) which allows for scalable and cutting edge solutions by leaveragibg these world-class frameworks which are tightly integrated into this Home Assistant integration.
 
-This is a work in progress.
+**The follwing features are supported.**
+
+- Create complex Home Assitant automations.
+- Image sciene analysis and understanding.
+- Home state analysis of entities, devices and areas.
+- Full agent control of allowed entities in the home.
+- Short- and long-term memory using semantic search.
+- Automatic summarization of home state to manage LLM context length.
+- A hybrid cloud - edge solution that balances cost, accuracy and latency.
 
 **This integration will set up the following platforms.**
 
 Platform | Description
 -- | --
-`conversation` | allows you to converse with Home Assistant
+`conversation` | Allows you to converse with Home Generative Assistant.
+
+## Architecture
+TBA
 
 ## Installation
 
@@ -26,7 +37,8 @@ Platform | Description
 1. Restart Home Assistant
 1. In the HA UI go to "Configuration" -> "Integrations" click "+" and search for "Home Generative Agent"
 
-## Configuration is done in the UI
+## Configuration
+Configuration is done in the UI and via the parameters in `constant.py`.
 
 <!---->
 
