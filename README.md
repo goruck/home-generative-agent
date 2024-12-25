@@ -6,36 +6,76 @@
 
 ![Project Maintenance][maintenance-shield]
 
-The goal of this project is to create a generative AI agent integration for Home Assistant which allows you to converse with an AI agent that is capable of understanding the state of your home and taking action on your behalf both explicily and proactively. The AI agent is built using [LangChain](https://www.langchain.com/) and [LangGraph](https://www.langchain.com/langgraph) which allows for scalable and cutting edge solutions by leaveragibg these world-class frameworks which are tightly integrated into this Home Assistant integration.
+The goal of this project is to create a generative AI agent integration for Home Assistant
+which allows you to converse with an AI agent that is capable of understanding the state of
+your home and taking action on your behalf both explicitly and proactively.
+The AI agent is built using [LangChain](https://www.langchain.com/) and
+[LangGraph](https://www.langchain.com/langgraph) which allows for scalable and cutting
+edge solutions by leveraging these world-class frameworks which are tightly integrated
+into this Home Assistant integration. A hybrid cloud - edge solution is used that balances cost, accuracy and latency.
 
 **The follwing features are supported.**
 
-- Create complex Home Assitant automations.
-- Image sciene analysis and understanding.
+- Create complex Home Assistant automation.
+- Image scene analysis and understanding.
 - Home state analysis of entities, devices and areas.
 - Full agent control of allowed entities in the home.
 - Short- and long-term memory using semantic search.
 - Automatic summarization of home state to manage LLM context length.
-- A hybrid cloud - edge solution that balances cost, accuracy and latency.
 
 This integration will set up the `conversation` platform which allows the user to
 converse with Home Generative Assistant.
 
-## Exaple Use Cases
+## Example Use Cases
+Create an automation.
 TBA
 
-## Architecture
+Check a single camera.
+TBA
+
+Check multiple cameras.
+TBA
+
+Check the history of a light.
+TBA
+
+Report power consumption of an appliance.
+TBA
+
+Summarize home state.
+TBA
+
+Long-term memory with semantic search.
+TBA
+
+Proactive notification of package delivery.
+TBA
+
+## Architecture and Design
+The general integration architecture follows the best practices as described in [Home Assistant Core](https://developers.home-assistant.io/docs/development_index/) and is compliant with [Home Assistant Community Store](https://www.hacs.xyz/) (HACS) publishing requirements.
+
+The agent is built using langgraph and uses the HA `conversation` component to interact with the user. The agent uses the Home Assistant LLM API to fetch the state of the home and to understand the HA native tools it has at its deposal. All other tools available to the agent are implemented using langchain. The agent employs several LLMs, a large and very accurate primary model for high-level reasoning and smaller specialized helper models for camera image analysis, primary model context summarization and embedding generation for long-term sematic search. The primary model is cloud-based and the helper models are edge-based and run under the [Ollama](https://ollama.com/) framework. The models currently being used are summarized below.
+
+Model | Location | Purpose
+-- | -- | -- |
+`gpt-4o` | OpenAI Cloud | High-level reasoning
+`llama-3.2-vision-11b` | Ollama Edge | Image scene analysis
+`llams-3.2-vision-11b` | Ollama Edge | Primary model context summarization
+`mxbai-embed-large` | Ollama Edge | Embedding generation for sematic search
+
+
+A high-level view of the architecture is shown below.
 TBA
 
 ## Installation
 
 1. Using the tool of choice open the directory (folder) for your HA configuration (where you find `configuration.yaml`).
-1. If you do not have a `custom_components` directory (folder) there, you need to create it.
-1. In the `custom_components` directory (folder) create a new folder called `home_generative_agent`.
-1. Download _all_ the files from the `custom_components/home_generative_agent/` directory (folder) in this repository.
-1. Place the files you downloaded in the new directory (folder) you created.
-1. Restart Home Assistant
-1. In the HA UI go to "Configuration" -> "Integrations" click "+" and search for "Home Generative Agent"
+2. If you do not have a `custom_components` directory (folder) there, you need to create it.
+3. In the `custom_components` directory (folder) create a new folder called `home_generative_agent`.
+4. Download _all_ the files from the `custom_components/home_generative_agent/` directory (folder) in this repository.
+4. Place the files you downloaded in the new directory (folder) you created.
+6. Restart Home Assistant
+7. In the HA UI go to "Configuration" -> "Integrations" click "+" and search for "Home Generative Agent"
 
 ## Configuration
 Configuration is done in the UI and via the parameters in `constant.py`.
