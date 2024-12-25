@@ -18,11 +18,11 @@ The goal of this project is to create a generative AI agent integration for Home
 - Automatic summarization of home state to manage LLM context length.
 - A hybrid cloud - edge solution that balances cost, accuracy and latency.
 
-**This integration will set up the following platforms.**
+This integration will set up the `conversation` platform which allows the user to
+converse with Home Generative Assistant.
 
-Platform | Description
--- | --
-`conversation` | Allows you to converse with Home Generative Assistant.
+## Exaple Use Cases
+TBA
 
 ## Architecture
 TBA
