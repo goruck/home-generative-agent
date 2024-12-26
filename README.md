@@ -6,15 +6,9 @@
 
 ![Project Maintenance][maintenance-shield]
 
-The goal of this project is to create a generative AI agent integration for Home Assistant
-which allows you to converse with an AI agent that is capable of understanding the state of
-your home and taking action on your behalf both explicitly and proactively.
-The AI agent is built using [LangChain](https://www.langchain.com/) and
-[LangGraph](https://www.langchain.com/langgraph) which allows for scalable and cutting
-edge solutions by leveraging these world-class frameworks which are tightly integrated
-into this Home Assistant integration. A hybrid cloud - edge solution is used that balances cost, accuracy and latency.
+The goal of this project is to create a generative AI agent integration for Home Assistant that understands your home's context, learn your preferences and interact with you and your home to accomplish activities you find valuable. The AI agent is built using [LangChain](https://www.langchain.com/) and [LangGraph](https://www.langchain.com/langgraph) which allows for scalable and cutting edge solutions by leveraging these world-class frameworks which are tightly integrated into Home Assistant. A hybrid cloud - edge solution is used that balances cost, accuracy and latency.
 
-**The follwing features are supported.**
+he following features are supported.
 
 - Create complex Home Assistant automation.
 - Image scene analysis and understanding.
@@ -23,8 +17,7 @@ into this Home Assistant integration. A hybrid cloud - edge solution is used tha
 - Short- and long-term memory using semantic search.
 - Automatic summarization of home state to manage LLM context length.
 
-This integration will set up the `conversation` platform which allows the user to
-converse with Home Generative Assistant.
+This integration will set up the `conversation` platform which allows the user to directly converse with Home Generative Assistant.
 
 ## Example Use Cases
 Create an automation.
@@ -54,15 +47,25 @@ TBA
 ## Architecture and Design
 The general integration architecture follows the best practices as described in [Home Assistant Core](https://developers.home-assistant.io/docs/development_index/) and is compliant with [Home Assistant Community Store](https://www.hacs.xyz/) (HACS) publishing requirements.
 
-The agent is built using langgraph and uses the HA `conversation` component to interact with the user. The agent uses the Home Assistant LLM API to fetch the state of the home and to understand the HA native tools it has at its deposal. All other tools available to the agent are implemented using langchain. The agent employs several LLMs, a large and very accurate primary model for high-level reasoning and smaller specialized helper models for camera image analysis, primary model context summarization and embedding generation for long-term sematic search. The primary model is cloud-based and the helper models are edge-based and run under the [Ollama](https://ollama.com/) framework. The models currently being used are summarized below.
+The agent is built using langgraph and uses the HA `conversation` component to interact with the user. The agent uses the Home Assistant LLM API to fetch the state of the home and to understand the HA native tools it has at its deposal. All other tools available to the agent are implemented using langchain. The agent employs several LLMs, a large and very accurate primary model for high-level reasoning and smaller specialized helper models for camera image analysis, primary model context summarization and embedding generation for long-term sematic search. The primary model is cloud-based and the helper models are edge-based and run under the [Ollama](https://ollama.com/) framework on a computer located in the home. The models currently being used are summarized below.
 
 Model | Location | Purpose
 -- | -- | -- |
-`gpt-4o` | OpenAI Cloud | High-level reasoning
-`llama-3.2-vision-11b` | Ollama Edge | Image scene analysis
-`llams-3.2-vision-11b` | Ollama Edge | Primary model context summarization
-`mxbai-embed-large` | Ollama Edge | Embedding generation for sematic search
+[GPT-4o](https://platform.openai.com/docs/models#gpt-4o) | OpenAI Cloud | High-level reasoning
+[llama-3.2-vision-11b](https://ollama.com/library/llama3.2-vision) | Ollama Edge | Image scene analysis
+[llama-3.2-vision-11b](https://ollama.com/library/llama3.2-vision) | Ollama Edge | Primary model context summarization
+[mxbai-embed-large](https://ollama.com/library/mxbai-embed-large) | Ollama Edge | Embedding generation for sematic search
 
+You need to carefully manage the context length of LLMs to balance cost, accuracy and latency and to avoid triggering rate limits such as OpenAI's Tokens per Minute restriction. The context length of the primary model is controlled in two ways, the messages in the context are trimmed if they exceed a max parameter and the context is summarized once the number of messages exceed another parameter. The messages may be trimmed only after content summarization. These parameters are configurable in `const.py` and you can see a description of them below.
+
+Parameter | Descritption | Default
+-- | -- | -- |
+`CONTEXT_MAX_MESSAGES` |  Messages to keep in context before deletion | 100
+`CONTEXT_SUMMARIZE_THRESHOLD` | Messages in context before summary generation | 20
+
+The latency between user requests or the agent taking timely action on the user's behalf, is very important for you to consider in the design. I used several techniques to reduce latency which include using specialized, smaller helper LLMs running on the edge and facilitation of primary model prompt caching by structuring the prompts to put static content such as instructions and examples up front and variable content such as user-specific information at the end. These techniques also reduce primary model usage cost considerably.
+
+Tools - TBA
 
 A high-level view of the architecture is shown below.
 TBA
