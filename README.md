@@ -49,6 +49,11 @@ Proactive notification of package delivery.
 TBA
 
 ## Architecture and Design
+
+A high-level view of the architecture is shown below.
+
+![Alt text](./assets/hga_arch.png)
+
 The general integration architecture follows the best practices as described in [Home Assistant Core](https://developers.home-assistant.io/docs/development_index/) and is compliant with [Home Assistant Community Store](https://www.hacs.xyz/) (HACS) publishing requirements.
 
 The agent is built using langgraph and uses the HA `conversation` component to interact with the user. The agent uses the Home Assistant LLM API to fetch the state of the home and to understand the HA native tools it has at its deposal. All other tools available to the agent are implemented using langchain. The agent employs several LLMs, a large and very accurate primary model for high-level reasoning and smaller specialized helper models for camera image analysis, primary model context summarization and embedding generation for long-term sematic search. The primary model is cloud-based and the helper models are edge-based and run under the [Ollama](https://ollama.com/) framework on a computer located in the home. The models currently being used are summarized below.
@@ -70,9 +75,6 @@ Parameter | Descritption | Default
 The latency between user requests or the agent taking timely action on the user's behalf, is very important for you to consider in the design. I used several techniques to reduce latency which include using specialized, smaller helper LLMs running on the edge and facilitation of primary model prompt caching by structuring the prompts to put static content such as instructions and examples up front and variable content such as user-specific information at the end. These techniques also reduce primary model usage cost considerably.
 
 Tools - TBA
-
-A high-level view of the architecture is shown below.
-TBA
 
 ## Installation
 
