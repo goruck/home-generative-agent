@@ -21,17 +21,20 @@ This integration will set up the `conversation` platform which allows the user t
 
 ## Example Use Cases
 Create an automation.
-TBA
+
+![Alt text](./assets/automation1.png)
 
 Check a single camera.
-TBA
+
+![Alt text](./assets/one_camera.png)
 
 Check multiple cameras.
 
 https://github.com/user-attachments/assets/230baae5-8702-4375-a3f0-ffa981ee66a3
 
 Check the history of a light.
-TBA
+
+![Alt text](./assets/history1.png)
 
 Report power consumption of an appliance.
 TBA
