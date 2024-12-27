@@ -27,7 +27,8 @@ Check a single camera.
 TBA
 
 Check multiple cameras.
-TBA
+
+https://github.com/user-attachments/assets/230baae5-8702-4375-a3f0-ffa981ee66a3
 
 Check the history of a light.
 TBA
