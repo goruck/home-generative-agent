@@ -8,7 +8,7 @@
 
 The goal of this project is to create a generative AI agent integration for Home Assistant that understands your home's context, learn your preferences and interact with you and your home to accomplish activities you find valuable. The AI agent is built using [LangChain](https://www.langchain.com/) and [LangGraph](https://www.langchain.com/langgraph) which allows for scalable and cutting edge solutions by leveraging these world-class frameworks which are tightly integrated into Home Assistant. A hybrid cloud - edge solution is used that balances cost, accuracy and latency.
 
-he following features are supported.
+The following features are supported.
 
 - Create complex Home Assistant automation.
 - Image scene analysis and understanding.
@@ -20,12 +20,10 @@ he following features are supported.
 This integration will set up the `conversation` platform which allows the user to directly converse with Home Generative Assistant.
 
 ## Example Use Cases
-Create an automation.
-
+### Create an automation.
 ![Alt text](./assets/automation1.png)
 
-Create an automation that runs periodically.
-
+### Create an automation that runs periodically.
 ![Alt text](./assets/cat_automation.png)
 
 You can see that the agent is fluent in yaml by what it generated and registered as a HA automation by the snippet below.
@@ -45,30 +43,27 @@ actions:
     action: notify.notify
 ```
 
-Check a single camera.
-
+### Check a single camera.
 ![Alt text](./assets/one_camera.png)
 
-Check multiple cameras.
-
+### Check multiple cameras.
 https://github.com/user-attachments/assets/230baae5-8702-4375-a3f0-ffa981ee66a3
 
-Check the history of a light.
-
+### Check the history of a light.
 ![Alt text](./assets/history1.png)
 
-Report power consumption of an appliance.
+### Report power consumption of an appliance.
 TBA
 
-Summarize home state.
-
+### Summarize home state.
 https://github.com/user-attachments/assets/96f834a8-58cc-4bd9-a899-4604c1103a98
 
+You can create an automation of the home state summary that runs periodically from the HA Blueprint `hga_summary.yaml` located in the `blueprints` folder.
 
-Long-term memory with semantic search.
+### Long-term memory with semantic search.
 TBA
 
-Proactive notification of package delivery.
+### Proactive notification of package delivery.
 TBA
 
 ## Architecture and Design
