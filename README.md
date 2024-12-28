@@ -61,7 +61,8 @@ Report power consumption of an appliance.
 TBA
 
 Summarize home state.
-TBA
+
+https://github.com/user-attachments/assets/96f834a8-58cc-4bd9-a899-4604c1103a98
 
 
 Long-term memory with semantic search.
