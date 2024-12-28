@@ -24,6 +24,27 @@ Create an automation.
 
 ![Alt text](./assets/automation1.png)
 
+Create an automation that runs periodically.
+
+![Alt text](./assets/cat_automation.png)
+
+You can see that the agent is fluent in yaml by what it generated and registered as a HA automation by the snippet below.
+
+```yaml
+alias: Check Litter Box Waste Drawer
+triggers:
+  - minutes: /30
+    trigger: time_pattern
+conditions:
+  - condition: numeric_state
+    entity_id: sensor.litter_robot_4_waste_drawer
+    above: 90
+actions:
+  - data:
+      message: The Litter Box waste drawer is more than 90% full!
+    action: notify.notify
+```
+
 Check a single camera.
 
 ![Alt text](./assets/one_camera.png)
@@ -41,6 +62,7 @@ TBA
 
 Summarize home state.
 TBA
+
 
 Long-term memory with semantic search.
 TBA
