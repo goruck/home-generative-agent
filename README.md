@@ -105,7 +105,7 @@ Tools - TBA
 7. In the HA UI go to "Configuration" -> "Integrations" click "+" and search for "Home Generative Agent"
 
 ## Configuration
-Configuration is done in the UI and via the parameters in `constant.py`.
+Configuration is done in the UI and via the parameters in `const.py`.
 
 <!---->
 
