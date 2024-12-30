@@ -1,0 +1,65 @@
+blueprint:
+  name:  Home Generative Agent Scene Analyzer
+  author: goruck
+  description: >
+    Periodically generate camera image scene analysis by prompting the generative agent.
+    Sends notifications only if the model detects a requested object in the prompt.
+  domain: automation
+  source_url: https://github.com/goruck/home-generative-agent/tree/main/blueprints/hga_scene_analysis.yaml
+  input:
+    time_pattern:
+      name: Time Pattern
+      description: cron-like time pattern (e.g., /30 for every 30 mins)
+      selector:
+        text:
+          multiline: false
+    message:
+      name: Prompt
+      description: Model prompt to generate camera image scene analysis.
+      default: Check the front porch camera and tell me if one or more cats are present.
+      selector:
+        text:
+          multiline: true
+    detection_keyword:
+      name: Detection Keyword
+      description: Keyword to detect in the model's response (e.g., "cat")
+      selector:
+        text:
+          multiline: false
+
+defaults:
+  detection_keyword: "cat"
+
+triggers:
+  - platform: time_pattern
+    minutes: !input time_pattern
+
+conditions: []
+
+actions:
+  - service: conversation.process
+    data:
+      agent_id: conversation.hga
+      text: !input message
+      conversation_id: hga_scene_analysis
+    response_variable: hga_scene_analysis_output
+
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: >
+              {{
+                !input detection_keyword | lower in
+                (hga_scene_analysis_output['response']['speech']['plain']['speech'] | lower)
+              }}
+        sequence:
+          - service: notify.persistent_notification
+            data:
+              title: HGA Scene Analysis
+              message: "{{ hga_scene_analysis_output['response']['speech']['plain']['speech'] }}"
+          - service: notify.notify
+            data:
+              title: HGA Scene Analysis
+              message: "{{ hga_scene_analysis_output['response']['speech']['plain']['speech'] }}"
+
+mode: single
