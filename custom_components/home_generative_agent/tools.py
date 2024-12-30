@@ -240,21 +240,54 @@ async def upsert_memory(
     )
     return f"Stored memory {mem_id}"
 
-@tool(parse_docstring=True)
+@tool(parse_docstring=False)
 async def add_automation(  # noqa: D417
-    automation_yaml: str,
+    automation_yaml: str | None = None,
+    time_pattern: str | None = None,
+    message: str | None = None,
+    detection_keyword: str | None = None,
     *,
     # Hide these arguments from the model.
     config: Annotated[RunnableConfig, InjectedToolArg()]
 ) -> str:
     """
-    Add an automation to Homeassistant.
+    Add an automation to Home Assistant.
+
+    You are provided a Home Assistant blueprint as part of this tool if you need it.
+    You MUST ONLY use the blueprint to create automations that involve camera image
+    analysis. You MUST generate valid yaml for ALL other automations.
+    If using the blueprint you MUST provide the arguments "time_pattern", "message" and
+    "detection_keyword and DO NOT provide the argument "automation_yaml".
 
     Args:
-        automation_yaml: Automation in valid yaml format.
+        automation_yaml: Automation in valid yaml format. Only provide this
+            if NOT using the blueprint
+        time_pattern: Cron-like time pattern (e.g., /30 for "every 30 mins").
+            Only provide this if using the blueprint.
+        message: Image analysis prompt (e.g.,"check the front porch camera and tell me
+            what you see"). Only provide this if using the blueprint.
+        detection_keyword: Keyword to detect in the model's response (e.g., "packages")
+            Only provide this if using the blueprint.
 
     """
+    blueprint_name = "goruck/hga_scene_analysis.yaml"
+
     hass = config["configurable"]["hass"]
+
+    if not [x for x in (time_pattern, message, detection_keyword) if x is None]:
+        automation_data = {
+            "alias": message,
+            "description": f"Created by blueprint with message '{message}'.",
+            "use_blueprint": {
+                "path": blueprint_name,
+                "input": {
+                    "time_pattern": time_pattern,
+                    "message": message,
+                    "detection_keyword": detection_keyword
+                }
+            }
+        }
+        automation_yaml = yaml.dump(automation_data)
 
     automation_parsed = yaml.safe_load(automation_yaml)
     ha_automation_config = {"id": ulid.ulid_now()}
