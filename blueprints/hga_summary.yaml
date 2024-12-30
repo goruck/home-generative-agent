@@ -2,8 +2,8 @@ blueprint:
   name: State of the home (Home Generative Agent v0.1)
   author: goruck
   description: >
-    Generative AI-powered summary of Homeassistant entities exposed to assistant agents.
-    Sends a persistant notification to the Homeassistant UI.
+    Periodically generate an AI-powered summary of Home Assistant entities exposed to assistant agents.
+    Sends a persistent notification to the Home Assistant UI with the summary.
   domain: automation
   source_url: https://github.com/goruck/home-generative-agent/tree/main/blueprints/hga_summary.yaml
   input:
