@@ -44,11 +44,7 @@ actions:
   - choose:
       - conditions:
           - condition: template
-            value_template: >-
-              {{ 
-                (hga_scene_analysis_output['response']['speech']['plain']['speech'] | lower) 
-                contains (detection_keyword | lower) 
-              }}
+            value_template: {{ detection_keyword | lower in (hga_scene_analysis_output['response']['speech']['plain']['speech'] | lower) }}
         sequence:
           - service: notify.persistent_notification
             data:
