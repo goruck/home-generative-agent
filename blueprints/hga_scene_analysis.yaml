@@ -27,9 +27,6 @@ blueprint:
         text:
           multiline: false
 
-defaults:
-  detection_keyword: "cat"
-
 triggers:
   - platform: time_pattern
     minutes: !input time_pattern
