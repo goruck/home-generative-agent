@@ -16,13 +16,7 @@ blueprint:
     message:
       name: Prompt
       description: Model prompt to generate camera image scene analysis.
-      default: Check the front porch camera and tell me if one or more cats are present.
-      selector:
-        text:
-          multiline: true
-    detection_keyword:
-      name: Detection Keyword
-      description: Keyword to detect in the model's response (e.g., "cat")
+      default: Check the front porch camera for one or more boxes.
       selector:
         text:
           multiline: false
@@ -32,9 +26,6 @@ triggers:
     minutes: !input time_pattern
 
 conditions: []
-
-variables:
-  detection_keyword: !input detection_keyword
   
 actions:
   - service: conversation.process
@@ -48,7 +39,7 @@ actions:
       - conditions:
           - condition: template
             value_template: >-
-              {{ detection_keyword | lower in (hga_scene_analysis_output['response']['speech']['plain']['speech'] | lower) }}
+              {{ 'no' not in (hga_scene_analysis_output['response']['speech']['plain']['speech'] | lower) }}
         sequence:
           - service: notify.persistent_notification
             data:
