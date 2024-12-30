@@ -81,7 +81,7 @@ Do not add any additional information.
 JSON schema:
 {schema}
 
-Task: Describe this image:
+Task: Describe this image but ONLY include people and things that are visible:
 """
 # Ollama VLM model image size (in pixels).
 VISION_MODEL_IMAGE_WIDTH = 1120
@@ -95,3 +95,5 @@ Represent this sentence for searching relevant passages: {query}
 """
 
 EVENT_AUTOMATION_REGISTERED = "automation_registered_via_home_generative_agent"
+
+BLUEPRINT_NAME = "goruck/hga_scene_analysis.yaml"

@@ -30,10 +30,11 @@ from langchain_core.tools import InjectedToolArg, tool
 from langchain_ollama import ChatOllama  # noqa: TCH002
 from langgraph.prebuilt import InjectedStore  # noqa: TCH002
 from langgraph.store.base import BaseStore  # noqa: TCH002
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PositiveInt
 from ulid import ULID  # noqa: TCH002
 
 from .const import (
+    BLUEPRINT_NAME,
     CONF_VISION_MODEL_TEMPERATURE,
     CONF_VLM,
     EVENT_AUTOMATION_REGISTERED,
@@ -126,7 +127,7 @@ async def _analyze_image(
         """Get type and location of objects in image."""
 
         object_type: str = Field(
-            description="the type of obect in the immage"
+            description="the type of object in the image"
         )
         object_location: str = Field(
             description="the location of the object in the image"
@@ -136,8 +137,7 @@ async def _analyze_image(
         """
         Get image scene analysis.
 
-        Includes a description of the image, type and location of objects present,
-        number of people present and number of animals present in the image.
+        Includes a description of the image and type and location of objects visible.
         """
 
         description: str = Field(
@@ -145,12 +145,6 @@ async def _analyze_image(
         )
         objects: list[ObjectTypeAndLocation] = Field(
             description="object type and location in image"
-        )
-        people: int = Field(
-            description="number of people in the image"
-        )
-        animals: int = Field(
-            description="number of aniamls in the image"
         )
 
     schema = json.dumps(ImageSceneAnalysis.model_json_schema())
@@ -188,15 +182,24 @@ async def _analyze_image(
 
     return response
 
-@tool
-async def get_and_analyze_camera_image(
+@tool(parse_docstring=False)
+async def get_and_analyze_camera_image( # noqa: D417
         camera_name: str,
         *,
         # Hide these arguments from the model.
         config: Annotated[RunnableConfig, InjectedToolArg()],
-        store: Annotated[BaseStore, InjectedStore()],
     ) -> str:
-    """Get an image from a given camera and analyze it."""
+    """
+    Get an image from a given camera and analyze it.
+
+    You MUST ONLY give positive confirmations in the image analysis.
+    For example, if you detect zero animals in the image, DO NOT
+    mention animals in your response at all.
+
+    Args:
+        camera_name: Name of the camera for image analysis.
+
+    """
     hass = config["configurable"]["hass"]
     vlm_model = config["configurable"]["vlm_model"]
     options = config["configurable"]["options"]
@@ -204,7 +207,7 @@ async def get_and_analyze_camera_image(
     return await _analyze_image(vlm_model, options, image)
 
 @tool(parse_docstring=False)
-async def upsert_memory(
+async def upsert_memory( # noqa: D417
     content: str,
     context: str,
     *,
@@ -245,7 +248,6 @@ async def add_automation(  # noqa: D417
     automation_yaml: str | None = None,
     time_pattern: str | None = None,
     message: str | None = None,
-    detection_keyword: str | None = None,
     *,
     # Hide these arguments from the model.
     config: Annotated[RunnableConfig, InjectedToolArg()]
@@ -256,34 +258,26 @@ async def add_automation(  # noqa: D417
     You are provided a Home Assistant blueprint as part of this tool if you need it.
     You MUST ONLY use the blueprint to create automations that involve camera image
     analysis. You MUST generate valid yaml for ALL other automations.
-    If using the blueprint you MUST provide the arguments "time_pattern", "message" and
-    "detection_keyword and DO NOT provide the argument "automation_yaml".
+    If using the blueprint you MUST provide the arguments "time_pattern" and "message"
+    and DO NOT provide the argument "automation_yaml".
 
     Args:
-        automation_yaml: Automation in valid yaml format. Only provide this
-            if NOT using the blueprint
+        automation_yaml: Automation in valid yaml format.
         time_pattern: Cron-like time pattern (e.g., /30 for "every 30 mins").
-            Only provide this if using the blueprint.
-        message: Image analysis prompt (e.g.,"check the front porch camera and tell me
-            what you see"). Only provide this if using the blueprint.
-        detection_keyword: Keyword to detect in the model's response (e.g., "packages")
-            Only provide this if using the blueprint.
+        message: Image analysis prompt (e.g.,"check the front porch camera for boxes")
 
     """
-    blueprint_name = "goruck/hga_scene_analysis.yaml"
-
     hass = config["configurable"]["hass"]
 
-    if not [x for x in (time_pattern, message, detection_keyword) if x is None]:
+    if time_pattern is not None and message is not None:
         automation_data = {
             "alias": message,
-            "description": f"Created by blueprint with message '{message}'.",
+            "description": f"Created with blueprint {BLUEPRINT_NAME}.",
             "use_blueprint": {
-                "path": blueprint_name,
+                "path": BLUEPRINT_NAME,
                 "input": {
                     "time_pattern": time_pattern,
                     "message": message,
-                    "detection_keyword": detection_keyword
                 }
             }
         }
