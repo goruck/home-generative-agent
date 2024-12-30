@@ -33,6 +33,9 @@ triggers:
 
 conditions: []
 
+variables:
+  detection_keyword: !input detection_keyword
+  
 actions:
   - service: conversation.process
     data:
