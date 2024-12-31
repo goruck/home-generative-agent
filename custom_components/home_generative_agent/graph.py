@@ -27,13 +27,15 @@ from pydantic import ValidationError
 
 from .const import (
     CONF_SUMMARIZATION_MODEL_TEMPERATURE,
+    CONF_SUMMARIZATION_MODEL_TOP_P,
     CONF_VLM,
     CONTEXT_MAX_MESSAGES,
     CONTEXT_SUMMARIZE_THRESHOLD,
     EMBEDDING_MODEL_PROMPT_TEMPLATE,
     RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
+    RECOMMENDED_SUMMARIZATION_MODEL_TOP_P,
     RECOMMENDED_VLM,
-    SUMMARY_INITAL_PROMPT,
+    SUMMARY_INITIAL_PROMPT,
     SUMMARY_PROMPT_TEMPLATE,
     SUMMARY_SYSTEM_PROMPT,
     TOOL_CALL_ERROR_TEMPLATE,
@@ -93,7 +95,7 @@ async def _summarize_and_trim(
     if summary:
         summary_message = SUMMARY_PROMPT_TEMPLATE.format(summary=summary)
     else:
-        summary_message = SUMMARY_INITAL_PROMPT
+        summary_message = SUMMARY_INITIAL_PROMPT
 
     messages = (
         [SystemMessage(content=SUMMARY_SYSTEM_PROMPT)] +
@@ -104,19 +106,20 @@ async def _summarize_and_trim(
     model = config["configurable"]["vlm_model"]
     options = config["configurable"]["options"]
     model_with_config = model.with_config(
-        {"configurable":
-            {
-                "model": options.get(
-                    CONF_VLM,
-                    RECOMMENDED_VLM,
-                ),
-                "format": "",
-                "temperature": options.get(
-                    CONF_SUMMARIZATION_MODEL_TEMPERATURE,
-                    RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
-                ),
-                "num_predict": VLM_NUM_PREDICT,
-            }
+        config={
+            "model": options.get(
+                CONF_VLM,
+                RECOMMENDED_VLM,
+            ),
+            "temperature": options.get(
+                CONF_SUMMARIZATION_MODEL_TEMPERATURE,
+                RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
+            ),
+            "top_p": options.get(
+                CONF_SUMMARIZATION_MODEL_TOP_P,
+                RECOMMENDED_SUMMARIZATION_MODEL_TOP_P,
+            ),
+            "num_predict": VLM_NUM_PREDICT,
         }
     )
 

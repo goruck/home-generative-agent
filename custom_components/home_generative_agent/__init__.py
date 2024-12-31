@@ -65,6 +65,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         model=ConfigurableField(id="model"),
         format=ConfigurableField(id="format"),
         temperature=ConfigurableField(id="temperature"),
+        top_p=ConfigurableField(id="top_p"),
         num_predict=ConfigurableField(id="num_predict"),
     )
 
