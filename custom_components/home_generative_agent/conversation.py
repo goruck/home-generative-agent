@@ -37,7 +37,7 @@ from .const import (
     LANGCHAIN_LOGGING_LEVEL,
     RECOMMENDED_CHAT_MODEL,
     RECOMMENDED_CHAT_MODEL_TEMPERATURE,
-    TOOL_CALL_ERROR_SYSTEM_MESSSAGE,
+    TOOL_CALL_ERROR_SYSTEM_MESSAGE,
 )
 from .graph import workflow
 from .tools import (
@@ -242,7 +242,7 @@ class HGAConversationEntity(
                         llm.BASE_PROMPT
                         + options.get(CONF_PROMPT, llm.DEFAULT_INSTRUCTIONS_PROMPT)
                         + f"\nYou are in the {self.tz} timezone."
-                        + TOOL_CALL_ERROR_SYSTEM_MESSSAGE if tools else ""
+                        + TOOL_CALL_ERROR_SYSTEM_MESSAGE if tools else ""
                     ),
                     self.hass,
                 ).async_render(
