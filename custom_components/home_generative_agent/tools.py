@@ -30,20 +30,23 @@ from langchain_core.tools import InjectedToolArg, tool
 from langchain_ollama import ChatOllama  # noqa: TCH002
 from langgraph.prebuilt import InjectedStore  # noqa: TCH002
 from langgraph.store.base import BaseStore  # noqa: TCH002
-from pydantic import BaseModel, Field, PositiveInt
+from pydantic import BaseModel, Field
 from ulid import ULID  # noqa: TCH002
 
 from .const import (
     BLUEPRINT_NAME,
     CONF_VISION_MODEL_TEMPERATURE,
+    CONF_VISION_MODEL_TOP_P,
     CONF_VLM,
     EVENT_AUTOMATION_REGISTERED,
     RECOMMENDED_VISION_MODEL_TEMPERATURE,
+    RECOMMENDED_VISION_MODEL_TOP_P,
     RECOMMENDED_VLM,
     VISION_MODEL_IMAGE_HEIGHT,
     VISION_MODEL_IMAGE_WIDTH,
     VISION_MODEL_SYSTEM_PROMPT,
-    VISION_MODEL_USER_PROMPT_TEMPLATE,
+    VISION_MODEL_USER_KW_PROMPT,
+    VISION_MODEL_USER_PROMPT,
     VLM_NUM_PREDICT,
 )
 
@@ -101,7 +104,8 @@ async def _get_camera_image(hass: HomeAssistant, camera_name: str) -> bytes:
 async def _analyze_image(
         vlm_model: ChatOllama,
         options: dict[str, Any] | MappingProxyType[str, Any],
-        image: bytes
+        image: bytes,
+        detection_keywords: list[str] | None = None
     ) -> str:
     """Analyze an image."""
     encoded_image = base64.b64encode(image).decode("utf-8")
@@ -123,57 +127,37 @@ async def _analyze_image(
 
         return [SystemMessage(content=system), HumanMessage(content=content_parts)]
 
-    class ObjectTypeAndLocation(BaseModel):
-        """Get type and location of objects in image."""
-
-        object_type: str = Field(
-            description="the type of object in the image"
-        )
-        object_location: str = Field(
-            description="the location of the object in the image"
-        )
-
-    class ImageSceneAnalysis(BaseModel):
-        """
-        Get image scene analysis.
-
-        Includes a description of the image and type and location of objects visible.
-        """
-
-        description: str = Field(
-            description="description of the image scene"
-        )
-        objects: list[ObjectTypeAndLocation] = Field(
-            description="object type and location in image"
-        )
-
-    schema = json.dumps(ImageSceneAnalysis.model_json_schema())
-
     model = vlm_model
     model_with_config = model.with_config(
-        {"configurable":
-            {
-                "model": options.get(
-                    CONF_VLM,
-                    RECOMMENDED_VLM,
-                ),
-                "format": "json",
-                "temperature": options.get(
-                    CONF_VISION_MODEL_TEMPERATURE,
-                    RECOMMENDED_VISION_MODEL_TEMPERATURE,
-                ),
-                "num_predict": VLM_NUM_PREDICT,
-            }
+        config={
+            "model": options.get(
+                CONF_VLM,
+                RECOMMENDED_VLM,
+            ),
+            "temperature": options.get(
+                CONF_VISION_MODEL_TEMPERATURE,
+                RECOMMENDED_VISION_MODEL_TEMPERATURE,
+            ),
+            "top_p": options.get(
+                CONF_VISION_MODEL_TOP_P,
+                RECOMMENDED_VISION_MODEL_TOP_P,
+            ),
+            "num_predict": VLM_NUM_PREDICT,
         }
     )
 
     chain = prompt_func | model_with_config
 
+    if detection_keywords is not None:
+        prompt = f"{VISION_MODEL_USER_KW_PROMPT} {' or '.join(detection_keywords):}"
+    else:
+        prompt = VISION_MODEL_USER_PROMPT
+
     try:
         response =  await chain.ainvoke(
             {
                 "system": VISION_MODEL_SYSTEM_PROMPT,
-                "text": VISION_MODEL_USER_PROMPT_TEMPLATE.format(schema=schema),
+                "text": prompt,
                 "image": encoded_image
             }
         )
@@ -185,26 +169,26 @@ async def _analyze_image(
 @tool(parse_docstring=False)
 async def get_and_analyze_camera_image( # noqa: D417
         camera_name: str,
+        detection_keywords: list[str] | None = None,
         *,
         # Hide these arguments from the model.
         config: Annotated[RunnableConfig, InjectedToolArg()],
     ) -> str:
     """
-    Get an image from a given camera and analyze it.
-
-    You MUST ONLY give positive confirmations in the image analysis.
-    For example, if you detect zero animals in the image, DO NOT
-    mention animals in your response at all.
+    Get a camera image and perform scene analysis on it.
 
     Args:
-        camera_name: Name of the camera for image analysis.
+        camera_name: Name of the camera for scene analysis.
+        detection_keywords: Specific objects to look for in image, if any.
+            For example, If user says "check the front porch camera for
+            boxes and dogs", detection_keywords would be ["boxes", "dogs"].
 
     """
     hass = config["configurable"]["hass"]
     vlm_model = config["configurable"]["vlm_model"]
     options = config["configurable"]["options"]
     image = await _get_camera_image(hass, camera_name)
-    return await _analyze_image(vlm_model, options, image)
+    return await _analyze_image(vlm_model, options, image, detection_keywords)
 
 @tool(parse_docstring=False)
 async def upsert_memory( # noqa: D417

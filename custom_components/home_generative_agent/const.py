@@ -17,7 +17,7 @@ RECOMMENDED_CHAT_MODEL_TEMPERATURE = 1.0
 # The VLM is used for vision and summarization tasks.
 # See https://github.com/ollama/ollama/blob/main/docs/modelfile.md#parameter
 CONF_VLM = "vlm_model"
-RECOMMENDED_VLM = "llama3.2-vision"
+RECOMMENDED_VLM = "llama3.2-vision:90b"
 CONF_VISION_MODEL_TEMPERATURE = "vision_model_temperature"
 RECOMMENDED_VISION_MODEL_TEMPERATURE = 0.8
 CONF_SUMMARIZATION_MODEL_TEMPERATURE = "summarization_model_temperature"
@@ -81,11 +81,11 @@ Do not add any additional information.
 JSON schema:
 {schema}
 
-Task: Describe this image but ONLY include people and things that are visible:
+Task: Describe this image:
 """
 # Ollama VLM model image size (in pixels).
-VISION_MODEL_IMAGE_WIDTH = 1120
-VISION_MODEL_IMAGE_HEIGHT = 1120
+VISION_MODEL_IMAGE_WIDTH = 640 #1120
+VISION_MODEL_IMAGE_HEIGHT = 480 #1120
 
 ### Ollama embedding model parameters. ###
 EMBEDDING_MODEL_URL = "192.168.1.252:11434"
