@@ -30,7 +30,6 @@ from langchain_core.tools import InjectedToolArg, tool
 from langchain_ollama import ChatOllama  # noqa: TCH002
 from langgraph.prebuilt import InjectedStore  # noqa: TCH002
 from langgraph.store.base import BaseStore  # noqa: TCH002
-from pydantic import BaseModel, Field
 from ulid import ULID  # noqa: TCH002
 
 from .const import (
@@ -241,12 +240,12 @@ async def add_automation(  # noqa: D417
 
     You are provided a Home Assistant blueprint as part of this tool if you need it.
     You MUST ONLY use the blueprint to create automations that involve camera image
-    analysis. You MUST generate valid yaml for ALL other automations.
+    analysis. You MUST generate Home Assistant automation yaml for everything else.
     If using the blueprint you MUST provide the arguments "time_pattern" and "message"
     and DO NOT provide the argument "automation_yaml".
 
     Args:
-        automation_yaml: Automation in valid yaml format.
+        automation_yaml: A Home Assistant automation in valid yaml format.
         time_pattern: Cron-like time pattern (e.g., /30 for "every 30 mins").
         message: Image analysis prompt (e.g.,"check the front porch camera for boxes")
 
