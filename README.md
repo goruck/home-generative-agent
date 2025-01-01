@@ -61,10 +61,42 @@ https://github.com/user-attachments/assets/96f834a8-58cc-4bd9-a899-4604c1103a98
 You can create an automation of the home state summary that runs periodically from the HA Blueprint `hga_summary.yaml` located in the `blueprints` folder.
 
 ### Long-term memory with semantic search.
-TBA
+![Alt text](./assets/semantic1.png)
+![Alt text](./assets/semantic2.png)
+![Alt text](./assets/semantic3.png)
+
+You can see that the agent correctly generates the automation below.
+```yaml
+alias: Prepare Home for Arrival
+description: Turn on front porch light and unlock garage door lock at 7:30 PM
+mode: single
+triggers:
+  - at: "19:30:00"
+    trigger: time
+actions:
+  - target:
+      entity_id: light.front_porch_light
+    action: light.turn_on
+    data: {}
+  - target:
+      entity_id: lock.garage_door_lock
+    action: lock.unlock
+    data: {}
+```
+
+### Check a camera for packages.
+![Alt text](./assets/check-for-boxes.png)
+
+You can see below the camera image the agent analyzed and that two packages are visible. 
+
+![Alt text](./assets/check-for-boxes-pic.png)
 
 ### Proactive notification of package delivery.
-TBA
+![Alt text](./assets/proactive-camera-automation.png)
+
+You can see an example notification from this automation below if any boxes or packages are visible.
+
+![Alt text](./assets/proactive-notification.png)
 
 ## Architecture and Design
 
