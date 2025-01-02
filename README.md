@@ -115,6 +115,15 @@ Model | Location | Purpose
 [llama-3.2-vision-11b](https://ollama.com/library/llama3.2-vision) | Ollama Edge | Primary model context summarization
 [mxbai-embed-large](https://ollama.com/library/mxbai-embed-large) | Ollama Edge | Embedding generation for sematic search
 
+### LangGraph-based Agent
+The conversation agent is powered by LangGraph which enables you to create stateful, multi-actor applications utilizing LLMs as easily as possible. It extends the capabilities of LangChain, introducing the ability to create and manage cyclical graphs, which are important for developing complex agent runtimes. The agent workflow is modeled by a graph, which you can see in the image below.
+
+![Alt text](./assets/graph.png)
+
+The agent workflow has five nodes which are Python modules that modify the state of the agent which is a shared data structure. The edges between the nodes represent the allowed transistions between them, with solid lines being unconditional and dashed lines conditional. Nodes do the work and edges tell what to do next.
+
+The ```__start__``` and ```__end__``` nodes simply inform the graph where to start and stop. The ```agent``` node runs the primary LLM and if it decides to use a tool, the ```action``` node runs the tool and then returns control to the ```agent```. If the ```agent``` has no tool to call and the number of messages meet the conditions defined below, the LLM's context is processed by the ```summarize_and_trim``` node to manage growth while maintaining accuracy.
+
 ### LLM Context Management
 You need to carefully manage the context length of LLMs to balance cost, accuracy and latency and to avoid triggering rate limits such as OpenAI's Tokens per Minute restriction. The context length of the primary model is controlled in two ways, the messages in the context are trimmed if they exceed a max parameter and the context is summarized once the number of messages exceed another parameter. The messages may be trimmed only after content summarization. These parameters are configurable in `const.py` and you can see a description of them below.
 
@@ -133,7 +142,7 @@ Action | Latency (s) | Remark
 HA intents | < 1 | e.g., turn on a light
 Analyze camera image | < 3 | initial request
 Add automation | < 1 |
-Add or update memory | < 1 |
+Memory operations | < 1 |
 
 ### Tools
 The agent is able to use HA tools as specified in the [LLM API](https://developers.home-assistant.io/docs/core/llm/) and other tools built in the langchain framework as specified in `tools.py`. Additionally you can extend the LLM API with tools of you own as well. The primary LLM is given the list of tools it can call along with instructions how to use them in its system message and in the docstring of the tool's python function definition. If the agent decides to use a tool, the langgraph state `action` is entered and the tool is run. A simple error recovery mechanism is used that will ask the agent to try calling the tool again with corrected parameters in the event of making a mistake.
