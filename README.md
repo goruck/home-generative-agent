@@ -6,9 +6,9 @@
 
 ![Project Maintenance][maintenance-shield]
 
-This project aims to create a generative AI agent integration for Home Assistant (HA) that understands your home's context, learns your preferences, and interacts with you and your home to accomplish activities you find valuable. Built using LangChain and LangGraph, which allow for scalable and cutting-edge solutions by leveraging these world-class frameworks, this project tightly integrates a generative agent into Home Assistant. Using a hybrid cloud-edge solution not only balances cost, accuracy, and latency but also provides the benefits of both cloud and edge computing, such as scalability, real-time processing, and cost-effectiveness.
+This is the documentation for a [Home Assistant](https://www.home-assistant.io/) integration called home-generative-agent. This project uses [LangChain](https://www.langchain.com/) and [LangGraph](https://www.langchain.com/langgraph) to create a [generative AI agent](https://arxiv.org/abs/2304.03442#) that interacts with and automates tasks within a Home Assistant smart home environment. Key features include creating automations, analyzing images, and managing home states using various LLMs (Large Language Models). The architecture involves both cloud-based and edge-based models for optimal performance and cost-effectiveness. Installation instructions and configuration details are included, along with information on the project's architecture and the different models used. The project is open-source and welcomes contributions.
 
-The following features are supported.
+These are some of the features currently supported:
 
 - Create complex Home Assistant automation.
 - Image scene analysis and understanding.
@@ -17,7 +17,7 @@ The following features are supported.
 - Short- and long-term memory using semantic search.
 - Automatic summarization of home state to manage LLM context length.
 
-This integration will set up the `conversation` platform, a convenient feature allowing users to converse directly with the Home Generative Assistant.
+This integration will set up the `conversation` platform, a convenient HA component allowing users to converse directly with the Home Generative Assistant.
 
 ## Example Use Cases
 ### Create an automation.
