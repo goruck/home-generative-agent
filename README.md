@@ -10,7 +10,7 @@ This README is the documentation for a [Home Assistant](https://www.home-assista
 
 These are some of the features currently supported:
 
-- Create complex Home Assistant automation.
+- Create complex Home Assistant automations.
 - Image scene analysis and understanding.
 - Home state analysis of entities, devices, and areas.
 - Full agent control of allowed entities in the home.
@@ -87,7 +87,7 @@ actions:
 ### Check a camera for packages.
 ![Alt text](./assets/check-for-boxes.png)
 
-Below the camera image the agent analyzed, you can see that two packages are visible. 
+Below is the camera image the agent analyzed, you can see that two packages are visible. 
 
 ![Alt text](./assets/check-for-boxes-pic.png)
 
@@ -127,12 +127,12 @@ The ```__start__``` and ```__end__``` nodes inform the graph where to start and 
 ### LLM Context Management
 You need to carefully manage the context length of LLMs to balance cost, accuracy, and latency and avoid triggering rate limits such as OpenAI's Tokens per Minute restriction. The system controls the context length of the primary model in two ways: it trims the messages in the context if they exceed a max parameter, and the context is summarized once the number of messages exceeds another parameter. These parameters are configurable in `const.py`; their description is below.
 
-Parameter | Descritption | Default
+Parameter | Description | Default
 -- | -- | -- |
 `CONTEXT_MAX_MESSAGES` |  Messages to keep in context before deletion | 100
 `CONTEXT_SUMMARIZE_THRESHOLD` | Messages in context before summary generation | 20
 
-The `summerize_and_trim` node in the graph may trim the messages only after content summarization.
+The `summarize_and_trim` node in the graph may trim the messages only after content summarization.
 
 ### Latency
 The latency between user requests or the agent taking timely action on the user's behalf is critical for you to consider in the design. I used several techniques to reduce latency, including using specialized, smaller helper LLMs running on the edge and facilitating primary model prompt caching by structuring the prompts to put static content, such as instructions and examples, upfront and variable content, such as user-specific information at the end. These techniques also reduce primary model usage costs considerably.
