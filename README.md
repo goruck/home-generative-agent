@@ -190,9 +190,7 @@ If you want to contribute to this, please read the [Contribution guidelines](CON
 [home_generative_agent]: https://github.com/goruck/home-generative-agent
 [commits-shield]: https://img.shields.io/github/commit-activity/y/goruck/home-generative-agent.svg?style=for-the-badge
 [commits]: https://github.com/goruck/home-generative-agent/commits/main
-[forum-shield]: https://img.shields.io/badge/community-forum-brightgreen.svg?style=for-the-badge
-[forum]: https://community.home-assistant.io/
-[license-shield]: https://img.shields.io/github/license/ludeeus/integration_blueprint.svg?style=for-the-badge
+[license-shield]: https://img.shields.io/github/license/goruck/home-generative-agent.svg?style=for-the-badge
 [maintenance-shield]: https://img.shields.io/badge/maintainer-Lindo%20St%20Angel%20%40goruck-blue.svg?style=for-the-badge
-[releases-shield]: https://img.shields.io/github/release/goruck/home_generative_agent.svg?style=for-the-badge
+[releases-shield]: https://img.shields.io/github/v/release/goruck/home-generative-agent.svg?style=for-the-badge
 [releases]: https://github.com/goruck/home-generative-agent/releases
