@@ -98,6 +98,8 @@ Below is an example notification from this automation if any boxes or packages a
 
 ![Alt text](./assets/proactive-notification.png)
 
+The agent uses a tool that in turn uses the HA Blueprint `hga_scene_analysis.yaml` for these requests and so the Blueprint needs to be installed in your HA installation.
+
 ## Architecture and Design
 
 Below is a high-level view of the architecture.
@@ -172,6 +174,7 @@ I built the HA installation on a Raspberry Pi 5 with SSD storage, Zigbee, and LA
 4. Place the files you downloaded in the new directory (folder) you created.
 6. Restart Home Assistant
 7. In the HA UI, go to "Configuration" -> "Integrations" click "+," and search for "Home Generative Agent"
+8. Install all the Blueprints in the `blueprints` directory (folder).
 
 ## Configuration
 Configuration is done in the UI and via the parameters in `const.py`.
