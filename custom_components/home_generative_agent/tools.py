@@ -322,10 +322,13 @@ async def get_entity_history(  # noqa: D417
     config: Annotated[RunnableConfig, InjectedToolArg()]
 ) -> dict[str, list[dict[str, Any]]]:
     """
-    Get entity state history from Homeassistant.
+    Get entity state history from Home Assistant.
 
     Args:
-        entity_ids: List of Homeassistant entity ids to retrive the history for.
+        entity_ids: List of Home Assistant entity ids to retrieve the history for.
+            For example if the user says "how much energy did the washing machine
+            consume last week", entity_id is "sensor.washing_machine_switch_0_energy"
+            DO NOT use use the name "washing machine Switch 0 energy" for entity_id.
         local_start_time: Start of local time history period in "%Y-%m-%dT%H:%M:%S%z".
         local_end_time: End of local time history period in "%Y-%m-%dT%H:%M:%S%z".
 
@@ -388,6 +391,7 @@ async def get_entity_history(  # noqa: D417
     for lst in history.values():
         for d in lst:
             for k, v in d.items():
+                LOGGER.debug("HISTORY TOOL: K: %s\n V: %s\n", k, v)
                 try:
                     dattim = dt_util.parse_datetime(v, raise_on_error=True)
                     dattim_local = dt_util.as_local(dattim)
