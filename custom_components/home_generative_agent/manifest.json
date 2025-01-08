@@ -12,6 +12,7 @@
   "requirements": [
     "langchain==0.3.13",
     "langchain-openai==0.2.13",
+    "langchain-ollama==0.2.2",
     "langgraph==0.2.60",
     "openai==1.58.1"
   ],
