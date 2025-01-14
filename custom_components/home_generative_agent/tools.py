@@ -49,7 +49,6 @@ from .const import (
     VLM_NUM_PREDICT,
 )
 from .utilities import gen_dict_extract
-import contextlib
 
 if TYPE_CHECKING:
     from datetime import datetime

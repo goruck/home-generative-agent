@@ -17,7 +17,6 @@ from homeassistant.exceptions import (
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import intent, llm, template
 from homeassistant.util import ulid
-from langchain.embeddings import init_embeddings
 from langchain.globals import set_debug, set_verbose
 from langchain_core.caches import InMemoryCache
 from langchain_core.globals import set_llm_cache

@@ -82,6 +82,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         base_url=EMBEDDING_MODEL_URL
     )
 
+    # TODO: find a way to verify embedding model was setup correctly.
     #try:
         #await hass.async_add_executor_job(embedding_model.get_name)
     #except HomeAssistantError as err:
