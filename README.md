@@ -52,8 +52,8 @@ https://github.com/user-attachments/assets/230baae5-8702-4375-a3f0-ffa981ee66a3
 ### Check the history of a light.
 ![Alt text](./assets/history1.png)
 
-### Report the power consumption of an appliance.
-TBA
+### Report the energy consumption of an appliance.
+![Alt text](./assets/fridge_energy_1.png) ![Alt text](./assets/fridge_energy_2.png)
 
 ### Summarize home state.
 https://github.com/user-attachments/assets/96f834a8-58cc-4bd9-a899-4604c1103a98
@@ -175,6 +175,8 @@ I built the HA installation on a Raspberry Pi 5 with SSD storage, Zigbee, and LA
 6. Restart Home Assistant
 7. In the HA UI, go to "Configuration" -> "Integrations" click "+," and search for "Home Generative Agent"
 8. Install all the Blueprints in the `blueprints` directory (folder).
+9. Install `ollama` on your edge device by following the instructions [here](https://ollama.com/download).
+10. Pull `ollama` models `llama-3.2-vision-11b` and `mxbai-embed-large`.
 
 ## Configuration
 Configuration is done in the UI and via the parameters in `const.py`.
