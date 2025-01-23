@@ -72,7 +72,7 @@ async def _call_model(
     mems_message = f"\n<memories>\n{formatted_mems}\n</memories>" \
         if formatted_mems else ""
 
-    # Retrive the latest conversation summary.
+    # Retrieve the latest conversation summary.
     summary = state.get("summary", "")
     summary_message = f"\nSummary of conversation earlier: {summary}" if summary else ""
 
