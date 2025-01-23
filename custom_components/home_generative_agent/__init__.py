@@ -14,7 +14,9 @@ from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_openai import ChatOpenAI
 
 from .const import (
+    EDGE_CHAT_MODEL_URL,
     EMBEDDING_MODEL_URL,
+    RECOMMENDED_EDGE_CHAT_MODEL,
     RECOMMENDED_EMBEDDING_MODEL,
     RECOMMENDED_VLM,
     VLM_URL,
@@ -35,6 +37,7 @@ class HGAData:
     """Data for Home Generative Assistant."""
 
     chat_model: ChatOpenAI
+    edge_chat_model: ChatOllama
     vision_model: ChatOllama
 
 async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
@@ -52,10 +55,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     try:
         await hass.async_add_executor_job(chat_model.get_name)
     except HomeAssistantError as err:
-        LOGGER.error("Error setting up ChatOpenAI: %s", err)
+        LOGGER.error("Error setting up chat model: %s", err)
         return False
 
     entry.chat_model = chat_model
+
+    edge_chat_model = ChatOllama(
+        model=RECOMMENDED_EDGE_CHAT_MODEL,
+        base_url=EDGE_CHAT_MODEL_URL,
+        http_async_client=get_async_client(hass)
+    ).configurable_fields(
+        model=ConfigurableField(id="model"),
+        format=ConfigurableField(id="format"),
+        temperature=ConfigurableField(id="temperature"),
+        top_p=ConfigurableField(id="top_p"),
+        num_predict=ConfigurableField(id="num_predict"),
+        num_ctx=ConfigurableField(id="num_ctx"),
+    )
+
+    try:
+        await hass.async_add_executor_job(edge_chat_model.get_name)
+    except HomeAssistantError as err:
+        LOGGER.error("Error setting up edge chat model: %s", err)
+        return False
+
+    entry.edge_chat_model = edge_chat_model
 
     vision_model = ChatOllama(
         model=RECOMMENDED_VLM,

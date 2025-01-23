@@ -7,12 +7,23 @@ DOMAIN = "home_generative_agent"
 CONF_RECOMMENDED = "recommended"
 # Name of system prompt.
 CONF_PROMPT = "prompt"
+# Run chat model in cloud or at edge.
+CONF_CHAT_MODEL_LOCATION = "chat_model_location"
+RECOMMENDED_CHAT_MODEL_LOCATION = "cloud"
 ### OpenAI chat model parameters.
 # See https://platform.openai.com/docs/api-reference/chat/create.
 CONF_CHAT_MODEL = "chat_model"
 RECOMMENDED_CHAT_MODEL = "gpt-4o"
 CONF_CHAT_MODEL_TEMPERATURE = "chat_model_temperature"
 RECOMMENDED_CHAT_MODEL_TEMPERATURE = 1.0
+### Ollama edge chat model parameters. ###
+# See https://github.com/ollama/ollama/blob/main/docs/modelfile.md#parameter
+CONF_EDGE_CHAT_MODEL = "edge_chat_model"
+RECOMMENDED_EDGE_CHAT_MODEL = "qwen2.5"
+CONF_EDGE_CHAT_MODEL_TEMPERATURE = "edge_chat_model_temperature"
+RECOMMENDED_EDGE_CHAT_MODEL_TEMPERATURE = 0
+CONF_EDGE_CHAT_MODEL_TOP_P = "edge_chat_model_top_p"
+RECOMMENDED_EDGE_CHAT_MODEL_TOP_P = 0.2
 ### Ollama vision language model (VLM) parameters. ###
 # The VLM is used for vision and summarization tasks.
 # See https://github.com/ollama/ollama/blob/main/docs/modelfile.md#parameter
@@ -58,6 +69,14 @@ Error: {error}
 
 Call the tool again with your mistake corrected.
 """
+
+### Ollama edge chat model parameters. ###
+# Edge chat model server URL.
+EDGE_CHAT_MODEL_URL = "192.168.1.252:11434"
+# Maximum number of tokens to predict when generating text.
+EDGE_CHAT_MODEL_NUM_PREDICT = 4096
+# Sets the size of the context window used to generate the next token.
+EDGE_CHAT_MODEL_NUM_CTX = 32768
 
 ### Ollama VLM parameters. ###
 # Ollama VLM server URL.

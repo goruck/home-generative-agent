@@ -29,13 +29,21 @@ from voluptuous_openapi import convert
 
 from .const import (
     CONF_CHAT_MODEL,
+    CONF_CHAT_MODEL_LOCATION,
     CONF_CHAT_MODEL_TEMPERATURE,
+    CONF_EDGE_CHAT_MODEL,
+    CONF_EDGE_CHAT_MODEL_TEMPERATURE,
     CONF_PROMPT,
     DOMAIN,
+    EDGE_CHAT_MODEL_NUM_CTX,
+    EDGE_CHAT_MODEL_NUM_PREDICT,
     EMBEDDING_MODEL_DIMS,
     LANGCHAIN_LOGGING_LEVEL,
     RECOMMENDED_CHAT_MODEL,
+    RECOMMENDED_CHAT_MODEL_LOCATION,
     RECOMMENDED_CHAT_MODEL_TEMPERATURE,
+    RECOMMENDED_EDGE_CHAT_MODEL,
+    RECOMMENDED_EDGE_CHAT_MODEL_TEMPERATURE,
     TOOL_CALL_ERROR_SYSTEM_MESSAGE,
 )
 from .graph import workflow
@@ -270,19 +278,46 @@ class HGAConversationEntity(
 
         prompt = "\n".join(prompt_parts)
 
-        chat_model = self.entry.chat_model
-        chat_model_with_config = chat_model.with_config(
-            {"configurable":
-                {
-                    "model_name": self.entry.options.get(
-                        CONF_CHAT_MODEL, RECOMMENDED_CHAT_MODEL
-                    ),
-                    "temperature": self.entry.options.get(
-                        CONF_CHAT_MODEL_TEMPERATURE, RECOMMENDED_CHAT_MODEL_TEMPERATURE
-                    ),
-                }
-            }
+        chat_model_location = self.entry.options.get(
+            CONF_CHAT_MODEL_LOCATION,
+            RECOMMENDED_CHAT_MODEL_LOCATION
         )
+        if chat_model_location == "edge":
+            chat_model = self.entry.edge_chat_model
+            chat_model_with_config = chat_model.with_config(
+                {"configurable":
+                    {
+                        "model": self.entry.options.get(
+                            CONF_EDGE_CHAT_MODEL,
+                            RECOMMENDED_EDGE_CHAT_MODEL
+                        ),
+                        "temperature": self.entry.options.get(
+                            CONF_EDGE_CHAT_MODEL_TEMPERATURE,
+                            RECOMMENDED_EDGE_CHAT_MODEL_TEMPERATURE
+                        ),
+                        "num_predict": EDGE_CHAT_MODEL_NUM_PREDICT,
+                        "num_ctx": EDGE_CHAT_MODEL_NUM_CTX,
+
+                    }
+                }
+            )
+        else:
+            chat_model = self.entry.chat_model
+            chat_model_with_config = chat_model.with_config(
+                {"configurable":
+                    {
+                        "model_name": self.entry.options.get(
+                            CONF_CHAT_MODEL,
+                            RECOMMENDED_CHAT_MODEL
+                        ),
+                        "temperature": self.entry.options.get(
+                            CONF_CHAT_MODEL_TEMPERATURE,
+                            RECOMMENDED_CHAT_MODEL_TEMPERATURE
+                        ),
+                    }
+                }
+            )
+
         chat_model_with_tools = chat_model_with_config.bind_tools(tools)
 
         # Remove special characters since memory namespace labels cannot contain.

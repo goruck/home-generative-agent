@@ -31,7 +31,11 @@ from langchain_openai import ChatOpenAI
 
 from .const import (
     CONF_CHAT_MODEL,
+    CONF_CHAT_MODEL_LOCATION,
     CONF_CHAT_MODEL_TEMPERATURE,
+    CONF_EDGE_CHAT_MODEL,
+    CONF_EDGE_CHAT_MODEL_TEMPERATURE,
+    CONF_EDGE_CHAT_MODEL_TOP_P,
     CONF_EMBEDDING_MODEL,
     CONF_PROMPT,
     CONF_RECOMMENDED,
@@ -42,7 +46,11 @@ from .const import (
     CONF_VLM,
     DOMAIN,
     RECOMMENDED_CHAT_MODEL,
+    RECOMMENDED_CHAT_MODEL_LOCATION,
     RECOMMENDED_CHAT_MODEL_TEMPERATURE,
+    RECOMMENDED_EDGE_CHAT_MODEL,
+    RECOMMENDED_EDGE_CHAT_MODEL_TEMPERATURE,
+    RECOMMENDED_EDGE_CHAT_MODEL_TOP_P,
     RECOMMENDED_EMBEDDING_MODEL,
     RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
     RECOMMENDED_SUMMARIZATION_MODEL_TOP_P,
@@ -204,11 +212,33 @@ def config_option_schema(
     if options.get(CONF_RECOMMENDED):
         return schema
 
+    chat_model_location: list[SelectOptionDict] = [
+        SelectOptionDict(
+            label="cloud",
+            value="cloud",
+        ),
+        SelectOptionDict(
+            label="edge",
+            value="edge",
+        )
+    ]
+
     schema.update(
         {
             vol.Optional(
+                CONF_CHAT_MODEL_LOCATION,
+                description={
+                    "suggested_value":
+                    options.get(CONF_CHAT_MODEL_LOCATION)
+                },
+                default=RECOMMENDED_CHAT_MODEL_LOCATION
+                ): SelectSelector(SelectSelectorConfig(options=chat_model_location)),
+            vol.Optional(
                 CONF_CHAT_MODEL,
-                description={"suggested_value": options.get(CONF_CHAT_MODEL)},
+                description={
+                    "suggested_value":
+                    options.get(CONF_CHAT_MODEL)
+                },
                 default=RECOMMENDED_CHAT_MODEL,
             ): str,
             vol.Optional(
@@ -220,8 +250,35 @@ def config_option_schema(
                 default=RECOMMENDED_CHAT_MODEL_TEMPERATURE,
             ): NumberSelector(NumberSelectorConfig(min=0, max=2, step=0.05)),
             vol.Optional(
+                CONF_EDGE_CHAT_MODEL,
+                description={
+                    "suggested_value":
+                    options.get(CONF_EDGE_CHAT_MODEL)
+                },
+                default=RECOMMENDED_EDGE_CHAT_MODEL,
+            ): str,
+            vol.Optional(
+                CONF_EDGE_CHAT_MODEL_TEMPERATURE,
+                description={
+                    "suggested_value":
+                    options.get(RECOMMENDED_EDGE_CHAT_MODEL_TEMPERATURE)
+                },
+                default=RECOMMENDED_EDGE_CHAT_MODEL_TEMPERATURE,
+            ): NumberSelector(NumberSelectorConfig(min=0, max=2, step=0.05)),
+            vol.Optional(
+                CONF_EDGE_CHAT_MODEL_TOP_P,
+                description={
+                    "suggested_value":
+                    options.get(RECOMMENDED_EDGE_CHAT_MODEL_TOP_P)
+                },
+                default=RECOMMENDED_EDGE_CHAT_MODEL_TOP_P,
+            ): NumberSelector(NumberSelectorConfig(min=0, max=1, step=0.05)),
+            vol.Optional(
                 CONF_VLM,
-                description={"suggested_value": options.get(RECOMMENDED_VLM)},
+                description={
+                    "suggested_value":
+                    options.get(RECOMMENDED_VLM)
+                },
                 default=RECOMMENDED_VLM,
             ): str,
             vol.Optional(
