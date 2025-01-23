@@ -108,11 +108,12 @@ Below is a high-level view of the architecture.
 
 The general integration architecture follows the best practices as described in [Home Assistant Core](https://developers.home-assistant.io/docs/development_index/) and is compliant with [Home Assistant Community Store](https://www.hacs.xyz/) (HACS) publishing requirements.
 
-The agent is built using LangGraph and uses the HA `conversation` component to interact with the user. The agent uses the Home Assistant LLM API to fetch the state of the home and understand the HA native tools it has at its disposal. I implemented all other tools available to the agent using LangChain. The agent employs several LLMs, a large and very accurate primary model for high-level reasoning, smaller specialized helper models for camera image analysis, primary model context summarization, and embedding generation for long-term semantic search. The primary model is cloud-based, and the helper models are edge-based and run under the [Ollama](https://ollama.com/) framework on a computer located in the home. The models currently being used are summarized below.
+The agent is built using LangGraph and uses the HA `conversation` component to interact with the user. The agent uses the Home Assistant LLM API to fetch the state of the home and understand the HA native tools it has at its disposal. I implemented all other tools available to the agent using LangChain. The agent employs several LLMs, a large and very accurate primary model for high-level reasoning, smaller specialized helper models for camera image analysis, primary model context summarization, and embedding generation for long-term semantic search. The primary model can be either cloud (best accuracy, highest cost) or edge-based (good accuracy, lowest cost) and the helper models are all edge-based. The edge models run under the [Ollama](https://ollama.com/) framework on a computer located in the home. The models currently being used are summarized below.
 
 Model | Location | Purpose
 -- | -- | -- |
 [GPT-4o](https://platform.openai.com/docs/models#gpt-4o) | OpenAI Cloud | High-level reasoning and planning
+[qwen2.5](https://ollama.com/library/qwen2.5) | Ollama Edge | High-level reasoning and planning
 [llama-3.2-vision-11b](https://ollama.com/library/llama3.2-vision) | Ollama Edge | Image scene analysis
 [llama-3.2-vision-11b](https://ollama.com/library/llama3.2-vision) | Ollama Edge | Primary model context summarization
 [mxbai-embed-large](https://ollama.com/library/mxbai-embed-large) | Ollama Edge | Embedding generation for sematic search
@@ -176,7 +177,7 @@ I built the HA installation on a Raspberry Pi 5 with SSD storage, Zigbee, and LA
 7. In the HA UI, go to "Configuration" -> "Integrations" click "+," and search for "Home Generative Agent"
 8. Install all the Blueprints in the `blueprints` directory (folder).
 9. Install `ollama` on your edge device by following the instructions [here](https://ollama.com/download).
-10. Pull `ollama` models `llama-3.2-vision-11b` and `mxbai-embed-large`.
+10. Pull `ollama` models `qwen2.5:7b`, `llama-3.2-vision-11b` and `mxbai-embed-large`.
 
 ## Configuration
 Configuration is done in the UI and via the parameters in `const.py`.
