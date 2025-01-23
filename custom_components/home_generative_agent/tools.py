@@ -31,6 +31,7 @@ from langchain_ollama import ChatOllama  # noqa: TCH002
 from langgraph.prebuilt import InjectedStore  # noqa: TCH002
 from langgraph.store.base import BaseStore  # noqa: TCH002
 from ulid import ULID  # noqa: TCH002
+from voluptuous import MultipleInvalid
 
 from .const import (
     BLUEPRINT_NAME,
@@ -83,7 +84,7 @@ def _as_utc(dattim: str, default: datetime, error_message: str) -> datetime:
 
         return dt_util.as_utc(parsed_datetime)
 
-async def _get_camera_image(hass: HomeAssistant, camera_name: str) -> bytes:
+async def _get_camera_image(hass: HomeAssistant, camera_name: str) -> bytes | None:
     """Get an image from a given camera."""
     camera_entity_id: str = f"camera.{camera_name.lower()}"
     try:
@@ -98,6 +99,7 @@ async def _get_camera_image(hass: HomeAssistant, camera_name: str) -> bytes:
             "Error getting image from camera '%s' with error: %s",
             camera_entity_id, err
         )
+        return None
 
     return image.content
 
@@ -188,12 +190,14 @@ async def get_and_analyze_camera_image( # noqa: D417
     vlm_model = config["configurable"]["vlm_model"]
     options = config["configurable"]["options"]
     image = await _get_camera_image(hass, camera_name)
+    if image is None:
+        return "Error getting image from camera."
     return await _analyze_image(vlm_model, options, image, detection_keywords)
 
 @tool(parse_docstring=False)
 async def upsert_memory( # noqa: D417
     content: str,
-    context: str,
+    context: str | None,
     *,
     memory_id: ULID | None = None,
     # Hide these arguments from the model.
@@ -201,17 +205,19 @@ async def upsert_memory( # noqa: D417
     store: Annotated[BaseStore, InjectedStore()],
 ) -> str:
     """
-    Upsert a memory in the database.
+    INSERT or UPDATE a memory in the database.
 
-    If a memory conflicts with an existing one, then just UPDATE the
-    existing one by passing in memory_id - don't create two memories
-    that are the same. If the user corrects a memory, UPDATE it.
+    You MUST use this tool to INSERT or UPDATE memories about users.
+    Examples of memories are specific facts or concepts learned from interactions
+    with users. If a memory conflicts with an existing one then just UPDATE the
+    existing one by passing in "memory_id" and DO NOT create two memories that are
+    the same. If the user corrects a memory then UPDATE it.
 
     Args:
-        content: The main content of the memory. For example:
-            "User expressed interest in learning about French."
-        context: Additional context for the memory. For example:
-            "This was mentioned while discussing career options in Europe."
+        content: The main content of the memory.
+            For example: "I would like to learn french."
+        context: Any additional relevant context for the memory.
+            For example: "This was mentioned while discussing career options in Europe."
         memory_id: ONLY PROVIDE IF UPDATING AN EXISTING MEMORY.
             The memory to overwrite
 
@@ -241,14 +247,17 @@ async def add_automation(  # noqa: D417
 
     You are provided a Home Assistant blueprint as part of this tool if you need it.
     You MUST ONLY use the blueprint to create automations that involve camera image
-    analysis. You MUST generate Home Assistant automation yaml for everything else.
+    analysis. You MUST generate Home Assistant automation YAML for everything else.
     If using the blueprint you MUST provide the arguments "time_pattern" and "message"
     and DO NOT provide the argument "automation_yaml".
 
     Args:
-        automation_yaml: A Home Assistant automation in valid yaml format.
+        automation_yaml: A Home Assistant automation in valid YAML format.
+            ONLY provide if NOT using the camera image analysis blueprint.
         time_pattern: Cron-like time pattern (e.g., /30 for "every 30 mins").
+            ONLY provide if using the camera image analysis blueprint.
         message: Image analysis prompt (e.g.,"check the front porch camera for boxes")
+            ONLY provide if using the camera image analysis blueprint.
 
     """
     hass = config["configurable"]["hass"]
@@ -281,7 +290,7 @@ async def add_automation(  # noqa: D417
             raise_on_errors = True,
             warn_on_errors = False
         )
-    except HomeAssistantError as err:
+    except (HomeAssistantError, MultipleInvalid) as err:
         return f"Invalid automation configuration {err}"
 
     async with aiofiles.open(
@@ -330,6 +339,7 @@ async def get_entity_history(  # noqa: D417
             For example if the user says "how much energy did the washing machine
             consume last week", entity_id is "sensor.washing_machine_switch_0_energy"
             DO NOT use use the name "washing machine Switch 0 energy" for entity_id.
+            You MUST use an underscore symbol (e.g., "_") as a word deliminator.
         local_start_time: Start of local time history period in "%Y-%m-%dT%H:%M:%S%z".
         local_end_time: End of local time history period in "%Y-%m-%dT%H:%M:%S%z".
 
@@ -338,6 +348,8 @@ async def get_entity_history(  # noqa: D417
 
     """
     hass = config["configurable"]["hass"]
+
+    entity_ids = [i.lower() for i in entity_ids]
 
     now = dt_util.utcnow()
     one_day = timedelta(days=1)
