@@ -33,6 +33,7 @@ from .const import (
     CONF_CHAT_MODEL_TEMPERATURE,
     CONF_EDGE_CHAT_MODEL,
     CONF_EDGE_CHAT_MODEL_TEMPERATURE,
+    CONF_EDGE_CHAT_MODEL_TOP_P,
     CONF_PROMPT,
     DOMAIN,
     EDGE_CHAT_MODEL_NUM_CTX,
@@ -44,6 +45,7 @@ from .const import (
     RECOMMENDED_CHAT_MODEL_TEMPERATURE,
     RECOMMENDED_EDGE_CHAT_MODEL,
     RECOMMENDED_EDGE_CHAT_MODEL_TEMPERATURE,
+    RECOMMENDED_EDGE_CHAT_MODEL_TOP_P,
     TOOL_CALL_ERROR_SYSTEM_MESSAGE,
 )
 from .graph import workflow
@@ -295,6 +297,10 @@ class HGAConversationEntity(
                             CONF_EDGE_CHAT_MODEL_TEMPERATURE,
                             RECOMMENDED_EDGE_CHAT_MODEL_TEMPERATURE
                         ),
+                        "top_p": self.entry.options.get(
+                            CONF_EDGE_CHAT_MODEL_TOP_P,
+                            RECOMMENDED_EDGE_CHAT_MODEL_TOP_P,
+                        ),
                         "num_predict": EDGE_CHAT_MODEL_NUM_PREDICT,
                         "num_ctx": EDGE_CHAT_MODEL_NUM_CTX,
 
@@ -320,6 +326,7 @@ class HGAConversationEntity(
 
         chat_model_with_tools = chat_model_with_config.bind_tools(tools)
 
+        user_name = "robot" if user_name is None else user_name
         # Remove special characters since memory namespace labels cannot contain.
         if user_name is not None:
             user_name = user_name.translate(str.maketrans("", "", string.punctuation))
