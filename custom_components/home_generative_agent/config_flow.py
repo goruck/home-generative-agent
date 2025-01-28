@@ -63,14 +63,16 @@ if TYPE_CHECKING:
     from types import MappingProxyType
 
     from homeassistant.core import HomeAssistant
+    from homeassistant.helpers.typing import VolDictType
 
-_LOGGER = logging.getLogger(__name__)
+LOGGER = logging.getLogger(__name__)
 
 STEP_USER_DATA_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_API_KEY): str,
     }
 )
+
 RECOMMENDED_OPTIONS = {
     CONF_RECOMMENDED: True,
     CONF_LLM_HASS_API: llm.LLM_API_ASSIST,
@@ -102,13 +104,16 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
                 step_id="user", data_schema=STEP_USER_DATA_SCHEMA
             )
 
-        errors = {}
+        errors: dict[str, str] = {}
 
         try:
             await validate_input(self.hass, user_input)
-        # TODO: improve error handling
+        except CannotConnectError:
+            errors["base"] = "cannot_connect"
+        except InvalidAuthError:
+            errors["base"] = "invalid_auth"
         except Exception:
-            _LOGGER.exception("Unexpected exception")
+            LOGGER.exception("Unexpected exception")
             errors["base"] = "unknown"
         else:
             return self.async_create_entry(
@@ -133,7 +138,6 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlow):
 
     def __init__(self, config_entry: ConfigEntry) -> None:
         """Initialize options flow."""
-        self.config_entry = config_entry
         self.last_rendered_recommended = config_entry.options.get(
             CONF_RECOMMENDED, False
         )
@@ -174,7 +178,7 @@ class InvalidAuthError(HomeAssistantError):
 def config_option_schema(
     hass: HomeAssistant,
     options: dict[str, Any] | MappingProxyType[str, Any],
-) -> dict:
+) -> VolDictType:
     """Return a schema for completion options."""
     hass_apis: list[SelectOptionDict] = [
         SelectOptionDict(
@@ -190,7 +194,7 @@ def config_option_schema(
         for api in llm.async_get_apis(hass)
     )
 
-    schema = {
+    schema : VolDictType = {
         vol.Optional(
             CONF_PROMPT,
             description={
@@ -227,101 +231,76 @@ def config_option_schema(
         {
             vol.Optional(
                 CONF_CHAT_MODEL_LOCATION,
-                description={
-                    "suggested_value":
-                    options.get(CONF_CHAT_MODEL_LOCATION)
-                },
+                description={"suggested_value": options.get(CONF_CHAT_MODEL_LOCATION)},
                 default=RECOMMENDED_CHAT_MODEL_LOCATION
                 ): SelectSelector(SelectSelectorConfig(options=chat_model_location)),
             vol.Optional(
                 CONF_CHAT_MODEL,
-                description={
-                    "suggested_value":
-                    options.get(CONF_CHAT_MODEL)
-                },
+                description={"suggested_value": options.get(CONF_CHAT_MODEL)},
                 default=RECOMMENDED_CHAT_MODEL,
             ): str,
             vol.Optional(
                 CONF_CHAT_MODEL_TEMPERATURE,
                 description={
-                    "suggested_value":
-                    options.get(RECOMMENDED_CHAT_MODEL_TEMPERATURE)
+                    "suggested_value": options.get(CONF_CHAT_MODEL_TEMPERATURE)
                 },
                 default=RECOMMENDED_CHAT_MODEL_TEMPERATURE,
             ): NumberSelector(NumberSelectorConfig(min=0, max=2, step=0.05)),
             vol.Optional(
                 CONF_EDGE_CHAT_MODEL,
-                description={
-                    "suggested_value":
-                    options.get(CONF_EDGE_CHAT_MODEL)
-                },
+                description={"suggested_value": options.get(CONF_EDGE_CHAT_MODEL)},
                 default=RECOMMENDED_EDGE_CHAT_MODEL,
             ): str,
             vol.Optional(
                 CONF_EDGE_CHAT_MODEL_TEMPERATURE,
                 description={
-                    "suggested_value":
-                    options.get(RECOMMENDED_EDGE_CHAT_MODEL_TEMPERATURE)
+                    "suggested_value": options.get(CONF_EDGE_CHAT_MODEL_TEMPERATURE)
                 },
                 default=RECOMMENDED_EDGE_CHAT_MODEL_TEMPERATURE,
             ): NumberSelector(NumberSelectorConfig(min=0, max=2, step=0.05)),
             vol.Optional(
                 CONF_EDGE_CHAT_MODEL_TOP_P,
                 description={
-                    "suggested_value":
-                    options.get(RECOMMENDED_EDGE_CHAT_MODEL_TOP_P)
+                    "suggested_value": options.get(CONF_EDGE_CHAT_MODEL_TOP_P)
                 },
                 default=RECOMMENDED_EDGE_CHAT_MODEL_TOP_P,
             ): NumberSelector(NumberSelectorConfig(min=0, max=1, step=0.05)),
             vol.Optional(
                 CONF_VLM,
-                description={
-                    "suggested_value":
-                    options.get(RECOMMENDED_VLM)
-                },
+                description={"suggested_value": options.get(CONF_VLM)},
                 default=RECOMMENDED_VLM,
             ): str,
             vol.Optional(
                 CONF_VISION_MODEL_TEMPERATURE,
                 description={
-                    "suggested_value":
-                    options.get(RECOMMENDED_VISION_MODEL_TEMPERATURE)
+                    "suggested_value": options.get(CONF_VISION_MODEL_TEMPERATURE)
                 },
                 default=RECOMMENDED_VISION_MODEL_TEMPERATURE,
             ): NumberSelector(NumberSelectorConfig(min=0, max=2, step=0.05)),
             vol.Optional(
                 CONF_VISION_MODEL_TOP_P,
-                description={
-                    "suggested_value":
-                    options.get(RECOMMENDED_VISION_MODEL_TOP_P)
-                },
+                description={"suggested_value": options.get(CONF_VISION_MODEL_TOP_P)},
                 default=RECOMMENDED_VISION_MODEL_TOP_P,
             ): NumberSelector(NumberSelectorConfig(min=0, max=1, step=0.05)),
             vol.Optional(
                 CONF_SUMMARIZATION_MODEL_TEMPERATURE,
                 description={
-                    "suggested_value":
-                    options.get(RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE)
+                    "suggested_value": options.get(CONF_SUMMARIZATION_MODEL_TEMPERATURE)
                 },
                 default=RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
             ): NumberSelector(NumberSelectorConfig(min=0, max=2, step=0.05)),
             vol.Optional(
                 CONF_SUMMARIZATION_MODEL_TOP_P,
                 description={
-                    "suggested_value":
-                    options.get(RECOMMENDED_SUMMARIZATION_MODEL_TOP_P)
+                    "suggested_value": options.get(CONF_SUMMARIZATION_MODEL_TOP_P)
                 },
                 default=RECOMMENDED_SUMMARIZATION_MODEL_TOP_P,
             ): NumberSelector(NumberSelectorConfig(min=0, max=1, step=0.05)),
             vol.Optional(
                 CONF_EMBEDDING_MODEL,
-                description={
-                    "suggested_value":
-                    options.get(RECOMMENDED_EMBEDDING_MODEL)
-                },
+                description={"suggested_value": options.get(CONF_EMBEDDING_MODEL)},
                 default=RECOMMENDED_EMBEDDING_MODEL,
             ): str,
         }
     )
-
     return schema
