@@ -4,6 +4,7 @@ from __future__ import annotations  # noqa: I001
 import copy
 import json
 import logging
+from functools import partial
 from typing import Any, Literal
 
 import voluptuous as vol
@@ -29,6 +30,7 @@ from .const import (
     CONF_SUMMARIZATION_MODEL_TEMPERATURE,
     CONF_SUMMARIZATION_MODEL_TOP_P,
     CONF_VLM,
+    CONTEXT_MANAGE_USE_TOKENS,
     CONTEXT_MAX_MESSAGES,
     CONTEXT_MAX_TOKENS,
     CONTEXT_SUMMARIZE_THRESHOLD,
@@ -133,32 +135,27 @@ async def _summarize_and_trim(
     LOGGER.debug("Summary messages: %s", messages)
     response = await model_with_config.ainvoke(messages)
 
-    def _token_counter(msgs: list[BaseMessage]) -> int:
-        """
-        Calculate chat model token usage.
+    LOGGER.debug("Token count from metadata: %s", state["chat_model_usage_metadata"])
 
-        If chat model usage metadata exists then use it, else fallback to counting
-        the number of messages for an indirect measure of token count.
-        """
-        if (chat_model_usage_metadata := state["chat_model_usage_metadata"]):
-            return chat_model_usage_metadata["total_tokens"]
-
-        return len(msgs)
-
-    LOGGER.debug("Token or message count: %s", _token_counter(state["messages"]))
-
-    max_tokens = CONTEXT_MAX_TOKENS if state[
-        "chat_model_usage_metadata"
-    ] else CONTEXT_MAX_MESSAGES
+    if CONTEXT_MANAGE_USE_TOKENS:
+        max_tokens = CONTEXT_MAX_TOKENS
+        token_counter = config["configurable"]["chat_model"]
+    else:
+        max_tokens = CONTEXT_MAX_MESSAGES
+        token_counter = len
 
     # Trim message history to manage context window length.
-    trimmed_messages = trim_messages(
-        messages=state["messages"],
-        token_counter=_token_counter,
-        max_tokens=max_tokens,
-        strategy="last",
-        start_on="human",
-        include_system=True,
+    hass = config["configurable"]["hass"]
+    trimmed_messages = await hass.async_add_executor_job(
+        partial(
+            trim_messages,
+            messages=state["messages"],
+            token_counter=token_counter,
+            max_tokens=max_tokens,
+            strategy="last",
+            start_on="human",
+            include_system=True,
+        )
     )
     messages_to_remove = [m for m in state["messages"] if m not in trimmed_messages]
     LOGGER.debug("Messages to remove: %s", messages_to_remove)
