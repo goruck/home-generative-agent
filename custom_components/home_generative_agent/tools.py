@@ -49,40 +49,14 @@ from .const import (
     VISION_MODEL_USER_PROMPT,
     VLM_NUM_PREDICT,
 )
-from .utilities import gen_dict_extract
+from .utilities import as_utc, gen_dict_extract
 
 if TYPE_CHECKING:
-    from datetime import datetime
     from types import MappingProxyType
 
     from homeassistant.core import HomeAssistant
 
 LOGGER = logging.getLogger(__name__)
-
-def _as_utc(dattim: str, default: datetime, error_message: str) -> datetime:
-        """
-        Convert a string representing a datetime into a datetime.datetime.
-
-        Args:
-            dattim: String representing a datetime.
-            default: datatime.datetime to use as default.
-            error_message: Message to raise in case of error.
-
-        Raises:
-            Homeassistant error if datetime cannot be parsed.
-
-        Returns:
-            A datetime.datetime of the string in UTC.
-
-        """
-        if dattim is None:
-            return default
-
-        parsed_datetime = dt_util.parse_datetime(dattim)
-        if parsed_datetime is None:
-            raise HomeAssistantError(error_message)
-
-        return dt_util.as_utc(parsed_datetime)
 
 async def _get_camera_image(hass: HomeAssistant, camera_name: str) -> bytes | None:
     """Get an image from a given camera."""
@@ -168,10 +142,10 @@ async def _analyze_image(
 
     return response
 
-@tool(parse_docstring=False)
+@tool(parse_docstring=True)
 async def get_and_analyze_camera_image( # noqa: D417
         camera_name: str,
-        detection_keywords: list[str] | None = None,
+        detection_keywords: list[str],
         *,
         # Hide these arguments from the model.
         config: Annotated[RunnableConfig, InjectedToolArg()],
@@ -194,19 +168,18 @@ async def get_and_analyze_camera_image( # noqa: D417
         return "Error getting image from camera."
     return await _analyze_image(vlm_model, options, image, detection_keywords)
 
-@tool(parse_docstring=False)
+@tool(parse_docstring=True)
 async def upsert_memory( # noqa: D417
     content: str,
-    context: str | None,
+    context: str = "",
     *,
-    memory_id: ULID | None = None,
+    memory_id: str = "",
     # Hide these arguments from the model.
     config: Annotated[RunnableConfig, InjectedToolArg()],
     store: Annotated[BaseStore, InjectedStore()],
 ) -> str:
     """
     INSERT or UPDATE a memory in the database.
-
     You MUST use this tool to INSERT or UPDATE memories about users.
     Examples of memories are specific facts or concepts learned from interactions
     with users. If a memory conflicts with an existing one then just UPDATE the
@@ -215,14 +188,12 @@ async def upsert_memory( # noqa: D417
 
     Args:
         content: The main content of the memory.
-            For example: "I would like to learn french."
-        context: Any additional relevant context for the memory.
-            For example: "This was mentioned while discussing career options in Europe."
-        memory_id: ONLY PROVIDE IF UPDATING AN EXISTING MEMORY.
-            The memory to overwrite
-
-    Returns:
-        A string containing the stored memory id.
+            e.g., "I would like to learn french."
+        context: Additional relevant context for the memory, if any.
+            e.g., "This was mentioned while discussing career options in Europe."
+        memory_id: The memory to overwrite.
+            ONLY PROVIDE IF UPDATING AN EXISTING MEMORY.
+            
 
     """
     mem_id = memory_id or ulid.ulid_now()
@@ -233,18 +204,17 @@ async def upsert_memory( # noqa: D417
     )
     return f"Stored memory {mem_id}"
 
-@tool(parse_docstring=False)
+@tool(parse_docstring=True)
 async def add_automation(  # noqa: D417
-    automation_yaml: str | None = None,
-    time_pattern: str | None = None,
-    message: str | None = None,
+    automation_yaml: str = "",
+    time_pattern: str = "",
+    message: str = "",
     *,
     # Hide these arguments from the model.
     config: Annotated[RunnableConfig, InjectedToolArg()]
 ) -> str:
     """
     Add an automation to Home Assistant.
-
     You are provided a Home Assistant blueprint as part of this tool if you need it.
     You MUST ONLY use the blueprint to create automations that involve camera image
     analysis. You MUST generate Home Assistant automation YAML for everything else.
@@ -262,7 +232,7 @@ async def add_automation(  # noqa: D417
     """
     hass = config["configurable"]["hass"]
 
-    if time_pattern is not None and message is not None:
+    if time_pattern and message:
         automation_data = {
             "alias": message,
             "description": f"Created with blueprint {BLUEPRINT_NAME}.",
@@ -354,12 +324,12 @@ async def get_entity_history(  # noqa: D417
     now = dt_util.utcnow()
     one_day = timedelta(days=1)
     try:
-        start_time = _as_utc(
+        start_time = as_utc(
             dattim = local_start_time,
             default = now - one_day,
             error_message = "start_time not valid"
         )
-        end_time = _as_utc(
+        end_time = as_utc(
             dattim = local_end_time,
             default = start_time + one_day,
             error_message = "end_time not valid"
