@@ -20,12 +20,9 @@ from homeassistant.util import ulid
 from langchain.globals import set_debug, set_verbose
 from langchain_core.caches import InMemoryCache
 from langchain_core.globals import set_llm_cache
-from langchain_core.messages import (
-    HumanMessage,
-)
+from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.store.memory import InMemoryStore
-from voluptuous_openapi import convert
 
 from .const import (
     CONF_CHAT_MODEL,
@@ -55,11 +52,9 @@ from .tools import (
     get_entity_history,
     upsert_memory,
 )
-from .utilities import generate_embeddings
+from .utilities import format_tool, generate_embeddings
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -77,18 +72,6 @@ elif LANGCHAIN_LOGGING_LEVEL == "debug":
 else:
     set_verbose(False)
     set_debug(False)
-
-def _format_tool(
-    tool: llm.Tool, custom_serializer: Callable[[Any], Any] | None
-) -> dict[str, Any]:
-    """Format Home Assistant LLM tools to be compatible with OpenAI format."""
-    tool_spec = {
-        "name": tool.name,
-        "parameters": convert(tool.parameters, custom_serializer=custom_serializer),
-    }
-    if tool.description:
-        tool_spec["description"] = tool.description
-    return {"type": "function", "function": tool_spec}
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -208,7 +191,7 @@ class HGAConversationEntity(
                     response=intent_response, conversation_id=user_input.conversation_id
                 )
             tools = [
-               _format_tool(tool, llm_api.custom_serializer) for tool in llm_api.tools
+               format_tool(tool, llm_api.custom_serializer) for tool in llm_api.tools
             ]
 
         # Add langchain tools to the list of HA tools.
@@ -328,8 +311,7 @@ class HGAConversationEntity(
 
         user_name = "robot" if user_name is None else user_name
         # Remove special characters since memory namespace labels cannot contain.
-        if user_name is not None:
-            user_name = user_name.translate(str.maketrans("", "", string.punctuation))
+        user_name = user_name.translate(str.maketrans("", "", string.punctuation))
 
         self.app_config = {
             "configurable": {
