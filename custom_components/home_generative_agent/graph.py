@@ -4,7 +4,7 @@ from __future__ import annotations  # noqa: I001
 import copy
 import json
 import logging
-from typing import Literal
+from typing import Any, Literal
 
 import voluptuous as vol
 from homeassistant.exceptions import (
@@ -30,6 +30,7 @@ from .const import (
     CONF_SUMMARIZATION_MODEL_TOP_P,
     CONF_VLM,
     CONTEXT_MAX_MESSAGES,
+    CONTEXT_MAX_TOKENS,
     CONTEXT_SUMMARIZE_THRESHOLD,
     EMBEDDING_MODEL_PROMPT_TEMPLATE,
     RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
@@ -45,9 +46,10 @@ from .const import (
 LOGGER = logging.getLogger(__name__)
 
 class State(MessagesState):
-    """Extend the MessagesState to include a summary key."""
+    """Extend the MessagesState to include a summary key and model response metadata."""
 
     summary: str
+    chat_model_usage_metadata: dict[str, Any]
 
 async def _call_model(
         state: State, config: RunnableConfig, *, store: BaseStore
@@ -84,7 +86,12 @@ async def _call_model(
     LOGGER.debug("Model call messages length: %s", len(messages))
 
     response = await model.ainvoke(messages)
-    return {"messages": response}
+    return {
+        "messages": response,
+        "chat_model_usage_metadata": response.usage_metadata if hasattr(
+            response, "usage_metadata"
+        ) else {}
+    }
 
 async def _summarize_and_trim(
         state: State, config: RunnableConfig, *, store: BaseStore
@@ -126,11 +133,29 @@ async def _summarize_and_trim(
     LOGGER.debug("Summary messages: %s", messages)
     response = await model_with_config.ainvoke(messages)
 
+    def _token_counter(msgs: list[BaseMessage]) -> int:
+        """
+        Calculate chat model token usage.
+
+        If chat model usage metadata exists then use it, else fallback to counting
+        the number of messages for an indirect measure of token count.
+        """
+        if (chat_model_usage_metadata := state["chat_model_usage_metadata"]):
+            return chat_model_usage_metadata["total_tokens"]
+
+        return len(msgs)
+
+    LOGGER.debug("Token or message count: %s", _token_counter(state["messages"]))
+
+    max_tokens = CONTEXT_MAX_TOKENS if state[
+        "chat_model_usage_metadata"
+    ] else CONTEXT_MAX_MESSAGES
+
     # Trim message history to manage context window length.
     trimmed_messages = trim_messages(
         messages=state["messages"],
-        token_counter=len,
-        max_tokens=CONTEXT_MAX_MESSAGES,
+        token_counter=_token_counter,
+        max_tokens=max_tokens,
         strategy="last",
         start_on="human",
         include_system=True,
