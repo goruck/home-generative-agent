@@ -48,17 +48,21 @@ RECOMMENDED_EMBEDDING_MODEL = "mxbai-embed-large"
 LANGCHAIN_LOGGING_LEVEL = "disable"
 
 ### Chat model parameters. ###
-# Next two parameters manage chat model context length.
+# Next three parameters manage chat model context length.
 # CONTEXT_MAX_MESSAGES should be set larger than CONTEXT_SUMMARIZE_THRESHOLD.
 # CONTEXT_MAX_MESSAGES is messages to keep in context before deletion.
 # Keep number of tokens below 30k otherwise rate limits may be triggered by OpenAI
-# (Tokens Per Minute limit for Tier 1 pricing is 30k tokens/minute).
+# (Tokens Per Minute limit for Tier 1 pricing is 30k tokens/minute), or Ollama model
+# context lengths limits will be reached.
 # Assume worse case message is 300 tokens -> 100 messages in context will be 30k tokens.
 # So, with 100 messages in context calls to OpenAI can be as frequent as 1 per minute.
 CONTEXT_MAX_MESSAGES = 100
 # If number of messages in context > CONTEXT_SUMMARIZE_THRESHOLD, generate a summary.
-# After summary, messages will be trimmed to CONTEXT_MAX_MESSAGES.
+# After summary, messages will be trimmed to CONTEXT_MAX_MESSAGES or CONTEXT_MAX_TOKENS.
 CONTEXT_SUMMARIZE_THRESHOLD = 20
+# If model usage metadata is available then use it to set the context length instead of
+# counting messages.
+CONTEXT_MAX_TOKENS = 30000
 # Next two parameters are for chat model tool error handling.
 TOOL_CALL_ERROR_SYSTEM_MESSAGE = """
 
