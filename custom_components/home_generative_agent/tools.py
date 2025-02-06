@@ -47,6 +47,7 @@ from .const import (
     VISION_MODEL_SYSTEM_PROMPT,
     VISION_MODEL_USER_KW_PROMPT,
     VISION_MODEL_USER_PROMPT,
+    VLM_NUM_CTX,
     VLM_NUM_PREDICT,
 )
 from .utilities import as_utc, gen_dict_extract
@@ -119,6 +120,7 @@ async def _analyze_image(
                 RECOMMENDED_VISION_MODEL_TOP_P,
             ),
             "num_predict": VLM_NUM_PREDICT,
+            "num_ctx": VLM_NUM_CTX,
         }
     )
 
