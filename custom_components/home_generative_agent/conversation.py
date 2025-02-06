@@ -309,9 +309,11 @@ class HGAConversationEntity(
 
         chat_model_with_tools = chat_model_with_config.bind_tools(tools)
 
+        # A user name of None indicates an automation is being run.
         user_name = "robot" if user_name is None else user_name
         # Remove special characters since memory namespace labels cannot contain.
         user_name = user_name.translate(str.maketrans("", "", string.punctuation))
+        LOGGER.debug("User name: %s", user_name)
 
         self.app_config = {
             "configurable": {
