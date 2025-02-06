@@ -29,7 +29,6 @@ from pydantic import ValidationError
 from .const import (
     CONF_SUMMARIZATION_MODEL_TEMPERATURE,
     CONF_SUMMARIZATION_MODEL_TOP_P,
-    CONF_VLM,
     CONTEXT_MANAGE_USE_TOKENS,
     CONTEXT_MAX_MESSAGES,
     CONTEXT_MAX_TOKENS,
@@ -37,12 +36,14 @@ from .const import (
     EMBEDDING_MODEL_PROMPT_TEMPLATE,
     RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
     RECOMMENDED_SUMMARIZATION_MODEL_TOP_P,
-    RECOMMENDED_VLM,
     SUMMARY_INITIAL_PROMPT,
     SUMMARY_PROMPT_TEMPLATE,
     SUMMARY_SYSTEM_PROMPT,
     TOOL_CALL_ERROR_TEMPLATE,
-    VLM_NUM_PREDICT,
+    CONF_SUMMARIZATION_MODEL,
+    RECOMMENDED_SUMMARIZATION_MODEL,
+    SUMMARIZATION_MODEL_CTX,
+    SUMMARIZATION_MODEL_PREDICT,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -117,8 +118,8 @@ async def _summarize_and_trim(
     model_with_config = model.with_config(
         config={
             "model": options.get(
-                CONF_VLM,
-                RECOMMENDED_VLM,
+                CONF_SUMMARIZATION_MODEL,
+                RECOMMENDED_SUMMARIZATION_MODEL,
             ),
             "temperature": options.get(
                 CONF_SUMMARIZATION_MODEL_TEMPERATURE,
@@ -128,7 +129,8 @@ async def _summarize_and_trim(
                 CONF_SUMMARIZATION_MODEL_TOP_P,
                 RECOMMENDED_SUMMARIZATION_MODEL_TOP_P,
             ),
-            "num_predict": VLM_NUM_PREDICT,
+            "num_predict": SUMMARIZATION_MODEL_PREDICT,
+            "num_ctx": SUMMARIZATION_MODEL_CTX,
         }
     )
 

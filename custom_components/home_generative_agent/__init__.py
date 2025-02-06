@@ -18,7 +18,9 @@ from .const import (
     EMBEDDING_MODEL_URL,
     RECOMMENDED_EDGE_CHAT_MODEL,
     RECOMMENDED_EMBEDDING_MODEL,
+    RECOMMENDED_SUMMARIZATION_MODEL,
     RECOMMENDED_VLM,
+    SUMMARIZATION_MODEL_URL,
     VLM_URL,
 )
 
@@ -39,6 +41,8 @@ class HGAData:
     chat_model: ChatOpenAI
     edge_chat_model: ChatOllama
     vision_model: ChatOllama
+    summarization_model = ChatOllama
+
 
 async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     """Set up Home generative Agent from a config entry."""
@@ -91,6 +95,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         temperature=ConfigurableField(id="temperature"),
         top_p=ConfigurableField(id="top_p"),
         num_predict=ConfigurableField(id="num_predict"),
+        num_ctx=ConfigurableField(id="num_ctx"),
     )
 
     try:
@@ -100,6 +105,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         return False
 
     entry.vision_model = vision_model
+
+    summarization_model = ChatOllama(
+        model=RECOMMENDED_SUMMARIZATION_MODEL,
+        base_url=SUMMARIZATION_MODEL_URL,
+        http_async_client=get_async_client(hass)
+    ).configurable_fields(
+        model=ConfigurableField(id="model"),
+        format=ConfigurableField(id="format"),
+        temperature=ConfigurableField(id="temperature"),
+        top_p=ConfigurableField(id="top_p"),
+        num_predict=ConfigurableField(id="num_predict"),
+        num_ctx=ConfigurableField(id="num_ctx"),
+    )
+
+    try:
+        await hass.async_add_executor_job(vision_model.get_name)
+    except HomeAssistantError as err:
+        LOGGER.error("Error setting up VLM: %s", err)
+        return False
+
+    entry.summarization_model = summarization_model
 
     embedding_model = OllamaEmbeddings(
         model=RECOMMENDED_EMBEDDING_MODEL,

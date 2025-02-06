@@ -39,6 +39,7 @@ from .const import (
     CONF_EMBEDDING_MODEL,
     CONF_PROMPT,
     CONF_RECOMMENDED,
+    CONF_SUMMARIZATION_MODEL,
     CONF_SUMMARIZATION_MODEL_TEMPERATURE,
     CONF_SUMMARIZATION_MODEL_TOP_P,
     CONF_VISION_MODEL_TEMPERATURE,
@@ -52,6 +53,7 @@ from .const import (
     RECOMMENDED_EDGE_CHAT_MODEL_TEMPERATURE,
     RECOMMENDED_EDGE_CHAT_MODEL_TOP_P,
     RECOMMENDED_EMBEDDING_MODEL,
+    RECOMMENDED_SUMMARIZATION_MODEL,
     RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
     RECOMMENDED_SUMMARIZATION_MODEL_TOP_P,
     RECOMMENDED_VISION_MODEL_TEMPERATURE,
@@ -282,6 +284,11 @@ def config_option_schema(
                 description={"suggested_value": options.get(CONF_VISION_MODEL_TOP_P)},
                 default=RECOMMENDED_VISION_MODEL_TOP_P,
             ): NumberSelector(NumberSelectorConfig(min=0, max=1, step=0.05)),
+            vol.Optional(
+                CONF_SUMMARIZATION_MODEL,
+                description={"suggested_value": options.get(CONF_SUMMARIZATION_MODEL)},
+                default=RECOMMENDED_SUMMARIZATION_MODEL,
+            ): str,
             vol.Optional(
                 CONF_SUMMARIZATION_MODEL_TEMPERATURE,
                 description={

@@ -33,6 +33,8 @@ CONF_VISION_MODEL_TEMPERATURE = "vision_model_temperature"
 RECOMMENDED_VISION_MODEL_TEMPERATURE = 0.2
 CONF_VISION_MODEL_TOP_P = "vision_model_top_p"
 RECOMMENDED_VISION_MODEL_TOP_P = 0.5
+CONF_SUMMARIZATION_MODEL = "summarization_model"
+RECOMMENDED_SUMMARIZATION_MODEL = "qwen2.5:3b"
 CONF_SUMMARIZATION_MODEL_TEMPERATURE = "summarization_model_temperature"
 RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE = 0.6
 CONF_SUMMARIZATION_MODEL_TOP_P = "summarization_model_top_p"
@@ -64,9 +66,10 @@ CONTEXT_MAX_MESSAGES = 100
 # After summary, messages will be trimmed to CONTEXT_MAX_MESSAGES or CONTEXT_MAX_TOKENS.
 CONTEXT_SUMMARIZE_THRESHOLD = 20
 # CONTEXT_MAX_TOKENS sets the limit on how large the context can grow to. This should be
-# set to no larger tha ~90% of the max size of the context window.
+# set to no larger tha ~80% of the max size of the context window to allow some growth
+# since context trimming is after the primary model is called.
 # Only used if context size is managed by tokens.
-CONTEXT_MAX_TOKENS = 30000
+CONTEXT_MAX_TOKENS = 25000
 # Next two parameters are for chat model tool error handling.
 TOOL_CALL_ERROR_SYSTEM_MESSAGE = """
 
@@ -91,15 +94,8 @@ EDGE_CHAT_MODEL_NUM_CTX = 32768
 VLM_URL = "192.168.1.252:11434"
 # Ollama VLM maximum number of output tokens to generate.
 VLM_NUM_PREDICT = 4096
-# Ollama VLM model prompts for summary tasks.
-SUMMARY_SYSTEM_PROMPT = "You are a bot that summarizes messages from a smart home AI."
-SUMMARY_INITIAL_PROMPT = "Create a summary of the messages above:"
-SUMMARY_PROMPT_TEMPLATE = """
-This is summary of the messages to date:
-{summary}
-
-Extend the summary by taking into account the new messages above:
-"""
+# Sets the size of the context window used to generate the next token.
+VLM_NUM_CTX = 16384
 # Ollama VLM model prompts for vision tasks.
 VISION_MODEL_SYSTEM_PROMPT = """
 You are a bot that generates scene analysis from camera images.
@@ -108,6 +104,23 @@ VISION_MODEL_USER_PROMPT = "Task: Describe this image:"
 VISION_MODEL_USER_KW_PROMPT =  "Task: Does this image contain"
 VISION_MODEL_IMAGE_WIDTH = 1920
 VISION_MODEL_IMAGE_HEIGHT = 1080
+
+### Ollama summarization model parameters. ###
+# Model server URL.
+SUMMARIZATION_MODEL_URL = "192.168.1.252:11434"
+# Maximum number of tokens to predict when generating text.
+SUMMARIZATION_MODEL_PREDICT = 4096
+# Sets the size of the context window used to generate the next token.
+SUMMARIZATION_MODEL_CTX = 32768
+# Model prompts for summary tasks.
+SUMMARY_SYSTEM_PROMPT = "You are a bot that summarizes messages from a smart home AI."
+SUMMARY_INITIAL_PROMPT = "Create a summary of the messages above:"
+SUMMARY_PROMPT_TEMPLATE = """
+This is summary of the messages to date:
+{summary}
+
+Extend the summary by taking into account the new messages above:
+"""
 
 ### Ollama embedding model parameters. ###
 EMBEDDING_MODEL_URL = "192.168.1.252:11434"
