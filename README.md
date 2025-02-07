@@ -113,9 +113,9 @@ The agent is built using LangGraph and uses the HA `conversation` component to i
 Model | Location | Purpose
 -- | -- | -- |
 [GPT-4o](https://platform.openai.com/docs/models#gpt-4o) | OpenAI Cloud | High-level reasoning and planning
-[qwen2.5](https://ollama.com/library/qwen2.5) | Ollama Edge | High-level reasoning and planning
-[llama-3.2-vision-11b](https://ollama.com/library/llama3.2-vision) | Ollama Edge | Image scene analysis
-[llama-3.2-vision-11b](https://ollama.com/library/llama3.2-vision) | Ollama Edge | Primary model context summarization
+[qwen2.5:32b](https://ollama.com/library/qwen2.5) | Ollama Edge | High-level reasoning and planning
+[llama-3.2-vision:11b](https://ollama.com/library/llama3.2-vision) | Ollama Edge | Image scene analysis
+[qwen2.5:3b](https://ollama.com/library/qwen2.5) | Ollama Edge | Primary model context summarization
 [mxbai-embed-large](https://ollama.com/library/mxbai-embed-large) | Ollama Edge | Embedding generation for sematic search
 
 ### LangGraph-based Agent
@@ -128,11 +128,13 @@ The agent workflow has five nodes, each Python module modifying the agent's stat
 The ```__start__``` and ```__end__``` nodes inform the graph where to start and stop. The ```agent``` node runs the primary LLM, and if it decides to use a tool, the ```action``` node runs the tool and then returns control to the ```agent```. The ```summarize_and_trim``` node processes the LLM's context to manage growth while maintaining accuracy if ```agent``` has no tool to call and the number of messages meets the below-mentioned conditions.
 
 ### LLM Context Management
-You need to carefully manage the context length of LLMs to balance cost, accuracy, and latency and avoid triggering rate limits such as OpenAI's Tokens per Minute restriction. The system controls the context length of the primary model in two ways: it trims the messages in the context if they exceed a max parameter, and the context is summarized once the number of messages exceeds another parameter. These parameters are configurable in `const.py`; their description is below.
+You need to carefully manage the context length of LLMs to balance cost, accuracy, and latency and avoid triggering rate limits such as OpenAI's Tokens per Minute restriction. The system controls the context length of the primary model in two ways: it trims the messages in the context if they exceed a max parameter which can be expressed in either tokens or messages, and the context is summarized once the number of messages exceeds another parameter. These parameters are configurable in `const.py`; their description is below.
 
 Parameter | Description | Default
 -- | -- | -- |
 `CONTEXT_MAX_MESSAGES` |  Messages to keep in context before deletion | 100
+`CONTEXT_MAX_TOKENS` | Tokens to keep in context before deletion | 25000
+`CONTEXT_MANAGE_USE_TOKENS` | If True, use tokens to manage context, else use messages | True
 `CONTEXT_SUMMARIZE_THRESHOLD` | Messages in context before summary generation | 20
 
 The `summarize_and_trim` node in the graph may trim the messages only after content summarization.
@@ -177,7 +179,7 @@ I built the HA installation on a Raspberry Pi 5 with SSD storage, Zigbee, and LA
 7. In the HA UI, go to "Configuration" -> "Integrations" click "+," and search for "Home Generative Agent"
 8. Install all the Blueprints in the `blueprints` directory (folder).
 9. Install `ollama` on your edge device by following the instructions [here](https://ollama.com/download).
-10. Pull `ollama` models `qwen2.5:7b`, `llama-3.2-vision-11b` and `mxbai-embed-large`.
+10. Pull `ollama` models `qwen2.5:32b`, `qwen2.5:3b`, `llama-3.2-vision-11b` and `mxbai-embed-large`.
 
 ## Configuration
 Configuration is done in the UI and via the parameters in `const.py`.
