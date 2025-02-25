@@ -49,6 +49,7 @@ from .graph import workflow
 from .tools import (
     add_automation,
     get_and_analyze_camera_image,
+    get_current_device_state,
     get_entity_history,
     upsert_memory,
 )
@@ -200,6 +201,7 @@ class HGAConversationEntity(
             "upsert_memory": upsert_memory,
             "add_automation": add_automation,
             "get_entity_history": get_entity_history,
+            "get_current_device_state": get_current_device_state,
         }
         tools.extend(langchain_tools.values())
 
@@ -323,8 +325,9 @@ class HGAConversationEntity(
                 "prompt": prompt,
                 "options": options,
                 "vlm_model": self.entry.vision_model,
+                "summarization_model": self.entry.summarization_model,
                 "langchain_tools": langchain_tools,
-                "ha_llm_api": llm_api,
+                "ha_llm_api": llm_api or None,
                 "hass": hass,
             },
             "recursion_limit": 10
