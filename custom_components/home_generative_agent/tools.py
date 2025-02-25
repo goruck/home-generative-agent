@@ -142,7 +142,7 @@ async def _analyze_image(
     except HomeAssistantError as err: #TODO: add validation error handling and retry prompt
         LOGGER.error("Error analyzing image %s", err)
 
-    return response
+    return response.content
 
 @tool(parse_docstring=True)
 async def get_and_analyze_camera_image( # noqa: D417
