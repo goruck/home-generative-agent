@@ -114,12 +114,11 @@ SUMMARIZATION_MODEL_PREDICT = 4096
 SUMMARIZATION_MODEL_CTX = 32768
 # Model prompts for summary tasks.
 SUMMARY_SYSTEM_PROMPT = "You are a bot that summarizes messages from a smart home AI."
-SUMMARY_INITIAL_PROMPT = "Create a summary of the messages above:"
+SUMMARY_INITIAL_PROMPT = "Create a summary of the smart home messages above:"
 SUMMARY_PROMPT_TEMPLATE = """
-This is summary of the messages to date:
-{summary}
+This is summary of the smart home messages so far: {summary}
 
-Extend the summary by taking into account the new messages above:
+Update the summary by taking into account the new smart home messages above:
 """
 
 ### Ollama embedding model parameters. ###
