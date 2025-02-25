@@ -8,12 +8,14 @@ from functools import partial
 from typing import Any, Literal
 
 import voluptuous as vol
+import homeassistant.util.dt as dt_util
 from homeassistant.exceptions import (
     HomeAssistantError,
 )
 from homeassistant.helpers import llm
 from langchain_core.messages import (
     AnyMessage,
+    AIMessage,
     BaseMessage,
     HumanMessage,
     RemoveMessage,
@@ -61,13 +63,16 @@ async def _call_model(
     model = config["configurable"]["chat_model"]
     prompt = config["configurable"]["prompt"]
     user_id = config["configurable"]["user_id"]
+    llm_api = config["configurable"]["ha_llm_api"]
+
+    last_message = state["messages"][-1]
+    last_message_from_user = isinstance(last_message, HumanMessage)
 
     # Retrieve most recent or search for most relevant memories for context.
     # Use semantic search if the last message was from the user.
-    msg = state["messages"][-1]
     query_prompt = EMBEDDING_MODEL_PROMPT_TEMPLATE.format(
-        query=msg.content
-    ) if isinstance(msg, HumanMessage) else None
+        query=last_message.content
+    ) if last_message_from_user else None
     mems = await store.asearch(
         (user_id, "memories"),
         query=query_prompt,
@@ -77,23 +82,47 @@ async def _call_model(
     mems_message = f"\n<memories>\n{formatted_mems}\n</memories>" \
         if formatted_mems else ""
 
-    # Retrieve the latest conversation summary.
-    summary = state.get("summary", "")
-    summary_message = f"\nSummary of conversation earlier: {summary}" if summary else ""
+    # Base message list is the default system message plus any memories.
+    messages = [SystemMessage(content=(prompt + mems_message))]
 
-    messages = [SystemMessage(
-        content=(prompt + mems_message + summary_message)
-    )] + state["messages"]
+     # Try to retrieve the latest conversation summary. If it exists, add to messages.
+    summary = state.get("summary", "")
+    if summary:
+        summary_message = f"{summary}"
+        messages += [HumanMessage(content=summary_message)]
+
+    # Add the HA LLM API prompt. There are two cases to consider.
+    # If the last message was from the user, add the prompt before user message.
+    # Else, add the prompt at the end of the messages.
+    # This logic is designed to keep the most current status of the smart home near
+    # the end of the context window to mitigate data drift when the context gets long.
+    # This approach works much better than keeping the prompt in the system message.
+    #if last_message_from_user:
+        #messages += (
+            #state["messages"][:-1] +
+            #[HumanMessage(content=llm_api.api_prompt)] +
+            #[last_message]
+        #)
+    #else:
+        #messages += (state["messages"] + [HumanMessage(content=llm_api.api_prompt)])
+
+    messages += state["messages"]
 
     LOGGER.debug("Model call messages: %s", messages)
     LOGGER.debug("Model call messages length: %s", len(messages))
 
     response = await model.ainvoke(messages)
+    metadata = response.usage_metadata if hasattr(response, "usage_metadata") else {}
+    # Clean up response, there is no need to include tool calls if there are none.
+    if hasattr(response, "tool_calls"):
+        response = AIMessage(content=response.content, tool_calls=response.tool_calls)
+    else:
+        response = AIMessage(content=response.content)
+    LOGGER.debug("Model response: %s", response)
+    LOGGER.debug("Token counts from metadata: %s", metadata)
     return {
         "messages": response,
-        "chat_model_usage_metadata": response.usage_metadata if hasattr(
-            response, "usage_metadata"
-        ) else {}
+        "chat_model_usage_metadata": metadata
     }
 
 async def _summarize_and_trim(
@@ -102,6 +131,9 @@ async def _summarize_and_trim(
     """Coroutine to summarize and trim message history."""
     summary = state.get("summary", "")
 
+    now = dt_util.now()
+    dattim = now.strftime("%Y-%m-%d %H:%M:%S")
+
     if summary:
         summary_message = SUMMARY_PROMPT_TEMPLATE.format(summary=summary)
     else:
@@ -109,11 +141,12 @@ async def _summarize_and_trim(
 
     messages = (
         [SystemMessage(content=SUMMARY_SYSTEM_PROMPT)] +
-        state["messages"] +
+        [HumanMessage(content=f"These are the smart home messages as of {dattim}:")] +
+        [m.content for m in state["messages"] if isinstance(m,HumanMessage|AIMessage)] +
         [HumanMessage(content=summary_message)]
     )
 
-    model = config["configurable"]["vlm_model"]
+    model = config["configurable"]["summarization_model"]
     options = config["configurable"]["options"]
     model_with_config = model.with_config(
         config={
@@ -136,8 +169,6 @@ async def _summarize_and_trim(
 
     LOGGER.debug("Summary messages: %s", messages)
     response = await model_with_config.ainvoke(messages)
-
-    LOGGER.debug("Token count from metadata: %s", state["chat_model_usage_metadata"])
 
     if CONTEXT_MANAGE_USE_TOKENS:
         max_tokens = CONTEXT_MAX_TOKENS
