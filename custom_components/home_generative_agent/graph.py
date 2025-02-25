@@ -63,7 +63,6 @@ async def _call_model(
     model = config["configurable"]["chat_model"]
     prompt = config["configurable"]["prompt"]
     user_id = config["configurable"]["user_id"]
-    llm_api = config["configurable"]["ha_llm_api"]
 
     last_message = state["messages"][-1]
     last_message_from_user = isinstance(last_message, HumanMessage)
@@ -90,21 +89,6 @@ async def _call_model(
     if summary:
         summary_message = f"{summary}"
         messages += [HumanMessage(content=summary_message)]
-
-    # Add the HA LLM API prompt. There are two cases to consider.
-    # If the last message was from the user, add the prompt before user message.
-    # Else, add the prompt at the end of the messages.
-    # This logic is designed to keep the most current status of the smart home near
-    # the end of the context window to mitigate data drift when the context gets long.
-    # This approach works much better than keeping the prompt in the system message.
-    #if last_message_from_user:
-        #messages += (
-            #state["messages"][:-1] +
-            #[HumanMessage(content=llm_api.api_prompt)] +
-            #[last_message]
-        #)
-    #else:
-        #messages += (state["messages"] + [HumanMessage(content=llm_api.api_prompt)])
 
     messages += state["messages"]
 
