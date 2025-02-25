@@ -425,3 +425,64 @@ async def get_entity_history(  # noqa: D417
         return {entity_id: {"value": state_value_change, "units": units}}
 
     return history
+
+@tool(parse_docstring=True)
+async def get_current_device_state( # noqa: D417
+        names: list[str],
+        *,
+        # Hide these arguments from the model.
+        config: Annotated[RunnableConfig, InjectedToolArg()],
+    ) -> dict[str, str]:
+    """
+    Get the current state of one or more Home Assistant devices.
+
+    Args:
+        names: List of Home Assistant device names.
+
+    """
+    def _parse_input_to_yaml(input_text: str) -> dict[str, Any]:
+        # Define the marker that separates instructions from the device list.
+        split_marker = "An overview of the areas and the devices in this smart home:"
+
+        # Check if the marker exists in the input text.
+        if split_marker not in input_text:
+            msg = "Input text format is invalid. Marker not found."
+            raise ValueError(msg)
+
+        # Split the input text into instructions and devices part
+        instructions_part, devices_part = input_text.split(split_marker, 1)
+
+        # Clean up whitespace
+        instructions = instructions_part.strip()
+        devices_yaml = devices_part.strip()
+
+        # Parse the devices list using PyYAML
+        devices = yaml.safe_load(devices_yaml)
+
+        # Combine into a single dictionary
+        return {
+            "instructions": instructions,
+            "devices": devices
+        }
+
+    # Use the HA LLM API to get overview of all devices.
+    llm_api = config["configurable"]["ha_llm_api"]
+    try:
+        overview = _parse_input_to_yaml(llm_api.api_prompt)
+    except ValueError as e:
+        LOGGER.error("There was a problem getting device state: %s", e)
+        return {}
+
+    # Get the list of devices.
+    devices = overview.get("devices", [])
+
+    # Create a dictionary mapping desired device names to their state.
+    state_dict = {}
+    for device in devices:
+        name = device.get("names", "Unnamed Device")
+        if name not in names:
+            continue
+        state = device.get("state", None)
+        state_dict[name] = state
+
+    return state_dict
