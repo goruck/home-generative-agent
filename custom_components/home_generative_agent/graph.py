@@ -63,12 +63,12 @@ async def _call_model(
     model = config["configurable"]["chat_model"]
     prompt = config["configurable"]["prompt"]
     user_id = config["configurable"]["user_id"]
-
-    last_message = state["messages"][-1]
-    last_message_from_user = isinstance(last_message, HumanMessage)
+    hass = config["configurable"]["hass"]
 
     # Retrieve most recent or search for most relevant memories for context.
     # Use semantic search if the last message was from the user.
+    last_message = state["messages"][-1]
+    last_message_from_user = isinstance(last_message, HumanMessage)
     query_prompt = EMBEDDING_MODEL_PROMPT_TEMPLATE.format(
         query=last_message.content
     ) if last_message_from_user else None
@@ -78,41 +78,75 @@ async def _call_model(
         limit=10
     )
     formatted_mems = "\n".join(f"[{mem.key}]: {mem.value}" for mem in mems)
-    mems_message = f"\n<memories>\n{formatted_mems}\n</memories>" \
-        if formatted_mems else ""
 
-    # Base message list is the default system message plus any memories.
-    messages = [SystemMessage(content=(prompt + mems_message))]
-
-     # Try to retrieve the latest conversation summary. If it exists, add to messages.
+    # Form the System Message from the base prompt plus memories and past conversation
+    # summaries, if they exist.
+    system_message = prompt
+    if formatted_mems:
+        system_message += f"\n<memories>\n{formatted_mems}\n</memories>"
     summary = state.get("summary", "")
     if summary:
-        summary_message = f"{summary}"
-        messages += [HumanMessage(content=summary_message)]
+        system_message += (
+            f"\n<conversation_summary>\n{summary}\n</conversation_summary>"
+        )
 
-    messages += state["messages"]
+    # Model input is the System Message plus current messages.
+    messages = [SystemMessage(content=system_message)] + state["messages"]
 
-    LOGGER.debug("Model call messages: %s", messages)
-    LOGGER.debug("Model call messages length: %s", len(messages))
+    # Trim messages to manage context window length.
+    # TODO - if using the token counter from the chat model API, the method
+    # 'get_num_tokens_from_messages()' will be called which currently ignores
+    # tool schemas and under counts message tokens for the qwen models.
+    # Until this is fixed, 'max_tokens' should be set to a value less than
+    # the maximum size of the model's context window. See const.py.
+    num_tokens = await hass.async_add_executor_job(
+        model.get_num_tokens_from_messages, messages
+    )
+    LOGGER.debug("Token count in messages from token counter: %s", num_tokens)
+    if CONTEXT_MANAGE_USE_TOKENS:
+        max_tokens = CONTEXT_MAX_TOKENS
+        token_counter = config["configurable"]["chat_model"]
+    else:
+        max_tokens = CONTEXT_MAX_MESSAGES
+        token_counter = len
+    trimmed_messages = await hass.async_add_executor_job(
+        partial(
+            trim_messages,
+            messages=messages,
+            token_counter=token_counter,
+            max_tokens=max_tokens,
+            strategy="last",
+            start_on="human",
+            include_system=True,
+        )
+    )
 
-    response = await model.ainvoke(messages)
+    LOGGER.debug("Model call messages: %s", trimmed_messages)
+    LOGGER.debug("Model call messages length: %s", len(trimmed_messages))
+
+    response = await model.ainvoke(trimmed_messages)
     metadata = response.usage_metadata if hasattr(response, "usage_metadata") else {}
-    # Clean up response, there is no need to include tool calls if there are none.
+    # Clean up response, there is no need to include tool call metadata if there's none.
     if hasattr(response, "tool_calls"):
         response = AIMessage(content=response.content, tool_calls=response.tool_calls)
     else:
         response = AIMessage(content=response.content)
     LOGGER.debug("Model response: %s", response)
     LOGGER.debug("Token counts from metadata: %s", metadata)
+
+    messages_to_remove = [m for m in state["messages"] if m not in trimmed_messages]
+    LOGGER.debug("Messages to remove: %s", messages_to_remove)
+    remove_messages = [RemoveMessage(id=m.id) for m in messages_to_remove]
+
     return {
-        "messages": response,
+        "messages": [response, *remove_messages],
         "chat_model_usage_metadata": metadata
     }
 
-async def _summarize_and_trim(
+async def _summarize_messages(
         state: State, config: RunnableConfig, *, store: BaseStore
     ) -> dict[str, list[AnyMessage]]:
-    """Coroutine to summarize and trim message history."""
+    """Coroutine to summarize message history."""
     summary = state.get("summary", "")
 
     now = dt_util.now()
@@ -153,32 +187,9 @@ async def _summarize_and_trim(
 
     LOGGER.debug("Summary messages: %s", messages)
     response = await model_with_config.ainvoke(messages)
+    LOGGER.debug("Summary response: %s", response)
 
-    if CONTEXT_MANAGE_USE_TOKENS:
-        max_tokens = CONTEXT_MAX_TOKENS
-        token_counter = config["configurable"]["chat_model"]
-    else:
-        max_tokens = CONTEXT_MAX_MESSAGES
-        token_counter = len
-
-    # Trim message history to manage context window length.
-    hass = config["configurable"]["hass"]
-    trimmed_messages = await hass.async_add_executor_job(
-        partial(
-            trim_messages,
-            messages=state["messages"],
-            token_counter=token_counter,
-            max_tokens=max_tokens,
-            strategy="last",
-            start_on="human",
-            include_system=True,
-        )
-    )
-    messages_to_remove = [m for m in state["messages"] if m not in trimmed_messages]
-    LOGGER.debug("Messages to remove: %s", messages_to_remove)
-    remove_messages = [RemoveMessage(id=m.id) for m in messages_to_remove]
-
-    return {"summary": response.content, "messages": remove_messages}
+    return {"summary": response.content}
 
 async def _call_tools(
         state: State, config: RunnableConfig, *, store: BaseStore
@@ -267,7 +278,7 @@ workflow = StateGraph(State)
 # Define nodes.
 workflow.add_node("agent", _call_model)
 workflow.add_node("action", _call_tools)
-workflow.add_node("summarize_and_trim", _summarize_and_trim)
+workflow.add_node("summarize_and_trim", _summarize_messages)
 
 # Define edges.
 workflow.add_edge(START, "agent")

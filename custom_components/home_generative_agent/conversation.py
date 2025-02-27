@@ -25,6 +25,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.store.memory import InMemoryStore
 
 from .const import (
+    CHAT_MODEL_NUM_CTX,
     CONF_CHAT_MODEL,
     CONF_CHAT_MODEL_LOCATION,
     CONF_CHAT_MODEL_TEMPERATURE,
@@ -33,7 +34,6 @@ from .const import (
     CONF_EDGE_CHAT_MODEL_TOP_P,
     CONF_PROMPT,
     DOMAIN,
-    EDGE_CHAT_MODEL_NUM_CTX,
     EDGE_CHAT_MODEL_NUM_PREDICT,
     EMBEDDING_MODEL_DIMS,
     LANGCHAIN_LOGGING_LEVEL,
@@ -287,7 +287,7 @@ class HGAConversationEntity(
                             RECOMMENDED_EDGE_CHAT_MODEL_TOP_P,
                         ),
                         "num_predict": EDGE_CHAT_MODEL_NUM_PREDICT,
-                        "num_ctx": EDGE_CHAT_MODEL_NUM_CTX,
+                        "num_ctx": CHAT_MODEL_NUM_CTX,
 
                     }
                 }
