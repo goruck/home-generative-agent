@@ -163,6 +163,7 @@ Langchain Tool | Purpose
 `upsert_memory` | add or update a memory
 `add_automation` | create and register a HA automation
 `get_entity_history` | query HA database for entity history
+`get_current_device_state` | get the current state of one or more Home Assistant devices
 
 ### Hardware
 I built the HA installation on a Raspberry Pi 5 with SSD storage, Zigbee, and LAN connectivity. I deployed the edge models under Ollama on an Ubuntu-based server with an AMD 64-bit 3.4 GHz CPU, Nvidia 3090 GPU, and 64 GB system RAM. The server is on the same LAN as the Raspberry Pi.
