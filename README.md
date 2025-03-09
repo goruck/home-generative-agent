@@ -125,17 +125,16 @@ LangGraph powers the conversation agent, enabling you to create stateful, multi-
 
 The agent workflow has five nodes, each Python module modifying the agent's state, a shared data structure. The edges between the nodes represent the allowed transitions between them, with solid lines unconditional and dashed lines conditional. Nodes do the work, and edges tell what to do next.
 
-The ```__start__``` and ```__end__``` nodes inform the graph where to start and stop. The ```agent``` node runs the primary LLM, and if it decides to use a tool, the ```action``` node runs the tool and then returns control to the ```agent```. The ```summarize_and_trim``` node processes the LLM's context to manage growth while maintaining accuracy if ```agent``` has no tool to call and the number of messages meets the below-mentioned conditions.
+The ```__start__``` and ```__end__``` nodes inform the graph where to start and stop. The ```agent``` node runs the primary LLM, and if it decides to use a tool, the ```action``` node runs the tool and then returns control to the ```agent```. The ```summarize_and_remove_messages``` node processes the LLM's context to manage growth while maintaining accuracy if ```agent``` has no tool to call and message trimming is required to manage the LLM context.
 
 ### LLM Context Management
-You need to carefully manage the context length of LLMs to balance cost, accuracy, and latency and avoid triggering rate limits such as OpenAI's Tokens per Minute restriction. The system controls the context length of the primary model in two ways: it trims the messages in the context if they exceed a max parameter which can be expressed in either tokens or messages, and the context is summarized once the number of messages exceeds another parameter. These parameters are configurable in `const.py`; their description is below.
+You need to carefully manage the context length of LLMs to balance cost, accuracy, and latency and avoid triggering rate limits such as OpenAI's Tokens per Minute restriction. The system controls the context length of the primary model by trimming the messages in the context if they exceed a max parameter which can be expressed in either tokens or messages, and the trimmed messages are replaced by a shorter summary inserted into the system message. These parameters are configurable in `const.py`; their description is below.
 
 Parameter | Description | Default
 -- | -- | -- |
-`CONTEXT_MAX_MESSAGES` |  Messages to keep in context before deletion | 100
-`CONTEXT_MAX_TOKENS` | Tokens to keep in context before deletion | 25000
+`CONTEXT_MAX_MESSAGES` |  Messages to keep in context before deletion | 80
+`CONTEXT_MAX_TOKENS` | Tokens to keep in context before deletion | 25600
 `CONTEXT_MANAGE_USE_TOKENS` | If True, use tokens to manage context, else use messages | True
-`CONTEXT_SUMMARIZE_THRESHOLD` | Messages in context before summary generation | 20
 
 The `summarize_and_trim` node in the graph may trim the messages only after content summarization.
 
