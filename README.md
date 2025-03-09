@@ -136,8 +136,6 @@ Parameter | Description | Default
 `CONTEXT_MAX_TOKENS` | Tokens to keep in context before deletion | 25600
 `CONTEXT_MANAGE_USE_TOKENS` | If True, use tokens to manage context, else use messages | True
 
-The `summarize_and_trim` node in the graph may trim the messages only after content summarization.
-
 ### Latency
 The latency between user requests or the agent taking timely action on the user's behalf is critical for you to consider in the design. I used several techniques to reduce latency, including using specialized, smaller helper LLMs running on the edge and facilitating primary model prompt caching by structuring the prompts to put static content, such as instructions and examples, upfront and variable content, such as user-specific information at the end. These techniques also reduce primary model usage costs considerably.
 
