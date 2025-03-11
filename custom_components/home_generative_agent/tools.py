@@ -294,6 +294,54 @@ async def add_automation(  # noqa: D417
 
     return f"Added automation {ha_automation_config['id']}"
 
+def _get_state_and_decimate(
+        v:list[dict[str, str]],
+        keys:list[str] | None = None,
+        limit:int = 50
+    ) -> list[dict[str, str]]:
+    if keys is None:
+        keys = ["state", "last_changed"]
+    # Filter entity history to only state values with datetimes.
+    state_values = [d for d in v if all(key in d for key in keys)]
+    state_values = [{k: sv[k] for k in keys} for sv in state_values]
+    # Decimate to avoid adding unnecessary fine grained date to context.
+    length = len(state_values)
+    if length > limit:
+        LOGGER.debug("Decimating sensor data set.")
+        factor = length // limit
+        state_values = state_values[::factor]
+    return state_values
+
+def _filter_history(k:Any, v:list[dict[str, str]]) -> dict[str, Any]:
+    try:
+        state_class_value = next(iter(gen_dict_extract("state_class", {k:v})))
+    except StopIteration:
+        state_class_value = None
+
+    if state_class_value in ("measurement", "total"):
+        state_values = _get_state_and_decimate(v)
+        units = next(iter(gen_dict_extract("unit_of_measurement", {k:v})))
+        return {"values": state_values, "units": units}
+
+    if state_class_value == "total_increasing":
+        # For sensors with state class 'total_increasing', the history contains the
+        # accumulated growth of the sensor's value since it was first added.
+        # Therefore return the net change, not the entire history.
+
+        # Filter history to just state values (no datetimes).
+        state_values = [float(x) for x in list(gen_dict_extract("state", {k:v}))]
+        # Check if sensor was reset during the time of interest.
+        zero_indices = [i for i, x in enumerate(state_values) if math.isclose(x, 0)]
+        if zero_indices:
+            # Start data set from last time the sensor was reset.
+            LOGGER.debug("Sensor was reset during time of interest.")
+            state_values = state_values[zero_indices[-1]:]
+        state_value_change = max(state_values) - min(state_values)
+        units = next(iter(gen_dict_extract("unit_of_measurement", {k:v})))
+        return {"value": state_value_change, "units": units}
+
+    return {"values": _get_state_and_decimate(v)}
+
 @tool(parse_docstring=True)
 async def get_entity_history(  # noqa: D417
     entity_ids: list[str],
@@ -385,46 +433,8 @@ async def get_entity_history(  # noqa: D417
                 except HomeAssistantError as err:
                     return f"Unexpected datetime conversion error {err}"
 
-    try:
-        state_class_value = next(iter(gen_dict_extract("state_class", history)))
-    except StopIteration:
-        state_class_value = None
-
-    if state_class_value in ("measurement", "total"):
-        # Filter history to just state values with datetimes.
-        keys_to_check = ["state", "last_changed"]
-        for lst in history.values():
-            state_values = [d for d in lst if all(key in d for key in keys_to_check)]
-        # Decimate to avoid adding unnecessary fine grained date to context.
-        limit = 50
-        length = len(state_values)
-        if length > limit:
-            LOGGER.debug("Decimating sensor data set.")
-            factor = length // limit
-            state_values = state_values[::factor]
-        entity_id = next(iter(gen_dict_extract("entity_id", history)))
-        units = next(iter(gen_dict_extract("unit_of_measurement", history)))
-        return {entity_id: {"values": state_values, "units": units}}
-
-    if state_class_value == "total_increasing":
-        # For sensors with state class 'total_increasing', the history contains the
-        # accumulated growth of the sensor's value since it was first added.
-        # Therefore return the net change, not the entire history.
-
-        # Filter history to just state values (no datetimes).
-        state_values = [float(v) for v in list(gen_dict_extract("state", history))]
-        # Check if sensor was reset during the time of interest.
-        zero_indices = [i for i, x in enumerate(state_values) if math.isclose(x, 0)]
-        if zero_indices:
-            # Start data set from last time the sensor was reset.
-            LOGGER.debug("Sensor was reset during time of interest.")
-            state_values = state_values[zero_indices[-1]:]
-        state_value_change = max(state_values) - min(state_values)
-        entity_id = next(iter(gen_dict_extract("entity_id", history)))
-        units = next(iter(gen_dict_extract("unit_of_measurement", history)))
-        return {entity_id: {"value": state_value_change, "units": units}}
-
-    return history
+    # Return filtered entity history to avoid filling context with too much data.
+    return {k: _filter_history(k,v) for k,v in history.items()}
 
 @tool(parse_docstring=True)
 async def get_current_device_state( # noqa: D417
