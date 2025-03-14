@@ -329,7 +329,13 @@ def _filter_history(k:Any, v:list[dict[str, str]]) -> dict[str, Any]:
         # Therefore return the net change, not the entire history.
 
         # Filter history to just state values (no datetimes).
-        state_values = [float(x) for x in list(gen_dict_extract("state", {k:v}))]
+        state_values = []
+        for x in list(gen_dict_extract("state", {k:v})):
+            try:
+                state_values.append(float(x))
+            except ValueError:
+                LOGGER.debug("Found string that could not be converted to float.")
+                continue
         # Check if sensor was reset during the time of interest.
         zero_indices = [i for i, x in enumerate(state_values) if math.isclose(x, 0)]
         if zero_indices:
