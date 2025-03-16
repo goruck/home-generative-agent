@@ -4,7 +4,7 @@ from __future__ import annotations
 import base64
 import logging
 import math
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
@@ -34,11 +34,13 @@ from ulid import ULID  # noqa: TCH002
 from voluptuous import MultipleInvalid
 
 from .const import (
-    BLUEPRINT_NAME,
+    AUTOMATION_TOOL_BLUEPRINT_NAME,
+    AUTOMATION_TOOL_EVENT_REGISTERED,
     CONF_VISION_MODEL_TEMPERATURE,
     CONF_VISION_MODEL_TOP_P,
     CONF_VLM,
-    EVENT_AUTOMATION_REGISTERED,
+    HISTORY_TOOL_CONTEXT_LIMIT,
+    HISTORY_TOOL_PURGE_KEEP_DAYS,
     RECOMMENDED_VISION_MODEL_TEMPERATURE,
     RECOMMENDED_VISION_MODEL_TOP_P,
     RECOMMENDED_VLM,
@@ -50,9 +52,9 @@ from .const import (
     VLM_NUM_CTX,
     VLM_NUM_PREDICT,
 )
-from .utilities import as_utc, gen_dict_extract
 
 if TYPE_CHECKING:
+    from collections.abc import Generator
     from types import MappingProxyType
 
     from homeassistant.core import HomeAssistant
@@ -237,9 +239,9 @@ async def add_automation(  # noqa: D417
     if time_pattern and message:
         automation_data = {
             "alias": message,
-            "description": f"Created with blueprint {BLUEPRINT_NAME}.",
+            "description": f"Created with blueprint {AUTOMATION_TOOL_BLUEPRINT_NAME}.",
             "use_blueprint": {
-                "path": BLUEPRINT_NAME,
+                "path": AUTOMATION_TOOL_BLUEPRINT_NAME,
                 "input": {
                     "time_pattern": time_pattern,
                     "message": message,
@@ -285,7 +287,7 @@ async def add_automation(  # noqa: D417
     await hass.services.async_call(automation.config.DOMAIN, SERVICE_RELOAD)
 
     hass.bus.async_fire(
-        EVENT_AUTOMATION_REGISTERED,
+        AUTOMATION_TOOL_EVENT_REGISTERED,
         {
             "automation_config": ha_automation_config,
             "raw_config": ha_automation_config_raw,
@@ -295,14 +297,14 @@ async def add_automation(  # noqa: D417
     return f"Added automation {ha_automation_config['id']}"
 
 def _get_state_and_decimate(
-        v:list[dict[str, str]],
+        data:list[dict[str, str]],
         keys:list[str] | None = None,
-        limit:int = 50
+        limit:int = HISTORY_TOOL_CONTEXT_LIMIT
     ) -> list[dict[str, str]]:
     if keys is None:
         keys = ["state", "last_changed"]
-    # Filter entity history to only state values with datetimes.
-    state_values = [d for d in v if all(key in d for key in keys)]
+    # Filter entity data to only state values with datetimes.
+    state_values = [d for d in data if all(key in d for key in keys)]
     state_values = [{k: sv[k] for k in keys} for sv in state_values]
     # Decimate to avoid adding unnecessary fine grained date to context.
     length = len(state_values)
@@ -312,25 +314,44 @@ def _get_state_and_decimate(
         state_values = state_values[::factor]
     return state_values
 
-def _filter_history(k:Any, v:list[dict[str, str]]) -> dict[str, Any]:
-    try:
-        state_class_value = next(iter(gen_dict_extract("state_class", {k:v})))
-    except StopIteration:
-        state_class_value = None
+def _gen_dict_extract(key: str, var: dict) -> Generator[str, None, None]:
+    """Find a key in nested dict."""
+    if hasattr(var,"items"):
+        for k, v in var.items():
+            if k == key:
+                yield v
+            if isinstance(v, dict):
+                for result in _gen_dict_extract(key, v):
+                    yield result
+            elif isinstance(v, list):
+                for d in v:
+                    for result in _gen_dict_extract(key, d):
+                        yield result
 
-    if state_class_value in ("measurement", "total"):
-        state_values = _get_state_and_decimate(v)
-        units = next(iter(gen_dict_extract("unit_of_measurement", {k:v})))
+def _filter_data(
+        entity_id:str,
+        data:list[dict[str, str]],
+        hass:HomeAssistant
+    ) -> dict[str, Any]:
+    state_obj = hass.states.get(entity_id)
+    if not state_obj:
+        return {}
+
+    state_class = state_obj.attributes.get("state_class")
+
+    if state_class in ("measurement", "total"):
+        state_values = _get_state_and_decimate(data)
+        units = state_obj.attributes.get("unit_of_measurement")
         return {"values": state_values, "units": units}
 
-    if state_class_value == "total_increasing":
-        # For sensors with state class 'total_increasing', the history contains the
+    if state_class == "total_increasing":
+        # For sensors with state class 'total_increasing', the data contains the
         # accumulated growth of the sensor's value since it was first added.
-        # Therefore return the net change, not the entire history.
+        # Therefore, return the net change.
 
         # Filter history to just state values (no datetimes).
         state_values = []
-        for x in list(gen_dict_extract("state", {k:v})):
+        for x in list(_gen_dict_extract("state", {entity_id:data})):
             try:
                 state_values.append(float(x))
             except ValueError:
@@ -343,10 +364,104 @@ def _filter_history(k:Any, v:list[dict[str, str]]) -> dict[str, Any]:
             LOGGER.debug("Sensor was reset during time of interest.")
             state_values = state_values[zero_indices[-1]:]
         state_value_change = max(state_values) - min(state_values)
-        units = next(iter(gen_dict_extract("unit_of_measurement", {k:v})))
+        units = state_obj.attributes.get("unit_of_measurement")
         return {"value": state_value_change, "units": units}
 
-    return {"values": _get_state_and_decimate(v)}
+    return {"values": _get_state_and_decimate(data)}
+
+async def _fetch_data_from_history(
+        hass:HomeAssistant,
+        start_time:datetime,
+        end_time:datetime,
+        entity_ids:list[str]
+    ) -> dict[str, list[str, str]]:
+    filters = None
+    include_start_time_state = True
+    significant_changes_only = True
+    minimal_response = True # If True filter out duplicate states
+    no_attributes = False
+    compressed_state_format = False
+
+    with recorder.util.session_scope(hass=hass, read_only=True) as session:
+        return await recorder.get_instance(hass).async_add_executor_job(
+            recorder.history.get_significant_states_with_session,
+            hass,
+            session,
+            start_time,
+            end_time,
+            entity_ids,
+            filters,
+            include_start_time_state,
+            significant_changes_only,
+            minimal_response,
+            no_attributes,
+            compressed_state_format
+        )
+
+async def _fetch_data_from_long_term_stats(
+        hass:HomeAssistant,
+        start_time:datetime,
+        end_time:datetime,
+        entity_ids:list[str]
+    ) -> dict[str, list[str, str]]:
+    period = "hour"
+    units = None
+
+    # Only concerned with two statistic types. The "state" type is associated with
+    # sensor entities that have State Class of total or total_increasing.
+    # The "mean" type is associated with entities with State Class measurement.
+    types = {"state", "mean"}
+
+    result = await recorder.get_instance(hass).async_add_executor_job(
+        recorder.statistics.statistics_during_period,
+        hass,
+        start_time,
+        end_time,
+        set(entity_ids),
+        period,
+        units,
+        types
+    )
+
+    # Make data format consistent with the History format.
+    parsed_result:dict[str, list[str, str]] = {}
+    for k, v in result.items():
+        data = [
+            {
+                "state": d["state"] if "state" in d else d.get("mean"),
+                "last_changed": dt_util.as_local(
+                    dt_util.utc_from_timestamp(d.get("end"))
+                )
+            } for d in v
+        ]
+        parsed_result.update({k: data})
+
+    return parsed_result
+
+def _as_utc(dattim: str, default: datetime, error_message: str) -> datetime:
+    """
+    Convert a string representing a datetime into a datetime.datetime.
+
+    Args:
+        dattim: String representing a datetime.
+        default: datatime.datetime to use as default.
+        error_message: Message to raise in case of error.
+
+    Raises:
+        Homeassistant error if datetime cannot be parsed.
+
+    Returns:
+        A datetime.datetime of the string in UTC.
+
+    """
+    if dattim is None:
+        return default
+
+    parsed_datetime = dt_util.parse_datetime(dattim)
+    if parsed_datetime is None:
+        raise HomeAssistantError(error_message)
+
+    return dt_util.as_utc(parsed_datetime)
 
 @tool(parse_docstring=True)
 async def get_entity_history(  # noqa: D417
@@ -380,12 +495,12 @@ async def get_entity_history(  # noqa: D417
     now = dt_util.utcnow()
     one_day = timedelta(days=1)
     try:
-        start_time = as_utc(
+        start_time = _as_utc(
             dattim = local_start_time,
             default = now - one_day,
             error_message = "start_time not valid"
         )
-        end_time = as_utc(
+        end_time = _as_utc(
             dattim = local_end_time,
             default = start_time + one_day,
             error_message = "end_time not valid"
@@ -393,41 +508,54 @@ async def get_entity_history(  # noqa: D417
     except HomeAssistantError as err:
         return f"Invalid time {err}"
 
-    filters = None
-    include_start_time_state = True
-    significant_changes_only = True
-    minimal_response = True # If True filter out duplicate states
-    no_attributes = False
-    compressed_state_format = False
+     # Calculate the threshold to fetch data from history or long-term statistics.
+    threshold = dt_util.now() - timedelta(days=HISTORY_TOOL_PURGE_KEEP_DAYS)
 
-    with recorder.util.session_scope(hass=hass, read_only=True) as session:
-        history = await recorder.get_instance(hass).async_add_executor_job(
-            recorder.history.get_significant_states_with_session,
-            hass,
-            session,
-            start_time,
-            end_time,
-            entity_ids,
-            filters,
-            include_start_time_state,
-            significant_changes_only,
-            minimal_response,
-            no_attributes,
-            compressed_state_format
+    # Check if the range spans both "old" and "recent" dates.
+    data:dict[str, list[str, str]] = {}
+    if start_time < threshold and end_time >= threshold:
+        # The range includes datetimes both older than threshold and more recent.
+        data = await _fetch_data_from_long_term_stats(
+            hass=hass,
+            start_time=start_time,
+            end_time=threshold,
+            entity_ids=entity_ids
+        )
+        data.update(await _fetch_data_from_history(
+            hass=hass,
+            start_time=threshold,
+            end_time=end_time,
+            entity_ids=entity_ids
+        ))
+    elif end_time < threshold:
+        # Entire range is older than threshold.
+        data = await _fetch_data_from_long_term_stats(
+            hass=hass,
+            start_time=start_time,
+            end_time=threshold,
+            entity_ids=entity_ids
+        )
+    else:
+        # Entire range is more recent than threshold.
+        data = await _fetch_data_from_history(
+            hass=hass,
+            start_time=threshold,
+            end_time=end_time,
+            entity_ids=entity_ids
         )
 
-    if not history:
+    if not data:
         return {}
 
-    # Convert any State objects in history to dict.
-    history = {
+    # Convert any State objects to dict.
+    data = {
         e: [
             s.as_dict() if isinstance(s, State) else s for s in v
-        ] for e, v in history.items()
+        ] for e, v in data.items()
     }
 
-    # Convert history datetimes in UTC to local timezone.
-    for lst in history.values():
+    # Convert datetimes in UTC to local timezone.
+    for lst in data.values():
         for d in lst:
             for k, v in d.items():
                 try:
@@ -439,8 +567,8 @@ async def get_entity_history(  # noqa: D417
                 except HomeAssistantError as err:
                     return f"Unexpected datetime conversion error {err}"
 
-    # Return filtered entity history to avoid filling context with too much data.
-    return {k: _filter_history(k,v) for k,v in history.items()}
+    # Return filtered entity data set to avoid filling context with too much data.
+    return {k: _filter_data(k,v,hass) for k,v in data.items()}
 
 @tool(parse_docstring=True)
 async def get_current_device_state( # noqa: D417

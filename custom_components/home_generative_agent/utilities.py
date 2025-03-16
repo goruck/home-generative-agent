@@ -1,13 +1,8 @@
 """Utility functions for Home Generative Assist."""
 import logging
-from collections.abc import Callable, Generator
-from datetime import datetime
+from collections.abc import Callable
 from typing import Any
 
-import homeassistant.util.dt as dt_util
-from homeassistant.exceptions import (
-    HomeAssistantError,
-)
 from homeassistant.helpers import llm
 from langchain_core.messages import (
     AIMessage,
@@ -30,20 +25,6 @@ async def generate_embeddings(
     response = await model.aembed_documents(texts)
     return list(response)
 
-def gen_dict_extract(key: str, var: dict) -> Generator[str, None, None]:
-    """Find a key in nested dict."""
-    if hasattr(var,"items"):
-        for k, v in var.items():
-            if k == key:
-                yield v
-            if isinstance(v, dict):
-                for result in gen_dict_extract(key, v):
-                    yield result
-            elif isinstance(v, list):
-                for d in v:
-                    for result in gen_dict_extract(key, d):
-                        yield result
-
 def format_tool(
     tool: llm.Tool, custom_serializer: Callable[[Any], Any] | None
 ) -> dict[str, Any]:
@@ -61,31 +42,6 @@ def format_tool(
     if tool.description:
         tool_spec["description"] = tool.description
     return {"type": "function", "function": tool_spec}
-
-def as_utc(dattim: str, default: datetime, error_message: str) -> datetime:
-        """
-        Convert a string representing a datetime into a datetime.datetime.
-
-        Args:
-            dattim: String representing a datetime.
-            default: datatime.datetime to use as default.
-            error_message: Message to raise in case of error.
-
-        Raises:
-            Homeassistant error if datetime cannot be parsed.
-
-        Returns:
-            A datetime.datetime of the string in UTC.
-
-        """
-        if dattim is None:
-            return default
-
-        parsed_datetime = dt_util.parse_datetime(dattim)
-        if parsed_datetime is None:
-            raise HomeAssistantError(error_message)
-
-        return dt_util.as_utc(parsed_datetime)
 
 def token_counter(messages: list[BaseMessage], encoding: Encoding | Any) -> int:
     """
