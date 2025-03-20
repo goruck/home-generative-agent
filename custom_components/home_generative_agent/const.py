@@ -134,3 +134,6 @@ HISTORY_TOOL_CONTEXT_LIMIT = 50
 HISTORY_TOOL_PURGE_KEEP_DAYS = 10 # TO-DO derive actual recorder setting
 AUTOMATION_TOOL_EVENT_REGISTERED = "automation_registered_via_home_generative_agent"
 AUTOMATION_TOOL_BLUEPRINT_NAME = "goruck/hga_scene_analysis.yaml"
+
+### postgresql db parameters for checkpointer and memory persistent storage. ###
+DB_URI = "postgresql://hga:hga@localhost:5432/hga?sslmode=disable"

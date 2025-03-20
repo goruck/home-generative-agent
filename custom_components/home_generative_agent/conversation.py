@@ -21,8 +21,9 @@ from langchain.globals import set_debug, set_verbose
 from langchain_core.caches import InMemoryCache
 from langchain_core.globals import set_llm_cache
 from langchain_core.messages import HumanMessage
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.store.memory import InMemoryStore
+from psycopg_pool import AsyncConnectionPool
 
 from .const import (
     CHAT_MODEL_MAX_TOKENS,
@@ -34,6 +35,7 @@ from .const import (
     CONF_EDGE_CHAT_MODEL_TEMPERATURE,
     CONF_EDGE_CHAT_MODEL_TOP_P,
     CONF_PROMPT,
+    DB_URI,
     DOMAIN,
     EMBEDDING_MODEL_DIMS,
     LANGCHAIN_LOGGING_LEVEL,
@@ -109,25 +111,14 @@ class HGAConversationEntity(
                 conversation.ConversationEntityFeature.CONTROL
             )
 
-        # Create database for thread-based (short-term) memory.
-        # TODO: Use a DB-backed store in production use.
-        memory = MemorySaver()
-
         # Create database for session-based (long-term) memory with semantic search.
         # TODO: Use a DB-backed store in production use.
-        store = InMemoryStore(
+        self.store = InMemoryStore(
             index={
                 "embed": partial(generate_embeddings, model=entry.embedding_model),
                 "dims": EMBEDDING_MODEL_DIMS,
                 "fields": ["content"]
             }
-        )
-
-        # Complile graph into a LangChain Runnable.
-        self.app = workflow.compile(
-            store=store,
-            checkpointer=memory,
-            debug=LANGCHAIN_LOGGING_LEVEL=="debug"
         )
 
         # Use in-memory caching for langgraph calls to LLMs.
@@ -219,6 +210,7 @@ class HGAConversationEntity(
                 conversation_id = ulid.ulid_now()
             except ValueError:
                 conversation_id = user_input.conversation_id
+        LOGGER.debug("Conversation ID: %s", conversation_id)
 
         if (
             user_input.context
@@ -318,7 +310,7 @@ class HGAConversationEntity(
         user_name = user_name.translate(str.maketrans("", "", string.punctuation))
         LOGGER.debug("User name: %s", user_name)
 
-        self.app_config = {
+        app_config = {
             "configurable": {
                 "thread_id": conversation_id,
                 "user_id": user_name,
@@ -334,32 +326,54 @@ class HGAConversationEntity(
             "recursion_limit": 10
         }
 
+        connection_kwargs = {
+            "autocommit": True,
+            "prepare_threshold": 0,
+        }
+
         # Interact with app.
-        try:
-            response = await self.app.ainvoke(
-                {"messages": [HumanMessage(content=user_input.text)]},
-                config=self.app_config
+        async with AsyncConnectionPool(
+            conninfo=DB_URI,
+            min_size=5,
+            max_size=20,
+            kwargs=connection_kwargs
+        ) as checkpointer_pool:
+            checkpointer = AsyncPostgresSaver(checkpointer_pool)
+            # NOTE: must call .setup() the first time checkpointer is used.
+            #await checkpointer.setup()  # noqa: ERA001
+
+            # Compile graph into a LangChain Runnable.
+            app = workflow.compile(
+                store=self.store,
+                checkpointer=checkpointer,
+                debug=LANGCHAIN_LOGGING_LEVEL=="debug"
             )
-        except HomeAssistantError as err:
-            LOGGER.error(err, exc_info=err)
-            intent_response = intent.IntentResponse(language=user_input.language)
-            intent_response.async_set_error(
-                intent.IntentResponseErrorCode.UNKNOWN,
-                f"Something went wrong: {err}",
-            )
-            return conversation.ConversationResult(
-                response=intent_response, conversation_id=conversation_id
-            )
-        except Exception as err:
-            LOGGER.error(err, exc_info=err)
-            intent_response = intent.IntentResponse(language=user_input.language)
-            intent_response.async_set_error(
-                intent.IntentResponseErrorCode.UNKNOWN,
-                f"Something went wrong: {err}",
-            )
-            return conversation.ConversationResult(
-                response=intent_response, conversation_id=conversation_id
-            )
+
+            try:
+                response = await app.ainvoke(
+                    {"messages": [HumanMessage(content=user_input.text)]},
+                    config=app_config
+                )
+            except HomeAssistantError as err:
+                LOGGER.error(err, exc_info=err)
+                intent_response = intent.IntentResponse(language=user_input.language)
+                intent_response.async_set_error(
+                    intent.IntentResponseErrorCode.UNKNOWN,
+                    f"Something went wrong: {err}",
+                )
+                return conversation.ConversationResult(
+                    response=intent_response, conversation_id=conversation_id
+                )
+            except Exception as err:
+                LOGGER.error(err, exc_info=err)
+                intent_response = intent.IntentResponse(language=user_input.language)
+                intent_response.async_set_error(
+                    intent.IntentResponseErrorCode.UNKNOWN,
+                    f"Something went wrong: {err}",
+                )
+                return conversation.ConversationResult(
+                    response=intent_response, conversation_id=conversation_id
+                )
 
         trace.async_conversation_trace_append(
             trace.ConversationTraceEventType.AGENT_DETAIL,
