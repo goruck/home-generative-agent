@@ -168,16 +168,18 @@ I built the HA installation on a Raspberry Pi 5 with SSD storage, Zigbee, and LA
 
 ## Installation
 
-1. Using the tool of choice, open your HA configuration's directory (folder) (where you find `configuration.yaml`).
-2. If you do not have a `custom_components` directory (folder), you must create it.
-3. In the `custom_components` directory (folder), create a new folder called `home_generative_agent`.
-4. Download _all_ the files from the `custom_components/home_generative_agent/` directory (folder) in this repository.
-4. Place the files you downloaded in the new directory (folder) you created.
-6. Restart Home Assistant
-7. In the HA UI, go to "Configuration" -> "Integrations" click "+," and search for "Home Generative Agent"
-8. Install all the Blueprints in the `blueprints` directory (folder).
-9. Install `ollama` on your edge device by following the instructions [here](https://ollama.com/download).
-10. Pull `ollama` models `qwen2.5:32b`, `qwen2.5:3b`, `llama-3.2-vision-11b` and `mxbai-embed-large`.
+1. Install the [PostgreSQL](https://www.postgresql.org/) database. This allows for persistence storage of conversations and memories.
+2. Install [pgvector](https://github.com/pgvector/pgvector). This enables vector similarity search for PostgresSQL.
+3. Using the tool of choice, open your HA configuration's directory (folder) (where you find `configuration.yaml`).
+4. If you do not have a `custom_components` directory (folder), you must create it.
+5. In the `custom_components` directory (folder), create a new folder called `home_generative_agent`.
+6. Download _all_ the files from the `custom_components/home_generative_agent/` directory (folder) in this repository.
+7. Place the files you downloaded in the new directory (folder) you created.
+8. Restart Home Assistant
+9. In the HA UI, go to "Configuration" -> "Integrations" click "+," and search for "Home Generative Agent"
+10. Install all the Blueprints in the `blueprints` directory (folder).
+11. Install `ollama` on your edge device by following the instructions [here](https://ollama.com/download).
+12. Pull `ollama` models `qwen2.5:32b`, `qwen2.5:3b`, `llama-3.2-vision-11b` and `mxbai-embed-large`.
 
 ## Configuration
 Configuration is done in the UI and via the parameters in `const.py`.
