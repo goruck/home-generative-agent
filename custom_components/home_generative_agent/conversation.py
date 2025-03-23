@@ -25,6 +25,7 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.store.postgres import AsyncPostgresStore
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
+from voluptuous_openapi import convert
 
 from .const import (
     CHAT_MODEL_MAX_TOKENS,
@@ -56,12 +57,14 @@ from .tools import (
     get_entity_history,
     upsert_memory,
 )
-from .utilities import format_tool, generate_embeddings
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
+    from langchain_ollama import OllamaEmbeddings
 
     from . import HGAConfigEntry
 
@@ -76,6 +79,31 @@ elif LANGCHAIN_LOGGING_LEVEL == "debug":
 else:
     set_verbose(False)
     set_debug(False)
+
+async def _generate_embeddings(
+        texts: list[str],
+        model: OllamaEmbeddings
+    ) -> list[list[float]]:
+    """Generate embeddings from a list of text."""
+    return await model.aembed_documents(texts)
+
+def _format_tool(
+    tool: llm.Tool, custom_serializer: Callable[[Any], Any] | None
+) -> dict[str, Any]:
+    """Format Home Assistant LLM tools to be compatible with OpenAI format."""
+    tool_spec = {
+        "name": tool.name,
+        "parameters": convert(tool.parameters, custom_serializer=custom_serializer),
+    }
+    # Add dummy arg descriptions if needed for custom token counter.
+    for arg in list(tool_spec["parameters"]["properties"]):
+        try:
+            _ = tool_spec["parameters"]["properties"][arg]["description"]
+        except KeyError:
+            tool_spec["parameters"]["properties"][arg]["description"] = ""
+    if tool.description:
+        tool_spec["description"] = tool.description
+    return {"type": "function", "function": tool_spec}
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -174,7 +202,7 @@ class HGAConversationEntity(
                     response=intent_response, conversation_id=user_input.conversation_id
                 )
             tools = [
-               format_tool(tool, llm_api.custom_serializer) for tool in llm_api.tools
+               _format_tool(tool, llm_api.custom_serializer) for tool in llm_api.tools
             ]
 
         # Add langchain tools to the list of HA tools.
@@ -248,7 +276,7 @@ class HGAConversationEntity(
 
         prompt = "\n".join(prompt_parts)
 
-        chat_model_location = self.entry.options.get(
+        chat_model_location = options.get(
             CONF_CHAT_MODEL_LOCATION,
             RECOMMENDED_CHAT_MODEL_LOCATION
         )
@@ -257,15 +285,15 @@ class HGAConversationEntity(
             chat_model_with_config = chat_model.with_config(
                 {"configurable":
                     {
-                        "model": self.entry.options.get(
+                        "model": options.get(
                             CONF_EDGE_CHAT_MODEL,
                             RECOMMENDED_EDGE_CHAT_MODEL
                         ),
-                        "temperature": self.entry.options.get(
+                        "temperature": options.get(
                             CONF_EDGE_CHAT_MODEL_TEMPERATURE,
                             RECOMMENDED_EDGE_CHAT_MODEL_TEMPERATURE
                         ),
-                        "top_p": self.entry.options.get(
+                        "top_p": options.get(
                             CONF_EDGE_CHAT_MODEL_TOP_P,
                             RECOMMENDED_EDGE_CHAT_MODEL_TOP_P,
                         ),
@@ -280,11 +308,11 @@ class HGAConversationEntity(
             chat_model_with_config = chat_model.with_config(
                 {"configurable":
                     {
-                        "model_name": self.entry.options.get(
+                        "model_name": options.get(
                             CONF_CHAT_MODEL,
                             RECOMMENDED_CHAT_MODEL
                         ),
-                        "temperature": self.entry.options.get(
+                        "temperature": options.get(
                             CONF_CHAT_MODEL_TEMPERATURE,
                             RECOMMENDED_CHAT_MODEL_TEMPERATURE
                         ),
@@ -340,7 +368,7 @@ class HGAConversationEntity(
                 pool,
                 index={
                     "embed": partial(
-                        generate_embeddings,
+                        _generate_embeddings,
                         model=self.entry.embedding_model
                     ),
                     "dims": EMBEDDING_MODEL_DIMS,

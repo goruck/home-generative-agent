@@ -1,6 +1,5 @@
 """Utility functions for Home Generative Assist."""
 import logging
-from collections.abc import Callable
 from typing import Any
 
 from homeassistant.helpers import llm
@@ -11,37 +10,9 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
-from langchain_ollama import OllamaEmbeddings
 from tiktoken.core import Encoding
-from voluptuous_openapi import convert
 
 LOGGER = logging.getLogger(__name__)
-
-async def generate_embeddings(
-        texts: list[str],
-        model: OllamaEmbeddings
-    ) -> list[list[float]]:
-    """Generate embeddings from a list of text."""
-    response = await model.aembed_documents(texts)
-    return list(response)
-
-def format_tool(
-    tool: llm.Tool, custom_serializer: Callable[[Any], Any] | None
-) -> dict[str, Any]:
-    """Format Home Assistant LLM tools to be compatible with OpenAI format."""
-    tool_spec = {
-        "name": tool.name,
-        "parameters": convert(tool.parameters, custom_serializer=custom_serializer),
-    }
-    # Add dummy arg descriptions if needed to make function token counter work.
-    for arg in list(tool_spec["parameters"]["properties"]):
-        try:
-            _ = tool_spec["parameters"]["properties"][arg]["description"]
-        except KeyError:
-            tool_spec["parameters"]["properties"][arg]["description"] = ""
-    if tool.description:
-        tool_spec["description"] = tool.description
-    return {"type": "function", "function": tool_spec}
 
 def token_counter(messages: list[BaseMessage], encoding: Encoding | Any) -> int:
     """
