@@ -22,7 +22,8 @@ from langchain_core.caches import InMemoryCache
 from langchain_core.globals import set_llm_cache
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-from langgraph.store.memory import InMemoryStore
+from langgraph.store.postgres import AsyncPostgresStore
+from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from .const import (
@@ -110,16 +111,6 @@ class HGAConversationEntity(
             self._attr_supported_features = (
                 conversation.ConversationEntityFeature.CONTROL
             )
-
-        # Create database for session-based (long-term) memory with semantic search.
-        # TODO: Use a DB-backed store in production use.
-        self.store = InMemoryStore(
-            index={
-                "embed": partial(generate_embeddings, model=entry.embedding_model),
-                "dims": EMBEDDING_MODEL_DIMS,
-                "fields": ["content"]
-            }
-        )
 
         # Use in-memory caching for langgraph calls to LLMs.
         set_llm_cache(InMemoryCache())
@@ -310,7 +301,7 @@ class HGAConversationEntity(
         user_name = user_name.translate(str.maketrans("", "", string.punctuation))
         LOGGER.debug("User name: %s", user_name)
 
-        app_config = {
+        self.app_config = {
             "configurable": {
                 "thread_id": conversation_id,
                 "user_id": user_name,
@@ -329,30 +320,48 @@ class HGAConversationEntity(
         connection_kwargs = {
             "autocommit": True,
             "prepare_threshold": 0,
+            "row_factory": dict_row
         }
 
-        # Interact with app.
+        # Open database for short-term and long-term memory.
         async with AsyncConnectionPool(
             conninfo=DB_URI,
             min_size=5,
             max_size=20,
             kwargs=connection_kwargs
-        ) as checkpointer_pool:
-            checkpointer = AsyncPostgresSaver(checkpointer_pool)
+        ) as pool:
+            # Database for thread-based (short-term) memory.
+            checkpointer = AsyncPostgresSaver(pool)
             # NOTE: must call .setup() the first time checkpointer is used.
             #await checkpointer.setup()  # noqa: ERA001
 
+            # Database for session-based (long-term) memory with semantic search.
+            store = AsyncPostgresStore(
+                pool,
+                index={
+                    "embed": partial(
+                        generate_embeddings,
+                        model=self.entry.embedding_model
+                    ),
+                    "dims": EMBEDDING_MODEL_DIMS,
+                    "fields": ["content"]
+                }
+            )
+            # NOTE: must call .setup() the first time store is used.
+            #await store.setup()  # noqa: ERA001
+
             # Compile graph into a LangChain Runnable.
             app = workflow.compile(
-                store=self.store,
+                store=store,
                 checkpointer=checkpointer,
                 debug=LANGCHAIN_LOGGING_LEVEL=="debug"
             )
 
+            # Interact with app.
             try:
                 response = await app.ainvoke(
                     {"messages": [HumanMessage(content=user_input.text)]},
-                    config=app_config
+                    config=self.app_config
                 )
             except HomeAssistantError as err:
                 LOGGER.error(err, exc_info=err)

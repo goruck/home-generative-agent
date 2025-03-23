@@ -15,6 +15,7 @@ from langchain_openai import ChatOpenAI
 
 from .const import (
     EDGE_CHAT_MODEL_URL,
+    EMBEDDING_MODEL_CTX,
     EMBEDDING_MODEL_URL,
     RECOMMENDED_EDGE_CHAT_MODEL,
     RECOMMENDED_EMBEDDING_MODEL,
@@ -130,7 +131,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
     embedding_model = OllamaEmbeddings(
         model=RECOMMENDED_EMBEDDING_MODEL,
-        base_url=EMBEDDING_MODEL_URL
+        base_url=EMBEDDING_MODEL_URL,
+        num_ctx=EMBEDDING_MODEL_CTX
     )
 
     # TODO: find a way to verify embedding model was setup correctly.

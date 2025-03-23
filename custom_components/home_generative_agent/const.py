@@ -124,7 +124,8 @@ Update the summary by taking into account the additional smart home messages abo
 
 ### Ollama embedding model parameters. ###
 EMBEDDING_MODEL_URL = "192.168.1.252:11434"
-EMBEDDING_MODEL_DIMS = 512
+EMBEDDING_MODEL_DIMS = 1024
+EMBEDDING_MODEL_CTX = 512
 EMBEDDING_MODEL_PROMPT_TEMPLATE = """
 Represent this sentence for searching relevant passages: {query}
 """
