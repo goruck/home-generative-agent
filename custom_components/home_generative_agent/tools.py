@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import base64
+import imghdr
 import logging
 import math
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 import aiofiles
 import homeassistant.util.dt as dt_util
@@ -47,7 +48,7 @@ from .const import (
     VISION_MODEL_IMAGE_HEIGHT,
     VISION_MODEL_IMAGE_WIDTH,
     VISION_MODEL_SYSTEM_PROMPT,
-    VISION_MODEL_USER_KW_PROMPT,
+    VISION_MODEL_USER_KW_TEMPLATE,
     VISION_MODEL_USER_PROMPT,
     VLM_NUM_CTX,
     VLM_NUM_PREDICT,
@@ -80,31 +81,70 @@ async def _get_camera_image(hass: HomeAssistant, camera_name: str) -> bytes | No
 
     return image.content
 
+def _determine_image_type(image_data: Any) -> Any | Literal["base64", "jpeg"] | None:
+    """
+    Determine if the image data is base64 encoded or JPEG.
+
+    Args:
+        image_data: The image data as a string or bytes.
+
+    Returns:
+        "base64" if the data is base64 encoded, "jpeg" if it's JPEG, or None if unknown.
+
+    """
+    if isinstance(image_data, str):
+        try:
+            # Attempt to decode base64 data, validating padding.
+            decoded_data = base64.b64decode(image_data, validate=True)
+            # Check if the decoded data is a valid image format.
+            if imghdr.what(None, decoded_data):
+                return "base64"
+        except base64.binascii.Error:
+             # If not valid base64, check if it might be JPEG.
+            if image_data.startswith((b"\xff\xd8", b"/9j/")):
+                return "jpeg" #Likely a JPEG file
+            return None
+
+    elif isinstance(image_data, bytes):
+        # Check if the byte data starts with JPEG magic numbers.
+        if image_data.startswith((b"\xff\xd8", b"/9j/")):
+            return "jpeg"
+        # Check for other image types using imghdr (e.g., PNG, GIF).
+        if imghdr.what(None, image_data):
+            # If imghdr detects an image type, it's not base64 in this context.
+            return imghdr.what(None, image_data)
+    return None
+
+def _prompt_func(data: dict[str, Any]) -> list[AnyMessage]:
+    system = data["system"]
+    text = data["text"]
+    image = data["image"]
+
+    text_part = {"type": "text", "text": text}
+    image_part = {
+        "type": "image_url",
+        "image_url": {"url": f"data:image/jpeg;base64,{image}"},
+    }
+
+    content_parts = []
+    content_parts.append(text_part)
+    content_parts.append(image_part)
+
+    return [SystemMessage(content=system), HumanMessage(content=content_parts)]
+
 async def _analyze_image(
         vlm_model: ChatOllama,
         options: dict[str, Any] | MappingProxyType[str, Any],
-        image: bytes,
+        image: Any,
         detection_keywords: list[str] | None = None
     ) -> str:
     """Analyze an image."""
-    encoded_image = base64.b64encode(image).decode("utf-8")
-
-    def prompt_func(data: dict[str, Any]) -> list[AnyMessage]:
-        system = data["system"]
-        text = data["text"]
-        image = data["image"]
-
-        text_part = {"type": "text", "text": text}
-        image_part = {
-            "type": "image_url",
-            "image_url": {"url": f"data:image/jpeg;base64,{image}"},
-        }
-
-        content_parts = []
-        content_parts.append(text_part)
-        content_parts.append(image_part)
-
-        return [SystemMessage(content=system), HumanMessage(content=content_parts)]
+    if (image_type :=_determine_image_type(image)) == "jpeg":
+        image_data = base64.b64encode(image).decode("utf-8")
+    elif image_type == "base64":
+        image_data = image
+    else:
+        return "Image cannot be analyzed."
 
     model = vlm_model
     model_with_config = model.with_config(
@@ -126,10 +166,12 @@ async def _analyze_image(
         }
     )
 
-    chain = prompt_func | model_with_config
+    chain = _prompt_func | model_with_config
 
     if detection_keywords is not None:
-        prompt = f"{VISION_MODEL_USER_KW_PROMPT} {' or '.join(detection_keywords):}"
+        prompt = VISION_MODEL_USER_KW_TEMPLATE.format(
+            key_words=f"{' or '.join(detection_keywords)}"
+        )
     else:
         prompt = VISION_MODEL_USER_PROMPT
 
@@ -138,7 +180,7 @@ async def _analyze_image(
             {
                 "system": VISION_MODEL_SYSTEM_PROMPT,
                 "text": prompt,
-                "image": encoded_image
+                "image": image_data
             }
         )
     except HomeAssistantError as err: #TODO: add validation error handling and retry prompt
