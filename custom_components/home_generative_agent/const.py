@@ -99,10 +99,14 @@ VLM_NUM_PREDICT = 4096
 VLM_NUM_CTX = 16384
 # Ollama VLM model prompts for vision tasks.
 VISION_MODEL_SYSTEM_PROMPT = """
-You are a bot that generates scene analysis from camera images.
+You are a bot that responses with a description of what is visible in a camera image.
+
+Keep your responses simple and to the point.
 """
 VISION_MODEL_USER_PROMPT = "Task: Describe this image:"
-VISION_MODEL_USER_KW_PROMPT =  "Task: Does this image contain"
+VISION_MODEL_USER_KW_TEMPLATE = """
+Task: Tell me if {key_words} are visible in this image:
+"""
 VISION_MODEL_IMAGE_WIDTH = 1920
 VISION_MODEL_IMAGE_HEIGHT = 1080
 
