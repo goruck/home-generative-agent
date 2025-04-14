@@ -43,6 +43,9 @@ RECOMMENDED_SUMMARIZATION_MODEL_TOP_P = 0.9
 # The embedding model is used for semantic search in long-term memory.
 CONF_EMBEDDING_MODEL = "embedding_model"
 RECOMMENDED_EMBEDDING_MODEL = "mxbai-embed-large"
+### Camera video analyzer enable parameter. ###
+CONF_VIDEO_ANALYZER_ENABLE = "video_analyzer_enable"
+RECOMMENDED_VIDEO_ANALYZER_ENABLE = False
 
 ### langchain logging level ###
 # Options are "disable", "verbose" or "debug".
@@ -139,6 +142,20 @@ HISTORY_TOOL_CONTEXT_LIMIT = 50
 HISTORY_TOOL_PURGE_KEEP_DAYS = 10 # TO-DO derive actual recorder setting
 AUTOMATION_TOOL_EVENT_REGISTERED = "automation_registered_via_home_generative_agent"
 AUTOMATION_TOOL_BLUEPRINT_NAME = "goruck/hga_scene_analysis.yaml"
+
+### Camera video analyzer. ###
+# Interval units are seconds.
+VIDEO_ANALYZER_SCAN_INTERVAL = 1
+# Root must in allowlist_external_dirs.
+VIDEO_ANALYZER_SNAPSHOT_ROOT = "/home/lindo/core/config/media/snapshots"
+VIDEO_ANALYZER_SYSTEM_MESSAGE = """
+You are a bot that generates a description of a video given descriptions of its frames.
+Keep the description to the point and use no more than 250 characters.
+"""
+VIDEO_ANALYZER_PROMPT = """
+Describe what is happening in this video from these frame descriptions:
+"""
+VIDEO_ANALYZER_MOBILE_APP = "mobile_app_lindos_iphone"
 
 ### postgresql db parameters for checkpointer and memory persistent storage. ###
 DB_URI = "postgresql://hga:hga@localhost:5432/hga?sslmode=disable"

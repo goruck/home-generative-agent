@@ -42,6 +42,7 @@ from .const import (
     CONF_SUMMARIZATION_MODEL,
     CONF_SUMMARIZATION_MODEL_TEMPERATURE,
     CONF_SUMMARIZATION_MODEL_TOP_P,
+    CONF_VIDEO_ANALYZER_ENABLE,
     CONF_VISION_MODEL_TEMPERATURE,
     CONF_VISION_MODEL_TOP_P,
     CONF_VLM,
@@ -56,6 +57,7 @@ from .const import (
     RECOMMENDED_SUMMARIZATION_MODEL,
     RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
     RECOMMENDED_SUMMARIZATION_MODEL_TOP_P,
+    RECOMMENDED_VIDEO_ANALYZER_ENABLE,
     RECOMMENDED_VISION_MODEL_TEMPERATURE,
     RECOMMENDED_VISION_MODEL_TOP_P,
     RECOMMENDED_VLM,
@@ -210,6 +212,11 @@ def config_option_schema(
             description={"suggested_value": options.get(CONF_LLM_HASS_API)},
             default="none",
         ): SelectSelector(SelectSelectorConfig(options=hass_apis)),
+        vol.Optional(
+            CONF_VIDEO_ANALYZER_ENABLE,
+            description={"suggested_value": options.get(CONF_VIDEO_ANALYZER_ENABLE)},
+            default=False
+        ): bool,
         vol.Required(
             CONF_RECOMMENDED, default=options.get(CONF_RECOMMENDED, False)
         ): bool,

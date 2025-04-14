@@ -1,33 +1,61 @@
-"""Home Generative Agent Initalization."""
+"""Home Generative Agent Initialization."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING
 
-from homeassistant.const import CONF_API_KEY, Platform
+import aiofiles
+import homeassistant.util.dt as dt_util
+from homeassistant.components.camera import DOMAIN as CAMERA_DOMAIN
+from homeassistant.const import (
+    CONF_API_KEY,
+    EVENT_STATE_CHANGED,
+    Platform,
+)
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.httpx_client import get_async_client
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import ConfigurableField
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_openai import ChatOpenAI
 
 from .const import (
+    CONF_SUMMARIZATION_MODEL,
+    CONF_SUMMARIZATION_MODEL_TEMPERATURE,
+    CONF_SUMMARIZATION_MODEL_TOP_P,
+    CONF_VIDEO_ANALYZER_ENABLE,
     EDGE_CHAT_MODEL_URL,
     EMBEDDING_MODEL_CTX,
     EMBEDDING_MODEL_URL,
     RECOMMENDED_EDGE_CHAT_MODEL,
     RECOMMENDED_EMBEDDING_MODEL,
     RECOMMENDED_SUMMARIZATION_MODEL,
+    RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
+    RECOMMENDED_SUMMARIZATION_MODEL_TOP_P,
+    RECOMMENDED_VIDEO_ANALYZER_ENABLE,
     RECOMMENDED_VLM,
+    SUMMARIZATION_MODEL_CTX,
+    SUMMARIZATION_MODEL_PREDICT,
     SUMMARIZATION_MODEL_URL,
+    VIDEO_ANALYZER_MOBILE_APP,
+    VIDEO_ANALYZER_PROMPT,
+    VIDEO_ANALYZER_SCAN_INTERVAL,
+    VIDEO_ANALYZER_SNAPSHOT_ROOT,
+    VIDEO_ANALYZER_SYSTEM_MESSAGE,
     VLM_URL,
 )
+from .tools import _analyze_image
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
-    from homeassistant.core import HomeAssistant
+    from homeassistant.core import Event, HomeAssistant
 
 LOGGER = logging.getLogger(__name__)
 
@@ -44,6 +72,176 @@ class HGAData:
     vision_model: ChatOllama
     summarization_model = ChatOllama
 
+class VideoAnalyzer:
+    """Analyze video from recording cameras."""
+
+    def __init__(self, hass: HomeAssistant, entry: HGAConfigEntry) -> None:
+        """Init the video analyzer."""
+        # Track snapshots and pending writes per camera.
+        self.camera_snapshots = {}
+        self.camera_write_locks = {}
+
+        self.hass = hass
+        self.entry = entry
+
+    @callback
+    def _get_recording_cameras(self) -> list[str]:
+        """Return a list of cameras currently recording."""
+        return [
+            state.entity_id for state in self.hass.states.async_all("camera")
+            if state.state == "recording"
+        ]
+
+    async def _take_snapshot(self, now: datetime) -> None:
+        """Take snapshots from all recording cameras."""
+        snapshot_root_path = Path(VIDEO_ANALYZER_SNAPSHOT_ROOT)
+        snapshot_root_path.mkdir(parents=True, exist_ok=True)
+
+        for camera_id in self._get_recording_cameras():
+            timestamp = dt_util.as_local(now).strftime("%Y%m%d_%H%M%S")
+            cam_dir = snapshot_root_path / camera_id.replace(".", "_")
+            cam_dir.mkdir(parents=True, exist_ok=True)
+            snapshot_path = cam_dir / f"snapshot_{timestamp}.jpg"
+
+            # Create a lock to track pending snapshot write.
+            lock = self.camera_write_locks.setdefault(camera_id, asyncio.Lock())
+
+            async with lock:
+                await self.hass.services.async_call(
+                    CAMERA_DOMAIN,
+                    "snapshot",
+                    {
+                        "entity_id": camera_id,
+                        "filename": str(snapshot_path),
+                    },
+                    blocking=True,
+                )
+                self.camera_snapshots.setdefault(camera_id, []).append(snapshot_path)
+                LOGGER.debug("[%s] Snapshot saved to %s", camera_id, snapshot_path)
+
+    async def _process_snapshots(self, camera_id: str) -> None:
+        """Process snapshots after a camera stops recording."""
+        lock = self.camera_write_locks.get(camera_id)
+        if lock:
+            LOGGER.debug("[%s] Waiting for snapshot writes to finish...", camera_id)
+            async with lock:
+                LOGGER.debug("[%s] Done waiting for writes.", camera_id)
+
+        snapshots = self.camera_snapshots.get(camera_id, [])
+        if not snapshots:
+            return
+
+        camera_name = camera_id.split(".")[-1]
+
+        options = self.entry.options
+
+        LOGGER.debug("[%s] Processing %s snapshots...", camera_id, len(snapshots))
+        frame_descriptions = []
+        for path in snapshots:
+            LOGGER.debug(" - %s", path)
+
+            async with aiofiles.open(path, "rb") as file:
+                image = await file.read()
+
+                detection_keywords = None
+                frame_description = await _analyze_image(
+                    self.entry.vision_model, options, image, detection_keywords
+                )
+                LOGGER.debug("Analysis for %s: %s", path, frame_description)
+                frame_descriptions.append(frame_description)
+
+        if len(frame_descriptions) > 1:
+            prompt_start = VIDEO_ANALYZER_PROMPT
+            tag_template = "\n<start frame description> {i} <end frame description>"
+            prompt_parts = [tag_template.format(i=i) for i in frame_descriptions]
+            prompt_parts.insert(0, prompt_start)
+            prompt = " ".join(prompt_parts)
+            LOGGER.debug("Prompt: %s", prompt)
+            system_message = VIDEO_ANALYZER_SYSTEM_MESSAGE
+            messages = [
+                SystemMessage(content=system_message),
+                HumanMessage(content=prompt)
+            ]
+            model = self.entry.summarization_model
+            model_with_config = model.with_config(
+                config={
+                    "model": options.get(
+                        CONF_SUMMARIZATION_MODEL,
+                        RECOMMENDED_SUMMARIZATION_MODEL,
+                    ),
+                    "temperature": options.get(
+                        CONF_SUMMARIZATION_MODEL_TEMPERATURE,
+                        RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
+                    ),
+                    "top_p": options.get(
+                        CONF_SUMMARIZATION_MODEL_TOP_P,
+                        RECOMMENDED_SUMMARIZATION_MODEL_TOP_P,
+                    ),
+                    "num_predict": SUMMARIZATION_MODEL_PREDICT,
+                    "num_ctx": SUMMARIZATION_MODEL_CTX,
+                }
+            )
+            summary = await model_with_config.ainvoke(messages)
+            LOGGER.debug("Summary for %s: %s", camera_id, summary.content)
+
+            notify_msg = summary.content
+        else:
+            notify_msg = frame_description
+
+        # Grab first snapshot to display as a static image in the notification.
+        img_path_parts = snapshots[0].parts
+        notify_img_path = Path("/media/local") / Path(*img_path_parts[-3:])
+
+        await self.hass.services.async_call(
+            "notify",
+            VIDEO_ANALYZER_MOBILE_APP,
+            {
+                "message": notify_msg,
+                "title": f"Camera Alert from {camera_name}!",
+                "data": {
+                    "entity_id:": camera_id,
+                    "image": str(notify_img_path)
+                }
+            },
+            blocking=True
+        )
+
+        self.camera_snapshots[camera_id] = []
+
+    @callback
+    def _handle_camera_state_change(self, event: Event) -> None:
+        """Handle camera state changes to trigger processing."""
+        entity_id = event.data.get("entity_id")
+        if not entity_id or not entity_id.startswith("camera."):
+            return
+
+        old_state = event.data.get("old_state")
+        new_state = event.data.get("new_state")
+        if old_state is None or new_state is None:
+            return
+
+        if old_state.state == "recording" and new_state.state != "recording":
+            # Debounce: wait 1 second before processing.
+            async def _delayed_process() -> None:
+                await asyncio.sleep(1)
+                await self._process_snapshots(entity_id)
+
+            self.hass.async_create_task(_delayed_process())
+
+    def start(self) -> None:
+        """Start the video analyzer."""
+         # Start video analyzer snapshot job.
+        async_track_time_interval(
+            self.hass,
+            self._take_snapshot,
+            timedelta(seconds=VIDEO_ANALYZER_SCAN_INTERVAL)
+        )
+
+        # Watch for recording cameras and analyze video.
+        self.hass.bus.async_listen(
+            EVENT_STATE_CHANGED,
+            self._handle_camera_state_change
+        )
 
 async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     """Set up Home generative Agent from a config entry."""
@@ -145,6 +343,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     entry.embedding_model = embedding_model
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    if entry.options.get(
+        CONF_VIDEO_ANALYZER_ENABLE, RECOMMENDED_VIDEO_ANALYZER_ENABLE
+    ):
+        LOGGER.info("Video analyzer enabled.")
+        video_analyzer = VideoAnalyzer(hass, entry)
+        video_analyzer.start()
 
     return True
 
