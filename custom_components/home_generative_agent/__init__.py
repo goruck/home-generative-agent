@@ -51,7 +51,7 @@ from .const import (
     VIDEO_ANALYZER_SYSTEM_MESSAGE,
     VLM_URL,
 )
-from .tools import _analyze_image
+from .tools import analyze_image
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -70,7 +70,7 @@ class HGAData:
     chat_model: ChatOpenAI
     edge_chat_model: ChatOllama
     vision_model: ChatOllama
-    summarization_model = ChatOllama
+    summarization_model: ChatOllama
 
 class VideoAnalyzer:
     """Analyze video from recording cameras."""
@@ -144,7 +144,7 @@ class VideoAnalyzer:
                 image = await file.read()
 
                 detection_keywords = None
-                frame_description = await _analyze_image(
+                frame_description = await analyze_image(
                     self.entry.vision_model, options, image, detection_keywords
                 )
                 LOGGER.debug("Analysis for %s: %s", path, frame_description)

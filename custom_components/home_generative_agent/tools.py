@@ -132,7 +132,7 @@ def _prompt_func(data: dict[str, Any]) -> list[AnyMessage]:
 
     return [SystemMessage(content=system), HumanMessage(content=content_parts)]
 
-async def _analyze_image(
+async def analyze_image(
         vlm_model: ChatOllama,
         options: dict[str, Any] | MappingProxyType[str, Any],
         image: Any,
@@ -212,7 +212,7 @@ async def get_and_analyze_camera_image( # noqa: D417
     image = await _get_camera_image(hass, camera_name)
     if image is None:
         return "Error getting image from camera."
-    return await _analyze_image(vlm_model, options, image, detection_keywords)
+    return await analyze_image(vlm_model, options, image, detection_keywords)
 
 @tool(parse_docstring=True)
 async def upsert_memory( # noqa: D417
