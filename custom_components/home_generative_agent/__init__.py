@@ -7,7 +7,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 import aiofiles
 import homeassistant.util.dt as dt_util
@@ -25,12 +25,15 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import ConfigurableField
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_openai import ChatOpenAI
+from psycopg.rows import dict_row
+from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
 from .const import (
     CONF_SUMMARIZATION_MODEL,
     CONF_SUMMARIZATION_MODEL_TEMPERATURE,
     CONF_SUMMARIZATION_MODEL_TOP_P,
     CONF_VIDEO_ANALYZER_ENABLE,
+    DB_URI,
     EDGE_CHAT_MODEL_URL,
     EMBEDDING_MODEL_CTX,
     EMBEDDING_MODEL_URL,
@@ -71,6 +74,7 @@ class HGAData:
     edge_chat_model: ChatOllama
     vision_model: ChatOllama
     summarization_model: ChatOllama
+    pool: Any #TODO: assign correct type
 
 class VideoAnalyzer:
     """Analyze video from recording cameras."""
@@ -342,6 +346,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
     entry.embedding_model = embedding_model
 
+     # Open postgresql database for short-term and long-term memory.
+    connection_kwargs = {
+        "autocommit": True,
+        "prepare_threshold": 0,
+        "row_factory": dict_row
+    }
+    pool = AsyncConnectionPool(
+        conninfo=DB_URI,
+        min_size=5,
+        max_size=20,
+        kwargs=connection_kwargs,
+        open=False
+    )
+    try:
+        await pool.open()
+    except PoolTimeout as err:
+        LOGGER.error("Error opening database: %s", err)
+        return False
+
+    entry.pool = pool
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     if entry.options.get(
@@ -355,4 +380,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload Home Generative Agent."""
+    pool = entry.pool
+    pool.close()
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
