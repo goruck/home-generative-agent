@@ -7,7 +7,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import aiofiles
 import homeassistant.util.dt as dt_util
@@ -75,6 +75,7 @@ class HGAData:
     vision_model: ChatOllama
     summarization_model: ChatOllama
     pool: Any #TODO: assign correct type
+    video_analyzer: VideoAnalyzer
 
 class VideoAnalyzer:
     """Analyze video from recording cameras."""
@@ -235,20 +236,31 @@ class VideoAnalyzer:
     def start(self) -> None:
         """Start the video analyzer."""
          # Start video analyzer snapshot job.
-        async_track_time_interval(
+        self.cancel_track = async_track_time_interval(
             self.hass,
             self._take_snapshot,
             timedelta(seconds=VIDEO_ANALYZER_SCAN_INTERVAL)
         )
-
         # Watch for recording cameras and analyze video.
-        self.hass.bus.async_listen(
+        self.cancel_listen = self.hass.bus.async_listen(
             EVENT_STATE_CHANGED,
             self._handle_camera_state_change
         )
+        LOGGER.info("Video analyzer started.")
+
+    def stop(self) -> None:
+        """Stop the video analyzer."""
+        if self.is_running():
+            self.cancel_track()
+            self.cancel_listen()
+            LOGGER.info("Video analyzer stopped.")
+
+    def is_running(self) -> bool:
+        """Check if video analyzer is running."""
+        return hasattr(self, "cancel_track") and hasattr(self, "cancel_listen")
 
 async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
-    """Set up Home generative Agent from a config entry."""
+    """Set up Home Generative Agent from a config entry."""
     chat_model = ChatOpenAI( #TODO: fix blocking call
         api_key=entry.data.get(CONF_API_KEY),
         timeout=10,
@@ -369,17 +381,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
+    # Initialize video analyzer and start if option is set.
+    video_analyzer = VideoAnalyzer(hass, entry)
     if entry.options.get(
         CONF_VIDEO_ANALYZER_ENABLE, RECOMMENDED_VIDEO_ANALYZER_ENABLE
     ):
-        LOGGER.info("Video analyzer enabled.")
-        video_analyzer = VideoAnalyzer(hass, entry)
         video_analyzer.start()
+
+    entry.video_analyzer = video_analyzer
 
     return True
 
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     """Unload Home Generative Agent."""
     pool = entry.pool
-    pool.close()
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    await pool.close()
+
+    video_analyzer = entry.video_analyzer
+    video_analyzer.stop()
+
+    await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
+    return True
