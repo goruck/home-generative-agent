@@ -6,6 +6,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -25,6 +26,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import ConfigurableField
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_openai import ChatOpenAI
+from langgraph.store.postgres import AsyncPostgresStore
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
@@ -36,6 +38,7 @@ from .const import (
     DB_URI,
     EDGE_CHAT_MODEL_URL,
     EMBEDDING_MODEL_CTX,
+    EMBEDDING_MODEL_DIMS,
     EMBEDDING_MODEL_URL,
     RECOMMENDED_EDGE_CHAT_MODEL,
     RECOMMENDED_EMBEDDING_MODEL,
@@ -75,7 +78,15 @@ class HGAData:
     vision_model: ChatOllama
     summarization_model: ChatOllama
     pool: AsyncConnectionPool
+    store: AsyncPostgresStore
     video_analyzer: VideoAnalyzer
+
+async def _generate_embeddings(
+        texts: list[str],
+        model: OllamaEmbeddings
+    ) -> list[list[float]]:
+    """Generate embeddings from a list of text."""
+    return await model.aembed_documents(texts)
 
 class VideoAnalyzer:
     """Analyze video from recording cameras."""
@@ -368,6 +379,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         LOGGER.error("Error opening postgresql db: %s", err)
         return False
     entry.pool = pool
+
+    # Initialize store for session-based (long-term) memory with semantic search.
+    store = AsyncPostgresStore(
+        pool,
+        index={
+            "embed": partial(
+                _generate_embeddings,
+                model=embedding_model
+            ),
+            "dims": EMBEDDING_MODEL_DIMS,
+            "fields": ["content"]
+        }
+    )
+    # NOTE: must call .setup() the first time store is used.
+    #await store.setup()  # noqa: ERA001
+    entry.store = store
 
     # Initialize video analyzer and start if option is set.
     video_analyzer = VideoAnalyzer(hass, entry)

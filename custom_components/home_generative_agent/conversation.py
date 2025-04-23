@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import logging
 import string
-from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
 import homeassistant.util.dt as dt_util
@@ -22,7 +21,6 @@ from langchain_core.caches import InMemoryCache
 from langchain_core.globals import set_llm_cache
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-from langgraph.store.postgres import AsyncPostgresStore
 from voluptuous_openapi import convert
 
 from .const import (
@@ -36,7 +34,6 @@ from .const import (
     CONF_EDGE_CHAT_MODEL_TOP_P,
     CONF_PROMPT,
     DOMAIN,
-    EMBEDDING_MODEL_DIMS,
     LANGCHAIN_LOGGING_LEVEL,
     RECOMMENDED_CHAT_MODEL,
     RECOMMENDED_CHAT_MODEL_LOCATION,
@@ -142,27 +139,10 @@ class HGAConversationEntity(
 
         self.tz = dt_util.get_default_time_zone()
 
-        pool = entry.pool
-
         # Database for thread-based (short-term) memory.
-        self.checkpointer = AsyncPostgresSaver(pool)
+        self.checkpointer = AsyncPostgresSaver(self.entry.pool)
         # NOTE: must call .setup() the first time checkpointer is used.
         #await checkpointer.setup()  # noqa: ERA001
-
-        # Database for session-based (long-term) memory with semantic search.
-        self.store = AsyncPostgresStore(
-            pool,
-            index={
-                "embed": partial(
-                    _generate_embeddings,
-                    model=self.entry.embedding_model
-                ),
-                "dims": EMBEDDING_MODEL_DIMS,
-                "fields": ["content"]
-            }
-        )
-        # NOTE: must call .setup() the first time store is used.
-        #await store.setup()  # noqa: ERA001
 
     async def async_added_to_hass(self) -> None:
         """When entity is added to Home Assistant."""
@@ -366,7 +346,7 @@ class HGAConversationEntity(
 
         # Compile graph into a LangChain Runnable.
         app = workflow.compile(
-            store=self.store,
+            store=self.entry.store,
             checkpointer=self.checkpointer,
             debug=LANGCHAIN_LOGGING_LEVEL=="debug"
         )
