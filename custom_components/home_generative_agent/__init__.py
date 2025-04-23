@@ -7,7 +7,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import aiofiles
 import homeassistant.util.dt as dt_util
@@ -74,7 +74,7 @@ class HGAData:
     edge_chat_model: ChatOllama
     vision_model: ChatOllama
     summarization_model: ChatOllama
-    pool: Any #TODO: assign correct type
+    pool: AsyncConnectionPool
     video_analyzer: VideoAnalyzer
 
 class VideoAnalyzer:
@@ -235,7 +235,7 @@ class VideoAnalyzer:
 
     def start(self) -> None:
         """Start the video analyzer."""
-         # Start video analyzer snapshot job.
+        # Start video analyzer snapshot job.
         self.cancel_track = async_track_time_interval(
             self.hass,
             self._take_snapshot,
@@ -261,6 +261,7 @@ class VideoAnalyzer:
 
 async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     """Set up Home Generative Agent from a config entry."""
+    # Initialize models and verify they were setup correctly.
     chat_model = ChatOpenAI( #TODO: fix blocking call
         api_key=entry.data.get(CONF_API_KEY),
         timeout=10,
@@ -271,13 +272,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         top_p=ConfigurableField(id="top_p"),
         max_tokens=ConfigurableField(id="max_tokens"),
     )
-
     try:
         await hass.async_add_executor_job(chat_model.get_name)
     except HomeAssistantError as err:
         LOGGER.error("Error setting up chat model: %s", err)
         return False
-
     entry.chat_model = chat_model
 
     edge_chat_model = ChatOllama(
@@ -292,13 +291,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         num_predict=ConfigurableField(id="num_predict"),
         num_ctx=ConfigurableField(id="num_ctx"),
     )
-
     try:
         await hass.async_add_executor_job(edge_chat_model.get_name)
     except HomeAssistantError as err:
         LOGGER.error("Error setting up edge chat model: %s", err)
         return False
-
     entry.edge_chat_model = edge_chat_model
 
     vision_model = ChatOllama(
@@ -313,13 +310,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         num_predict=ConfigurableField(id="num_predict"),
         num_ctx=ConfigurableField(id="num_ctx"),
     )
-
     try:
         await hass.async_add_executor_job(vision_model.get_name)
     except HomeAssistantError as err:
         LOGGER.error("Error setting up VLM: %s", err)
         return False
-
     entry.vision_model = vision_model
 
     summarization_model = ChatOllama(
@@ -334,13 +329,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         num_predict=ConfigurableField(id="num_predict"),
         num_ctx=ConfigurableField(id="num_ctx"),
     )
-
     try:
         await hass.async_add_executor_job(vision_model.get_name)
     except HomeAssistantError as err:
-        LOGGER.error("Error setting up VLM: %s", err)
+        LOGGER.error("Error setting up summarization model: %s", err)
         return False
-
     entry.summarization_model = summarization_model
 
     embedding_model = OllamaEmbeddings(
@@ -348,17 +341,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         base_url=EMBEDDING_MODEL_URL,
         num_ctx=EMBEDDING_MODEL_CTX
     )
-
     # TODO: find a way to verify embedding model was setup correctly.
     #try:
         #await hass.async_add_executor_job(embedding_model.get_name)
     #except HomeAssistantError as err:
         #LOGGER.error("Error setting up embedding model: %s", err)
         #return False
-
     entry.embedding_model = embedding_model
 
-     # Open postgresql database for short-term and long-term memory.
+    # Open postgresql database for short-term and long-term memory.
     connection_kwargs = {
         "autocommit": True,
         "prepare_threshold": 0,
@@ -374,12 +365,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     try:
         await pool.open()
     except PoolTimeout as err:
-        LOGGER.error("Error opening database: %s", err)
+        LOGGER.error("Error opening postgresql db: %s", err)
         return False
-
     entry.pool = pool
-
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     # Initialize video analyzer and start if option is set.
     video_analyzer = VideoAnalyzer(hass, entry)
@@ -387,8 +375,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         CONF_VIDEO_ANALYZER_ENABLE, RECOMMENDED_VIDEO_ANALYZER_ENABLE
     ):
         video_analyzer.start()
-
     entry.video_analyzer = video_analyzer
+
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     return True
 
