@@ -404,6 +404,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         video_analyzer.start()
     entry.video_analyzer = video_analyzer
 
+    # Setup conversation platform.
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     return True

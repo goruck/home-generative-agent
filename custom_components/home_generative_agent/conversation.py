@@ -58,7 +58,6 @@ if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
-    from langchain_ollama import OllamaEmbeddings
 
     from . import HGAConfigEntry
 
@@ -73,13 +72,6 @@ elif LANGCHAIN_LOGGING_LEVEL == "debug":
 else:
     set_verbose(False)
     set_debug(False)
-
-async def _generate_embeddings(
-        texts: list[str],
-        model: OllamaEmbeddings
-    ) -> list[list[float]]:
-    """Generate embeddings from a list of text."""
-    return await model.aembed_documents(texts)
 
 def _format_tool(
     tool: llm.Tool, custom_serializer: Callable[[Any], Any] | None
