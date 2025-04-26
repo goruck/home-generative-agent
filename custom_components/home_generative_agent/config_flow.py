@@ -42,7 +42,9 @@ from .const import (
     CONF_SUMMARIZATION_MODEL,
     CONF_SUMMARIZATION_MODEL_TEMPERATURE,
     CONF_SUMMARIZATION_MODEL_TOP_P,
+    CONF_VIDEO_ANALYZER_ANOMALY_DETECTION_ENABLE,
     CONF_VIDEO_ANALYZER_ENABLE,
+    CONF_VIDEO_ANALYZER_NOTIFICATIONS_ENABLE,
     CONF_VISION_MODEL_TEMPERATURE,
     CONF_VISION_MODEL_TOP_P,
     CONF_VLM,
@@ -57,7 +59,9 @@ from .const import (
     RECOMMENDED_SUMMARIZATION_MODEL,
     RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
     RECOMMENDED_SUMMARIZATION_MODEL_TOP_P,
+    RECOMMENDED_VIDEO_ANALYZER_ANOMALY_DETECTION_ENABLE,
     RECOMMENDED_VIDEO_ANALYZER_ENABLE,
+    RECOMMENDED_VIDEO_ANALYZER_NOTIFICATIONS_ENABLE,
     RECOMMENDED_VISION_MODEL_TEMPERATURE,
     RECOMMENDED_VISION_MODEL_TOP_P,
     RECOMMENDED_VLM,
@@ -215,7 +219,23 @@ def config_option_schema(
         vol.Optional(
             CONF_VIDEO_ANALYZER_ENABLE,
             description={"suggested_value": options.get(CONF_VIDEO_ANALYZER_ENABLE)},
-            default=False
+            default=RECOMMENDED_VIDEO_ANALYZER_ENABLE
+        ): bool,
+        vol.Optional(
+            CONF_VIDEO_ANALYZER_NOTIFICATIONS_ENABLE,
+            description={
+                "suggested_value": options.get(CONF_VIDEO_ANALYZER_NOTIFICATIONS_ENABLE)
+            },
+            default=RECOMMENDED_VIDEO_ANALYZER_NOTIFICATIONS_ENABLE
+        ): bool,
+        vol.Optional(
+            CONF_VIDEO_ANALYZER_ANOMALY_DETECTION_ENABLE,
+            description={
+                "suggested_value": options.get(
+                    CONF_VIDEO_ANALYZER_ANOMALY_DETECTION_ENABLE
+                )
+            },
+            default=RECOMMENDED_VIDEO_ANALYZER_ANOMALY_DETECTION_ENABLE
         ): bool,
         vol.Required(
             CONF_RECOMMENDED, default=options.get(CONF_RECOMMENDED, False)

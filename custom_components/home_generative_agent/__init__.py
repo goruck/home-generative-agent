@@ -34,7 +34,9 @@ from .const import (
     CONF_SUMMARIZATION_MODEL,
     CONF_SUMMARIZATION_MODEL_TEMPERATURE,
     CONF_SUMMARIZATION_MODEL_TOP_P,
+    CONF_VIDEO_ANALYZER_ANOMALY_DETECTION_ENABLE,
     CONF_VIDEO_ANALYZER_ENABLE,
+    CONF_VIDEO_ANALYZER_NOTIFICATIONS_ENABLE,
     DB_URI,
     EDGE_CHAT_MODEL_URL,
     EMBEDDING_MODEL_CTX,
@@ -45,12 +47,16 @@ from .const import (
     RECOMMENDED_SUMMARIZATION_MODEL,
     RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
     RECOMMENDED_SUMMARIZATION_MODEL_TOP_P,
+    RECOMMENDED_VIDEO_ANALYZER_ANOMALY_DETECTION_ENABLE,
     RECOMMENDED_VIDEO_ANALYZER_ENABLE,
+    RECOMMENDED_VIDEO_ANALYZER_NOTIFICATIONS_ENABLE,
     RECOMMENDED_VLM,
     SUMMARIZATION_MODEL_CTX,
     SUMMARIZATION_MODEL_PREDICT,
     SUMMARIZATION_MODEL_URL,
     VIDEO_ANALYZER_MOBILE_APP,
+    VIDEO_ANALYZER_NOTIFY_HYSTERESIS,
+    VIDEO_ANALYZER_NOTIFY_THRESHOLD,
     VIDEO_ANALYZER_PROMPT,
     VIDEO_ANALYZER_SCAN_INTERVAL,
     VIDEO_ANALYZER_SNAPSHOT_ROOT,
@@ -204,24 +210,76 @@ class VideoAnalyzer:
         else:
             notify_msg = frame_description
 
-        # Grab first snapshot to display as a static image in the notification.
-        img_path_parts = snapshots[0].parts
-        notify_img_path = Path("/media/local") / Path(*img_path_parts[-3:])
+        # Sematic search of the store with notify_msg as query.
+        store = self.entry.store
+        search_results = await store.asearch(
+            ("video_analysis", camera_name),
+            query=notify_msg,
+            limit=5
+        )
+        LOGGER.debug("Search results: %s", search_results)
 
-        await self.hass.services.async_call(
-            "notify",
-            VIDEO_ANALYZER_MOBILE_APP,
-            {
-                "message": notify_msg,
-                "title": f"Camera Alert from {camera_name}!",
-                "data": {
-                    "entity_id:": camera_id,
-                    "image": str(notify_img_path)
-                }
-            },
-            blocking=True
+        # Grab first snapshot image path parts.
+        img_path_parts = snapshots[0].parts
+
+        if options.get(
+            CONF_VIDEO_ANALYZER_ANOMALY_DETECTION_ENABLE,
+            RECOMMENDED_VIDEO_ANALYZER_ANOMALY_DETECTION_ENABLE
+        ):
+            # Calculate time threshold from first snapshot. The first snapshot time is
+            # adjusted with a time offset to provide hysteresis to avoid notifications
+            # with multiple similar messages in a short timeframe.
+            # Snapshot names are in the form "snapshot_20250426_002804.jpg".
+            first_str = img_path_parts[-1].replace("snapshot_", "").replace(".jpg", "")
+            first_dt = datetime.strptime(first_str, "%Y%m%d_%H%M%S")  # noqa: DTZ007
+            first_dt_local = dt_util.as_local(first_dt)
+            no_newer_dt = (
+                first_dt_local - timedelta(seconds=VIDEO_ANALYZER_NOTIFY_HYSTERESIS)
+            )
+
+            # Simple anomaly detection.
+            # If any search result is older then the first snapshot time minus
+            # hysteresis and has a lower similarity score then the threshold, then
+            # declare current notify msg as an anomaly.
+            is_anomaly = any(
+                bool(
+                    r.updated_at < no_newer_dt and
+                    r.score < VIDEO_ANALYZER_NOTIFY_THRESHOLD
+                ) for r in search_results
+            )
+            LOGGER.debug("Is anomaly: %s", is_anomaly)
+        else:
+            is_anomaly = True
+
+        if options.get(
+            CONF_VIDEO_ANALYZER_NOTIFICATIONS_ENABLE,
+            RECOMMENDED_VIDEO_ANALYZER_NOTIFICATIONS_ENABLE
+        ) and is_anomaly:
+            # Display first snapshot as a static image in the notification.
+            notify_img_path = Path("/media/local") / Path(*img_path_parts[-3:])
+            # Send mobile notification.
+            await self.hass.services.async_call(
+                "notify",
+                VIDEO_ANALYZER_MOBILE_APP,
+                {
+                    "message": notify_msg,
+                    "title": f"Camera Alert from {camera_name}!",
+                    "data": {
+                        "entity_id:": camera_id,
+                        "image": str(notify_img_path)
+                    }
+                },
+                blocking=True
+            )
+
+        # Store current notify msg and associated snapshots.
+        await store.aput(
+            namespace=("video_analysis", camera_name),
+            key=img_path_parts[-1], # key is date and time of first snapshot
+            value={"content": notify_msg, "snapshots": [str(s) for s in snapshots]},
         )
 
+        # All done, clear list of snapshots.
         self.camera_snapshots[camera_id] = []
 
     @callback

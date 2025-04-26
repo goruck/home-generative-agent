@@ -43,9 +43,13 @@ RECOMMENDED_SUMMARIZATION_MODEL_TOP_P = 0.9
 # The embedding model is used for semantic search in long-term memory.
 CONF_EMBEDDING_MODEL = "embedding_model"
 RECOMMENDED_EMBEDDING_MODEL = "mxbai-embed-large"
-### Camera video analyzer enable parameter. ###
+### Camera video analyzer enable parameters. ###
 CONF_VIDEO_ANALYZER_ENABLE = "video_analyzer_enable"
 RECOMMENDED_VIDEO_ANALYZER_ENABLE = False
+CONF_VIDEO_ANALYZER_NOTIFICATIONS_ENABLE = "video_analyzer_notifications_enable"
+RECOMMENDED_VIDEO_ANALYZER_NOTIFICATIONS_ENABLE = False
+CONF_VIDEO_ANALYZER_ANOMALY_DETECTION_ENABLE = "video_analyzer_anomaly_detection_enable"
+RECOMMENDED_VIDEO_ANALYZER_ANOMALY_DETECTION_ENABLE = False
 
 ### langchain logging level ###
 # Options are "disable", "verbose" or "debug".
@@ -156,6 +160,9 @@ VIDEO_ANALYZER_PROMPT = """
 Describe what is happening in this video from these frame descriptions:
 """
 VIDEO_ANALYZER_MOBILE_APP = "mobile_app_lindos_iphone"
+# Hysteresis units are seconds.
+VIDEO_ANALYZER_NOTIFY_HYSTERESIS = 120
+VIDEO_ANALYZER_NOTIFY_THRESHOLD = 0.8
 
 ### postgresql db parameters for checkpointer and memory persistent storage. ###
 DB_URI = "postgresql://hga:hga@localhost:5432/hga?sslmode=disable"
