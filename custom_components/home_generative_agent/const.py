@@ -29,12 +29,12 @@ RECOMMENDED_EDGE_CHAT_MODEL_TOP_P = 0.8
 ### Ollama vision language model (VLM) parameters. ###
 # The VLM is used for vision and summarization tasks.
 # See https://github.com/ollama/ollama/blob/main/docs/modelfile.md#parameter
-CONF_VLM = "vlm_model"
+CONF_VLM = "vlm"
 RECOMMENDED_VLM = "llama3.2-vision"
-CONF_VISION_MODEL_TEMPERATURE = "vision_model_temperature"
-RECOMMENDED_VISION_MODEL_TEMPERATURE = 0.2
-CONF_VISION_MODEL_TOP_P = "vision_model_top_p"
-RECOMMENDED_VISION_MODEL_TOP_P = 0.5
+CONF_VLM_TEMPERATURE = "vlm_temperature"
+RECOMMENDED_VLM_TEMPERATURE = 0.2
+CONF_VLM_TOP_P = "vlm_top_p"
+RECOMMENDED_VLM_TOP_P = 0.5
 CONF_SUMMARIZATION_MODEL = "summarization_model"
 RECOMMENDED_SUMMARIZATION_MODEL = "qwen2.5:3b"
 CONF_SUMMARIZATION_MODEL_TEMPERATURE = "summarization_model_temperature"
@@ -104,17 +104,17 @@ VLM_NUM_PREDICT = 4096
 # Sets the size of the context window used to generate the next token.
 VLM_NUM_CTX = 16384
 # Ollama VLM model prompts for vision tasks.
-VISION_MODEL_SYSTEM_PROMPT = """
+VLM_SYSTEM_PROMPT = """
 You are a bot that responses with a description of what is visible in a camera image.
 
 Keep your responses simple and to the point.
 """
-VISION_MODEL_USER_PROMPT = "Task: Describe this image:"
-VISION_MODEL_USER_KW_TEMPLATE = """
+VLM_USER_PROMPT = "Task: Describe this image:"
+VLM_USER_KW_TEMPLATE = """
 Task: Tell me if {key_words} are visible in this image:
 """
-VISION_MODEL_IMAGE_WIDTH = 1920
-VISION_MODEL_IMAGE_HEIGHT = 1080
+VLM_IMAGE_WIDTH = 1920
+VLM_IMAGE_HEIGHT = 1080
 
 ### Ollama summarization model parameters. ###
 # Model server URL.

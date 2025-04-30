@@ -43,9 +43,9 @@ from .const import (
     CONF_SUMMARIZATION_MODEL_TEMPERATURE,
     CONF_SUMMARIZATION_MODEL_TOP_P,
     CONF_VIDEO_ANALYZER_MODE,
-    CONF_VISION_MODEL_TEMPERATURE,
-    CONF_VISION_MODEL_TOP_P,
     CONF_VLM,
+    CONF_VLM_TEMPERATURE,
+    CONF_VLM_TOP_P,
     DOMAIN,
     RECOMMENDED_CHAT_MODEL,
     RECOMMENDED_CHAT_MODEL_LOCATION,
@@ -58,9 +58,9 @@ from .const import (
     RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
     RECOMMENDED_SUMMARIZATION_MODEL_TOP_P,
     RECOMMENDED_VIDEO_ANALYZER_MODE,
-    RECOMMENDED_VISION_MODEL_TEMPERATURE,
-    RECOMMENDED_VISION_MODEL_TOP_P,
     RECOMMENDED_VLM,
+    RECOMMENDED_VLM_TEMPERATURE,
+    RECOMMENDED_VLM_TOP_P,
 )
 
 if TYPE_CHECKING:
@@ -296,16 +296,16 @@ def config_option_schema(
                 default=RECOMMENDED_VLM,
             ): str,
             vol.Optional(
-                CONF_VISION_MODEL_TEMPERATURE,
+                CONF_VLM_TEMPERATURE,
                 description={
-                    "suggested_value": options.get(CONF_VISION_MODEL_TEMPERATURE)
+                    "suggested_value": options.get(CONF_VLM_TEMPERATURE)
                 },
-                default=RECOMMENDED_VISION_MODEL_TEMPERATURE,
+                default=RECOMMENDED_VLM_TEMPERATURE,
             ): NumberSelector(NumberSelectorConfig(min=0, max=2, step=0.05)),
             vol.Optional(
-                CONF_VISION_MODEL_TOP_P,
-                description={"suggested_value": options.get(CONF_VISION_MODEL_TOP_P)},
-                default=RECOMMENDED_VISION_MODEL_TOP_P,
+                CONF_VLM_TOP_P,
+                description={"suggested_value": options.get(CONF_VLM_TOP_P)},
+                default=RECOMMENDED_VLM_TOP_P,
             ): NumberSelector(NumberSelectorConfig(min=0, max=1, step=0.05)),
             vol.Optional(
                 CONF_SUMMARIZATION_MODEL,

@@ -37,21 +37,21 @@ from voluptuous import MultipleInvalid
 from .const import (
     AUTOMATION_TOOL_BLUEPRINT_NAME,
     AUTOMATION_TOOL_EVENT_REGISTERED,
-    CONF_VISION_MODEL_TEMPERATURE,
-    CONF_VISION_MODEL_TOP_P,
     CONF_VLM,
+    CONF_VLM_TEMPERATURE,
+    CONF_VLM_TOP_P,
     HISTORY_TOOL_CONTEXT_LIMIT,
     HISTORY_TOOL_PURGE_KEEP_DAYS,
-    RECOMMENDED_VISION_MODEL_TEMPERATURE,
-    RECOMMENDED_VISION_MODEL_TOP_P,
     RECOMMENDED_VLM,
-    VISION_MODEL_IMAGE_HEIGHT,
-    VISION_MODEL_IMAGE_WIDTH,
-    VISION_MODEL_SYSTEM_PROMPT,
-    VISION_MODEL_USER_KW_TEMPLATE,
-    VISION_MODEL_USER_PROMPT,
+    RECOMMENDED_VLM_TEMPERATURE,
+    RECOMMENDED_VLM_TOP_P,
+    VLM_IMAGE_HEIGHT,
+    VLM_IMAGE_WIDTH,
     VLM_NUM_CTX,
     VLM_NUM_PREDICT,
+    VLM_SYSTEM_PROMPT,
+    VLM_USER_KW_TEMPLATE,
+    VLM_USER_PROMPT,
 )
 
 if TYPE_CHECKING:
@@ -69,8 +69,8 @@ async def _get_camera_image(hass: HomeAssistant, camera_name: str) -> bytes | No
         image = await camera.async_get_image(
             hass=hass,
             entity_id=camera_entity_id,
-            width=VISION_MODEL_IMAGE_WIDTH,
-            height=VISION_MODEL_IMAGE_HEIGHT
+            width=VLM_IMAGE_WIDTH,
+            height=VLM_IMAGE_HEIGHT
         )
     except HomeAssistantError as err:
         LOGGER.error(
@@ -154,12 +154,12 @@ async def analyze_image(
                 RECOMMENDED_VLM,
             ),
             "temperature": options.get(
-                CONF_VISION_MODEL_TEMPERATURE,
-                RECOMMENDED_VISION_MODEL_TEMPERATURE,
+                CONF_VLM_TEMPERATURE,
+                RECOMMENDED_VLM_TEMPERATURE,
             ),
             "top_p": options.get(
-                CONF_VISION_MODEL_TOP_P,
-                RECOMMENDED_VISION_MODEL_TOP_P,
+                CONF_VLM_TOP_P,
+                RECOMMENDED_VLM_TOP_P,
             ),
             "num_predict": VLM_NUM_PREDICT,
             "num_ctx": VLM_NUM_CTX,
@@ -169,16 +169,16 @@ async def analyze_image(
     chain = _prompt_func | model_with_config
 
     if detection_keywords is not None:
-        prompt = VISION_MODEL_USER_KW_TEMPLATE.format(
+        prompt = VLM_USER_KW_TEMPLATE.format(
             key_words=f"{' or '.join(detection_keywords)}"
         )
     else:
-        prompt = VISION_MODEL_USER_PROMPT
+        prompt = VLM_USER_PROMPT
 
     try:
         response =  await chain.ainvoke(
             {
-                "system": VISION_MODEL_SYSTEM_PROMPT,
+                "system": VLM_SYSTEM_PROMPT,
                 "text": prompt,
                 "image": image_data
             }
