@@ -1,5 +1,7 @@
 """Constants for Home Generative Agent."""
 
+from typing import Literal
+
 DOMAIN = "home_generative_agent"
 
 ### Configuration parameters that can be overridden in the integration's config UI. ###
@@ -43,18 +45,15 @@ RECOMMENDED_SUMMARIZATION_MODEL_TOP_P = 0.9
 # The embedding model is used for semantic search in long-term memory.
 CONF_EMBEDDING_MODEL = "embedding_model"
 RECOMMENDED_EMBEDDING_MODEL = "mxbai-embed-large"
-### Camera video analyzer enable parameters. ###
-CONF_VIDEO_ANALYZER_ENABLE = "video_analyzer_enable"
-RECOMMENDED_VIDEO_ANALYZER_ENABLE = False
-CONF_VIDEO_ANALYZER_NOTIFICATIONS_ENABLE = "video_analyzer_notifications_enable"
-RECOMMENDED_VIDEO_ANALYZER_NOTIFICATIONS_ENABLE = False
-CONF_VIDEO_ANALYZER_ANOMALY_DETECTION_ENABLE = "video_analyzer_anomaly_detection_enable"
-RECOMMENDED_VIDEO_ANALYZER_ANOMALY_DETECTION_ENABLE = False
+### Camera video analyzer parameters. ###
+CONF_VIDEO_ANALYZER_MODE = "video_analyzer_mode"
+RECOMMENDED_VIDEO_ANALYZER_MODE: Literal[
+    "disable", "notify_on_anomaly", "always_notify"
+] = "disable"
 
 ### langchain logging level ###
-# Options are "disable", "verbose" or "debug".
 # See https://python.langchain.com/docs/how_to/debugging/
-LANGCHAIN_LOGGING_LEVEL = "disable"
+LANGCHAIN_LOGGING_LEVEL: Literal["disable", "verbose", "debug"] = "disable"
 
 ### Chat model context-related parameters. ###
 # Sets the size of the context window used to generate the next token.

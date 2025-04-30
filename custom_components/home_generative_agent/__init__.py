@@ -34,9 +34,7 @@ from .const import (
     CONF_SUMMARIZATION_MODEL,
     CONF_SUMMARIZATION_MODEL_TEMPERATURE,
     CONF_SUMMARIZATION_MODEL_TOP_P,
-    CONF_VIDEO_ANALYZER_ANOMALY_DETECTION_ENABLE,
-    CONF_VIDEO_ANALYZER_ENABLE,
-    CONF_VIDEO_ANALYZER_NOTIFICATIONS_ENABLE,
+    CONF_VIDEO_ANALYZER_MODE,
     DB_URI,
     EDGE_CHAT_MODEL_URL,
     EMBEDDING_MODEL_CTX,
@@ -47,9 +45,6 @@ from .const import (
     RECOMMENDED_SUMMARIZATION_MODEL,
     RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
     RECOMMENDED_SUMMARIZATION_MODEL_TOP_P,
-    RECOMMENDED_VIDEO_ANALYZER_ANOMALY_DETECTION_ENABLE,
-    RECOMMENDED_VIDEO_ANALYZER_ENABLE,
-    RECOMMENDED_VIDEO_ANALYZER_NOTIFICATIONS_ENABLE,
     RECOMMENDED_VLM,
     SUMMARIZATION_MODEL_CTX,
     SUMMARIZATION_MODEL_PREDICT,
@@ -141,6 +136,28 @@ class VideoAnalyzer:
                 self.camera_snapshots.setdefault(camera_id, []).append(snapshot_path)
                 LOGGER.debug("[%s] Snapshot saved to %s", camera_id, snapshot_path)
 
+    async def _send_notification(
+            self,
+            msg: str,
+            camera_name: str,
+            camera_id: str,
+            notify_img_path: Path
+        ) -> None:
+        """Send notification to the mobile app."""
+        await self.hass.services.async_call(
+            "notify",
+            VIDEO_ANALYZER_MOBILE_APP,
+            {
+                "message": msg,
+                "title": f"Camera Alert from {camera_name}!",
+                "data": {
+                    "entity_id:": camera_id,
+                    "image": str(notify_img_path)
+                }
+            },
+            blocking=True
+        )
+
     async def _process_snapshots(self, camera_id: str) -> None:
         """Process snapshots after a camera stops recording."""
         lock = self.camera_write_locks.get(camera_id)
@@ -171,6 +188,8 @@ class VideoAnalyzer:
                 )
                 LOGGER.debug("Analysis for %s: %s", path, frame_description)
                 frame_descriptions.append(frame_description)
+
+        self.camera_snapshots[camera_id] = []
 
         if len(frame_descriptions) > 1:
             prompt_start = VIDEO_ANALYZER_PROMPT
@@ -206,26 +225,25 @@ class VideoAnalyzer:
             summary = await model_with_config.ainvoke(messages)
             LOGGER.debug("Summary for %s: %s", camera_id, summary.content)
 
-            notify_msg = summary.content
+            msg = summary.content
         else:
-            notify_msg = frame_description
-
-        # Sematic search of the store with notify_msg as query.
-        store = self.entry.store
-        search_results = await store.asearch(
-            ("video_analysis", camera_name),
-            query=notify_msg,
-            limit=5
-        )
-        LOGGER.debug("Search results: %s", search_results)
+            msg = frame_description
 
         # Grab first snapshot image path parts.
         img_path_parts = snapshots[0].parts
+        # Display first snapshot as a static image in the notification.
+        notify_img_path = Path("/media/local") / Path(*img_path_parts[-3:])
 
-        if options.get(
-            CONF_VIDEO_ANALYZER_ANOMALY_DETECTION_ENABLE,
-            RECOMMENDED_VIDEO_ANALYZER_ANOMALY_DETECTION_ENABLE
-        ):
+        if (mode := options.get(CONF_VIDEO_ANALYZER_MODE)) == "notify_on_anomaly":
+            # Sematic search of the store with msg as query.
+            store = self.entry.store
+            search_results = await store.asearch(
+                ("video_analysis", camera_name),
+                query=msg,
+                limit=5
+            )
+            LOGGER.debug("Search results: %s", search_results)
+
             # Calculate time threshold from first snapshot. The first snapshot time is
             # adjusted with a time offset to provide hysteresis to avoid notifications
             # with multiple similar messages in a short timeframe.
@@ -248,39 +266,20 @@ class VideoAnalyzer:
                 ) for r in search_results
             )
             LOGGER.debug("Is anomaly: %s", is_anomaly)
-        else:
-            is_anomaly = True
 
-        if options.get(
-            CONF_VIDEO_ANALYZER_NOTIFICATIONS_ENABLE,
-            RECOMMENDED_VIDEO_ANALYZER_NOTIFICATIONS_ENABLE
-        ) and is_anomaly:
-            # Display first snapshot as a static image in the notification.
-            notify_img_path = Path("/media/local") / Path(*img_path_parts[-3:])
-            # Send mobile notification.
-            await self.hass.services.async_call(
-                "notify",
-                VIDEO_ANALYZER_MOBILE_APP,
-                {
-                    "message": notify_msg,
-                    "title": f"Camera Alert from {camera_name}!",
-                    "data": {
-                        "entity_id:": camera_id,
-                        "image": str(notify_img_path)
-                    }
-                },
-                blocking=True
-            )
+            if is_anomaly:
+                await self._send_notification(
+                    msg, camera_name, camera_id, notify_img_path
+                )
+        elif mode == "always_notify":
+            await self._send_notification(msg, camera_name, camera_id, notify_img_path)
 
-        # Store current notify msg and associated snapshots.
+        # Store current msg and associated snapshots.
         await store.aput(
             namespace=("video_analysis", camera_name),
             key=img_path_parts[-1], # key is date and time of first snapshot
-            value={"content": notify_msg, "snapshots": [str(s) for s in snapshots]},
+            value={"content": msg, "snapshots": [str(s) for s in snapshots]},
         )
-
-        # All done, clear list of snapshots.
-        self.camera_snapshots[camera_id] = []
 
     @callback
     def _handle_camera_state_change(self, event: Event) -> None:
@@ -456,9 +455,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
     # Initialize video analyzer and start if option is set.
     video_analyzer = VideoAnalyzer(hass, entry)
-    if entry.options.get(
-        CONF_VIDEO_ANALYZER_ENABLE, RECOMMENDED_VIDEO_ANALYZER_ENABLE
-    ):
+    if entry.options.get(CONF_VIDEO_ANALYZER_MODE) != "disable":
         video_analyzer.start()
     entry.video_analyzer = video_analyzer
 

@@ -42,9 +42,7 @@ from .const import (
     CONF_SUMMARIZATION_MODEL,
     CONF_SUMMARIZATION_MODEL_TEMPERATURE,
     CONF_SUMMARIZATION_MODEL_TOP_P,
-    CONF_VIDEO_ANALYZER_ANOMALY_DETECTION_ENABLE,
-    CONF_VIDEO_ANALYZER_ENABLE,
-    CONF_VIDEO_ANALYZER_NOTIFICATIONS_ENABLE,
+    CONF_VIDEO_ANALYZER_MODE,
     CONF_VISION_MODEL_TEMPERATURE,
     CONF_VISION_MODEL_TOP_P,
     CONF_VLM,
@@ -59,9 +57,7 @@ from .const import (
     RECOMMENDED_SUMMARIZATION_MODEL,
     RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
     RECOMMENDED_SUMMARIZATION_MODEL_TOP_P,
-    RECOMMENDED_VIDEO_ANALYZER_ANOMALY_DETECTION_ENABLE,
-    RECOMMENDED_VIDEO_ANALYZER_ENABLE,
-    RECOMMENDED_VIDEO_ANALYZER_NOTIFICATIONS_ENABLE,
+    RECOMMENDED_VIDEO_ANALYZER_MODE,
     RECOMMENDED_VISION_MODEL_TEMPERATURE,
     RECOMMENDED_VISION_MODEL_TOP_P,
     RECOMMENDED_VLM,
@@ -85,6 +81,7 @@ RECOMMENDED_OPTIONS = {
     CONF_RECOMMENDED: True,
     CONF_LLM_HASS_API: llm.LLM_API_ASSIST,
     CONF_PROMPT: llm.DEFAULT_INSTRUCTIONS_PROMPT,
+    CONF_VIDEO_ANALYZER_MODE: "disable",
 }
 
 async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str, Any]:
@@ -169,6 +166,7 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlow):
                 CONF_RECOMMENDED: user_input[CONF_RECOMMENDED],
                 CONF_PROMPT: user_input[CONF_PROMPT],
                 CONF_LLM_HASS_API: user_input[CONF_LLM_HASS_API],
+                CONF_VIDEO_ANALYZER_MODE: user_input[CONF_VIDEO_ANALYZER_MODE]
             }
 
         schema = config_option_schema(self.hass, options)
@@ -202,14 +200,26 @@ def config_option_schema(
         for api in llm.async_get_apis(hass)
     )
 
+    video_analyzer_mode: list[SelectOptionDict] = [
+        SelectOptionDict(
+            label="Disable",
+            value="disable",
+        ),
+        SelectOptionDict(
+            label="Notify on anomaly",
+            value="notify_on_anomaly",
+        ),
+        SelectOptionDict(
+            label="Always notify",
+            value="always_notify",
+        )
+    ]
+
     schema : VolDictType = {
         vol.Optional(
             CONF_PROMPT,
-            description={
-                "suggested_value": options.get(
-                    CONF_PROMPT, llm.DEFAULT_INSTRUCTIONS_PROMPT
-                )
-            },
+            description={"suggested_value": options.get(CONF_PROMPT)},
+            default=llm.DEFAULT_INSTRUCTIONS_PROMPT
         ): TemplateSelector(),
         vol.Optional(
             CONF_LLM_HASS_API,
@@ -217,28 +227,14 @@ def config_option_schema(
             default="none",
         ): SelectSelector(SelectSelectorConfig(options=hass_apis)),
         vol.Optional(
-            CONF_VIDEO_ANALYZER_ENABLE,
-            description={"suggested_value": options.get(CONF_VIDEO_ANALYZER_ENABLE)},
-            default=RECOMMENDED_VIDEO_ANALYZER_ENABLE
-        ): bool,
-        vol.Optional(
-            CONF_VIDEO_ANALYZER_NOTIFICATIONS_ENABLE,
-            description={
-                "suggested_value": options.get(CONF_VIDEO_ANALYZER_NOTIFICATIONS_ENABLE)
-            },
-            default=RECOMMENDED_VIDEO_ANALYZER_NOTIFICATIONS_ENABLE
-        ): bool,
-        vol.Optional(
-            CONF_VIDEO_ANALYZER_ANOMALY_DETECTION_ENABLE,
-            description={
-                "suggested_value": options.get(
-                    CONF_VIDEO_ANALYZER_ANOMALY_DETECTION_ENABLE
-                )
-            },
-            default=RECOMMENDED_VIDEO_ANALYZER_ANOMALY_DETECTION_ENABLE
-        ): bool,
+            CONF_VIDEO_ANALYZER_MODE,
+            description={"suggested_value": options.get(CONF_VIDEO_ANALYZER_MODE)},
+            default=RECOMMENDED_VIDEO_ANALYZER_MODE
+            ): SelectSelector(SelectSelectorConfig(options=video_analyzer_mode)),
         vol.Required(
-            CONF_RECOMMENDED, default=options.get(CONF_RECOMMENDED, False)
+            CONF_RECOMMENDED,
+            description={"suggested_value": options.get(CONF_RECOMMENDED)},
+            default=options.get(CONF_RECOMMENDED, False)
         ): bool,
     }
 
@@ -337,4 +333,5 @@ def config_option_schema(
             ): str,
         }
     )
+
     return schema
