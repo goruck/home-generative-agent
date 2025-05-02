@@ -269,7 +269,7 @@ class VideoAnalyzer:
         notify_img_path = Path("/media/local") / Path(*img_path_parts[-3:])
 
         if (mode := options.get(CONF_VIDEO_ANALYZER_MODE)) == "notify_on_anomaly":
-            is_anomaly = self._is_anomaly(camera_name, msg, img_path_parts)
+            is_anomaly = await self._is_anomaly(camera_name, msg, img_path_parts)
             LOGGER.debug("Is anomaly: %s", is_anomaly)
 
             if is_anomaly:
