@@ -159,9 +159,9 @@ VIDEO_ANALYZER_PROMPT = """
 Describe what is happening in this video from these frame descriptions:
 """
 VIDEO_ANALYZER_MOBILE_APP = "mobile_app_lindos_iphone"
-# Hysteresis units are seconds.
-VIDEO_ANALYZER_NOTIFY_HYSTERESIS = 120
-VIDEO_ANALYZER_NOTIFY_THRESHOLD = 0.8
+# Time offset units are seconds.
+VIDEO_ANALYZER_TIME_OFFSET = 120
+VIDEO_ANALYZER_SIMILARITY_THRESHOLD = 0.8
 
 ### postgresql db parameters for checkpointer and memory persistent storage. ###
 DB_URI = "postgresql://hga:hga@localhost:5432/hga?sslmode=disable"

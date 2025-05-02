@@ -50,12 +50,12 @@ from .const import (
     SUMMARIZATION_MODEL_PREDICT,
     SUMMARIZATION_MODEL_URL,
     VIDEO_ANALYZER_MOBILE_APP,
-    VIDEO_ANALYZER_NOTIFY_HYSTERESIS,
-    VIDEO_ANALYZER_NOTIFY_THRESHOLD,
     VIDEO_ANALYZER_PROMPT,
     VIDEO_ANALYZER_SCAN_INTERVAL,
+    VIDEO_ANALYZER_SIMILARITY_THRESHOLD,
     VIDEO_ANALYZER_SNAPSHOT_ROOT,
     VIDEO_ANALYZER_SYSTEM_MESSAGE,
+    VIDEO_ANALYZER_TIME_OFFSET,
     VLM_URL,
 )
 from .tools import analyze_image
@@ -231,40 +231,37 @@ class VideoAnalyzer:
 
         # Grab first snapshot image path parts.
         img_path_parts = snapshots[0].parts
-        # Display first snapshot as a static image in the notification.
+
+        # First snapshot path to use as a static image in the mobile app notification.
         notify_img_path = Path("/media/local") / Path(*img_path_parts[-3:])
 
         if (mode := options.get(CONF_VIDEO_ANALYZER_MODE)) == "notify_on_anomaly":
-            # Sematic search of the store with msg as query.
+            # Sematic search of the store with the video analysis as query.
             store = self.entry.store
             search_results = await store.asearch(
                 ("video_analysis", camera_name),
                 query=msg,
-                limit=5
+                limit=10
             )
             LOGGER.debug("Search results: %s", search_results)
 
-            # Calculate time threshold from first snapshot. The first snapshot time is
-            # adjusted with a time offset to provide hysteresis to avoid notifications
-            # with multiple similar messages in a short timeframe.
+            # Calculate a "no newer than" time threshold from first snapshot time
+            # by delaying it by the time offset.
             # Snapshot names are in the form "snapshot_20250426_002804.jpg".
             first_str = img_path_parts[-1].replace("snapshot_", "").replace(".jpg", "")
-            first_dt = datetime.strptime(first_str, "%Y%m%d_%H%M%S")  # noqa: DTZ007
-            first_dt_local = dt_util.as_local(first_dt)
-            no_newer_dt = (
-                first_dt_local - timedelta(seconds=VIDEO_ANALYZER_NOTIFY_HYSTERESIS)
-            )
+            first_dt = dt_util.as_local(datetime.strptime(first_str, "%Y%m%d_%H%M%S"))  # noqa: DTZ007
+            no_newer_dt = first_dt - timedelta(seconds=VIDEO_ANALYZER_TIME_OFFSET)
 
             # Simple anomaly detection.
-            # If any search result is older then the first snapshot time minus
-            # hysteresis and has a lower similarity score then the threshold, then
-            # declare current notify msg as an anomaly.
-            is_anomaly = any(
-                bool(
-                    r.updated_at < no_newer_dt and
-                    r.score < VIDEO_ANALYZER_NOTIFY_THRESHOLD
-                ) for r in search_results
-            )
+            # If all search results are older then the time threshold or if any are
+            # newer or equal to it, and have a lower score then the similarity
+            # threshold, declare the current video analysis as an anomaly.
+            is_anomaly = (
+                all(bool(r.updated_at < no_newer_dt) for r in search_results) or
+                any(bool(r.updated_at >= no_newer_dt and
+                         r.score < VIDEO_ANALYZER_SIMILARITY_THRESHOLD)
+                         for r in search_results)
+                )
             LOGGER.debug("Is anomaly: %s", is_anomaly)
 
             if is_anomaly:
