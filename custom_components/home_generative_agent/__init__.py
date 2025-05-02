@@ -95,8 +95,8 @@ class VideoAnalyzer:
     def __init__(self, hass: HomeAssistant, entry: HGAConfigEntry) -> None:
         """Init the video analyzer."""
         # Track snapshots and pending writes per camera.
-        self.camera_snapshots = {}
-        self.camera_write_locks = {}
+        self.camera_snapshots: dict[str, list[Path]] = {}
+        self.camera_write_locks: dict[str, asyncio.Lock] = {}
 
         self.hass = hass
         self.entry = entry
@@ -257,11 +257,11 @@ class VideoAnalyzer:
             # newer or equal to it, and have a lower score then the similarity
             # threshold, declare the current video analysis as an anomaly.
             is_anomaly = (
-                all(bool(r.updated_at < no_newer_dt) for r in search_results) or
-                any(bool(r.updated_at >= no_newer_dt and
-                         r.score < VIDEO_ANALYZER_SIMILARITY_THRESHOLD)
-                         for r in search_results)
-                )
+                all(r.updated_at < no_newer_dt for r in search_results) or
+                any(r.updated_at >= no_newer_dt and
+                    r.score < VIDEO_ANALYZER_SIMILARITY_THRESHOLD
+                    for r in search_results)
+            )
             LOGGER.debug("Is anomaly: %s", is_anomaly)
 
             if is_anomaly:
