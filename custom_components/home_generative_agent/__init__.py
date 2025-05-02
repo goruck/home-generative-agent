@@ -158,6 +158,39 @@ class VideoAnalyzer:
             blocking=True
         )
 
+    async def _is_anomaly(
+            self,
+            camera_name: str,
+            msg: str,
+            img_path_parts: list[str]
+        ) -> bool:
+        """Perform anomaly detection on video analysis."""
+        # Sematic search of the store with the video analysis as query.
+        search_results = await self.entry.store.asearch(
+            ("video_analysis", camera_name),
+            query=msg,
+            limit=10
+        )
+        LOGGER.debug("Search results: %s", search_results)
+
+        # Calculate a "no newer than" time threshold from first snapshot time
+        # by delaying it by the time offset.
+        # Snapshot names are in the form "snapshot_20250426_002804.jpg".
+        first_str = img_path_parts[-1].replace("snapshot_", "").replace(".jpg", "")
+        first_dt = dt_util.as_local(datetime.strptime(first_str, "%Y%m%d_%H%M%S"))  # noqa: DTZ007
+        no_newer_dt = first_dt - timedelta(seconds=VIDEO_ANALYZER_TIME_OFFSET)
+
+        # Simple anomaly detection.
+        # If all search results are older then the time threshold or if any are
+        # newer or equal to it, and have a lower score then the similarity
+        # threshold, declare the current video analysis as an anomaly.
+        return (
+            all(r.updated_at < no_newer_dt for r in search_results) or
+            any(r.updated_at >= no_newer_dt and
+                r.score < VIDEO_ANALYZER_SIMILARITY_THRESHOLD
+                for r in search_results)
+        )
+
     async def _process_snapshots(self, camera_id: str) -> None:
         """Process snapshots after a camera stops recording."""
         lock = self.camera_write_locks.get(camera_id)
@@ -236,32 +269,7 @@ class VideoAnalyzer:
         notify_img_path = Path("/media/local") / Path(*img_path_parts[-3:])
 
         if (mode := options.get(CONF_VIDEO_ANALYZER_MODE)) == "notify_on_anomaly":
-            # Sematic search of the store with the video analysis as query.
-            store = self.entry.store
-            search_results = await store.asearch(
-                ("video_analysis", camera_name),
-                query=msg,
-                limit=10
-            )
-            LOGGER.debug("Search results: %s", search_results)
-
-            # Calculate a "no newer than" time threshold from first snapshot time
-            # by delaying it by the time offset.
-            # Snapshot names are in the form "snapshot_20250426_002804.jpg".
-            first_str = img_path_parts[-1].replace("snapshot_", "").replace(".jpg", "")
-            first_dt = dt_util.as_local(datetime.strptime(first_str, "%Y%m%d_%H%M%S"))  # noqa: DTZ007
-            no_newer_dt = first_dt - timedelta(seconds=VIDEO_ANALYZER_TIME_OFFSET)
-
-            # Simple anomaly detection.
-            # If all search results are older then the time threshold or if any are
-            # newer or equal to it, and have a lower score then the similarity
-            # threshold, declare the current video analysis as an anomaly.
-            is_anomaly = (
-                all(r.updated_at < no_newer_dt for r in search_results) or
-                any(r.updated_at >= no_newer_dt and
-                    r.score < VIDEO_ANALYZER_SIMILARITY_THRESHOLD
-                    for r in search_results)
-            )
+            is_anomaly = self._is_anomaly(camera_name, msg, img_path_parts)
             LOGGER.debug("Is anomaly: %s", is_anomaly)
 
             if is_anomaly:
@@ -272,7 +280,7 @@ class VideoAnalyzer:
             await self._send_notification(msg, camera_name, camera_id, notify_img_path)
 
         # Store current msg and associated snapshots.
-        await store.aput(
+        await self.entry.store.aput(
             namespace=("video_analysis", camera_name),
             key=img_path_parts[-1], # key is date and time of first snapshot
             value={"content": msg, "snapshots": [str(s) for s in snapshots]},
