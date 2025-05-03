@@ -159,6 +159,53 @@ class VideoAnalyzer:
             blocking=True
         )
 
+    async def _generate_summary(
+            self,
+            frame_descriptions: list[str],
+            camera_id: str
+        ) -> str:
+        """Generate video scene summary analysis from its frame descriptions."""
+        if not frame_descriptions:
+            return ValueError("There must be at least one frame description.")
+
+        if len(frame_descriptions) == 1:
+            return frame_descriptions[0]
+
+        options = self.entry.options
+        prompt_start = VIDEO_ANALYZER_PROMPT
+        tag_template = "\n<start frame description> {i} <end frame description>"
+        prompt_parts = [tag_template.format(i=i) for i in frame_descriptions]
+        prompt_parts.insert(0, prompt_start)
+        prompt = " ".join(prompt_parts)
+        LOGGER.debug("Prompt: %s", prompt)
+        system_message = VIDEO_ANALYZER_SYSTEM_MESSAGE
+        messages = [
+            SystemMessage(content=system_message),
+            HumanMessage(content=prompt)
+        ]
+        model = self.entry.summarization_model
+        model_with_config = model.with_config(
+            config={
+                "model": options.get(
+                    CONF_SUMMARIZATION_MODEL,
+                    RECOMMENDED_SUMMARIZATION_MODEL,
+                ),
+                "temperature": options.get(
+                    CONF_SUMMARIZATION_MODEL_TEMPERATURE,
+                    RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
+                ),
+                "top_p": options.get(
+                    CONF_SUMMARIZATION_MODEL_TOP_P,
+                    RECOMMENDED_SUMMARIZATION_MODEL_TOP_P,
+                ),
+                "num_predict": SUMMARIZATION_MODEL_PREDICT,
+                "num_ctx": SUMMARIZATION_MODEL_CTX,
+            }
+        )
+        summary = await model_with_config.ainvoke(messages)
+        LOGGER.debug("Summary for %s: %s", camera_id, summary.content)
+        return summary.content
+
     async def _is_anomaly(
             self,
             camera_name: str,
@@ -209,7 +256,7 @@ class VideoAnalyzer:
         options = self.entry.options
 
         LOGGER.debug("[%s] Processing %s snapshots...", camera_id, len(snapshots))
-        frame_descriptions = []
+        frame_descriptions: list[str] = []
         for path in snapshots:
             LOGGER.debug(" - %s", path)
 
@@ -223,43 +270,7 @@ class VideoAnalyzer:
                 LOGGER.debug("Analysis for %s: %s", path, frame_description)
                 frame_descriptions.append(frame_description)
 
-        if len(frame_descriptions) > 1:
-            prompt_start = VIDEO_ANALYZER_PROMPT
-            tag_template = "\n<start frame description> {i} <end frame description>"
-            prompt_parts = [tag_template.format(i=i) for i in frame_descriptions]
-            prompt_parts.insert(0, prompt_start)
-            prompt = " ".join(prompt_parts)
-            LOGGER.debug("Prompt: %s", prompt)
-            system_message = VIDEO_ANALYZER_SYSTEM_MESSAGE
-            messages = [
-                SystemMessage(content=system_message),
-                HumanMessage(content=prompt)
-            ]
-            model = self.entry.summarization_model
-            model_with_config = model.with_config(
-                config={
-                    "model": options.get(
-                        CONF_SUMMARIZATION_MODEL,
-                        RECOMMENDED_SUMMARIZATION_MODEL,
-                    ),
-                    "temperature": options.get(
-                        CONF_SUMMARIZATION_MODEL_TEMPERATURE,
-                        RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
-                    ),
-                    "top_p": options.get(
-                        CONF_SUMMARIZATION_MODEL_TOP_P,
-                        RECOMMENDED_SUMMARIZATION_MODEL_TOP_P,
-                    ),
-                    "num_predict": SUMMARIZATION_MODEL_PREDICT,
-                    "num_ctx": SUMMARIZATION_MODEL_CTX,
-                }
-            )
-            summary = await model_with_config.ainvoke(messages)
-            LOGGER.debug("Summary for %s: %s", camera_id, summary.content)
-
-            msg = summary.content
-        else:
-            msg = frame_description
+        msg = await self._generate_summary(frame_descriptions, camera_id)
 
         # Grab first snapshot image path parts.
         img_path_parts = snapshots[0].parts
