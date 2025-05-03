@@ -49,6 +49,7 @@ from .const import (
     SUMMARIZATION_MODEL_CTX,
     SUMMARIZATION_MODEL_PREDICT,
     SUMMARIZATION_MODEL_URL,
+    VIDEO_ANALYZER_DELETE_SNAPSHOTS,
     VIDEO_ANALYZER_MOBILE_APP,
     VIDEO_ANALYZER_PROMPT,
     VIDEO_ANALYZER_SCAN_INTERVAL,
@@ -222,8 +223,6 @@ class VideoAnalyzer:
                 LOGGER.debug("Analysis for %s: %s", path, frame_description)
                 frame_descriptions.append(frame_description)
 
-        self.camera_snapshots[camera_id] = []
-
         if len(frame_descriptions) > 1:
             prompt_start = VIDEO_ANALYZER_PROMPT
             tag_template = "\n<start frame description> {i} <end frame description>"
@@ -285,6 +284,15 @@ class VideoAnalyzer:
             key=img_path_parts[-1], # key is date and time of first snapshot
             value={"content": msg, "snapshots": [str(s) for s in snapshots]},
         )
+
+        # Clean-up.
+        self.camera_snapshots[camera_id] = []
+        if VIDEO_ANALYZER_DELETE_SNAPSHOTS:
+            for path in snapshots:
+                try:
+                    path.unlink()
+                except OSError:
+                    LOGGER.warning("Failed to delete snapshot: %s", path)
 
     @callback
     def _handle_camera_state_change(self, event: Event) -> None:
