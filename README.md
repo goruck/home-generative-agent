@@ -100,7 +100,7 @@ Below is an example notification from this automation if any boxes or packages a
 
 The agent uses a tool that in turn uses the HA Blueprint `hga_scene_analysis.yaml` for these requests and so the Blueprint needs to be installed in your HA installation.
 
-### Proactive Camera Video Analysis,
+### Proactive Camera Video Analysis.
 
 You can enable proactive video scene analysis from cameras visible to Home Assistant. When enabled, motion detection will trigger the analysis which will be stored in a database for use by the agent, and optionally, notifications of the analysis will be sent to the mobile app. You can also enable anomaly detection which will only send notifications based on sematic search of the current analysis vis-a-vis the database. These options are set in the integration's config UI.
 
