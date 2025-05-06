@@ -77,15 +77,39 @@ async def _call_model(
         query=query_prompt,
         limit=10
     )
-    formatted_mems = "\n".join(f"[{mem.key}]: {mem.value}" for mem in mems)
 
-    # Form the System Message from the base prompt plus memories and past conversation
-    # summaries, if they exist.
+    # Retrieve most recent camera activity from video analysis by the VLM.
+    camera_activity: list[dict[str, str]] = []
+    for entity_id in hass.states.async_entity_ids():
+        if entity_id.startswith("camera."):
+            camera_name = entity_id.split(".")[-1]
+            s = await store.asearch(
+                ("video_analysis", camera_name),
+                limit=1
+            )
+            if s:
+                camera_activity.append(
+                    {
+                        camera_name: {
+                            "last activity": s[0].value.get("content"),
+                            "datetime": s[0].updated_at.strftime("%Y-%m-%d %H:%M:%S")
+                        }
+                    }
+                )
+
+    # Form the System Message from the base prompt plus memories, recent camera activity
+    # and past conversation summaries, if they exist.
     system_message = prompt
-    if formatted_mems:
+
+    if mems:
+        formatted_mems = "\n".join(f"[{mem.key}]: {mem.value}" for mem in mems)
         system_message += f"\n<memories>\n{formatted_mems}\n</memories>"
-    summary = state.get("summary", "")
-    if summary:
+
+    if camera_activity:
+        ca = "\n".join(str(a) for a in camera_activity)
+        system_message += f"\n<recent_camera_activity>\n{ca}\n</recent_camera_activity>"
+
+    if (summary := state.get("summary", "")):
         system_message += (
             f"\n<past_conversation_summary>\n{summary}\n</past_conversation_summary>"
         )
