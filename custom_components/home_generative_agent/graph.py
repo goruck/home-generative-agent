@@ -8,7 +8,6 @@ from functools import partial
 from typing import Any, Literal
 
 import voluptuous as vol
-import homeassistant.util.dt as dt_util
 from homeassistant.exceptions import (
     HomeAssistantError,
 )
