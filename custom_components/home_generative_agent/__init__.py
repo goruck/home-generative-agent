@@ -174,7 +174,7 @@ class VideoAnalyzer:
 
         options = self.entry.options
         prompt_start = VIDEO_ANALYZER_PROMPT
-        tag_template = "\n<start frame description> {i} <end frame description>"
+        tag_template = "\n<frame description>\n{i}\n</frame description>"
         prompt_parts = [tag_template.format(i=i) for i in frame_descriptions]
         prompt_parts.insert(0, prompt_start)
         prompt = " ".join(prompt_parts)
