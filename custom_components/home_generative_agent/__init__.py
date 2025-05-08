@@ -48,6 +48,7 @@ from .const import (
     RECOMMENDED_VLM,
     SUMMARIZATION_MODEL_CTX,
     SUMMARIZATION_MODEL_PREDICT,
+    SUMMARIZATION_MODEL_REASONING_DELIMITER,
     SUMMARIZATION_MODEL_URL,
     VIDEO_ANALYZER_DELETE_SNAPSHOTS,
     VIDEO_ANALYZER_MOBILE_APP,
@@ -202,9 +203,16 @@ class VideoAnalyzer:
                 "num_ctx": SUMMARIZATION_MODEL_CTX,
             }
         )
-        summary = await model_with_config.ainvoke(messages)
-        LOGGER.debug("Summary for %s: %s", camera_id, summary.content)
-        return summary.content
+        model_response = await model_with_config.ainvoke(messages)
+        summary: str = model_response.content
+        LOGGER.debug("Summary for %s: %s", camera_id, summary)
+        # If model used reasoning, just return the final result.
+        first, sep, last = summary.partition(
+            SUMMARIZATION_MODEL_REASONING_DELIMITER.get("end", "")
+        )
+        if sep:
+            return last.strip("\n")
+        return first.strip("\n")
 
     async def _is_anomaly(
             self,

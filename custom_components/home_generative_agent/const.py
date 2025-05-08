@@ -11,7 +11,7 @@ CONF_RECOMMENDED = "recommended"
 CONF_PROMPT = "prompt"
 # Run chat model in cloud or at edge.
 CONF_CHAT_MODEL_LOCATION = "chat_model_location"
-RECOMMENDED_CHAT_MODEL_LOCATION = "cloud"
+RECOMMENDED_CHAT_MODEL_LOCATION: Literal["cloud", "edge"] = "edge"
 ### OpenAI chat model parameters.
 # See https://platform.openai.com/docs/api-reference/chat/create.
 CONF_CHAT_MODEL = "chat_model"
@@ -21,7 +21,7 @@ RECOMMENDED_CHAT_MODEL_TEMPERATURE = 1.0
 ### Ollama edge chat model parameters. ###
 # See https://github.com/ollama/ollama/blob/main/docs/modelfile.md#parameter
 CONF_EDGE_CHAT_MODEL = "edge_chat_model"
-RECOMMENDED_EDGE_CHAT_MODEL = "qwen2.5:32b"
+RECOMMENDED_EDGE_CHAT_MODEL = "qwen3:32b"
 CONF_EDGE_CHAT_MODEL_TEMPERATURE = "edge_chat_model_temperature"
 RECOMMENDED_EDGE_CHAT_MODEL_TEMPERATURE = 0.7
 CONF_EDGE_CHAT_MODEL_TOP_P = "edge_chat_model_top_p"
@@ -36,7 +36,7 @@ RECOMMENDED_VLM_TEMPERATURE = 0.2
 CONF_VLM_TOP_P = "vlm_top_p"
 RECOMMENDED_VLM_TOP_P = 0.5
 CONF_SUMMARIZATION_MODEL = "summarization_model"
-RECOMMENDED_SUMMARIZATION_MODEL = "qwen2.5:3b"
+RECOMMENDED_SUMMARIZATION_MODEL = "qwen3:4b"
 CONF_SUMMARIZATION_MODEL_TEMPERATURE = "summarization_model_temperature"
 RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE = 0.6
 CONF_SUMMARIZATION_MODEL_TOP_P = "summarization_model_top_p"
@@ -123,6 +123,11 @@ SUMMARIZATION_MODEL_URL = "192.168.1.252:11434"
 SUMMARIZATION_MODEL_PREDICT = 4096
 # Sets the size of the context window used to generate the next token.
 SUMMARIZATION_MODEL_CTX = 32768
+# Reasoning deliminators for models that use them in output.
+# These may be model dependent, the defaults work for qwen3.
+SUMMARIZATION_MODEL_REASONING_DELIMITER: dict[str, str] = {
+    "start": "<think>", "end": "</think>"
+}
 # Model prompts for summary tasks.
 SUMMARY_SYSTEM_PROMPT = "You are a bot that summarizes messages from a smart home AI."
 SUMMARY_INITIAL_PROMPT = "Create a summary of the smart home messages above:"
