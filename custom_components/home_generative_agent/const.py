@@ -95,6 +95,11 @@ Call the tool again with your mistake corrected.
 ### Ollama edge chat model parameters. ###
 # Edge chat model server URL.
 EDGE_CHAT_MODEL_URL = "192.168.1.252:11434"
+# Reasoning delimiters for models that use them in output.
+# These may be model dependent, the defaults work for qwen3.
+EDGE_CHAT_MODEL_REASONING_DELIMITER: dict[str, str] = {
+    "start": "<think>", "end": "</think>"
+}
 
 ### Ollama VLM parameters. ###
 # Ollama VLM server URL.
@@ -123,7 +128,7 @@ SUMMARIZATION_MODEL_URL = "192.168.1.252:11434"
 SUMMARIZATION_MODEL_PREDICT = 4096
 # Sets the size of the context window used to generate the next token.
 SUMMARIZATION_MODEL_CTX = 32768
-# Reasoning deliminators for models that use them in output.
+# Reasoning delimiters for models that use them in output.
 # These may be model dependent, the defaults work for qwen3.
 SUMMARIZATION_MODEL_REASONING_DELIMITER: dict[str, str] = {
     "start": "<think>", "end": "</think>"

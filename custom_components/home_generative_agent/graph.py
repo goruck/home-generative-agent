@@ -33,6 +33,7 @@ from .const import (
     CONTEXT_MANAGE_USE_TOKENS,
     CONTEXT_MAX_MESSAGES,
     CONTEXT_MAX_TOKENS,
+    EDGE_CHAT_MODEL_REASONING_DELIMITER,
     EMBEDDING_MODEL_PROMPT_TEMPLATE,
     RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
     RECOMMENDED_SUMMARIZATION_MODEL_TOP_P,
@@ -147,21 +148,32 @@ async def _call_model(
     LOGGER.debug("Model call messages: %s", trimmed_messages)
     LOGGER.debug("Model call messages length: %s", len(trimmed_messages))
 
-    response = await model.ainvoke(trimmed_messages)
-    metadata = response.usage_metadata if hasattr(response, "usage_metadata") else {}
-    # Clean up response, there is no need to include tool call metadata if there's none.
-    if hasattr(response, "tool_calls"):
-        response = AIMessage(content=response.content, tool_calls=response.tool_calls)
+    raw_response = await model.ainvoke(trimmed_messages)
+    LOGGER.debug("Raw chat model response: %s", raw_response)
+    # Clean up raw response.
+    response: str = raw_response.content
+    # If model used reasoning, just use the final result.
+    first, sep, last = response.partition(
+        EDGE_CHAT_MODEL_REASONING_DELIMITER.get("end", "")
+    )
+    response = last.strip("\n") if sep else first.strip("\n")
+    # Create AI message, no need to include tool call metadata if there's none.
+    if hasattr(raw_response, "tool_calls"):
+        ai_response = AIMessage(content=response, tool_calls=raw_response.tool_calls)
     else:
-        response = AIMessage(content=response.content)
-    LOGGER.debug("Model response: %s", response)
+        ai_response = AIMessage(content=response)
+    LOGGER.debug("AI response: %s", ai_response)
+
+    metadata = raw_response.usage_metadata if hasattr(
+        raw_response, "usage_metadata"
+    ) else {}
     LOGGER.debug("Token counts from metadata: %s", metadata)
 
     messages_to_remove = [m for m in state["messages"] if m not in trimmed_messages]
     LOGGER.debug("Messages to remove: %s", messages_to_remove)
 
     return {
-        "messages": response,
+        "messages": ai_response,
         "chat_model_usage_metadata": metadata,
         "messages_to_remove": messages_to_remove,
     }
