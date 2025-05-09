@@ -176,6 +176,8 @@ I built the HA installation on a Raspberry Pi 5 with SSD storage, Zigbee, and LA
 
 ## Installation
 
+**Important Note**: This project has been tested only under Home Assistant Core in a manual development environment as described [here](https://developers.home-assistant.io/docs/development_environment#manual-environment). I have NOT tested it with docker or HAOS.
+
 1. Install the [PostgreSQL](https://www.postgresql.org/) database. This allows for persistence storage of conversations and memories.
 2. Install [pgvector](https://github.com/pgvector/pgvector). This enables vector similarity search for PostgresSQL.
 3. Using the tool of choice, open your HA configuration's directory (folder) (where you find `configuration.yaml`).
