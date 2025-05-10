@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import base64
-import imghdr
 import logging
 import math
 from datetime import datetime, timedelta
@@ -31,7 +30,6 @@ from langchain_core.tools import InjectedToolArg, tool
 from langchain_ollama import ChatOllama  # noqa: TCH002
 from langgraph.prebuilt import InjectedStore  # noqa: TCH002
 from langgraph.store.base import BaseStore  # noqa: TCH002
-from ulid import ULID  # noqa: TCH002
 from voluptuous import MultipleInvalid
 
 from .const import (
@@ -81,40 +79,6 @@ async def _get_camera_image(hass: HomeAssistant, camera_name: str) -> bytes | No
 
     return image.content
 
-def _determine_image_type(image_data: Any) -> Any | Literal["base64", "jpeg"] | None:
-    """
-    Determine if the image data is base64 encoded or JPEG.
-
-    Args:
-        image_data: The image data as a string or bytes.
-
-    Returns:
-        "base64" if the data is base64 encoded, "jpeg" if it's JPEG, or None if unknown.
-
-    """
-    if isinstance(image_data, str):
-        try:
-            # Attempt to decode base64 data, validating padding.
-            decoded_data = base64.b64decode(image_data, validate=True)
-            # Check if the decoded data is a valid image format.
-            if imghdr.what(None, decoded_data):
-                return "base64"
-        except base64.binascii.Error:
-             # If not valid base64, check if it might be JPEG.
-            if image_data.startswith((b"\xff\xd8", b"/9j/")):
-                return "jpeg" #Likely a JPEG file
-            return None
-
-    elif isinstance(image_data, bytes):
-        # Check if the byte data starts with JPEG magic numbers.
-        if image_data.startswith((b"\xff\xd8", b"/9j/")):
-            return "jpeg"
-        # Check for other image types using imghdr (e.g., PNG, GIF).
-        if imghdr.what(None, image_data):
-            # If imghdr detects an image type, it's not base64 in this context.
-            return imghdr.what(None, image_data)
-    return None
-
 def _prompt_func(data: dict[str, Any]) -> list[AnyMessage]:
     system = data["system"]
     text = data["text"]
@@ -135,16 +99,11 @@ def _prompt_func(data: dict[str, Any]) -> list[AnyMessage]:
 async def analyze_image(
         vlm_model: ChatOllama,
         options: dict[str, Any] | MappingProxyType[str, Any],
-        image: Any,
+        image: bytes,
         detection_keywords: list[str] | None = None
     ) -> str:
     """Analyze an image."""
-    if (image_type :=_determine_image_type(image)) == "jpeg":
-        image_data = base64.b64encode(image).decode("utf-8")
-    elif image_type == "base64":
-        image_data = image
-    else:
-        return "Image cannot be analyzed."
+    image_data = base64.b64encode(image).decode("utf-8")
 
     model = vlm_model
     model_with_config = model.with_config(
