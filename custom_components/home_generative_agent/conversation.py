@@ -176,10 +176,6 @@ class HGAConversationEntity(
             device_id=user_input.device_id,
         )
 
-        LOGGER.debug("APP CONFIG: %s", self.app_config["configurable"])
-
-        LOGGER.debug("USER INPUT: %s", user_input)
-
         if options.get(CONF_LLM_HASS_API):
             try:
                 llm_api = await llm.async_get_api(
