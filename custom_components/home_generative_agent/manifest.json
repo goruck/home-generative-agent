@@ -10,6 +10,7 @@
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/goruck/home_generative_agent/issues",
   "requirements": [
+    "aiofiles==24.1.0",
     "langchain==0.3.25",
     "langchain-openai==0.3.16",
     "langchain-ollama==0.3.2",
