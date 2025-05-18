@@ -21,7 +21,7 @@ RECOMMENDED_CHAT_MODEL_TEMPERATURE = 1.0
 ### Ollama edge chat model parameters. ###
 # See https://github.com/ollama/ollama/blob/main/docs/modelfile.md#parameter
 CONF_EDGE_CHAT_MODEL = "edge_chat_model"
-RECOMMENDED_EDGE_CHAT_MODEL = "qwen3:32b"
+RECOMMENDED_EDGE_CHAT_MODEL = "qwen3:8b"
 CONF_EDGE_CHAT_MODEL_TEMPERATURE = "edge_chat_model_temperature"
 RECOMMENDED_EDGE_CHAT_MODEL_TEMPERATURE = 0.6
 CONF_EDGE_CHAT_MODEL_TOP_P = "edge_chat_model_top_p"
@@ -36,11 +36,11 @@ RECOMMENDED_VLM_TEMPERATURE = 0.2
 CONF_VLM_TOP_P = "vlm_top_p"
 RECOMMENDED_VLM_TOP_P = 0.5
 CONF_SUMMARIZATION_MODEL = "summarization_model"
-RECOMMENDED_SUMMARIZATION_MODEL = "qwen3:4b"
+RECOMMENDED_SUMMARIZATION_MODEL = "qwen3:1.7b"
 CONF_SUMMARIZATION_MODEL_TEMPERATURE = "summarization_model_temperature"
 RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE = 0.6
 CONF_SUMMARIZATION_MODEL_TOP_P = "summarization_model_top_p"
-RECOMMENDED_SUMMARIZATION_MODEL_TOP_P = 0.9
+RECOMMENDED_SUMMARIZATION_MODEL_TOP_P = 0.95
 ### Ollama embedding model parameters. ###
 # The embedding model is used for semantic search in long-term memory.
 CONF_EMBEDDING_MODEL = "embedding_model"
@@ -57,9 +57,9 @@ LANGCHAIN_LOGGING_LEVEL: Literal["disable", "verbose", "debug"] = "disable"
 
 ### Chat model context-related parameters. ###
 # Sets the size of the context window used to generate the next token.
-CHAT_MODEL_NUM_CTX = 32768
+CHAT_MODEL_NUM_CTX = 65536
 # Sets the maximum number of output tokens to generate.
-CHAT_MODEL_MAX_TOKENS = 1024
+CHAT_MODEL_MAX_TOKENS = 2048
 # Next parameters manage chat model context length.
 # CONTEXT_MANAGE_USE_TOKENS = True manages chat model context size via token
 # counting, if False management is done via message counting.
@@ -79,7 +79,7 @@ CONTEXT_MAX_MESSAGES = 80
 # These offsets are for the qwen models and were empirically determined.
 # TODO: fix the token counter to get an accurate count.
 #
-CONTEXT_MAX_TOKENS = (CHAT_MODEL_NUM_CTX - CHAT_MODEL_MAX_TOKENS - 2048 - 4096) # 25600
+CONTEXT_MAX_TOKENS = (CHAT_MODEL_NUM_CTX - CHAT_MODEL_MAX_TOKENS - 2048 - 4096) # 57344
 
 ### Chat model tool error handling parameters. ###
 TOOL_CALL_ERROR_SYSTEM_MESSAGE = """
