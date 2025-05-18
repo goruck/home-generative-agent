@@ -50,7 +50,6 @@ from .graph import workflow
 from .tools import (
     add_automation,
     get_and_analyze_camera_image,
-    get_current_device_state,
     get_entity_history,
     upsert_memory,
 )
@@ -238,7 +237,6 @@ class HGAConversationEntity(
             "upsert_memory": upsert_memory,
             "add_automation": add_automation,
             "get_entity_history": get_entity_history,
-            "get_current_device_state": get_current_device_state,
         }
         tools.extend(langchain_tools.values())
 

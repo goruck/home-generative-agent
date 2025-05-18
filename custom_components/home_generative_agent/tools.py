@@ -571,6 +571,10 @@ async def get_entity_history(  # noqa: D417
     # Return filtered entity data set to avoid filling context with too much data.
     return {k: _filter_data(k,v,hass) for k,v in data.items()}
 
+###
+# This tool has been replaced by the HA native tool GetLiveContext.
+# It is no longer used. Keeping it here for reference only.
+###
 @tool(parse_docstring=True)
 async def get_current_device_state( # noqa: D417
         names: list[str],
