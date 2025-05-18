@@ -1,6 +1,7 @@
 """Conversation support for Home Generative Agent using langgraph."""
 from __future__ import annotations
 
+import copy
 import logging
 import string
 from typing import TYPE_CHECKING, Any, Literal
@@ -19,7 +20,14 @@ from homeassistant.util import ulid
 from langchain.globals import set_debug, set_verbose
 from langchain_core.caches import InMemoryCache
 from langchain_core.globals import set_llm_cache
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import (
+    AIMessage,
+    AnyMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolCall,
+    ToolMessage,
+)
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from voluptuous_openapi import convert
 
@@ -91,6 +99,15 @@ def _format_tool(
         tool_spec["description"] = tool.description
     return {"type": "function", "function": tool_spec}
 
+def _convert_content(
+    content: conversation.UserContent | conversation.AssistantContent,
+) -> HumanMessage | AIMessage:
+    """Convert HA native chat messages to LangChain messages."""
+    if isinstance(content, conversation.UserContent):
+        return HumanMessage(content=content.content)
+
+    return AIMessage(content=content.content)
+
 async def async_setup_entry(
     hass: HomeAssistant,
     config_entry: HGAConfigEntry,
@@ -111,7 +128,7 @@ class HGAConversationEntity(
     def __init__(self, entry: ConfigEntry) -> None:
         """Initialize the agent."""
         self.entry = entry
-        self.app_config: dict[str, dict[str, str]] = {"configurable": {"thread_id": ""}}
+        self.app_config: dict[str, dict[str, str]]
         self._attr_unique_id = entry.entry_id
         self._attr_device_info = dr.DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
@@ -120,6 +137,7 @@ class HGAConversationEntity(
             model="HGA",
             entry_type=dr.DeviceEntryType.SERVICE,
         )
+        self.message_history_len = 0
 
         if self.entry.options.get(CONF_LLM_HASS_API):
             self._attr_supported_features = (
@@ -157,9 +175,11 @@ class HGAConversationEntity(
         """Return a list of supported languages."""
         return MATCH_ALL
 
-    async def async_process(
-        self, user_input: conversation.ConversationInput
-    ) -> conversation.ConversationResult:
+    async def _async_handle_message(
+            self,
+            user_input: conversation.ConversationInput,
+            chat_log: conversation.ChatLog,
+        ) -> conversation.ConversationResult:
         """Process the user input."""
         hass = self.hass
         options = self.entry.options
@@ -175,6 +195,27 @@ class HGAConversationEntity(
             assistant=conversation.DOMAIN,
             device_id=user_input.device_id,
         )
+
+        # We are only concerned with User or Assistant content from the chat log since
+        # these may be from the local agent when user asks for something that the local
+        # agent can quickly process. These messages need to be included in this agent so
+        # the entire context is visible. LangChain will handle the rest of the message
+        # history so we don't need to stream anything back into the chat log.
+        message_history = [
+            _convert_content(m) for m in chat_log.content
+            if isinstance(m, conversation.UserContent | conversation.AssistantContent)
+        ]
+        # The last chat log entry will be the current user request, include it later.
+        message_history = message_history[:-1]
+
+        # If new HA agent messages are added to the chat history, include them, else
+        # ignore the older ones since they were already included in the context.
+        if (mhlen := len(message_history)) <= self.message_history_len:
+            message_history = []
+        else:
+            diff = mhlen - self.message_history_len
+            message_history = message_history[-diff:]
+            self.message_history_len = mhlen
 
         if options.get(CONF_LLM_HASS_API):
             try:
@@ -207,12 +248,10 @@ class HGAConversationEntity(
         tools.extend(langchain_tools.values())
 
         # Conversation IDs are ULIDs. Generate a new one if not provided.
-        if user_input.conversation_id is None:
+        if chat_log.conversation_id is None:
             conversation_id = ulid.ulid_now()
-        elif user_input.conversation_id in self.app_config["configurable"].values():
-            conversation_id = user_input.conversation_id
         else:
-            conversation_id = user_input.conversation_id
+            conversation_id = chat_log.conversation_id
         LOGGER.debug("Conversation ID: %s", conversation_id)
 
         if (
@@ -336,10 +375,16 @@ class HGAConversationEntity(
             debug=LANGCHAIN_LOGGING_LEVEL=="debug"
         )
 
-        # Interact with app.
+        # The input to the agent is the message history combined with
+        # the user request.
+        messages: list[HumanMessage | AIMessage] = []
+        messages.extend(message_history)
+        messages.append(HumanMessage(content=user_input.text))
+
+        # Interact with agent app.
         try:
             response = await app.ainvoke(
-                {"messages": [HumanMessage(content=user_input.text)]},
+                {"messages": messages},
                 config=self.app_config
             )
         except HomeAssistantError as err:
