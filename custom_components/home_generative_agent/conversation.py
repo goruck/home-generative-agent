@@ -1,7 +1,6 @@
 """Conversation support for Home Generative Agent using langgraph."""
 from __future__ import annotations
 
-import copy
 import logging
 import string
 from typing import TYPE_CHECKING, Any, Literal
@@ -22,11 +21,7 @@ from langchain_core.caches import InMemoryCache
 from langchain_core.globals import set_llm_cache
 from langchain_core.messages import (
     AIMessage,
-    AnyMessage,
     HumanMessage,
-    SystemMessage,
-    ToolCall,
-    ToolMessage,
 )
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from voluptuous_openapi import convert
@@ -282,7 +277,6 @@ class HGAConversationEntity(
                     parse_result=False,
                 )
             ]
-
         except TemplateError as err:
             LOGGER.error("Error rendering prompt: %s", err)
             intent_response = intent.IntentResponse(language=user_input.language)
@@ -388,17 +382,7 @@ class HGAConversationEntity(
                 config=self.app_config
             )
         except HomeAssistantError as err:
-            LOGGER.error(err, exc_info=err)
-            intent_response = intent.IntentResponse(language=user_input.language)
-            intent_response.async_set_error(
-                intent.IntentResponseErrorCode.UNKNOWN,
-                f"Something went wrong: {err}",
-            )
-            return conversation.ConversationResult(
-                response=intent_response, conversation_id=conversation_id
-            )
-        except Exception as err:
-            LOGGER.error(err, exc_info=err)
+            LOGGER.error("LangGraph error: %s", err)
             intent_response = intent.IntentResponse(language=user_input.language)
             intent_response.async_set_error(
                 intent.IntentResponseErrorCode.UNKNOWN,
