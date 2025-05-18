@@ -23,9 +23,9 @@ RECOMMENDED_CHAT_MODEL_TEMPERATURE = 1.0
 CONF_EDGE_CHAT_MODEL = "edge_chat_model"
 RECOMMENDED_EDGE_CHAT_MODEL = "qwen3:32b"
 CONF_EDGE_CHAT_MODEL_TEMPERATURE = "edge_chat_model_temperature"
-RECOMMENDED_EDGE_CHAT_MODEL_TEMPERATURE = 0.7
+RECOMMENDED_EDGE_CHAT_MODEL_TEMPERATURE = 0.6
 CONF_EDGE_CHAT_MODEL_TOP_P = "edge_chat_model_top_p"
-RECOMMENDED_EDGE_CHAT_MODEL_TOP_P = 0.8
+RECOMMENDED_EDGE_CHAT_MODEL_TOP_P = 0.95
 ### Ollama vision language model (VLM) parameters. ###
 # The VLM is used for vision and summarization tasks.
 # See https://github.com/ollama/ollama/blob/main/docs/modelfile.md#parameter
