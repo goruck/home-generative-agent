@@ -189,7 +189,7 @@ I built the HA installation on a Raspberry Pi 5 with SSD storage, Zigbee, and LA
 9. In the HA UI, go to "Configuration" -> "Integrations" click "+," and search for "Home Generative Agent"
 10. Install all the Blueprints in the `blueprints` directory (folder).
 11. Install `ollama` on your edge device by following the instructions [here](https://ollama.com/download).
-12. Pull `ollama` models `qwen3:32b`, `qwen3:4b`, `qwen2.5:32b`, `qwen2.5:3b`, `llama-3.2-vision-11b` and `mxbai-embed-large`.
+12. Pull `ollama` models `qwen3:8`, `qwen3:1.7b`, `qwen2.5:32b`, `qwen2.5:3b`, `llama-3.2-vision-11b` and `mxbai-embed-large`.
 
 ## Configuration
 Configuration is done in the UI and via the parameters in `const.py`.
