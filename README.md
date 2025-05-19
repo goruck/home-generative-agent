@@ -121,9 +121,9 @@ The agent is built using LangGraph and uses the HA `conversation` component to i
 Model | Location | Purpose
 -- | -- | -- |
 [GPT-4o](https://platform.openai.com/docs/models#gpt-4o) | OpenAI Cloud | High-level reasoning and planning
-[qwen2.5:32b](https://ollama.com/library/qwen2.5) | Ollama Edge | High-level reasoning and planning
-[llama-3.2-vision:11b](https://ollama.com/library/llama3.2-vision) | Ollama Edge | Image scene analysis
-[qwen2.5:3b](https://ollama.com/library/qwen2.5) | Ollama Edge | Primary model context summarization
+[qwen3:8b](https://ollama.com/library/qwen3) | Ollama Edge | High-level reasoning and planning
+[qwen2.5vl:7b](https://ollama.com/library/qwen2.5vl) | Ollama Edge | Image scene analysis
+[qwen3:1.7bb](https://ollama.com/library/qwen3) | Ollama Edge | Primary model context summarization
 [mxbai-embed-large](https://ollama.com/library/mxbai-embed-large) | Ollama Edge | Embedding generation for sematic search
 
 ### LangGraph-based Agent
@@ -169,7 +169,7 @@ Langchain Tool | Purpose
 `upsert_memory` | add or update a memory
 `add_automation` | create and register a HA automation
 `get_entity_history` | query HA database for entity history
-`get_current_device_state` | get the current state of one or more Home Assistant devices
+<del>`get_current_device_state`</del> | <del>get the current state of one or more Home Assistant devices</del> (deprecated, using native HA GetLiveContext tool instead)
 
 ### Hardware
 I built the HA installation on a Raspberry Pi 5 with SSD storage, Zigbee, and LAN connectivity. I deployed the edge models under Ollama on an Ubuntu-based server with an AMD 64-bit 3.4 GHz CPU, Nvidia 3090 GPU, and 64 GB system RAM. The server is on the same LAN as the Raspberry Pi.
@@ -189,7 +189,7 @@ I built the HA installation on a Raspberry Pi 5 with SSD storage, Zigbee, and LA
 9. In the HA UI, go to "Configuration" -> "Integrations" click "+," and search for "Home Generative Agent"
 10. Install all the Blueprints in the `blueprints` directory (folder).
 11. Install `ollama` on your edge device by following the instructions [here](https://ollama.com/download).
-12. Pull `ollama` models `qwen3:8`, `qwen3:1.7b`, `qwen2.5:32b`, `qwen2.5:3b`, `llama-3.2-vision-11b` and `mxbai-embed-large`.
+12. Pull `ollama` models `qwen3:8b`, `qwen3:1.7b`, `qwen2.5vl:7b` and `mxbai-embed-large`.
 
 ## Configuration
 Configuration is done in the UI and via the parameters in `const.py`.
