@@ -30,9 +30,9 @@ RECOMMENDED_EDGE_CHAT_MODEL_TOP_P = 0.95
 # The VLM is used for vision and summarization tasks.
 # See https://github.com/ollama/ollama/blob/main/docs/modelfile.md#parameter
 CONF_VLM = "vlm"
-RECOMMENDED_VLM = "llama3.2-vision"
+RECOMMENDED_VLM = "qwen2.5vl:7b"
 CONF_VLM_TEMPERATURE = "vlm_temperature"
-RECOMMENDED_VLM_TEMPERATURE = 0.2
+RECOMMENDED_VLM_TEMPERATURE = 0.0001
 CONF_VLM_TOP_P = "vlm_top_p"
 RECOMMENDED_VLM_TOP_P = 0.5
 CONF_SUMMARIZATION_MODEL = "summarization_model"
