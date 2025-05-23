@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import partial
@@ -52,12 +53,14 @@ from .const import (
     SUMMARIZATION_MODEL_URL,
     VIDEO_ANALYZER_DELETE_SNAPSHOTS,
     VIDEO_ANALYZER_MOBILE_APP,
+    VIDEO_ANALYZER_MOTION_CAMERA_MAP,
     VIDEO_ANALYZER_PROMPT,
     VIDEO_ANALYZER_SCAN_INTERVAL,
     VIDEO_ANALYZER_SIMILARITY_THRESHOLD,
     VIDEO_ANALYZER_SNAPSHOT_ROOT,
     VIDEO_ANALYZER_SYSTEM_MESSAGE,
     VIDEO_ANALYZER_TIME_OFFSET,
+    VIDEO_ANALYZER_TRIGGER_ON_MOTION,
     VLM_URL,
 )
 from .tools import analyze_image
@@ -92,51 +95,14 @@ async def _generate_embeddings(
     return await model.aembed_documents(texts)
 
 class VideoAnalyzer:
-    """Analyze video from recording cameras."""
+    """Analyze video from recording or motion-triggered cameras."""
 
-    def __init__(self, hass: HomeAssistant, entry: HGAConfigEntry) -> None:
-        """Init the video analyzer."""
-        # Track snapshots and pending writes per camera.
-        self.camera_snapshots: dict[str, list[Path]] = {}
-        self.camera_write_locks: dict[str, asyncio.Lock] = {}
-
+    def __init__(self, hass: HomeAssistant, entry: HGAConfigEntry) -> None:  # noqa: D107
         self.hass = hass
         self.entry = entry
-
-    @callback
-    def _get_recording_cameras(self) -> list[str]:
-        """Return a list of cameras currently recording."""
-        return [
-            state.entity_id for state in self.hass.states.async_all("camera")
-            if state.state == "recording"
-        ]
-
-    async def _take_snapshot(self, now: datetime) -> None:
-        """Take snapshots from all recording cameras."""
-        snapshot_root_path = Path(VIDEO_ANALYZER_SNAPSHOT_ROOT)
-        snapshot_root_path.mkdir(parents=True, exist_ok=True)
-
-        for camera_id in self._get_recording_cameras():
-            timestamp = dt_util.as_local(now).strftime("%Y%m%d_%H%M%S")
-            cam_dir = snapshot_root_path / camera_id.replace(".", "_")
-            cam_dir.mkdir(parents=True, exist_ok=True)
-            snapshot_path = cam_dir / f"snapshot_{timestamp}.jpg"
-
-            # Create a lock to track pending snapshot write.
-            lock = self.camera_write_locks.setdefault(camera_id, asyncio.Lock())
-
-            async with lock:
-                await self.hass.services.async_call(
-                    CAMERA_DOMAIN,
-                    "snapshot",
-                    {
-                        "entity_id": camera_id,
-                        "filename": str(snapshot_path),
-                    },
-                    blocking=True,
-                )
-                self.camera_snapshots.setdefault(camera_id, []).append(snapshot_path)
-                LOGGER.debug("[%s] Snapshot saved to %s", camera_id, snapshot_path)
+        self.camera_snapshots = {}
+        self.camera_write_locks = {}
+        self.active_motion_cameras = {}
 
     async def _send_notification(
             self,
@@ -160,59 +126,51 @@ class VideoAnalyzer:
             blocking=True
         )
 
-    async def _generate_summary(
-            self,
-            frame_descriptions: list[str],
-            camera_id: str
-        ) -> str:
-        """Generate video scene summary analysis from its frame descriptions."""
-        if not frame_descriptions:
-            return ValueError("There must be at least one frame description.")
+    async def _generate_summary(self, frames: list[str], cam_id: str) -> str:
+        """Generate a summarized analysis from frame descriptions."""
+        if not frames:
+            return ValueError("At least one frame description required.")
 
-        if len(frame_descriptions) == 1:
-            return frame_descriptions[0]
+        if len(frames) == 1:
+            return frames[0]
 
-        options = self.entry.options
-        prompt_start = VIDEO_ANALYZER_PROMPT
-        tag_template = "\n<frame description>\n{i}\n</frame description>"
-        prompt_parts = [tag_template.format(i=i) for i in frame_descriptions]
-        prompt_parts.insert(0, prompt_start)
-        prompt = " ".join(prompt_parts)
+        opts = self.entry.options
+        tag = "\n<frame description>\n{}\n</frame description>"
+        prompt = " ".join([
+            VIDEO_ANALYZER_PROMPT
+        ] + [tag.format(i) for i in frames])
+
         LOGGER.debug("Prompt: %s", prompt)
-        system_message = VIDEO_ANALYZER_SYSTEM_MESSAGE
+
+        cfg = {
+            "model": opts.get(
+                CONF_SUMMARIZATION_MODEL, RECOMMENDED_SUMMARIZATION_MODEL
+            ),
+            "temperature": opts.get(
+                CONF_SUMMARIZATION_MODEL_TEMPERATURE,
+                RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
+            ),
+            "top_p": opts.get(
+                CONF_SUMMARIZATION_MODEL_TOP_P,
+                RECOMMENDED_SUMMARIZATION_MODEL_TOP_P,
+            ),
+            "num_predict": SUMMARIZATION_MODEL_PREDICT,
+            "num_ctx": SUMMARIZATION_MODEL_CTX,
+        }
+
         messages = [
-            SystemMessage(content=system_message),
-            HumanMessage(content=prompt)
+            SystemMessage(content=VIDEO_ANALYZER_SYSTEM_MESSAGE),
+            HumanMessage(content=prompt),
         ]
-        model = self.entry.summarization_model
-        model_with_config = model.with_config(
-            config={
-                "model": options.get(
-                    CONF_SUMMARIZATION_MODEL,
-                    RECOMMENDED_SUMMARIZATION_MODEL,
-                ),
-                "temperature": options.get(
-                    CONF_SUMMARIZATION_MODEL_TEMPERATURE,
-                    RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
-                ),
-                "top_p": options.get(
-                    CONF_SUMMARIZATION_MODEL_TOP_P,
-                    RECOMMENDED_SUMMARIZATION_MODEL_TOP_P,
-                ),
-                "num_predict": SUMMARIZATION_MODEL_PREDICT,
-                "num_ctx": SUMMARIZATION_MODEL_CTX,
-            }
-        )
-        model_response = await model_with_config.ainvoke(messages)
-        summary: str = model_response.content
-        LOGGER.debug("Summary for %s: %s", camera_id, summary)
-        # If model used reasoning, just return the final result.
+        model = self.entry.summarization_model.with_config(config=cfg)
+        resp = await model.ainvoke(messages)
+
+        summary = resp.content
+        LOGGER.debug("Summary for %s: %s", cam_id, summary)
         first, sep, last = summary.partition(
             SUMMARIZATION_MODEL_REASONING_DELIMITER.get("end", "")
         )
-        if sep:
-            return last.strip("\n")
-        return first.strip("\n")
+        return (last if sep else first).strip("\n")
 
     async def _is_anomaly(
             self,
@@ -234,7 +192,7 @@ class VideoAnalyzer:
         # Snapshot names are in the form "snapshot_20250426_002804.jpg".
         first_str = img_path_parts[-1].replace("snapshot_", "").replace(".jpg", "")
         first_dt = dt_util.as_local(datetime.strptime(first_str, "%Y%m%d_%H%M%S"))  # noqa: DTZ007
-        no_newer_dt = first_dt - timedelta(seconds=VIDEO_ANALYZER_TIME_OFFSET)
+        no_newer_dt = first_dt - timedelta(minutes=VIDEO_ANALYZER_TIME_OFFSET)
 
         # Simple anomaly detection.
         # If all search results are older then the time threshold or if any are
@@ -248,7 +206,7 @@ class VideoAnalyzer:
         )
 
     async def _process_snapshots(self, camera_id: str) -> None:
-        """Process snapshots after a camera stops recording."""
+        """Process snapshots after they are written."""
         lock = self.camera_write_locks.get(camera_id)
         if lock:
             LOGGER.debug("[%s] Waiting for snapshot writes to finish...", camera_id)
@@ -313,9 +271,141 @@ class VideoAnalyzer:
                 except OSError:
                     LOGGER.warning("Failed to delete snapshot: %s", path)
 
+    def _resolve_camera_from_motion(self, motion_entity_id: str) -> str | None:
+        """Resolve a camera entity ID from a motion sensor ID."""
+        # Explicit override.
+        overrides: dict = VIDEO_ANALYZER_MOTION_CAMERA_MAP
+        camera_id = overrides.get(motion_entity_id)
+        if camera_id and self.hass.states.get(camera_id):
+            return camera_id
+
+        # Attempt Axis-style VMD fallback.
+        base = motion_entity_id.replace("binary_sensor.", "")
+        base = re.sub(r"_vmd\d+.*", "", base)
+        inferred_camera_id = f"camera.{base}"
+        if self.hass.states.get(inferred_camera_id):
+            return inferred_camera_id
+
+        LOGGER.debug(
+            "Failed to resolve camera for motion sensor %s (override: %s, fallback: %s)",
+            motion_entity_id, camera_id, inferred_camera_id
+        )
+        return None
+
+    async def _take_single_snapshot(self, camera_id: str, now: datetime) -> Path | None:
+        """Take a snapshot from a specific camera."""
+        snapshot_root_path = Path(VIDEO_ANALYZER_SNAPSHOT_ROOT)
+        snapshot_root_path.mkdir(parents=True, exist_ok=True)
+
+        timestamp = dt_util.as_local(now).strftime("%Y%m%d_%H%M%S")
+        cam_dir = snapshot_root_path / camera_id.replace(".", "_")
+        cam_dir.mkdir(parents=True, exist_ok=True)
+        snapshot_path = cam_dir / f"snapshot_{timestamp}.jpg"
+
+        lock = self.camera_write_locks.setdefault(camera_id, asyncio.Lock())
+
+        try:
+            async with lock:
+                await self.hass.services.async_call(
+                    CAMERA_DOMAIN,
+                    "snapshot",
+                    {
+                        "entity_id": camera_id,
+                        "filename": str(snapshot_path),
+                    },
+                    blocking=True,
+                )
+                self.camera_snapshots.setdefault(camera_id, []).append(snapshot_path)
+                LOGGER.debug("[%s] Snapshot saved to %s", camera_id, snapshot_path)
+                return snapshot_path
+        except HomeAssistantError as e:
+            LOGGER.warning("Snapshot failed for %s: %s", camera_id, e)
+            return None
+
+    async def _motion_snapshot_loop(self, camera_id: str) -> None:
+        """Continuously take snapshots while motion is active."""
+        try:
+            while True:
+                now = dt_util.utcnow()
+                await self._take_single_snapshot(camera_id, now)
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            LOGGER.debug("Snapshot loop cancelled for camera: %s", camera_id)
+
+    @callback
+    def _handle_motion_event(self, event: Event) -> None:
+        """Respond to motion sensor changes by starting/stopping snapshot loop."""
+        entity_id = event.data.get("entity_id")
+        if not entity_id or not entity_id.startswith("binary_sensor."):
+            return
+
+        new_state = event.data.get("new_state")
+        old_state = event.data.get("old_state")
+        if new_state is None:
+            return
+
+        camera_id = self._resolve_camera_from_motion(entity_id)
+        if not camera_id:
+            LOGGER.debug("No camera resolved for motion sensor: %s", entity_id)
+            return
+
+        if new_state.state == "on" and (old_state is None or old_state.state != "on"):
+            if camera_id not in self.active_motion_cameras:
+                LOGGER.debug("Motion ON: Starting snapshot loop for %s", camera_id)
+                task = self.hass.async_create_task(self._motion_snapshot_loop(camera_id))
+                self.active_motion_cameras[camera_id] = task
+
+        elif new_state.state == "off" and camera_id in self.active_motion_cameras:
+            LOGGER.debug("Motion OFF: Stopping snapshot loop for %s", camera_id)
+            task = self.active_motion_cameras.pop(camera_id, None)
+            if task and not task.done():
+                task.cancel()
+
+            # Wait briefly to allow final snapshot to write
+            async def _delayed_process() -> None:
+                await asyncio.sleep(1)
+                await self._process_snapshots(camera_id)
+
+            self.hass.async_create_task(_delayed_process())
+
+    @callback
+    def _get_recording_cameras(self) -> list[str]:
+        """Return a list of cameras currently recording."""
+        return [
+            state.entity_id for state in self.hass.states.async_all("camera")
+            if state.state == "recording"
+        ]
+
+    async def _take_snapshot(self, now: datetime) -> None:
+        """Take snapshots from all recording cameras."""
+        snapshot_root_path = Path(VIDEO_ANALYZER_SNAPSHOT_ROOT)
+        snapshot_root_path.mkdir(parents=True, exist_ok=True)
+
+        for camera_id in self._get_recording_cameras():
+            timestamp = dt_util.as_local(now).strftime("%Y%m%d_%H%M%S")
+            cam_dir = snapshot_root_path / camera_id.replace(".", "_")
+            cam_dir.mkdir(parents=True, exist_ok=True)
+            snapshot_path = cam_dir / f"snapshot_{timestamp}.jpg"
+
+            # Create a lock to track pending snapshot write.
+            lock = self.camera_write_locks.setdefault(camera_id, asyncio.Lock())
+
+            async with lock:
+                await self.hass.services.async_call(
+                    CAMERA_DOMAIN,
+                    "snapshot",
+                    {
+                        "entity_id": camera_id,
+                        "filename": str(snapshot_path),
+                    },
+                    blocking=True,
+                )
+                self.camera_snapshots.setdefault(camera_id, []).append(snapshot_path)
+                LOGGER.debug("[%s] Snapshot saved to %s", camera_id, snapshot_path)
+
     @callback
     def _handle_camera_state_change(self, event: Event) -> None:
-        """Handle camera state changes to trigger processing."""
+        """Handle camera recording state changes to trigger processing."""
         entity_id = event.data.get("entity_id")
         if not entity_id or not entity_id.startswith("camera."):
             return
@@ -335,24 +425,32 @@ class VideoAnalyzer:
 
     def start(self) -> None:
         """Start the video analyzer."""
-        # Start video analyzer snapshot job.
         self.cancel_track = async_track_time_interval(
             self.hass,
             self._take_snapshot,
             timedelta(seconds=VIDEO_ANALYZER_SCAN_INTERVAL)
         )
-        # Watch for recording cameras and analyze video.
         self.cancel_listen = self.hass.bus.async_listen(
             EVENT_STATE_CHANGED,
             self._handle_camera_state_change
         )
+        if VIDEO_ANALYZER_TRIGGER_ON_MOTION:
+            self.cancel_motion_listen = self.hass.bus.async_listen(
+                EVENT_STATE_CHANGED,
+                self._handle_motion_event
+            )
         LOGGER.info("Video analyzer started.")
 
     def stop(self) -> None:
         """Stop the video analyzer."""
+        for task in self.active_motion_cameras.values():
+            task.cancel()
+        self.active_motion_cameras.clear()
         if self.is_running():
             self.cancel_track()
             self.cancel_listen()
+            if hasattr(self, "cancel_motion_listen"):
+                self.cancel_motion_listen()
             LOGGER.info("Video analyzer stopped.")
 
     def is_running(self) -> bool:

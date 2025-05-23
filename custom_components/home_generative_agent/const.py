@@ -169,10 +169,12 @@ VIDEO_ANALYZER_PROMPT = """
 Describe what is happening in this video from these frame descriptions:
 """
 VIDEO_ANALYZER_MOBILE_APP = "mobile_app_lindos_iphone"
-# Time offset units are seconds.
-VIDEO_ANALYZER_TIME_OFFSET = 120
+# Time offset units are minutes.
+VIDEO_ANALYZER_TIME_OFFSET = 15
 VIDEO_ANALYZER_SIMILARITY_THRESHOLD = 0.8
 VIDEO_ANALYZER_DELETE_SNAPSHOTS = False
+VIDEO_ANALYZER_TRIGGER_ON_MOTION = True
+VIDEO_ANALYZER_MOTION_CAMERA_MAP: dict = {}
 
 ### postgresql db parameters for checkpointer and memory persistent storage. ###
 DB_URI = "postgresql://hga:hga@localhost:5432/hga?sslmode=disable"
