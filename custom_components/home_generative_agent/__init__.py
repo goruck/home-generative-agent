@@ -51,13 +51,13 @@ from .const import (
     SUMMARIZATION_MODEL_PREDICT,
     SUMMARIZATION_MODEL_REASONING_DELIMITER,
     SUMMARIZATION_MODEL_URL,
-    VIDEO_ANALYZER_DELETE_SNAPSHOTS,
     VIDEO_ANALYZER_MOBILE_APP,
     VIDEO_ANALYZER_MOTION_CAMERA_MAP,
     VIDEO_ANALYZER_PROMPT,
     VIDEO_ANALYZER_SCAN_INTERVAL,
     VIDEO_ANALYZER_SIMILARITY_THRESHOLD,
     VIDEO_ANALYZER_SNAPSHOT_ROOT,
+    VIDEO_ANALYZER_SNAPSHOTS_TO_KEEP,
     VIDEO_ANALYZER_SYSTEM_MESSAGE,
     VIDEO_ANALYZER_TIME_OFFSET,
     VIDEO_ANALYZER_TRIGGER_ON_MOTION,
@@ -259,17 +259,30 @@ class VideoAnalyzer:
         await self.entry.store.aput(
             namespace=("video_analysis", camera_name),
             key=img_path_parts[-1], # key is date and time of first snapshot
-            value={"content": msg, "snapshots": [str(s) for s in snapshots]},
+            value={
+                "content": msg, "snapshots": [str(s) for s in snapshots]
+            },
         )
 
-        # Clean-up.
+        # Get a list of snapshot paths sorted by modification time (newest first).
+        folder = Path(VIDEO_ANALYZER_SNAPSHOT_ROOT) / camera_id.replace(".", "_")
+        snapshots_in_folder = await self.hass.async_add_executor_job(
+            lambda: sorted(
+                [f for f in folder.iterdir() if f.is_file()],
+                key=lambda x: x.stat().st_mtime,
+                reverse=True
+            )
+        )
+
+        # Delete snapshots beyond number to keep.
+        for path in snapshots_in_folder[VIDEO_ANALYZER_SNAPSHOTS_TO_KEEP:]:
+            try:
+                await self.hass.async_add_executor_job(path.unlink)
+                LOGGER.debug("Deleted snapshot: %s", path)
+            except OSError:
+                LOGGER.warning("Failed to delete snapshot: %s", path)
+
         self.camera_snapshots[camera_id] = []
-        if VIDEO_ANALYZER_DELETE_SNAPSHOTS:
-            for path in snapshots:
-                try:
-                    path.unlink()
-                except OSError:
-                    LOGGER.warning("Failed to delete snapshot: %s", path)
 
     def _resolve_camera_from_motion(self, motion_entity_id: str) -> str | None:
         """Resolve a camera entity ID from a motion sensor ID."""
