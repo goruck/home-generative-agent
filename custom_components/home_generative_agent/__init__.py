@@ -103,6 +103,7 @@ class VideoAnalyzer:
         self.camera_snapshots = {}
         self.camera_write_locks = {}
         self.active_motion_cameras = {}
+        self.last_snapshot_time: dict[str, datetime] = {}
 
     async def _send_notification(
             self,
@@ -338,12 +339,13 @@ class VideoAnalyzer:
             return None
 
     async def _motion_snapshot_loop(self, camera_id: str) -> None:
-        """Continuously take snapshots while motion is active."""
+        """Take snapshots while motion is active."""
         try:
             while True:
                 now = dt_util.utcnow()
                 await self._take_single_snapshot(camera_id, now)
-                await asyncio.sleep(1)
+                # Take snapshots no faster than the scan interval.
+                await asyncio.sleep(VIDEO_ANALYZER_SCAN_INTERVAL)
         except asyncio.CancelledError:
             LOGGER.debug("Snapshot loop cancelled for camera: %s", camera_id)
 
@@ -391,7 +393,7 @@ class VideoAnalyzer:
             if state.state == "recording"
         ]
 
-    async def _take_snapshot(self, now: datetime) -> None:
+    async def _take_snapshots_from_recording_cameras(self, now: datetime) -> None:
         """Take snapshots from all recording cameras."""
         snapshot_root_path = Path(VIDEO_ANALYZER_SNAPSHOT_ROOT)
         snapshot_root_path.mkdir(parents=True, exist_ok=True)
@@ -419,7 +421,7 @@ class VideoAnalyzer:
                 LOGGER.debug("[%s] Snapshot saved to %s", camera_id, snapshot_path)
 
     @callback
-    def _handle_camera_state_change(self, event: Event) -> None:
+    def _handle_camera_recording_state_change(self, event: Event) -> None:
         """Handle camera recording state changes to trigger processing."""
         entity_id = event.data.get("entity_id")
         if not entity_id or not entity_id.startswith("camera."):
@@ -442,12 +444,12 @@ class VideoAnalyzer:
         """Start the video analyzer."""
         self.cancel_track = async_track_time_interval(
             self.hass,
-            self._take_snapshot,
+            self._take_snapshots_from_recording_cameras,
             timedelta(seconds=VIDEO_ANALYZER_SCAN_INTERVAL)
         )
         self.cancel_listen = self.hass.bus.async_listen(
             EVENT_STATE_CHANGED,
-            self._handle_camera_state_change
+            self._handle_camera_recording_state_change
         )
         if VIDEO_ANALYZER_TRIGGER_ON_MOTION:
             self.cancel_motion_listen = self.hass.bus.async_listen(
