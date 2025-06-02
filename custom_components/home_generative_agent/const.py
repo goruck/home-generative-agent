@@ -158,7 +158,7 @@ AUTOMATION_TOOL_BLUEPRINT_NAME = "goruck/hga_scene_analysis.yaml"
 
 ### Camera video analyzer. ###
 # Interval units are seconds.
-VIDEO_ANALYZER_SCAN_INTERVAL = 1
+VIDEO_ANALYZER_SCAN_INTERVAL = 1.5
 # Root must be in allowlist_external_dirs.
 VIDEO_ANALYZER_SNAPSHOT_ROOT = "/home/lindo/core/config/media/snapshots"
 VIDEO_ANALYZER_SYSTEM_MESSAGE = """
