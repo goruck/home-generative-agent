@@ -176,7 +176,7 @@ class VideoAnalyzer:
             self,
             camera_name: str,
             msg: str,
-            img_path_parts: list[str]
+            first_path_parts: tuple[str]
         ) -> bool:
         """Perform anomaly detection on video analysis."""
         # Sematic search of the store with the video analysis as query.
@@ -190,7 +190,7 @@ class VideoAnalyzer:
         # Calculate a "no newer than" time threshold from first snapshot time
         # by delaying it by the time offset.
         # Snapshot names are in the form "snapshot_20250426_002804.jpg".
-        first_str = img_path_parts[-1].replace("snapshot_", "").replace(".jpg", "")
+        first_str = first_path_parts[-1].replace("snapshot_", "").replace(".jpg", "")
         first_dt = dt_util.as_local(datetime.strptime(first_str, "%Y%m%d_%H%M%S"))  # noqa: DTZ007
         no_newer_dt = first_dt - timedelta(minutes=VIDEO_ANALYZER_TIME_OFFSET)
 
@@ -213,7 +213,8 @@ class VideoAnalyzer:
             async with lock:
                 LOGGER.debug("[%s] Done waiting for writes.", camera_id)
 
-        snapshots = self.camera_snapshots.get(camera_id, [])
+        snapshots: list[Path] = self.camera_snapshots.get(camera_id, [])
+
         if not snapshots:
             return
 
@@ -238,14 +239,15 @@ class VideoAnalyzer:
 
         msg = await self._generate_summary(frame_descriptions, camera_id)
 
-        # Grab first snapshot image path parts.
-        img_path_parts = snapshots[0].parts
+        first_path_parts = snapshots[0].parts
 
-        # First snapshot path to use as a static image in the mobile app notification.
-        notify_img_path = Path("/media/local") / Path(*img_path_parts[-3:])
+        # Use mid snapshot as a static image in the mobile app notification.
+        mid_index = len(snapshots) // 2
+        mid_path_parts = snapshots[mid_index].parts
+        notify_img_path = Path("/media/local") / Path(*mid_path_parts[-3:])
 
         if (mode := options.get(CONF_VIDEO_ANALYZER_MODE)) == "notify_on_anomaly":
-            is_anomaly = await self._is_anomaly(camera_name, msg, img_path_parts)
+            is_anomaly = await self._is_anomaly(camera_name, msg, first_path_parts)
             LOGGER.debug("Is anomaly: %s", is_anomaly)
 
             if is_anomaly:
@@ -258,7 +260,7 @@ class VideoAnalyzer:
         # Store current msg and associated snapshots.
         await self.entry.store.aput(
             namespace=("video_analysis", camera_name),
-            key=img_path_parts[-1], # key is date and time of first snapshot
+            key=first_path_parts[-1], # key is date and time of first snapshot
             value={
                 "content": msg, "snapshots": [str(s) for s in snapshots]
             },
