@@ -100,10 +100,10 @@ class VideoAnalyzer:
     def __init__(self, hass: HomeAssistant, entry: HGAConfigEntry) -> None:  # noqa: D107
         self.hass = hass
         self.entry = entry
-        self.camera_snapshots = {}
-        self.camera_write_locks = {}
-        self.active_motion_cameras = {}
-        self.last_snapshot_time: dict[str, datetime] = {}
+        self._camera_snapshots: dict[Path] = {}
+        self._camera_write_locks: dict[asyncio.Lock] = {}
+        self._active_motion_cameras: dict[asyncio.Task] = {}
+        self._processing_snapshots: dict[str, bool] = {}
 
     async def _send_notification(
             self,
@@ -206,86 +206,126 @@ class VideoAnalyzer:
                 for r in search_results)
         )
 
+    async def _delete_old_snapshots(self, camera_id: str) -> None:
+        """Delete old snapshots beyond the retention limit."""
+        folder = Path(VIDEO_ANALYZER_SNAPSHOT_ROOT) / camera_id.replace(".", "_")
+        if not folder.exists():
+            LOGGER.warning("[%s] Snapshot folder does not exist: %s", camera_id, folder)
+        else:
+            snapshots_in_folder = await self.hass.async_add_executor_job(
+                lambda folder=folder: sorted(
+                    [f for f in folder.iterdir() if f.is_file()],
+                    key=lambda x: x.stat().st_mtime,
+                    reverse=True
+                )
+            )
+            for path in snapshots_in_folder[VIDEO_ANALYZER_SNAPSHOTS_TO_KEEP:]:
+                try:
+                    await self.hass.async_add_executor_job(path.unlink)
+                    LOGGER.debug("Deleted snapshot: %s", path)
+                except OSError as e:
+                    LOGGER.warning("Failed to delete snapshot %s: %s", path, e)
+
     async def _process_snapshots(self, camera_id: str) -> None:
-        """Process snapshots after they are written."""
-        lock = self.camera_write_locks.get(camera_id)
-        if lock:
-            LOGGER.debug("[%s] Waiting for snapshot writes to finish...", camera_id)
-            async with lock:
-                LOGGER.debug("[%s] Done waiting for writes.", camera_id)
+        """
+        Process snapshots after they are written.
 
-        snapshots: list[Path] = self.camera_snapshots.get(camera_id, [])
-
-        if not snapshots:
+        Method logic ensures no processing overlap and handling of new arrivals.
+        """
+        # Debounce: skip if already processing
+        if self._processing_snapshots.get(camera_id, False):
+            LOGGER.debug("[%s] Already processing, skipping this call.", camera_id)
             return
 
-        camera_name = camera_id.split(".")[-1]
+        self._processing_snapshots[camera_id] = True
+        try:
+            while True:
+                # Yield control to avoid event loop starvation.
+                await asyncio.sleep(0)
 
-        options = self.entry.options
+                lock = self._camera_write_locks.get(camera_id)
+                if lock:
+                    LOGGER.debug(
+                        "[%s] Waiting for snapshot writes to finish...", camera_id
+                    )
+                    async with lock:
+                        LOGGER.debug("[%s] Done waiting for writes.", camera_id)
 
-        LOGGER.debug("[%s] Processing %s snapshots...", camera_id, len(snapshots))
-        frame_descriptions: list[str] = []
-        for path in snapshots:
-            LOGGER.debug(" - %s", path)
+                # Copy current snapshots and clear the list
+                snapshots = self._camera_snapshots.get(camera_id, []).copy()
+                self._camera_snapshots[camera_id] = []
 
-            async with aiofiles.open(path, "rb") as file:
-                image = await file.read()
+                if not snapshots:
+                    LOGGER.debug("[%s] No snapshots to process.", camera_id)
+                    break  # Exit loop when no snapshots remain
 
-                detection_keywords = None
-                frame_description = await analyze_image(
-                    self.entry.vision_model, options, image, detection_keywords
+                camera_name = camera_id.split(".")[-1]
+                options = self.entry.options
+
+                # Generate frame descriptions from snapshot images.
+                LOGGER.debug(
+                    "[%s] Processing %s snapshots...", camera_id, len(snapshots)
                 )
-                LOGGER.debug("Analysis for %s: %s", path, frame_description)
-                frame_descriptions.append(frame_description)
+                frame_descriptions: list[str] = []
+                for path in snapshots:
+                    try:
+                        async with aiofiles.open(path, "rb") as file:
+                            image = await file.read()
 
-        msg = await self._generate_summary(frame_descriptions, camera_id)
+                            frame_description = await analyze_image(
+                                self.entry.vision_model, options, image, None
+                            )
+                            frame_descriptions.append(frame_description)
+                    except FileNotFoundError as err:
+                        LOGGER.warning("Snapshot not found: %s", err)
 
-        first_path_parts = snapshots[0].parts
+                # Generate summary message from frame descriptions.
+                msg = await self._generate_summary(frame_descriptions, camera_id)
 
-        # Use mid snapshot as a static image in the mobile app notification.
-        mid_index = len(snapshots) // 2
-        mid_path_parts = snapshots[mid_index].parts
-        notify_img_path = Path("/media/local") / Path(*mid_path_parts[-3:])
+                # Use mid snapshot as a static image in the mobile app notification.
+                mid_path_parts = snapshots[len(snapshots) // 2].parts
+                notify_img_path = Path("/media/local") / Path(*mid_path_parts[-3:])
 
-        if (mode := options.get(CONF_VIDEO_ANALYZER_MODE)) == "notify_on_anomaly":
-            is_anomaly = await self._is_anomaly(camera_name, msg, first_path_parts)
-            LOGGER.debug("Is anomaly: %s", is_anomaly)
+                first_path_parts = snapshots[0].parts
+                if (mode := options.get(CONF_VIDEO_ANALYZER_MODE)
+                ) == "notify_on_anomaly":
+                    is_anomaly = await self._is_anomaly(
+                        camera_name, msg, first_path_parts
+                    )
+                    LOGGER.debug("[%s] Is anomaly: %s", camera_id, is_anomaly)
+                    if is_anomaly:
+                        await self._send_notification(
+                            msg, camera_name, camera_id, notify_img_path
+                        )
+                elif mode == "always_notify":
+                    await self._send_notification(
+                        msg, camera_name, camera_id, notify_img_path
+                    )
 
-            if is_anomaly:
-                await self._send_notification(
-                    msg, camera_name, camera_id, notify_img_path
+                # Store the current message and associated snapshots.
+                await self.entry.store.aput(
+                    namespace=("video_analysis", camera_name),
+                    key=first_path_parts[-1],
+                    value={
+                        "content": msg,
+                        "snapshots": [str(s) for s in snapshots]
+                    },
                 )
-        elif mode == "always_notify":
-            await self._send_notification(msg, camera_name, camera_id, notify_img_path)
 
-        # Store current msg and associated snapshots.
-        await self.entry.store.aput(
-            namespace=("video_analysis", camera_name),
-            key=first_path_parts[-1], # key is date and time of first snapshot
-            value={
-                "content": msg, "snapshots": [str(s) for s in snapshots]
-            },
-        )
+                await self._delete_old_snapshots(camera_id)
 
-        # Get a list of snapshot paths sorted by modification time (newest first).
-        folder = Path(VIDEO_ANALYZER_SNAPSHOT_ROOT) / camera_id.replace(".", "_")
-        snapshots_in_folder = await self.hass.async_add_executor_job(
-            lambda: sorted(
-                [f for f in folder.iterdir() if f.is_file()],
-                key=lambda x: x.stat().st_mtime,
-                reverse=True
-            )
-        )
+                # Check for new snapshots added during processing
+                if not self._camera_snapshots.get(camera_id):
+                    break  # No new snapshots — exit loop
 
-        # Delete snapshots beyond number to keep.
-        for path in snapshots_in_folder[VIDEO_ANALYZER_SNAPSHOTS_TO_KEEP:]:
-            try:
-                await self.hass.async_add_executor_job(path.unlink)
-                LOGGER.debug("Deleted snapshot: %s", path)
-            except OSError:
-                LOGGER.warning("Failed to delete snapshot: %s", path)
+                LOGGER.debug(
+                    "[%s] New snapshots detected during processing, continuing loop.",
+                    camera_id
+                )
 
-        self.camera_snapshots[camera_id] = []
+            LOGGER.debug("[%s] Finished processing all snapshots.", camera_id)
+        finally:
+            self._processing_snapshots[camera_id] = False
 
     def _resolve_camera_from_motion(self, motion_entity_id: str) -> str | None:
         """Resolve a camera entity ID from a motion sensor ID."""
@@ -302,10 +342,10 @@ class VideoAnalyzer:
         if self.hass.states.get(inferred_camera_id):
             return inferred_camera_id
 
-        LOGGER.debug(
-            "Failed to resolve camera for motion sensor %s (override: %s, fallback: %s)",
-            motion_entity_id, camera_id, inferred_camera_id
-        )
+        #LOGGER.debug(
+            #"Failed to resolve camera for motion sensor %s (override: %s, fallback: %s)",
+            #motion_entity_id, camera_id, inferred_camera_id
+        #)
         return None
 
     async def _take_single_snapshot(self, camera_id: str, now: datetime) -> Path | None:
@@ -318,7 +358,7 @@ class VideoAnalyzer:
         cam_dir.mkdir(parents=True, exist_ok=True)
         snapshot_path = cam_dir / f"snapshot_{timestamp}.jpg"
 
-        lock = self.camera_write_locks.setdefault(camera_id, asyncio.Lock())
+        lock = self._camera_write_locks.setdefault(camera_id, asyncio.Lock())
 
         try:
             async with lock:
@@ -331,7 +371,7 @@ class VideoAnalyzer:
                     },
                     blocking=True,
                 )
-                self.camera_snapshots.setdefault(camera_id, []).append(snapshot_path)
+                self._camera_snapshots.setdefault(camera_id, []).append(snapshot_path)
                 LOGGER.debug("[%s] Snapshot saved to %s", camera_id, snapshot_path)
                 return snapshot_path
         except HomeAssistantError as e:
@@ -363,22 +403,21 @@ class VideoAnalyzer:
 
         camera_id = self._resolve_camera_from_motion(entity_id)
         if not camera_id:
-            LOGGER.debug("No camera resolved for motion sensor: %s", entity_id)
             return
 
         if new_state.state == "on" and (old_state is None or old_state.state != "on"):
-            if camera_id not in self.active_motion_cameras:
+            if camera_id not in self._active_motion_cameras:
                 LOGGER.debug("Motion ON: Starting snapshot loop for %s", camera_id)
                 task = self.hass.async_create_task(self._motion_snapshot_loop(camera_id))
-                self.active_motion_cameras[camera_id] = task
+                self._active_motion_cameras[camera_id] = task
 
-        elif new_state.state == "off" and camera_id in self.active_motion_cameras:
+        elif new_state.state == "off" and camera_id in self._active_motion_cameras:
             LOGGER.debug("Motion OFF: Stopping snapshot loop for %s", camera_id)
-            task = self.active_motion_cameras.pop(camera_id, None)
+            task = self._active_motion_cameras.pop(camera_id, None)
             if task and not task.done():
                 task.cancel()
 
-            # Wait briefly to allow final snapshot to write
+            # Wait briefly to allow final snapshot to write.
             async def _delayed_process() -> None:
                 await asyncio.sleep(1)
                 await self._process_snapshots(camera_id)
@@ -405,7 +444,7 @@ class VideoAnalyzer:
             snapshot_path = cam_dir / f"snapshot_{timestamp}.jpg"
 
             # Create a lock to track pending snapshot write.
-            lock = self.camera_write_locks.setdefault(camera_id, asyncio.Lock())
+            lock = self._camera_write_locks.setdefault(camera_id, asyncio.Lock())
 
             async with lock:
                 await self.hass.services.async_call(
@@ -417,7 +456,7 @@ class VideoAnalyzer:
                     },
                     blocking=True,
                 )
-                self.camera_snapshots.setdefault(camera_id, []).append(snapshot_path)
+                self._camera_snapshots.setdefault(camera_id, []).append(snapshot_path)
                 LOGGER.debug("[%s] Snapshot saved to %s", camera_id, snapshot_path)
 
     @callback
@@ -460,9 +499,9 @@ class VideoAnalyzer:
 
     def stop(self) -> None:
         """Stop the video analyzer."""
-        for task in self.active_motion_cameras.values():
+        for task in self._active_motion_cameras.values():
             task.cancel()
-        self.active_motion_cameras.clear()
+        self._active_motion_cameras.clear()
         if self.is_running():
             self.cancel_track()
             self.cancel_listen()
