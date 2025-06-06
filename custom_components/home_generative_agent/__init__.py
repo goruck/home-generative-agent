@@ -206,25 +206,32 @@ class VideoAnalyzer:
                 for r in search_results)
         )
 
-    async def _delete_old_snapshots(self, camera_id: str) -> None:
+    async def _delete_old_snapshots(
+            self, camera_id: str, processing_paths: set[Path]
+        ) -> None:
         """Delete old snapshots beyond the retention limit."""
         folder = Path(VIDEO_ANALYZER_SNAPSHOT_ROOT) / camera_id.replace(".", "_")
         if not folder.exists():
             LOGGER.warning("[%s] Snapshot folder does not exist: %s", camera_id, folder)
-        else:
-            snapshots_in_folder = await self.hass.async_add_executor_job(
-                lambda folder=folder: sorted(
-                    [f for f in folder.iterdir() if f.is_file()],
-                    key=lambda x: x.stat().st_mtime,
-                    reverse=True
-                )
+            return
+
+        snapshots_in_folder = await self.hass.async_add_executor_job(
+            lambda folder=folder: sorted(
+                [f for f in folder.iterdir() if f.is_file()],
+                key=lambda x: x.stat().st_mtime,
+                reverse=True
             )
-            for path in snapshots_in_folder[VIDEO_ANALYZER_SNAPSHOTS_TO_KEEP:]:
-                try:
-                    await self.hass.async_add_executor_job(path.unlink)
-                    LOGGER.debug("Deleted snapshot: %s", path)
-                except OSError as e:
-                    LOGGER.warning("Failed to delete snapshot %s: %s", path, e)
+        )
+
+        for path in snapshots_in_folder[VIDEO_ANALYZER_SNAPSHOTS_TO_KEEP:]:
+            if path in processing_paths:
+                LOGGER.debug("Skipping deletion of active snapshot: %s", path)
+                continue
+            try:
+                await self.hass.async_add_executor_job(path.unlink)
+                LOGGER.debug("Deleted snapshot: %s", path)
+            except OSError as e:
+                LOGGER.warning("Failed to delete snapshot %s: %s", path, e)
 
     async def _process_snapshots(self, camera_id: str) -> None:
         """
@@ -312,7 +319,9 @@ class VideoAnalyzer:
                     },
                 )
 
-                await self._delete_old_snapshots(camera_id)
+                # Delete old snapshots beyond the retention limit.
+                processing_paths = set(snapshots)
+                await self._delete_old_snapshots(camera_id, processing_paths)
 
                 # Check for new snapshots added during processing
                 if not self._camera_snapshots.get(camera_id):
