@@ -193,17 +193,14 @@ class VideoAnalyzer:
         # Snapshot names are in the form "snapshot_20250426_002804.jpg".
         first_str = first_path_parts[-1].replace("snapshot_", "").replace(".jpg", "")
         first_dt = dt_util.as_local(datetime.strptime(first_str, "%Y%m%d_%H%M%S"))  # noqa: DTZ007
-        no_newer_dt = first_dt - timedelta(minutes=VIDEO_ANALYZER_TIME_OFFSET)
 
         # Simple anomaly detection.
-        # If all search results are older then the time threshold or if any are
-        # newer or equal to it, and have a lower score then the similarity
-        # threshold, declare the current video analysis as an anomaly.
+        # If the first snapshot is older then the time threshold or if any search
+        # result has a lower score then the similarity threshold, declare the current
+        # video analysis as an anomaly.
         return (
-            all(r.updated_at < no_newer_dt for r in search_results) or
-            any(r.updated_at >= no_newer_dt and
-                r.score < VIDEO_ANALYZER_SIMILARITY_THRESHOLD
-                for r in search_results)
+            first_dt < dt_util.now() - timedelta(minutes=VIDEO_ANALYZER_TIME_OFFSET) or
+            any(r.score < VIDEO_ANALYZER_SIMILARITY_THRESHOLD for r in search_results)
         )
 
     async def _delete_old_snapshots(
