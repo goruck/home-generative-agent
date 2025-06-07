@@ -293,9 +293,9 @@ class VideoAnalyzer:
                 mid_path_parts = snapshots[len(snapshots) // 2].parts
                 notify_img_path = Path("/media/local") / Path(*mid_path_parts[-3:])
 
+                mode = options.get(CONF_VIDEO_ANALYZER_MODE)
                 first_path_parts = snapshots[0].parts
-                if (mode := options.get(CONF_VIDEO_ANALYZER_MODE)
-                ) == "notify_on_anomaly":
+                if mode == "notify_on_anomaly":
                     is_anomaly = await self._is_anomaly(
                         camera_name, msg, first_path_parts
                     )
