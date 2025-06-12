@@ -100,7 +100,8 @@ async def _generate_embeddings(
 class VideoAnalyzer:
     """Analyze video from recording or motion-triggered cameras."""
 
-    def __init__(self, hass: HomeAssistant, entry: HGAConfigEntry) -> None:  # noqa: D107
+    def __init__(self, hass: HomeAssistant, entry: HGAConfigEntry) -> None:
+        """Init analyzer."""
         self.hass = hass
         self.entry = entry
         self._snapshot_queues: dict[str, asyncio.Queue[Path]] = {}
@@ -108,6 +109,21 @@ class VideoAnalyzer:
         self._active_queue_tasks: dict[str, asyncio.Task] = {}
         self._initialized_dirs: set[str] = set()
         self._active_motion_cameras: dict[str, asyncio.Task] = {}
+        self._sum_model_cfg = {
+            "model": self.entry.options.get(
+                CONF_SUMMARIZATION_MODEL, RECOMMENDED_SUMMARIZATION_MODEL
+            ),
+            "temperature": self.entry.options.get(
+                CONF_SUMMARIZATION_MODEL_TEMPERATURE,
+                RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
+            ),
+            "top_p": self.entry.options.get(
+                CONF_SUMMARIZATION_MODEL_TOP_P,
+                RECOMMENDED_SUMMARIZATION_MODEL_TOP_P,
+            ),
+            "num_predict": SUMMARIZATION_MODEL_PREDICT,
+            "num_ctx": SUMMARIZATION_MODEL_CTX,
+        }
 
     def _get_snapshot_queue(self, camera_id: str) -> asyncio.Queue[Path]:
         """Lazily create a Queue and start its processing task."""
@@ -125,7 +141,6 @@ class VideoAnalyzer:
             self,
             msg: str,
             camera_name: str,
-            camera_id: str,
             notify_img_path: Path
         ) -> None:
         """Send notification to the mobile app."""
@@ -136,7 +151,6 @@ class VideoAnalyzer:
                 "message": msg,
                 "title": f"Camera Alert from {camera_name}!",
                 "data": {
-                    #"entity_id": camera_id,
                     "image": str(notify_img_path)
                 }
             },
@@ -152,7 +166,6 @@ class VideoAnalyzer:
         if len(frames) == 1:
             return frames[0]
 
-        opts = self.entry.options
         tag = "\n<frame description>\n{}\n</frame description>"
         prompt = " ".join([
             VIDEO_ANALYZER_PROMPT
@@ -160,27 +173,11 @@ class VideoAnalyzer:
 
         LOGGER.debug("Prompt: %s", prompt)
 
-        cfg = {
-            "model": opts.get(
-                CONF_SUMMARIZATION_MODEL, RECOMMENDED_SUMMARIZATION_MODEL
-            ),
-            "temperature": opts.get(
-                CONF_SUMMARIZATION_MODEL_TEMPERATURE,
-                RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
-            ),
-            "top_p": opts.get(
-                CONF_SUMMARIZATION_MODEL_TOP_P,
-                RECOMMENDED_SUMMARIZATION_MODEL_TOP_P,
-            ),
-            "num_predict": SUMMARIZATION_MODEL_PREDICT,
-            "num_ctx": SUMMARIZATION_MODEL_CTX,
-        }
-
         messages = [
             SystemMessage(content=VIDEO_ANALYZER_SYSTEM_MESSAGE),
             HumanMessage(content=prompt),
         ]
-        model = self.entry.summarization_model.with_config(config=cfg)
+        model = self.entry.summarization_model.with_config(config=self._sum_model_cfg)
         resp = await model.ainvoke(messages)
 
         summary = resp.content
@@ -219,6 +216,19 @@ class VideoAnalyzer:
             first_dt < dt_util.now() - timedelta(minutes=VIDEO_ANALYZER_TIME_OFFSET) or
             any(r.score < VIDEO_ANALYZER_SIMILARITY_THRESHOLD for r in search_results)
         )
+
+    async def _prune_old_snapshots(self, camera_id: str, batch: list[Path]) -> None:
+        """Retain and prune old snapshots."""
+        retention = self._retention_deques.setdefault(camera_id, deque())
+        for path in batch:
+            retention.append(path)
+            if len(retention) > VIDEO_ANALYZER_SNAPSHOTS_TO_KEEP:
+                old = retention.popleft()
+                try:
+                    await self.hass.async_add_executor_job(old.unlink)
+                    LOGGER.debug("[%s] Deleted old snapshot: %s", camera_id, old)
+                except OSError as e:
+                    LOGGER.warning("[%s] Failed to delete %s: %s", camera_id, old, e)
 
     async def _process_snapshot_queue(self, camera_id: str) -> None:
         """
@@ -275,7 +285,7 @@ class VideoAnalyzer:
         if mode == "notify_on_anomaly":
             if await self._is_anomaly(camera_name, msg, batch[0].parts):
                 LOGGER.debug("[%s] Video is an anomaly!", camera_id)
-                await self._send_notification(msg, camera_name, camera_id, notify_img)
+                await self._send_notification(msg, camera_name, notify_img)
         else:
             await self._send_notification(msg, camera_name, camera_id, notify_img)
 
@@ -288,16 +298,7 @@ class VideoAnalyzer:
             )
 
         # Retain and prune old snapshots.
-        retention = self._retention_deques.setdefault(camera_id, deque())
-        for path in batch:
-            retention.append(path)
-            if len(retention) > VIDEO_ANALYZER_SNAPSHOTS_TO_KEEP:
-                old = retention.popleft()
-                try:
-                    await self.hass.async_add_executor_job(old.unlink)
-                    LOGGER.debug("[%s] Deleted old snapshot: %s", camera_id, old)
-                except OSError as e:
-                    LOGGER.warning("[%s] Failed to delete %s: %s", camera_id, old, e)
+        await self._prune_old_snapshots(camera_id, batch)
 
     def _resolve_camera_from_motion(self, motion_entity_id: str) -> str | None:
         """Resolve a camera entity ID from a motion sensor ID."""
@@ -458,6 +459,10 @@ class VideoAnalyzer:
 
     def start(self) -> None:
         """Start the video analyzer."""
+        if hasattr(self, "_cancel_track"):
+            LOGGER.warning("VideoAnalyzer already started.")
+            return
+
         self._cancel_track = async_track_time_interval(
             self.hass,
             self._take_snapshots_from_recording_cameras,
@@ -476,6 +481,10 @@ class VideoAnalyzer:
 
     async def stop(self) -> None:
         """Stop the video analyzer: cancel tasks and unsubscribe listeners."""
+        if not hasattr(self, "_cancel_track"):
+            LOGGER.warning("VideoAnalyzer not started.")
+            return
+
         tasks_to_await: list[asyncio.Task] = []
 
         # Cancel active motion-triggered snapshot loops.
