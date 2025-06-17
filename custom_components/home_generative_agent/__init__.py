@@ -159,6 +159,8 @@ class VideoAnalyzer:
 
     async def _generate_summary(self, frames: list[str], cam_id: str) -> str:
         """Generate a summarized analysis from frame descriptions."""
+        await asyncio.sleep(0) # avoid blocking the event loop
+
         if not frames:
             msg = "At least one frame description required."
             raise ValueError(msg)

@@ -1,6 +1,7 @@
 """Langgraph tools for Home Generative Agent."""
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import math
@@ -103,6 +104,8 @@ async def analyze_image(
         detection_keywords: list[str] | None = None
     ) -> str:
     """Analyze an image."""
+    await asyncio.sleep(0)
+
     image_data = base64.b64encode(image).decode("utf-8")
 
     model = vlm_model
