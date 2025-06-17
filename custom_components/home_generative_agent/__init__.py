@@ -326,7 +326,7 @@ class VideoAnalyzer:
             cam_dir.mkdir(parents=True, exist_ok=True)
             self._initialized_dirs.add(camera_id)
             dir_not_empty = await self.hass.async_add_executor_job(
-                lambda: cam_dir.iterdir()
+                lambda: any(cam_dir.iterdir())
             )
             if dir_not_empty:
                 msg = "[{id}] Folder not empty. Existing snapshots will not be pruned."
