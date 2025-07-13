@@ -19,6 +19,7 @@
     "openai==1.88.0",
     "ollama==0.4.8",
     "psycopg==3.2.6",
+    "psycopg-binary==3.2.6",
     "psycopg-pool==3.2.6",
     "transformers==4.51.3"
   ],
