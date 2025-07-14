@@ -178,4 +178,4 @@ VIDEO_ANALYZER_TRIGGER_ON_MOTION = True
 VIDEO_ANALYZER_MOTION_CAMERA_MAP: dict = {}
 
 ### postgresql db parameters for checkpointer and memory persistent storage. ###
-DB_URI = "postgresql://hga:hga@localhost:5432/hga?sslmode=disable"
+DB_URI = "postgresql://ha_user:ha_passwd@localhost:5432/ha_db?sslmode=disable"
