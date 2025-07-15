@@ -23,7 +23,6 @@ from langchain_core.messages import (
     AIMessage,
     HumanMessage,
 )
-from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from voluptuous_openapi import convert
 
 from .const import (
@@ -142,11 +141,6 @@ class HGAConversationEntity(
         set_llm_cache(InMemoryCache())
 
         self.tz = dt_util.get_default_time_zone()
-
-        # Database for thread-based (short-term) memory.
-        self.checkpointer = AsyncPostgresSaver(self.entry.pool)
-        # NOTE: must call .setup() the first time checkpointer is used.
-        #await checkpointer.setup()  # noqa: ERA001
 
     async def async_added_to_hass(self) -> None:
         """When entity is added to Home Assistant."""
@@ -362,7 +356,7 @@ class HGAConversationEntity(
         # Compile graph into a LangChain Runnable.
         app = workflow.compile(
             store=self.entry.store,
-            checkpointer=self.checkpointer,
+            checkpointer=self.entry.checkpointer,
             debug=LANGCHAIN_LOGGING_LEVEL=="debug"
         )
 

@@ -31,6 +31,7 @@ from langchain_core.runnables import ConfigurableField
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_openai import ChatOpenAI
 from langgraph.store.postgres import AsyncPostgresStore
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
@@ -655,6 +656,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     # NOTE: must call .setup() the first time store is used.
     #await store.setup()  # noqa: ERA001
     entry.store = store
+
+     # Initialize database for thread-based (short-term) memory.
+    checkpointer = AsyncPostgresSaver(pool)
+    # NOTE: must call .setup() the first time checkpointer is used.
+    #await checkpointer.setup()  # noqa: ERA001
+    entry.checkpointer = checkpointer
 
     # Initialize video analyzer and start if option is set.
     video_analyzer = VideoAnalyzer(hass, entry)
