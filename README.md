@@ -176,10 +176,9 @@ I built the HA installation on a Raspberry Pi 5 with SSD storage, Zigbee, and LA
 
 ## Installation
 
-**Important Note**: This project has been tested only under Home Assistant Core in a manual development environment as described [here](https://developers.home-assistant.io/docs/development_environment#manual-environment). I have NOT tested it with docker or HAOS.
+**Important Note**: This project has been tested with Home Assistant Operating System and the now depreciated Home Assistant Core. Please use it only with Home Assistant Operating System as the Core installation method is no longer supported. 
 
-1. Install the [PostgreSQL](https://www.postgresql.org/) database. This allows for persistence storage of conversations and memories.
-2. Install [pgvector](https://github.com/pgvector/pgvector). This enables vector similarity search for PostgresSQL.
+1. Install the [PostgreSQL with pgvector](https://github.com/goruck/addon-postgres-pgvector/tree/main/postgres_pgvector) add-on. This allows for persistence storage of conversations and memories with vector similarity search.
 3. Using the tool of choice, open your HA configuration's directory (folder) (where you find `configuration.yaml`).
 4. If you do not have a `custom_components` directory (folder), you must create it.
 5. In the `custom_components` directory (folder), create a new folder called `home_generative_agent`.
