@@ -654,13 +654,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         }
     )
     # NOTE: must call .setup() the first time store is used.
-    #await store.setup()  # noqa: ERA001
+    await store.setup()  # noqa: ERA001
     entry.store = store
 
      # Initialize database for thread-based (short-term) memory.
     checkpointer = AsyncPostgresSaver(pool)
     # NOTE: must call .setup() the first time checkpointer is used.
-    #await checkpointer.setup()  # noqa: ERA001
+    await checkpointer.setup()  # noqa: ERA001
     entry.checkpointer = checkpointer
 
     # Initialize video analyzer and start if option is set.
