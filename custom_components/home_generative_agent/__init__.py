@@ -270,8 +270,15 @@ class VideoAnalyzer:
             except FileNotFoundError:
                 LOGGER.warning("[%s] Snapshot not found: %s", camera_id, path)
                 continue
+            except asyncio.TimeoutError:
+                LOGGER.warning("[%s] Image analysis timed out for %s", camera_id, path)
+                continue
             except HomeAssistantError:
                 LOGGER.exception("[%s] Error analyzing %s", camera_id, path)
+                continue
+            except Exception as exc:
+                LOGGER.exception("[%s] Unexpected error analyzing %s: %s", camera_id, path, exc)
+                continue
 
         if not frame_descriptions:
             return
