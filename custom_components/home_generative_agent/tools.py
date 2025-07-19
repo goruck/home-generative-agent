@@ -5,6 +5,7 @@ import asyncio
 import base64
 import logging
 import math
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal
@@ -15,12 +16,13 @@ import yaml
 from homeassistant.components import automation, camera, recorder
 from homeassistant.components.automation.config import _async_validate_config_item
 from homeassistant.config import AUTOMATION_CONFIG_PATH
-from homeassistant.const import SERVICE_RELOAD
+from homeassistant.const import ATTR_FRIENDLY_NAME, SERVICE_RELOAD
 from homeassistant.core import State
+from homeassistant.helpers.entity import generate_entity_id
 from homeassistant.exceptions import (
     HomeAssistantError,
 )
-from homeassistant.util import ulid
+from homeassistant.util import ulid, slugify
 from langchain_core.messages import (
     AnyMessage,
     HumanMessage,
@@ -32,6 +34,7 @@ from langchain_ollama import ChatOllama  # noqa: TCH002
 from langgraph.prebuilt import InjectedStore  # noqa: TCH002
 from langgraph.store.base import BaseStore  # noqa: TCH002
 from voluptuous import MultipleInvalid
+
 
 from .const import (
     AUTOMATION_TOOL_BLUEPRINT_NAME,
@@ -467,9 +470,56 @@ def _as_utc(dattim: str, default: datetime, error_message: str) -> datetime:
 
     return dt_util.as_utc(parsed_datetime)
 
+# Allow domains like "sensor", "binary_sensor", "camera", etc.
+_DOMAIN_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
+# Valid HA entity_id = <domain>.<object_id>, both starting with a letter,
+# then letters, digits or underscores
+_ENTITY_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$")
+
+async def _get_existing_entity_id(
+    name: str, hass: HomeAssistant, domain: str = "sensor") -> str:
+    """
+    Lookup an existing entity by its friendly name in a sync context.
+
+    Raises ValueError if not found, ambiguous, or invalid domain/entity_id.
+    """
+    if not isinstance(name, str) or not name.strip():
+        msg = "Name must be a non-empty string"
+        raise ValueError(msg)
+    if not isinstance(domain, str) or not _DOMAIN_PATTERN.match(domain):
+        msg = "Domain invalid; must be a valid Home Assistant domain"
+        raise ValueError(msg)
+
+    target = name.strip().lower()
+    prefix = f"{domain}."
+    candidates = []
+
+    # Iterate over all states in Home Assistant to find matching entity_id.
+    for state in hass.states.async_all():
+        eid = state.entity_id
+        if not eid.startswith(prefix):
+            continue
+        fn = state.attributes.get(ATTR_FRIENDLY_NAME, "")
+        if isinstance(fn, str) and fn.strip().lower() == target:
+            candidates.append(eid)
+
+    if not candidates:
+        msg = f"No '{domain}' entity found with friendly name '{name}'"
+        raise ValueError(msg)
+    if len(candidates) > 1:
+        msg = f"Multiple '{domain}' entities found for '{name}': {candidates}"
+        raise ValueError(msg)
+
+    eid = candidates[0]
+    if not _ENTITY_ID_PATTERN.match(eid):
+        msg = f"Found entity_id '{eid}' is not valid"
+        raise ValueError(msg)
+
+    return eid
+
 @tool(parse_docstring=True)
 async def get_entity_history(  # noqa: D417
-    entity_ids: list[str],
+    names: list[tuple[str, str]],
     local_start_time: str,
     local_end_time: str,
     *,
@@ -480,11 +530,8 @@ async def get_entity_history(  # noqa: D417
     Get entity state history from Home Assistant.
 
     Args:
-        entity_ids: List of Home Assistant entity ids to retrieve the history for.
-            For example if the user says "how much energy did the washing machine
-            consume last week", entity_id is "sensor.washing_machine_switch_0_energy"
-            DO NOT use use the name "washing machine Switch 0 energy" for entity_id.
-            You MUST use an underscore symbol (e.g., "_") as a word deliminator.
+        names: List of tuples of Home Assistant friendly names and domains, for example:
+            [("Living Room Light", "light"), ("Kitchen Sensor", "sensor")].
         local_start_time: Start of local time history period in "%Y-%m-%dT%H:%M:%S%z".
         local_end_time: End of local time history period in "%Y-%m-%dT%H:%M:%S%z".
 
@@ -494,7 +541,11 @@ async def get_entity_history(  # noqa: D417
     """
     hass = config["configurable"]["hass"]
 
-    entity_ids = [i.lower() for i in entity_ids]
+    try:
+        entity_ids = [await _get_existing_entity_id(n, hass, d) for n, d in names]
+    except ValueError:
+        LOGGER.exception("Invalid entity_id %s")
+        return {}
 
     now = dt_util.utcnow()
     one_day = timedelta(days=1)
