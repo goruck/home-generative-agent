@@ -587,14 +587,14 @@ async def get_entity_history(  # noqa: D417
         data = await _fetch_data_from_long_term_stats(
             hass=hass,
             start_time=start_time,
-            end_time=threshold,
+            end_time=end_time,
             entity_ids=entity_ids
         )
     else:
         # Entire range is more recent than threshold.
         data = await _fetch_data_from_history(
             hass=hass,
-            start_time=threshold,
+            start_time=start_time,
             end_time=end_time,
             entity_ids=entity_ids
         )
