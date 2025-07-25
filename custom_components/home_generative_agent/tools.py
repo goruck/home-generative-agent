@@ -8,33 +8,36 @@ import math
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any
 
 import aiofiles
 import homeassistant.util.dt as dt_util
 import yaml
-from homeassistant.components import automation, camera, recorder
+from homeassistant.components import camera
 from homeassistant.components.automation.config import _async_validate_config_item
+from homeassistant.components.automation.const import DOMAIN as AUTOMATION_DOMAIN
+from homeassistant.components.recorder import history as recorder_history
+from homeassistant.components.recorder import statistics as recorder_statistics
 from homeassistant.config import AUTOMATION_CONFIG_PATH
 from homeassistant.const import ATTR_FRIENDLY_NAME, SERVICE_RELOAD
 from homeassistant.core import State
-from homeassistant.helpers.entity import generate_entity_id
 from homeassistant.exceptions import (
     HomeAssistantError,
 )
-from homeassistant.util import ulid, slugify
+from homeassistant.helpers.recorder import get_instance as get_recorder_instance
+from homeassistant.helpers.recorder import session_scope as recorder_session_scope
+from homeassistant.util import ulid
 from langchain_core.messages import (
     AnyMessage,
     HumanMessage,
     SystemMessage,
 )
-from langchain_core.runnables import RunnableConfig  # noqa: TCH002
+from langchain_core.runnables import RunnableConfig  # noqa: TC002
 from langchain_core.tools import InjectedToolArg, tool
-from langchain_ollama import ChatOllama  # noqa: TCH002
-from langgraph.prebuilt import InjectedStore  # noqa: TCH002
-from langgraph.store.base import BaseStore  # noqa: TCH002
+from langchain_ollama import ChatOllama  # noqa: TC002
+from langgraph.prebuilt import InjectedStore
+from langgraph.store.base import BaseStore  # noqa: TC002
 from voluptuous import MultipleInvalid
-
 
 from .const import (
     AUTOMATION_TOOL_BLUEPRINT_NAME,
@@ -74,10 +77,9 @@ async def _get_camera_image(hass: HomeAssistant, camera_name: str) -> bytes | No
             width=VLM_IMAGE_WIDTH,
             height=VLM_IMAGE_HEIGHT
         )
-    except HomeAssistantError as err:
-        LOGGER.error(
-            "Error getting image from camera '%s' with error: %s",
-            camera_entity_id, err
+    except HomeAssistantError:
+        LOGGER.exception(
+            "Error getting image from camera %s", camera_entity_id
         )
         return None
 
@@ -112,24 +114,19 @@ async def analyze_image(
     image_data = base64.b64encode(image).decode("utf-8")
 
     model = vlm_model
-    model_with_config = model.with_config(
-        config={
-            "model": options.get(
-                CONF_VLM,
-                RECOMMENDED_VLM,
-            ),
+    config: RunnableConfig = {
+        "configurable": {
+            "model": options.get(CONF_VLM, RECOMMENDED_VLM),
             "temperature": options.get(
                 CONF_VLM_TEMPERATURE,
-                RECOMMENDED_VLM_TEMPERATURE,
+                RECOMMENDED_VLM_TEMPERATURE
             ),
-            "top_p": options.get(
-                CONF_VLM_TOP_P,
-                RECOMMENDED_VLM_TOP_P,
-            ),
+            "top_p": options.get(CONF_VLM_TOP_P, RECOMMENDED_VLM_TOP_P),
             "num_predict": VLM_NUM_PREDICT,
-            "num_ctx": VLM_NUM_CTX,
+            "num_ctx": VLM_NUM_CTX
         }
-    )
+    }
+    model_with_config = model.with_config(config)
 
     chain = _prompt_func | model_with_config
 
@@ -148,10 +145,12 @@ async def analyze_image(
                 "image": image_data
             }
         )
-    except HomeAssistantError as err: #TODO: add validation error handling and retry prompt
-        LOGGER.error("Error analyzing image %s", err)
-
-    return response.content
+    except HomeAssistantError:
+        msg = "Error analyzing image with VLM model."
+        LOGGER.exception(msg)
+        return msg
+    else:
+        return response.text()
 
 @tool(parse_docstring=True)
 async def get_and_analyze_camera_image( # noqa: D417
@@ -171,6 +170,9 @@ async def get_and_analyze_camera_image( # noqa: D417
             boxes and dogs", detection_keywords would be ["boxes", "dogs"].
 
     """
+    if "configurable" not in config:
+        return "Configuration not found. Please check your setup."
+
     hass = config["configurable"]["hass"]
     vlm_model = config["configurable"]["vlm_model"]
     options = config["configurable"]["options"]
@@ -190,7 +192,8 @@ async def upsert_memory( # noqa: D417
     store: Annotated[BaseStore, InjectedStore()],
 ) -> str:
     """
-    INSERT or UPDATE a memory in the database.
+    INSERT or UPDATE a memory about users in the database.
+
     You MUST use this tool to INSERT or UPDATE memories about users.
     Examples of memories are specific facts or concepts learned from interactions
     with users. If a memory conflicts with an existing one then just UPDATE the
@@ -204,12 +207,16 @@ async def upsert_memory( # noqa: D417
             e.g., "This was mentioned while discussing career options in Europe."
         memory_id: The memory to overwrite.
             ONLY PROVIDE IF UPDATING AN EXISTING MEMORY.
-            
 
     """
+    if "configurable" not in config:
+        return "Configuration not found. Please check your setup."
+
     mem_id = memory_id or ulid.ulid_now()
+
+    user_id = config["configurable"]["user_id"]
     await store.aput(
-        namespace=(config["configurable"]["user_id"], "memories"),
+        namespace=(user_id, "memories"),
         key=str(mem_id),
         value={"content": content, "context": context},
     )
@@ -226,6 +233,7 @@ async def add_automation(  # noqa: D417
 ) -> str:
     """
     Add an automation to Home Assistant.
+
     You are provided a Home Assistant blueprint as part of this tool if you need it.
     You MUST ONLY use the blueprint to create automations that involve camera image
     analysis. You MUST generate Home Assistant automation YAML for everything else.
@@ -241,6 +249,9 @@ async def add_automation(  # noqa: D417
             ONLY provide if using the camera image analysis blueprint.
 
     """
+    if "configurable" not in config:
+        return "Configuration not found. Please check your setup."
+
     hass = config["configurable"]["hass"]
 
     if time_pattern and message:
@@ -291,7 +302,7 @@ async def add_automation(  # noqa: D417
         )
         await f.write("\n" + ha_automation_config_raw)
 
-    await hass.services.async_call(automation.config.DOMAIN, SERVICE_RELOAD)
+    await hass.services.async_call(AUTOMATION_DOMAIN, SERVICE_RELOAD)
 
     hass.bus.async_fire(
         AUTOMATION_TOOL_EVENT_REGISTERED,
@@ -362,13 +373,13 @@ def _filter_data(
             try:
                 state_values.append(float(x))
             except ValueError:
-                LOGGER.debug("Found string that could not be converted to float.")
+                LOGGER.warning("Found string that could not be converted to float.")
                 continue
         # Check if sensor was reset during the time of interest.
         zero_indices = [i for i, x in enumerate(state_values) if math.isclose(x, 0)]
         if zero_indices:
             # Start data set from last time the sensor was reset.
-            LOGGER.debug("Sensor was reset during time of interest.")
+            LOGGER.warning("Sensor was reset during time of interest.")
             state_values = state_values[zero_indices[-1]:]
         state_value_change = max(state_values) - min(state_values)
         units = state_obj.attributes.get("unit_of_measurement")
@@ -381,7 +392,7 @@ async def _fetch_data_from_history(
         start_time:datetime,
         end_time:datetime,
         entity_ids:list[str]
-    ) -> dict[str, list[str, str]]:
+    ) -> dict[str, list[dict[str, Any]]]:
     filters = None
     include_start_time_state = True
     significant_changes_only = True
@@ -389,9 +400,9 @@ async def _fetch_data_from_history(
     no_attributes = False
     compressed_state_format = False
 
-    with recorder.util.session_scope(hass=hass, read_only=True) as session:
-        return await recorder.get_instance(hass).async_add_executor_job(
-            recorder.history.get_significant_states_with_session,
+    with recorder_session_scope(hass=hass, read_only=True) as session:
+        result = await get_recorder_instance(hass).async_add_executor_job(
+            recorder_history.get_significant_states_with_session,
             hass,
             session,
             start_time,
@@ -405,12 +416,22 @@ async def _fetch_data_from_history(
             compressed_state_format
         )
 
+    if not result:
+        return {}
+
+    # Convert any State objects to dict.
+    return {
+        e: [
+            s.as_dict() if isinstance(s, State) else s for s in v
+        ] for e, v in result.items()
+    }
+
 async def _fetch_data_from_long_term_stats(
         hass:HomeAssistant,
         start_time:datetime,
         end_time:datetime,
         entity_ids:list[str]
-    ) -> dict[str, list[str, str]]:
+    ) -> dict[str, list[dict[str, Any]]]:
     period = "hour"
     units = None
 
@@ -419,8 +440,8 @@ async def _fetch_data_from_long_term_stats(
     # The "mean" type is associated with entities with State Class measurement.
     types = {"state", "mean"}
 
-    result = await recorder.get_instance(hass).async_add_executor_job(
-        recorder.statistics.statistics_during_period,
+    result = await get_recorder_instance(hass).async_add_executor_job(
+        recorder_statistics.statistics_during_period,
         hass,
         start_time,
         end_time,
@@ -431,17 +452,16 @@ async def _fetch_data_from_long_term_stats(
     )
 
     # Make data format consistent with the History format.
-    parsed_result:dict[str, list[str, str]] = {}
+    parsed_result:dict[str, list[dict[str, Any]]] = {}
     for k, v in result.items():
-        data = [
+        data:list[dict[str, Any]] = [
             {
                 "state": d["state"] if "state" in d else d.get("mean"),
                 "last_changed": dt_util.as_local(
-                    dt_util.utc_from_timestamp(d.get("end"))
-                )
+                    dt_util.utc_from_timestamp(d["end"])) if "end" in d else None
             } for d in v
         ]
-        parsed_result.update({k: data})
+        parsed_result[k] = data
 
     return parsed_result
 
@@ -525,7 +545,7 @@ async def get_entity_history(  # noqa: D417
     *,
     # Hide these arguments from the model.
     config: Annotated[RunnableConfig, InjectedToolArg()]
-) -> dict[str, list[dict[str, Any]]]:
+) -> dict[str, dict[str, list[dict[str, str]]]]:
     """
     Get entity state history from Home Assistant.
 
@@ -536,15 +556,24 @@ async def get_entity_history(  # noqa: D417
         local_end_time: End of local time history period in "%Y-%m-%dT%H:%M:%S%z".
 
     Returns:
-        Entity history in local time.
+        Entity history in local time format, for example:
+        {"binary_sensor.front_door": {"values": [
+            {"state": "off", "last_changed": "2025-07-24T00:00:00-0700"},
+            {"state": "on", "last_changed": "2025-07-24T04:47:28-0700"},
+            ...]}
+        }.
 
     """
+    if "configurable" not in config:
+        LOGGER.warning("Configuration not found. Please check your setup.")
+        return {}
+
     hass = config["configurable"]["hass"]
 
     try:
         entity_ids = [await _get_existing_entity_id(n, hass, d) for n, d in names]
     except ValueError:
-        LOGGER.exception("Invalid entity_id %s")
+        LOGGER.exception("Invalid entity_id for names: %s", names)
         return {}
 
     now = dt_util.utcnow()
@@ -560,14 +589,15 @@ async def get_entity_history(  # noqa: D417
             default = start_time + one_day,
             error_message = "end_time not valid"
         )
-    except HomeAssistantError as err:
-        return f"Invalid time {err}"
+    except HomeAssistantError:
+        LOGGER.exception("Error parsing start or end time.")
+        return {}
 
      # Calculate the threshold to fetch data from history or long-term statistics.
     threshold = dt_util.now() - timedelta(days=HISTORY_TOOL_PURGE_KEEP_DAYS)
 
     # Check if the range spans both "old" and "recent" dates.
-    data:dict[str, list[str, str]] = {}
+    data:dict[str, list[dict[str, Any]]] = {}
     if start_time < threshold and end_time >= threshold:
         # The range includes datetimes both older than threshold and more recent.
         data = await _fetch_data_from_long_term_stats(
@@ -602,13 +632,6 @@ async def get_entity_history(  # noqa: D417
     if not data:
         return {}
 
-    # Convert any State objects to dict.
-    data = {
-        e: [
-            s.as_dict() if isinstance(s, State) else s for s in v
-        ] for e, v in data.items()
-    }
-
     # Convert datetimes in UTC to local timezone.
     for lst in data.values():
         for d in lst:
@@ -619,8 +642,6 @@ async def get_entity_history(  # noqa: D417
                     d.update({k: dattim_local.strftime("%Y-%m-%dT%H:%M:%S%z")})
                 except (ValueError, TypeError):
                     pass
-                except HomeAssistantError as err:
-                    return f"Unexpected datetime conversion error {err}"
 
     # Return filtered entity data set to avoid filling context with too much data.
     return {k: _filter_data(k,v,hass) for k,v in data.items()}
@@ -669,11 +690,14 @@ async def get_current_device_state( # noqa: D417
         }
 
     # Use the HA LLM API to get overview of all devices.
+    if "configurable" not in config:
+        LOGGER.warning("Configuration not found. Please check your setup.")
+        return {}
     llm_api = config["configurable"]["ha_llm_api"]
     try:
         overview = _parse_input_to_yaml(llm_api.api_prompt)
-    except ValueError as e:
-        LOGGER.error("There was a problem getting device state: %s", e)
+    except ValueError:
+        LOGGER.exception("There was a problem getting device state.")
         return {}
 
     # Get the list of devices.
