@@ -34,7 +34,6 @@ from langchain_core.messages import (
 )
 from langchain_core.runnables import RunnableConfig  # noqa: TC002
 from langchain_core.tools import InjectedToolArg, tool
-from langchain_ollama import ChatOllama  # noqa: TC002
 from langgraph.prebuilt import InjectedStore
 from langgraph.store.base import BaseStore  # noqa: TC002
 from voluptuous import MultipleInvalid
@@ -64,6 +63,8 @@ if TYPE_CHECKING:
     from types import MappingProxyType
 
     from homeassistant.core import HomeAssistant
+    from langchain_core.language_models import BaseMessage, LanguageModelInput
+    from langchain_core.runnables.base import RunnableSerializable
 
 LOGGER = logging.getLogger(__name__)
 
@@ -103,7 +104,7 @@ def _prompt_func(data: dict[str, Any]) -> list[AnyMessage]:
     return [SystemMessage(content=system), HumanMessage(content=content_parts)]
 
 async def analyze_image(
-        vlm_model: ChatOllama,
+        vlm_model: RunnableSerializable[LanguageModelInput, BaseMessage],
         options: dict[str, Any] | MappingProxyType[str, Any],
         image: bytes,
         detection_keywords: list[str] | None = None
@@ -113,7 +114,6 @@ async def analyze_image(
 
     image_data = base64.b64encode(image).decode("utf-8")
 
-    model = vlm_model
     config: RunnableConfig = {
         "configurable": {
             "model": options.get(CONF_VLM, RECOMMENDED_VLM),
@@ -126,7 +126,7 @@ async def analyze_image(
             "num_ctx": VLM_NUM_CTX
         }
     }
-    model_with_config = model.with_config(config)
+    model_with_config = vlm_model.with_config(config)
 
     chain = _prompt_func | model_with_config
 

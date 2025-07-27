@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import homeassistant.util.dt as dt_util
 from homeassistant.components import assist_pipeline, conversation
 from homeassistant.components.conversation import trace
+from homeassistant.components.conversation.models import AbstractConversationAgent
 from homeassistant.const import CONF_LLM_HASS_API, MATCH_ALL
 from homeassistant.exceptions import (
     HomeAssistantError,
@@ -59,8 +60,9 @@ if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
+    from langchain_core.runnables import RunnableConfig
 
-    from . import HGAConfigEntry
+    from . import HGAConfigEntry, HGAData
 
 LOGGER = logging.getLogger(__name__)
 
@@ -96,6 +98,10 @@ def _convert_content(
     content: conversation.UserContent | conversation.AssistantContent,
 ) -> HumanMessage | AIMessage:
     """Convert HA native chat messages to LangChain messages."""
+    if content.content is None:
+        LOGGER.warning("Content is None, returning empty message")
+        return HumanMessage(content="")
+
     if isinstance(content, conversation.UserContent):
         return HumanMessage(content=content.content)
 
@@ -111,7 +117,7 @@ async def async_setup_entry(
     async_add_entities([agent])
 
 class HGAConversationEntity(
-    conversation.ConversationEntity, conversation.AbstractConversationAgent
+    conversation.ConversationEntity, AbstractConversationAgent
 ):
     """Home Generative Assistant conversation agent."""
 
@@ -121,7 +127,6 @@ class HGAConversationEntity(
     def __init__(self, entry: ConfigEntry) -> None:
         """Initialize the agent."""
         self.entry = entry
-        self.app_config: dict[str, dict[str, str]]
         self._attr_unique_id = entry.entry_id
         self._attr_device_info = dr.DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
@@ -172,7 +177,6 @@ class HGAConversationEntity(
         hass = self.hass
         options = self.entry.options
         intent_response = intent.IntentResponse(language=user_input.language)
-        llm_api: llm.API | None = None
         tools: list[dict[str, Any]] | None = None
         user_name: str | None = None
         llm_context = llm.LLMContext(
@@ -204,28 +208,28 @@ class HGAConversationEntity(
             message_history = message_history[-diff:]
             self.message_history_len = mhlen
 
-        if options.get(CONF_LLM_HASS_API):
-            try:
-                llm_api = await llm.async_get_api(
-                    hass,
-                    options[CONF_LLM_HASS_API],
-                    llm_context,
-                )
-            except HomeAssistantError as err:
-                LOGGER.error("Error getting LLM API: %s", err)
-                intent_response.async_set_error(
-                    intent.IntentResponseErrorCode.UNKNOWN,
-                    f"Error preparing LLM API: {err}",
-                )
-                return conversation.ConversationResult(
-                    response=intent_response, conversation_id=user_input.conversation_id
-                )
-            tools = [
-               _format_tool(tool, llm_api.custom_serializer) for tool in llm_api.tools
-            ]
+        try:
+            llm_api = await llm.async_get_api(
+                hass,
+                options[CONF_LLM_HASS_API],
+                llm_context,
+            )
+        except HomeAssistantError:
+            msg = "Error getting LLM API, check your configuration."
+            LOGGER.exception(msg)
+            intent_response.async_set_error(
+                intent.IntentResponseErrorCode.UNKNOWN, msg
+            )
+            return conversation.ConversationResult(
+                response=intent_response, conversation_id=user_input.conversation_id
+            )
+
+        tools = [
+            _format_tool(tool, llm_api.custom_serializer) for tool in llm_api.tools
+        ]
 
         # Add langchain tools to the list of HA tools.
-        langchain_tools = {
+        langchain_tools:dict[str, Any] = {
             "get_and_analyze_camera_image": get_and_analyze_camera_image,
             "upsert_memory": upsert_memory,
             "add_automation": add_automation,
@@ -269,7 +273,7 @@ class HGAConversationEntity(
                 )
             ]
         except TemplateError as err:
-            LOGGER.error("Error rendering prompt: %s", err)
+            LOGGER.exception("Error rendering prompt.")
             intent_response = intent.IntentResponse(language=user_input.language)
             intent_response.async_set_error(
                 intent.IntentResponseErrorCode.UNKNOWN,
@@ -289,7 +293,7 @@ class HGAConversationEntity(
             RECOMMENDED_CHAT_MODEL_LOCATION
         )
         if chat_model_location == "edge":
-            chat_model = self.entry.edge_chat_model
+            chat_model = self.entry.runtime_data.edge_chat_model
             chat_model_with_config = chat_model.with_config(
                 {"configurable":
                     {
@@ -312,7 +316,7 @@ class HGAConversationEntity(
                 }
             )
         else:
-            chat_model = self.entry.chat_model
+            chat_model = self.entry.runtime_data.chat_model
             chat_model_with_config = chat_model.with_config(
                 {"configurable":
                     {
@@ -337,15 +341,15 @@ class HGAConversationEntity(
         user_name = user_name.translate(str.maketrans("", "", string.punctuation))
         LOGGER.debug("User name: %s", user_name)
 
-        self.app_config = {
+        app_config: RunnableConfig = {
             "configurable": {
                 "thread_id": conversation_id,
                 "user_id": user_name,
                 "chat_model": chat_model_with_tools,
                 "prompt": prompt,
                 "options": options,
-                "vlm_model": self.entry.vision_model,
-                "summarization_model": self.entry.summarization_model,
+                "vlm_model": self.entry.runtime_data.vision_model,
+                "summarization_model": self.entry.runtime_data.summarization_model,
                 "langchain_tools": langchain_tools,
                 "ha_llm_api": llm_api or None,
                 "hass": hass,
@@ -355,8 +359,8 @@ class HGAConversationEntity(
 
         # Compile graph into a LangChain Runnable.
         app = workflow.compile(
-            store=self.entry.store,
-            checkpointer=self.entry.checkpointer,
+            store=self.entry.runtime_data.store,
+            checkpointer=self.entry.runtime_data.checkpointer,
             debug=LANGCHAIN_LOGGING_LEVEL=="debug"
         )
 
@@ -370,7 +374,7 @@ class HGAConversationEntity(
         try:
             response = await app.ainvoke(
                 {"messages": messages},
-                config=self.app_config
+                config=app_config
             )
         except HomeAssistantError as err:
             LOGGER.error("LangGraph error: %s", err)

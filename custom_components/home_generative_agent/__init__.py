@@ -9,17 +9,15 @@ from asyncio import QueueEmpty
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import aiofiles
 import async_timeout
 import homeassistant.util.dt as dt_util
-from homeassistant.components.camera import DOMAIN as CAMERA_DOMAIN
+from homeassistant.components.camera.const import DOMAIN as CAMERA_DOMAIN
 from homeassistant.const import (
     CONF_API_KEY,
-    EVENT_STATE_CHANGED,
     Platform,
 )
 from homeassistant.core import HomeAssistant, callback
@@ -30,9 +28,9 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import ConfigurableField
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_openai import ChatOpenAI
-from langgraph.store.postgres import AsyncPostgresStore
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-from psycopg.rows import dict_row
+from langgraph.store.postgres import AsyncPostgresStore
+from psycopg.rows import DictRow, dict_row
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
 from .const import (
@@ -70,33 +68,35 @@ from .const import (
 from .tools import analyze_image
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import Event, HomeAssistant
+    from langchain_core.language_models import BaseMessage, LanguageModelInput
+    from langchain_core.runnables import RunnableConfig
+    from langchain_core.runnables.base import RunnableSerializable
+    from langgraph.store.postgres.base import PostgresIndexConfig
+    from psycopg import AsyncConnection
 
 LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = (Platform.CONVERSATION,)
+PLATFORMS = (Platform.CONVERSATION,)
 
 type HGAConfigEntry = ConfigEntry[HGAData]
 
 @dataclass
 class HGAData:
-    """Data for Home Generative Assistant."""
+    """Run-time data for Home Generative Agent."""
 
-    chat_model: ChatOpenAI
-    edge_chat_model: ChatOllama
-    vision_model: ChatOllama
-    summarization_model: ChatOllama
-    pool: AsyncConnectionPool
+    chat_model: RunnableSerializable[LanguageModelInput, BaseMessage]
+    edge_chat_model: RunnableSerializable[LanguageModelInput, BaseMessage]
+    vision_model: RunnableSerializable[LanguageModelInput, BaseMessage]
+    summarization_model: RunnableSerializable[LanguageModelInput, BaseMessage]
+    pool: AsyncConnectionPool[AsyncConnection[DictRow]]
     store: AsyncPostgresStore
     video_analyzer: VideoAnalyzer
-
-async def _generate_embeddings(
-        texts: list[str],
-        model: OllamaEmbeddings
-    ) -> list[list[float]]:
-    """Generate embeddings from a list of text."""
-    return await model.aembed_documents(texts)
+    checkpointer: AsyncPostgresSaver
+    embedding_model: OllamaEmbeddings
 
 class VideoAnalyzer:
     """Analyze video from recording or motion-triggered cameras."""
@@ -110,20 +110,22 @@ class VideoAnalyzer:
         self._active_queue_tasks: dict[str, asyncio.Task] = {}
         self._initialized_dirs: set[str] = set()
         self._active_motion_cameras: dict[str, asyncio.Task] = {}
-        self._sum_model_cfg = {
-            "model": self.entry.options.get(
-                CONF_SUMMARIZATION_MODEL, RECOMMENDED_SUMMARIZATION_MODEL
-            ),
-            "temperature": self.entry.options.get(
-                CONF_SUMMARIZATION_MODEL_TEMPERATURE,
-                RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
-            ),
-            "top_p": self.entry.options.get(
-                CONF_SUMMARIZATION_MODEL_TOP_P,
-                RECOMMENDED_SUMMARIZATION_MODEL_TOP_P,
-            ),
-            "num_predict": SUMMARIZATION_MODEL_PREDICT,
-            "num_ctx": SUMMARIZATION_MODEL_CTX,
+        self._sum_model_cfg: RunnableConfig = {
+            "configurable": {
+                "model": self.entry.options.get(
+                    CONF_SUMMARIZATION_MODEL, RECOMMENDED_SUMMARIZATION_MODEL
+                ),
+                "temperature": self.entry.options.get(
+                    CONF_SUMMARIZATION_MODEL_TEMPERATURE,
+                    RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
+                ),
+                "top_p": self.entry.options.get(
+                    CONF_SUMMARIZATION_MODEL_TOP_P,
+                    RECOMMENDED_SUMMARIZATION_MODEL_TOP_P,
+                ),
+                "num_predict": SUMMARIZATION_MODEL_PREDICT,
+                "num_ctx": SUMMARIZATION_MODEL_CTX,
+            }
         }
 
     def _get_snapshot_queue(self, camera_id: str) -> asyncio.Queue[Path]:
@@ -180,7 +182,9 @@ class VideoAnalyzer:
             SystemMessage(content=VIDEO_ANALYZER_SYSTEM_MESSAGE),
             HumanMessage(content=prompt),
         ]
-        model = self.entry.summarization_model.with_config(config=self._sum_model_cfg)
+        model = self.entry.runtime_data.summarization_model.with_config(
+            config=self._sum_model_cfg
+        )
         resp = await model.ainvoke(messages)
 
         summary = resp.content
@@ -194,12 +198,12 @@ class VideoAnalyzer:
             self,
             camera_name: str,
             msg: str,
-            first_path_parts: tuple[str]
+            first_path: str
         ) -> bool:
         """Perform anomaly detection on video analysis."""
         # Sematic search of the store with the video analysis as query.
         async with async_timeout.timeout(10):
-            search_results = await self.entry.store.asearch(
+            search_results = await self.entry.runtime_data.store.asearch(
                 ("video_analysis", camera_name),
                 query=msg,
                 limit=10
@@ -208,7 +212,7 @@ class VideoAnalyzer:
         # Calculate a "no newer than" time threshold from first snapshot time
         # by delaying it by the time offset.
         # Snapshot names are in the form "snapshot_20250426_002804.jpg".
-        first_str = first_path_parts[-1].replace("snapshot_", "").replace(".jpg", "")
+        first_str = first_path.replace("snapshot_", "").replace(".jpg", "")
         first_dt = dt_util.as_local(datetime.strptime(first_str, "%Y%m%d_%H%M%S"))  # noqa: DTZ007
 
         # Simple anomaly detection.
@@ -217,7 +221,10 @@ class VideoAnalyzer:
         # video analysis as an anomaly.
         return (
             first_dt < dt_util.now() - timedelta(minutes=VIDEO_ANALYZER_TIME_OFFSET) or
-            any(r.score < VIDEO_ANALYZER_SIMILARITY_THRESHOLD for r in search_results)
+            any(
+                r.score < VIDEO_ANALYZER_SIMILARITY_THRESHOLD
+                for r in search_results if r.score is not None
+            )
         )
 
     async def _prune_old_snapshots(self, camera_id: str, batch: list[Path]) -> None:
@@ -264,20 +271,23 @@ class VideoAnalyzer:
                     data = await f.read()
                 async with async_timeout.timeout(30):
                     desc = await analyze_image(
-                        self.entry.vision_model, self.entry.options, data, None
+                        self.entry.runtime_data.vision_model,
+                        self.entry.options,
+                        data,
+                        None
                     )
                 frame_descriptions.append(desc)
             except FileNotFoundError:
                 LOGGER.warning("[%s] Snapshot not found: %s", camera_id, path)
                 continue
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 LOGGER.warning("[%s] Image analysis timed out for %s", camera_id, path)
                 continue
             except HomeAssistantError:
                 LOGGER.exception("[%s] Error analyzing %s", camera_id, path)
                 continue
-            except Exception as exc:
-                LOGGER.exception("[%s] Unexpected error analyzing %s: %s", camera_id, path, exc)
+            except Exception:
+                LOGGER.exception("[%s] Unexpected error analyzing %s.", camera_id, path)
                 continue
 
         if not frame_descriptions:
@@ -293,15 +303,17 @@ class VideoAnalyzer:
 
         mode = self.entry.options.get(CONF_VIDEO_ANALYZER_MODE)
         if mode == "notify_on_anomaly":
-            if await self._is_anomaly(camera_name, msg, batch[0].parts):
+            first_snapshot = batch[0].parts[-1]
+            LOGGER.debug("[%s] First snapshot: %s", camera_id, first_snapshot)
+            if await self._is_anomaly(camera_name, msg, first_snapshot):
                 LOGGER.debug("[%s] Video is an anomaly!", camera_id)
                 await self._send_notification(msg, camera_name, notify_img)
         else:
-            await self._send_notification(msg, camera_name, camera_id, notify_img)
+            await self._send_notification(msg, camera_name, notify_img)
 
         # Store the result.
         async with async_timeout.timeout(10):
-            await self.entry.store.aput(
+            await self.entry.runtime_data.store.aput(
                 namespace=("video_analysis", camera_name),
                 key=batch[0].name,
                 value={"content": msg, "snapshots": [str(p) for p in batch]},
@@ -448,7 +460,9 @@ class VideoAnalyzer:
             try:
                 path = await self._take_single_snapshot(camera_id, now)
                 if path:
-                    LOGGER.debug("[%s] Enqueued snapshot for processing: %s", camera_id, path)
+                    LOGGER.debug(
+                        "[%s] Enqueued snapshot for processing: %s", camera_id, path
+                    )
             except HomeAssistantError:
                 LOGGER.exception("[%s] Failed to take/enqueue snapshot.", camera_id)
 
@@ -479,12 +493,12 @@ class VideoAnalyzer:
             timedelta(seconds=VIDEO_ANALYZER_SCAN_INTERVAL)
         )
         self._cancel_listen = self.hass.bus.async_listen(
-            EVENT_STATE_CHANGED,
+            "state_changed",
             self._handle_camera_recording_state_change
         )
         if VIDEO_ANALYZER_TRIGGER_ON_MOTION:
             self._cancel_motion_listen = self.hass.bus.async_listen(
-                EVENT_STATE_CHANGED,
+                "state_changed",
                 self._handle_motion_event
             )
         LOGGER.info("Video analyzer started.")
@@ -553,15 +567,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     )
     try:
         await hass.async_add_executor_job(chat_model.get_name)
-    except HomeAssistantError as err:
-        LOGGER.error("Error setting up chat model: %s", err)
+    except HomeAssistantError:
+        LOGGER.exception("Error setting up chat model.")
         return False
-    entry.chat_model = chat_model
 
     edge_chat_model = ChatOllama(
         model=RECOMMENDED_EDGE_CHAT_MODEL,
-        base_url=EDGE_CHAT_MODEL_URL,
-        http_async_client=get_async_client(hass)
+        base_url=EDGE_CHAT_MODEL_URL
     ).configurable_fields(
         model=ConfigurableField(id="model"),
         format=ConfigurableField(id="format"),
@@ -572,15 +584,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     )
     try:
         await hass.async_add_executor_job(edge_chat_model.get_name)
-    except HomeAssistantError as err:
-        LOGGER.error("Error setting up edge chat model: %s", err)
+    except HomeAssistantError:
+        LOGGER.exception("Error setting up edge chat model.")
         return False
-    entry.edge_chat_model = edge_chat_model
 
     vision_model = ChatOllama(
         model=RECOMMENDED_VLM,
         base_url=VLM_URL,
-        http_async_client=get_async_client(hass)
     ).configurable_fields(
         model=ConfigurableField(id="model"),
         format=ConfigurableField(id="format"),
@@ -591,15 +601,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     )
     try:
         await hass.async_add_executor_job(vision_model.get_name)
-    except HomeAssistantError as err:
-        LOGGER.error("Error setting up VLM: %s", err)
+    except HomeAssistantError:
+        LOGGER.exception("Error setting up VLM.")
         return False
-    entry.vision_model = vision_model
 
     summarization_model = ChatOllama(
         model=RECOMMENDED_SUMMARIZATION_MODEL,
-        base_url=SUMMARIZATION_MODEL_URL,
-        http_async_client=get_async_client(hass)
+        base_url=SUMMARIZATION_MODEL_URL
     ).configurable_fields(
         model=ConfigurableField(id="model"),
         format=ConfigurableField(id="format"),
@@ -610,10 +618,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     )
     try:
         await hass.async_add_executor_job(vision_model.get_name)
-    except HomeAssistantError as err:
-        LOGGER.error("Error setting up summarization model: %s", err)
+    except HomeAssistantError:
+        LOGGER.exception("Error setting up summarization model.")
         return False
-    entry.summarization_model = summarization_model
 
     embedding_model = OllamaEmbeddings(
         model=RECOMMENDED_EMBEDDING_MODEL,
@@ -626,7 +633,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     #except HomeAssistantError as err:
         #LOGGER.error("Error setting up embedding model: %s", err)
         #return False
-    entry.embedding_model = embedding_model
+    #entry.embedding_model = embedding_model
 
     # Open postgresql database for short-term and long-term memory.
     connection_kwargs = {
@@ -634,7 +641,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         "prepare_threshold": 0,
         "row_factory": dict_row
     }
-    pool = AsyncConnectionPool(
+    pool: AsyncConnectionPool[AsyncConnection[DictRow]] = AsyncConnectionPool(
         conninfo=DB_URI,
         min_size=5,
         max_size=20,
@@ -643,38 +650,48 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     )
     try:
         await pool.open()
-    except PoolTimeout as err:
-        LOGGER.error("Error opening postgresql db: %s", err)
+    except PoolTimeout:
+        LOGGER.exception("Error opening postgresql db.")
         return False
-    entry.pool = pool
 
     # Initialize store for session-based (long-term) memory with semantic search.
+    async def _generate_embeddings(texts: Sequence[str]) -> list[list[float]]:
+        """Generate embeddings from a list of text."""
+        return await embedding_model.aembed_documents(list(texts))
+    index_config: PostgresIndexConfig= {
+        "embed": _generate_embeddings,
+        "dims": EMBEDDING_MODEL_DIMS,
+        "fields": ["content"]
+    }
+    # NOTE: must call .setup() the first time store is used.
     store = AsyncPostgresStore(
         pool,
-        index={
-            "embed": partial(
-                _generate_embeddings,
-                model=embedding_model
-            ),
-            "dims": EMBEDDING_MODEL_DIMS,
-            "fields": ["content"]
-        }
+        index=index_config,
     )
     # NOTE: must call .setup() the first time store is used.
-    await store.setup()  # noqa: ERA001
-    entry.store = store
+    #await store.setup()  # noqa: ERA001
 
-     # Initialize database for thread-based (short-term) memory.
+    # Initialize database for thread-based (short-term) memory.
     checkpointer = AsyncPostgresSaver(pool)
     # NOTE: must call .setup() the first time checkpointer is used.
-    await checkpointer.setup()  # noqa: ERA001
-    entry.checkpointer = checkpointer
+    #await checkpointer.setup()  # noqa: ERA001
 
     # Initialize video analyzer and start if option is set.
     video_analyzer = VideoAnalyzer(hass, entry)
     if entry.options.get(CONF_VIDEO_ANALYZER_MODE) != "disable":
         video_analyzer.start()
-    entry.video_analyzer = video_analyzer
+
+    entry.runtime_data = HGAData(
+        chat_model=chat_model,
+        edge_chat_model=edge_chat_model,
+        vision_model=vision_model,
+        summarization_model=summarization_model,
+        pool=pool,
+        store=store,
+        video_analyzer=video_analyzer,
+        checkpointer=checkpointer,
+        embedding_model=embedding_model
+    )
 
     # Setup conversation platform.
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -683,10 +700,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
 async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     """Unload Home Generative Agent."""
-    pool = entry.pool
+    pool = entry.runtime_data.pool
     await pool.close()
 
-    video_analyzer = entry.video_analyzer
+    video_analyzer = entry.runtime_data.video_analyzer
     await video_analyzer.stop()
 
     await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
