@@ -11,17 +11,17 @@
   "issue_tracker": "https://github.com/goruck/home_generative_agent/issues",
   "requirements": [
     "aiofiles==24.1.0",
-    "langchain==0.3.25",
-    "langchain-openai==0.3.16",
-    "langchain-ollama==0.3.3",
-    "langgraph==0.4.4",
-    "langgraph-checkpoint-postgres==2.0.21",
-    "openai==1.88.0",
-    "ollama==0.4.8",
+    "langchain==0.3.27",
+    "langchain-openai==0.3.28",
+    "langchain-ollama==0.3.6",
+    "langgraph==0.6.0",
+    "langgraph-checkpoint-postgres==2.0.23",
+    "openai==1.97.1",
+    "ollama==0.5.1",
     "psycopg==3.2.6",
-    "psycopg-binary==3.2.6",
+    "psycopg-binary==3.2.9",
     "psycopg-pool==3.2.6",
-    "transformers==4.51.3"
+    "transformers==4.54.0"
   ],
-  "version": "1.0.0"
+  "version": "1.0.1"
 }
