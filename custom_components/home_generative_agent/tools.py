@@ -332,7 +332,7 @@ def _get_state_and_decimate(
         state_values = state_values[::factor]
     return state_values
 
-def _gen_dict_extract(key: str, var: dict) -> Generator[str, None, None]:
+def _gen_dict_extract(key: str, var: dict) -> Generator[str]:
     """Find a key in nested dict."""
     if hasattr(var,"items"):
         for k, v in var.items():
