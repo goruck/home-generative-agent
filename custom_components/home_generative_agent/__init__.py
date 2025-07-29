@@ -258,9 +258,6 @@ class VideoAnalyzer:
         except QueueEmpty:
             pass
 
-        if not batch:
-            return
-
         camera_name = camera_id.split(".")[-1]
 
         # Generate frame descriptions.
@@ -432,7 +429,9 @@ class VideoAnalyzer:
         if new_state.state == "on" and (old_state is None or old_state.state != "on"):
             if camera_id not in self._active_motion_cameras:
                 LOGGER.debug("Motion ON: Starting snapshot loop for %s", camera_id)
-                task = self.hass.async_create_task(self._motion_snapshot_loop(camera_id))
+                task = self.hass.async_create_task(
+                    self._motion_snapshot_loop(camera_id)
+                )
                 self._active_motion_cameras[camera_id] = task
 
         elif new_state.state == "off" and camera_id in self._active_motion_cameras:
@@ -532,13 +531,16 @@ class VideoAnalyzer:
         try:
             self._cancel_listen()
         except HomeAssistantError:
-            LOGGER.warning("Error unsubscribing recording state listener", exc_info=True)
+            LOGGER.warning(
+                "Error unsubscribing recording state listener", exc_info=True)
 
         if hasattr(self, "_cancel_motion_listen"):
             try:
                 self._cancel_motion_listen()
             except HomeAssistantError:
-                LOGGER.warning("Error unsubscribing motion event listener", exc_info=True)
+                LOGGER.warning(
+                    "Error unsubscribing motion event listener", exc_info=True
+                )
 
         # Await cancellation of all background tasks, with timeout.
         if tasks_to_await:
@@ -555,7 +557,9 @@ class VideoAnalyzer:
 async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     """Set up Home Generative Agent from a config entry."""
     # Initialize models and verify they were setup correctly.
-    chat_model = ChatOpenAI( #TODO: fix blocking call
+    # TODO(goruck): fix blocking call.
+    # https://github.com/goruck/home-generative-agent/issues/110
+    chat_model = ChatOpenAI(
         api_key=entry.data.get(CONF_API_KEY),
         timeout=10,
         http_async_client=get_async_client(hass),
@@ -627,13 +631,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         base_url=EMBEDDING_MODEL_URL,
         num_ctx=EMBEDDING_MODEL_CTX
     )
-    # TODO: find a way to verify embedding model was setup correctly.
-    #try:
-        #await hass.async_add_executor_job(embedding_model.get_name)
-    #except HomeAssistantError as err:
-        #LOGGER.error("Error setting up embedding model: %s", err)
-        #return False
-    #entry.embedding_model = embedding_model
 
     # Open postgresql database for short-term and long-term memory.
     connection_kwargs = {
