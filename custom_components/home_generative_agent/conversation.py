@@ -1,4 +1,5 @@
 """Conversation support for Home Generative Agent using langgraph."""
+
 from __future__ import annotations
 
 import logging
@@ -76,6 +77,7 @@ else:
     set_verbose(False)
     set_debug(False)
 
+
 def _format_tool(
     tool: llm.Tool, custom_serializer: Callable[[Any], Any] | None
 ) -> dict[str, Any]:
@@ -94,6 +96,7 @@ def _format_tool(
         tool_spec["description"] = tool.description
     return {"type": "function", "function": tool_spec}
 
+
 def _convert_content(
     content: conversation.UserContent | conversation.AssistantContent,
 ) -> HumanMessage | AIMessage:
@@ -107,6 +110,7 @@ def _convert_content(
 
     return AIMessage(content=content.content)
 
+
 async def async_setup_entry(
     hass: HomeAssistant,  # noqa: ARG001
     config_entry: HGAConfigEntry,
@@ -116,9 +120,8 @@ async def async_setup_entry(
     agent = HGAConversationEntity(config_entry)
     async_add_entities([agent])
 
-class HGAConversationEntity(
-    conversation.ConversationEntity, AbstractConversationAgent
-):
+
+class HGAConversationEntity(conversation.ConversationEntity, AbstractConversationAgent):
     """Home Generative Assistant conversation agent."""
 
     _attr_has_entity_name = True
@@ -169,10 +172,10 @@ class HGAConversationEntity(
         return MATCH_ALL
 
     async def _async_handle_message(  # noqa: PLR0915
-            self,
-            user_input: conversation.ConversationInput,
-            chat_log: conversation.ChatLog,
-        ) -> conversation.ConversationResult:
+        self,
+        user_input: conversation.ConversationInput,
+        chat_log: conversation.ChatLog,
+    ) -> conversation.ConversationResult:
         """Process the user input."""
         hass = self.hass
         options = self.entry.options
@@ -193,7 +196,8 @@ class HGAConversationEntity(
         # the entire context is visible. LangChain will handle the rest of the message
         # history so we don't need to stream anything back into the chat log.
         message_history = [
-            _convert_content(m) for m in chat_log.content
+            _convert_content(m)
+            for m in chat_log.content
             if isinstance(m, conversation.UserContent | conversation.AssistantContent)
         ]
         # The last chat log entry will be the current user request, include it later.
@@ -217,9 +221,7 @@ class HGAConversationEntity(
         except HomeAssistantError:
             msg = "Error getting LLM API, check your configuration."
             LOGGER.exception(msg)
-            intent_response.async_set_error(
-                intent.IntentResponseErrorCode.UNKNOWN, msg
-            )
+            intent_response.async_set_error(intent.IntentResponseErrorCode.UNKNOWN, msg)
             return conversation.ConversationResult(
                 response=intent_response, conversation_id=user_input.conversation_id
             )
@@ -229,7 +231,7 @@ class HGAConversationEntity(
         ]
 
         # Add langchain tools to the list of HA tools.
-        langchain_tools:dict[str, Any] = {
+        langchain_tools: dict[str, Any] = {
             "get_and_analyze_camera_image": get_and_analyze_camera_image,
             "upsert_memory": upsert_memory,
             "add_automation": add_automation,
@@ -247,9 +249,7 @@ class HGAConversationEntity(
         if (
             user_input.context
             and user_input.context.user_id
-            and (
-                user := await hass.auth.async_get_user(user_input.context.user_id)
-            )
+            and (user := await hass.auth.async_get_user(user_input.context.user_id))
         ):
             user_name = user.name
 
@@ -260,7 +260,9 @@ class HGAConversationEntity(
                         llm.BASE_PROMPT
                         + options.get(CONF_PROMPT, llm.DEFAULT_INSTRUCTIONS_PROMPT)
                         + f"\nYou are in the {self.tz} timezone."
-                        + TOOL_CALL_ERROR_SYSTEM_MESSAGE if tools else ""
+                        + TOOL_CALL_ERROR_SYSTEM_MESSAGE
+                        if tools
+                        else ""
                     ),
                     self.hass,
                 ).async_render(
@@ -289,21 +291,19 @@ class HGAConversationEntity(
         prompt = "\n".join(prompt_parts)
 
         chat_model_location = options.get(
-            CONF_CHAT_MODEL_LOCATION,
-            RECOMMENDED_CHAT_MODEL_LOCATION
+            CONF_CHAT_MODEL_LOCATION, RECOMMENDED_CHAT_MODEL_LOCATION
         )
         if chat_model_location == "edge":
             chat_model = self.entry.runtime_data.edge_chat_model
             chat_model_with_config = chat_model.with_config(
-                {"configurable":
-                    {
+                {
+                    "configurable": {
                         "model": options.get(
-                            CONF_EDGE_CHAT_MODEL,
-                            RECOMMENDED_EDGE_CHAT_MODEL
+                            CONF_EDGE_CHAT_MODEL, RECOMMENDED_EDGE_CHAT_MODEL
                         ),
                         "temperature": options.get(
                             CONF_EDGE_CHAT_MODEL_TEMPERATURE,
-                            RECOMMENDED_EDGE_CHAT_MODEL_TEMPERATURE
+                            RECOMMENDED_EDGE_CHAT_MODEL_TEMPERATURE,
                         ),
                         "top_p": options.get(
                             CONF_EDGE_CHAT_MODEL_TOP_P,
@@ -311,22 +311,20 @@ class HGAConversationEntity(
                         ),
                         "num_predict": CHAT_MODEL_MAX_TOKENS,
                         "num_ctx": CHAT_MODEL_NUM_CTX,
-
                     }
                 }
             )
         else:
             chat_model = self.entry.runtime_data.chat_model
             chat_model_with_config = chat_model.with_config(
-                {"configurable":
-                    {
+                {
+                    "configurable": {
                         "model_name": options.get(
-                            CONF_CHAT_MODEL,
-                            RECOMMENDED_CHAT_MODEL
+                            CONF_CHAT_MODEL, RECOMMENDED_CHAT_MODEL
                         ),
                         "temperature": options.get(
                             CONF_CHAT_MODEL_TEMPERATURE,
-                            RECOMMENDED_CHAT_MODEL_TEMPERATURE
+                            RECOMMENDED_CHAT_MODEL_TEMPERATURE,
                         ),
                         "max_tokens": CHAT_MODEL_MAX_TOKENS,
                     }
@@ -354,14 +352,14 @@ class HGAConversationEntity(
                 "ha_llm_api": llm_api or None,
                 "hass": hass,
             },
-            "recursion_limit": 10
+            "recursion_limit": 10,
         }
 
         # Compile graph into a LangChain Runnable.
         app = workflow.compile(
             store=self.entry.runtime_data.store,
             checkpointer=self.entry.runtime_data.checkpointer,
-            debug=LANGCHAIN_LOGGING_LEVEL=="debug"
+            debug=LANGCHAIN_LOGGING_LEVEL == "debug",
         )
 
         # The input to the agent is the message history combined with
@@ -372,10 +370,7 @@ class HGAConversationEntity(
 
         # Interact with agent app.
         try:
-            response = await app.ainvoke(
-                {"messages": messages},
-                config=app_config
-            )
+            response = await app.ainvoke({"messages": messages}, config=app_config)
         except HomeAssistantError as err:
             LOGGER.exception("LangGraph error during conversation processing.")
             intent_response = intent.IntentResponse(language=user_input.language)

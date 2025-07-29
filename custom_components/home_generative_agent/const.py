@@ -80,7 +80,7 @@ CONTEXT_MAX_MESSAGES = 80
 # TODO(goruck): fix the token counter to get an accurate count.  # noqa: FIX002
 # https://github.com/goruck/home-generative-agent/issues/109
 #
-CONTEXT_MAX_TOKENS = (CHAT_MODEL_NUM_CTX - CHAT_MODEL_MAX_TOKENS - 2048 - 4096) # 57344
+CONTEXT_MAX_TOKENS = CHAT_MODEL_NUM_CTX - CHAT_MODEL_MAX_TOKENS - 2048 - 4096  # 57344
 
 ### Chat model tool error handling parameters. ###
 TOOL_CALL_ERROR_SYSTEM_MESSAGE = """
@@ -99,7 +99,8 @@ EDGE_CHAT_MODEL_URL = "192.168.1.252:11434"
 # Reasoning delimiters for models that use them in output.
 # These may be model dependent, the defaults work for qwen3.
 EDGE_CHAT_MODEL_REASONING_DELIMITER: dict[str, str] = {
-    "start": "<think>", "end": "</think>"
+    "start": "<think>",
+    "end": "</think>",
 }
 
 ### Ollama VLM parameters. ###
@@ -132,7 +133,8 @@ SUMMARIZATION_MODEL_CTX = 32768
 # Reasoning delimiters for models that use them in output.
 # These may be model dependent, the defaults work for qwen3.
 SUMMARIZATION_MODEL_REASONING_DELIMITER: dict[str, str] = {
-    "start": "<think>", "end": "</think>"
+    "start": "<think>",
+    "end": "</think>",
 }
 # Model prompts for summary tasks.
 SUMMARY_SYSTEM_PROMPT = "You are a bot that summarizes messages from a smart home AI."
@@ -153,7 +155,7 @@ Represent this sentence for searching relevant passages: {query}
 
 ### Tool parameters. ###
 HISTORY_TOOL_CONTEXT_LIMIT = 50
-HISTORY_TOOL_PURGE_KEEP_DAYS = 10 # TO-DO derive actual recorder setting
+HISTORY_TOOL_PURGE_KEEP_DAYS = 10  # TO-DO derive actual recorder setting
 AUTOMATION_TOOL_EVENT_REGISTERED = "automation_registered_via_home_generative_agent"
 AUTOMATION_TOOL_BLUEPRINT_NAME = "goruck/hga_scene_analysis.yaml"
 

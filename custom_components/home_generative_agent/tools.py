@@ -1,4 +1,5 @@
 """Langgraph tools for Home Generative Agent."""
+
 from __future__ import annotations
 
 import asyncio
@@ -68,6 +69,7 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
+
 async def _get_camera_image(hass: HomeAssistant, camera_name: str) -> bytes | None:
     """Get an image from a given camera."""
     camera_entity_id: str = f"camera.{camera_name.lower()}"
@@ -76,15 +78,14 @@ async def _get_camera_image(hass: HomeAssistant, camera_name: str) -> bytes | No
             hass=hass,
             entity_id=camera_entity_id,
             width=VLM_IMAGE_WIDTH,
-            height=VLM_IMAGE_HEIGHT
+            height=VLM_IMAGE_HEIGHT,
         )
     except HomeAssistantError:
-        LOGGER.exception(
-            "Error getting image from camera %s", camera_entity_id
-        )
+        LOGGER.exception("Error getting image from camera %s", camera_entity_id)
         return None
 
     return image.content
+
 
 def _prompt_func(data: dict[str, Any]) -> list[AnyMessage]:
     system = data["system"]
@@ -103,12 +104,13 @@ def _prompt_func(data: dict[str, Any]) -> list[AnyMessage]:
 
     return [SystemMessage(content=system), HumanMessage(content=content_parts)]
 
+
 async def analyze_image(
-        vlm_model: RunnableSerializable[LanguageModelInput, BaseMessage],
-        options: dict[str, Any] | MappingProxyType[str, Any],
-        image: bytes,
-        detection_keywords: list[str] | None = None
-    ) -> str:
+    vlm_model: RunnableSerializable[LanguageModelInput, BaseMessage],
+    options: dict[str, Any] | MappingProxyType[str, Any],
+    image: bytes,
+    detection_keywords: list[str] | None = None,
+) -> str:
     """Analyze an image."""
     await asyncio.sleep(0)
 
@@ -118,12 +120,11 @@ async def analyze_image(
         "configurable": {
             "model": options.get(CONF_VLM, RECOMMENDED_VLM),
             "temperature": options.get(
-                CONF_VLM_TEMPERATURE,
-                RECOMMENDED_VLM_TEMPERATURE
+                CONF_VLM_TEMPERATURE, RECOMMENDED_VLM_TEMPERATURE
             ),
             "top_p": options.get(CONF_VLM_TOP_P, RECOMMENDED_VLM_TOP_P),
             "num_predict": VLM_NUM_PREDICT,
-            "num_ctx": VLM_NUM_CTX
+            "num_ctx": VLM_NUM_CTX,
         }
     }
     model_with_config = vlm_model.with_config(config)
@@ -138,12 +139,8 @@ async def analyze_image(
         prompt = VLM_USER_PROMPT
 
     try:
-        response =  await chain.ainvoke(
-            {
-                "system": VLM_SYSTEM_PROMPT,
-                "text": prompt,
-                "image": image_data
-            }
+        response = await chain.ainvoke(
+            {"system": VLM_SYSTEM_PROMPT, "text": prompt, "image": image_data}
         )
     except HomeAssistantError:
         msg = "Error analyzing image with VLM model."
@@ -152,14 +149,15 @@ async def analyze_image(
     else:
         return response.text()
 
+
 @tool(parse_docstring=True)
-async def get_and_analyze_camera_image( # noqa: D417
-        camera_name: str,
-        detection_keywords: list[str] | None = None,
-        *,
-        # Hide these arguments from the model.
-        config: Annotated[RunnableConfig, InjectedToolArg()],
-    ) -> str:
+async def get_and_analyze_camera_image(  # noqa: D417
+    camera_name: str,
+    detection_keywords: list[str] | None = None,
+    *,
+    # Hide these arguments from the model.
+    config: Annotated[RunnableConfig, InjectedToolArg()],
+) -> str:
     """
     Get a camera image and perform scene analysis on it.
 
@@ -181,8 +179,9 @@ async def get_and_analyze_camera_image( # noqa: D417
         return "Error getting image from camera."
     return await analyze_image(vlm_model, options, image, detection_keywords)
 
+
 @tool(parse_docstring=True)
-async def upsert_memory( # noqa: D417
+async def upsert_memory(  # noqa: D417
     content: str,
     context: str = "",
     *,
@@ -222,6 +221,7 @@ async def upsert_memory( # noqa: D417
     )
     return f"Stored memory {mem_id}"
 
+
 @tool(parse_docstring=True)
 async def add_automation(  # noqa: D417
     automation_yaml: str = "",
@@ -229,7 +229,7 @@ async def add_automation(  # noqa: D417
     message: str = "",
     *,
     # Hide these arguments from the model.
-    config: Annotated[RunnableConfig, InjectedToolArg()]
+    config: Annotated[RunnableConfig, InjectedToolArg()],
 ) -> str:
     """
     Add an automation to Home Assistant.
@@ -263,8 +263,8 @@ async def add_automation(  # noqa: D417
                 "input": {
                     "time_pattern": time_pattern,
                     "message": message,
-                }
-            }
+                },
+            },
         }
         automation_yaml = yaml.dump(automation_data)
 
@@ -277,17 +277,16 @@ async def add_automation(  # noqa: D417
 
     try:
         await _async_validate_config_item(
-            hass = hass,
-            config = ha_automation_config,
-            raise_on_errors = True,
-            warn_on_errors = False
+            hass=hass,
+            config=ha_automation_config,
+            raise_on_errors=True,
+            warn_on_errors=False,
         )
     except (HomeAssistantError, MultipleInvalid) as err:
         return f"Invalid automation configuration {err}"
 
     async with aiofiles.open(
-        Path(hass.config.config_dir) / AUTOMATION_CONFIG_PATH,
-        encoding="utf-8"
+        Path(hass.config.config_dir) / AUTOMATION_CONFIG_PATH, encoding="utf-8"
     ) as f:
         ha_exsiting_automation_configs = await f.read()
         ha_exsiting_automations_yaml = yaml.safe_load(ha_exsiting_automation_configs)
@@ -295,7 +294,7 @@ async def add_automation(  # noqa: D417
     async with aiofiles.open(
         Path(hass.config.config_dir) / AUTOMATION_CONFIG_PATH,
         "a" if ha_exsiting_automations_yaml else "w",
-        encoding="utf-8"
+        encoding="utf-8",
     ) as f:
         ha_automation_config_raw = yaml.dump(
             [ha_automation_config], allow_unicode=True, sort_keys=False
@@ -314,11 +313,12 @@ async def add_automation(  # noqa: D417
 
     return f"Added automation {ha_automation_config['id']}"
 
+
 def _get_state_and_decimate(
-        data:list[dict[str, str]],
-        keys:list[str] | None = None,
-        limit:int = HISTORY_TOOL_CONTEXT_LIMIT
-    ) -> list[dict[str, str]]:
+    data: list[dict[str, str]],
+    keys: list[str] | None = None,
+    limit: int = HISTORY_TOOL_CONTEXT_LIMIT,
+) -> list[dict[str, str]]:
     if keys is None:
         keys = ["state", "last_changed"]
     # Filter entity data to only state values with datetimes.
@@ -332,9 +332,10 @@ def _get_state_and_decimate(
         state_values = state_values[::factor]
     return state_values
 
+
 def _gen_dict_extract(key: str, var: dict) -> Generator[str]:
     """Find a key in nested dict."""
-    if hasattr(var,"items"):
+    if hasattr(var, "items"):
         for k, v in var.items():
             if k == key:
                 yield v
@@ -346,11 +347,10 @@ def _gen_dict_extract(key: str, var: dict) -> Generator[str]:
                     for result in _gen_dict_extract(key, d):
                         yield result
 
+
 def _filter_data(
-        entity_id:str,
-        data:list[dict[str, str]],
-        hass:HomeAssistant
-    ) -> dict[str, Any]:
+    entity_id: str, data: list[dict[str, str]], hass: HomeAssistant
+) -> dict[str, Any]:
     state_obj = hass.states.get(entity_id)
     if not state_obj:
         return {}
@@ -369,7 +369,7 @@ def _filter_data(
 
         # Filter history to just state values (no datetimes).
         state_values = []
-        for x in list(_gen_dict_extract("state", {entity_id:data})):
+        for x in list(_gen_dict_extract("state", {entity_id: data})):
             try:
                 state_values.append(float(x))
             except ValueError:
@@ -380,23 +380,21 @@ def _filter_data(
         if zero_indices:
             # Start data set from last time the sensor was reset.
             LOGGER.warning("Sensor was reset during time of interest.")
-            state_values = state_values[zero_indices[-1]:]
+            state_values = state_values[zero_indices[-1] :]
         state_value_change = max(state_values) - min(state_values)
         units = state_obj.attributes.get("unit_of_measurement")
         return {"value": state_value_change, "units": units}
 
     return {"values": _get_state_and_decimate(data)}
 
+
 async def _fetch_data_from_history(
-        hass:HomeAssistant,
-        start_time:datetime,
-        end_time:datetime,
-        entity_ids:list[str]
-    ) -> dict[str, list[dict[str, Any]]]:
+    hass: HomeAssistant, start_time: datetime, end_time: datetime, entity_ids: list[str]
+) -> dict[str, list[dict[str, Any]]]:
     filters = None
     include_start_time_state = True
     significant_changes_only = True
-    minimal_response = True # If True filter out duplicate states
+    minimal_response = True  # If True filter out duplicate states
     no_attributes = False
     compressed_state_format = False
 
@@ -413,7 +411,7 @@ async def _fetch_data_from_history(
             significant_changes_only,
             minimal_response,
             no_attributes,
-            compressed_state_format
+            compressed_state_format,
         )
 
     if not result:
@@ -421,17 +419,14 @@ async def _fetch_data_from_history(
 
     # Convert any State objects to dict.
     return {
-        e: [
-            s.as_dict() if isinstance(s, State) else s for s in v
-        ] for e, v in result.items()
+        e: [s.as_dict() if isinstance(s, State) else s for s in v]
+        for e, v in result.items()
     }
 
+
 async def _fetch_data_from_long_term_stats(
-        hass:HomeAssistant,
-        start_time:datetime,
-        end_time:datetime,
-        entity_ids:list[str]
-    ) -> dict[str, list[dict[str, Any]]]:
+    hass: HomeAssistant, start_time: datetime, end_time: datetime, entity_ids: list[str]
+) -> dict[str, list[dict[str, Any]]]:
     period = "hour"
     units = None
 
@@ -448,22 +443,25 @@ async def _fetch_data_from_long_term_stats(
         set(entity_ids),
         period,
         units,
-        types
+        types,
     )
 
     # Make data format consistent with the History format.
-    parsed_result:dict[str, list[dict[str, Any]]] = {}
+    parsed_result: dict[str, list[dict[str, Any]]] = {}
     for k, v in result.items():
-        data:list[dict[str, Any]] = [
+        data: list[dict[str, Any]] = [
             {
                 "state": d["state"] if "state" in d else d.get("mean"),
-                "last_changed": dt_util.as_local(
-                    dt_util.utc_from_timestamp(d["end"])) if "end" in d else None
-            } for d in v
+                "last_changed": dt_util.as_local(dt_util.utc_from_timestamp(d["end"]))
+                if "end" in d
+                else None,
+            }
+            for d in v
         ]
         parsed_result[k] = data
 
     return parsed_result
+
 
 def _as_utc(dattim: str, default: datetime, error_message: str) -> datetime:
     """
@@ -490,14 +488,17 @@ def _as_utc(dattim: str, default: datetime, error_message: str) -> datetime:
 
     return dt_util.as_utc(parsed_datetime)
 
+
 # Allow domains like "sensor", "binary_sensor", "camera", etc.
 _DOMAIN_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 # Valid HA entity_id = <domain>.<object_id>, both starting with a letter,
 # then letters, digits or underscores
 _ENTITY_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$")
 
+
 async def _get_existing_entity_id(
-    name: str, hass: HomeAssistant, domain: str = "sensor") -> str:
+    name: str, hass: HomeAssistant, domain: str = "sensor"
+) -> str:
     """
     Lookup an existing entity by its friendly name in a sync context.
 
@@ -537,6 +538,7 @@ async def _get_existing_entity_id(
 
     return eid
 
+
 @tool(parse_docstring=True)
 async def get_entity_history(  # noqa: D417
     names: list[tuple[str, str]],
@@ -544,7 +546,7 @@ async def get_entity_history(  # noqa: D417
     local_end_time: str,
     *,
     # Hide these arguments from the model.
-    config: Annotated[RunnableConfig, InjectedToolArg()]
+    config: Annotated[RunnableConfig, InjectedToolArg()],
 ) -> dict[str, dict[str, list[dict[str, str]]]]:
     """
     Get entity state history from Home Assistant.
@@ -580,53 +582,46 @@ async def get_entity_history(  # noqa: D417
     one_day = timedelta(days=1)
     try:
         start_time = _as_utc(
-            dattim = local_start_time,
-            default = now - one_day,
-            error_message = "start_time not valid"
+            dattim=local_start_time,
+            default=now - one_day,
+            error_message="start_time not valid",
         )
         end_time = _as_utc(
-            dattim = local_end_time,
-            default = start_time + one_day,
-            error_message = "end_time not valid"
+            dattim=local_end_time,
+            default=start_time + one_day,
+            error_message="end_time not valid",
         )
     except HomeAssistantError:
         LOGGER.exception("Error parsing start or end time.")
         return {}
 
-     # Calculate the threshold to fetch data from history or long-term statistics.
+    # Calculate the threshold to fetch data from history or long-term statistics.
     threshold = dt_util.now() - timedelta(days=HISTORY_TOOL_PURGE_KEEP_DAYS)
 
     # Check if the range spans both "old" and "recent" dates.
-    data:dict[str, list[dict[str, Any]]] = {}
+    data: dict[str, list[dict[str, Any]]] = {}
     if start_time < threshold and end_time >= threshold:
         # The range includes datetimes both older than threshold and more recent.
         data = await _fetch_data_from_long_term_stats(
-            hass=hass,
-            start_time=start_time,
-            end_time=threshold,
-            entity_ids=entity_ids
+            hass=hass, start_time=start_time, end_time=threshold, entity_ids=entity_ids
         )
-        data.update(await _fetch_data_from_history(
-            hass=hass,
-            start_time=threshold,
-            end_time=end_time,
-            entity_ids=entity_ids
-        ))
+        data.update(
+            await _fetch_data_from_history(
+                hass=hass,
+                start_time=threshold,
+                end_time=end_time,
+                entity_ids=entity_ids,
+            )
+        )
     elif end_time < threshold:
         # Entire range is older than threshold.
         data = await _fetch_data_from_long_term_stats(
-            hass=hass,
-            start_time=start_time,
-            end_time=end_time,
-            entity_ids=entity_ids
+            hass=hass, start_time=start_time, end_time=end_time, entity_ids=entity_ids
         )
     else:
         # Entire range is more recent than threshold.
         data = await _fetch_data_from_history(
-            hass=hass,
-            start_time=start_time,
-            end_time=end_time,
-            entity_ids=entity_ids
+            hass=hass, start_time=start_time, end_time=end_time, entity_ids=entity_ids
         )
 
     if not data:
@@ -644,19 +639,20 @@ async def get_entity_history(  # noqa: D417
                     pass
 
     # Return filtered entity data set to avoid filling context with too much data.
-    return {k: _filter_data(k,v,hass) for k,v in data.items()}
+    return {k: _filter_data(k, v, hass) for k, v in data.items()}
+
 
 ###
 # This tool has been replaced by the HA native tool GetLiveContext.
 # It is no longer used. Keeping it here for reference only.
 ###
 @tool(parse_docstring=True)
-async def get_current_device_state( # noqa: D417
-        names: list[str],
-        *,
-        # Hide these arguments from the model.
-        config: Annotated[RunnableConfig, InjectedToolArg()],
-    ) -> dict[str, str]:
+async def get_current_device_state(  # noqa: D417
+    names: list[str],
+    *,
+    # Hide these arguments from the model.
+    config: Annotated[RunnableConfig, InjectedToolArg()],
+) -> dict[str, str]:
     """
     Get the current state of one or more Home Assistant devices.
 
@@ -664,6 +660,7 @@ async def get_current_device_state( # noqa: D417
         names: List of Home Assistant device names.
 
     """
+
     def _parse_input_to_yaml(input_text: str) -> dict[str, Any]:
         # Define the marker that separates instructions from the device list.
         split_marker = "An overview of the areas and the devices in this smart home:"
@@ -684,10 +681,7 @@ async def get_current_device_state( # noqa: D417
         devices = yaml.safe_load(devices_yaml)
 
         # Combine into a single dictionary
-        return {
-            "instructions": instructions,
-            "devices": devices
-        }
+        return {"instructions": instructions, "devices": devices}
 
     # Use the HA LLM API to get overview of all devices.
     if "configurable" not in config:

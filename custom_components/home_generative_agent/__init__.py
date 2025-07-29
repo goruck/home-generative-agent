@@ -84,6 +84,7 @@ PLATFORMS = (Platform.CONVERSATION,)
 
 type HGAConfigEntry = ConfigEntry[HGAData]
 
+
 @dataclass
 class HGAData:
     """Run-time data for Home Generative Agent."""
@@ -97,6 +98,7 @@ class HGAData:
     video_analyzer: VideoAnalyzer
     checkpointer: AsyncPostgresSaver
     embedding_model: OllamaEmbeddings
+
 
 class VideoAnalyzer:
     """Analyze video from recording or motion-triggered cameras."""
@@ -134,18 +136,13 @@ class VideoAnalyzer:
             queue: asyncio.Queue[Path] = asyncio.Queue()
             self._snapshot_queues[camera_id] = queue
             # Kick off the consumer.
-            task = self.hass.async_create_task(
-                self._process_snapshot_queue(camera_id)
-            )
+            task = self.hass.async_create_task(self._process_snapshot_queue(camera_id))
             self._active_queue_tasks[camera_id] = task
         return self._snapshot_queues[camera_id]
 
     async def _send_notification(
-            self,
-            msg: str,
-            camera_name: str,
-            notify_img_path: Path
-        ) -> None:
+        self, msg: str, camera_name: str, notify_img_path: Path
+    ) -> None:
         """Send notification to the mobile app."""
         await self.hass.services.async_call(
             "notify",
@@ -153,16 +150,14 @@ class VideoAnalyzer:
             {
                 "message": msg,
                 "title": f"Camera Alert from {camera_name}!",
-                "data": {
-                    "image": str(notify_img_path)
-                }
+                "data": {"image": str(notify_img_path)},
             },
-            blocking=False
+            blocking=False,
         )
 
     async def _generate_summary(self, frames: list[str], cam_id: str) -> str:
         """Generate a summarized analysis from frame descriptions."""
-        await asyncio.sleep(0) # avoid blocking the event loop
+        await asyncio.sleep(0)  # avoid blocking the event loop
 
         if not frames:
             msg = "At least one frame description required."
@@ -172,9 +167,7 @@ class VideoAnalyzer:
             return frames[0]
 
         tag = "\n<frame description>\n{}\n</frame description>"
-        prompt = " ".join([
-            VIDEO_ANALYZER_PROMPT
-        ] + [tag.format(i) for i in frames])
+        prompt = " ".join([VIDEO_ANALYZER_PROMPT] + [tag.format(i) for i in frames])
 
         LOGGER.debug("Prompt: %s", prompt)
 
@@ -194,19 +187,12 @@ class VideoAnalyzer:
         )
         return (last if sep else first).strip("\n")
 
-    async def _is_anomaly(
-            self,
-            camera_name: str,
-            msg: str,
-            first_path: str
-        ) -> bool:
+    async def _is_anomaly(self, camera_name: str, msg: str, first_path: str) -> bool:
         """Perform anomaly detection on video analysis."""
         # Sematic search of the store with the video analysis as query.
         async with async_timeout.timeout(10):
             search_results = await self.entry.runtime_data.store.asearch(
-                ("video_analysis", camera_name),
-                query=msg,
-                limit=10
+                ("video_analysis", camera_name), query=msg, limit=10
             )
 
         # Calculate a "no newer than" time threshold from first snapshot time
@@ -219,12 +205,12 @@ class VideoAnalyzer:
         # If the first snapshot is older then the time threshold or if any search
         # result has a lower score then the similarity threshold, declare the current
         # video analysis as an anomaly.
-        return (
-            first_dt < dt_util.now() - timedelta(minutes=VIDEO_ANALYZER_TIME_OFFSET) or
-            any(
-                r.score < VIDEO_ANALYZER_SIMILARITY_THRESHOLD
-                for r in search_results if r.score is not None
-            )
+        return first_dt < dt_util.now() - timedelta(
+            minutes=VIDEO_ANALYZER_TIME_OFFSET
+        ) or any(
+            r.score < VIDEO_ANALYZER_SIMILARITY_THRESHOLD
+            for r in search_results
+            if r.score is not None
         )
 
     async def _prune_old_snapshots(self, camera_id: str, batch: list[Path]) -> None:
@@ -271,7 +257,7 @@ class VideoAnalyzer:
                         self.entry.runtime_data.vision_model,
                         self.entry.options,
                         data,
-                        None
+                        None,
                     )
                 frame_descriptions.append(desc)
             except FileNotFoundError:
@@ -378,16 +364,20 @@ class VideoAnalyzer:
                     LOGGER.debug(
                         "[%s] Snapshot appeared on disk after %.2f seconds.",
                         camera_id,
-                        (dt_util.utcnow() - start_time).total_seconds()
+                        (dt_util.utcnow() - start_time).total_seconds(),
                     )
                     break
                 await asyncio.sleep(0.2)
-                LOGGER.debug("[%s] Waiting for snapshot to appear... attempt %d",
-                            camera_id, i + 1)
+                LOGGER.debug(
+                    "[%s] Waiting for snapshot to appear... attempt %d",
+                    camera_id,
+                    i + 1,
+                )
             else:
                 LOGGER.warning(
                     "[%s] Snapshot failed to appear on disk after waiting: %s",
-                    camera_id, path
+                    camera_id,
+                    path,
                 )
                 return None
 
@@ -445,7 +435,8 @@ class VideoAnalyzer:
     def _get_recording_cameras(self) -> list[str]:
         """Return a list of cameras currently recording."""
         return [
-            state.entity_id for state in self.hass.states.async_all("camera")
+            state.entity_id
+            for state in self.hass.states.async_all("camera")
             if state.state == "recording"
         ]
 
@@ -489,16 +480,14 @@ class VideoAnalyzer:
         self._cancel_track = async_track_time_interval(
             self.hass,
             self._take_snapshots_from_recording_cameras,
-            timedelta(seconds=VIDEO_ANALYZER_SCAN_INTERVAL)
+            timedelta(seconds=VIDEO_ANALYZER_SCAN_INTERVAL),
         )
         self._cancel_listen = self.hass.bus.async_listen(
-            "state_changed",
-            self._handle_camera_recording_state_change
+            "state_changed", self._handle_camera_recording_state_change
         )
         if VIDEO_ANALYZER_TRIGGER_ON_MOTION:
             self._cancel_motion_listen = self.hass.bus.async_listen(
-                "state_changed",
-                self._handle_motion_event
+                "state_changed", self._handle_motion_event
             )
         LOGGER.info("Video analyzer started.")
 
@@ -532,7 +521,8 @@ class VideoAnalyzer:
             self._cancel_listen()
         except HomeAssistantError:
             LOGGER.warning(
-                "Error unsubscribing recording state listener", exc_info=True)
+                "Error unsubscribing recording state listener", exc_info=True
+            )
 
         if hasattr(self, "_cancel_motion_listen"):
             try:
@@ -552,7 +542,8 @@ class VideoAnalyzer:
 
     def is_running(self) -> bool:
         """Check if video analyzer is running."""
-        return (hasattr(self, "_cancel_track") and hasattr(self, "_cancel_listen"))
+        return hasattr(self, "_cancel_track") and hasattr(self, "_cancel_listen")
+
 
 async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     """Set up Home Generative Agent from a config entry."""
@@ -576,8 +567,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         return False
 
     edge_chat_model = ChatOllama(
-        model=RECOMMENDED_EDGE_CHAT_MODEL,
-        base_url=EDGE_CHAT_MODEL_URL
+        model=RECOMMENDED_EDGE_CHAT_MODEL, base_url=EDGE_CHAT_MODEL_URL
     ).configurable_fields(
         model=ConfigurableField(id="model"),
         format=ConfigurableField(id="format"),
@@ -610,8 +600,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         return False
 
     summarization_model = ChatOllama(
-        model=RECOMMENDED_SUMMARIZATION_MODEL,
-        base_url=SUMMARIZATION_MODEL_URL
+        model=RECOMMENDED_SUMMARIZATION_MODEL, base_url=SUMMARIZATION_MODEL_URL
     ).configurable_fields(
         model=ConfigurableField(id="model"),
         format=ConfigurableField(id="format"),
@@ -629,21 +618,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     embedding_model = OllamaEmbeddings(
         model=RECOMMENDED_EMBEDDING_MODEL,
         base_url=EMBEDDING_MODEL_URL,
-        num_ctx=EMBEDDING_MODEL_CTX
+        num_ctx=EMBEDDING_MODEL_CTX,
     )
 
     # Open postgresql database for short-term and long-term memory.
     connection_kwargs = {
         "autocommit": True,
         "prepare_threshold": 0,
-        "row_factory": dict_row
+        "row_factory": dict_row,
     }
     pool: AsyncConnectionPool[AsyncConnection[DictRow]] = AsyncConnectionPool(
-        conninfo=DB_URI,
-        min_size=5,
-        max_size=20,
-        kwargs=connection_kwargs,
-        open=False
+        conninfo=DB_URI, min_size=5, max_size=20, kwargs=connection_kwargs, open=False
     )
     try:
         await pool.open()
@@ -655,10 +640,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     async def _generate_embeddings(texts: Sequence[str]) -> list[list[float]]:
         """Generate embeddings from a list of text."""
         return await embedding_model.aembed_documents(list(texts))
-    index_config: PostgresIndexConfig= {
+
+    index_config: PostgresIndexConfig = {
         "embed": _generate_embeddings,
         "dims": EMBEDDING_MODEL_DIMS,
-        "fields": ["content"]
+        "fields": ["content"],
     }
     # NOTE: must call .setup() the first time store is used.
     store = AsyncPostgresStore(
@@ -666,12 +652,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         index=index_config,
     )
     # NOTE: must call .setup() the first time store is used.
-    #await store.setup()  # noqa: ERA001
+    # await store.setup()  # noqa: ERA001
 
     # Initialize database for thread-based (short-term) memory.
     checkpointer = AsyncPostgresSaver(pool)
     # NOTE: must call .setup() the first time checkpointer is used.
-    #await checkpointer.setup()  # noqa: ERA001
+    # await checkpointer.setup()  # noqa: ERA001
 
     # Initialize video analyzer and start if option is set.
     video_analyzer = VideoAnalyzer(hass, entry)
@@ -687,13 +673,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         store=store,
         video_analyzer=video_analyzer,
         checkpointer=checkpointer,
-        embedding_model=embedding_model
+        embedding_model=embedding_model,
     )
 
     # Setup conversation platform.
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     return True
+
 
 async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     """Unload Home Generative Agent."""

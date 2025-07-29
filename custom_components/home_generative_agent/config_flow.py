@@ -84,16 +84,16 @@ RECOMMENDED_OPTIONS = {
     CONF_VIDEO_ANALYZER_MODE: "disable",
 }
 
+
 async def _validate_input(hass: HomeAssistant, data: dict[str, Any]) -> None:
     """
     Validate the user input allows us to connect.
 
     Data has the keys from STEP_USER_DATA_SCHEMA with values provided by the user.
     """
-    client = ChatOpenAI(
-        api_key=data[CONF_API_KEY], async_client=get_async_client(hass)
-    )
+    client = ChatOpenAI(api_key=data[CONF_API_KEY], async_client=get_async_client(hass))
     await hass.async_add_executor_job(client.bind(timeout=10).get_name)
+
 
 class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Home Generative Agent."""
@@ -138,6 +138,7 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
         """Create the options flow."""
         return HomeGenerativeAgentOptionsFlow(config_entry)
 
+
 class HomeGenerativeAgentOptionsFlow(OptionsFlow):
     """Config flow options handler."""
 
@@ -166,7 +167,7 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlow):
                 CONF_RECOMMENDED: user_input[CONF_RECOMMENDED],
                 CONF_PROMPT: user_input[CONF_PROMPT],
                 CONF_LLM_HASS_API: user_input[CONF_LLM_HASS_API],
-                CONF_VIDEO_ANALYZER_MODE: user_input[CONF_VIDEO_ANALYZER_MODE]
+                CONF_VIDEO_ANALYZER_MODE: user_input[CONF_VIDEO_ANALYZER_MODE],
             }
 
         schema = _config_option_schema(self.hass, options)
@@ -175,11 +176,14 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlow):
             data_schema=vol.Schema(schema),
         )
 
+
 class CannotConnectError(HomeAssistantError):
     """Error to indicate we cannot connect."""
 
+
 class InvalidAuthError(HomeAssistantError):
     """Error to indicate there is invalid auth."""
+
 
 def _config_option_schema(
     hass: HomeAssistant,
@@ -212,14 +216,14 @@ def _config_option_schema(
         SelectOptionDict(
             label="Always notify",
             value="always_notify",
-        )
+        ),
     ]
 
-    schema : VolDictType = {
+    schema: VolDictType = {
         vol.Optional(
             CONF_PROMPT,
             description={"suggested_value": options.get(CONF_PROMPT)},
-            default=llm.DEFAULT_INSTRUCTIONS_PROMPT
+            default=llm.DEFAULT_INSTRUCTIONS_PROMPT,
         ): TemplateSelector(),
         vol.Optional(
             CONF_LLM_HASS_API,
@@ -229,12 +233,12 @@ def _config_option_schema(
         vol.Optional(
             CONF_VIDEO_ANALYZER_MODE,
             description={"suggested_value": options.get(CONF_VIDEO_ANALYZER_MODE)},
-            default=RECOMMENDED_VIDEO_ANALYZER_MODE
-            ): SelectSelector(SelectSelectorConfig(options=video_analyzer_mode)),
+            default=RECOMMENDED_VIDEO_ANALYZER_MODE,
+        ): SelectSelector(SelectSelectorConfig(options=video_analyzer_mode)),
         vol.Required(
             CONF_RECOMMENDED,
             description={"suggested_value": options.get(CONF_RECOMMENDED)},
-            default=options.get(CONF_RECOMMENDED, False)
+            default=options.get(CONF_RECOMMENDED, False),
         ): bool,
     }
 
@@ -249,7 +253,7 @@ def _config_option_schema(
         SelectOptionDict(
             label="edge",
             value="edge",
-        )
+        ),
     ]
 
     schema.update(
@@ -257,8 +261,8 @@ def _config_option_schema(
             vol.Optional(
                 CONF_CHAT_MODEL_LOCATION,
                 description={"suggested_value": options.get(CONF_CHAT_MODEL_LOCATION)},
-                default=RECOMMENDED_CHAT_MODEL_LOCATION
-                ): SelectSelector(SelectSelectorConfig(options=chat_model_location)),
+                default=RECOMMENDED_CHAT_MODEL_LOCATION,
+            ): SelectSelector(SelectSelectorConfig(options=chat_model_location)),
             vol.Optional(
                 CONF_CHAT_MODEL,
                 description={"suggested_value": options.get(CONF_CHAT_MODEL)},
@@ -297,9 +301,7 @@ def _config_option_schema(
             ): str,
             vol.Optional(
                 CONF_VLM_TEMPERATURE,
-                description={
-                    "suggested_value": options.get(CONF_VLM_TEMPERATURE)
-                },
+                description={"suggested_value": options.get(CONF_VLM_TEMPERATURE)},
                 default=RECOMMENDED_VLM_TEMPERATURE,
             ): NumberSelector(NumberSelectorConfig(min=0, max=2, step=0.05)),
             vol.Optional(
