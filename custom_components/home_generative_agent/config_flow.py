@@ -84,7 +84,7 @@ RECOMMENDED_OPTIONS = {
     CONF_VIDEO_ANALYZER_MODE: "disable",
 }
 
-async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str, Any]:
+async def _validate_input(hass: HomeAssistant, data: dict[str, Any]) -> None:
     """
     Validate the user input allows us to connect.
 
@@ -112,7 +112,7 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         try:
-            await validate_input(self.hass, user_input)
+            await _validate_input(self.hass, user_input)
         except CannotConnectError:
             errors["base"] = "cannot_connect"
         except InvalidAuthError:
@@ -169,7 +169,7 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlow):
                 CONF_VIDEO_ANALYZER_MODE: user_input[CONF_VIDEO_ANALYZER_MODE]
             }
 
-        schema = config_option_schema(self.hass, options)
+        schema = _config_option_schema(self.hass, options)
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(schema),
@@ -181,7 +181,7 @@ class CannotConnectError(HomeAssistantError):
 class InvalidAuthError(HomeAssistantError):
     """Error to indicate there is invalid auth."""
 
-def config_option_schema(
+def _config_option_schema(
     hass: HomeAssistant,
     options: dict[str, Any] | MappingProxyType[str, Any],
 ) -> VolDictType:

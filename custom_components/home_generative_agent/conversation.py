@@ -62,7 +62,7 @@ if TYPE_CHECKING:
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
     from langchain_core.runnables import RunnableConfig
 
-    from . import HGAConfigEntry, HGAData
+    from . import HGAConfigEntry
 
 LOGGER = logging.getLogger(__name__)
 
@@ -108,7 +108,7 @@ def _convert_content(
     return AIMessage(content=content.content)
 
 async def async_setup_entry(
-    hass: HomeAssistant,
+    hass: HomeAssistant,  # noqa: ARG001
     config_entry: HGAConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
@@ -168,7 +168,7 @@ class HGAConversationEntity(
         """Return a list of supported languages."""
         return MATCH_ALL
 
-    async def _async_handle_message(
+    async def _async_handle_message(  # noqa: PLR0915
             self,
             user_input: conversation.ConversationInput,
             chat_log: conversation.ChatLog,
@@ -377,7 +377,7 @@ class HGAConversationEntity(
                 config=app_config
             )
         except HomeAssistantError as err:
-            LOGGER.error("LangGraph error: %s", err)
+            LOGGER.exception("LangGraph error during conversation processing.")
             intent_response = intent.IntentResponse(language=user_input.language)
             intent_response.async_set_error(
                 intent.IntentResponseErrorCode.UNKNOWN,

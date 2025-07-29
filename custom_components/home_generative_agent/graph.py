@@ -5,7 +5,7 @@ import copy
 import json
 import logging
 from functools import partial
-from typing import Any, Literal
+from typing import Any, Literal, TYPE_CHECKING
 
 import voluptuous as vol
 from homeassistant.exceptions import (
@@ -15,15 +15,14 @@ from homeassistant.helpers import llm
 from langchain_core.messages import (
     AnyMessage,
     AIMessage,
-    BaseMessage,
     HumanMessage,
     RemoveMessage,
     SystemMessage,
     ToolMessage,
     trim_messages,
 )
-from langchain_core.runnables import RunnableConfig  # noqa: TCH002
-from langgraph.store.base import BaseStore  # noqa: TCH002
+from langchain_core.runnables import RunnableConfig  # noqa: TC002
+from langgraph.store.base import BaseStore  # noqa: TC002
 from langgraph.graph import END, START, MessagesState, StateGraph
 from pydantic import ValidationError
 
@@ -47,6 +46,9 @@ from .const import (
     SUMMARIZATION_MODEL_PREDICT,
 )
 
+if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
+
 LOGGER = logging.getLogger(__name__)
 
 class State(MessagesState):
@@ -56,10 +58,44 @@ class State(MessagesState):
     chat_model_usage_metadata: dict[str, Any]
     messages_to_remove: list[AnyMessage]
 
+async def _retrieve_camera_activity(
+        hass: HomeAssistant, store: BaseStore
+    ) -> list[dict[str, dict[str, str]]]:
+        """Retrieve most recent camera activity from video analysis by the VLM."""
+        # This function is called to gather camera activity data for the agent.
+        camera_activity: list[dict[str, dict[str, str]]] = []
+        for entity_id in hass.states.async_entity_ids():
+            if entity_id.startswith("camera."):
+                camera: str = entity_id.split(".")[-1]
+                s = await store.asearch(
+                    ("video_analysis", camera),
+                    limit=1
+                )
+                if s[0] and (la := s[0].value.get("content")):
+                    camera_activity.append(
+                        {
+                            camera: {
+                                "last activity": la,
+                                "date_time": s[0].updated_at.strftime(
+                                    "%Y-%m-%d %H:%M:%S"
+                                )
+                            }
+                        }
+                    )
+        if camera_activity:
+            LOGGER.debug("Recent camera activity: %s", camera_activity)
+            return camera_activity
+        LOGGER.debug("No recent camera activity found.")
+        return []
+
 async def _call_model(
         state: State, config: RunnableConfig, *, store: BaseStore
-    ) -> dict[str, list[BaseMessage]]:
+    ) -> dict[str, Any]:
     """Coroutine to call the model."""
+    if "configurable" not in config:
+        msg = "Configuration for the model is missing."
+        raise HomeAssistantError(msg)
+
     model = config["configurable"]["chat_model"]
     prompt = config["configurable"]["prompt"]
     user_id = config["configurable"]["user_id"]
@@ -79,23 +115,7 @@ async def _call_model(
     )
 
     # Retrieve most recent camera activity from video analysis by the VLM.
-    camera_activity: list[dict[str, str]] = []
-    for entity_id in hass.states.async_entity_ids():
-        if entity_id.startswith("camera."):
-            camera_name = entity_id.split(".")[-1]
-            s = await store.asearch(
-                ("video_analysis", camera_name),
-                limit=1
-            )
-            if s:
-                camera_activity.append(
-                    {
-                        camera_name: {
-                            "last activity": s[0].value.get("content"),
-                            "datetime": s[0].updated_at.strftime("%Y-%m-%d %H:%M:%S")
-                        }
-                    }
-                )
+    camera_activity = await _retrieve_camera_activity(hass, store)
 
     # Form the System Message from the base prompt plus memories, recent camera activity
     # and past conversation summaries, if they exist.
@@ -118,11 +138,12 @@ async def _call_model(
     messages = [SystemMessage(content=system_message)] + state["messages"]
 
     # Trim messages to manage context window length.
-    # TODO - if using the token counter from the chat model API, the method
+    # TODO(goruck): If using the token counter from the chat model API, the method
     # 'get_num_tokens_from_messages()' will be called which currently ignores
     # tool schemas and under counts message tokens for the qwen models.
     # Until this is fixed, 'max_tokens' should be set to a value less than
     # the maximum size of the model's context window. See const.py.
+    # https://github.com/goruck/home-generative-agent/issues/109
     num_tokens = await hass.async_add_executor_job(
         model.get_num_tokens_from_messages, messages
     )
@@ -164,7 +185,7 @@ async def _call_model(
         ai_response = AIMessage(content=response)
     LOGGER.debug("AI response: %s", ai_response)
 
-    metadata = raw_response.usage_metadata if hasattr(
+    metadata: dict[str, str] = raw_response.usage_metadata if hasattr(
         raw_response, "usage_metadata"
     ) else {}
     LOGGER.debug("Token counts from metadata: %s", metadata)
@@ -179,9 +200,12 @@ async def _call_model(
     }
 
 async def _summarize_and_remove_messages(
-        state: State, config: RunnableConfig, *, store: BaseStore
-    ) -> dict[str, str | list[AnyMessage]]:
+        state: State, config: RunnableConfig
+    ) -> dict[str, Any]:
     """Coroutine to summarize and remove messages."""
+    if "configurable" not in config:
+        msg = "Configuration is missing."
+        raise HomeAssistantError(msg)
     summary = state.get("summary", "")
     msgs_to_remove = state.get("messages_to_remove", [])
 
@@ -229,18 +253,26 @@ async def _summarize_and_remove_messages(
 
     return {
         "summary": response.content,
-        "messages": [RemoveMessage(id=m.id) for m in msgs_to_remove],
+        "messages": [
+            RemoveMessage(id=m.id) for m in msgs_to_remove if m.id is not None
+        ],
     }
 
 async def _call_tools(
         state: State, config: RunnableConfig, *, store: BaseStore
     ) -> dict[str, list[ToolMessage]]:
     """Coroutine to call Home Assistant or langchain LLM tools."""
-    # Tool calls will be the last message in state.
-    tool_calls = state["messages"][-1].tool_calls
-
+    if "configurable" not in config:
+        msg = "Configuration is missing."
+        raise HomeAssistantError(msg)
     langchain_tools = config["configurable"]["langchain_tools"]
     ha_llm_api = config["configurable"]["ha_llm_api"]
+
+    # Tool calls will be in the last message in state which should be an AIMessage.
+    if not state["messages"] or not isinstance(state["messages"][-1], AIMessage):
+        msg = "No tool calls found in the last message."
+        raise HomeAssistantError(msg)
+    tool_calls = state["messages"][-1].tool_calls
 
     tool_responses: list[ToolMessage] = []
     for tool_call in tool_calls:
@@ -275,7 +307,9 @@ async def _call_tools(
             try:
                 tool_response = await lc_tool.ainvoke(tool_call_copy)
             except (HomeAssistantError, ValidationError) as e:
-                tool_response = _handle_tool_error(repr(e), tool_name, tool_call["id"])
+                tool_response = _handle_tool_error(
+                    repr(e), tool_name, tool_call["id"] if tool_call["id"] else ""
+                )
         # A Home Assistant tool was called.
         else:
             tool_input = llm.ToolInput(
@@ -292,7 +326,9 @@ async def _call_tools(
                     name=tool_name,
                 )
             except (HomeAssistantError, vol.Invalid) as e:
-                tool_response = _handle_tool_error(repr(e), tool_name, tool_call["id"])
+                tool_response = _handle_tool_error(
+                    repr(e), tool_name, tool_call["id"] if tool_call["id"] else ""
+                )
 
         LOGGER.debug("Tool response: %s", tool_response)
         tool_responses.append(tool_response)
@@ -304,7 +340,7 @@ def _should_continue(
     """Return the next node in graph to execute."""
     messages = state["messages"]
 
-    if messages[-1].tool_calls:
+    if isinstance(messages[-1], AIMessage) and messages[-1].tool_calls:
         return "action"
 
     return "summarize_and_remove_messages"

@@ -155,7 +155,7 @@ async def analyze_image(
 @tool(parse_docstring=True)
 async def get_and_analyze_camera_image( # noqa: D417
         camera_name: str,
-        detection_keywords: list[str],
+        detection_keywords: list[str] | None = None,
         *,
         # Hide these arguments from the model.
         config: Annotated[RunnableConfig, InjectedToolArg()],
