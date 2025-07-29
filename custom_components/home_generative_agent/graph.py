@@ -138,7 +138,8 @@ async def _call_model(
     messages = [SystemMessage(content=system_message)] + state["messages"]
 
     # Trim messages to manage context window length.
-    # TODO(goruck): If using the token counter from the chat model API, the method
+    # TODO(goruck): Fix token counting.  # noqa: FIX002
+    # If using the token counter from the chat model API, the method
     # 'get_num_tokens_from_messages()' will be called which currently ignores
     # tool schemas and under counts message tokens for the qwen models.
     # Until this is fixed, 'max_tokens' should be set to a value less than

@@ -557,7 +557,7 @@ class VideoAnalyzer:
 async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     """Set up Home Generative Agent from a config entry."""
     # Initialize models and verify they were setup correctly.
-    # TODO(goruck): fix blocking call.
+    # TODO(goruck): fix blocking call.  # noqa: FIX002
     # https://github.com/goruck/home-generative-agent/issues/110
     chat_model = ChatOpenAI(
         api_key=entry.data.get(CONF_API_KEY),

@@ -77,7 +77,7 @@ CONTEXT_MAX_MESSAGES = 80
 # Reduce by 2k tokens because the token counter ignores tool schemas.
 # Reduce by another 4k because the token counter under counts by as much as 4k tokens.
 # These offsets are for the qwen models and were empirically determined.
-# TODO(goruck): fix the token counter to get an accurate count.
+# TODO(goruck): fix the token counter to get an accurate count.  # noqa: FIX002
 # https://github.com/goruck/home-generative-agent/issues/109
 #
 CONTEXT_MAX_TOKENS = (CHAT_MODEL_NUM_CTX - CHAT_MODEL_MAX_TOKENS - 2048 - 4096) # 57344
