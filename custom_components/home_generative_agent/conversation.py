@@ -23,6 +23,7 @@ from langchain_core.caches import InMemoryCache
 from langchain_core.globals import set_llm_cache
 from langchain_core.messages import (
     AIMessage,
+    AnyMessage,
     HumanMessage,
 )
 from voluptuous_openapi import convert
@@ -64,6 +65,7 @@ if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
 
     from . import HGAConfigEntry
+    from .graph import State
 
 LOGGER = logging.getLogger(__name__)
 
@@ -362,15 +364,20 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             debug=LANGCHAIN_LOGGING_LEVEL == "debug",
         )
 
-        # The input to the agent is the message history combined with
-        # the user request.
-        messages: list[HumanMessage | AIMessage] = []
+        # The input to the agent is the message history combined with the user request.
+        messages: list[AnyMessage] = []
         messages.extend(message_history)
         messages.append(HumanMessage(content=user_input.text))
+        app_input: State = {
+            "messages": messages,
+            "summary": "",
+            "chat_model_usage_metadata": {},
+            "messages_to_remove": [],
+        }
 
         # Interact with agent app.
         try:
-            response = await app.ainvoke({"messages": messages}, config=app_config)
+            response = await app.ainvoke(input=app_input, config=app_config)
         except HomeAssistantError as err:
             LOGGER.exception("LangGraph error during conversation processing.")
             intent_response = intent.IntentResponse(language=user_input.language)
