@@ -11,41 +11,20 @@ from homeassistant.components import assist_pipeline, conversation
 from homeassistant.components.conversation import trace
 from homeassistant.components.conversation.models import AbstractConversationAgent
 from homeassistant.const import CONF_LLM_HASS_API, MATCH_ALL
-from homeassistant.exceptions import (
-    HomeAssistantError,
-    TemplateError,
-)
+from homeassistant.exceptions import HomeAssistantError, TemplateError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import intent, llm, template
 from homeassistant.util import ulid
 from langchain.globals import set_debug, set_verbose
 from langchain_core.caches import InMemoryCache
 from langchain_core.globals import set_llm_cache
-from langchain_core.messages import (
-    AIMessage,
-    AnyMessage,
-    HumanMessage,
-)
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
 from voluptuous_openapi import convert
 
 from .const import (
-    CHAT_MODEL_MAX_TOKENS,
-    CHAT_MODEL_NUM_CTX,
-    CONF_CHAT_MODEL,
-    CONF_CHAT_MODEL_LOCATION,
-    CONF_CHAT_MODEL_TEMPERATURE,
-    CONF_EDGE_CHAT_MODEL,
-    CONF_EDGE_CHAT_MODEL_TEMPERATURE,
-    CONF_EDGE_CHAT_MODEL_TOP_P,
     CONF_PROMPT,
     DOMAIN,
     LANGCHAIN_LOGGING_LEVEL,
-    RECOMMENDED_CHAT_MODEL,
-    RECOMMENDED_CHAT_MODEL_LOCATION,
-    RECOMMENDED_CHAT_MODEL_TEMPERATURE,
-    RECOMMENDED_EDGE_CHAT_MODEL,
-    RECOMMENDED_EDGE_CHAT_MODEL_TEMPERATURE,
-    RECOMMENDED_EDGE_CHAT_MODEL_TOP_P,
     TOOL_CALL_ERROR_SYSTEM_MESSAGE,
 )
 from .graph import workflow
@@ -88,12 +67,6 @@ def _format_tool(
         "name": tool.name,
         "parameters": convert(tool.parameters, custom_serializer=custom_serializer),
     }
-    # Add dummy arg descriptions if needed for custom token counter.
-    for arg in list(tool_spec["parameters"]["properties"]):
-        try:
-            _ = tool_spec["parameters"]["properties"][arg]["description"]
-        except KeyError:
-            tool_spec["parameters"]["properties"][arg]["description"] = ""
     if tool.description:
         tool_spec["description"] = tool.description
     return {"type": "function", "function": tool_spec}
@@ -106,10 +79,8 @@ def _convert_content(
     if content.content is None:
         LOGGER.warning("Content is None, returning empty message")
         return HumanMessage(content="")
-
     if isinstance(content, conversation.UserContent):
         return HumanMessage(content=content.content)
-
     return AIMessage(content=content.content)
 
 
@@ -123,7 +94,9 @@ async def async_setup_entry(
     async_add_entities([agent])
 
 
-class HGAConversationEntity(conversation.ConversationEntity, AbstractConversationAgent):
+class HGAConversationEntity(
+    conversation.ConversationEntity, AbstractConversationAgent
+):
     """Home Generative Assistant conversation agent."""
 
     _attr_has_entity_name = True
@@ -192,21 +165,15 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             device_id=user_input.device_id,
         )
 
-        # We are only concerned with User or Assistant content from the chat log since
-        # these may be from the local agent when user asks for something that the local
-        # agent can quickly process. These messages need to be included in this agent so
-        # the entire context is visible. LangChain will handle the rest of the message
-        # history so we don't need to stream anything back into the chat log.
+        # Include only HA User/Assistant messages not already seen by this entity.
         message_history = [
             _convert_content(m)
             for m in chat_log.content
             if isinstance(m, conversation.UserContent | conversation.AssistantContent)
         ]
-        # The last chat log entry will be the current user request, include it later.
+        # The last chat log entry will be the current user request—add it later.
         message_history = message_history[:-1]
 
-        # If new HA agent messages are added to the chat history, include them, else
-        # ignore the older ones since they were already included in the context.
         if (mhlen := len(message_history)) <= self.message_history_len:
             message_history = []
         else:
@@ -214,6 +181,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             message_history = message_history[-diff:]
             self.message_history_len = mhlen
 
+        # HA tools & schema
         try:
             llm_api = await llm.async_get_api(
                 hass,
@@ -232,7 +200,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             _format_tool(tool, llm_api.custom_serializer) for tool in llm_api.tools
         ]
 
-        # Add langchain tools to the list of HA tools.
+        # Add LangChain-native tools (wired in graph via config).
         langchain_tools: dict[str, Any] = {
             "get_and_analyze_camera_image": get_and_analyze_camera_image,
             "upsert_memory": upsert_memory,
@@ -241,13 +209,15 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         }
         tools.extend(langchain_tools.values())
 
-        # Conversation IDs are ULIDs. Generate a new one if not provided.
-        if chat_log.conversation_id is None:
-            conversation_id = ulid.ulid_now()
-        else:
-            conversation_id = chat_log.conversation_id
+        # Conversation ID
+        conversation_id = (
+            ulid.ulid_now()
+            if chat_log.conversation_id is None
+            else chat_log.conversation_id
+        )
         LOGGER.debug("Conversation ID: %s", conversation_id)
 
+        # Resolve user name (None means automation)
         if (
             user_input.context
             and user_input.context.user_id
@@ -255,6 +225,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         ):
             user_name = user.name
 
+        # Build system prompt
         try:
             prompt_parts = [
                 template.Template(
@@ -292,52 +263,16 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
 
         prompt = "\n".join(prompt_parts)
 
-        chat_model_location = options.get(
-            CONF_CHAT_MODEL_LOCATION, RECOMMENDED_CHAT_MODEL_LOCATION
-        )
-        if chat_model_location == "edge":
-            chat_model = self.entry.runtime_data.edge_chat_model
-            chat_model_with_config = chat_model.with_config(
-                {
-                    "configurable": {
-                        "model": options.get(
-                            CONF_EDGE_CHAT_MODEL, RECOMMENDED_EDGE_CHAT_MODEL
-                        ),
-                        "temperature": options.get(
-                            CONF_EDGE_CHAT_MODEL_TEMPERATURE,
-                            RECOMMENDED_EDGE_CHAT_MODEL_TEMPERATURE,
-                        ),
-                        "top_p": options.get(
-                            CONF_EDGE_CHAT_MODEL_TOP_P,
-                            RECOMMENDED_EDGE_CHAT_MODEL_TOP_P,
-                        ),
-                        "num_predict": CHAT_MODEL_MAX_TOKENS,
-                        "num_ctx": CHAT_MODEL_NUM_CTX,
-                    }
-                }
-            )
-        else:
-            chat_model = self.entry.runtime_data.chat_model
-            chat_model_with_config = chat_model.with_config(
-                {
-                    "configurable": {
-                        "model_name": options.get(
-                            CONF_CHAT_MODEL, RECOMMENDED_CHAT_MODEL
-                        ),
-                        "temperature": options.get(
-                            CONF_CHAT_MODEL_TEMPERATURE,
-                            RECOMMENDED_CHAT_MODEL_TEMPERATURE,
-                        ),
-                        "max_tokens": CHAT_MODEL_MAX_TOKENS,
-                    }
-                }
-            )
-
-        chat_model_with_tools = chat_model_with_config.bind_tools(tools)
+        # -------- Use the already-configured chat model from __init__.py --------
+        base_llm = self.entry.runtime_data.chat_model
+        try:
+            chat_model_with_tools = base_llm.bind_tools(tools)
+        except AttributeError:
+            chat_model_with_tools = base_llm
 
         # A user name of None indicates an automation is being run.
         user_name = "robot" if user_name is None else user_name
-        # Remove special characters since memory namespace labels cannot contain.
+        # Remove special characters since memory namespace labels cannot contain them.
         user_name = user_name.translate(str.maketrans("", "", string.punctuation))
         LOGGER.debug("User name: %s", user_name)
 
@@ -364,7 +299,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             debug=LANGCHAIN_LOGGING_LEVEL == "debug",
         )
 
-        # The input to the agent is the message history combined with the user request.
+        # Agent input: message history + current user request.
         messages: list[AnyMessage] = []
         messages.extend(message_history)
         messages.append(HumanMessage(content=user_input.text))
@@ -406,5 +341,5 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         self, hass: HomeAssistant, entry: ConfigEntry
     ) -> None:
         """Handle options update."""
-        # Reload as we update device info + entity name + supported features
+        # Reload as we update device info + entity name + supported features.
         await hass.config_entries.async_reload(entry.entry_id)
