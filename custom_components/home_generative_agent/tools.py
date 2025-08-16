@@ -549,7 +549,8 @@ async def get_entity_history(  # noqa: D417
     try:
         entity_ids = [
             await _get_existing_entity_id(n, hass, d)
-            for n in friendly_names for d in domains
+            for n in friendly_names
+            for d in domains
         ]
     except ValueError:
         LOGGER.exception("Invalid name %s or domain: %s", friendly_names, domains)

@@ -301,9 +301,7 @@ class VideoAnalyzer:
 
         summary = resp.content
         LOGGER.debug("Summary for %s: %s", cam_id, summary)
-        first, sep, last = summary.partition(
-            REASONING_DELIMITERS.get("end", "")
-        )
+        first, sep, last = summary.partition(REASONING_DELIMITERS.get("end", ""))
         return (last if sep else first).strip("\n")
 
     async def _is_anomaly(self, camera_name: str, msg: str, first_path: str) -> bool:

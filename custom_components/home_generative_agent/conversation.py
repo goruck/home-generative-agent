@@ -94,9 +94,7 @@ async def async_setup_entry(
     async_add_entities([agent])
 
 
-class HGAConversationEntity(
-    conversation.ConversationEntity, AbstractConversationAgent
-):
+class HGAConversationEntity(conversation.ConversationEntity, AbstractConversationAgent):
     """Home Generative Assistant conversation agent."""
 
     _attr_has_entity_name = True
