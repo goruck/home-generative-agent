@@ -116,15 +116,15 @@ Below is a high-level view of the architecture.
 
 The general integration architecture follows the best practices as described in [Home Assistant Core](https://developers.home-assistant.io/docs/development_index/) and is compliant with [Home Assistant Community Store](https://www.hacs.xyz/) (HACS) publishing requirements.
 
-The agent is built using LangGraph and uses the HA `conversation` component to interact with the user. The agent uses the Home Assistant LLM API to fetch the state of the home and understand the HA native tools it has at its disposal. I implemented all other tools available to the agent using LangChain. The agent employs several LLMs, a large and very accurate primary model for high-level reasoning, smaller specialized helper models for camera image analysis, primary model context summarization, and embedding generation for long-term semantic search. The primary model can be either cloud (best accuracy, highest cost) or edge-based (good accuracy, lowest cost) and the helper models are all edge-based. The edge models run under the [Ollama](https://ollama.com/) framework on a computer located in the home. The models currently being used are summarized below.
+The agent is built using LangGraph and uses the HA `conversation` component to interact with the user. The agent uses the Home Assistant LLM API to fetch the state of the home and understand the HA native tools it has at its disposal. I implemented all other tools available to the agent using LangChain. The agent employs several LLMs, a large and very accurate primary model for high-level reasoning, smaller specialized helper models for camera image analysis, primary model context summarization, and embedding generation for long-term semantic search. The models can be either cloud (best accuracy, highest cost) or edge-based (good accuracy, lowest cost). The edge models run under the [Ollama](https://ollama.com/) framework on a computer located in the home. The models currently being used are summarized below. however other models are available and are configurable via integration's UI.
 
-Model | Location | Purpose
+Model | Provider | Purpose
 -- | -- | -- |
-[GPT-4o](https://platform.openai.com/docs/models#gpt-4o) | OpenAI Cloud | High-level reasoning and planning
-[qwen3:8b](https://ollama.com/library/qwen3) | Ollama Edge | High-level reasoning and planning
-[qwen2.5vl:7b](https://ollama.com/library/qwen2.5vl) | Ollama Edge | Image scene analysis
-[qwen3:1.7bb](https://ollama.com/library/qwen3) | Ollama Edge | Primary model context summarization
-[mxbai-embed-large](https://ollama.com/library/mxbai-embed-large) | Ollama Edge | Embedding generation for sematic search
+[GPT-4o](https://platform.openai.com/docs/models#gpt-4o) | OpenAI | High-level reasoning and planning
+[qwen3:8b](https://ollama.com/library/qwen3) | Ollama | High-level reasoning and planning
+[qwen2.5vl:7b](https://ollama.com/library/qwen2.5vl) | Ollama | Image scene analysis
+[qwen3:1.7bb](https://ollama.com/library/qwen3) | Ollama | Primary model context summarization
+[mxbai-embed-large](https://ollama.com/library/mxbai-embed-large) | Ollama | Embedding generation for sematic search
 
 ### LangGraph-based Agent
 LangGraph powers the conversation agent, enabling you to create stateful, multi-actor applications utilizing LLMs as quickly as possible. It extends LangChain's capabilities, introducing the ability to create and manage cyclical graphs essential for developing complex agent runtimes. A graph models the agent workflow, as seen in the image below.
