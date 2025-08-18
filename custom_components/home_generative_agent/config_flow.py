@@ -31,11 +31,9 @@ from .const import (
     CONF_CHAT_MODEL_TEMPERATURE,
     CONF_EMBEDDING_MODEL_PROVIDER,
     CONF_OLLAMA_CHAT_MODEL,
-    CONF_OLLAMA_EMBEDDING_MODEL,
     CONF_OLLAMA_SUMMARIZATION_MODEL,
     CONF_OLLAMA_VLM,
     CONF_OPENAI_CHAT_MODEL,
-    CONF_OPENAI_EMBEDDING_MODEL,
     CONF_OPENAI_SUMMARIZATION_MODEL,
     CONF_OPENAI_VLM,
     CONF_PROMPT,
@@ -48,15 +46,14 @@ from .const import (
     DOMAIN,
     HTTP_STATUS_BAD_REQUEST,
     HTTP_STATUS_UNAUTHORIZED,
+    MODEL_CATEGORY_SPECS,
     RECOMMENDED_CHAT_MODEL_PROVIDER,
     RECOMMENDED_CHAT_MODEL_TEMPERATURE,
     RECOMMENDED_EMBEDDING_MODEL_PROVIDER,
     RECOMMENDED_OLLAMA_CHAT_MODEL,
-    RECOMMENDED_OLLAMA_EMBEDDING_MODEL,
     RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL,
     RECOMMENDED_OLLAMA_VLM,
     RECOMMENDED_OPENAI_CHAT_MODEL,
-    RECOMMENDED_OPENAI_EMBEDDING_MODEL,
     RECOMMENDED_OPENAI_SUMMARIZATION_MODEL,
     RECOMMENDED_OPENAI_VLM,
     RECOMMENDED_SUMMARIZATION_MODEL_PROVIDER,
@@ -65,84 +62,6 @@ from .const import (
     RECOMMENDED_VLM_PROVIDER,
     RECOMMENDED_VLM_TEMPERATURE,
 )
-
-# ---- Dynamic, data-driven provider+model registry ----
-# If you add a new provider (e.g., "anthropic"), extend the dicts below.
-MODEL_CATEGORY_SPECS: dict[str, dict[str, Any]] = {
-    "chat": {
-        "provider_key": CONF_CHAT_MODEL_PROVIDER,
-        "temperature_key": CONF_CHAT_MODEL_TEMPERATURE,
-        "recommended_provider": RECOMMENDED_CHAT_MODEL_PROVIDER,
-        "recommended_temperature": RECOMMENDED_CHAT_MODEL_TEMPERATURE,
-        "providers": {
-            "openai": ["gpt-4.1", "gpt-4o", "o4-mini"],
-            "ollama": ["qwen2.5:32b", "qwen3:32b", "qwen3:8b"],
-        },
-        "recommended_models": {
-            "openai": RECOMMENDED_OPENAI_CHAT_MODEL,
-            "ollama": RECOMMENDED_OLLAMA_CHAT_MODEL,
-        },
-        "model_keys": {
-            "openai": CONF_OPENAI_CHAT_MODEL,
-            "ollama": CONF_OLLAMA_CHAT_MODEL,
-        },
-    },
-    "vlm": {
-        "provider_key": CONF_VLM_PROVIDER,
-        "temperature_key": CONF_VLM_TEMPERATURE,
-        "recommended_provider": RECOMMENDED_VLM_PROVIDER,
-        "recommended_temperature": RECOMMENDED_VLM_TEMPERATURE,
-        "providers": {
-            "openai": ["gpt-4.1", "gpt-4.1-nano"],
-            "ollama": ["qwen2.5vl:7b"],
-        },
-        "recommended_models": {
-            "openai": RECOMMENDED_OPENAI_VLM,
-            "ollama": RECOMMENDED_OLLAMA_VLM,
-        },
-        "model_keys": {
-            "openai": CONF_OPENAI_VLM,
-            "ollama": CONF_OLLAMA_VLM,
-        },
-    },
-    "summarization": {
-        "provider_key": CONF_SUMMARIZATION_MODEL_PROVIDER,
-        "temperature_key": CONF_SUMMARIZATION_MODEL_TEMPERATURE,
-        "recommended_provider": RECOMMENDED_SUMMARIZATION_MODEL_PROVIDER,
-        "recommended_temperature": RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
-        "providers": {
-            "openai": ["gpt-4.1", "gpt-4.1-nano"],
-            "ollama": ["qwen3:1.7b", "qwen3:8b"],
-        },
-        "recommended_models": {
-            "openai": RECOMMENDED_OPENAI_SUMMARIZATION_MODEL,
-            "ollama": RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL,
-        },
-        "model_keys": {
-            "openai": CONF_OPENAI_SUMMARIZATION_MODEL,
-            "ollama": CONF_OLLAMA_SUMMARIZATION_MODEL,
-        },
-    },
-    "embedding": {
-        "provider_key": CONF_EMBEDDING_MODEL_PROVIDER,
-        "temperature_key": None,  # embeddings dont use temperature
-        "recommended_provider": RECOMMENDED_EMBEDDING_MODEL_PROVIDER,
-        "recommended_temperature": None,
-        "providers": {
-            "openai": ["text-embedding-3-large", "text-embedding-3-small"],
-            "ollama": ["mxbai-embed-large"],
-        },
-        "recommended_models": {
-            "openai": RECOMMENDED_OPENAI_EMBEDDING_MODEL,
-            "ollama": RECOMMENDED_OLLAMA_EMBEDDING_MODEL,
-        },
-        "model_keys": {
-            "openai": CONF_OPENAI_EMBEDDING_MODEL,
-            "ollama": CONF_OLLAMA_EMBEDDING_MODEL,
-        },
-    },
-}
-
 
 LOGGER = logging.getLogger(__name__)
 
