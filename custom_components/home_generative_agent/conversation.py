@@ -7,7 +7,7 @@ import string
 from typing import TYPE_CHECKING, Any, Literal
 
 import homeassistant.util.dt as dt_util
-from homeassistant.components import assist_pipeline, conversation
+from homeassistant.components import conversation
 from homeassistant.components.conversation import trace
 from homeassistant.components.conversation.models import AbstractConversationAgent
 from homeassistant.const import CONF_LLM_HASS_API, MATCH_ALL
