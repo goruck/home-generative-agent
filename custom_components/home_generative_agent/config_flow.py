@@ -11,6 +11,7 @@ from homeassistant.config_entries import (
     ConfigFlow,
     ConfigFlowResult,
     OptionsFlow,
+    OptionsFlowWithReload,
 )
 from homeassistant.const import CONF_API_KEY, CONF_LLM_HASS_API
 from homeassistant.exceptions import HomeAssistantError
@@ -216,9 +217,6 @@ def _prune_irrelevant_model_fields(opts: dict[str, Any]) -> dict[str, Any]:
             key = _model_option_key(cat, provider)
             if provider != selected:
                 pruned.pop(key, None)
-        if not selected:
-            for provider in spec["providers"]:
-                pruned.pop(_model_option_key(cat, provider), None)
 
     return pruned
 
@@ -350,7 +348,7 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
         return HomeGenerativeAgentOptionsFlow(config_entry)
 
 
-class HomeGenerativeAgentOptionsFlow(OptionsFlow):
+class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
     """Handle options flow for Home Generative Agent."""
 
     def __init__(self, config_entry: ConfigEntry) -> None:
