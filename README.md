@@ -48,7 +48,7 @@ This integration will set up the `conversation` platform, a convenient HA compon
 8. Follow steps 2 to 5 above.
 
 ## Configuration
-Configuration is done in the UI and via the parameters in `const.py`.
+Configuration is done in the UI and via the parameters in `const.py`. You must enter in your OpenAI API key during initial setup through the Home Assistant UI.
 
 ## Contributions are welcome!
 
