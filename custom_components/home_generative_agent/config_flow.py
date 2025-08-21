@@ -25,6 +25,9 @@ from homeassistant.helpers.selector import (
     SelectSelectorConfig,
     SelectSelectorMode,
     TemplateSelector,
+    TextSelector,
+    TextSelectorConfig,
+    TextSelectorType,
 )
 
 from .const import (
@@ -68,7 +71,9 @@ LOGGER = logging.getLogger(__name__)
 
 STEP_USER_DATA_SCHEMA = vol.Schema(
     {
-        vol.Required(CONF_API_KEY): str,
+        vol.Required(CONF_API_KEY): TextSelector(
+            TextSelectorConfig(type=TextSelectorType.PASSWORD)
+        ),
     }
 )
 
@@ -331,7 +336,7 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
             errors["base"] = "unknown"
         else:
             return self.async_create_entry(
-                title="HGA",
+                title="Home Generative Agent",
                 data=user_input,
                 options=RECOMMENDED_OPTIONS,
             )
