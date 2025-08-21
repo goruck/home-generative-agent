@@ -71,7 +71,7 @@ LOGGER = logging.getLogger(__name__)
 
 STEP_USER_DATA_SCHEMA = vol.Schema(
     {
-        vol.Required(CONF_API_KEY): TextSelector(
+        vol.Optional(CONF_API_KEY): TextSelector(
             TextSelectorConfig(type=TextSelectorType.PASSWORD)
         ),
     }
@@ -106,9 +106,9 @@ if TYPE_CHECKING:
 
 async def _validate_input(hass: HomeAssistant, data: dict[str, Any]) -> None:
     """
-    Validate the user input allows us to connect.
+    Check that the user has entered a valid OpenAI API key.
 
-    Data has the keys from STEP_USER_DATA_SCHEMA with values provided by the user.
+    Data has the key from STEP_USER_DATA_SCHEMA provided by the user.
     """
     api_key = data[CONF_API_KEY]
     client = get_async_client(hass)
@@ -325,24 +325,29 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
 
         errors: dict[str, str] = {}
 
-        try:
-            await _validate_input(self.hass, user_input)
-        except CannotConnectError:
-            errors["base"] = "cannot_connect"
-        except InvalidAuthError:
-            errors["base"] = "invalid_auth"
-        except Exception:
-            LOGGER.exception("Unexpected exception")
-            errors["base"] = "unknown"
-        else:
-            return self.async_create_entry(
-                title="Home Generative Agent",
-                data=user_input,
-                options=RECOMMENDED_OPTIONS,
+        api_key = (user_input.get(CONF_API_KEY) or "").strip()
+
+        if api_key:
+            try:
+                await _validate_input(self.hass, user_input)
+            except CannotConnectError:
+                errors["base"] = "cannot_connect"
+            except InvalidAuthError:
+                errors["base"] = "invalid_auth"
+            except Exception:
+                LOGGER.exception("Unexpected exception")
+                errors["base"] = "unknown"
+
+        if errors:
+            return self.async_show_form(
+                step_id="user", data_schema=STEP_USER_DATA_SCHEMA, errors=errors
             )
 
-        return self.async_show_form(
-            step_id="user", data_schema=STEP_USER_DATA_SCHEMA, errors=errors
+        # Allow empty api_key, proceed
+        return self.async_create_entry(
+            title="Home Generative Agent",
+            data=user_input,  # may omit CONF_API_KEY
+            options=RECOMMENDED_OPTIONS,
         )
 
     @staticmethod

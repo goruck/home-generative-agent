@@ -7,10 +7,10 @@
     },
     "step": {
       "user": {
-        "title": "Connect OpenAI",
-        "description": "Enter your **OpenAI API key**. This lets Home Generative Agent call the OpenAI APIs. You can create or view a key in your OpenAI account; it usually starts with `sk-...`.",
+        "title": "Connect OpenAI (optional)",
+        "description": "If you plan to use OpenAI, enter your **OpenAI API key** now (usually starts with `sk-...`). You can also leave this blank and finish setup the Ollama provider; you can add a key later in Options.",
         "data": {
-          "api_key": "OpenAI API key"
+          "api_key": "OpenAI API key (optional)"
         }
       }
     }
