@@ -1,14 +1,16 @@
 {
   "config": {
     "error": {
-      "cannot_connect": "Failed to connect",
-      "invalid_auth": "Invalid authentication",
-      "unknown": "Unexpected error"
+      "cannot_connect": "Can't reach OpenAI. Check network and try again.",
+      "invalid_auth": "Invalid OpenAI API key.",
+      "unknown": "Unexpected error."
     },
     "step": {
       "user": {
+        "title": "Connect OpenAI",
+        "description": "Enter your **OpenAI API key**. This lets Home Generative Agent call the OpenAI APIs. You can create or view a key in your OpenAI account; it usually starts with `sk-...`.",
         "data": {
-          "api_key": "API key"
+          "api_key": "OpenAI API key"
         }
       }
     }
@@ -23,19 +25,21 @@
       "init": {
         "data": {
           "prompt": "Instructions",
-          "chat_model_location": "Chat model location",
-          "chat_model": "Chat model",
+          "chat_model_provider": "Chat model provider",
+          "ollama_chat_model": "Ollama chat model",
+          "openai_chat_model": "OpenAI chat model",
           "chat_model_temperature": "Chat model temperature",
-          "edge_chat_model": "Edge chat model",
-          "edge_chat_model_temperature": "Edge chat model temperature",
-          "edge_chat_model_top_p": "Edge chat model top P",
-          "vlm": "VLM",
+          "vlm_provider": "VLM provider",
+          "ollama_vlm": "Ollama VLM",
+          "openai_vlm": "OpenAI VLM",
           "vlm_temperature": "VLM temperature",
-          "vlm_top_p": "VLM top P",
-          "summarization_model": "Summarization model",
+          "summarization_provider": "Summarization provider",
+          "ollama_summarization_model": "Ollama summarization model",
+          "openai_summarization_model": "OpenAI summarization model",
           "summarization_model_temperature": "Summarization model temperature",
-          "summarization_model_top_p": "Summarization model top P",
-          "embedding_model": "Embedding model",
+          "embedding_provider": "Embedding provider",
+          "ollama_embedding_model": "Ollama embedding model",
+          "openai_embedding_model": "OpenAI embedding model",
           "llm_hass_api": "Control Home Assistant",
           "recommended": "Recommended model settings",
           "video_analyzer_mode": "Video analyzer mode"
