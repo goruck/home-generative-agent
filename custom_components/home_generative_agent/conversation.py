@@ -107,8 +107,8 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         self._attr_device_info = dr.DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
             name=entry.title,
-            manufacturer="LinTek",
-            model="HGA",
+            manufacturer="Lindo St. Angel",
+            model="Home Generative Agent",
             entry_type=dr.DeviceEntryType.SERVICE,
         )
         self.message_history_len = 0
