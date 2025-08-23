@@ -633,7 +633,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     """Set up Home Generative Agent from a config entry."""
     hass.data.setdefault(DOMAIN, {})
 
-    api_key = entry.data.get(CONF_API_KEY)
+    # Options override data.
+    # entry.options is where the key lives if added later via Options.
+    # Merging options over data guarantees you see the most recent value.
+    conf = {**entry.data, **entry.options}
+    api_key = conf.get(CONF_API_KEY)
 
     # Health checks (fast, non-fatal)
     health_timeout = 2.0

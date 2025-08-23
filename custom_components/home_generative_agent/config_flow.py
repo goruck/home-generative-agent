@@ -226,10 +226,8 @@ def _prune_irrelevant_model_fields(opts: dict[str, Any]) -> dict[str, Any]:
     return pruned
 
 
-def _config_option_schema(
-    hass: HomeAssistant, options: dict[str, Any] | MappingProxyType[str, Any]
-) -> VolDictType:
-    """Generate the options schema based on current options and providers."""
+def _schema_for(hass: HomeAssistant, opts: dict[str, Any]) -> VolDictType:
+    """Generate the options schema with API key field first."""
     hass_apis = [SelectOptionDict(label="No control", value="none")] + [
         SelectOptionDict(label=api.name, value=api.id)
         for api in llm.async_get_apis(hass)
@@ -240,36 +238,41 @@ def _config_option_schema(
         SelectOptionDict(label="Always notify", value="always_notify"),
     ]
 
-    # Base fields (always visible)
     schema: VolDictType = {
+        # --- OpenAI API key (optional, masked) ---
+        vol.Optional(
+            CONF_API_KEY,
+            description={"suggested_value": opts.get(CONF_API_KEY)},
+        ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
+        # --- existing base fields ---
         vol.Optional(
             CONF_PROMPT,
-            description={"suggested_value": options.get(CONF_PROMPT)},
+            description={"suggested_value": opts.get(CONF_PROMPT)},
             default=llm.DEFAULT_INSTRUCTIONS_PROMPT,
         ): TemplateSelector(),
         vol.Optional(
             CONF_LLM_HASS_API,
-            description={"suggested_value": options.get(CONF_LLM_HASS_API)},
+            description={"suggested_value": opts.get(CONF_LLM_HASS_API)},
             default="none",
         ): SelectSelector(SelectSelectorConfig(options=hass_apis)),
         vol.Optional(
             CONF_VIDEO_ANALYZER_MODE,
-            description={"suggested_value": options.get(CONF_VIDEO_ANALYZER_MODE)},
+            description={"suggested_value": opts.get(CONF_VIDEO_ANALYZER_MODE)},
             default=RECOMMENDED_VIDEO_ANALYZER_MODE,
         ): SelectSelector(SelectSelectorConfig(options=video_analyzer_mode)),
         vol.Required(
             CONF_RECOMMENDED,
-            description={"suggested_value": options.get(CONF_RECOMMENDED)},
-            default=options.get(CONF_RECOMMENDED, False),
+            description={"suggested_value": opts.get(CONF_RECOMMENDED)},
+            default=opts.get(CONF_RECOMMENDED, False),
         ): bool,
     }
 
-    recommended_on = options.get(CONF_RECOMMENDED, False)
+    # Recommended ON → no providers/models/temps
+    recommended_on = opts.get(CONF_RECOMMENDED, False)
     if recommended_on:
-        # In recommended mode: no providers, no models, no temperatures.
         return schema
 
-    # Recommended is OFF. Show providers, with their model, temp directly under each.
+    # Recommended OFF → show providers + their model + temp
     for cat, spec in MODEL_CATEGORY_SPECS.items():
         provider_key = spec["provider_key"]
 
@@ -277,31 +280,31 @@ def _config_option_schema(
         schema[
             vol.Optional(
                 provider_key,
-                description={"suggested_value": options.get(provider_key)},
-                default=options.get(provider_key, spec["recommended_provider"]),
+                description={"suggested_value": opts.get(provider_key)},
+                default=opts.get(provider_key, spec["recommended_provider"]),
             )
         ] = SelectSelector(_provider_selector_config(cat))
 
-        # Model select for the chosen provider
-        selected_provider = _get_selected_provider(options, cat)
+        # Model select for chosen provider
+        selected_provider = _get_selected_provider(opts, cat)
         if selected_provider:
             model_key = _model_option_key(cat, selected_provider)
             default_model = spec.get("recommended_models", {}).get(selected_provider)
             schema[
                 vol.Optional(
                     model_key,
-                    description={"suggested_value": options.get(model_key)},
-                    default=options.get(model_key, default_model),
+                    description={"suggested_value": opts.get(model_key)},
+                    default=opts.get(model_key, default_model),
                 )
             ] = SelectSelector(_model_selector_config(cat, selected_provider))
 
-        # Temperature directly under model (if this category uses temperature)
+        # Temperature (if used by this category)
         temp_key = spec.get("temperature_key")
         if temp_key:
             schema[
                 vol.Optional(
                     temp_key,
-                    description={"suggested_value": options.get(temp_key)},
+                    description={"suggested_value": opts.get(temp_key)},
                     default=spec.get("recommended_temperature", 1.0),
                 )
             ] = NumberSelector(NumberSelectorConfig(min=0, max=2, step=0.05))
@@ -368,50 +371,97 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         )
         self._last_providers = _extract_provider_state(config_entry.options)
 
-    async def async_step_init(
+    async def async_step_init(  # noqa: PLR0912
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Handle the options flow init step."""
-        LOGGER.debug("Options flow init called with user_input: %s", user_input)
-
+        # Start from current options + DATA
+        # (for backward-compat if API key was set at setup)
         options = dict(self.config_entry.options)
+        if CONF_API_KEY not in options and self.config_entry.data.get(CONF_API_KEY):
+            # Surface existing key from data into the form as suggested_value,
+            # we won't mutate data here.
+            options[CONF_API_KEY] = self.config_entry.data[CONF_API_KEY]
 
+        # First render
         if user_input is None:
-            schema = _config_option_schema(self.hass, options)
-            return self.async_show_form(step_id="init", data_schema=vol.Schema(schema))
+            return self.async_show_form(
+                step_id="init", data_schema=vol.Schema(_schema_for(self.hass, options))
+            )
 
         # Merge new input
-        options.update(user_input)
+        options.update(user_input or {})
 
+        errors: dict[str, str] = {}
+
+        # --- Handle API key edits explicitly ---
+        api_key = CONF_API_KEY in (user_input or {})
+        if api_key:
+            raw = (user_input.get(CONF_API_KEY) or "").strip()
+            if raw:
+                # validate only when provided
+                try:
+                    await _validate_input(self.hass, {CONF_API_KEY: raw})
+                except CannotConnectError:
+                    errors["base"] = "cannot_connect"
+                except InvalidAuthError:
+                    errors["base"] = "invalid_auth"
+                except Exception:
+                    LOGGER.exception("Unexpected exception in Options validation")
+                    errors["base"] = "unknown"
+                else:
+                    options[CONF_API_KEY] = raw
+            else:
+                # explicit delete when user clears the field
+                options.pop(CONF_API_KEY, None)
+        # If not provided in user_input: leave existing options[CONF_API_KEY] as-is
+
+        if errors:
+            # Re-render with same options and show errors
+            return self.async_show_form(
+                step_id="init",
+                data_schema=vol.Schema(_schema_for(self.hass, options)),
+                errors=errors,
+            )
+
+        # Handle schema-affecting toggles (recommended/providers)
         recommended_now = options.get(CONF_RECOMMENDED, False)
         recommended_changed = recommended_now != self.last_rendered_recommended
         provider_changed = _providers_changed(self._last_providers, options)
 
-        # If Recommended just turned ON → apply defaults and SAVE NOW (no second submit)
+        # If Recommended turned ON → apply defaults and SAVE immediately
         if recommended_changed and recommended_now:
             options = _apply_recommended_defaults(options)
             options = _prune_irrelevant_model_fields(options)
             if options.get(CONF_LLM_HASS_API) == "none":
                 options.pop(CONF_LLM_HASS_API, None)
+            # Normalize API key: drop if blank
+            if not api_key:
+                options.pop(CONF_API_KEY, None)
             self.last_rendered_recommended = True
             self._last_providers = _extract_provider_state(options)
             return self.async_create_entry(title="", data=options)
 
-        # If Recommended toggled OFF or any provider changed → re-render once
+        # If Recommended toggled OFF or providers changed → re-render once
         if recommended_changed or provider_changed:
             options = _prune_irrelevant_model_fields(options)
             self.last_rendered_recommended = recommended_now
             self._last_providers = _extract_provider_state(options)
-            schema = _config_option_schema(self.hass, options)
-            return self.async_show_form(step_id="init", data_schema=vol.Schema(schema))
+            return self.async_show_form(
+                step_id="init", data_schema=vol.Schema(_schema_for(self.hass, options))
+            )
 
-        # No schema-affecting changes → finalize and save
+        # Finalize and save (no schema changes)
         final_options = _prune_irrelevant_model_fields(options)
         if final_options.get(CONF_RECOMMENDED, False):
             final_options = _apply_recommended_defaults(final_options)
             final_options = _prune_irrelevant_model_fields(final_options)
         if final_options.get(CONF_LLM_HASS_API) == "none":
             final_options.pop(CONF_LLM_HASS_API, None)
+
+        # Normalize API key: drop if blank so you don't store empty strings
+        if not api_key:
+            final_options.pop(CONF_API_KEY, None)
 
         return self.async_create_entry(title="", data=final_options)
 
