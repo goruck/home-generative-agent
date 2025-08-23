@@ -260,7 +260,15 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         try:
             chat_model_with_tools = base_llm.bind_tools(tools)
         except AttributeError:
-            chat_model_with_tools = base_llm
+            LOGGER.exception("Error during conversation processing.")
+            intent_response = intent.IntentResponse(language=user_input.language)
+            intent_response.async_set_error(
+                intent.IntentResponseErrorCode.UNKNOWN,
+                f"Model must support tool calling, model = {base_llm}",
+            )
+            return conversation.ConversationResult(
+                response=intent_response, conversation_id=conversation_id
+            )
 
         # A user name of None indicates an automation is being run.
         user_name = "robot" if user_name is None else user_name
