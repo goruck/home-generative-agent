@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urljoin
 
 import voluptuous as vol
 from homeassistant.config_entries import (
@@ -36,6 +37,7 @@ from .const import (
     CONF_EMBEDDING_MODEL_PROVIDER,
     CONF_OLLAMA_CHAT_MODEL,
     CONF_OLLAMA_SUMMARIZATION_MODEL,
+    CONF_OLLAMA_URL,
     CONF_OLLAMA_VLM,
     CONF_OPENAI_CHAT_MODEL,
     CONF_OPENAI_SUMMARIZATION_MODEL,
@@ -56,6 +58,7 @@ from .const import (
     RECOMMENDED_EMBEDDING_MODEL_PROVIDER,
     RECOMMENDED_OLLAMA_CHAT_MODEL,
     RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL,
+    RECOMMENDED_OLLAMA_URL,
     RECOMMENDED_OLLAMA_VLM,
     RECOMMENDED_OPENAI_CHAT_MODEL,
     RECOMMENDED_OPENAI_SUMMARIZATION_MODEL,
@@ -74,8 +77,13 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
         vol.Optional(CONF_API_KEY): TextSelector(
             TextSelectorConfig(type=TextSelectorType.PASSWORD)
         ),
+        vol.Optional(
+            CONF_OLLAMA_URL,
+            description={"suggested_value": RECOMMENDED_OLLAMA_URL},
+        ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
     }
 )
+
 
 RECOMMENDED_OPTIONS = {
     CONF_RECOMMENDED: True,
@@ -102,6 +110,31 @@ if TYPE_CHECKING:
 
     from homeassistant.core import HomeAssistant
     from homeassistant.helpers.typing import VolDictType
+
+
+def _ensure_http_url(url: str) -> str:
+    """Ensure a URL has an explicit scheme."""
+    if url.startswith(("http://", "https://")):
+        return url
+    return f"http://{url}"
+
+
+async def _validate_ollama_url(hass: HomeAssistant, base_url: str) -> None:
+    """Light probe to confirm the Ollama server is reachable."""
+    if not base_url:
+        return
+    base_url = _ensure_http_url(base_url)
+    client = get_async_client(hass)
+    try:
+        # /api/tags and /api/version are fast, no auth
+        resp = await client.get(
+            urljoin(base_url.rstrip("/") + "/", "api/tags"), timeout=10
+        )
+    except Exception as err:
+        LOGGER.debug("Ollama connectivity exception during validation: %s", err)
+        raise CannotConnectError from err
+    if resp.status_code >= HTTP_STATUS_BAD_REQUEST:
+        raise CannotConnectError
 
 
 async def _validate_input(hass: HomeAssistant, data: dict[str, Any]) -> None:
@@ -244,6 +277,11 @@ def _schema_for(hass: HomeAssistant, opts: dict[str, Any]) -> VolDictType:
             CONF_API_KEY,
             description={"suggested_value": opts.get(CONF_API_KEY)},
         ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
+        # Ollama URL (optional, text)
+        vol.Optional(
+            CONF_OLLAMA_URL,
+            description={"suggested_value": (opts.get(CONF_OLLAMA_URL))},
+        ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
         # --- existing base fields ---
         vol.Optional(
             CONF_PROMPT,
@@ -329,10 +367,12 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         api_key = (user_input.get(CONF_API_KEY) or "").strip()
+        ollama_url = (user_input.get(CONF_OLLAMA_URL) or "").strip()
 
+        # Validate OpenAI only if provided
         if api_key:
             try:
-                await _validate_input(self.hass, user_input)
+                await _validate_input(self.hass, {CONF_API_KEY: api_key})
             except CannotConnectError:
                 errors["base"] = "cannot_connect"
             except InvalidAuthError:
@@ -341,15 +381,28 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
                 LOGGER.exception("Unexpected exception")
                 errors["base"] = "unknown"
 
+        # Validate Ollama only if provided
+        if not errors and ollama_url:
+            try:
+                await _validate_ollama_url(self.hass, ollama_url)
+                user_input[CONF_OLLAMA_URL] = _ensure_http_url(ollama_url)
+            except CannotConnectError:
+                errors["base"] = "cannot_connect"
+
         if errors:
             return self.async_show_form(
                 step_id="user", data_schema=STEP_USER_DATA_SCHEMA, errors=errors
             )
 
-        # Allow empty api_key, proceed
+        # Normalize empty values: drop them so defaults can apply later
+        if not api_key:
+            user_input.pop(CONF_API_KEY, None)
+        if not ollama_url:
+            user_input.pop(CONF_OLLAMA_URL, None)
+
         return self.async_create_entry(
             title="Home Generative Agent",
-            data=user_input,  # may omit CONF_API_KEY
+            data=user_input,
             options=RECOMMENDED_OPTIONS,
         )
 
@@ -371,17 +424,18 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         )
         self._last_providers = _extract_provider_state(config_entry.options)
 
-    async def async_step_init(  # noqa: PLR0912
+    async def async_step_init(  # noqa: PLR0912, PLR0915
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Handle the options flow init step."""
         # Start from current options + DATA
         # (for backward-compat if API key was set at setup)
         options = dict(self.config_entry.options)
-        if CONF_API_KEY not in options and self.config_entry.data.get(CONF_API_KEY):
-            # Surface existing key from data into the form as suggested_value,
-            # we won't mutate data here.
-            options[CONF_API_KEY] = self.config_entry.data[CONF_API_KEY]
+
+        # Surface setup-time values (stored in entry.data) so they appear in Options UI
+        for k in (CONF_API_KEY, CONF_OLLAMA_URL):
+            if k not in options and self.config_entry.data.get(k):
+                options[k] = self.config_entry.data[k]
 
         # First render
         if user_input is None:
@@ -394,7 +448,22 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
 
         errors: dict[str, str] = {}
 
-        # --- Handle API key edits explicitly ---
+        # Detect explicit edit of Ollama URL
+        ollama_edited = CONF_OLLAMA_URL in (user_input or {})
+        if ollama_edited:
+            raw = (user_input.get(CONF_OLLAMA_URL) or "").strip()
+            if raw:
+                try:
+                    await _validate_ollama_url(self.hass, raw)
+                except CannotConnectError:
+                    errors["base"] = "cannot_connect"
+                else:
+                    options[CONF_OLLAMA_URL] = _ensure_http_url(raw)
+            else:
+                # explicit delete: remove to fall back on default later
+                options.pop(CONF_OLLAMA_URL, None)
+
+        # Handle API key edits explicitly
         api_key = CONF_API_KEY in (user_input or {})
         if api_key:
             raw = (user_input.get(CONF_API_KEY) or "").strip()
@@ -459,9 +528,11 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         if final_options.get(CONF_LLM_HASS_API) == "none":
             final_options.pop(CONF_LLM_HASS_API, None)
 
-        # Normalize API key: drop if blank so you don't store empty strings
-        if not api_key:
+        # Drop if blank so you don't store empty strings
+        if not (options.get(CONF_API_KEY) or "").strip():
             final_options.pop(CONF_API_KEY, None)
+        if not (options.get(CONF_OLLAMA_URL) or "").strip():
+            final_options.pop(CONF_OLLAMA_URL, None)
 
         return self.async_create_entry(title="", data=final_options)
 
