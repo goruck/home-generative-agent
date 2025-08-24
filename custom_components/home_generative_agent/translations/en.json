@@ -1,18 +1,19 @@
 {
   "config": {
-    "error": {
-      "cannot_connect": "Can't reach OpenAI. Check network and try again.",
-      "invalid_auth": "Invalid OpenAI API key.",
-      "unknown": "Unexpected error."
-    },
     "step": {
       "user": {
-        "title": "Connect OpenAI (optional)",
-        "description": "If you plan to use OpenAI, enter your **OpenAI API key** now (usually starts with `sk-...`). You can also leave this blank and finish setup with the Ollama provider; you can add a key later in Options.",
+        "title": "Connect models",
+        "description": "Optionally enter an **OpenAI API key** and/or your **Ollama server URL**. You can skip either and configure later in Options.",
         "data": {
-          "api_key": "OpenAI API key (optional)"
+          "api_key": "OpenAI API key (optional)",
+          "ollama_url": "Ollama server URL (optional)"
         }
       }
+    },
+    "error": {
+      "cannot_connect": "Can't reach the service. Check keys/URLs and try again.",
+      "invalid_auth": "Invalid OpenAI API key.",
+      "unknown": "Unexpected error."
     }
   },
   "exceptions": {
@@ -24,9 +25,10 @@
     "step": {
       "init": {
         "title": "Home Generative Agent Options",
-        "description": "Configure models and (optionally) set or update your OpenAI API key.",
+        "description": "Configure models and providers. You can set/update your OpenAI API key and Ollama server URL here.",
         "data": {
           "api_key": "OpenAI API key (optional)",
+          "ollama_url": "Ollama server URL (optional)",
           "prompt": "Instructions",
           "chat_model_provider": "Chat model provider",
           "ollama_chat_model": "Ollama chat model",
