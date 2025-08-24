@@ -44,6 +44,7 @@ from .const import (
     CONF_OLLAMA_CHAT_MODEL,
     CONF_OLLAMA_EMBEDDING_MODEL,
     CONF_OLLAMA_SUMMARIZATION_MODEL,
+    CONF_OLLAMA_URL,
     CONF_OLLAMA_VLM,
     CONF_OPENAI_CHAT_MODEL,
     CONF_OPENAI_EMBEDDING_MODEL,
@@ -59,7 +60,6 @@ from .const import (
     EMBEDDING_MODEL_CTX,
     EMBEDDING_MODEL_DIMS,
     HTTP_STATUS_BAD_REQUEST,
-    OLLAMA_URL,
     REASONING_DELIMITERS,
     RECOMMENDED_CHAT_MODEL_PROVIDER,
     RECOMMENDED_CHAT_MODEL_TEMPERATURE,
@@ -67,6 +67,7 @@ from .const import (
     RECOMMENDED_OLLAMA_CHAT_MODEL,
     RECOMMENDED_OLLAMA_EMBEDDING_MODEL,
     RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL,
+    RECOMMENDED_OLLAMA_URL,
     RECOMMENDED_OLLAMA_VLM,
     RECOMMENDED_OPENAI_CHAT_MODEL,
     RECOMMENDED_OPENAI_EMBEDDING_MODEL,
@@ -638,11 +639,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     # Merging options over data guarantees you see the most recent value.
     conf = {**entry.data, **entry.options}
     api_key = conf.get(CONF_API_KEY)
+    ollama_url = conf.get(CONF_OLLAMA_URL, RECOMMENDED_OLLAMA_URL)
+    ollama_url = _ensure_http_url(ollama_url)
 
     # Health checks (fast, non-fatal)
     health_timeout = 2.0
     ollama_ok, openai_ok = await asyncio.gather(
-        _ollama_healthy(hass, OLLAMA_URL, timeout_s=health_timeout),
+        _ollama_healthy(hass, ollama_url, timeout_s=health_timeout),
         _openai_healthy(hass, api_key, timeout_s=health_timeout),
     )
 
@@ -670,7 +673,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         try:
             ollama_provider = ChatOllama(
                 model=RECOMMENDED_OLLAMA_CHAT_MODEL,
-                base_url=_ensure_http_url(OLLAMA_URL),
+                base_url=ollama_url,
             ).configurable_fields(
                 model=ConfigurableField(id="model"),
                 format=ConfigurableField(id="format"),
@@ -703,7 +706,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 model=entry.options.get(
                     CONF_OLLAMA_EMBEDDING_MODEL, RECOMMENDED_OLLAMA_EMBEDDING_MODEL
                 ),
-                base_url=_ensure_http_url(OLLAMA_URL),
+                base_url=ollama_url,
                 num_ctx=EMBEDDING_MODEL_CTX,
             )
         except Exception:
