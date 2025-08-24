@@ -14,10 +14,6 @@ DB_URI = "postgresql://ha_user:ha_passwd@localhost:5432/ha_db?sslmode=disable"
 # See https://python.langchain.com/docs/how_to/debugging/
 LANGCHAIN_LOGGING_LEVEL: Literal["disable", "verbose", "debug"] = "disable"
 
-# ---- Ollama ----
-# Base URL for the Ollama server (scheme added at runtime if missing).
-OLLAMA_URL = "192.168.1.252:11434"
-
 # --- Reasoning delimiters ---
 # These delimiters are used to mark the start and end of reasoning blocks in the model's
 # responses.
@@ -26,6 +22,10 @@ REASONING_DELIMITERS: dict[str, str] = {
     "start": "<think>",
     "end": "</think>",
 }
+
+# ---- Ollama ----
+CONF_OLLAMA_URL = "ollama_url"
+RECOMMENDED_OLLAMA_URL = "http://localhost:11434"
 
 # ---- Global options ----
 CONF_RECOMMENDED = "recommended"
