@@ -753,13 +753,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         pool,
         index=index_config if index_config else None,
     )
-    # NOTE: must call .setup() the first time store is used.
-    # await store.setup()  # noqa: ERA001
+    # Only need to call .setup() the first time store is used,
+    # but it's cheap and safe to call again as a simplifier
+    await store.setup()
 
     # Initialize database for thread-based (short-term) memory.
     checkpointer = AsyncPostgresSaver(pool)
-    # NOTE: must call .setup() the first time store is used.
-    # await checkpointer.setup()  # noqa: ERA001
+    # Only need to call .setup() the first time store is used,
+    # but it's cheap and safe to call again as a simplifier.
+    await checkpointer.setup()
 
     # ----- Choose concrete models for roles from constants -----
 
