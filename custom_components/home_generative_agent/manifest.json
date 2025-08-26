@@ -23,5 +23,5 @@
     "psycopg-pool==3.2.6",
     "transformers==4.54.0"
   ],
-  "version": "2.1.1"
+  "version": "2.1.2"
 }
