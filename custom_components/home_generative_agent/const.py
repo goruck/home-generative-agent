@@ -153,6 +153,7 @@ CONF_VIDEO_ANALYZER_MODE = "video_analyzer_mode"
 RECOMMENDED_VIDEO_ANALYZER_MODE: Literal[
     "disable", "notify_on_anomaly", "always_notify"
 ] = "disable"
+CONF_NOTIFY_SERVICE = "notify_service"
 
 # Interval units are seconds.
 VIDEO_ANALYZER_SCAN_INTERVAL = 1.5
@@ -164,7 +165,6 @@ Keep the description to the point and use no more than 250 characters.
 VIDEO_ANALYZER_PROMPT = """
 Describe what is happening in this video from these frame descriptions:
 """
-VIDEO_ANALYZER_MOBILE_APP = "mobile_app_lindos_iphone"
 # Time offset units are minutes.
 VIDEO_ANALYZER_TIME_OFFSET = 15
 VIDEO_ANALYZER_SIMILARITY_THRESHOLD = 0.89

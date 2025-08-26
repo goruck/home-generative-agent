@@ -47,7 +47,8 @@
           "openai_embedding_model": "OpenAI embedding model",
           "llm_hass_api": "Control Home Assistant",
           "recommended": "Recommended model settings",
-          "video_analyzer_mode": "Video analyzer mode"
+          "video_analyzer_mode": "Video analyzer mode",
+          "notify_service": "Mobile App Notify Service (optional)"
         },
         "data_description": {
           "prompt": "Instruct how the LLM should respond. This can be a template."

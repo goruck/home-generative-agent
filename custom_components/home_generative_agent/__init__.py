@@ -41,6 +41,7 @@ from .const import (
     CONF_CHAT_MODEL_PROVIDER,
     CONF_CHAT_MODEL_TEMPERATURE,
     CONF_EMBEDDING_MODEL_PROVIDER,
+    CONF_NOTIFY_SERVICE,
     CONF_OLLAMA_CHAT_MODEL,
     CONF_OLLAMA_EMBEDDING_MODEL,
     CONF_OLLAMA_SUMMARIZATION_MODEL,
@@ -80,7 +81,6 @@ from .const import (
     SUMMARIZATION_MODEL_CTX,
     SUMMARIZATION_MODEL_PREDICT,
     SUMMARIZATION_MODEL_TOP_P,
-    VIDEO_ANALYZER_MOBILE_APP,
     VIDEO_ANALYZER_MOTION_CAMERA_MAP,
     VIDEO_ANALYZER_PROMPT,
     VIDEO_ANALYZER_SCAN_INTERVAL,
@@ -162,6 +162,16 @@ async def _generate_embeddings(
 ) -> list[list[float]]:
     """Generate embeddings from a list of text."""
     return await emb.aembed_documents(list(texts))
+
+
+def _discover_mobile_notify_service(hass: HomeAssistant) -> str | None:
+    # Returns just the service *name* (e.g., "mobile_app_lindos_iphone")
+    services = hass.services.async_services().get("notify", {})
+    # `services` is a dict mapping service_name -> Service object
+    for svc_name in services:
+        if svc_name.startswith("mobile_app_"):
+            return svc_name
+    return None
 
 
 class NullChat:
@@ -266,9 +276,21 @@ class VideoAnalyzer:
     async def _send_notification(
         self, msg: str, camera_name: str, notify_img_path: Path
     ) -> None:
+        # Prefer configured option; fall back to discovery
+        full_service = self.entry.options.get(CONF_NOTIFY_SERVICE)
+        if full_service and full_service.startswith("notify."):
+            domain, service = full_service.split(".", 1)
+        else:
+            service = _discover_mobile_notify_service(self.hass)
+            LOGGER.debug("Discovered notify service: %s", service)
+            if not service:
+                LOGGER.warning("No notify.mobile_app_* service found.")
+                return
+            domain = "notify"
+
         await self.hass.services.async_call(
-            "notify",
-            VIDEO_ANALYZER_MOBILE_APP,
+            domain,
+            service,
             {
                 "message": msg,
                 "title": f"Camera Alert from {camera_name}!",

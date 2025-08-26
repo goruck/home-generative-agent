@@ -35,6 +35,7 @@ from .const import (
     CONF_CHAT_MODEL_PROVIDER,
     CONF_CHAT_MODEL_TEMPERATURE,
     CONF_EMBEDDING_MODEL_PROVIDER,
+    CONF_NOTIFY_SERVICE,
     CONF_OLLAMA_CHAT_MODEL,
     CONF_OLLAMA_SUMMARIZATION_MODEL,
     CONF_OLLAMA_URL,
@@ -193,6 +194,14 @@ def _provider_selector_config(cat: str) -> SelectSelectorConfig:
     )
 
 
+def _list_mobile_notify_services(hass: HomeAssistant) -> list[str]:
+    """Return a sorted list like ['notify.mobile_app_xxx', ...]."""
+    services = hass.services.async_services().get("notify", {}) or {}
+    return sorted(
+        f"notify.{name}" for name in services if name.startswith("mobile_app_")
+    )
+
+
 def _model_selector_config(cat: str, provider: str) -> SelectSelectorConfig:
     models = MODEL_CATEGORY_SPECS[cat]["providers"].get(provider, [])
     return SelectSelectorConfig(
@@ -282,7 +291,6 @@ def _schema_for(hass: HomeAssistant, opts: dict[str, Any]) -> VolDictType:
             CONF_OLLAMA_URL,
             description={"suggested_value": (opts.get(CONF_OLLAMA_URL))},
         ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
-        # --- existing base fields ---
         vol.Optional(
             CONF_PROMPT,
             description={"suggested_value": opts.get(CONF_PROMPT)},
@@ -298,12 +306,37 @@ def _schema_for(hass: HomeAssistant, opts: dict[str, Any]) -> VolDictType:
             description={"suggested_value": opts.get(CONF_VIDEO_ANALYZER_MODE)},
             default=RECOMMENDED_VIDEO_ANALYZER_MODE,
         ): SelectSelector(SelectSelectorConfig(options=video_analyzer_mode)),
+    }
+
+    selected_mode = opts.get(CONF_VIDEO_ANALYZER_MODE, RECOMMENDED_VIDEO_ANALYZER_MODE)
+    if selected_mode != "disable":
+        mobile_opts = _list_mobile_notify_services(hass)
+        if mobile_opts:
+            schema[
+                vol.Optional(
+                    CONF_NOTIFY_SERVICE,
+                    description={"suggested_value": opts.get(CONF_NOTIFY_SERVICE)},
+                    default=opts.get(CONF_NOTIFY_SERVICE, mobile_opts[0]),
+                )
+            ] = SelectSelector(
+                SelectSelectorConfig(
+                    options=[
+                        SelectOptionDict(label=s.replace("notify.", ""), value=s)
+                        for s in mobile_opts
+                    ],
+                    mode=SelectSelectorMode.DROPDOWN,
+                    sort=False,
+                    custom_value=False,
+                )
+            )
+
+    schema[
         vol.Required(
             CONF_RECOMMENDED,
             description={"suggested_value": opts.get(CONF_RECOMMENDED)},
             default=opts.get(CONF_RECOMMENDED, False),
-        ): bool,
-    }
+        )
+    ] = bool
 
     # Recommended ON → no providers/models/temps
     recommended_on = opts.get(CONF_RECOMMENDED, False)
@@ -423,6 +456,9 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
             CONF_RECOMMENDED, False
         )
         self._last_providers = _extract_provider_state(config_entry.options)
+        self._last_analyzer_mode = config_entry.options.get(
+            CONF_VIDEO_ANALYZER_MODE, RECOMMENDED_VIDEO_ANALYZER_MODE
+        )
 
     async def async_step_init(  # noqa: PLR0912, PLR0915
         self, user_input: dict[str, Any] | None = None
@@ -493,10 +529,14 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
                 errors=errors,
             )
 
-        # Handle schema-affecting toggles (recommended/providers)
+        # Handle schema-affecting toggles
         recommended_now = options.get(CONF_RECOMMENDED, False)
         recommended_changed = recommended_now != self.last_rendered_recommended
         provider_changed = _providers_changed(self._last_providers, options)
+        analyzer_mode_now = options.get(
+            CONF_VIDEO_ANALYZER_MODE, RECOMMENDED_VIDEO_ANALYZER_MODE
+        )
+        analyzer_mode_changed = analyzer_mode_now != self._last_analyzer_mode
 
         # If Recommended turned ON → apply defaults and SAVE immediately
         if recommended_changed and recommended_now:
@@ -509,13 +549,15 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
                 options.pop(CONF_API_KEY, None)
             self.last_rendered_recommended = True
             self._last_providers = _extract_provider_state(options)
+            self._last_analyzer_mode = analyzer_mode_now
             return self.async_create_entry(title="", data=options)
 
-        # If Recommended toggled OFF or providers changed → re-render once
-        if recommended_changed or provider_changed:
+        # If Recommended toggled OFF or schema changes, re-render once
+        if recommended_changed or provider_changed or analyzer_mode_changed:
             options = _prune_irrelevant_model_fields(options)
             self.last_rendered_recommended = recommended_now
             self._last_providers = _extract_provider_state(options)
+            self._last_analyzer_mode = analyzer_mode_now
             return self.async_show_form(
                 step_id="init", data_schema=vol.Schema(_schema_for(self.hass, options))
             )
