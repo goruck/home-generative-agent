@@ -40,6 +40,7 @@ from .const import (
     CHAT_MODEL_TOP_P,
     CONF_CHAT_MODEL_PROVIDER,
     CONF_CHAT_MODEL_TEMPERATURE,
+    CONF_DB_BOOTSTRAPPED,
     CONF_EMBEDDING_MODEL_PROVIDER,
     CONF_NOTIFY_SERVICE,
     CONF_OLLAMA_CHAT_MODEL,
@@ -172,6 +173,24 @@ def _discover_mobile_notify_service(hass: HomeAssistant) -> str | None:
         if svc_name.startswith("mobile_app_"):
             return svc_name
     return None
+
+
+async def _bootstrap_db_once(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    store: AsyncPostgresStore,
+    checkpointer: AsyncPostgresSaver,
+) -> None:
+    if entry.data.get(CONF_DB_BOOTSTRAPPED):
+        return
+    # First time only
+    await store.setup()
+    await checkpointer.setup()
+
+    # Persist the flag so it survives restarts
+    hass.config_entries.async_update_entry(
+        entry, data={**entry.data, CONF_DB_BOOTSTRAPPED: True}
+    )
 
 
 class NullChat:
@@ -771,19 +790,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         LOGGER.exception("Error opening postgresql db.")
         return False
 
+    # Initialize database for long-term memory.
     store = AsyncPostgresStore(
         pool,
         index=index_config if index_config else None,
     )
-    # Only need to call .setup() the first time store is used,
-    # but it's cheap and safe to call again as a simplifier
-    await store.setup()
-
     # Initialize database for thread-based (short-term) memory.
     checkpointer = AsyncPostgresSaver(pool)
-    # Only need to call .setup() the first time store is used,
-    # but it's cheap and safe to call again as a simplifier.
-    await checkpointer.setup()
+    # First-time setup (if needed)
+    await _bootstrap_db_once(hass, entry, store, checkpointer)
 
     # ----- Choose concrete models for roles from constants -----
 

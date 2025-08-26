@@ -9,6 +9,8 @@ HTTP_STATUS_BAD_REQUEST = 400
 
 # ---- PostgreSQL (vector store + checkpointer) ----
 DB_URI = "postgresql://ha_user:ha_passwd@localhost:5432/ha_db?sslmode=disable"
+# constants.py
+CONF_DB_BOOTSTRAPPED = "db_bootstrapped"
 
 # ---- LangChain logging ----
 # See https://python.langchain.com/docs/how_to/debugging/
