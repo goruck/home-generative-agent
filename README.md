@@ -23,13 +23,14 @@ This integration will set up the `conversation` platform, a convenient HA compon
 
 ### HACS
 
-1. home-generative-agent is available in the default HACS repository. You can install it directly through HACS or click the button below to open it there.
 
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=goruck&repository=https%3A%2F%2Fgithub.com%2Fgoruck%2Fhome-generative-agent&category=integration)
-
-2. Install the [PostgreSQL with pgvector](https://github.com/goruck/addon-postgres-pgvector/tree/main/postgres_pgvector) add-on by clicking the button below and configure it according to [these directions](https://github.com/goruck/addon-postgres-pgvector/blob/main/postgres_pgvector/DOCS.md). This allows for persistence storage of conversations and memories with vector similarity search.
+1. Install the [PostgreSQL with pgvector](https://github.com/goruck/addon-postgres-pgvector/tree/main/postgres_pgvector) add-on by clicking the button below and configure it according to [these directions](https://github.com/goruck/addon-postgres-pgvector/blob/main/postgres_pgvector/DOCS.md). This allows for persistence storage of conversations and memories with vector similarity search.
 
 [![Open your Home Assistant instance and show the add add-on repository dialog with a specific repository URL pre-filled.](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fgoruck%2Faddon-postgres-pgvector)
+
+2. home-generative-agent is available in the default HACS repository. You can install it directly through HACS or click the button below to open it there.
+
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=goruck&repository=https%3A%2F%2Fgithub.com%2Fgoruck%2Fhome-generative-agent&category=integration)
 
 3. Install all the Blueprints in the `blueprints` directory.
 
@@ -38,17 +39,18 @@ This integration will set up the `conversation` platform, a convenient HA compon
 5. (Optional) Pull `ollama` models `gpt-oss`, `qwen3:8b`, `qwen3:1.7b`, `qwen2.5vl:7b` and `mxbai-embed-large`.
 
 ### Manual (non-HACS install)
-1. Using the tool of choice, open your HA configuration's directory (where you find `configuration.yaml`).
-2. If you do not have a `custom_components` directory, you must create it.
-3. In the `custom_components` directory, create a new sub-directory called `home_generative_agent`.
-4. Download _all_ the files from the `custom_components/home_generative_agent/` directory in this repository.
-5. Place the files you downloaded in the new directory you created.
-6. Restart Home Assistant
-7. In the HA UI, go to "Configuration" -> "Integrations" click "+," and search for "Home Generative Agent"
-8. Follow steps 2 to 5 above.
+1. Install PostgreSQL with pgvector as shown above in Step 1.
+2. Using the tool of choice, open your HA configuration's directory (where you find `configuration.yaml`).
+3. If you do not have a `custom_components` directory, you must create it.
+4. In the `custom_components` directory, create a new sub-directory called `home_generative_agent`.
+5. Download _all_ the files from the `custom_components/home_generative_agent/` directory in this repository.
+6. Place the files you downloaded in the new directory you created.
+7. Restart Home Assistant
+8. In the HA UI, go to "Configuration" -> "Integrations" click "+," and search for "Home Generative Agent"
+9. Follow steps 3 to 5 above.
 
 ## Configuration
-Configuration is done in the UI and via the parameters in `const.py`. You must enter in your OpenAI API key during initial setup through the Home Assistant UI.
+Configuration is done in the UI and via the parameters in `const.py`. You can enter in your OpenAI API key and your Ollama server URL during initial setup through the Home Assistant UI or later in the integration's settings.
 
 ## Contributions are welcome!
 
