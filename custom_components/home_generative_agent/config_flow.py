@@ -409,7 +409,7 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
-    async def async_step_user(
+    async def async_step_user(  # noqa: PLR0912
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Handle the initial step."""
@@ -491,7 +491,7 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
             CONF_VIDEO_ANALYZER_MODE, RECOMMENDED_VIDEO_ANALYZER_MODE
         )
 
-    async def async_step_init(  # noqa: PLR0912, PLR0915
+    async def async_step_init(  # noqa: C901, PLR0912, PLR0915
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Handle the options flow init step."""
