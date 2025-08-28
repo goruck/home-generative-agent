@@ -3,10 +3,11 @@
     "step": {
       "user": {
         "title": "Connect models",
-        "description": "Optionally enter an **OpenAI API key** and/or your **Ollama server URL**. You can skip either and configure later in Options.",
+        "description": "Optionally enter an **OpenAI or Gemini API key** and/or your **Ollama server URL**. You can skip either and configure later in Options.",
         "data": {
           "api_key": "OpenAI API key (optional)",
-          "ollama_url": "Ollama server URL (optional)"
+          "ollama_url": "Ollama server URL (optional)",
+          "gemini_api_key": "Google Gemini API key (optional)"
         }
       }
     },
@@ -25,26 +26,31 @@
     "step": {
       "init": {
         "title": "Home Generative Agent Options",
-        "description": "Configure models and providers. You can set/update your OpenAI API key and Ollama server URL here.",
+        "description": "Configure main prompt, models and providers. You can also update your API keys and Ollama server URL here.",
         "data": {
           "api_key": "OpenAI API key (optional)",
+          "gemini_api_key": "Google Gemini API key (optional)",
           "ollama_url": "Ollama server URL (optional)",
           "prompt": "Instructions",
           "chat_model_provider": "Chat model provider",
           "ollama_chat_model": "Ollama chat model",
           "openai_chat_model": "OpenAI chat model",
+          "gemini_chat_model": "Gemini chat model",
           "chat_model_temperature": "Chat model temperature",
           "vlm_provider": "VLM provider",
           "ollama_vlm": "Ollama VLM",
           "openai_vlm": "OpenAI VLM",
+          "gemini_vlm": "Gemini VLM",
           "vlm_temperature": "VLM temperature",
           "summarization_provider": "Summarization provider",
           "ollama_summarization_model": "Ollama summarization model",
           "openai_summarization_model": "OpenAI summarization model",
+          "gemini_summarization_model": "Gemini summarization model",
           "summarization_model_temperature": "Summarization model temperature",
-          "embedding_provider": "Embedding provider",
+          "embedding_model_provider": "Embedding model provider",
           "ollama_embedding_model": "Ollama embedding model",
           "openai_embedding_model": "OpenAI embedding model",
+          "gemini_embedding_model": "Gemini embedding model",
           "llm_hass_api": "Control Home Assistant",
           "recommended": "Recommended model settings",
           "video_analyzer_mode": "Video analyzer mode",

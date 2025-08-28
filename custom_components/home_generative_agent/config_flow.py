@@ -35,6 +35,7 @@ from .const import (
     CONF_CHAT_MODEL_PROVIDER,
     CONF_CHAT_MODEL_TEMPERATURE,
     CONF_EMBEDDING_MODEL_PROVIDER,
+    CONF_GEMINI_API_KEY,
     CONF_NOTIFY_SERVICE,
     CONF_OLLAMA_CHAT_MODEL,
     CONF_OLLAMA_SUMMARIZATION_MODEL,
@@ -78,11 +79,14 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
         vol.Optional(CONF_API_KEY): TextSelector(
             TextSelectorConfig(type=TextSelectorType.PASSWORD)
         ),
+        vol.Optional(CONF_GEMINI_API_KEY): TextSelector(
+            TextSelectorConfig(type=TextSelectorType.PASSWORD)
+        ),
         vol.Optional(
             CONF_OLLAMA_URL,
             description={"suggested_value": RECOMMENDED_OLLAMA_URL},
         ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
-    }
+    },
 )
 
 
@@ -159,6 +163,21 @@ async def _validate_input(hass: HomeAssistant, data: dict[str, Any]) -> None:
         raise CannotConnectError from err
     if resp.status_code == HTTP_STATUS_UNAUTHORIZED:
         raise InvalidAuthError
+    if resp.status_code >= HTTP_STATUS_BAD_REQUEST:
+        raise CannotConnectError
+
+
+async def _validate_gemini_key(hass: HomeAssistant, api_key: str) -> None:
+    """Light probe to confirm Gemini key works."""
+    client = get_async_client(hass)
+    try:
+        resp = await client.get(
+            f"https://generativelanguage.googleapis.com/v1/models?key={api_key}",
+            timeout=10,
+        )
+    except Exception as err:
+        LOGGER.debug("Gemini connectivity exception during validation: %s", err)
+        raise CannotConnectError from err
     if resp.status_code >= HTTP_STATUS_BAD_REQUEST:
         raise CannotConnectError
 
@@ -281,12 +300,14 @@ def _schema_for(hass: HomeAssistant, opts: dict[str, Any]) -> VolDictType:
     ]
 
     schema: VolDictType = {
-        # --- OpenAI API key (optional, masked) ---
         vol.Optional(
             CONF_API_KEY,
             description={"suggested_value": opts.get(CONF_API_KEY)},
         ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
-        # Ollama URL (optional, text)
+        vol.Optional(
+            CONF_GEMINI_API_KEY,
+            description={"suggested_value": opts.get(CONF_GEMINI_API_KEY)},
+        ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
         vol.Optional(
             CONF_OLLAMA_URL,
             description={"suggested_value": (opts.get(CONF_OLLAMA_URL))},
@@ -401,6 +422,7 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
 
         api_key = (user_input.get(CONF_API_KEY) or "").strip()
         ollama_url = (user_input.get(CONF_OLLAMA_URL) or "").strip()
+        gemini_key = (user_input.get(CONF_GEMINI_API_KEY) or "").strip()
 
         # Validate OpenAI only if provided
         if api_key:
@@ -422,6 +444,13 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
             except CannotConnectError:
                 errors["base"] = "cannot_connect"
 
+        # Validate Gemini only if provided
+        if not errors and gemini_key:
+            try:
+                await _validate_gemini_key(self.hass, gemini_key)
+            except CannotConnectError:
+                errors["base"] = "cannot_connect"
+
         if errors:
             return self.async_show_form(
                 step_id="user", data_schema=STEP_USER_DATA_SCHEMA, errors=errors
@@ -432,6 +461,8 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
             user_input.pop(CONF_API_KEY, None)
         if not ollama_url:
             user_input.pop(CONF_OLLAMA_URL, None)
+        if not gemini_key:
+            user_input.pop(CONF_GEMINI_API_KEY, None)
 
         return self.async_create_entry(
             title="Home Generative Agent",
@@ -469,7 +500,7 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         options = dict(self.config_entry.options)
 
         # Surface setup-time values (stored in entry.data) so they appear in Options UI
-        for k in (CONF_API_KEY, CONF_OLLAMA_URL):
+        for k in (CONF_API_KEY, CONF_OLLAMA_URL, CONF_GEMINI_API_KEY):
             if k not in options and self.config_entry.data.get(k):
                 options[k] = self.config_entry.data[k]
 
@@ -498,6 +529,26 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
             else:
                 # explicit delete: remove to fall back on default later
                 options.pop(CONF_OLLAMA_URL, None)
+
+        # Handle Gemini API key edits explicitly
+        gemini_key_edited = CONF_GEMINI_API_KEY in (user_input or {})
+        if gemini_key_edited:
+            raw = (user_input.get(CONF_GEMINI_API_KEY) or "").strip()
+            if raw:
+                try:
+                    await _validate_gemini_key(self.hass, raw)
+                except CannotConnectError:
+                    errors["base"] = "cannot_connect"
+                except Exception:
+                    LOGGER.exception(
+                        "Unexpected exception in Gemini Options validation"
+                    )
+                    errors["base"] = "unknown"
+                else:
+                    options[CONF_GEMINI_API_KEY] = raw
+            else:
+                # explicit delete when user clears the field
+                options.pop(CONF_GEMINI_API_KEY, None)
 
         # Handle API key edits explicitly
         api_key = CONF_API_KEY in (user_input or {})
@@ -575,6 +626,8 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
             final_options.pop(CONF_API_KEY, None)
         if not (options.get(CONF_OLLAMA_URL) or "").strip():
             final_options.pop(CONF_OLLAMA_URL, None)
+        if not (options.get(CONF_GEMINI_API_KEY) or "").strip():
+            final_options.pop(CONF_GEMINI_API_KEY, None)
 
         return self.async_create_entry(title="", data=final_options)
 

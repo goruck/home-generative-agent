@@ -26,6 +26,7 @@ from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.httpx_client import get_async_client
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import ConfigurableField
+from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -42,6 +43,11 @@ from .const import (
     CONF_CHAT_MODEL_TEMPERATURE,
     CONF_DB_BOOTSTRAPPED,
     CONF_EMBEDDING_MODEL_PROVIDER,
+    CONF_GEMINI_API_KEY,
+    CONF_GEMINI_CHAT_MODEL,
+    CONF_GEMINI_EMBEDDING_MODEL,
+    CONF_GEMINI_SUMMARIZATION_MODEL,
+    CONF_GEMINI_VLM,
     CONF_NOTIFY_SERVICE,
     CONF_OLLAMA_CHAT_MODEL,
     CONF_OLLAMA_EMBEDDING_MODEL,
@@ -66,6 +72,10 @@ from .const import (
     RECOMMENDED_CHAT_MODEL_PROVIDER,
     RECOMMENDED_CHAT_MODEL_TEMPERATURE,
     RECOMMENDED_EMBEDDING_MODEL_PROVIDER,
+    RECOMMENDED_GEMINI_CHAT_MODEL,
+    RECOMMENDED_GEMINI_EMBEDDING_MODEL,
+    RECOMMENDED_GEMINI_SUMMARIZATION_MODEL,
+    RECOMMENDED_GEMINI_VLM,
     RECOMMENDED_OLLAMA_CHAT_MODEL,
     RECOMMENDED_OLLAMA_EMBEDDING_MODEL,
     RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL,
@@ -158,11 +168,44 @@ async def _openai_healthy(
     return False
 
 
+async def _gemini_healthy(
+    hass: HomeAssistant, api_key: str | None, timeout_s: float = 2.0
+) -> bool:
+    """Quick reachability check for Gemini."""
+    if not api_key:
+        LOGGER.warning("Gemini health check skipped: missing API key.")
+        return False
+    client = get_async_client(hass)
+    try:
+        # Public models list endpoint requires key query param
+        url = f"https://generativelanguage.googleapis.com/v1/models?key={api_key}"
+        async with async_timeout.timeout(timeout_s):
+            resp = await client.get(url)
+        if resp.status_code < HTTP_STATUS_BAD_REQUEST:
+            return True
+        LOGGER.warning("Gemini health check HTTP %s: %s", resp.status_code, resp.text)
+    except Exception as err:  # noqa: BLE001
+        LOGGER.warning("Gemini health check failed: %s", err)
+    return False
+
+
 async def _generate_embeddings(
-    emb: OpenAIEmbeddings | OllamaEmbeddings, texts: Sequence[str]
+    emb: OpenAIEmbeddings | OllamaEmbeddings | GoogleGenerativeAIEmbeddings,
+    texts: Sequence[str],
 ) -> list[list[float]]:
-    """Generate embeddings from a list of text."""
-    return await emb.aembed_documents(list(texts))
+    """
+    Generate embeddings from a list of text.
+
+    Note: Gemini supports custom output dimensionality; force 1024 to match our index.
+    """
+    texts_list = list(texts)
+    # If it's Gemini, ask for 1024-d explicitly
+    if isinstance(emb, GoogleGenerativeAIEmbeddings):
+        return await emb.aembed_documents(
+            texts_list, output_dimensionality=EMBEDDING_MODEL_DIMS
+        )
+    # OpenAI / Ollama paths unchanged
+    return await emb.aembed_documents(texts_list)
 
 
 def _discover_mobile_notify_service(hass: HomeAssistant) -> str | None:
@@ -680,14 +723,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     # Merging options over data guarantees you see the most recent value.
     conf = {**entry.data, **entry.options}
     api_key = conf.get(CONF_API_KEY)
+    gemini_key = conf.get(CONF_GEMINI_API_KEY)
     ollama_url = conf.get(CONF_OLLAMA_URL, RECOMMENDED_OLLAMA_URL)
     ollama_url = _ensure_http_url(ollama_url)
 
     # Health checks (fast, non-fatal)
     health_timeout = 2.0
-    ollama_ok, openai_ok = await asyncio.gather(
+    ollama_ok, openai_ok, gemini_ok = await asyncio.gather(
         _ollama_healthy(hass, ollama_url, timeout_s=health_timeout),
         _openai_healthy(hass, api_key, timeout_s=health_timeout),
+        _gemini_healthy(hass, gemini_key, timeout_s=health_timeout),
     )
 
     http_client = get_async_client(hass)
@@ -726,6 +771,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         except Exception:
             LOGGER.exception("Ollama provider init failed; continuing without it.")
 
+    gemini_provider: RunnableSerializable[LanguageModelInput, BaseMessage] | None = None
+    if gemini_ok:
+        try:
+            gemini_provider = ChatGoogleGenerativeAI(
+                api_key=gemini_key,
+                model=RECOMMENDED_GEMINI_CHAT_MODEL,  # default, will get overridden
+            ).configurable_fields(
+                model=ConfigurableField(id="model"),
+                temperature=ConfigurableField(id="temperature"),
+                top_p=ConfigurableField(id="top_p"),
+                max_output_tokens=ConfigurableField(id="max_tokens"),
+            )
+        except Exception:
+            LOGGER.exception("Gemini provider init failed; continuing without it.")
+
     # Embeddings: instantiate both, then select based on provider
     openai_embeddings: OpenAIEmbeddings | None = None
     if openai_ok:
@@ -753,14 +813,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         except Exception:
             LOGGER.exception("Ollama embeddings init failed; continuing without them.")
 
+    gemini_embeddings: GoogleGenerativeAIEmbeddings | None = None
+    if gemini_ok:
+        try:
+            gemini_embeddings = GoogleGenerativeAIEmbeddings(
+                google_api_key=gemini_key,
+                model=entry.options.get(
+                    CONF_GEMINI_EMBEDDING_MODEL, RECOMMENDED_GEMINI_EMBEDDING_MODEL
+                ),
+            )
+        except Exception:
+            LOGGER.exception("Gemini embeddings init failed; continuing without them.")
+
     # Choose active embedding provider
-    embedding_model: OpenAIEmbeddings | OllamaEmbeddings | None = None
+    embedding_model: (
+        OpenAIEmbeddings | OllamaEmbeddings | GoogleGenerativeAIEmbeddings | None
+    ) = None
     embedding_provider = entry.options.get(
         CONF_EMBEDDING_MODEL_PROVIDER, RECOMMENDED_EMBEDDING_MODEL_PROVIDER
     )
     index_config: PostgresIndexConfig | None = None
     if embedding_provider == "openai":
         embedding_model = openai_embeddings
+    elif embedding_provider == "gemini":
+        embedding_model = gemini_embeddings
     else:
         embedding_model = ollama_embeddings
 
@@ -822,6 +898,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 }
             }
         )
+    elif chat_provider == "gemini":
+        chat_model = (gemini_provider or NullChat()).with_config(
+            config={
+                "configurable": {
+                    "model": entry.options.get(
+                        CONF_GEMINI_CHAT_MODEL, RECOMMENDED_GEMINI_CHAT_MODEL
+                    ),
+                    "temperature": chat_temp,
+                    "top_p": CHAT_MODEL_TOP_P,
+                    "max_tokens": CHAT_MODEL_MAX_TOKENS,
+                }
+            }
+        )
     else:
         chat_model = (ollama_provider or NullChat()).with_config(
             config={
@@ -847,6 +936,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     "model_name": entry.options.get(
                         CONF_OPENAI_VLM, RECOMMENDED_OPENAI_VLM
                     ),
+                    "temperature": vlm_temp,
+                    "top_p": VLM_TOP_P,
+                    "max_tokens": VLM_NUM_PREDICT,
+                }
+            }
+        )
+    elif vlm_provider == "gemini":
+        vision_model = (gemini_provider or NullChat()).with_config(
+            config={
+                "configurable": {
+                    "model": entry.options.get(CONF_GEMINI_VLM, RECOMMENDED_GEMINI_VLM),
                     "temperature": vlm_temp,
                     "top_p": VLM_TOP_P,
                     "max_tokens": VLM_NUM_PREDICT,
@@ -881,6 +981,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     "model_name": entry.options.get(
                         CONF_OPENAI_SUMMARIZATION_MODEL,
                         RECOMMENDED_OPENAI_SUMMARIZATION_MODEL,
+                    ),
+                    "temperature": sum_temp,
+                    "top_p": SUMMARIZATION_MODEL_TOP_P,
+                    "max_tokens": SUMMARIZATION_MODEL_PREDICT,
+                }
+            }
+        )
+    elif sum_provider == "gemini":
+        summarization_model = (gemini_provider or NullChat()).with_config(
+            config={
+                "configurable": {
+                    "model": entry.options.get(
+                        CONF_GEMINI_SUMMARIZATION_MODEL,
+                        RECOMMENDED_GEMINI_SUMMARIZATION_MODEL,
                     ),
                     "temperature": sum_temp,
                     "top_p": SUMMARIZATION_MODEL_TOP_P,
@@ -924,17 +1038,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
     msg = (
         "Home Generative Agent initialized with the following models: "
-        "chat=%s, vlm=%s, summarization=%s. "
-        "OpenAI ok=%s, Ollama ok=%s."
+        "chat=%s, vlm=%s, summarization=%s. embeddings=%s. "
+        "OpenAI ok=%s, Ollama ok=%s, Gemini ok=%s."
     )
     LOGGER.info(
         msg,
         chat_provider,
         vlm_provider,
         sum_provider,
+        embedding_provider,
         openai_ok,
         ollama_ok,
+        gemini_ok,
     )
+
     return True
 
 
