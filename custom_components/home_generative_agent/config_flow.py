@@ -142,17 +142,11 @@ async def _validate_ollama_url(hass: HomeAssistant, base_url: str) -> None:
         raise CannotConnectError
 
 
-async def _validate_input(hass: HomeAssistant, data: dict[str, Any]) -> None:
-    """
-    Check that the user has entered a valid OpenAI API key.
-
-    Data has the key from STEP_USER_DATA_SCHEMA provided by the user.
-    """
-    api_key = data[CONF_API_KEY]
+async def _validate_openai_key(hass: HomeAssistant, api_key: str) -> None:
+    """Light probe to confirm OpenAI key works."""
     client = get_async_client(hass)
 
     try:
-        # Fast, non-fatal reachability check like __init__.py
         resp = await client.get(
             "https://api.openai.com/v1/models",
             headers={"Authorization": f"Bearer {api_key}"},
@@ -178,6 +172,8 @@ async def _validate_gemini_key(hass: HomeAssistant, api_key: str) -> None:
     except Exception as err:
         LOGGER.debug("Gemini connectivity exception during validation: %s", err)
         raise CannotConnectError from err
+    if resp.status_code == HTTP_STATUS_UNAUTHORIZED:
+        raise InvalidAuthError
     if resp.status_code >= HTTP_STATUS_BAD_REQUEST:
         raise CannotConnectError
 
@@ -427,7 +423,7 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
         # Validate OpenAI only if provided
         if api_key:
             try:
-                await _validate_input(self.hass, {CONF_API_KEY: api_key})
+                await _validate_openai_key(self.hass, api_key)
             except CannotConnectError:
                 errors["base"] = "cannot_connect"
             except InvalidAuthError:
@@ -539,6 +535,8 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
                     await _validate_gemini_key(self.hass, raw)
                 except CannotConnectError:
                     errors["base"] = "cannot_connect"
+                except InvalidAuthError:
+                    errors["base"] = "invalid_auth"
                 except Exception:
                     LOGGER.exception(
                         "Unexpected exception in Gemini Options validation"
@@ -557,7 +555,7 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
             if raw:
                 # validate only when provided
                 try:
-                    await _validate_input(self.hass, {CONF_API_KEY: raw})
+                    await _validate_openai_key(self.hass, raw)
                 except CannotConnectError:
                     errors["base"] = "cannot_connect"
                 except InvalidAuthError:
