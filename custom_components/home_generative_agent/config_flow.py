@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urljoin
 
@@ -72,6 +74,12 @@ from .const import (
     RECOMMENDED_VLM_TEMPERATURE,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Mapping
+
+    from homeassistant.core import HomeAssistant
+    from homeassistant.helpers.typing import VolDictType
+
 LOGGER = logging.getLogger(__name__)
 
 STEP_USER_DATA_SCHEMA = vol.Schema(
@@ -88,7 +96,6 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
         ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
     },
 )
-
 
 RECOMMENDED_OPTIONS = {
     CONF_RECOMMENDED: True,
@@ -110,11 +117,10 @@ RECOMMENDED_OPTIONS = {
     CONF_OPENAI_SUMMARIZATION_MODEL: RECOMMENDED_OPENAI_SUMMARIZATION_MODEL,
 }
 
-if TYPE_CHECKING:
-    from types import MappingProxyType
 
-    from homeassistant.core import HomeAssistant
-    from homeassistant.helpers.typing import VolDictType
+# ---------------------------
+# Utilities / validators
+# ---------------------------
 
 
 def _ensure_http_url(url: str) -> str:
@@ -124,6 +130,11 @@ def _ensure_http_url(url: str) -> str:
     return f"http://{url}"
 
 
+def _get_str(src: Mapping[str, Any], key: str) -> str:
+    """Get a trimmed string from a mapping (missing -> '')."""
+    return str(src.get(key, "") or "").strip()
+
+
 async def _validate_ollama_url(hass: HomeAssistant, base_url: str) -> None:
     """Light probe to confirm the Ollama server is reachable."""
     if not base_url:
@@ -131,7 +142,6 @@ async def _validate_ollama_url(hass: HomeAssistant, base_url: str) -> None:
     base_url = _ensure_http_url(base_url)
     client = get_async_client(hass)
     try:
-        # /api/tags and /api/version are fast, no auth
         resp = await client.get(
             urljoin(base_url.rstrip("/") + "/", "api/tags"), timeout=10
         )
@@ -144,8 +154,9 @@ async def _validate_ollama_url(hass: HomeAssistant, base_url: str) -> None:
 
 async def _validate_openai_key(hass: HomeAssistant, api_key: str) -> None:
     """Light probe to confirm OpenAI key works."""
+    if not api_key:
+        return
     client = get_async_client(hass)
-
     try:
         resp = await client.get(
             "https://api.openai.com/v1/models",
@@ -163,6 +174,8 @@ async def _validate_openai_key(hass: HomeAssistant, api_key: str) -> None:
 
 async def _validate_gemini_key(hass: HomeAssistant, api_key: str) -> None:
     """Light probe to confirm Gemini key works."""
+    if not api_key:
+        return
     client = get_async_client(hass)
     try:
         resp = await client.get(
@@ -178,25 +191,44 @@ async def _validate_gemini_key(hass: HomeAssistant, api_key: str) -> None:
         raise CannotConnectError
 
 
-def _all_category_provider_keys() -> tuple[str, ...]:
-    return tuple(spec["provider_key"] for spec in MODEL_CATEGORY_SPECS.values())
-
-
-def _get_selected_provider(
-    options: dict[str, Any] | MappingProxyType[str, Any], cat: str
-) -> str | None:
-    spec = MODEL_CATEGORY_SPECS[cat]
-    return options.get(spec["provider_key"], spec["recommended_provider"])
-
-
 def _model_option_key(cat: str, provider: str) -> str:
     """Return the stable option key for the model field of (category, provider)."""
     spec = MODEL_CATEGORY_SPECS[cat]
     key = spec.get("model_keys", {}).get(provider)
     if key:
         return key
-    # Fallback stable naming for new providers without explicit constants
     return f"model__{cat}__{provider}"
+
+
+def _prune_irrelevant_model_fields(opts: Mapping[str, Any]) -> dict[str, Any]:
+    """
+    Drop model fields that don't match the chosen provider for each category.
+
+    Also drop temperatures when recommended is enabled.
+    """
+    pruned = dict(opts)
+
+    # Strip temps if recommended
+    if pruned.get(CONF_RECOMMENDED):
+        for spec in MODEL_CATEGORY_SPECS.values():
+            temp_key = spec.get("temperature_key")
+            if temp_key:
+                pruned.pop(temp_key, None)
+
+    # Remove model keys for providers not selected
+    for cat, spec in MODEL_CATEGORY_SPECS.items():
+        selected = pruned.get(spec["provider_key"])
+        for provider in spec["providers"]:
+            key = _model_option_key(cat, provider)
+            if provider != selected:
+                pruned.pop(key, None)
+
+    return pruned
+
+
+def _get_selected_provider(options: Mapping[str, Any], cat: str) -> str | None:
+    spec = MODEL_CATEGORY_SPECS[cat]
+    return options.get(spec["provider_key"], spec["recommended_provider"])
 
 
 def _provider_selector_config(cat: str) -> SelectSelectorConfig:
@@ -227,64 +259,8 @@ def _model_selector_config(cat: str, provider: str) -> SelectSelectorConfig:
     )
 
 
-def _apply_recommended_defaults(opts: dict[str, Any]) -> dict[str, Any]:
-    """Force providers (and their model keys) to recommended values."""
-    updated = dict(opts)
-    for cat, spec in MODEL_CATEGORY_SPECS.items():
-        rec_provider = spec["recommended_provider"]
-        provider_key = spec["provider_key"]
-        updated[provider_key] = rec_provider
-
-        # Clear all model keys for this category
-        for prov in spec["providers"]:
-            updated.pop(_model_option_key(cat, prov), None)
-
-        # Set recommended model for the recommended provider, if known
-        rec_model = spec.get("recommended_models", {}).get(rec_provider)
-        if rec_model:
-            updated[_model_option_key(cat, rec_provider)] = rec_model
-    return updated
-
-
-def _extract_provider_state(
-    opts: dict[str, Any] | MappingProxyType[str, Any],
-) -> dict[str, Any]:
-    keys = _all_category_provider_keys()
-    return {k: opts.get(k) for k in keys}
-
-
-def _providers_changed(prev: dict[str, Any], current: dict[str, Any]) -> bool:
-    return any(prev.get(k) != current.get(k) for k in _all_category_provider_keys())
-
-
-def _prune_irrelevant_model_fields(opts: dict[str, Any]) -> dict[str, Any]:
-    """
-    Drop model fields that don't match the chosen provider for each category.
-
-    Also drop temperatures when recommended is enabled.
-    """
-    pruned = dict(opts)
-
-    # Strip temps if recommended
-    if pruned.get(CONF_RECOMMENDED):
-        for spec in MODEL_CATEGORY_SPECS.values():
-            temp_key = spec.get("temperature_key")
-            if temp_key:
-                pruned.pop(temp_key, None)
-
-    # Remove model keys for providers not selected
-    for cat, spec in MODEL_CATEGORY_SPECS.items():
-        selected = pruned.get(spec["provider_key"])
-        for provider in spec["providers"]:
-            key = _model_option_key(cat, provider)
-            if provider != selected:
-                pruned.pop(key, None)
-
-    return pruned
-
-
-def _schema_for(hass: HomeAssistant, opts: dict[str, Any]) -> VolDictType:
-    """Generate the options schema with API key field first."""
+def _schema_for(hass: HomeAssistant, opts: Mapping[str, Any]) -> VolDictType:
+    """Generate the options schema."""
     hass_apis = [SelectOptionDict(label="No control", value="none")] + [
         SelectOptionDict(label=api.name, value=api.id)
         for api in llm.async_get_apis(hass)
@@ -356,8 +332,7 @@ def _schema_for(hass: HomeAssistant, opts: dict[str, Any]) -> VolDictType:
     ] = bool
 
     # Recommended ON → no providers/models/temps
-    recommended_on = opts.get(CONF_RECOMMENDED, False)
-    if recommended_on:
+    if opts.get(CONF_RECOMMENDED, False):
         return schema
 
     # Recommended OFF → show providers + their model + temp
@@ -400,12 +375,81 @@ def _schema_for(hass: HomeAssistant, opts: dict[str, Any]) -> VolDictType:
     return schema
 
 
+@dataclass(frozen=True)
+class _SecretSpec:
+    field: str
+    validator: Callable[[Any, str], Awaitable[None]]
+    label: str
+
+
+# ---------------------------
+# Config Flow
+# ---------------------------
+
+
 class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Home Generative Agent."""
 
     VERSION = 1
 
-    async def async_step_user(  # noqa: PLR0912
+    async def _validate_present(
+        self,
+        hass: HomeAssistant,
+        value: str,
+        validator: Callable[[HomeAssistant, str], Any],
+        log_label: str,
+    ) -> str | None:
+        """Run validator only when value is non-empty."""
+        if not value:
+            return None
+        try:
+            await validator(hass, value)
+        except InvalidAuthError:
+            return "invalid_auth"
+        except CannotConnectError:
+            return "cannot_connect"
+        except Exception:
+            LOGGER.exception("Unexpected exception during %s validation", log_label)
+            return "unknown"
+        else:
+            return None
+
+    async def _run_validations_user(
+        self, data: Mapping[str, Any]
+    ) -> tuple[dict[str, str], dict[str, Any]]:
+        """Validate inputs for the user step and normalize results."""
+        errors: dict[str, str] = {}
+        normalized: dict[str, Any] = dict(data)
+
+        vals = {
+            CONF_API_KEY: _get_str(data, CONF_API_KEY),
+            CONF_OLLAMA_URL: _get_str(data, CONF_OLLAMA_URL),
+            CONF_GEMINI_API_KEY: _get_str(data, CONF_GEMINI_API_KEY),
+        }
+
+        # Ordered, table-driven validation; short-circuits on first error.
+        for key, validator, label in (
+            (CONF_API_KEY, _validate_openai_key, "OpenAI"),
+            (CONF_OLLAMA_URL, _validate_ollama_url, "Ollama"),
+            (CONF_GEMINI_API_KEY, _validate_gemini_key, "Gemini"),
+        ):
+            code = await self._validate_present(self.hass, vals[key], validator, label)
+            if code:
+                errors["base"] = code
+                break
+
+        # Normalize Ollama URL only on success.
+        if not errors and vals[CONF_OLLAMA_URL]:
+            normalized[CONF_OLLAMA_URL] = _ensure_http_url(vals[CONF_OLLAMA_URL])
+
+        # Drop empties so defaults can apply later.
+        for key in (CONF_API_KEY, CONF_OLLAMA_URL, CONF_GEMINI_API_KEY):
+            if not vals[key]:
+                normalized.pop(key, None)
+
+        return errors, normalized
+
+    async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Handle the initial step."""
@@ -414,64 +458,27 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
                 step_id="user", data_schema=STEP_USER_DATA_SCHEMA
             )
 
-        errors: dict[str, str] = {}
-
-        api_key = (user_input.get(CONF_API_KEY) or "").strip()
-        ollama_url = (user_input.get(CONF_OLLAMA_URL) or "").strip()
-        gemini_key = (user_input.get(CONF_GEMINI_API_KEY) or "").strip()
-
-        # Validate OpenAI only if provided
-        if api_key:
-            try:
-                await _validate_openai_key(self.hass, api_key)
-            except CannotConnectError:
-                errors["base"] = "cannot_connect"
-            except InvalidAuthError:
-                errors["base"] = "invalid_auth"
-            except Exception:
-                LOGGER.exception("Unexpected exception")
-                errors["base"] = "unknown"
-
-        # Validate Ollama only if provided
-        if not errors and ollama_url:
-            try:
-                await _validate_ollama_url(self.hass, ollama_url)
-                user_input[CONF_OLLAMA_URL] = _ensure_http_url(ollama_url)
-            except CannotConnectError:
-                errors["base"] = "cannot_connect"
-
-        # Validate Gemini only if provided
-        if not errors and gemini_key:
-            try:
-                await _validate_gemini_key(self.hass, gemini_key)
-            except CannotConnectError:
-                errors["base"] = "cannot_connect"
-
+        errors, normalized = await self._run_validations_user(user_input)
         if errors:
             return self.async_show_form(
                 step_id="user", data_schema=STEP_USER_DATA_SCHEMA, errors=errors
             )
 
-        # Normalize empty values: drop them so defaults can apply later
-        if not api_key:
-            user_input.pop(CONF_API_KEY, None)
-        if not ollama_url:
-            user_input.pop(CONF_OLLAMA_URL, None)
-        if not gemini_key:
-            user_input.pop(CONF_GEMINI_API_KEY, None)
-
         return self.async_create_entry(
             title="Home Generative Agent",
-            data=user_input,
+            data=normalized,
             options=RECOMMENDED_OPTIONS,
         )
 
     @staticmethod
-    def async_get_options_flow(
-        config_entry: ConfigEntry,
-    ) -> OptionsFlow:
+    def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
         """Create the options flow."""
         return HomeGenerativeAgentOptionsFlow(config_entry)
+
+
+# ---------------------------
+# Options Flow
+# ---------------------------
 
 
 class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
@@ -482,23 +489,145 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         self.last_rendered_recommended = config_entry.options.get(
             CONF_RECOMMENDED, False
         )
-        self._last_providers = _extract_provider_state(config_entry.options)
+        self._last_providers = self._extract_provider_state(config_entry.options)
         self._last_analyzer_mode = config_entry.options.get(
             CONF_VIDEO_ANALYZER_MODE, RECOMMENDED_VIDEO_ANALYZER_MODE
         )
 
-    async def async_step_init(  # noqa: C901, PLR0912, PLR0915
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Handle the options flow init step."""
-        # Start from current options + DATA
-        # (for backward-compat if API key was set at setup)
-        options = dict(self.config_entry.options)
+    # ---- helpers ----
 
-        # Surface setup-time values (stored in entry.data) so they appear in Options UI
+    def _all_category_provider_keys(self) -> tuple[str, ...]:
+        return tuple(spec["provider_key"] for spec in MODEL_CATEGORY_SPECS.values())
+
+    def _providers_changed(
+        self, prev: Mapping[str, Any], current: Mapping[str, Any]
+    ) -> bool:
+        return any(
+            prev.get(k) != current.get(k) for k in self._all_category_provider_keys()
+        )
+
+    def _extract_provider_state(self, opts: Mapping[str, Any]) -> dict[str, Any]:
+        keys = self._all_category_provider_keys()
+        return {k: opts.get(k) for k in keys}
+
+    def _apply_recommended_defaults(self, opts: Mapping[str, Any]) -> dict[str, Any]:
+        """Force providers (and their model keys) to recommended values."""
+        updated: dict[str, Any] = dict(opts)
+        for cat, spec in MODEL_CATEGORY_SPECS.items():
+            rec_provider = spec["recommended_provider"]
+            provider_key = spec["provider_key"]
+            updated[provider_key] = rec_provider
+
+            # Clear all model keys for this category
+            for prov in spec["providers"]:
+                updated.pop(_model_option_key(cat, prov), None)
+
+            # Set recommended model for the recommended provider, if known
+            rec_model = spec.get("recommended_models", {}).get(rec_provider)
+            if rec_model:
+                updated[_model_option_key(cat, rec_provider)] = rec_model
+        return updated
+
+    def _base_options_with_entry_data(self) -> dict[str, Any]:
+        """Start from current options, overlaying any setup-time data for visibility."""
+        options = dict(self.config_entry.options)
         for k in (CONF_API_KEY, CONF_OLLAMA_URL, CONF_GEMINI_API_KEY):
             if k not in options and self.config_entry.data.get(k):
                 options[k] = self.config_entry.data[k]
+        return options
+
+    async def _maybe_edit_ollama(
+        self,
+        options: dict[str, Any],
+        user_input: Mapping[str, Any] | None,
+    ) -> str | None:
+        """Validate/apply Ollama URL when present; return error code or None."""
+        if user_input is None or CONF_OLLAMA_URL not in user_input:
+            return None
+
+        raw = _get_str(user_input, CONF_OLLAMA_URL)
+        if not raw:
+            options.pop(CONF_OLLAMA_URL, None)
+            return None
+
+        try:
+            await _validate_ollama_url(self.hass, raw)
+        except CannotConnectError:
+            return "cannot_connect"
+        except Exception:
+            LOGGER.exception("Unexpected exception validating Ollama URL")
+            return "unknown"
+
+        options[CONF_OLLAMA_URL] = _ensure_http_url(raw)
+        return None
+
+    async def _maybe_edit_secret(
+        self,
+        spec: _SecretSpec,
+        options: dict[str, Any],
+        user_input: Mapping[str, Any] | None,
+    ) -> str | None:
+        """Validate/apply a secret field when present; return error code or None."""
+        if user_input is None or spec.field not in user_input:
+            return None
+
+        raw = _get_str(user_input, spec.field)
+        if not raw:
+            options.pop(spec.field, None)
+            return None
+
+        try:
+            await spec.validator(self.hass, raw)
+        except InvalidAuthError:
+            return "invalid_auth"
+        except CannotConnectError:
+            return "cannot_connect"
+        except Exception:
+            LOGGER.exception("Unexpected exception in %s validation", spec.label)
+            return "unknown"
+
+        options[spec.field] = raw
+        return None
+
+    def _drop_empty_secret_fields(self, final_options: dict[str, Any]) -> None:
+        """Remove empty strings for secret/url fields to avoid storing empties."""
+        for k in (CONF_API_KEY, CONF_OLLAMA_URL, CONF_GEMINI_API_KEY):
+            if not _get_str(final_options, k):
+                final_options.pop(k, None)
+
+    def _cleanup_none_llm_api(self, options: dict[str, Any]) -> None:
+        """Remove the 'none' sentinel so options omit the key when unset."""
+        if options.get(CONF_LLM_HASS_API) == "none":
+            options.pop(CONF_LLM_HASS_API, None)
+
+    def _schema_changes_since_last(
+        self, options: Mapping[str, Any]
+    ) -> tuple[bool, bool, bool]:
+        """Detect changes that require re-render."""
+        recommended_now = options.get(CONF_RECOMMENDED, False)
+        recommended_changed = recommended_now != self.last_rendered_recommended
+        provider_changed = self._providers_changed(self._last_providers, options)
+        analyzer_now = options.get(
+            CONF_VIDEO_ANALYZER_MODE, RECOMMENDED_VIDEO_ANALYZER_MODE
+        )
+        analyzer_changed = analyzer_now != self._last_analyzer_mode
+        return recommended_changed, provider_changed, analyzer_changed
+
+    def _remember_schema_baseline(self, options: Mapping[str, Any]) -> None:
+        """Record the state we used for last-rendered schema."""
+        self.last_rendered_recommended = bool(options.get(CONF_RECOMMENDED, False))
+        self._last_providers = self._extract_provider_state(options)
+        self._last_analyzer_mode = options.get(
+            CONF_VIDEO_ANALYZER_MODE, RECOMMENDED_VIDEO_ANALYZER_MODE
+        )
+
+    # ---- main step ----
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Handle the options flow init step."""
+        options = self._base_options_with_entry_data()
 
         # First render
         if user_input is None:
@@ -506,72 +635,31 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
                 step_id="init", data_schema=vol.Schema(_schema_for(self.hass, options))
             )
 
-        # Merge new input
+        # Merge new input for non-validated fields
         options.update(user_input or {})
-
         errors: dict[str, str] = {}
 
-        # Detect explicit edit of Ollama URL
-        ollama_edited = CONF_OLLAMA_URL in (user_input or {})
-        if ollama_edited:
-            raw = (user_input.get(CONF_OLLAMA_URL) or "").strip()
-            if raw:
-                try:
-                    await _validate_ollama_url(self.hass, raw)
-                except CannotConnectError:
-                    errors["base"] = "cannot_connect"
-                else:
-                    options[CONF_OLLAMA_URL] = _ensure_http_url(raw)
-            else:
-                # explicit delete: remove to fall back on default later
-                options.pop(CONF_OLLAMA_URL, None)
-
-        # Handle Gemini API key edits explicitly
-        gemini_key_edited = CONF_GEMINI_API_KEY in (user_input or {})
-        if gemini_key_edited:
-            raw = (user_input.get(CONF_GEMINI_API_KEY) or "").strip()
-            if raw:
-                try:
-                    await _validate_gemini_key(self.hass, raw)
-                except CannotConnectError:
-                    errors["base"] = "cannot_connect"
-                except InvalidAuthError:
-                    errors["base"] = "invalid_auth"
-                except Exception:
-                    LOGGER.exception(
-                        "Unexpected exception in Gemini Options validation"
-                    )
-                    errors["base"] = "unknown"
-                else:
-                    options[CONF_GEMINI_API_KEY] = raw
-            else:
-                # explicit delete when user clears the field
-                options.pop(CONF_GEMINI_API_KEY, None)
-
-        # Handle API key edits explicitly
-        api_key = CONF_API_KEY in (user_input or {})
-        if api_key:
-            raw = (user_input.get(CONF_API_KEY) or "").strip()
-            if raw:
-                # validate only when provided
-                try:
-                    await _validate_openai_key(self.hass, raw)
-                except CannotConnectError:
-                    errors["base"] = "cannot_connect"
-                except InvalidAuthError:
-                    errors["base"] = "invalid_auth"
-                except Exception:
-                    LOGGER.exception("Unexpected exception in Options validation")
-                    errors["base"] = "unknown"
-                else:
-                    options[CONF_API_KEY] = raw
-            else:
-                # explicit delete when user clears the field
-                options.pop(CONF_API_KEY, None)
-        # If not provided in user_input: leave existing options[CONF_API_KEY] as-is
+        # Field-specific edits with validation/normalization
+        err = await self._maybe_edit_ollama(options, user_input)
+        if not err:
+            err = await self._maybe_edit_secret(
+                _SecretSpec(
+                    CONF_GEMINI_API_KEY, _validate_gemini_key, "Gemini Options"
+                ),
+                options,
+                user_input,
+            )
+        if not err:
+            err = await self._maybe_edit_secret(
+                _SecretSpec(CONF_API_KEY, _validate_openai_key, "OpenAI Options"),
+                options,
+                user_input,
+            )
+        if err:
+            errors["base"] = err
 
         if errors:
-            # Re-render with same options and show errors
+            # Re-render with the same options and show errors
             return self.async_show_form(
                 step_id="init",
                 data_schema=vol.Schema(_schema_for(self.hass, options)),
@@ -579,55 +667,42 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
             )
 
         # Handle schema-affecting toggles
-        recommended_now = options.get(CONF_RECOMMENDED, False)
-        recommended_changed = recommended_now != self.last_rendered_recommended
-        provider_changed = _providers_changed(self._last_providers, options)
-        analyzer_mode_now = options.get(
-            CONF_VIDEO_ANALYZER_MODE, RECOMMENDED_VIDEO_ANALYZER_MODE
+        recommended_changed, provider_changed, analyzer_changed = (
+            self._schema_changes_since_last(options)
         )
-        analyzer_mode_changed = analyzer_mode_now != self._last_analyzer_mode
 
         # If Recommended turned ON → apply defaults and SAVE immediately
-        if recommended_changed and recommended_now:
-            options = _apply_recommended_defaults(options)
-            options = _prune_irrelevant_model_fields(options)
-            if options.get(CONF_LLM_HASS_API) == "none":
-                options.pop(CONF_LLM_HASS_API, None)
-            # Normalize API key: drop if blank
-            if not api_key:
-                options.pop(CONF_API_KEY, None)
-            self.last_rendered_recommended = True
-            self._last_providers = _extract_provider_state(options)
-            self._last_analyzer_mode = analyzer_mode_now
-            return self.async_create_entry(title="", data=options)
+        if recommended_changed and options.get(CONF_RECOMMENDED, False):
+            final_options = self._apply_recommended_defaults(options)
+            final_options = _prune_irrelevant_model_fields(final_options)
+            self._cleanup_none_llm_api(final_options)
+            self._drop_empty_secret_fields(final_options)
+            self._remember_schema_baseline(final_options)
+            return self.async_create_entry(title="", data=final_options)
 
-        # If Recommended toggled OFF or schema changes, re-render once
-        if recommended_changed or provider_changed or analyzer_mode_changed:
-            options = _prune_irrelevant_model_fields(options)
-            self.last_rendered_recommended = recommended_now
-            self._last_providers = _extract_provider_state(options)
-            self._last_analyzer_mode = analyzer_mode_now
+        # If Recommended toggled OFF or provider/analyzer changes, re-render once
+        if recommended_changed or provider_changed or analyzer_changed:
+            pruned = _prune_irrelevant_model_fields(options)
+            self._remember_schema_baseline(pruned)
             return self.async_show_form(
-                step_id="init", data_schema=vol.Schema(_schema_for(self.hass, options))
+                step_id="init",
+                data_schema=vol.Schema(_schema_for(self.hass, pruned)),
             )
 
         # Finalize and save (no schema changes)
         final_options = _prune_irrelevant_model_fields(options)
         if final_options.get(CONF_RECOMMENDED, False):
-            final_options = _apply_recommended_defaults(final_options)
+            final_options = self._apply_recommended_defaults(final_options)
             final_options = _prune_irrelevant_model_fields(final_options)
-        if final_options.get(CONF_LLM_HASS_API) == "none":
-            final_options.pop(CONF_LLM_HASS_API, None)
-
-        # Drop if blank so you don't store empty strings
-        if not (options.get(CONF_API_KEY) or "").strip():
-            final_options.pop(CONF_API_KEY, None)
-        if not (options.get(CONF_OLLAMA_URL) or "").strip():
-            final_options.pop(CONF_OLLAMA_URL, None)
-        if not (options.get(CONF_GEMINI_API_KEY) or "").strip():
-            final_options.pop(CONF_GEMINI_API_KEY, None)
+        self._cleanup_none_llm_api(final_options)
+        self._drop_empty_secret_fields(final_options)
 
         return self.async_create_entry(title="", data=final_options)
+
+
+# ---------------------------
+# Flow errors
+# ---------------------------
 
 
 class CannotConnectError(HomeAssistantError):
