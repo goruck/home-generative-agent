@@ -9,7 +9,9 @@ HTTP_STATUS_BAD_REQUEST = 400
 
 # ---- PostgreSQL (vector store + checkpointer) ----
 CONF_DB_URI = "db_uri"
-RECOMMENDED_DB_URI = "postgresql://ha_user:ha_password@localhost:5432/ha_db?sslmode=disable"
+RECOMMENDED_DB_URI = (
+    "postgresql://ha_user:ha_password@localhost:5432/ha_db?sslmode=disable"
+)
 CONF_DB_BOOTSTRAPPED = "db_bootstrapped"
 
 # ---- LangChain logging ----
