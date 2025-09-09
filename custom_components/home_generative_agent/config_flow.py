@@ -6,8 +6,9 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
+import psycopg
 import voluptuous as vol
 from homeassistant.config_entries import (
     ConfigEntry,
@@ -36,6 +37,7 @@ from homeassistant.helpers.selector import (
 from .const import (
     CONF_CHAT_MODEL_PROVIDER,
     CONF_CHAT_MODEL_TEMPERATURE,
+    CONF_DB_URI,
     CONF_EMBEDDING_MODEL_PROVIDER,
     CONF_GEMINI_API_KEY,
     CONF_NOTIFY_SERVICE,
@@ -59,6 +61,7 @@ from .const import (
     MODEL_CATEGORY_SPECS,
     RECOMMENDED_CHAT_MODEL_PROVIDER,
     RECOMMENDED_CHAT_MODEL_TEMPERATURE,
+    RECOMMENDED_DB_URI,
     RECOMMENDED_EMBEDDING_MODEL_PROVIDER,
     RECOMMENDED_OLLAMA_CHAT_MODEL,
     RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL,
@@ -93,6 +96,10 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
         vol.Optional(
             CONF_OLLAMA_URL,
             description={"suggested_value": RECOMMENDED_OLLAMA_URL},
+        ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+        vol.Required(
+            CONF_DB_URI,
+            description={"suggested_value": RECOMMENDED_DB_URI},
         ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
     },
 )
@@ -133,6 +140,32 @@ def _ensure_http_url(url: str) -> str:
 def _get_str(src: Mapping[str, Any], key: str) -> str:
     """Get a trimmed string from a mapping (missing -> '')."""
     return str(src.get(key, "") or "").strip()
+
+
+async def _validate_db_uri(hass: HomeAssistant, db_uri: str) -> None:
+    """Validate PostgreSQL DB URI using psycopg, allow empty user/pass."""
+    if not db_uri:
+        return
+
+    parsed = urlparse(db_uri)
+    if not parsed.scheme.startswith("postgres"):
+        raise CannotConnectError
+    if not parsed.hostname:
+        raise CannotConnectError
+    if not parsed.path or parsed.path == "/":
+        raise CannotConnectError
+
+    def _psycopg_ping() -> None:
+        # psycopg accepts URIs directly, including those with missing user/pass
+        with psycopg.connect(db_uri, connect_timeout=5) as conn, conn.cursor() as cur:
+            cur.execute("SELECT 1")
+            cur.fetchone()
+
+    try:
+        await hass.async_add_executor_job(_psycopg_ping)
+    except Exception as err:
+        LOGGER.debug("psycopg ping failed: %s", err)
+        raise CannotConnectError from err
 
 
 async def _validate_ollama_url(hass: HomeAssistant, base_url: str) -> None:
@@ -284,6 +317,10 @@ def _schema_for(hass: HomeAssistant, opts: Mapping[str, Any]) -> VolDictType:
             CONF_OLLAMA_URL,
             description={"suggested_value": (opts.get(CONF_OLLAMA_URL))},
         ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+        vol.Required(
+            CONF_DB_URI,
+            description={"suggested_value": (opts.get(CONF_DB_URI))},
+        ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
         vol.Optional(
             CONF_PROMPT,
             description={"suggested_value": opts.get(CONF_PROMPT)},
@@ -425,6 +462,7 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
             CONF_API_KEY: _get_str(data, CONF_API_KEY),
             CONF_OLLAMA_URL: _get_str(data, CONF_OLLAMA_URL),
             CONF_GEMINI_API_KEY: _get_str(data, CONF_GEMINI_API_KEY),
+            CONF_DB_URI: _get_str(data, CONF_DB_URI),
         }
 
         # Ordered, table-driven validation; short-circuits on first error.
@@ -432,6 +470,7 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
             (CONF_API_KEY, _validate_openai_key, "OpenAI"),
             (CONF_OLLAMA_URL, _validate_ollama_url, "Ollama"),
             (CONF_GEMINI_API_KEY, _validate_gemini_key, "Gemini"),
+            (CONF_DB_URI, _validate_db_uri, "Database URI"),
         ):
             code = await self._validate_present(self.hass, vals[key], validator, label)
             if code:
@@ -443,7 +482,12 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
             normalized[CONF_OLLAMA_URL] = _ensure_http_url(vals[CONF_OLLAMA_URL])
 
         # Drop empties so defaults can apply later.
-        for key in (CONF_API_KEY, CONF_OLLAMA_URL, CONF_GEMINI_API_KEY):
+        for key in (
+            CONF_API_KEY,
+            CONF_OLLAMA_URL,
+            CONF_GEMINI_API_KEY,
+            CONF_DB_URI,
+        ):
             if not vals[key]:
                 normalized.pop(key, None)
 
@@ -531,7 +575,7 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
     def _base_options_with_entry_data(self) -> dict[str, Any]:
         """Start from current options, overlaying any setup-time data for visibility."""
         options = dict(self.config_entry.options)
-        for k in (CONF_API_KEY, CONF_OLLAMA_URL, CONF_GEMINI_API_KEY):
+        for k in (CONF_API_KEY, CONF_OLLAMA_URL, CONF_GEMINI_API_KEY, CONF_DB_URI):
             if k not in options and self.config_entry.data.get(k):
                 options[k] = self.config_entry.data[k]
         return options
@@ -559,6 +603,31 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
             return "unknown"
 
         options[CONF_OLLAMA_URL] = _ensure_http_url(raw)
+        return None
+
+    async def _maybe_edit_db_uri(
+        self,
+        options: dict[str, Any],
+        user_input: Mapping[str, Any] | None,
+    ) -> str | None:
+        """Validate/apply DB URI when present; return error code or None."""
+        if user_input is None or CONF_DB_URI not in user_input:
+            return None
+
+        raw = _get_str(user_input, CONF_DB_URI)
+        if not raw:
+            options.pop(CONF_DB_URI, None)
+            return None
+
+        try:
+            await _validate_db_uri(self.hass, raw)
+        except CannotConnectError:
+            return "cannot_connect"
+        except Exception:
+            LOGGER.exception("Unexpected exception validating DB URI")
+            return "unknown"
+
+        options[CONF_DB_URI] = raw
         return None
 
     async def _maybe_edit_secret(
@@ -589,9 +658,9 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         options[spec.field] = raw
         return None
 
-    def _drop_empty_secret_fields(self, final_options: dict[str, Any]) -> None:
-        """Remove empty strings for secret/url fields to avoid storing empties."""
-        for k in (CONF_API_KEY, CONF_OLLAMA_URL, CONF_GEMINI_API_KEY):
+    def _drop_empty_fields(self, final_options: dict[str, Any]) -> None:
+        """Remove empty strings for fields to avoid storing empties."""
+        for k in (CONF_API_KEY, CONF_OLLAMA_URL, CONF_GEMINI_API_KEY, CONF_DB_URI):
             if not _get_str(final_options, k):
                 final_options.pop(k, None)
 
@@ -642,6 +711,8 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         # Field-specific edits with validation/normalization
         err = await self._maybe_edit_ollama(options, user_input)
         if not err:
+            err = await self._maybe_edit_db_uri(options, user_input)
+        if not err:
             err = await self._maybe_edit_secret(
                 _SecretSpec(
                     CONF_GEMINI_API_KEY, _validate_gemini_key, "Gemini Options"
@@ -676,7 +747,7 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
             final_options = self._apply_recommended_defaults(options)
             final_options = _prune_irrelevant_model_fields(final_options)
             self._cleanup_none_llm_api(final_options)
-            self._drop_empty_secret_fields(final_options)
+            self._drop_empty_fields(final_options)
             self._remember_schema_baseline(final_options)
             return self.async_create_entry(title="", data=final_options)
 
@@ -695,7 +766,7 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
             final_options = self._apply_recommended_defaults(final_options)
             final_options = _prune_irrelevant_model_fields(final_options)
         self._cleanup_none_llm_api(final_options)
-        self._drop_empty_secret_fields(final_options)
+        self._drop_empty_fields(final_options)
 
         return self.async_create_entry(title="", data=final_options)
 

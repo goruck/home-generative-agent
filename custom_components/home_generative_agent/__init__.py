@@ -42,6 +42,7 @@ from .const import (
     CONF_CHAT_MODEL_PROVIDER,
     CONF_CHAT_MODEL_TEMPERATURE,
     CONF_DB_BOOTSTRAPPED,
+    CONF_DB_URI,
     CONF_EMBEDDING_MODEL_PROVIDER,
     CONF_GEMINI_API_KEY,
     CONF_GEMINI_CHAT_MODEL,
@@ -63,7 +64,6 @@ from .const import (
     CONF_VIDEO_ANALYZER_MODE,
     CONF_VLM_PROVIDER,
     CONF_VLM_TEMPERATURE,
-    DB_URI,
     DOMAIN,
     EMBEDDING_MODEL_CTX,
     EMBEDDING_MODEL_DIMS,
@@ -71,6 +71,7 @@ from .const import (
     REASONING_DELIMITERS,
     RECOMMENDED_CHAT_MODEL_PROVIDER,
     RECOMMENDED_CHAT_MODEL_TEMPERATURE,
+    RECOMMENDED_DB_URI,
     RECOMMENDED_EMBEDDING_MODEL_PROVIDER,
     RECOMMENDED_GEMINI_CHAT_MODEL,
     RECOMMENDED_GEMINI_EMBEDDING_MODEL,
@@ -857,8 +858,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         "prepare_threshold": 0,
         "row_factory": dict_row,
     }
+    db_uri = conf.get(CONF_DB_URI, RECOMMENDED_DB_URI)
     pool: AsyncConnectionPool[AsyncConnection[DictRow]] = AsyncConnectionPool(
-        conninfo=DB_URI, min_size=5, max_size=20, kwargs=connection_kwargs, open=False
+        conninfo=db_uri, min_size=5, max_size=20, kwargs=connection_kwargs, open=False
     )
     try:
         await pool.open()

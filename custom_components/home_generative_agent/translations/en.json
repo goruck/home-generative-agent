@@ -3,17 +3,18 @@
     "step": {
       "user": {
         "title": "Connect models",
-        "description": "Optionally enter an **OpenAI or Gemini API key** and/or your **Ollama server URL**. You can skip either and configure later in Options.",
+        "description": "Enter **API keys**, your **Ollama server URL** or **Postgres URI**. You must enter a valid **Postgres URI**, the others you can configure later in Options.",
         "data": {
           "api_key": "OpenAI API key (optional)",
           "ollama_url": "Ollama server URL (optional)",
-          "gemini_api_key": "Google Gemini API key (optional)"
+          "gemini_api_key": "Google Gemini API key (optional)",
+          "db_uri": "PostgreSQL Database URI (required)"
         }
       }
     },
     "error": {
       "cannot_connect": "Can't reach the service. Check keys/URLs and try again.",
-      "invalid_auth": "Invalid OpenAI API key.",
+      "invalid_auth": "Invalid API key.",
       "unknown": "Unexpected error."
     }
   },
@@ -26,11 +27,12 @@
     "step": {
       "init": {
         "title": "Home Generative Agent Options",
-        "description": "Configure main prompt, models and providers. You can also update your API keys and Ollama server URL here.",
+        "description": "Configure main prompt, models and providers. You can also update your API keys, Ollama server URL and db URI here.",
         "data": {
           "api_key": "OpenAI API key (optional)",
           "gemini_api_key": "Google Gemini API key (optional)",
           "ollama_url": "Ollama server URL (optional)",
+          "db_uri": "PostgreSQL Database URI (required)",
           "prompt": "Instructions",
           "chat_model_provider": "Chat model provider",
           "ollama_chat_model": "Ollama chat model",
