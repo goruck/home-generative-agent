@@ -50,7 +50,7 @@ This integration will set up the `conversation` platform, a convenient HA compon
 9. Follow steps 3 to 5 above.
 
 ## Configuration
-Configuration is done in the UI and via the parameters in `const.py`. You can enter in your OpenAI API key and your Ollama server URL during initial setup through the Home Assistant UI or later in the integration's settings.
+Configuration is done in the Home Assistant UI. You can enter in your model provider API keys and your Ollama server URL during initial setup through the Home Assistant UI or later in the integration's options settings. You can also configure the Postgres database URI during setup or later in options, but note that the integration trusts the [PostgreSQL with pgvector](https://github.com/goruck/addon-postgres-pgvector/tree/main/postgres_pgvector) add-on, so a password in the URI string is optional.
 
 ## Contributions are welcome!
 
