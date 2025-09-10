@@ -30,7 +30,7 @@ conditions: []
 actions:
   - service: conversation.process
     data:
-      agent_id: conversation.hga
+      agent_id: conversation.home_generative_agent
       text: !input message
       conversation_id: hga_scene_analysis
     response_variable: hga_scene_analysis_output
