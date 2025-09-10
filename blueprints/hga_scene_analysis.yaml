@@ -1,11 +1,12 @@
 blueprint:
-  name:  Home Generative Agent Scene Analyzer
+  name: Home Generative Agent Scene Analyzer
   author: goruck
   description: >
     Periodically generate camera image scene analysis by prompting the generative agent.
     Sends notifications only if the model detects a requested object in the prompt.
   domain: automation
   source_url: https://github.com/goruck/home-generative-agent/tree/main/blueprints/hga_scene_analysis.yaml
+
   input:
     time_pattern:
       name: Time Pattern
@@ -20,19 +21,51 @@ blueprint:
       selector:
         text:
           multiline: false
+    agent_id:
+      name: Agent ID
+      description: The conversation agent to process the prompt.
+      default: conversation.home_generative_agent
+      selector:
+        text:
+          multiline: false
+    conversation_id:
+      name: Conversation ID
+      description: A unique identifier for the conversation session.
+      default: hga_scene_analysis
+      selector:
+        text:
+          multiline: false
+    notify_service:
+      name: Primary Notify Service
+      description: Notify service to send the alert (e.g., notify.notify or notify.my_group).
+      default: notify.notify
+      selector:
+        text:
+          multiline: false
+    mobile_device:
+      name: Mobile Device (Optional)
+      description: Select a mobile_app device to receive a push notification. Leave empty to disable.
+      selector:
+        device:
+          integration: mobile_app
+    send_persistent:
+      name: Also create a persistent notification
+      default: true
+      selector:
+        boolean: {}
 
 triggers:
   - platform: time_pattern
     minutes: !input time_pattern
 
 conditions: []
-  
+
 actions:
   - service: conversation.process
     data:
-      agent_id: conversation.home_generative_agent
+      agent_id: !input agent_id
       text: !input message
-      conversation_id: hga_scene_analysis
+      conversation_id: !input conversation_id
     response_variable: hga_scene_analysis_output
 
   - choose:
@@ -41,13 +74,37 @@ actions:
             value_template: >-
               {{ 'no' not in (hga_scene_analysis_output['response']['speech']['plain']['speech'] | lower) }}
         sequence:
-          - service: notify.persistent_notification
+          # Optional persistent notification
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ !input send_persistent }}"
+                sequence:
+                  - service: notify.persistent_notification
+                    data:
+                      title: HGA Scene Analysis
+                      message: "{{ hga_scene_analysis_output['response']['speech']['plain']['speech'] }}"
+            default: []
+
+          # Primary notify (required)
+          - service: !input notify_service
             data:
               title: HGA Scene Analysis
               message: "{{ hga_scene_analysis_output['response']['speech']['plain']['speech'] }}"
-          - service: notify.notify
-            data:
-              title: HGA Scene Analysis
-              message: "{{ hga_scene_analysis_output['response']['speech']['plain']['speech'] }}"
+
+          # Optional mobile push to selected device via notify.notify target (device_id)
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: >-
+                      {{ (!input mobile_device) is string and (!input mobile_device) | length > 0 }}
+                sequence:
+                  - service: notify.notify
+                    data:
+                      title: HGA Scene Analysis
+                      message: "{{ hga_scene_analysis_output['response']['speech']['plain']['speech'] }}"
+                      target:
+                        - !input mobile_device
+            default: []
 
 mode: single

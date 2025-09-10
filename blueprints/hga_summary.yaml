@@ -1,11 +1,12 @@
 blueprint:
-  name: State of the home (Home Generative Agent)
+  name: State of the Home (Home Generative Agent)
   author: goruck
   description: >
     Periodically generate an AI-powered summary of Home Assistant entities exposed to assistant agents.
-    Sends a persistent notification to the Home Assistant UI with the summary.
+    Sends notifications (configurable) with the summary.
   domain: automation
   source_url: https://github.com/goruck/home-generative-agent/tree/main/blueprints/hga_summary.yaml
+
   input:
     time_pattern:
       name: Time Pattern
@@ -13,6 +14,7 @@ blueprint:
       selector:
         text:
           multiline: false
+
     message:
       name: Prompt
       description: Model prompt to create the summary
@@ -23,25 +25,94 @@ blueprint:
         text:
           multiline: true
 
+    agent_id:
+      name: Agent ID
+      description: The conversation agent to process the prompt.
+      default: conversation.home_generative_agent
+      selector:
+        text:
+          multiline: false
+
+    conversation_id:
+      name: Conversation ID
+      description: A unique identifier for the conversation session.
+      default: hga_automation_summary
+      selector:
+        text:
+          multiline: false
+
+    notify_service:
+      name: Primary Notify Service
+      description: Notify service to send the alert (e.g., notify.notify or notify.my_group).
+      default: notify.notify
+      selector:
+        text:
+          multiline: false
+
+    mobile_device:
+      name: Mobile Device (Optional)
+      description: Select a mobile_app device to also receive a push notification. Leave empty to disable.
+      selector:
+        device:
+          integration: mobile_app
+
+    send_persistent:
+      name: Also create a persistent notification
+      default: true
+      selector:
+        boolean: {}
+
 triggers:
-  - trigger: time_pattern
+  - platform: time_pattern
     minutes: !input time_pattern
 
 conditions: []
 
 actions:
-  - action: conversation.process
-    metadata: {}
+  - service: conversation.process
     data:
-      agent_id: conversation.home_generative_agent
+      agent_id: !input agent_id
       text: !input message
-      conversation_id: hga_automation_summary
+      conversation_id: !input conversation_id
     response_variable: hga_automation_summary_output
 
-  - action: notify.persistent_notification
-    metadata: {}
-    data:
-      title: HGA Automation Summary
-      message: "{{ hga_automation_summary_output['response']['speech']['plain']['speech'] }}"
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ (hga_automation_summary_output['response']['speech']['plain']['speech'] | string) | length > 0 }}
+        sequence:
+          # Optional persistent notification
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ !input send_persistent }}"
+                sequence:
+                  - service: notify.persistent_notification
+                    data:
+                      title: HGA Automation Summary
+                      message: "{{ hga_automation_summary_output['response']['speech']['plain']['speech'] }}"
+            default: []
+
+          # Primary notify (required)
+          - service: !input notify_service
+            data:
+              title: HGA Automation Summary
+              message: "{{ hga_automation_summary_output['response']['speech']['plain']['speech'] }}"
+
+          # Optional mobile push to selected device via notify.notify target (device_id)
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: >-
+                      {{ (!input mobile_device) | string | length > 0 }}
+                sequence:
+                  - service: notify.notify
+                    data:
+                      title: HGA Automation Summary
+                      message: "{{ hga_automation_summary_output['response']['speech']['plain']['speech'] }}"
+                      target:
+                        - !input mobile_device
+            default: []
 
 mode: single
