@@ -101,12 +101,11 @@ actions:
               title: HGA Automation Summary
               message: "{{ hga_automation_summary_output['response']['speech']['plain']['speech'] }}"
 
-          # Optional mobile push (only if mobile_device is set)
+          # Optional mobile push (only if a device is selected)
           - choose:
               - conditions:
                   - condition: template
-                    value_template: >-
-                      {{ (inputs.mobile_device | default('')) | string | length > 0 }}
+                    value_template: "{{ !input mobile_device != '' }}"
                 sequence:
                   - service: notify.notify
                     data:
