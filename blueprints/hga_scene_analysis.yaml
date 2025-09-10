@@ -37,14 +37,17 @@ blueprint:
           multiline: false
     notify_service:
       name: Primary Notify Service
-      description: Notify service to send the alert (e.g., notify.notify or notify.my_group).
+      description: >
+        Notify service to send the alert (e.g., notify.notify or notify.my_group).
       default: notify.notify
       selector:
         text:
           multiline: false
     mobile_device:
       name: Mobile Device (Optional)
-      description: Select a mobile_app device to receive a push notification. Leave empty to disable.
+      description: Select a mobile_app device to also receive a push notification. Leave empty to disable.
+      # Important: default ensures the input is always defined even if not selected
+      default: ""
       selector:
         device:
           integration: mobile_app
@@ -59,7 +62,7 @@ triggers:
     minutes: !input time_pattern
 
 conditions: []
-
+  
 actions:
   - service: conversation.process
     data:
@@ -92,12 +95,12 @@ actions:
               title: HGA Scene Analysis
               message: "{{ hga_scene_analysis_output['response']['speech']['plain']['speech'] }}"
 
-          # Optional mobile push to selected device via notify.notify target (device_id)
+          # Optional mobile push (only if a device is selected)
           - choose:
               - conditions:
                   - condition: template
                     value_template: >-
-                      {{ (!input mobile_device) is string and (!input mobile_device) | length > 0 }}
+                      {{ (inputs.mobile_device | default('')) | string | length > 0 }}
                 sequence:
                   - service: notify.notify
                     data:

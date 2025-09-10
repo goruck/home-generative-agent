@@ -52,6 +52,7 @@ blueprint:
     mobile_device:
       name: Mobile Device (Optional)
       description: Select a mobile_app device to also receive a push notification. Leave empty to disable.
+      default: ""
       selector:
         device:
           integration: mobile_app
@@ -100,12 +101,12 @@ actions:
               title: HGA Automation Summary
               message: "{{ hga_automation_summary_output['response']['speech']['plain']['speech'] }}"
 
-          # Optional mobile push to selected device via notify.notify target (device_id)
+          # Optional mobile push (only if mobile_device is set)
           - choose:
               - conditions:
                   - condition: template
                     value_template: >-
-                      {{ (!input mobile_device) | string | length > 0 }}
+                      {{ (inputs.mobile_device | default('')) | string | length > 0 }}
                 sequence:
                   - service: notify.notify
                     data:
