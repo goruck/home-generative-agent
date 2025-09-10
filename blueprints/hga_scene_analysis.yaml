@@ -56,6 +56,15 @@ blueprint:
       selector:
         boolean: {}
 
+# <-- Assign inputs to variables for use in templates
+variables:
+  v_msg: !input message
+  v_agent: !input agent_id
+  v_conv: !input conversation_id
+  v_notify: !input notify_service
+  v_mobile: !input mobile_device
+  v_persist: !input send_persistent
+
 triggers:
   - platform: time_pattern
     minutes: !input time_pattern
@@ -65,9 +74,9 @@ conditions: []
 actions:
   - service: conversation.process
     data:
-      agent_id: !input agent_id
-      text: !input message
-      conversation_id: !input conversation_id
+      agent_id: "{{ v_agent }}"
+      text: "{{ v_msg }}"
+      conversation_id: "{{ v_conv }}"
     response_variable: hga_scene_analysis_output
 
   - choose:
@@ -80,7 +89,7 @@ actions:
           - choose:
               - conditions:
                   - condition: template
-                    value_template: "{{ !input send_persistent }}"
+                    value_template: "{{ v_persist }}"
                 sequence:
                   - service: notify.persistent_notification
                     data:
@@ -89,7 +98,7 @@ actions:
             default: []
 
           # Primary notify (required)
-          - service: !input notify_service
+          - service: "{{ v_notify }}"
             data:
               title: HGA Scene Analysis
               message: "{{ hga_scene_analysis_output['response']['speech']['plain']['speech'] }}"
@@ -98,14 +107,14 @@ actions:
           - choose:
               - conditions:
                   - condition: template
-                    value_template: "{{ !input mobile_device != '' }}"
+                    value_template: "{{ v_mobile != '' }}"
                 sequence:
                   - service: notify.notify
                     data:
                       title: HGA Scene Analysis
                       message: "{{ hga_scene_analysis_output['response']['speech']['plain']['speech'] }}"
                       target:
-                        - !input mobile_device
+                        - "{{ v_mobile }}"
             default: []
 
 mode: single
