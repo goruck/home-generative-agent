@@ -1,5 +1,5 @@
 blueprint:
-  name: State of the home (Home Generative Agent v0.1)
+  name: State of the home (Home Generative Agent)
   author: goruck
   description: >
     Periodically generate an AI-powered summary of Home Assistant entities exposed to assistant agents.
@@ -33,7 +33,7 @@ actions:
   - action: conversation.process
     metadata: {}
     data:
-      agent_id: conversation.hga
+      agent_id: conversation.home_generative_agent
       text: !input message
       conversation_id: hga_automation_summary
     response_variable: hga_automation_summary_output
