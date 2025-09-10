@@ -46,7 +46,6 @@ blueprint:
     mobile_device:
       name: Mobile Device (Optional)
       description: Select a mobile_app device to also receive a push notification. Leave empty to disable.
-      # Important: default ensures the input is always defined even if not selected
       default: ""
       selector:
         device:
@@ -99,8 +98,7 @@ actions:
           - choose:
               - conditions:
                   - condition: template
-                    value_template: >-
-                      {{ (inputs.mobile_device | default('')) | string | length > 0 }}
+                    value_template: "{{ !input mobile_device != '' }}"
                 sequence:
                   - service: notify.notify
                     data:
