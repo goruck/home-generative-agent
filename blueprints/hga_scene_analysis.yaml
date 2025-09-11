@@ -14,6 +14,7 @@ blueprint:
       selector:
         text:
           multiline: false
+
     message:
       name: Prompt
       description: Model prompt to generate camera image scene analysis.
@@ -21,6 +22,7 @@ blueprint:
       selector:
         text:
           multiline: false
+
     agent_id:
       name: Agent ID
       description: The conversation agent to process the prompt.
@@ -28,6 +30,7 @@ blueprint:
       selector:
         text:
           multiline: false
+
     conversation_id:
       name: Conversation ID
       description: A unique identifier for the conversation session.
@@ -35,86 +38,106 @@ blueprint:
       selector:
         text:
           multiline: false
+
     notify_service:
       name: Primary Notify Service
-      description: >
-        Notify service to send the alert (e.g., notify.notify or notify.my_group).
+      description: Notify service to send the alert (e.g., notify.notify or notify.my_group).
       default: notify.notify
       selector:
         text:
           multiline: false
+
+    mobile_notify_service:
+      name: Mobile Notify Service (Optional, preferred)
+      description: e.g., notify.mobile_app_evas_iphone. If set, used for mobile push.
+      default: ""
+      selector:
+        text:
+          multiline: false
+
     mobile_device:
-      name: Mobile Device (Optional)
-      description: Select a mobile_app device to also receive a push notification. Leave empty to disable.
+      name: Mobile Device (Optional, fallback)
+      description: Select a mobile_app device to also receive a push notification.
       default: ""
       selector:
         device:
           integration: mobile_app
+
     send_persistent:
       name: Also create a persistent notification
       default: true
       selector:
         boolean: {}
 
-# <-- Assign inputs to variables for use in templates
-variables:
-  v_msg: !input message
-  v_agent: !input agent_id
-  v_conv: !input conversation_id
-  v_notify: !input notify_service
-  v_mobile: !input mobile_device
-  v_persist: !input send_persistent
-
 triggers:
   - platform: time_pattern
     minutes: !input time_pattern
 
 conditions: []
-  
+
 actions:
+  # Run the agent
   - service: conversation.process
     data:
-      agent_id: "{{ v_agent }}"
-      text: "{{ v_msg }}"
-      conversation_id: "{{ v_conv }}"
+      agent_id: !input agent_id
+      text: !input message
+      conversation_id: !input conversation_id
     response_variable: hga_scene_analysis_output
+
+  # Mirror inputs into runtime variables and extract message once
+  - variables:
+      hga_msg: >-
+        {{ hga_scene_analysis_output.get('response', {})
+                                    .get('speech', {})
+                                    .get('plain', {})
+                                    .get('speech', '') | string }}
+      _send_persistent: !input send_persistent
+      _mobile_notify_service: !input mobile_notify_service
+      _mobile_device: !input mobile_device
 
   - choose:
       - conditions:
           - condition: template
-            value_template: >-
-              {{ 'no' not in (hga_scene_analysis_output['response']['speech']['plain']['speech'] | lower) }}
+            value_template: "{{ 'no' not in (hga_msg | lower) }}"
         sequence:
           # Optional persistent notification
           - choose:
               - conditions:
                   - condition: template
-                    value_template: "{{ v_persist }}"
+                    value_template: "{{ _send_persistent }}"
                 sequence:
                   - service: notify.persistent_notification
                     data:
                       title: HGA Scene Analysis
-                      message: "{{ hga_scene_analysis_output['response']['speech']['plain']['speech'] }}"
+                      message: "{{ hga_msg }}"
             default: []
 
-          # Primary notify (required)
-          - service: "{{ v_notify }}"
+          # Primary notify
+          - service: !input notify_service
             data:
               title: HGA Scene Analysis
-              message: "{{ hga_scene_analysis_output['response']['speech']['plain']['speech'] }}"
+              message: "{{ hga_msg }}"
 
-          # Optional mobile push (only if a device is selected)
+          # Mobile push — prefer explicit service if provided; else fallback to device target
           - choose:
               - conditions:
                   - condition: template
-                    value_template: "{{ v_mobile != '' }}"
+                    value_template: "{{ (_mobile_notify_service | trim) != '' }}"
+                sequence:
+                  - service: "{{ _mobile_notify_service }}"
+                    data:
+                      title: HGA Scene Analysis
+                      message: "{{ hga_msg }}"
+              - conditions:
+                  - condition: template
+                    value_template: "{{ (_mobile_device | string | length) > 0 }}"
                 sequence:
                   - service: notify.notify
                     data:
                       title: HGA Scene Analysis
-                      message: "{{ hga_scene_analysis_output['response']['speech']['plain']['speech'] }}"
+                      message: "{{ hga_msg }}"
                       target:
-                        - "{{ v_mobile }}"
+                        - "{{ _mobile_device }}"
             default: []
 
 mode: single
