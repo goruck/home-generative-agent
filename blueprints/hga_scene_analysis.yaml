@@ -1,5 +1,5 @@
 blueprint:
-  name: Home Generative Agent Scene Analyzer (Clean)
+  name: Home Generative Agent Scene Analyzer
   author: goruck
   description: >
     Periodically prompt the Home Generative Agent to analyze a camera scene.
