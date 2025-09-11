@@ -48,7 +48,6 @@ blueprint:
       selector:
         boolean: {}
 
-# Bind inputs to variables for use in templates (never use !input inside {{ }})
 variables:
   v_mobile: !input mobile_device
   v_persist: !input send_persistent
@@ -60,7 +59,6 @@ trigger:
 condition: []
 
 action:
-  # Run the agent and capture output
   - service: conversation.process
     data:
       agent_id: !input agent_id
@@ -68,20 +66,41 @@ action:
       conversation_id: !input conversation_id
     response_variable: hga_scene_analysis_output
 
-  # Only continue if the model response does NOT contain "no"
   - choose:
       - conditions:
           - condition: template
             value_template: >
               {{ 'no' not in (hga_scene_analysis_output['response']['speech']['plain']['speech'] | lower) }}
         sequence:
-          # Optional persistent notification
-          - if:
-              - condition: template
-                value_template: "{{ v_persist }}"
-            then:
-              - service: notify.persistent_notification
-                data:
+          # Persistent notification (optional)
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ v_persist }}"
+                sequence:
+                  - service: persistent_notification.create
+                    data:
+                      title: HGA Scene Analysis
+                      message: >
+                        {{ hga_scene_analysis_output['response']['speech']['plain']['speech'] }}
+            default: []
+
+          # Mobile push (optional)
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ v_mobile != '' }}"
+                sequence:
+                  - service: notify.notify
+                    data:
+                      title: HGA Scene Analysis
+                      message: >
+                        {{ hga_scene_analysis_output['response']['speech']['plain']['speech'] }}
+                      target:
+                        - "{{ v_mobile }}"
+            default: []
+
+mode: single
                   title: HGA Scene Analysis
                   message: >
                     {{ hga_scene_analysis_output['response']['speech']['plain']['speech'] }}
