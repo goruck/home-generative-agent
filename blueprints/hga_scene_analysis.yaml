@@ -55,7 +55,6 @@ blueprint:
       selector:
         boolean: {}
 
-# Bind inputs to variables (safe for use in templates)
 variables:
   v_notify: !input notify_service
   v_mobile: !input mobile_device
@@ -68,20 +67,65 @@ trigger:
 condition: []
 
 action:
-  - alias: Run agent
-    action: conversation.process
+  # Run the agent
+  - service: conversation.process
     data:
       agent_id: !input agent_id
       text: !input message
       conversation_id: !input conversation_id
     response_variable: hga_scene_analysis_output
 
-  - alias: Notify if match
-    choose:
+  # Only proceed if model did NOT say "no"
+  - choose:
       - conditions:
           - condition: template
-            value_template: >-
+            value_template: >
               {{ 'no' not in (hga_scene_analysis_output['response']['speech']['plain']['speech'] | lower) }}
+        sequence:
+          # Optional persistent notification
+          - if:
+              - condition: template
+                value_template: "{{ v_persist }}"
+            then:
+              - service: notify.persistent_notification
+                data:
+                  title: HGA Scene Analysis
+                  message: "{{ hga_scene_analysis_output['response']['speech']['plain']['speech'] }}"
+
+          # Primary OR targeted (dedup)
+          - choose:
+              # If mobile selected AND primary is notify.notify -> send ONLY targeted
+              - conditions:
+                  - condition: template
+                    value_template: >
+                      {{ v_mobile != '' and (v_notify | lower) == 'notify.notify' }}
+                sequence:
+                  - service: notify.notify
+                    data:
+                      title: HGA Scene Analysis
+                      message: "{{ hga_scene_analysis_output['response']['speech']['plain']['speech'] }}"
+                      target:
+                        - "{{ v_mobile }}"
+            default:
+              - service: "{{ v_notify }}"
+                data:
+                  title: HGA Scene Analysis
+                  message: "{{ hga_scene_analysis_output['response']['speech']['plain']['speech'] }}"
+
+          # Extra targeted ONLY when primary is neither notify.notify nor mobile_app
+          - if:
+              - condition: template
+                value_template: >
+                  {{ v_mobile != '' and (v_notify | lower) != 'notify.notify' and ((v_notify | lower)[:19] != 'notify.mobile_app_') }}
+            then:
+              - service: notify.notify
+                data:
+                  title: HGA Scene Analysis
+                  message: "{{ hga_scene_analysis_output['response']['speech']['plain']['speech'] }}"
+                  target:
+                    - "{{ v_mobile }}"
+
+mode: single
         sequence:
           # Optional persistent notification
           - choose:
