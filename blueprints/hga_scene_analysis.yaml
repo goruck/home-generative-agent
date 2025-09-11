@@ -35,13 +35,13 @@ blueprint:
       selector:
         text:
           multiline: false
-    mobile_device:
-      name: Mobile Device (Optional)
-      description: Companion app device to notify.
+    mobile_push_service:
+      name: Mobile Push Notify Service (Optional)
+      description: Exact mobile_app notify service (e.g., notify.mobile_app_evas_iphone)
       default: ""
       selector:
-        device:
-          integration: mobile_app
+        text:
+          multiline: false
     send_persistent:
       name: Send persistent notification?
       default: true
@@ -49,7 +49,7 @@ blueprint:
         boolean: {}
 
 variables:
-  v_mobile: !input mobile_device
+  v_push: !input mobile_push_service
   v_persist: !input send_persistent
 
 trigger:
@@ -81,16 +81,14 @@ action:
                     data:
                       title: HGA Scene Analysis
                       message: "{{ hga_scene_analysis_output['response']['speech']['plain']['speech'] }}"
+
           - choose:
               - conditions:
                   - condition: template
-                    value_template: "{{ v_mobile != '' }}"
+                    value_template: "{{ v_push != '' }}"
                 sequence:
-                  - service: notify.notify
+                  - service: "{{ v_push }}"
                     data:
                       title: HGA Scene Analysis
                       message: "{{ hga_scene_analysis_output['response']['speech']['plain']['speech'] }}"
-                      target:
-                        - "{{ v_mobile }}"
-
 mode: single
