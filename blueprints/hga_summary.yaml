@@ -1,21 +1,11 @@
 blueprint:
-  name: State of the Home (Home Generative Agent)
+  name: Home Generative Agent - State of the Home
   author: goruck
   description: >
-    Periodically generate an AI-powered summary of Home Assistant entities exposed to assistant agents.
-    Sends notifications (configurable) with the summary.
+    Periodically ask the Home Generative Agent for a house-state summary.
+    If the model responds, optionally send a persistent notification and/or mobile push.
   domain: automation
-  source_url: https://github.com/goruck/home-generative-agent/tree/main/blueprints/hga_summary.yaml
-
-  input:
-blueprint:
-  name: State of the Home (Home Generative Agent)
-  author: goruck
-  description: >
-    Periodically generate an AI-powered summary of Home Assistant entities exposed to assistant agents.
-    Sends notifications (configurable) with the summary.
-  domain: automation
-  source_url: https://github.com/goruck/home-generative-agent/tree/main/blueprints/hga_summary.yaml
+  source_url: https://github.com/goruck/home-generative-agent
 
   input:
     time_pattern:
@@ -27,7 +17,7 @@ blueprint:
 
     message:
       name: Prompt
-      description: Model prompt to create the summary
+      description: Model prompt to create the summary.
       default: >
         Provide the latest summary of the house's state and an analysis of the camera images.
         Draw conclusions from this data including presence of people and pets inside the house.
@@ -37,7 +27,7 @@ blueprint:
 
     agent_id:
       name: Agent ID
-      description: The conversation agent to process the prompt.
+      description: ID of the assistant agent to query.
       default: conversation.home_generative_agent
       selector:
         text:
@@ -45,167 +35,37 @@ blueprint:
 
     conversation_id:
       name: Conversation ID
-      description: A unique identifier for the conversation session.
+      description: Identifier for the chat session.
       default: hga_automation_summary
       selector:
         text:
           multiline: false
 
-    notify_service:
-      name: Primary Notify Service
-      description: Notify service to send the alert (e.g., notify.notify or notify.my_group).
-      default: notify.notify
+    mobile_push_service:
+      name: Mobile Push Notify Service (Optional)
+      description: Exact notify service for your phone (e.g., notify.mobile_app_evas_iphone)
+      default: ""
       selector:
         text:
           multiline: false
 
-    mobile_device:
-      name: Mobile Device (Optional)
-      description: Select a mobile_app device to also receive a push notification. Leave empty to disable.
-      default: ""
-      selector:
-        device:
-          integration: mobile_app
-
     send_persistent:
-      name: Also create a persistent notification
+      name: Send persistent notification?
       default: true
       selector:
         boolean: {}
 
 variables:
-  v_msg: !input message
-  v_agent: !input agent_id
-  v_conv: !input conversation_id
-  v_notify: !input notify_service
-  v_mobile: !input mobile_device
+  v_push: !input mobile_push_service
   v_persist: !input send_persistent
 
-triggers:
+trigger:
   - platform: time_pattern
     minutes: !input time_pattern
 
-conditions: []
+condition: []
 
-actions:
-  - service: conversation.process
-    data:
-      agent_id: "{{ v_agent }}"
-      text: "{{ v_msg }}"
-      conversation_id: "{{ v_conv }}"
-    response_variable: hga_automation_summary_output
-
-  - choose:
-      - conditions:
-          - condition: template
-            value_template: >-
-              {{ (hga_automation_summary_output['response']['speech']['plain']['speech'] | string) | length > 0 }}
-        sequence:
-          # Optional persistent notification
-          - choose:
-              - conditions:
-                  - condition: template
-                    value_template: "{{ v_persist }}"
-                sequence:
-                  - service: notify.persistent_notification
-                    data:
-                      title: HGA Automation Summary
-                      message: "{{ hga_automation_summary_output['response']['speech']['plain']['speech'] }}"
-            default: []
-
-          # Primary OR targeted mobile (avoid duplicates)
-          - choose:
-              # If mobile device selected AND primary is notify.notify -> send ONLY targeted mobile
-              - conditions:
-                  - condition: template
-                    value_template: "{{ v_mobile != '' and (v_notify | lower) == 'notify.notify' }}"
-                sequence:
-                  - service: notify.notify
-                    data:
-                      title: HGA Automation Summary
-                      message: "{{ hga_automation_summary_output['response']['speech']['plain']['speech'] }}"
-                      target:
-                        - "{{ v_mobile }}"
-            default:
-              # Otherwise send the primary service
-              - service: "{{ v_notify }}"
-                data:
-                  title: HGA Automation Summary
-                  message: "{{ hga_automation_summary_output['response']['speech']['plain']['speech'] }}"
-
-          # Extra targeted mobile ONLY when primary is neither notify.notify nor a mobile_app service
-          - choose:
-              - conditions:
-                  - condition: template
-                    value_template: >-
-                      {{ v_mobile != '' and (v_notify | lower) != 'notify.notify' and ((v_notify | lower)[:19] != 'notify.mobile_app_') }}
-                sequence:
-                  - service: notify.notify
-                    data:
-                      title: HGA Automation Summary
-                      message: "{{ hga_automation_summary_output['response']['speech']['plain']['speech'] }}"
-                      target:
-                        - "{{ v_mobile }}"
-            default: []
-
-mode: single
-time_pattern:
-      name: Time Pattern
-      description: cron-like time pattern (e.g., /30 for every 30 mins)
-      selector: {text: {multiline: false}}
-
-    message:
-      name: Prompt
-      description: Model prompt to create the summary
-      default: >
-        Provide the latest summary of the house's state and an analysis of the camera images.
-        Draw conclusions from this data including presence of people and pets inside the house.
-      selector: {text: {multiline: true}}
-
-    agent_id:
-      name: Agent ID
-      description: The conversation agent to process the prompt.
-      default: conversation.home_generative_agent
-      selector: {text: {multiline: false}}
-
-    conversation_id:
-      name: Conversation ID
-      description: A unique identifier for the conversation session.
-      default: hga_automation_summary
-      selector: {text: {multiline: false}}
-
-    notify_service:
-      name: Primary Notify Service
-      description: Notify service to send the alert (e.g., notify.notify or notify.my_group).
-      default: notify.notify
-      selector: {text: {multiline: false}}
-
-    mobile_notify_service:
-      name: Mobile Notify Service (Optional, preferred)
-      description: e.g., notify.mobile_app_evas_iphone. If set, used for mobile push.
-      default: ""
-      selector: {text: {multiline: false}}
-
-    mobile_device:
-      name: Mobile Device (Optional, fallback)
-      description: Select a mobile_app device to also receive a push notification.
-      default: ""
-      selector:
-        device: {integration: mobile_app}
-
-    send_persistent:
-      name: Also create a persistent notification
-      default: true
-      selector: {boolean: {}}
-
-triggers:
-  - platform: time_pattern
-    minutes: !input time_pattern
-
-conditions: []
-
-actions:
-  # Run the agent
+action:
   - service: conversation.process
     data:
       agent_id: !input agent_id
@@ -213,60 +73,29 @@ actions:
       conversation_id: !input conversation_id
     response_variable: hga_automation_summary_output
 
-  # Mirror blueprint inputs into runtime variables (usable inside templates)
-  - variables:
-      hga_msg: >-
-        {{ hga_automation_summary_output.get('response', {})
-                                         .get('speech', {})
-                                         .get('plain', {})
-                                         .get('speech', '') | string }}
-      _send_persistent: !input send_persistent
-      _mobile_notify_service: !input mobile_notify_service
-      _mobile_device: !input mobile_device
-
   - choose:
       - conditions:
           - condition: template
-            value_template: "{{ hga_msg | length > 0 }}"
+            value_template: >
+              {{ (hga_automation_summary_output['response']['speech']['plain']['speech'] | string) | length > 0 }}
         sequence:
-          # Optional persistent notification
           - choose:
               - conditions:
                   - condition: template
-                    value_template: "{{ _send_persistent }}"
+                    value_template: "{{ v_persist }}"
                 sequence:
-                  - service: notify.persistent_notification
+                  - service: persistent_notification.create
                     data:
                       title: HGA Automation Summary
-                      message: "{{ hga_msg }}"
-            default: []
+                      message: "{{ hga_automation_summary_output['response']['speech']['plain']['speech'] }}"
 
-          # Primary notify
-          - service: !input notify_service
-            data:
-              title: HGA Automation Summary
-              message: "{{ hga_msg }}"
-
-          # Mobile push — prefer explicit service if provided
           - choose:
               - conditions:
                   - condition: template
-                    value_template: "{{ (_mobile_notify_service | trim) != '' }}"
+                    value_template: "{{ v_push != '' }}"
                 sequence:
-                  - service: "{{ _mobile_notify_service }}"
+                  - service: "{{ v_push }}"
                     data:
                       title: HGA Automation Summary
-                      message: "{{ hga_msg }}"
-              - conditions:
-                  - condition: template
-                    value_template: "{{ (_mobile_device | string | length) > 0 }}"
-                sequence:
-                  - service: notify.notify
-                    data:
-                      title: HGA Automation Summary
-                      message: "{{ hga_msg }}"
-                      target:
-                        - "{{ _mobile_device }}"
-            default: []
-
+                      message: "{{ hga_automation_summary_output['response']['speech']['plain']['speech'] }}"
 mode: single
