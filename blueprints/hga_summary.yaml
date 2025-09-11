@@ -49,9 +49,21 @@ blueprint:
         text:
           multiline: false
 
+    # Preferred: explicit mobile app notify service (robust across HA versions)
+    mobile_notify_service:
+      name: Mobile Notify Service (Optional, preferred)
+      description: >
+        e.g., notify.mobile_app_evas_iphone. If set, this is used for mobile push.
+        Leave blank to skip or to use the device selector fallback.
+      default: ""
+      selector:
+        text:
+          multiline: false
+
+    # Fallback: pick a mobile_app device (only works on HA builds that support device targets on notify.notify)
     mobile_device:
-      name: Mobile Device (Optional)
-      description: Select a mobile_app device to also receive a push notification. Leave empty to disable.
+      name: Mobile Device (Optional, fallback)
+      description: Select a mobile_app device to also receive a push notification.
       default: ""
       selector:
         device:
@@ -63,15 +75,6 @@ blueprint:
       selector:
         boolean: {}
 
-# <-- Assign inputs to variables for use in templates
-variables:
-  v_msg: !input message
-  v_agent: !input agent_id
-  v_conv: !input conversation_id
-  v_notify: !input notify_service
-  v_mobile: !input mobile_device
-  v_persist: !input send_persistent
-
 triggers:
   - platform: time_pattern
     minutes: !input time_pattern
@@ -79,49 +82,67 @@ triggers:
 conditions: []
 
 actions:
+  # Run the agent
   - service: conversation.process
     data:
-      agent_id: "{{ v_agent }}"
-      text: "{{ v_msg }}"
-      conversation_id: "{{ v_conv }}"
+      agent_id: !input agent_id
+      text: !input message
+      conversation_id: !input conversation_id
     response_variable: hga_automation_summary_output
+
+  # Cache message once
+  - variables:
+      hga_msg: >-
+        {{ hga_automation_summary_output.get('response', {})
+                                         .get('speech', {})
+                                         .get('plain', {})
+                                         .get('speech', '') | string }}
 
   - choose:
       - conditions:
           - condition: template
-            value_template: >-
-              {{ (hga_automation_summary_output['response']['speech']['plain']['speech'] | string) | length > 0 }}
+            value_template: "{{ hga_msg | length > 0 }}"
         sequence:
           # Optional persistent notification
           - choose:
               - conditions:
                   - condition: template
-                    value_template: "{{ v_persist }}"
+                    value_template: "{{ !input send_persistent }}"
                 sequence:
                   - service: notify.persistent_notification
                     data:
                       title: HGA Automation Summary
-                      message: "{{ hga_automation_summary_output['response']['speech']['plain']['speech'] }}"
+                      message: "{{ hga_msg }}"
             default: []
 
-          # Primary notify (required)
-          - service: "{{ v_notify }}"
+          # Primary notify
+          - service: !input notify_service
             data:
               title: HGA Automation Summary
-              message: "{{ hga_automation_summary_output['response']['speech']['plain']['speech'] }}"
+              message: "{{ hga_msg }}"
 
-          # Optional mobile push (only if a device is selected)
+          # Mobile push — prefer explicit service if provided
           - choose:
+              # Path A: explicit mobile service name (works everywhere)
               - conditions:
                   - condition: template
-                    value_template: "{{ v_mobile != '' }}"
+                    value_template: "{{ (inputs.mobile_notify_service | default('')) | trim | length > 0 }}"
+                sequence:
+                  - service: !input mobile_notify_service
+                    data:
+                      title: HGA Automation Summary
+                      message: "{{ hga_msg }}"
+              # Path B (fallback): device target via notify.notify (only on supported HA versions)
+              - conditions:
+                  - condition: template
+                    value_template: "{{ (inputs.mobile_device | default('')) | string | length > 0 }}"
                 sequence:
                   - service: notify.notify
                     data:
                       title: HGA Automation Summary
-                      message: "{{ hga_automation_summary_output['response']['speech']['plain']['speech'] }}"
+                      message: "{{ hga_msg }}"
                       target:
-                        - "{{ v_mobile }}"
+                        - !input mobile_device
             default: []
 
 mode: single
