@@ -49,7 +49,6 @@ blueprint:
         text:
           multiline: false
 
-    # Preferred: explicit mobile app notify service (robust across HA versions)
     mobile_notify_service:
       name: Mobile Notify Service (Optional, preferred)
       description: >
@@ -60,7 +59,6 @@ blueprint:
         text:
           multiline: false
 
-    # Fallback: pick a mobile_app device (only works on HA builds that support device targets on notify.notify)
     mobile_device:
       name: Mobile Device (Optional, fallback)
       description: Select a mobile_app device to also receive a push notification.
@@ -82,7 +80,6 @@ triggers:
 conditions: []
 
 actions:
-  # Run the agent
   - service: conversation.process
     data:
       agent_id: !input agent_id
@@ -90,7 +87,6 @@ actions:
       conversation_id: !input conversation_id
     response_variable: hga_automation_summary_output
 
-  # Cache message once
   - variables:
       hga_msg: >-
         {{ hga_automation_summary_output.get('response', {})
@@ -107,7 +103,7 @@ actions:
           - choose:
               - conditions:
                   - condition: template
-                    value_template: "{{ !input send_persistent }}"
+                    value_template: "{{ inputs.send_persistent }}"
                 sequence:
                   - service: notify.persistent_notification
                     data:
@@ -123,19 +119,17 @@ actions:
 
           # Mobile push — prefer explicit service if provided
           - choose:
-              # Path A: explicit mobile service name (works everywhere)
               - conditions:
                   - condition: template
-                    value_template: "{{ (inputs.mobile_notify_service | default('')) | trim | length > 0 }}"
+                    value_template: "{{ (inputs.mobile_notify_service | default('') | trim) != '' }}"
                 sequence:
                   - service: !input mobile_notify_service
                     data:
                       title: HGA Automation Summary
                       message: "{{ hga_msg }}"
-              # Path B (fallback): device target via notify.notify (only on supported HA versions)
               - conditions:
                   - condition: template
-                    value_template: "{{ (inputs.mobile_device | default('')) | string | length > 0 }}"
+                    value_template: "{{ (inputs.mobile_device | default('') | string | length) > 0 }}"
                 sequence:
                   - service: notify.notify
                     data:
