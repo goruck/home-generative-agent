@@ -1,9 +1,9 @@
 blueprint:
-  name: Home Generative Agent Scene Analyzer
+  name: Home Generative Agent Scene Analyzer (Simple)
   author: goruck
   description: >
-    Periodically generate camera image scene analysis by prompting the generative agent.
-    Sends notifications only if the model detects a requested object in the prompt.
+    Periodically prompt the Home Generative Agent to analyze a camera scene.
+    If the model does not say "no", optionally send a persistent notification and/or a mobile push.
   domain: automation
   source_url: https://github.com/goruck/home-generative-agent/tree/main/blueprints/hga_scene_analysis.yaml
 
@@ -23,7 +23,7 @@ blueprint:
           multiline: false
     agent_id:
       name: Agent ID
-      description: The conversation agent to process the prompt.
+      description: Conversation agent to process the prompt.
       default: conversation.home_generative_agent
       selector:
         text:
@@ -35,16 +35,9 @@ blueprint:
       selector:
         text:
           multiline: false
-    notify_service:
-      name: Primary Notify Service
-      description: Notify service to send the alert (e.g., notify.notify or notify.my_group).
-      default: notify.notify
-      selector:
-        text:
-          multiline: false
     mobile_device:
       name: Mobile Device (Optional)
-      description: Select a mobile_app device to also receive a push notification. Leave empty to disable.
+      description: Select a mobile_app device to receive a push. Leave empty to disable.
       default: ""
       selector:
         device:
@@ -55,8 +48,8 @@ blueprint:
       selector:
         boolean: {}
 
+# Bind inputs to variables for use in templates (never use !input inside {{ }})
 variables:
-  v_notify: !input notify_service
   v_mobile: !input mobile_device
   v_persist: !input send_persistent
 
@@ -67,7 +60,7 @@ trigger:
 condition: []
 
 action:
-  # Run the agent
+  # Run the agent and capture output
   - service: conversation.process
     data:
       agent_id: !input agent_id
@@ -75,13 +68,38 @@ action:
       conversation_id: !input conversation_id
     response_variable: hga_scene_analysis_output
 
-  # Only proceed if model did NOT say "no"
+  # Only continue if the model response does NOT contain "no"
   - choose:
       - conditions:
           - condition: template
             value_template: >
               {{ 'no' not in (hga_scene_analysis_output['response']['speech']['plain']['speech'] | lower) }}
         sequence:
+          # Optional persistent notification
+          - if:
+              - condition: template
+                value_template: "{{ v_persist }}"
+            then:
+              - service: notify.persistent_notification
+                data:
+                  title: HGA Scene Analysis
+                  message: >
+                    {{ hga_scene_analysis_output['response']['speech']['plain']['speech'] }}
+
+          # Optional mobile push (only if a device is selected)
+          - if:
+              - condition: template
+                value_template: "{{ v_mobile != '' }}"
+            then:
+              - service: notify.notify
+                data:
+                  title: HGA Scene Analysis
+                  message: >
+                    {{ hga_scene_analysis_output['response']['speech']['plain']['speech'] }}
+                  target:
+                    - "{{ v_mobile }}"
+
+mode: single
           # Optional persistent notification
           - if:
               - condition: template
