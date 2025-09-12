@@ -36,6 +36,7 @@ from voluptuous import MultipleInvalid
 from .const import (
     AUTOMATION_TOOL_BLUEPRINT_NAME,
     AUTOMATION_TOOL_EVENT_REGISTERED,
+    CONF_NOTIFY_SERVICE,
     HISTORY_TOOL_CONTEXT_LIMIT,
     HISTORY_TOOL_PURGE_KEEP_DAYS,
     VLM_IMAGE_HEIGHT,
@@ -230,6 +231,7 @@ async def add_automation(  # noqa: D417
         return "Configuration not found. Please check your setup."
 
     hass = config["configurable"]["hass"]
+    mobile_push_service = config["configurable"]["options"].get(CONF_NOTIFY_SERVICE)
 
     if time_pattern and message:
         automation_data = {
@@ -240,6 +242,7 @@ async def add_automation(  # noqa: D417
                 "input": {
                     "time_pattern": time_pattern,
                     "message": message,
+                    "mobile_push_service": mobile_push_service or "",
                 },
             },
         }

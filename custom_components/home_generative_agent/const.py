@@ -14,6 +14,9 @@ RECOMMENDED_DB_URI = (
 )
 CONF_DB_BOOTSTRAPPED = "db_bootstrapped"
 
+# ---- Notify service (for mobile push notifications) ----
+CONF_NOTIFY_SERVICE = "notify_service"
+
 # ---- LangChain logging ----
 # See https://python.langchain.com/docs/how_to/debugging/
 LANGCHAIN_LOGGING_LEVEL: Literal["disable", "verbose", "debug"] = "disable"
@@ -188,7 +191,6 @@ CONF_VIDEO_ANALYZER_MODE = "video_analyzer_mode"
 RECOMMENDED_VIDEO_ANALYZER_MODE: Literal[
     "disable", "notify_on_anomaly", "always_notify"
 ] = "disable"
-CONF_NOTIFY_SERVICE = "notify_service"
 
 # Interval units are seconds.
 VIDEO_ANALYZER_SCAN_INTERVAL = 1.5
