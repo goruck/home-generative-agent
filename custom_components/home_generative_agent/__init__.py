@@ -744,7 +744,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         try:
             openai_provider = ChatOpenAI(
                 api_key=api_key,
-                timeout=10,
+                timeout=120,
                 http_async_client=http_client,
             ).configurable_fields(
                 model_name=ConfigurableField(id="model_name"),
