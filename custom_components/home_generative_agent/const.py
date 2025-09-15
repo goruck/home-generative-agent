@@ -6,6 +6,7 @@ DOMAIN = "home_generative_agent"
 
 HTTP_STATUS_UNAUTHORIZED = 401
 HTTP_STATUS_BAD_REQUEST = 400
+HTTP_STATUS_WEBPAGE_NOT_FOUND = 404
 
 # ---- PostgreSQL (vector store + checkpointer) ----
 CONF_DB_URI = "db_uri"
@@ -44,22 +45,25 @@ CONF_GEMINI_API_KEY = "gemini_api_key"
 # ---------------- Chat model ----------------
 CHAT_MODEL_TOP_P = 1.0
 CHAT_MODEL_NUM_CTX = 65536
-CHAT_MODEL_MAX_TOKENS = 2048
+CHAT_MODEL_MAX_TOKENS = 4096
 # Add more models by extending the Literal types.
 CHAT_MODEL_OLLAMA_SUPPORTED = Literal["gpt-oss", "qwen2.5:32b", "qwen3:32b", "qwen3:8b"]
-CHAT_MODEL_OPENAI_SUPPORTED = Literal["gpt-4o", "gpt-4.1", "o4-mini"]
+CHAT_MODEL_OPENAI_SUPPORTED = Literal[
+    "gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-4o", "gpt-4.1", "o4-mini"
+]
 CHAT_MODEL_GEMINI_SUPPORTED = Literal[
     "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"
 ]
 
 CONF_CHAT_MODEL_PROVIDER = "chat_model_provider"
-RECOMMENDED_CHAT_MODEL_PROVIDER: Literal["openai", "ollama", "gemini"] = "ollama"
+PROVIDERS = Literal["openai", "ollama", "gemini"]
+RECOMMENDED_CHAT_MODEL_PROVIDER: PROVIDERS = "ollama"
 
 CONF_OLLAMA_CHAT_MODEL = "ollama_chat_model"
 RECOMMENDED_OLLAMA_CHAT_MODEL: CHAT_MODEL_OLLAMA_SUPPORTED = "qwen3:8b"
 
 CONF_OPENAI_CHAT_MODEL = "openai_chat_model"
-RECOMMENDED_OPENAI_CHAT_MODEL: CHAT_MODEL_OPENAI_SUPPORTED = "gpt-4o"
+RECOMMENDED_OPENAI_CHAT_MODEL: CHAT_MODEL_OPENAI_SUPPORTED = "gpt-5"
 
 CONF_GEMINI_CHAT_MODEL = "gemini_chat_model"
 RECOMMENDED_GEMINI_CHAT_MODEL: CHAT_MODEL_GEMINI_SUPPORTED = "gemini-2.5-flash-lite"
@@ -71,14 +75,14 @@ RECOMMENDED_CHAT_MODEL_TEMPERATURE = 1.0
 CONTEXT_MANAGE_USE_TOKENS = True
 CONTEXT_MAX_MESSAGES = 80
 # Keep buffer for tools + token counter undercount (see repo notes).
-CONTEXT_MAX_TOKENS = CHAT_MODEL_NUM_CTX - CHAT_MODEL_MAX_TOKENS - 2048 - 4096  # 57344
+CONTEXT_MAX_TOKENS = CHAT_MODEL_NUM_CTX - CHAT_MODEL_MAX_TOKENS - 2048 - 4096  # 55296
 
 # ---------------- VLM (vision) ----------------
 VLM_TOP_P = 0.6
 VLM_NUM_PREDICT = 4096
 VLM_NUM_CTX = 16384
 VLM_OLLAMA_SUPPORTED = Literal["qwen2.5vl:7b"]
-VLM_OPENAI_SUPPORTED = Literal["gpt-4.1", "gpt-4.1-nano"]
+VLM_OPENAI_SUPPORTED = Literal["gpt-5-nano", "gpt-4.1", "gpt-4.1-nano"]
 VLM_GEMINI_SUPPORTED = Literal[
     "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"
 ]
@@ -90,7 +94,7 @@ CONF_OLLAMA_VLM = "ollama_vlm"
 RECOMMENDED_OLLAMA_VLM: VLM_OLLAMA_SUPPORTED = "qwen2.5vl:7b"
 
 CONF_OPENAI_VLM = "openai_vlm"
-RECOMMENDED_OPENAI_VLM: VLM_OPENAI_SUPPORTED = "gpt-4.1-nano"
+RECOMMENDED_OPENAI_VLM: VLM_OPENAI_SUPPORTED = "gpt-5-nano"
 
 CONF_GEMINI_VLM = "gemini_vlm"
 RECOMMENDED_GEMINI_VLM: VLM_GEMINI_SUPPORTED = "gemini-2.5-flash-lite"
@@ -116,7 +120,7 @@ SUMMARIZATION_MODEL_TOP_P = 0.95
 SUMMARIZATION_MODEL_PREDICT = 4096
 SUMMARIZATION_MODEL_CTX = 32768
 SUMMARIZATION_MODEL_OLLAMA_SUPPORTED = Literal["qwen3:1.7b", "qwen3:8b"]
-SUMMARIZATION_MODEL_OPENAI_SUPPORTED = Literal["gpt-4.1", "gpt-4.1-nano"]
+SUMMARIZATION_MODEL_OPENAI_SUPPORTED = Literal["gpt-5-nano", "gpt-4.1", "gpt-4.1-nano"]
 SUMMARIZATION_MODEL_GEMINI_SUPPORTED = Literal[
     "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"
 ]
@@ -133,7 +137,7 @@ RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL: SUMMARIZATION_MODEL_OLLAMA_SUPPORTED = (
 
 CONF_OPENAI_SUMMARIZATION_MODEL = "openai_summarization_model"
 RECOMMENDED_OPENAI_SUMMARIZATION_MODEL: SUMMARIZATION_MODEL_OPENAI_SUPPORTED = (
-    "gpt-4.1-nano"
+    "gpt-5-nano"
 )
 
 CONF_GEMINI_SUMMARIZATION_MODEL = "gemini_summarization_model"
