@@ -701,7 +701,7 @@ class VideoAnalyzer:
                 )
 
         if tasks_to_await:
-            done, pending = await asyncio.wait(tasks_to_await, timeout=5)
+            _, pending = await asyncio.wait(tasks_to_await, timeout=5)
             for task in pending:
                 LOGGER.warning("Task did not cancel in time: %s", task)
 
