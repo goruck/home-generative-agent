@@ -3,17 +3,21 @@ blueprint:
   author: goruck
   description: >
     Periodically prompt the Home Generative Agent to analyze a camera scene.
-    If the model does not say "no", optionally send a persistent notification and/or mobile push.
+    Sends a persistent notification and/or mobile push if the agent detects something relevant.
   domain: automation
   source_url: https://github.com/goruck/home-generative-agent
 
   input:
-    time_pattern:
-      name: Time Pattern
-      description: cron-like time pattern (e.g., /30 for every 30 mins)
+    interval_minutes:
+      name: Interval in Minutes
+      description: Run automation every N minutes (e.g., 30 for every half hour).
+      default: 30
       selector:
-        text:
-          multiline: false
+        number:
+          min: 1
+          max: 1440
+          mode: box
+
     message:
       name: Prompt
       description: What the agent should evaluate in the image.
@@ -21,29 +25,31 @@ blueprint:
       selector:
         text:
           multiline: false
+
     agent_id:
       name: Agent ID
-      description: ID of the assistant agent to query.
       default: conversation.home_generative_agent
       selector:
         text:
           multiline: false
+
     conversation_id:
       name: Conversation ID
-      description: Identifier for the chat session.
       default: hga_scene_analysis
       selector:
         text:
           multiline: false
+
     mobile_push_service:
       name: Mobile Push Notify Service (Optional)
-      description: Exact mobile_app notify service (e.g., notify.mobile_app_evas_iphone)
+      description: Exact service name (e.g., notify.mobile_app_yourdevice)
       default: ""
       selector:
         text:
           multiline: false
+
     send_persistent:
-      name: Send persistent notification?
+      name: Also send a persistent notification?
       default: true
       selector:
         boolean: {}
@@ -51,10 +57,13 @@ blueprint:
 variables:
   v_push: !input mobile_push_service
   v_persist: !input send_persistent
+  v_interval: !input interval_minutes
 
 trigger:
-  - platform: time_pattern
-    minutes: !input time_pattern
+  - platform: template
+    value_template: >
+      {% set minutes = now().hour * 60 + now().minute %}
+      {{ v_interval > 0 and (minutes % v_interval) == 0 }}
 
 condition: []
 
@@ -91,4 +100,5 @@ action:
                     data:
                       title: HGA Scene Analysis
                       message: "{{ hga_scene_analysis_output['response']['speech']['plain']['speech'] }}"
+
 mode: single

@@ -1,33 +1,35 @@
 blueprint:
-  name: Home Generative Agent - State of the Home
+  name: Home Generative Agent State of the Home Summary
   author: goruck
   description: >
-    Periodically ask the Home Generative Agent for a house-state summary.
-    If the model responds, optionally send a persistent notification and/or mobile push.
+    Periodically ask the Home Generative Agent for a summary of the home's state.
+    Sends a persistent notification and/or mobile push if any content is returned.
   domain: automation
   source_url: https://github.com/goruck/home-generative-agent
 
   input:
-    time_pattern:
-      name: Time Pattern
-      description: cron-like time pattern (e.g., /30 for every 30 mins)
+    interval_minutes:
+      name: Interval in Minutes
+      description: Run automation every N minutes (e.g., 30 for every half hour).
+      default: 30
       selector:
-        text:
-          multiline: false
+        number:
+          min: 1
+          max: 1440
+          mode: box
 
     message:
       name: Prompt
       description: Model prompt to create the summary.
       default: >
         Provide the latest summary of the house's state and an analysis of the camera images.
-        Draw conclusions from this data including presence of people and pets inside the house.
+        Draw conclusions from this data including presence of people and animals inside and outside the house.
       selector:
         text:
           multiline: true
 
     agent_id:
       name: Agent ID
-      description: ID of the assistant agent to query.
       default: conversation.home_generative_agent
       selector:
         text:
@@ -35,7 +37,6 @@ blueprint:
 
     conversation_id:
       name: Conversation ID
-      description: Identifier for the chat session.
       default: hga_automation_summary
       selector:
         text:
@@ -43,14 +44,14 @@ blueprint:
 
     mobile_push_service:
       name: Mobile Push Notify Service (Optional)
-      description: Exact notify service for your phone (e.g., notify.mobile_app_evas_iphone)
+      description: Exact service name (e.g., notify.mobile_app_yourdevice)
       default: ""
       selector:
         text:
           multiline: false
 
     send_persistent:
-      name: Send persistent notification?
+      name: Also send a persistent notification?
       default: true
       selector:
         boolean: {}
@@ -58,10 +59,13 @@ blueprint:
 variables:
   v_push: !input mobile_push_service
   v_persist: !input send_persistent
+  v_interval: !input interval_minutes
 
 trigger:
-  - platform: time_pattern
-    minutes: !input time_pattern
+  - platform: template
+    value_template: >
+      {% set minutes = now().hour * 60 + now().minute %}
+      {{ v_interval > 0 and (minutes % v_interval) == 0 }}
 
 condition: []
 
@@ -98,4 +102,5 @@ action:
                     data:
                       title: HGA Automation Summary
                       message: "{{ hga_automation_summary_output['response']['speech']['plain']['speech'] }}"
+
 mode: single
