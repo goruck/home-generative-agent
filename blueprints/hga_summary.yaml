@@ -44,7 +44,7 @@ blueprint:
 
     mobile_push_service:
       name: Mobile Push Notify Service (Optional)
-      description: Exact service name (e.g., notify.mobile_app_yourdevice)
+      description: Exact service name (e.g., notify.mobile_app_lindos_iphone). Leave blank to skip mobile push.
       default: ""
       selector:
         text:
@@ -59,13 +59,12 @@ blueprint:
 variables:
   v_push: !input mobile_push_service
   v_persist: !input send_persistent
-  v_interval: !input interval_minutes
 
-trigger:
+  trigger:
   - platform: template
     value_template: >
       {% set minutes = now().hour * 60 + now().minute %}
-      {{ v_interval > 0 and (minutes % v_interval) == 0 }}
+      {{ (minutes % (!input interval_minutes)) == 0 }}
 
 condition: []
 
