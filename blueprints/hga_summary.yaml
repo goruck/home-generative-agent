@@ -1,37 +1,33 @@
 blueprint:
-  name: Home Generative Agent State of the Home Summary
+  name: Home Generative Agent State of the Home
   author: goruck
   description: >
-    Periodically summarizes the overall state of the home using the Home Generative Agent.
-    Useful for generating context-aware overviews or alerts on a fixed schedule.
+    Periodically ask the Home Generative Agent for a house-state summary.
+    If the model responds, optionally send a persistent notification and/or mobile push.
   domain: automation
   source_url: https://github.com/goruck/home-generative-agent
 
   input:
-    interval:
-      name: Interval
-      description: Run every N minutes
-      default: "30"
+    time_pattern:
+      name: Time Pattern
+      description: cron-like time pattern (e.g., /30 for every 30 mins)
       selector:
-        select:
-          options:
-            - "10"
-            - "20"
-            - "30"
-            - "40"
-            - "50"
-            - "60"
+        text:
+          multiline: false
 
     message:
       name: Prompt
-      description: What the agent should summarize about the home.
-      default: Give a concise summary of the current state of the home.
+      description: Model prompt to create the summary.
+      default: >
+        Provide the latest summary of the house's state and an analysis of the camera images.
+        Draw conclusions from this data including presence of people and ani,als inside and outside the house.
       selector:
         text:
           multiline: true
 
     agent_id:
       name: Agent ID
+      description: ID of the assistant agent to query.
       default: conversation.home_generative_agent
       selector:
         text:
@@ -39,39 +35,35 @@ blueprint:
 
     conversation_id:
       name: Conversation ID
-      default: hga_home_summary
+      description: Identifier for the chat session.
+      default: hga_automation_summary
       selector:
         text:
           multiline: false
 
     mobile_push_service:
       name: Mobile Push Notify Service (Optional)
-      description: Exact service name (e.g., notify.mobile_app_lindos_iphone). Leave blank to skip mobile push.
+      description: Exact notify service for your phone (e.g., notify.mobile_app_evas_iphone)
       default: ""
       selector:
         text:
           multiline: false
 
     send_persistent:
-      name: Also send a persistent notification?
+      name: Send persistent notification?
       default: true
       selector:
         boolean: {}
 
-trigger:
-  - platform: time_pattern
-    minutes: "*"
-
 variables:
   v_push: !input mobile_push_service
   v_persist: !input send_persistent
-  v_interval: "{{ ('' ~ i_interval) | int }}"
-  i_interval: !input interval
-  v_now_minutes: "{{ now().hour * 60 + now().minute }}"
 
-condition:
-  - condition: template
-    value_template: "{{ v_now_minutes | int % v_interval == 0 }}"
+trigger:
+  - platform: time_pattern
+    minutes: !input time_pattern
+
+condition: []
 
 action:
   - service: conversation.process
@@ -79,32 +71,31 @@ action:
       agent_id: !input agent_id
       text: !input message
       conversation_id: !input conversation_id
-    response_variable: hga_home_summary_output
+    response_variable: hga_automation_summary_output
 
   - choose:
       - conditions:
           - condition: template
             value_template: >
-              {{ 'no' not in (hga_home_summary_output['response']['speech']['plain']['speech'] | lower) }}
+              {{ (hga_automation_summary_output['response']['speech']['plain']['speech'] | string) | length > 0 }}
         sequence:
           - choose:
               - conditions:
                   - condition: template
-                    value_template: "{{ v_persist == true }}"
+                    value_template: "{{ v_persist }}"
                 sequence:
                   - service: persistent_notification.create
                     data:
-                      title: HGA Home Summary
-                      message: "{{ hga_home_summary_output['response']['speech']['plain']['speech'] }}"
+                      title: HGA Automation Summary
+                      message: "{{ hga_automation_summary_output['response']['speech']['plain']['speech'] }}"
 
           - choose:
               - conditions:
                   - condition: template
-                    value_template: "{{ v_push | trim != '' }}"
+                    value_template: "{{ v_push != '' }}"
                 sequence:
                   - service: "{{ v_push }}"
                     data:
-                      title: HGA Home Summary
-                      message: "{{ hga_home_summary_output['response']['speech']['plain']['speech'] }}"
-
+                      title: HGA Automation Summary
+                      message: "{{ hga_automation_summary_output['response']['speech']['plain']['speech'] }}"
 mode: single
