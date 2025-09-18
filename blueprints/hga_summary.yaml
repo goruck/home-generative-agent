@@ -1,8 +1,9 @@
 blueprint:
-  name: Home Generative Agent State of the Home Summary
+  name: Home Generative Agent: State of the Home Summary
   author: goruck
   description: >
-    Periodically summarize the overall state of the home and send it via persistent notification and/or mobile push.
+    Periodically summarizes the overall state of the home using the Home Generative Agent.
+    Useful for generating context-aware overviews or alerts on a fixed schedule.
   domain: automation
   source_url: https://github.com/goruck/home-generative-agent
 
@@ -23,8 +24,8 @@ blueprint:
 
     message:
       name: Prompt
-      description: Prompt given to the Home Generative Agent to summarize home status.
-      default: Summarize the current state of the home.
+      description: What the agent should summarize about the home.
+      default: Give a concise summary of the current state of the home.
       selector:
         text:
           multiline: true
@@ -64,8 +65,8 @@ trigger:
 variables:
   v_push: !input mobile_push_service
   v_persist: !input send_persistent
+  v_interval: "{{ ('' ~ i_interval) | int }}"
   i_interval: !input interval
-  v_interval: "{{ i_interval | int }}"
   v_now_minutes: "{{ now().hour * 60 + now().minute }}"
 
 condition:
@@ -89,7 +90,7 @@ action:
           - choose:
               - conditions:
                   - condition: template
-                    value_template: "{{ v_persist }}"
+                    value_template: "{{ v_persist == true }}"
                 sequence:
                   - service: persistent_notification.create
                     data:
@@ -99,7 +100,7 @@ action:
           - choose:
               - conditions:
                   - condition: template
-                    value_template: "{{ v_push != '' }}"
+                    value_template: "{{ v_push | trim != '' }}"
                 sequence:
                   - service: "{{ v_push }}"
                     data:

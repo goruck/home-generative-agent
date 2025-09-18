@@ -65,8 +65,8 @@ trigger:
 variables:
   v_push: !input mobile_push_service
   v_persist: !input send_persistent
+  v_interval: "{{ ('' ~ i_interval) | int }}"
   i_interval: !input interval
-  v_interval: "{{ i_interval | int }}"
   v_now_minutes: "{{ now().hour * 60 + now().minute }}"
 
 condition:
@@ -90,7 +90,7 @@ action:
           - choose:
               - conditions:
                   - condition: template
-                    value_template: "{{ v_persist }}"
+                    value_template: "{{ v_persist == true }}"
                 sequence:
                   - service: persistent_notification.create
                     data:
@@ -100,7 +100,7 @@ action:
           - choose:
               - conditions:
                   - condition: template
-                    value_template: "{{ v_push != '' }}"
+                    value_template: "{{ v_push | trim != '' }}"
                 sequence:
                   - service: "{{ v_push }}"
                     data:
