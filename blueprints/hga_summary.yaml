@@ -1,5 +1,5 @@
 blueprint:
-  name: Home Generative Agent: State of the Home Summary
+  name: Home Generative Agent State of the Home Summary
   author: goruck
   description: >
     Periodically summarizes the overall state of the home using the Home Generative Agent.
