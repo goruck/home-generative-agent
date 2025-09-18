@@ -62,16 +62,12 @@ trigger:
   - platform: time_pattern
     minutes: "*"
 
-variables:
-  i_interval: !input interval
-  v_interval: "{{ i_interval | int }}"
-  v_now_minutes: "{{ now().hour * 60 + now().minute }}"
-  v_push: !input mobile_push_service
-  v_persist: !input send_persistent
-
 condition:
   - condition: template
-    value_template: "{{ v_now_minutes | int % v_interval == 0 }}"
+    value_template: >
+      {% set v_interval = ('' ~ !input interval) | int %}
+      {% set v_now_minutes = now().hour * 60 + now().minute %}
+      {{ v_now_minutes % v_interval == 0 }}
 
 action:
   - service: conversation.process
@@ -90,7 +86,7 @@ action:
           - choose:
               - conditions:
                   - condition: template
-                    value_template: "{{ v_persist }}"
+                    value_template: "{{ !input send_persistent }}"
                 sequence:
                   - service: persistent_notification.create
                     data:
@@ -100,9 +96,9 @@ action:
           - choose:
               - conditions:
                   - condition: template
-                    value_template: "{{ v_push != '' }}"
+                    value_template: "{{ !input mobile_push_service != '' }}"
                 sequence:
-                  - service: "{{ v_push }}"
+                  - service: !input mobile_push_service
                     data:
                       title: HGA Scene Analysis
                       message: "{{ hga_scene_analysis_output['response']['speech']['plain']['speech'] }}"
