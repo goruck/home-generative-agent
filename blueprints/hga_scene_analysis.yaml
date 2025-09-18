@@ -10,7 +10,7 @@ blueprint:
   input:
     interval:
       name: Interval
-      description: Run every N minutes (fixed options)
+      description: Run every N minutes
       default: "30"
       selector:
         select:
@@ -62,12 +62,16 @@ trigger:
   - platform: time_pattern
     minutes: "*"
 
+variables:
+  v_push: !input mobile_push_service
+  v_persist: !input send_persistent
+  i_interval: !input interval
+  v_interval: "{{ i_interval | int }}"
+  v_now_minutes: "{{ now().hour * 60 + now().minute }}"
+
 condition:
   - condition: template
-    value_template: >
-      {% set v_interval = ('' ~ !input interval) | int %}
-      {% set v_now_minutes = now().hour * 60 + now().minute %}
-      {{ v_now_minutes % v_interval == 0 }}
+    value_template: "{{ v_now_minutes | int % v_interval == 0 }}"
 
 action:
   - service: conversation.process
@@ -86,7 +90,7 @@ action:
           - choose:
               - conditions:
                   - condition: template
-                    value_template: "{{ !input send_persistent }}"
+                    value_template: "{{ v_persist }}"
                 sequence:
                   - service: persistent_notification.create
                     data:
@@ -96,9 +100,9 @@ action:
           - choose:
               - conditions:
                   - condition: template
-                    value_template: "{{ !input mobile_push_service != '' }}"
+                    value_template: "{{ v_push != '' }}"
                 sequence:
-                  - service: !input mobile_push_service
+                  - service: "{{ v_push }}"
                     data:
                       title: HGA Scene Analysis
                       message: "{{ hga_scene_analysis_output['response']['speech']['plain']['speech'] }}"
