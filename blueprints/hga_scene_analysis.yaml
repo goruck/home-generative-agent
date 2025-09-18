@@ -8,15 +8,19 @@ blueprint:
   source_url: https://github.com/goruck/home-generative-agent
 
   input:
-    interval_minutes:
-      name: Interval in Minutes
-      description: Run automation every N minutes (e.g., 30 for every half hour).
-      default: 30
+    interval:
+      name: Interval
+      description: Run every N minutes (fixed options)
+      default: "30"
       selector:
-        number:
-          min: 1
-          max: 1440
-          mode: box
+        select:
+          options:
+            - "10"
+            - "20"
+            - "30"
+            - "40"
+            - "50"
+            - "60"
 
     message:
       name: Prompt
@@ -54,17 +58,20 @@ blueprint:
       selector:
         boolean: {}
 
+trigger:
+  - platform: time_pattern
+    minutes: "*"
+
 variables:
   v_push: !input mobile_push_service
   v_persist: !input send_persistent
+  v_interval: "{{ i_interval | int }}"
+  i_interval: !input interval
+  v_now_minutes: "{{ now().hour * 60 + now().minute }}"
 
-  trigger:
-  - platform: template
-    value_template: >
-      {% set minutes = now().hour * 60 + now().minute %}
-      {{ (minutes % (!input interval_minutes)) == 0 }}
-
-condition: []
+condition:
+  - condition: template
+    value_template: "{{ v_now_minutes | int % v_interval == 0 }}"
 
 action:
   - service: conversation.process
