@@ -1,9 +1,9 @@
 blueprint:
-  name: Home Generative Agent State of the Home Summary
+  name: State of the Home Summary
   author: goruck
   description: >
-    Periodically prompt the Home Generative Agent to summarize the current state of the home
-    (occupancy, alarm, doors, locks, windows, lights, etc.). Sends a persistent and/or mobile notification.
+    Periodically generate an AI-powered summary of Home Assistant entities exposed to assistant agents.
+    Sends a persistent notification and/or mobile push with the summary.
   domain: automation
   source_url: https://github.com/goruck/home-generative-agent
 
@@ -24,11 +24,13 @@ blueprint:
 
     message:
       name: Prompt
-      description: What the agent should summarize about the house.
-      default: Summarize the current state of the house including occupancy, alarm, locks, doors, windows, and lights.
+      description: Model prompt to create the summary
+      default: >
+        Provide the latest summary of the house's state and an analysis of the camera images.
+        Draw conclusions from this data including presence of people and pets inside the house.
       selector:
         text:
-          multiline: false
+          multiline: true
 
     agent_id:
       name: Agent ID
@@ -39,7 +41,7 @@ blueprint:
 
     conversation_id:
       name: Conversation ID
-      default: hga_home_state
+      default: hga_summary
       selector:
         text:
           multiline: false
@@ -63,14 +65,15 @@ trigger:
     minutes: "*"
 
 variables:
+  i_interval: !input interval
+  v_interval: "{{ i_interval | int }}"
+  v_now_minutes: "{{ now().hour * 60 + now().minute }}"
   v_push: !input mobile_push_service
   v_persist: !input send_persistent
-  v_interval: "{{ ('' ~ !input interval) | int }}"
-  v_now_minutes: "{{ now().hour * 60 + now().minute }}"
 
 condition:
   - condition: template
-    value_template: "{{ v_now_minutes % v_interval == 0 }}"
+    value_template: "{{ v_now_minutes | int % v_interval == 0 }}"
 
 action:
   - service: conversation.process
@@ -78,32 +81,26 @@ action:
       agent_id: !input agent_id
       text: !input message
       conversation_id: !input conversation_id
-    response_variable: hga_home_state_output
+    response_variable: hga_summary_output
 
   - choose:
       - conditions:
           - condition: template
-            value_template: >
-              {{ 'no' not in (hga_home_state_output['response']['speech']['plain']['speech'] | lower) }}
+            value_template: "{{ v_persist }}"
         sequence:
-          - choose:
-              - conditions:
-                  - condition: template
-                    value_template: "{{ v_persist }}"
-                sequence:
-                  - service: persistent_notification.create
-                    data:
-                      title: HGA Home Summary
-                      message: "{{ hga_home_state_output['response']['speech']['plain']['speech'] }}"
+          - service: persistent_notification.create
+            data:
+              title: HGA Automation Summary
+              message: "{{ hga_summary_output['response']['speech']['plain']['speech'] }}"
 
-          - choose:
-              - conditions:
-                  - condition: template
-                    value_template: "{{ v_push != '' }}"
-                sequence:
-                  - service: "{{ v_push }}"
-                    data:
-                      title: HGA Home Summary
-                      message: "{{ hga_home_state_output['response']['speech']['plain']['speech'] }}"
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ v_push != '' }}"
+        sequence:
+          - service: "{{ v_push }}"
+            data:
+              title: HGA Automation Summary
+              message: "{{ hga_summary_output['response']['speech']['plain']['speech'] }}"
 
 mode: single

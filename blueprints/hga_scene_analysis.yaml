@@ -63,14 +63,15 @@ trigger:
     minutes: "*"
 
 variables:
+  i_interval: !input interval
+  v_interval: "{{ i_interval | int }}"
+  v_now_minutes: "{{ now().hour * 60 + now().minute }}"
   v_push: !input mobile_push_service
   v_persist: !input send_persistent
-  v_interval: "{{ ('' ~ !input interval) | int }}"
-  v_now_minutes: "{{ now().hour * 60 + now().minute }}"
 
 condition:
   - condition: template
-    value_template: "{{ v_now_minutes % v_interval == 0 }}"
+    value_template: "{{ v_now_minutes | int % v_interval == 0 }}"
 
 action:
   - service: conversation.process
