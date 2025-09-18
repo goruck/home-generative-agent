@@ -20,7 +20,7 @@ blueprint:
       description: Model prompt to create the summary.
       default: >
         Provide the latest summary of the house's state and an analysis of the camera images.
-        Draw conclusions from this data including presence of people and ani,als inside and outside the house.
+        Draw conclusions from this data including presence of people and animals inside and outside the house.
       selector:
         text:
           multiline: true
