@@ -32,11 +32,15 @@ This integration will set up the `conversation` platform, a convenient HA compon
 
 [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=goruck&repository=https%3A%2F%2Fgithub.com%2Fgoruck%2Fhome-generative-agent&category=integration)
 
-3. Install all the Blueprints in the `blueprints` directory.
+3. Add Home Generative Agent as an assistant in your Home Assistant installation by going to Settings → Voice Assistants. Use a configuration similar to the figure below.
 
-4. (Optional) Install `ollama` on your edge device by following the instructions [here](https://ollama.com/download).
+![Alt text](./assets/hga_assist_config.png)
 
-5. (Optional) Pull `ollama` models `gpt-oss`, `qwen3:8b`, `qwen3:1.7b`, `qwen2.5vl:7b` and `mxbai-embed-large`.
+4. Install all the Blueprints in the `blueprints` directory. You can manually create automations using these that converse directly with the Agent (the Agent can also create automations for you from your your conversations with it, see examples below.)
+
+5. (Optional) Install `ollama` on your edge device by following the instructions [here](https://ollama.com/download).
+
+6. (Optional) Pull `ollama` models `gpt-oss`, `qwen3:8b`, `qwen3:1.7b`, `qwen2.5vl:7b` and `mxbai-embed-large`.
 
 ### Manual (non-HACS install)
 1. Install PostgreSQL with pgvector as shown above in Step 1.
