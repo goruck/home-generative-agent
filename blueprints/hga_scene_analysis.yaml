@@ -56,7 +56,12 @@ trigger:
   - platform: time_pattern
     minutes: !input time_pattern
 
-condition: []
+# time_pattern triggers fire at the specified interval and at the “zero point” (top of the hour, day, etc.)
+# Filter so it won't fire at the top of the hour
+condition:
+  - condition: template
+    value_template: >
+      {{ now().minute != 0 }}
 
 action:
   - service: conversation.process
