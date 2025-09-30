@@ -200,11 +200,12 @@ RECOMMENDED_VIDEO_ANALYZER_MODE: Literal[
 VIDEO_ANALYZER_SCAN_INTERVAL = 1.5
 VIDEO_ANALYZER_SNAPSHOT_ROOT = "/media/snapshots"
 VIDEO_ANALYZER_SYSTEM_MESSAGE = """
-You are a bot that generates a description of a video given descriptions of its frames.
+You are a bot that generates a description of a video given descriptions
+of its frames and the identity of any person(s) present.
 Keep the description to the point and use no more than 250 characters.
 """
 VIDEO_ANALYZER_PROMPT = """
-Describe what is happening in this video from these frame descriptions:
+Describe what is happening in this video from these information:
 """
 # Time offset units are minutes.
 VIDEO_ANALYZER_TIME_OFFSET = 15
@@ -213,6 +214,15 @@ VIDEO_ANALYZER_DELETE_SNAPSHOTS = False
 VIDEO_ANALYZER_SNAPSHOTS_TO_KEEP = 15
 VIDEO_ANALYZER_TRIGGER_ON_MOTION = True
 VIDEO_ANALYZER_MOTION_CAMERA_MAP: dict = {}
+VIDEO_ANALYZER_FACE_CROP = True
+
+# ---------------- Face recognition ----------------
+CONF_FACE_RECOGNITION_MODE = "face_recognition_mode"
+RECOMMENDED_FACE_RECOGNITION_MODE: Literal["local", "remote", "disable"] = "disable"
+
+CONF_FACE_API_URL = "face_api_url"
+RECOMMENDED_FACE_API_URL = "http://face-recog-server.local:8000"
+
 
 # ---------------- Tools ----------------
 TOOL_CALL_ERROR_SYSTEM_MESSAGE = """

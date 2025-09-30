@@ -3,11 +3,12 @@
     "step": {
       "user": {
         "title": "Connect models",
-        "description": "Enter **API keys**, your **Ollama server URL** or **Postgres URI**. You must enter a valid **Postgres URI**, the others you can configure later in Options.",
+        "description": "Enter **API keys**, your **Ollama server URL**, **Postgres URI** or **Face recognition server URI**. You must enter a valid **Postgres URI**, the others you can configure later in Options.",
         "data": {
           "api_key": "OpenAI API key (optional)",
           "ollama_url": "Ollama server URL (optional)",
           "gemini_api_key": "Google Gemini API key (optional)",
+          "face_api_url": "Face recognition server API URL (optional)",
           "db_uri": "PostgreSQL Database URI (required)"
         }
       }
@@ -27,11 +28,12 @@
     "step": {
       "init": {
         "title": "Home Generative Agent Options",
-        "description": "Configure main prompt, models and providers. You can also update your API keys, Ollama server URL and db URI here.",
+        "description": "Configure Keys, URLs, main prompt, models and providers.",
         "data": {
           "api_key": "OpenAI API key (optional)",
           "gemini_api_key": "Google Gemini API key (optional)",
           "ollama_url": "Ollama server URL (optional)",
+          "face_api_url": "Face recognition API URL (optional)",
           "db_uri": "PostgreSQL Database URI (required)",
           "prompt": "Instructions",
           "chat_model_provider": "Chat model provider",
@@ -56,7 +58,8 @@
           "llm_hass_api": "Control Home Assistant",
           "recommended": "Recommended model settings",
           "video_analyzer_mode": "Video analyzer mode",
-          "notify_service": "Mobile App Notify Service (optional)"
+          "notify_service": "Mobile App Notify Service (optional)",
+          "face_recognition_mode": "Face recognition mode"
         },
         "data_description": {
           "prompt": "Instruct how the LLM should respond. This can be a template."

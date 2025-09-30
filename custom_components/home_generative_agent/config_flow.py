@@ -39,6 +39,8 @@ from .const import (
     CONF_CHAT_MODEL_TEMPERATURE,
     CONF_DB_URI,
     CONF_EMBEDDING_MODEL_PROVIDER,
+    CONF_FACE_API_URL,
+    CONF_FACE_RECOGNITION_MODE,
     CONF_GEMINI_API_KEY,
     CONF_NOTIFY_SERVICE,
     CONF_OLLAMA_CHAT_MODEL,
@@ -63,6 +65,8 @@ from .const import (
     RECOMMENDED_CHAT_MODEL_TEMPERATURE,
     RECOMMENDED_DB_URI,
     RECOMMENDED_EMBEDDING_MODEL_PROVIDER,
+    RECOMMENDED_FACE_API_URL,
+    RECOMMENDED_FACE_RECOGNITION_MODE,
     RECOMMENDED_OLLAMA_CHAT_MODEL,
     RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL,
     RECOMMENDED_OLLAMA_URL,
@@ -97,6 +101,10 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
             CONF_OLLAMA_URL,
             description={"suggested_value": RECOMMENDED_OLLAMA_URL},
         ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+        vol.Optional(
+            CONF_FACE_API_URL,
+            description={"suggested_value": RECOMMENDED_FACE_API_URL},
+        ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
         vol.Required(
             CONF_DB_URI,
             description={"suggested_value": RECOMMENDED_DB_URI},
@@ -109,6 +117,8 @@ RECOMMENDED_OPTIONS = {
     CONF_LLM_HASS_API: llm.LLM_API_ASSIST,
     CONF_PROMPT: llm.DEFAULT_INSTRUCTIONS_PROMPT,
     CONF_VIDEO_ANALYZER_MODE: RECOMMENDED_VIDEO_ANALYZER_MODE,
+    CONF_FACE_RECOGNITION_MODE: RECOMMENDED_FACE_RECOGNITION_MODE,
+    CONF_FACE_API_URL: RECOMMENDED_FACE_API_URL,
     CONF_CHAT_MODEL_PROVIDER: RECOMMENDED_CHAT_MODEL_PROVIDER,
     CONF_CHAT_MODEL_TEMPERATURE: RECOMMENDED_CHAT_MODEL_TEMPERATURE,
     CONF_VLM_PROVIDER: RECOMMENDED_VLM_PROVIDER,
@@ -224,6 +234,25 @@ async def _validate_gemini_key(hass: HomeAssistant, api_key: str) -> None:
         raise CannotConnectError
 
 
+async def _validate_face_api_url(hass: HomeAssistant, base_url: str) -> None:
+    """Light probe to confirm the face recognition server is reachable."""
+    if not base_url:
+        return
+    base_url = _ensure_http_url(base_url)
+    client = get_async_client(hass)
+    try:
+        resp = await client.get(
+            urljoin(base_url.rstrip("/") + "/", "status"), timeout=10
+        )
+    except Exception as err:
+        LOGGER.debug(
+            "Face recognition server connectivity exception during validation: %s", err
+        )
+        raise CannotConnectError from err
+    if resp.status_code >= HTTP_STATUS_BAD_REQUEST:
+        raise CannotConnectError
+
+
 def _model_option_key(cat: str, provider: str) -> str:
     """Return the stable option key for the model field of (category, provider)."""
     spec = MODEL_CATEGORY_SPECS[cat]
@@ -317,6 +346,10 @@ def _schema_for(hass: HomeAssistant, opts: Mapping[str, Any]) -> VolDictType:
             CONF_OLLAMA_URL,
             description={"suggested_value": (opts.get(CONF_OLLAMA_URL))},
         ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+        vol.Optional(
+            CONF_FACE_API_URL,
+            description={"suggested_value": (opts.get(CONF_FACE_API_URL))},
+        ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
         vol.Required(
             CONF_DB_URI,
             description={"suggested_value": (opts.get(CONF_DB_URI))},
@@ -336,6 +369,11 @@ def _schema_for(hass: HomeAssistant, opts: Mapping[str, Any]) -> VolDictType:
             description={"suggested_value": opts.get(CONF_VIDEO_ANALYZER_MODE)},
             default=RECOMMENDED_VIDEO_ANALYZER_MODE,
         ): SelectSelector(SelectSelectorConfig(options=video_analyzer_mode)),
+        vol.Optional(
+            CONF_FACE_RECOGNITION_MODE,
+            description={"suggested_value": opts.get(CONF_FACE_RECOGNITION_MODE)},
+            default=RECOMMENDED_FACE_RECOGNITION_MODE,
+        ): vol.In(["local", "remote", "disable"]),
     }
 
     selected_mode = opts.get(CONF_VIDEO_ANALYZER_MODE, RECOMMENDED_VIDEO_ANALYZER_MODE)
@@ -463,6 +501,7 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
             CONF_OLLAMA_URL: _get_str(data, CONF_OLLAMA_URL),
             CONF_GEMINI_API_KEY: _get_str(data, CONF_GEMINI_API_KEY),
             CONF_DB_URI: _get_str(data, CONF_DB_URI),
+            CONF_FACE_API_URL: _get_str(data, CONF_FACE_API_URL),
         }
 
         # Ordered, table-driven validation; short-circuits on first error.
@@ -471,15 +510,18 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
             (CONF_OLLAMA_URL, _validate_ollama_url, "Ollama"),
             (CONF_GEMINI_API_KEY, _validate_gemini_key, "Gemini"),
             (CONF_DB_URI, _validate_db_uri, "Database URI"),
+            (CONF_FACE_API_URL, _validate_face_api_url, "Face Recognition API"),
         ):
             code = await self._validate_present(self.hass, vals[key], validator, label)
             if code:
                 errors["base"] = code
                 break
 
-        # Normalize Ollama URL only on success.
+        # Normalize URLs only on success.
         if not errors and vals[CONF_OLLAMA_URL]:
             normalized[CONF_OLLAMA_URL] = _ensure_http_url(vals[CONF_OLLAMA_URL])
+        if not errors and vals[CONF_FACE_API_URL]:
+            normalized[CONF_FACE_API_URL] = _ensure_http_url(vals[CONF_FACE_API_URL])
 
         # Drop empties so defaults can apply later.
         for key in (
@@ -487,6 +529,7 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
             CONF_OLLAMA_URL,
             CONF_GEMINI_API_KEY,
             CONF_DB_URI,
+            CONF_FACE_API_URL,
         ):
             if not vals[key]:
                 normalized.pop(key, None)
@@ -575,10 +618,41 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
     def _base_options_with_entry_data(self) -> dict[str, Any]:
         """Start from current options, overlaying any setup-time data for visibility."""
         options = dict(self.config_entry.options)
-        for k in (CONF_API_KEY, CONF_OLLAMA_URL, CONF_GEMINI_API_KEY, CONF_DB_URI):
+        for k in (
+            CONF_API_KEY,
+            CONF_OLLAMA_URL,
+            CONF_GEMINI_API_KEY,
+            CONF_DB_URI,
+            CONF_FACE_API_URL,
+        ):
             if k not in options and self.config_entry.data.get(k):
                 options[k] = self.config_entry.data[k]
         return options
+
+    async def _maybe_edit_face_recognition_url(
+        self,
+        options: dict[str, Any],
+        user_input: Mapping[str, Any] | None,
+    ) -> str | None:
+        """Validate/apply face recog URL when present; return error code or None."""
+        if user_input is None or CONF_FACE_API_URL not in user_input:
+            return None
+
+        raw = _get_str(user_input, CONF_FACE_API_URL)
+        if not raw:
+            options.pop(CONF_FACE_API_URL, None)
+            return None
+
+        try:
+            await _validate_face_api_url(self.hass, raw)
+        except CannotConnectError:
+            return "cannot_connect"
+        except Exception:
+            LOGGER.exception("Unexpected exception validating face recognition api URL")
+            return "unknown"
+
+        options[CONF_FACE_API_URL] = _ensure_http_url(raw)
+        return None
 
     async def _maybe_edit_ollama(
         self,
@@ -660,7 +734,13 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
 
     def _drop_empty_fields(self, final_options: dict[str, Any]) -> None:
         """Remove empty strings for fields to avoid storing empties."""
-        for k in (CONF_API_KEY, CONF_OLLAMA_URL, CONF_GEMINI_API_KEY, CONF_DB_URI):
+        for k in (
+            CONF_API_KEY,
+            CONF_OLLAMA_URL,
+            CONF_GEMINI_API_KEY,
+            CONF_DB_URI,
+            CONF_FACE_API_URL,
+        ):
             if not _get_str(final_options, k):
                 final_options.pop(k, None)
 
@@ -712,6 +792,8 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         err = await self._maybe_edit_ollama(options, user_input)
         if not err:
             err = await self._maybe_edit_db_uri(options, user_input)
+        if not err:
+            err = await self._maybe_edit_face_recognition_url(options, user_input)
         if not err:
             err = await self._maybe_edit_secret(
                 _SecretSpec(

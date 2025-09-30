@@ -1,0 +1,36 @@
+enroll_person:
+  name: Enroll Person
+  description: Enroll a new person into the face database from an image file.
+  fields:
+    name:
+      name: Person name
+      description: Display name for the person to enroll
+      required: true
+      example: "Eva"
+      selector:
+        text:
+    file_path:
+      name: File path
+      description: Path to image file inside Home Assistant /media
+      required: true
+      example: "/media/faces/eva_face.jpg"
+      selector:
+        text:
+confirm_enroll:
+  name: Confirm Enroll
+  description: Confirm and assign a name to a previously detected unknown face.
+  fields:
+    uid:
+      name: UID
+      description: Identifier for the unknown face
+      required: true
+      example: "unk_deadbeef"
+      selector:
+        text:
+    name:
+      name: Person name
+      description: Name to assign to the person
+      required: true
+      example: "Eva"
+      selector:
+        text:
