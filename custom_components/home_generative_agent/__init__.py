@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import re
-from asyncio import QueueEmpty
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -13,15 +13,20 @@ from datetime import datetime, timedelta
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urljoin
 
 import aiofiles
 import async_timeout
 import homeassistant.util.dt as dt_util
+import httpx
+import numpy as np
+import voluptuous as vol
 from homeassistant.components.camera.const import DOMAIN as CAMERA_DOMAIN
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_API_KEY, Platform
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.httpx_client import get_async_client
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -32,6 +37,7 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.store.postgres import AsyncPostgresStore
 from langgraph.store.postgres.base import PostgresIndexConfig
+from PIL import Image
 from psycopg.rows import DictRow, dict_row
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
@@ -44,6 +50,8 @@ from .const import (
     CONF_DB_BOOTSTRAPPED,
     CONF_DB_URI,
     CONF_EMBEDDING_MODEL_PROVIDER,
+    CONF_FACE_API_URL,
+    CONF_FACE_RECOGNITION_MODE,
     CONF_GEMINI_API_KEY,
     CONF_GEMINI_CHAT_MODEL,
     CONF_GEMINI_EMBEDDING_MODEL,
@@ -73,6 +81,8 @@ from .const import (
     RECOMMENDED_CHAT_MODEL_TEMPERATURE,
     RECOMMENDED_DB_URI,
     RECOMMENDED_EMBEDDING_MODEL_PROVIDER,
+    RECOMMENDED_FACE_API_URL,
+    RECOMMENDED_FACE_RECOGNITION_MODE,
     RECOMMENDED_GEMINI_CHAT_MODEL,
     RECOMMENDED_GEMINI_EMBEDDING_MODEL,
     RECOMMENDED_GEMINI_SUMMARIZATION_MODEL,
@@ -93,6 +103,7 @@ from .const import (
     SUMMARIZATION_MODEL_CTX,
     SUMMARIZATION_MODEL_PREDICT,
     SUMMARIZATION_MODEL_TOP_P,
+    VIDEO_ANALYZER_FACE_CROP,
     VIDEO_ANALYZER_MOTION_CAMERA_MAP,
     VIDEO_ANALYZER_PROMPT,
     VIDEO_ANALYZER_SCAN_INTERVAL,
@@ -109,17 +120,26 @@ from .const import (
 from .tools import analyze_image
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Sequence
+    from collections.abc import AsyncGenerator, Callable
 
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import Event, HomeAssistant
     from langchain_core.language_models import BaseMessage, LanguageModelInput
     from langchain_core.runnables.base import RunnableSerializable
-    from psycopg import AsyncConnection
+    from psycopg import AsyncConnection, AsyncCursor
 
 LOGGER = logging.getLogger(__name__)
 
 PLATFORMS = (Platform.CONVERSATION,)
+
+SERVICE_ENROLL_PERSON = "enroll_person"
+
+ENROLL_SCHEMA = vol.Schema(
+    {
+        vol.Required("name"): cv.string,
+        vol.Required("file_path"): cv.isfile,  # path to a local uploaded snapshot
+    }
+)
 
 
 # ---------------- Utilities ----------------
@@ -227,6 +247,7 @@ async def _bootstrap_db_once(
 ) -> None:
     if entry.data.get(CONF_DB_BOOTSTRAPPED):
         return
+
     # First time only
     await store.setup()
     await checkpointer.setup()
@@ -235,6 +256,65 @@ async def _bootstrap_db_once(
     hass.config_entries.async_update_entry(
         entry, data={**entry.data, CONF_DB_BOOTSTRAPPED: True}
     )
+
+
+async def migration_1(cur: AsyncCursor[DictRow]) -> None:
+    """Migration 1: create person_gallery and bump schema version."""
+    await cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS person_gallery (
+            id SERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
+            embedding VECTOR(512),
+            added_at TIMESTAMP DEFAULT NOW()
+        )
+        """
+    )
+    await cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_person_gallery_embedding
+        ON person_gallery USING ivfflat (embedding vector_l2_ops)
+        WITH (lists = 100)
+        """
+    )
+
+    # bump version to 1
+    await cur.execute(
+        "INSERT INTO hga_schema_version (id, version) VALUES (1, 1) "
+        "ON CONFLICT(id) DO UPDATE SET version = 1"
+    )
+
+
+# Registry of migrations in order
+MIGRATIONS: dict[int, Callable] = {
+    1: migration_1,
+    # 2: migration_2, 3: migration_3, ...
+}
+
+
+async def _migrate_person_gallery_db_schema(
+    pool: AsyncConnectionPool[AsyncConnection[DictRow]],
+) -> None:
+    async with pool.connection() as conn, conn.cursor() as cur:
+        # --- Schema version table ---
+        await cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS hga_schema_version (
+                id INTEGER PRIMARY KEY DEFAULT 1,
+                version INTEGER NOT NULL
+            )
+            """
+        )
+        await cur.execute("SELECT version FROM hga_schema_version WHERE id = 1")
+
+        row: dict[str, int] | None = await cur.fetchone()
+        current_version: int = row["version"] if row else 0
+
+        # --- Run pending migrations ---
+        for version in sorted(MIGRATIONS.keys()):
+            if current_version < version:
+                await MIGRATIONS[version](cur)
+                current_version = version
 
 
 class NullChat:
@@ -273,9 +353,123 @@ class HGAData:
     # Video analyzer
     video_analyzer: VideoAnalyzer
 
+    # Face recognition
+    face_api_url: str
+    face_mode: str
+    person_gallery: Any
+
 
 # After HGAData is defined, we can specialize the ConfigEntry type.
 type HGAConfigEntry = ConfigEntry[HGAData]
+
+# ---------------- Face Recognition DAO ---------------
+
+Embedding = Sequence[float]
+FACE_EMBEDDING_DIMS = 512
+
+
+class PersonGalleryDAO:
+    """Access layer for person recognition using pgvector cosine distance."""
+
+    def __init__(
+        self, pool: AsyncConnectionPool[AsyncConnection[DictRow]]
+    ) -> None:  # RuffANN001 fixed
+        """Initialize with a psycopg_pool AsyncConnectionPool."""
+        self.pool = pool
+
+    def _normalize(self, embedding: Embedding) -> list[float]:
+        """Return L2-normalized list of floats."""
+        v = np.array(embedding, dtype=np.float32)
+        norm = float(np.linalg.norm(v))
+        if norm == 0.0:
+            msg = "Zero vector cannot be normalized"
+            raise ValueError(msg)
+        return (v / norm).tolist()
+
+    def _as_pgvector(self, embedding: Embedding) -> str:
+        """Format floats as pgvector literal string with full precision."""
+        if len(embedding) != FACE_EMBEDDING_DIMS:
+            msg = f"Expected {FACE_EMBEDDING_DIMS} dims, got {len(embedding)}"
+            raise ValueError(msg)
+        return "[" + ",".join(format(float(x), ".17g") for x in embedding) + "]"
+
+    async def enroll_from_image(
+        self, face_api_url: str, name: str, image_bytes: bytes
+    ) -> bool:
+        """Detect face in image, extract embedding, and add to gallery."""
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                urljoin(face_api_url.rstrip("/") + "/", "analyze"),
+                files={"file": ("snapshot.jpg", image_bytes, "image/jpeg")},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        faces = data.get("faces", [])
+        if not faces:
+            LOGGER.warning("No face detected for enrollment of %s", name)
+            return False
+
+        emb: Embedding = faces[0]["embedding"]
+        await self.add_person(name, emb)
+        LOGGER.info("Enrolled new person '%s' with embedding.", name)
+        return True
+
+    async def add_person(self, name: str, embedding: Embedding) -> None:
+        """Insert normalized embedding into gallery (cosine distance ready)."""
+        normed = self._normalize(embedding)
+        vec_str = self._as_pgvector(normed)
+
+        sql = """
+            INSERT INTO public.person_gallery (name, embedding)
+            VALUES (%s, %s::vector(512))
+        """
+        async with (
+            self.pool.connection() as conn,
+            conn.cursor(row_factory=dict_row) as cur,
+        ):
+            await cur.execute(sql, (name, vec_str))
+            LOGGER.debug("Inserted %s into person_gallery", name)
+
+    async def recognize_person(
+        self, embedding: Embedding, threshold: float = 0.7
+    ) -> str:
+        """Return best cosine match or 'Unknown'."""
+        normed = self._normalize(embedding)
+        vec_str = self._as_pgvector(normed)
+
+        sql = """
+            SELECT name, embedding <=> %s::vector(512) AS distance
+            FROM public.person_gallery
+            ORDER BY distance
+            LIMIT 1
+        """
+        async with (
+            self.pool.connection() as conn,
+            conn.cursor(row_factory=dict_row) as cur,
+        ):
+            await cur.execute(sql, (vec_str,))
+            row = await cur.fetchone()
+
+            if not row:
+                LOGGER.error("Recognition query returned no rows")
+                return "Unknown"
+
+            dist = float(row["distance"])
+            LOGGER.debug("Closest match=%s cosine_distance=%.6f", row["name"], dist)
+            return row["name"] if dist < threshold else "Unknown"
+
+    async def list_people(self) -> list[str]:
+        """Return list of distinct enrolled person names."""
+        async with (
+            self.pool.connection() as conn,
+            conn.cursor(row_factory=dict_row) as cur,
+        ):
+            await cur.execute(
+                "SELECT DISTINCT name FROM public.person_gallery ORDER BY name"
+            )
+            rows = await cur.fetchall()
+            return [r["name"] for r in rows]
 
 
 # ---------------- Video Analyzer ----------------
@@ -293,6 +487,7 @@ class VideoAnalyzer:
         self._active_queue_tasks: dict[str, asyncio.Task] = {}
         self._initialized_dirs: set[str] = set()
         self._active_motion_cameras: dict[str, asyncio.Task] = {}
+        self._last_recognized: dict[str, list[str]] = {}
 
         sum_provider = self.entry.options.get(
             CONF_SUMMARIZATION_MODEL_PROVIDER, RECOMMENDED_SUMMARIZATION_MODEL_PROVIDER
@@ -362,17 +557,21 @@ class VideoAnalyzer:
             blocking=False,
         )
 
-    async def _generate_summary(self, frames: list[str], cam_id: str) -> str:
+    async def _generate_summary(
+        self, frames: list[str], people: list[str], cam_id: str
+    ) -> str:
         await asyncio.sleep(0)
         if not frames:
             msg = "At least one frame description required."
             raise ValueError(msg)
 
-        if len(frames) == 1:
-            return frames[0]
-
-        tag = "\n<frame description>\n{}\n</frame description>"
-        prompt = " ".join([VIDEO_ANALYZER_PROMPT] + [tag.format(i) for i in frames])
+        ftag = "\n<frame description>\n{}\n</frame description>"
+        ptag = "\n<person identity>\n{}\n</person identity"
+        prompt = " ".join(
+            [VIDEO_ANALYZER_PROMPT]
+            + [ftag.format(i) for i in frames]
+            + [ptag.format(j) for j in people]
+        )
 
         LOGGER.debug("Prompt: %s", prompt)
 
@@ -426,53 +625,177 @@ class VideoAnalyzer:
                 except OSError as err:
                     LOGGER.warning("[%s] Failed to delete %s: %s", camera_id, old, err)
 
-    async def _process_snapshot_queue(self, camera_id: str) -> None:
-        queue = self._snapshot_queues.get(camera_id)
-        if not queue:
-            return
+    async def _recognize_faces(self, snapshot_path: Path, camera_id: str) -> list[str]:  # noqa: PLR0912, PLR0915
+        """Call face API to recognize faces in the snapshot image."""
+        face_mode = self.entry.runtime_data.face_mode
+        if not face_mode or face_mode == "disable":
+            return []
 
+        base_url = self.entry.runtime_data.face_api_url
+
+        # --- read snapshot ---
+        async with aiofiles.open(snapshot_path, "rb") as f:
+            file_bytes = await f.read()
+
+        # --- call face API with timeout & specific exception handling ---
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post(
+                    urljoin(base_url.rstrip("/") + "/", "analyze"),
+                    files={"file": ("snapshot.jpg", file_bytes, "image/jpeg")},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+        except asyncio.CancelledError:
+            raise
+        except httpx.HTTPStatusError as err:
+            LOGGER.warning("Face API HTTP %s: %s", err.response.status_code, err)
+            return []
+        except httpx.RequestError as err:
+            LOGGER.warning("Face API request error: %s", err)
+            return []
+        except ValueError as err:  # JSON parsing
+            LOGGER.warning("Face API returned invalid JSON: %s", err)
+            return []
+
+        faces = data.get("faces", [])
+        if not faces:
+            return []
+
+        # --- helper: offload Pillow + filesystem sync work to executor ---
+        def _load_img(buf: bytes) -> Image.Image:
+            return Image.open(io.BytesIO(buf)).convert("RGB")
+
+        def _ensure_dir(p: Path) -> None:
+            p.mkdir(parents=True, exist_ok=True)
+
+        def _crop_resize_encode(
+            img: Image.Image, bbox: list[int], pad: float, min_px: int
+        ) -> bytes | None:
+            x1, y1, x2, y2 = map(int, bbox)
+            w, h = x2 - x1, y2 - y1
+            if w <= 0 or h <= 0:
+                return None
+            dx, dy = int(w * pad), int(h * pad)
+            x1, y1 = max(0, x1 - dx), max(0, y1 - dy)
+            x2, y2 = min(img.width, x2 + dx), min(img.height, y2 + dy)
+            if x2 <= x1 or y2 <= y1:
+                return None
+            crop = img.crop((x1, y1, x2, y2))
+            if crop.width < min_px or crop.height < min_px:
+                crop = crop.resize((min_px, min_px), resample=Image.Resampling.LANCZOS)
+            out = io.BytesIO()
+            crop.save(out, format="JPEG", quality=95, subsampling=0)
+            return out.getvalue()
+
+        # --- decode snapshot off the loop (Pillow is sync) ---
+        try:
+            img = await self.hass.async_add_executor_job(_load_img, file_bytes)
+        except asyncio.CancelledError:
+            raise
+        except (Image.UnidentifiedImageError, OSError) as err:
+            LOGGER.warning("Failed to decode snapshot for crops: %s", err)
+            img = None  # still return recognition results below
+
+        dao = self.entry.runtime_data.person_gallery
+        recognized: list[str] = []
+
+        timestamp = dt_util.now().strftime("%Y%m%d_%H%M%S")
+        face_debug_root = (
+            Path(VIDEO_ANALYZER_SNAPSHOT_ROOT) / "faces" / camera_id.replace(".", "_")
+        )
+
+        # ensure directory off the loop
+        try:
+            await self.hass.async_add_executor_job(_ensure_dir, face_debug_root)
+        except OSError as err:
+            LOGGER.debug("Could not ensure face debug dir: %s", err)
+
+        insightface_bbox_length = 4
+        small_crop_threshold = 128  # pixels
+
+        for idx, face in enumerate(faces):
+            emb = face["embedding"]
+            # Let unexpected DAO errors propagate; don't catch blindly
+            name = await dao.recognize_person(emb)
+            recognized.append(name)
+
+            # optional debug crop
+            if not VIDEO_ANALYZER_FACE_CROP or not img:
+                continue
+
+            bbox = face.get("bbox")
+            if bbox and len(bbox) == insightface_bbox_length:
+                try:
+                    # crop/resize/encode off the loop
+                    jpeg_bytes = await self.hass.async_add_executor_job(
+                        _crop_resize_encode, img, bbox, 0.3, small_crop_threshold
+                    )
+                    if not jpeg_bytes:
+                        continue
+                    face_file = face_debug_root / f"face_{timestamp}_{idx}_{name}.jpg"
+                    # async write
+                    async with aiofiles.open(face_file, "wb") as f:
+                        await f.write(jpeg_bytes)
+                    LOGGER.debug("Saved face crop: %s", face_file)
+                except asyncio.CancelledError:
+                    raise
+                except OSError as err:
+                    LOGGER.warning("Failed to save face crop: %s", err)
+
+        return recognized
+
+    def _log_snapshot_error(self, camera_id: str, path: Path, exc: Exception) -> None:
+        """Log errors from snapshot processing."""
+        if isinstance(exc, FileNotFoundError):
+            LOGGER.warning("[%s] Snapshot not found: %s", camera_id, path)
+        elif isinstance(exc, TimeoutError):
+            LOGGER.warning("[%s] Image analysis timed out for %s", camera_id, path)
+        elif isinstance(exc, HomeAssistantError):
+            LOGGER.exception("[%s] Error analyzing %s", camera_id, path)
+        else:
+            LOGGER.exception("[%s] Unexpected error analyzing %s.", camera_id, path)
+
+    def _drain_queue(self, queue: asyncio.Queue[Path]) -> list[Path]:
+        """Drain all items from the asyncio queue into a list."""
         batch: list[Path] = []
         try:
             while True:
                 batch.append(queue.get_nowait())
-        except QueueEmpty:
+        except asyncio.QueueEmpty:
             pass
+        return batch
 
+    async def _process_snapshot(
+        self, path: Path, camera_id: str
+    ) -> tuple[list[str], str | None]:
+        """Process a single snapshot: recognize faces and describe image."""
+        try:
+            people = await self._recognize_faces(path, camera_id)
+
+            async with aiofiles.open(path, "rb") as file:
+                data = await file.read()
+
+            async with async_timeout.timeout(30):
+                desc = await analyze_image(
+                    self.entry.runtime_data.vision_model,
+                    data,
+                    None,
+                )
+
+        except (FileNotFoundError, TimeoutError, HomeAssistantError) as exc:
+            self._log_snapshot_error(camera_id, path, exc)
+            return [], None
+
+        else:
+            return people, desc
+
+    async def _handle_notification(
+        self, camera_id: str, msg: str, batch: list[Path]
+    ) -> None:
+        """Decide whether to notify and send if needed."""
         camera_name = camera_id.split(".")[-1]
-
-        frame_descriptions: list[str] = []
-        for path in batch:
-            try:
-                async with aiofiles.open(path, "rb") as file:
-                    data = await file.read()
-                async with async_timeout.timeout(30):
-                    desc = await analyze_image(
-                        self.entry.runtime_data.vision_model,
-                        data,
-                        None,
-                    )
-                frame_descriptions.append(desc)
-            except FileNotFoundError:
-                LOGGER.warning("[%s] Snapshot not found: %s", camera_id, path)
-                continue
-            except TimeoutError:
-                LOGGER.warning("[%s] Image analysis timed out for %s", camera_id, path)
-                continue
-            except HomeAssistantError:
-                LOGGER.exception("[%s] Error analyzing %s", camera_id, path)
-                continue
-            except Exception:
-                LOGGER.exception("[%s] Unexpected error analyzing %s.", camera_id, path)
-                continue
-
-        if not frame_descriptions:
-            return
-
-        async with async_timeout.timeout(60):
-            msg = await self._generate_summary(frame_descriptions, camera_id)
-
-        mid = batch[len(batch) // 2]
-        notify_img = Path("/media/local") / Path(*mid.parts[-3:])
+        notify_img = Path("/media/local") / Path(*batch[len(batch) // 2].parts[-3:])
 
         mode = self.entry.options.get(CONF_VIDEO_ANALYZER_MODE)
         if mode == "notify_on_anomaly":
@@ -484,6 +807,9 @@ class VideoAnalyzer:
         else:
             await self._send_notification(msg, camera_name, notify_img)
 
+    async def _store_results(self, camera_id: str, batch: list[Path], msg: str) -> None:
+        """Store the analysis results in the vector DB."""
+        camera_name = camera_id.split(".")[-1]
         async with async_timeout.timeout(10):
             await self.entry.runtime_data.store.aput(
                 namespace=("video_analysis", camera_name),
@@ -491,6 +817,43 @@ class VideoAnalyzer:
                 value={"content": msg, "snapshots": [str(p) for p in batch]},
             )
 
+    async def _process_snapshot_queue(self, camera_id: str) -> None:
+        """Process snapshots from the queue in batches."""
+        queue: asyncio.Queue[Path] | None = self._snapshot_queues.get(camera_id)
+        if not queue:
+            return
+
+        batch = self._drain_queue(queue)
+        if not batch:
+            return
+
+        # Collect results
+        recognized_people: list[str] = []
+        frame_descriptions: list[str] = []
+
+        for path in batch:
+            people, desc = await self._process_snapshot(path, camera_id)
+            recognized_people.extend(people)
+            if desc:
+                frame_descriptions.append(desc)
+
+        if not frame_descriptions:
+            return
+
+        # Deduplicate recognized people
+        recognized_people = sorted(set(recognized_people))
+        self._last_recognized[camera_id] = recognized_people
+
+        # Generate summary
+        async with async_timeout.timeout(60):
+            msg = await self._generate_summary(
+                frame_descriptions, recognized_people, camera_id
+            )
+
+        LOGGER.info("[%s] Video analysis: %s", camera_id, msg)
+
+        await self._handle_notification(camera_id, msg, batch)
+        await self._store_results(camera_id, batch, msg)
         await self._prune_old_snapshots(camera_id, batch)
 
     def _resolve_camera_from_motion(self, motion_entity_id: str) -> str | None:
@@ -715,18 +1078,20 @@ class VideoAnalyzer:
 # ---------------- Home Assistant entrypoints ----------------
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:  # noqa: PLR0912, PLR0915
+async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:  # noqa: C901, PLR0912, PLR0915
     """Set up Home Generative Agent from a config entry."""
     hass.data.setdefault(DOMAIN, {})
 
     # Options override data.
-    # entry.options is where the key lives if added later via Options.
-    # Merging options over data guarantees you see the most recent value.
+    # entry.options is where data lives if added or changed later via Options.
+    # Merging options over data guarantees you see the most recent values.
     conf = {**entry.data, **entry.options}
     api_key = conf.get(CONF_API_KEY)
     gemini_key = conf.get(CONF_GEMINI_API_KEY)
     ollama_url = conf.get(CONF_OLLAMA_URL, RECOMMENDED_OLLAMA_URL)
     ollama_url = _ensure_http_url(ollama_url)
+    face_api_url = conf.get(CONF_FACE_API_URL, RECOMMENDED_FACE_API_URL)
+    face_api_url = _ensure_http_url(face_api_url)
 
     # Health checks (fast, non-fatal)
     health_timeout = 2.0
@@ -878,6 +1243,41 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     # First-time setup (if needed)
     await _bootstrap_db_once(hass, entry, store, checkpointer)
 
+    # Migrate person gallery DB schema (if needed)
+    try:
+        await _migrate_person_gallery_db_schema(pool)
+    except Exception:
+        LOGGER.exception("Error migrating person_gallery database schema.")
+        return False
+
+    person_gallery = PersonGalleryDAO(pool)
+
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute("""
+                SELECT current_database() AS db,
+                    current_user     AS usr,
+                    inet_server_addr()::text AS host,
+                    inet_server_port()       AS port,
+                    current_schemas(true)    AS schemas,
+                    current_setting('search_path', true) AS search_path
+            """)
+        env = await cur.fetchone()
+        if env:
+            LOGGER.info(
+                "DB env: db=%s user=%s host=%s port=%s schemas=%s search_path=%s",
+                env["db"],
+                env["usr"],
+                env["host"],
+                env["port"],
+                env["schemas"],
+                env["search_path"],
+            )
+
+        await cur.execute("SELECT COUNT(*) AS total FROM public.person_gallery")
+        resp = await cur.fetchone()
+        if resp:
+            LOGGER.info("Gallery rows visible to this connection: %s", resp["total"])
+
     # ----- Choose concrete models for roles from constants -----
 
     # CHAT
@@ -1025,6 +1425,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     if entry.options.get(CONF_VIDEO_ANALYZER_MODE) != "disable":
         video_analyzer.start()
 
+    # Face recognition
+    face_mode = entry.options.get(
+        CONF_FACE_RECOGNITION_MODE, RECOMMENDED_FACE_RECOGNITION_MODE
+    )
+
     # Save runtime data.
     entry.runtime_data = HGAData(
         chat_model=chat_model,
@@ -1034,6 +1439,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         video_analyzer=video_analyzer,
         checkpointer=checkpointer,
         pool=pool,
+        face_mode=face_mode,
+        face_api_url=face_api_url,
+        person_gallery=person_gallery,
     )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -1052,6 +1460,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         openai_ok,
         ollama_ok,
         gemini_ok,
+    )
+
+    async def _handle_enroll_person(call: ServiceCall) -> None:
+        name: str = call.data["name"]
+        file_path: str = call.data["file_path"]
+
+        try:
+            async with aiofiles.open(file_path, "rb") as f:
+                img_bytes = await f.read()
+        except OSError as err:
+            msg = f"Could not read file: {err}"
+            raise HomeAssistantError(msg) from err
+
+        dao: PersonGalleryDAO = entry.runtime_data.person_gallery
+        ok = await dao.enroll_from_image(
+            entry.runtime_data.face_api_url, name, img_bytes
+        )
+        if not ok:
+            msg = f"No face found in image for {name}"
+            raise HomeAssistantError(msg)
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_ENROLL_PERSON,
+        _handle_enroll_person,
+        schema=ENROLL_SCHEMA,
     )
 
     return True
