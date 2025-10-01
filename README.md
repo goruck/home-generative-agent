@@ -42,6 +42,8 @@ This integration will set up the `conversation` platform, a convenient HA compon
 
 6. (Optional) Pull `ollama` models `gpt-oss`, `qwen3:8b`, `qwen3:1.7b`, `qwen2.5vl:7b` and `mxbai-embed-large`.
 
+7. (Optional) Install [face-service](https://github.com/goruck/face-service) on your edge device if you want to use face recognition.
+
 ### Manual (non-HACS install)
 1. Install PostgreSQL with pgvector as shown above in Step 1.
 2. Using the tool of choice, open your HA configuration's directory (where you find `configuration.yaml`).
@@ -51,10 +53,10 @@ This integration will set up the `conversation` platform, a convenient HA compon
 6. Place the files you downloaded in the new directory you created.
 7. Restart Home Assistant
 8. In the HA UI, go to "Configuration" -> "Integrations" click "+," and search for "Home Generative Agent"
-9. Follow steps 3 to 5 above.
+9. Follow steps 3 to 7 above.
 
 ## Configuration
-Configuration is done in the Home Assistant UI. You can enter in your model provider API keys and your Ollama server URL during initial setup through the Home Assistant UI or later in the integration's options settings. You can also configure the Postgres database URI during setup or later in options, but note that the integration trusts the [PostgreSQL with pgvector](https://github.com/goruck/addon-postgres-pgvector/tree/main/postgres_pgvector) add-on, so a password in the URI string is optional.
+Configuration is done in the Home Assistant UI. You can enter in your model provider API keys and your Ollama server URL during initial setup through the Home Assistant UI or later in the integration's options settings. You also configure the Postgres database URI during setup or later in options, but note that the integration trusts the [PostgreSQL with pgvector](https://github.com/goruck/addon-postgres-pgvector/tree/main/postgres_pgvector) add-on, so a password in the URI string is optional. The URL of the optonal remote face recognition service can be configured at setup or via options as well.
 
 ## Contributions are welcome!
 
