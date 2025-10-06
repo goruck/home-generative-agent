@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import calendar
 import io
 import logging
 import re
@@ -434,7 +435,7 @@ class PersonGalleryDAO:
     async def recognize_person(
         self, embedding: Embedding, threshold: float = 0.7
     ) -> str:
-        """Return best cosine match or 'Unknown'."""
+        """Return best cosine match or 'Unknown Person'."""
         normed = self._normalize(embedding)
         vec_str = self._as_pgvector(normed)
 
@@ -453,11 +454,11 @@ class PersonGalleryDAO:
 
             if not row:
                 LOGGER.error("Recognition query returned no rows")
-                return "Unknown"
+                return "Unknown Person"
 
             dist = float(row["distance"])
             LOGGER.debug("Closest match=%s cosine_distance=%.6f", row["name"], dist)
-            return row["name"] if dist < threshold else "Unknown"
+            return row["name"] if dist < threshold else "Unknown Person"
 
     async def list_people(self) -> list[str]:
         """Return list of distinct enrolled person names."""
@@ -558,19 +559,22 @@ class VideoAnalyzer:
         )
 
     async def _generate_summary(
-        self, frames: list[str], people: list[str], cam_id: str
+        self, frame_descriptions: list[dict[str, list[str]]], cam_id: str
     ) -> str:
-        await asyncio.sleep(0)
-        if not frames:
+        await asyncio.sleep(0)  # yield control
+        if not frame_descriptions:
             msg = "At least one frame description required."
             raise ValueError(msg)
 
         ftag = "\n<frame description>\n{}\n</frame description>"
-        ptag = "\n<person identity>\n{}\n</person identity"
+        ptag = "\n<person identity>\n{}\n</person identity>"
         prompt = " ".join(
             [VIDEO_ANALYZER_PROMPT]
-            + [ftag.format(i) for i in frames]
-            + [ptag.format(j) for j in people]
+            + [
+                ftag.format(frame) + "".join([ptag.format(p) for p in people])
+                for entry in frame_descriptions
+                for frame, people in entry.items()
+            ]
         )
 
         LOGGER.debug("Prompt: %s", prompt)
@@ -625,7 +629,7 @@ class VideoAnalyzer:
                 except OSError as err:
                     LOGGER.warning("[%s] Failed to delete %s: %s", camera_id, old, err)
 
-    async def _recognize_faces(self, snapshot_path: Path, camera_id: str) -> list[str]:  # noqa: PLR0912, PLR0915
+    async def _recognize_faces(self, data: bytes, camera_id: str) -> list[str]:  # noqa: PLR0912, PLR0915
         """Call face API to recognize faces in the snapshot image."""
         face_mode = self.entry.runtime_data.face_mode
         if not face_mode or face_mode == "disable":
@@ -633,19 +637,15 @@ class VideoAnalyzer:
 
         base_url = self.entry.runtime_data.face_api_url
 
-        # --- read snapshot ---
-        async with aiofiles.open(snapshot_path, "rb") as f:
-            file_bytes = await f.read()
-
         # --- call face API with timeout & specific exception handling ---
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 resp = await client.post(
                     urljoin(base_url.rstrip("/") + "/", "analyze"),
-                    files={"file": ("snapshot.jpg", file_bytes, "image/jpeg")},
+                    files={"file": ("snapshot.jpg", data, "image/jpeg")},
                 )
                 resp.raise_for_status()
-                data = resp.json()
+                face_res = resp.json()
         except asyncio.CancelledError:
             raise
         except httpx.HTTPStatusError as err:
@@ -658,9 +658,9 @@ class VideoAnalyzer:
             LOGGER.warning("Face API returned invalid JSON: %s", err)
             return []
 
-        faces = data.get("faces", [])
+        faces = face_res.get("faces", [])
         if not faces:
-            return []
+            return ["Indeterminate"]
 
         # --- helper: offload Pillow + filesystem sync work to executor ---
         def _load_img(buf: bytes) -> Image.Image:
@@ -690,7 +690,7 @@ class VideoAnalyzer:
 
         # --- decode snapshot off the loop (Pillow is sync) ---
         try:
-            img = await self.hass.async_add_executor_job(_load_img, file_bytes)
+            img = await self.hass.async_add_executor_job(_load_img, data)
         except asyncio.CancelledError:
             raise
         except (Image.UnidentifiedImageError, OSError) as err:
@@ -768,27 +768,23 @@ class VideoAnalyzer:
 
     async def _process_snapshot(
         self, path: Path, camera_id: str
-    ) -> tuple[list[str], str | None]:
-        """Process a single snapshot: recognize faces and describe image."""
+    ) -> dict[str, list[str]]:
+        """Process a single snapshot: recognize faces and describe the frame."""
         try:
-            people = await self._recognize_faces(path, camera_id)
-
             async with aiofiles.open(path, "rb") as file:
                 data = await file.read()
-
             async with async_timeout.timeout(30):
-                desc = await analyze_image(
+                faces_in_frame = await self._recognize_faces(data, camera_id)
+                frame_description: str = await analyze_image(
                     self.entry.runtime_data.vision_model,
                     data,
                     None,
                 )
-
         except (FileNotFoundError, TimeoutError, HomeAssistantError) as exc:
             self._log_snapshot_error(camera_id, path, exc)
-            return [], None
-
+            return {}
         else:
-            return people, desc
+            return {frame_description: faces_in_frame}
 
     async def _handle_notification(
         self, camera_id: str, msg: str, batch: list[Path]
@@ -827,28 +823,39 @@ class VideoAnalyzer:
         if not batch:
             return
 
-        # Collect results
-        recognized_people: list[str] = []
-        frame_descriptions: list[str] = []
+        def _epoch_from_path(path: Path) -> int:
+            s = path.stem.removeprefix("snapshot_")  # "YYYYMMDD_HHMMSS"
+            y, mo, d = int(s[0:4]), int(s[4:6]), int(s[6:8])
+            hh, mm, ss = int(s[9:11]), int(s[11:13]), int(s[13:15])
+            # UTC epoch seconds without creating a datetime object
+            return calendar.timegm((y, mo, d, hh, mm, ss, 0, 0, 0))
 
-        for path in batch:
-            people, desc = await self._process_snapshot(path, camera_id)
-            recognized_people.extend(people)
-            if desc:
-                frame_descriptions.append(desc)
+        # Sort by actual timestamp (handles out-of-order filenames)
+        ordered = sorted(
+            ((path, _epoch_from_path(path)) for path in batch), key=lambda x: x[1]
+        )
+        t0 = ordered[0][1]
+
+        # Collect results
+        frame_descriptions = [
+            {f"t+{ts - t0}s. {k}": v}
+            for path, ts in ordered
+            if (fd := await self._process_snapshot(path, camera_id))
+            for k, v in [next(iter(fd.items()))]
+        ]
 
         if not frame_descriptions:
             return
 
-        # Deduplicate recognized people
-        recognized_people = sorted(set(recognized_people))
-        self._last_recognized[camera_id] = recognized_people
+        # Deduplicate recognized people and cache last seen.
+        recognized_people = [
+            p for d in frame_descriptions for v in d.values() for p in v if p != "None"
+        ]
+        self._last_recognized[camera_id] = sorted(set(recognized_people))
 
         # Generate summary
         async with async_timeout.timeout(60):
-            msg = await self._generate_summary(
-                frame_descriptions, recognized_people, camera_id
-            )
+            msg = await self._generate_summary(frame_descriptions, camera_id)
 
         LOGGER.info("[%s] Video analysis: %s", camera_id, msg)
 
