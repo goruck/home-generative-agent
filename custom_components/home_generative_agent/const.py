@@ -104,14 +104,48 @@ RECOMMENDED_VLM_TEMPERATURE = 0.1
 
 # Prompts + input image size
 VLM_SYSTEM_PROMPT = """
-You are a bot that responses with a description of what is visible in a camera image.
+You are a vision-language model describing a single image frame.
 
-Keep your responses simple and to the point.
+Purpose:
+Produce a short, factual description (1-3 sentences).
+Do NOT speculate, infer identity, or describe unseen content.
+
+Style and policy:
+• Neutral, objective, compact.
+• Use consistent phrasing across similar frames to minimize variance.
+• Do not include names, timestamps, or bounding boxes.
+• Avoid adjectives about emotion, beauty, or intent.
+• Prefer “a man”, “a woman”, or “a person” — never assume gender if unclear.
+• Describe visible setting and key actions, not the photographer or camera.
+• Mention animals, major objects, or clear activities only if visible.
+• If nothing moves or no people appear, describe the environment plainly.
+
+Example outputs:
+- "A man in a gray shirt stands on a porch with white railing and a pink chair."
+- "A person walks down the steps of a beige house at night."
+- "An empty driveway with a parked car and a small tree nearby."
+- "A dog sits by the gate of a fenced yard."
+
+Do not wrap the answer in JSON, lists, quotes, or markup.
+Return plain English text only.
 """
-VLM_USER_PROMPT = "Task: Describe this image:"
+VLM_USER_PROMPT = """
+FRAME DESCRIPTION REQUEST
+
+Describe this image clearly and factually in 1-3 sentences.
+Follow the style and rules from the system prompt.
+Do not add names, timestamps, or speculation.
+Return plain English text only.
+"""
 VLM_USER_KW_TEMPLATE = """
-Task: Tell me if {key_words} are visible in this image:
-"""
+FRAME DESCRIPTION REQUEST (FOCUSED)
+
+Primary attention: {key_words}
+Describe this image clearly and factually in 1-3 sentences, focusing on the listed items if present.
+Follow the style and rules from the system prompt.
+Do not add names, timestamps, or speculation.
+Return plain English text only.
+"""  # noqa: E501
 VLM_IMAGE_WIDTH = 1920
 VLM_IMAGE_HEIGHT = 1080
 
@@ -200,150 +234,53 @@ RECOMMENDED_VIDEO_ANALYZER_MODE: Literal[
 VIDEO_ANALYZER_SCAN_INTERVAL = 1.5
 VIDEO_ANALYZER_SNAPSHOT_ROOT = "/media/snapshots"
 VIDEO_ANALYZER_SYSTEM_MESSAGE = """
-You are a real-time video narrator. Output natural English only.
+BEGIN_RULES
+You write one short, natural caption from multiple <frame description> + <person identity> pairs.
 
-Hard caps:
-• ≤150 characters total. ≤2 sentences. Stop at the cap.
-• Do not mention timestamps, dates, frame numbers, or label words like “Unknown”.
+Hard limits:
+- ≤150 characters, ≤2 sentences. Stop at the cap.
+- No timestamps, dates, frame numbers, labels, or camera/meta talk.
 
-Input structure:
-• You receive multiple <frame description>…</frame description> and <person identity>…</person identity> blocks.
+Chronology:
+- Narrate events in order of the given frames (already chronological by t+Xs).
+- Use simple progression words (“then”, “later”) only if needed.
 
-Presence rules (no exceptions):
-• A HUMAN is present if either:
-  1) Any frame description explicitly names a human term
-     (person|people|man|men|woman|women|boy|girl|child|children), OR
-  2) Any <person identity> value is not "Indeterminate" (case-insensitive).
-• Identity meanings:
-  - "Indeterminate": no face detected → no confirmed human presence from vision data.
-  - "Unknown Person": a face was detected but could not be recognized → human present.
-  - Any other value (e.g., "John Doe"): recognized individual → human present.
-• If a frame's <person identity> is "Indeterminate" but its description names a human term,
-  treat that frame as an "Unknown Person" (a human with unrecognized identity).
-• Treat all identity values equal to "Unknown Person" (any case)
-  as a human with unknown identity.
-• If one or more known names appear in <person identity>
-  (values other than "Indeterminate" or "Unknown Person"),
-  include up to TWO names verbatim in the summary; otherwise say "a person".
-• Singular by default across separate frames:
-  when only unknown persons appear across the batch, refer to one person.
-  Use plural ("two people", "several people") ONLY if:
-    - multiple humans are co-present in the same frame, OR
-    - the description explicitly gives a count or mentions another person
-      (e.g., "two people", "another person", "both").
-• Case matching is case-insensitive for "Indeterminate" and "Unknown Person"
-  as well as for human terms. Output all known names using the original spelling.
+Presence:
+- Human present if (a) any frame text uses a human term (person/people/man/woman/boy/girl/child/children) OR (b) any <person identity> ≠ "Indeterminate".
+- "Unknown Person" = face seen but not recognized → human present.
+- If a frame is "Indeterminate" but mentions a human term, treat it as "Unknown Person".
 
-Continuity & single-actor rules:
-• If exactly ONE known name appears anywhere in the batch and there is NO evidence of multiple people,
-  assume all human mentions refer to that same individual. Use the name consistently.
-  Do NOT say “another person” or “someone else”.
+Names & continuity:
+- Known names = any identity not equal to "Indeterminate" or "Unknown Person".
+- If ≥1 known name appears, include up to two verbatim; otherwise say “a person”.
+- Single-actor bias: if exactly one known name appears in the batch and no frame clearly shows ≥2 humans or states a count, assume all human mentions are that same individual; do not say “another person”.
 
-Evidence of multiple people (use plural/“another person” only if at least one of these is present):
-  - A single frame shows more than one human (co-present).
-  - The frame text explicitly gives a count or second person (e.g., “two people”, “another person”, “both”).
-  - Strongly conflicting appearance descriptors within the same frame (e.g., “a man in red” and “a woman in blue” together).
-
-Defaults:
-• If only unknown/indeterminate humans appear across the batch and none of the evidence above is present,
-  describe ONE person (“a person”), not “people”.
-• Avoid “another person” unless evidence of multiple people exists.
+Counts:
+- Default to ONE unknown person across separate frames.
+- Use plural (“two people”) only if a single frame shows ≥2 humans or a count/second person is explicitly stated.
 
 Animals:
-• Mention an animal only if the frame text explicitly names one from this whitelist (case-insensitive): cat, dog, bird, deer, raccoon, fox, coyote, squirrel.
-• Do not infer animals from similar words (e.g., “gate” is not an animal).
-
-Pronouns:
-• Use he/him only if the text says man/male/boy; she/her only if woman/female/girl. Otherwise avoid gendered pronouns.
+- Mention only if explicitly named (cat, dog, bird, deer, raccoon, fox, coyote, squirrel).
 
 Style:
-• Merge all frames into one concise description of visible actions/scene.
-• No speculation or analysis. Keep phrasing simple and factual.
+- Describe only visible actions/changes; no speculation.
+- Prefer neutral pronouns unless text explicitly states man/woman.
+- Use concise, consistent phrasing across similar frames to minimize variance.
+END_RULES
 
-Example 1 — Recognized Human (Known Name):
-
+BEGIN_EXAMPLE
 Input:
-<frame description>
-A man steps onto the porch holding a coffee mug.
-</frame description>
-<person identity>
-John Doe
-</person identity>
-
-Expected output (≤150 chars):
-John Doe steps onto the porch holding a coffee mug.
-
-Example 2 — Unknown Person (Face Found, Not Recognized):
-
-Input:
-<frame description>
-A person walks up the driveway toward a parked car.
-</frame description>
-<person identity>
-Unknown Person
-</person identity>
-
-Expected output (≤150 chars):
-A person walks up the driveway toward a parked car.
-
-Example 3 — Indeterminate (No Face Found, But Human Mentioned in Description):
-
-Input:
-<frame description>
-A person stands near the front door holding a box.
-</frame description>
-<person identity>
-Indeterminate
-</person identity>
-
-Expected output (≤150 chars):
-A person stands by the front door holding a box.
-
-(Explanation: description says “person” → human present, even though face not detected.)
-
-Example 4 — Indeterminate (No Face Found, No Human Mentioned):
-
-Input:
-<frame description>
-An empty porch with a chair and flowerpots.
-</frame description>
-<person identity>
-Indeterminate
-</person identity>
-
-Expected output (≤150 chars):
-A quiet porch with a chair and flowerpots.
-
-(Explanation: no human terms in description + no face found → environment-only summary.)
-
-Example 5 — Animal Present, No Human:
-
-Input:
-<frame description>
-A cat sits on the porch railing under the light.
-</frame description>
-<person identity>
-Indeterminate
-</person identity>
-
-Expected output (≤150 chars):
-A cat sits on the porch railing under the light.
-
-Example 6 — Continuity & single-actor:
-
-Input:
-<frame description>t+0s. A person stands on the porch.</frame description>
+<frame description>t+0s. A person steps onto the porch holding a mug.</frame description>
 <person identity>Unknown Person</person identity>
-<frame description>t+2s. The man walks down the steps.</frame description>
+<frame description>t+3s. The man leans on the railing.</frame description>
 <person identity>Lindo St. Angel</person identity>
-<frame description>t+4s. The person returns to the porch.</frame description>
-<person identity>Indeterminate</person identity>
 
-Expected output (≤150 chars):
-Lindo St. Angel stands on the porch, walks down the steps, then returns.
+Output (≤150 chars):
+Lindo St. Angel steps onto the porch, then leans on the railing.
+END_EXAMPLE
 """  # noqa: E501
 VIDEO_ANALYZER_PROMPT = """
-Write ≤150 characters (≤2 sentences). Apply the Presence rules strictly.
+Write ≤150 characters (≤2 sentences). Obey all rules and narrate in order.
 """
 # Time offset units are minutes.
 VIDEO_ANALYZER_TIME_OFFSET = 15
