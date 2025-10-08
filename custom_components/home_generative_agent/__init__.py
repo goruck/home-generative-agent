@@ -45,6 +45,7 @@ from psycopg_pool import AsyncConnectionPool, PoolTimeout
 from .const import (
     CHAT_MODEL_MAX_TOKENS,
     CHAT_MODEL_NUM_CTX,
+    CHAT_MODEL_REPEAT_PENALTY,
     CHAT_MODEL_TOP_P,
     CONF_CHAT_MODEL_PROVIDER,
     CONF_CHAT_MODEL_TEMPERATURE,
@@ -103,6 +104,7 @@ from .const import (
     RECOMMENDED_VLM_TEMPERATURE,
     SUMMARIZATION_MODEL_CTX,
     SUMMARIZATION_MODEL_PREDICT,
+    SUMMARIZATION_MODEL_REPEAT_PENALTY,
     SUMMARIZATION_MODEL_TOP_P,
     VIDEO_ANALYZER_FACE_CROP,
     VIDEO_ANALYZER_MOTION_CAMERA_MAP,
@@ -116,6 +118,7 @@ from .const import (
     VIDEO_ANALYZER_TRIGGER_ON_MOTION,
     VLM_NUM_CTX,
     VLM_NUM_PREDICT,
+    VLM_REPEAT_PENALTY,
     VLM_TOP_P,
 )
 from .tools import analyze_image
@@ -521,6 +524,7 @@ class VideoAnalyzer:
                     "top_p": SUMMARIZATION_MODEL_TOP_P,
                     "num_predict": SUMMARIZATION_MODEL_PREDICT,
                     "num_ctx": SUMMARIZATION_MODEL_CTX,
+                    "repeat_penalty": SUMMARIZATION_MODEL_REPEAT_PENALTY,
                 }
             }
 
@@ -1140,6 +1144,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 top_p=ConfigurableField(id="top_p"),
                 num_predict=ConfigurableField(id="num_predict"),
                 num_ctx=ConfigurableField(id="num_ctx"),
+                repeat_penalty=ConfigurableField(id="repeat_penalty"),
             )
         except Exception:
             LOGGER.exception("Ollama provider init failed; continuing without it.")
@@ -1331,6 +1336,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     "top_p": CHAT_MODEL_TOP_P,
                     "num_predict": CHAT_MODEL_MAX_TOKENS,
                     "num_ctx": CHAT_MODEL_NUM_CTX,
+                    "repeat_penalty": CHAT_MODEL_REPEAT_PENALTY,
                 }
             }
         )
@@ -1371,6 +1377,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     "top_p": VLM_TOP_P,
                     "num_predict": VLM_NUM_PREDICT,
                     "num_ctx": VLM_NUM_CTX,
+                    "repeat_penalty": VLM_REPEAT_PENALTY,
                 }
             }
         )
@@ -1423,6 +1430,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     "top_p": SUMMARIZATION_MODEL_TOP_P,
                     "num_predict": SUMMARIZATION_MODEL_PREDICT,
                     "num_ctx": SUMMARIZATION_MODEL_CTX,
+                    "repeat_penalty": SUMMARIZATION_MODEL_REPEAT_PENALTY,
                 }
             }
         )
