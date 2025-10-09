@@ -77,16 +77,28 @@ def _prompt_func(data: dict[str, Any]) -> list[AnyMessage]:
     system = data["system"]
     text = data["text"]
     image = data["image"]
+    prev_text = data.get("prev_text")
 
-    text_part = {"type": "text", "text": text}
-    image_part = {
-        "type": "image_url",
-        "image_url": {"url": f"data:image/jpeg;base64,{image}"},
-    }
+    # Build the user content (text first, then optional previous frame text, then image)
+    content_parts: list[str | dict[str, Any]] = []
 
-    content_parts = []
-    content_parts.append(text_part)
-    content_parts.append(image_part)
+    # Main instruction text
+    content_parts.append({"type": "text", "text": text})
+
+    # OPTIONAL: previous frame's one-line description to aid motion/direction grounding
+    if prev_text:
+        # Keep it short and explicit that it is text-only context, not metadata
+        content_parts.append(
+            {"type": "text", "text": f'Previous frame (text only): "{prev_text}"'}
+        )
+
+    # Image payload last
+    content_parts.append(
+        {
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{image}"},
+        }
+    )
 
     return [SystemMessage(content=system), HumanMessage(content=content_parts)]
 
@@ -95,11 +107,11 @@ async def analyze_image(
     vlm_model: RunnableSerializable[LanguageModelInput, BaseMessage],
     image: bytes,
     detection_keywords: list[str] | None = None,
+    prev_text: str | None = None,
 ) -> str:
     """Analyze an image with the preconfigured VLM model."""
     await asyncio.sleep(0)  # keep the event loop snappy
 
-    # Build multimodal prompt (text + inlined base64 image)
     image_data = base64.b64encode(image).decode("utf-8")
     chain = _prompt_func | vlm_model
 
@@ -110,7 +122,12 @@ async def analyze_image(
 
     try:
         resp = await chain.ainvoke(
-            {"system": VLM_SYSTEM_PROMPT, "text": prompt, "image": image_data}
+            {
+                "system": VLM_SYSTEM_PROMPT,
+                "text": prompt,
+                "image": image_data,
+                "prev_text": prev_text,
+            }
         )
     except HomeAssistantError:
         msg = "Error analyzing image with VLM model."
@@ -120,7 +137,7 @@ async def analyze_image(
     # Normalize return text across adapters
     if hasattr(resp, "content"):
         return str(resp.content)
-    if hasattr(resp, "text"):  # some adapters expose .text()
+    if hasattr(resp, "text"):
         try:
             return str(resp.text())
         except Exception:

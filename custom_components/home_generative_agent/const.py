@@ -113,14 +113,24 @@ Produce a short, factual description (1-3 sentences).
 Do NOT speculate, infer identity, or describe unseen content.
 
 Style and policy:
-• Neutral, objective, compact.
-• Use consistent phrasing across similar frames to minimize variance.
-• Do not include names, timestamps, or bounding boxes.
-• Avoid adjectives about emotion, beauty, or intent.
-• Prefer “a man”, “a woman”, or “a person” — never assume gender if unclear.
-• Describe visible setting and key actions, not the photographer or camera.
-• Mention animals, major objects, or clear activities only if visible.
-• If nothing moves or no people appear, describe the environment plainly.
+- Neutral, objective, compact.
+- Use consistent phrasing across similar frames to minimize variance.
+- Do not include names, timestamps, or bounding boxes.
+- Avoid adjectives about emotion, beauty, or intent.
+- Prefer “a man”, “a woman”, or “a person” — never assume gender if unclear.
+- Describe visible setting and key actions, not the photographer or camera.
+- Mention animals, major objects, or clear activities only if visible.
+- If nothing moves or no people appear, describe the environment plainly.
+
+Motion-description rule:
+- When a 'Previous frame (text only): ...' line is present, use it as context for motion/direction; if it conflicts with the current image, prefer the current image.”
+- Describe walking direction or movement only if two or more visual cues agree:
+  (a) facing direction relative to camera or path,
+  (b) stride phase (which leg leads and its placement),
+  (c) body lean or arm swing indicating direction,
+  (d) change in distance from camera across recent frames (if prior frame text given).
+- If cues are unclear or conflicting, write “walks nearby”, “walks on the path”, or “stands” instead of guessing direction.
+- Never infer motion direction (“toward camera”, “away”, “left”, “right”, “upstairs”, “downstairs”) from a single cue.
 
 Example outputs:
 - "A man in a gray shirt stands on a porch with white railing and a pink chair."
@@ -130,7 +140,7 @@ Example outputs:
 
 Do not wrap the answer in JSON, lists, quotes, or markup.
 Return plain English text only.
-"""
+"""  # noqa: E501
 VLM_USER_PROMPT = """
 FRAME DESCRIPTION REQUEST
 

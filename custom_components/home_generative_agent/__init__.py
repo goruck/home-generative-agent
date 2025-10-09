@@ -771,7 +771,7 @@ class VideoAnalyzer:
         return batch
 
     async def _process_snapshot(
-        self, path: Path, camera_id: str
+        self, path: Path, camera_id: str, prev_text: str | None = None
     ) -> dict[str, list[str]]:
         """Process a single snapshot: recognize faces and describe the frame."""
         try:
@@ -782,7 +782,8 @@ class VideoAnalyzer:
                 frame_description: str = await analyze_image(
                     self.entry.runtime_data.vision_model,
                     data,
-                    None,
+                    None,  # detection_keywords
+                    prev_text=prev_text,  # previous description (text only)
                 )
         except (FileNotFoundError, TimeoutError, HomeAssistantError) as exc:
             self._log_snapshot_error(camera_id, path, exc)
@@ -838,15 +839,28 @@ class VideoAnalyzer:
         ordered = sorted(
             ((path, _epoch_from_path(path)) for path in batch), key=lambda x: x[1]
         )
+        if not ordered:
+            return
         t0 = ordered[0][1]
 
-        # Collect results
-        frame_descriptions = [
-            {f"t+{ts - t0}s. {k}": v}
-            for path, ts in ordered
-            if (fd := await self._process_snapshot(path, camera_id))
-            for k, v in [next(iter(fd.items()))]
-        ]
+        # Collect results SEQUENTIALLY so we can thread prev_text
+        frame_descriptions: list[dict[str, list[str]]] = []
+        prev_text: str | None = None
+
+        for path, ts in ordered:
+            fd = await self._process_snapshot(path, camera_id, prev_text=prev_text)
+            if not fd:
+                continue
+
+            # Extract description and faces
+            frame_description, faces = next(iter(fd.items()))
+
+            # Save time-prefixed description for downstream summarizer
+            timed_desc = f"t+{ts - t0}s. {frame_description}"
+            frame_descriptions.append({timed_desc: faces})
+
+            # Update prev_text with the raw description (NO time prefix)
+            prev_text = frame_description
 
         if not frame_descriptions:
             return
