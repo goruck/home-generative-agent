@@ -1,4 +1,5 @@
 """Home Generative Agent core module."""
+
 from .migrations import migrate_person_gallery
 from .person_gallery import PersonGalleryDAO
 from .runtime import HGAData
