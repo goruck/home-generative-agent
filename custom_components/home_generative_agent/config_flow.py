@@ -6,9 +6,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urljoin, urlparse
 
-import psycopg
 import voluptuous as vol
 from homeassistant.config_entries import (
     ConfigEntry,
@@ -18,9 +16,7 @@ from homeassistant.config_entries import (
     OptionsFlowWithReload,
 )
 from homeassistant.const import CONF_API_KEY, CONF_LLM_HASS_API
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import llm
-from homeassistant.helpers.httpx_client import get_async_client
 from homeassistant.helpers.selector import (
     NumberSelector,
     NumberSelectorConfig,
@@ -58,8 +54,6 @@ from .const import (
     CONF_VLM_PROVIDER,
     CONF_VLM_TEMPERATURE,
     DOMAIN,
-    HTTP_STATUS_BAD_REQUEST,
-    HTTP_STATUS_UNAUTHORIZED,
     MODEL_CATEGORY_SPECS,
     RECOMMENDED_CHAT_MODEL_PROVIDER,
     RECOMMENDED_CHAT_MODEL_TEMPERATURE,
@@ -79,6 +73,17 @@ from .const import (
     RECOMMENDED_VIDEO_ANALYZER_MODE,
     RECOMMENDED_VLM_PROVIDER,
     RECOMMENDED_VLM_TEMPERATURE,
+)
+from .core.utils import (
+    CannotConnectError,
+    InvalidAuthError,
+    ensure_http_url,
+    list_mobile_notify_services,
+    validate_db_uri,
+    validate_face_api_url,
+    validate_gemini_key,
+    validate_ollama_url,
+    validate_openai_key,
 )
 
 if TYPE_CHECKING:
@@ -136,121 +141,13 @@ RECOMMENDED_OPTIONS = {
 
 
 # ---------------------------
-# Utilities / validators
+# Helpers
 # ---------------------------
-
-
-def _ensure_http_url(url: str) -> str:
-    """Ensure a URL has an explicit scheme."""
-    if url.startswith(("http://", "https://")):
-        return url
-    return f"http://{url}"
 
 
 def _get_str(src: Mapping[str, Any], key: str) -> str:
     """Get a trimmed string from a mapping (missing -> '')."""
     return str(src.get(key, "") or "").strip()
-
-
-async def _validate_db_uri(hass: HomeAssistant, db_uri: str) -> None:
-    """Validate PostgreSQL DB URI using psycopg, allow empty user/pass."""
-    if not db_uri:
-        return
-
-    parsed = urlparse(db_uri)
-    if not parsed.scheme.startswith("postgres"):
-        raise CannotConnectError
-    if not parsed.hostname:
-        raise CannotConnectError
-    if not parsed.path or parsed.path == "/":
-        raise CannotConnectError
-
-    def _psycopg_ping() -> None:
-        # psycopg accepts URIs directly, including those with missing user/pass
-        with psycopg.connect(db_uri, connect_timeout=5) as conn, conn.cursor() as cur:
-            cur.execute("SELECT 1")
-            cur.fetchone()
-
-    try:
-        await hass.async_add_executor_job(_psycopg_ping)
-    except Exception as err:
-        LOGGER.debug("psycopg ping failed: %s", err)
-        raise CannotConnectError from err
-
-
-async def _validate_ollama_url(hass: HomeAssistant, base_url: str) -> None:
-    """Light probe to confirm the Ollama server is reachable."""
-    if not base_url:
-        return
-    base_url = _ensure_http_url(base_url)
-    client = get_async_client(hass)
-    try:
-        resp = await client.get(
-            urljoin(base_url.rstrip("/") + "/", "api/tags"), timeout=10
-        )
-    except Exception as err:
-        LOGGER.debug("Ollama connectivity exception during validation: %s", err)
-        raise CannotConnectError from err
-    if resp.status_code >= HTTP_STATUS_BAD_REQUEST:
-        raise CannotConnectError
-
-
-async def _validate_openai_key(hass: HomeAssistant, api_key: str) -> None:
-    """Light probe to confirm OpenAI key works."""
-    if not api_key:
-        return
-    client = get_async_client(hass)
-    try:
-        resp = await client.get(
-            "https://api.openai.com/v1/models",
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=10,
-        )
-    except Exception as err:
-        LOGGER.debug("OpenAI connectivity exception during validation: %s", err)
-        raise CannotConnectError from err
-    if resp.status_code == HTTP_STATUS_UNAUTHORIZED:
-        raise InvalidAuthError
-    if resp.status_code >= HTTP_STATUS_BAD_REQUEST:
-        raise CannotConnectError
-
-
-async def _validate_gemini_key(hass: HomeAssistant, api_key: str) -> None:
-    """Light probe to confirm Gemini key works."""
-    if not api_key:
-        return
-    client = get_async_client(hass)
-    try:
-        resp = await client.get(
-            f"https://generativelanguage.googleapis.com/v1/models?key={api_key}",
-            timeout=10,
-        )
-    except Exception as err:
-        LOGGER.debug("Gemini connectivity exception during validation: %s", err)
-        raise CannotConnectError from err
-    if resp.status_code == HTTP_STATUS_UNAUTHORIZED:
-        raise InvalidAuthError
-    if resp.status_code >= HTTP_STATUS_BAD_REQUEST:
-        raise CannotConnectError
-
-
-async def _validate_face_api_url(hass: HomeAssistant, base_url: str) -> None:
-    """Light probe to confirm the face recognition server is reachable."""
-    if not base_url:
-        return
-    base_url = _ensure_http_url(base_url)
-    client = get_async_client(hass)
-    try:
-        resp = await client.get(
-            urljoin(base_url.rstrip("/") + "/", "status"), timeout=10
-        )
-    except Exception as err:
-        LOGGER.debug(
-            "Face recognition server connectivity exception during validation: %s", err
-        )
-        raise CannotConnectError from err
-    if resp.status_code >= HTTP_STATUS_BAD_REQUEST:
-        raise CannotConnectError
 
 
 def _model_option_key(cat: str, provider: str) -> str:
@@ -300,14 +197,6 @@ def _provider_selector_config(cat: str) -> SelectSelectorConfig:
         mode=SelectSelectorMode.DROPDOWN,
         sort=False,
         custom_value=False,
-    )
-
-
-def _list_mobile_notify_services(hass: HomeAssistant) -> list[str]:
-    """Return a sorted list like ['notify.mobile_app_xxx', ...]."""
-    services = hass.services.async_services().get("notify", {}) or {}
-    return sorted(
-        f"notify.{name}" for name in services if name.startswith("mobile_app_")
     )
 
 
@@ -378,7 +267,7 @@ def _schema_for(hass: HomeAssistant, opts: Mapping[str, Any]) -> VolDictType:
 
     selected_mode = opts.get(CONF_VIDEO_ANALYZER_MODE, RECOMMENDED_VIDEO_ANALYZER_MODE)
     if selected_mode != "disable":
-        mobile_opts = _list_mobile_notify_services(hass)
+        mobile_opts = list_mobile_notify_services(hass)
         if mobile_opts:
             schema[
                 vol.Optional(
@@ -506,11 +395,11 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
 
         # Ordered, table-driven validation; short-circuits on first error.
         for key, validator, label in (
-            (CONF_API_KEY, _validate_openai_key, "OpenAI"),
-            (CONF_OLLAMA_URL, _validate_ollama_url, "Ollama"),
-            (CONF_GEMINI_API_KEY, _validate_gemini_key, "Gemini"),
-            (CONF_DB_URI, _validate_db_uri, "Database URI"),
-            (CONF_FACE_API_URL, _validate_face_api_url, "Face Recognition API"),
+            (CONF_API_KEY, validate_openai_key, "OpenAI"),
+            (CONF_OLLAMA_URL, validate_ollama_url, "Ollama"),
+            (CONF_GEMINI_API_KEY, validate_gemini_key, "Gemini"),
+            (CONF_DB_URI, validate_db_uri, "Database URI"),
+            (CONF_FACE_API_URL, validate_face_api_url, "Face Recognition API"),
         ):
             code = await self._validate_present(self.hass, vals[key], validator, label)
             if code:
@@ -519,9 +408,9 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
 
         # Normalize URLs only on success.
         if not errors and vals[CONF_OLLAMA_URL]:
-            normalized[CONF_OLLAMA_URL] = _ensure_http_url(vals[CONF_OLLAMA_URL])
+            normalized[CONF_OLLAMA_URL] = ensure_http_url(vals[CONF_OLLAMA_URL])
         if not errors and vals[CONF_FACE_API_URL]:
-            normalized[CONF_FACE_API_URL] = _ensure_http_url(vals[CONF_FACE_API_URL])
+            normalized[CONF_FACE_API_URL] = ensure_http_url(vals[CONF_FACE_API_URL])
 
         # Drop empties so defaults can apply later.
         for key in (
@@ -644,14 +533,14 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
             return None
 
         try:
-            await _validate_face_api_url(self.hass, raw)
+            await validate_face_api_url(self.hass, raw)
         except CannotConnectError:
             return "cannot_connect"
         except Exception:
             LOGGER.exception("Unexpected exception validating face recognition api URL")
             return "unknown"
 
-        options[CONF_FACE_API_URL] = _ensure_http_url(raw)
+        options[CONF_FACE_API_URL] = ensure_http_url(raw)
         return None
 
     async def _maybe_edit_ollama(
@@ -669,14 +558,14 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
             return None
 
         try:
-            await _validate_ollama_url(self.hass, raw)
+            await validate_ollama_url(self.hass, raw)
         except CannotConnectError:
             return "cannot_connect"
         except Exception:
             LOGGER.exception("Unexpected exception validating Ollama URL")
             return "unknown"
 
-        options[CONF_OLLAMA_URL] = _ensure_http_url(raw)
+        options[CONF_OLLAMA_URL] = ensure_http_url(raw)
         return None
 
     async def _maybe_edit_db_uri(
@@ -694,7 +583,7 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
             return None
 
         try:
-            await _validate_db_uri(self.hass, raw)
+            await validate_db_uri(self.hass, raw)
         except CannotConnectError:
             return "cannot_connect"
         except Exception:
@@ -796,15 +685,13 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
             err = await self._maybe_edit_face_recognition_url(options, user_input)
         if not err:
             err = await self._maybe_edit_secret(
-                _SecretSpec(
-                    CONF_GEMINI_API_KEY, _validate_gemini_key, "Gemini Options"
-                ),
+                _SecretSpec(CONF_GEMINI_API_KEY, validate_gemini_key, "Gemini Options"),
                 options,
                 user_input,
             )
         if not err:
             err = await self._maybe_edit_secret(
-                _SecretSpec(CONF_API_KEY, _validate_openai_key, "OpenAI Options"),
+                _SecretSpec(CONF_API_KEY, validate_openai_key, "OpenAI Options"),
                 options,
                 user_input,
             )
@@ -851,16 +738,3 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         self._drop_empty_fields(final_options)
 
         return self.async_create_entry(title="", data=final_options)
-
-
-# ---------------------------
-# Flow errors
-# ---------------------------
-
-
-class CannotConnectError(HomeAssistantError):
-    """Error to indicate we cannot connect."""
-
-
-class InvalidAuthError(HomeAssistantError):
-    """Error to indicate there is invalid auth."""
