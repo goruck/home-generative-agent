@@ -21,30 +21,30 @@ from langchain_core.globals import set_llm_cache
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
 from voluptuous_openapi import convert
 
+from .agent.graph import workflow
+from .agent.tools import (
+    add_automation,
+    get_and_analyze_camera_image,
+    get_entity_history,
+    upsert_memory,
+)
 from .const import (
     CONF_PROMPT,
     DOMAIN,
     LANGCHAIN_LOGGING_LEVEL,
     TOOL_CALL_ERROR_SYSTEM_MESSAGE,
 )
-from .graph import workflow
-from .tools import (
-    add_automation,
-    get_and_analyze_camera_image,
-    get_entity_history,
-    upsert_memory,
-)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from agent.graph import State
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
     from langchain_core.runnables import RunnableConfig
 
-    from . import HGAConfigEntry
-    from .graph import State
+    from .core.runtime import HGAConfigEntry
 
 LOGGER = logging.getLogger(__name__)
 

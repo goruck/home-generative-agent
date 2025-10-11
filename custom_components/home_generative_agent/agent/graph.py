@@ -35,7 +35,7 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.store.base import BaseStore  # noqa: TC002
 from pydantic import SecretStr, ValidationError
 
-from .const import (
+from ..const import (  # noqa: TID252
     CONF_CHAT_MODEL_PROVIDER,
     CONF_GEMINI_API_KEY,
     CONF_GEMINI_CHAT_MODEL,

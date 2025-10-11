@@ -33,7 +33,7 @@ from langgraph.prebuilt import InjectedStore
 from langgraph.store.base import BaseStore  # noqa: TC002
 from voluptuous import MultipleInvalid
 
-from .const import (
+from ..const import (  # noqa: TID252
     AUTOMATION_TOOL_BLUEPRINT_NAME,
     AUTOMATION_TOOL_EVENT_REGISTERED,
     CONF_NOTIFY_SERVICE,
