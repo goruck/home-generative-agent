@@ -262,7 +262,7 @@ def _schema_for(hass: HomeAssistant, opts: Mapping[str, Any]) -> VolDictType:
             CONF_FACE_RECOGNITION_MODE,
             description={"suggested_value": opts.get(CONF_FACE_RECOGNITION_MODE)},
             default=RECOMMENDED_FACE_RECOGNITION_MODE,
-        ): vol.In(["local", "remote", "disable"]),
+        ): vol.In(["enable", "disable"]),
     }
 
     selected_mode = opts.get(CONF_VIDEO_ANALYZER_MODE, RECOMMENDED_VIDEO_ANALYZER_MODE)
