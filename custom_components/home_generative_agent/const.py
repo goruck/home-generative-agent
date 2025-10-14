@@ -44,7 +44,7 @@ CONF_GEMINI_API_KEY = "gemini_api_key"
 
 # ---------------- Chat model ----------------
 CHAT_MODEL_TOP_P = 1.0
-CHAT_MODEL_NUM_CTX = 65536
+CHAT_MODEL_NUM_CTX = 32768
 CHAT_MODEL_MAX_TOKENS = 4096
 CHAT_MODEL_REPEAT_PENALTY = 1.05
 # Add more models by extending the Literal types.
@@ -76,7 +76,7 @@ RECOMMENDED_CHAT_MODEL_TEMPERATURE = 1.0
 CONTEXT_MANAGE_USE_TOKENS = True
 CONTEXT_MAX_MESSAGES = 80
 # Keep buffer for tools + token counter undercount (see repo notes).
-CONTEXT_MAX_TOKENS = CHAT_MODEL_NUM_CTX - CHAT_MODEL_MAX_TOKENS - 2048 - 4096  # 55296
+CONTEXT_MAX_TOKENS = CHAT_MODEL_NUM_CTX - CHAT_MODEL_MAX_TOKENS - 2048 - 4096  # 26624
 
 # ---------------- VLM (vision) ----------------
 VLM_TOP_P = 1

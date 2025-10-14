@@ -33,7 +33,7 @@ from langchain_core.runnables import RunnableConfig  # noqa: TC002
 from langchain_openai import ChatOpenAI as LCChatOpenAI
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.store.base import BaseStore  # noqa: TC002
-from pydantic import SecretStr, ValidationError
+from pydantic import ValidationError
 
 from ..const import (  # noqa: TID252
     CONF_CHAT_MODEL_PROVIDER,
@@ -46,7 +46,6 @@ from ..const import (  # noqa: TID252
     CONTEXT_MAX_MESSAGES,
     CONTEXT_MAX_TOKENS,
     EMBEDDING_MODEL_PROMPT_TEMPLATE,
-    HTTP_STATUS_WEBPAGE_NOT_FOUND,
     PROVIDERS,
     REASONING_DELIMITERS,
     SUMMARIZATION_INITIAL_PROMPT,
@@ -214,25 +213,28 @@ def _count_ollama_tokens(
     model: str,
     base_url: str,
     timeout: float = 60.0,
+    *,
+    options: dict[str, Any] | None = None,
 ) -> int:
-    """Try /api/tokenize; on 404 fall back to /api/generate."""
+    """Use /api/generate with num_predict=0 and the SAME options as chat."""
     combined = _concat_messages_for_count(messages)
-    url = f"{base_url.rstrip('/')}/api/tokenize"
-    payload = {"model": model, "prompt": combined}
-    try:
-        r = requests.post(url, json=payload, timeout=timeout)
-        r.raise_for_status()
-        data = r.json()
-        if "token_count" in data:
-            return int(data["token_count"])
-        if "tokens" in data and isinstance(data["tokens"], list):
-            return len(data["tokens"])
-        # Unknown shape → fallback
-        return _count_ollama_via_generate(messages, model, base_url, timeout)
-    except requests.HTTPError as e:
-        if getattr(e.response, "status_code", None) == HTTP_STATUS_WEBPAGE_NOT_FOUND:
-            return _count_ollama_via_generate(messages, model, base_url, timeout)
-        raise
+    url = f"{base_url.rstrip('/')}/api/generate"
+    opts = dict(options or {})
+    opts["num_predict"] = 0  # evaluate prompt only, but keep other knobs
+    payload = {
+        "model": model,
+        "prompt": combined,
+        "stream": False,
+        "options": opts,
+    }
+    r = requests.post(url, json=payload, timeout=timeout)
+    r.raise_for_status()
+    data = r.json()
+    n = data.get("prompt_eval_count")
+    if isinstance(n, int):
+        return n
+    msg = f"Unexpected /api/generate response: {data}"
+    raise RuntimeError(msg)
 
 
 # Entrypoint
@@ -242,9 +244,8 @@ def count_tokens_cross_provider(  # noqa: PLR0913
     provider: PROVIDERS,
     *,
     prefer_langchain_when_available: bool = True,
-    openai_api_key: SecretStr,
-    gemini_api_key: SecretStr,
-    ollama_base_url: str,
+    options: dict[str, Any],
+    chat_model_options: dict[str, Any],
 ) -> int:
     """
     Count tokens in messages for different providers.
@@ -256,9 +257,14 @@ def count_tokens_cross_provider(  # noqa: PLR0913
     Gemini:
       - Uses REST models/{model}:countTokens (API key required).
     Ollama:
-      - Tries /api/tokenize; on 404 falls back to /api/generate
-      (reads prompt_eval_count).
+      - Uses /api/generate (reads prompt_eval_count).
     """
+    ollama_base_url = options.get(CONF_OLLAMA_URL)
+    if ollama_base_url is None:
+        msg = "Ollama base URL must be set in options."
+        raise ValueError(msg)
+    openai_api_key = options.get(CONF_API_KEY)
+    gemini_api_key = options.get(CONF_GEMINI_API_KEY)
     if provider == "openai":
         if prefer_langchain_when_available:
             tmp = LCChatOpenAI(model=model, temperature=0, api_key=openai_api_key)
@@ -280,8 +286,10 @@ def count_tokens_cross_provider(  # noqa: PLR0913
             messages, model=model, gemini_api_key=gemini_api_key
         )
 
-    # "ollama"
-    return _count_ollama_tokens(messages, model=model, base_url=ollama_base_url)
+    # Ollama
+    return _count_ollama_tokens(
+        messages, model=model, base_url=ollama_base_url, options=chat_model_options
+    )
 
 
 # ----- Other utilities -----
@@ -339,6 +347,7 @@ async def _call_model(
     user_id = config["configurable"]["user_id"]
     hass = config["configurable"]["hass"]
     opts = config["configurable"]["options"]
+    chat_model_options = config["configurable"].get("chat_model_options", {})
 
     # Retrieve memories (semantic if last message is from user).
     last_message = state["messages"][-1]
@@ -387,9 +396,8 @@ async def _call_model(
             count_tokens_cross_provider,
             model=model_name,
             provider=provider,
-            ollama_base_url=opts.get(CONF_OLLAMA_URL),
-            openai_api_key=opts.get(CONF_API_KEY),
-            gemini_api_key=opts.get(CONF_GEMINI_API_KEY),
+            options=opts,
+            chat_model_options=chat_model_options,
         )
     else:
         max_tokens = CONTEXT_MAX_MESSAGES

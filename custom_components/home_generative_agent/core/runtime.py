@@ -21,6 +21,7 @@ class HGAData:
     """HGA integration data."""
 
     chat_model: Any
+    chat_model_options: dict[str, Any]
     vision_model: Any
     summarization_model: Any
     pool: AsyncConnectionPool[AsyncConnection[DictRow]]

@@ -375,6 +375,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     chat_temp = entry.options.get(
         CONF_CHAT_MODEL_TEMPERATURE, RECOMMENDED_CHAT_MODEL_TEMPERATURE
     )
+    chat_model_options = {
+        "temperature": chat_temp,
+        "top_p": CHAT_MODEL_TOP_P,
+        "num_predict": CHAT_MODEL_MAX_TOKENS,
+        "num_ctx": CHAT_MODEL_NUM_CTX,
+        "repeat_penalty": CHAT_MODEL_REPEAT_PENALTY,
+    }
     if chat_provider == "openai":
         chat_model = (openai_provider or NullChat()).with_config(
             config={
@@ -520,6 +527,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     # Save runtime data.
     entry.runtime_data = HGAData(
         chat_model=chat_model,
+        chat_model_options=chat_model_options,
         vision_model=vision_model,
         summarization_model=summarization_model,
         store=store,

@@ -146,6 +146,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         """Process the user input."""
         hass = self.hass
         options = self.entry.options
+        runtime_data = self.entry.runtime_data
         intent_response = intent.IntentResponse(language=user_input.language)
         tools: list[dict[str, Any]] | None = None
         user_name: str | None = None
@@ -256,7 +257,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         prompt = "\n".join(prompt_parts)
 
         # Use the already-configured chat model from __init__.py
-        base_llm = self.entry.runtime_data.chat_model
+        base_llm = runtime_data.chat_model
         try:
             chat_model_with_tools = base_llm.bind_tools(tools)
         except AttributeError:
@@ -281,10 +282,11 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 "thread_id": conversation_id,
                 "user_id": user_name,
                 "chat_model": chat_model_with_tools,
+                "chat_model_options": runtime_data.chat_model_options,
                 "prompt": prompt,
                 "options": options,
-                "vlm_model": self.entry.runtime_data.vision_model,
-                "summarization_model": self.entry.runtime_data.summarization_model,
+                "vlm_model": runtime_data.vision_model,
+                "summarization_model": runtime_data.summarization_model,
                 "langchain_tools": langchain_tools,
                 "ha_llm_api": llm_api or None,
                 "hass": hass,
