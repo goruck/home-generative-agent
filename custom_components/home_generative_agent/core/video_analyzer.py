@@ -10,6 +10,7 @@ import re
 from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
+from time import monotonic
 from typing import TYPE_CHECKING
 from urllib.parse import urljoin
 
@@ -66,6 +67,21 @@ class VideoAnalyzer:
         self._initialized_dirs: set[str] = set()
         self._active_motion_cameras: dict[str, asyncio.Task] = {}
         self._last_recognized: dict[str, list[str]] = {}
+        # Protect images referenced in notifications from immediate pruning
+        self._notify_protected: dict[Path, float] = {}  # path -> expiry time
+
+    def _protect_notify_image(self, p: Path, ttl_sec: int = 1800) -> None:
+        """Mark a snapshot as protected from pruning for ttl_sec seconds."""
+        self._notify_protected[p] = monotonic() + ttl_sec
+
+    def _is_protected(self, p: Path) -> bool:
+        """Return True if snapshot is still within its protection TTL."""
+        now = monotonic()
+        # Drop expired entries
+        expired = [k for k, t in self._notify_protected.items() if t < now]
+        for k in expired:
+            self._notify_protected.pop(k, None)
+        return self._notify_protected.get(p, 0) > now
 
     def _get_snapshot_queue(self, camera_id: str) -> asyncio.Queue[Path]:
         if camera_id not in self._snapshot_queues:
@@ -162,8 +178,14 @@ class VideoAnalyzer:
         retention = self._retention_deques.setdefault(camera_id, deque())
         for path in batch:
             retention.append(path)
-            if len(retention) > VIDEO_ANALYZER_SNAPSHOTS_TO_KEEP:
+            while len(retention) > VIDEO_ANALYZER_SNAPSHOTS_TO_KEEP:
                 old = retention.popleft()
+                # Skip if protected by a recent notification
+                if self._is_protected(old):
+                    retention.append(
+                        old
+                    )  # push it to the end once; stop pruning this round
+                    break
                 try:
                     await self.hass.async_add_executor_job(old.unlink)
                     LOGGER.debug("[%s] Deleted old snapshot: %s", camera_id, old)
@@ -333,7 +355,24 @@ class VideoAnalyzer:
     ) -> None:
         """Decide whether to notify and send if needed."""
         camera_name = camera_id.split(".")[-1]
-        notify_img = Path("/media/local") / Path(*batch[len(batch) // 2].parts[-3:])
+        chosen = batch[len(batch) // 2]
+
+        # If backlog is hot, let filesystem settle before notifying
+        queue = self._snapshot_queues.get(camera_id)
+        backlog_limit = 10
+        if queue and queue.qsize() > backlog_limit:
+            await asyncio.sleep(0.5)
+
+        # If the Home Assistant media_dirs option is set in configuration.yaml,
+        # ensure that /media is added as an option for '/media/local' to work.
+        # (If its not set then the default is /media.)
+        # E.g:
+        # homeassistant:
+        #   media_dirs:
+        #       local: /media # restore default 'local'
+        #       foo: /media/snapshots/foo  # optional extra source
+        media_dir = "/media/local"
+        notify_img = Path(media_dir) / Path(*chosen.parts[-3:])
 
         mode = self.entry.options.get(CONF_VIDEO_ANALYZER_MODE)
         if mode == "notify_on_anomaly":
@@ -341,8 +380,11 @@ class VideoAnalyzer:
             LOGGER.debug("[%s] First snapshot: %s", camera_id, first_snapshot)
             if await self._is_anomaly(camera_name, msg, first_snapshot):
                 LOGGER.debug("[%s] Video is an anomaly!", camera_id)
+                # Protect the chosen file from pruning for 30 minutes
+                self._protect_notify_image(chosen, ttl_sec=1800)
                 await self._send_notification(msg, camera_name, notify_img)
         else:
+            self._protect_notify_image(chosen, ttl_sec=1800)
             await self._send_notification(msg, camera_name, notify_img)
 
     async def _store_results(self, camera_id: str, batch: list[Path], msg: str) -> None:
