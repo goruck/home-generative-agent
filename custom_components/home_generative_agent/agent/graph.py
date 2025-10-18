@@ -5,19 +5,14 @@ from __future__ import annotations
 import copy
 import json
 import logging
-from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
 from typing import (
     TYPE_CHECKING,
     Any,
     Literal,
-    cast,
 )
 
-import requests
-import tiktoken
 import voluptuous as vol
-from homeassistant.const import CONF_API_KEY
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import llm
 from langchain_core.messages import (
@@ -27,35 +22,32 @@ from langchain_core.messages import (
     RemoveMessage,
     SystemMessage,
     ToolMessage,
-    trim_messages,
 )
-from langchain_core.runnables import RunnableConfig  # noqa: TC002
-from langchain_openai import ChatOpenAI as LCChatOpenAI
+from langchain_core.messages.utils import trim_messages
 from langgraph.graph import END, START, MessagesState, StateGraph
-from langgraph.store.base import BaseStore  # noqa: TC002
 from pydantic import ValidationError
 
 from ..const import (  # noqa: TID252
     CONF_CHAT_MODEL_PROVIDER,
-    CONF_GEMINI_API_KEY,
     CONF_GEMINI_CHAT_MODEL,
     CONF_OLLAMA_CHAT_MODEL,
-    CONF_OLLAMA_URL,
     CONF_OPENAI_CHAT_MODEL,
     CONTEXT_MANAGE_USE_TOKENS,
     CONTEXT_MAX_MESSAGES,
     CONTEXT_MAX_TOKENS,
     EMBEDDING_MODEL_PROMPT_TEMPLATE,
-    PROVIDERS,
     REASONING_DELIMITERS,
     SUMMARIZATION_INITIAL_PROMPT,
     SUMMARIZATION_PROMPT_TEMPLATE,
     SUMMARIZATION_SYSTEM_PROMPT,
     TOOL_CALL_ERROR_TEMPLATE,
 )
+from .token_counter import count_tokens_cross_provider
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
+    from langchain_core.runnables import RunnableConfig
+    from langgraph.store.base import BaseStore
 
 LOGGER = logging.getLogger(__name__)
 
@@ -68,231 +60,7 @@ class State(MessagesState):
     messages_to_remove: list[AnyMessage]
 
 
-# ----- Token counting -----
-
-MessageLike = Mapping[str, Any] | Any
-
-
-# Message normalization
-def _normalize_message(msg: MessageLike) -> Mapping[str, Any]:
-    """Normalize message to dict with 'role' and 'content'."""
-    if hasattr(msg, "type") and hasattr(msg, "content"):  # LangChain
-        role = {
-            "human": "user",
-            "ai": "assistant",
-            "system": "system",
-            "tool": "tool",
-            "function": "tool",
-        }.get(getattr(msg, "type"), getattr(msg, "type"))  # noqa: B009
-        return {"role": role, "content": getattr(msg, "content")}  # noqa: B009
-    if isinstance(msg, Mapping):  # OpenAI-style
-        return {"role": msg.get("role", "user"), "content": msg.get("content", "")}
-    msg = f"Unsupported message type: {type(msg)}"
-    raise TypeError(msg)
-
-
-def _flatten_text_content(content: Any) -> str:
-    """Flatten message content to plain text."""
-    if content is None:
-        return ""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        out: list[str] = []
-        for part in content:
-            if isinstance(part, Mapping) and isinstance(part.get("text"), str):
-                out.append(part["text"])
-            elif isinstance(part, str):
-                out.append(part)
-        return "\n".join(out)
-    return str(content)
-
-
-def _concat_messages_for_count(messages: Sequence[MessageLike]) -> str:
-    """Concatenate messages to a single string for token counting."""
-    out: list[str] = []
-    for m in messages:
-        mm = _normalize_message(m)
-        out.append(
-            f"{mm.get('role', 'user')}:\n{_flatten_text_content(mm.get('content', ''))}"
-        )
-    return "\n\n".join(out)
-
-
-# OpenAI, uses tiktoken
-def _pick_encoding_for_model(model: str) -> tiktoken.Encoding:
-    """Return tiktoken encoding for model, with fallback."""
-    try:
-        return tiktoken.encoding_for_model(model)
-    except KeyError:
-        return tiktoken.get_encoding("o200k_base")
-
-
-def _count_tokens_tiktoken(
-    messages: Iterable[MessageLike],
-    model: str,
-    tools: Sequence[Any] | None = None,  # noqa: ARG001
-) -> int:
-    """Count tokens in messages for OpenAI models using tiktoken."""
-    enc = _pick_encoding_for_model(model)
-    total = 0
-    for m in messages:
-        mm = _normalize_message(m)
-        total += len(enc.encode(str(mm.get("role", "user"))))
-        total += len(enc.encode("\n"))
-        content_text = _flatten_text_content(mm.get("content"))
-        if content_text:
-            total += len(enc.encode(content_text))
-    return total
-
-
-# Gemini, uses REST :countTokens
-def _count_gemini_tokens(
-    messages: Sequence[MessageLike],
-    model: str,
-    gemini_api_key: Any | None = None,
-    *,
-    timeout: float = 10.0,
-    endpoint_base: str = "https://generativelanguage.googleapis.com",
-) -> int:
-    """Count tokens in messages for Gemini models using REST API."""
-    key = None
-    if gemini_api_key is not None:
-        key = (
-            gemini_api_key.get_secret_value()
-            if hasattr(gemini_api_key, "get_secret_value")
-            else str(gemini_api_key)
-        )
-    if not key:
-        msg = "Gemini API key required for token counting."
-        raise RuntimeError(msg)
-
-    combined = _concat_messages_for_count(messages)
-    url = f"{endpoint_base.rstrip('/')}/v1beta/models/{model}:countTokens"
-    params = {"key": key}
-    payload = {"contents": [{"role": "user", "parts": [{"text": combined}]}]}
-    r = requests.post(url, params=params, json=payload, timeout=timeout)
-    r.raise_for_status()
-    data = r.json()
-    if "totalTokens" in data:
-        return int(data["totalTokens"])
-    if "total_tokens" in data:
-        return int(data["total_tokens"])
-    msg = f"Unexpected Gemini countTokens response: {data}"
-    raise RuntimeError(msg)
-
-
-# Ollama, uses /api/tokenize with fallback to /api/generate
-def _count_ollama_via_generate(
-    messages: Sequence[MessageLike],
-    model: str,
-    base_url: str,
-    timeout: float = 60.0,
-) -> int:
-    """Count tokens in messages for Ollama models using /api/generate."""
-    combined = _concat_messages_for_count(messages)
-    url = f"{base_url.rstrip('/')}/api/generate"
-    payload = {
-        "model": model,
-        "prompt": combined,
-        "stream": False,  # single JSON with metrics
-        "options": {"num_predict": 0},  # evaluate prompt only
-    }
-    r = requests.post(url, json=payload, timeout=timeout)
-    r.raise_for_status()
-    data = r.json()
-    n = data.get("prompt_eval_count")
-    if isinstance(n, int):
-        return n
-    msg = f"Unexpected /api/generate response (no prompt_eval_count): {data}"
-    raise RuntimeError(msg)
-
-
-def _count_ollama_tokens(
-    messages: Sequence[MessageLike],
-    model: str,
-    base_url: str,
-    timeout: float = 60.0,
-    *,
-    options: dict[str, Any] | None = None,
-) -> int:
-    """Use /api/generate with num_predict=0 and the SAME options as chat."""
-    combined = _concat_messages_for_count(messages)
-    url = f"{base_url.rstrip('/')}/api/generate"
-    opts = dict(options or {})
-    opts["num_predict"] = 0  # evaluate prompt only, but keep other knobs
-    payload = {
-        "model": model,
-        "prompt": combined,
-        "stream": False,
-        "options": opts,
-    }
-    r = requests.post(url, json=payload, timeout=timeout)
-    r.raise_for_status()
-    data = r.json()
-    n = data.get("prompt_eval_count")
-    if isinstance(n, int):
-        return n
-    msg = f"Unexpected /api/generate response: {data}"
-    raise RuntimeError(msg)
-
-
-# Entrypoint
-def count_tokens_cross_provider(  # noqa: PLR0913
-    messages: Sequence[MessageLike],
-    model: str,
-    provider: PROVIDERS,
-    *,
-    prefer_langchain_when_available: bool = True,
-    options: dict[str, Any],
-    chat_model_options: dict[str, Any],
-) -> int:
-    """
-    Count tokens in messages for different providers.
-
-    OpenAI:
-      - If prefer_langchain_when_available=True and LCChatOpenAI is imported,
-        try its get_num_tokens_from_messages(); on NotImplementedError,
-        fall back to tiktoken.
-    Gemini:
-      - Uses REST models/{model}:countTokens (API key required).
-    Ollama:
-      - Uses /api/generate (reads prompt_eval_count).
-    """
-    ollama_base_url = options.get(CONF_OLLAMA_URL)
-    if ollama_base_url is None:
-        msg = "Ollama base URL must be set in options."
-        raise ValueError(msg)
-    openai_api_key = options.get(CONF_API_KEY)
-    gemini_api_key = options.get(CONF_GEMINI_API_KEY)
-    if provider == "openai":
-        if prefer_langchain_when_available:
-            tmp = LCChatOpenAI(model=model, temperature=0, api_key=openai_api_key)
-            try:
-                return tmp.get_num_tokens_from_messages(
-                    cast("list[Any]", list(messages))
-                )
-            except NotImplementedError:
-                # LC doesn't support this model's token counting yet → fallback
-                pass
-            except HomeAssistantError:
-                # Any LC-specific issue → fallback rather than crashing
-                pass
-        # Fallback path for OpenAI (or when LC is unavailable/unsupported)
-        return _count_tokens_tiktoken(messages, model=model)
-
-    if provider == "gemini":
-        return _count_gemini_tokens(
-            messages, model=model, gemini_api_key=gemini_api_key
-        )
-
-    # Ollama
-    return _count_ollama_tokens(
-        messages, model=model, base_url=ollama_base_url, options=chat_model_options
-    )
-
-
-# ----- Other utilities -----
+# ----- Utilities -----
 
 
 async def _retrieve_camera_activity(
