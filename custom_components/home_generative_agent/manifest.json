@@ -10,19 +10,20 @@
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/goruck/home_generative_agent/issues",
   "requirements": [
-    "aiofiles==24.1.0",
-    "langchain==0.3.27",
-    "langchain-openai==0.3.28",
-    "langchain-ollama==0.3.6",
-    "langgraph==0.6.2",
-    "langgraph-checkpoint-postgres==2.0.23",
-    "openai==1.97.1",
-    "ollama==0.5.1",
-    "psycopg==3.2.9",
-    "psycopg-binary==3.2.9",
+    "aiofiles==25.1.0",
+    "langchain==1.0.0",
+    "langchain-core==1.0.0",
+    "langchain-openai==1.0.0",
+    "langchain-ollama==0.3.10",
+    "langgraph==1.0.0",
+    "langgraph-checkpoint-postgres==2.0.25",
+    "openai==2.5.0",
+    "ollama==0.6.0",
+    "psycopg==3.2.11",
+    "psycopg-binary==3.2.11",
     "psycopg-pool==3.2.6",
-    "transformers==4.54.0",
-    "langchain-google-genai==2.1.10"
+    "transformers==4.57.1",
+    "langchain-google-genai==3.0.0"
   ],
-  "version": "2.3.0"
+  "version": "2.4.0"
 }

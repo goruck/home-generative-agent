@@ -22,7 +22,7 @@ from homeassistant.components.camera.const import DOMAIN as CAMERA_DOMAIN
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.event import async_track_time_interval
-from langchain.schema import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from PIL import Image
 
 from ..agent.tools import analyze_image  # noqa: TID252

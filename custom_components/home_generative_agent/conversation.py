@@ -15,9 +15,8 @@ from homeassistant.exceptions import HomeAssistantError, TemplateError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import intent, llm, template
 from homeassistant.util import ulid
-from langchain.globals import set_debug, set_verbose
 from langchain_core.caches import InMemoryCache
-from langchain_core.globals import set_llm_cache
+from langchain_core.globals import set_debug, set_llm_cache, set_verbose
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
 from voluptuous_openapi import convert
 
