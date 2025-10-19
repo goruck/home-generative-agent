@@ -45,6 +45,7 @@ from .const import (
     CONF_GEMINI_VLM,
     CONF_OLLAMA_CHAT_MODEL,
     CONF_OLLAMA_EMBEDDING_MODEL,
+    CONF_OLLAMA_REASONING,
     CONF_OLLAMA_SUMMARIZATION_MODEL,
     CONF_OLLAMA_URL,
     CONF_OLLAMA_VLM,
@@ -72,6 +73,7 @@ from .const import (
     RECOMMENDED_GEMINI_VLM,
     RECOMMENDED_OLLAMA_CHAT_MODEL,
     RECOMMENDED_OLLAMA_EMBEDDING_MODEL,
+    RECOMMENDED_OLLAMA_REASONING,
     RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL,
     RECOMMENDED_OLLAMA_URL,
     RECOMMENDED_OLLAMA_VLM,
@@ -101,6 +103,7 @@ from .core.utils import (
     generate_embeddings,
     ollama_healthy,
     openai_healthy,
+    reasoning_field,
 )
 from .core.video_analyzer import VideoAnalyzer
 
@@ -221,6 +224,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 num_predict=ConfigurableField(id="num_predict"),
                 num_ctx=ConfigurableField(id="num_ctx"),
                 repeat_penalty=ConfigurableField(id="repeat_penalty"),
+                reasoning=ConfigurableField(id="reasoning"),
             )
         except Exception:
             LOGGER.exception("Ollama provider init failed; continuing without it.")
@@ -368,6 +372,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
     # ----- Choose concrete models for roles from constants -----
 
+    ollama_reasoning: bool = entry.options.get(
+        CONF_OLLAMA_REASONING, RECOMMENDED_OLLAMA_REASONING
+    )
+
     # CHAT
     chat_provider = entry.options.get(
         CONF_CHAT_MODEL_PROVIDER, RECOMMENDED_CHAT_MODEL_PROVIDER
@@ -375,7 +383,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     chat_temp = entry.options.get(
         CONF_CHAT_MODEL_TEMPERATURE, RECOMMENDED_CHAT_MODEL_TEMPERATURE
     )
-    chat_model_options = {
+    ollama_chat_model_options = {
         "temperature": chat_temp,
         "top_p": CHAT_MODEL_TOP_P,
         "num_predict": CHAT_MODEL_MAX_TOKENS,
@@ -409,17 +417,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             }
         )
     else:
+        ollama_chat_model = entry.options.get(
+            CONF_OLLAMA_CHAT_MODEL, RECOMMENDED_OLLAMA_CHAT_MODEL
+        )
+        rf_chat = reasoning_field(model=ollama_chat_model, enabled=ollama_reasoning)
+        ollama_chat_model_options = {**ollama_chat_model_options, **rf_chat}
         chat_model = (ollama_provider or NullChat()).with_config(
             config={
                 "configurable": {
-                    "model": entry.options.get(
-                        CONF_OLLAMA_CHAT_MODEL, RECOMMENDED_OLLAMA_CHAT_MODEL
-                    ),
+                    "model": ollama_chat_model,
                     "temperature": chat_temp,
                     "top_p": CHAT_MODEL_TOP_P,
                     "num_predict": CHAT_MODEL_MAX_TOKENS,
                     "num_ctx": CHAT_MODEL_NUM_CTX,
                     "repeat_penalty": CHAT_MODEL_REPEAT_PENALTY,
+                    **rf_chat,
                 }
             }
         )
@@ -452,15 +464,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             }
         )
     else:
+        ollama_vlm = entry.options.get(CONF_OLLAMA_VLM, RECOMMENDED_OLLAMA_VLM)
+        rf_vlm = reasoning_field(model=ollama_vlm, enabled=ollama_reasoning)
         vision_model = (ollama_provider or NullChat()).with_config(
             config={
                 "configurable": {
-                    "model": entry.options.get(CONF_OLLAMA_VLM, RECOMMENDED_OLLAMA_VLM),
+                    "model": ollama_vlm,
                     "temperature": vlm_temp,
                     "top_p": VLM_TOP_P,
                     "num_predict": VLM_NUM_PREDICT,
                     "num_ctx": VLM_NUM_CTX,
                     "repeat_penalty": VLM_REPEAT_PENALTY,
+                    **rf_vlm,
                 }
             }
         )
@@ -502,18 +517,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             }
         )
     else:
+        ollama_summarization_model = entry.options.get(
+            CONF_OLLAMA_SUMMARIZATION_MODEL,
+            RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL,
+        )
+        rf_summarization = reasoning_field(
+            model=ollama_summarization_model, enabled=ollama_reasoning
+        )
         summarization_model = (ollama_provider or NullChat()).with_config(
             config={
                 "configurable": {
-                    "model": entry.options.get(
-                        CONF_OLLAMA_SUMMARIZATION_MODEL,
-                        RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL,
-                    ),
+                    "model": ollama_summarization_model,
                     "temperature": sum_temp,
                     "top_p": SUMMARIZATION_MODEL_TOP_P,
                     "num_predict": SUMMARIZATION_MODEL_PREDICT,
                     "num_ctx": SUMMARIZATION_MODEL_CTX,
                     "repeat_penalty": SUMMARIZATION_MODEL_REPEAT_PENALTY,
+                    **rf_summarization,
                 }
             }
         )
@@ -527,7 +547,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     # Save runtime data.
     entry.runtime_data = HGAData(
         chat_model=chat_model,
-        chat_model_options=chat_model_options,
+        chat_model_options=ollama_chat_model_options,
         vision_model=vision_model,
         summarization_model=summarization_model,
         store=store,

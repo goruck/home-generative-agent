@@ -35,6 +35,17 @@ REASONING_DELIMITERS: dict[str, str] = {
 CONF_OLLAMA_URL = "ollama_url"
 RECOMMENDED_OLLAMA_URL = "http://localhost:11434"
 
+CONF_OLLAMA_REASONING = "ollama_reasoning"
+RECOMMENDED_OLLAMA_REASONING: bool = False
+OLLAMA_GPT_EFFORT = "low"
+OLLAMA_OSS_TAG = "gpt-oss"
+OLLAMA_BOOL_HINT_TAGS = {
+    "deepseek-r1",
+    "qwen3",
+    "deepseek-v3.1",
+    "magistral",
+}
+
 # ---- Global options ----
 CONF_RECOMMENDED = "recommended"
 CONF_PROMPT = "prompt"

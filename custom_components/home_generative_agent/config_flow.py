@@ -18,6 +18,7 @@ from homeassistant.config_entries import (
 from homeassistant.const import CONF_API_KEY, CONF_LLM_HASS_API
 from homeassistant.helpers import llm
 from homeassistant.helpers.selector import (
+    BooleanSelector,
     NumberSelector,
     NumberSelectorConfig,
     SelectOptionDict,
@@ -40,6 +41,7 @@ from .const import (
     CONF_GEMINI_API_KEY,
     CONF_NOTIFY_SERVICE,
     CONF_OLLAMA_CHAT_MODEL,
+    CONF_OLLAMA_REASONING,
     CONF_OLLAMA_SUMMARIZATION_MODEL,
     CONF_OLLAMA_URL,
     CONF_OLLAMA_VLM,
@@ -62,6 +64,7 @@ from .const import (
     RECOMMENDED_FACE_API_URL,
     RECOMMENDED_FACE_RECOGNITION_MODE,
     RECOMMENDED_OLLAMA_CHAT_MODEL,
+    RECOMMENDED_OLLAMA_REASONING,
     RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL,
     RECOMMENDED_OLLAMA_URL,
     RECOMMENDED_OLLAMA_VLM,
@@ -137,6 +140,7 @@ RECOMMENDED_OPTIONS = {
     CONF_OPENAI_VLM: RECOMMENDED_OPENAI_VLM,
     CONF_OLLAMA_SUMMARIZATION_MODEL: RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL,
     CONF_OPENAI_SUMMARIZATION_MODEL: RECOMMENDED_OPENAI_SUMMARIZATION_MODEL,
+    CONF_OLLAMA_REASONING: RECOMMENDED_OLLAMA_REASONING
 }
 
 
@@ -263,6 +267,12 @@ def _schema_for(hass: HomeAssistant, opts: Mapping[str, Any]) -> VolDictType:
             description={"suggested_value": opts.get(CONF_FACE_RECOGNITION_MODE)},
             default=RECOMMENDED_FACE_RECOGNITION_MODE,
         ): vol.In(["enable", "disable"]),
+        vol.Optional(
+            CONF_OLLAMA_REASONING,
+            description={"suggested_value": opts.get(CONF_OLLAMA_REASONING)},
+            default=RECOMMENDED_OLLAMA_REASONING,
+        ): BooleanSelector()
+
     }
 
     selected_mode = opts.get(CONF_VIDEO_ANALYZER_MODE, RECOMMENDED_VIDEO_ANALYZER_MODE)

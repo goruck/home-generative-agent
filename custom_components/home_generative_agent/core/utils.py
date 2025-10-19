@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from functools import lru_cache
+from typing import TYPE_CHECKING, Literal
 from urllib.parse import urljoin, urlparse
 
 import async_timeout
 import httpx
 import psycopg
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.httpx_client import get_async_client
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
@@ -16,6 +18,9 @@ from ..const import (  # noqa: TID252
     EMBEDDING_MODEL_DIMS,
     HTTP_STATUS_BAD_REQUEST,
     HTTP_STATUS_UNAUTHORIZED,
+    OLLAMA_BOOL_HINT_TAGS,
+    OLLAMA_GPT_EFFORT,
+    OLLAMA_OSS_TAG,
 )
 
 if TYPE_CHECKING:
@@ -26,6 +31,7 @@ if TYPE_CHECKING:
     from langchain_openai import OpenAIEmbeddings
 
 LOGGER = logging.getLogger(__name__)
+
 
 # ---------------------------
 # Exceptions
@@ -259,3 +265,45 @@ async def validate_db_uri(hass: HomeAssistant, db_uri: str) -> None:
             raise CannotConnectError from err
 
     await hass.async_add_executor_job(_psycopg_ping)
+
+
+# ---------------------------
+# Ollama "thinking"/reasoning capability check
+# ---------------------------
+
+
+# 'reasoning' may be boolean or an effort level required by gpt-oss.
+type ReasoningValue = bool | Literal["low", "medium", "high"]
+
+
+@lru_cache(maxsize=128)
+def _guess_ollama_reasoning(
+    model: str,
+) -> tuple[bool, ReasoningValue]:
+    """
+    Zero-network heuristic to decide if a model probably supports reasoning.
+
+    Returns:
+        (True, OLLAMA_GPT_EFFORT)  for gpt-oss models
+        (True, True)   for boolean-style models
+        (False, False) for others
+
+    """
+    m = model.lower()
+    if OLLAMA_OSS_TAG in m:
+        return True, OLLAMA_GPT_EFFORT
+    if any(tag in m for tag in OLLAMA_BOOL_HINT_TAGS):
+        return True, True
+    return False, False
+
+
+def reasoning_field(
+    *,
+    model: str,
+    enabled: bool,
+) -> dict[str, ReasoningValue]:
+    """Return {'reasoning': value} if enabled and model likely supports it."""
+    if not enabled:
+        return {}
+    supported, value = _guess_ollama_reasoning(model)
+    return {"reasoning": value} if supported else {}
