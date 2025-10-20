@@ -118,7 +118,7 @@ class VideoAnalyzer:
         )
 
     async def _generate_summary(
-        self, frame_descriptions: list[dict[str, list[str]]], cam_id: str
+        self, frame_descriptions: list[dict[str, list[str]]]
     ) -> str:
         await asyncio.sleep(0)  # yield control
         if not frame_descriptions:
@@ -143,11 +143,12 @@ class VideoAnalyzer:
             HumanMessage(content=prompt),
         ]
         model = self.entry.runtime_data.summarization_model
-        resp = await model.ainvoke(messages)
+        summary = await model.ainvoke(messages)
+        LOGGER.debug("Video analyzer summary: %s", summary)
 
-        summary = resp.content
-        LOGGER.debug("Summary for %s: %s", cam_id, summary)
-        first, sep, last = summary.partition(REASONING_DELIMITERS.get("end", ""))
+        first, sep, last = summary.content.partition(
+            REASONING_DELIMITERS.get("end", "")
+        )
         return (last if sep else first).strip("\n")
 
     async def _is_anomaly(self, camera_name: str, msg: str, first_path: str) -> bool:
@@ -452,7 +453,7 @@ class VideoAnalyzer:
 
         # Generate summary
         async with async_timeout.timeout(60):
-            msg = await self._generate_summary(frame_descriptions, camera_id)
+            msg = await self._generate_summary(frame_descriptions)
 
         LOGGER.info("[%s] Video analysis: %s", camera_id, msg)
 
