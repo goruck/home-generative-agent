@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from functools import lru_cache
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urljoin, urlparse
 
 import async_timeout
 import httpx
 import psycopg
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.httpx_client import get_async_client
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
@@ -49,6 +51,18 @@ class InvalidAuthError(Exception):
 # ---------------------------
 # Helpers
 # ---------------------------
+
+
+def dispatch_on_loop(hass: HomeAssistant, signal: str, *args: Any) -> None:
+    """Thread-safe dispatcher send; always run on HA's loop."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:  # not in any loop
+        loop = None
+    if loop is hass.loop:
+        async_dispatcher_send(hass, signal, *args)
+    else:
+        hass.loop.call_soon_threadsafe(async_dispatcher_send, hass, signal, *args)
 
 
 def ensure_http_url(url: str) -> str:

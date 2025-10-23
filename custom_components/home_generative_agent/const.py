@@ -306,14 +306,22 @@ END_EXAMPLE
 VIDEO_ANALYZER_PROMPT = """
 Write ≤150 characters (≤2 sentences). Obey all rules and narrate in order.
 """
-# Time offset units are minutes.
-VIDEO_ANALYZER_TIME_OFFSET = 15
+VIDEO_ANALYZER_TIME_OFFSET = 15  # minutes
 VIDEO_ANALYZER_SIMILARITY_THRESHOLD = 0.89
 VIDEO_ANALYZER_DELETE_SNAPSHOTS = False
 VIDEO_ANALYZER_SNAPSHOTS_TO_KEEP = 200
 VIDEO_ANALYZER_TRIGGER_ON_MOTION = True
 VIDEO_ANALYZER_MOTION_CAMERA_MAP: dict = {}
 VIDEO_ANALYZER_FACE_CROP = False
+
+# Stable “latest” file publication
+VIDEO_ANALYZER_SAVE_LATEST = True
+VIDEO_ANALYZER_LATEST_NAME = "latest.jpg"
+VIDEO_ANALYZER_LATEST_SUBFOLDER = "_latest"
+
+# Dispatcher signals
+SIGNAL_HGA_NEW_LATEST = "hga_new_latest"
+SIGNAL_HGA_RECOGNIZED = "hga_recognized_people"
 
 # ---------------- Face recognition ----------------
 CONF_FACE_RECOGNITION_MODE = "face_recognition_mode"

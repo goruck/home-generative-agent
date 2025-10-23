@@ -6,16 +6,24 @@ import asyncio
 import logging
 from collections.abc import Sequence
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, cast
 
 import aiofiles
 import voluptuous as vol
+from homeassistant.components.camera.const import DOMAIN as CAMERA_DOMAIN
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_API_KEY, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.httpx_client import get_async_client
+from homeassistant.helpers.target import (
+    TargetSelectorData,
+    async_extract_referenced_entity_ids,
+)
+from homeassistant.util import dt as dt_util
 from langchain_core.runnables import ConfigurableField
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_ollama import ChatOllama, OllamaEmbeddings
@@ -26,6 +34,7 @@ from langgraph.store.postgres.base import PostgresIndexConfig
 from psycopg.rows import DictRow, dict_row
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
+from .agent.tools import analyze_image
 from .const import (
     CHAT_MODEL_MAX_TOKENS,
     CHAT_MODEL_NUM_CTX,
@@ -85,10 +94,13 @@ from .const import (
     RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
     RECOMMENDED_VLM_PROVIDER,
     RECOMMENDED_VLM_TEMPERATURE,
+    SIGNAL_HGA_NEW_LATEST,
+    SIGNAL_HGA_RECOGNIZED,
     SUMMARIZATION_MODEL_CTX,
     SUMMARIZATION_MODEL_PREDICT,
     SUMMARIZATION_MODEL_REPEAT_PENALTY,
     SUMMARIZATION_MODEL_TOP_P,
+    VIDEO_ANALYZER_SNAPSHOT_ROOT,
     VLM_NUM_CTX,
     VLM_NUM_PREDICT,
     VLM_REPEAT_PENALTY,
@@ -98,6 +110,7 @@ from .core.migrations import migrate_person_gallery
 from .core.person_gallery import PersonGalleryDAO
 from .core.runtime import HGAConfigEntry, HGAData
 from .core.utils import (
+    dispatch_on_loop,
     ensure_http_url,
     gemini_healthy,
     generate_embeddings,
@@ -106,19 +119,21 @@ from .core.utils import (
     reasoning_field,
 )
 from .core.video_analyzer import VideoAnalyzer
+from .core.video_helpers import latest_target, publish_latest_atomic
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant, ServiceCall
+    from homeassistant.helpers.typing import ConfigType
     from langchain_core.language_models import BaseMessage, LanguageModelInput
     from langchain_core.runnables.base import RunnableSerializable
     from psycopg import AsyncConnection
 
 LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = (Platform.CONVERSATION,)
+PLATFORMS = (Platform.CONVERSATION, "image", "sensor")
 
 SERVICE_ENROLL_PERSON = "enroll_person"
 
@@ -128,6 +143,8 @@ ENROLL_SCHEMA = vol.Schema(
         vol.Required("file_path"): cv.isfile,  # path to a local uploaded snapshot
     }
 )
+
+Embedding = Sequence[float]
 
 
 async def _bootstrap_db_once(
@@ -165,12 +182,114 @@ class NullChat:
         return self
 
 
-Embedding = Sequence[float]
+def _register_services(hass: HomeAssistant, entry: HGAConfigEntry) -> None:
+    """Register integration services."""
+
+    async def _handle_save_and_analyze_snapshot(call: ServiceCall) -> None:
+        """Capture a snapshot, analyze it, and publish 'latest' for targeted cameras."""
+        # 1) Resolve Target selector (entity/device/area/label[/floor])
+        # raw 'target:' from the service call (may be absent)
+        raw_target: ConfigType = cast("ConfigType", call.data.get("target", {}))
+        selector = TargetSelectorData(raw_target)
+        refs = async_extract_referenced_entity_ids(hass, selector, expand_group=True)
+        entity_ids = sorted(refs.referenced | refs.indirectly_referenced)
+
+        # Back-compat: honor legacy data.entity_id if someone passed it
+        legacy = call.data.get("entity_id")
+        if isinstance(legacy, str):
+            entity_ids.append(legacy)
+        elif isinstance(legacy, list):
+            entity_ids.extend(str(e) for e in legacy)
+
+        # Keep only cameras
+        entity_ids = [e for e in entity_ids if e.startswith("camera.")]
+        if not entity_ids:
+            msg = "Please target at least one camera entity."
+            raise HomeAssistantError(msg)
+
+        protect_minutes = int(call.data.get("protect_minutes", 30))
+
+        # Access models from config entry runtime
+        vision_model = entry.runtime_data.vision_model
+        video_analyzer = entry.runtime_data.video_analyzer
+
+        for camera_id in entity_ids:
+            # 2) Compute destination and ensure directory exists
+            dst = latest_target(Path(VIDEO_ANALYZER_SNAPSHOT_ROOT), camera_id)
+            await hass.async_add_executor_job(
+                partial(dst.parent.mkdir, parents=True, exist_ok=True)
+            )
+
+            # 3) Capture snapshot to a temp filename
+            tmp_name = f"snapshot_{dt_util.utcnow().strftime('%Y%m%d_%H%M%S')}.jpg"
+            tmp_path = dst.parent / tmp_name
+
+            await hass.services.async_call(
+                CAMERA_DOMAIN,
+                "snapshot",
+                {"entity_id": camera_id, "filename": str(tmp_path)},
+                blocking=True,
+            )
+
+            # 4) Read bytes for analysis
+            try:
+                async with aiofiles.open(tmp_path, "rb") as f:
+                    img_bytes = await f.read()
+            except OSError as err:
+                msg = f"Failed to read snapshot {tmp_path}: {err}"
+                raise HomeAssistantError(msg) from err
+
+            # 5) Run AI analysis (summary) and face recognition if available.
+            summary: str | None
+            summary = await analyze_image(vision_model, img_bytes, None, prev_text=None)
+
+            people: list[str] = []
+            people = await video_analyzer.recognize_faces(img_bytes, camera_id)
+
+            # 6) Publish to _latest atomically
+            await publish_latest_atomic(hass, tmp_path, dst)
+
+            # 7) Notify listeners (image entity + sensor + event)
+            iso = dt_util.utcnow().isoformat()
+
+            # Image entity (path update)
+            dispatch_on_loop(hass, SIGNAL_HGA_NEW_LATEST, camera_id, str(dst))
+
+            # Sensor + metadata (recognized + summary + timestamp + latest path)
+            dispatch_on_loop(
+                hass,
+                SIGNAL_HGA_RECOGNIZED,
+                camera_id,
+                people,
+                summary,
+                iso,
+                str(dst),
+            )
+
+            # Bus event for anything else listening, and a safety net for image entities
+            hass.bus.async_fire(
+                "hga_last_event_frame",
+                {
+                    "camera_id": camera_id,
+                    "summary": summary,
+                    "path": str(tmp_path),
+                    "latest": str(dst),
+                },
+            )
+
+            video_analyzer.protect_notify_image(dst, ttl_sec=protect_minutes * 60)
+
+    # Register the service
+    hass.services.async_register(
+        DOMAIN, "save_and_analyze_snapshot", _handle_save_and_analyze_snapshot
+    )
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:  # noqa: C901, PLR0912, PLR0915
     """Set up Home Generative Agent from a config entry."""
     hass.data.setdefault(DOMAIN, {})
+
+    _register_services(hass, entry)
 
     # Options override data.
     # entry.options is where data lives if added or changed later via Options.
