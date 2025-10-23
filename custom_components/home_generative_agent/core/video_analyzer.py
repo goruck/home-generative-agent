@@ -30,7 +30,11 @@ from ..const import (  # noqa: TID252
     CONF_NOTIFY_SERVICE,
     CONF_VIDEO_ANALYZER_MODE,
     REASONING_DELIMITERS,
+    SIGNAL_HGA_NEW_LATEST,
+    SIGNAL_HGA_RECOGNIZED,
     VIDEO_ANALYZER_FACE_CROP,
+    VIDEO_ANALYZER_LATEST_NAME,
+    VIDEO_ANALYZER_LATEST_SUBFOLDER,
     VIDEO_ANALYZER_MOTION_CAMERA_MAP,
     VIDEO_ANALYZER_PROMPT,
     VIDEO_ANALYZER_SCAN_INTERVAL,
@@ -43,6 +47,11 @@ from ..const import (  # noqa: TID252
 )
 from .utils import (
     discover_mobile_notify_service,
+    dispatch_on_loop,
+)
+from .video_helpers import (
+    latest_target,
+    publish_latest_atomic,
 )
 
 if TYPE_CHECKING:
@@ -70,7 +79,7 @@ class VideoAnalyzer:
         # Protect images referenced in notifications from immediate pruning
         self._notify_protected: dict[Path, float] = {}  # path -> expiry time
 
-    def _protect_notify_image(self, p: Path, ttl_sec: int = 1800) -> None:
+    def protect_notify_image(self, p: Path, ttl_sec: int = 1800) -> None:
         """Mark a snapshot as protected from pruning for ttl_sec seconds."""
         self._notify_protected[p] = monotonic() + ttl_sec
 
@@ -181,6 +190,15 @@ class VideoAnalyzer:
             retention.append(path)
             while len(retention) > VIDEO_ANALYZER_SNAPSHOTS_TO_KEEP:
                 old = retention.popleft()
+
+                # Do not delete published "latest" assets
+                if (
+                    old.name == VIDEO_ANALYZER_LATEST_NAME
+                    or old.parent.name == VIDEO_ANALYZER_LATEST_SUBFOLDER
+                ):
+                    retention.append(old)
+                    break
+
                 # Skip if protected by a recent notification
                 if self._is_protected(old):
                     retention.append(
@@ -193,7 +211,7 @@ class VideoAnalyzer:
                 except OSError as err:
                     LOGGER.warning("[%s] Failed to delete %s: %s", camera_id, old, err)
 
-    async def _recognize_faces(self, data: bytes, camera_id: str) -> list[str]:  # noqa: PLR0912, PLR0915
+    async def recognize_faces(self, data: bytes, camera_id: str) -> list[str]:  # noqa: PLR0912, PLR0915
         """Call face API to recognize faces in the snapshot image."""
         face_mode = self.entry.runtime_data.face_mode
         if not face_mode or face_mode == "disable":
@@ -338,7 +356,7 @@ class VideoAnalyzer:
             async with aiofiles.open(path, "rb") as file:
                 data = await file.read()
             async with async_timeout.timeout(30):
-                faces_in_frame = await self._recognize_faces(data, camera_id)
+                faces_in_frame = await self.recognize_faces(data, camera_id)
                 frame_description: str = await analyze_image(
                     self.entry.runtime_data.vision_model,
                     data,
@@ -357,6 +375,42 @@ class VideoAnalyzer:
         """Decide whether to notify and send if needed."""
         camera_name = camera_id.split(".")[-1]
         chosen = batch[len(batch) // 2]
+
+        dst = latest_target(Path(VIDEO_ANALYZER_SNAPSHOT_ROOT), camera_id)
+        await publish_latest_atomic(self.hass, chosen, dst)
+
+        # Fire bus event when a new latest is published
+        self.hass.bus.async_fire(
+            "hga_last_event_frame",
+            {
+                "camera_id": camera_id,
+                "summary": msg,
+                "path": str(chosen),
+                "latest": str(dst),
+            },
+        )
+
+        # Notify ImageEntity listeners (latest frame)
+        dispatch_on_loop(
+            self.hass,
+            SIGNAL_HGA_NEW_LATEST,
+            camera_id,
+            str(dst),
+            msg,
+            list(self._last_recognized.get(camera_id, [])),
+            dt_util.utcnow().isoformat(),
+        )
+
+        # Notify Sensor listeners (recognized names + summary + path)
+        dispatch_on_loop(
+            self.hass,
+            SIGNAL_HGA_RECOGNIZED,
+            camera_id,
+            list(self._last_recognized.get(camera_id, [])),
+            msg,
+            dt_util.utcnow().isoformat(),
+            str(dst),
+        )
 
         # If backlog is hot, let filesystem settle before notifying
         queue = self._snapshot_queues.get(camera_id)
@@ -382,10 +436,10 @@ class VideoAnalyzer:
             if await self._is_anomaly(camera_name, msg, first_snapshot):
                 LOGGER.debug("[%s] Video is an anomaly!", camera_id)
                 # Protect the chosen file from pruning for 30 minutes
-                self._protect_notify_image(chosen, ttl_sec=1800)
+                self.protect_notify_image(chosen, ttl_sec=1800)
                 await self._send_notification(msg, camera_name, notify_img)
         else:
-            self._protect_notify_image(chosen, ttl_sec=1800)
+            self.protect_notify_image(chosen, ttl_sec=1800)
             await self._send_notification(msg, camera_name, notify_img)
 
     async def _store_results(self, camera_id: str, batch: list[Path], msg: str) -> None:

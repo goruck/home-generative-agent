@@ -1,10 +1,18 @@
 {
   "domain": "home_generative_agent",
   "name": "Home Generative Agent",
-  "after_dependencies": ["assist_pipeline", "intent"],
-  "codeowners": ["@goruck"],
+  "after_dependencies": [
+    "assist_pipeline",
+    "intent"
+  ],
+  "codeowners": [
+    "@goruck"
+  ],
   "config_flow": true,
-  "dependencies": ["conversation", "recorder"],
+  "dependencies": [
+    "conversation",
+    "recorder"
+  ],
   "documentation": "https://github.com/goruck/home_generative_agent",
   "integration_type": "service",
   "iot_class": "cloud_polling",
@@ -25,5 +33,9 @@
     "transformers==4.57.1",
     "langchain-google-genai==3.0.0"
   ],
-  "version": "2.4.0"
+  "platforms": [
+    "image",
+    "sensor"
+  ],
+  "version": "2.4.1"
 }

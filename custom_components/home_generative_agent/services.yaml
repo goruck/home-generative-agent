@@ -34,3 +34,22 @@ confirm_enroll:
       example: "Eva"
       selector:
         text:
+
+save_and_analyze_snapshot:
+  name: Save & analyze snapshot
+  description: Capture a snapshot, run AI analysis, and publish the latest event for the selected cameras.
+  target:
+    entity:
+      domain: camera
+  fields:
+    protect_minutes:
+      name: Protect minutes
+      description: Protect the published latest file from pruning for this many minutes (if your analyzer respects this).
+      default: 30
+      selector:
+        number:
+          min: 0
+          max: 180
+          step: 1
+          unit_of_measurement: min
+          mode: box
