@@ -62,7 +62,7 @@ Configuration is done in the Home Assistant UI. You can enter in your model prov
 
 ## Image and Sensor Entities
 
-This section shows how to display the latest camera image, the AI-generated summary, and recognized people in Home Assistant using this integration’s image and sensor platforms.
+This section shows how to display the latest camera image, the AI-generated summary, and recognized people in Home Assistant or use in automations via the image and sensor platforms.
 
 ### Overview
  
@@ -87,7 +87,7 @@ A service is provided to capture a fresh snapshot, analyze it, and publish it as
 - Service: `home_generative_agent.save_and_analyze_snapshot`
    - target: one or more camera.* entities
    - fields:
-      - protect_minutes (optional, default: 30) — protect the new file from pruning (if your analyzer respects this)
+      - protect_minutes (optional, default: 30) — protect the new file from pruning
 
 Example -> Developer Tools -> Services:
 
