@@ -17,7 +17,7 @@ These are some of the features currently supported:
 - Short- and long-term memory using semantic search.
 - Automatic summarization of home state to manage LLM context length.
 
-This integration will set up the `conversation` platform, a convenient HA component allowing users to converse directly with the Home Generative Assistant.
+This integration will set up the `conversation` platform, allowing users to converse directly with the Home Generative Assistant, and the `image` and `sensor` platforms which create entities to display the latest camera image, the AI-generated summary, and recognized people in HA's UI or they can be used to create automations.
 
 ## Installation
 
@@ -60,9 +60,195 @@ This integration will set up the `conversation` platform, a convenient HA compon
 ## Configuration
 Configuration is done in the Home Assistant UI. You can enter in your model provider API keys and your Ollama server URL during initial setup through the Home Assistant UI or later in the integration's options settings. You also configure the Postgres database URI during setup or later in options, but note that the integration trusts the [PostgreSQL with pgvector](https://github.com/goruck/addon-postgres-pgvector/tree/main/postgres_pgvector) add-on, so a password in the URI string is optional. The URL of the optonal remote face recognition service can be configured at setup or via options as well.
 
-## Contributions are welcome!
+## Image and Sensor Entities
 
-If you want to contribute to this, please read the [Contribution guidelines](CONTRIBUTING.md)
+This section shows how to display the latest camera image, the AI-generated summary, and recognized people in Home Assistant using this integration’s image and sensor platforms.
+
+### Overview
+ 
+   * Image entities (1 per camera): `image.<camera_slug>_last_event`. Shows the most recent snapshot published by the analyzer/service.
+
+   * Sensor entities (1 per camera): `sensor.<camera_slug>_recognized_people`
+   
+   * Attributes include:
+      * recognized_people: names from face recognition
+      * summary: AI description of the last frame
+      * latest_path: filesystem path of the published image
+      * count, last_event, camera_id: aux info
+
+The analyzer publishes snapshots automatically on motion/recording, and you can also invoke a service to capture and analyze now. For this to work, HA needs to have write access to your snapshots location (default: `/media/snapshots`) and your camera entities must exist in HA (`camera.*`).
+
+In the examples below, replace the entity names with the actuals from your HA installation.
+
+### Publish a Latest Event (On Demand)
+
+A service is provided to capture a fresh snapshot, analyze it, and publish it as the latest event.
+
+- Service: `home_generative_agent.save_and_analyze_snapshot`
+   - target: one or more camera.* entities
+   - fields:
+      - protect_minutes (optional, default: 30) — protect the new file from pruning (if your analyzer respects this)
+
+Example -> Developer Tools -> Services:
+
+```yaml
+service: home_generative_agent.save_and_analyze_snapshot
+target:
+  entity_id:
+    - camera.frontgate
+    - camera.backyard
+data:
+  protect_minutes: 30
+```
+
+Example Button Card in UI:
+
+```yaml
+type: button
+name: Refresh Frontgate
+icon: mdi:camera
+tap_action:
+  action: call-service
+  service: home_generative_agent.save_and_analyze_snapshot
+  target:
+    entity_id: camera.frontgate
+```
+
+### Dashboards (Lovelace) — Show Image + Summary + Names
+
+* Simple Image and Markdown (two cards per camera)
+
+```yaml
+type: grid
+columns: 2
+square: false
+cards:
+  - type: vertical-stack
+    cards:
+      - type: picture-entity
+        entity: image.frontgate_last_event
+        show_name: false
+        show_state: false
+      - type: markdown
+        content: |
+          **Summary**
+          {{ state_attr('image.frontgate_last_event', 'summary') or '—' }}
+
+          **Recognized**
+          {% set names = state_attr('image.frontgate_last_event', 'recognized_people') or [] %}
+          {{ names | join(', ') if names else 'None' }}
+```
+
+Duplicate the stack for each camera’s `image.<slug>_last_event`.
+
+* All in one cameras view
+
+```yaml
+title: Cameras
+path: cameras
+cards:
+  - type: grid
+    columns: 2
+    square: false
+    cards:
+      # Repeat this block for each camera slug
+      - type: vertical-stack
+        cards:
+          - type: picture-entity
+            entity: image.frontgate_last_event
+            show_name: false
+            show_state: false
+          - type: markdown
+            content: |
+              **Summary**
+              {{ state_attr('image.frontgate_last_event', 'summary') or '—' }}
+
+              **Recognized**
+              {% set names = state_attr('image.frontgate_last_event', 'recognized_people') or [] %}
+              {{ names | join(', ') if names else 'None' }}
+```
+
+* Overlay: Place Text on the Image
+
+```yaml
+type: picture-elements
+image: /api/image_proxy/image.frontgate_last_event
+elements:
+  - type: markdown
+    content: >
+      {% set names = state_attr('image.frontgate_last_event', 'recognized_people') or [] %}
+      **{{ names | join(', ') if names else 'None' }}**
+    style:
+      top: 6%
+      left: 50%
+      width: 92%
+      color: white
+      text-shadow: 0 0 6px rgba(0,0,0,0.9)
+      transform: translateX(-50%)
+  - type: state-label
+    entity: image.frontgate_last_event
+    attribute: summary
+    style:
+      bottom: 6%
+      left: 50%
+      width: 92%
+      color: white
+      text-shadow: 0 0 6px rgba(0,0,0,0.9)
+      transform: translateX(-50%)
+```
+
+### Automations
+
+Notify when people are recognized on any camera:
+
+```yaml
+alias: Camera recognized people
+mode: parallel
+trigger:
+  - platform: state
+    entity_id:
+      - sensor.frontgate_recognized_people
+      - sensor.playroomdoor_recognized_people
+      - sensor.backyard_recognized_people
+condition: []
+action:
+  - variables:
+      ent: "{{ trigger.entity_id }}"
+      cam: "{{ state_attr(ent, 'camera_id') }}"
+      names: "{{ state_attr(ent, 'recognized_people') or [] }}"
+      summary: "{{ state_attr(ent, 'summary') or 'An event occurred.' }}"
+      image_entity: "image.{{ cam.split('.')[-1] }}_last_event"
+  - service: notify.mobile_app_phone
+    data:
+      title: "Camera: {{ cam }}"
+      message: >
+        {{ summary }}
+        {% if names %} Recognized: {{ names | join(', ') }}.{% endif %}
+      data:
+        image: >
+          {{ state_attr(image_entity, 'entity_picture') }}
+```
+
+### Events and Signals
+
+* Event `hga_last_event_frame` is fired whenever a new “latest” frame is published.
+
+```json
+{
+  "camera_id": "camera.frontgate",
+  "summary": "A person approaches the gate...",
+  "path": "/media/snapshots/camera_frontgate/snapshot_YYYYMMDD_HHMMSS.jpg",
+  "latest": "/media/snapshots/camera_frontgate/_latest/latest.jpg"
+}
+```
+
+* Dispatcher signals (internal):
+
+  * `SIGNAL_HGA_NEW_LATEST` -> updates image.*_last_event
+
+  * `SIGNAL_HGA_RECOGNIZED` -> updates sensor.*_recognized_people
+
+Most users won’t need to consume these directly; the platform entities update automatically.
 
 ## Architecture and Design
 
@@ -218,6 +404,10 @@ You can enable proactive video scene analysis from cameras visible to Home Assis
 The image below is an example of a notification sent to the mobile app.
 
 ![Alt text](./assets/video-analysis-screenshot.jpeg)
+
+## Contributions are welcome!
+
+If you want to contribute to this, please read the [Contribution guidelines](CONTRIBUTING.md)
 
 ***
 
