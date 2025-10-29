@@ -94,7 +94,7 @@ VLM_TOP_P = 1
 VLM_NUM_PREDICT = 4096
 VLM_NUM_CTX = 16384
 VLM_REPEAT_PENALTY = 1.05
-VLM_OLLAMA_SUPPORTED = Literal["qwen2.5vl:7b"]
+VLM_OLLAMA_SUPPORTED = Literal["qwen2.5vl:7b", "qwen3-vl:8b"]
 VLM_OPENAI_SUPPORTED = Literal["gpt-5-nano", "gpt-4.1", "gpt-4.1-nano"]
 VLM_GEMINI_SUPPORTED = Literal[
     "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"
@@ -104,7 +104,7 @@ CONF_VLM_PROVIDER = "vlm_provider"
 RECOMMENDED_VLM_PROVIDER: Literal["openai", "ollama", "gemini"] = "ollama"
 
 CONF_OLLAMA_VLM = "ollama_vlm"
-RECOMMENDED_OLLAMA_VLM: VLM_OLLAMA_SUPPORTED = "qwen2.5vl:7b"
+RECOMMENDED_OLLAMA_VLM: VLM_OLLAMA_SUPPORTED = "qwen3-vl:8b"
 
 CONF_OPENAI_VLM = "openai_vlm"
 RECOMMENDED_OPENAI_VLM: VLM_OPENAI_SUPPORTED = "gpt-5-nano"
