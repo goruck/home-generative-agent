@@ -299,6 +299,7 @@ def _guess_ollama_reasoning(model: str) -> tuple[bool, ReasoningValue]:
         (True, OLLAMA_GPT_EFFORT)  for gpt-oss models
         (True, True)               for boolean-style models
         (False, False)             for others
+
     """
     m = model.lower()
 
