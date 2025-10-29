@@ -291,23 +291,30 @@ type ReasoningValue = bool | Literal["low", "medium", "high"]
 
 
 @lru_cache(maxsize=128)
-def _guess_ollama_reasoning(
-    model: str,
-) -> tuple[bool, ReasoningValue]:
+def _guess_ollama_reasoning(model: str) -> tuple[bool, ReasoningValue]:
     """
     Zero-network heuristic to decide if a model probably supports reasoning.
 
     Returns:
         (True, OLLAMA_GPT_EFFORT)  for gpt-oss models
-        (True, True)   for boolean-style models
-        (False, False) for others
-
+        (True, True)               for boolean-style models
+        (False, False)             for others
     """
     m = model.lower()
+
+    # Normalize: drop digest, tag, and any registry/user prefix
+    base = m.split("@", 1)[0].split(":", 1)[0].rsplit("/", 1)[-1]
+
+    # Special-case: qwen3* can reason EXCEPT qwen3-vl*
+    if base.startswith("qwen3") and not base.startswith("qwen3-vl"):
+        return True, True
+
     if OLLAMA_OSS_TAG in m:
         return True, OLLAMA_GPT_EFFORT
+
     if any(tag in m for tag in OLLAMA_BOOL_HINT_TAGS):
         return True, True
+
     return False, False
 
 
