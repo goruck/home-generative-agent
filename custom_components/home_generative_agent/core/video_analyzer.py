@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import io
 import logging
 import re
 import statistics
@@ -52,8 +51,17 @@ from .utils import (
     dispatch_on_loop,
 )
 from .video_helpers import (
+    crop_resize_encode_jpeg,
+    dedupe_desc,
+    dhash_bytes,
+    ensure_dir,
+    epoch_from_path,
+    hamming64,
     latest_target,
+    load_image_rgb,
+    order_batch,
     publish_latest_atomic,
+    put_with_backpressure,
 )
 
 if TYPE_CHECKING:
@@ -68,15 +76,14 @@ LOGGER = logging.getLogger(__name__)
 # --- Video analyzer tuning constants ---
 _MAX_BATCH: Final[int] = 5  # frames per batch
 _QUEUE_MAXSIZE: Final[int] = 50  # per-camera backlog cap
-_FRAME_DEADLINE_SEC: Final[int] = 240  # skip frames older than this
+_FRAME_DEADLINE_SEC: Final[int] = 360  # skip frames older than this
 _SUMMARY_TIMEOUT_SEC: Final[int] = 60  # was 35
 _FACE_TIMEOUT_SEC: Final[int] = 10  # was 10 (keep)
-_VISION_TIMEOUT_SEC: Final[int] = 60  # was 30
+_VISION_TIMEOUT_SEC: Final[int] = 90  # was 30
 _GLOBAL_VISION_CONCURRENCY: Final[int] = 3  # tune per hardware
 
 # --- Uniqueness gate tuning ---
 _UNIQUENESS_ENABLED: Final[bool] = False
-_UNIQUENESS_HASH_SIZE: Final[int] = 8  # dHash grid size (8 -> 64-bit)
 _UNIQUENESS_HAMMING_MAX: Final[int] = 4  # <= this => "too similar" (tune 4-10)
 _UNIQUENESS_HISTORY: Final[int] = 2  # compare against last N accepted hashes
 _UNIQUENESS_HEARTBEAT_SEC: Final[int] = 10  # always allow a frame at least this often
@@ -86,53 +93,6 @@ _METRICS_REPORT_INTERVAL_SEC: Final[int] = 3600  # once per hour
 _METRICS_LAT_HISTORY: Final[int] = 512  # keep up to 512 lat samples per camera
 
 _global_vision_sem = asyncio.Semaphore(_GLOBAL_VISION_CONCURRENCY)
-
-
-def _dedupe_desc(descs: list[dict[str, list[str]]]) -> list[dict[str, list[str]]]:
-    """Collapse near-duplicate frame texts to reduce prompt size."""
-    out: list[dict[str, list[str]]] = []
-    last_norm: str | None = None
-    for d in descs:
-        # dict has single key
-        text = next(iter(d.keys()))
-        norm = re.sub(r"\s+", " ", text.lower()).strip()
-        if norm != last_norm:
-            out.append(d)
-            last_norm = norm
-    return out
-
-
-def _hamming64(a: int, b: int) -> int:
-    """Hamming distance for up to 64-bit integers."""
-    x = (a ^ b) & ((1 << 64) - 1)
-    # builtin bit_count is fast in Py3.8+
-    return x.bit_count()
-
-
-def _dhash_bytes(buf: bytes, size: int = _UNIQUENESS_HASH_SIZE) -> int:
-    """
-    Compute 64-bit (size=8) or larger dHash from JPEG/PNG bytes using PIL only.
-
-    dHash compares adjacent pixels horizontally.
-    """
-    with Image.open(io.BytesIO(buf)) as img:
-        im = img.convert("L")  # grayscale
-        # Resize to (size+1, size) to have adjacent pairs horizontally
-        im = im.resize((size + 1, size), Image.Resampling.LANCZOS)
-        pixels = im.getdata()
-        # Build bitstring by comparing horizontally
-        bits = 0
-        bitpos = 0
-        width = size + 1
-        for y in range(size):
-            row_off = y * width
-            for x in range(size):
-                left = pixels[row_off + x]
-                right = pixels[row_off + x + 1]
-                if left > right:  # set bit if left > right
-                    bits |= 1 << bitpos
-                bitpos += 1
-        return bits  # up to size*size bits; with size=8 it's 64-bit
 
 
 @dataclass
@@ -268,16 +228,6 @@ class VideoAnalyzer:
             self._active_queue_tasks[camera_id] = task
         return self._snapshot_queues[camera_id]
 
-    def _epoch_from_path(self, path: Path) -> int:
-        s = path.stem.removeprefix("snapshot_")  # "YYYYMMDD_HHMMSS"
-        y, mo, d = int(s[0:4]), int(s[4:6]), int(s[6:8])
-        hh, mm, ss = int(s[9:11]), int(s[11:13]), int(s[13:15])
-
-        # Filename was created with dt_util.as_local(...), so attach local tz
-        dt_local = datetime(y, mo, d, hh, mm, ss, tzinfo=dt_util.DEFAULT_TIME_ZONE)
-        # Return UTC epoch seconds
-        return int(dt_util.as_timestamp(dt_local))
-
     async def _get_batch(
         self,
         queue: asyncio.Queue[Path],
@@ -301,11 +251,6 @@ class VideoAnalyzer:
         )
         return batch
 
-    def _order_batch(self, batch: list[Path]) -> list[tuple[Path, int]]:
-        return sorted(
-            ((p, self._epoch_from_path(p)) for p in batch), key=lambda x: x[1]
-        )
-
     async def _process_batch(
         self,
         camera_id: str,
@@ -327,7 +272,7 @@ class VideoAnalyzer:
             prev_text = frame_desc
 
         # dedupe near-identical, then cap to last 8
-        frame_descriptions = _dedupe_desc(frame_descriptions)[-8:]
+        frame_descriptions = dedupe_desc(frame_descriptions)[-8:]
 
         recognized: list[str] = sorted(
             {
@@ -379,7 +324,7 @@ class VideoAnalyzer:
         try:
             while True:
                 batch = await self._get_batch(queue, camera_id)
-                ordered = self._order_batch(batch)
+                ordered = order_batch(batch)
 
                 if ordered:
                     first_epoch = ordered[0][1]
@@ -542,35 +487,9 @@ class VideoAnalyzer:
         if not faces:
             return ["Indeterminate"]
 
-        # --- helper: offload Pillow + filesystem sync work to executor ---
-        def _load_img(buf: bytes) -> Image.Image:
-            return Image.open(io.BytesIO(buf)).convert("RGB")
-
-        def _ensure_dir(p: Path) -> None:
-            p.mkdir(parents=True, exist_ok=True)
-
-        def _crop_resize_encode(
-            img: Image.Image, bbox: list[int], pad: float, min_px: int
-        ) -> bytes | None:
-            x1, y1, x2, y2 = map(int, bbox)
-            w, h = x2 - x1, y2 - y1
-            if w <= 0 or h <= 0:
-                return None
-            dx, dy = int(w * pad), int(h * pad)
-            x1, y1 = max(0, x1 - dx), max(0, y1 - dy)
-            x2, y2 = min(img.width, x2 + dx), min(img.height, y2 + dy)
-            if x2 <= x1 or y2 <= y1:
-                return None
-            crop = img.crop((x1, y1, x2, y2))
-            if crop.width < min_px or crop.height < min_px:
-                crop = crop.resize((min_px, min_px), resample=Image.Resampling.LANCZOS)
-            out = io.BytesIO()
-            crop.save(out, format="JPEG", quality=95, subsampling=0)
-            return out.getvalue()
-
         # --- decode snapshot off the loop (Pillow is sync) ---
         try:
-            img = await self.hass.async_add_executor_job(_load_img, data)
+            img = await self.hass.async_add_executor_job(load_image_rgb, data)
         except asyncio.CancelledError:
             raise
         except (Image.UnidentifiedImageError, OSError) as err:
@@ -587,7 +506,7 @@ class VideoAnalyzer:
 
         # ensure directory off the loop
         try:
-            await self.hass.async_add_executor_job(_ensure_dir, face_debug_root)
+            await self.hass.async_add_executor_job(ensure_dir, face_debug_root)
         except OSError as err:
             LOGGER.debug("Could not ensure face debug dir: %s", err)
 
@@ -609,7 +528,7 @@ class VideoAnalyzer:
                 try:
                     # crop/resize/encode off the loop
                     jpeg_bytes = await self.hass.async_add_executor_job(
-                        _crop_resize_encode, img, bbox, 0.3, small_crop_threshold
+                        crop_resize_encode_jpeg, img, bbox, 0.3, small_crop_threshold
                     )
                     if not jpeg_bytes:
                         continue
@@ -652,7 +571,7 @@ class VideoAnalyzer:
         """Process a single snapshot: recognize faces and describe the frame."""
         # freshness gate
         try:
-            epoch = self._epoch_from_path(path)
+            epoch = epoch_from_path(path)
         except (OSError, FileNotFoundError, ValueError):
             epoch = 0
         age = dt_util.utcnow().timestamp() - float(epoch)
@@ -798,7 +717,7 @@ class VideoAnalyzer:
 
         # Sort by actual timestamp (handles out-of-order filenames)
         ordered: list[tuple[Path, int]] = sorted(
-            ((path, self._epoch_from_path(path)) for path in batch),
+            ((path, epoch_from_path(path)) for path in batch),
             key=lambda x: x[1],
         )
         if not ordered:
@@ -858,7 +777,7 @@ class VideoAnalyzer:
 
         # Hash compute is fast; do it inline (PIL decode already occurs)
         try:
-            dh = _dhash_bytes(data, _UNIQUENESS_HASH_SIZE)
+            dh = dhash_bytes(data)
         except (Image.UnidentifiedImageError, OSError, ValueError):
             return True  # be permissive on failures
 
@@ -872,7 +791,7 @@ class VideoAnalyzer:
             return True
 
         # Compute min Hamming distance to recent accepted frames
-        min_h = min(_hamming64(dh, prev) for prev in hist)
+        min_h = min(hamming64(dh, prev) for prev in hist)
 
         if min_h <= _UNIQUENESS_HAMMING_MAX and not heartbeat_due:
             # Too similar and no heartbeat due → skip
@@ -882,15 +801,6 @@ class VideoAnalyzer:
         hist.append(dh)
         self._last_unique_ts[camera_id] = now
         return True
-
-    async def _put_with_backpressure(self, q: asyncio.Queue[Path], p: Path) -> None:
-        """Put item into queue, dropping oldest if full."""
-        if q.full():
-            with contextlib.suppress(asyncio.QueueEmpty):
-                _ = q.get_nowait()
-                q.task_done()
-            LOGGER.debug("Queue full; dropped oldest to enqueue %s", p)
-        await q.put(p)
 
     async def _take_single_snapshot(self, camera_id: str, now: datetime) -> Path | None:
         snapshot_dir = await self._get_snapshot_dir(camera_id)
@@ -948,7 +858,7 @@ class VideoAnalyzer:
                 )
                 return None
 
-            await self._put_with_backpressure(queue, path)
+            await put_with_backpressure(queue, path)
             self._m_inc(camera_id, "enqueued")
             LOGGER.debug(
                 "[%s] Enqueue t=%s %s", camera_id, dt_util.utcnow().isoformat(), path
