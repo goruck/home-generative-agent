@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-import calendar
+import contextlib
 import io
 import logging
 import re
-from collections import deque
+import statistics
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from time import monotonic
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 from urllib.parse import urljoin
 
 import aiofiles
@@ -55,12 +57,96 @@ from .video_helpers import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
     from homeassistant.core import Event, HomeAssistant
 
     from .runtime import HGAConfigEntry
 
-
 LOGGER = logging.getLogger(__name__)
+
+# --- Video analyzer tuning constants ---
+_MAX_BATCH: Final[int] = 5  # frames per batch
+_QUEUE_MAXSIZE: Final[int] = 50  # per-camera backlog cap
+_FRAME_DEADLINE_SEC: Final[int] = 240  # skip frames older than this
+_SUMMARY_TIMEOUT_SEC: Final[int] = 60  # was 35
+_FACE_TIMEOUT_SEC: Final[int] = 10  # was 10 (keep)
+_VISION_TIMEOUT_SEC: Final[int] = 60  # was 30
+_GLOBAL_VISION_CONCURRENCY: Final[int] = 3  # tune per hardware
+
+# --- Uniqueness gate tuning ---
+_UNIQUENESS_ENABLED: Final[bool] = False
+_UNIQUENESS_HASH_SIZE: Final[int] = 8  # dHash grid size (8 -> 64-bit)
+_UNIQUENESS_HAMMING_MAX: Final[int] = 4  # <= this => "too similar" (tune 4-10)
+_UNIQUENESS_HISTORY: Final[int] = 2  # compare against last N accepted hashes
+_UNIQUENESS_HEARTBEAT_SEC: Final[int] = 10  # always allow a frame at least this often
+
+# --- Metrics reporting ---
+_METRICS_REPORT_INTERVAL_SEC: Final[int] = 3600  # once per hour
+_METRICS_LAT_HISTORY: Final[int] = 512  # keep up to 512 lat samples per camera
+
+_global_vision_sem = asyncio.Semaphore(_GLOBAL_VISION_CONCURRENCY)
+
+
+def _dedupe_desc(descs: list[dict[str, list[str]]]) -> list[dict[str, list[str]]]:
+    """Collapse near-duplicate frame texts to reduce prompt size."""
+    out: list[dict[str, list[str]]] = []
+    last_norm: str | None = None
+    for d in descs:
+        # dict has single key
+        text = next(iter(d.keys()))
+        norm = re.sub(r"\s+", " ", text.lower()).strip()
+        if norm != last_norm:
+            out.append(d)
+            last_norm = norm
+    return out
+
+
+def _hamming64(a: int, b: int) -> int:
+    """Hamming distance for up to 64-bit integers."""
+    x = (a ^ b) & ((1 << 64) - 1)
+    # builtin bit_count is fast in Py3.8+
+    return x.bit_count()
+
+
+def _dhash_bytes(buf: bytes, size: int = _UNIQUENESS_HASH_SIZE) -> int:
+    """
+    Compute 64-bit (size=8) or larger dHash from JPEG/PNG bytes using PIL only.
+
+    dHash compares adjacent pixels horizontally.
+    """
+    with Image.open(io.BytesIO(buf)) as img:
+        im = img.convert("L")  # grayscale
+        # Resize to (size+1, size) to have adjacent pairs horizontally
+        im = im.resize((size + 1, size), Image.Resampling.LANCZOS)
+        pixels = im.getdata()
+        # Build bitstring by comparing horizontally
+        bits = 0
+        bitpos = 0
+        width = size + 1
+        for y in range(size):
+            row_off = y * width
+            for x in range(size):
+                left = pixels[row_off + x]
+                right = pixels[row_off + x + 1]
+                if left > right:  # set bit if left > right
+                    bits |= 1 << bitpos
+                bitpos += 1
+        return bits  # up to size*size bits; with size=8 it's 64-bit
+
+
+@dataclass
+class _Metrics:
+    captured: int = 0
+    enqueued: int = 0
+    skipped_duplicate: int = 0
+    dropped_stale: int = 0
+    analyzed: int = 0
+    timeouts: int = 0
+    # PEP 585: deque is subscriptable; keep in a field to avoid shared default
+    lat_ms: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_METRICS_LAT_HISTORY)
+    )
 
 
 class VideoAnalyzer:
@@ -78,6 +164,88 @@ class VideoAnalyzer:
         self._last_recognized: dict[str, list[str]] = {}
         # Protect images referenced in notifications from immediate pruning
         self._notify_protected: dict[Path, float] = {}  # path -> expiry time
+        self._httpx_client: httpx.AsyncClient | None = None
+        self._last_hashes: dict[
+            str, deque[int]
+        ] = {}  # camera_id -> deque of recent dHashes
+        self._last_unique_ts: dict[
+            str, float
+        ] = {}  # camera_id -> monotonic() of last accepted
+        # Per-camera counters and latency samples
+        self._metrics: dict[str, _Metrics] = defaultdict(_Metrics)
+        self._metrics_job_cancel: Callable[[], None] | None = (
+            None  # hourly report handle
+        )
+
+    def _pctl(self, values: Iterable[float], q: float) -> float:
+        """Nearest-rank percentile for a finite iterable."""
+        xs = list(values)
+        if not xs:
+            return 0.0
+        xs.sort()
+        if len(xs) == 1:
+            return float(xs[0])
+        # clamp rank to [0, len(xs)-1]
+        k = max(0, min(len(xs) - 1, round((q / 100.0) * (len(xs) - 1))))
+        return float(xs[k])
+
+    def _m_inc(self, camera_id: str, key: str, n: int = 1) -> None:
+        """Increment a metrics counter by key."""
+        m = self._metrics[camera_id]
+        if key == "captured":
+            m.captured += n
+        elif key == "enqueued":
+            m.enqueued += n
+        elif key == "skipped_duplicate":
+            m.skipped_duplicate += n
+        elif key == "dropped_stale":
+            m.dropped_stale += n
+        elif key == "analyzed":
+            m.analyzed += n
+        elif key == "timeouts":
+            m.timeouts += n
+        else:
+            # ignore unknown keys silently to avoid noisy logs in prod
+            return
+
+    def _m_add_latency(self, camera_id: str, ms: float) -> None:
+        """Record a single latency sample in milliseconds."""
+        self._metrics[camera_id].lat_ms.append(float(ms))
+
+    async def _metrics_flush_report(self, _now: datetime) -> None:
+        """Aggregate and log per-camera metrics, then reset counters and samples."""
+        for cam, m in self._metrics.items():
+            lat_list = list(m.lat_ms)
+            avg_ms = statistics.fmean(lat_list) if lat_list else 0.0
+            p95_ms = self._pctl(lat_list, 95.0) if lat_list else 0.0
+
+            msg = (
+                "[%s] Metrics (last interval): "
+                "captured=%d enqueued=%d skipped_duplicate=%d "
+                "dropped_stale=%d analyzed=%d timeouts=%d "
+                "avg_latency_ms=%.1f p95_latency_ms=%.1f"
+            )
+            LOGGER.info(
+                msg,
+                cam,
+                m.captured,
+                m.enqueued,
+                m.skipped_duplicate,
+                m.dropped_stale,
+                m.analyzed,
+                m.timeouts,
+                avg_ms,
+                p95_ms,
+            )
+
+            # reset counters and samples
+            m.captured = 0
+            m.enqueued = 0
+            m.skipped_duplicate = 0
+            m.dropped_stale = 0
+            m.analyzed = 0
+            m.timeouts = 0
+            m.lat_ms.clear()
 
     def protect_notify_image(self, p: Path, ttl_sec: int = 1800) -> None:
         """Mark a snapshot as protected from pruning for ttl_sec seconds."""
@@ -94,11 +262,138 @@ class VideoAnalyzer:
 
     def _get_snapshot_queue(self, camera_id: str) -> asyncio.Queue[Path]:
         if camera_id not in self._snapshot_queues:
-            queue: asyncio.Queue[Path] = asyncio.Queue()
+            queue: asyncio.Queue[Path] = asyncio.Queue(maxsize=_QUEUE_MAXSIZE)
             self._snapshot_queues[camera_id] = queue
-            task = self.hass.async_create_task(self._process_snapshot_queue(camera_id))
+            task = self.hass.async_create_task(self._snapshot_worker(camera_id))
             self._active_queue_tasks[camera_id] = task
         return self._snapshot_queues[camera_id]
+
+    def _epoch_from_path(self, path: Path) -> int:
+        s = path.stem.removeprefix("snapshot_")  # "YYYYMMDD_HHMMSS"
+        y, mo, d = int(s[0:4]), int(s[4:6]), int(s[6:8])
+        hh, mm, ss = int(s[9:11]), int(s[11:13]), int(s[13:15])
+
+        # Filename was created with dt_util.as_local(...), so attach local tz
+        dt_local = datetime(y, mo, d, hh, mm, ss, tzinfo=dt_util.DEFAULT_TIME_ZONE)
+        # Return UTC epoch seconds
+        return int(dt_util.as_timestamp(dt_local))
+
+    async def _get_batch(
+        self,
+        queue: asyncio.Queue[Path],
+        camera_id: str,
+        *,
+        max_batch: int = _MAX_BATCH,
+    ) -> list[Path]:
+        first: Path = await queue.get()
+        batch: list[Path] = [first]
+
+        n: int = max(max_batch - 1, 0)
+        with contextlib.suppress(asyncio.QueueEmpty):
+            batch.extend(queue.get_nowait() for _ in range(n))
+
+        LOGGER.debug(
+            "[%s] Start t=%s batch=%d qsize=%d",
+            camera_id,
+            dt_util.utcnow().isoformat(),
+            len(batch),
+            queue.qsize(),
+        )
+        return batch
+
+    def _order_batch(self, batch: list[Path]) -> list[tuple[Path, int]]:
+        return sorted(
+            ((p, self._epoch_from_path(p)) for p in batch), key=lambda x: x[1]
+        )
+
+    async def _process_batch(
+        self,
+        camera_id: str,
+        ordered: list[tuple[Path, int]],
+    ) -> tuple[list[dict[str, list[str]]], list[str]]:
+        if not ordered:
+            return [], []
+
+        t0: int = ordered[0][1]
+        frame_descriptions: list[dict[str, list[str]]] = []
+        prev_text: str | None = None
+
+        for path, ts in ordered:
+            fd = await self._process_snapshot(path, camera_id, prev_text=prev_text)
+            if not fd:
+                continue
+            frame_desc, faces = next(iter(fd.items()))
+            frame_descriptions.append({f"t+{ts - t0}s. {frame_desc}": faces})
+            prev_text = frame_desc
+
+        # dedupe near-identical, then cap to last 8
+        frame_descriptions = _dedupe_desc(frame_descriptions)[-8:]
+
+        recognized: list[str] = sorted(
+            {
+                p
+                for d in frame_descriptions
+                for v in d.values()
+                for p in v
+                if p != "None"
+            }
+        )
+        return frame_descriptions, recognized
+
+    async def _summarize(
+        self, camera_id: str, frame_descriptions: list[dict[str, list[str]]]
+    ) -> str | None:
+        if not frame_descriptions:
+            return None
+        try:
+            async with async_timeout.timeout(_SUMMARY_TIMEOUT_SEC):
+                msg: str = await self._generate_summary(frame_descriptions)
+        except TimeoutError as exc:
+            LOGGER.warning("[%s] Summary timed out: %s", camera_id, exc)
+            return None
+        else:
+            LOGGER.info("[%s] Video analysis: %s", camera_id, msg)
+            return msg
+
+    async def _finalize(self, camera_id: str, batch: list[Path], msg: str) -> None:
+        await self._handle_notification(camera_id, msg, batch)
+        await self._store_results(camera_id, batch, msg)
+        await self._prune_old_snapshots(camera_id, batch)
+
+    async def _analyze_and_finalize(
+        self, camera_id: str, ordered: list[tuple[Path, int]]
+    ) -> None:
+        frame_descs, recognized = await self._process_batch(camera_id, ordered)
+        if not frame_descs:
+            return
+        self._last_recognized[camera_id] = recognized
+        msg = await self._summarize(camera_id, frame_descs)
+        if not msg:
+            return
+        await self._finalize(camera_id, [p for p, _ in ordered], msg)
+
+    async def _snapshot_worker(self, camera_id: str) -> None:
+        """Consume and process snapshots for one camera."""
+        queue = self._snapshot_queues[camera_id]
+        LOGGER.debug("[%s] Worker started", camera_id)
+        try:
+            while True:
+                batch = await self._get_batch(queue, camera_id)
+                ordered = self._order_batch(batch)
+
+                if ordered:
+                    first_epoch = ordered[0][1]
+                    age = int(dt_util.utcnow().timestamp() - first_epoch)
+                    LOGGER.debug(
+                        "[%s] Dequeue age=%ds qsize=%d", camera_id, age, queue.qsize()
+                    )
+
+                await self._analyze_and_finalize(camera_id, ordered)
+        except asyncio.CancelledError:
+            LOGGER.debug("[%s] Worker cancelled", camera_id)
+            raise
+        except Exception:
+            LOGGER.exception("[%s] Worker crashed", camera_id)
 
     async def _send_notification(
         self, msg: str, camera_name: str, notify_img_path: Path
@@ -218,16 +513,19 @@ class VideoAnalyzer:
             return []
 
         base_url = self.entry.runtime_data.face_api_url
+        client = self._httpx_client
+        if client is None:
+            # fallback if start() wasn't called yet
+            client = httpx.AsyncClient(timeout=_FACE_TIMEOUT_SEC)
 
-        # --- call face API with timeout & specific exception handling ---
+        # Call face API with timeout & specific exception handling
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.post(
-                    urljoin(base_url.rstrip("/") + "/", "analyze"),
-                    files={"file": ("snapshot.jpg", data, "image/jpeg")},
-                )
-                resp.raise_for_status()
-                face_res = resp.json()
+            resp = await client.post(
+                urljoin(base_url.rstrip("/") + "/", "analyze"),
+                files={"file": ("snapshot.jpg", data, "image/jpeg")},
+            )
+            resp.raise_for_status()
+            face_res = resp.json()
         except asyncio.CancelledError:
             raise
         except httpx.HTTPStatusError as err:
@@ -352,21 +650,57 @@ class VideoAnalyzer:
         self, path: Path, camera_id: str, prev_text: str | None = None
     ) -> dict[str, list[str]]:
         """Process a single snapshot: recognize faces and describe the frame."""
+        # freshness gate
+        try:
+            epoch = self._epoch_from_path(path)
+        except (OSError, FileNotFoundError, ValueError):
+            epoch = 0
+        age = dt_util.utcnow().timestamp() - float(epoch)
+        if age > _FRAME_DEADLINE_SEC:
+            self._m_inc(camera_id, "dropped_stale")
+            LOGGER.debug(
+                "[%s] Skipping stale snapshot (%ds): %s", camera_id, int(age), path
+            )
+            return {}
+
+        start_ns = monotonic()
         try:
             async with aiofiles.open(path, "rb") as file:
                 data = await file.read()
-            async with async_timeout.timeout(30):
-                faces_in_frame = await self.recognize_faces(data, camera_id)
-                frame_description: str = await analyze_image(
-                    self.entry.runtime_data.vision_model,
-                    data,
-                    None,  # detection_keywords
-                    prev_text=prev_text,  # previous description (text only)
+
+            # Face recognition: short timeout
+            try:
+                async with async_timeout.timeout(_FACE_TIMEOUT_SEC):
+                    faces_in_frame = await self.recognize_faces(data, camera_id)
+            except TimeoutError:
+                LOGGER.warning(
+                    "[%s] Face recognition timed out for %s", camera_id, path
                 )
-        except (FileNotFoundError, TimeoutError, HomeAssistantError) as exc:
+                faces_in_frame = []
+
+            # Vision: global concurrency + short timeout
+            try:
+                async with (
+                    _global_vision_sem,
+                    async_timeout.timeout(_VISION_TIMEOUT_SEC),
+                ):
+                    frame_description = await analyze_image(
+                        self.entry.runtime_data.vision_model,
+                        data,
+                        None,
+                        prev_text=prev_text,
+                    )
+            except TimeoutError as exc:
+                self._m_inc(camera_id, "timeouts")
+                self._log_snapshot_error(camera_id, path, exc)
+                return {}
+        except (FileNotFoundError, HomeAssistantError) as exc:
             self._log_snapshot_error(camera_id, path, exc)
             return {}
         else:
+            dur_ms = (monotonic() - start_ns) * 1000.0
+            self._m_add_latency(camera_id, dur_ms)
+            self._m_inc(camera_id, "analyzed")
             return {frame_description: faces_in_frame}
 
     async def _handle_notification(
@@ -453,7 +787,7 @@ class VideoAnalyzer:
             )
 
     async def _process_snapshot_queue(self, camera_id: str) -> None:
-        """Process snapshots from the queue in batches."""
+        """Flush any queued snapshots for a camera as one ordered batch."""
         queue: asyncio.Queue[Path] | None = self._snapshot_queues.get(camera_id)
         if not queue:
             return
@@ -462,58 +796,16 @@ class VideoAnalyzer:
         if not batch:
             return
 
-        def _epoch_from_path(path: Path) -> int:
-            s = path.stem.removeprefix("snapshot_")  # "YYYYMMDD_HHMMSS"
-            y, mo, d = int(s[0:4]), int(s[4:6]), int(s[6:8])
-            hh, mm, ss = int(s[9:11]), int(s[11:13]), int(s[13:15])
-            # UTC epoch seconds without creating a datetime object
-            return calendar.timegm((y, mo, d, hh, mm, ss, 0, 0, 0))
-
         # Sort by actual timestamp (handles out-of-order filenames)
-        ordered = sorted(
-            ((path, _epoch_from_path(path)) for path in batch), key=lambda x: x[1]
+        ordered: list[tuple[Path, int]] = sorted(
+            ((path, self._epoch_from_path(path)) for path in batch),
+            key=lambda x: x[1],
         )
         if not ordered:
             return
-        t0 = ordered[0][1]
 
-        # Collect results SEQUENTIALLY so we can thread prev_text
-        frame_descriptions: list[dict[str, list[str]]] = []
-        prev_text: str | None = None
-
-        for path, ts in ordered:
-            fd = await self._process_snapshot(path, camera_id, prev_text=prev_text)
-            if not fd:
-                continue
-
-            # Extract description and faces
-            frame_description, faces = next(iter(fd.items()))
-
-            # Save time-prefixed description for downstream summarizer
-            timed_desc = f"t+{ts - t0}s. {frame_description}"
-            frame_descriptions.append({timed_desc: faces})
-
-            # Update prev_text with the raw description (NO time prefix)
-            prev_text = frame_description
-
-        if not frame_descriptions:
-            return
-
-        # Deduplicate recognized people and cache last seen.
-        recognized_people = [
-            p for d in frame_descriptions for v in d.values() for p in v if p != "None"
-        ]
-        self._last_recognized[camera_id] = sorted(set(recognized_people))
-
-        # Generate summary
-        async with async_timeout.timeout(60):
-            msg = await self._generate_summary(frame_descriptions)
-
-        LOGGER.info("[%s] Video analysis: %s", camera_id, msg)
-
-        await self._handle_notification(camera_id, msg, batch)
-        await self._store_results(camera_id, batch, msg)
-        await self._prune_old_snapshots(camera_id, batch)
+        # Reuse the same path as the live worker (process → summarize → finalize)
+        await self._analyze_and_finalize(camera_id, ordered)
 
     def _resolve_camera_from_motion(self, motion_entity_id: str) -> str | None:
         """Resolve a camera entity ID from a motion sensor ID."""
@@ -542,6 +834,63 @@ class VideoAnalyzer:
                 msg = "[{id}] Folder not empty. Existing snapshots will not be pruned."
                 LOGGER.info(msg.format(id=camera_id))
         return Path(VIDEO_ANALYZER_SNAPSHOT_ROOT) / camera_id.replace(".", "_")
+
+    async def _is_unique_enough(self, camera_id: str, path: Path) -> bool:
+        """
+        Gate snapshots by perceptual uniqueness + heartbeat.
+
+        Returns True to enqueue, False to skip.
+        """
+        if not _UNIQUENESS_ENABLED:
+            return True
+
+        # Heartbeat: always allow at least one frame every N seconds
+        now = monotonic()
+        last_ok = self._last_unique_ts.get(camera_id, 0.0)
+        heartbeat_due = now - last_ok >= _UNIQUENESS_HEARTBEAT_SEC
+
+        # Load bytes async, compute hash off the loop if needed
+        try:
+            async with aiofiles.open(path, "rb") as f:
+                data = await f.read()
+        except (FileNotFoundError, OSError):
+            return True  # if we can't read, don't block processing
+
+        # Hash compute is fast; do it inline (PIL decode already occurs)
+        try:
+            dh = _dhash_bytes(data, _UNIQUENESS_HASH_SIZE)
+        except (Image.UnidentifiedImageError, OSError, ValueError):
+            return True  # be permissive on failures
+
+        hist = self._last_hashes.setdefault(
+            camera_id, deque(maxlen=_UNIQUENESS_HISTORY)
+        )
+        # If we have no history, accept and seed
+        if not hist:
+            hist.append(dh)
+            self._last_unique_ts[camera_id] = now
+            return True
+
+        # Compute min Hamming distance to recent accepted frames
+        min_h = min(_hamming64(dh, prev) for prev in hist)
+
+        if min_h <= _UNIQUENESS_HAMMING_MAX and not heartbeat_due:
+            # Too similar and no heartbeat due → skip
+            return False
+
+        # Accept: update history and last-unique time
+        hist.append(dh)
+        self._last_unique_ts[camera_id] = now
+        return True
+
+    async def _put_with_backpressure(self, q: asyncio.Queue[Path], p: Path) -> None:
+        """Put item into queue, dropping oldest if full."""
+        if q.full():
+            with contextlib.suppress(asyncio.QueueEmpty):
+                _ = q.get_nowait()
+                q.task_done()
+            LOGGER.debug("Queue full; dropped oldest to enqueue %s", p)
+        await q.put(p)
 
     async def _take_single_snapshot(self, camera_id: str, now: datetime) -> Path | None:
         snapshot_dir = await self._get_snapshot_dir(camera_id)
@@ -583,9 +932,27 @@ class VideoAnalyzer:
                 )
                 return None
 
+            self._m_inc(camera_id, "captured")
             queue = self._get_snapshot_queue(camera_id)
-            await queue.put(path)
-            LOGGER.debug("[%s] Enqueued snapshot %s", camera_id, path)
+
+            # --- Uniqueness gate: skip near-duplicate frames unless heartbeat due ---
+            try:
+                should_enqueue = await self._is_unique_enough(camera_id, path)
+            except (OSError, FileNotFoundError, ValueError):
+                should_enqueue = True  # fail-open
+
+            if not should_enqueue:
+                self._m_inc(camera_id, "skipped_duplicate")
+                LOGGER.debug(
+                    "[%s] Skipping enqueue (near-duplicate): %s", camera_id, path
+                )
+                return None
+
+            await self._put_with_backpressure(queue, path)
+            self._m_inc(camera_id, "enqueued")
+            LOGGER.debug(
+                "[%s] Enqueue t=%s %s", camera_id, dt_util.utcnow().isoformat(), path
+            )
         except HomeAssistantError as err:
             LOGGER.warning("Snapshot failed for %s: %s", camera_id, err)
         else:
@@ -670,21 +1037,35 @@ class VideoAnalyzer:
             LOGGER.warning("VideoAnalyzer already started.")
             return
 
+        # Create a reusable httpx client for face API
+        if self._httpx_client is None:
+            self._httpx_client = httpx.AsyncClient(timeout=_FACE_TIMEOUT_SEC)
+
         self._cancel_track = async_track_time_interval(
             self.hass,
             self._take_snapshots_from_recording_cameras,
             timedelta(seconds=VIDEO_ANALYZER_SCAN_INTERVAL),
         )
+
         self._cancel_listen = self.hass.bus.async_listen(
             "state_changed", self._handle_camera_recording_state_change
         )
+
         if VIDEO_ANALYZER_TRIGGER_ON_MOTION:
             self._cancel_motion_listen = self.hass.bus.async_listen(
                 "state_changed", self._handle_motion_event
             )
+
+        # hourly metrics reporting
+        self._metrics_job_cancel = async_track_time_interval(
+            self.hass,
+            self._metrics_flush_report,
+            timedelta(seconds=_METRICS_REPORT_INTERVAL_SEC),
+        )
+
         LOGGER.info("Video analyzer started.")
 
-    async def stop(self) -> None:
+    async def stop(self) -> None:  # noqa: PLR0912
         """Stop the video analyzer."""
         if not hasattr(self, "_cancel_track"):
             LOGGER.warning("VideoAnalyzer not started.")
@@ -726,6 +1107,22 @@ class VideoAnalyzer:
             _, pending = await asyncio.wait(tasks_to_await, timeout=5)
             for task in pending:
                 LOGGER.warning("Task did not cancel in time: %s", task)
+
+        # close reusable httpx client
+        if self._httpx_client is not None:
+            try:
+                await self._httpx_client.aclose()
+            finally:
+                self._httpx_client = None
+
+        # cancel hourly metrics reporting
+        if self._metrics_job_cancel is not None:
+            try:
+                self._metrics_job_cancel()
+            except HomeAssistantError:
+                LOGGER.warning("Error unsubscribing metrics reporter", exc_info=True)
+            finally:
+                self._metrics_job_cancel = None
 
         LOGGER.info("Video analyzer stopped.")
 
