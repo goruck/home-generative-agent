@@ -297,7 +297,7 @@ class VideoAnalyzer:
             LOGGER.warning("[%s] Summary timed out: %s", camera_id, exc)
             return None
         else:
-            LOGGER.info("[%s] Video analysis: %s", camera_id, msg)
+            LOGGER.debug("[%s] Video analysis: %s", camera_id, msg)
             return msg
 
     async def _finalize(self, camera_id: str, batch: list[Path], msg: str) -> None:
