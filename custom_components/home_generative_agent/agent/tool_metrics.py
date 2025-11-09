@@ -20,7 +20,9 @@ class ToolCallMetrics:
     end_time: datetime | None = None
     duration_ms: float | None = None
     success: bool | None = None
-    error_type: str | None = None  # "validation" | "execution" | "timeout" | "not_found"
+    error_type: str | None = (
+        None  # "validation" | "execution" | "timeout" | "not_found"
+    )
     error_message: str | None = None
     inputs_hash: str | None = None  # Sanitized hash of inputs for tracking
     response_size_bytes: int | None = None
@@ -158,9 +160,7 @@ class ToolMetricsCollector:
             if m.error_type:
                 errors[m.error_type] = errors.get(m.error_type, 0) + 1
 
-        durations = [
-            m.duration_ms for m in metrics if m.duration_ms is not None
-        ]
+        durations = [m.duration_ms for m in metrics if m.duration_ms is not None]
         avg_duration = sum(durations) / len(durations) if durations else 0.0
 
         return {

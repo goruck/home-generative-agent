@@ -46,7 +46,7 @@ from ..const import (  # noqa: TID252
 )
 from ..core.utils import extract_final  # noqa: TID252
 from .token_counter import count_tokens_cross_provider
-from .tool_metrics import ToolCallMetrics, ToolMetricsCollector
+from .tool_metrics import ToolCallMetrics
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -66,7 +66,9 @@ class ToolErrorType(str, Enum):
     UNKNOWN = "unknown"  # Unknown error type
 
     @classmethod
-    def classify(cls, error: Exception, timeout_exceeded: bool = False) -> "ToolErrorType":
+    def classify(
+        cls, error: Exception, timeout_exceeded: bool = False
+    ) -> "ToolErrorType":
         """Classify error type based on exception.
 
         Args:

@@ -458,24 +458,32 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
                         errors["base"] = "cannot_connect"
                         break
                     except Exception:
-                        LOGGER.exception("Unexpected exception during OpenAI validation")
+                        LOGGER.exception(
+                            "Unexpected exception during OpenAI validation"
+                        )
                         errors["base"] = "unknown"
                         break
             elif key == CONF_ANTHROPIC_API_KEY:
                 # For Anthropic, handle similarly to other secrets
-                code = await self._validate_present(self.hass, vals[key], validator, label)
+                code = await self._validate_present(
+                    self.hass, vals[key], validator, label
+                )
                 if code:
                     errors["base"] = code
                     break
             else:
-                code = await self._validate_present(self.hass, vals[key], validator, label)
+                code = await self._validate_present(
+                    self.hass, vals[key], validator, label
+                )
                 if code:
                     errors["base"] = code
                     break
 
         # Normalize URLs only on success.
         if not errors and vals[CONF_OPENAI_BASE_URL]:
-            normalized[CONF_OPENAI_BASE_URL] = ensure_http_url(vals[CONF_OPENAI_BASE_URL])
+            normalized[CONF_OPENAI_BASE_URL] = ensure_http_url(
+                vals[CONF_OPENAI_BASE_URL]
+            )
         if not errors and vals[CONF_OLLAMA_URL]:
             normalized[CONF_OLLAMA_URL] = ensure_http_url(vals[CONF_OLLAMA_URL])
         if not errors and vals[CONF_FACE_API_URL]:
@@ -759,7 +767,9 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
             err = await self._maybe_edit_face_recognition_url(options, user_input)
         if not err:
             err = await self._maybe_edit_secret(
-                _SecretSpec(CONF_ANTHROPIC_API_KEY, validate_anthropic_key, "Anthropic Options"),
+                _SecretSpec(
+                    CONF_ANTHROPIC_API_KEY, validate_anthropic_key, "Anthropic Options"
+                ),
                 options,
                 user_input,
             )

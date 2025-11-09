@@ -383,7 +383,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         except Exception:
             LOGGER.exception("Gemini provider init failed; continuing without it.")
 
-    anthropic_provider: RunnableSerializable[LanguageModelInput, BaseMessage] | None = None
+    anthropic_provider: RunnableSerializable[LanguageModelInput, BaseMessage] | None = (
+        None
+    )
     if anthropic_ok:
         try:
             anthropic_provider = ChatAnthropic(

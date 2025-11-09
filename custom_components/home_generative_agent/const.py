@@ -208,9 +208,9 @@ SUMMARIZATION_MODEL_ANTHROPIC_SUPPORTED = Literal[
 ]
 
 CONF_SUMMARIZATION_MODEL_PROVIDER = "summarization_provider"
-RECOMMENDED_SUMMARIZATION_MODEL_PROVIDER: Literal["openai", "ollama", "gemini", "anthropic"] = (
-    "ollama"
-)
+RECOMMENDED_SUMMARIZATION_MODEL_PROVIDER: Literal[
+    "openai", "ollama", "gemini", "anthropic"
+] = "ollama"
 
 CONF_OLLAMA_SUMMARIZATION_MODEL = "ollama_summarization_model"
 RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL: SUMMARIZATION_MODEL_OLLAMA_SUPPORTED = (

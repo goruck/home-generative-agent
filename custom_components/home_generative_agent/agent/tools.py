@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import math
 import re
@@ -90,15 +91,30 @@ def _validate_tool_params(
         expected_type = field_schema.get("type")
 
         if expected_type == "string" and not isinstance(value, str):
-            return False, f"Parameter '{field}' must be a string, got {type(value).__name__}"
+            return (
+                False,
+                f"Parameter '{field}' must be a string, got {type(value).__name__}",
+            )
         elif expected_type == "array" and not isinstance(value, list):
-            return False, f"Parameter '{field}' must be a list, got {type(value).__name__}"
+            return (
+                False,
+                f"Parameter '{field}' must be a list, got {type(value).__name__}",
+            )
         elif expected_type == "object" and not isinstance(value, dict):
-            return False, f"Parameter '{field}' must be an object, got {type(value).__name__}"
+            return (
+                False,
+                f"Parameter '{field}' must be an object, got {type(value).__name__}",
+            )
         elif expected_type == "number" and not isinstance(value, (int, float)):
-            return False, f"Parameter '{field}' must be a number, got {type(value).__name__}"
+            return (
+                False,
+                f"Parameter '{field}' must be a number, got {type(value).__name__}",
+            )
         elif expected_type == "boolean" and not isinstance(value, bool):
-            return False, f"Parameter '{field}' must be a boolean, got {type(value).__name__}"
+            return (
+                False,
+                f"Parameter '{field}' must be a boolean, got {type(value).__name__}",
+            )
 
         # Check string length constraints
         if isinstance(value, str):
@@ -161,9 +177,7 @@ def _sanitize_tool_response(
 
     # Truncate if needed
     if len(sanitized) > max_length:
-        sanitized = (
-            sanitized[: max_length - 3] + "..."
-        )  # Reserve space for ellipsis
+        sanitized = sanitized[: max_length - 3] + "..."  # Reserve space for ellipsis
         LOGGER.debug(
             "Tool response truncated from %d to %d characters",
             len(response_str),
