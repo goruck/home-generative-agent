@@ -24,24 +24,28 @@ class SnapshotManager:
     """Handles snapshot capture and storage."""
 
     def __init__(self, hass: HomeAssistant, snapshot_root: Path) -> None:
-        """Initialize snapshot manager.
+        """
+        Initialize snapshot manager.
 
         Args:
             hass: Home Assistant instance
             snapshot_root: Root directory for snapshots
+
         """
         self.hass = hass
         self.snapshot_root = snapshot_root
         self._initialized_dirs: set[str] = set()
 
     async def get_snapshot_dir(self, camera_id: str) -> Path:
-        """Get or create snapshot directory for camera.
+        """
+        Get or create snapshot directory for camera.
 
         Args:
             camera_id: Camera entity ID
 
         Returns:
             Path to camera's snapshot directory
+
         """
         if camera_id not in self._initialized_dirs:
             cam_dir = PathUtils.camera_snapshot_dir(self.snapshot_root, camera_id)
@@ -60,10 +64,9 @@ class SnapshotManager:
 
         return PathUtils.camera_snapshot_dir(self.snapshot_root, camera_id)
 
-    async def take_snapshot(
-        self, camera_id: str, timestamp: datetime
-    ) -> Path | None:
-        """Take and save a single snapshot.
+    async def take_snapshot(self, camera_id: str, timestamp: datetime) -> Path | None:
+        """
+        Take and save a single snapshot.
 
         Args:
             camera_id: Camera entity ID
@@ -71,6 +74,7 @@ class SnapshotManager:
 
         Returns:
             Path to saved snapshot, or None if failed
+
         """
         snapshot_dir = await self.get_snapshot_dir(camera_id)
         timestamp_str = DateTimeUtils.snapshot_timestamp(timestamp)

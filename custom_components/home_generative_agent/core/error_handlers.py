@@ -12,8 +12,8 @@ from pydantic import ValidationError
 if TYPE_CHECKING:
     from collections.abc import Coroutine
 
-    from ..agent.tool_metrics import ToolCallMetrics
     from ..agent.graph import ToolErrorType
+    from ..agent.tool_metrics import ToolCallMetrics
 
 LOGGER = logging.getLogger(__name__)
 
@@ -29,7 +29,8 @@ class ErrorHandler:
         metric: ToolCallMetrics | None = None,
         error_type_classifier: type[ToolErrorType] | None = None,
     ) -> tuple[Any | None, Exception | None]:
-        """Execute async operation with standard error handling.
+        """
+        Execute async operation with standard error handling.
 
         Args:
             coro: The coroutine to execute
@@ -40,6 +41,7 @@ class ErrorHandler:
 
         Returns:
             (result, error) - one will be None
+
         """
         try:
             if timeout:
@@ -53,7 +55,7 @@ class ErrorHandler:
 
             return result, None
 
-        except asyncio.TimeoutError as err:
+        except TimeoutError as err:
             LOGGER.warning("%s timed out after %.1fs", operation_name, timeout)
             if metric:
                 metric.finalize(
@@ -73,7 +75,9 @@ class ErrorHandler:
             if metric:
                 metric.finalize(
                     success=False,
-                    error_type=error_type.value if hasattr(error_type, "value") else str(error_type),
+                    error_type=error_type.value
+                    if hasattr(error_type, "value")
+                    else str(error_type),
                     error_message=str(err),
                 )
             return None, err

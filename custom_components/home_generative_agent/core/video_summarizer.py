@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import async_timeout
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -15,9 +15,6 @@ from ..const import (  # noqa: TID252
     VIDEO_ANALYZER_SYSTEM_MESSAGE,
 )
 
-if TYPE_CHECKING:
-    pass
-
 LOGGER = logging.getLogger(__name__)
 
 
@@ -25,11 +22,13 @@ class VideoSummarizer:
     """Generates multi-frame summaries using LLM."""
 
     def __init__(self, summarization_model: Any, timeout: int = 60) -> None:
-        """Initialize video summarizer.
+        """
+        Initialize video summarizer.
 
         Args:
             summarization_model: LLM model for summarization
             timeout: Timeout in seconds for summary generation
+
         """
         self.model = summarization_model
         self._timeout = timeout
@@ -37,7 +36,8 @@ class VideoSummarizer:
     async def generate_summary(
         self, frame_descriptions: list[dict[str, list[str]]]
     ) -> str:
-        """Create narrative summary from frame descriptions.
+        """
+        Create narrative summary from frame descriptions.
 
         Args:
             frame_descriptions: List of {description: [people]} dicts
@@ -47,6 +47,7 @@ class VideoSummarizer:
 
         Raises:
             ValueError: If frame_descriptions is empty
+
         """
         await asyncio.sleep(0)  # Yield control
 
@@ -87,7 +88,8 @@ class VideoSummarizer:
     async def summarize_with_timeout(
         self, camera_id: str, frame_descriptions: list[dict[str, list[str]]]
     ) -> str | None:
-        """Generate summary with timeout protection.
+        """
+        Generate summary with timeout protection.
 
         Args:
             camera_id: Camera identifier for logging
@@ -95,6 +97,7 @@ class VideoSummarizer:
 
         Returns:
             Summary text, or None if timeout/failure
+
         """
         if not frame_descriptions:
             return None

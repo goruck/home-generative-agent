@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import logging
 from collections import deque
+from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 import async_timeout
 
-from ..const import VIDEO_ANALYZER_LATEST_NAME, VIDEO_ANALYZER_LATEST_SUBFOLDER  # noqa: TID252
+from ..const import (  # noqa: TID252
+    VIDEO_ANALYZER_LATEST_NAME,
+    VIDEO_ANALYZER_LATEST_SUBFOLDER,
+)
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -27,12 +31,14 @@ class StorageManager:
         store: BaseStore,
         snapshots_to_keep: int = 100,
     ) -> None:
-        """Initialize storage manager.
+        """
+        Initialize storage manager.
 
         Args:
             hass: Home Assistant instance
             store: LangGraph store for vector database
             snapshots_to_keep: Number of snapshots to retain per camera
+
         """
         self.hass = hass
         self.store = store
@@ -42,12 +48,14 @@ class StorageManager:
     async def store_results(
         self, camera_id: str, batch: list[Path], summary: str
     ) -> None:
-        """Store analysis results in vector database.
+        """
+        Store analysis results in vector database.
 
         Args:
             camera_id: Camera entity ID
             batch: List of snapshot paths
             summary: Analysis summary text
+
         """
         camera_name = camera_id.split(".")[-1]
 
@@ -72,12 +80,14 @@ class StorageManager:
         batch: list[Path],
         is_protected: Callable[[Path], bool],
     ) -> None:
-        """Delete old snapshots respecting retention policy.
+        """
+        Delete old snapshots respecting retention policy.
 
         Args:
             camera_id: Camera entity ID
             batch: Newly processed snapshots to add to retention
             is_protected: Function to check if a path is protected from deletion
+
         """
         # Get or create retention deque for this camera
         retention = self._retention_deques.setdefault(camera_id, deque())
@@ -110,6 +120,4 @@ class StorageManager:
                     await self.hass.async_add_executor_job(old.unlink)
                     LOGGER.debug("[%s] Deleted old snapshot: %s", camera_id, old)
                 except OSError as err:
-                    LOGGER.warning(
-                        "[%s] Failed to delete %s: %s", camera_id, old, err
-                    )
+                    LOGGER.warning("[%s] Failed to delete %s: %s", camera_id, old, err)

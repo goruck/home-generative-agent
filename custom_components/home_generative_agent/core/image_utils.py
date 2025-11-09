@@ -16,7 +16,8 @@ class ImageUtils:
 
     @staticmethod
     def load_from_bytes(data: bytes, mode: str = "RGB") -> ImageType:
-        """Load PIL Image from bytes with optional mode conversion.
+        """
+        Load PIL Image from bytes with optional mode conversion.
 
         Args:
             data: Image bytes (JPEG, PNG, etc.)
@@ -27,6 +28,7 @@ class ImageUtils:
 
         Raises:
             Image.UnidentifiedImageError: If data is not a valid image
+
         """
         img = Image.open(io.BytesIO(data))
         if mode and img.mode != mode:
@@ -34,10 +36,9 @@ class ImageUtils:
         return img
 
     @staticmethod
-    def compute_dhash(
-        image_or_bytes: ImageType | bytes, size: int = 8
-    ) -> int:
-        """Compute dHash (difference hash) for perceptual similarity.
+    def compute_dhash(image_or_bytes: ImageType | bytes, size: int = 8) -> int:
+        """
+        Compute dHash (difference hash) for perceptual similarity.
 
         dHash compares adjacent pixels horizontally to create a binary hash
         that is robust to minor image variations.
@@ -51,6 +52,7 @@ class ImageUtils:
 
         Raises:
             Image.UnidentifiedImageError: If bytes are not a valid image
+
         """
         # Load from bytes if needed
         if isinstance(image_or_bytes, bytes):
@@ -83,7 +85,8 @@ class ImageUtils:
 
     @staticmethod
     def hamming_distance(hash_a: int, hash_b: int, max_bits: int = 64) -> int:
-        """Compute Hamming distance between two hashes.
+        """
+        Compute Hamming distance between two hashes.
 
         Args:
             hash_a: First hash
@@ -92,6 +95,7 @@ class ImageUtils:
 
         Returns:
             Number of differing bits
+
         """
         xor_result = (hash_a ^ hash_b) & ((1 << max_bits) - 1)
         return xor_result.bit_count()

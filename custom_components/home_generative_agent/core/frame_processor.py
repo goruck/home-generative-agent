@@ -38,7 +38,8 @@ class FrameProcessor:
         vision_timeout: int = 60,
         frame_deadline: int = 240,
     ) -> None:
-        """Initialize frame processor.
+        """
+        Initialize frame processor.
 
         Args:
             hass: Home Assistant instance
@@ -48,6 +49,7 @@ class FrameProcessor:
             face_timeout: Timeout for face recognition in seconds
             vision_timeout: Timeout for VLM analysis in seconds
             frame_deadline: Skip frames older than this in seconds
+
         """
         self.hass = hass
         self.vision_model = vision_model
@@ -57,16 +59,16 @@ class FrameProcessor:
         self._vision_timeout = vision_timeout
         self._frame_deadline = frame_deadline
 
-    def order_by_timestamp(
-        self, batch: list[Path]
-    ) -> list[tuple[Path, int]]:
-        """Sort paths by embedded timestamp.
+    def order_by_timestamp(self, batch: list[Path]) -> list[tuple[Path, int]]:
+        """
+        Sort paths by embedded timestamp.
 
         Args:
             batch: List of snapshot paths
 
         Returns:
             List of (path, epoch_timestamp) tuples, sorted by timestamp
+
         """
         ordered = []
         for path in batch:
@@ -82,7 +84,8 @@ class FrameProcessor:
     async def process_single_frame(
         self, path: Path, camera_id: str, prev_description: str | None = None
     ) -> dict[str, list[str]]:
-        """Process one snapshot: faces + VLM description.
+        """
+        Process one snapshot: faces + VLM description.
 
         Args:
             path: Path to snapshot
@@ -92,6 +95,7 @@ class FrameProcessor:
         Returns:
             Dict mapping frame description to list of recognized names,
             or empty dict if processing failed/skipped
+
         """
         # Freshness check
         try:
@@ -156,7 +160,8 @@ class FrameProcessor:
     async def process_batch(
         self, camera_id: str, ordered_paths: list[tuple[Path, int]]
     ) -> tuple[list[dict[str, list[str]]], list[str]]:
-        """Process multiple frames in temporal order.
+        """
+        Process multiple frames in temporal order.
 
         Args:
             camera_id: Camera entity ID
@@ -166,6 +171,7 @@ class FrameProcessor:
             Tuple of:
                 - List of frame descriptions with people
                 - List of unique recognized person names
+
         """
         if not ordered_paths:
             return [], []
@@ -210,15 +216,17 @@ class FrameProcessor:
 
     @staticmethod
     def _deduplicate_descriptions(
-        descs: list[dict[str, list[str]]]
+        descs: list[dict[str, list[str]]],
     ) -> list[dict[str, list[str]]]:
-        """Collapse near-duplicate frame texts to reduce prompt size.
+        """
+        Collapse near-duplicate frame texts to reduce prompt size.
 
         Args:
             descs: List of {description: people} dicts
 
         Returns:
             Deduplicated list
+
         """
         out: list[dict[str, list[str]]] = []
         last_norm: str | None = None

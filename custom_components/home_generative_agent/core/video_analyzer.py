@@ -60,11 +60,13 @@ class VideoAnalyzer:
     """Analyze video from recording or motion-triggered cameras - Orchestrator."""
 
     def __init__(self, hass: HomeAssistant, entry: HGAConfigEntry) -> None:
-        """Initialize the video analyzer with specialized components.
+        """
+        Initialize the video analyzer with specialized components.
 
         Args:
             hass: Home Assistant instance
             entry: Config entry with runtime data
+
         """
         self.hass = hass
         self.entry = entry
@@ -74,9 +76,7 @@ class VideoAnalyzer:
         # Initialize specialized services via dependency injection
         self.snapshot_mgr = SnapshotManager(hass, snapshot_root)
 
-        self.uniqueness = UniquenessFilter(
-            hass, enabled=_UNIQUENESS_ENABLED
-        )
+        self.uniqueness = UniquenessFilter(hass, enabled=_UNIQUENESS_ENABLED)
 
         self.face_service = FaceRecognitionService(
             hass,
@@ -134,7 +134,8 @@ class VideoAnalyzer:
     async def _get_batch(
         self, queue: asyncio.Queue[Path], camera_id: str
     ) -> list[Path]:
-        """Get a batch of snapshots from queue.
+        """
+        Get a batch of snapshots from queue.
 
         Args:
             queue: Queue to pull from
@@ -142,6 +143,7 @@ class VideoAnalyzer:
 
         Returns:
             List of snapshot paths (up to _MAX_BATCH)
+
         """
         # Wait for first item
         first = await queue.get()
@@ -161,10 +163,12 @@ class VideoAnalyzer:
         return batch
 
     async def _snapshot_worker(self, camera_id: str) -> None:
-        """Consume and process snapshots for one camera.
+        """
+        Consume and process snapshots for one camera.
 
         Args:
             camera_id: Camera entity ID
+
         """
         queue = self.queue_mgr.get_queue(camera_id)
         if not queue:
@@ -202,11 +206,13 @@ class VideoAnalyzer:
     async def _analyze_and_finalize(
         self, camera_id: str, ordered: list[tuple[Path, int]]
     ) -> None:
-        """Process batch: analyze frames, summarize, notify, store.
+        """
+        Process batch: analyze frames, summarize, notify, store.
 
         Args:
             camera_id: Camera entity ID
             ordered: List of (path, epoch) tuples sorted by time
+
         """
         # 1. Process frames
         frame_descs, recognized = await self.frame_processor.process_batch(
@@ -245,10 +251,12 @@ class VideoAnalyzer:
         )
 
     async def _process_snapshot_queue(self, camera_id: str) -> None:
-        """Flush any queued snapshots for a camera as one ordered batch.
+        """
+        Flush any queued snapshots for a camera as one ordered batch.
 
         Args:
             camera_id: Camera entity ID
+
         """
         queue = self.queue_mgr.get_queue(camera_id)
         if not queue:
@@ -263,10 +271,9 @@ class VideoAnalyzer:
         if ordered:
             await self._analyze_and_finalize(camera_id, ordered)
 
-    async def _take_single_snapshot(
-        self, camera_id: str, now: datetime
-    ) -> Path | None:
-        """Take a snapshot and enqueue if unique enough.
+    async def _take_single_snapshot(self, camera_id: str, now: datetime) -> Path | None:
+        """
+        Take a snapshot and enqueue if unique enough.
 
         Args:
             camera_id: Camera entity ID
@@ -274,6 +281,7 @@ class VideoAnalyzer:
 
         Returns:
             Path to snapshot if successful, None otherwise
+
         """
         # 1. Take snapshot
         path = await self.snapshot_mgr.take_snapshot(camera_id, now)
@@ -298,10 +306,12 @@ class VideoAnalyzer:
         return path
 
     async def _motion_snapshot_loop(self, camera_id: str) -> None:
-        """Continuous snapshot loop while motion is detected.
+        """
+        Continuous snapshot loop while motion is detected.
 
         Args:
             camera_id: Camera entity ID
+
         """
         try:
             while True:
@@ -312,13 +322,15 @@ class VideoAnalyzer:
             LOGGER.debug("Snapshot loop cancelled for camera: %s", camera_id)
 
     def _resolve_camera_from_motion(self, motion_entity_id: str) -> str | None:
-        """Resolve camera entity ID from motion sensor ID.
+        """
+        Resolve camera entity ID from motion sensor ID.
 
         Args:
             motion_entity_id: Motion sensor entity ID
 
         Returns:
             Camera entity ID, or None if not found
+
         """
         # Check overrides
         overrides: dict = VIDEO_ANALYZER_MOTION_CAMERA_MAP
@@ -338,10 +350,12 @@ class VideoAnalyzer:
 
     @callback
     def _handle_motion_event(self, event: Event) -> None:
-        """Handle motion sensor state change.
+        """
+        Handle motion sensor state change.
 
         Args:
             event: State change event
+
         """
         entity_id = event.data.get("entity_id")
         if not entity_id or not entity_id.startswith("binary_sensor."):
@@ -375,10 +389,12 @@ class VideoAnalyzer:
 
     @callback
     def _get_recording_cameras(self) -> list[str]:
-        """Get list of cameras currently recording.
+        """
+        Get list of cameras currently recording.
 
         Returns:
             List of camera entity IDs
+
         """
         return [
             state.entity_id
@@ -387,10 +403,12 @@ class VideoAnalyzer:
         ]
 
     async def _take_snapshots_from_recording_cameras(self, now: datetime) -> None:
-        """Take snapshots from all recording cameras.
+        """
+        Take snapshots from all recording cameras.
 
         Args:
             now: Current timestamp
+
         """
         for camera_id in self._get_recording_cameras():
             try:
@@ -404,10 +422,12 @@ class VideoAnalyzer:
 
     @callback
     def _handle_camera_recording_state_change(self, event: Event) -> None:
-        """Handle camera recording state change.
+        """
+        Handle camera recording state change.
 
         Args:
             event: State change event
+
         """
         entity_id = event.data.get("entity_id")
         if not entity_id or not entity_id.startswith("camera."):
@@ -495,9 +515,11 @@ class VideoAnalyzer:
         LOGGER.info("Video analyzer stopped.")
 
     def is_running(self) -> bool:
-        """Check if the video analyzer is running.
+        """
+        Check if the video analyzer is running.
 
         Returns:
             True if running, False otherwise
+
         """
         return self._cancel_track is not None and self._cancel_listen is not None

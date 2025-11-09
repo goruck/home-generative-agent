@@ -36,23 +36,27 @@ class VideoAnalyzerMetrics:
         report_interval_sec: int = 3600,
         latency_history_size: int = 512,
     ) -> None:
-        """Initialize metrics collector.
+        """
+        Initialize metrics collector.
 
         Args:
             report_interval_sec: How often to flush and report metrics
             latency_history_size: Number of latency samples to keep per camera
+
         """
         self._report_interval = report_interval_sec
         self._history_size = latency_history_size
         self._metrics: dict[str, _Metrics] = defaultdict(_Metrics)
 
     def increment(self, camera_id: str, metric: str, count: int = 1) -> None:
-        """Increment a counter metric.
+        """
+        Increment a counter metric.
 
         Args:
             camera_id: Camera identifier
             metric: Metric name (captured, enqueued, skipped_duplicate, etc.)
             count: Amount to increment by
+
         """
         m = self._metrics[camera_id]
 
@@ -71,19 +75,23 @@ class VideoAnalyzerMetrics:
         # Unknown metrics are silently ignored
 
     def record_latency(self, camera_id: str, ms: float) -> None:
-        """Record a latency sample in milliseconds.
+        """
+        Record a latency sample in milliseconds.
 
         Args:
             camera_id: Camera identifier
             ms: Latency in milliseconds
+
         """
         self._metrics[camera_id].lat_ms.append(float(ms))
 
     async def flush_and_report(self, _now: datetime) -> None:
-        """Log aggregated metrics and reset counters.
+        """
+        Log aggregated metrics and reset counters.
 
         Args:
             _now: Current datetime (unused, for compatibility with time interval callback)
+
         """
         for cam, m in self._metrics.items():
             lat_list = list(m.lat_ms)
@@ -120,7 +128,8 @@ class VideoAnalyzerMetrics:
 
     @staticmethod
     def _percentile(values: Iterable[float], q: float) -> float:
-        """Calculate nearest-rank percentile.
+        """
+        Calculate nearest-rank percentile.
 
         Args:
             values: Iterable of numeric values
@@ -128,6 +137,7 @@ class VideoAnalyzerMetrics:
 
         Returns:
             Percentile value, or 0.0 if no data
+
         """
         xs = list(values)
         if not xs:

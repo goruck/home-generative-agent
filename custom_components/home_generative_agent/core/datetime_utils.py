@@ -19,7 +19,8 @@ class DateTimeUtils:
         default: datetime,
         error_message: str | None = None,
     ) -> datetime:
-        """Parse datetime string or return default.
+        """
+        Parse datetime string or return default.
 
         Args:
             datetime_str: String to parse (ISO format or None)
@@ -31,6 +32,7 @@ class DateTimeUtils:
 
         Raises:
             HomeAssistantError: If error_message provided and parsing fails
+
         """
         if datetime_str is None:
             return default
@@ -45,13 +47,15 @@ class DateTimeUtils:
 
     @staticmethod
     def snapshot_timestamp(dt: datetime | None = None) -> str:
-        """Get standardized snapshot filename timestamp.
+        """
+        Get standardized snapshot filename timestamp.
 
         Args:
             dt: Datetime to format (defaults to now)
 
         Returns:
             Timestamp string in YYYYMMDD_HHMMSS format
+
         """
         if dt is None:
             dt = dt_util.utcnow()
@@ -59,7 +63,8 @@ class DateTimeUtils:
 
     @staticmethod
     def parse_snapshot_timestamp(filename: str) -> datetime:
-        """Extract datetime from snapshot filename.
+        """
+        Extract datetime from snapshot filename.
 
         Args:
             filename: Filename like "snapshot_20250426_002804.jpg" or just "20250426_002804"
@@ -69,6 +74,7 @@ class DateTimeUtils:
 
         Raises:
             ValueError: If filename format is invalid
+
         """
         # Extract timestamp from "snapshot_20250426_002804.jpg"
         timestamp_str = filename.replace("snapshot_", "").replace(".jpg", "")
@@ -83,19 +89,22 @@ class DateTimeUtils:
 
     @staticmethod
     def to_epoch(dt: datetime) -> int:
-        """Convert datetime to UTC epoch seconds.
+        """
+        Convert datetime to UTC epoch seconds.
 
         Args:
             dt: Datetime to convert
 
         Returns:
             Unix timestamp (seconds since epoch)
+
         """
         return int(dt_util.as_timestamp(dt))
 
     @staticmethod
     def epoch_from_snapshot_path(filename: str) -> int:
-        """Parse snapshot filename and return epoch timestamp.
+        """
+        Parse snapshot filename and return epoch timestamp.
 
         Args:
             filename: Snapshot filename (with or without "snapshot_" prefix)
@@ -105,6 +114,7 @@ class DateTimeUtils:
 
         Raises:
             ValueError: If filename format is invalid
+
         """
         dt_local = DateTimeUtils.parse_snapshot_timestamp(filename)
         return DateTimeUtils.to_epoch(dt_local)

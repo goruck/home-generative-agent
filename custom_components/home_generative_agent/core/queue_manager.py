@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Generic, TypeVar
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
@@ -26,12 +26,14 @@ class QueueManager(Generic[T]):
         worker_factory: Callable[[str], Coroutine],
         max_size: int = 50,
     ) -> None:
-        """Initialize queue manager.
+        """
+        Initialize queue manager.
 
         Args:
             hass: Home Assistant instance
             worker_factory: Function that creates a worker coroutine for a given camera_id
             max_size: Maximum queue size per camera
+
         """
         self.hass = hass
         self.worker_factory = worker_factory
@@ -40,13 +42,15 @@ class QueueManager(Generic[T]):
         self._tasks: dict[str, asyncio.Task] = {}
 
     def get_or_create(self, camera_id: str) -> asyncio.Queue[T]:
-        """Get existing queue or create new one with worker.
+        """
+        Get existing queue or create new one with worker.
 
         Args:
             camera_id: Camera identifier
 
         Returns:
             Queue for this camera
+
         """
         if camera_id not in self._queues:
             queue: asyncio.Queue[T] = asyncio.Queue(maxsize=self.max_size)
@@ -60,25 +64,29 @@ class QueueManager(Generic[T]):
         return self._queues[camera_id]
 
     def get_queue(self, camera_id: str) -> asyncio.Queue[T] | None:
-        """Get queue for camera if it exists.
+        """
+        Get queue for camera if it exists.
 
         Args:
             camera_id: Camera identifier
 
         Returns:
             Queue or None if not found
+
         """
         return self._queues.get(camera_id)
 
     @staticmethod
     def drain(queue: asyncio.Queue[T]) -> list[T]:
-        """Drain all items from queue into a list.
+        """
+        Drain all items from queue into a list.
 
         Args:
             queue: Queue to drain
 
         Returns:
             List of all queued items
+
         """
         items: list[T] = []
         try:
@@ -90,11 +98,13 @@ class QueueManager(Generic[T]):
 
     @staticmethod
     async def put_with_backpressure(queue: asyncio.Queue[T], item: T) -> None:
-        """Put item into queue, dropping oldest if full.
+        """
+        Put item into queue, dropping oldest if full.
 
         Args:
             queue: Queue to add to
             item: Item to enqueue
+
         """
         if queue.full():
             with contextlib.suppress(asyncio.QueueEmpty):
@@ -104,10 +114,12 @@ class QueueManager(Generic[T]):
         await queue.put(item)
 
     async def stop_all(self, timeout: float = 5.0) -> None:
-        """Cancel all worker tasks and clear queues.
+        """
+        Cancel all worker tasks and clear queues.
 
         Args:
             timeout: Maximum time to wait for tasks to cancel
+
         """
         # Cancel all tasks
         for camera_id, task in self._tasks.items():
@@ -116,9 +128,7 @@ class QueueManager(Generic[T]):
 
         # Wait for cancellation
         if self._tasks:
-            _, pending = await asyncio.wait(
-                list(self._tasks.values()), timeout=timeout
-            )
+            _, pending = await asyncio.wait(list(self._tasks.values()), timeout=timeout)
             for task in pending:
                 LOGGER.warning("Task did not cancel in time: %s", task)
 
@@ -128,9 +138,11 @@ class QueueManager(Generic[T]):
         LOGGER.debug("All queues and tasks cleared")
 
     def get_active_cameras(self) -> list[str]:
-        """Get list of camera IDs with active queues.
+        """
+        Get list of camera IDs with active queues.
 
         Returns:
             List of camera IDs
+
         """
         return list(self._queues.keys())

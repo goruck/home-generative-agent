@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 from time import monotonic
 from typing import TYPE_CHECKING
@@ -19,7 +19,7 @@ from ..const import (  # noqa: TID252
     VIDEO_ANALYZER_TIME_OFFSET,
 )
 from .datetime_utils import DateTimeUtils
-from .utils import dispatch_on_loop, discover_mobile_notify_service
+from .utils import discover_mobile_notify_service, dispatch_on_loop
 from .video_helpers import latest_target, publish_latest_atomic
 
 if TYPE_CHECKING:
@@ -39,13 +39,15 @@ class NotificationManager:
         snapshot_root: Path,
         notify_service: str | None = None,
     ) -> None:
-        """Initialize notification manager.
+        """
+        Initialize notification manager.
 
         Args:
             hass: Home Assistant instance
             store: LangGraph store for anomaly detection
             snapshot_root: Root directory for snapshots
             notify_service: Notification service name (optional)
+
         """
         self.hass = hass
         self.store = store
@@ -54,22 +56,26 @@ class NotificationManager:
         self._protected_images: dict[Path, float] = {}  # path -> expiry_time
 
     def protect_image(self, path: Path, ttl_sec: int = 1800) -> None:
-        """Mark image as protected from pruning.
+        """
+        Mark image as protected from pruning.
 
         Args:
             path: Path to protect
             ttl_sec: Time to live in seconds (default 30 minutes)
+
         """
         self._protected_images[path] = monotonic() + ttl_sec
 
     def is_protected(self, path: Path) -> bool:
-        """Check if image is still protected.
+        """
+        Check if image is still protected.
 
         Args:
             path: Path to check
 
         Returns:
             True if protected, False otherwise
+
         """
         now = monotonic()
 
@@ -83,7 +89,8 @@ class NotificationManager:
     async def is_anomaly(
         self, camera_name: str, summary: str, first_snapshot_name: str
     ) -> bool:
-        """Check if event is anomalous via semantic search.
+        """
+        Check if event is anomalous via semantic search.
 
         Args:
             camera_name: Camera name (without domain)
@@ -92,6 +99,7 @@ class NotificationManager:
 
         Returns:
             True if anomalous, False if normal
+
         """
         try:
             async with async_timeout.timeout(10):
@@ -132,12 +140,14 @@ class NotificationManager:
     async def send_notification(
         self, message: str, camera_name: str, image_path: Path
     ) -> None:
-        """Send push notification with image.
+        """
+        Send push notification with image.
 
         Args:
             message: Notification message
             camera_name: Camera name for title
             image_path: Path to image attachment
+
         """
         # Determine service to use
         full_service = self.notify_service
@@ -173,7 +183,8 @@ class NotificationManager:
         recognized_people: list[str],
         queue_size: int = 0,
     ) -> None:
-        """Decide whether to notify and send notification.
+        """
+        Decide whether to notify and send notification.
 
         Args:
             camera_id: Camera entity ID
@@ -182,6 +193,7 @@ class NotificationManager:
             mode: Notification mode ("notify_on_all" or "notify_on_anomaly")
             recognized_people: List of recognized person names
             queue_size: Current queue backlog size
+
         """
         camera_name = camera_id.split(".")[-1]
 

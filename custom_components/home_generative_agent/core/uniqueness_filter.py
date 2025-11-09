@@ -31,7 +31,8 @@ class UniquenessFilter:
         heartbeat_sec: int = 10,
         history_size: int = 2,
     ) -> None:
-        """Initialize uniqueness filter.
+        """
+        Initialize uniqueness filter.
 
         Args:
             hass: Home Assistant instance
@@ -40,6 +41,7 @@ class UniquenessFilter:
             hamming_threshold: Max Hamming distance to consider duplicate
             heartbeat_sec: Always allow a frame at least this often
             history_size: Number of recent hashes to compare against
+
         """
         self.hass = hass
         self._enabled = enabled
@@ -53,7 +55,8 @@ class UniquenessFilter:
         self._last_unique_ts: dict[str, float] = {}
 
     async def should_process(self, camera_id: str, image_path: Path) -> bool:
-        """Check if frame is unique enough to process.
+        """
+        Check if frame is unique enough to process.
 
         Args:
             camera_id: Camera identifier
@@ -61,6 +64,7 @@ class UniquenessFilter:
 
         Returns:
             True to process, False to skip as duplicate
+
         """
         if not self._enabled:
             return True
@@ -84,9 +88,7 @@ class UniquenessFilter:
             return True
 
         # Get or initialize history for this camera
-        hist = self._last_hashes.setdefault(
-            camera_id, deque(maxlen=self._history_size)
-        )
+        hist = self._last_hashes.setdefault(camera_id, deque(maxlen=self._history_size))
 
         # If no history, seed it and allow
         if not hist:
@@ -96,7 +98,9 @@ class UniquenessFilter:
 
         # Compute minimum Hamming distance to recent frames
         min_hamming = min(
-            ImageUtils.hamming_distance(image_hash, prev, max_bits=self._hash_size * self._hash_size)
+            ImageUtils.hamming_distance(
+                image_hash, prev, max_bits=self._hash_size * self._hash_size
+            )
             for prev in hist
         )
 

@@ -1,0 +1,13 @@
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+ignore = [
+    "PLR0913",  # Too many arguments - often necessary for dependency injection
+    "PLR2004",  # Magic value comparison - constants would be overkill
+    "FBT001",   # Boolean positional arg - common pattern in this codebase
+    "FBT002",   # Boolean default arg - common pattern in this codebase  
+    "ASYNC109", # timeout parameter name - clear in context
+    "TRY300",   # else block suggestion - stylistic preference
+    "DTZ007",   # Naive datetime - intentional where used
+]

@@ -36,7 +36,8 @@ class FaceRecognitionService:
         timeout: int = 10,
         save_debug_crops: bool = False,
     ) -> None:
-        """Initialize face recognition service.
+        """
+        Initialize face recognition service.
 
         Args:
             hass: Home Assistant instance
@@ -45,6 +46,7 @@ class FaceRecognitionService:
             snapshot_root: Root directory for snapshots
             timeout: HTTP request timeout in seconds
             save_debug_crops: Whether to save debug face crops
+
         """
         self.hass = hass
         self.api_url = api_url
@@ -69,10 +71,9 @@ class FaceRecognitionService:
                 self._client = None
             LOGGER.debug("Face recognition service stopped")
 
-    async def recognize_faces(
-        self, image_bytes: bytes, camera_id: str
-    ) -> list[str]:
-        """Detect and recognize faces in image.
+    async def recognize_faces(self, image_bytes: bytes, camera_id: str) -> list[str]:
+        """
+        Detect and recognize faces in image.
 
         Args:
             image_bytes: Image data (JPEG)
@@ -80,6 +81,7 @@ class FaceRecognitionService:
 
         Returns:
             List of recognized person names, or ["Indeterminate"] if no faces
+
         """
         client = self._client
         if client is None:
@@ -133,7 +135,8 @@ class FaceRecognitionService:
         face_idx: int,
         person_name: str,
     ) -> None:
-        """Save debug face crop to disk.
+        """
+        Save debug face crop to disk.
 
         Args:
             image_bytes: Original image data
@@ -141,6 +144,7 @@ class FaceRecognitionService:
             camera_id: Camera entity ID
             face_idx: Face index in this frame
             person_name: Recognized person name
+
         """
         if not bbox or len(bbox) != 4:
             return
