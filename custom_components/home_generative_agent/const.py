@@ -38,6 +38,15 @@ OLLAMA_BOOL_HINT_TAGS = {
     "magistral",
 }
 
+# --- Reasoning delimiters ---
+# These delimiters are used to mark the start and end of reasoning blocks in the model's
+# responses.
+# These may be model dependent, the defaults work for qwen3.
+REASONING_DELIMITERS: dict[str, str] = {
+    "start": "<think>",
+    "end": "</think>",
+}
+
 # ---- Global options ----
 CONF_RECOMMENDED = "recommended"
 CONF_PROMPT = "prompt"
