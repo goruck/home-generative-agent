@@ -294,7 +294,16 @@ def _schema_for(hass: HomeAssistant, opts: Mapping[str, Any]) -> VolDictType:
             CONF_FACE_RECOGNITION_MODE,
             description={"suggested_value": opts.get(CONF_FACE_RECOGNITION_MODE)},
             default=RECOMMENDED_FACE_RECOGNITION_MODE,
-        ): vol.In(["enable", "disable"]),
+        ): SelectSelector(
+            SelectSelectorConfig(
+                options=[
+                    SelectOptionDict(label="Enable", value="enable"),
+                    SelectOptionDict(label="Disable", value="disable"),
+                    SelectOptionDict(label="Debug", value="debug"),
+                ],
+                mode=SelectSelectorMode.DROPDOWN,
+            )
+        ),
         vol.Optional(
             CONF_OLLAMA_REASONING,
             description={"suggested_value": opts.get(CONF_OLLAMA_REASONING)},
@@ -594,6 +603,7 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
             CONF_DB_URI,
             CONF_FACE_API_URL,
         ):
+            # Only overlay from entry.data if not explicitly set in options (including empty string)
             if k not in options and self.config_entry.data.get(k):
                 options[k] = self.config_entry.data[k]
         return options
@@ -609,7 +619,8 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
 
         raw = _get_str(user_input, CONF_FACE_API_URL)
         if not raw:
-            options.pop(CONF_FACE_API_URL, None)
+            # Store empty string to indicate user explicitly cleared it
+            options[CONF_FACE_API_URL] = ""
             return None
 
         try:
@@ -702,7 +713,11 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         return None
 
     def _drop_empty_fields(self, final_options: dict[str, Any]) -> None:
-        """Remove empty strings for fields to avoid storing empties."""
+        """Remove empty strings for fields to avoid storing empties.
+
+        Note: CONF_FACE_API_URL is preserved as empty string to indicate
+        user explicitly cleared it, preventing restoration from entry.data.
+        """
         for k in (
             CONF_API_KEY,
             CONF_OPENAI_BASE_URL,
@@ -710,10 +725,11 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
             CONF_OLLAMA_URL,
             CONF_GEMINI_API_KEY,
             CONF_DB_URI,
-            CONF_FACE_API_URL,
         ):
             if not _get_str(final_options, k):
                 final_options.pop(k, None)
+
+        # Don't drop CONF_FACE_API_URL - keep empty string to mark as explicitly cleared
 
     def _cleanup_none_llm_api(self, options: dict[str, Any]) -> None:
         """Remove the 'none' sentinel so options omit the key when unset."""

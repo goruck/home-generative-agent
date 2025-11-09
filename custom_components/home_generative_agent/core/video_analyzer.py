@@ -8,7 +8,7 @@ import re
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import homeassistant.util.dt as dt_util
 from homeassistant.core import HomeAssistant, callback
@@ -16,7 +16,6 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.event import async_track_time_interval
 
 from ..const import (  # noqa: TID252
-    CONF_NOTIFY_SERVICE,
     CONF_VIDEO_ANALYZER_MODE,
     VIDEO_ANALYZER_MOTION_CAMERA_MAP,
     VIDEO_ANALYZER_SCAN_INTERVAL,
@@ -59,13 +58,27 @@ _global_vision_sem = asyncio.Semaphore(_GLOBAL_VISION_CONCURRENCY)
 class VideoAnalyzer:
     """Analyze video from recording or motion-triggered cameras - Orchestrator."""
 
-    def __init__(self, hass: HomeAssistant, entry: HGAConfigEntry) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: HGAConfigEntry,
+        face_api_url: str,
+        person_gallery: Any,
+        face_mode: str,
+        vision_model: Any,
+        summarization_model: Any,
+    ) -> None:
         """
         Initialize the video analyzer with specialized components.
 
         Args:
             hass: Home Assistant instance
-            entry: Config entry with runtime data
+            entry: Config entry
+            face_api_url: Face recognition API URL
+            person_gallery: Person gallery DAO instance
+            face_mode: Face recognition mode (enable/disable/debug)
+            vision_model: Vision model for frame analysis
+            summarization_model: Model for summarizing frame descriptions
 
         """
         self.hass = hass
@@ -80,16 +93,16 @@ class VideoAnalyzer:
 
         self.face_service = FaceRecognitionService(
             hass,
-            entry.runtime_data.face_api_url,
-            entry.runtime_data.person_gallery,
+            face_api_url,
+            person_gallery,
             snapshot_root,
             timeout=_FACE_TIMEOUT_SEC,
-            save_debug_crops=entry.runtime_data.face_mode == "debug",
+            save_debug_crops=face_mode == "debug",
         )
 
         self.frame_processor = FrameProcessor(
             hass,
-            entry.runtime_data.vision_model,
+            vision_model,
             self.face_service,
             _global_vision_sem,
             face_timeout=_FACE_TIMEOUT_SEC,
@@ -98,19 +111,12 @@ class VideoAnalyzer:
         )
 
         self.summarizer = VideoSummarizer(
-            entry.runtime_data.summarization_model, timeout=_SUMMARY_TIMEOUT_SEC
+            summarization_model, timeout=_SUMMARY_TIMEOUT_SEC
         )
 
-        self.notifier = NotificationManager(
-            hass,
-            entry.runtime_data.store,
-            snapshot_root,
-            entry.options.get(CONF_NOTIFY_SERVICE),
-        )
-
-        self.storage = StorageManager(
-            hass, entry.runtime_data.store, VIDEO_ANALYZER_SNAPSHOTS_TO_KEEP
-        )
+        # Store and notifier will be set later via set_dependencies method
+        self.notifier = None
+        self.storage = None
 
         self.metrics = VideoAnalyzerMetrics(
             report_interval_sec=_METRICS_REPORT_INTERVAL_SEC
@@ -130,6 +136,54 @@ class VideoAnalyzer:
         self._cancel_listen: Callable[[], None] | None = None
         self._cancel_motion_listen: Callable[[], None] | None = None
         self._metrics_job_cancel: Callable[[], None] | None = None
+
+    def set_dependencies(self, store: Any, notify_service: str | None) -> None:
+        """
+        Set store and notifier dependencies after initialization.
+
+        Args:
+            store: AsyncPostgresStore instance
+            notify_service: Notification service name
+
+        """
+        snapshot_root = Path(VIDEO_ANALYZER_SNAPSHOT_ROOT)
+
+        self.notifier = NotificationManager(
+            self.hass,
+            store,
+            snapshot_root,
+            notify_service,
+        )
+
+        self.storage = StorageManager(
+            self.hass, store, VIDEO_ANALYZER_SNAPSHOTS_TO_KEEP
+        )
+
+    def protect_notify_image(self, path: Path, ttl_sec: int) -> None:
+        """
+        Protect an image from deletion for a specified time.
+
+        Args:
+            path: Path to the image to protect
+            ttl_sec: Time to live in seconds
+
+        """
+        if self.notifier:
+            self.notifier.protect(path, ttl_sec)
+
+    async def recognize_faces(self, img_bytes: bytes, camera_id: str) -> list[str]:
+        """
+        Recognize faces in an image.
+
+        Args:
+            img_bytes: Image data
+            camera_id: Camera entity ID
+
+        Returns:
+            List of recognized person names
+
+        """
+        return await self.face_service.recognize_faces(img_bytes, camera_id)
 
     async def _get_batch(
         self, queue: asyncio.Queue[Path], camera_id: str

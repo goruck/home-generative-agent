@@ -354,7 +354,7 @@ SIGNAL_HGA_RECOGNIZED = "hga_recognized_people"
 
 # ---------------- Face recognition ----------------
 CONF_FACE_RECOGNITION_MODE = "face_recognition_mode"
-RECOMMENDED_FACE_RECOGNITION_MODE: Literal["enable", "disable"] = "disable"
+RECOMMENDED_FACE_RECOGNITION_MODE: Literal["enable", "disable", "debug"] = "disable"
 
 CONF_FACE_API_URL = "face_api_url"
 RECOMMENDED_FACE_API_URL = "http://face-recog-server.local:8000"
