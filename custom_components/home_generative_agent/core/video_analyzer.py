@@ -30,7 +30,6 @@ from ..agent.tools import analyze_image  # noqa: TID252
 from ..const import (  # noqa: TID252
     CONF_NOTIFY_SERVICE,
     CONF_VIDEO_ANALYZER_MODE,
-    REASONING_DELIMITERS,
     SIGNAL_HGA_NEW_LATEST,
     SIGNAL_HGA_RECOGNIZED,
     VIDEO_ANALYZER_FACE_CROP,
@@ -49,6 +48,7 @@ from ..const import (  # noqa: TID252
 from .utils import (
     discover_mobile_notify_service,
     dispatch_on_loop,
+    extract_final,
 )
 from .video_helpers import (
     crop_resize_encode_jpeg,
@@ -76,7 +76,7 @@ LOGGER = logging.getLogger(__name__)
 # --- Video analyzer tuning constants ---
 _MAX_BATCH: Final[int] = 5  # frames per batch
 _QUEUE_MAXSIZE: Final[int] = 50  # per-camera backlog cap
-_FRAME_DEADLINE_SEC: Final[int] = 360  # skip frames older than this
+_FRAME_DEADLINE_SEC: Final[int] = 600  # skip frames older than this
 _SUMMARY_TIMEOUT_SEC: Final[int] = 60  # was 35
 _FACE_TIMEOUT_SEC: Final[int] = 10  # was 10 (keep)
 _VISION_TIMEOUT_SEC: Final[int] = 90  # was 30
@@ -393,12 +393,14 @@ class VideoAnalyzer:
         ]
         model = self.entry.runtime_data.summarization_model
         summary = await model.ainvoke(messages)
-        LOGGER.debug("Video analyzer summary: %s", summary)
+        LOGGER.debug("Raw video analyzer summary: %s", summary)
 
-        first, sep, last = summary.content.partition(
-            REASONING_DELIMITERS.get("end", "")
-        )
-        return (last if sep else first).strip("\n")
+        text = extract_final(getattr(summary, "content", "") or "")
+        if text:
+            return text
+
+        msg = "Empty model content after parsing."
+        raise ValueError(msg)
 
     async def _is_anomaly(self, camera_name: str, msg: str, first_path: str) -> bool:
         async with async_timeout.timeout(10):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urljoin, urlparse
@@ -34,6 +35,8 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
+
+_THINK_BLOCK = re.compile(r"<think>.*?(?:</think>|$)", re.IGNORECASE | re.DOTALL)
 
 # ---------------------------
 # Exceptions
@@ -282,7 +285,7 @@ async def validate_db_uri(hass: HomeAssistant, db_uri: str) -> None:
 
 
 # ---------------------------
-# Ollama "thinking"/reasoning capability check
+# Ollama "thinking"/reasoning
 # ---------------------------
 
 
@@ -329,3 +332,17 @@ def reasoning_field(
         return {}
     supported, value = _guess_ollama_reasoning(model)
     return {"reasoning": value} if supported else {}
+
+
+def extract_final(raw: str, max_chars: int | None = None) -> str:
+    """Return plain text with <think> blocks removed."""
+    if not raw:
+        return ""
+    # Remove any leaked reasoning
+    s = _THINK_BLOCK.sub("", raw)
+    # Collapse whitespace
+    s = re.sub(r"\s+", " ", s).strip()
+    # Char-limit (if specified)
+    if max_chars is None:
+        return s
+    return s[:max_chars].rstrip()

@@ -36,12 +36,12 @@ from ..const import (  # noqa: TID252
     CONTEXT_MAX_MESSAGES,
     CONTEXT_MAX_TOKENS,
     EMBEDDING_MODEL_PROMPT_TEMPLATE,
-    REASONING_DELIMITERS,
     SUMMARIZATION_INITIAL_PROMPT,
     SUMMARIZATION_PROMPT_TEMPLATE,
     SUMMARIZATION_SYSTEM_PROMPT,
     TOOL_CALL_ERROR_TEMPLATE,
 )
+from ..core.utils import extract_final  # noqa: TID252
 from .token_counter import count_tokens_cross_provider
 
 if TYPE_CHECKING:
@@ -188,11 +188,9 @@ async def _call_model(
 
     raw_response = await model.ainvoke(trimmed_messages)
     LOGGER.debug("Raw chat model response: %s", raw_response)
-    # Clean up raw response.
-    response: str = raw_response.content
-    # If model used reasoning, just use the final result.
-    first, sep, last = response.partition(REASONING_DELIMITERS.get("end", ""))
-    response = last.strip("\n") if sep else first.strip("\n")
+
+    response = extract_final(getattr(raw_response, "content", "") or "")
+
     # Create AI message, no need to include tool call metadata if there's none.
     if hasattr(raw_response, "tool_calls"):
         ai_response = AIMessage(content=response, tool_calls=raw_response.tool_calls)
@@ -243,11 +241,13 @@ async def _summarize_and_remove_messages(
 
     model = config["configurable"]["summarization_model"]
     LOGGER.debug("Summary messages: %s", messages)
-    response = await model.ainvoke(messages)
-    LOGGER.debug("Summary response: %s", response)
+    raw_response = await model.ainvoke(messages)
+    LOGGER.debug("Raw summary response: %s", raw_response)
+
+    response = extract_final(getattr(raw_response, "content", "") or "")
 
     return {
-        "summary": getattr(response, "content", response),
+        "summary": response,
         "messages": [
             RemoveMessage(id=m.id) for m in msgs_to_remove if m.id is not None
         ],

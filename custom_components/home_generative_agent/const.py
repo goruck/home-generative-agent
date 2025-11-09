@@ -22,14 +22,6 @@ CONF_NOTIFY_SERVICE = "notify_service"
 # See https://python.langchain.com/docs/how_to/debugging/
 LANGCHAIN_LOGGING_LEVEL: Literal["disable", "verbose", "debug"] = "disable"
 
-# --- Reasoning delimiters ---
-# These delimiters are used to mark the start and end of reasoning blocks in the model's
-# responses.
-# These may be model dependent, the defaults work for qwen3.
-REASONING_DELIMITERS: dict[str, str] = {
-    "start": "<think>",
-    "end": "</think>",
-}
 
 # ---- Ollama ----
 CONF_OLLAMA_URL = "ollama_url"
@@ -55,9 +47,9 @@ CONF_GEMINI_API_KEY = "gemini_api_key"
 
 # ---------------- Chat model ----------------
 CHAT_MODEL_TOP_P = 1.0
-CHAT_MODEL_NUM_CTX = 32768
-CHAT_MODEL_MAX_TOKENS = 4096
-CHAT_MODEL_REPEAT_PENALTY = 1.05
+CHAT_MODEL_NUM_CTX = 32768  # Ollama only
+CHAT_MODEL_MAX_TOKENS = -2  # Ollama only, -2 = fill context
+CHAT_MODEL_REPEAT_PENALTY = 1.05  # Ollama only
 # Add more models by extending the Literal types.
 CHAT_MODEL_OLLAMA_SUPPORTED = Literal["gpt-oss", "qwen2.5:32b", "qwen3:32b", "qwen3:8b"]
 CHAT_MODEL_OPENAI_SUPPORTED = Literal[
@@ -72,7 +64,7 @@ PROVIDERS = Literal["openai", "ollama", "gemini"]
 RECOMMENDED_CHAT_MODEL_PROVIDER: PROVIDERS = "ollama"
 
 CONF_OLLAMA_CHAT_MODEL = "ollama_chat_model"
-RECOMMENDED_OLLAMA_CHAT_MODEL: CHAT_MODEL_OLLAMA_SUPPORTED = "qwen3:8b"
+RECOMMENDED_OLLAMA_CHAT_MODEL: CHAT_MODEL_OLLAMA_SUPPORTED = "gpt-oss"
 
 CONF_OPENAI_CHAT_MODEL = "openai_chat_model"
 RECOMMENDED_OPENAI_CHAT_MODEL: CHAT_MODEL_OPENAI_SUPPORTED = "gpt-5"
@@ -87,13 +79,14 @@ RECOMMENDED_CHAT_MODEL_TEMPERATURE = 1.0
 CONTEXT_MANAGE_USE_TOKENS = True
 CONTEXT_MAX_MESSAGES = 80
 # Keep buffer for tools + token counter undercount (see repo notes).
-CONTEXT_MAX_TOKENS = CHAT_MODEL_NUM_CTX - CHAT_MODEL_MAX_TOKENS - 2048 - 4096  # 26624
+CONTEXT_MAX_TOKENS = CHAT_MODEL_NUM_CTX - CHAT_MODEL_MAX_TOKENS - 2048 - 4096  # 22528
 
 # ---------------- VLM (vision) ----------------
-VLM_TOP_P = 1
-VLM_NUM_PREDICT = 4096
-VLM_NUM_CTX = 16384
-VLM_REPEAT_PENALTY = 1.05
+VLM_TOP_P = 0.9
+VLM_NUM_PREDICT = -2  # Ollama only, -2 = fill context
+VLM_NUM_CTX = 16384  # Ollama only
+VLM_REPEAT_PENALTY = 1.05  # Ollama only
+VLM_MIRO_STAT = 0  # Ollama only
 VLM_OLLAMA_SUPPORTED = Literal["qwen2.5vl:7b", "qwen3-vl:8b"]
 VLM_OPENAI_SUPPORTED = Literal["gpt-5-nano", "gpt-4.1", "gpt-4.1-nano"]
 VLM_GEMINI_SUPPORTED = Literal[
@@ -113,7 +106,7 @@ CONF_GEMINI_VLM = "gemini_vlm"
 RECOMMENDED_GEMINI_VLM: VLM_GEMINI_SUPPORTED = "gemini-2.5-flash-lite"
 
 CONF_VLM_TEMPERATURE = "vlm_temperature"
-RECOMMENDED_VLM_TEMPERATURE = 0.0001
+RECOMMENDED_VLM_TEMPERATURE = 0.2
 
 # Prompts + input image size
 VLM_SYSTEM_PROMPT = """
@@ -158,7 +151,6 @@ FRAME DESCRIPTION REQUEST
 Describe this image clearly and factually in 1-3 sentences.
 Follow the style and rules from the system prompt.
 Do not add names, timestamps, or speculation.
-Return plain English text only.
 """
 VLM_USER_KW_TEMPLATE = """
 FRAME DESCRIPTION REQUEST (FOCUSED)
@@ -167,16 +159,16 @@ Primary attention: {key_words}
 Describe this image clearly and factually in 1-3 sentences, focusing on the listed items if present.
 Follow the style and rules from the system prompt.
 Do not add names, timestamps, or speculation.
-Return plain English text only.
 """  # noqa: E501
 VLM_IMAGE_WIDTH = 1920
 VLM_IMAGE_HEIGHT = 1080
 
 # ---------------- Summarization ----------------
-SUMMARIZATION_MODEL_TOP_P = 1
-SUMMARIZATION_MODEL_PREDICT = 4096
-SUMMARIZATION_MODEL_CTX = 32768
-SUMMARIZATION_MODEL_REPEAT_PENALTY = 1.05
+SUMMARIZATION_MODEL_TOP_P = 0.9
+SUMMARIZATION_MODEL_PREDICT = -2  # Ollama only, -2 = fill context
+SUMMARIZATION_MODEL_CTX = 32768  # Ollama only
+SUMMARIZATION_MODEL_REPEAT_PENALTY = 1.05  # Ollama only
+SUMMARIZATION_MIRO_STAT = 0  # Ollama only
 SUMMARIZATION_MODEL_OLLAMA_SUPPORTED = Literal["qwen3:1.7b", "qwen3:8b"]
 SUMMARIZATION_MODEL_OPENAI_SUPPORTED = Literal["gpt-5-nano", "gpt-4.1", "gpt-4.1-nano"]
 SUMMARIZATION_MODEL_GEMINI_SUPPORTED = Literal[
@@ -190,7 +182,7 @@ RECOMMENDED_SUMMARIZATION_MODEL_PROVIDER: Literal["openai", "ollama", "gemini"] 
 
 CONF_OLLAMA_SUMMARIZATION_MODEL = "ollama_summarization_model"
 RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL: SUMMARIZATION_MODEL_OLLAMA_SUPPORTED = (
-    "qwen3:1.7b"
+    "qwen3:8b"
 )
 
 CONF_OPENAI_SUMMARIZATION_MODEL = "openai_summarization_model"
@@ -204,7 +196,7 @@ RECOMMENDED_GEMINI_SUMMARIZATION_MODEL: SUMMARIZATION_MODEL_GEMINI_SUPPORTED = (
 )
 
 CONF_SUMMARIZATION_MODEL_TEMPERATURE = "summarization_model_temperature"
-RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE = 0
+RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE = 0.2
 
 # Prompts for summarization (used in graph/tools flows)
 SUMMARIZATION_SYSTEM_PROMPT = (

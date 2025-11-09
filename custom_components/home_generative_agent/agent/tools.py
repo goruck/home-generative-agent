@@ -45,6 +45,7 @@ from ..const import (  # noqa: TID252
     VLM_USER_KW_TEMPLATE,
     VLM_USER_PROMPT,
 )
+from ..core.utils import extract_final  # noqa: TID252
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -134,16 +135,9 @@ async def analyze_image(
         LOGGER.exception(msg)
         return msg
 
-    # Normalize return text across adapters
-    if hasattr(resp, "content"):
-        return str(resp.content)
-    if hasattr(resp, "text"):
-        try:
-            return str(resp.text())
-        except Exception:
-            LOGGER.exception("Error converting response to string.")
-            return "Error converting response to string."
-    return str(resp)
+    LOGGER.debug("Raw VLM model response: %s", resp)
+
+    return extract_final(getattr(resp, "content", "") or "")
 
 
 @tool(parse_docstring=True)
