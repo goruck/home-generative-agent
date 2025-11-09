@@ -21,15 +21,25 @@ from ..const import (  # noqa: TID252
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
 
     from homeassistant.core import HomeAssistant
 
 _LOGGER = logging.getLogger(__name__)
 
+# Video snapshot naming constants
 _LATEST_NAME: Final[str] = VIDEO_ANALYZER_LATEST_NAME
 _LATEST_SUBFOLDER: Final[str] = VIDEO_ANALYZER_LATEST_SUBFOLDER
+
+# dHash parameters
 _UNIQUENESS_HASH_SIZE: Final[int] = 8  # dHash grid size (8 -> 64-bit)
+
+# Single-frame heuristic helpers
+_HUMAN_TERMS = {"person", "people", "man", "woman", "boy", "girl", "child", "children"}
+_NEG_IDENTS = {"Indeterminate", "Unknown Person", ""}
+_MAX_SENTENCES = 2
+_MAX_CHARS = 300
+_MAX_NAMES = 2
 
 
 def load_image_rgb(buf: bytes) -> Image.Image:
@@ -208,3 +218,60 @@ def www_notify_path(hass: HomeAssistant, camera_id: str) -> Path:
     slug = camera_id.replace(".", "_")
     base = Path(hass.config.path("www")) / "hga_notify" / slug
     return base / "latest.jpg"
+
+
+# --- Single-frame heuristic helpers ---
+
+
+def clean_frame_text(text: str) -> str:
+    """Remove timestamps/labels and collapse whitespace."""
+    s = re.sub(r"\bt\+\d+s\.\s*", "", text, flags=re.IGNORECASE)  # drop "t+3s." etc.
+    s = re.sub(
+        r"\b(frame|camera)\s*\d*:?\s*", "", s, flags=re.IGNORECASE
+    )  # drop "Frame 1:"
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def limit_sentences_and_chars(
+    text: str,
+    *,
+    max_chars: int = _MAX_CHARS,
+    max_sentences: int = _MAX_SENTENCES,
+) -> str:
+    """Split on sentence enders, keep up to 2 sentences, then enforce char cap."""
+    parts = re.split(r"(?<=[.!?])\s+", text)
+    clipped = " ".join(parts[:max_sentences]).strip()
+    return clipped[:max_chars].rstrip(" ,;")
+
+
+def has_human_terms(text: str) -> bool:
+    """Return True if text contains any human-related terms."""
+    lt = text.lower()
+    return any(term in lt for term in _HUMAN_TERMS)
+
+
+def format_subject(identities: Iterable[str], text: str) -> str | None:
+    """Return subject phrase per rules, else None if no human present."""
+    idents = [i for i in identities if i not in _NEG_IDENTS]
+    if idents:
+        # Up to two known names
+        uniq = []
+        for i in idents:
+            if i not in uniq:
+                uniq.append(i)
+            if len(uniq) == _MAX_NAMES:
+                break
+        return " and ".join(uniq)
+    # Unknown but human mentioned?
+    if has_human_terms(text) or any(i == "Unknown Person" for i in identities):
+        return "a person"
+    return None
+
+
+def apply_name_substitution(text: str, subject: str, *, had_known_name: bool) -> str:
+    """Swap generic 'the/a person/man/woman' with the known name when possible."""
+    if not had_known_name:
+        return text
+    # Replace only the first generic mention to keep phrasing natural
+    pattern = r"\b(?:the|a)\s+(?:person|man|woman)\b"
+    return re.sub(pattern, subject, text, count=1, flags=re.IGNORECASE)

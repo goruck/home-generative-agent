@@ -51,13 +51,18 @@ from .utils import (
     extract_final,
 )
 from .video_helpers import (
+    apply_name_substitution,
+    clean_frame_text,
     crop_resize_encode_jpeg,
     dedupe_desc,
     dhash_bytes,
     ensure_dir,
     epoch_from_path,
+    format_subject,
     hamming64,
+    has_human_terms,
     latest_target,
+    limit_sentences_and_chars,
     load_image_rgb,
     order_batch,
     publish_latest_atomic,
@@ -374,6 +379,45 @@ class VideoAnalyzer:
             msg = "At least one frame description required."
             raise ValueError(msg)
 
+        # ---------- Heuristic fast-path for a single frame ----------
+        if len(frame_descriptions) == 1:
+            # Expect a single dict mapping <frame description> -> [identities...]
+            entry = frame_descriptions[0]
+            if not entry:
+                msg = "At least one frame description required."
+                raise ValueError(msg)
+
+            # Unpack first (and only) (frame_text, identities) pair
+            (raw_text, identities), *_ = entry.items()
+
+            text = clean_frame_text(raw_text or "")
+            identities = identities or []
+
+            subject = format_subject(identities, text)
+            had_known_name = bool(subject and subject not in {"a person"})
+
+            if subject:
+                # If we have a subject, try to weave it in naturally.
+                caption = apply_name_substitution(
+                    text, subject, had_known_name=had_known_name
+                )
+                # If the text doesn't already contain a subject,
+                # prepend one with a simple verb.
+                if caption == text and had_known_name and not has_human_terms(text):
+                    # Minimal, neutral verb to avoid speculation.
+                    caption = f"{subject} is present. {text}".strip()
+            else:
+                # No human present; describe scene as-is.
+                caption = text
+
+            caption = limit_sentences_and_chars(caption, max_chars=150, max_sentences=2)
+            if caption:
+                LOGGER.debug("Heuristic single-frame summary: %s", caption)
+                return caption
+
+            LOGGER.debug("Heuristic produced empty caption; falling back to LLM.")
+
+        # ---------- LLM path for multiple frames ----------
         ftag = "\n<frame description>\n{}\n</frame description>"
         ptag = "\n<person identity>\n{}\n</person identity>"
         prompt = " ".join(
