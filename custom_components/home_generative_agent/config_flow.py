@@ -45,6 +45,7 @@ from .const import (
     CONF_OLLAMA_SUMMARIZATION_MODEL,
     CONF_OLLAMA_URL,
     CONF_OLLAMA_VLM,
+    CONF_OPENAI_BASE_URL,
     CONF_OPENAI_CHAT_MODEL,
     CONF_OPENAI_SUMMARIZATION_MODEL,
     CONF_OPENAI_VLM,
@@ -68,6 +69,7 @@ from .const import (
     RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL,
     RECOMMENDED_OLLAMA_URL,
     RECOMMENDED_OLLAMA_VLM,
+    RECOMMENDED_OPENAI_BASE_URL,
     RECOMMENDED_OPENAI_CHAT_MODEL,
     RECOMMENDED_OPENAI_SUMMARIZATION_MODEL,
     RECOMMENDED_OPENAI_VLM,
@@ -102,6 +104,10 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
         vol.Optional(CONF_API_KEY): TextSelector(
             TextSelectorConfig(type=TextSelectorType.PASSWORD)
         ),
+        vol.Optional(
+            CONF_OPENAI_BASE_URL,
+            description={"suggested_value": RECOMMENDED_OPENAI_BASE_URL},
+        ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
         vol.Optional(CONF_GEMINI_API_KEY): TextSelector(
             TextSelectorConfig(type=TextSelectorType.PASSWORD)
         ),
@@ -231,6 +237,10 @@ def _schema_for(hass: HomeAssistant, opts: Mapping[str, Any]) -> VolDictType:
             CONF_API_KEY,
             description={"suggested_value": opts.get(CONF_API_KEY)},
         ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
+        vol.Optional(
+            CONF_OPENAI_BASE_URL,
+            description={"suggested_value": (opts.get(CONF_OPENAI_BASE_URL))},
+        ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
         vol.Optional(
             CONF_GEMINI_API_KEY,
             description={"suggested_value": opts.get(CONF_GEMINI_API_KEY)},
@@ -396,6 +406,7 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
 
         vals = {
             CONF_API_KEY: _get_str(data, CONF_API_KEY),
+            CONF_OPENAI_BASE_URL: _get_str(data, CONF_OPENAI_BASE_URL),
             CONF_OLLAMA_URL: _get_str(data, CONF_OLLAMA_URL),
             CONF_GEMINI_API_KEY: _get_str(data, CONF_GEMINI_API_KEY),
             CONF_DB_URI: _get_str(data, CONF_DB_URI),
@@ -403,6 +414,7 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
         }
 
         # Ordered, table-driven validation; short-circuits on first error.
+        # Note: OpenAI key and base_url validation uses the base_url if provided
         for key, validator, label in (
             (CONF_API_KEY, validate_openai_key, "OpenAI"),
             (CONF_OLLAMA_URL, validate_ollama_url, "Ollama"),
@@ -410,12 +422,34 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
             (CONF_DB_URI, validate_db_uri, "Database URI"),
             (CONF_FACE_API_URL, validate_face_api_url, "Face Recognition API"),
         ):
-            code = await self._validate_present(self.hass, vals[key], validator, label)
-            if code:
-                errors["base"] = code
-                break
+            if key == CONF_API_KEY:
+                # For OpenAI, pass the base_url if provided
+                if vals[CONF_API_KEY]:
+                    try:
+                        await validate_openai_key(
+                            self.hass,
+                            vals[CONF_API_KEY],
+                            vals.get(CONF_OPENAI_BASE_URL),
+                        )
+                    except InvalidAuthError:
+                        errors["base"] = "invalid_auth"
+                        break
+                    except CannotConnectError:
+                        errors["base"] = "cannot_connect"
+                        break
+                    except Exception:
+                        LOGGER.exception("Unexpected exception during OpenAI validation")
+                        errors["base"] = "unknown"
+                        break
+            else:
+                code = await self._validate_present(self.hass, vals[key], validator, label)
+                if code:
+                    errors["base"] = code
+                    break
 
         # Normalize URLs only on success.
+        if not errors and vals[CONF_OPENAI_BASE_URL]:
+            normalized[CONF_OPENAI_BASE_URL] = ensure_http_url(vals[CONF_OPENAI_BASE_URL])
         if not errors and vals[CONF_OLLAMA_URL]:
             normalized[CONF_OLLAMA_URL] = ensure_http_url(vals[CONF_OLLAMA_URL])
         if not errors and vals[CONF_FACE_API_URL]:
@@ -424,6 +458,7 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
         # Drop empties so defaults can apply later.
         for key in (
             CONF_API_KEY,
+            CONF_OPENAI_BASE_URL,
             CONF_OLLAMA_URL,
             CONF_GEMINI_API_KEY,
             CONF_DB_URI,
@@ -518,6 +553,7 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         options = dict(self.config_entry.options)
         for k in (
             CONF_API_KEY,
+            CONF_OPENAI_BASE_URL,
             CONF_OLLAMA_URL,
             CONF_GEMINI_API_KEY,
             CONF_DB_URI,
@@ -634,6 +670,7 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         """Remove empty strings for fields to avoid storing empties."""
         for k in (
             CONF_API_KEY,
+            CONF_OPENAI_BASE_URL,
             CONF_OLLAMA_URL,
             CONF_GEMINI_API_KEY,
             CONF_DB_URI,

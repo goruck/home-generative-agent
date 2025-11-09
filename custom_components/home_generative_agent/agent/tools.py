@@ -39,6 +39,7 @@ from ..const import (  # noqa: TID252
     CONF_NOTIFY_SERVICE,
     HISTORY_TOOL_CONTEXT_LIMIT,
     HISTORY_TOOL_PURGE_KEEP_DAYS,
+    TOOL_RESPONSE_MAX_LENGTH,
     VLM_IMAGE_HEIGHT,
     VLM_IMAGE_WIDTH,
     VLM_SYSTEM_PROMPT,
@@ -55,6 +56,121 @@ if TYPE_CHECKING:
     from langchain_core.runnables.base import RunnableSerializable
 
 LOGGER = logging.getLogger(__name__)
+
+
+# ----- Helper Functions for Tool Validation & Sanitization -----
+
+
+def _validate_tool_params(
+    tool_schema: dict[str, Any],
+    provided_args: dict[str, Any],
+) -> tuple[bool, str | None]:
+    """Validate tool parameters against schema.
+
+    Args:
+        tool_schema: Schema defining expected parameters
+        provided_args: Arguments provided to the tool
+
+    Returns:
+        Tuple of (is_valid, error_message)
+    """
+    # Check required fields
+    required = tool_schema.get("required", [])
+    for field in required:
+        if field not in provided_args:
+            return False, f"Missing required parameter: {field}"
+
+    # Check field types
+    properties = tool_schema.get("properties", {})
+    for field, value in provided_args.items():
+        if field not in properties:
+            return False, f"Unknown parameter: {field}"
+
+        field_schema = properties[field]
+        expected_type = field_schema.get("type")
+
+        if expected_type == "string" and not isinstance(value, str):
+            return False, f"Parameter '{field}' must be a string, got {type(value).__name__}"
+        elif expected_type == "array" and not isinstance(value, list):
+            return False, f"Parameter '{field}' must be a list, got {type(value).__name__}"
+        elif expected_type == "object" and not isinstance(value, dict):
+            return False, f"Parameter '{field}' must be an object, got {type(value).__name__}"
+        elif expected_type == "number" and not isinstance(value, (int, float)):
+            return False, f"Parameter '{field}' must be a number, got {type(value).__name__}"
+        elif expected_type == "boolean" and not isinstance(value, bool):
+            return False, f"Parameter '{field}' must be a boolean, got {type(value).__name__}"
+
+        # Check string length constraints
+        if isinstance(value, str):
+            max_length = field_schema.get("maxLength")
+            if max_length and len(value) > max_length:
+                return (
+                    False,
+                    f"Parameter '{field}' exceeds max length of {max_length}",
+                )
+            min_length = field_schema.get("minLength")
+            if min_length and len(value) < min_length:
+                return (
+                    False,
+                    f"Parameter '{field}' below min length of {min_length}",
+                )
+
+        # Check enum values
+        enum_values = field_schema.get("enum")
+        if enum_values and value not in enum_values:
+            return (
+                False,
+                f"Parameter '{field}' must be one of {enum_values}, got {value}",
+            )
+
+    return True, None
+
+
+def _sanitize_tool_response(
+    response: Any,
+    max_length: int = TOOL_RESPONSE_MAX_LENGTH,
+) -> str:
+    """Sanitize and limit tool response size.
+
+    Args:
+        response: The tool response (any type)
+        max_length: Maximum length in characters
+
+    Returns:
+        Sanitized, truncated response as string
+    """
+    if response is None:
+        return ""
+
+    # Convert to string
+    if isinstance(response, str):
+        response_str = response
+    elif isinstance(response, dict) or isinstance(response, list):
+        try:
+            response_str = json.dumps(response)
+        except (TypeError, ValueError):
+            response_str = str(response)
+    else:
+        response_str = str(response)
+
+    # Sanitize - remove control characters except newlines/tabs
+    sanitized = "".join(
+        char if ord(char) >= 32 or char in ("\n", "\t", "\r") else ""
+        for char in response_str
+    )
+
+    # Truncate if needed
+    if len(sanitized) > max_length:
+        sanitized = (
+            sanitized[: max_length - 3] + "..."
+        )  # Reserve space for ellipsis
+        LOGGER.debug(
+            "Tool response truncated from %d to %d characters",
+            len(response_str),
+            max_length,
+        )
+
+    return sanitized
 
 
 async def _get_camera_image(hass: HomeAssistant, camera_name: str) -> bytes | None:

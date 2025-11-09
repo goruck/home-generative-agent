@@ -21,6 +21,7 @@ from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
 from voluptuous_openapi import convert
 
 from .agent.graph import workflow
+from .agent.tool_metrics import ToolCallRateLimiter, ToolMetricsCollector
 from .agent.tools import (
     add_automation,
     get_and_analyze_camera_image,
@@ -31,6 +32,7 @@ from .const import (
     CONF_PROMPT,
     DOMAIN,
     LANGCHAIN_LOGGING_LEVEL,
+    TOOL_CALL_RATE_LIMIT_PER_MINUTE,
     TOOL_CALL_ERROR_SYSTEM_MESSAGE,
 )
 
@@ -122,10 +124,22 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
 
         self.tz = dt_util.get_default_time_zone()
 
+        # Initialize tool calling improvements
+        self.rate_limiter = ToolCallRateLimiter(
+            max_calls_per_minute=TOOL_CALL_RATE_LIMIT_PER_MINUTE
+        )
+        self.metrics_collector = ToolMetricsCollector(retention_minutes=60)
+
     async def async_added_to_hass(self) -> None:
         """When entity is added to Home Assistant."""
         await super().async_added_to_hass()
         conversation.async_set_agent(self.hass, self.entry, self)
+        # Make metrics collector available to graph nodes
+        self.hass._hga_tool_metrics = self.metrics_collector
+        LOGGER.debug(
+            "Tool metrics collector initialized with %d minute retention",
+            60,
+        )
 
     async def async_will_remove_from_hass(self) -> None:
         """When entity will be removed from Home Assistant."""
@@ -292,6 +306,23 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             },
             "recursion_limit": 10,
         }
+
+        # Check rate limiting before invoking graph
+        allowed, current_count, reset_seconds = self.rate_limiter.can_call("tool_call")
+        if not allowed:
+            LOGGER.warning(
+                "Tool rate limit exceeded (%d calls). Reset in %.1f seconds.",
+                current_count,
+                reset_seconds,
+            )
+            intent_response = intent.IntentResponse(language=user_input.language)
+            intent_response.async_set_error(
+                intent.IntentResponseErrorCode.UNKNOWN,
+                f"Tool call rate limit exceeded. Please try again in {int(reset_seconds)} seconds.",
+            )
+            return conversation.ConversationResult(
+                response=intent_response, conversation_id=conversation_id
+            )
 
         # Compile graph into a LangChain Runnable.
         app = workflow.compile(

@@ -54,6 +54,11 @@ CONF_PROMPT = "prompt"
 # --- Gemini API key (used in config_flow/__init__.py) ---
 CONF_GEMINI_API_KEY = "gemini_api_key"
 
+# ---- OpenAI API Configuration ----
+CONF_OPENAI_API_KEY = "api_key"
+CONF_OPENAI_BASE_URL = "openai_base_url"
+RECOMMENDED_OPENAI_BASE_URL = "https://api.openai.com/v1"
+
 # ---------------- Chat model ----------------
 CHAT_MODEL_TOP_P = 1.0
 CHAT_MODEL_NUM_CTX = 32768  # Ollama only
@@ -346,6 +351,12 @@ HISTORY_TOOL_CONTEXT_LIMIT = 50
 HISTORY_TOOL_PURGE_KEEP_DAYS = 10
 AUTOMATION_TOOL_EVENT_REGISTERED = "automation_registered_via_home_generative_agent"
 AUTOMATION_TOOL_BLUEPRINT_NAME = "goruck/hga_scene_analysis.yaml"
+
+# Tool calling and rate limiting
+TOOL_CALL_TIMEOUT_SECONDS = 30
+TOOL_CALL_MAX_RETRIES = 3
+TOOL_CALL_RATE_LIMIT_PER_MINUTE = 30
+TOOL_RESPONSE_MAX_LENGTH = 16000  # Prevent context bloat
 
 # ---------------- Dynamic model + provider registry ----------------
 # This is a dynamic registry of model categories, providers, and models.

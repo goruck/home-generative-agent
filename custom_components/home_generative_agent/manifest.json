@@ -23,6 +23,7 @@
     "langchain-core==1.0.0",
     "langchain-openai==1.0.0",
     "langchain-ollama==0.3.10",
+    "langchain-anthropic==0.3.0",
     "langgraph==1.0.0",
     "langgraph-checkpoint-postgres==2.0.25",
     "openai==2.5.0",

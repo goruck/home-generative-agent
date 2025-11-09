@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import logging
+from enum import Enum
 from functools import partial
 from typing import (
     TYPE_CHECKING,
@@ -40,9 +42,11 @@ from ..const import (  # noqa: TID252
     SUMMARIZATION_PROMPT_TEMPLATE,
     SUMMARIZATION_SYSTEM_PROMPT,
     TOOL_CALL_ERROR_TEMPLATE,
+    TOOL_CALL_TIMEOUT_SECONDS,
 )
 from ..core.utils import extract_final  # noqa: TID252
 from .token_counter import count_tokens_cross_provider
+from .tool_metrics import ToolCallMetrics, ToolMetricsCollector
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -50,6 +54,43 @@ if TYPE_CHECKING:
     from langgraph.store.base import BaseStore
 
 LOGGER = logging.getLogger(__name__)
+
+
+class ToolErrorType(str, Enum):
+    """Classification of tool call errors."""
+
+    VALIDATION = "validation"  # Invalid parameters or schema mismatch
+    EXECUTION = "execution"  # Tool executed but failed
+    TIMEOUT = "timeout"  # Tool call exceeded time limit
+    NOT_FOUND = "not_found"  # Tool does not exist
+    UNKNOWN = "unknown"  # Unknown error type
+
+    @classmethod
+    def classify(cls, error: Exception, timeout_exceeded: bool = False) -> "ToolErrorType":
+        """Classify error type based on exception.
+
+        Args:
+            error: The exception to classify
+            timeout_exceeded: Whether timeout was exceeded
+
+        Returns:
+            ToolErrorType classification
+        """
+        if timeout_exceeded:
+            return cls.TIMEOUT
+        if isinstance(error, ValidationError):
+            return cls.VALIDATION
+        if isinstance(error, (ValueError, TypeError, KeyError)):
+            return cls.VALIDATION
+        if isinstance(error, AttributeError):
+            return cls.NOT_FOUND
+        if isinstance(error, HomeAssistantError):
+            err_str = str(error).lower()
+            if "not found" in err_str or "unknown" in err_str:
+                return cls.NOT_FOUND
+            if "invalid" in err_str or "schema" in err_str:
+                return cls.VALIDATION
+        return cls.EXECUTION
 
 
 class State(MessagesState):
@@ -257,13 +298,20 @@ async def _summarize_and_remove_messages(
 async def _call_tools(
     state: State, config: RunnableConfig, *, store: BaseStore
 ) -> dict[str, list[ToolMessage]]:
-    """Call Home Assistant or LangChain tools requested by the model."""
+    """Call Home Assistant or LangChain tools requested by the model.
+
+    Includes enhanced error handling, timeouts, and metrics collection.
+    """
     if "configurable" not in config:
         msg = "Configuration is missing."
         raise HomeAssistantError(msg)
 
     langchain_tools = config["configurable"]["langchain_tools"]
     ha_llm_api = config["configurable"]["ha_llm_api"]
+    hass = config["configurable"].get("hass")
+
+    # Initialize metrics collector if available
+    metrics_collector = getattr(hass, "_hga_tool_metrics", None)
 
     # Expect tool calls in the last AIMessage.
     if not state["messages"] or not isinstance(state["messages"][-1], AIMessage):
@@ -276,11 +324,32 @@ async def _call_tools(
     for tool_call in tool_calls:
         tool_name = tool_call["name"]
         tool_args = tool_call["args"]
+        tool_id = tool_call.get("id") or ""
         LOGGER.debug("Tool call: %s(%s)", tool_name, tool_args)
 
-        def _handle_tool_error(err: str, name: str, tid: str) -> ToolMessage:
+        # Create metric for this call
+        metric = None
+        if metrics_collector:
+            metric = ToolCallMetrics(tool_name=tool_name, call_id=tool_id)
+            metrics_collector.add_metric(metric)
+
+        def _handle_tool_error(
+            err: Exception,
+            name: str,
+            tid: str,
+            error_type: ToolErrorType = ToolErrorType.UNKNOWN,
+        ) -> ToolMessage:
+            """Create error response with classification."""
+            error_msg = str(err)
+            LOGGER.warning(
+                "Tool error [%s] in %s: %s",
+                error_type.value,
+                name,
+                error_msg,
+            )
+            message = TOOL_CALL_ERROR_TEMPLATE.format(error=error_msg)
             return ToolMessage(
-                content=TOOL_CALL_ERROR_TEMPLATE.format(error=err),
+                content=message,
                 name=name,
                 tool_call_id=tid,
                 status="error",
@@ -292,28 +361,147 @@ async def _call_tools(
             tool_call_copy = copy.deepcopy(tool_call)
             tool_call_copy["args"].update({"store": store, "config": config})
             try:
-                tool_response = await lc_tool.ainvoke(tool_call_copy)
-            except (HomeAssistantError, ValidationError) as err:
+                # Execute with timeout
+                tool_response = await asyncio.wait_for(
+                    lc_tool.ainvoke(tool_call_copy),
+                    timeout=TOOL_CALL_TIMEOUT_SECONDS,
+                )
+                if metric:
+                    # Calculate response size
+                    response_size = len(str(tool_response)) if tool_response else 0
+                    metric.finalize(
+                        success=True,
+                        response_size_bytes=response_size,
+                    )
+                LOGGER.debug("LangChain tool response: %s", tool_response)
+            except asyncio.TimeoutError:
+                error_type = ToolErrorType.TIMEOUT
+                if metric:
+                    metric.finalize(
+                        success=False,
+                        error_type=error_type.value,
+                        error_message="Tool execution timed out",
+                    )
                 tool_response = _handle_tool_error(
-                    repr(err), tool_name, tool_call.get("id") or ""
+                    Exception(
+                        f"Tool '{tool_name}' timed out after"
+                        f" {TOOL_CALL_TIMEOUT_SECONDS}s"
+                    ),
+                    tool_name,
+                    tool_id,
+                    error_type,
+                )
+            except (HomeAssistantError, ValidationError, ValueError, TypeError) as err:
+                error_type = ToolErrorType.classify(err)
+                if metric:
+                    metric.finalize(
+                        success=False,
+                        error_type=error_type.value,
+                        error_message=str(err),
+                    )
+                tool_response = _handle_tool_error(
+                    err,
+                    tool_name,
+                    tool_id,
+                    error_type,
+                )
+            except Exception as err:
+                error_type = ToolErrorType.EXECUTION
+                if metric:
+                    metric.finalize(
+                        success=False,
+                        error_type=error_type.value,
+                        error_message=str(err),
+                    )
+                LOGGER.exception("Unexpected error in LangChain tool")
+                tool_response = _handle_tool_error(
+                    err,
+                    tool_name,
+                    tool_id,
+                    error_type,
                 )
         # Home Assistant tool
         else:
             tool_input = llm.ToolInput(tool_name=tool_name, tool_args=tool_args)
             try:
-                response = await ha_llm_api.async_call_tool(tool_input)
+                # Execute with timeout
+                response = await asyncio.wait_for(
+                    ha_llm_api.async_call_tool(tool_input),
+                    timeout=TOOL_CALL_TIMEOUT_SECONDS,
+                )
                 tool_response = ToolMessage(
                     content=json.dumps(response),
-                    tool_call_id=tool_call.get("id"),
+                    tool_call_id=tool_id,
                     name=tool_name,
                 )
-            except (HomeAssistantError, vol.Invalid) as err:
+                if metric:
+                    response_size = len(json.dumps(response)) if response else 0
+                    metric.finalize(
+                        success=True,
+                        response_size_bytes=response_size,
+                    )
+                LOGGER.debug("HA tool response: %s", tool_response)
+            except asyncio.TimeoutError:
+                error_type = ToolErrorType.TIMEOUT
+                if metric:
+                    metric.finalize(
+                        success=False,
+                        error_type=error_type.value,
+                        error_message="Tool execution timed out",
+                    )
                 tool_response = _handle_tool_error(
-                    repr(err), tool_name, tool_call.get("id") or ""
+                    Exception(
+                        f"Tool '{tool_name}' timed out after"
+                        f" {TOOL_CALL_TIMEOUT_SECONDS}s"
+                    ),
+                    tool_name,
+                    tool_id,
+                    error_type,
+                )
+            except (HomeAssistantError, vol.Invalid, ValueError, AttributeError) as err:
+                error_type = ToolErrorType.classify(err)
+                if metric:
+                    metric.finalize(
+                        success=False,
+                        error_type=error_type.value,
+                        error_message=str(err),
+                    )
+                tool_response = _handle_tool_error(
+                    err,
+                    tool_name,
+                    tool_id,
+                    error_type,
+                )
+            except Exception as err:
+                error_type = ToolErrorType.EXECUTION
+                if metric:
+                    metric.finalize(
+                        success=False,
+                        error_type=error_type.value,
+                        error_message=str(err),
+                    )
+                LOGGER.exception("Unexpected error in HA tool")
+                tool_response = _handle_tool_error(
+                    err,
+                    tool_name,
+                    tool_id,
+                    error_type,
                 )
 
         LOGGER.debug("Tool response: %s", tool_response)
         tool_responses.append(tool_response)
+
+    # Log metrics summary if available
+    if metrics_collector:
+        summary = metrics_collector.get_summary()
+        if summary["total_calls"] > 0:
+            LOGGER.debug(
+                "Tool metrics - Total: %d, Success: %d, Failed: %d, Rate: %.1f%%",
+                summary["total_calls"],
+                summary["successful_calls"],
+                summary["failed_calls"],
+                summary["success_rate"] * 100,
+            )
 
     return {"messages": tool_responses}
 

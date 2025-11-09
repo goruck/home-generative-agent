@@ -57,6 +57,7 @@ from .const import (
     CONF_OLLAMA_SUMMARIZATION_MODEL,
     CONF_OLLAMA_URL,
     CONF_OLLAMA_VLM,
+    CONF_OPENAI_BASE_URL,
     CONF_OPENAI_CHAT_MODEL,
     CONF_OPENAI_EMBEDDING_MODEL,
     CONF_OPENAI_SUMMARIZATION_MODEL,
@@ -85,6 +86,7 @@ from .const import (
     RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL,
     RECOMMENDED_OLLAMA_URL,
     RECOMMENDED_OLLAMA_VLM,
+    RECOMMENDED_OPENAI_BASE_URL,
     RECOMMENDED_OPENAI_CHAT_MODEL,
     RECOMMENDED_OPENAI_EMBEDDING_MODEL,
     RECOMMENDED_OPENAI_SUMMARIZATION_MODEL,
@@ -298,6 +300,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     conf = {**entry.data, **entry.options}
     api_key = conf.get(CONF_API_KEY)
     gemini_key = conf.get(CONF_GEMINI_API_KEY)
+    openai_base_url = conf.get(CONF_OPENAI_BASE_URL, RECOMMENDED_OPENAI_BASE_URL)
+    openai_base_url = ensure_http_url(openai_base_url)
     ollama_url = conf.get(CONF_OLLAMA_URL, RECOMMENDED_OLLAMA_URL)
     ollama_url = ensure_http_url(ollama_url)
     face_api_url = conf.get(CONF_FACE_API_URL, RECOMMENDED_FACE_API_URL)
@@ -307,7 +311,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     health_timeout = 2.0
     ollama_ok, openai_ok, gemini_ok = await asyncio.gather(
         ollama_healthy(hass, ollama_url, timeout_s=health_timeout),
-        openai_healthy(hass, api_key, timeout_s=health_timeout),
+        openai_healthy(hass, api_key, openai_base_url, timeout_s=health_timeout),
         gemini_healthy(hass, gemini_key, timeout_s=health_timeout),
     )
 
@@ -319,6 +323,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         try:
             openai_provider = ChatOpenAI(
                 api_key=api_key,
+                base_url=openai_base_url,
                 timeout=120,
                 http_async_client=http_client,
             ).configurable_fields(
@@ -371,6 +376,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         try:
             openai_embeddings = OpenAIEmbeddings(
                 api_key=api_key,
+                base_url=openai_base_url,
                 model=entry.options.get(
                     CONF_OPENAI_EMBEDDING_MODEL, RECOMMENDED_OPENAI_EMBEDDING_MODEL
                 ),
