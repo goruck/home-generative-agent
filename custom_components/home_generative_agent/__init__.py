@@ -23,6 +23,7 @@ from homeassistant.helpers.target import (
     async_extract_referenced_entity_ids,
 )
 from homeassistant.util import dt as dt_util
+from langchain_anthropic import ChatAnthropic
 from langchain_core.runnables import ConfigurableField
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_ollama import ChatOllama, OllamaEmbeddings
@@ -39,6 +40,10 @@ from .const import (
     CHAT_MODEL_NUM_CTX,
     CHAT_MODEL_REPEAT_PENALTY,
     CHAT_MODEL_TOP_P,
+    CONF_ANTHROPIC_API_KEY,
+    CONF_ANTHROPIC_CHAT_MODEL,
+    CONF_ANTHROPIC_SUMMARIZATION_MODEL,
+    CONF_ANTHROPIC_VLM,
     CONF_CHAT_MODEL_PROVIDER,
     CONF_CHAT_MODEL_TEMPERATURE,
     CONF_DB_BOOTSTRAPPED,
@@ -70,6 +75,9 @@ from .const import (
     DOMAIN,
     EMBEDDING_MODEL_CTX,
     EMBEDDING_MODEL_DIMS,
+    RECOMMENDED_ANTHROPIC_CHAT_MODEL,
+    RECOMMENDED_ANTHROPIC_SUMMARIZATION_MODEL,
+    RECOMMENDED_ANTHROPIC_VLM,
     RECOMMENDED_CHAT_MODEL_PROVIDER,
     RECOMMENDED_CHAT_MODEL_TEMPERATURE,
     RECOMMENDED_DB_URI,
@@ -113,6 +121,7 @@ from .core.migrations import migrate_person_gallery
 from .core.person_gallery import PersonGalleryDAO
 from .core.runtime import HGAConfigEntry, HGAData
 from .core.utils import (
+    anthropic_healthy,
     dispatch_on_loop,
     ensure_http_url,
     gemini_healthy,
@@ -307,12 +316,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     face_api_url = conf.get(CONF_FACE_API_URL, RECOMMENDED_FACE_API_URL)
     face_api_url = ensure_http_url(face_api_url)
 
+    # Extract Anthropic API key
+    anthropic_key = conf.get(CONF_ANTHROPIC_API_KEY)
+
     # Health checks (fast, non-fatal)
     health_timeout = 2.0
-    ollama_ok, openai_ok, gemini_ok = await asyncio.gather(
+    ollama_ok, openai_ok, gemini_ok, anthropic_ok = await asyncio.gather(
         ollama_healthy(hass, ollama_url, timeout_s=health_timeout),
         openai_healthy(hass, api_key, openai_base_url, timeout_s=health_timeout),
         gemini_healthy(hass, gemini_key, timeout_s=health_timeout),
+        anthropic_healthy(hass, anthropic_key, timeout_s=health_timeout),
     )
 
     http_client = get_async_client(hass)
@@ -369,6 +382,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             )
         except Exception:
             LOGGER.exception("Gemini provider init failed; continuing without it.")
+
+    anthropic_provider: RunnableSerializable[LanguageModelInput, BaseMessage] | None = None
+    if anthropic_ok:
+        try:
+            anthropic_provider = ChatAnthropic(
+                api_key=anthropic_key,
+                model=RECOMMENDED_ANTHROPIC_CHAT_MODEL,
+                timeout=120,
+                http_client=http_client,
+            ).configurable_fields(
+                model_name=ConfigurableField(id="model_name"),
+                temperature=ConfigurableField(id="temperature"),
+                top_p=ConfigurableField(id="top_p"),
+                max_tokens=ConfigurableField(id="max_tokens"),
+            )
+        except Exception:
+            LOGGER.exception("Anthropic provider init failed; continuing without it.")
 
     # Embeddings: instantiate both, then select based on provider
     openai_embeddings: OpenAIEmbeddings | None = None
@@ -541,6 +571,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 }
             }
         )
+    elif chat_provider == "anthropic":
+        chat_model = (anthropic_provider or NullChat()).with_config(
+            config={
+                "configurable": {
+                    "model_name": entry.options.get(
+                        CONF_ANTHROPIC_CHAT_MODEL, RECOMMENDED_ANTHROPIC_CHAT_MODEL
+                    ),
+                    "temperature": chat_temp,
+                    "top_p": CHAT_MODEL_TOP_P,
+                    "max_tokens": CHAT_MODEL_MAX_TOKENS,
+                }
+            }
+        )
     else:
         ollama_chat_model = entry.options.get(
             CONF_OLLAMA_CHAT_MODEL, RECOMMENDED_OLLAMA_CHAT_MODEL
@@ -583,6 +626,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     "model": entry.options.get(CONF_GEMINI_VLM, RECOMMENDED_GEMINI_VLM),
                     "temperature": vlm_temp,
                     "top_p": VLM_TOP_P,
+                }
+            }
+        )
+    elif vlm_provider == "anthropic":
+        vision_model = (anthropic_provider or NullChat()).with_config(
+            config={
+                "configurable": {
+                    "model_name": entry.options.get(
+                        CONF_ANTHROPIC_VLM, RECOMMENDED_ANTHROPIC_VLM
+                    ),
+                    "temperature": vlm_temp,
+                    "top_p": VLM_TOP_P,
+                    "max_tokens": VLM_NUM_PREDICT,
                 }
             }
         )
@@ -638,6 +694,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 }
             }
         )
+    elif sum_provider == "anthropic":
+        summarization_model = (anthropic_provider or NullChat()).with_config(
+            config={
+                "configurable": {
+                    "model_name": entry.options.get(
+                        CONF_ANTHROPIC_SUMMARIZATION_MODEL,
+                        RECOMMENDED_ANTHROPIC_SUMMARIZATION_MODEL,
+                    ),
+                    "temperature": sum_temp,
+                    "top_p": SUMMARIZATION_MODEL_TOP_P,
+                    "max_tokens": SUMMARIZATION_MODEL_PREDICT,
+                }
+            }
+        )
     else:
         ollama_summarization_model = entry.options.get(
             CONF_OLLAMA_SUMMARIZATION_MODEL,
@@ -690,7 +760,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     msg = (
         "Home Generative Agent initialized with the following models: "
         "chat=%s, vlm=%s, summarization=%s. embeddings=%s. "
-        "OpenAI ok=%s, Ollama ok=%s, Gemini ok=%s."
+        "OpenAI ok=%s, Ollama ok=%s, Gemini ok=%s, Anthropic ok=%s."
     )
     LOGGER.info(
         msg,
@@ -701,6 +771,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         openai_ok,
         ollama_ok,
         gemini_ok,
+        anthropic_ok,
     )
 
     async def _handle_enroll_person(call: ServiceCall) -> None:

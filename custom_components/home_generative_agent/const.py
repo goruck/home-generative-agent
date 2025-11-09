@@ -54,6 +54,9 @@ CONF_PROMPT = "prompt"
 # --- Gemini API key (used in config_flow/__init__.py) ---
 CONF_GEMINI_API_KEY = "gemini_api_key"
 
+# ---- Anthropic API key ----
+CONF_ANTHROPIC_API_KEY = "anthropic_api_key"
+
 # ---- OpenAI API Configuration ----
 CONF_OPENAI_API_KEY = "api_key"
 CONF_OPENAI_BASE_URL = "openai_base_url"
@@ -72,9 +75,12 @@ CHAT_MODEL_OPENAI_SUPPORTED = Literal[
 CHAT_MODEL_GEMINI_SUPPORTED = Literal[
     "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"
 ]
+CHAT_MODEL_ANTHROPIC_SUPPORTED = Literal[
+    "claude-3-5-sonnet", "claude-3-5-haiku", "claude-3-opus"
+]
 
 CONF_CHAT_MODEL_PROVIDER = "chat_model_provider"
-PROVIDERS = Literal["openai", "ollama", "gemini"]
+PROVIDERS = Literal["openai", "ollama", "gemini", "anthropic"]
 RECOMMENDED_CHAT_MODEL_PROVIDER: PROVIDERS = "ollama"
 
 CONF_OLLAMA_CHAT_MODEL = "ollama_chat_model"
@@ -85,6 +91,9 @@ RECOMMENDED_OPENAI_CHAT_MODEL: CHAT_MODEL_OPENAI_SUPPORTED = "gpt-5"
 
 CONF_GEMINI_CHAT_MODEL = "gemini_chat_model"
 RECOMMENDED_GEMINI_CHAT_MODEL: CHAT_MODEL_GEMINI_SUPPORTED = "gemini-2.5-flash-lite"
+
+CONF_ANTHROPIC_CHAT_MODEL = "anthropic_chat_model"
+RECOMMENDED_ANTHROPIC_CHAT_MODEL: CHAT_MODEL_ANTHROPIC_SUPPORTED = "claude-3-5-haiku"
 
 CONF_CHAT_MODEL_TEMPERATURE = "chat_model_temperature"
 RECOMMENDED_CHAT_MODEL_TEMPERATURE = 1.0
@@ -106,9 +115,12 @@ VLM_OPENAI_SUPPORTED = Literal["gpt-5-nano", "gpt-4.1", "gpt-4.1-nano"]
 VLM_GEMINI_SUPPORTED = Literal[
     "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"
 ]
+VLM_ANTHROPIC_SUPPORTED = Literal[
+    "claude-3-5-sonnet", "claude-3-5-haiku", "claude-3-opus"
+]
 
 CONF_VLM_PROVIDER = "vlm_provider"
-RECOMMENDED_VLM_PROVIDER: Literal["openai", "ollama", "gemini"] = "ollama"
+RECOMMENDED_VLM_PROVIDER: Literal["openai", "ollama", "gemini", "anthropic"] = "ollama"
 
 CONF_OLLAMA_VLM = "ollama_vlm"
 RECOMMENDED_OLLAMA_VLM: VLM_OLLAMA_SUPPORTED = "qwen3-vl:8b"
@@ -118,6 +130,9 @@ RECOMMENDED_OPENAI_VLM: VLM_OPENAI_SUPPORTED = "gpt-5-nano"
 
 CONF_GEMINI_VLM = "gemini_vlm"
 RECOMMENDED_GEMINI_VLM: VLM_GEMINI_SUPPORTED = "gemini-2.5-flash-lite"
+
+CONF_ANTHROPIC_VLM = "anthropic_vlm"
+RECOMMENDED_ANTHROPIC_VLM: VLM_ANTHROPIC_SUPPORTED = "claude-3-5-haiku"
 
 CONF_VLM_TEMPERATURE = "vlm_temperature"
 RECOMMENDED_VLM_TEMPERATURE = 0.2
@@ -188,9 +203,12 @@ SUMMARIZATION_MODEL_OPENAI_SUPPORTED = Literal["gpt-5-nano", "gpt-4.1", "gpt-4.1
 SUMMARIZATION_MODEL_GEMINI_SUPPORTED = Literal[
     "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"
 ]
+SUMMARIZATION_MODEL_ANTHROPIC_SUPPORTED = Literal[
+    "claude-3-5-sonnet", "claude-3-5-haiku", "claude-3-opus"
+]
 
 CONF_SUMMARIZATION_MODEL_PROVIDER = "summarization_provider"
-RECOMMENDED_SUMMARIZATION_MODEL_PROVIDER: Literal["openai", "ollama", "gemini"] = (
+RECOMMENDED_SUMMARIZATION_MODEL_PROVIDER: Literal["openai", "ollama", "gemini", "anthropic"] = (
     "ollama"
 )
 
@@ -207,6 +225,11 @@ RECOMMENDED_OPENAI_SUMMARIZATION_MODEL: SUMMARIZATION_MODEL_OPENAI_SUPPORTED = (
 CONF_GEMINI_SUMMARIZATION_MODEL = "gemini_summarization_model"
 RECOMMENDED_GEMINI_SUMMARIZATION_MODEL: SUMMARIZATION_MODEL_GEMINI_SUPPORTED = (
     "gemini-2.5-flash-lite"
+)
+
+CONF_ANTHROPIC_SUMMARIZATION_MODEL = "anthropic_summarization_model"
+RECOMMENDED_ANTHROPIC_SUMMARIZATION_MODEL: SUMMARIZATION_MODEL_ANTHROPIC_SUPPORTED = (
+    "claude-3-5-haiku"
 )
 
 CONF_SUMMARIZATION_MODEL_TEMPERATURE = "summarization_model_temperature"
@@ -371,16 +394,19 @@ MODEL_CATEGORY_SPECS: dict[str, dict[str, Any]] = {
             "openai": list(get_args(CHAT_MODEL_OPENAI_SUPPORTED)),
             "ollama": list(get_args(CHAT_MODEL_OLLAMA_SUPPORTED)),
             "gemini": list(get_args(CHAT_MODEL_GEMINI_SUPPORTED)),
+            "anthropic": list(get_args(CHAT_MODEL_ANTHROPIC_SUPPORTED)),
         },
         "recommended_models": {
             "openai": RECOMMENDED_OPENAI_CHAT_MODEL,
             "ollama": RECOMMENDED_OLLAMA_CHAT_MODEL,
             "gemini": RECOMMENDED_GEMINI_CHAT_MODEL,
+            "anthropic": RECOMMENDED_ANTHROPIC_CHAT_MODEL,
         },
         "model_keys": {
             "openai": CONF_OPENAI_CHAT_MODEL,
             "ollama": CONF_OLLAMA_CHAT_MODEL,
             "gemini": CONF_GEMINI_CHAT_MODEL,
+            "anthropic": CONF_ANTHROPIC_CHAT_MODEL,
         },
     },
     "vlm": {
@@ -392,16 +418,19 @@ MODEL_CATEGORY_SPECS: dict[str, dict[str, Any]] = {
             "openai": list(get_args(VLM_OPENAI_SUPPORTED)),
             "ollama": list(get_args(VLM_OLLAMA_SUPPORTED)),
             "gemini": list(get_args(VLM_GEMINI_SUPPORTED)),
+            "anthropic": list(get_args(VLM_ANTHROPIC_SUPPORTED)),
         },
         "recommended_models": {
             "openai": RECOMMENDED_OPENAI_VLM,
             "ollama": RECOMMENDED_OLLAMA_VLM,
             "gemini": RECOMMENDED_GEMINI_VLM,
+            "anthropic": RECOMMENDED_ANTHROPIC_VLM,
         },
         "model_keys": {
             "openai": CONF_OPENAI_VLM,
             "ollama": CONF_OLLAMA_VLM,
             "gemini": CONF_GEMINI_VLM,
+            "anthropic": CONF_ANTHROPIC_VLM,
         },
     },
     "summarization": {
@@ -413,16 +442,19 @@ MODEL_CATEGORY_SPECS: dict[str, dict[str, Any]] = {
             "openai": list(get_args(SUMMARIZATION_MODEL_OPENAI_SUPPORTED)),
             "ollama": list(get_args(SUMMARIZATION_MODEL_OLLAMA_SUPPORTED)),
             "gemini": list(get_args(SUMMARIZATION_MODEL_GEMINI_SUPPORTED)),
+            "anthropic": list(get_args(SUMMARIZATION_MODEL_ANTHROPIC_SUPPORTED)),
         },
         "recommended_models": {
             "openai": RECOMMENDED_OPENAI_SUMMARIZATION_MODEL,
             "ollama": RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL,
             "gemini": RECOMMENDED_GEMINI_SUMMARIZATION_MODEL,
+            "anthropic": RECOMMENDED_ANTHROPIC_SUMMARIZATION_MODEL,
         },
         "model_keys": {
             "openai": CONF_OPENAI_SUMMARIZATION_MODEL,
             "ollama": CONF_OLLAMA_SUMMARIZATION_MODEL,
             "gemini": CONF_GEMINI_SUMMARIZATION_MODEL,
+            "anthropic": CONF_ANTHROPIC_SUMMARIZATION_MODEL,
         },
     },
     "embedding": {

@@ -32,6 +32,10 @@ from homeassistant.helpers.selector import (
 )
 
 from .const import (
+    CONF_ANTHROPIC_API_KEY,
+    CONF_ANTHROPIC_CHAT_MODEL,
+    CONF_ANTHROPIC_SUMMARIZATION_MODEL,
+    CONF_ANTHROPIC_VLM,
     CONF_CHAT_MODEL_PROVIDER,
     CONF_CHAT_MODEL_TEMPERATURE,
     CONF_DB_URI,
@@ -58,6 +62,9 @@ from .const import (
     CONF_VLM_TEMPERATURE,
     DOMAIN,
     MODEL_CATEGORY_SPECS,
+    RECOMMENDED_ANTHROPIC_CHAT_MODEL,
+    RECOMMENDED_ANTHROPIC_SUMMARIZATION_MODEL,
+    RECOMMENDED_ANTHROPIC_VLM,
     RECOMMENDED_CHAT_MODEL_PROVIDER,
     RECOMMENDED_CHAT_MODEL_TEMPERATURE,
     RECOMMENDED_DB_URI,
@@ -84,6 +91,7 @@ from .core.utils import (
     InvalidAuthError,
     ensure_http_url,
     list_mobile_notify_services,
+    validate_anthropic_key,
     validate_db_uri,
     validate_face_api_url,
     validate_gemini_key,
@@ -108,6 +116,9 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
             CONF_OPENAI_BASE_URL,
             description={"suggested_value": RECOMMENDED_OPENAI_BASE_URL},
         ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+        vol.Optional(CONF_ANTHROPIC_API_KEY): TextSelector(
+            TextSelectorConfig(type=TextSelectorType.PASSWORD)
+        ),
         vol.Optional(CONF_GEMINI_API_KEY): TextSelector(
             TextSelectorConfig(type=TextSelectorType.PASSWORD)
         ),
@@ -140,6 +151,9 @@ RECOMMENDED_OPTIONS = {
     CONF_SUMMARIZATION_MODEL_PROVIDER: RECOMMENDED_SUMMARIZATION_MODEL_PROVIDER,
     CONF_SUMMARIZATION_MODEL_TEMPERATURE: RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
     CONF_EMBEDDING_MODEL_PROVIDER: RECOMMENDED_EMBEDDING_MODEL_PROVIDER,
+    CONF_ANTHROPIC_CHAT_MODEL: RECOMMENDED_ANTHROPIC_CHAT_MODEL,
+    CONF_ANTHROPIC_VLM: RECOMMENDED_ANTHROPIC_VLM,
+    CONF_ANTHROPIC_SUMMARIZATION_MODEL: RECOMMENDED_ANTHROPIC_SUMMARIZATION_MODEL,
     CONF_OLLAMA_CHAT_MODEL: RECOMMENDED_OLLAMA_CHAT_MODEL,
     CONF_OPENAI_CHAT_MODEL: RECOMMENDED_OPENAI_CHAT_MODEL,
     CONF_OLLAMA_VLM: RECOMMENDED_OLLAMA_VLM,
@@ -241,6 +255,10 @@ def _schema_for(hass: HomeAssistant, opts: Mapping[str, Any]) -> VolDictType:
             CONF_OPENAI_BASE_URL,
             description={"suggested_value": (opts.get(CONF_OPENAI_BASE_URL))},
         ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+        vol.Optional(
+            CONF_ANTHROPIC_API_KEY,
+            description={"suggested_value": opts.get(CONF_ANTHROPIC_API_KEY)},
+        ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
         vol.Optional(
             CONF_GEMINI_API_KEY,
             description={"suggested_value": opts.get(CONF_GEMINI_API_KEY)},
@@ -407,6 +425,7 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
         vals = {
             CONF_API_KEY: _get_str(data, CONF_API_KEY),
             CONF_OPENAI_BASE_URL: _get_str(data, CONF_OPENAI_BASE_URL),
+            CONF_ANTHROPIC_API_KEY: _get_str(data, CONF_ANTHROPIC_API_KEY),
             CONF_OLLAMA_URL: _get_str(data, CONF_OLLAMA_URL),
             CONF_GEMINI_API_KEY: _get_str(data, CONF_GEMINI_API_KEY),
             CONF_DB_URI: _get_str(data, CONF_DB_URI),
@@ -417,6 +436,7 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
         # Note: OpenAI key and base_url validation uses the base_url if provided
         for key, validator, label in (
             (CONF_API_KEY, validate_openai_key, "OpenAI"),
+            (CONF_ANTHROPIC_API_KEY, validate_anthropic_key, "Anthropic"),
             (CONF_OLLAMA_URL, validate_ollama_url, "Ollama"),
             (CONF_GEMINI_API_KEY, validate_gemini_key, "Gemini"),
             (CONF_DB_URI, validate_db_uri, "Database URI"),
@@ -441,6 +461,12 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
                         LOGGER.exception("Unexpected exception during OpenAI validation")
                         errors["base"] = "unknown"
                         break
+            elif key == CONF_ANTHROPIC_API_KEY:
+                # For Anthropic, handle similarly to other secrets
+                code = await self._validate_present(self.hass, vals[key], validator, label)
+                if code:
+                    errors["base"] = code
+                    break
             else:
                 code = await self._validate_present(self.hass, vals[key], validator, label)
                 if code:
@@ -554,6 +580,7 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         for k in (
             CONF_API_KEY,
             CONF_OPENAI_BASE_URL,
+            CONF_ANTHROPIC_API_KEY,
             CONF_OLLAMA_URL,
             CONF_GEMINI_API_KEY,
             CONF_DB_URI,
@@ -671,6 +698,7 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         for k in (
             CONF_API_KEY,
             CONF_OPENAI_BASE_URL,
+            CONF_ANTHROPIC_API_KEY,
             CONF_OLLAMA_URL,
             CONF_GEMINI_API_KEY,
             CONF_DB_URI,
@@ -729,6 +757,12 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
             err = await self._maybe_edit_db_uri(options, user_input)
         if not err:
             err = await self._maybe_edit_face_recognition_url(options, user_input)
+        if not err:
+            err = await self._maybe_edit_secret(
+                _SecretSpec(CONF_ANTHROPIC_API_KEY, validate_anthropic_key, "Anthropic Options"),
+                options,
+                user_input,
+            )
         if not err:
             err = await self._maybe_edit_secret(
                 _SecretSpec(CONF_GEMINI_API_KEY, validate_gemini_key, "Gemini Options"),

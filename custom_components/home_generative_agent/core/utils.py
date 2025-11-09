@@ -174,6 +174,22 @@ async def gemini_healthy(
         return True
 
 
+async def anthropic_healthy(
+    hass: HomeAssistant, api_key: str | None, timeout_s: float = 2.0
+) -> bool:
+    """Return True if Anthropic API is reachable, False otherwise."""
+    if not api_key:
+        LOGGER.warning("Anthropic health check skipped: missing API key.")
+        return False
+    try:
+        await validate_anthropic_key(hass, api_key, timeout_s)
+    except (CannotConnectError, InvalidAuthError) as err:
+        LOGGER.warning("Anthropic health check failed: %s", err)
+        return False
+    else:
+        return True
+
+
 # ---------------------------
 # Validators
 # ---------------------------
@@ -242,6 +258,29 @@ async def validate_gemini_key(
             )
     except (TimeoutError, httpx.RequestError) as err:
         LOGGER.debug("Gemini connectivity exception: %s", err)
+        raise CannotConnectError from err
+    else:
+        if resp.status_code == HTTP_STATUS_UNAUTHORIZED:
+            raise InvalidAuthError
+        if resp.status_code >= HTTP_STATUS_BAD_REQUEST:
+            raise CannotConnectError
+
+
+async def validate_anthropic_key(
+    hass: HomeAssistant, api_key: str, timeout_s: float = 10.0
+) -> None:
+    """Validate that an Anthropic API key is authorized and reachable."""
+    if not api_key:
+        return
+    client = get_async_client(hass)
+    try:
+        async with async_timeout.timeout(timeout_s):
+            resp = await client.get(
+                "https://api.anthropic.com/v1/models",
+                headers={"x-api-key": api_key},
+            )
+    except (TimeoutError, httpx.RequestError) as err:
+        LOGGER.debug("Anthropic connectivity exception: %s", err)
         raise CannotConnectError from err
     else:
         if resp.status_code == HTTP_STATUS_UNAUTHORIZED:
