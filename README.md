@@ -1,3 +1,5 @@
+Custom version with more providers and possible improvements. AI Generated improvements....
+
 # home-generative-agent
 
 [![GitHub Release][releases-shield]][releases]
