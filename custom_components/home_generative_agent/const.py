@@ -261,7 +261,9 @@ SUMMARIZATION_INITIAL_PROMPT = "Create a summary of the smart home messages abov
 SUMMARIZATION_PROMPT_TEMPLATE = """
 This is the summary of the smart home messages so far: {summary}
 
-Update the summary by taking into account the additional smart home messages above:
+Update the summary by taking into account the additional smart home messages above.
+If you controlled entities the summary is just the work 'Erledigt'. Only list HASS entities if the user asked for data:
+
 """
 
 # ---------------- Embeddings ----------------

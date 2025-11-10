@@ -226,8 +226,8 @@ async def _call_model(
         )
     )
 
-    LOGGER.debug("Model call messages: %s", trimmed_messages)
-    LOGGER.debug("Model call messages length: %s", len(trimmed_messages))
+    # LOGGER.debug("Model call messages: %s", trimmed_messages)
+    # LOGGER.debug("Model call messages length: %s", len(trimmed_messages))
 
     raw_response = await model.ainvoke(trimmed_messages)
     LOGGER.debug("Raw chat model response: %s", raw_response)
