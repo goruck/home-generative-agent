@@ -27,6 +27,7 @@ from .agent.tools import (
     get_and_analyze_camera_image,
     get_entity_history,
     upsert_memory,
+    web_search,
 )
 from .const import (
     CONF_PROMPT,
@@ -212,6 +213,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             "upsert_memory": upsert_memory,
             "add_automation": add_automation,
             "get_entity_history": get_entity_history,
+            "web_search": web_search,
         }
         tools.extend(langchain_tools.values())
 
