@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 
 import aiofiles
 import homeassistant.util.dt as dt_util
+import httpx
 import yaml
 from homeassistant.components import camera
 from homeassistant.components.automation.config import _async_validate_config_item
@@ -38,14 +39,21 @@ from ..const import (  # noqa: TID252
     AUTOMATION_TOOL_BLUEPRINT_NAME,
     AUTOMATION_TOOL_EVENT_REGISTERED,
     CONF_NOTIFY_SERVICE,
+    CONF_PLAYWRIGHT_URL,
+    CONF_SEARXNG_URL,
     HISTORY_TOOL_CONTEXT_LIMIT,
     HISTORY_TOOL_PURGE_KEEP_DAYS,
+    RECOMMENDED_PLAYWRIGHT_URL,
+    RECOMMENDED_SEARXNG_URL,
     TOOL_RESPONSE_MAX_LENGTH,
     VLM_IMAGE_HEIGHT,
     VLM_IMAGE_WIDTH,
     VLM_SYSTEM_PROMPT,
     VLM_USER_KW_TEMPLATE,
     VLM_USER_PROMPT,
+    WEB_SEARCH_MAX_CONTENT_LENGTH,
+    WEB_SEARCH_MAX_RESULTS,
+    WEB_SEARCH_TIMEOUT_SECONDS,
 )
 from ..core.utils import extract_final  # noqa: TID252
 
@@ -808,3 +816,179 @@ async def get_current_device_state(  # noqa: D417
         state_dict[name] = state
 
     return state_dict
+
+
+# ----- Web Search Tool (Playwright + searxng) -----
+
+
+async def _query_searxng(
+    searxng_url: str, query: str, max_results: int = WEB_SEARCH_MAX_RESULTS
+) -> list[dict[str, str]]:
+    """Query searxng and return search results.
+
+    Args:
+        searxng_url: URL of the searxng instance
+        query: Search query
+        max_results: Maximum number of results to return
+
+    Returns:
+        List of search results with 'url', 'title', and 'content' keys
+    """
+    try:
+        async with httpx.AsyncClient(timeout=WEB_SEARCH_TIMEOUT_SECONDS) as client:
+            response = await client.get(
+                f"{searxng_url}/search",
+                params={"q": query, "format": "json"},
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            results = []
+            for result in data.get("results", [])[:max_results]:
+                results.append(
+                    {
+                        "url": result.get("url", ""),
+                        "title": result.get("title", ""),
+                        "content": result.get("content", ""),
+                    }
+                )
+            return results
+    except Exception:
+        LOGGER.exception("Error querying searxng at %s", searxng_url)
+        return []
+
+
+async def _fetch_page_with_playwright(
+    playwright_url: str, url: str, timeout: int = WEB_SEARCH_TIMEOUT_SECONDS
+) -> str:
+    """Fetch page content using Playwright server.
+
+    Args:
+        playwright_url: WebSocket URL of the Playwright server
+        url: URL to fetch
+        timeout: Timeout in seconds
+
+    Returns:
+        Extracted text content from the page
+    """
+    try:
+        # Connect to remote Playwright server via CDP
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            # Send request to Playwright server to fetch and extract content
+            response = await client.post(
+                playwright_url.replace("ws://", "http://").replace("wss://", "https://")
+                + "/extract",
+                json={"url": url, "timeout": timeout * 1000},
+            )
+            response.raise_for_status()
+            data = response.json()
+            return data.get("text", "")
+    except Exception:
+        LOGGER.exception("Error fetching page %s with Playwright", url)
+        return ""
+
+
+async def _summarize_search_results(
+    chat_model: RunnableSerializable[LanguageModelInput, BaseMessage],
+    query: str,
+    results: list[dict[str, Any]],
+) -> str:
+    """Summarize search results using the chat model.
+
+    Args:
+        chat_model: Language model to use for summarization
+        query: Original search query
+        results: List of search results with content
+
+    Returns:
+        Summarized content
+    """
+    # Prepare content for summarization
+    content_parts = []
+    for i, result in enumerate(results, 1):
+        content_parts.append(
+            f"Result {i}: {result['title']}\n"
+            f"URL: {result['url']}\n"
+            f"Content: {result['content'][:WEB_SEARCH_MAX_CONTENT_LENGTH]}\n"
+        )
+
+    combined_content = "\n\n".join(content_parts)
+
+    messages = [
+        SystemMessage(
+            content="You are a helpful assistant that summarizes web search results. "
+            "Provide a concise summary of the key information found."
+        ),
+        HumanMessage(
+            content=f"Search query: {query}\n\n"
+            f"Search results:\n{combined_content}\n\n"
+            f"Please provide a brief summary of the most relevant information."
+        ),
+    ]
+
+    try:
+        response = await chat_model.ainvoke(messages)
+        return extract_final(getattr(response, "content", "") or "")
+    except Exception:
+        LOGGER.exception("Error summarizing search results")
+        return "Error: Could not summarize search results."
+
+
+@tool(parse_docstring=True)
+async def web_search(  # noqa: D417
+    query: str,
+    *,
+    # Hide these arguments from the model.
+    config: Annotated[RunnableConfig, InjectedToolArg()],
+) -> str:
+    """
+    Perform a web search using searxng and fetch detailed content with Playwright.
+
+    This tool first searches the web using a searxng instance, then fetches
+    and analyzes the content of the top results using Playwright, and finally
+    provides a summary of the findings.
+
+    Args:
+        query: The search query to execute.
+
+    """
+    if "configurable" not in config:
+        return "Configuration not found. Please check your setup."
+
+    hass: HomeAssistant = config["configurable"]["hass"]
+    chat_model = config["configurable"]["chat_model"]
+
+    # Get configuration
+    entry_data = hass.config_entries.async_entries("home_generative_agent")
+    if not entry_data:
+        return "Integration not configured properly."
+
+    entry = entry_data[0]
+    merged_config = {**entry.data, **entry.options}
+
+    searxng_url = merged_config.get(CONF_SEARXNG_URL, RECOMMENDED_SEARXNG_URL)
+    playwright_url = merged_config.get(CONF_PLAYWRIGHT_URL, RECOMMENDED_PLAYWRIGHT_URL)
+
+    LOGGER.info("Performing web search for query: %s", query)
+
+    # Step 1: Query searxng
+    search_results = await _query_searxng(searxng_url, query, WEB_SEARCH_MAX_RESULTS)
+
+    if not search_results:
+        return f"No search results found for query: {query}"
+
+    LOGGER.debug("Found %d search results", len(search_results))
+
+    # Step 2: Fetch detailed content from top results using Playwright
+    for result in search_results:
+        url = result["url"]
+        LOGGER.debug("Fetching content from: %s", url)
+        content = await _fetch_page_with_playwright(playwright_url, url)
+        if content:
+            result["content"] = content[:WEB_SEARCH_MAX_CONTENT_LENGTH]
+        # If Playwright fails, we'll use the snippet from searxng (already in result['content'])
+
+    # Step 3: Summarize the results
+    summary = await _summarize_search_results(chat_model, query, search_results)
+
+    return summary

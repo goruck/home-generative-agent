@@ -19,6 +19,7 @@
   "issue_tracker": "https://github.com/goruck/home_generative_agent/issues",
   "requirements": [
     "aiofiles==25.1.0",
+    "httpx==0.28.1",
     "langchain==1.0.5",
     "langchain-core==1.0.4",
     "langchain-openai==1.0.2",
