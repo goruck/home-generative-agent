@@ -141,14 +141,11 @@ async def ollama_healthy(
 
 async def openai_healthy(
     hass: HomeAssistant,
-    api_key: str | None,
-    base_url: str | None = None,
+    api_key: str,
+    base_url: str,
     timeout_s: float = 2.0,
 ) -> bool:
     """Return True if OpenAI API is reachable, False otherwise."""
-    if not api_key:
-        LOGGER.warning("OpenAI health check skipped: missing API key.")
-        return False
     try:
         await validate_openai_key(hass, api_key, base_url, timeout_s)
     except (CannotConnectError, InvalidAuthError) as err:
