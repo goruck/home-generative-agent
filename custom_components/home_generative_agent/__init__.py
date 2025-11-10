@@ -561,6 +561,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     "model_name": entry.options.get(
                         CONF_OPENAI_CHAT_MODEL, RECOMMENDED_OPENAI_CHAT_MODEL
                     ),
+                    "base_url": openai_base_url,
                     "temperature": chat_temp,
                     "top_p": CHAT_MODEL_TOP_P,
                 }
@@ -618,6 +619,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         vision_model = (openai_provider or NullChat()).with_config(
             config={
                 "configurable": {
+                    "base_url": openai_base_url,
                     "model_name": entry.options.get(
                         CONF_OPENAI_VLM, RECOMMENDED_OPENAI_VLM
                     ),
@@ -683,6 +685,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                         CONF_OPENAI_SUMMARIZATION_MODEL,
                         RECOMMENDED_OPENAI_SUMMARIZATION_MODEL,
                     ),
+                    "base_url": openai_base_url,
                     "temperature": sum_temp,
                     "top_p": SUMMARIZATION_MODEL_TOP_P,
                 }
@@ -727,6 +730,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             config={
                 "configurable": {
                     "model": ollama_summarization_model,
+                    "base_url": ollama_url,
                     "temperature": sum_temp,
                     "top_p": SUMMARIZATION_MODEL_TOP_P,
                     "num_predict": SUMMARIZATION_MODEL_PREDICT,
