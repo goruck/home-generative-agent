@@ -100,7 +100,6 @@ from .core.utils import (
     validate_face_api_url,
     validate_gemini_key,
     validate_ollama_url,
-    validate_openai_key,
 )
 
 if TYPE_CHECKING:
@@ -498,7 +497,9 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
         if not errors and vals[CONF_OLLAMA_URL]:
             normalized[CONF_OLLAMA_URL] = ensure_http_url(vals[CONF_OLLAMA_URL])
         if not errors and vals[CONF_PLAYWRIGHT_URL]:
-            normalized[CONF_PLAYWRIGHT_URL] = vals[CONF_PLAYWRIGHT_URL]  # Keep as-is (can be ws://)
+            normalized[CONF_PLAYWRIGHT_URL] = vals[
+                CONF_PLAYWRIGHT_URL
+            ]  # Keep as-is (can be ws://)
         if not errors and vals[CONF_SEARXNG_URL]:
             normalized[CONF_SEARXNG_URL] = ensure_http_url(vals[CONF_SEARXNG_URL])
         if not errors and vals[CONF_FACE_API_URL]:
