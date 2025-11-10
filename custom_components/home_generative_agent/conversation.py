@@ -236,8 +236,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             prompt_parts = [
                 template.Template(
                     (
-                        llm.BASE_PROMPT
-                        + options.get(CONF_PROMPT, llm.DEFAULT_INSTRUCTIONS_PROMPT)
+                        options.get(CONF_PROMPT, llm.DEFAULT_INSTRUCTIONS_PROMPT)
                         + f"\nYou are in the {self.tz} timezone."
                         + TOOL_CALL_ERROR_SYSTEM_MESSAGE
                         if tools
