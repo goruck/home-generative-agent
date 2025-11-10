@@ -396,7 +396,7 @@ AUTOMATION_TOOL_EVENT_REGISTERED = "automation_registered_via_home_generative_ag
 AUTOMATION_TOOL_BLUEPRINT_NAME = "goruck/hga_scene_analysis.yaml"
 
 # Tool calling and rate limiting
-TOOL_CALL_TIMEOUT_SECONDS = 30
+TOOL_CALL_TIMEOUT_SECONDS = 60
 TOOL_CALL_MAX_RETRIES = 3
 TOOL_CALL_RATE_LIMIT_PER_MINUTE = 30
 TOOL_RESPONSE_MAX_LENGTH = 16000  # Prevent context bloat
