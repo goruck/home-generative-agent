@@ -417,6 +417,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     CONF_OPENAI_EMBEDDING_MODEL, RECOMMENDED_OPENAI_EMBEDDING_MODEL
                 ),
                 dimensions=EMBEDDING_MODEL_DIMS,
+                http_async_client=http_client,
             )
         except Exception:
             LOGGER.exception("OpenAI embeddings init failed; continuing without them.")
