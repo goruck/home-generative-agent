@@ -221,8 +221,7 @@ async def validate_openai_key(
     timeout_s: float = 10.0,
 ) -> None:
     """Validate that an OpenAI API key is authorized and reachable."""
-    if not api_key:
-        return
+
     # Use custom base_url if provided, otherwise use default
     url = base_url
     url = ensure_http_url(url)
