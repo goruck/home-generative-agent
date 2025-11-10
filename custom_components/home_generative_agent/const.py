@@ -256,9 +256,7 @@ CONF_SUMMARIZATION_MODEL_TEMPERATURE = "summarization_model_temperature"
 RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE = 0.2
 
 # Prompts for summarization (used in graph/tools flows)
-SUMMARIZATION_SYSTEM_PROMPT = (
-    "You are a bot that summarizes messages from a smart home AI."
-)
+SUMMARIZATION_SYSTEM_PROMPT = "You are a bot that summarizes messages from a smart home AI. If you controlled entities the summary is just the work 'Erledigt'. Only list HASS entities if the user asked for data."
 SUMMARIZATION_INITIAL_PROMPT = "Create a summary of the smart home messages above:"
 SUMMARIZATION_PROMPT_TEMPLATE = """
 This is the summary of the smart home messages so far: {summary}
