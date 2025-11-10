@@ -897,7 +897,6 @@ async def _fetch_page_with_browserless(
                     "bestAttempt": True,
                 },
             )
-            response.raise_for_status()
             LOGGER.debug("Browserless response status: %d", response.status_code)
             data = response.json()
 
