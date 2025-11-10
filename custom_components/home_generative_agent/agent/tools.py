@@ -894,6 +894,7 @@ async def _fetch_page_with_browserless(
                         {"selector": "pre"},
                         {"selector": "code"},
                     ],
+                    "goToOptions": {"waitUntil": "networkidle0"},
                 },
             )
             response.raise_for_status()
