@@ -70,7 +70,14 @@ CHAT_MODEL_REPEAT_PENALTY = 1.05  # Ollama only
 # Add more models by extending the Literal types.
 CHAT_MODEL_OLLAMA_SUPPORTED = Literal["gpt-oss", "qwen2.5:32b", "qwen3:32b", "qwen3:8b"]
 CHAT_MODEL_OPENAI_SUPPORTED = Literal[
-    "gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-4o", "gpt-4.1", "o4-mini"
+    "gpt-5",
+    "gpt-5-mini",
+    "gpt-5-nano",
+    "gpt-4o",
+    "gpt-4.1",
+    "o4-mini",
+    "Qwen3-Coder-30B-A3B-Instruct-Q8_0",
+    "gemma-3-27b-it-Q8_0",
 ]
 CHAT_MODEL_GEMINI_SUPPORTED = Literal[
     "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"
@@ -111,7 +118,9 @@ VLM_NUM_CTX = 16384  # Ollama only
 VLM_REPEAT_PENALTY = 1.05  # Ollama only
 VLM_MIRO_STAT = 0  # Ollama only
 VLM_OLLAMA_SUPPORTED = Literal["qwen2.5vl:7b", "qwen3-vl:8b"]
-VLM_OPENAI_SUPPORTED = Literal["gpt-5-nano", "gpt-4.1", "gpt-4.1-nano"]
+VLM_OPENAI_SUPPORTED = Literal[
+    "gpt-5-nano", "gpt-4.1", "gpt-4.1-nano", "gemma-3-27b-it-Q8_0"
+]
 VLM_GEMINI_SUPPORTED = Literal[
     "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"
 ]
@@ -199,7 +208,9 @@ SUMMARIZATION_MODEL_CTX = 32768  # Ollama only
 SUMMARIZATION_MODEL_REPEAT_PENALTY = 1.05  # Ollama only
 SUMMARIZATION_MIRO_STAT = 0  # Ollama only
 SUMMARIZATION_MODEL_OLLAMA_SUPPORTED = Literal["qwen3:1.7b", "qwen3:8b"]
-SUMMARIZATION_MODEL_OPENAI_SUPPORTED = Literal["gpt-5-nano", "gpt-4.1", "gpt-4.1-nano"]
+SUMMARIZATION_MODEL_OPENAI_SUPPORTED = Literal[
+    "gpt-5-nano", "gpt-4.1", "gpt-4.1-nano", "Qwen3-Coder-30B-A3B-Instruct-Q8_0"
+]
 SUMMARIZATION_MODEL_GEMINI_SUPPORTED = Literal[
     "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"
 ]
@@ -249,7 +260,7 @@ Update the summary by taking into account the additional smart home messages abo
 # ---------------- Embeddings ----------------
 EMBEDDING_MODEL_OLLAMA_SUPPORTED = Literal["mxbai-embed-large"]
 EMBEDDING_MODEL_OPENAI_SUPPORTED = Literal[
-    "text-embedding-3-large", "text-embedding-3-small"
+    "text-embedding-3-large", "text-embedding-3-small", "mxbai-embed-large-v1-f16"
 ]
 EMBEDDING_MODEL_GEMINI_SUPPORTED = Literal["gemini-embedding-001"]
 
