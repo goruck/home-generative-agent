@@ -53,7 +53,7 @@ from .const import (
     CONF_OPENAI_CHAT_MODEL,
     CONF_OPENAI_SUMMARIZATION_MODEL,
     CONF_OPENAI_VLM,
-    CONF_PLAYWRIGHT_URL,
+    CONF_BROWSERLESS_URL,
     CONF_PROMPT,
     CONF_RECOMMENDED,
     CONF_SEARXNG_URL,
@@ -82,7 +82,7 @@ from .const import (
     RECOMMENDED_OPENAI_CHAT_MODEL,
     RECOMMENDED_OPENAI_SUMMARIZATION_MODEL,
     RECOMMENDED_OPENAI_VLM,
-    RECOMMENDED_PLAYWRIGHT_URL,
+    RECOMMENDED_BROWSERLESS_URL,
     RECOMMENDED_SEARXNG_URL,
     RECOMMENDED_SUMMARIZATION_MODEL_PROVIDER,
     RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
@@ -130,8 +130,8 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
             description={"suggested_value": RECOMMENDED_OLLAMA_URL},
         ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
         vol.Optional(
-            CONF_PLAYWRIGHT_URL,
-            description={"suggested_value": RECOMMENDED_PLAYWRIGHT_URL},
+            CONF_BROWSERLESS_URL,
+            description={"suggested_value": RECOMMENDED_BROWSERLESS_URL},
         ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
         vol.Optional(
             CONF_SEARXNG_URL,
@@ -279,8 +279,8 @@ def _schema_for(hass: HomeAssistant, opts: Mapping[str, Any]) -> VolDictType:
             description={"suggested_value": (opts.get(CONF_OLLAMA_URL))},
         ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
         vol.Optional(
-            CONF_PLAYWRIGHT_URL,
-            description={"suggested_value": (opts.get(CONF_PLAYWRIGHT_URL))},
+            CONF_BROWSERLESS_URL,
+            description={"suggested_value": (opts.get(CONF_BROWSERLESS_URL))},
         ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
         vol.Optional(
             CONF_SEARXNG_URL,
@@ -457,7 +457,7 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
             CONF_OLLAMA_URL: _get_str(data, CONF_OLLAMA_URL),
             CONF_GEMINI_API_KEY: _get_str(data, CONF_GEMINI_API_KEY),
             CONF_DB_URI: _get_str(data, CONF_DB_URI),
-            CONF_PLAYWRIGHT_URL: _get_str(data, CONF_PLAYWRIGHT_URL),
+            CONF_BROWSERLESS_URL: _get_str(data, CONF_BROWSERLESS_URL),
             CONF_SEARXNG_URL: _get_str(data, CONF_SEARXNG_URL),
             CONF_FACE_API_URL: _get_str(data, CONF_FACE_API_URL),
         }
@@ -496,9 +496,9 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
             )
         if not errors and vals[CONF_OLLAMA_URL]:
             normalized[CONF_OLLAMA_URL] = ensure_http_url(vals[CONF_OLLAMA_URL])
-        if not errors and vals[CONF_PLAYWRIGHT_URL]:
-            normalized[CONF_PLAYWRIGHT_URL] = vals[
-                CONF_PLAYWRIGHT_URL
+        if not errors and vals[CONF_BROWSERLESS_URL]:
+            normalized[CONF_BROWSERLESS_URL] = vals[
+                CONF_BROWSERLESS_URL
             ]  # Keep as-is (can be ws://)
         if not errors and vals[CONF_SEARXNG_URL]:
             normalized[CONF_SEARXNG_URL] = ensure_http_url(vals[CONF_SEARXNG_URL])
@@ -512,7 +512,7 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
             CONF_OLLAMA_URL,
             CONF_GEMINI_API_KEY,
             CONF_DB_URI,
-            CONF_PLAYWRIGHT_URL,
+            CONF_BROWSERLESS_URL,
             CONF_SEARXNG_URL,
             CONF_FACE_API_URL,
         ):
@@ -610,7 +610,7 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
             CONF_OLLAMA_URL,
             CONF_GEMINI_API_KEY,
             CONF_DB_URI,
-            CONF_PLAYWRIGHT_URL,
+            CONF_BROWSERLESS_URL,
             CONF_SEARXNG_URL,
             CONF_FACE_API_URL,
         ):
@@ -708,7 +708,7 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
             CONF_OLLAMA_URL,
             CONF_GEMINI_API_KEY,
             CONF_DB_URI,
-            CONF_PLAYWRIGHT_URL,
+            CONF_BROWSERLESS_URL,
             CONF_SEARXNG_URL,
         ):
             if not _get_str(final_options, k):

@@ -38,12 +38,12 @@ from voluptuous import MultipleInvalid
 from ..const import (  # noqa: TID252
     AUTOMATION_TOOL_BLUEPRINT_NAME,
     AUTOMATION_TOOL_EVENT_REGISTERED,
+    CONF_BROWSERLESS_URL,
     CONF_NOTIFY_SERVICE,
-    CONF_PLAYWRIGHT_URL,
     CONF_SEARXNG_URL,
     HISTORY_TOOL_CONTEXT_LIMIT,
     HISTORY_TOOL_PURGE_KEEP_DAYS,
-    RECOMMENDED_PLAYWRIGHT_URL,
+    RECOMMENDED_BROWSERLESS_URL,
     RECOMMENDED_SEARXNG_URL,
     TOOL_RESPONSE_MAX_LENGTH,
     VLM_IMAGE_HEIGHT,
@@ -818,7 +818,7 @@ async def get_current_device_state(  # noqa: D417
     return state_dict
 
 
-# ----- Web Search Tool (Playwright + searxng) -----
+# ----- Web Search Tool (Browserless + searxng) -----
 
 
 async def _query_searxng(
@@ -858,35 +858,65 @@ async def _query_searxng(
         return []
 
 
-async def _fetch_page_with_playwright(
-    playwright_url: str, url: str, timeout: int = WEB_SEARCH_TIMEOUT_SECONDS
+async def _fetch_page_with_browserless(
+    browserless_url: str, url: str, timeout: int = WEB_SEARCH_TIMEOUT_SECONDS
 ) -> str:
-    """Fetch page content using Playwright server.
+    """Fetch page content using Browserless /chromium/scrape endpoint.
 
     Args:
-        playwright_url: WebSocket URL of the Playwright server
+        browserless_url: Base URL of the Browserless server
         url: URL to fetch
         timeout: Timeout in seconds
 
     Returns:
-        Extracted text content from the page
+        Extracted text content from the page, filtered for common body tags
     """
     try:
-        # Connect to remote Playwright server via CDP
         async with httpx.AsyncClient(timeout=timeout) as client:
-            # Send request to Playwright server to fetch and extract content
+            # Use browserless /chromium/scrape endpoint with element filtering
+            # Filter for common body tags that contain relevant content
             response = await client.post(
-                playwright_url.replace("ws://", "http://").replace("wss://", "https://")
-                + "/extract",
-                json={"url": url, "timeout": timeout * 1000},
+                f"{browserless_url}/chromium/scrape",
+                json={
+                    "url": url,
+                    "elements": [
+                        {"selector": "article"},
+                        {"selector": "main"},
+                        {"selector": "p"},
+                        {"selector": "h1"},
+                        {"selector": "h2"},
+                        {"selector": "h3"},
+                        {"selector": "h4"},
+                        {"selector": "h5"},
+                        {"selector": "h6"},
+                        {"selector": "li"},
+                        {"selector": "blockquote"},
+                        {"selector": "pre"},
+                        {"selector": "code"},
+                    ],
+                },
             )
             response.raise_for_status()
-            LOGGER.debug("Playwright response status: %d", response.status_code)
-            LOGGER.debug("Playwright response content: %s", response.text)
+            LOGGER.debug("Browserless response status: %d", response.status_code)
             data = response.json()
-            return data.get("text", "")
+
+            # Extract text from the elements
+            text_parts = []
+            for element_data in data.get("data", []):
+                if isinstance(element_data, dict):
+                    # Extract text from results array
+                    for result in element_data.get("results", []):
+                        if isinstance(result, dict):
+                            text = result.get("text", "")
+                            if text and text.strip():
+                                text_parts.append(text.strip())
+
+            # Join all text parts with newlines
+            combined_text = "\n".join(text_parts)
+            LOGGER.debug("Extracted %d characters from page", len(combined_text))
+            return combined_text
     except Exception:
-        LOGGER.exception("Error fetching page %s with Playwright", url)
+        LOGGER.exception("Error fetching page %s with Browserless", url)
         return ""
 
 
@@ -944,10 +974,10 @@ async def web_search(  # noqa: D417
     config: Annotated[RunnableConfig, InjectedToolArg()],
 ) -> str:
     """
-    Perform a web search using searxng and fetch detailed content with Playwright.
+    Perform a web search using searxng and fetch detailed content with Browserless.
 
     This tool first searches the web using a searxng instance, then fetches
-    and analyzes the content of the top results using Playwright, and finally
+    and analyzes the content of the top results using Browserless, and finally
     provides a summary of the findings.
 
     Args:
@@ -969,7 +999,9 @@ async def web_search(  # noqa: D417
     merged_config = {**entry.data, **entry.options}
 
     searxng_url = merged_config.get(CONF_SEARXNG_URL, RECOMMENDED_SEARXNG_URL)
-    playwright_url = merged_config.get(CONF_PLAYWRIGHT_URL, RECOMMENDED_PLAYWRIGHT_URL)
+    browserless_url = merged_config.get(
+        CONF_BROWSERLESS_URL, RECOMMENDED_BROWSERLESS_URL
+    )
 
     LOGGER.info("Performing web search for query: %s", query)
 
@@ -981,14 +1013,14 @@ async def web_search(  # noqa: D417
 
     LOGGER.debug("Found %d search results", len(search_results))
 
-    # Step 2: Fetch detailed content from top results using Playwright
+    # Step 2: Fetch detailed content from top results using Browserless
     for result in search_results:
         url = result["url"]
         LOGGER.debug("Fetching content from: %s", url)
-        content = await _fetch_page_with_playwright(playwright_url, url)
+        content = await _fetch_page_with_browserless(browserless_url, url)
         if content:
             result["content"] = content[:WEB_SEARCH_MAX_CONTENT_LENGTH]
-        # If Playwright fails, we'll use the snippet from searxng (already in result['content'])
+        # If Browserless fails, we'll use the snippet from searxng (already in result['content'])
 
     # Step 3: Summarize the results
     summary = await _summarize_search_results(chat_model, query, search_results)

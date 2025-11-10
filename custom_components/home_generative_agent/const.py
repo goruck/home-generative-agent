@@ -27,9 +27,9 @@ LANGCHAIN_LOGGING_LEVEL: Literal["disable", "verbose", "debug"] = "disable"
 CONF_OLLAMA_URL = "ollama_url"
 RECOMMENDED_OLLAMA_URL = "http://localhost:11434"
 
-# ---- Web Search (Playwright + searxng) ----
-CONF_PLAYWRIGHT_URL = "playwright_url"
-RECOMMENDED_PLAYWRIGHT_URL = "ws://localhost:3000"
+# ---- Web Search (Browserless + searxng) ----
+CONF_BROWSERLESS_URL = "browserless_url"
+RECOMMENDED_BROWSERLESS_URL = "http://localhost:3000"
 CONF_SEARXNG_URL = "searxng_url"
 RECOMMENDED_SEARXNG_URL = "http://localhost:8080"
 WEB_SEARCH_MAX_RESULTS = 5
