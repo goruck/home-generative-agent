@@ -1,6 +1,6 @@
 {
-    "name": "goruck/home_generative_agent",
-    "image": "mcr.microsoft.com/devcontainers/python:3.12",
+    "name": "lemming1337/home_generative_agent",
+    "image": "mcr.microsoft.com/devcontainers/python:3.14",
     "postCreateCommand": "scripts/setup",
     "forwardPorts": [
         8123

@@ -1,5 +1,28 @@
 #!/usr/bin/env bash
 
+sudo apt update
+sudo apt install -y bluez \
+        ffmpeg \
+        libudev-dev \
+        libavformat-dev \
+        libavcodec-dev \
+        libavdevice-dev \
+        libavutil-dev \
+        libswscale-dev \
+        libswresample-dev \
+        libavfilter-dev \
+        libpcap-dev \
+        libturbojpeg0 \
+        libyaml-dev \
+        libxml2 \
+        git \
+        cmake \
+        autoconf
+
+wget https://github.com/AlexxIT/go2rtc/releases/download/v1.9.11/go2rtc_linux_amd64
+chmod +x go2rtc_linux_amd64
+sudo mv go2rtc_linux_amd64 /usr/bin/go2rtc
+
 set -e
 
 cd "$(dirname "$0")/.."

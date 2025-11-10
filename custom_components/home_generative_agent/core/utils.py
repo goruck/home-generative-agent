@@ -217,14 +217,14 @@ async def validate_ollama_url(
 async def validate_openai_key(
     hass: HomeAssistant,
     api_key: str,
-    base_url: str | None = None,
+    base_url: str,
     timeout_s: float = 10.0,
 ) -> None:
     """Validate that an OpenAI API key is authorized and reachable."""
     if not api_key:
         return
     # Use custom base_url if provided, otherwise use default
-    url = base_url or "https://api.openai.com/v1"
+    url = base_url
     url = ensure_http_url(url)
     models_endpoint = urljoin(url.rstrip("/") + "/", "models")
     client = get_async_client(hass)

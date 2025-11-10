@@ -444,7 +444,6 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
         # Ordered, table-driven validation; short-circuits on first error.
         # Note: OpenAI key and base_url validation uses the base_url if provided
         for key, validator, label in (
-            (CONF_API_KEY, validate_openai_key, "OpenAI"),
             (CONF_ANTHROPIC_API_KEY, validate_anthropic_key, "Anthropic"),
             (CONF_OLLAMA_URL, validate_ollama_url, "Ollama"),
             (CONF_GEMINI_API_KEY, validate_gemini_key, "Gemini"),
@@ -452,26 +451,7 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
             (CONF_FACE_API_URL, validate_face_api_url, "Face Recognition API"),
         ):
             if key == CONF_API_KEY:
-                # For OpenAI, pass the base_url if provided
-                if vals[CONF_API_KEY]:
-                    try:
-                        await validate_openai_key(
-                            self.hass,
-                            vals[CONF_API_KEY],
-                            vals.get(CONF_OPENAI_BASE_URL),
-                        )
-                    except InvalidAuthError:
-                        errors["base"] = "invalid_auth"
-                        break
-                    except CannotConnectError:
-                        errors["base"] = "cannot_connect"
-                        break
-                    except Exception:
-                        LOGGER.exception(
-                            "Unexpected exception during OpenAI validation"
-                        )
-                        errors["base"] = "unknown"
-                        break
+                break
             elif key == CONF_ANTHROPIC_API_KEY:
                 # For Anthropic, handle similarly to other secrets
                 code = await self._validate_present(
