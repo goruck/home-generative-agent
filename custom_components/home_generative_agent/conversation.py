@@ -345,8 +345,8 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
 
         # Interact with agent app.
         try:
-            LOGGER.debug(app_input)
-            LOGGER.debug(app_config)
+            # LOGGER.debug(app_input)
+            # LOGGER.debug(app_config)
             response = await app.ainvoke(input=app_input, config=app_config)
         except HomeAssistantError as err:
             LOGGER.exception("LangGraph error during conversation processing.")
