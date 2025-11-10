@@ -881,6 +881,8 @@ async def _fetch_page_with_playwright(
                 json={"url": url, "timeout": timeout * 1000},
             )
             response.raise_for_status()
+            LOGGER.debug("Playwright response status: %d", response.status_code)
+            LOGGER.debug("Playwright response content: %s", response.text)
             data = response.json()
             return data.get("text", "")
     except Exception:
