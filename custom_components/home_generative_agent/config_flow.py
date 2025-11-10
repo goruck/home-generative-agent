@@ -664,34 +664,6 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         options[CONF_DB_URI] = raw
         return None
 
-    async def _maybe_edit_secret(
-        self,
-        spec: _SecretSpec,
-        options: dict[str, Any],
-        user_input: Mapping[str, Any] | None,
-    ) -> str | None:
-        """Validate/apply a secret field when present; return error code or None."""
-        if user_input is None or spec.field not in user_input:
-            return None
-
-        raw = _get_str(user_input, spec.field)
-        if not raw:
-            options.pop(spec.field, None)
-            return None
-
-        try:
-            await spec.validator(self.hass, raw)
-        except InvalidAuthError:
-            return "invalid_auth"
-        except CannotConnectError:
-            return "cannot_connect"
-        except Exception:
-            LOGGER.exception("Unexpected exception in %s validation", spec.label)
-            return "unknown"
-
-        options[spec.field] = raw
-        return None
-
     def _drop_empty_fields(self, final_options: dict[str, Any]) -> None:
         """Remove empty strings for fields to avoid storing empties.
 
@@ -754,35 +726,6 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         # Merge new input for non-validated fields
         options.update(user_input or {})
         errors: dict[str, str] = {}
-
-        # Field-specific edits with validation/normalization
-        err = await self._maybe_edit_ollama(options, user_input)
-        if not err:
-            err = await self._maybe_edit_db_uri(options, user_input)
-        if not err:
-            err = await self._maybe_edit_face_recognition_url(options, user_input)
-        if not err:
-            err = await self._maybe_edit_secret(
-                _SecretSpec(
-                    CONF_ANTHROPIC_API_KEY, validate_anthropic_key, "Anthropic Options"
-                ),
-                options,
-                user_input,
-            )
-        if not err:
-            err = await self._maybe_edit_secret(
-                _SecretSpec(CONF_GEMINI_API_KEY, validate_gemini_key, "Gemini Options"),
-                options,
-                user_input,
-            )
-        if not err:
-            err = await self._maybe_edit_secret(
-                _SecretSpec(CONF_API_KEY, validate_openai_key, "OpenAI Options"),
-                options,
-                user_input,
-            )
-        if err:
-            errors["base"] = err
 
         if errors:
             # Re-render with the same options and show errors
