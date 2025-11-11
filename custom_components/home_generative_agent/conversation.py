@@ -372,11 +372,10 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         # Convert Markdown to HTML for better formatting in Home Assistant
         response_content = response["messages"][-1].content
         html_content = markdown.markdown(
-            response_content,
-            extensions=['fenced_code', 'tables', 'nl2br']
+            response_content, extensions=["fenced_code", "tables", "nl2br"]
         )
 
-        intent_response.async_set_speech(html_content)
+        intent_response.async_set_speech(response_content)
         return conversation.ConversationResult(
             response=intent_response, conversation_id=conversation_id
         )

@@ -394,7 +394,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         try:
             anthropic_provider = ChatAnthropic(
                 api_key=anthropic_key,
-                model=RECOMMENDED_ANTHROPIC_CHAT_MODEL,
+                model_name=RECOMMENDED_ANTHROPIC_CHAT_MODEL,
                 timeout=120,
                 http_client=http_client,
             ).configurable_fields(

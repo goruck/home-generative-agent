@@ -266,8 +266,8 @@ async def _summarize_and_remove_messages(
 
     summary = state.get("summary", "")
     msgs_to_remove = state.get("messages_to_remove", [])
-    if not msgs_to_remove:
-        return {"summary": summary}
+    # if not msgs_to_remove:
+    #    return {"summary": summary}
 
     summary_message = (
         SUMMARIZATION_PROMPT_TEMPLATE.format(summary=summary)
