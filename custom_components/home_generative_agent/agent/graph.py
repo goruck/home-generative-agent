@@ -512,9 +512,9 @@ def _should_continue(
     state: State,
 ) -> Literal["action", "summarize_and_remove_messages"]:
     """Return the next node in graph to execute."""
-    # messages = state["messages"]
-    # if isinstance(messages[-1], AIMessage) and messages[-1].tool_calls:
-    #    return "action"
+    messages = state["messages"]
+    if isinstance(messages[-1], AIMessage) and messages[-1].tool_calls:
+        return "action"
     return "summarize_and_remove_messages"
 
 
