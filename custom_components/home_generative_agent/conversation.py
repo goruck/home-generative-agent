@@ -6,6 +6,7 @@ import logging
 import string
 from typing import TYPE_CHECKING, Any, Literal
 
+import markdown
 import homeassistant.util.dt as dt_util
 from homeassistant.components import conversation
 from homeassistant.components.conversation import trace
@@ -367,7 +368,15 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         LOGGER.debug("====== End of run ======")
 
         intent_response = intent.IntentResponse(language=user_input.language)
-        intent_response.async_set_speech(response["messages"][-1].content)
+
+        # Convert Markdown to HTML for better formatting in Home Assistant
+        response_content = response["messages"][-1].content
+        html_content = markdown.markdown(
+            response_content,
+            extensions=['fenced_code', 'tables', 'nl2br']
+        )
+
+        intent_response.async_set_speech(html_content)
         return conversation.ConversationResult(
             response=intent_response, conversation_id=conversation_id
         )
