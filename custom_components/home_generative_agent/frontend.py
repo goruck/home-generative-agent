@@ -27,7 +27,7 @@ MARKED_VERSION = "12.0.0"  # Stable version compatible with the card
 MARKED_CDN_URL = f"https://cdn.jsdelivr.net/npm/marked@{MARKED_VERSION}/marked.min.js"
 
 # Version to download (can be updated to track latest)
-CARD_VERSION = "v0.0.2"
+CARD_VERSION = "v0.0.3"
 
 # Local cache configuration
 CACHE_DIR_NAME = "homeassistant-assist-card"
