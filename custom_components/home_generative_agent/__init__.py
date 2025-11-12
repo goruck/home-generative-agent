@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, cast
 import aiofiles
 import voluptuous as vol
 from homeassistant.components.camera.const import DOMAIN as CAMERA_DOMAIN
+from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_API_KEY, Platform
 from homeassistant.core import HomeAssistant
@@ -209,11 +210,13 @@ async def _register_frontend_resources(hass: HomeAssistant) -> None:
         return
 
     # Register static path using the component name
-    await hass.http.async_register_static_paths(
-        f"/{DOMAIN}",
-        str(card_dir),
-        cache_headers=False,  # Disable cache for easier development/updates
-    )
+    await hass.http.async_register_static_paths([
+        StaticPathConfig(
+            f"/{DOMAIN}",
+            str(card_dir),
+            False,  # Disable cache for easier development/updates
+        )
+    ])
 
     hass.data[f"_hga_frontend_registered"] = True
 
