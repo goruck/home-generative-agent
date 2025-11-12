@@ -13,23 +13,38 @@ The Home Generative Agent integration now includes a custom Lovelace card that p
 
 ## Installation
 
-The custom card is automatically installed with the Home Generative Agent integration. After installing the integration, follow these steps to add the card to your dashboard:
+The custom card is automatically installed with the Home Generative Agent integration. After installing the integration and restarting Home Assistant, follow these steps to add the card to your dashboard:
 
-### Step 1: Register the Resource
+### Step 1: Verify Resource Registration
+
+The card JavaScript is automatically served at `/home_generative_agent/homeassistant-assist-card.js` when the integration loads.
+
+To verify it's working, navigate to (replace `your-ha-url` with your Home Assistant URL):
+```
+http://your-ha-url:8123/home_generative_agent/homeassistant-assist-card.js
+```
+
+You should see JavaScript code. If you get a 404 error:
+1. Verify the integration is installed and loaded
+2. Check the Home Assistant logs for frontend registration messages
+3. Restart Home Assistant
+
+### Step 2: Register the Resource in Lovelace
 
 1. Go to **Settings** → **Dashboards** → **Resources** (three-dot menu in top right)
 2. Click **+ Add Resource**
 3. Enter the following details:
-   - **URL**: `/hacsfiles/home_generative_agent/homeassistant-assist-card.js`
+   - **URL**: `/home_generative_agent/homeassistant-assist-card.js`
    - **Resource type**: JavaScript Module
 4. Click **Create**
+5. Refresh your browser (Ctrl+Shift+R or Cmd+Shift+R)
 
-### Step 2: Add the Card to Your Dashboard
+### Step 3: Add the Card to Your Dashboard
 
 1. Open the dashboard where you want to add the card
 2. Click **Edit Dashboard** (three-dot menu in top right)
 3. Click **+ Add Card**
-4. Scroll down and select **Custom: Assist Card** (or search for "assist")
+4. Scroll down and select **Custom: Assist Card** (or search for "homeassistant-assist")
 5. Configure the card options (see below)
 6. Click **Save**
 

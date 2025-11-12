@@ -80,14 +80,21 @@ The integration includes a beautiful custom Lovelace card that provides a chat i
 
 ### Quick Setup
 
-1. Go to **Settings** → **Dashboards** → **Resources**
-2. Add resource: `/hacsfiles/home_generative_agent/homeassistant-assist-card.js` (JavaScript Module)
-3. Add the card to your dashboard:
+After installing the integration and restarting Home Assistant:
+
+1. **Register the Resource**: Go to **Settings** → **Dashboards** → **Resources**
+   - Click **+ Add Resource**
+   - URL: `/home_generative_agent/homeassistant-assist-card.js`
+   - Resource type: **JavaScript Module**
+
+2. **Add the Card**: Edit your dashboard and add a new card:
    ```yaml
    type: custom:homeassistant-assist-card
    title: Home Assistant
    show_tools: true
    ```
+
+3. **Verify**: The card file should be accessible at `http://your-ha-url:8123/home_generative_agent/homeassistant-assist-card.js`
 
 For detailed configuration options and troubleshooting, see [CUSTOM_CARD.md](./CUSTOM_CARD.md).
 

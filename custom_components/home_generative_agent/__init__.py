@@ -197,14 +197,31 @@ class NullChat:
 
 async def _register_frontend_resources(hass: HomeAssistant) -> None:
     """Register frontend resources for the custom card."""
-    # Register the static path for the card
+    # Only register once, not for each config entry
+    if f"_hga_frontend_registered" in hass.data:
+        return
+
     card_dir = Path(__file__).parent / "www"
+
+    # Verify the www directory exists
+    if not card_dir.exists():
+        LOGGER.warning("Frontend resources directory not found: %s", card_dir)
+        return
+
+    # Register static path using the component name
     hass.http.register_static_path(
-        f"/hacsfiles/{DOMAIN}",
+        f"/{DOMAIN}",
         str(card_dir),
-        cache_headers=True,
+        cache_headers=False,  # Disable cache for easier development/updates
     )
-    LOGGER.info("Registered frontend resources at /hacsfiles/%s", DOMAIN)
+
+    hass.data[f"_hga_frontend_registered"] = True
+
+    LOGGER.info(
+        "Registered frontend resources at /%s -> %s",
+        DOMAIN,
+        card_dir,
+    )
 
 
 def _register_services(hass: HomeAssistant, entry: HGAConfigEntry) -> None:
