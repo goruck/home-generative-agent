@@ -64,7 +64,7 @@ async def _download_card(hass: HomeAssistant) -> bool:
 
     try:
         client = get_async_client(hass, verify_ssl=True)
-        response = await client.get(url, timeout=30.0)
+        response = await client.get(url, timeout=30.0, follow_redirects=True)
         response.raise_for_status()
 
         # Write the downloaded content
