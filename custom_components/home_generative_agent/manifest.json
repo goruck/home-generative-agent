@@ -29,7 +29,7 @@
     "langchain-anthropic==1.0.1",
     "langgraph==1.0.2",
     "langgraph-checkpoint-postgres==3.0.0",
-    "openai==2.7.1",
+    "openai==2.2.0",
     "ollama==0.6.0",
     "psycopg==3.2.12",
     "psycopg-binary==3.2.12",
