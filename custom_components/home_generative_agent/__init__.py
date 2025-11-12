@@ -209,7 +209,7 @@ async def _register_frontend_resources(hass: HomeAssistant) -> None:
         return
 
     # Register static path using the component name
-    hass.http.register_static_path(
+    await hass.http.async_register_static_paths(
         f"/{DOMAIN}",
         str(card_dir),
         cache_headers=False,  # Disable cache for easier development/updates
