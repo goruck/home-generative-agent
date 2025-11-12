@@ -21,6 +21,11 @@ CARD_REPO_NAME = "homeassistant-assist-card"
 CARD_REPO = f"{CARD_REPO_OWNER}/{CARD_REPO_NAME}"
 CARD_FILENAME = "homeassistant-assist-card.js"
 
+# marked.js dependency (required by the card)
+MARKED_FILENAME = "marked.min.js"
+MARKED_VERSION = "12.0.0"  # Stable version compatible with the card
+MARKED_CDN_URL = f"https://cdn.jsdelivr.net/npm/marked@{MARKED_VERSION}/marked.min.js"
+
 # Version to download (can be updated to track latest)
 CARD_VERSION = "v0.0.1"
 
@@ -40,9 +45,19 @@ def _get_cached_file_path(hass: HomeAssistant) -> Path:
     return _get_cache_dir(hass) / CARD_FILENAME
 
 
+def _get_cached_marked_path(hass: HomeAssistant) -> Path:
+    """Get the path to the cached marked.js file."""
+    return _get_cache_dir(hass) / MARKED_FILENAME
+
+
 def _get_version_file_path(hass: HomeAssistant) -> Path:
     """Get the path to the version tracking file."""
     return _get_cache_dir(hass) / "version.txt"
+
+
+def _get_marked_version_file_path(hass: HomeAssistant) -> Path:
+    """Get the path to the marked.js version tracking file."""
+    return _get_cache_dir(hass) / "marked-version.txt"
 
 
 def _get_download_url() -> str:
@@ -88,6 +103,90 @@ async def _download_card(hass: HomeAssistant) -> bool:
     except Exception as err:
         LOGGER.error("Failed to download assist card from %s: %s", url, err)
         return False
+
+
+async def _download_marked(hass: HomeAssistant) -> bool:
+    """Download marked.js from CDN.
+
+    Returns:
+        True if download was successful, False otherwise.
+    """
+    url = MARKED_CDN_URL
+    cached_file = _get_cached_marked_path(hass)
+    version_file = _get_marked_version_file_path(hass)
+
+    LOGGER.info("Downloading marked.js from %s", url)
+
+    try:
+        client = get_async_client(hass, verify_ssl=True)
+        response = await client.get(url, timeout=30.0, follow_redirects=True)
+        response.raise_for_status()
+
+        # Write the downloaded content
+        content = response.content
+        cached_file.write_bytes(content)
+
+        # Calculate and log checksum for verification
+        sha256_hash = hashlib.sha256(content).hexdigest()
+        LOGGER.info(
+            "Downloaded %s (%d bytes, SHA256: %s)",
+            MARKED_FILENAME,
+            len(content),
+            sha256_hash[:16]
+        )
+
+        # Save version information
+        version_file.write_text(f"{MARKED_VERSION}\n{sha256_hash}")
+
+        return True
+
+    except Exception as err:
+        LOGGER.error("Failed to download marked.js from %s: %s", url, err)
+        return False
+
+
+async def _ensure_marked_available(hass: HomeAssistant) -> bool:
+    """Ensure marked.js is available locally.
+
+    Downloads if not cached or if version mismatch.
+
+    Returns:
+        True if marked.js is available, False otherwise.
+    """
+    cached_file = _get_cached_marked_path(hass)
+    version_file = _get_marked_version_file_path(hass)
+
+    # Check if we need to download
+    needs_download = False
+
+    if not cached_file.exists():
+        LOGGER.info("marked.js not found in cache, will download")
+        needs_download = True
+    elif not version_file.exists():
+        LOGGER.info("marked.js version file not found, will re-download")
+        needs_download = True
+    else:
+        # Check version
+        try:
+            cached_version = version_file.read_text().strip().split("\n")[0]
+            if cached_version != MARKED_VERSION:
+                LOGGER.info(
+                    "marked.js version mismatch (cached: %s, required: %s), will update",
+                    cached_version,
+                    MARKED_VERSION
+                )
+                needs_download = True
+        except Exception as err:
+            LOGGER.warning("Failed to read marked.js version file: %s, will re-download", err)
+            needs_download = True
+
+    if needs_download:
+        if not await _download_marked(hass):
+            return False
+    else:
+        LOGGER.debug("Using cached marked.js version %s", MARKED_VERSION)
+
+    return cached_file.exists()
 
 
 async def _ensure_card_available(hass: HomeAssistant) -> bool:
@@ -137,8 +236,8 @@ async def _ensure_card_available(hass: HomeAssistant) -> bool:
 async def async_register_frontend(hass: HomeAssistant) -> bool:
     """Register frontend resources for the custom assist card.
 
-    Downloads the card from GitHub releases if needed and registers
-    it as a static resource.
+    Downloads the card and marked.js from sources if needed and registers
+    them as static resources.
 
     Returns:
         True if registration was successful, False otherwise.
@@ -146,6 +245,11 @@ async def async_register_frontend(hass: HomeAssistant) -> bool:
     # Only register once
     if "_hga_frontend_registered" in hass.data:
         return True
+
+    # Ensure marked.js is available (download if needed)
+    if not await _ensure_marked_available(hass):
+        LOGGER.error("Failed to make marked.js available")
+        return False
 
     # Ensure card is available (download if needed)
     if not await _ensure_card_available(hass):
@@ -168,9 +272,10 @@ async def async_register_frontend(hass: HomeAssistant) -> bool:
         hass.data["_hga_frontend_registered"] = True
 
         LOGGER.info(
-            "Registered assist card frontend resources at /home_generative_agent -> %s (version %s)",
+            "Registered assist card frontend resources at /home_generative_agent -> %s (card: %s, marked: %s)",
             cache_dir,
             CARD_VERSION,
+            MARKED_VERSION,
         )
 
         return True
