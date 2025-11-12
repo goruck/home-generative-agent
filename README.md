@@ -68,6 +68,29 @@ You also configure the Postgres database URI during setup or later in options, b
 
 The URL of the optional remote face recognition service can be configured at setup or via options as well.
 
+## Custom Lovelace Card
+
+The integration includes a beautiful custom Lovelace card that provides a chat interface for interacting with your Home Assistant Assist agent. The card features:
+
+- Clean, modern chat UI with message bubbles
+- Full Markdown rendering for assistant responses
+- Tool call visualization with expandable details
+- Conversation history and context
+- Responsive design for desktop and mobile
+
+### Quick Setup
+
+1. Go to **Settings** → **Dashboards** → **Resources**
+2. Add resource: `/hacsfiles/home_generative_agent/homeassistant-assist-card.js` (JavaScript Module)
+3. Add the card to your dashboard:
+   ```yaml
+   type: custom:homeassistant-assist-card
+   title: Home Assistant
+   show_tools: true
+   ```
+
+For detailed configuration options and troubleshooting, see [CUSTOM_CARD.md](./CUSTOM_CARD.md).
+
 ## Image and Sensor Entities
 
 This section shows how to display the latest camera image, the AI-generated summary, and recognized people in Home Assistant or use in automations via the image and sensor platforms.

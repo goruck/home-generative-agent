@@ -195,6 +195,18 @@ class NullChat:
         return self
 
 
+async def _register_frontend_resources(hass: HomeAssistant) -> None:
+    """Register frontend resources for the custom card."""
+    # Register the static path for the card
+    card_dir = Path(__file__).parent / "www"
+    hass.http.register_static_path(
+        f"/hacsfiles/{DOMAIN}",
+        str(card_dir),
+        cache_headers=True,
+    )
+    LOGGER.info("Registered frontend resources at /hacsfiles/%s", DOMAIN)
+
+
 def _register_services(hass: HomeAssistant, entry: HGAConfigEntry) -> None:
     """Register integration services."""
 
@@ -301,6 +313,9 @@ def _register_services(hass: HomeAssistant, entry: HGAConfigEntry) -> None:
 async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:  # noqa: C901, PLR0912, PLR0915
     """Set up Home Generative Agent from a config entry."""
     hass.data.setdefault(DOMAIN, {})
+
+    # Register frontend resources for the custom card
+    await _register_frontend_resources(hass)
 
     _register_services(hass, entry)
 

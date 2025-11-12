@@ -11,7 +11,9 @@
   "config_flow": true,
   "dependencies": [
     "conversation",
-    "recorder"
+    "recorder",
+    "frontend",
+    "http"
   ],
   "documentation": "https://github.com/goruck/home_generative_agent",
   "integration_type": "service",
