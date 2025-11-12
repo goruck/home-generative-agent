@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Any, cast
 import aiofiles
 import voluptuous as vol
 from homeassistant.components.camera.const import DOMAIN as CAMERA_DOMAIN
-from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_API_KEY, Platform
 from homeassistant.core import HomeAssistant
@@ -134,6 +133,7 @@ from .core.utils import (
 )
 from .core.video_analyzer import VideoAnalyzer
 from .core.video_helpers import latest_target, publish_latest_atomic
+from .frontend import async_register_frontend
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -196,35 +196,6 @@ class NullChat:
         return self
 
 
-async def _register_frontend_resources(hass: HomeAssistant) -> None:
-    """Register frontend resources for the custom card."""
-    # Only register once, not for each config entry
-    if f"_hga_frontend_registered" in hass.data:
-        return
-
-    card_dir = Path(__file__).parent / "www"
-
-    # Verify the www directory exists
-    if not card_dir.exists():
-        LOGGER.warning("Frontend resources directory not found: %s", card_dir)
-        return
-
-    # Register static path using the component name
-    await hass.http.async_register_static_paths([
-        StaticPathConfig(
-            f"/{DOMAIN}",
-            str(card_dir),
-            False,  # Disable cache for easier development/updates
-        )
-    ])
-
-    hass.data[f"_hga_frontend_registered"] = True
-
-    LOGGER.info(
-        "Registered frontend resources at /%s -> %s",
-        DOMAIN,
-        card_dir,
-    )
 
 
 def _register_services(hass: HomeAssistant, entry: HGAConfigEntry) -> None:
@@ -334,8 +305,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     """Set up Home Generative Agent from a config entry."""
     hass.data.setdefault(DOMAIN, {})
 
-    # Register frontend resources for the custom card
-    await _register_frontend_resources(hass)
+    # Register frontend resources for the custom card (downloads from GitHub if needed)
+    await async_register_frontend(hass)
 
     _register_services(hass, entry)
 
