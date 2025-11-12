@@ -208,9 +208,9 @@ async def _register_frontend_resources(hass: HomeAssistant) -> None:
         LOGGER.warning("Frontend resources directory not found: %s", card_dir)
         return
 
-    # Register static path (synchronous call is fine in async function)
+    # Register static path using the component name
     hass.http.register_static_path(
-        f"/hacsfiles/{DOMAIN}",
+        f"/{DOMAIN}",
         str(card_dir),
         cache_headers=False,  # Disable cache for easier development/updates
     )
@@ -218,7 +218,7 @@ async def _register_frontend_resources(hass: HomeAssistant) -> None:
     hass.data[f"_hga_frontend_registered"] = True
 
     LOGGER.info(
-        "Registered frontend resources at /hacsfiles/%s -> %s",
+        "Registered frontend resources at /%s -> %s",
         DOMAIN,
         card_dir,
     )

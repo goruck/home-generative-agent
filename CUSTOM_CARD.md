@@ -17,11 +17,11 @@ The custom card is automatically installed with the Home Generative Agent integr
 
 ### Step 1: Verify Resource Registration
 
-The card JavaScript is automatically served at `/hacsfiles/home_generative_agent/homeassistant-assist-card.js` when the integration loads.
+The card JavaScript is automatically served at `/home_generative_agent/homeassistant-assist-card.js` when the integration loads.
 
 To verify it's working, navigate to (replace `your-ha-url` with your Home Assistant URL):
 ```
-http://your-ha-url:8123/hacsfiles/home_generative_agent/homeassistant-assist-card.js
+http://your-ha-url:8123/home_generative_agent/homeassistant-assist-card.js
 ```
 
 You should see JavaScript code. If you get a 404 error:
@@ -34,7 +34,7 @@ You should see JavaScript code. If you get a 404 error:
 1. Go to **Settings** → **Dashboards** → **Resources** (three-dot menu in top right)
 2. Click **+ Add Resource**
 3. Enter the following details:
-   - **URL**: `/hacsfiles/home_generative_agent/homeassistant-assist-card.js`
+   - **URL**: `/home_generative_agent/homeassistant-assist-card.js`
    - **Resource type**: JavaScript Module
 4. Click **Create**
 5. Refresh your browser (Ctrl+Shift+R or Cmd+Shift+R)
