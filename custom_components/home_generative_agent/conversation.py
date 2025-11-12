@@ -375,9 +375,14 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             response_content, extensions=["fenced_code", "tables", "nl2br"]
         )
 
+        cleaned_response = response_content
+
+        # Collapse multiple spaces and newlines
+        cleaned_response = response_content.sub(r"\s+", " ", cleaned_response).strip()
+
         # Set speech (cleaned up version without newlines for TTS)
         intent_response.async_set_speech(
-            response_content,
+            cleaned_response,
             extra_data={
                 "original_response": response_content,
                 "html_content": html_content,
