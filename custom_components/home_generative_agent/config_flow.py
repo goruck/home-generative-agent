@@ -43,6 +43,7 @@ from .const import (
     CONF_FACE_API_URL,
     CONF_FACE_RECOGNITION_MODE,
     CONF_GEMINI_API_KEY,
+    CONF_GOOGLE_MAPS_API_KEY,
     CONF_NOTIFY_SERVICE,
     CONF_OLLAMA_CHAT_MODEL,
     CONF_OLLAMA_REASONING,
@@ -123,6 +124,9 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
             TextSelectorConfig(type=TextSelectorType.PASSWORD)
         ),
         vol.Optional(CONF_GEMINI_API_KEY): TextSelector(
+            TextSelectorConfig(type=TextSelectorType.PASSWORD)
+        ),
+        vol.Optional(CONF_GOOGLE_MAPS_API_KEY): TextSelector(
             TextSelectorConfig(type=TextSelectorType.PASSWORD)
         ),
         vol.Optional(
@@ -273,6 +277,10 @@ def _schema_for(hass: HomeAssistant, opts: Mapping[str, Any]) -> VolDictType:
         vol.Optional(
             CONF_GEMINI_API_KEY,
             description={"suggested_value": opts.get(CONF_GEMINI_API_KEY)},
+        ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
+        vol.Optional(
+            CONF_GOOGLE_MAPS_API_KEY,
+            description={"suggested_value": opts.get(CONF_GOOGLE_MAPS_API_KEY)},
         ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
         vol.Optional(
             CONF_OLLAMA_URL,
@@ -456,6 +464,7 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
             CONF_ANTHROPIC_API_KEY: _get_str(data, CONF_ANTHROPIC_API_KEY),
             CONF_OLLAMA_URL: _get_str(data, CONF_OLLAMA_URL),
             CONF_GEMINI_API_KEY: _get_str(data, CONF_GEMINI_API_KEY),
+            CONF_GOOGLE_MAPS_API_KEY: _get_str(data, CONF_GOOGLE_MAPS_API_KEY),
             CONF_DB_URI: _get_str(data, CONF_DB_URI),
             CONF_BROWSERLESS_URL: _get_str(data, CONF_BROWSERLESS_URL),
             CONF_SEARXNG_URL: _get_str(data, CONF_SEARXNG_URL),
@@ -511,6 +520,7 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
             CONF_OPENAI_BASE_URL,
             CONF_OLLAMA_URL,
             CONF_GEMINI_API_KEY,
+            CONF_GOOGLE_MAPS_API_KEY,
             CONF_DB_URI,
             CONF_BROWSERLESS_URL,
             CONF_SEARXNG_URL,
@@ -609,6 +619,7 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
             CONF_ANTHROPIC_API_KEY,
             CONF_OLLAMA_URL,
             CONF_GEMINI_API_KEY,
+            CONF_GOOGLE_MAPS_API_KEY,
             CONF_DB_URI,
             CONF_BROWSERLESS_URL,
             CONF_SEARXNG_URL,
@@ -707,6 +718,7 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
             CONF_ANTHROPIC_API_KEY,
             CONF_OLLAMA_URL,
             CONF_GEMINI_API_KEY,
+            CONF_GOOGLE_MAPS_API_KEY,
             CONF_DB_URI,
             CONF_BROWSERLESS_URL,
             CONF_SEARXNG_URL,

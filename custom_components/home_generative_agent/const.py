@@ -71,6 +71,9 @@ CONF_OPENAI_API_KEY = "api_key"
 CONF_OPENAI_BASE_URL = "openai_base_url"
 RECOMMENDED_OPENAI_BASE_URL = "https://api.openai.com/v1"
 
+# ---- Google Maps API Configuration ----
+CONF_GOOGLE_MAPS_API_KEY = "google_maps_api_key"
+
 # ---------------- Chat model ----------------
 CHAT_MODEL_TOP_P = 1.0
 CHAT_MODEL_NUM_CTX = 32768  # Ollama only

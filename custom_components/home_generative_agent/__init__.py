@@ -196,8 +196,6 @@ class NullChat:
         return self
 
 
-
-
 def _register_services(hass: HomeAssistant, entry: HGAConfigEntry) -> None:
     """Register integration services."""
 

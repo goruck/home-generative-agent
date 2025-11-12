@@ -31,6 +31,7 @@ from .agent.tools import (
     upsert_memory,
     web_search,
 )
+from .agent.travel_times import get_travel_time
 from .const import (
     CONF_PROMPT,
     DOMAIN,
@@ -216,6 +217,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             "add_automation": add_automation,
             "get_entity_history": get_entity_history,
             "web_search": web_search,
+            "get_travel_time": get_travel_time,
         }
         tools.extend(langchain_tools.values())
 

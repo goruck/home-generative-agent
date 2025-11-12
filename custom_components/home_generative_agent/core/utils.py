@@ -386,7 +386,7 @@ def extract_final(raw: str, max_chars: int | None = None) -> str:
     # Remove any leaked reasoning
     s = _THINK_BLOCK.sub("", raw)
     # Collapse whitespace
-    #s = re.sub(r"\s+", " ", s).strip()
+    # s = re.sub(r"\s+", " ", s).strip()
     # Char-limit (if specified)
     if max_chars is None:
         return s

@@ -35,7 +35,11 @@ CACHE_DIR_NAME = "homeassistant-assist-card"
 
 def _get_cache_dir(hass: HomeAssistant) -> Path:
     """Get the cache directory for frontend resources."""
-    cache_dir = Path(hass.config.path("custom_components", "home_generative_agent", "www_cache", CACHE_DIR_NAME))
+    cache_dir = Path(
+        hass.config.path(
+            "custom_components", "home_generative_agent", "www_cache", CACHE_DIR_NAME
+        )
+    )
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir
 
@@ -92,7 +96,7 @@ async def _download_card(hass: HomeAssistant) -> bool:
             "Downloaded %s (%d bytes, SHA256: %s)",
             CARD_FILENAME,
             len(content),
-            sha256_hash[:16]
+            sha256_hash[:16],
         )
 
         # Save version information
@@ -132,7 +136,7 @@ async def _download_marked(hass: HomeAssistant) -> bool:
             "Downloaded %s (%d bytes, SHA256: %s)",
             MARKED_FILENAME,
             len(content),
-            sha256_hash[:16]
+            sha256_hash[:16],
         )
 
         # Save version information
@@ -173,11 +177,13 @@ async def _ensure_marked_available(hass: HomeAssistant) -> bool:
                 LOGGER.info(
                     "marked.js version mismatch (cached: %s, required: %s), will update",
                     cached_version,
-                    MARKED_VERSION
+                    MARKED_VERSION,
                 )
                 needs_download = True
         except Exception as err:
-            LOGGER.warning("Failed to read marked.js version file: %s, will re-download", err)
+            LOGGER.warning(
+                "Failed to read marked.js version file: %s, will re-download", err
+            )
             needs_download = True
 
     if needs_download:
@@ -217,7 +223,7 @@ async def _ensure_card_available(hass: HomeAssistant) -> bool:
                 LOGGER.info(
                     "Assist card version mismatch (cached: %s, required: %s), will update",
                     cached_version,
-                    CARD_VERSION
+                    CARD_VERSION,
                 )
                 needs_download = True
         except Exception as err:
@@ -261,13 +267,15 @@ async def async_register_frontend(hass: HomeAssistant) -> bool:
 
     # Register static path
     try:
-        await hass.http.async_register_static_paths([
-            StaticPathConfig(
-                "/home_generative_agent",
-                str(cache_dir),
-                False,  # Disable cache for easier updates
-            )
-        ])
+        await hass.http.async_register_static_paths(
+            [
+                StaticPathConfig(
+                    "/home_generative_agent",
+                    str(cache_dir),
+                    False,  # Disable cache for easier updates
+                )
+            ]
+        )
 
         hass.data["_hga_frontend_registered"] = True
 
