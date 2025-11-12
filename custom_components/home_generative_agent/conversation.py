@@ -376,14 +376,13 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         )
 
         # Set speech (cleaned up version without newlines for TTS)
-        intent_response.async_set_speech(response_content)
-
-        # Store original response with newlines in extra_data for custom cards
-        # This allows proper Markdown formatting in the frontend
-        intent_response.extra_data = {
-            "original_response": response_content,
-            "html_content": html_content,
-        }
+        intent_response.async_set_speech(
+            response_content,
+            extra_data={
+                "original_response": response_content,
+                "html_content": html_content,
+            },
+        )
 
         return conversation.ConversationResult(
             response=intent_response, conversation_id=conversation_id
