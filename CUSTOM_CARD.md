@@ -1,6 +1,6 @@
 # Home Assistant Assist Card
 
-The Home Generative Agent integration now includes a custom Lovelace card that provides a beautiful chat interface for interacting with your Home Assistant Assist agent.
+The Home Generative Agent integration includes a custom Lovelace card that provides a beautiful chat interface for interacting with your Home Assistant Assist agent.
 
 ## Features
 
@@ -13,11 +13,13 @@ The Home Generative Agent integration now includes a custom Lovelace card that p
 
 ## Installation
 
-The custom card is automatically installed with the Home Generative Agent integration. After installing the integration and restarting Home Assistant, follow these steps to add the card to your dashboard:
+The custom card is **automatically downloaded** from the [homeassistant-assist-card repository](https://github.com/lemming1337/homeassistant-assist-card) when the integration loads. After installing the integration and restarting Home Assistant, follow these steps to add the card to your dashboard:
 
 ### Step 1: Verify Resource Registration
 
-The card JavaScript is automatically served at `/home_generative_agent/homeassistant-assist-card.js` when the integration loads.
+The card JavaScript is automatically downloaded from GitHub and served at `/home_generative_agent/homeassistant-assist-card.js` when the integration loads.
+
+**Current version**: v0.0.1
 
 To verify it's working, navigate to (replace `your-ha-url` with your Home Assistant URL):
 ```
@@ -26,8 +28,9 @@ http://your-ha-url:8123/home_generative_agent/homeassistant-assist-card.js
 
 You should see JavaScript code. If you get a 404 error:
 1. Verify the integration is installed and loaded
-2. Check the Home Assistant logs for frontend registration messages
-3. Restart Home Assistant
+2. Check the Home Assistant logs for download and frontend registration messages
+3. Ensure your Home Assistant instance can reach GitHub
+4. Restart Home Assistant
 
 ### Step 2: Register the Resource in Lovelace
 
@@ -93,6 +96,19 @@ The card automatically adapts to your Home Assistant theme, using:
 - Theme-appropriate text colors and backgrounds
 - Consistent with Home Assistant's design language
 
+## Automatic Updates
+
+The integration automatically downloads the card from GitHub releases. To update to a newer version:
+
+1. The integration maintainer will update the version number in the code
+2. Restart Home Assistant to download the new version
+3. Clear your browser cache (Ctrl+Shift+R or Cmd+Shift+R) to load the new version
+
+The downloaded card is cached locally in:
+```
+config/custom_components/home_generative_agent/www_cache/homeassistant-assist-card/
+```
+
 ## Troubleshooting
 
 ### Card Not Showing Up
@@ -102,6 +118,17 @@ If the custom card doesn't appear in the card picker:
 1. Clear your browser cache (Ctrl+Shift+R or Cmd+Shift+R)
 2. Verify the resource is registered correctly in Settings → Dashboards → Resources
 3. Check the browser console for any JavaScript errors (F12)
+4. Check Home Assistant logs for download errors: `grep "assist card" home-assistant.log`
+
+### Download Fails
+
+If the integration cannot download the card from GitHub:
+
+1. Verify your Home Assistant instance has internet access
+2. Check if GitHub is accessible: `https://github.com/lemming1337/homeassistant-assist-card`
+3. Check the Home Assistant logs for specific error messages
+4. Ensure no firewall is blocking GitHub access
+5. Try restarting Home Assistant to retry the download
 
 ### Card Shows Error
 
@@ -136,12 +163,31 @@ If no pipeline_id is specified, the card uses the default Home Assistant convers
 - **Dependencies**: lit, marked.js (for Markdown rendering)
 - **Size**: ~69KB (minified)
 - **Browser Support**: All modern browsers supporting Web Components
+- **Distribution**: Automatically downloaded from GitHub releases
+- **Source Repository**: https://github.com/lemming1337/homeassistant-assist-card
+- **Current Version**: v0.0.1
+
+## How It Works
+
+The Home Generative Agent integration uses a modern dependency management approach:
+
+1. **On First Load**: When the integration starts, it checks if the assist card is cached locally
+2. **Download**: If not cached or if a new version is required, it downloads the card from GitHub releases
+3. **Caching**: The card is cached in `www_cache/homeassistant-assist-card/` for fast subsequent loads
+4. **Version Tracking**: Version information is stored to ensure updates are downloaded when available
+5. **Static Serving**: The cached card is served via Home Assistant's HTTP server at `/home_generative_agent/`
+
+This approach ensures:
+- **Easy Updates**: Update the version number and restart to get the latest card
+- **No Manual Installation**: No need to manually copy files or manage dependencies
+- **Automatic Verification**: SHA256 checksums are logged for security verification
+- **Offline Operation**: Once cached, works offline (until update required)
 
 ## Development
 
 The card source is available at: https://github.com/lemming1337/homeassistant-assist-card
 
-To build from source:
+To contribute to the card development:
 
 ```bash
 git clone https://github.com/lemming1337/homeassistant-assist-card.git
@@ -150,7 +196,15 @@ npm install
 npm run build
 ```
 
-The built file will be in `dist/homeassistant-assist-card.js`.
+The built file will be in the root directory as `homeassistant-assist-card.js`.
+
+### Creating a New Release
+
+To update the card version used by the integration:
+
+1. Create a new release in the homeassistant-assist-card repository
+2. Update the `CARD_VERSION` constant in `custom_components/home_generative_agent/frontend.py`
+3. Restart Home Assistant to download the new version
 
 ## Support
 

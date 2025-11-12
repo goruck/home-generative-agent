@@ -17,3 +17,6 @@ visualize_graph.py
 # Home Assistant configuration
 config/*
 #!config/configuration.yaml
+
+# Frontend cache (downloaded from GitHub)
+custom_components/*/www_cache/
