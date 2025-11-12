@@ -19,28 +19,45 @@ The custom card is **automatically downloaded** from the [homeassistant-assist-c
 
 The card JavaScript is automatically downloaded from GitHub and served at `/home_generative_agent/homeassistant-assist-card.js` when the integration loads.
 
-**Current version**: v0.0.1
+**Current versions**:
+- Card: v0.0.1
+- marked.js: v12.0.0
 
-To verify it's working, navigate to (replace `your-ha-url` with your Home Assistant URL):
+To verify resources are working, navigate to (replace `your-ha-url` with your Home Assistant URL):
 ```
+http://your-ha-url:8123/home_generative_agent/marked.min.js
 http://your-ha-url:8123/home_generative_agent/homeassistant-assist-card.js
 ```
 
-You should see JavaScript code. If you get a 404 error:
+You should see JavaScript code for both. If you get 404 errors:
 1. Verify the integration is installed and loaded
 2. Check the Home Assistant logs for download and frontend registration messages
-3. Ensure your Home Assistant instance can reach GitHub
+3. Ensure your Home Assistant instance can reach GitHub and CDN
 4. Restart Home Assistant
 
-### Step 2: Register the Resource in Lovelace
+### Step 2: Register the Resources in Lovelace
+
+**IMPORTANT**: You need to register TWO resources in the correct order:
+
+#### First: Register marked.js (required dependency)
 
 1. Go to **Settings** → **Dashboards** → **Resources** (three-dot menu in top right)
 2. Click **+ Add Resource**
 3. Enter the following details:
-   - **URL**: `/home_generative_agent/homeassistant-assist-card.js`
+   - **URL**: `/home_generative_agent/marked.min.js`
    - **Resource type**: JavaScript Module
 4. Click **Create**
-5. Refresh your browser (Ctrl+Shift+R or Cmd+Shift+R)
+
+#### Second: Register the Assist Card
+
+1. Click **+ Add Resource** again
+2. Enter the following details:
+   - **URL**: `/home_generative_agent/homeassistant-assist-card.js`
+   - **Resource type**: JavaScript Module
+3. Click **Create**
+4. Refresh your browser (Ctrl+Shift+R or Cmd+Shift+R)
+
+**Note**: The order is important - marked.js must be loaded before the assist card.
 
 ### Step 3: Add the Card to Your Dashboard
 
@@ -171,17 +188,20 @@ If no pipeline_id is specified, the card uses the default Home Assistant convers
 
 The Home Generative Agent integration uses a modern dependency management approach:
 
-1. **On First Load**: When the integration starts, it checks if the assist card is cached locally
-2. **Download**: If not cached or if a new version is required, it downloads the card from GitHub releases
-3. **Caching**: The card is cached in `www_cache/homeassistant-assist-card/` for fast subsequent loads
+1. **On First Load**: When the integration starts, it checks if the assist card and marked.js are cached locally
+2. **Download**: If not cached or if a new version is required, it downloads:
+   - **marked.js** from jsDelivr CDN (v12.0.0)
+   - **homeassistant-assist-card.js** from GitHub releases (v0.0.1)
+3. **Caching**: Both files are cached in `www_cache/homeassistant-assist-card/` for fast subsequent loads
 4. **Version Tracking**: Version information is stored to ensure updates are downloaded when available
-5. **Static Serving**: The cached card is served via Home Assistant's HTTP server at `/home_generative_agent/`
+5. **Static Serving**: The cached files are served via Home Assistant's HTTP server at `/home_generative_agent/`
 
 This approach ensures:
-- **Easy Updates**: Update the version number and restart to get the latest card
+- **Easy Updates**: Update the version numbers and restart to get the latest versions
 - **No Manual Installation**: No need to manually copy files or manage dependencies
 - **Automatic Verification**: SHA256 checksums are logged for security verification
 - **Offline Operation**: Once cached, works offline (until update required)
+- **Dependency Management**: marked.js is automatically provided as a required dependency
 
 ## Development
 
