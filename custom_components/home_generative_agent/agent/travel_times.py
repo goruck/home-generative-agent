@@ -172,21 +172,10 @@ async def get_travel_time(  # noqa: D417
         origin_longitude: Longitude of the starting location (e.g., -122.4194).
         destination_latitude: Latitude of the destination (e.g., 37.3382).
         destination_longitude: Longitude of the destination (e.g., -121.8863).
-        travel_mode: Mode of transportation. Options are:
-            - "DRIVE" (default): By car
-            - "TRANSIT": Public transportation
-            - "WALK": Walking
-            - "BICYCLE": Cycling
-            - "TWO_WHEELER": Motorcycle/scooter
+        travel_mode: Mode of transportation. Valid options are DRIVE (default, by car),
+            TRANSIT (public transportation), WALK (walking), BICYCLE (cycling),
+            or TWO_WHEELER (motorcycle/scooter).
 
-    Returns:
-        A formatted string with travel time and distance information.
-
-    Example:
-        To get travel time from San Francisco to San Jose by car:
-        origin_latitude=37.7749, origin_longitude=-122.4194,
-        destination_latitude=37.3382, destination_longitude=-121.8863,
-        travel_mode="DRIVE"
     """
     if "configurable" not in config:
         return "Configuration not found. Please check your setup."
