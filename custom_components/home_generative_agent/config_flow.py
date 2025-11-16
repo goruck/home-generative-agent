@@ -262,20 +262,22 @@ def _schema_for(hass: HomeAssistant, opts: Mapping[str, Any]) -> VolDictType:
             description={"suggested_value": opts.get(CONF_VIDEO_ANALYZER_MODE)},
             default=RECOMMENDED_VIDEO_ANALYZER_MODE,
         ): SelectSelector(SelectSelectorConfig(options=video_analyzer_mode)),
-        vol.Optional(
-            CONF_FACE_RECOGNITION,
-            description={"suggested_value": opts.get(CONF_FACE_RECOGNITION)},
-            default=RECOMMENDED_FACE_RECOGNITION,
-        ): BooleanSelector(),
-        vol.Optional(
-            CONF_OLLAMA_REASONING,
-            description={"suggested_value": opts.get(CONF_OLLAMA_REASONING)},
-            default=RECOMMENDED_OLLAMA_REASONING,
-        ): BooleanSelector(),
     }
 
+    # Determine current analyzer mode before adding any conditional fields.
     selected_mode = opts.get(CONF_VIDEO_ANALYZER_MODE, RECOMMENDED_VIDEO_ANALYZER_MODE)
+
     if selected_mode != "disable":
+        # Show Face Recognition toggle only when analyzer is enabled.
+        schema[
+            vol.Optional(
+                CONF_FACE_RECOGNITION,
+                description={"suggested_value": opts.get(CONF_FACE_RECOGNITION)},
+                default=RECOMMENDED_FACE_RECOGNITION,
+            )
+        ] = BooleanSelector()
+
+        # Conditional notify service select.
         mobile_opts = list_mobile_notify_services(hass)
         if mobile_opts:
             schema[
@@ -295,6 +297,14 @@ def _schema_for(hass: HomeAssistant, opts: Mapping[str, Any]) -> VolDictType:
                     custom_value=False,
                 )
             )
+
+    schema[
+        vol.Optional(
+            CONF_OLLAMA_REASONING,
+            description={"suggested_value": opts.get(CONF_OLLAMA_REASONING)},
+            default=RECOMMENDED_OLLAMA_REASONING,
+        )
+    ] = BooleanSelector()
 
     schema[
         vol.Required(
