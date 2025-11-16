@@ -33,5 +33,5 @@
     "transformers==4.57.1",
     "langchain-google-genai==3.0.0"
   ],
-  "version": "2.4.1"
+  "version": "2.6.1"
 }
