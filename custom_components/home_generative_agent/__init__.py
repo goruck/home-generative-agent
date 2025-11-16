@@ -45,7 +45,7 @@ from .const import (
     CONF_DB_URI,
     CONF_EMBEDDING_MODEL_PROVIDER,
     CONF_FACE_API_URL,
-    CONF_FACE_RECOGNITION_MODE,
+    CONF_FACE_RECOGNITION,
     CONF_GEMINI_API_KEY,
     CONF_GEMINI_CHAT_MODEL,
     CONF_GEMINI_EMBEDDING_MODEL,
@@ -74,7 +74,7 @@ from .const import (
     RECOMMENDED_DB_URI,
     RECOMMENDED_EMBEDDING_MODEL_PROVIDER,
     RECOMMENDED_FACE_API_URL,
-    RECOMMENDED_FACE_RECOGNITION_MODE,
+    RECOMMENDED_FACE_RECOGNITION,
     RECOMMENDED_GEMINI_CHAT_MODEL,
     RECOMMENDED_GEMINI_EMBEDDING_MODEL,
     RECOMMENDED_GEMINI_SUMMARIZATION_MODEL,
@@ -657,8 +657,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
     video_analyzer = VideoAnalyzer(hass, entry)
 
-    face_mode = entry.options.get(
-        CONF_FACE_RECOGNITION_MODE, RECOMMENDED_FACE_RECOGNITION_MODE
+    face_recognition = entry.options.get(
+        CONF_FACE_RECOGNITION, RECOMMENDED_FACE_RECOGNITION
     )
 
     # Save runtime data.
@@ -671,7 +671,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         video_analyzer=video_analyzer,
         checkpointer=checkpointer,
         pool=pool,
-        face_mode=face_mode,
+        face_recognition=face_recognition,
         face_api_url=face_api_url,
         person_gallery=person_gallery,
     )

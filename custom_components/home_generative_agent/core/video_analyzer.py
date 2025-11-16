@@ -499,8 +499,8 @@ class VideoAnalyzer:
 
     async def recognize_faces(self, data: bytes, camera_id: str) -> list[str]:  # noqa: PLR0912, PLR0915
         """Call face API to recognize faces in the snapshot image."""
-        face_mode = self.entry.runtime_data.face_mode
-        if not face_mode or face_mode == "disable":
+        face_recognition = self.entry.runtime_data.face_recognition
+        if not face_recognition:
             return []
 
         base_url = self.entry.runtime_data.face_api_url

@@ -29,7 +29,7 @@ class HGAData:
     checkpointer: AsyncPostgresSaver
     video_analyzer: VideoAnalyzer
     face_api_url: str
-    face_mode: str
+    face_recognition: bool
     person_gallery: Any
 
 

@@ -59,7 +59,7 @@
           "recommended": "Recommended model settings",
           "video_analyzer_mode": "Video analyzer mode",
           "notify_service": "Mobile App Notify Service (optional)",
-          "face_recognition_mode": "Face recognition mode",
+          "face_recognition": "Enable face recognition",
           "ollama_reasoning": "Enable Ollama reasoning"
         },
         "data_description": {
