@@ -129,7 +129,7 @@ async def _download_marked(hass: HomeAssistant) -> bool:
 
         # Write the downloaded content
         content = response.content
-        cached_file.write_bytes(content)
+        await hass.async_add_executor_job(cached_file.write_bytes, content)
 
         # Calculate and log checksum for verification
         sha256_hash = hashlib.sha256(content).hexdigest()

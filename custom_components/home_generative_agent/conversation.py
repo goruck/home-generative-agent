@@ -7,6 +7,8 @@ import re
 import string
 from typing import TYPE_CHECKING, Any, Literal
 
+from functools import partial
+
 import markdown
 import homeassistant.util.dt as dt_util
 from homeassistant.components import conversation
@@ -374,9 +376,12 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
 
         # Convert Markdown to HTML for better formatting in Home Assistant
         response_content = response["messages"][-1].content
-
-        html_content = await hass.async_add_executor_job(
-            markdown.markdown, response_content, [] , ["fenced_code", "tables", "nl2br"]
+        
+        html_content = await hass.async_add_executor_job(partial(
+            markdown.markdown, 
+            response_content,
+            extensions=["fenced_code", "tables", "nl2br"]
+            )
         )
 
         # Collapse multiple spaces and newlines
