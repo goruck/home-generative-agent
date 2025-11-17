@@ -210,7 +210,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
 
         tools = [
             _format_tool(tool, llm_api.custom_serializer)
-            for tool in chat_log.llm_api.tools
+            for tool in llm_api.tools
         ]
 
         # Add LangChain-native tools (wired in graph via config).
