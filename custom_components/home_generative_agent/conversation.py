@@ -376,9 +376,8 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         response_content = response["messages"][-1].content
 
         html_content = await hass.async_add_executor_job(
-            markdown.markdown,
-            response_content,
-            extensions=["fenced_code", "tables", "nl2br"],
+            markdown.markdown, 
+            { "text": response_content, "extensions" : ["fenced_code", "tables", "nl2br"] }
         )
 
         # Collapse multiple spaces and newlines
