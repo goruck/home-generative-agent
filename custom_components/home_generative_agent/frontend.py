@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING
 
 from homeassistant.helpers import aiohttp_client
 from homeassistant.components.http import StaticPathConfig
-from homeassistant.helpers.httpx_client import get_async_client
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -85,7 +84,7 @@ async def _download_card(hass: HomeAssistant) -> bool:
 
     try:
         client = aiohttp_client.async_get_clientsession(hass, verify_ssl=True)
-        response = await client.get(url, timeout=30.0, follow_redirects=True)
+        response = await client.get(url, timeout=30.0, allow_redirects=True)
         response.raise_for_status()
 
         # Write the downloaded content
@@ -125,7 +124,7 @@ async def _download_marked(hass: HomeAssistant) -> bool:
 
     try:
         client = aiohttp_client.async_get_clientsession(hass, verify_ssl=True)
-        response = await client.get(url, timeout=30.0, follow_redirects=True)
+        response = await client.get(url, timeout=30.0, allow_redirects=True)
         response.raise_for_status()
 
         # Write the downloaded content
