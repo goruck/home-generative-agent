@@ -60,7 +60,10 @@
           "video_analyzer_mode": "Video analyzer mode",
           "notify_service": "Mobile App Notify Service (optional)",
           "face_recognition": "Enable face recognition",
-          "ollama_reasoning": "Enable Ollama reasoning"
+          "ollama_reasoning": "Enable Ollama reasoning",
+          "ollama_chat_keepalive": "Ollama chat model keepalive (minutes or Never unload (-1)",
+          "ollama_vlm_keepalive": "Ollama VLM keepalive (minutes or Never unload (-1)",
+          "ollama_summarization_keepalive": "Ollama summarization model keepalive (minutes or Never unload (-1)"
         },
         "data_description": {
           "prompt": "Instruct how the LLM should respond. This can be a template."

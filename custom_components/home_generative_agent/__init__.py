@@ -51,12 +51,15 @@ from .const import (
     CONF_GEMINI_EMBEDDING_MODEL,
     CONF_GEMINI_SUMMARIZATION_MODEL,
     CONF_GEMINI_VLM,
+    CONF_OLLAMA_CHAT_KEEPALIVE,
     CONF_OLLAMA_CHAT_MODEL,
     CONF_OLLAMA_EMBEDDING_MODEL,
     CONF_OLLAMA_REASONING,
+    CONF_OLLAMA_SUMMARIZATION_KEEPALIVE,
     CONF_OLLAMA_SUMMARIZATION_MODEL,
     CONF_OLLAMA_URL,
     CONF_OLLAMA_VLM,
+    CONF_OLLAMA_VLM_KEEPALIVE,
     CONF_OPENAI_CHAT_MODEL,
     CONF_OPENAI_EMBEDDING_MODEL,
     CONF_OPENAI_SUMMARIZATION_MODEL,
@@ -346,6 +349,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 repeat_penalty=ConfigurableField(id="repeat_penalty"),
                 reasoning=ConfigurableField(id="reasoning"),
                 mirostat=ConfigurableField(id="mirostat"),
+                keep_alive=ConfigurableField(id="keep_alive"),
             )
         except Exception:
             LOGGER.exception("Ollama provider init failed; continuing without it.")
@@ -504,12 +508,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     chat_temp = entry.options.get(
         CONF_CHAT_MODEL_TEMPERATURE, RECOMMENDED_CHAT_MODEL_TEMPERATURE
     )
+    ollama_chat_keep_alive = entry.options.get(CONF_OLLAMA_CHAT_KEEPALIVE, 5)
     ollama_chat_model_options = {
         "temperature": chat_temp,
         "top_p": CHAT_MODEL_TOP_P,
         "num_predict": CHAT_MODEL_MAX_TOKENS,
         "num_ctx": CHAT_MODEL_NUM_CTX,
         "repeat_penalty": CHAT_MODEL_REPEAT_PENALTY,
+        "keep_alive": ollama_chat_keep_alive,
     }
     if chat_provider == "openai":
         chat_model = (openai_provider or NullChat()).with_config(
@@ -550,6 +556,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     "num_predict": CHAT_MODEL_MAX_TOKENS,
                     "num_ctx": CHAT_MODEL_NUM_CTX,
                     "repeat_penalty": CHAT_MODEL_REPEAT_PENALTY,
+                    "keep_alive": ollama_chat_keep_alive,
                     **rf_chat,
                 }
             }
@@ -593,6 +600,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     "num_ctx": VLM_NUM_CTX,
                     "repeat_penalty": VLM_REPEAT_PENALTY,
                     "mirostat": VLM_MIRO_STAT,
+                    "keep_alive": entry.options.get(CONF_OLLAMA_VLM_KEEPALIVE, 5),
                     **rf_vlm,
                 }
             }
@@ -650,6 +658,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     "num_ctx": SUMMARIZATION_MODEL_CTX,
                     "repeat_penalty": SUMMARIZATION_MODEL_REPEAT_PENALTY,
                     "mirostat": SUMMARIZATION_MIRO_STAT,
+                    "keep_alive": entry.options.get(
+                        CONF_OLLAMA_SUMMARIZATION_KEEPALIVE, 5
+                    ),
                     **rf_summarization,
                 }
             }

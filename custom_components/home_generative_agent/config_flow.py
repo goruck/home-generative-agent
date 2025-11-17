@@ -40,11 +40,14 @@ from .const import (
     CONF_FACE_RECOGNITION,
     CONF_GEMINI_API_KEY,
     CONF_NOTIFY_SERVICE,
+    CONF_OLLAMA_CHAT_KEEPALIVE,
     CONF_OLLAMA_CHAT_MODEL,
     CONF_OLLAMA_REASONING,
+    CONF_OLLAMA_SUMMARIZATION_KEEPALIVE,
     CONF_OLLAMA_SUMMARIZATION_MODEL,
     CONF_OLLAMA_URL,
     CONF_OLLAMA_VLM,
+    CONF_OLLAMA_VLM_KEEPALIVE,
     CONF_OPENAI_CHAT_MODEL,
     CONF_OPENAI_SUMMARIZATION_MODEL,
     CONF_OPENAI_VLM,
@@ -143,6 +146,10 @@ RECOMMENDED_OPTIONS = {
     CONF_OLLAMA_REASONING: RECOMMENDED_OLLAMA_REASONING,
 }
 
+# Ollama keepalive value limits
+_KEEPALIVE_MIN: float = 1.0
+_KEEPALIVE_MAX: float = 15.0
+_KEEPALIVE_SENTINEL: int = -1
 
 # ---------------------------
 # Helpers
@@ -171,12 +178,15 @@ def _prune_irrelevant_model_fields(opts: Mapping[str, Any]) -> dict[str, Any]:
     """
     pruned = dict(opts)
 
-    # Strip temps if recommended
+    # Strip temps and keepalive if recommended
     if pruned.get(CONF_RECOMMENDED):
-        for spec in MODEL_CATEGORY_SPECS.values():
+        for cat, spec in MODEL_CATEGORY_SPECS.items():
             temp_key = spec.get("temperature_key")
             if temp_key:
                 pruned.pop(temp_key, None)
+            keep_key = _ollama_keepalive_key_for_cat(cat)
+            if keep_key:
+                pruned.pop(keep_key, None)
 
     # Remove model keys for providers not selected
     for cat, spec in MODEL_CATEGORY_SPECS.items():
@@ -185,6 +195,11 @@ def _prune_irrelevant_model_fields(opts: Mapping[str, Any]) -> dict[str, Any]:
             key = _model_option_key(cat, provider)
             if provider != selected:
                 pruned.pop(key, None)
+
+        # Remove keepalive if provider is not ollama
+        keep_key = _ollama_keepalive_key_for_cat(cat)
+        if keep_key and selected != "ollama":
+            pruned.pop(keep_key, None)
 
     return pruned
 
@@ -212,6 +227,50 @@ def _model_selector_config(cat: str, provider: str) -> SelectSelectorConfig:
         sort=False,
         custom_value=True,
     )
+
+
+def _ollama_keepalive_selector_config() -> SelectSelectorConfig:
+    """Keepalive: allow -1 (sentinel) or any typed value via custom input."""
+    # Values MUST be strings for SelectSelector options
+    options: list[SelectOptionDict] = [
+        SelectOptionDict(label="Never unload (-1)", value="-1"),
+    ]
+    return SelectSelectorConfig(
+        options=options,
+        mode=SelectSelectorMode.DROPDOWN,
+        sort=False,
+        custom_value=True,  # allows user to type e.g. 2.5, 7.25, etc.
+    )
+
+
+def _coerce_keepalive_value(value: Any) -> float | int:
+    """Accept -1 or any float in [1, 15]. Raise ValueError if invalid."""
+    if isinstance(value, (int, float)):
+        v = float(value)
+    else:
+        s = str(value).strip()
+        if not s:
+            msg = "empty keepalive"
+            raise ValueError(msg)
+        v = float(s)
+
+    if v == float(_KEEPALIVE_SENTINEL):
+        return _KEEPALIVE_SENTINEL
+    if _KEEPALIVE_MIN <= v <= _KEEPALIVE_MAX:
+        return v
+    msg = f"keepalive out of range: {v}"
+    raise ValueError(msg)
+
+
+def _ollama_keepalive_key_for_cat(cat: str) -> str | None:
+    """Return the keepalive option key for a given model category."""
+    if cat == "chat":
+        return CONF_OLLAMA_CHAT_KEEPALIVE
+    if cat == "vlm":
+        return CONF_OLLAMA_VLM_KEEPALIVE
+    if cat == "summarization":
+        return CONF_OLLAMA_SUMMARIZATION_KEEPALIVE
+    return None
 
 
 def _schema_for(hass: HomeAssistant, opts: Mapping[str, Any]) -> VolDictType:
@@ -343,6 +402,19 @@ def _schema_for(hass: HomeAssistant, opts: Mapping[str, Any]) -> VolDictType:
                     default=opts.get(model_key, default_model),
                 )
             ] = SelectSelector(_model_selector_config(cat, selected_provider))
+
+        if selected_provider == "ollama":
+            keep_key = _ollama_keepalive_key_for_cat(cat)
+            if keep_key is not None:
+                schema[
+                    vol.Optional(
+                        keep_key,
+                        description={
+                            "suggested_value": _get_str(opts, keep_key) or "5.0"
+                        },
+                        default=_get_str(opts, keep_key) or "5.0",
+                    )
+                ] = SelectSelector(_ollama_keepalive_selector_config())
 
         # Temperature (if used by this category)
         temp_key = spec.get("temperature_key")
@@ -640,6 +712,31 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         options[spec.field] = raw
         return None
 
+    def _maybe_edit_keepalives(
+        self,
+        options: dict[str, Any],
+        user_input: Mapping[str, Any] | None,
+    ) -> str | None:
+        """
+        Validate/normalize Ollama keepalive fields if present.
+
+        Return error code or None.
+        """
+        if not user_input:
+            return None
+
+        # Only these categories have keepalive
+        for cat in ("chat", "vlm", "summarization"):
+            keep_key = _ollama_keepalive_key_for_cat(cat)
+            if keep_key and keep_key in user_input:
+                try:
+                    options[keep_key] = _coerce_keepalive_value(user_input[keep_key])
+                except (ValueError, TypeError):
+                    # Keep message key stable; HA will show a generic error at top.
+                    return "invalid_keepalive"
+
+        return None
+
     def _drop_empty_fields(self, final_options: dict[str, Any]) -> None:
         """Remove empty strings for fields to avoid storing empties."""
         for k in (
@@ -714,6 +811,8 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
                 options,
                 user_input,
             )
+        if not err:
+            err = self._maybe_edit_keepalives(options, user_input)
         if err:
             errors["base"] = err
 
