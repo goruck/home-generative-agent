@@ -209,7 +209,8 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             )
 
         tools = [
-            _format_tool(tool, llm_api.custom_serializer) for tool in chat_log.llm_api.tools
+            _format_tool(tool, llm_api.custom_serializer)
+            for tool in chat_log.llm_api.tools
         ]
 
         # Add LangChain-native tools (wired in graph via config).
@@ -376,11 +377,12 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
 
         # Convert Markdown to HTML for better formatting in Home Assistant
         response_content = response["messages"][-1].content
-        
-        html_content = await hass.async_add_executor_job(partial(
-            markdown.markdown, 
-            response_content,
-            extensions=["fenced_code", "tables", "nl2br"]
+
+        html_content = await hass.async_add_executor_job(
+            partial(
+                markdown.markdown,
+                response_content,
+                extensions=["fenced_code", "tables", "nl2br"],
             )
         )
 

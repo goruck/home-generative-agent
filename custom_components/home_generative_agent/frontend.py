@@ -88,8 +88,8 @@ async def _download_card(hass: HomeAssistant) -> bool:
         response.raise_for_status()
 
         # Write the downloaded content
-        content = response.content
-        cached_file.write_bytes(content)
+        content = await response.read()
+        await hass.async_add_executor_job(cached_file.write_bytes, content)
 
         # Calculate and log checksum for verification
         sha256_hash = hashlib.sha256(content).hexdigest()
@@ -128,7 +128,7 @@ async def _download_marked(hass: HomeAssistant) -> bool:
         response.raise_for_status()
 
         # Write the downloaded content
-        content = response.content
+        content = await response.read()
         await hass.async_add_executor_job(cached_file.write_bytes, content)
 
         # Calculate and log checksum for verification
