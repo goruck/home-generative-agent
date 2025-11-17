@@ -374,7 +374,9 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
 
         # Convert Markdown to HTML for better formatting in Home Assistant
         response_content = response["messages"][-1].content
-        html_content = markdown.markdown(
+
+        html_content = await hass.async_add_executor_job(
+            markdown.markdown, 
             response_content, extensions=["fenced_code", "tables", "nl2br"]
         )
 

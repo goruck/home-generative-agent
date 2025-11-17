@@ -7,6 +7,8 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+
+from homeassistant.helpers import aiohttp_client
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.helpers.httpx_client import get_async_client
 
@@ -82,7 +84,7 @@ async def _download_card(hass: HomeAssistant) -> bool:
     LOGGER.info("Downloading assist card from %s", url)
 
     try:
-        client = get_async_client(hass, verify_ssl=True)
+        client = aiohttp_client.async_get_clientsession(hass, verify_ssl=True)
         response = await client.get(url, timeout=30.0, follow_redirects=True)
         response.raise_for_status()
 
@@ -122,7 +124,7 @@ async def _download_marked(hass: HomeAssistant) -> bool:
     LOGGER.info("Downloading marked.js from %s", url)
 
     try:
-        client = get_async_client(hass, verify_ssl=True)
+        client = aiohttp_client.async_get_clientsession(hass, verify_ssl=True)
         response = await client.get(url, timeout=30.0, follow_redirects=True)
         response.raise_for_status()
 
