@@ -83,7 +83,7 @@ CONTEXT_MAX_MESSAGES = 80
 CONTEXT_MAX_TOKENS = CHAT_MODEL_NUM_CTX - CHAT_MODEL_MAX_TOKENS - 2048 - 4096  # 22528
 
 # ---------------- VLM (vision) ----------------
-VLM_TOP_P = 0.9
+VLM_TOP_P = 1.0
 VLM_NUM_PREDICT = -2  # Ollama only, -2 = fill context
 VLM_NUM_CTX = 16384  # Ollama only
 VLM_REPEAT_PENALTY = 1.05  # Ollama only
@@ -166,7 +166,7 @@ VLM_IMAGE_WIDTH = 1920
 VLM_IMAGE_HEIGHT = 1080
 
 # ---------------- Summarization ----------------
-SUMMARIZATION_MODEL_TOP_P = 0.9
+SUMMARIZATION_MODEL_TOP_P = 1.0
 SUMMARIZATION_MODEL_PREDICT = -2  # Ollama only, -2 = fill context
 SUMMARIZATION_MODEL_CTX = 32768  # Ollama only
 SUMMARIZATION_MODEL_REPEAT_PENALTY = 1.05  # Ollama only
