@@ -147,8 +147,8 @@ RECOMMENDED_OPTIONS = {
 }
 
 # Ollama keepalive value limits
-_KEEPALIVE_MIN: float = 1.0
-_KEEPALIVE_MAX: float = 15.0
+_KEEPALIVE_MIN: float = 0.0 # minutes
+_KEEPALIVE_MAX: float = 15.0 # minutes
 _KEEPALIVE_SENTINEL: int = -1
 
 # ---------------------------
@@ -244,15 +244,19 @@ def _ollama_keepalive_selector_config() -> SelectSelectorConfig:
 
 
 def _coerce_keepalive_value(value: Any) -> float | int:
-    """Accept -1 or any float in [1, 15]. Raise ValueError if invalid."""
+    """
+    Accept -1 or any float in [_KEEPALIVE_MIN, _KEEPALIVE_MAX].
+    
+    Raise ValueError if invalid.
+    """
     if isinstance(value, (int, float)):
-        v = float(value)
+        v = 60.0 * float(value)
     else:
         s = str(value).strip()
         if not s:
             msg = "empty keepalive"
             raise ValueError(msg)
-        v = float(s)
+        v = 60.0 * float(s)
 
     if v == float(_KEEPALIVE_SENTINEL):
         return _KEEPALIVE_SENTINEL
