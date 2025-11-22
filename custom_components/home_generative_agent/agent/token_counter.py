@@ -12,7 +12,11 @@ import tiktoken
 from langchain_core.messages import BaseMessage
 from langchain_core.messages.utils import count_tokens_approximately
 
-from ..const import CONF_GEMINI_API_KEY, CONF_OLLAMA_URL  # noqa: TID252
+from ..const import (  # noqa: TID252
+    CONF_GEMINI_API_KEY,
+    CONF_OLLAMA_URL,
+    OLLAMA_EXACT_TOKEN_COUNT,
+)
 
 OPENAI_PREFIXES: tuple[str, ...] = ("gpt",)
 
@@ -301,8 +305,7 @@ def count_tokens_cross_provider(
         raise ValueError(msg)
     ollama_base_url: str = ollama_base_url_any
 
-    exact = bool(options.get("exact_ollama_token_count", False))
-    if exact:
+    if OLLAMA_EXACT_TOKEN_COUNT:
         n = _count_ollama_tokens(
             messages, model=model, base_url=ollama_base_url, options=chat_model_options
         )

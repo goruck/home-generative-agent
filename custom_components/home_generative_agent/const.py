@@ -23,7 +23,9 @@ CONF_NOTIFY_SERVICE = "notify_service"
 LANGCHAIN_LOGGING_LEVEL: Literal["disable", "verbose", "debug"] = "disable"
 
 
-# ---- Ollama ----
+# ---- Global Ollama Options ----
+RECOMMENDED_OLLAMA_CONTEXT_SIZE = 16384
+
 CONF_OLLAMA_URL = "ollama_url"
 RECOMMENDED_OLLAMA_URL = "http://localhost:11434"
 
@@ -47,9 +49,6 @@ CONF_GEMINI_API_KEY = "gemini_api_key"
 
 # ---------------- Chat model ----------------
 CHAT_MODEL_TOP_P = 1.0
-CHAT_MODEL_NUM_CTX = 32768  # Ollama only
-CHAT_MODEL_MAX_TOKENS = -2  # Ollama only, -2 = fill context
-CHAT_MODEL_REPEAT_PENALTY = 1.05  # Ollama only
 # Add more models by extending the Literal types.
 CHAT_MODEL_OLLAMA_SUPPORTED = Literal["gpt-oss", "qwen2.5:32b", "qwen3:32b", "qwen3:8b"]
 CHAT_MODEL_OPENAI_SUPPORTED = Literal[
@@ -66,6 +65,9 @@ RECOMMENDED_CHAT_MODEL_PROVIDER: PROVIDERS = "ollama"
 CONF_OLLAMA_CHAT_MODEL = "ollama_chat_model"
 RECOMMENDED_OLLAMA_CHAT_MODEL: CHAT_MODEL_OLLAMA_SUPPORTED = "gpt-oss"
 CONF_OLLAMA_CHAT_KEEPALIVE = "ollama_chat_keepalive"
+CONF_OLLAMA_CHAT_CONTEXT_SIZE = "ollama_chat_context_size"
+CHAT_MODEL_MAX_TOKENS = -2  # Ollama only, -2 = fill context
+CHAT_MODEL_REPEAT_PENALTY = 1.05  # Ollama only
 
 CONF_OPENAI_CHAT_MODEL = "openai_chat_model"
 RECOMMENDED_OPENAI_CHAT_MODEL: CHAT_MODEL_OPENAI_SUPPORTED = "gpt-5"
@@ -74,20 +76,27 @@ CONF_GEMINI_CHAT_MODEL = "gemini_chat_model"
 RECOMMENDED_GEMINI_CHAT_MODEL: CHAT_MODEL_GEMINI_SUPPORTED = "gemini-2.5-flash-lite"
 
 CONF_CHAT_MODEL_TEMPERATURE = "chat_model_temperature"
-RECOMMENDED_CHAT_MODEL_TEMPERATURE = 1.0
+RECOMMENDED_CHAT_MODEL_TEMPERATURE = 0.2
 
-# Context management (for trimming history)
-CONTEXT_MANAGE_USE_TOKENS = True
-CONTEXT_MAX_MESSAGES = 80
-# Keep buffer for tools + token counter undercount (see repo notes).
-CONTEXT_MAX_TOKENS = CHAT_MODEL_NUM_CTX - CHAT_MODEL_MAX_TOKENS - 2048 - 4096  # 22528
+## Context management (for trimming chat history) ##
+
+# Ollama exact token counting option.
+# Set False to get fast, approximate token counts.
+# Recommended for using `trim_messages` on the hot path, where
+# exact token counting is not necessary.
+OLLAMA_EXACT_TOKEN_COUNT: bool = False
+
+CONF_MANAGE_CONTEXT_WITH_TOKENS = "manage_context_with_tokens"
+RECOMMENDED_MANAGE_CONTEXT_WITH_TOKENS: Literal["true", "false"] = "true"
+CONF_MAX_TOKENS_IN_CONTEXT = "max_tokens_in_context"
+# For Ollama models, this should be <= model context size.
+RECOMMENDED_MAX_TOKENS_IN_CONTEXT = 16384
+
+CONF_MAX_MESSAGES_IN_CONTEXT = "max_messages_in_context"
+RECOMMENDED_MAX_MESSAGES_IN_CONTEXT = 60
 
 # ---------------- VLM (vision) ----------------
 VLM_TOP_P = 1.0
-VLM_NUM_PREDICT = -2  # Ollama only, -2 = fill context
-VLM_NUM_CTX = 16384  # Ollama only
-VLM_REPEAT_PENALTY = 1.05  # Ollama only
-VLM_MIRO_STAT = 0  # Ollama only
 VLM_OLLAMA_SUPPORTED = Literal["qwen2.5vl:7b", "qwen3-vl:8b"]
 VLM_OPENAI_SUPPORTED = Literal["gpt-5-nano", "gpt-4.1", "gpt-4.1-nano"]
 VLM_GEMINI_SUPPORTED = Literal[
@@ -100,6 +109,10 @@ RECOMMENDED_VLM_PROVIDER: Literal["openai", "ollama", "gemini"] = "ollama"
 CONF_OLLAMA_VLM = "ollama_vlm"
 RECOMMENDED_OLLAMA_VLM: VLM_OLLAMA_SUPPORTED = "qwen3-vl:8b"
 CONF_OLLAMA_VLM_KEEPALIVE = "ollama_vlm_keepalive"
+CONF_OLLAMA_VLM_CONTEXT_SIZE = "ollama_vlm_context_size"
+VLM_NUM_PREDICT = -2  # Ollama only, -2 = fill context
+VLM_REPEAT_PENALTY = 1.05  # Ollama only
+VLM_MIRO_STAT = 0  # Ollama only
 
 CONF_OPENAI_VLM = "openai_vlm"
 RECOMMENDED_OPENAI_VLM: VLM_OPENAI_SUPPORTED = "gpt-5-nano"
@@ -167,10 +180,6 @@ VLM_IMAGE_HEIGHT = 1080
 
 # ---------------- Summarization ----------------
 SUMMARIZATION_MODEL_TOP_P = 1.0
-SUMMARIZATION_MODEL_PREDICT = -2  # Ollama only, -2 = fill context
-SUMMARIZATION_MODEL_CTX = 32768  # Ollama only
-SUMMARIZATION_MODEL_REPEAT_PENALTY = 1.05  # Ollama only
-SUMMARIZATION_MIRO_STAT = 0  # Ollama only
 SUMMARIZATION_MODEL_OLLAMA_SUPPORTED = Literal["qwen3:1.7b", "qwen3:8b"]
 SUMMARIZATION_MODEL_OPENAI_SUPPORTED = Literal["gpt-5-nano", "gpt-4.1", "gpt-4.1-nano"]
 SUMMARIZATION_MODEL_GEMINI_SUPPORTED = Literal[
@@ -187,6 +196,10 @@ RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL: SUMMARIZATION_MODEL_OLLAMA_SUPPORTED = (
     "qwen3:8b"
 )
 CONF_OLLAMA_SUMMARIZATION_KEEPALIVE = "ollama_summarization_keepalive"
+CONF_OLLAMA_SUMMARIZATION_CONTEXT_SIZE = "ollama_summarization_context_size"
+SUMMARIZATION_MODEL_PREDICT = -2  # Ollama only, -2 = fill context
+SUMMARIZATION_MODEL_REPEAT_PENALTY = 1.05  # Ollama only
+SUMMARIZATION_MIRO_STAT = 0  # Ollama only
 
 CONF_OPENAI_SUMMARIZATION_MODEL = "openai_summarization_model"
 RECOMMENDED_OPENAI_SUMMARIZATION_MODEL: SUMMARIZATION_MODEL_OPENAI_SUPPORTED = (

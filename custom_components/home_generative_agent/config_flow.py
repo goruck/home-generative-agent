@@ -39,14 +39,20 @@ from .const import (
     CONF_FACE_API_URL,
     CONF_FACE_RECOGNITION,
     CONF_GEMINI_API_KEY,
+    CONF_MANAGE_CONTEXT_WITH_TOKENS,
+    CONF_MAX_MESSAGES_IN_CONTEXT,
+    CONF_MAX_TOKENS_IN_CONTEXT,
     CONF_NOTIFY_SERVICE,
+    CONF_OLLAMA_CHAT_CONTEXT_SIZE,
     CONF_OLLAMA_CHAT_KEEPALIVE,
     CONF_OLLAMA_CHAT_MODEL,
     CONF_OLLAMA_REASONING,
+    CONF_OLLAMA_SUMMARIZATION_CONTEXT_SIZE,
     CONF_OLLAMA_SUMMARIZATION_KEEPALIVE,
     CONF_OLLAMA_SUMMARIZATION_MODEL,
     CONF_OLLAMA_URL,
     CONF_OLLAMA_VLM,
+    CONF_OLLAMA_VLM_CONTEXT_SIZE,
     CONF_OLLAMA_VLM_KEEPALIVE,
     CONF_OPENAI_CHAT_MODEL,
     CONF_OPENAI_SUMMARIZATION_MODEL,
@@ -66,7 +72,11 @@ from .const import (
     RECOMMENDED_EMBEDDING_MODEL_PROVIDER,
     RECOMMENDED_FACE_API_URL,
     RECOMMENDED_FACE_RECOGNITION,
+    RECOMMENDED_MANAGE_CONTEXT_WITH_TOKENS,
+    RECOMMENDED_MAX_MESSAGES_IN_CONTEXT,
+    RECOMMENDED_MAX_TOKENS_IN_CONTEXT,
     RECOMMENDED_OLLAMA_CHAT_MODEL,
+    RECOMMENDED_OLLAMA_CONTEXT_SIZE,
     RECOMMENDED_OLLAMA_REASONING,
     RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL,
     RECOMMENDED_OLLAMA_URL,
@@ -129,7 +139,6 @@ RECOMMENDED_OPTIONS = {
     CONF_PROMPT: llm.DEFAULT_INSTRUCTIONS_PROMPT,
     CONF_VIDEO_ANALYZER_MODE: RECOMMENDED_VIDEO_ANALYZER_MODE,
     CONF_FACE_RECOGNITION: RECOMMENDED_FACE_RECOGNITION,
-    CONF_FACE_API_URL: RECOMMENDED_FACE_API_URL,
     CONF_CHAT_MODEL_PROVIDER: RECOMMENDED_CHAT_MODEL_PROVIDER,
     CONF_CHAT_MODEL_TEMPERATURE: RECOMMENDED_CHAT_MODEL_TEMPERATURE,
     CONF_VLM_PROVIDER: RECOMMENDED_VLM_PROVIDER,
@@ -144,12 +153,16 @@ RECOMMENDED_OPTIONS = {
     CONF_OLLAMA_SUMMARIZATION_MODEL: RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL,
     CONF_OPENAI_SUMMARIZATION_MODEL: RECOMMENDED_OPENAI_SUMMARIZATION_MODEL,
     CONF_OLLAMA_REASONING: RECOMMENDED_OLLAMA_REASONING,
+    CONF_MANAGE_CONTEXT_WITH_TOKENS: RECOMMENDED_MANAGE_CONTEXT_WITH_TOKENS,
+    CONF_MAX_TOKENS_IN_CONTEXT: RECOMMENDED_MAX_TOKENS_IN_CONTEXT,
+    CONF_MAX_MESSAGES_IN_CONTEXT: RECOMMENDED_MAX_MESSAGES_IN_CONTEXT,
 }
 
-# Ollama keepalive value limits
-_KEEPALIVE_MIN: float = 0.0 # minutes
-_KEEPALIVE_MAX: float = 15.0 # minutes
-_KEEPALIVE_SENTINEL: int = -1
+# Ollama keepalive limits (seconds)
+_KEEPALIVE_MIN_SECONDS: int = 0  # 0 = unload immediately
+_KEEPALIVE_MAX_SECONDS: int = 15 * 60  # 900 = 15 minutes
+_KEEPALIVE_SENTINEL: int = -1  # never unload
+
 
 # ---------------------------
 # Helpers
@@ -187,6 +200,9 @@ def _prune_irrelevant_model_fields(opts: Mapping[str, Any]) -> dict[str, Any]:
             keep_key = _ollama_keepalive_key_for_cat(cat)
             if keep_key:
                 pruned.pop(keep_key, None)
+            context_key = _ollama_context_size_key_for_cat(cat)
+            if context_key:
+                pruned.pop(context_key, None)
 
     # Remove model keys for providers not selected
     for cat, spec in MODEL_CATEGORY_SPECS.items():
@@ -200,6 +216,11 @@ def _prune_irrelevant_model_fields(opts: Mapping[str, Any]) -> dict[str, Any]:
         keep_key = _ollama_keepalive_key_for_cat(cat)
         if keep_key and selected != "ollama":
             pruned.pop(keep_key, None)
+
+        # Remove context size if provider is not ollama
+        context_key = _ollama_context_size_key_for_cat(cat)
+        if context_key and selected != "ollama":
+            pruned.pop(context_key, None)
 
     return pruned
 
@@ -229,41 +250,20 @@ def _model_selector_config(cat: str, provider: str) -> SelectSelectorConfig:
     )
 
 
-def _ollama_keepalive_selector_config() -> SelectSelectorConfig:
-    """Keepalive: allow -1 (sentinel) or any typed value via custom input."""
-    # Values MUST be strings for SelectSelector options
-    options: list[SelectOptionDict] = [
-        SelectOptionDict(label="Never unload (-1)", value="-1"),
-    ]
-    return SelectSelectorConfig(
-        options=options,
-        mode=SelectSelectorMode.DROPDOWN,
-        sort=False,
-        custom_value=True,  # allows user to type e.g. 2.5, 7.25, etc.
-    )
+def _coerce_keepalive_value(value: Any) -> int:
+    """Accept -1, 0, or any integer in range."""
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError) as err:
+        msg = f"invalid keepalive: {value!r}"
+        raise ValueError(msg) from err
 
-
-def _coerce_keepalive_value(value: Any) -> float | int:
-    """
-    Accept -1 or any float in [_KEEPALIVE_MIN, _KEEPALIVE_MAX].
-    
-    Raise ValueError if invalid.
-    """
-    if isinstance(value, (int, float)):
-        v = 60.0 * float(value)
-    else:
-        s = str(value).strip()
-        if not s:
-            msg = "empty keepalive"
-            raise ValueError(msg)
-        v = 60.0 * float(s)
-
-    if v == float(_KEEPALIVE_SENTINEL):
+    if seconds == _KEEPALIVE_SENTINEL:
         return _KEEPALIVE_SENTINEL
-    if _KEEPALIVE_MIN <= v <= _KEEPALIVE_MAX:
-        return v
-    msg = f"keepalive out of range: {v}"
-    raise ValueError(msg)
+    if not (_KEEPALIVE_MIN_SECONDS <= seconds <= _KEEPALIVE_MAX_SECONDS):
+        msg = f"keepalive out of range: {seconds}"
+        raise ValueError(msg)
+    return seconds
 
 
 def _ollama_keepalive_key_for_cat(cat: str) -> str | None:
@@ -274,6 +274,17 @@ def _ollama_keepalive_key_for_cat(cat: str) -> str | None:
         return CONF_OLLAMA_VLM_KEEPALIVE
     if cat == "summarization":
         return CONF_OLLAMA_SUMMARIZATION_KEEPALIVE
+    return None
+
+
+def _ollama_context_size_key_for_cat(cat: str) -> str | None:
+    """Return the context size option key for a given model category."""
+    if cat == "chat":
+        return CONF_OLLAMA_CHAT_CONTEXT_SIZE
+    if cat == "vlm":
+        return CONF_OLLAMA_VLM_CONTEXT_SIZE
+    if cat == "summarization":
+        return CONF_OLLAMA_SUMMARIZATION_CONTEXT_SIZE
     return None
 
 
@@ -362,14 +373,6 @@ def _schema_for(hass: HomeAssistant, opts: Mapping[str, Any]) -> VolDictType:
             )
 
     schema[
-        vol.Optional(
-            CONF_OLLAMA_REASONING,
-            description={"suggested_value": opts.get(CONF_OLLAMA_REASONING)},
-            default=RECOMMENDED_OLLAMA_REASONING,
-        )
-    ] = BooleanSelector()
-
-    schema[
         vol.Required(
             CONF_RECOMMENDED,
             description={"suggested_value": opts.get(CONF_RECOMMENDED)},
@@ -381,7 +384,52 @@ def _schema_for(hass: HomeAssistant, opts: Mapping[str, Any]) -> VolDictType:
     if opts.get(CONF_RECOMMENDED, False):
         return schema
 
-    # Recommended OFF → show providers + their model + temp
+    schema[
+        vol.Optional(
+            CONF_OLLAMA_REASONING,
+            description={"suggested_value": opts.get(CONF_OLLAMA_REASONING)},
+            default=RECOMMENDED_OLLAMA_REASONING,
+        )
+    ] = BooleanSelector()
+
+    context_mgmt_modes = [
+        SelectOptionDict(label="Use tokens", value="true"),
+        SelectOptionDict(label="Use messages", value="false"),
+    ]
+
+    schema[
+        vol.Optional(
+            CONF_MANAGE_CONTEXT_WITH_TOKENS,
+            description={
+                "suggested_value": opts.get(CONF_MANAGE_CONTEXT_WITH_TOKENS, "true")
+            },
+            default=RECOMMENDED_MANAGE_CONTEXT_WITH_TOKENS,
+        )
+    ] = SelectSelector(
+        SelectSelectorConfig(
+            options=context_mgmt_modes,
+            mode=SelectSelectorMode.DROPDOWN,
+            sort=False,
+            custom_value=False,
+        )
+    )
+
+    schema[
+        vol.Optional(
+            CONF_MAX_TOKENS_IN_CONTEXT,
+            description={"suggested_value": opts.get(CONF_MAX_TOKENS_IN_CONTEXT)},
+            default=RECOMMENDED_MAX_TOKENS_IN_CONTEXT,
+        )
+    ] = NumberSelector(NumberSelectorConfig(min=64, max=65536, step=1))
+
+    schema[
+        vol.Optional(
+            CONF_MAX_MESSAGES_IN_CONTEXT,
+            description={"suggested_value": opts.get(CONF_MAX_MESSAGES_IN_CONTEXT)},
+            default=RECOMMENDED_MAX_MESSAGES_IN_CONTEXT,
+        )
+    ] = NumberSelector(NumberSelectorConfig(min=15, max=240, step=1))
+
     for cat, spec in MODEL_CATEGORY_SPECS.items():
         provider_key = spec["provider_key"]
 
@@ -407,18 +455,35 @@ def _schema_for(hass: HomeAssistant, opts: Mapping[str, Any]) -> VolDictType:
                 )
             ] = SelectSelector(_model_selector_config(cat, selected_provider))
 
+        # Ollama keepalive (only when provider is ollama)
         if selected_provider == "ollama":
             keep_key = _ollama_keepalive_key_for_cat(cat)
             if keep_key is not None:
                 schema[
                     vol.Optional(
                         keep_key,
-                        description={
-                            "suggested_value": _get_str(opts, keep_key) or "5.0"
-                        },
-                        default=_get_str(opts, keep_key) or "5.0",
+                        description={"suggested_value": opts.get(keep_key)},
+                        default=opts.get(keep_key, 5 * 60),
                     )
-                ] = SelectSelector(_ollama_keepalive_selector_config())
+                ] = NumberSelector(
+                    NumberSelectorConfig(
+                        min=_KEEPALIVE_SENTINEL,
+                        max=_KEEPALIVE_MAX_SECONDS,
+                        step=1,
+                    )
+                )
+
+        # Ollama context size (only when provider is ollama)
+        if selected_provider == "ollama":
+            context_key = _ollama_context_size_key_for_cat(cat)
+            if context_key:
+                schema[
+                    vol.Optional(
+                        context_key,
+                        description={"suggested_value": opts.get(context_key)},
+                        default=opts.get(context_key, RECOMMENDED_OLLAMA_CONTEXT_SIZE),
+                    )
+                ] = NumberSelector(NumberSelectorConfig(min=64, max=65536, step=1))
 
         # Temperature (if used by this category)
         temp_key = spec.get("temperature_key")
@@ -429,7 +494,7 @@ def _schema_for(hass: HomeAssistant, opts: Mapping[str, Any]) -> VolDictType:
                     description={"suggested_value": opts.get(temp_key)},
                     default=spec.get("recommended_temperature", 1.0),
                 )
-            ] = NumberSelector(NumberSelectorConfig(min=0, max=2, step=0.05))
+            ] = NumberSelector(NumberSelectorConfig(min=0, max=1, step=0.05))
 
     return schema
 
@@ -582,21 +647,47 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         return {k: opts.get(k) for k in keys}
 
     def _apply_recommended_defaults(self, opts: Mapping[str, Any]) -> dict[str, Any]:
-        """Force providers (and their model keys) to recommended values."""
+        """Reset all settings to recommended values, preserving secrets/URLs."""
         updated: dict[str, Any] = dict(opts)
+
+        # 1) Overlay the known recommended options in bulk.
+        # (These include prompt, analyzer mode, face recognition, providers/temps
+        # defaults, context management mode & limits, reasoning flag, etc.)
+        updated: dict[str, Any] = {
+            **dict(opts),
+            **dict(RECOMMENDED_OPTIONS.items()),
+        }
+
+        # 2) For each category, force provider/model/temperature to recommended.
         for cat, spec in MODEL_CATEGORY_SPECS.items():
             rec_provider = spec["recommended_provider"]
             provider_key = spec["provider_key"]
             updated[provider_key] = rec_provider
 
-            # Clear all model keys for this category
+            # Clear all model keys for this category, then set the recommended one.
             for prov in spec["providers"]:
                 updated.pop(_model_option_key(cat, prov), None)
 
-            # Set recommended model for the recommended provider, if known
             rec_model = spec.get("recommended_models", {}).get(rec_provider)
             if rec_model:
                 updated[_model_option_key(cat, rec_provider)] = rec_model
+
+            # Set the temperature to recommended (when the category supports it).
+            temp_key = spec.get("temperature_key")
+            if temp_key is not None:
+                updated[temp_key] = spec.get("recommended_temperature", 1.0)
+
+        # 3) Clear Ollama-only extras so “Recommended” doesn't retain
+        # per-provider overrides.
+        for cat in ("chat", "vlm", "summarization"):
+            keep_key = _ollama_keepalive_key_for_cat(cat)
+            if keep_key:
+                updated.pop(keep_key, None)
+            ctx_key = _ollama_context_size_key_for_cat(cat)
+            if ctx_key:
+                updated.pop(ctx_key, None)
+
+        # 4) Preserve secrets and URLs already present (no changes needed here).
         return updated
 
     def _base_options_with_entry_data(self) -> dict[str, Any]:

@@ -56,14 +56,20 @@
           "openai_embedding_model": "OpenAI embedding model",
           "gemini_embedding_model": "Gemini embedding model",
           "llm_hass_api": "Control Home Assistant",
-          "recommended": "Recommended model settings",
+          "recommended": "Recommended model settings (changing these may impact performance)",
           "video_analyzer_mode": "Video analyzer mode",
           "notify_service": "Mobile App Notify Service (optional)",
           "face_recognition": "Enable face recognition",
           "ollama_reasoning": "Enable Ollama reasoning",
-          "ollama_chat_keepalive": "Ollama chat model keepalive (minutes or Never unload (-1)",
-          "ollama_vlm_keepalive": "Ollama VLM keepalive (minutes or Never unload (-1)",
-          "ollama_summarization_keepalive": "Ollama summarization model keepalive (minutes or Never unload (-1)"
+          "ollama_chat_keepalive": "Ollama chat model keepalive (seconds or Never unload (-1))",
+          "ollama_vlm_keepalive": "Ollama VLM keepalive (seconds or Never unload (-1))",
+          "ollama_summarization_keepalive": "Ollama summarization model keepalive (seconds or Never unload (-1))",
+          "ollama_chat_context_size": "Ollama chat model context size (tokens)",
+          "ollama_vlm_context_size": "Ollama VLM context size (tokens)",
+          "ollama_summarization_context_size": "Ollama summarization model context size (tokens)",
+          "manage_context_with_tokens": "Context management method",
+          "max_tokens_in_context": "Max tokens in chat context",
+          "max_messages_in_context": "Max messages in chat context"
         },
         "data_description": {
           "prompt": "Instruct how the LLM should respond. This can be a template."

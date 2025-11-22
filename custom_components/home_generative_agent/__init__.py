@@ -36,7 +36,6 @@ from psycopg_pool import AsyncConnectionPool, PoolTimeout
 from .agent.tools import analyze_image
 from .const import (
     CHAT_MODEL_MAX_TOKENS,
-    CHAT_MODEL_NUM_CTX,
     CHAT_MODEL_REPEAT_PENALTY,
     CHAT_MODEL_TOP_P,
     CONF_CHAT_MODEL_PROVIDER,
@@ -51,14 +50,17 @@ from .const import (
     CONF_GEMINI_EMBEDDING_MODEL,
     CONF_GEMINI_SUMMARIZATION_MODEL,
     CONF_GEMINI_VLM,
+    CONF_OLLAMA_CHAT_CONTEXT_SIZE,
     CONF_OLLAMA_CHAT_KEEPALIVE,
     CONF_OLLAMA_CHAT_MODEL,
     CONF_OLLAMA_EMBEDDING_MODEL,
     CONF_OLLAMA_REASONING,
+    CONF_OLLAMA_SUMMARIZATION_CONTEXT_SIZE,
     CONF_OLLAMA_SUMMARIZATION_KEEPALIVE,
     CONF_OLLAMA_SUMMARIZATION_MODEL,
     CONF_OLLAMA_URL,
     CONF_OLLAMA_VLM,
+    CONF_OLLAMA_VLM_CONTEXT_SIZE,
     CONF_OLLAMA_VLM_KEEPALIVE,
     CONF_OPENAI_CHAT_MODEL,
     CONF_OPENAI_EMBEDDING_MODEL,
@@ -99,13 +101,11 @@ from .const import (
     SIGNAL_HGA_NEW_LATEST,
     SIGNAL_HGA_RECOGNIZED,
     SUMMARIZATION_MIRO_STAT,
-    SUMMARIZATION_MODEL_CTX,
     SUMMARIZATION_MODEL_PREDICT,
     SUMMARIZATION_MODEL_REPEAT_PENALTY,
     SUMMARIZATION_MODEL_TOP_P,
     VIDEO_ANALYZER_SNAPSHOT_ROOT,
     VLM_MIRO_STAT,
-    VLM_NUM_CTX,
     VLM_NUM_PREDICT,
     VLM_REPEAT_PENALTY,
     VLM_TOP_P,
@@ -509,11 +509,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         CONF_CHAT_MODEL_TEMPERATURE, RECOMMENDED_CHAT_MODEL_TEMPERATURE
     )
     ollama_chat_keep_alive = entry.options.get(CONF_OLLAMA_CHAT_KEEPALIVE, 5)
+    ollama_chat_context_size = entry.options.get(CONF_OLLAMA_CHAT_CONTEXT_SIZE)
     ollama_chat_model_options = {
         "temperature": chat_temp,
         "top_p": CHAT_MODEL_TOP_P,
         "num_predict": CHAT_MODEL_MAX_TOKENS,
-        "num_ctx": CHAT_MODEL_NUM_CTX,
+        "num_ctx": ollama_chat_context_size,
         "repeat_penalty": CHAT_MODEL_REPEAT_PENALTY,
         "keep_alive": ollama_chat_keep_alive,
     }
@@ -554,7 +555,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     "temperature": chat_temp,
                     "top_p": CHAT_MODEL_TOP_P,
                     "num_predict": CHAT_MODEL_MAX_TOKENS,
-                    "num_ctx": CHAT_MODEL_NUM_CTX,
+                    "num_ctx": ollama_chat_context_size,
                     "repeat_penalty": CHAT_MODEL_REPEAT_PENALTY,
                     "keep_alive": ollama_chat_keep_alive,
                     **rf_chat,
@@ -597,7 +598,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     "temperature": vlm_temp,
                     "top_p": VLM_TOP_P,
                     "num_predict": VLM_NUM_PREDICT,
-                    "num_ctx": VLM_NUM_CTX,
+                    "num_ctx": entry.options.get(CONF_OLLAMA_VLM_CONTEXT_SIZE),
                     "repeat_penalty": VLM_REPEAT_PENALTY,
                     "mirostat": VLM_MIRO_STAT,
                     "keep_alive": entry.options.get(CONF_OLLAMA_VLM_KEEPALIVE, 5),
@@ -655,7 +656,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     "temperature": sum_temp,
                     "top_p": SUMMARIZATION_MODEL_TOP_P,
                     "num_predict": SUMMARIZATION_MODEL_PREDICT,
-                    "num_ctx": SUMMARIZATION_MODEL_CTX,
+                    "num_ctx": entry.options.get(
+                        CONF_OLLAMA_SUMMARIZATION_CONTEXT_SIZE
+                    ),
                     "repeat_penalty": SUMMARIZATION_MODEL_REPEAT_PENALTY,
                     "mirostat": SUMMARIZATION_MIRO_STAT,
                     "keep_alive": entry.options.get(

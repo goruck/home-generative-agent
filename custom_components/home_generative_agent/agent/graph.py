@@ -30,11 +30,11 @@ from pydantic import ValidationError
 from ..const import (  # noqa: TID252
     CONF_CHAT_MODEL_PROVIDER,
     CONF_GEMINI_CHAT_MODEL,
+    CONF_MANAGE_CONTEXT_WITH_TOKENS,
+    CONF_MAX_MESSAGES_IN_CONTEXT,
+    CONF_MAX_TOKENS_IN_CONTEXT,
     CONF_OLLAMA_CHAT_MODEL,
     CONF_OPENAI_CHAT_MODEL,
-    CONTEXT_MANAGE_USE_TOKENS,
-    CONTEXT_MAX_MESSAGES,
-    CONTEXT_MAX_TOKENS,
     EMBEDDING_MODEL_PROMPT_TEMPLATE,
     SUMMARIZATION_INITIAL_PROMPT,
     SUMMARIZATION_PROMPT_TEMPLATE,
@@ -147,19 +147,16 @@ async def _call_model(
     messages = [SystemMessage(content=system_message)] + state["messages"]
 
     # Trim messages to manage context window length.
-    # TODO(goruck): Fix token counting.  # noqa: FIX002
-    # If using the token counter from the chat model API, the method
-    # 'get_num_tokens_from_messages()' will be called which currently ignores
-    # tool schemas and under counts message tokens for the qwen models.
-    # Until this is fixed, 'max_tokens' should be set to a value less than
-    # the maximum size of the model's context window. See const.py.
-    # https://github.com/goruck/home-generative-agent/issues/109
-
     provider = opts.get(CONF_CHAT_MODEL_PROVIDER)
     model_name = _determine_model_name(provider, opts)
+    manage_context_with_tokens: bool = (
+        opts.get(CONF_MANAGE_CONTEXT_WITH_TOKENS) == "true"
+    )
+    context_max_messages: int = opts.get(CONF_MAX_MESSAGES_IN_CONTEXT)
+    context_max_tokens: int = opts.get(CONF_MAX_TOKENS_IN_CONTEXT)
 
-    if CONTEXT_MANAGE_USE_TOKENS:
-        max_tokens = CONTEXT_MAX_TOKENS
+    if manage_context_with_tokens:
+        max_tokens = context_max_tokens
         token_counter = partial(
             count_tokens_cross_provider,
             model=model_name,
@@ -168,7 +165,7 @@ async def _call_model(
             chat_model_options=chat_model_options,
         )
     else:
-        max_tokens = CONTEXT_MAX_MESSAGES
+        max_tokens = context_max_messages
         token_counter = len
 
     trimmed_messages = await hass.async_add_executor_job(
