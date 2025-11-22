@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import string
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Literal
 
 from functools import partial
 
@@ -157,11 +157,16 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         """Return a list of supported languages."""
         return MATCH_ALL
 
+    @property
+    def supports_streaming(self) -> bool:
+        """Return True if the agent supports streaming responses."""
+        return True
+
     async def _async_handle_message(  # noqa: PLR0915
         self,
         user_input: conversation.ConversationInput,
         chat_log: conversation.ChatLog,
-    ) -> conversation.ConversationResult:
+    ) -> AsyncGenerator[conversation.ConversationResult, None]:
         """Process the user input."""
         hass = self.hass
         options = self.entry.options
@@ -209,8 +214,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             )
 
         tools = [
-            _format_tool(tool, llm_api.custom_serializer)
-            for tool in llm_api.tools
+            _format_tool(tool, llm_api.custom_serializer) for tool in llm_api.tools
         ]
 
         # Add LangChain-native tools (wired in graph via config).
@@ -350,11 +354,84 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             "messages_to_remove": [],
         }
 
-        # Interact with agent app.
+        # Stream interaction with agent app.
         try:
             # LOGGER.debug(app_input)
             # LOGGER.debug(app_config)
-            response = await app.ainvoke(input=app_input, config=app_config)
+
+            # Accumulate the streaming response
+            response_content = ""
+            final_messages = None
+
+            # Stream events from LangGraph
+            async for event in app.astream_events(
+                input=app_input, config=app_config, version="v2"
+            ):
+                kind = event["event"]
+
+                # Capture LLM token streaming
+                if kind == "on_chat_model_stream":
+                    chunk = event["data"]["chunk"]
+                    if hasattr(chunk, "content") and chunk.content:
+                        response_content += chunk.content
+
+                        # Yield intermediate result
+                        intent_response = intent.IntentResponse(
+                            language=user_input.language
+                        )
+
+                        # Collapse multiple spaces for TTS
+                        cleaned_response = re.sub(r"\s+", " ", response_content).strip()
+
+                        intent_response.async_set_speech(
+                            cleaned_response,
+                            extra_data={
+                                "original_response": response_content,
+                            },
+                        )
+
+                        yield conversation.ConversationResult(
+                            response=intent_response, conversation_id=conversation_id
+                        )
+
+                # Capture final state when workflow completes
+                elif kind == "on_chain_end" and event["name"] == "LangGraph":
+                    final_messages = event["data"]["output"].get("messages")
+
+            # After streaming is complete, send final result with HTML
+            if response_content:
+                html_content = await hass.async_add_executor_job(
+                    partial(
+                        markdown.markdown,
+                        response_content,
+                        extensions=["fenced_code", "tables", "nl2br"],
+                    )
+                )
+
+                # Collapse multiple spaces and newlines
+                cleaned_response = re.sub(r"\s+", " ", response_content).strip()
+
+                intent_response = intent.IntentResponse(language=user_input.language)
+                intent_response.async_set_speech(
+                    cleaned_response,
+                    extra_data={
+                        "original_response": response_content,
+                        "html_content": html_content,
+                    },
+                )
+
+                if final_messages:
+                    trace.async_conversation_trace_append(
+                        trace.ConversationTraceEventType.AGENT_DETAIL,
+                        {"messages": final_messages, "tools": tools if tools else None},
+                    )
+
+                LOGGER.debug("====== End of run ======")
+
+                yield conversation.ConversationResult(
+                    response=intent_response, conversation_id=conversation_id
+                )
+
         except HomeAssistantError as err:
             LOGGER.exception("LangGraph error during conversation processing.")
             intent_response = intent.IntentResponse(language=user_input.language)
@@ -362,45 +439,9 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 intent.IntentResponseErrorCode.UNKNOWN,
                 f"Something went wrong: {err}",
             )
-            return conversation.ConversationResult(
+            yield conversation.ConversationResult(
                 response=intent_response, conversation_id=conversation_id
             )
-
-        trace.async_conversation_trace_append(
-            trace.ConversationTraceEventType.AGENT_DETAIL,
-            {"messages": response["messages"], "tools": tools if tools else None},
-        )
-
-        LOGGER.debug("====== End of run ======")
-
-        intent_response = intent.IntentResponse(language=user_input.language)
-
-        # Convert Markdown to HTML for better formatting in Home Assistant
-        response_content = response["messages"][-1].content
-
-        html_content = await hass.async_add_executor_job(
-            partial(
-                markdown.markdown,
-                response_content,
-                extensions=["fenced_code", "tables", "nl2br"],
-            )
-        )
-
-        # Collapse multiple spaces and newlines
-        cleaned_response = re.sub(r"\s+", " ", response_content).strip()
-
-        # Set speech (cleaned up version without newlines for TTS)
-        intent_response.async_set_speech(
-            cleaned_response,
-            extra_data={
-                "original_response": response_content,
-                "html_content": html_content,
-            },
-        )
-
-        return conversation.ConversationResult(
-            response=intent_response, conversation_id=conversation_id
-        )
 
     async def _async_entry_update_listener(
         self, hass: HomeAssistant, entry: ConfigEntry
