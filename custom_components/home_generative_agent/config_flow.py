@@ -647,24 +647,16 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         return {k: opts.get(k) for k in keys}
 
     def _apply_recommended_defaults(self, opts: Mapping[str, Any]) -> dict[str, Any]:
-        """Reset all settings to recommended values, preserving secrets/URLs."""
+        """Reset only model-related settings to recommended values."""
         updated: dict[str, Any] = dict(opts)
 
-        # 1) Overlay the known recommended options in bulk.
-        # (These include prompt, analyzer mode, face recognition, providers/temps
-        # defaults, context management mode & limits, reasoning flag, etc.)
-        updated: dict[str, Any] = {
-            **dict(opts),
-            **dict(RECOMMENDED_OPTIONS.items()),
-        }
-
-        # 2) For each category, force provider/model/temperature to recommended.
+        # Per-category provider/model/temp + prune provider-specific extras
         for cat, spec in MODEL_CATEGORY_SPECS.items():
             rec_provider = spec["recommended_provider"]
             provider_key = spec["provider_key"]
             updated[provider_key] = rec_provider
 
-            # Clear all model keys for this category, then set the recommended one.
+            # Clear all model keys for this category, then set recommended
             for prov in spec["providers"]:
                 updated.pop(_model_option_key(cat, prov), None)
 
@@ -672,14 +664,11 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
             if rec_model:
                 updated[_model_option_key(cat, rec_provider)] = rec_model
 
-            # Set the temperature to recommended (when the category supports it).
             temp_key = spec.get("temperature_key")
             if temp_key is not None:
                 updated[temp_key] = spec.get("recommended_temperature", 1.0)
 
-        # 3) Clear Ollama-only extras so “Recommended” doesn't retain
-        # per-provider overrides.
-        for cat in ("chat", "vlm", "summarization"):
+            # Provider-specific extras should not persist when switching to recommended
             keep_key = _ollama_keepalive_key_for_cat(cat)
             if keep_key:
                 updated.pop(keep_key, None)
@@ -687,7 +676,14 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
             if ctx_key:
                 updated.pop(ctx_key, None)
 
-        # 4) Preserve secrets and URLs already present (no changes needed here).
+        # Global model-policy defaults (cross-category, model-related)
+        updated[CONF_OLLAMA_REASONING] = RECOMMENDED_OLLAMA_REASONING
+        updated[CONF_MANAGE_CONTEXT_WITH_TOKENS] = (
+            RECOMMENDED_MANAGE_CONTEXT_WITH_TOKENS
+        )
+        updated[CONF_MAX_TOKENS_IN_CONTEXT] = RECOMMENDED_MAX_TOKENS_IN_CONTEXT
+        updated[CONF_MAX_MESSAGES_IN_CONTEXT] = RECOMMENDED_MAX_MESSAGES_IN_CONTEXT
+
         return updated
 
     def _base_options_with_entry_data(self) -> dict[str, Any]:
