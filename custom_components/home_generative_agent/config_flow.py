@@ -70,7 +70,6 @@ from .const import (
     RECOMMENDED_CHAT_MODEL_TEMPERATURE,
     RECOMMENDED_DB_URI,
     RECOMMENDED_EMBEDDING_MODEL_PROVIDER,
-    RECOMMENDED_FACE_API_URL,
     RECOMMENDED_FACE_RECOGNITION,
     RECOMMENDED_MANAGE_CONTEXT_WITH_TOKENS,
     RECOMMENDED_MAX_MESSAGES_IN_CONTEXT,
@@ -79,7 +78,6 @@ from .const import (
     RECOMMENDED_OLLAMA_CONTEXT_SIZE,
     RECOMMENDED_OLLAMA_REASONING,
     RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL,
-    RECOMMENDED_OLLAMA_URL,
     RECOMMENDED_OLLAMA_VLM,
     RECOMMENDED_OPENAI_CHAT_MODEL,
     RECOMMENDED_OPENAI_SUMMARIZATION_MODEL,
@@ -120,11 +118,9 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
         ),
         vol.Optional(
             CONF_OLLAMA_URL,
-            description={"suggested_value": RECOMMENDED_OLLAMA_URL},
         ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
         vol.Optional(
             CONF_FACE_API_URL,
-            description={"suggested_value": RECOMMENDED_FACE_API_URL},
         ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
         vol.Required(
             CONF_DB_URI,
@@ -164,9 +160,64 @@ _KEEPALIVE_MAX_SECONDS: int = 15 * 60  # 900 = 15 minutes
 _KEEPALIVE_SENTINEL: int = -1  # never unload
 
 
+_PROVIDER_REQUIRED_KEYS: dict[str, tuple[str, ...]] = {
+    "openai": (CONF_API_KEY,),
+    "gemini": (CONF_GEMINI_API_KEY,),
+    "ollama": (CONF_OLLAMA_URL,),
+}
+
 # ---------------------------
 # Helpers
 # ---------------------------
+
+
+def _provider_is_configured(opts: Mapping[str, Any], provider: str) -> bool:
+    required = _PROVIDER_REQUIRED_KEYS.get(provider, ())
+    for k in required:
+        v = str(opts.get(k, "") or "").strip()
+        if not v:
+            return False
+    return True
+
+
+def _pick_configured_provider_for_cat(
+    opts: Mapping[str, Any], cat: str, preferred: str | None = None
+) -> str:
+    """
+    Choose a provider for the category that actually has credentials/URL.
+
+    Priority:
+      1) preferred if configured
+      2) category's recommended_provider if configured
+      3) first configured in providers list order
+      4) fallback to preferred or recommended_provider (even if not configured)
+    """
+    spec = MODEL_CATEGORY_SPECS[cat]
+    providers = list(spec["providers"].keys())
+    rec = spec["recommended_provider"]
+    # 1) preferred
+    if preferred and _provider_is_configured(opts, preferred):
+        return preferred
+    # 2) recommended for this category
+    if _provider_is_configured(opts, rec):
+        return rec
+    # 3) first configured by order
+    for p in providers:
+        if _provider_is_configured(opts, p):
+            return p
+    # 4) nothing configured; keep stable
+    return preferred or rec
+
+
+def _auto_select_configured_providers(opts: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a copy of opts with configured providers."""
+    new_opts = dict(opts)
+    for cat, spec in MODEL_CATEGORY_SPECS.items():
+        key = spec["provider_key"]
+        chosen = new_opts.get(key, spec["recommended_provider"])
+        fixed = _pick_configured_provider_for_cat(new_opts, cat, chosen)
+        new_opts[key] = fixed
+    return new_opts
 
 
 def _get_str(src: Mapping[str, Any], key: str) -> str:
@@ -290,10 +341,14 @@ def _ollama_context_size_key_for_cat(cat: str) -> str | None:
 
 def _schema_for(hass: HomeAssistant, opts: Mapping[str, Any]) -> VolDictType:
     """Generate the options schema."""
+    # Coerce provider selections to ones that are actually configured
+    opts = _auto_select_configured_providers(opts)
+
     hass_apis = [SelectOptionDict(label="No control", value="none")] + [
         SelectOptionDict(label=api.name, value=api.id)
         for api in llm.async_get_apis(hass)
     ]
+
     video_analyzer_mode: list[SelectOptionDict] = [
         SelectOptionDict(label="Disable", value="disable"),
         SelectOptionDict(label="Notify on anomaly", value="notify_on_anomaly"),
@@ -603,7 +658,7 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_create_entry(
             title="Home Generative Agent",
             data=normalized,
-            options=RECOMMENDED_OPTIONS,
+            options=_auto_select_configured_providers(RECOMMENDED_OPTIONS),
         )
 
     @staticmethod
@@ -652,7 +707,10 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
 
         # Per-category provider/model/temp + prune provider-specific extras
         for cat, spec in MODEL_CATEGORY_SPECS.items():
-            rec_provider = spec["recommended_provider"]
+            # Pick a configured provider
+            rec_provider = _pick_configured_provider_for_cat(
+                updated, cat, spec["recommended_provider"]
+            )
             provider_key = spec["provider_key"]
             updated[provider_key] = rec_provider
 
@@ -923,6 +981,7 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         # If Recommended turned ON → apply defaults and SAVE immediately
         if recommended_changed and options.get(CONF_RECOMMENDED, False):
             final_options = self._apply_recommended_defaults(options)
+            final_options = _auto_select_configured_providers(final_options)
             final_options = _prune_irrelevant_model_fields(final_options)
             self._cleanup_none_llm_api(final_options)
             self._drop_empty_fields(final_options)
@@ -943,6 +1002,7 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         if final_options.get(CONF_RECOMMENDED, False):
             final_options = self._apply_recommended_defaults(final_options)
             final_options = _prune_irrelevant_model_fields(final_options)
+        final_options = _auto_select_configured_providers(final_options)
         self._cleanup_none_llm_api(final_options)
         self._drop_empty_fields(final_options)
 
