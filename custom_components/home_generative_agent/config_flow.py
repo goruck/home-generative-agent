@@ -655,10 +655,13 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
                 step_id="user", data_schema=STEP_USER_DATA_SCHEMA, errors=errors
             )
 
+        opts = _auto_select_configured_providers({**normalized, **RECOMMENDED_OPTIONS})
+        opts = _prune_irrelevant_model_fields(opts)
+
         return self.async_create_entry(
             title="Home Generative Agent",
             data=normalized,
-            options=_auto_select_configured_providers(RECOMMENDED_OPTIONS),
+            options=opts,
         )
 
     @staticmethod
