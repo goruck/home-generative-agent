@@ -84,12 +84,15 @@ from .const import (
     RECOMMENDED_GEMINI_EMBEDDING_MODEL,
     RECOMMENDED_GEMINI_SUMMARIZATION_MODEL,
     RECOMMENDED_GEMINI_VLM,
+    RECOMMENDED_OLLAMA_CHAT_KEEPALIVE,
     RECOMMENDED_OLLAMA_CHAT_MODEL,
     RECOMMENDED_OLLAMA_EMBEDDING_MODEL,
     RECOMMENDED_OLLAMA_REASONING,
+    RECOMMENDED_OLLAMA_SUMMARIZATION_KEEPALIVE,
     RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL,
     RECOMMENDED_OLLAMA_URL,
     RECOMMENDED_OLLAMA_VLM,
+    RECOMMENDED_OLLAMA_VLM_KEEPALIVE,
     RECOMMENDED_OPENAI_CHAT_MODEL,
     RECOMMENDED_OPENAI_EMBEDDING_MODEL,
     RECOMMENDED_OPENAI_SUMMARIZATION_MODEL,
@@ -508,7 +511,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     chat_temp = entry.options.get(
         CONF_CHAT_MODEL_TEMPERATURE, RECOMMENDED_CHAT_MODEL_TEMPERATURE
     )
-    ollama_chat_keep_alive = entry.options.get(CONF_OLLAMA_CHAT_KEEPALIVE, 5)
+    ollama_chat_keep_alive = entry.options.get(
+        CONF_OLLAMA_CHAT_KEEPALIVE, RECOMMENDED_OLLAMA_CHAT_KEEPALIVE
+    )
     ollama_chat_context_size = entry.options.get(CONF_OLLAMA_CHAT_CONTEXT_SIZE)
     ollama_chat_model_options = {
         "temperature": chat_temp,
@@ -601,7 +606,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     "num_ctx": entry.options.get(CONF_OLLAMA_VLM_CONTEXT_SIZE),
                     "repeat_penalty": VLM_REPEAT_PENALTY,
                     "mirostat": VLM_MIRO_STAT,
-                    "keep_alive": entry.options.get(CONF_OLLAMA_VLM_KEEPALIVE, 5),
+                    "keep_alive": entry.options.get(
+                        CONF_OLLAMA_VLM_KEEPALIVE, RECOMMENDED_OLLAMA_VLM_KEEPALIVE
+                    ),
                     **rf_vlm,
                 }
             }
@@ -662,7 +669,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     "repeat_penalty": SUMMARIZATION_MODEL_REPEAT_PENALTY,
                     "mirostat": SUMMARIZATION_MIRO_STAT,
                     "keep_alive": entry.options.get(
-                        CONF_OLLAMA_SUMMARIZATION_KEEPALIVE, 5
+                        CONF_OLLAMA_SUMMARIZATION_KEEPALIVE,
+                        RECOMMENDED_OLLAMA_SUMMARIZATION_KEEPALIVE,
                     ),
                     **rf_summarization,
                 }

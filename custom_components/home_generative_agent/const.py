@@ -1,6 +1,8 @@
 """Constants for Home Generative Agent."""
 
-from typing import Any, Literal, get_args
+from typing import Annotated, Any, Literal, get_args
+
+from annotated_types import Ge, Le
 
 DOMAIN = "home_generative_agent"
 
@@ -25,6 +27,15 @@ LANGCHAIN_LOGGING_LEVEL: Literal["disable", "verbose", "debug"] = "disable"
 
 # ---- Global Ollama Options ----
 RECOMMENDED_OLLAMA_CONTEXT_SIZE = 16384
+
+# Ollama keepalive limits (seconds)
+KEEPALIVE_MIN_SECONDS: int = 0  # 0 = unload immediately
+KEEPALIVE_MAX_SECONDS: int = 15 * 60  # 900 = 15 minutes
+KEEPALIVE_SENTINEL: int = -1  # never unload
+
+KeepAliveSeconds = (
+    Annotated[int, Ge(KEEPALIVE_MIN_SECONDS), Le(KEEPALIVE_MAX_SECONDS)] | Literal[-1]
+)
 
 CONF_OLLAMA_URL = "ollama_url"
 RECOMMENDED_OLLAMA_URL = "http://localhost:11434"
@@ -65,6 +76,7 @@ RECOMMENDED_CHAT_MODEL_PROVIDER: PROVIDERS = "ollama"
 CONF_OLLAMA_CHAT_MODEL = "ollama_chat_model"
 RECOMMENDED_OLLAMA_CHAT_MODEL: CHAT_MODEL_OLLAMA_SUPPORTED = "gpt-oss"
 CONF_OLLAMA_CHAT_KEEPALIVE = "ollama_chat_keepalive"
+RECOMMENDED_OLLAMA_CHAT_KEEPALIVE: KeepAliveSeconds = 300
 CONF_OLLAMA_CHAT_CONTEXT_SIZE = "ollama_chat_context_size"
 CHAT_MODEL_MAX_TOKENS = -2  # Ollama only, -2 = fill context
 CHAT_MODEL_REPEAT_PENALTY = 1.05  # Ollama only
@@ -109,6 +121,7 @@ RECOMMENDED_VLM_PROVIDER: Literal["openai", "ollama", "gemini"] = "ollama"
 CONF_OLLAMA_VLM = "ollama_vlm"
 RECOMMENDED_OLLAMA_VLM: VLM_OLLAMA_SUPPORTED = "qwen3-vl:8b"
 CONF_OLLAMA_VLM_KEEPALIVE = "ollama_vlm_keepalive"
+RECOMMENDED_OLLAMA_VLM_KEEPALIVE: KeepAliveSeconds = 300
 CONF_OLLAMA_VLM_CONTEXT_SIZE = "ollama_vlm_context_size"
 VLM_NUM_PREDICT = -2  # Ollama only, -2 = fill context
 VLM_REPEAT_PENALTY = 1.05  # Ollama only
@@ -196,6 +209,7 @@ RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL: SUMMARIZATION_MODEL_OLLAMA_SUPPORTED = (
     "qwen3:8b"
 )
 CONF_OLLAMA_SUMMARIZATION_KEEPALIVE = "ollama_summarization_keepalive"
+RECOMMENDED_OLLAMA_SUMMARIZATION_KEEPALIVE: KeepAliveSeconds = 300
 CONF_OLLAMA_SUMMARIZATION_CONTEXT_SIZE = "ollama_summarization_context_size"
 SUMMARIZATION_MODEL_PREDICT = -2  # Ollama only, -2 = fill context
 SUMMARIZATION_MODEL_REPEAT_PENALTY = 1.05  # Ollama only

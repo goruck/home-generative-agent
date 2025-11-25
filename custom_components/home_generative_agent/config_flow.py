@@ -65,6 +65,9 @@ from .const import (
     CONF_VLM_PROVIDER,
     CONF_VLM_TEMPERATURE,
     DOMAIN,
+    KEEPALIVE_MAX_SECONDS,
+    KEEPALIVE_MIN_SECONDS,
+    KEEPALIVE_SENTINEL,
     MODEL_CATEGORY_SPECS,
     RECOMMENDED_CHAT_MODEL_PROVIDER,
     RECOMMENDED_CHAT_MODEL_TEMPERATURE,
@@ -74,11 +77,14 @@ from .const import (
     RECOMMENDED_MANAGE_CONTEXT_WITH_TOKENS,
     RECOMMENDED_MAX_MESSAGES_IN_CONTEXT,
     RECOMMENDED_MAX_TOKENS_IN_CONTEXT,
+    RECOMMENDED_OLLAMA_CHAT_KEEPALIVE,
     RECOMMENDED_OLLAMA_CHAT_MODEL,
     RECOMMENDED_OLLAMA_CONTEXT_SIZE,
     RECOMMENDED_OLLAMA_REASONING,
+    RECOMMENDED_OLLAMA_SUMMARIZATION_KEEPALIVE,
     RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL,
     RECOMMENDED_OLLAMA_VLM,
+    RECOMMENDED_OLLAMA_VLM_KEEPALIVE,
     RECOMMENDED_OPENAI_CHAT_MODEL,
     RECOMMENDED_OPENAI_SUMMARIZATION_MODEL,
     RECOMMENDED_OPENAI_VLM,
@@ -152,12 +158,10 @@ RECOMMENDED_OPTIONS = {
     CONF_MANAGE_CONTEXT_WITH_TOKENS: RECOMMENDED_MANAGE_CONTEXT_WITH_TOKENS,
     CONF_MAX_TOKENS_IN_CONTEXT: RECOMMENDED_MAX_TOKENS_IN_CONTEXT,
     CONF_MAX_MESSAGES_IN_CONTEXT: RECOMMENDED_MAX_MESSAGES_IN_CONTEXT,
+    CONF_OLLAMA_CHAT_KEEPALIVE: RECOMMENDED_OLLAMA_CHAT_KEEPALIVE,
+    CONF_OLLAMA_VLM_KEEPALIVE: RECOMMENDED_OLLAMA_VLM_KEEPALIVE,
+    CONF_OLLAMA_SUMMARIZATION_KEEPALIVE: RECOMMENDED_OLLAMA_SUMMARIZATION_KEEPALIVE,
 }
-
-# Ollama keepalive limits (seconds)
-_KEEPALIVE_MIN_SECONDS: int = 0  # 0 = unload immediately
-_KEEPALIVE_MAX_SECONDS: int = 15 * 60  # 900 = 15 minutes
-_KEEPALIVE_SENTINEL: int = -1  # never unload
 
 
 _PROVIDER_REQUIRED_KEYS: dict[str, tuple[str, ...]] = {
@@ -309,9 +313,9 @@ def _coerce_keepalive_value(value: Any) -> int:
         msg = f"invalid keepalive: {value!r}"
         raise ValueError(msg) from err
 
-    if seconds == _KEEPALIVE_SENTINEL:
-        return _KEEPALIVE_SENTINEL
-    if not (_KEEPALIVE_MIN_SECONDS <= seconds <= _KEEPALIVE_MAX_SECONDS):
+    if seconds == KEEPALIVE_SENTINEL:
+        return KEEPALIVE_SENTINEL
+    if not (KEEPALIVE_MIN_SECONDS <= seconds <= KEEPALIVE_MAX_SECONDS):
         msg = f"keepalive out of range: {seconds}"
         raise ValueError(msg)
     return seconds
@@ -522,8 +526,8 @@ def _schema_for(hass: HomeAssistant, opts: Mapping[str, Any]) -> VolDictType:
                     )
                 ] = NumberSelector(
                     NumberSelectorConfig(
-                        min=_KEEPALIVE_SENTINEL,
-                        max=_KEEPALIVE_MAX_SECONDS,
+                        min=KEEPALIVE_SENTINEL,
+                        max=KEEPALIVE_MAX_SECONDS,
                         step=1,
                     )
                 )
