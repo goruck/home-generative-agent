@@ -58,9 +58,7 @@ This integration will set up the `conversation` platform, allowing users to conv
 9. Follow steps 3 to 6 above.
 
 ## Configuration
-Configuration is done in the Home Assistant UI. You can enter in your model provider API keys and your Ollama server URL during initial setup through the Home Assistant UI or later in the integration's options settings. 
-
-The integration defaults to using Ollama as a provider. If you are not using Ollama, you must configure the integration to use a valid provider via the UI by going to Settings -> Devices & services -> Home Generative Agent -> Configure and un-selecting `Recommended model settings`. 
+Configuration is done in the Home Assistant UI. You can enter in your model provider API keys and your Ollama server URL during initial setup through the Home Assistant UI or later in the integration's options settings.
 
 You also configure the Postgres database URI during setup or later in options, but note that the integration trusts the [PostgreSQL with pgvector](https://github.com/goruck/addon-postgres-pgvector/tree/main/postgres_pgvector) add-on, so a password in the URI string is optional.
 
