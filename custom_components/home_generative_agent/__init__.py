@@ -86,6 +86,7 @@ from .const import (
     RECOMMENDED_GEMINI_VLM,
     RECOMMENDED_OLLAMA_CHAT_KEEPALIVE,
     RECOMMENDED_OLLAMA_CHAT_MODEL,
+    RECOMMENDED_OLLAMA_CONTEXT_SIZE,
     RECOMMENDED_OLLAMA_EMBEDDING_MODEL,
     RECOMMENDED_OLLAMA_REASONING,
     RECOMMENDED_OLLAMA_SUMMARIZATION_KEEPALIVE,
@@ -514,7 +515,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     ollama_chat_keep_alive = entry.options.get(
         CONF_OLLAMA_CHAT_KEEPALIVE, RECOMMENDED_OLLAMA_CHAT_KEEPALIVE
     )
-    ollama_chat_context_size = entry.options.get(CONF_OLLAMA_CHAT_CONTEXT_SIZE)
+    ollama_chat_context_size = entry.options.get(
+        CONF_OLLAMA_CHAT_CONTEXT_SIZE, RECOMMENDED_OLLAMA_CONTEXT_SIZE
+    )
     ollama_chat_model_options = {
         "temperature": chat_temp,
         "top_p": CHAT_MODEL_TOP_P,
@@ -603,7 +606,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     "temperature": vlm_temp,
                     "top_p": VLM_TOP_P,
                     "num_predict": VLM_NUM_PREDICT,
-                    "num_ctx": entry.options.get(CONF_OLLAMA_VLM_CONTEXT_SIZE),
+                    "num_ctx": entry.options.get(
+                        CONF_OLLAMA_VLM_CONTEXT_SIZE, RECOMMENDED_OLLAMA_CONTEXT_SIZE
+                    ),
                     "repeat_penalty": VLM_REPEAT_PENALTY,
                     "mirostat": VLM_MIRO_STAT,
                     "keep_alive": entry.options.get(
@@ -664,7 +669,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     "top_p": SUMMARIZATION_MODEL_TOP_P,
                     "num_predict": SUMMARIZATION_MODEL_PREDICT,
                     "num_ctx": entry.options.get(
-                        CONF_OLLAMA_SUMMARIZATION_CONTEXT_SIZE
+                        CONF_OLLAMA_SUMMARIZATION_CONTEXT_SIZE,
+                        RECOMMENDED_OLLAMA_CONTEXT_SIZE,
                     ),
                     "repeat_penalty": SUMMARIZATION_MODEL_REPEAT_PENALTY,
                     "mirostat": SUMMARIZATION_MIRO_STAT,

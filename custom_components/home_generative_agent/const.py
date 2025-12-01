@@ -26,7 +26,7 @@ LANGCHAIN_LOGGING_LEVEL: Literal["disable", "verbose", "debug"] = "disable"
 
 
 # ---- Global Ollama Options ----
-RECOMMENDED_OLLAMA_CONTEXT_SIZE = 16384
+RECOMMENDED_OLLAMA_CONTEXT_SIZE = 32000
 
 # Ollama keepalive limits (seconds)
 KEEPALIVE_MIN_SECONDS: int = 0  # 0 = unload immediately
@@ -102,7 +102,7 @@ CONF_MANAGE_CONTEXT_WITH_TOKENS = "manage_context_with_tokens"
 RECOMMENDED_MANAGE_CONTEXT_WITH_TOKENS: Literal["true", "false"] = "true"
 CONF_MAX_TOKENS_IN_CONTEXT = "max_tokens_in_context"
 # For Ollama models, this should be <= model context size.
-RECOMMENDED_MAX_TOKENS_IN_CONTEXT = 16384
+RECOMMENDED_MAX_TOKENS_IN_CONTEXT = 32000
 
 CONF_MAX_MESSAGES_IN_CONTEXT = "max_messages_in_context"
 RECOMMENDED_MAX_MESSAGES_IN_CONTEXT = 60
