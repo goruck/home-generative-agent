@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
 import aiofiles
+import async_timeout
 import homeassistant.util.dt as dt_util
 import yaml
 from homeassistant.components import camera
@@ -20,7 +21,12 @@ from homeassistant.components.automation.const import DOMAIN as AUTOMATION_DOMAI
 from homeassistant.components.recorder import history as recorder_history
 from homeassistant.components.recorder import statistics as recorder_statistics
 from homeassistant.config import AUTOMATION_CONFIG_PATH
-from homeassistant.const import ATTR_FRIENDLY_NAME, SERVICE_RELOAD
+from homeassistant.const import (
+    ATTR_FRIENDLY_NAME,
+    SERVICE_RELOAD,
+    STATE_UNAVAILABLE,
+    STATE_UNKNOWN,
+)
 from homeassistant.core import State
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.recorder import get_instance as get_recorder_instance
@@ -60,18 +66,64 @@ LOGGER = logging.getLogger(__name__)
 async def _get_camera_image(hass: HomeAssistant, camera_name: str) -> bytes | None:
     """Get an image from a given camera."""
     camera_entity_id: str = f"camera.{camera_name.lower()}"
-    try:
-        image = await camera.async_get_image(
-            hass=hass,
-            entity_id=camera_entity_id,
-            width=VLM_IMAGE_WIDTH,
-            height=VLM_IMAGE_HEIGHT,
+    state = hass.states.get(camera_entity_id)
+    if state and state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+        LOGGER.warning(
+            "Camera %s is %s; skipping capture", camera_entity_id, state.state
         )
-    except HomeAssistantError:
-        LOGGER.exception("Error getting image from camera %s", camera_entity_id)
         return None
 
-    return image.content
+    max_attempts = 3
+    timeout_sec = 5
+    backoff_base = 0.35
+
+    for attempt in range(1, max_attempts + 1):
+        if attempt > 1:
+            await asyncio.sleep(backoff_base * (attempt - 1))
+
+        try:
+            async with async_timeout.timeout(timeout_sec):
+                image = await camera.async_get_image(
+                    hass=hass,
+                    entity_id=camera_entity_id,
+                    width=VLM_IMAGE_WIDTH,
+                    height=VLM_IMAGE_HEIGHT,
+                )
+        except TimeoutError:
+            LOGGER.warning(
+                "Timed out (%ss) getting image from %s (attempt %s/%s)",
+                timeout_sec,
+                camera_entity_id,
+                attempt,
+                max_attempts,
+            )
+            continue
+        except HomeAssistantError:
+            LOGGER.exception(
+                "Error getting image from camera %s (attempt %s/%s)",
+                camera_entity_id,
+                attempt,
+                max_attempts,
+            )
+            continue
+
+        if image is None or image.content is None:
+            LOGGER.warning(
+                "Camera %s returned empty image (attempt %s/%s)",
+                camera_entity_id,
+                attempt,
+                max_attempts,
+            )
+            continue
+
+        return image.content
+
+    LOGGER.error(
+        "Failed to capture image from camera %s after %s attempts",
+        camera_entity_id,
+        max_attempts,
+    )
+    return None
 
 
 def _prompt_func(data: dict[str, Any]) -> list[AnyMessage]:
