@@ -58,7 +58,9 @@ This integration will set up the `conversation` platform, allowing users to conv
 9. Follow steps 3 to 6 above.
 
 ## Configuration
-Configuration is done in the Home Assistant UI. You can enter in your model provider API keys and your Ollama server URL during initial setup through the Home Assistant UI or later in the integration's options settings. The integration uses defaults that were determined to give the best performance in terms of latency and accuracy. You can change these defaults by unselecting `Recommended model settings` but be aware performance could degrade in some dimension. Note that the UI form will rerender when settings are changed to show relevant parameters.
+Configuration is done in the Home Assistant UI. You can enter in your model provider API keys and your Ollama server URL during initial setup through the Home Assistant UI or later in the integration's options settings. The base Ollama URL is used as the default/fallback so existing configs keep working and so shared pieces (like embeddings) still have a single endpoint to use. If a chat/VLM/summarization-specific URL is present, that one is used; otherwise the base URL supplies a value so validation, health checks, and Ollama clients don’t break when a per-category URL isn’t provided.
+
+The integration uses defaults that were determined to give the best performance in terms of latency and accuracy. You can change these defaults by unselecting `Recommended model settings` but be aware performance could degrade in some dimension. Note that the UI form will rerender when settings are changed to show relevant parameters.
 
 You also configure the Postgres database URI during setup or later in options, but note that the integration trusts the [PostgreSQL with pgvector](https://github.com/goruck/addon-postgres-pgvector/tree/main/postgres_pgvector) add-on, so a password in the URI string is optional.
 
