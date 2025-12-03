@@ -72,7 +72,7 @@ CONF_GEMINI_API_KEY = "gemini_api_key"
 
 # ---------------- Chat model ----------------
 CHAT_MODEL_TOP_P = 1.0
-# Add more models by extending the Literal types.
+# *SUPPORTED are used as defaults and fallbacks for Ollama in the UI.
 CHAT_MODEL_OLLAMA_SUPPORTED = Literal["gpt-oss", "qwen2.5:32b", "qwen3:32b", "qwen3:8b"]
 CHAT_MODEL_OPENAI_SUPPORTED = Literal[
     "gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-4o", "gpt-4.1", "o4-mini"

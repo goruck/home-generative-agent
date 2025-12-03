@@ -1,12 +1,16 @@
-"""Config flow for Home Generative Agent."""
+"""Config flow for Home Generative Agent integration."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urljoin
 
+import async_timeout
+import httpx
 import voluptuous as vol
 from homeassistant.config_entries import (
     ConfigEntry,
@@ -17,6 +21,7 @@ from homeassistant.config_entries import (
 )
 from homeassistant.const import CONF_API_KEY, CONF_LLM_HASS_API
 from homeassistant.helpers import llm
+from homeassistant.helpers.httpx_client import get_async_client
 from homeassistant.helpers.selector import (
     BooleanSelector,
     NumberSelector,
@@ -68,6 +73,7 @@ from .const import (
     CONF_VLM_PROVIDER,
     CONF_VLM_TEMPERATURE,
     DOMAIN,
+    HTTP_STATUS_BAD_REQUEST,
     KEEPALIVE_MAX_SECONDS,
     KEEPALIVE_MIN_SECONDS,
     KEEPALIVE_SENTINEL,
@@ -322,16 +328,6 @@ def _provider_selector_config(cat: str) -> SelectSelectorConfig:
     )
 
 
-def _model_selector_config(cat: str, provider: str) -> SelectSelectorConfig:
-    models = MODEL_CATEGORY_SPECS[cat]["providers"].get(provider, [])
-    return SelectSelectorConfig(
-        options=[SelectOptionDict(label=m, value=m) for m in models],
-        mode=SelectSelectorMode.DROPDOWN,
-        sort=False,
-        custom_value=True,
-    )
-
-
 def _coerce_keepalive_value(value: Any) -> int:
     """Accept -1, 0, or any integer in range."""
     try:
@@ -370,7 +366,90 @@ def _ollama_context_size_key_for_cat(cat: str) -> str | None:
     return None
 
 
-def _schema_for(hass: HomeAssistant, opts: Mapping[str, Any]) -> VolDictType:
+async def _fetch_ollama_models(
+    hass: HomeAssistant, base_url: str, timeout_s: float = 5.0
+) -> list[str]:
+    """Return a sorted list of models installed on the given Ollama host."""
+    client = get_async_client(hass)
+    base_url = ensure_http_url(base_url).rstrip("/") + "/"
+    try:
+        async with async_timeout.timeout(timeout_s):
+            resp = await client.get(urljoin(base_url, "api/tags"))
+    except (TimeoutError, httpx.HTTPError) as err:
+        LOGGER.debug("Unable to reach Ollama at %s: %s", base_url, err)
+        return []
+
+    if resp.status_code >= HTTP_STATUS_BAD_REQUEST:
+        LOGGER.debug(
+            "Ollama responded with HTTP %s when fetching tags from %s",
+            resp.status_code,
+            base_url,
+        )
+        return []
+
+    try:
+        payload = resp.json()
+    except ValueError:
+        LOGGER.debug("Invalid JSON when fetching Ollama tags from %s", base_url)
+        return []
+
+    names: list[str] = []
+    for model in payload.get("models", []):
+        name = model.get("model") or model.get("name")
+        if isinstance(name, str) and name.strip():
+            names.append(name.strip())
+
+    # Preserve order but drop duplicates.
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for name in names:
+        if name in seen:
+            continue
+        seen.add(name)
+        deduped.append(name)
+
+    return sorted(deduped)
+
+
+async def _ollama_models_by_category(
+    hass: HomeAssistant, opts: Mapping[str, Any]
+) -> dict[str, list[str]]:
+    """
+    Fetch installed Ollama models for each configured category URL.
+
+    Categories that share a URL reuse the same response.
+    """
+    url_for_cat: dict[str, str] = {}
+    for cat in MODEL_CATEGORY_SPECS:
+        url = ollama_url_for_category(opts, cat, fallback=opts.get(CONF_OLLAMA_URL))
+        if url:
+            url_for_cat[cat] = url
+
+    if not url_for_cat:
+        return {}
+
+    unique_urls = set(url_for_cat.values())
+    tasks = {url: _fetch_ollama_models(hass, url) for url in unique_urls}
+    results = await asyncio.gather(*tasks.values())
+    models_by_url = dict(zip(tasks.keys(), results, strict=False))
+    return {cat: models_by_url.get(url, []) for cat, url in url_for_cat.items()}
+
+
+def _model_selector_config(
+    cat: str, provider: str, ollama_models: Mapping[str, list[str]] | None
+) -> SelectSelectorConfig:
+    models = MODEL_CATEGORY_SPECS[cat]["providers"].get(provider, [])
+    if provider == "ollama" and ollama_models is not None:
+        models = ollama_models.get(cat) or models
+    return SelectSelectorConfig(
+        options=[SelectOptionDict(label=m, value=m) for m in models],
+        mode=SelectSelectorMode.DROPDOWN,
+        sort=False,
+        custom_value=True,
+    )
+
+
+async def _schema_for(hass: HomeAssistant, opts: Mapping[str, Any]) -> VolDictType:
     """Generate the options schema."""
     # Coerce provider selections to ones that are actually configured
     opts = _auto_select_configured_providers(opts)
@@ -482,6 +561,13 @@ def _schema_for(hass: HomeAssistant, opts: Mapping[str, Any]) -> VolDictType:
     if opts.get(CONF_RECOMMENDED, False):
         return schema
 
+    selected_is_ollama = any(
+        _get_selected_provider(opts, cat) == "ollama" for cat in MODEL_CATEGORY_SPECS
+    )
+    ollama_models = (
+        await _ollama_models_by_category(hass, opts) if selected_is_ollama else {}
+    )
+
     schema[
         vol.Optional(
             CONF_OLLAMA_REASONING,
@@ -551,7 +637,9 @@ def _schema_for(hass: HomeAssistant, opts: Mapping[str, Any]) -> VolDictType:
                     description={"suggested_value": opts.get(model_key)},
                     default=opts.get(model_key, default_model),
                 )
-            ] = SelectSelector(_model_selector_config(cat, selected_provider))
+            ] = SelectSelector(
+                _model_selector_config(cat, selected_provider, ollama_models)
+            )
 
         # Ollama keepalive (only when provider is ollama)
         if selected_provider == "ollama":
@@ -1024,7 +1112,8 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         # First render
         if user_input is None:
             return self.async_show_form(
-                step_id="init", data_schema=vol.Schema(_schema_for(self.hass, options))
+                step_id="init",
+                data_schema=vol.Schema(await _schema_for(self.hass, options)),
             )
 
         # Merge new input for non-validated fields
@@ -1058,7 +1147,7 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
             # Re-render with the same options and show errors
             return self.async_show_form(
                 step_id="init",
-                data_schema=vol.Schema(_schema_for(self.hass, options)),
+                data_schema=vol.Schema(await _schema_for(self.hass, options)),
                 errors=errors,
             )
 
@@ -1083,7 +1172,7 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
             self._remember_schema_baseline(pruned)
             return self.async_show_form(
                 step_id="init",
-                data_schema=vol.Schema(_schema_for(self.hass, pruned)),
+                data_schema=vol.Schema(await _schema_for(self.hass, pruned)),
             )
 
         # Finalize and save (no schema changes)
