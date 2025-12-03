@@ -14,6 +14,7 @@ from langchain_core.messages.utils import count_tokens_approximately
 
 from ..const import (  # noqa: TID252
     CONF_GEMINI_API_KEY,
+    CONF_OLLAMA_CHAT_URL,
     CONF_OLLAMA_URL,
     OLLAMA_EXACT_TOKEN_COUNT,
 )
@@ -299,7 +300,9 @@ def count_tokens_cross_provider(
     if _looks_like_openai_model(model):
         return _count_tokens_tiktoken(messages, model=model)
 
-    ollama_base_url_any = options.get(CONF_OLLAMA_URL)
+    ollama_base_url_any = options.get(CONF_OLLAMA_CHAT_URL) or options.get(
+        CONF_OLLAMA_URL
+    )
     if not isinstance(ollama_base_url_any, str) or not ollama_base_url_any.strip():
         msg = "Ollama base URL must be a non-empty string in options."
         raise ValueError(msg)

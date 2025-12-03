@@ -3,10 +3,13 @@
     "step": {
       "user": {
         "title": "Connect models",
-        "description": "Enter **API keys**, your **Ollama server URL**, **Postgres URI** or **Face recognition server URI**. You must enter a valid **Postgres URI**, the others you can configure later in Options.",
+        "description": "Enter **API keys**, optional **Ollama server URLs** (global or per-model), **Postgres URI** or **Face recognition server URI**. You must enter a valid **Postgres URI**, the others you can configure later in Options.",
         "data": {
           "api_key": "OpenAI API key (optional)",
           "ollama_url": "Ollama server URL (optional)",
+          "ollama_chat_url": "Ollama chat server URL (optional)",
+          "ollama_vlm_url": "Ollama VLM server URL (optional)",
+          "ollama_summarization_url": "Ollama summarization server URL (optional)",
           "gemini_api_key": "Google Gemini API key (optional)",
           "face_api_url": "Face recognition server API URL (optional)",
           "db_uri": "PostgreSQL Database URI (required)"
@@ -32,7 +35,10 @@
         "data": {
           "api_key": "OpenAI API key (optional)",
           "gemini_api_key": "Google Gemini API key (optional)",
-          "ollama_url": "Ollama server URL (optional)",
+          "ollama_url": "Ollama embedding and global fallback server URL (optional)",
+          "ollama_chat_url": "Ollama chat server URL (optional)",
+          "ollama_vlm_url": "Ollama VLM server URL (optional)",
+          "ollama_summarization_url": "Ollama summarization server URL (optional)",
           "face_api_url": "Face recognition API URL (optional)",
           "db_uri": "PostgreSQL Database URI (required)",
           "prompt": "Instructions",

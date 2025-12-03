@@ -18,16 +18,18 @@ from homeassistant.helpers.httpx_client import get_async_client
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
 from ..const import (  # noqa: TID252
+    CONF_OLLAMA_URL,
     EMBEDDING_MODEL_DIMS,
     HTTP_STATUS_BAD_REQUEST,
     HTTP_STATUS_UNAUTHORIZED,
     OLLAMA_BOOL_HINT_TAGS,
+    OLLAMA_CATEGORY_URL_KEYS,
     OLLAMA_GPT_EFFORT,
     OLLAMA_OSS_TAG,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from homeassistant.core import HomeAssistant
     from langchain_ollama import OllamaEmbeddings
@@ -73,6 +75,61 @@ def ensure_http_url(url: str) -> str:
     if url.startswith(("http://", "https://")):
         return url
     return f"http://{url}"
+
+
+def _normalized_url(value: Any) -> str | None:
+    """Return a cleaned HTTP(S) URL or None."""
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    return ensure_http_url(str(value))
+
+
+def ollama_url_for_category(
+    options: Mapping[str, Any],
+    category: str,
+    *,
+    fallback: str | None = None,
+) -> str | None:
+    """Pick the Ollama URL for a model category, falling back to the global URL."""
+    specific_key = OLLAMA_CATEGORY_URL_KEYS.get(category)
+    if specific_key:
+        url = _normalized_url(options.get(specific_key))
+        if url:
+            return url
+
+    if fallback:
+        return _normalized_url(fallback)
+
+    return _normalized_url(options.get(CONF_OLLAMA_URL))
+
+
+def configured_ollama_urls(
+    options: Mapping[str, Any], *, fallback: str | None = None
+) -> list[str]:
+    """Return a de-duplicated list of configured Ollama URLs."""
+    urls: list[str] = []
+
+    base_url = _normalized_url(options.get(CONF_OLLAMA_URL)) or _normalized_url(
+        fallback
+    )
+    if base_url:
+        urls.append(base_url)
+
+    for cat in OLLAMA_CATEGORY_URL_KEYS:
+        url = ollama_url_for_category(options, cat, fallback=base_url)
+        if url:
+            urls.append(url)
+
+    seen: set[str] = set()
+    deduped = []
+    for url in urls:
+        if url in seen:
+            continue
+        seen.add(url)
+        deduped.append(url)
+    return deduped
 
 
 async def generate_embeddings(

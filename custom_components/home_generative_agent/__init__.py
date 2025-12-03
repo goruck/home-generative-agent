@@ -118,11 +118,13 @@ from .core.migrations import migrate_person_gallery
 from .core.person_gallery import PersonGalleryDAO
 from .core.runtime import HGAConfigEntry, HGAData
 from .core.utils import (
+    configured_ollama_urls,
     dispatch_on_loop,
     ensure_http_url,
     gemini_healthy,
     generate_embeddings,
     ollama_healthy,
+    ollama_url_for_category,
     openai_healthy,
     reasoning_field,
 )
@@ -305,18 +307,40 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     conf = {**entry.data, **entry.options}
     api_key = conf.get(CONF_API_KEY)
     gemini_key = conf.get(CONF_GEMINI_API_KEY)
-    ollama_url = conf.get(CONF_OLLAMA_URL, RECOMMENDED_OLLAMA_URL)
-    ollama_url = ensure_http_url(ollama_url)
+    base_ollama_url = ensure_http_url(conf.get(CONF_OLLAMA_URL, RECOMMENDED_OLLAMA_URL))
+    ollama_chat_url = (
+        ollama_url_for_category(conf, "chat", fallback=base_ollama_url)
+        or base_ollama_url
+    )
+    ollama_vlm_url = (
+        ollama_url_for_category(conf, "vlm", fallback=base_ollama_url)
+        or base_ollama_url
+    )
+    ollama_sum_url = (
+        ollama_url_for_category(conf, "summarization", fallback=base_ollama_url)
+        or base_ollama_url
+    )
     face_api_url = conf.get(CONF_FACE_API_URL, RECOMMENDED_FACE_API_URL)
     face_api_url = ensure_http_url(face_api_url)
 
     # Health checks (fast, non-fatal)
     health_timeout = 2.0
-    ollama_ok, openai_ok, gemini_ok = await asyncio.gather(
-        ollama_healthy(hass, ollama_url, timeout_s=health_timeout),
+    ollama_urls = configured_ollama_urls(conf, fallback=base_ollama_url)
+    ollama_health: dict[str, bool] = {}
+    if ollama_urls:
+        ollama_results = await asyncio.gather(
+            *(
+                ollama_healthy(hass, url, timeout_s=health_timeout)
+                for url in ollama_urls
+            )
+        )
+        ollama_health = dict(zip(ollama_urls, ollama_results, strict=False))
+
+    openai_ok, gemini_ok = await asyncio.gather(
         openai_healthy(hass, api_key, timeout_s=health_timeout),
         gemini_healthy(hass, gemini_key, timeout_s=health_timeout),
     )
+    ollama_any_ok = any(ollama_health.values())
 
     http_client = get_async_client(hass)
 
@@ -337,26 +361,37 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         except Exception:
             LOGGER.exception("OpenAI provider init failed; continuing without it.")
 
-    ollama_provider: RunnableSerializable[LanguageModelInput, BaseMessage] | None = None
-    if ollama_ok:
+    def _build_ollama_provider(
+        url: str,
+    ) -> RunnableSerializable[LanguageModelInput, BaseMessage]:
+        return ChatOllama(
+            model=RECOMMENDED_OLLAMA_CHAT_MODEL,
+            base_url=url,
+        ).configurable_fields(
+            model=ConfigurableField(id="model"),
+            format=ConfigurableField(id="format"),
+            temperature=ConfigurableField(id="temperature"),
+            top_p=ConfigurableField(id="top_p"),
+            num_predict=ConfigurableField(id="num_predict"),
+            num_ctx=ConfigurableField(id="num_ctx"),
+            repeat_penalty=ConfigurableField(id="repeat_penalty"),
+            reasoning=ConfigurableField(id="reasoning"),
+            mirostat=ConfigurableField(id="mirostat"),
+            keep_alive=ConfigurableField(id="keep_alive"),
+        )
+
+    ollama_providers: dict[
+        str, RunnableSerializable[LanguageModelInput, BaseMessage]
+    ] = {}
+    for url, healthy in ollama_health.items():
+        if not healthy:
+            continue
         try:
-            ollama_provider = ChatOllama(
-                model=RECOMMENDED_OLLAMA_CHAT_MODEL,
-                base_url=ollama_url,
-            ).configurable_fields(
-                model=ConfigurableField(id="model"),
-                format=ConfigurableField(id="format"),
-                temperature=ConfigurableField(id="temperature"),
-                top_p=ConfigurableField(id="top_p"),
-                num_predict=ConfigurableField(id="num_predict"),
-                num_ctx=ConfigurableField(id="num_ctx"),
-                repeat_penalty=ConfigurableField(id="repeat_penalty"),
-                reasoning=ConfigurableField(id="reasoning"),
-                mirostat=ConfigurableField(id="mirostat"),
-                keep_alive=ConfigurableField(id="keep_alive"),
-            )
+            ollama_providers[url] = _build_ollama_provider(url)
         except Exception:
-            LOGGER.exception("Ollama provider init failed; continuing without it.")
+            LOGGER.exception(
+                "Ollama provider init failed for %s; continuing without it.", url
+            )
 
     gemini_provider: RunnableSerializable[LanguageModelInput, BaseMessage] | None = None
     if gemini_ok:
@@ -388,13 +423,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             LOGGER.exception("OpenAI embeddings init failed; continuing without them.")
 
     ollama_embeddings: OllamaEmbeddings | None = None
-    if ollama_ok:
+    if ollama_health.get(base_ollama_url):
         try:
             ollama_embeddings = OllamaEmbeddings(
                 model=entry.options.get(
                     CONF_OLLAMA_EMBEDDING_MODEL, RECOMMENDED_OLLAMA_EMBEDDING_MODEL
                 ),
-                base_url=ollama_url,
+                base_url=base_ollama_url,
                 num_ctx=EMBEDDING_MODEL_CTX,
             )
         except Exception:
@@ -504,6 +539,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     ollama_reasoning: bool = entry.options.get(
         CONF_OLLAMA_REASONING, RECOMMENDED_OLLAMA_REASONING
     )
+    chat_ollama_provider = ollama_providers.get(ollama_chat_url)
+    vlm_ollama_provider = ollama_providers.get(ollama_vlm_url)
+    summarization_ollama_provider = ollama_providers.get(ollama_sum_url)
 
     # CHAT
     chat_provider = entry.options.get(
@@ -556,7 +594,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         )
         rf_chat = reasoning_field(model=ollama_chat_model, enabled=ollama_reasoning)
         ollama_chat_model_options = {**ollama_chat_model_options, **rf_chat}
-        chat_model = (ollama_provider or NullChat()).with_config(
+        chat_model = (chat_ollama_provider or NullChat()).with_config(
             config={
                 "configurable": {
                     "model": ollama_chat_model,
@@ -599,7 +637,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     else:
         ollama_vlm = entry.options.get(CONF_OLLAMA_VLM, RECOMMENDED_OLLAMA_VLM)
         rf_vlm = reasoning_field(model=ollama_vlm, enabled=ollama_reasoning)
-        vision_model = (ollama_provider or NullChat()).with_config(
+        vision_model = (vlm_ollama_provider or NullChat()).with_config(
             config={
                 "configurable": {
                     "model": ollama_vlm,
@@ -661,7 +699,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         rf_summarization = reasoning_field(
             model=ollama_summarization_model, enabled=ollama_reasoning
         )
-        summarization_model = (ollama_provider or NullChat()).with_config(
+        summarization_model = (summarization_ollama_provider or NullChat()).with_config(
             config={
                 "configurable": {
                     "model": ollama_summarization_model,
@@ -721,7 +759,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         sum_provider,
         embedding_provider,
         openai_ok,
-        ollama_ok,
+        ollama_any_ok,
         gemini_ok,
     )
 

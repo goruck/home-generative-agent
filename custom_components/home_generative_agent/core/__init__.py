@@ -8,6 +8,7 @@ from .runtime import HGAData
 from .utils import (
     CannotConnectError,
     InvalidAuthError,
+    configured_ollama_urls,
     default_mobile_notify_service,
     discover_mobile_notify_service,
     dispatch_on_loop,
@@ -16,6 +17,7 @@ from .utils import (
     gemini_healthy,
     generate_embeddings,
     list_mobile_notify_services,
+    ollama_url_for_category,
     ollama_healthy,
     openai_healthy,
     reasoning_field,
@@ -77,6 +79,7 @@ __all__ = [
     "load_image_rgb",
     "migrate_person_gallery",
     "mirror_to_www",
+    "ollama_url_for_category",
     "ollama_healthy",
     "openai_healthy",
     "order_batch",
@@ -88,4 +91,5 @@ __all__ = [
     "validate_gemini_key",
     "validate_ollama_url",
     "validate_openai_key",
+    "configured_ollama_urls",
 ]

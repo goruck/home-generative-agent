@@ -46,14 +46,17 @@ from .const import (
     CONF_OLLAMA_CHAT_CONTEXT_SIZE,
     CONF_OLLAMA_CHAT_KEEPALIVE,
     CONF_OLLAMA_CHAT_MODEL,
+    CONF_OLLAMA_CHAT_URL,
     CONF_OLLAMA_REASONING,
     CONF_OLLAMA_SUMMARIZATION_CONTEXT_SIZE,
     CONF_OLLAMA_SUMMARIZATION_KEEPALIVE,
     CONF_OLLAMA_SUMMARIZATION_MODEL,
+    CONF_OLLAMA_SUMMARIZATION_URL,
     CONF_OLLAMA_URL,
     CONF_OLLAMA_VLM,
     CONF_OLLAMA_VLM_CONTEXT_SIZE,
     CONF_OLLAMA_VLM_KEEPALIVE,
+    CONF_OLLAMA_VLM_URL,
     CONF_OPENAI_CHAT_MODEL,
     CONF_OPENAI_SUMMARIZATION_MODEL,
     CONF_OPENAI_VLM,
@@ -79,12 +82,15 @@ from .const import (
     RECOMMENDED_MAX_TOKENS_IN_CONTEXT,
     RECOMMENDED_OLLAMA_CHAT_KEEPALIVE,
     RECOMMENDED_OLLAMA_CHAT_MODEL,
+    RECOMMENDED_OLLAMA_CHAT_URL,
     RECOMMENDED_OLLAMA_CONTEXT_SIZE,
     RECOMMENDED_OLLAMA_REASONING,
     RECOMMENDED_OLLAMA_SUMMARIZATION_KEEPALIVE,
     RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL,
+    RECOMMENDED_OLLAMA_SUMMARIZATION_URL,
     RECOMMENDED_OLLAMA_VLM,
     RECOMMENDED_OLLAMA_VLM_KEEPALIVE,
+    RECOMMENDED_OLLAMA_VLM_URL,
     RECOMMENDED_OPENAI_CHAT_MODEL,
     RECOMMENDED_OPENAI_SUMMARIZATION_MODEL,
     RECOMMENDED_OPENAI_VLM,
@@ -99,6 +105,7 @@ from .core.utils import (
     InvalidAuthError,
     ensure_http_url,
     list_mobile_notify_services,
+    ollama_url_for_category,
     validate_db_uri,
     validate_face_api_url,
     validate_gemini_key,
@@ -124,6 +131,15 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
         ),
         vol.Optional(
             CONF_OLLAMA_URL,
+        ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+        vol.Optional(
+            CONF_OLLAMA_CHAT_URL,
+        ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+        vol.Optional(
+            CONF_OLLAMA_VLM_URL,
+        ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+        vol.Optional(
+            CONF_OLLAMA_SUMMARIZATION_URL,
         ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
         vol.Optional(
             CONF_FACE_API_URL,
@@ -164,13 +180,15 @@ RECOMMENDED_OPTIONS = {
     CONF_OLLAMA_CHAT_CONTEXT_SIZE: RECOMMENDED_OLLAMA_CONTEXT_SIZE,
     CONF_OLLAMA_VLM_CONTEXT_SIZE: RECOMMENDED_OLLAMA_CONTEXT_SIZE,
     CONF_OLLAMA_SUMMARIZATION_CONTEXT_SIZE: RECOMMENDED_OLLAMA_CONTEXT_SIZE,
+    CONF_OLLAMA_CHAT_URL: RECOMMENDED_OLLAMA_CHAT_URL,
+    CONF_OLLAMA_VLM_URL: RECOMMENDED_OLLAMA_VLM_URL,
+    CONF_OLLAMA_SUMMARIZATION_URL: RECOMMENDED_OLLAMA_SUMMARIZATION_URL,
 }
 
 
 _PROVIDER_REQUIRED_KEYS: dict[str, tuple[str, ...]] = {
     "openai": (CONF_API_KEY,),
     "gemini": (CONF_GEMINI_API_KEY,),
-    "ollama": (CONF_OLLAMA_URL,),
 }
 
 # ---------------------------
@@ -178,7 +196,13 @@ _PROVIDER_REQUIRED_KEYS: dict[str, tuple[str, ...]] = {
 # ---------------------------
 
 
-def _provider_is_configured(opts: Mapping[str, Any], provider: str) -> bool:
+def _provider_is_configured(
+    opts: Mapping[str, Any], provider: str, cat: str | None = None
+) -> bool:
+    if provider == "ollama":
+        return bool(
+            ollama_url_for_category(opts, cat or "", fallback=opts.get(CONF_OLLAMA_URL))
+        )
     required = _PROVIDER_REQUIRED_KEYS.get(provider, ())
     for k in required:
         v = str(opts.get(k, "") or "").strip()
@@ -203,14 +227,14 @@ def _pick_configured_provider_for_cat(
     providers = list(spec["providers"].keys())
     rec = spec["recommended_provider"]
     # 1) preferred
-    if preferred and _provider_is_configured(opts, preferred):
+    if preferred and _provider_is_configured(opts, preferred, cat):
         return preferred
     # 2) recommended for this category
-    if _provider_is_configured(opts, rec):
+    if _provider_is_configured(opts, rec, cat):
         return rec
     # 3) first configured by order
     for p in providers:
-        if _provider_is_configured(opts, p):
+        if _provider_is_configured(opts, p, cat):
             return p
     # 4) nothing configured; keep stable
     return preferred or rec
@@ -374,6 +398,18 @@ def _schema_for(hass: HomeAssistant, opts: Mapping[str, Any]) -> VolDictType:
         vol.Optional(
             CONF_OLLAMA_URL,
             description={"suggested_value": (opts.get(CONF_OLLAMA_URL))},
+        ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+        vol.Optional(
+            CONF_OLLAMA_CHAT_URL,
+            description={"suggested_value": (opts.get(CONF_OLLAMA_CHAT_URL))},
+        ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+        vol.Optional(
+            CONF_OLLAMA_VLM_URL,
+            description={"suggested_value": (opts.get(CONF_OLLAMA_VLM_URL))},
+        ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+        vol.Optional(
+            CONF_OLLAMA_SUMMARIZATION_URL,
+            description={"suggested_value": (opts.get(CONF_OLLAMA_SUMMARIZATION_URL))},
         ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
         vol.Optional(
             CONF_FACE_API_URL,
@@ -610,6 +646,11 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
         vals = {
             CONF_API_KEY: _get_str(data, CONF_API_KEY),
             CONF_OLLAMA_URL: _get_str(data, CONF_OLLAMA_URL),
+            CONF_OLLAMA_CHAT_URL: _get_str(data, CONF_OLLAMA_CHAT_URL),
+            CONF_OLLAMA_VLM_URL: _get_str(data, CONF_OLLAMA_VLM_URL),
+            CONF_OLLAMA_SUMMARIZATION_URL: _get_str(
+                data, CONF_OLLAMA_SUMMARIZATION_URL
+            ),
             CONF_GEMINI_API_KEY: _get_str(data, CONF_GEMINI_API_KEY),
             CONF_DB_URI: _get_str(data, CONF_DB_URI),
             CONF_FACE_API_URL: _get_str(data, CONF_FACE_API_URL),
@@ -619,6 +660,13 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
         for key, validator, label in (
             (CONF_API_KEY, validate_openai_key, "OpenAI"),
             (CONF_OLLAMA_URL, validate_ollama_url, "Ollama"),
+            (CONF_OLLAMA_CHAT_URL, validate_ollama_url, "Ollama (chat)"),
+            (CONF_OLLAMA_VLM_URL, validate_ollama_url, "Ollama (vlm)"),
+            (
+                CONF_OLLAMA_SUMMARIZATION_URL,
+                validate_ollama_url,
+                "Ollama (summarization)",
+            ),
             (CONF_GEMINI_API_KEY, validate_gemini_key, "Gemini"),
             (CONF_DB_URI, validate_db_uri, "Database URI"),
             (CONF_FACE_API_URL, validate_face_api_url, "Face Recognition API"),
@@ -631,6 +679,16 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
         # Normalize URLs only on success.
         if not errors and vals[CONF_OLLAMA_URL]:
             normalized[CONF_OLLAMA_URL] = ensure_http_url(vals[CONF_OLLAMA_URL])
+        if not errors and vals[CONF_OLLAMA_CHAT_URL]:
+            normalized[CONF_OLLAMA_CHAT_URL] = ensure_http_url(
+                vals[CONF_OLLAMA_CHAT_URL]
+            )
+        if not errors and vals[CONF_OLLAMA_VLM_URL]:
+            normalized[CONF_OLLAMA_VLM_URL] = ensure_http_url(vals[CONF_OLLAMA_VLM_URL])
+        if not errors and vals[CONF_OLLAMA_SUMMARIZATION_URL]:
+            normalized[CONF_OLLAMA_SUMMARIZATION_URL] = ensure_http_url(
+                vals[CONF_OLLAMA_SUMMARIZATION_URL]
+            )
         if not errors and vals[CONF_FACE_API_URL]:
             normalized[CONF_FACE_API_URL] = ensure_http_url(vals[CONF_FACE_API_URL])
 
@@ -638,6 +696,9 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
         for key in (
             CONF_API_KEY,
             CONF_OLLAMA_URL,
+            CONF_OLLAMA_CHAT_URL,
+            CONF_OLLAMA_VLM_URL,
+            CONF_OLLAMA_SUMMARIZATION_URL,
             CONF_GEMINI_API_KEY,
             CONF_DB_URI,
             CONF_FACE_API_URL,
@@ -662,7 +723,7 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
                 step_id="user", data_schema=STEP_USER_DATA_SCHEMA, errors=errors
             )
 
-        opts = _auto_select_configured_providers({**normalized, **RECOMMENDED_OPTIONS})
+        opts = _auto_select_configured_providers({**RECOMMENDED_OPTIONS, **normalized})
         opts = _prune_irrelevant_model_fields(opts)
 
         return self.async_create_entry(
@@ -760,6 +821,9 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         for k in (
             CONF_API_KEY,
             CONF_OLLAMA_URL,
+            CONF_OLLAMA_CHAT_URL,
+            CONF_OLLAMA_VLM_URL,
+            CONF_OLLAMA_SUMMARIZATION_URL,
             CONF_GEMINI_API_KEY,
             CONF_DB_URI,
             CONF_FACE_API_URL,
@@ -793,29 +857,41 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         options[CONF_FACE_API_URL] = ensure_http_url(raw)
         return None
 
-    async def _maybe_edit_ollama(
+    async def _maybe_edit_ollama_urls(
         self,
         options: dict[str, Any],
         user_input: Mapping[str, Any] | None,
     ) -> str | None:
-        """Validate/apply Ollama URL when present; return error code or None."""
-        if user_input is None or CONF_OLLAMA_URL not in user_input:
+        """Validate/apply Ollama URLs when present; return error code or None."""
+        if not user_input:
             return None
 
-        raw = _get_str(user_input, CONF_OLLAMA_URL)
-        if not raw:
-            options.pop(CONF_OLLAMA_URL, None)
-            return None
+        for field in (
+            CONF_OLLAMA_URL,
+            CONF_OLLAMA_CHAT_URL,
+            CONF_OLLAMA_VLM_URL,
+            CONF_OLLAMA_SUMMARIZATION_URL,
+        ):
+            if field not in user_input:
+                continue
 
-        try:
-            await validate_ollama_url(self.hass, raw)
-        except CannotConnectError:
-            return "cannot_connect"
-        except Exception:
-            LOGGER.exception("Unexpected exception validating Ollama URL")
-            return "unknown"
+            raw = _get_str(user_input, field)
+            if not raw:
+                options.pop(field, None)
+                continue
 
-        options[CONF_OLLAMA_URL] = ensure_http_url(raw)
+            try:
+                await validate_ollama_url(self.hass, raw)
+            except CannotConnectError:
+                return "cannot_connect"
+            except Exception:
+                LOGGER.exception(
+                    "Unexpected exception validating Ollama URL field %s", field
+                )
+                return "unknown"
+
+            options[field] = ensure_http_url(raw)
+
         return None
 
     async def _maybe_edit_db_uri(
@@ -901,6 +977,9 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         for k in (
             CONF_API_KEY,
             CONF_OLLAMA_URL,
+            CONF_OLLAMA_CHAT_URL,
+            CONF_OLLAMA_VLM_URL,
+            CONF_OLLAMA_SUMMARIZATION_URL,
             CONF_GEMINI_API_KEY,
             CONF_DB_URI,
             CONF_FACE_API_URL,
@@ -953,7 +1032,7 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         errors: dict[str, str] = {}
 
         # Field-specific edits with validation/normalization
-        err = await self._maybe_edit_ollama(options, user_input)
+        err = await self._maybe_edit_ollama_urls(options, user_input)
         if not err:
             err = await self._maybe_edit_db_uri(options, user_input)
         if not err:
