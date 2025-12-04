@@ -1,0 +1,86 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Modelleri bağla",
+        "description": "**API anahtarlarını**, isteğe bağlı **Ollama sunucu URL'lerini** (genel veya model bazlı), **Postgres URI** veya **Yüz tanıma sunucusu URI**'sini girin. Geçerli bir **Postgres URI** girmeniz zorunludur, diğerlerini daha sonra Seçenekler'den yapılandırabilirsiniz.",
+        "data": {
+          "api_key": "OpenAI API anahtarı (isteğe bağlı)",
+          "ollama_url": "Ollama sunucu URL'si (isteğe bağlı)",
+          "ollama_chat_url": "Ollama sohbet sunucusu URL'si (isteğe bağlı)",
+          "ollama_vlm_url": "Ollama VLM sunucusu URL'si (isteğe bağlı)",
+          "ollama_summarization_url": "Ollama özetleme sunucusu URL'si (isteğe bağlı)",
+          "gemini_api_key": "Google Gemini API anahtarı (isteğe bağlı)",
+          "face_api_url": "Yüz tanıma sunucusu API URL'si (isteğe bağlı)",
+          "db_uri": "PostgreSQL Veritabanı URI (zorunlu)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Servise ulaşılamıyor. Anahtarları/URL'leri kontrol edip tekrar deneyin.",
+      "invalid_auth": "Geçersiz API anahtarı.",
+      "unknown": "Beklenmeyen hata."
+    }
+  },
+  "exceptions": {
+    "invalid_config_entry": {
+      "message": "Geçersiz yapılandırma girişi sağlandı. Alınan: {config_entry}"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Home Generative Agent Seçenekleri",
+        "description": "Anahtarları, URL'leri, ana komutu, modelleri ve sağlayıcıları yapılandırın.",
+        "data": {
+          "api_key": "OpenAI API anahtarı (isteğe bağlı)",
+          "gemini_api_key": "Google Gemini API anahtarı (isteğe bağlı)",
+          "ollama_url": "Ollama gömme ve genel yedek sunucu URL'si (isteğe bağlı)",
+          "ollama_chat_url": "Ollama sohbet sunucusu URL'si (isteğe bağlı)",
+          "ollama_vlm_url": "Ollama VLM sunucusu URL'si (isteğe bağlı)",
+          "ollama_summarization_url": "Ollama özetleme sunucusu URL'si (isteğe bağlı)",
+          "face_api_url": "Yüz tanıma API URL'si (isteğe bağlı)",
+          "db_uri": "PostgreSQL Veritabanı URI (zorunlu)",
+          "prompt": "Talimatlar",
+          "chat_model_provider": "Sohbet modeli sağlayıcısı",
+          "ollama_chat_model": "Ollama sohbet modeli",
+          "openai_chat_model": "OpenAI sohbet modeli",
+          "gemini_chat_model": "Gemini sohbet modeli",
+          "chat_model_temperature": "Sohbet modeli sıcaklığı",
+          "vlm_provider": "VLM sağlayıcısı",
+          "ollama_vlm": "Ollama VLM",
+          "openai_vlm": "OpenAI VLM",
+          "gemini_vlm": "Gemini VLM",
+          "vlm_temperature": "VLM sıcaklığı",
+          "summarization_provider": "Özetleme sağlayıcısı",
+          "ollama_summarization_model": "Ollama özetleme modeli",
+          "openai_summarization_model": "OpenAI özetleme modeli",
+          "gemini_summarization_model": "Gemini özetleme modeli",
+          "summarization_model_temperature": "Özetleme modeli sıcaklığı",
+          "embedding_model_provider": "Gömme modeli sağlayıcısı",
+          "ollama_embedding_model": "Ollama gömme modeli",
+          "openai_embedding_model": "OpenAI gömme modeli",
+          "gemini_embedding_model": "Gemini gömme modeli",
+          "llm_hass_api": "Home Assistant'ı kontrol et",
+          "recommended": "Önerilen model ayarları (bunları değiştirmek performansı etkileyebilir)",
+          "video_analyzer_mode": "Video analizci modu",
+          "notify_service": "Mobil Uygulama Bildirim Servisi (isteğe bağlı)",
+          "face_recognition": "Yüz tanımayı etkinleştir",
+          "ollama_reasoning": "Ollama muhakemeyi etkinleştir",
+          "ollama_chat_keepalive": "Ollama sohbet modeli canlı tutma (saniye veya Asla kaldırma (-1))",
+          "ollama_vlm_keepalive": "Ollama VLM canlı tutma (saniye veya Asla kaldırma (-1))",
+          "ollama_summarization_keepalive": "Ollama özetleme modeli canlı tutma (saniye veya Asla kaldırma (-1))",
+          "ollama_chat_context_size": "Ollama sohbet modeli bağlam boyutu (token)",
+          "ollama_vlm_context_size": "Ollama VLM bağlam boyutu (token)",
+          "ollama_summarization_context_size": "Ollama özetleme modeli bağlam boyutu (token)",
+          "manage_context_with_tokens": "Bağlam yönetim yöntemi",
+          "max_tokens_in_context": "Sohbet bağlamındaki maksimum token sayısı",
+          "max_messages_in_context": "Sohbet bağlamındaki maksimum mesaj sayısı"
+        },
+        "data_description": {
+          "prompt": "LLM'in nasıl yanıt vermesi gerektiğini belirtin. Bu bir şablon olabilir."
+        }
+      }
+    }
+  }
+}
