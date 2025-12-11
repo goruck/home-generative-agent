@@ -23,12 +23,16 @@ from voluptuous_openapi import convert
 from .agent.graph import workflow
 from .agent.tools import (
     add_automation,
+    alarm_control,
+    confirm_sensitive_action,
     get_and_analyze_camera_image,
     get_entity_history,
     upsert_memory,
 )
 from .const import (
+    CONF_CRITICAL_ACTION_PIN_ENABLED,
     CONF_PROMPT,
+    CRITICAL_ACTION_PROMPT,
     DOMAIN,
     LANGCHAIN_LOGGING_LEVEL,
     TOOL_CALL_ERROR_SYSTEM_MESSAGE,
@@ -198,6 +202,8 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             "upsert_memory": upsert_memory,
             "add_automation": add_automation,
             "get_entity_history": get_entity_history,
+            "confirm_sensitive_action": confirm_sensitive_action,
+            "alarm_control": alarm_control,
         }
         tools.extend(langchain_tools.values())
 
@@ -219,12 +225,15 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
 
         # Build system prompt
         try:
+            pin_enabled = options.get(CONF_CRITICAL_ACTION_PIN_ENABLED, True)
+            critical_prompt = CRITICAL_ACTION_PROMPT if pin_enabled else ""
             prompt_parts = [
                 template.Template(
                     (
                         llm.DATE_TIME_PROMPT
                         + options.get(CONF_PROMPT, llm.DEFAULT_INSTRUCTIONS_PROMPT)
                         + f"\nYou are in the {self.tz} timezone."
+                        + critical_prompt
                         + TOOL_CALL_ERROR_SYSTEM_MESSAGE
                         if tools
                         else ""
@@ -289,6 +298,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 "langchain_tools": langchain_tools,
                 "ha_llm_api": llm_api or None,
                 "hass": hass,
+                "pending_actions": runtime_data.pending_actions,
             },
             "recursion_limit": 10,
         }

@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import math
 import re
+from collections.abc import Mapping
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, cast
 
 import aiofiles
 import async_timeout
 import homeassistant.util.dt as dt_util
+import voluptuous as vol
 import yaml
 from homeassistant.components import camera
 from homeassistant.components.automation.config import _async_validate_config_item
@@ -29,6 +32,7 @@ from homeassistant.const import (
 )
 from homeassistant.core import State
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import llm
 from homeassistant.helpers.recorder import get_instance as get_recorder_instance
 from homeassistant.helpers.recorder import session_scope as recorder_session_scope
 from homeassistant.util import ulid
@@ -42,7 +46,11 @@ from voluptuous import MultipleInvalid
 from ..const import (  # noqa: TID252
     AUTOMATION_TOOL_BLUEPRINT_NAME,
     AUTOMATION_TOOL_EVENT_REGISTERED,
+    CONF_CRITICAL_ACTION_PIN_HASH,
+    CONF_CRITICAL_ACTION_PIN_SALT,
     CONF_NOTIFY_SERVICE,
+    CRITICAL_PIN_MAX_LEN,
+    CRITICAL_PIN_MIN_LEN,
     HISTORY_TOOL_CONTEXT_LIMIT,
     HISTORY_TOOL_PURGE_KEEP_DAYS,
     VLM_IMAGE_HEIGHT,
@@ -51,16 +59,189 @@ from ..const import (  # noqa: TID252
     VLM_USER_KW_TEMPLATE,
     VLM_USER_PROMPT,
 )
-from ..core.utils import extract_final  # noqa: TID252
+from ..core.utils import extract_final, verify_pin  # noqa: TID252
+from .helpers import (
+    ConfigurableData,
+    maybe_fill_lock_entity,
+    normalize_intent_for_alarm,
+    normalize_intent_for_lock,
+    sanitize_tool_args,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import Generator, Mapping
 
     from homeassistant.core import HomeAssistant
     from langchain_core.language_models import BaseMessage, LanguageModelInput
     from langchain_core.runnables.base import RunnableSerializable
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _map_alarm_service(tool_name: str, requested_state: str) -> str:
+    """Map requested alarm state or intent to the HA service."""
+    service_map = {
+        "arm_home": "alarm_arm_home",
+        "home": "alarm_arm_home",
+        "armed_home": "alarm_arm_home",
+        "arm_away": "alarm_arm_away",
+        "away": "alarm_arm_away",
+        "armed_away": "alarm_arm_away",
+        "arm_night": "alarm_arm_night",
+        "night": "alarm_arm_night",
+        "armed_night": "alarm_arm_night",
+        "vacation": "alarm_arm_vacation",
+        "arm_vacation": "alarm_arm_vacation",
+        "armed_vacation": "alarm_arm_vacation",
+        "custom_bypass": "alarm_arm_custom_bypass",
+        "arm_custom_bypass": "alarm_arm_custom_bypass",
+        "armed_custom_bypass": "alarm_arm_custom_bypass",
+        "disarm": "alarm_disarm",
+        "off": "alarm_disarm",
+        "disarmed": "alarm_disarm",
+    }
+    default_service = "alarm_arm_home" if tool_name == "HassTurnOn" else "alarm_disarm"
+    return service_map.get(requested_state, default_service)
+
+
+def _extract_alarm_code(tool_args: dict[str, Any]) -> str:
+    """Pull the alarm code from the best available slot."""
+    code = str(tool_args.get("code", "")).strip()
+    if code:
+        return code
+
+    dc_val = tool_args.get("device_class")
+    if (
+        isinstance(dc_val, list)
+        and len(dc_val) == 1
+        and str(dc_val[0]).strip().isdigit()
+    ):
+        code = str(dc_val[0]).strip()
+        tool_args["device_class"] = []
+    elif isinstance(dc_val, str) and dc_val.strip().isdigit():
+        code = dc_val.strip()
+        tool_args["device_class"] = []
+    elif (floor := tool_args.get("floor")) and str(floor).strip().isdigit():
+        code = str(floor).strip()
+    elif name := tool_args.get("name"):
+        tokens = str(name).strip().split()
+        if tokens and tokens[-1].isdigit():
+            code = tokens[-1]
+
+    if not code:
+        msg = "Alarm code required to arm/disarm."
+        raise HomeAssistantError(msg)
+    tool_args["code"] = code
+    return code
+
+
+def _resolve_alarm_entity(hass: HomeAssistant, tool_args: dict[str, Any]) -> str:
+    """Resolve alarm entity_id from args or the environment."""
+    entity_id = tool_args.get("entity_id")
+    alarm_entities = hass.states.async_entity_ids("alarm_control_panel")
+    if entity_id not in alarm_entities:
+        entity_id = None
+
+    if not entity_id and (name := tool_args.get("name")):
+        slug = str(name).strip().lower().replace(" ", "_")
+        parts = [p for p in slug.split("_") if p]
+        if parts and parts[-1].isdigit():
+            parts = parts[:-1]
+        if parts:
+            candidate = f"alarm_control_panel.{'_'.join(parts)}"
+            if candidate in alarm_entities:
+                entity_id = candidate
+
+    if not entity_id and len(alarm_entities) == 1:
+        entity_id = alarm_entities[0]
+
+    if not entity_id:
+        msg = "Missing alarm entity_id; cannot arm/disarm."
+        raise HomeAssistantError(msg)
+    return entity_id
+
+
+def _infer_alarm_state(state_obj: State | None) -> str:
+    """Infer a simplified alarm state from the HA state object."""
+    if not state_obj:
+        return "unknown"
+    current_state = str(state_obj.state).lower()
+    if current_state in {
+        "armed_home",
+        "armed_away",
+        "armed_night",
+        "armed_vacation",
+        "armed_custom_bypass",
+    }:
+        return "armed"
+    if current_state in {
+        "disarmed",
+        "pending",
+        "arming",
+        "triggered",
+        "disarming",
+    }:
+        return current_state
+    return "unknown"
+
+
+def _alarm_warning(*, is_arm_request: bool, inferred_status: str) -> str | None:
+    """Build a warning message if the alarm state is unexpected."""
+    if inferred_status == "unknown":
+        return "Alarm panel state is unknown after the request."
+    if is_arm_request and inferred_status == "disarmed":
+        return """
+        Arming requested but the panel still shows disarmed; it may still be updating.
+        """
+    if not is_arm_request and inferred_status != "disarmed":
+        return (
+            f"Disarm requested but the panel reports {inferred_status}; "
+            "please verify at the panel."
+        )
+    return None
+
+
+async def _perform_alarm_control(
+    hass: HomeAssistant, tool_name: str, tool_args: dict[str, Any]
+) -> dict[str, Any]:
+    """Arm or disarm an alarm_control_panel entity and report its state."""
+    requested_state = str(tool_args.get("state") or "").lower()
+    resolved_service = _map_alarm_service(tool_name, requested_state)
+    code = _extract_alarm_code(tool_args)
+    entity_id = _resolve_alarm_entity(hass, tool_args)
+
+    data: dict[str, Any] = {"entity_id": entity_id, "code": code}
+    await hass.services.async_call(
+        "alarm_control_panel",
+        resolved_service,
+        data,
+        blocking=True,
+    )
+
+    # Give HA a moment to update state before reading it back.
+    await asyncio.sleep(2.0)
+
+    state_obj = hass.states.get(entity_id)
+    inferred_status = _infer_alarm_state(state_obj)
+    is_arm_request = resolved_service.startswith("alarm_arm")
+    warning = _alarm_warning(
+        is_arm_request=is_arm_request, inferred_status=inferred_status
+    )
+    result_text = warning or (
+        f"Alarm service {resolved_service} completed; panel state: {inferred_status}."
+    )
+    expected_states = (
+        {"armed", "arming", "pending"} if is_arm_request else {"disarmed", "disarming"}
+    )
+
+    return {
+        "success": warning is None and inferred_status in expected_states,
+        "entity_id": entity_id,
+        "service": resolved_service,
+        "inferred_state": inferred_status,
+        "warning": warning,
+        "result_text": result_text,
+    }
 
 
 async def _get_camera_image(hass: HomeAssistant, camera_name: str) -> bytes | None:
@@ -354,6 +535,204 @@ async def add_automation(  # noqa: D417
     )
 
     return f"Added automation {ha_automation_config['id']}"
+
+
+@tool(parse_docstring=True)
+async def confirm_sensitive_action(  # noqa: D417, PLR0911
+    action_id: str,
+    pin: str,
+    *,
+    config: Annotated[RunnableConfig, InjectedToolArg()],
+    store: Annotated[BaseStore, InjectedStore()],  # noqa: ARG001
+) -> str:
+    """
+    Confirm and execute a pending sensitive action that requires a PIN.
+
+    Args:
+        action_id: The action to confirm (provided by agent when it asked for a PIN).
+        pin: The user-provided PIN.
+
+    """
+    if "configurable" not in config:
+        return "Configuration not found. Please check your setup."
+
+    cfg = cast("ConfigurableData", config.get("configurable", {}))
+    opts = cfg.get("options", {})
+    pin_hash = opts.get(CONF_CRITICAL_ACTION_PIN_HASH, "")
+    salt = opts.get(CONF_CRITICAL_ACTION_PIN_SALT, "")
+    pending_actions = cfg.get("pending_actions", {})
+    provided_pin = str(pin or "").strip()
+    requested_action_id = str(action_id or "").strip()
+
+    resolved_action_id = _resolve_action_id(pending_actions, requested_action_id)
+    if resolved_action_id is None:
+        return "Pending action not found or expired."
+
+    action, action_err = _load_pending_action(pending_actions, resolved_action_id)
+    if action_err or not action:
+        return action_err or "Pending action not found."
+
+    if _is_wrong_user(cfg, action):
+        return "Pending action belongs to a different user; please re-run the request."
+
+    pin_err = _validate_pin_for_action(
+        provided_pin=provided_pin,
+        pin_hash=pin_hash,
+        salt=salt,
+        action=action,
+    )
+    if pin_err:
+        return pin_err
+
+    ha_llm_api, api_err = _ensure_api(cfg)
+    if api_err or ha_llm_api is None:
+        return api_err or "Home Assistant LLM API unavailable."
+
+    result, exec_err = await _execute_pending_action(
+        resolved_action_id, action, ha_llm_api, cfg
+    )
+    return result or exec_err or "Unable to process the confirmation."
+
+
+def _resolve_action_id(
+    pending_actions: dict[str, dict[str, Any]], requested_action_id: str
+) -> str | None:
+    """Return a valid action_id or None if it cannot be resolved safely."""
+    if requested_action_id and requested_action_id in pending_actions:
+        return requested_action_id
+    if not requested_action_id and len(pending_actions) == 1:
+        return next(iter(pending_actions))
+    return None
+
+
+def _load_pending_action(
+    pending_actions: dict[str, dict[str, Any]], resolved_action_id: str
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Validate and return a pending action."""
+    action = pending_actions.get(resolved_action_id)
+    if not action:
+        return None, "Pending action not found or expired."
+
+    created_at = action.get("created_at")
+    if created_at:
+        try:
+            ts = datetime.fromisoformat(created_at)
+        except ValueError:
+            pending_actions.pop(resolved_action_id, None)
+            return None, "Pending action is invalid; please try again."
+        if dt_util.utcnow() - ts > timedelta(minutes=10):
+            pending_actions.pop(resolved_action_id, None)
+            return None, "Pending action expired; please re-run the request."
+
+    action.setdefault("attempts", 0)
+    return action, None
+
+
+def _validate_pin_for_action(
+    *, provided_pin: str, pin_hash: str, salt: str, action: dict[str, Any]
+) -> str | None:
+    """Validate PIN format and value against stored hash/salt."""
+    max_pin_attempts = 5
+    if not pin_hash or not salt:
+        return "No PIN configured; cannot confirm the action."
+    if not provided_pin.isdigit() or not (
+        CRITICAL_PIN_MIN_LEN <= len(provided_pin) <= CRITICAL_PIN_MAX_LEN
+    ):
+        return f"Invalid PIN. Use {CRITICAL_PIN_MIN_LEN}-{CRITICAL_PIN_MAX_LEN} digits."
+    attempts = int(action.get("attempts", 0) or 0)
+    if attempts >= max_pin_attempts:
+        return "Too many incorrect attempts; please re-run the request."
+    if not verify_pin(provided_pin, hashed=pin_hash, salt=salt):
+        action["attempts"] = attempts + 1
+        return "Incorrect PIN. Action not executed."
+    return None
+
+
+def _ensure_api(cfg: Mapping[str, Any]) -> tuple[Any | None, str | None]:
+    """Return the HA LLM API or an error message."""
+    ha_llm_api = cfg.get("ha_llm_api")
+    if ha_llm_api is None:
+        return None, "Home Assistant LLM API unavailable."
+    return ha_llm_api, None
+
+
+def _is_wrong_user(cfg: Mapping[str, Any], action: Mapping[str, Any]) -> bool:
+    requester_id = cfg.get("user_id")
+    action_owner = action.get("user")
+    return bool(requester_id and action_owner and requester_id != action_owner)
+
+
+async def _execute_pending_action(
+    resolved_action_id: str,
+    action: dict[str, Any],
+    ha_llm_api: Any,
+    cfg: Mapping[str, Any],
+) -> tuple[str | None, str | None]:
+    """Normalize args, execute the pending action, and clear it."""
+    raw_tool_name = action.get("tool_name")
+    if not isinstance(raw_tool_name, str) or not raw_tool_name:
+        return None, "Pending action is invalid; missing tool name."
+    tool_name = raw_tool_name
+    tool_args = action.get("tool_args") or {}
+    tool_args = normalize_intent_for_alarm(tool_name, tool_args)
+    tool_args = normalize_intent_for_lock(tool_name, tool_args)
+    tool_args = maybe_fill_lock_entity(tool_args, cfg.get("hass"))
+    tool_args = sanitize_tool_args(tool_args)
+    try:
+        tool_input = llm.ToolInput(tool_name=tool_name, tool_args=tool_args)
+        response = await ha_llm_api.async_call_tool(tool_input)
+    except (HomeAssistantError, vol.Invalid) as err:
+        return None, f"Failed to execute action: {err!r}"
+
+    pending_actions = cfg.get("pending_actions", {})
+    pending_actions.pop(resolved_action_id, None)
+    return json.dumps(
+        {"status": "completed", "action_id": resolved_action_id, "result": response}
+    ), None
+
+
+@tool(parse_docstring=True)
+async def alarm_control(  # noqa: D417, PLR0913
+    name: str | None = None,
+    entity_id: str | None = None,
+    state: str | None = None,
+    code: str | None = None,
+    *,
+    bypass_open_sensors: bool | None = None,
+    config: Annotated[RunnableConfig, InjectedToolArg()],
+) -> str:
+    """
+    Arm or disarm an alarm control panel using the alarm system code (not the PIN).
+
+    Args:
+        name: Friendly name of the alarm panel (for example, "Home Alarm").
+        entity_id: Specific alarm entity_id (if known). If not provided, the tool will
+            try to resolve it from name or fall back to the only alarm entity.
+        state: Desired target state. Examples: "arm_home", "armed_home", "arm_away",
+            "armed_away", "disarm", "disarmed". If omitted, defaults to "arm_home".
+        code: The alarm panel code (required by most alarm integrations).
+        bypass_open_sensors: If True, request bypass of open sensors (if supported).
+
+    """
+    if "configurable" not in config:
+        return "Configuration not found. Please check your setup."
+
+    hass: HomeAssistant = config["configurable"]["hass"]
+    tool_args: dict[str, Any] = {
+        "name": name,
+        "entity_id": entity_id,
+        "state": state,
+        "code": code,
+        "bypass_open_sensors": bypass_open_sensors,
+    }
+    # Drop None/empty values so the alarm helper can apply its own defaults.
+    tool_args = {k: v for k, v in tool_args.items() if v not in (None, "")}
+
+    try:
+        result = await _perform_alarm_control(hass, "alarm_control", tool_args)
+    except HomeAssistantError as err:
+        return f"Error controlling alarm: {err}"
+    return json.dumps(result)
 
 
 def _get_state_and_decimate(

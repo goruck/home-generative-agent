@@ -740,6 +740,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         face_recognition=face_recognition,
         face_api_url=face_api_url,
         person_gallery=person_gallery,
+        pending_actions={},
     )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

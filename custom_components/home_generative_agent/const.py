@@ -10,6 +10,27 @@ HTTP_STATUS_UNAUTHORIZED = 401
 HTTP_STATUS_BAD_REQUEST = 400
 HTTP_STATUS_WEBPAGE_NOT_FOUND = 404
 
+# ---- Critical action guard ----
+CONF_CRITICAL_ACTION_PIN_ENABLED = "critical_action_pin_enabled"
+CONF_CRITICAL_ACTION_PIN = "critical_action_pin"
+CONF_CRITICAL_ACTION_PIN_HASH = "critical_action_pin_hash"
+CONF_CRITICAL_ACTION_PIN_SALT = "critical_action_pin_salt"
+CONF_CRITICAL_ACTIONS = "critical_actions"
+RECOMMENDED_CRITICAL_ACTIONS: list[dict[str, str]] = [
+    {"domain": "lock", "service": "unlock"},
+    {"domain": "lock", "service": "open"},
+    # Covers: guard only doors/gates/garages, not windows/shades
+    {"domain": "cover", "service": "open_cover", "entity_match": "door"},
+    {"domain": "cover", "service": "open_cover", "entity_match": "gate"},
+    {"domain": "cover", "service": "open_cover", "entity_match": "garage"},
+    {"domain": "cover", "service": "open", "entity_match": "door"},
+    {"domain": "cover", "service": "open", "entity_match": "gate"},
+    {"domain": "cover", "service": "open", "entity_match": "garage"},
+    {"domain": "garage_door", "service": "open"},
+]
+CRITICAL_PIN_MIN_LEN = 4
+CRITICAL_PIN_MAX_LEN = 10
+
 # ---- PostgreSQL (vector store + checkpointer) ----
 CONF_DB_URI = "db_uri"
 RECOMMENDED_DB_URI = (
@@ -19,6 +40,7 @@ CONF_DB_BOOTSTRAPPED = "db_bootstrapped"
 
 # ---- Notify service (for mobile push notifications) ----
 CONF_NOTIFY_SERVICE = "notify_service"
+LLM_HASS_API_NONE = "none"
 
 # ---- LangChain logging ----
 # See https://python.langchain.com/docs/how_to/debugging/
@@ -284,9 +306,11 @@ Represent this sentence for searching relevant passages: {query}
 
 # ---------------- Camera video analyzer ----------------
 CONF_VIDEO_ANALYZER_MODE = "video_analyzer_mode"
-RECOMMENDED_VIDEO_ANALYZER_MODE: Literal[
-    "disable", "notify_on_anomaly", "always_notify"
-] = "disable"
+VideoAnalyzerMode = Literal["disable", "notify_on_anomaly", "always_notify"]
+VIDEO_ANALYZER_MODE_DISABLE: VideoAnalyzerMode = "disable"
+VIDEO_ANALYZER_MODE_NOTIFY_ON_ANOMALY: VideoAnalyzerMode = "notify_on_anomaly"
+VIDEO_ANALYZER_MODE_ALWAYS_NOTIFY: VideoAnalyzerMode = "always_notify"
+RECOMMENDED_VIDEO_ANALYZER_MODE: VideoAnalyzerMode = VIDEO_ANALYZER_MODE_DISABLE
 
 # Interval units are seconds.
 VIDEO_ANALYZER_SCAN_INTERVAL = 1.5
@@ -374,6 +398,17 @@ TOOL_CALL_ERROR_TEMPLATE = """
 Error: {error}
 
 Call the tool again with your mistake corrected.
+"""
+CRITICAL_ACTION_PROMPT = """
+Critical actions (door/lock/garage/open) require user confirmation.
+- If a tool response has status "requires_pin", ask the user for the PIN they set and
+  then call the "confirm_sensitive_action" tool with the provided action_id and PIN.
+- Never guess or invent a PIN. Do not proceed without a PIN. If the user refuses or
+  fails, inform them and do not re-attempt the action.
+- Do not expose or repeat the PIN in responses beyond acknowledging success/failure.
+- Alarm control uses the alarm system code, not the critical-action PIN. When arming or
+  disarming an alarm, ask for the alarm code and include it in the tool call. Do NOT
+  call "confirm_sensitive_action" for alarm control.
 """
 HISTORY_TOOL_CONTEXT_LIMIT = 50
 HISTORY_TOOL_PURGE_KEEP_DAYS = 10

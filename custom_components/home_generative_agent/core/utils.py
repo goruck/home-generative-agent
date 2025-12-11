@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import logging
 import re
+import secrets
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urljoin, urlparse
@@ -174,6 +177,22 @@ def default_mobile_notify_service(hass: HomeAssistant) -> str | None:
     """Best default mobile_app notify service name or None."""
     services = list_mobile_notify_services(hass)
     return services[0] if services else None
+
+
+def hash_pin(pin: str, *, salt: str | None = None) -> tuple[str, str]:
+    """Return (hash, salt) for a numeric PIN using PBKDF2-HMAC."""
+    if not salt:
+        salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", pin.encode("utf-8"), salt.encode("utf-8"), 120_000
+    )
+    return digest.hex(), salt
+
+
+def verify_pin(pin: str, *, hashed: str, salt: str) -> bool:
+    """Compare a PIN against the stored hash+salt."""
+    digest, _ = hash_pin(pin, salt=salt)
+    return hmac.compare_digest(digest, hashed)
 
 
 # ---------------------------

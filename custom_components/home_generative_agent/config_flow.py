@@ -39,6 +39,10 @@ from homeassistant.helpers.selector import (
 from .const import (
     CONF_CHAT_MODEL_PROVIDER,
     CONF_CHAT_MODEL_TEMPERATURE,
+    CONF_CRITICAL_ACTION_PIN,
+    CONF_CRITICAL_ACTION_PIN_ENABLED,
+    CONF_CRITICAL_ACTION_PIN_HASH,
+    CONF_CRITICAL_ACTION_PIN_SALT,
     CONF_DB_URI,
     CONF_EMBEDDING_MODEL_PROVIDER,
     CONF_FACE_API_URL,
@@ -72,11 +76,14 @@ from .const import (
     CONF_VIDEO_ANALYZER_MODE,
     CONF_VLM_PROVIDER,
     CONF_VLM_TEMPERATURE,
+    CRITICAL_PIN_MAX_LEN,
+    CRITICAL_PIN_MIN_LEN,
     DOMAIN,
     HTTP_STATUS_BAD_REQUEST,
     KEEPALIVE_MAX_SECONDS,
     KEEPALIVE_MIN_SECONDS,
     KEEPALIVE_SENTINEL,
+    LLM_HASS_API_NONE,
     MODEL_CATEGORY_SPECS,
     RECOMMENDED_CHAT_MODEL_PROVIDER,
     RECOMMENDED_CHAT_MODEL_TEMPERATURE,
@@ -105,11 +112,15 @@ from .const import (
     RECOMMENDED_VIDEO_ANALYZER_MODE,
     RECOMMENDED_VLM_PROVIDER,
     RECOMMENDED_VLM_TEMPERATURE,
+    VIDEO_ANALYZER_MODE_ALWAYS_NOTIFY,
+    VIDEO_ANALYZER_MODE_DISABLE,
+    VIDEO_ANALYZER_MODE_NOTIFY_ON_ANOMALY,
 )
 from .core.utils import (
     CannotConnectError,
     InvalidAuthError,
     ensure_http_url,
+    hash_pin,
     list_mobile_notify_services,
     ollama_url_for_category,
     validate_db_uri,
@@ -161,6 +172,7 @@ RECOMMENDED_OPTIONS = {
     CONF_RECOMMENDED: True,
     CONF_LLM_HASS_API: llm.LLM_API_ASSIST,
     CONF_PROMPT: llm.DEFAULT_INSTRUCTIONS_PROMPT,
+    CONF_CRITICAL_ACTION_PIN_ENABLED: True,
     CONF_VIDEO_ANALYZER_MODE: RECOMMENDED_VIDEO_ANALYZER_MODE,
     CONF_FACE_RECOGNITION: RECOMMENDED_FACE_RECOGNITION,
     CONF_CHAT_MODEL_PROVIDER: RECOMMENDED_CHAT_MODEL_PROVIDER,
@@ -454,15 +466,19 @@ async def _schema_for(hass: HomeAssistant, opts: Mapping[str, Any]) -> VolDictTy
     # Coerce provider selections to ones that are actually configured
     opts = _auto_select_configured_providers(opts)
 
-    hass_apis = [SelectOptionDict(label="No control", value="none")] + [
+    hass_apis = [SelectOptionDict(label="No control", value=LLM_HASS_API_NONE)] + [
         SelectOptionDict(label=api.name, value=api.id)
         for api in llm.async_get_apis(hass)
     ]
 
-    video_analyzer_mode: list[SelectOptionDict] = [
-        SelectOptionDict(label="Disable", value="disable"),
-        SelectOptionDict(label="Notify on anomaly", value="notify_on_anomaly"),
-        SelectOptionDict(label="Always notify", value="always_notify"),
+    video_analyzer_mode_opts: list[SelectOptionDict] = [
+        SelectOptionDict(label="Disable", value=VIDEO_ANALYZER_MODE_DISABLE),
+        SelectOptionDict(
+            label="Notify on anomaly", value=VIDEO_ANALYZER_MODE_NOTIFY_ON_ANOMALY
+        ),
+        SelectOptionDict(
+            label="Always notify", value=VIDEO_ANALYZER_MODE_ALWAYS_NOTIFY
+        ),
     ]
 
     schema: VolDictType = {
@@ -508,17 +524,42 @@ async def _schema_for(hass: HomeAssistant, opts: Mapping[str, Any]) -> VolDictTy
             description={"suggested_value": opts.get(CONF_LLM_HASS_API)},
             default="none",
         ): SelectSelector(SelectSelectorConfig(options=hass_apis)),
+    }
+
+    schema[
+        vol.Optional(
+            CONF_CRITICAL_ACTION_PIN_ENABLED,
+            description={
+                "suggested_value": opts.get(CONF_CRITICAL_ACTION_PIN_ENABLED, True)
+            },
+            default=opts.get(CONF_CRITICAL_ACTION_PIN_ENABLED, True),
+        )
+    ] = BooleanSelector()
+
+    pin_enabled = opts.get(CONF_CRITICAL_ACTION_PIN_ENABLED, True)
+    if pin_enabled:
+        schema[
+            vol.Optional(
+                CONF_CRITICAL_ACTION_PIN,
+                description={
+                    "suggested_value": "",
+                    "placeholder": "Set/replace PIN for critical actions",
+                },
+            )
+        ] = TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
+
+    schema[
         vol.Optional(
             CONF_VIDEO_ANALYZER_MODE,
             description={"suggested_value": opts.get(CONF_VIDEO_ANALYZER_MODE)},
             default=RECOMMENDED_VIDEO_ANALYZER_MODE,
-        ): SelectSelector(SelectSelectorConfig(options=video_analyzer_mode)),
-    }
+        )
+    ] = SelectSelector(SelectSelectorConfig(options=video_analyzer_mode_opts))
 
-    # Determine current analyzer mode before adding any conditional fields.
-    selected_mode = opts.get(CONF_VIDEO_ANALYZER_MODE, RECOMMENDED_VIDEO_ANALYZER_MODE)
-
-    if selected_mode != "disable":
+    video_analyzer_mode = opts.get(
+        CONF_VIDEO_ANALYZER_MODE, RECOMMENDED_VIDEO_ANALYZER_MODE
+    )
+    if video_analyzer_mode != VIDEO_ANALYZER_MODE_DISABLE:
         # Show Face Recognition toggle only when analyzer is enabled.
         schema[
             vol.Optional(
@@ -1035,6 +1076,46 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         options[spec.field] = raw
         return None
 
+    def _maybe_edit_pin(
+        self, options: dict[str, Any], user_input: Mapping[str, Any] | None
+    ) -> str | None:
+        """Hash and store the critical-action PIN if provided."""
+        if user_input is None:
+            return None
+
+        pin_enabled = user_input.get(
+            CONF_CRITICAL_ACTION_PIN_ENABLED,
+            options.get(CONF_CRITICAL_ACTION_PIN_ENABLED, True),
+        )
+        options[CONF_CRITICAL_ACTION_PIN_ENABLED] = pin_enabled
+
+        if not pin_enabled:
+            options.pop(CONF_CRITICAL_ACTION_PIN, None)
+            options.pop(CONF_CRITICAL_ACTION_PIN_HASH, None)
+            options.pop(CONF_CRITICAL_ACTION_PIN_SALT, None)
+            return None
+
+        if CONF_CRITICAL_ACTION_PIN not in user_input:
+            return None
+
+        raw = _get_str(user_input, CONF_CRITICAL_ACTION_PIN)
+        options.pop(CONF_CRITICAL_ACTION_PIN, None)
+        if not raw:
+            options.pop(CONF_CRITICAL_ACTION_PIN_HASH, None)
+            options.pop(CONF_CRITICAL_ACTION_PIN_SALT, None)
+            return None
+
+        if (
+            not raw.isdigit()
+            or not CRITICAL_PIN_MIN_LEN <= len(raw) <= CRITICAL_PIN_MAX_LEN
+        ):
+            return "invalid_pin"
+
+        hashed, salt = hash_pin(raw)
+        options[CONF_CRITICAL_ACTION_PIN_HASH] = hashed
+        options[CONF_CRITICAL_ACTION_PIN_SALT] = salt
+        return None
+
     def _maybe_edit_keepalives(
         self,
         options: dict[str, Any],
@@ -1077,7 +1158,7 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
 
     def _cleanup_none_llm_api(self, options: dict[str, Any]) -> None:
         """Remove the 'none' sentinel so options omit the key when unset."""
-        if options.get(CONF_LLM_HASS_API) == "none":
+        if options.get(CONF_LLM_HASS_API) == LLM_HASS_API_NONE:
             options.pop(CONF_LLM_HASS_API, None)
 
     def _schema_changes_since_last(
@@ -1138,6 +1219,8 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
                 options,
                 user_input,
             )
+        if not err:
+            err = self._maybe_edit_pin(options, user_input)
         if not err:
             err = self._maybe_edit_keepalives(options, user_input)
         if err:

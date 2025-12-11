@@ -31,6 +31,7 @@ class HGAData:
     face_api_url: str
     face_recognition: bool
     person_gallery: Any
+    pending_actions: dict[str, dict[str, Any]]
 
 
 type HGAConfigEntry = ConfigEntry[HGAData]

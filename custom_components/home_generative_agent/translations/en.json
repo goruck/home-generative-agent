@@ -19,6 +19,7 @@
     "error": {
       "cannot_connect": "Can't reach the service. Check keys/URLs and try again.",
       "invalid_auth": "Invalid API key.",
+      "invalid_pin": "PIN must be 4-10 digits.",
       "unknown": "Unexpected error."
     }
   },
@@ -75,7 +76,9 @@
           "ollama_summarization_context_size": "Ollama summarization model context size (tokens)",
           "manage_context_with_tokens": "Context management method",
           "max_tokens_in_context": "Max tokens in chat context",
-          "max_messages_in_context": "Max messages in chat context"
+          "max_messages_in_context": "Max messages in chat context",
+          "critical_action_pin_enabled": "Require critical action PIN",
+          "critical_action_pin": "Critical action PIN (required to unlock/arm/open sensitive devices)"
         },
         "data_description": {
           "prompt": "Instruct how the LLM should respond. This can be a template."
