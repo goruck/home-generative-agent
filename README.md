@@ -66,6 +66,19 @@ You also configure the Postgres database URI during setup or later in options, b
 
 The URL of the optional remote face recognition service can be configured at setup or via options as well.
 
+### Critical Action PIN protection
+
+Keep unlocking and opening actions behind a second check. Open Home Assistant → Settings → Devices & Services → Home Generative Agent → Configure and toggle `Require critical action PIN` (on by default). Enter a 4-10 digit PIN to set or replace it; the value is stored as a salted hash. Leaving the field blank while the toggle is on clears the stored PIN, and turning the toggle off removes the guard entirely. In the conversation agent settings for HGA, disable `Prefer handling commands locally` for Critical Action PIN protection to work properly.
+
+The agent will demand the PIN before it:
+- Unlocks or opens locks.
+- Opens covers whose entity_id includes door/gate/garage, or opens garage doors.
+- Uses HA intent tools on locks. Alarm control panels use their own alarm code and never the PIN.
+
+If you have an alarm control panel, the agent will ask for that alarm's code when arming or disarming; this code is separate from the critical-action PIN.
+
+When you ask the agent to perform a protected action, it queues the request and asks for the PIN. Reply with the digits to complete the action; after five bad attempts or 10 minutes, the queued action expires and you must ask again. If the guard is enabled but no PIN is configured, the agent will reject the request until you set one in options.
+
 ## Image and Sensor Entities
 
 This section shows how to display the latest camera image, the AI-generated summary, and recognized people in Home Assistant or use in automations via the image and sensor platforms.
