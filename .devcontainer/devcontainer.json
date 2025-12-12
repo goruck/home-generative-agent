@@ -1,10 +1,10 @@
 {
     "name": "goruck/home_generative_agent",
-    "image": "mcr.microsoft.com/devcontainers/python:3.12",
+    "dockerComposeFile": [ "docker-compose.yaml" ],
+    "service": "devcontainer",
+    "workspaceFolder": "/workspaces",
     "postCreateCommand": "scripts/setup",
-    "forwardPorts": [
-        8123
-    ],
+    "forwardPorts": [ 8123 ],
     "portsAttributes": {
         "8123": {
             "label": "Home Assistant",
@@ -37,5 +37,6 @@
         }
     },
     "remoteUser": "vscode",
-    "features": {}
+    "runServices": [ "db" ],
+    "shutdownAction": "stopCompose"
 }

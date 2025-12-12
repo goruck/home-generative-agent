@@ -1,0 +1,33 @@
+version: "3.8"
+services:
+  devcontainer:
+    image: ghcr.io/home-assistant/devcontainer:supervisor
+    volumes:
+      - ..:/workspaces:cached
+    user: vscode
+    ports:
+      - "8123:8123"
+    # keep the container running so VS Code can attach
+    command: sleep infinity
+    depends_on:
+      - db
+
+  db:
+    image: pgvector/pgvector:pg18-trixie
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ha_user
+      POSTGRES_PASSWORD: ha_password
+      POSTGRES_DB: ha_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/
+      - ./init-db:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      retries: 10
+    ports:
+      - "5432:5432"
+
+volumes:
+  postgres_data:
