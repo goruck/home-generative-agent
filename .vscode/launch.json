@@ -1,0 +1,24 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug Home Assistant",
+            "type": "python",
+            "request": "launch",
+            "python": "/usr/local/bin/python3",
+            "module": "homeassistant",
+            "args": [
+                "--config",
+                "${workspaceFolder}/config",
+                "--debug"
+            ],
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/custom_components",
+                "PYTHONUNBUFFERED": "1"
+            },
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "subProcess": false
+        }
+    ]
+}
