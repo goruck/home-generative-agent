@@ -5,14 +5,16 @@ services:
     volumes:
       - ..:/workspaces:cached
     user: vscode
+    environment:
+      HGA_RECOMMENDED_DB_PASSWORD: ha_password
     ports:
       - "8123:8123"
     # keep the container running so VS Code can attach
     command: sleep infinity
     depends_on:
-      - db
+      - pgvector_db
 
-  db:
+  pgvector_db:
     image: pgvector/pgvector:pg18-trixie
     restart: unless-stopped
     environment:

@@ -334,7 +334,6 @@ async def validate_face_api_url(
         if resp.status_code >= HTTP_STATUS_BAD_REQUEST:
             raise CannotConnectError
 
-
 async def validate_db_uri(hass: HomeAssistant, db_uri: str) -> None:
     """Validate PostgreSQL connection URI by executing a trivial query."""
     if not db_uri:

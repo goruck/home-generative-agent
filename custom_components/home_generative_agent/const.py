@@ -1,6 +1,8 @@
 """Constants for Home Generative Agent."""
 
+import os
 from typing import Annotated, Any, Literal, get_args
+from homeassistant.util.package import is_docker_env
 
 from annotated_types import Ge, Le
 
@@ -32,10 +34,20 @@ CRITICAL_PIN_MIN_LEN = 4
 CRITICAL_PIN_MAX_LEN = 10
 
 # ---- PostgreSQL (vector store + checkpointer) ----
+
+# -- version 1
 CONF_DB_URI = "db_uri"
-RECOMMENDED_DB_URI = (
-    "postgresql://ha_user:ha_password@localhost:5432/ha_db?sslmode=disable"
-)
+
+# -- version 2
+CONF_DB_NAME = "db_name"
+CONF_DB_PARAMS = "db_params"
+RECOMMENDED_DB_USERNAME = "ha_user"
+RECOMMENDED_DB_PASSWORD = os.getenv("HGA_RECOMMENDED_DB_PASSWORD", None)
+RECOMMENDED_DB_HOST = "pgvector_db" if is_docker_env() else "localhost"
+RECOMMENDED_DB_PORT = 5432
+RECOMMENDED_DB_NAME = "ha_db"
+RECOMMENDED_DB_PARAMS = [{"key": "sslmode", "value": "disable"}]
+
 CONF_DB_BOOTSTRAPPED = "db_bootstrapped"
 
 # ---- Notify service (for mobile push notifications) ----

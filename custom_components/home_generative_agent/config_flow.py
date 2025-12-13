@@ -12,14 +12,19 @@ from urllib.parse import urljoin
 import async_timeout
 import httpx
 import voluptuous as vol
+from homeassistant.core import callback
 from homeassistant.config_entries import (
     ConfigEntry,
+    ConfigSubentryFlow,
     ConfigFlow,
     ConfigFlowResult,
     OptionsFlow,
     OptionsFlowWithReload,
 )
-from homeassistant.const import CONF_API_KEY, CONF_LLM_HASS_API
+from homeassistant.const import (
+    CONF_API_KEY,
+    CONF_LLM_HASS_API,
+)
 from homeassistant.helpers import llm
 from homeassistant.helpers.httpx_client import get_async_client
 from homeassistant.helpers.selector import (
@@ -43,7 +48,6 @@ from .const import (
     CONF_CRITICAL_ACTION_PIN_ENABLED,
     CONF_CRITICAL_ACTION_PIN_HASH,
     CONF_CRITICAL_ACTION_PIN_SALT,
-    CONF_DB_URI,
     CONF_EMBEDDING_MODEL_PROVIDER,
     CONF_FACE_API_URL,
     CONF_FACE_RECOGNITION,
@@ -87,7 +91,6 @@ from .const import (
     MODEL_CATEGORY_SPECS,
     RECOMMENDED_CHAT_MODEL_PROVIDER,
     RECOMMENDED_CHAT_MODEL_TEMPERATURE,
-    RECOMMENDED_DB_URI,
     RECOMMENDED_EMBEDDING_MODEL_PROVIDER,
     RECOMMENDED_FACE_RECOGNITION,
     RECOMMENDED_MANAGE_CONTEXT_WITH_TOKENS,
@@ -123,12 +126,12 @@ from .core.utils import (
     hash_pin,
     list_mobile_notify_services,
     ollama_url_for_category,
-    validate_db_uri,
     validate_face_api_url,
     validate_gemini_key,
     validate_ollama_url,
     validate_openai_key,
 )
+from .flows.pgvector_db_subentry_flow import PgVectorDbSubentryFlow
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -160,10 +163,6 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
         ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
         vol.Optional(
             CONF_FACE_API_URL,
-        ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
-        vol.Required(
-            CONF_DB_URI,
-            description={"suggested_value": RECOMMENDED_DB_URI},
         ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
     },
 )
@@ -510,10 +509,6 @@ async def _schema_for(hass: HomeAssistant, opts: Mapping[str, Any]) -> VolDictTy
             CONF_FACE_API_URL,
             description={"suggested_value": (opts.get(CONF_FACE_API_URL))},
         ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
-        vol.Required(
-            CONF_DB_URI,
-            description={"suggested_value": (opts.get(CONF_DB_URI))},
-        ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
         vol.Optional(
             CONF_PROMPT,
             description={"suggested_value": opts.get(CONF_PROMPT)},
@@ -741,7 +736,7 @@ class _SecretSpec:
 class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Home Generative Agent."""
 
-    VERSION = 1
+    VERSION = 2
 
     async def _validate_present(
         self,
@@ -781,7 +776,6 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
                 data, CONF_OLLAMA_SUMMARIZATION_URL
             ),
             CONF_GEMINI_API_KEY: _get_str(data, CONF_GEMINI_API_KEY),
-            CONF_DB_URI: _get_str(data, CONF_DB_URI),
             CONF_FACE_API_URL: _get_str(data, CONF_FACE_API_URL),
         }
 
@@ -797,7 +791,6 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
                 "Ollama (summarization)",
             ),
             (CONF_GEMINI_API_KEY, validate_gemini_key, "Gemini"),
-            (CONF_DB_URI, validate_db_uri, "Database URI"),
             (CONF_FACE_API_URL, validate_face_api_url, "Face Recognition API"),
         ):
             code = await self._validate_present(self.hass, vals[key], validator, label)
@@ -829,7 +822,6 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
             CONF_OLLAMA_VLM_URL,
             CONF_OLLAMA_SUMMARIZATION_URL,
             CONF_GEMINI_API_KEY,
-            CONF_DB_URI,
             CONF_FACE_API_URL,
         ):
             if not vals[key]:
@@ -865,6 +857,14 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
     def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
         """Create the options flow."""
         return HomeGenerativeAgentOptionsFlow(config_entry)
+
+    @classmethod
+    @callback
+    def async_get_supported_subentry_types(
+        cls, config_entry: ConfigEntry
+    ) -> dict[str, type[ConfigSubentryFlow]]:
+        """Return supported subentry flow handlers."""
+        return {"database": PgVectorDbSubentryFlow}
 
 
 # ---------------------------
@@ -954,7 +954,6 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
             CONF_OLLAMA_VLM_URL,
             CONF_OLLAMA_SUMMARIZATION_URL,
             CONF_GEMINI_API_KEY,
-            CONF_DB_URI,
             CONF_FACE_API_URL,
         ):
             if k not in options and self.config_entry.data.get(k):
@@ -1021,31 +1020,6 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
 
             options[field] = ensure_http_url(raw)
 
-        return None
-
-    async def _maybe_edit_db_uri(
-        self,
-        options: dict[str, Any],
-        user_input: Mapping[str, Any] | None,
-    ) -> str | None:
-        """Validate/apply DB URI when present; return error code or None."""
-        if user_input is None or CONF_DB_URI not in user_input:
-            return None
-
-        raw = _get_str(user_input, CONF_DB_URI)
-        if not raw:
-            options.pop(CONF_DB_URI, None)
-            return None
-
-        try:
-            await validate_db_uri(self.hass, raw)
-        except CannotConnectError:
-            return "cannot_connect"
-        except Exception:
-            LOGGER.exception("Unexpected exception validating DB URI")
-            return "unknown"
-
-        options[CONF_DB_URI] = raw
         return None
 
     async def _maybe_edit_secret(
@@ -1150,7 +1124,6 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
             CONF_OLLAMA_VLM_URL,
             CONF_OLLAMA_SUMMARIZATION_URL,
             CONF_GEMINI_API_KEY,
-            CONF_DB_URI,
             CONF_FACE_API_URL,
         ):
             if not _get_str(final_options, k):
@@ -1203,8 +1176,6 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
 
         # Field-specific edits with validation/normalization
         err = await self._maybe_edit_ollama_urls(options, user_input)
-        if not err:
-            err = await self._maybe_edit_db_uri(options, user_input)
         if not err:
             err = await self._maybe_edit_face_recognition_url(options, user_input)
         if not err:
