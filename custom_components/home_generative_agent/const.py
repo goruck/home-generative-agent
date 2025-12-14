@@ -2,9 +2,9 @@
 
 import os
 from typing import Annotated, Any, Literal, get_args
-from homeassistant.util.package import is_docker_env
 
 from annotated_types import Ge, Le
+from homeassistant.util.package import is_docker_env
 
 DOMAIN = "home_generative_agent"
 

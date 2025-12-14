@@ -13,7 +13,14 @@ import aiofiles
 import voluptuous as vol
 from homeassistant.components.camera.const import DOMAIN as CAMERA_DOMAIN
 from homeassistant.config_entries import ConfigEntry, ConfigSubentry
-from homeassistant.const import CONF_API_KEY, Platform
+from homeassistant.const import (
+    CONF_API_KEY,
+    CONF_HOST,
+    CONF_PASSWORD,
+    CONF_PORT,
+    CONF_USERNAME,
+    Platform,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
@@ -34,12 +41,6 @@ from psycopg.rows import DictRow, dict_row
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
 from .agent.tools import analyze_image
-from homeassistant.const import (
-    CONF_USERNAME,
-    CONF_PASSWORD,
-    CONF_HOST,
-    CONF_PORT,
-)
 from .const import (
     CHAT_MODEL_MAX_TOKENS,
     CHAT_MODEL_REPEAT_PENALTY,
@@ -47,9 +48,9 @@ from .const import (
     CONF_CHAT_MODEL_PROVIDER,
     CONF_CHAT_MODEL_TEMPERATURE,
     CONF_DB_BOOTSTRAPPED,
-    CONF_DB_URI,
     CONF_DB_NAME,
     CONF_DB_PARAMS,
+    CONF_DB_URI,
     CONF_EMBEDDING_MODEL_PROVIDER,
     CONF_FACE_API_URL,
     CONF_FACE_RECOGNITION,
@@ -84,6 +85,12 @@ from .const import (
     EMBEDDING_MODEL_DIMS,
     RECOMMENDED_CHAT_MODEL_PROVIDER,
     RECOMMENDED_CHAT_MODEL_TEMPERATURE,
+    RECOMMENDED_DB_HOST,
+    RECOMMENDED_DB_NAME,
+    RECOMMENDED_DB_PARAMS,
+    RECOMMENDED_DB_PASSWORD,
+    RECOMMENDED_DB_PORT,
+    RECOMMENDED_DB_USERNAME,
     RECOMMENDED_EMBEDDING_MODEL_PROVIDER,
     RECOMMENDED_FACE_API_URL,
     RECOMMENDED_FACE_RECOGNITION,
@@ -109,12 +116,6 @@ from .const import (
     RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
     RECOMMENDED_VLM_PROVIDER,
     RECOMMENDED_VLM_TEMPERATURE,
-    RECOMMENDED_DB_USERNAME,
-    RECOMMENDED_DB_PASSWORD,
-    RECOMMENDED_DB_HOST,
-    RECOMMENDED_DB_PORT,
-    RECOMMENDED_DB_NAME,
-    RECOMMENDED_DB_PARAMS,
     SIGNAL_HGA_NEW_LATEST,
     SIGNAL_HGA_RECOGNIZED,
     SUMMARIZATION_MIRO_STAT,
@@ -127,6 +128,7 @@ from .const import (
     VLM_REPEAT_PENALTY,
     VLM_TOP_P,
 )
+from .core.db_utils import build_postgres_uri, parse_postgres_uri
 from .core.migrations import migrate_person_gallery
 from .core.person_gallery import PersonGalleryDAO
 from .core.runtime import HGAConfigEntry, HGAData
@@ -141,7 +143,6 @@ from .core.utils import (
     openai_healthy,
     reasoning_field,
 )
-from .core.db_utils import build_postgres_uri, parse_postgres_uri
 from .core.video_analyzer import VideoAnalyzer
 from .core.video_helpers import latest_target, publish_latest_atomic
 
@@ -831,6 +832,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool
     await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     return True
 
+
 async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:
     """
     Migrate config entry from version 1 -> 2.
@@ -888,12 +890,12 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
                         subentry,
                     )
                     LOGGER.info(
-                        "Created database subentry (ConfigSubentry + async_add_subentry) for entry %s",
+                        "Created database subentry for entry %s",
                         config_entry.entry_id,
                     )
                 except Exception:
                     LOGGER.exception(
-                        "Failed creating database subentry during migration for entry %s; falling back to options['database']",
+                        "Migration failed for entry %s']",
                         config_entry.entry_id,
                     )
                     return False

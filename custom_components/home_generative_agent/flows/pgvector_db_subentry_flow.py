@@ -1,31 +1,15 @@
-# ---------------------------
-# Database Config Flow
-# ---------------------------
+"""Database Config Flow."""
 
-from typing import TYPE_CHECKING, Any
-from ..core.db_utils import build_postgres_uri
-from ..core.utils import (
-    CannotConnectError,
-    InvalidAuthError,
-    validate_db_uri,
-)
-import voluptuous as vol
 import logging
-from ..const import (
-    CONF_DB_NAME,
-    CONF_DB_PARAMS,
-    RECOMMENDED_DB_USERNAME,
-    RECOMMENDED_DB_PASSWORD,
-    RECOMMENDED_DB_HOST,
-    RECOMMENDED_DB_PORT,
-    RECOMMENDED_DB_NAME,
-    RECOMMENDED_DB_PARAMS,
-)
+from typing import TYPE_CHECKING, Any
+
+import voluptuous as vol
+from homeassistant.config_entries import ConfigSubentryFlow, SubentryFlowResult
 from homeassistant.const import (
-    CONF_USERNAME,
-    CONF_PASSWORD,
     CONF_HOST,
+    CONF_PASSWORD,
     CONF_PORT,
+    CONF_USERNAME,
 )
 from homeassistant.helpers.selector import (
     NumberSelector,
@@ -35,18 +19,61 @@ from homeassistant.helpers.selector import (
     TextSelectorConfig,
     TextSelectorType,
 )
-from homeassistant.config_entries import ConfigSubentryFlow, SubentryFlowResult
+
+from home_generative_agent.const import (
+    CONF_DB_NAME,
+    CONF_DB_PARAMS,
+    RECOMMENDED_DB_HOST,
+    RECOMMENDED_DB_NAME,
+    RECOMMENDED_DB_PARAMS,
+    RECOMMENDED_DB_PASSWORD,
+    RECOMMENDED_DB_PORT,
+    RECOMMENDED_DB_USERNAME,
+)
+from home_generative_agent.core.db_utils import build_postgres_uri
+from home_generative_agent.core.utils import (
+    CannotConnectError,
+    InvalidAuthError,
+    validate_db_uri,
+)
 
 if TYPE_CHECKING:
     from homeassistant.helpers.typing import VolDictType
 
 LOGGER = logging.getLogger(__name__)
 
+
 class PgVectorDbSubentryFlow(ConfigSubentryFlow):
+    """
+    Config flow handler for pgvector (Postgres) database subentries.
+
+    This flow presents a form for users to input database connection details,
+    validates the URI, and either creates a new subentry or updates an existing
+    one.
+
+    """
+
     async def async_step_set_options(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
+        """
+        Show and handle the 'set_options' step.
 
+        When called without `user_input`, this method builds the form schema and
+        suggested defaults (either recommended values or existing subentry
+        values). When `user_input` is provided, it builds a Postgres URI from the
+        input and validates the connection. On success, it creates or updates
+        the subentry; on failure, it returns the form with errors.
+
+        Args:
+            user_input: Mapping of form keys to values supplied by the user, or
+                None when the form is first shown.
+
+        Returns:
+            A SubentryFlowResult which is either a form to display or an entry
+            creation/update result.
+
+        """
         errors: dict[str, str] = {}
 
         entry = self._get_entry()
@@ -70,7 +97,7 @@ class PgVectorDbSubentryFlow(ConfigSubentryFlow):
         else:
             try:
                 db_uri = build_postgres_uri(user_input)
-            except Exception:
+            except (KeyError, ValueError):
                 errors["base"] = "invalid_uri"
             else:
                 try:

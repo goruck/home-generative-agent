@@ -1,23 +1,25 @@
-from typing import Any
-from collections.abc import Iterable, Mapping
+"""Various pgvector database utility functions."""
 
-from urllib.parse import parse_qsl, unquote, urlparse, urlencode, urlunsplit
+from collections.abc import Iterable, Mapping
+from typing import Any
+from urllib.parse import parse_qsl, unquote, urlencode, urlparse, urlunsplit
+
 from homeassistant.const import (
-    CONF_USERNAME,
-    CONF_PASSWORD,
     CONF_HOST,
+    CONF_PASSWORD,
     CONF_PORT,
+    CONF_USERNAME,
 )
-from ..const import (
-    CONF_DB_NAME,
-    CONF_DB_PARAMS,
-)
+
+from home_generative_agent.const import CONF_DB_NAME, CONF_DB_PARAMS
+
 
 def parse_postgres_uri(uri: str) -> dict[str, Any]:
     """
     Parse a postgres URI into components.
 
-    Returns keys: username, password, host, port, dbname, params (list of {"key","value"}).
+    Returns keys: username, password, host, port, dbname, params
+                  (list of {"key","value"}).
     """
     parsed = urlparse(uri)
     username = unquote(parsed.username) if parsed.username else None
@@ -44,6 +46,7 @@ def parse_postgres_uri(uri: str) -> dict[str, Any]:
         "params": params,
     }
 
+
 def _build_postgres_params(
     params_list: Iterable[Mapping[str, Any]] | None,
 ) -> dict[str, str]:
@@ -56,6 +59,7 @@ def _build_postgres_params(
             if key:
                 params[key] = value
     return params
+
 
 def build_postgres_uri(data: dict[str, Any]) -> str:
     """Build a PostgreSQL URI from validated database form data."""

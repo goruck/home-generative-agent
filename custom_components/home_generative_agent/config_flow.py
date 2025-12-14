@@ -12,12 +12,11 @@ from urllib.parse import urljoin
 import async_timeout
 import httpx
 import voluptuous as vol
-from homeassistant.core import callback
 from homeassistant.config_entries import (
     ConfigEntry,
-    ConfigSubentryFlow,
     ConfigFlow,
     ConfigFlowResult,
+    ConfigSubentryFlow,
     OptionsFlow,
     OptionsFlowWithReload,
 )
@@ -25,6 +24,7 @@ from homeassistant.const import (
     CONF_API_KEY,
     CONF_LLM_HASS_API,
 )
+from homeassistant.core import callback
 from homeassistant.helpers import llm
 from homeassistant.helpers.httpx_client import get_async_client
 from homeassistant.helpers.selector import (
@@ -861,7 +861,7 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
     @classmethod
     @callback
     def async_get_supported_subentry_types(
-        cls, config_entry: ConfigEntry
+        cls, _config_entry: ConfigEntry
     ) -> dict[str, type[ConfigSubentryFlow]]:
         """Return supported subentry flow handlers."""
         return {"database": PgVectorDbSubentryFlow}
