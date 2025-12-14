@@ -12,8 +12,15 @@ from typing import TYPE_CHECKING, Any, cast
 import aiofiles
 import voluptuous as vol
 from homeassistant.components.camera.const import DOMAIN as CAMERA_DOMAIN
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_API_KEY, Platform
+from homeassistant.config_entries import ConfigEntry, ConfigSubentry
+from homeassistant.const import (
+    CONF_API_KEY,
+    CONF_HOST,
+    CONF_PASSWORD,
+    CONF_PORT,
+    CONF_USERNAME,
+    Platform,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
@@ -41,6 +48,8 @@ from .const import (
     CONF_CHAT_MODEL_PROVIDER,
     CONF_CHAT_MODEL_TEMPERATURE,
     CONF_DB_BOOTSTRAPPED,
+    CONF_DB_NAME,
+    CONF_DB_PARAMS,
     CONF_DB_URI,
     CONF_EMBEDDING_MODEL_PROVIDER,
     CONF_FACE_API_URL,
@@ -76,7 +85,12 @@ from .const import (
     EMBEDDING_MODEL_DIMS,
     RECOMMENDED_CHAT_MODEL_PROVIDER,
     RECOMMENDED_CHAT_MODEL_TEMPERATURE,
-    RECOMMENDED_DB_URI,
+    RECOMMENDED_DB_HOST,
+    RECOMMENDED_DB_NAME,
+    RECOMMENDED_DB_PARAMS,
+    RECOMMENDED_DB_PASSWORD,
+    RECOMMENDED_DB_PORT,
+    RECOMMENDED_DB_USERNAME,
     RECOMMENDED_EMBEDDING_MODEL_PROVIDER,
     RECOMMENDED_FACE_API_URL,
     RECOMMENDED_FACE_RECOGNITION,
@@ -114,6 +128,7 @@ from .const import (
     VLM_REPEAT_PENALTY,
     VLM_TOP_P,
 )
+from .core.db_utils import build_postgres_uri, parse_postgres_uri
 from .core.migrations import migrate_person_gallery
 from .core.person_gallery import PersonGalleryDAO
 from .core.runtime import HGAConfigEntry, HGAData
@@ -479,60 +494,77 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         "prepare_threshold": 0,
         "row_factory": dict_row,
     }
-    db_uri = conf.get(CONF_DB_URI, RECOMMENDED_DB_URI)
-    pool: AsyncConnectionPool[AsyncConnection[DictRow]] = AsyncConnectionPool(
-        conninfo=db_uri, min_size=5, max_size=20, kwargs=connection_kwargs, open=False
-    )
-    try:
-        await pool.open()
-    except PoolTimeout:
-        LOGGER.exception("Error opening postgresql db.")
-        return False
 
-    # Initialize database for long-term memory.
-    store = AsyncPostgresStore(
-        pool,
-        index=index_config if index_config else None,
-    )
-    # Initialize database for thread-based (short-term) memory.
-    checkpointer = AsyncPostgresSaver(pool)
-    # First-time setup (if needed)
-    await _bootstrap_db_once(hass, entry, store, checkpointer)
+    db_uri = None
+    for subentry in entry.subentries.values():
+        if subentry.subentry_type == "database":
+            db_uri = build_postgres_uri(subentry.data)
 
-    # Migrate person gallery DB schema (if needed)
-    try:
-        await migrate_person_gallery(pool)
-    except Exception:
-        LOGGER.exception("Error migrating person_gallery database schema.")
-        return False
+    if db_uri is not None:
+        pool: AsyncConnectionPool[AsyncConnection[DictRow]] = AsyncConnectionPool(
+            conninfo=db_uri,
+            min_size=5,
+            max_size=20,
+            kwargs=connection_kwargs,
+            open=False,
+        )
+        try:
+            await pool.open()
+        except PoolTimeout:
+            LOGGER.exception("Error opening postgresql db.")
+            return False
 
-    person_gallery = PersonGalleryDAO(pool)
+        # Initialize database for long-term memory.
+        store = AsyncPostgresStore(
+            pool,
+            index=index_config if index_config else None,
+        )
+        # Initialize database for thread-based (short-term) memory.
+        checkpointer = AsyncPostgresSaver(pool)
+        # First-time setup (if needed)
+        await _bootstrap_db_once(hass, entry, store, checkpointer)
 
-    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute("""
-                SELECT current_database() AS db,
-                    current_user     AS usr,
-                    inet_server_addr()::text AS host,
-                    inet_server_port()       AS port,
-                    current_schemas(true)    AS schemas,
-                    current_setting('search_path', true) AS search_path
-            """)
-        env = await cur.fetchone()
-        if env:
-            LOGGER.info(
-                "DB env: db=%s user=%s host=%s port=%s schemas=%s search_path=%s",
-                env["db"],
-                env["usr"],
-                env["host"],
-                env["port"],
-                env["schemas"],
-                env["search_path"],
-            )
+        # Migrate person gallery DB schema (if needed)
+        try:
+            await migrate_person_gallery(pool)
+        except Exception:
+            LOGGER.exception("Error migrating person_gallery database schema.")
+            return False
 
-        await cur.execute("SELECT COUNT(*) AS total FROM public.person_gallery")
-        resp = await cur.fetchone()
-        if resp:
-            LOGGER.info("Gallery rows visible to this connection: %s", resp["total"])
+        person_gallery = PersonGalleryDAO(pool)
+
+        async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute("""
+                    SELECT current_database() AS db,
+                        current_user     AS usr,
+                        inet_server_addr()::text AS host,
+                        inet_server_port()       AS port,
+                        current_schemas(true)    AS schemas,
+                        current_setting('search_path', true) AS search_path
+                """)
+            env = await cur.fetchone()
+            if env:
+                LOGGER.info(
+                    "DB env: db=%s user=%s host=%s port=%s schemas=%s search_path=%s",
+                    env["db"],
+                    env["usr"],
+                    env["host"],
+                    env["port"],
+                    env["schemas"],
+                    env["search_path"],
+                )
+
+            await cur.execute("SELECT COUNT(*) AS total FROM public.person_gallery")
+            resp = await cur.fetchone()
+            if resp:
+                LOGGER.info(
+                    "Gallery rows visible to this connection: %s", resp["total"]
+                )
+    else:
+        person_gallery = None
+        checkpointer = None
+        pool = None
+        store = None
 
     # ----- Choose concrete models for roles from constants -----
 
@@ -798,4 +830,96 @@ async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool
     await entry.runtime_data.pool.close()
     await entry.runtime_data.video_analyzer.stop()
     await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    return True
+
+
+async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:
+    """
+    Migrate config entry from version 1 -> 2.
+
+    - Move CONF_DB_URI (if present) into a config subentry of type "database".
+    - Remove CONF_DB_URI from the main entry and bump version to 2.
+    """
+    current_version = config_entry.version or 1
+
+    if current_version == 1:
+        LOGGER.info(
+            "Migrating %s config entry %s -> v2",
+            config_entry.domain,
+            config_entry.entry_id,
+        )
+
+        # Work on copies so we don't mutate original objects directly
+        new_data = dict(config_entry.data)
+        new_options = dict(config_entry.options)
+
+        # Look for old single DB URI in data (primary) or options
+        db_uri = new_data.pop(CONF_DB_URI, None) or new_options.pop(CONF_DB_URI, None)
+
+        if db_uri:
+            parsed = parse_postgres_uri(db_uri)
+
+            db_subentry_data = {
+                CONF_USERNAME: parsed.get("username") or RECOMMENDED_DB_USERNAME,
+                CONF_PASSWORD: parsed.get("password") or RECOMMENDED_DB_PASSWORD,
+                CONF_HOST: parsed.get("host") or RECOMMENDED_DB_HOST,
+                CONF_PORT: parsed.get("port") or RECOMMENDED_DB_PORT,
+                CONF_DB_NAME: parsed.get("dbname") or RECOMMENDED_DB_NAME,
+                CONF_DB_PARAMS: parsed.get("params") or RECOMMENDED_DB_PARAMS,
+            }
+
+            # If a database subentry already exists, skip creation
+            if any(
+                s.subentry_type == "database" for s in config_entry.subentries.values()
+            ):
+                LOGGER.debug(
+                    "Database subentry already exists for entry %s, skipping creation",
+                    config_entry.entry_id,
+                )
+            else:
+                # Try the newer API first if available
+                try:
+                    subentry = ConfigSubentry(
+                        subentry_type="database",
+                        title="Database",
+                        unique_id=f"{config_entry.entry_id}_database",
+                        data=db_subentry_data,
+                    )
+                    hass.config_entries.async_add_subentry(
+                        config_entry,
+                        subentry,
+                    )
+                    LOGGER.info(
+                        "Created database subentry for entry %s",
+                        config_entry.entry_id,
+                    )
+                except Exception:
+                    LOGGER.exception(
+                        "Migration failed for entry %s']",
+                        config_entry.entry_id,
+                    )
+                    return False
+        else:
+            LOGGER.debug(
+                "No %s found in entry %s; only bumping version.",
+                CONF_DB_URI,
+                config_entry.entry_id,
+            )
+
+        # Update the entry atomically (async_update_entry is synchronous; do not await)
+        try:
+            hass.config_entries.async_update_entry(
+                config_entry, data=new_data, options=new_options, version=2
+            )
+            LOGGER.info(
+                "Migration to version 2 finished for entry %s", config_entry.entry_id
+            )
+        except Exception:
+            LOGGER.exception(
+                "Failed to update config entry %s during migration",
+                config_entry.entry_id,
+            )
+            return False
+
+    # If already at newer version or migration succeeded
     return True

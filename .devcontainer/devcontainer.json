@@ -37,6 +37,6 @@
         }
     },
     "remoteUser": "vscode",
-    "runServices": [ "db" ],
+    "runServices": [ "pgvector_db" ],
     "shutdownAction": "stopCompose"
 }

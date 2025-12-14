@@ -11,8 +11,7 @@
           "ollama_vlm_url": "Ollama VLM sunucusu URL'si (isteğe bağlı)",
           "ollama_summarization_url": "Ollama özetleme sunucusu URL'si (isteğe bağlı)",
           "gemini_api_key": "Google Gemini API anahtarı (isteğe bağlı)",
-          "face_api_url": "Yüz tanıma sunucusu API URL'si (isteğe bağlı)",
-          "db_uri": "PostgreSQL Veritabanı URI (zorunlu)"
+          "face_api_url": "Yüz tanıma sunucusu API URL'si (isteğe bağlı)"
         }
       }
     },
@@ -40,7 +39,6 @@
           "ollama_vlm_url": "Ollama VLM sunucusu URL'si (isteğe bağlı)",
           "ollama_summarization_url": "Ollama özetleme sunucusu URL'si (isteğe bağlı)",
           "face_api_url": "Yüz tanıma API URL'si (isteğe bağlı)",
-          "db_uri": "PostgreSQL Veritabanı URI (zorunlu)",
           "prompt": "Talimatlar",
           "chat_model_provider": "Sohbet modeli sağlayıcısı",
           "ollama_chat_model": "Ollama sohbet modeli",
