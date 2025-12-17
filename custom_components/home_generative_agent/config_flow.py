@@ -861,9 +861,10 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
     @classmethod
     @callback
     def async_get_supported_subentry_types(
-        cls, _config_entry: ConfigEntry
+        cls, config_entry: ConfigEntry
     ) -> dict[str, type[ConfigSubentryFlow]]:
         """Return supported subentry flow handlers."""
+        _ = config_entry
         return {"database": PgVectorDbSubentryFlow}
 
 

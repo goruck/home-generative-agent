@@ -20,7 +20,7 @@ from homeassistant.helpers.selector import (
     TextSelectorType,
 )
 
-from home_generative_agent.const import (
+from ..const import (  # noqa: TID252
     CONF_DB_NAME,
     CONF_DB_PARAMS,
     RECOMMENDED_DB_HOST,
@@ -30,8 +30,8 @@ from home_generative_agent.const import (
     RECOMMENDED_DB_PORT,
     RECOMMENDED_DB_USERNAME,
 )
-from home_generative_agent.core.db_utils import build_postgres_uri
-from home_generative_agent.core.utils import (
+from ..core.db_utils import build_postgres_uri  # noqa: TID252
+from ..core.utils import (  # noqa: TID252
     CannotConnectError,
     InvalidAuthError,
     validate_db_uri,
