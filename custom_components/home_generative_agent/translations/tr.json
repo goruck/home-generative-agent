@@ -18,7 +18,74 @@
     "error": {
       "cannot_connect": "Servise ulaşılamıyor. Anahtarları/URL'leri kontrol edip tekrar deneyin.",
       "invalid_auth": "Geçersiz API anahtarı.",
+      "invalid_pin": "PIN 4-10 rakam olmalıdır.",
       "unknown": "Beklenmeyen hata."
+    }
+  },
+  "config_subentries": {
+    "database": {
+      "entry_type": "service",
+      "abort": {
+        "reconfigure_successful": "Veritabanı yapılandırması başarıyla güncellendi."
+      },
+      "initiate_flow": {
+        "reconfigure": "Veritabanını yeniden yapılandır",
+        "user": "Veritabanını kur"
+      },
+      "step": {
+        "set_options": {
+          "title": "Veritabanı kurulumu",
+          "description": "Veritabanı için gerekli parametreleri girin.",
+          "data": {
+            "username": "Veritabanı kullanıcı adı",
+            "password": "Veritabanı parolası",
+            "host": "Veritabanı ana makinesi",
+            "port": "Veritabanı bağlantı noktası (isteğe bağlı)",
+            "db_name": "Veritabanı adı",
+            "db_params": "Veritabanı bağlantı parametreleri (isteğe bağlı)"
+          }
+        }
+      },
+      "error": {
+        "cannot_connect": "Veritabanına bağlanılamadı. Ayarları kontrol edip tekrar deneyin.",
+        "invalid_auth": "Geçersiz yetkilendirme.",
+        "invalid_uri": "URI oluşturulamadı.",
+        "unknown": "Beklenmeyen hata."
+      }
+    },
+    "model_provider": {
+      "entry_type": "service",
+      "abort": {
+        "reconfigure_successful": "Model sağlayıcı güncellendi."
+      },
+      "initiate_flow": {
+        "reconfigure": "Model sağlayıcıyı yeniden yapılandır",
+        "user": "Model sağlayıcı ekle"
+      }
+    },
+    "feature": {
+      "entry_type": "service",
+      "abort": {
+        "reconfigure_successful": "Özellik güncellendi."
+      },
+      "initiate_flow": {
+        "reconfigure": "Özelliği yeniden yapılandır",
+        "user": "Özellik ekle"
+      }
+    }
+  },
+  "selector": {
+    "db_params": {
+      "fields": {
+        "key": {
+          "name": "Anahtar",
+          "description": "Bağlantı parametresi adı (ör. sslmode, connect_timeout)"
+        },
+        "value": {
+          "name": "Değer",
+          "description": "Bağlantı parametresi değeri (ör. disable, 30)"
+        }
+      }
     }
   },
   "exceptions": {
@@ -73,7 +140,9 @@
           "ollama_summarization_context_size": "Ollama özetleme modeli bağlam boyutu (token)",
           "manage_context_with_tokens": "Bağlam yönetim yöntemi",
           "max_tokens_in_context": "Sohbet bağlamındaki maksimum token sayısı",
-          "max_messages_in_context": "Sohbet bağlamındaki maksimum mesaj sayısı"
+          "max_messages_in_context": "Sohbet bağlamındaki maksimum mesaj sayısı",
+          "critical_action_pin_enabled": "Kritik eylemler için PIN zorunlu",
+          "critical_action_pin": "Kritik eylem PIN’i (kilit açma/kurma/açma için gerekli)"
         },
         "data_description": {
           "prompt": "LLM'in nasıl yanıt vermesi gerektiğini belirtin. Bu bir şablon olabilir."

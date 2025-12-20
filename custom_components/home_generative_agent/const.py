@@ -8,6 +8,12 @@ from homeassistant.util.package import is_docker_env
 
 DOMAIN = "home_generative_agent"
 
+CONFIG_ENTRY_VERSION = 3
+
+SUBENTRY_TYPE_DATABASE = "database"
+SUBENTRY_TYPE_MODEL_PROVIDER = "model_provider"
+SUBENTRY_TYPE_FEATURE = "feature"
+
 HTTP_STATUS_UNAUTHORIZED = 401
 HTTP_STATUS_BAD_REQUEST = 400
 HTTP_STATUS_WEBPAGE_NOT_FOUND = 404

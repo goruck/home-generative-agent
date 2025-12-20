@@ -80,6 +80,7 @@ from .const import (
     CONF_VIDEO_ANALYZER_MODE,
     CONF_VLM_PROVIDER,
     CONF_VLM_TEMPERATURE,
+    CONFIG_ENTRY_VERSION,
     CRITICAL_PIN_MAX_LEN,
     CRITICAL_PIN_MIN_LEN,
     DOMAIN,
@@ -115,6 +116,9 @@ from .const import (
     RECOMMENDED_VIDEO_ANALYZER_MODE,
     RECOMMENDED_VLM_PROVIDER,
     RECOMMENDED_VLM_TEMPERATURE,
+    SUBENTRY_TYPE_DATABASE,
+    SUBENTRY_TYPE_FEATURE,
+    SUBENTRY_TYPE_MODEL_PROVIDER,
     VIDEO_ANALYZER_MODE_ALWAYS_NOTIFY,
     VIDEO_ANALYZER_MODE_DISABLE,
     VIDEO_ANALYZER_MODE_NOTIFY_ON_ANOMALY,
@@ -131,6 +135,8 @@ from .core.utils import (
     validate_ollama_url,
     validate_openai_key,
 )
+from .flows.feature_subentry_flow import FeatureSubentryFlow
+from .flows.model_provider_subentry_flow import ModelProviderSubentryFlow
 from .flows.pgvector_db_subentry_flow import PgVectorDbSubentryFlow
 
 if TYPE_CHECKING:
@@ -736,7 +742,7 @@ class _SecretSpec:
 class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Home Generative Agent."""
 
-    VERSION = 2
+    VERSION = CONFIG_ENTRY_VERSION
 
     async def _validate_present(
         self,
@@ -865,7 +871,11 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> dict[str, type[ConfigSubentryFlow]]:
         """Return supported subentry flow handlers."""
         _ = config_entry
-        return {"database": PgVectorDbSubentryFlow}
+        return {
+            SUBENTRY_TYPE_DATABASE: PgVectorDbSubentryFlow,
+            SUBENTRY_TYPE_MODEL_PROVIDER: ModelProviderSubentryFlow,
+            SUBENTRY_TYPE_FEATURE: FeatureSubentryFlow,
+        }
 
 
 # ---------------------------

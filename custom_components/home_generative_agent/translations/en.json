@@ -24,48 +24,68 @@
   },
   "config_subentries": {
     "database": {
-        "entry_type": "service",
-        "abort": {
-            "reconfigure_successful": "Database configuration updated successfully."
-        },
-        "initiate_flow": {
-            "reconfigure": "Reconfigure Database",
-            "user": "Setup Database"
-        },
-        "step": {
-            "set_options": {
-                "title": "Database setup",
-                "description": "Enter the necessary parameters for the databse",
-                "data": {
-                    "username": "Database username",
-                    "password": "Database password",
-                    "host": "Database host",
-                    "port": "Database port (optional)",
-                    "db_name": "Database name",
-                    "db_params": "Database connection params (optional)"
-                }
-            }
-        },
-        "error": {
-            "cannot_connect": "Could not connect to the database. Check the database settings and try again.",
-            "invalid_auth": "Invalid authorization.",
-            "invalid_uri": "URI could not be generated.",
-            "unknown": "Unexpected error."
+      "entry_type": "service",
+      "abort": {
+        "reconfigure_successful": "Database configuration updated successfully."
+      },
+      "initiate_flow": {
+        "reconfigure": "Reconfigure Database",
+        "user": "Setup Database"
+      },
+      "step": {
+        "set_options": {
+          "title": "Database setup",
+          "description": "Enter the necessary parameters for the databse",
+          "data": {
+            "username": "Database username",
+            "password": "Database password",
+            "host": "Database host",
+            "port": "Database port (optional)",
+            "db_name": "Database name",
+            "db_params": "Database connection params (optional)"
+          }
         }
+      },
+      "error": {
+        "cannot_connect": "Could not connect to the database. Check the database settings and try again.",
+        "invalid_auth": "Invalid authorization.",
+        "invalid_uri": "URI could not be generated.",
+        "unknown": "Unexpected error."
+      }
+    },
+    "model_provider": {
+      "entry_type": "service",
+      "abort": {
+        "reconfigure_successful": "Model provider updated."
+      },
+      "initiate_flow": {
+        "reconfigure": "Reconfigure Model Provider",
+        "user": "Add Model Provider"
+      }
+    },
+    "feature": {
+      "entry_type": "service",
+      "abort": {
+        "reconfigure_successful": "Feature updated."
+      },
+      "initiate_flow": {
+        "reconfigure": "Reconfigure Feature",
+        "user": "Add Feature"
+      }
     }
   },
   "selector": {
     "db_params": {
-        "fields": {
-            "key": {
-                "name": "Key",
-                "description": "Connection parameter name (for example: sslmode, connect_timeout)"
-            },
-            "value": {
-                "name": "Value",
-                "description": "Connection parameter value (for example: disable, 30)"
-            }
+      "fields": {
+        "key": {
+          "name": "Key",
+          "description": "Connection parameter name (for example: sslmode, connect_timeout)"
+        },
+        "value": {
+          "name": "Value",
+          "description": "Connection parameter value (for example: disable, 30)"
         }
+      }
     }
   },
   "exceptions": {

@@ -29,6 +29,7 @@ from ..const import (  # noqa: TID252
     RECOMMENDED_DB_PASSWORD,
     RECOMMENDED_DB_PORT,
     RECOMMENDED_DB_USERNAME,
+    SUBENTRY_TYPE_DATABASE,
 )
 from ..core.db_utils import build_postgres_uri  # noqa: TID252
 from ..core.utils import (  # noqa: TID252
@@ -78,7 +79,11 @@ class PgVectorDbSubentryFlow(ConfigSubentryFlow):
 
         entry = self._get_entry()
         current_subentry = next(
-            (v for v in entry.subentries.values() if v.subentry_type == "database"),
+            (
+                v
+                for v in entry.subentries.values()
+                if v.subentry_type == SUBENTRY_TYPE_DATABASE
+            ),
             None,
         )
 
