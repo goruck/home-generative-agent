@@ -190,6 +190,10 @@ class ModelProviderSubentryFlow(ConfigSubentryFlow):
         """Configure provider-specific settings."""
         provider_type = self._provider_type or "ollama"
         errors: dict[str, str] = {}
+        current = _current_subentry(self)
+        current_settings = (
+            dict(current.data.get("settings", {})) if current else {}
+        )
 
         if user_input is not None:
             settings: dict[str, Any] = {}
@@ -246,7 +250,6 @@ class ModelProviderSubentryFlow(ConfigSubentryFlow):
                     "capabilities": sorted(caps),
                     "settings": settings,
                 }
-                current = _current_subentry(self)
                 if current is None:
                     if self.source not in (SOURCE_USER, SOURCE_RECONFIGURE):
                         return self.async_abort(reason="no_existing_subentry")
@@ -271,25 +274,37 @@ class ModelProviderSubentryFlow(ConfigSubentryFlow):
         if provider_type == "ollama":
             schema = vol.Schema(
                 {
-                    vol.Required("base_url"): TextSelector(
-                        TextSelectorConfig(type=TextSelectorType.TEXT)
-                    )
+                    vol.Required(
+                        "base_url",
+                        description={
+                            "suggested_value": current_settings.get("base_url")
+                        },
+                        default=current_settings.get("base_url") or "",
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT))
                 }
             )
         elif provider_type == "openai":
             schema = vol.Schema(
                 {
-                    vol.Required(CONF_API_KEY): TextSelector(
-                        TextSelectorConfig(type=TextSelectorType.PASSWORD)
-                    )
+                    vol.Required(
+                        CONF_API_KEY,
+                        description={
+                            "suggested_value": current_settings.get("api_key")
+                        },
+                        default=current_settings.get("api_key") or "",
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
                 }
             )
         else:
             schema = vol.Schema(
                 {
-                    vol.Required(CONF_GEMINI_API_KEY): TextSelector(
-                        TextSelectorConfig(type=TextSelectorType.PASSWORD)
-                    )
+                    vol.Required(
+                        CONF_GEMINI_API_KEY,
+                        description={
+                            "suggested_value": current_settings.get("api_key")
+                        },
+                        default=current_settings.get("api_key") or "",
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
                 }
             )
 
