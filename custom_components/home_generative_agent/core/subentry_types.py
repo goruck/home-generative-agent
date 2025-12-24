@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 ProviderType = Literal[
     "ollama",
@@ -34,4 +37,5 @@ class FeatureConfig:
     name: str
     feature_type: str
     model_provider_id: str | None
-    data: dict
+    model: Mapping[str, object]
+    config: Mapping[str, object]

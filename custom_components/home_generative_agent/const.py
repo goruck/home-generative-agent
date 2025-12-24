@@ -8,7 +8,7 @@ from homeassistant.util.package import is_docker_env
 
 DOMAIN = "home_generative_agent"
 
-CONFIG_ENTRY_VERSION = 3
+CONFIG_ENTRY_VERSION = 4
 
 SUBENTRY_TYPE_DATABASE = "database"
 SUBENTRY_TYPE_MODEL_PROVIDER = "model_provider"
@@ -48,8 +48,8 @@ CONF_DB_URI = "db_uri"
 CONF_DB_NAME = "db_name"
 CONF_DB_PARAMS = "db_params"
 RECOMMENDED_DB_USERNAME = "ha_user"
-RECOMMENDED_DB_PASSWORD = os.getenv("HGA_RECOMMENDED_DB_PASSWORD", None)
-RECOMMENDED_DB_HOST = "pgvector_db" if is_docker_env() else "localhost"
+RECOMMENDED_DB_PASSWORD = "ha_password"
+RECOMMENDED_DB_HOST = "localhost"
 RECOMMENDED_DB_PORT = 5432
 RECOMMENDED_DB_NAME = "ha_db"
 RECOMMENDED_DB_PARAMS = [{"key": "sslmode", "value": "disable"}]
@@ -106,6 +106,15 @@ OLLAMA_BOOL_HINT_TAGS = {
 # ---- Global options ----
 CONF_RECOMMENDED = "recommended"
 CONF_PROMPT = "prompt"
+CONF_DISABLED_FEATURES = "disabled_features"
+
+# ---- Feature model config (per-feature subentry) ----
+CONF_FEATURE_MODEL = "model"
+CONF_FEATURE_MODEL_NAME = "model_name"
+CONF_FEATURE_MODEL_TEMPERATURE = "temperature"
+CONF_FEATURE_MODEL_REASONING = "reasoning"
+CONF_FEATURE_MODEL_KEEPALIVE = "keepalive_s"
+CONF_FEATURE_MODEL_CONTEXT_SIZE = "context_size"
 
 # --- Gemini API key (used in config_flow/__init__.py) ---
 CONF_GEMINI_API_KEY = "gemini_api_key"

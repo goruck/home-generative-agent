@@ -15,8 +15,6 @@ from homeassistant.config_entries import (
 )
 from homeassistant.const import CONF_API_KEY
 from homeassistant.helpers.selector import (
-    NumberSelector,
-    NumberSelectorConfig,
     SelectOptionDict,
     SelectSelector,
     SelectSelectorConfig,
@@ -28,26 +26,7 @@ from homeassistant.helpers.selector import (
 
 from ..const import (  # noqa: TID252
     CONF_GEMINI_API_KEY,
-    CONF_OLLAMA_URL,
-    RECOMMENDED_GEMINI_CHAT_MODEL,
-    RECOMMENDED_GEMINI_EMBEDDING_MODEL,
-    RECOMMENDED_GEMINI_SUMMARIZATION_MODEL,
-    RECOMMENDED_GEMINI_VLM,
-    RECOMMENDED_OLLAMA_CHAT_KEEPALIVE,
-    RECOMMENDED_OLLAMA_CHAT_MODEL,
-    RECOMMENDED_OLLAMA_CONTEXT_SIZE,
-    RECOMMENDED_OLLAMA_EMBEDDING_MODEL,
-    RECOMMENDED_OLLAMA_SUMMARIZATION_KEEPALIVE,
-    RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL,
-    RECOMMENDED_OLLAMA_SUMMARIZATION_URL,
-    RECOMMENDED_OLLAMA_URL,
-    RECOMMENDED_OLLAMA_VLM,
-    RECOMMENDED_OLLAMA_VLM_KEEPALIVE,
-    RECOMMENDED_OLLAMA_VLM_URL,
-    RECOMMENDED_OPENAI_CHAT_MODEL,
-    RECOMMENDED_OPENAI_EMBEDDING_MODEL,
-    RECOMMENDED_OPENAI_SUMMARIZATION_MODEL,
-    RECOMMENDED_OPENAI_VLM,
+    SUBENTRY_TYPE_MODEL_PROVIDER,
 )
 from ..core.utils import (  # noqa: TID252
     CannotConnectError,
@@ -66,6 +45,12 @@ ProviderNames = {
     "gemini": "Cloud-LLM Gemini",
 }
 
+ProviderCapabilities = {
+    "ollama": {"chat", "vlm", "summarization", "embedding"},
+    "openai": {"chat", "vlm", "summarization", "embedding"},
+    "gemini": {"chat", "vlm", "summarization", "embedding"},
+}
+
 
 def _current_subentry(flow: ConfigSubentryFlow) -> ConfigSubentry | None:
     """Return the subentry currently being edited, if any."""
@@ -79,84 +64,112 @@ def _current_subentry(flow: ConfigSubentryFlow) -> ConfigSubentry | None:
         matches = [
             subentry
             for subentry in entry.subentries.values()
-            if subentry.subentry_type == "model_provider"
+            if subentry.subentry_type == SUBENTRY_TYPE_MODEL_PROVIDER
         ]
         if len(matches) == 1:
             return matches[0]
     return None
 
 
-def _capabilities_from_settings(data: dict[str, Any]) -> list[str]:
-    """Infer capability categories from model fields."""
-    caps = [
-        cat
-        for cat in ("chat", "vlm", "summarization", "embedding")
-        if data.get(f"{cat}_model")
-    ]
-    return caps or ["chat"]
-
-
 class ModelProviderSubentryFlow(ConfigSubentryFlow):
     """Config flow handler for model provider subentries."""
 
     def __init__(self) -> None:
-        """Initialize state."""
+        """Initialize the config flow."""
+        self._deployment: str | None = None
         self._provider_type: str | None = None
         self._name: str | None = None
 
     def _schedule_reload(self) -> None:
-        """Reload the parent entry to apply subentry changes."""
         entry = self._get_entry()
         self.hass.async_create_task(
             self.hass.config_entries.async_reload(entry.entry_id)
         )
 
-    def _default_provider_from_entry(self) -> str:
-        """Choose a reasonable default based on configured options."""
-        entry = self._get_entry()
-        options = {**entry.data, **entry.options}
-        if options.get(CONF_API_KEY):
-            return "openai"
-        if options.get(CONF_GEMINI_API_KEY):
-            return "gemini"
-        if options.get(CONF_OLLAMA_URL):
-            return "ollama"
-        return "ollama"
+    def _provider_options(self) -> list[SelectOptionDict]:
+        opts: list[SelectOptionDict] = []
+        if self._deployment == "edge":
+            opts.append(SelectOptionDict(label="Ollama", value="ollama"))
+        if self._deployment == "cloud":
+            opts.extend(
+                [
+                    SelectOptionDict(label="OpenAI", value="openai"),
+                    SelectOptionDict(label="Gemini", value="gemini"),
+                ]
+            )
+        if not opts:
+            opts = [
+                SelectOptionDict(label="Ollama", value="ollama"),
+                SelectOptionDict(label="OpenAI", value="openai"),
+                SelectOptionDict(label="Gemini", value="gemini"),
+            ]
+        return opts
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
-        """Select provider type and friendly name."""
+        """Entry point for model provider setup or reconfigure."""
         current = _current_subentry(self)
-        default_provider = self._provider_type or (
-            current.data.get("provider_type")
-            if current
-            else self._default_provider_from_entry()
-        )
-        default_name = self._name or (current.title if current else None)
-        provider_key = default_provider or "ollama"
-        default_name = default_name or ProviderNames.get(provider_key, "Model Provider")
+        if current:
+            self._provider_type = current.data.get("provider_type")
+            provider_type = self._provider_type or "ollama"
+            self._name = current.title or ProviderNames.get(provider_type, "Provider")
+            self._deployment = current.data.get("deployment")
+            return await self.async_step_provider(user_input)
+        return await self.async_step_deployment(user_input)
 
+    async_step_reconfigure = async_step_user
+
+    async def async_step_deployment(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Select deployment type (edge or cloud)."""
+        if user_input is not None:
+            self._deployment = user_input.get("deployment")
+            return await self.async_step_provider()
+
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    "deployment",
+                    default=self._deployment or "edge",
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(label="Edge", value="edge"),
+                            SelectOptionDict(label="Cloud", value="cloud"),
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                        sort=False,
+                        custom_value=False,
+                    )
+                )
+            }
+        )
+        return self.async_show_form(step_id="deployment", data_schema=schema)
+
+    async def async_step_provider(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Select provider type and name."""
         if user_input is not None:
             self._provider_type = user_input["provider_type"]
             provider_type = self._provider_type or "ollama"
             self._name = user_input.get("name") or ProviderNames.get(
                 provider_type, "Model Provider"
             )
-            return await self.async_step_config()
+            return await self.async_step_settings()
 
+        provider_type = self._provider_type or "ollama"
+        default_name = self._name or ProviderNames.get(provider_type, "Model Provider")
         schema = vol.Schema(
             {
                 vol.Required(
                     "provider_type",
-                    default=default_provider,
+                    default=provider_type,
                 ): SelectSelector(
                     SelectSelectorConfig(
-                        options=[
-                            SelectOptionDict(label="Ollama", value="ollama"),
-                            SelectOptionDict(label="OpenAI", value="openai"),
-                            SelectOptionDict(label="Gemini", value="gemini"),
-                        ],
+                        options=self._provider_options(),
                         mode=SelectSelectorMode.DROPDOWN,
                         sort=False,
                         custom_value=False,
@@ -169,333 +182,68 @@ class ModelProviderSubentryFlow(ConfigSubentryFlow):
                 ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             }
         )
-        return self.async_show_form(step_id="user", data_schema=schema)
+        return self.async_show_form(step_id="provider", data_schema=schema)
 
-    async_step_reconfigure = async_step_user
-
-    def _ollama_defaults(self) -> dict[str, Any]:
-        return {
-            "name": ProviderNames["ollama"],
-            "base_url": RECOMMENDED_OLLAMA_URL,
-            "chat_url": RECOMMENDED_OLLAMA_URL,
-            "vlm_url": RECOMMENDED_OLLAMA_VLM_URL,
-            "summarization_url": RECOMMENDED_OLLAMA_SUMMARIZATION_URL,
-            "chat_model": RECOMMENDED_OLLAMA_CHAT_MODEL,
-            "vlm_model": RECOMMENDED_OLLAMA_VLM,
-            "summarization_model": RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL,
-            "embedding_model": RECOMMENDED_OLLAMA_EMBEDDING_MODEL,
-            "chat_keepalive": RECOMMENDED_OLLAMA_CHAT_KEEPALIVE,
-            "vlm_keepalive": RECOMMENDED_OLLAMA_VLM_KEEPALIVE,
-            "summarization_keepalive": RECOMMENDED_OLLAMA_SUMMARIZATION_KEEPALIVE,
-            "chat_context": RECOMMENDED_OLLAMA_CONTEXT_SIZE,
-            "vlm_context": RECOMMENDED_OLLAMA_CONTEXT_SIZE,
-            "summarization_context": RECOMMENDED_OLLAMA_CONTEXT_SIZE,
-            "reasoning": None,
-        }
-
-    def _openai_defaults(self) -> dict[str, Any]:
-        return {
-            "name": ProviderNames["openai"],
-            "api_key": "",
-            "chat_model": RECOMMENDED_OPENAI_CHAT_MODEL,
-            "vlm_model": RECOMMENDED_OPENAI_VLM,
-            "summarization_model": RECOMMENDED_OPENAI_SUMMARIZATION_MODEL,
-            "embedding_model": RECOMMENDED_OPENAI_EMBEDDING_MODEL,
-        }
-
-    def _gemini_defaults(self) -> dict[str, Any]:
-        return {
-            "name": ProviderNames["gemini"],
-            "api_key": "",
-            "chat_model": RECOMMENDED_GEMINI_CHAT_MODEL,
-            "vlm_model": RECOMMENDED_GEMINI_VLM,
-            "summarization_model": RECOMMENDED_GEMINI_SUMMARIZATION_MODEL,
-            "embedding_model": RECOMMENDED_GEMINI_EMBEDDING_MODEL,
-        }
-
-    def _defaults_for_provider(self, provider_type: str) -> dict[str, Any]:
-        current = _current_subentry(self)
-        if current:
-            settings = current.data.get("settings") or {}
-            if settings:
-                return dict(settings)
-
-        if provider_type == "openai":
-            return self._openai_defaults()
-        if provider_type == "gemini":
-            return self._gemini_defaults()
-        return self._ollama_defaults()
-
-    def _ollama_schema(self, defaults: dict[str, Any]) -> vol.Schema:
-        reasoning_value = defaults.get("reasoning")
-        if reasoning_value is True:
-            reasoning_default = "true"
-        elif reasoning_value is False or reasoning_value is None:
-            reasoning_default = "false"
-        else:
-            reasoning_default = str(reasoning_value)
-        return vol.Schema(
-            {
-                vol.Required(
-                    "base_url",
-                    description={"suggested_value": defaults.get("base_url")},
-                    default=defaults.get("base_url"),
-                ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
-                vol.Optional(
-                    "chat_url",
-                    description={"suggested_value": defaults.get("chat_url")},
-                    default=defaults.get("chat_url"),
-                ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
-                vol.Optional(
-                    "vlm_url",
-                    description={"suggested_value": defaults.get("vlm_url")},
-                    default=defaults.get("vlm_url"),
-                ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
-                vol.Optional(
-                    "summarization_url",
-                    description={"suggested_value": defaults.get("summarization_url")},
-                    default=defaults.get("summarization_url"),
-                ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
-                vol.Required(
-                    "chat_model",
-                    description={"suggested_value": defaults.get("chat_model")},
-                    default=defaults.get("chat_model"),
-                ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
-                vol.Required(
-                    "vlm_model",
-                    description={"suggested_value": defaults.get("vlm_model")},
-                    default=defaults.get("vlm_model"),
-                ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
-                vol.Required(
-                    "summarization_model",
-                    description={
-                        "suggested_value": defaults.get("summarization_model")
-                    },
-                    default=defaults.get("summarization_model"),
-                ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
-                vol.Optional(
-                    "embedding_model",
-                    description={"suggested_value": defaults.get("embedding_model")},
-                    default=defaults.get("embedding_model"),
-                ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
-                vol.Optional(
-                    "chat_keepalive",
-                    description={"suggested_value": defaults.get("chat_keepalive")},
-                    default=defaults.get("chat_keepalive"),
-                ): NumberSelector(NumberSelectorConfig(step=1)),
-                vol.Optional(
-                    "vlm_keepalive",
-                    description={"suggested_value": defaults.get("vlm_keepalive")},
-                    default=defaults.get("vlm_keepalive"),
-                ): NumberSelector(NumberSelectorConfig(step=1)),
-                vol.Optional(
-                    "summarization_keepalive",
-                    description={
-                        "suggested_value": defaults.get("summarization_keepalive")
-                    },
-                    default=defaults.get("summarization_keepalive"),
-                ): NumberSelector(NumberSelectorConfig(step=1)),
-                vol.Optional(
-                    "chat_context",
-                    description={"suggested_value": defaults.get("chat_context")},
-                    default=defaults.get("chat_context"),
-                ): NumberSelector(NumberSelectorConfig(min=64, max=65536, step=1)),
-                vol.Optional(
-                    "vlm_context",
-                    description={"suggested_value": defaults.get("vlm_context")},
-                    default=defaults.get("vlm_context"),
-                ): NumberSelector(NumberSelectorConfig(min=64, max=65536, step=1)),
-                vol.Optional(
-                    "summarization_context",
-                    description={
-                        "suggested_value": defaults.get("summarization_context")
-                    },
-                    default=defaults.get("summarization_context"),
-                ): NumberSelector(NumberSelectorConfig(min=64, max=65536, step=1)),
-                vol.Optional(
-                    "reasoning",
-                    description={"suggested_value": reasoning_default},
-                    default=reasoning_default,
-                ): SelectSelector(
-                    SelectSelectorConfig(
-                        options=[
-                            SelectOptionDict(label="Off", value="false"),
-                            SelectOptionDict(label="On", value="true"),
-                            SelectOptionDict(label="GPT-OSS effort", value="low"),
-                        ],
-                        mode=SelectSelectorMode.DROPDOWN,
-                        sort=False,
-                        custom_value=True,
-                    )
-                ),
-            }
-        )
-
-    def _openai_schema(self, defaults: dict[str, Any]) -> vol.Schema:
-        return vol.Schema(
-            {
-                vol.Required(
-                    CONF_API_KEY,
-                    description={"suggested_value": defaults.get("api_key")},
-                    default=defaults.get("api_key"),
-                ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
-                vol.Required(
-                    "chat_model",
-                    description={"suggested_value": defaults.get("chat_model")},
-                    default=defaults.get("chat_model"),
-                ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
-                vol.Optional(
-                    "vlm_model",
-                    description={"suggested_value": defaults.get("vlm_model")},
-                    default=defaults.get("vlm_model"),
-                ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
-                vol.Optional(
-                    "summarization_model",
-                    description={
-                        "suggested_value": defaults.get("summarization_model")
-                    },
-                    default=defaults.get("summarization_model"),
-                ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
-                vol.Optional(
-                    "embedding_model",
-                    description={"suggested_value": defaults.get("embedding_model")},
-                    default=defaults.get("embedding_model"),
-                ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
-            }
-        )
-
-    def _gemini_schema(self, defaults: dict[str, Any]) -> vol.Schema:
-        return vol.Schema(
-            {
-                vol.Required(
-                    CONF_GEMINI_API_KEY,
-                    description={"suggested_value": defaults.get("api_key")},
-                    default=defaults.get("api_key"),
-                ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
-                vol.Required(
-                    "chat_model",
-                    description={"suggested_value": defaults.get("chat_model")},
-                    default=defaults.get("chat_model"),
-                ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
-                vol.Optional(
-                    "vlm_model",
-                    description={"suggested_value": defaults.get("vlm_model")},
-                    default=defaults.get("vlm_model"),
-                ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
-                vol.Optional(
-                    "summarization_model",
-                    description={
-                        "suggested_value": defaults.get("summarization_model")
-                    },
-                    default=defaults.get("summarization_model"),
-                ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
-                vol.Optional(
-                    "embedding_model",
-                    description={"suggested_value": defaults.get("embedding_model")},
-                    default=defaults.get("embedding_model"),
-                ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
-            }
-        )
-
-    def _schema_for_provider(
-        self, provider_type: str, defaults: dict[str, Any]
-    ) -> vol.Schema:
-        if provider_type == "openai":
-            return self._openai_schema(defaults)
-        if provider_type == "gemini":
-            return self._gemini_schema(defaults)
-        return self._ollama_schema(defaults)
-
-    async def _validate_ollama(
-        self, data: dict[str, Any], errors: dict[str, str]
-    ) -> dict[str, Any]:
-        """Normalize Ollama URLs and validate connectivity."""
-        normalized = dict(data)
-        for field in ("base_url", "chat_url", "vlm_url", "summarization_url"):
-            if normalized.get(field):
-                normalized[field] = ensure_http_url(str(normalized[field]))
-        try:
-            await validate_ollama_url(self.hass, normalized["base_url"])
-        except CannotConnectError:
-            errors["base"] = "cannot_connect"
-        except Exception:
-            LOGGER.exception("Unexpected exception validating Ollama URL")
-            errors["base"] = "unknown"
-        return normalized
-
-    async def _validate_openai(
-        self, data: dict[str, Any], errors: dict[str, str]
-    ) -> dict[str, Any]:
-        """Validate OpenAI API key when present."""
-        if not data.get(CONF_API_KEY):
-            errors["base"] = "invalid_auth"
-            return data
-        try:
-            await validate_openai_key(self.hass, data[CONF_API_KEY])
-        except InvalidAuthError:
-            LOGGER.warning("OpenAI key validation failed; saving without verification.")
-        except CannotConnectError:
-            errors["base"] = "cannot_connect"
-        except Exception:
-            LOGGER.exception("Unexpected exception validating OpenAI key")
-            errors["base"] = "unknown"
-        return data
-
-    async def _validate_gemini(
-        self, data: dict[str, Any], errors: dict[str, str]
-    ) -> dict[str, Any]:
-        """Validate Gemini API key when present."""
-        if not data.get(CONF_GEMINI_API_KEY):
-            errors["base"] = "invalid_auth"
-            return data
-        try:
-            await validate_gemini_key(self.hass, data[CONF_GEMINI_API_KEY])
-        except InvalidAuthError:
-            errors["base"] = "invalid_auth"
-        except CannotConnectError:
-            errors["base"] = "cannot_connect"
-        except Exception:
-            LOGGER.exception("Unexpected exception validating Gemini key")
-            errors["base"] = "unknown"
-        return data
-
-    async def async_step_config(
+    async def async_step_settings(  # noqa: PLR0912, PLR0915
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
         """Configure provider-specific settings."""
-        errors: dict[str, str] = {}
         provider_type = self._provider_type or "ollama"
-        defaults = self._defaults_for_provider(provider_type)
-        name = (
-            self._name
-            or defaults.get("name")
-            or ProviderNames.get(provider_type, "Model Provider")
-        )
+        errors: dict[str, str] = {}
 
         if user_input is not None:
-            settings = dict(defaults)
-            settings.update(user_input)
-            if "reasoning" in settings:
-                raw_reasoning = settings.get("reasoning")
-                if raw_reasoning in ("false", "", None):
-                    settings["reasoning"] = None
-                elif raw_reasoning == "true":
-                    settings["reasoning"] = True
-                else:
-                    settings["reasoning"] = raw_reasoning
+            settings: dict[str, Any] = {}
             if provider_type == "ollama":
-                settings = await self._validate_ollama(settings, errors)
+                base_url = user_input.get("base_url")
+                if not base_url:
+                    errors["base"] = "cannot_connect"
+                else:
+                    settings["base_url"] = ensure_http_url(str(base_url))
+                    try:
+                        await validate_ollama_url(self.hass, settings["base_url"])
+                    except CannotConnectError:
+                        errors["base"] = "cannot_connect"
+                    except Exception:
+                        LOGGER.exception("Unexpected exception validating Ollama URL")
+                        errors["base"] = "unknown"
             elif provider_type == "openai":
-                settings = await self._validate_openai(settings, errors)
+                api_key = user_input.get(CONF_API_KEY)
+                if not api_key:
+                    errors["base"] = "invalid_auth"
+                else:
+                    try:
+                        await validate_openai_key(self.hass, api_key)
+                    except InvalidAuthError:
+                        errors["base"] = "invalid_auth"
+                    except CannotConnectError:
+                        errors["base"] = "cannot_connect"
+                    except Exception:
+                        LOGGER.exception("Unexpected exception validating OpenAI key")
+                        errors["base"] = "unknown"
+                    settings["api_key"] = api_key
             elif provider_type == "gemini":
-                settings = await self._validate_gemini(settings, errors)
+                api_key = user_input.get(CONF_GEMINI_API_KEY)
+                if not api_key:
+                    errors["base"] = "invalid_auth"
+                else:
+                    try:
+                        await validate_gemini_key(self.hass, api_key)
+                    except InvalidAuthError:
+                        errors["base"] = "invalid_auth"
+                    except CannotConnectError:
+                        errors["base"] = "cannot_connect"
+                    except Exception:
+                        LOGGER.exception("Unexpected exception validating Gemini key")
+                        errors["base"] = "unknown"
+                    settings["api_key"] = api_key
 
             if not errors:
-                caps = _capabilities_from_settings(settings)
+                caps = ProviderCapabilities.get(provider_type, {"chat"})
                 payload = {
                     "provider_type": provider_type,
-                    "name": name,
-                    "capabilities": caps,
+                    "name": self._name or ProviderNames.get(provider_type, "Provider"),
+                    "deployment": self._deployment,
+                    "capabilities": sorted(caps),
                     "settings": settings,
                 }
                 current = _current_subentry(self)
@@ -506,19 +254,45 @@ class ModelProviderSubentryFlow(ConfigSubentryFlow):
                         self._source = SOURCE_USER
                         self.context["source"] = SOURCE_USER
                     self._schedule_reload()
-                    return self.async_create_entry(title=name, data=payload)
-                self._schedule_reload()
-                return self.async_update_and_abort(
-                    self._get_entry(),
-                    current,
-                    data=payload,
-                    title=name,
-                )
+                    result = self.async_create_entry(
+                        title=payload["name"], data=payload
+                    )
+                else:
+                    self._schedule_reload()
+                    result = self.async_update_and_abort(
+                        self._get_entry(),
+                        current,
+                        data=payload,
+                        title=payload["name"],
+                    )
 
-        schema = self._schema_for_provider(provider_type, defaults)
+                return result
+
+        if provider_type == "ollama":
+            schema = vol.Schema(
+                {
+                    vol.Required("base_url"): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.TEXT)
+                    )
+                }
+            )
+        elif provider_type == "openai":
+            schema = vol.Schema(
+                {
+                    vol.Required(CONF_API_KEY): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.PASSWORD)
+                    )
+                }
+            )
+        else:
+            schema = vol.Schema(
+                {
+                    vol.Required(CONF_GEMINI_API_KEY): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.PASSWORD)
+                    )
+                }
+            )
+
         return self.async_show_form(
-            step_id="config",
-            data_schema=schema,
-            errors=errors,
-            description_placeholders={"name": name},
+            step_id="settings", data_schema=schema, errors=errors
         )

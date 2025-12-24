@@ -20,6 +20,12 @@ from ..const import (  # noqa: TID252
     CONF_DB_PARAMS,
     CONF_DB_URI,
     CONF_EMBEDDING_MODEL_PROVIDER,
+    CONF_FEATURE_MODEL,
+    CONF_FEATURE_MODEL_CONTEXT_SIZE,
+    CONF_FEATURE_MODEL_KEEPALIVE,
+    CONF_FEATURE_MODEL_NAME,
+    CONF_FEATURE_MODEL_REASONING,
+    CONF_FEATURE_MODEL_TEMPERATURE,
     CONF_GEMINI_API_KEY,
     CONF_GEMINI_CHAT_MODEL,
     CONF_GEMINI_EMBEDDING_MODEL,
@@ -350,7 +356,8 @@ def _feature_from_subentry(subentry: ConfigSubentry) -> FeatureConfig:
         name=data.get("name") or subentry.title,
         feature_type=data.get("feature_type", ""),
         model_provider_id=data.get("model_provider_id"),
-        data=data.get("config", {}),
+        model=dict(data.get(CONF_FEATURE_MODEL, {})),
+        config=dict(data.get("config", {})),
     )
 
 
@@ -377,6 +384,49 @@ def legacy_feature_configs(
     for provider in providers.values():
         providers_by_type.setdefault(provider.provider_type, provider)
 
+    def _legacy_model_data(
+        category: str | None, provider_type: str, opts: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        if not category:
+            return {}
+        spec = MODEL_CATEGORY_SPECS.get(category, {})
+        model_key = _model_key_for(category, provider_type)
+        model_name = (
+            opts.get(model_key)
+            if model_key
+            else spec.get("recommended_models", {}).get(provider_type)
+        )
+        model_data: dict[str, Any] = {}
+        if model_name:
+            model_data[CONF_FEATURE_MODEL_NAME] = model_name
+        temp_key = spec.get("temperature_key")
+        if temp_key and opts.get(temp_key) is not None:
+            model_data[CONF_FEATURE_MODEL_TEMPERATURE] = opts.get(temp_key)
+
+        if provider_type == "ollama":
+            keepalive_map = {
+                "chat": CONF_OLLAMA_CHAT_KEEPALIVE,
+                "vlm": CONF_OLLAMA_VLM_KEEPALIVE,
+                "summarization": CONF_OLLAMA_SUMMARIZATION_KEEPALIVE,
+            }
+            context_map = {
+                "chat": CONF_OLLAMA_CHAT_CONTEXT_SIZE,
+                "vlm": CONF_OLLAMA_VLM_CONTEXT_SIZE,
+                "summarization": CONF_OLLAMA_SUMMARIZATION_CONTEXT_SIZE,
+            }
+            keepalive_key = keepalive_map.get(category)
+            if keepalive_key and opts.get(keepalive_key) is not None:
+                model_data[CONF_FEATURE_MODEL_KEEPALIVE] = opts.get(keepalive_key)
+            context_key = context_map.get(category)
+            if context_key and opts.get(context_key) is not None:
+                model_data[CONF_FEATURE_MODEL_CONTEXT_SIZE] = opts.get(context_key)
+            if category == "chat" and opts.get(CONF_OLLAMA_REASONING) is not None:
+                model_data[CONF_FEATURE_MODEL_REASONING] = opts.get(
+                    CONF_OLLAMA_REASONING
+                )
+
+        return model_data
+
     def _feature(
         feature_type: str, provider_type_opt: str, default_provider: str
     ) -> FeatureConfig | None:
@@ -384,12 +434,15 @@ def legacy_feature_configs(
         provider = providers_by_type.get(provider_type)
         if not provider:
             return None
+        category = FeatureCategoryMap.get(feature_type)
+        model_data = _legacy_model_data(category, provider.provider_type, options)
         return FeatureConfig(
             entry_id=f"{entry.entry_id}_{feature_type}_legacy",
             name=feature_type.replace("_", " ").title(),
             feature_type=feature_type,
             model_provider_id=provider.entry_id,
-            data={},
+            model=model_data,
+            config={},
         )
 
     features: dict[str, FeatureConfig] = {}
@@ -427,39 +480,15 @@ def _apply_provider_to_category(
     if provider_key:
         options[provider_key] = provider.provider_type
 
-    model_key = _model_key_for(category, provider.provider_type)
-    model_value = settings.get(f"{category}_model")
-    if model_key and model_value:
-        options[model_key] = model_value
-
     if provider.provider_type == "ollama":
         base_url = settings.get("base_url", RECOMMENDED_OLLAMA_URL)
-        options[CONF_OLLAMA_URL] = base_url
-        cat_url_field = {
-            "chat": CONF_OLLAMA_CHAT_URL,
-            "vlm": CONF_OLLAMA_VLM_URL,
-            "summarization": CONF_OLLAMA_SUMMARIZATION_URL,
-        }.get(category)
-        if cat_url_field:
-            options[cat_url_field] = settings.get(cat_url_field) or settings.get(
-                f"{category}_url", base_url
-            )
-        keepalive_field = {
-            "chat": CONF_OLLAMA_CHAT_KEEPALIVE,
-            "vlm": CONF_OLLAMA_VLM_KEEPALIVE,
-            "summarization": CONF_OLLAMA_SUMMARIZATION_KEEPALIVE,
-        }.get(category)
-        context_field = {
-            "chat": CONF_OLLAMA_CHAT_CONTEXT_SIZE,
-            "vlm": CONF_OLLAMA_VLM_CONTEXT_SIZE,
-            "summarization": CONF_OLLAMA_SUMMARIZATION_CONTEXT_SIZE,
-        }.get(category)
-        if keepalive_field and settings.get(f"{category}_keepalive") is not None:
-            options[keepalive_field] = settings.get(f"{category}_keepalive")
-        if context_field and settings.get(f"{category}_context") is not None:
-            options[context_field] = settings.get(f"{category}_context")
-        if settings.get("reasoning") is not None:
-            options[CONF_OLLAMA_REASONING] = settings["reasoning"]
+        options.setdefault(CONF_OLLAMA_URL, base_url)
+        if category == "chat":
+            options[CONF_OLLAMA_CHAT_URL] = base_url
+        if category == "vlm":
+            options[CONF_OLLAMA_VLM_URL] = base_url
+        if category == "summarization":
+            options[CONF_OLLAMA_SUMMARIZATION_URL] = base_url
 
     if provider.provider_type == "openai" and (api_key := settings.get("api_key")):
         options[CONF_API_KEY] = api_key
@@ -469,6 +498,55 @@ def _apply_provider_to_category(
 
     if category == "embedding":
         options[CONF_EMBEDDING_MODEL_PROVIDER] = provider.provider_type
+
+
+def _apply_feature_model_to_options(
+    options: dict[str, Any],
+    category: str,
+    provider_type: str,
+    model_data: Mapping[str, Any],
+) -> None:
+    spec = MODEL_CATEGORY_SPECS.get(category, {})
+    model_key = _model_key_for(category, provider_type)
+    model_name = model_data.get(CONF_FEATURE_MODEL_NAME) or spec.get(
+        "recommended_models", {}
+    ).get(provider_type)
+    if model_key and model_name:
+        options[model_key] = model_name
+
+    temp_key = spec.get("temperature_key")
+    temp_value = model_data.get(CONF_FEATURE_MODEL_TEMPERATURE)
+    if temp_value is None:
+        temp_value = spec.get("recommended_temperature")
+    if temp_key and temp_value is not None:
+        options[temp_key] = temp_value
+
+    if provider_type == "ollama":
+        keepalive_map = {
+            "chat": CONF_OLLAMA_CHAT_KEEPALIVE,
+            "vlm": CONF_OLLAMA_VLM_KEEPALIVE,
+            "summarization": CONF_OLLAMA_SUMMARIZATION_KEEPALIVE,
+        }
+        context_map = {
+            "chat": CONF_OLLAMA_CHAT_CONTEXT_SIZE,
+            "vlm": CONF_OLLAMA_VLM_CONTEXT_SIZE,
+            "summarization": CONF_OLLAMA_SUMMARIZATION_CONTEXT_SIZE,
+        }
+        keepalive_key = keepalive_map.get(category)
+        keepalive_val = model_data.get(CONF_FEATURE_MODEL_KEEPALIVE)
+        if keepalive_key and keepalive_val is not None:
+            options[keepalive_key] = keepalive_val
+        context_key = context_map.get(category)
+        context_val = model_data.get(CONF_FEATURE_MODEL_CONTEXT_SIZE)
+        if context_key and context_val is not None:
+            options[context_key] = context_val
+        if (
+            category == "chat"
+            and model_data.get(CONF_FEATURE_MODEL_REASONING) is not None
+        ):
+            options[CONF_OLLAMA_REASONING] = model_data.get(
+                CONF_FEATURE_MODEL_REASONING
+            )
 
 
 def resolve_runtime_options(entry: ConfigEntry) -> dict[str, Any]:
@@ -509,5 +587,11 @@ def resolve_runtime_options(entry: ConfigEntry) -> dict[str, Any]:
 
     for cat, provider in category_provider.items():
         _apply_provider_to_category(options, cat, provider)
+        for feature in features.values():
+            if FeatureCategoryMap.get(feature.feature_type) != cat:
+                continue
+            _apply_feature_model_to_options(
+                options, cat, provider.provider_type, feature.model
+            )
 
     return options

@@ -2,17 +2,8 @@
   "config": {
     "step": {
       "user": {
-        "title": "Connect models",
-        "description": "Enter **API keys**, optional **Ollama server URLs** (global or per-model), **Postgres URI** or **Face recognition server URI**. You must enter a valid **Postgres URI**, the others you can configure later in Options.",
-        "data": {
-          "api_key": "OpenAI API key (optional)",
-          "ollama_url": "Ollama server URL (optional)",
-          "ollama_chat_url": "Ollama chat server URL (optional)",
-          "ollama_vlm_url": "Ollama VLM server URL (optional)",
-          "ollama_summarization_url": "Ollama summarization server URL (optional)",
-          "gemini_api_key": "Google Gemini API key (optional)",
-          "face_api_url": "Face recognition server API URL (optional)"
-        }
+        "title": "Home Generative Agent",
+        "description": "Default features are being created. Next, run **Setup** to enable/configure features and the database, then add a **Model Provider**."
       }
     },
     "error": {
@@ -61,16 +52,115 @@
       "initiate_flow": {
         "reconfigure": "Reconfigure Model Provider",
         "user": "Add Model Provider"
+      },
+      "step": {
+        "deployment": {
+          "title": "Deployment",
+          "description": "Choose where this provider runs.",
+          "data": {
+            "deployment": "Deployment"
+          }
+        },
+        "provider": {
+          "title": "Provider",
+          "description": "Select a provider type and name.",
+          "data": {
+            "provider_type": "Provider",
+            "name": "Provider name"
+          }
+        },
+        "settings": {
+          "title": "Provider settings",
+          "description": "Configure the provider endpoint or credentials.",
+          "data": {
+            "base_url": "Base URL",
+            "api_key": "API key",
+            "gemini_api_key": "Gemini API key"
+          }
+        }
+      },
+      "error": {
+        "cannot_connect": "Can't reach the provider.",
+        "invalid_auth": "Invalid credentials.",
+        "unknown": "Unexpected error."
       }
     },
     "feature": {
       "entry_type": "service",
       "abort": {
-        "reconfigure_successful": "Feature updated."
+        "reconfigure_successful": "Feature updated.",
+        "setup_complete": "Setup completed."
+      },
+      "error": {
+        "no_providers": "No model providers are configured.",
+        "cannot_connect": "Could not connect to the database. Check settings and try again.",
+        "invalid_auth": "Invalid authorization.",
+        "invalid_uri": "URI could not be generated.",
+        "unknown": "Unexpected error."
       },
       "initiate_flow": {
         "reconfigure": "Reconfigure Feature",
-        "user": "Add Feature"
+        "user": "Setup"
+      },
+      "step": {
+        "feature_enable": {
+          "title": "Feature setup",
+          "description": "Enable or disable optional features.",
+          "data": {
+            "camera_image_analysis": "Camera Image Analysis",
+            "home_state_summary": "Home State Summary"
+          }
+        },
+        "conversation": {
+          "title": "Conversation",
+          "description": "Configure model settings for this feature. {provider_notice}",
+          "data": {
+            "model_provider_id": "Model provider",
+            "model_name": "Model",
+            "temperature": "Temperature",
+            "keepalive_s": "Ollama keepalive (seconds or Never unload (-1))",
+            "context_size": "Ollama context size (tokens)",
+            "reasoning": "Ollama reasoning"
+          }
+        },
+        "camera_image_analysis": {
+          "title": "Camera Image Analysis",
+          "description": "Configure model settings for this feature. {provider_notice}",
+          "data": {
+            "model_provider_id": "Model provider",
+            "model_name": "Model",
+            "temperature": "Temperature",
+            "keepalive_s": "Ollama keepalive (seconds or Never unload (-1))",
+            "context_size": "Ollama context size (tokens)"
+          }
+        },
+        "home_state_summary": {
+          "title": "Home State Summary",
+          "description": "Configure model settings for this feature. {provider_notice}",
+          "data": {
+            "model_provider_id": "Model provider",
+            "model_name": "Model",
+            "temperature": "Temperature",
+            "keepalive_s": "Ollama keepalive (seconds or Never unload (-1))",
+            "context_size": "Ollama context size (tokens)"
+          }
+        },
+        "database": {
+          "title": "Database setup",
+          "description": "Enter the necessary parameters for the database.",
+          "data": {
+            "username": "Database username",
+            "password": "Database password",
+            "host": "Database host",
+            "port": "Database port (optional)",
+            "db_name": "Database name",
+            "db_params": "Database connection params (optional)"
+          }
+        },
+        "instructions": {
+          "title": "Add a model provider",
+          "description": "No model provider is configured yet. Add one from **Model Provider**."
+        }
       }
     }
   },
@@ -97,47 +187,14 @@
     "step": {
       "init": {
         "title": "Home Generative Agent Options",
-        "description": "Configure Keys, URLs, main prompt, models and providers.",
+        "description": "Configure global behavior and prompts.",
         "data": {
-          "api_key": "OpenAI API key (optional)",
-          "gemini_api_key": "Google Gemini API key (optional)",
-          "ollama_url": "Ollama embedding and global fallback server URL (optional)",
-          "ollama_chat_url": "Ollama chat server URL (optional)",
-          "ollama_vlm_url": "Ollama VLM server URL (optional)",
-          "ollama_summarization_url": "Ollama summarization server URL (optional)",
           "face_api_url": "Face recognition API URL (optional)",
           "prompt": "Instructions",
-          "chat_model_provider": "Chat model provider",
-          "ollama_chat_model": "Ollama chat model",
-          "openai_chat_model": "OpenAI chat model",
-          "gemini_chat_model": "Gemini chat model",
-          "chat_model_temperature": "Chat model temperature",
-          "vlm_provider": "VLM provider",
-          "ollama_vlm": "Ollama VLM",
-          "openai_vlm": "OpenAI VLM",
-          "gemini_vlm": "Gemini VLM",
-          "vlm_temperature": "VLM temperature",
-          "summarization_provider": "Summarization provider",
-          "ollama_summarization_model": "Ollama summarization model",
-          "openai_summarization_model": "OpenAI summarization model",
-          "gemini_summarization_model": "Gemini summarization model",
-          "summarization_model_temperature": "Summarization model temperature",
-          "embedding_model_provider": "Embedding model provider",
-          "ollama_embedding_model": "Ollama embedding model",
-          "openai_embedding_model": "OpenAI embedding model",
-          "gemini_embedding_model": "Gemini embedding model",
           "llm_hass_api": "Control Home Assistant",
-          "recommended": "Recommended model settings (changing these may impact performance)",
           "video_analyzer_mode": "Video analyzer mode",
           "notify_service": "Mobile App Notify Service (optional)",
           "face_recognition": "Enable face recognition",
-          "ollama_reasoning": "Enable Ollama reasoning",
-          "ollama_chat_keepalive": "Ollama chat model keepalive (seconds or Never unload (-1))",
-          "ollama_vlm_keepalive": "Ollama VLM keepalive (seconds or Never unload (-1))",
-          "ollama_summarization_keepalive": "Ollama summarization model keepalive (seconds or Never unload (-1))",
-          "ollama_chat_context_size": "Ollama chat model context size (tokens)",
-          "ollama_vlm_context_size": "Ollama VLM context size (tokens)",
-          "ollama_summarization_context_size": "Ollama summarization model context size (tokens)",
           "manage_context_with_tokens": "Context management method",
           "max_tokens_in_context": "Max tokens in chat context",
           "max_messages_in_context": "Max messages in chat context",

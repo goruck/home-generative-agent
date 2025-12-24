@@ -4,20 +4,19 @@
 from __future__ import annotations
 
 import pytest
+from homeassistant.const import CONF_API_KEY, CONF_HOST, CONF_PASSWORD, CONF_USERNAME
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.home_generative_agent import async_migrate_entry
 from custom_components.home_generative_agent.config_flow import (
     HomeGenerativeAgentConfigFlow,
 )
-from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_USERNAME
-
-from homeassistant.const import CONF_API_KEY
-
 from custom_components.home_generative_agent.const import (
     CONF_CHAT_MODEL_PROVIDER,
     CONF_DB_NAME,
     CONF_DB_PARAMS,
+    CONF_FEATURE_MODEL,
+    CONF_FEATURE_MODEL_NAME,
     CONF_OLLAMA_CHAT_MODEL,
     CONF_SUMMARIZATION_MODEL_PROVIDER,
     CONF_VLM_PROVIDER,
@@ -35,15 +34,14 @@ from custom_components.home_generative_agent.flows.feature_subentry_flow import 
 from custom_components.home_generative_agent.flows.model_provider_subentry_flow import (
     ModelProviderSubentryFlow,
 )
-from custom_components.home_generative_agent.flows.pgvector_db_subentry_flow import (
-    PgVectorDbSubentryFlow,
-)
 
 
 class DummySubentry:
     """Simple stand-in for ConfigSubentry."""
 
-    def __init__(self, subentry_id: str, subentry_type: str, title: str, data: dict) -> None:
+    def __init__(
+        self, subentry_id: str, subentry_type: str, title: str, data: dict
+    ) -> None:
         """Initialize dummy subentry."""
         self.subentry_id = subentry_id
         self.subentry_type = subentry_type
@@ -74,29 +72,7 @@ def _patch_entry(flow, entry) -> None:
 def test_supported_subentry_types() -> None:
     """Ensure all subentry flow types are registered."""
     supported = HomeGenerativeAgentConfigFlow.async_get_supported_subentry_types(None)
-    assert set(supported) == {
-        "database",
-        SUBENTRY_TYPE_MODEL_PROVIDER,
-        SUBENTRY_TYPE_FEATURE,
-    }
-
-
-@pytest.mark.asyncio
-async def test_pgvector_flow_defaults(hass) -> None:
-    """Database flow shows recommended defaults when no subentry exists."""
-    entry = DummyEntry()
-    flow = PgVectorDbSubentryFlow()
-    flow.hass = hass
-    _patch_entry(flow, entry)
-
-    flow.async_show_form = lambda **kwargs: {  # type: ignore[assignment]
-        "type": "form",
-        "data_schema": kwargs["data_schema"],
-    }
-    result = await flow.async_step_user()
-    assert result["type"] == "form"
-    schema_dict = result["data_schema"].schema
-    assert CONF_HOST in schema_dict
+    assert set(supported) == {SUBENTRY_TYPE_MODEL_PROVIDER, SUBENTRY_TYPE_FEATURE}
 
 
 @pytest.mark.asyncio
@@ -120,6 +96,7 @@ async def test_model_provider_flow_creates_ollama(hass, monkeypatch) -> None:
     }
     flow._schedule_reload = lambda: None  # type: ignore[assignment]  # noqa: SLF001
     _patch_entry(flow, entry)
+
     async def _noop_validate(*_args, **_kwargs) -> None:
         return None
 
@@ -128,17 +105,18 @@ async def test_model_provider_flow_creates_ollama(hass, monkeypatch) -> None:
         _noop_validate,
     )
 
-    first = await flow.async_step_user({"provider_type": "ollama", "name": "Primary Ollama"})
+    first = await flow.async_step_user()
     assert first["type"] == "form"
 
-    result = await flow.async_step_config(
-        {
-            "base_url": "http://localhost:11434",
-            "chat_model": "gpt-oss",
-            "vlm_model": "qwen",
-            "summarization_model": "gpt-oss",
-        }
+    second = await flow.async_step_deployment({"deployment": "edge"})
+    assert second["type"] == "form"
+
+    third = await flow.async_step_provider(
+        {"provider_type": "ollama", "name": "Primary Ollama"}
     )
+    assert third["type"] == "form"
+
+    result = await flow.async_step_settings({"base_url": "http://localhost:11434"})
     assert result["type"] == "create_entry"
     assert result["data"]["provider_type"] == "ollama"
     assert "settings" in result["data"]
@@ -151,18 +129,20 @@ async def test_feature_flow_links_provider(hass) -> None:
         "prov1",
         SUBENTRY_TYPE_MODEL_PROVIDER,
         "Primary Ollama",
-        {"provider_type": "ollama"},
+        {"provider_type": "ollama", "capabilities": ["chat"]},
+    )
+    feature = DummySubentry(
+        "feature1",
+        SUBENTRY_TYPE_FEATURE,
+        "Conversation",
+        {"feature_type": "conversation", "model_provider_id": "prov1"},
     )
     entry = DummyEntry()
     entry.subentries[provider.subentry_id] = provider
+    entry.subentries[feature.subentry_id] = feature
 
     flow = FeatureSubentryFlow()
     flow.hass = hass
-    flow.async_create_entry = lambda **kwargs: {  # type: ignore[assignment]
-        "type": "create_entry",
-        "title": kwargs.get("title"),
-        "data": kwargs.get("data"),
-    }
     flow.async_show_form = lambda **kwargs: {  # type: ignore[assignment]
         "type": "form",
         "data_schema": kwargs["data_schema"],
@@ -172,18 +152,21 @@ async def test_feature_flow_links_provider(hass) -> None:
         "type": "abort",
         "reason": kwargs.get("reason"),
     }
+    flow.hass.config_entries.async_update_subentry = (  # type: ignore[assignment]
+        lambda _entry, subentry, data, title: subentry.data.update(data)
+    )
     flow._schedule_reload = lambda: None  # type: ignore[assignment]  # noqa: SLF001
     _patch_entry(flow, entry)
+    flow.context["subentry_id"] = feature.subentry_id
 
-    result = await flow.async_step_user(
-        {
-            "feature_type": "conversation",
-            "model_provider_id": "prov1",
-            "name": "Conversation Agent",
-        }
+    first = await flow.async_step_user()
+    assert first["type"] == "form"
+    result = await flow.async_step_conversation(
+        {"model_provider_id": "prov1", "model_name": "gpt-oss"}
     )
-    assert result["type"] == "create_entry"
-    assert result["data"]["model_provider_id"] == "prov1"
+    assert result["type"] == "abort"
+    assert feature.data["model_provider_id"] == "prov1"
+    assert feature.data[CONF_FEATURE_MODEL][CONF_FEATURE_MODEL_NAME] == "gpt-oss"
 
 
 def test_resolve_runtime_options_prefers_subentries() -> None:
@@ -195,20 +178,19 @@ def test_resolve_runtime_options_prefers_subentries() -> None:
         {
             "provider_type": "ollama",
             "capabilities": ["chat", "vlm", "summarization", "embedding"],
-            "settings": {
-                "base_url": "http://ollama:11434",
-                "chat_model": "chat-ollama",
-                "vlm_model": "vlm-ollama",
-                "summarization_model": "sum-ollama",
-                "embedding_model": "embed-ollama",
-            },
+            "settings": {"base_url": "http://ollama:11434"},
         },
     )
     feature = DummySubentry(
         "feature1",
         SUBENTRY_TYPE_FEATURE,
         "Conversation",
-        {"feature_type": "conversation", "model_provider_id": "provider1", "name": "Conversation"},
+        {
+            "feature_type": "conversation",
+            "model_provider_id": "provider1",
+            "name": "Conversation",
+            CONF_FEATURE_MODEL: {CONF_FEATURE_MODEL_NAME: "chat-ollama"},
+        },
     )
     entry = DummyEntry()
     entry.subentries = {
@@ -246,7 +228,9 @@ async def test_migration_creates_provider_and_feature_subentries(hass) -> None:
 
     assert await async_migrate_entry(hass, entry)
     providers = [
-        s for s in entry.subentries.values() if s.subentry_type == SUBENTRY_TYPE_MODEL_PROVIDER
+        s
+        for s in entry.subentries.values()
+        if s.subentry_type == SUBENTRY_TYPE_MODEL_PROVIDER
     ]
     features = [
         s for s in entry.subentries.values() if s.subentry_type == SUBENTRY_TYPE_FEATURE
