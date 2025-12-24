@@ -161,9 +161,9 @@ async def test_feature_flow_links_provider(hass) -> None:
 
     first = await flow.async_step_user()
     assert first["type"] == "form"
-    result = await flow.async_step_conversation(
-        {"model_provider_id": "prov1", "model_name": "gpt-oss"}
-    )
+    provider_step = await flow.async_step_conversation({"model_provider_id": "prov1"})
+    assert provider_step["type"] == "form"
+    result = await flow.async_step_feature_model({"model_name": "gpt-oss"})
     assert result["type"] == "abort"
     assert feature.data["model_provider_id"] == "prov1"
     assert feature.data[CONF_FEATURE_MODEL][CONF_FEATURE_MODEL_NAME] == "gpt-oss"

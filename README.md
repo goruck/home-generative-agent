@@ -66,9 +66,12 @@ Configuration is done entirely in the Home Assistant UI using subentry flows.
    - Configure each enabled feature’s model settings.
    - Configure the database.
    - If no model provider exists, you’ll see a reminder to add one.
+   - Default features include Conversation, Camera Image Analysis, and Summarization.
 3. Click **+ Model Provider** to add a provider (Edge/Cloud → provider → settings).
    - The first provider is automatically assigned to all features with default models.
 4. Use a feature’s gear icon to adjust that feature’s model settings later.
+
+Embedding model selection: the integration uses the first model provider that supports embeddings (or the feature’s provider when it advertises embedding capability). If you want a different embedding model, add a provider that supports embeddings and select the desired embedding model name in that provider’s defaults, then re-run Setup or reload the integration.
 
 Global options (prompt, face recognition URL, context management, critical-action PIN, etc.) live in the integration’s **Options** flow.
 

@@ -64,6 +64,7 @@ from ..core.db_utils import build_postgres_uri  # noqa: TID252
 from ..core.utils import (  # noqa: TID252
     CannotConnectError,
     InvalidAuthError,
+    list_ollama_models,
     validate_db_uri,
 )
 
@@ -79,7 +80,7 @@ FeatureCategoryMap = {
 FeatureDefs = {
     "conversation": {"name": "Conversation", "required": True},
     "camera_image_analysis": {"name": "Camera Image Analysis", "required": False},
-    "home_state_summary": {"name": "Home State Summary", "required": False},
+    "home_state_summary": {"name": "Summarization", "required": False},
 }
 
 KEEPALIVE_DEFAULTS = {
@@ -181,6 +182,8 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
         self._setup_mode = False
         self._feature_queue: list[str] = []
         self._active_feature: str | None = None
+        self._pending_provider_id: str | None = None
+        self._ollama_model_cache: dict[str, list[str]] = {}
 
     def _schedule_reload(self) -> None:
         entry = self._get_entry()
@@ -308,9 +311,143 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
         self._active_feature = next_feature
         return await self._async_step_feature(next_feature, None)
 
-    async def _async_step_feature(  # noqa: PLR0911, PLR0912, PLR0915
+    async def _async_step_feature(
         self, feature_type: str | None, user_input: dict[str, Any] | None
     ) -> SubentryFlowResult:
+        """Start the feature flow by selecting a provider."""
+        if feature_type not in FeatureDefs:
+            return self.async_abort(reason="no_existing_subentry")
+
+        entry = self._get_entry()
+        subentry = _feature_subentry(entry, feature_type)
+        if subentry is None:
+            return self.async_abort(reason="no_existing_subentry")
+
+        self._active_feature = feature_type
+        self._pending_provider_id = None
+
+        category = FeatureCategoryMap.get(feature_type)
+        provider_opts = _provider_options(entry, category or "")
+
+        provider_notice = ""
+        if not provider_opts:
+            provider_notice = """
+            No model provider is configured.
+            A default model will be assigned once available.
+            """
+            return self.async_show_form(
+                step_id="feature_model",
+                data_schema=vol.Schema({}),
+                description_placeholders={
+                    "provider_notice": provider_notice,
+                    "feature_name": FeatureDefs[feature_type]["name"],
+                },
+            )
+
+        provider_ids = {opt["value"] for opt in provider_opts}
+        existing_provider_id = subentry.data.get("model_provider_id")
+        provider_id = (
+            existing_provider_id
+            if existing_provider_id in provider_ids
+            else provider_opts[0]["value"]
+        )
+
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    "model_provider_id",
+                    default=provider_id,
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=provider_opts,
+                        mode=SelectSelectorMode.DROPDOWN,
+                        sort=False,
+                        custom_value=False,
+                    )
+                )
+            }
+        )
+        if user_input is not None:
+            return await self.async_step_feature_provider(user_input)
+
+        return self.async_show_form(
+            step_id="feature_provider",
+            data_schema=schema,
+            description_placeholders={
+                "feature_name": FeatureDefs[feature_type]["name"],
+            },
+        )
+
+    async def async_step_feature_provider(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Handle the provider selection step."""
+        feature_type = self._active_feature
+        if feature_type not in FeatureDefs:
+            return self.async_abort(reason="no_existing_subentry")
+
+        entry = self._get_entry()
+        subentry = _feature_subentry(entry, feature_type)
+        if subentry is None:
+            return self.async_abort(reason="no_existing_subentry")
+
+        category = FeatureCategoryMap.get(feature_type)
+        provider_opts = _provider_options(entry, category or "")
+        if not provider_opts:
+            return await self.async_step_feature_model()
+
+        provider_ids = {opt["value"] for opt in provider_opts}
+        existing_provider_id = subentry.data.get("model_provider_id")
+        provider_id = (
+            existing_provider_id
+            if existing_provider_id in provider_ids
+            else provider_opts[0]["value"]
+        )
+
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    "model_provider_id",
+                    default=provider_id,
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=provider_opts,
+                        mode=SelectSelectorMode.DROPDOWN,
+                        sort=False,
+                        custom_value=False,
+                    )
+                )
+            }
+        )
+
+        if user_input is None:
+            return self.async_show_form(
+                step_id="feature_provider",
+                data_schema=schema,
+                description_placeholders={
+                    "feature_name": FeatureDefs[feature_type]["name"],
+                },
+            )
+
+        provider_id = user_input.get("model_provider_id")
+        if provider_id not in provider_ids:
+            return self.async_show_form(
+                step_id="feature_provider",
+                data_schema=schema,
+                errors={"base": "no_providers"},
+                description_placeholders={
+                    "feature_name": FeatureDefs[feature_type]["name"],
+                },
+            )
+
+        self._pending_provider_id = provider_id
+        return await self.async_step_feature_model()
+
+    async def async_step_feature_model(  # noqa: PLR0911, PLR0912, PLR0915
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Handle the model configuration step."""
+        feature_type = self._active_feature
         if feature_type not in FeatureDefs:
             return self.async_abort(reason="no_existing_subentry")
 
@@ -341,17 +478,29 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
                     title=subentry.title,
                 )
             return self.async_show_form(
-                step_id=feature_type,
+                step_id="feature_model",
                 data_schema=vol.Schema({}),
-                description_placeholders={"provider_notice": provider_notice},
+                description_placeholders={
+                    "provider_notice": provider_notice,
+                    "feature_name": FeatureDefs[feature_type]["name"],
+                },
             )
 
         provider_ids = {opt["value"] for opt in provider_opts}
         provider_id = (
-            existing_provider_id
-            if existing_provider_id in provider_ids
-            else provider_opts[0]["value"]
+            self._pending_provider_id
+            if self._pending_provider_id in provider_ids
+            else (
+                existing_provider_id
+                if existing_provider_id in provider_ids
+                else provider_opts[0]["value"]
+            )
         )
+        if (
+            self._pending_provider_id
+            and self._pending_provider_id != existing_provider_id
+        ):
+            existing_model = {}
         provider_type = _provider_type_for_id(entry, provider_id)
         defaults = _default_model_data(category or "", provider_type)
 
@@ -360,18 +509,22 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
             .get("providers", {})
             .get(provider_type or "", [])
         )
+        if provider_type == "ollama":
+            provider_subentry = (
+                entry.subentries.get(provider_id) if provider_id else None
+            )
+            settings = (
+                provider_subentry.data.get("settings", {}) if provider_subentry else {}
+            )
+            ollama_url = settings.get("base_url")
+            if isinstance(ollama_url, str) and ollama_url:
+                cached = self._ollama_model_cache.get(ollama_url)
+                if cached is None:
+                    cached = await list_ollama_models(self.hass, ollama_url)
+                    self._ollama_model_cache[ollama_url] = cached
+                if cached:
+                    model_options = cached
         schema: dict[Any, Any] = {
-            vol.Required(
-                "model_provider_id",
-                default=provider_id,
-            ): SelectSelector(
-                SelectSelectorConfig(
-                    options=provider_opts,
-                    mode=SelectSelectorMode.DROPDOWN,
-                    sort=False,
-                    custom_value=False,
-                )
-            ),
             vol.Required(
                 CONF_FEATURE_MODEL_NAME,
                 default=existing_model.get(CONF_FEATURE_MODEL_NAME)
@@ -453,14 +606,6 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
                 )
 
         if user_input is not None:
-            provider_id = user_input.get("model_provider_id", provider_id)
-            if provider_id not in provider_ids:
-                return self.async_show_form(
-                    step_id=feature_type,
-                    data_schema=vol.Schema(schema),
-                    errors={"base": "no_providers"},
-                    description_placeholders={"provider_notice": provider_notice},
-                )
             provider_type = _provider_type_for_id(entry, provider_id)
             model_data = dict(defaults)
             model_data.update(existing_model)
@@ -489,15 +634,19 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
             self.hass.config_entries.async_update_subentry(  # type: ignore[attr-defined]
                 entry, subentry, data=payload, title=FeatureDefs[feature_type]["name"]
             )
+            self._pending_provider_id = None
             self._schedule_reload()
             if self._setup_mode:
                 return await self._advance_setup()
             return self.async_abort(reason="reconfigure_successful")
 
         return self.async_show_form(
-            step_id=feature_type,
+            step_id="feature_model",
             data_schema=vol.Schema(schema),
-            description_placeholders={"provider_notice": provider_notice},
+            description_placeholders={
+                "provider_notice": provider_notice,
+                "feature_name": FeatureDefs[feature_type]["name"],
+            },
         )
 
     async def async_step_conversation(

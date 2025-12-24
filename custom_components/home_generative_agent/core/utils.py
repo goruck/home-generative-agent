@@ -271,6 +271,40 @@ async def validate_ollama_url(
             raise CannotConnectError
 
 
+async def list_ollama_models(  # noqa: PLR0911
+    hass: HomeAssistant, base_url: str, timeout_s: float = 5.0
+) -> list[str]:
+    """Return available Ollama model names for the given base URL."""
+    if not base_url:
+        return []
+    base_url = ensure_http_url(base_url)
+    client = get_async_client(hass)
+    try:
+        async with async_timeout.timeout(timeout_s):
+            resp = await client.get(urljoin(base_url.rstrip("/") + "/", "api/tags"))
+    except (TimeoutError, httpx.RequestError):
+        return []
+    if resp.status_code >= HTTP_STATUS_BAD_REQUEST:
+        return []
+    try:
+        payload = resp.json()
+    except ValueError:
+        return []
+    if not isinstance(payload, dict):
+        return []
+    models = payload.get("models")
+    if not isinstance(models, list):
+        return []
+    names: list[str] = []
+    for item in models:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        if isinstance(name, str) and name and name not in names:
+            names.append(name)
+    return names
+
+
 async def validate_openai_key(
     hass: HomeAssistant, api_key: str, timeout_s: float = 10.0
 ) -> None:

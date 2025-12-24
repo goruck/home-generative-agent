@@ -108,41 +108,25 @@
           "description": "İsteğe bağlı özellikleri etkinleştirin veya devre dışı bırakın.",
           "data": {
             "camera_image_analysis": "Kamera Görüntü Analizi",
-            "home_state_summary": "Ev Durumu Özeti"
+            "home_state_summary": "Özetleme"
           }
         },
-        "conversation": {
-          "title": "Konuşma",
+        "feature_provider": {
+          "title": "Model sağlayıcı seçin",
+          "description": "{feature_name} için bir model sağlayıcı seçin.",
+          "data": {
+            "model_provider_id": "Model sağlayıcı"
+          }
+        },
+        "feature_model": {
+          "title": "{feature_name}",
           "description": "Bu özellik için model ayarlarını yapılandırın. {provider_notice}",
           "data": {
-            "model_provider_id": "Model sağlayıcı",
             "model_name": "Model",
             "temperature": "Sıcaklık",
             "keepalive_s": "Ollama keepalive (saniye veya Asla boşaltma (-1))",
             "context_size": "Ollama bağlam boyutu (token)",
             "reasoning": "Ollama reasoning"
-          }
-        },
-        "camera_image_analysis": {
-          "title": "Kamera Görüntü Analizi",
-          "description": "Bu özellik için model ayarlarını yapılandırın. {provider_notice}",
-          "data": {
-            "model_provider_id": "Model sağlayıcı",
-            "model_name": "Model",
-            "temperature": "Sıcaklık",
-            "keepalive_s": "Ollama keepalive (saniye veya Asla boşaltma (-1))",
-            "context_size": "Ollama bağlam boyutu (token)"
-          }
-        },
-        "home_state_summary": {
-          "title": "Ev Durumu Özeti",
-          "description": "Bu özellik için model ayarlarını yapılandırın. {provider_notice}",
-          "data": {
-            "model_provider_id": "Model sağlayıcı",
-            "model_name": "Model",
-            "temperature": "Sıcaklık",
-            "keepalive_s": "Ollama keepalive (saniye veya Asla boşaltma (-1))",
-            "context_size": "Ollama bağlam boyutu (token)"
           }
         },
         "database": {

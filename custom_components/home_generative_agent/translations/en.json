@@ -108,41 +108,25 @@
           "description": "Enable or disable optional features.",
           "data": {
             "camera_image_analysis": "Camera Image Analysis",
-            "home_state_summary": "Home State Summary"
+            "home_state_summary": "Summarization"
           }
         },
-        "conversation": {
-          "title": "Conversation",
+        "feature_provider": {
+          "title": "Choose model provider",
+          "description": "Select a model provider for {feature_name}.",
+          "data": {
+            "model_provider_id": "Model provider"
+          }
+        },
+        "feature_model": {
+          "title": "{feature_name}",
           "description": "Configure model settings for this feature. {provider_notice}",
           "data": {
-            "model_provider_id": "Model provider",
             "model_name": "Model",
             "temperature": "Temperature",
             "keepalive_s": "Ollama keepalive (seconds or Never unload (-1))",
             "context_size": "Ollama context size (tokens)",
             "reasoning": "Ollama reasoning"
-          }
-        },
-        "camera_image_analysis": {
-          "title": "Camera Image Analysis",
-          "description": "Configure model settings for this feature. {provider_notice}",
-          "data": {
-            "model_provider_id": "Model provider",
-            "model_name": "Model",
-            "temperature": "Temperature",
-            "keepalive_s": "Ollama keepalive (seconds or Never unload (-1))",
-            "context_size": "Ollama context size (tokens)"
-          }
-        },
-        "home_state_summary": {
-          "title": "Home State Summary",
-          "description": "Configure model settings for this feature. {provider_notice}",
-          "data": {
-            "model_provider_id": "Model provider",
-            "model_name": "Model",
-            "temperature": "Temperature",
-            "keepalive_s": "Ollama keepalive (seconds or Never unload (-1))",
-            "context_size": "Ollama context size (tokens)"
           }
         },
         "database": {
