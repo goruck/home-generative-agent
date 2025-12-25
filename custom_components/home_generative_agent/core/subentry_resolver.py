@@ -92,7 +92,7 @@ LOGGER = logging.getLogger(__name__)
 FeatureCategoryMap = {
     "conversation": "chat",
     "camera_image_analysis": "vlm",
-    "home_state_summary": "summarization",
+    "conversation_summary": "summarization",
 }
 
 
@@ -449,7 +449,7 @@ def legacy_feature_configs(
     mapping = [
         ("conversation", CONF_CHAT_MODEL_PROVIDER, "ollama"),
         ("camera_image_analysis", CONF_VLM_PROVIDER, "ollama"),
-        ("home_state_summary", CONF_SUMMARIZATION_MODEL_PROVIDER, "ollama"),
+        ("conversation_summary", CONF_SUMMARIZATION_MODEL_PROVIDER, "ollama"),
     ]
     for feat_type, opt_key, default in mapping:
         feature = _feature(feat_type, opt_key, default)

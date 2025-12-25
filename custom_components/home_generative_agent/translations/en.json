@@ -108,7 +108,7 @@
           "description": "Enable or disable optional features.",
           "data": {
             "camera_image_analysis": "Camera Image Analysis",
-            "home_state_summary": "Summarization"
+            "conversation_summary": "Conversation Summary"
           }
         },
         "feature_provider": {

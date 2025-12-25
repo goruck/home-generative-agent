@@ -196,19 +196,19 @@ Embedding = Sequence[float]
 DEFAULT_FEATURE_TYPES: tuple[str, ...] = (
     "conversation",
     "camera_image_analysis",
-    "home_state_summary",
+    "conversation_summary",
 )
 
 FEATURE_NAMES = {
     "conversation": "Conversation",
     "camera_image_analysis": "Camera Image Analysis",
-    "home_state_summary": "Home State Summary",
+    "conversation_summary": "Summarization",
 }
 
 FEATURE_CATEGORY_MAP = {
     "conversation": "chat",
     "camera_image_analysis": "vlm",
-    "home_state_summary": "summarization",
+    "conversation_summary": "summarization",
 }
 
 

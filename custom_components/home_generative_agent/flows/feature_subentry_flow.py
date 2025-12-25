@@ -74,13 +74,13 @@ if TYPE_CHECKING:
 FeatureCategoryMap = {
     "conversation": "chat",
     "camera_image_analysis": "vlm",
-    "home_state_summary": "summarization",
+    "conversation_summary": "summarization",
 }
 
 FeatureDefs = {
     "conversation": {"name": "Conversation", "required": True},
     "camera_image_analysis": {"name": "Camera Image Analysis", "required": False},
-    "home_state_summary": {"name": "Summarization", "required": False},
+    "conversation_summary": {"name": "Conversation Summary", "required": False},
 }
 
 KEEPALIVE_DEFAULTS = {
@@ -661,11 +661,11 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
         """Handle the camera image analysis feature step."""
         return await self._async_step_feature("camera_image_analysis", user_input)
 
-    async def async_step_home_state_summary(
+    async def async_step_conversation_summary(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
-        """Handle the home state summary feature step."""
-        return await self._async_step_feature("home_state_summary", user_input)
+        """Handle the conversation summary feature step."""
+        return await self._async_step_feature("conversation_summary", user_input)
 
     async def async_step_database(
         self, user_input: dict[str, Any] | None = None

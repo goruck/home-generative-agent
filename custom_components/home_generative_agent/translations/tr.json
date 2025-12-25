@@ -108,7 +108,7 @@
           "description": "İsteğe bağlı özellikleri etkinleştirin veya devre dışı bırakın.",
           "data": {
             "camera_image_analysis": "Kamera Görüntü Analizi",
-            "home_state_summary": "Özetleme"
+            "conversation_summary": "Sohbet Özeti"
           }
         },
         "feature_provider": {
@@ -126,7 +126,7 @@
             "temperature": "Sıcaklık",
             "keepalive_s": "Ollama keepalive (saniye veya Asla boşaltma (-1))",
             "context_size": "Ollama bağlam boyutu (token)",
-            "reasoning": "Ollama reasoning"
+            "reasoning": "Ollama akıl yürütme"
           }
         },
         "database": {
