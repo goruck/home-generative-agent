@@ -52,6 +52,7 @@ from ..const import (  # noqa: TID252
     CONF_OPENAI_VLM,
     CONF_SUMMARIZATION_MODEL_PROVIDER,
     CONF_VLM_PROVIDER,
+    FEATURE_CATEGORY_MAP,
     MODEL_CATEGORY_SPECS,
     RECOMMENDED_DB_HOST,
     RECOMMENDED_DB_NAME,
@@ -88,13 +89,6 @@ if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry, ConfigSubentry
 
 LOGGER = logging.getLogger(__name__)
-
-FeatureCategoryMap = {
-    "conversation": "chat",
-    "camera_image_analysis": "vlm",
-    "conversation_summary": "summarization",
-}
-
 
 def _options_for(entry: ConfigEntry) -> dict[str, Any]:
     """Merge entry data + options for convenience."""
@@ -434,7 +428,7 @@ def legacy_feature_configs(
         provider = providers_by_type.get(provider_type)
         if not provider:
             return None
-        category = FeatureCategoryMap.get(feature_type)
+        category = FEATURE_CATEGORY_MAP.get(feature_type)
         model_data = _legacy_model_data(category, provider.provider_type, options)
         return FeatureConfig(
             entry_id=f"{entry.entry_id}_{feature_type}_legacy",
@@ -565,7 +559,7 @@ def resolve_runtime_options(entry: ConfigEntry) -> dict[str, Any]:
 
     category_provider: dict[str, ModelProviderConfig] = {}
     for feature in features.values():
-        cat = FeatureCategoryMap.get(feature.feature_type)
+        cat = FEATURE_CATEGORY_MAP.get(feature.feature_type)
         if not cat:
             continue
         provider = providers_by_id.get(feature.model_provider_id or "")
@@ -588,7 +582,7 @@ def resolve_runtime_options(entry: ConfigEntry) -> dict[str, Any]:
     for cat, provider in category_provider.items():
         _apply_provider_to_category(options, cat, provider)
         for feature in features.values():
-            if FeatureCategoryMap.get(feature.feature_type) != cat:
+            if FEATURE_CATEGORY_MAP.get(feature.feature_type) != cat:
                 continue
             _apply_feature_model_to_options(
                 options, cat, provider.provider_type, feature.model

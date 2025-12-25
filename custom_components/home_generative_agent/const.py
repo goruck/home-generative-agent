@@ -1,10 +1,8 @@
 """Constants for Home Generative Agent."""
 
-import os
 from typing import Annotated, Any, Literal, get_args
 
 from annotated_types import Ge, Le
-from homeassistant.util.package import is_docker_env
 
 DOMAIN = "home_generative_agent"
 
@@ -48,7 +46,7 @@ CONF_DB_URI = "db_uri"
 CONF_DB_NAME = "db_name"
 CONF_DB_PARAMS = "db_params"
 RECOMMENDED_DB_USERNAME = "ha_user"
-RECOMMENDED_DB_PASSWORD = "ha_password"
+RECOMMENDED_DB_PASSWORD = "ha_password"  # noqa: S105
 RECOMMENDED_DB_HOST = "localhost"
 RECOMMENDED_DB_PORT = 5432
 RECOMMENDED_DB_NAME = "ha_db"
@@ -107,6 +105,29 @@ OLLAMA_BOOL_HINT_TAGS = {
 CONF_RECOMMENDED = "recommended"
 CONF_PROMPT = "prompt"
 CONF_DISABLED_FEATURES = "disabled_features"
+
+# ---- Feature definitions ----
+DEFAULT_FEATURE_TYPES: tuple[str, ...] = (
+    "conversation",
+    "camera_image_analysis",
+    "conversation_summary",
+)
+
+FEATURE_DEFS: dict[str, dict[str, Any]] = {
+    "conversation": {"name": "Conversation", "required": True},
+    "camera_image_analysis": {"name": "Camera Image Analysis", "required": False},
+    "conversation_summary": {"name": "Conversation Summary", "required": False},
+}
+
+FEATURE_NAMES: dict[str, str] = {
+    key: value["name"] for key, value in FEATURE_DEFS.items()
+}
+
+FEATURE_CATEGORY_MAP: dict[str, str] = {
+    "conversation": "chat",
+    "camera_image_analysis": "vlm",
+    "conversation_summary": "summarization",
+}
 
 # ---- Feature model config (per-feature subentry) ----
 CONF_FEATURE_MODEL = "model"

@@ -92,9 +92,12 @@ from .const import (
     CONF_VLM_PROVIDER,
     CONF_VLM_TEMPERATURE,
     CONFIG_ENTRY_VERSION,
+    DEFAULT_FEATURE_TYPES,
     DOMAIN,
     EMBEDDING_MODEL_CTX,
     EMBEDDING_MODEL_DIMS,
+    FEATURE_CATEGORY_MAP,
+    FEATURE_NAMES,
     MODEL_CATEGORY_SPECS,
     RECOMMENDED_CHAT_MODEL_PROVIDER,
     RECOMMENDED_CHAT_MODEL_TEMPERATURE,
@@ -192,25 +195,6 @@ ENROLL_SCHEMA = vol.Schema(
 )
 
 Embedding = Sequence[float]
-
-DEFAULT_FEATURE_TYPES: tuple[str, ...] = (
-    "conversation",
-    "camera_image_analysis",
-    "conversation_summary",
-)
-
-FEATURE_NAMES = {
-    "conversation": "Conversation",
-    "camera_image_analysis": "Camera Image Analysis",
-    "conversation_summary": "Summarization",
-}
-
-FEATURE_CATEGORY_MAP = {
-    "conversation": "chat",
-    "camera_image_analysis": "vlm",
-    "conversation_summary": "summarization",
-}
-
 
 def _default_feature_payload(feature_type: str) -> dict[str, Any]:
     return {

@@ -42,6 +42,8 @@ from ..const import (  # noqa: TID252
     CONF_FEATURE_MODEL_NAME,
     CONF_FEATURE_MODEL_REASONING,
     CONF_FEATURE_MODEL_TEMPERATURE,
+    FEATURE_CATEGORY_MAP,
+    FEATURE_DEFS,
     KEEPALIVE_MAX_SECONDS,
     KEEPALIVE_SENTINEL,
     MODEL_CATEGORY_SPECS,
@@ -70,18 +72,6 @@ from ..core.utils import (  # noqa: TID252
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
-
-FeatureCategoryMap = {
-    "conversation": "chat",
-    "camera_image_analysis": "vlm",
-    "conversation_summary": "summarization",
-}
-
-FeatureDefs = {
-    "conversation": {"name": "Conversation", "required": True},
-    "camera_image_analysis": {"name": "Camera Image Analysis", "required": False},
-    "conversation_summary": {"name": "Conversation Summary", "required": False},
-}
 
 KEEPALIVE_DEFAULTS = {
     "chat": RECOMMENDED_OLLAMA_CHAT_KEEPALIVE,
@@ -205,10 +195,10 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
         self.hass.config_entries.async_update_entry(entry, options=options)
 
     def _feature_defaults(self, feature_type: str) -> dict[str, Any]:
-        category = FeatureCategoryMap.get(feature_type)
+        category = FEATURE_CATEGORY_MAP.get(feature_type)
         return {
             "feature_type": feature_type,
-            "name": FeatureDefs[feature_type]["name"],
+            "name": FEATURE_DEFS[feature_type]["name"],
             "model_provider_id": None,
             CONF_FEATURE_MODEL: _default_model_data(category or "", None),
             "config": {},
@@ -223,7 +213,7 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
     ) -> dict[str, Any]:
         return {
             "feature_type": feature_type,
-            "name": FeatureDefs[feature_type]["name"],
+            "name": FEATURE_DEFS[feature_type]["name"],
             "model_provider_id": provider_id,
             CONF_FEATURE_MODEL: model_data,
             "config": config_data,
@@ -253,7 +243,7 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
 
         if user_input is None:
             schema_dict: dict[Any, Any] = {}
-            for feature_type, info in FeatureDefs.items():
+            for feature_type, info in FEATURE_DEFS.items():
                 if info["required"]:
                     continue
                 enabled = _feature_subentry(entry, feature_type) is not None
@@ -272,7 +262,7 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
 
         cache = self._disabled_feature_cache()
         enabled_features = {"conversation"}
-        for feature_type, info in FeatureDefs.items():
+        for feature_type, info in FEATURE_DEFS.items():
             if info["required"]:
                 continue
             enabled = bool(user_input.get(feature_type, False))
@@ -299,7 +289,7 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
         self._persist_disabled_cache(cache)
         self._feature_queue = [
             feature_type
-            for feature_type in FeatureDefs
+            for feature_type in FEATURE_DEFS
             if feature_type in enabled_features
         ]
         return await self._advance_setup()
@@ -315,7 +305,7 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
         self, feature_type: str | None, user_input: dict[str, Any] | None
     ) -> SubentryFlowResult:
         """Start the feature flow by selecting a provider."""
-        if feature_type not in FeatureDefs:
+        if feature_type not in FEATURE_DEFS:
             return self.async_abort(reason="no_existing_subentry")
 
         entry = self._get_entry()
@@ -326,7 +316,7 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
         self._active_feature = feature_type
         self._pending_provider_id = None
 
-        category = FeatureCategoryMap.get(feature_type)
+        category = FEATURE_CATEGORY_MAP.get(feature_type)
         provider_opts = _provider_options(entry, category or "")
 
         provider_notice = ""
@@ -340,7 +330,7 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
                 data_schema=vol.Schema({}),
                 description_placeholders={
                     "provider_notice": provider_notice,
-                    "feature_name": FeatureDefs[feature_type]["name"],
+                    "feature_name": FEATURE_DEFS[feature_type]["name"],
                 },
             )
 
@@ -374,7 +364,7 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
             step_id="feature_provider",
             data_schema=schema,
             description_placeholders={
-                "feature_name": FeatureDefs[feature_type]["name"],
+                "feature_name": FEATURE_DEFS[feature_type]["name"],
             },
         )
 
@@ -383,7 +373,7 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
     ) -> SubentryFlowResult:
         """Handle the provider selection step."""
         feature_type = self._active_feature
-        if feature_type not in FeatureDefs:
+        if feature_type not in FEATURE_DEFS:
             return self.async_abort(reason="no_existing_subentry")
 
         entry = self._get_entry()
@@ -391,7 +381,7 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
         if subentry is None:
             return self.async_abort(reason="no_existing_subentry")
 
-        category = FeatureCategoryMap.get(feature_type)
+        category = FEATURE_CATEGORY_MAP.get(feature_type)
         provider_opts = _provider_options(entry, category or "")
         if not provider_opts:
             return await self.async_step_feature_model()
@@ -425,7 +415,7 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
                 step_id="feature_provider",
                 data_schema=schema,
                 description_placeholders={
-                    "feature_name": FeatureDefs[feature_type]["name"],
+                    "feature_name": FEATURE_DEFS[feature_type]["name"],
                 },
             )
 
@@ -436,7 +426,7 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
                 data_schema=schema,
                 errors={"base": "no_providers"},
                 description_placeholders={
-                    "feature_name": FeatureDefs[feature_type]["name"],
+                    "feature_name": FEATURE_DEFS[feature_type]["name"],
                 },
             )
 
@@ -448,7 +438,7 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
     ) -> SubentryFlowResult:
         """Handle the model configuration step."""
         feature_type = self._active_feature
-        if feature_type not in FeatureDefs:
+        if feature_type not in FEATURE_DEFS:
             return self.async_abort(reason="no_existing_subentry")
 
         entry = self._get_entry()
@@ -456,7 +446,7 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
         if subentry is None:
             return self.async_abort(reason="no_existing_subentry")
 
-        category = FeatureCategoryMap.get(feature_type)
+        category = FEATURE_CATEGORY_MAP.get(feature_type)
         provider_opts = _provider_options(entry, category or "")
         existing_model = dict(subentry.data.get(CONF_FEATURE_MODEL, {}))
         existing_config = dict(subentry.data.get("config", {}))
@@ -482,7 +472,7 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
                 data_schema=vol.Schema({}),
                 description_placeholders={
                     "provider_notice": provider_notice,
-                    "feature_name": FeatureDefs[feature_type]["name"],
+                    "feature_name": FEATURE_DEFS[feature_type]["name"],
                 },
             )
 
@@ -632,7 +622,7 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
                 feature_type, provider_id, model_data, existing_config
             )
             self.hass.config_entries.async_update_subentry(  # type: ignore[attr-defined]
-                entry, subentry, data=payload, title=FeatureDefs[feature_type]["name"]
+                entry, subentry, data=payload, title=FEATURE_DEFS[feature_type]["name"]
             )
             self._pending_provider_id = None
             self._schedule_reload()
@@ -645,7 +635,7 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
             data_schema=vol.Schema(schema),
             description_placeholders={
                 "provider_notice": provider_notice,
-                "feature_name": FeatureDefs[feature_type]["name"],
+                "feature_name": FEATURE_DEFS[feature_type]["name"],
             },
         )
 
