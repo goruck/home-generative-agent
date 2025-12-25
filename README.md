@@ -61,6 +61,7 @@ This integration will set up the `conversation` platform, allowing users to conv
 Configuration is done entirely in the Home Assistant UI using subentry flows.
 
 1. Add the integration (instruction-only screen).
+   - If you previously configured the integration via the legacy flow, your settings are automatically migrated into the new subentry-based UI.
 2. Click **+ Setup** on the integration page.
    - Enable optional features.
    - Configure each enabled feature’s model settings.
