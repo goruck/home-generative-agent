@@ -59,6 +59,7 @@ This integration will set up the `conversation` platform, allowing users to conv
 
 ## Configuration
 Configuration is done entirely in the Home Assistant UI using subentry flows.
+A "feature" is a discrete capability exposed by the integration (for example Conversation, Camera Image Analysis, or Conversation Summarization). Each feature is enabled separately and has its own model/provider configuration.
 
 1. Add the integration (instruction-only screen).
    - If you previously configured the integration via the legacy flow, your settings are automatically migrated into the new subentry-based UI.
@@ -67,7 +68,7 @@ Configuration is done entirely in the Home Assistant UI using subentry flows.
    - Configure each enabled feature’s model settings.
    - Configure the database.
    - If no model provider exists, you’ll see a reminder to add one.
-   - Default features include Conversation, Camera Image Analysis, and Summarization.
+   - Default features include Conversation, Camera Image Analysis, and Conversation Summarization.
 3. Click **+ Model Provider** to add a provider (Edge/Cloud → provider → settings).
    - The first provider is automatically assigned to all features with default models.
 4. Use a feature’s gear icon to adjust that feature’s model settings later.
@@ -289,33 +290,40 @@ Below is a high-level view of the architecture.
 
 The general integration architecture follows the best practices as described in [Home Assistant Core](https://developers.home-assistant.io/docs/development_index/) and is compliant with [Home Assistant Community Store](https://www.hacs.xyz/) (HACS) publishing requirements.
 
-The agent is built using LangGraph and uses the HA `conversation` component to interact with the user. The agent uses the Home Assistant LLM API to fetch the state of the home and understand the HA native tools it has at its disposal. I implemented all other tools available to the agent using LangChain. The agent employs several LLMs, a large and very accurate primary model for high-level reasoning, smaller specialized helper models for camera image analysis, primary model context summarization, and embedding generation for long-term semantic search. The models can be either cloud (best accuracy, highest cost) or edge-based (good accuracy, lowest cost). The edge models run under the [Ollama](https://ollama.com/) framework on a computer located in the home. The models currently being used are summarized below. however other models are available and are configurable via integration's UI.
+The agent is built using LangGraph and uses the HA `conversation` component to interact with the user. The agent uses the Home Assistant LLM API to fetch the state of the home and understand the HA native tools it has at its disposal. I implemented all other tools available to the agent using LangChain. The agent employs several LLMs, a large and very accurate primary model for high-level reasoning, smaller specialized helper models for camera image analysis, primary model context summarization, and embedding generation for long-term semantic search. The models can be either cloud (best accuracy, highest cost) or edge-based (good accuracy, lowest cost). The edge models run under the [Ollama](https://ollama.com/) framework on a computer located in the home. Recommended defaults and supported models are configurable in the integration UI, with defaults defined in `const.py`.
 
-Model | Provider | Purpose
--- | -- | -- |
-[GPT-4o](https://platform.openai.com/docs/models#gpt-4o) | OpenAI | High-level reasoning and planning
-[qwen3:8b](https://ollama.com/library/qwen3) | Ollama | High-level reasoning and planning
-[qwen2.5vl:7b](https://ollama.com/library/qwen2.5vl) | Ollama | Image scene analysis
-[qwen3:1.7bb](https://ollama.com/library/qwen3) | Ollama | Primary model context summarization
-[mxbai-embed-large](https://ollama.com/library/mxbai-embed-large) | Ollama | Embedding generation for sematic search
+Category | Provider | Default model | Purpose
+-- | -- | -- | -- |
+Chat | OpenAI | gpt-5 | High-level reasoning and planning
+Chat | Ollama | gpt-oss | High-level reasoning and planning
+Chat | Gemini | gemini-2.5-flash-lite | High-level reasoning and planning
+VLM | Ollama | qwen3-vl:8b | Image scene analysis
+VLM | OpenAI | gpt-5-nano | Image scene analysis
+VLM | Gemini | gemini-2.5-flash-lite | Image scene analysis
+Summarization | Ollama | qwen3:1.7b | Primary model context summarization
+Summarization | OpenAI | gpt-5-nano | Primary model context summarization
+Summarization | Gemini | gemini-2.5-flash-lite | Primary model context summarization
+Embeddings | Ollama | mxbai-embed-large | Embedding generation for semantic search
+Embeddings | OpenAI | text-embedding-3-small | Embedding generation for semantic search
+Embeddings | Gemini | gemini-embedding-001 | Embedding generation for semantic search
 
 ### LangGraph-based Agent
 LangGraph powers the conversation agent, enabling you to create stateful, multi-actor applications utilizing LLMs as quickly as possible. It extends LangChain's capabilities, introducing the ability to create and manage cyclical graphs essential for developing complex agent runtimes. A graph models the agent workflow, as seen in the image below.
 
 ![Alt text](./assets/graph.png)
 
-The agent workflow has five nodes, each Python module modifying the agent's state, a shared data structure. The edges between the nodes represent the allowed transitions between them, with solid lines unconditional and dashed lines conditional. Nodes do the work, and edges tell what to do next.
+The agent workflow has three nodes, each Python module modifying the agent's state, a shared data structure. The edges between the nodes represent the allowed transitions between them, with solid lines unconditional and dashed lines conditional. Nodes do the work, and edges tell what to do next.
 
-The ```__start__``` and ```__end__``` nodes inform the graph where to start and stop. The ```agent``` node runs the primary LLM, and if it decides to use a tool, the ```action``` node runs the tool and then returns control to the ```agent```. The ```summarize_and_remove_messages``` node processes the LLM's context to manage growth while maintaining accuracy if ```agent``` has no tool to call and message trimming is required to manage the LLM context.
+The ```__start__``` and ```__end__``` nodes inform the graph where to start and stop. The ```agent``` node runs the primary LLM, and if it decides to use a tool, the ```action``` node runs the tool and then returns control to the ```agent```. When the agent does not call a tool, control passes to ```summarize_and_remove_messages```, which summarizes only when trimming is required to manage the LLM context.
 
 ### LLM Context Management
-You need to carefully manage the context length of LLMs to balance cost, accuracy, and latency and avoid triggering rate limits such as OpenAI's Tokens per Minute restriction. The system controls the context length of the primary model by trimming the messages in the context if they exceed a max parameter which can be expressed in either tokens or messages, and the trimmed messages are replaced by a shorter summary inserted into the system message. These parameters are configurable in `const.py`; their description is below.
+You need to carefully manage the context length of LLMs to balance cost, accuracy, and latency and avoid triggering rate limits such as OpenAI's Tokens per Minute restriction. The system controls the context length of the primary model by trimming the messages in the context if they exceed a max parameter which can be expressed in either tokens or messages, and the trimmed messages are replaced by a shorter summary inserted into the system message. These parameters are configurable in the UI, with defaults defined in `const.py`; their description is below.
 
 Parameter | Description | Default
 -- | -- | -- |
-`CONTEXT_MAX_MESSAGES` |  Messages to keep in context before deletion | 80
-`CONTEXT_MAX_TOKENS` | Tokens to keep in context before deletion | 25600
-`CONTEXT_MANAGE_USE_TOKENS` | If True, use tokens to manage context, else use messages | True
+`max_messages_in_context` | Messages to keep in context before deletion | 60
+`max_tokens_in_context` | Tokens to keep in context before deletion | 32000
+`manage_context_with_tokens` | If "true", use tokens to manage context, else use messages | "true"
 
 ### Latency
 The latency between user requests or the agent taking timely action on the user's behalf is critical for you to consider in the design. I used several techniques to reduce latency, including using specialized, smaller helper LLMs running on the edge and facilitating primary model prompt caching by structuring the prompts to put static content, such as instructions and examples, upfront and variable content, such as user-specific information at the end. These techniques also reduce primary model usage costs considerably.
@@ -332,7 +340,7 @@ Memory operations | < 1 |
 ### Tools
 The agent can use HA tools as specified in the [LLM API](https://developers.home-assistant.io/docs/core/llm/) and other tools built in the LangChain framework as defined in `tools.py`. Additionally, you can extend the LLM API with tools of your own as well. The code gives the primary LLM the list of tools it can call, along with instructions on using them in its system message and in the docstring of the tool's Python function definition. If the agent decides to use a tool, the LangGraph node `action` is entered, and the node's code runs the tool. The node uses a simple error recovery mechanism that will ask the agent to try calling the tool again with corrected parameters in the event of making a mistake.
 
-The LLM API instructs the agent always to call tools using HA [built-in intents](https://developers.home-assistant.io/docs/intent_builtin) when controlling Home Assistant and to use the intents `HassTurnOn` to lock and `HassTurnOff` to unlock a lock. An intent describes a user's intention generated by user actions.
+The agent can call HA LLM API tools, including [built-in intents](https://developers.home-assistant.io/docs/intent_builtin) like `HassTurnOn` and `HassTurnOff`. The integration normalizes lock intents to lock/unlock services and routes alarm intents to the `alarm_control` tool.
 
 You can see the list of LangChain tools that the agent can use in the table below.
 
@@ -341,6 +349,8 @@ Langchain Tool | Purpose
 `get_and_analyze_camera_image` | run scene analysis on the image from a camera
 `upsert_memory` | add or update a memory
 `add_automation` | create and register a HA automation
+`confirm_sensitive_action` | confirm and execute a pending critical action with a PIN
+`alarm_control` | arm or disarm an alarm control panel with the alarm code
 `get_entity_history` | query HA database for entity history
 <del>`get_current_device_state`</del> | <del>get the current state of one or more Home Assistant devices</del> (deprecated, using native HA GetLiveContext tool instead)
 
