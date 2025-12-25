@@ -26,6 +26,7 @@ from homeassistant.helpers.selector import (
 
 from ..const import (  # noqa: TID252
     CONF_GEMINI_API_KEY,
+    MODEL_CATEGORY_SPECS,
     SUBENTRY_TYPE_MODEL_PROVIDER,
 )
 from ..core.utils import (  # noqa: TID252
@@ -45,11 +46,23 @@ ProviderNames = {
     "gemini": "Cloud-LLM Gemini",
 }
 
-ProviderCapabilities = {
-    "ollama": {"chat", "vlm", "summarization", "embedding"},
-    "openai": {"chat", "vlm", "summarization", "embedding"},
-    "gemini": {"chat", "vlm", "summarization", "embedding"},
-}
+_PROVIDER_CAPABILITIES_CACHE: dict[str, set[str]] | None = None
+
+
+def _provider_capabilities() -> dict[str, set[str]]:
+    """Derive provider capabilities from MODEL_CATEGORY_SPECS."""
+    global _PROVIDER_CAPABILITIES_CACHE  # noqa: PLW0603
+    if _PROVIDER_CAPABILITIES_CACHE is not None:
+        return _PROVIDER_CAPABILITIES_CACHE
+    capabilities: dict[str, set[str]] = {}
+    for category, spec in MODEL_CATEGORY_SPECS.items():
+        providers = spec.get("providers", {})
+        if not isinstance(providers, dict):
+            continue
+        for provider in providers:
+            capabilities.setdefault(provider, set()).add(category)
+    _PROVIDER_CAPABILITIES_CACHE = capabilities
+    return capabilities
 
 
 def _current_subentry(flow: ConfigSubentryFlow) -> ConfigSubentry | None:
@@ -191,9 +204,7 @@ class ModelProviderSubentryFlow(ConfigSubentryFlow):
         provider_type = self._provider_type or "ollama"
         errors: dict[str, str] = {}
         current = _current_subentry(self)
-        current_settings = (
-            dict(current.data.get("settings", {})) if current else {}
-        )
+        current_settings = dict(current.data.get("settings", {})) if current else {}
 
         if user_input is not None:
             settings: dict[str, Any] = {}
@@ -242,7 +253,7 @@ class ModelProviderSubentryFlow(ConfigSubentryFlow):
                     settings["api_key"] = api_key
 
             if not errors:
-                caps = ProviderCapabilities.get(provider_type, {"chat"})
+                caps = _provider_capabilities().get(provider_type, {"chat"})
                 payload = {
                     "provider_type": provider_type,
                     "name": self._name or ProviderNames.get(provider_type, "Provider"),
