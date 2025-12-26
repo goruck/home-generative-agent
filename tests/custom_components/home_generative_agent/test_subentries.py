@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any
+
 import pytest
 from homeassistant.const import CONF_API_KEY, CONF_HOST, CONF_PASSWORD, CONF_USERNAME
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -35,34 +37,45 @@ from custom_components.home_generative_agent.flows.model_provider_subentry_flow 
     ModelProviderSubentryFlow,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from homeassistant.core import HomeAssistant
+
 
 class DummySubentry:
     """Simple stand-in for ConfigSubentry."""
 
     def __init__(
-        self, subentry_id: str, subentry_type: str, title: str, data: dict
+        self,
+        subentry_id: str,
+        subentry_type: str,
+        title: str,
+        data: dict[str, Any],
     ) -> None:
         """Initialize dummy subentry."""
         self.subentry_id = subentry_id
         self.subentry_type = subentry_type
         self.title = title
-        self.data = data
+        self.data: dict[str, Any] = data
 
 
 class DummyEntry:
     """Simple stand-in for ConfigEntry used in unit tests."""
 
-    def __init__(self, data: dict | None = None, options: dict | None = None) -> None:
+    def __init__(
+        self, data: dict[str, Any] | None = None, options: dict[str, Any] | None = None
+    ) -> None:
         """Initialize dummy entry."""
         self.entry_id = "entry1"
         self.domain = DOMAIN
-        self.data = data or {}
-        self.options = options or {}
+        self.data: dict[str, Any] = data or {}
+        self.options: dict[str, Any] = options or {}
         self.subentries: dict[str, DummySubentry] = {}
         self.version = CONFIG_ENTRY_VERSION
 
 
-def _patch_entry(flow, entry) -> None:
+def _patch_entry(flow: Any, entry: DummyEntry) -> None:
     """Attach hass/entry to a subentry flow."""
     flow._get_entry = lambda: entry  # type: ignore[attr-defined]  # noqa: SLF001
     flow._source = "user"  # noqa: SLF001
@@ -71,12 +84,15 @@ def _patch_entry(flow, entry) -> None:
 
 def test_supported_subentry_types() -> None:
     """Ensure all subentry flow types are registered."""
-    supported = HomeGenerativeAgentConfigFlow.async_get_supported_subentry_types(None)
+    entry = MockConfigEntry(domain=DOMAIN, title="Home Generative Agent")
+    supported = HomeGenerativeAgentConfigFlow.async_get_supported_subentry_types(entry)
     assert set(supported) == {SUBENTRY_TYPE_MODEL_PROVIDER, SUBENTRY_TYPE_FEATURE}
 
 
 @pytest.mark.asyncio
-async def test_model_provider_flow_creates_ollama(hass, monkeypatch) -> None:
+async def test_model_provider_flow_creates_ollama(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Model provider flow creates an Ollama subentry payload."""
     entry = DummyEntry()
     flow = ModelProviderSubentryFlow()
@@ -97,7 +113,7 @@ async def test_model_provider_flow_creates_ollama(hass, monkeypatch) -> None:
     flow._schedule_reload = lambda: None  # type: ignore[assignment]  # noqa: SLF001
     _patch_entry(flow, entry)
 
-    async def _noop_validate(*_args, **_kwargs) -> None:
+    async def _noop_validate(*_args: Any, **_kwargs: Any) -> None:
         return None
 
     monkeypatch.setattr(
@@ -106,24 +122,26 @@ async def test_model_provider_flow_creates_ollama(hass, monkeypatch) -> None:
     )
 
     first = await flow.async_step_user()
-    assert first["type"] == "form"
+    assert first.get("type") == "form"
 
     second = await flow.async_step_deployment({"deployment": "edge"})
-    assert second["type"] == "form"
+    assert second.get("type") == "form"
 
     third = await flow.async_step_provider(
         {"provider_type": "ollama", "name": "Primary Ollama"}
     )
-    assert third["type"] == "form"
+    assert third.get("type") == "form"
 
     result = await flow.async_step_settings({"base_url": "http://localhost:11434"})
-    assert result["type"] == "create_entry"
-    assert result["data"]["provider_type"] == "ollama"
-    assert "settings" in result["data"]
+    assert result.get("type") == "create_entry"
+    result_data = result.get("data")
+    assert result_data is not None
+    assert result_data["provider_type"] == "ollama"
+    assert "settings" in result_data
 
 
 @pytest.mark.asyncio
-async def test_feature_flow_links_provider(hass) -> None:
+async def test_feature_flow_links_provider(hass: HomeAssistant) -> None:
     """Feature flow saves provider reference."""
     provider = DummySubentry(
         "prov1",
@@ -152,19 +170,28 @@ async def test_feature_flow_links_provider(hass) -> None:
         "type": "abort",
         "reason": kwargs.get("reason"),
     }
+    def _update_subentry(
+        _entry: DummyEntry,
+        subentry: DummySubentry,
+        data: Mapping[str, Any],
+        title: str | None,
+    ) -> None:
+        _ = title
+        subentry.data = {**subentry.data, **data}
+
     flow.hass.config_entries.async_update_subentry = (  # type: ignore[assignment]
-        lambda _entry, subentry, data, title: subentry.data.update(data)
+        _update_subentry
     )
     flow._schedule_reload = lambda: None  # type: ignore[assignment]  # noqa: SLF001
     _patch_entry(flow, entry)
     flow.context["subentry_id"] = feature.subentry_id
 
     first = await flow.async_step_user()
-    assert first["type"] == "form"
+    assert first.get("type") == "form"
     provider_step = await flow.async_step_conversation({"model_provider_id": "prov1"})
-    assert provider_step["type"] == "form"
+    assert provider_step.get("type") == "form"
     result = await flow.async_step_feature_model({"model_name": "gpt-oss"})
-    assert result["type"] == "abort"
+    assert result.get("type") == "abort"
     assert feature.data["model_provider_id"] == "prov1"
     assert feature.data[CONF_FEATURE_MODEL][CONF_FEATURE_MODEL_NAME] == "gpt-oss"
 
@@ -204,7 +231,9 @@ def test_resolve_runtime_options_prefers_subentries() -> None:
 
 
 @pytest.mark.asyncio
-async def test_migration_creates_provider_and_feature_subentries(hass) -> None:
+async def test_migration_creates_provider_and_feature_subentries(
+    hass: HomeAssistant,
+) -> None:
     """Migration should add provider and feature subentries from legacy options."""
     entry = MockConfigEntry(
         domain=DOMAIN,
@@ -224,7 +253,6 @@ async def test_migration_creates_provider_and_feature_subentries(hass) -> None:
         },
     )
     entry.add_to_hass(hass)
-    entry.subentries = {}
 
     assert await async_migrate_entry(hass, entry)
     providers = [
