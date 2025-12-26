@@ -116,7 +116,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         )
         self.message_history_len = 0
 
-        if self.entry.options.get(CONF_LLM_HASS_API):
+        if self.entry.runtime_data.options.get(CONF_LLM_HASS_API):
             self._attr_supported_features = (
                 conversation.ConversationEntityFeature.CONTROL
             )
@@ -148,7 +148,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
     ) -> conversation.ConversationResult:
         """Process the user input."""
         hass = self.hass
-        options = self.entry.options
+        options = self.entry.runtime_data.options
         runtime_data = self.entry.runtime_data
         intent_response = intent.IntentResponse(language=user_input.language)
         tools: list[dict[str, Any]] | None = None

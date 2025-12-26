@@ -6,6 +6,12 @@ from annotated_types import Ge, Le
 
 DOMAIN = "home_generative_agent"
 
+CONFIG_ENTRY_VERSION = 4
+
+SUBENTRY_TYPE_DATABASE = "database"
+SUBENTRY_TYPE_MODEL_PROVIDER = "model_provider"
+SUBENTRY_TYPE_FEATURE = "feature"
+
 HTTP_STATUS_UNAUTHORIZED = 401
 HTTP_STATUS_BAD_REQUEST = 400
 HTTP_STATUS_WEBPAGE_NOT_FOUND = 404
@@ -32,10 +38,20 @@ CRITICAL_PIN_MIN_LEN = 4
 CRITICAL_PIN_MAX_LEN = 10
 
 # ---- PostgreSQL (vector store + checkpointer) ----
+
+# -- version 1
 CONF_DB_URI = "db_uri"
-RECOMMENDED_DB_URI = (
-    "postgresql://ha_user:ha_password@localhost:5432/ha_db?sslmode=disable"
-)
+
+# -- version 2
+CONF_DB_NAME = "db_name"
+CONF_DB_PARAMS = "db_params"
+RECOMMENDED_DB_USERNAME = "ha_user"
+RECOMMENDED_DB_PASSWORD = "ha_password"  # noqa: S105
+RECOMMENDED_DB_HOST = "localhost"
+RECOMMENDED_DB_PORT = 5432
+RECOMMENDED_DB_NAME = "ha_db"
+RECOMMENDED_DB_PARAMS = [{"key": "sslmode", "value": "disable"}]
+
 CONF_DB_BOOTSTRAPPED = "db_bootstrapped"
 
 # ---- Notify service (for mobile push notifications) ----
@@ -88,6 +104,38 @@ OLLAMA_BOOL_HINT_TAGS = {
 # ---- Global options ----
 CONF_RECOMMENDED = "recommended"
 CONF_PROMPT = "prompt"
+CONF_DISABLED_FEATURES = "disabled_features"
+
+# ---- Feature definitions ----
+DEFAULT_FEATURE_TYPES: tuple[str, ...] = (
+    "conversation",
+    "camera_image_analysis",
+    "conversation_summary",
+)
+
+FEATURE_DEFS: dict[str, dict[str, Any]] = {
+    "conversation": {"name": "Conversation", "required": True},
+    "camera_image_analysis": {"name": "Camera Image Analysis", "required": False},
+    "conversation_summary": {"name": "Conversation Summary", "required": False},
+}
+
+FEATURE_NAMES: dict[str, str] = {
+    key: value["name"] for key, value in FEATURE_DEFS.items()
+}
+
+FEATURE_CATEGORY_MAP: dict[str, str] = {
+    "conversation": "chat",
+    "camera_image_analysis": "vlm",
+    "conversation_summary": "summarization",
+}
+
+# ---- Feature model config (per-feature subentry) ----
+CONF_FEATURE_MODEL = "model"
+CONF_FEATURE_MODEL_NAME = "model_name"
+CONF_FEATURE_MODEL_TEMPERATURE = "temperature"
+CONF_FEATURE_MODEL_REASONING = "reasoning"
+CONF_FEATURE_MODEL_KEEPALIVE = "keepalive_s"
+CONF_FEATURE_MODEL_CONTEXT_SIZE = "context_size"
 
 # --- Gemini API key (used in config_flow/__init__.py) ---
 CONF_GEMINI_API_KEY = "gemini_api_key"

@@ -2,24 +2,164 @@
   "config": {
     "step": {
       "user": {
-        "title": "Modelleri bağla",
-        "description": "**API anahtarlarını**, isteğe bağlı **Ollama sunucu URL'lerini** (genel veya model bazlı), **Postgres URI** veya **Yüz tanıma sunucusu URI**'sini girin. Geçerli bir **Postgres URI** girmeniz zorunludur, diğerlerini daha sonra Seçenekler'den yapılandırabilirsiniz.",
-        "data": {
-          "api_key": "OpenAI API anahtarı (isteğe bağlı)",
-          "ollama_url": "Ollama sunucu URL'si (isteğe bağlı)",
-          "ollama_chat_url": "Ollama sohbet sunucusu URL'si (isteğe bağlı)",
-          "ollama_vlm_url": "Ollama VLM sunucusu URL'si (isteğe bağlı)",
-          "ollama_summarization_url": "Ollama özetleme sunucusu URL'si (isteğe bağlı)",
-          "gemini_api_key": "Google Gemini API anahtarı (isteğe bağlı)",
-          "face_api_url": "Yüz tanıma sunucusu API URL'si (isteğe bağlı)",
-          "db_uri": "PostgreSQL Veritabanı URI (zorunlu)"
-        }
+        "title": "Home Generative Agent",
+        "description": "Varsayılan özellikler oluşturuluyor. Sonraki adımda **Kurulum** ile özellikleri ve veritabanını yapılandırın, ardından bir **Model Sağlayıcı** ekleyin."
       }
     },
     "error": {
       "cannot_connect": "Servise ulaşılamıyor. Anahtarları/URL'leri kontrol edip tekrar deneyin.",
       "invalid_auth": "Geçersiz API anahtarı.",
+      "invalid_pin": "PIN 4-10 rakam olmalıdır.",
       "unknown": "Beklenmeyen hata."
+    }
+  },
+  "config_subentries": {
+    "database": {
+      "entry_type": "service",
+      "abort": {
+        "reconfigure_successful": "Veritabanı yapılandırması başarıyla güncellendi."
+      },
+      "initiate_flow": {
+        "reconfigure": "Veritabanını yeniden yapılandır",
+        "user": "Veritabanını kur"
+      },
+      "step": {
+        "set_options": {
+          "title": "Veritabanı kurulumu",
+          "description": "Veritabanı için gerekli parametreleri girin.",
+          "data": {
+            "username": "Veritabanı kullanıcı adı",
+            "password": "Veritabanı parolası",
+            "host": "Veritabanı ana makinesi",
+            "port": "Veritabanı bağlantı noktası (isteğe bağlı)",
+            "db_name": "Veritabanı adı",
+            "db_params": "Veritabanı bağlantı parametreleri (isteğe bağlı)"
+          }
+        }
+      },
+      "error": {
+        "cannot_connect": "Veritabanına bağlanılamadı. Ayarları kontrol edip tekrar deneyin.",
+        "invalid_auth": "Geçersiz yetkilendirme.",
+        "invalid_uri": "URI oluşturulamadı.",
+        "unknown": "Beklenmeyen hata."
+      }
+    },
+    "model_provider": {
+      "entry_type": "service",
+      "abort": {
+        "reconfigure_successful": "Model sağlayıcı güncellendi."
+      },
+      "initiate_flow": {
+        "reconfigure": "Model sağlayıcıyı yeniden yapılandır",
+        "user": "Model sağlayıcı ekle"
+      },
+      "step": {
+        "deployment": {
+          "title": "Dağıtım",
+          "description": "Bu sağlayıcının nerede çalışacağını seçin.",
+          "data": {
+            "deployment": "Dağıtım"
+          }
+        },
+        "provider": {
+          "title": "Sağlayıcı",
+          "description": "Sağlayıcı türünü ve adını seçin.",
+          "data": {
+            "provider_type": "Sağlayıcı",
+            "name": "Sağlayıcı adı"
+          }
+        },
+        "settings": {
+          "title": "Sağlayıcı ayarları",
+          "description": "Sağlayıcı uç noktası veya kimlik bilgilerini yapılandırın.",
+          "data": {
+            "base_url": "Temel URL",
+            "api_key": "API anahtarı",
+            "gemini_api_key": "Gemini API anahtarı"
+          }
+        }
+      },
+      "error": {
+        "cannot_connect": "Sağlayıcıya erişilemiyor.",
+        "invalid_auth": "Geçersiz kimlik bilgileri.",
+        "unknown": "Beklenmeyen hata."
+      }
+    },
+    "feature": {
+      "entry_type": "service",
+      "abort": {
+        "reconfigure_successful": "Özellik güncellendi.",
+        "setup_complete": "Kurulum tamamlandı."
+      },
+      "error": {
+        "no_providers": "Hiç model sağlayıcı yapılandırılmamış.",
+        "cannot_connect": "Veritabanına bağlanılamadı. Ayarları kontrol edip tekrar deneyin.",
+        "invalid_auth": "Geçersiz yetkilendirme.",
+        "invalid_uri": "URI oluşturulamadı.",
+        "unknown": "Beklenmeyen hata."
+      },
+      "initiate_flow": {
+        "reconfigure": "Özelliği yeniden yapılandır",
+        "user": "Kurulum"
+      },
+      "step": {
+        "feature_enable": {
+          "title": "Özellik kurulumu",
+          "description": "İsteğe bağlı özellikleri etkinleştirin veya devre dışı bırakın.",
+          "data": {
+            "camera_image_analysis": "Kamera Görüntü Analizi",
+            "conversation_summary": "Sohbet Özeti"
+          }
+        },
+        "feature_provider": {
+          "title": "Model sağlayıcı seçin",
+          "description": "{feature_name} için bir model sağlayıcı seçin.",
+          "data": {
+            "model_provider_id": "Model sağlayıcı"
+          }
+        },
+        "feature_model": {
+          "title": "{feature_name}",
+          "description": "Bu özellik için model ayarlarını yapılandırın. {provider_notice}",
+          "data": {
+            "model_name": "Model",
+            "temperature": "Sıcaklık",
+            "keepalive_s": "Ollama keepalive (saniye veya Asla boşaltma (-1))",
+            "context_size": "Ollama bağlam boyutu (token)",
+            "reasoning": "Ollama akıl yürütme"
+          }
+        },
+        "database": {
+          "title": "Veritabanı kurulumu",
+          "description": "Veritabanı için gerekli parametreleri girin.",
+          "data": {
+            "username": "Veritabanı kullanıcı adı",
+            "password": "Veritabanı parolası",
+            "host": "Veritabanı ana makinesi",
+            "port": "Veritabanı bağlantı noktası (isteğe bağlı)",
+            "db_name": "Veritabanı adı",
+            "db_params": "Veritabanı bağlantı parametreleri (isteğe bağlı)"
+          }
+        },
+        "instructions": {
+          "title": "Model sağlayıcı ekleyin",
+          "description": "Henüz bir model sağlayıcı yok. **Model Sağlayıcı** bölümünden bir tane ekleyin."
+        }
+      }
+    }
+  },
+  "selector": {
+    "db_params": {
+      "fields": {
+        "key": {
+          "name": "Anahtar",
+          "description": "Bağlantı parametresi adı (ör. sslmode, connect_timeout)"
+        },
+        "value": {
+          "name": "Değer",
+          "description": "Bağlantı parametresi değeri (ör. disable, 30)"
+        }
+      }
     }
   },
   "exceptions": {
@@ -31,51 +171,19 @@
     "step": {
       "init": {
         "title": "Home Generative Agent Seçenekleri",
-        "description": "Anahtarları, URL'leri, ana komutu, modelleri ve sağlayıcıları yapılandırın.",
+        "description": "Genel davranış ve komutları yapılandırın.",
         "data": {
-          "api_key": "OpenAI API anahtarı (isteğe bağlı)",
-          "gemini_api_key": "Google Gemini API anahtarı (isteğe bağlı)",
-          "ollama_url": "Ollama gömme ve genel yedek sunucu URL'si (isteğe bağlı)",
-          "ollama_chat_url": "Ollama sohbet sunucusu URL'si (isteğe bağlı)",
-          "ollama_vlm_url": "Ollama VLM sunucusu URL'si (isteğe bağlı)",
-          "ollama_summarization_url": "Ollama özetleme sunucusu URL'si (isteğe bağlı)",
           "face_api_url": "Yüz tanıma API URL'si (isteğe bağlı)",
-          "db_uri": "PostgreSQL Veritabanı URI (zorunlu)",
           "prompt": "Talimatlar",
-          "chat_model_provider": "Sohbet modeli sağlayıcısı",
-          "ollama_chat_model": "Ollama sohbet modeli",
-          "openai_chat_model": "OpenAI sohbet modeli",
-          "gemini_chat_model": "Gemini sohbet modeli",
-          "chat_model_temperature": "Sohbet modeli sıcaklığı",
-          "vlm_provider": "VLM sağlayıcısı",
-          "ollama_vlm": "Ollama VLM",
-          "openai_vlm": "OpenAI VLM",
-          "gemini_vlm": "Gemini VLM",
-          "vlm_temperature": "VLM sıcaklığı",
-          "summarization_provider": "Özetleme sağlayıcısı",
-          "ollama_summarization_model": "Ollama özetleme modeli",
-          "openai_summarization_model": "OpenAI özetleme modeli",
-          "gemini_summarization_model": "Gemini özetleme modeli",
-          "summarization_model_temperature": "Özetleme modeli sıcaklığı",
-          "embedding_model_provider": "Gömme modeli sağlayıcısı",
-          "ollama_embedding_model": "Ollama gömme modeli",
-          "openai_embedding_model": "OpenAI gömme modeli",
-          "gemini_embedding_model": "Gemini gömme modeli",
           "llm_hass_api": "Home Assistant'ı kontrol et",
-          "recommended": "Önerilen model ayarları (bunları değiştirmek performansı etkileyebilir)",
           "video_analyzer_mode": "Video analizci modu",
           "notify_service": "Mobil Uygulama Bildirim Servisi (isteğe bağlı)",
           "face_recognition": "Yüz tanımayı etkinleştir",
-          "ollama_reasoning": "Ollama muhakemeyi etkinleştir",
-          "ollama_chat_keepalive": "Ollama sohbet modeli canlı tutma (saniye veya Asla kaldırma (-1))",
-          "ollama_vlm_keepalive": "Ollama VLM canlı tutma (saniye veya Asla kaldırma (-1))",
-          "ollama_summarization_keepalive": "Ollama özetleme modeli canlı tutma (saniye veya Asla kaldırma (-1))",
-          "ollama_chat_context_size": "Ollama sohbet modeli bağlam boyutu (token)",
-          "ollama_vlm_context_size": "Ollama VLM bağlam boyutu (token)",
-          "ollama_summarization_context_size": "Ollama özetleme modeli bağlam boyutu (token)",
           "manage_context_with_tokens": "Bağlam yönetim yöntemi",
           "max_tokens_in_context": "Sohbet bağlamındaki maksimum token sayısı",
-          "max_messages_in_context": "Sohbet bağlamındaki maksimum mesaj sayısı"
+          "max_messages_in_context": "Sohbet bağlamındaki maksimum mesaj sayısı",
+          "critical_action_pin_enabled": "Kritik eylemler için PIN zorunlu",
+          "critical_action_pin": "Kritik eylem PIN’i (kilit açma/kurma/açma için gerekli)"
         },
         "data_description": {
           "prompt": "LLM'in nasıl yanıt vermesi gerektiğini belirtin. Bu bir şablon olabilir."

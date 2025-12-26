@@ -7,13 +7,21 @@ import logging
 from collections.abc import Sequence
 from functools import partial
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, cast
 
 import aiofiles
 import voluptuous as vol
 from homeassistant.components.camera.const import DOMAIN as CAMERA_DOMAIN
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_API_KEY, Platform
+from homeassistant.config_entries import ConfigEntry, ConfigSubentry
+from homeassistant.const import (
+    CONF_API_KEY,
+    CONF_HOST,
+    CONF_PASSWORD,
+    CONF_PORT,
+    CONF_USERNAME,
+    Platform,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
@@ -27,6 +35,7 @@ from langchain_core.runnables import ConfigurableField
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.store.postgres import AsyncPostgresStore
 from langgraph.store.postgres.base import PostgresIndexConfig
@@ -41,10 +50,18 @@ from .const import (
     CONF_CHAT_MODEL_PROVIDER,
     CONF_CHAT_MODEL_TEMPERATURE,
     CONF_DB_BOOTSTRAPPED,
+    CONF_DB_NAME,
+    CONF_DB_PARAMS,
     CONF_DB_URI,
     CONF_EMBEDDING_MODEL_PROVIDER,
     CONF_FACE_API_URL,
     CONF_FACE_RECOGNITION,
+    CONF_FEATURE_MODEL,
+    CONF_FEATURE_MODEL_CONTEXT_SIZE,
+    CONF_FEATURE_MODEL_KEEPALIVE,
+    CONF_FEATURE_MODEL_NAME,
+    CONF_FEATURE_MODEL_REASONING,
+    CONF_FEATURE_MODEL_TEMPERATURE,
     CONF_GEMINI_API_KEY,
     CONF_GEMINI_CHAT_MODEL,
     CONF_GEMINI_EMBEDDING_MODEL,
@@ -53,15 +70,18 @@ from .const import (
     CONF_OLLAMA_CHAT_CONTEXT_SIZE,
     CONF_OLLAMA_CHAT_KEEPALIVE,
     CONF_OLLAMA_CHAT_MODEL,
+    CONF_OLLAMA_CHAT_URL,
     CONF_OLLAMA_EMBEDDING_MODEL,
     CONF_OLLAMA_REASONING,
     CONF_OLLAMA_SUMMARIZATION_CONTEXT_SIZE,
     CONF_OLLAMA_SUMMARIZATION_KEEPALIVE,
     CONF_OLLAMA_SUMMARIZATION_MODEL,
+    CONF_OLLAMA_SUMMARIZATION_URL,
     CONF_OLLAMA_URL,
     CONF_OLLAMA_VLM,
     CONF_OLLAMA_VLM_CONTEXT_SIZE,
     CONF_OLLAMA_VLM_KEEPALIVE,
+    CONF_OLLAMA_VLM_URL,
     CONF_OPENAI_CHAT_MODEL,
     CONF_OPENAI_EMBEDDING_MODEL,
     CONF_OPENAI_SUMMARIZATION_MODEL,
@@ -71,12 +91,22 @@ from .const import (
     CONF_VIDEO_ANALYZER_MODE,
     CONF_VLM_PROVIDER,
     CONF_VLM_TEMPERATURE,
+    CONFIG_ENTRY_VERSION,
+    DEFAULT_FEATURE_TYPES,
     DOMAIN,
     EMBEDDING_MODEL_CTX,
     EMBEDDING_MODEL_DIMS,
+    FEATURE_CATEGORY_MAP,
+    FEATURE_NAMES,
+    MODEL_CATEGORY_SPECS,
     RECOMMENDED_CHAT_MODEL_PROVIDER,
     RECOMMENDED_CHAT_MODEL_TEMPERATURE,
-    RECOMMENDED_DB_URI,
+    RECOMMENDED_DB_HOST,
+    RECOMMENDED_DB_NAME,
+    RECOMMENDED_DB_PARAMS,
+    RECOMMENDED_DB_PASSWORD,
+    RECOMMENDED_DB_PORT,
+    RECOMMENDED_DB_USERNAME,
     RECOMMENDED_EMBEDDING_MODEL_PROVIDER,
     RECOMMENDED_FACE_API_URL,
     RECOMMENDED_FACE_RECOGNITION,
@@ -104,6 +134,9 @@ from .const import (
     RECOMMENDED_VLM_TEMPERATURE,
     SIGNAL_HGA_NEW_LATEST,
     SIGNAL_HGA_RECOGNIZED,
+    SUBENTRY_TYPE_DATABASE,
+    SUBENTRY_TYPE_FEATURE,
+    SUBENTRY_TYPE_MODEL_PROVIDER,
     SUMMARIZATION_MIRO_STAT,
     SUMMARIZATION_MODEL_PREDICT,
     SUMMARIZATION_MODEL_REPEAT_PENALTY,
@@ -114,9 +147,16 @@ from .const import (
     VLM_REPEAT_PENALTY,
     VLM_TOP_P,
 )
+from .core.db_utils import parse_postgres_uri
 from .core.migrations import migrate_person_gallery
 from .core.person_gallery import PersonGalleryDAO
 from .core.runtime import HGAConfigEntry, HGAData
+from .core.subentry_resolver import (
+    build_database_uri_from_entry,
+    legacy_feature_configs,
+    legacy_model_provider_configs,
+    resolve_runtime_options,
+)
 from .core.utils import (
     configured_ollama_urls,
     dispatch_on_loop,
@@ -156,6 +196,91 @@ ENROLL_SCHEMA = vol.Schema(
 
 Embedding = Sequence[float]
 
+def _default_feature_payload(feature_type: str) -> dict[str, Any]:
+    return {
+        "feature_type": feature_type,
+        "name": FEATURE_NAMES.get(feature_type, feature_type),
+        "model_provider_id": None,
+        CONF_FEATURE_MODEL: {},
+        "config": {},
+    }
+
+
+def _default_model_data(category: str, provider_type: str) -> dict[str, Any]:
+    spec = MODEL_CATEGORY_SPECS.get(category, {})
+    model_data: dict[str, Any] = {}
+    model_name = spec.get("recommended_models", {}).get(provider_type)
+    if model_name:
+        model_data[CONF_FEATURE_MODEL_NAME] = model_name
+    temp = spec.get("recommended_temperature")
+    if temp is not None:
+        model_data[CONF_FEATURE_MODEL_TEMPERATURE] = temp
+    if provider_type == "ollama":
+        keepalive_map = {
+            "chat": RECOMMENDED_OLLAMA_CHAT_KEEPALIVE,
+            "vlm": RECOMMENDED_OLLAMA_VLM_KEEPALIVE,
+            "summarization": RECOMMENDED_OLLAMA_SUMMARIZATION_KEEPALIVE,
+        }
+        keepalive = keepalive_map.get(category)
+        if keepalive is not None:
+            model_data[CONF_FEATURE_MODEL_KEEPALIVE] = keepalive
+        model_data[CONF_FEATURE_MODEL_CONTEXT_SIZE] = RECOMMENDED_OLLAMA_CONTEXT_SIZE
+        if category == "chat":
+            model_data[CONF_FEATURE_MODEL_REASONING] = RECOMMENDED_OLLAMA_REASONING
+    return model_data
+
+
+def _ensure_default_feature_subentries(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    for feature_type in DEFAULT_FEATURE_TYPES:
+        exists = any(
+            s.subentry_type == SUBENTRY_TYPE_FEATURE
+            and s.data.get("feature_type") == feature_type
+            for s in entry.subentries.values()
+        )
+        if exists:
+            continue
+        payload = _default_feature_payload(feature_type)
+        subentry = ConfigSubentry(
+            subentry_type=SUBENTRY_TYPE_FEATURE,
+            title=FEATURE_NAMES.get(feature_type, feature_type),
+            unique_id=f"{entry.entry_id}_{feature_type}",
+            data=MappingProxyType(payload),
+        )
+        hass.config_entries.async_add_subentry(entry, subentry)
+
+
+def _assign_first_provider_if_needed(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    providers = [
+        s
+        for s in entry.subentries.values()
+        if s.subentry_type == SUBENTRY_TYPE_MODEL_PROVIDER
+    ]
+    if len(providers) != 1:
+        return
+    provider = providers[0]
+    provider_type = provider.data.get("provider_type", "ollama")
+
+    for subentry in entry.subentries.values():
+        if subentry.subentry_type != SUBENTRY_TYPE_FEATURE:
+            continue
+        data = dict(subentry.data)
+        if data.get("model_provider_id"):
+            continue
+        feature_type = data.get("feature_type")
+        category = (
+            FEATURE_CATEGORY_MAP.get(feature_type)
+            if isinstance(feature_type, str)
+            else None
+        )
+        model_data = dict(data.get(CONF_FEATURE_MODEL, {}))
+        if not model_data and category:
+            model_data = _default_model_data(category, provider_type)
+        data["model_provider_id"] = provider.subentry_id
+        data[CONF_FEATURE_MODEL] = model_data
+        hass.config_entries.async_update_subentry(  # type: ignore[attr-defined]
+            entry, subentry, data=MappingProxyType(data), title=subentry.title
+        )
+
 
 async def _bootstrap_db_once(
     hass: HomeAssistant,
@@ -190,6 +315,18 @@ class NullChat:
     def with_config(self, **_cfg: Any) -> NullChat:
         """Return self, as this is a no-op."""
         return self
+
+
+class NullStore:
+    """Non-throwing fallback for memory store operations."""
+
+    async def asearch(self, *_args: Any, **_kwargs: Any) -> list[Any]:
+        """Return an empty result set."""
+        return []
+
+    async def aput(self, *_args: Any, **_kwargs: Any) -> None:
+        """No-op write."""
+        return
 
 
 def _register_services(hass: HomeAssistant, entry: HGAConfigEntry) -> None:
@@ -300,11 +437,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})
 
     _register_services(hass, entry)
+    _ensure_default_feature_subentries(hass, entry)
+    _assign_first_provider_if_needed(hass, entry)
 
-    # Options override data.
-    # entry.options is where data lives if added or changed later via Options.
-    # Merging options over data guarantees you see the most recent values.
-    conf = {**entry.data, **entry.options}
+    # Resolve effective options (data + options + subentries).
+    options = resolve_runtime_options(entry)
+    conf = dict(options)
     api_key = conf.get(CONF_API_KEY)
     gemini_key = conf.get(CONF_GEMINI_API_KEY)
     base_ollama_url = ensure_http_url(conf.get(CONF_OLLAMA_URL, RECOMMENDED_OLLAMA_URL))
@@ -414,7 +552,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         try:
             openai_embeddings = OpenAIEmbeddings(
                 api_key=api_key,
-                model=entry.options.get(
+                model=options.get(
                     CONF_OPENAI_EMBEDDING_MODEL, RECOMMENDED_OPENAI_EMBEDDING_MODEL
                 ),
                 dimensions=EMBEDDING_MODEL_DIMS,
@@ -426,7 +564,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     if ollama_health.get(base_ollama_url):
         try:
             ollama_embeddings = OllamaEmbeddings(
-                model=entry.options.get(
+                model=options.get(
                     CONF_OLLAMA_EMBEDDING_MODEL, RECOMMENDED_OLLAMA_EMBEDDING_MODEL
                 ),
                 base_url=base_ollama_url,
@@ -440,7 +578,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         try:
             gemini_embeddings = GoogleGenerativeAIEmbeddings(
                 google_api_key=gemini_key,
-                model=entry.options.get(
+                model=options.get(
                     CONF_GEMINI_EMBEDDING_MODEL, RECOMMENDED_GEMINI_EMBEDDING_MODEL
                 ),
             )
@@ -451,7 +589,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     embedding_model: (
         OpenAIEmbeddings | OllamaEmbeddings | GoogleGenerativeAIEmbeddings | None
     ) = None
-    embedding_provider = entry.options.get(
+    embedding_provider = options.get(
         CONF_EMBEDDING_MODEL_PROVIDER, RECOMMENDED_EMBEDDING_MODEL_PROVIDER
     )
     index_config: PostgresIndexConfig | None = None
@@ -479,64 +617,80 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         "prepare_threshold": 0,
         "row_factory": dict_row,
     }
-    db_uri = conf.get(CONF_DB_URI, RECOMMENDED_DB_URI)
-    pool: AsyncConnectionPool[AsyncConnection[DictRow]] = AsyncConnectionPool(
-        conninfo=db_uri, min_size=5, max_size=20, kwargs=connection_kwargs, open=False
-    )
-    try:
-        await pool.open()
-    except PoolTimeout:
-        LOGGER.exception("Error opening postgresql db.")
-        return False
 
-    # Initialize database for long-term memory.
-    store = AsyncPostgresStore(
-        pool,
-        index=index_config if index_config else None,
-    )
-    # Initialize database for thread-based (short-term) memory.
-    checkpointer = AsyncPostgresSaver(pool)
-    # First-time setup (if needed)
-    await _bootstrap_db_once(hass, entry, store, checkpointer)
+    db_uri = build_database_uri_from_entry(entry)
 
-    # Migrate person gallery DB schema (if needed)
-    try:
-        await migrate_person_gallery(pool)
-    except Exception:
-        LOGGER.exception("Error migrating person_gallery database schema.")
-        return False
-
-    person_gallery = PersonGalleryDAO(pool)
-
-    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute("""
-                SELECT current_database() AS db,
-                    current_user     AS usr,
-                    inet_server_addr()::text AS host,
-                    inet_server_port()       AS port,
-                    current_schemas(true)    AS schemas,
-                    current_setting('search_path', true) AS search_path
-            """)
-        env = await cur.fetchone()
-        if env:
-            LOGGER.info(
-                "DB env: db=%s user=%s host=%s port=%s schemas=%s search_path=%s",
-                env["db"],
-                env["usr"],
-                env["host"],
-                env["port"],
-                env["schemas"],
-                env["search_path"],
+    if db_uri is not None:
+        pool: AsyncConnectionPool[AsyncConnection[DictRow]] | None = (
+            AsyncConnectionPool(
+                conninfo=db_uri,
+                min_size=5,
+                max_size=20,
+                kwargs=connection_kwargs,
+                open=False,
             )
+        )
+        try:
+            await pool.open()
+        except PoolTimeout:
+            LOGGER.exception("Error opening postgresql db.")
+            return False
 
-        await cur.execute("SELECT COUNT(*) AS total FROM public.person_gallery")
-        resp = await cur.fetchone()
-        if resp:
-            LOGGER.info("Gallery rows visible to this connection: %s", resp["total"])
+        # Initialize database for long-term memory.
+        store = AsyncPostgresStore(
+            pool,
+            index=index_config if index_config else None,
+        )
+        # Initialize database for thread-based (short-term) memory.
+        checkpointer = AsyncPostgresSaver(pool)
+        # First-time setup (if needed)
+        await _bootstrap_db_once(hass, entry, store, checkpointer)
+
+        # Migrate person gallery DB schema (if needed)
+        try:
+            await migrate_person_gallery(pool)
+        except Exception:
+            LOGGER.exception("Error migrating person_gallery database schema.")
+            return False
+
+        person_gallery = PersonGalleryDAO(pool)
+
+        async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute("""
+                    SELECT current_database() AS db,
+                        current_user     AS usr,
+                        inet_server_addr()::text AS host,
+                        inet_server_port()       AS port,
+                        current_schemas(true)    AS schemas,
+                        current_setting('search_path', true) AS search_path
+                """)
+            env = await cur.fetchone()
+            if env:
+                LOGGER.info(
+                    "DB env: db=%s user=%s host=%s port=%s schemas=%s search_path=%s",
+                    env["db"],
+                    env["usr"],
+                    env["host"],
+                    env["port"],
+                    env["schemas"],
+                    env["search_path"],
+                )
+
+            await cur.execute("SELECT COUNT(*) AS total FROM public.person_gallery")
+            resp = await cur.fetchone()
+            if resp:
+                LOGGER.info(
+                    "Gallery rows visible to this connection: %s", resp["total"]
+                )
+    else:
+        person_gallery = None
+        checkpointer = MemorySaver()
+        pool = None
+        store = NullStore()
 
     # ----- Choose concrete models for roles from constants -----
 
-    ollama_reasoning: bool = entry.options.get(
+    ollama_reasoning: bool = options.get(
         CONF_OLLAMA_REASONING, RECOMMENDED_OLLAMA_REASONING
     )
     chat_ollama_provider = ollama_providers.get(ollama_chat_url)
@@ -544,16 +698,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     summarization_ollama_provider = ollama_providers.get(ollama_sum_url)
 
     # CHAT
-    chat_provider = entry.options.get(
+    chat_provider = options.get(
         CONF_CHAT_MODEL_PROVIDER, RECOMMENDED_CHAT_MODEL_PROVIDER
     )
-    chat_temp = entry.options.get(
+    chat_temp = options.get(
         CONF_CHAT_MODEL_TEMPERATURE, RECOMMENDED_CHAT_MODEL_TEMPERATURE
     )
-    ollama_chat_keep_alive = entry.options.get(
+    ollama_chat_keep_alive = options.get(
         CONF_OLLAMA_CHAT_KEEPALIVE, RECOMMENDED_OLLAMA_CHAT_KEEPALIVE
     )
-    ollama_chat_context_size = entry.options.get(
+    ollama_chat_context_size = options.get(
         CONF_OLLAMA_CHAT_CONTEXT_SIZE, RECOMMENDED_OLLAMA_CONTEXT_SIZE
     )
     ollama_chat_model_options = {
@@ -568,7 +722,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         chat_model = (openai_provider or NullChat()).with_config(
             config={
                 "configurable": {
-                    "model_name": entry.options.get(
+                    "model_name": options.get(
                         CONF_OPENAI_CHAT_MODEL, RECOMMENDED_OPENAI_CHAT_MODEL
                     ),
                     "temperature": chat_temp,
@@ -580,7 +734,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         chat_model = (gemini_provider or NullChat()).with_config(
             config={
                 "configurable": {
-                    "model": entry.options.get(
+                    "model": options.get(
                         CONF_GEMINI_CHAT_MODEL, RECOMMENDED_GEMINI_CHAT_MODEL
                     ),
                     "temperature": chat_temp,
@@ -589,7 +743,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             }
         )
     else:
-        ollama_chat_model = entry.options.get(
+        ollama_chat_model = options.get(
             CONF_OLLAMA_CHAT_MODEL, RECOMMENDED_OLLAMA_CHAT_MODEL
         )
         rf_chat = reasoning_field(model=ollama_chat_model, enabled=ollama_reasoning)
@@ -610,15 +764,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         )
 
     # VLM
-    vlm_provider = entry.options.get(CONF_VLM_PROVIDER, RECOMMENDED_VLM_PROVIDER)
-    vlm_temp = entry.options.get(CONF_VLM_TEMPERATURE, RECOMMENDED_VLM_TEMPERATURE)
+    vlm_provider = options.get(CONF_VLM_PROVIDER, RECOMMENDED_VLM_PROVIDER)
+    vlm_temp = options.get(CONF_VLM_TEMPERATURE, RECOMMENDED_VLM_TEMPERATURE)
     if vlm_provider == "openai":
         vision_model = (openai_provider or NullChat()).with_config(
             config={
                 "configurable": {
-                    "model_name": entry.options.get(
-                        CONF_OPENAI_VLM, RECOMMENDED_OPENAI_VLM
-                    ),
+                    "model_name": options.get(CONF_OPENAI_VLM, RECOMMENDED_OPENAI_VLM),
                     "temperature": vlm_temp,
                     "top_p": VLM_TOP_P,
                 }
@@ -628,14 +780,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         vision_model = (gemini_provider or NullChat()).with_config(
             config={
                 "configurable": {
-                    "model": entry.options.get(CONF_GEMINI_VLM, RECOMMENDED_GEMINI_VLM),
+                    "model": options.get(CONF_GEMINI_VLM, RECOMMENDED_GEMINI_VLM),
                     "temperature": vlm_temp,
                     "top_p": VLM_TOP_P,
                 }
             }
         )
     else:
-        ollama_vlm = entry.options.get(CONF_OLLAMA_VLM, RECOMMENDED_OLLAMA_VLM)
+        ollama_vlm = options.get(CONF_OLLAMA_VLM, RECOMMENDED_OLLAMA_VLM)
         rf_vlm = reasoning_field(model=ollama_vlm, enabled=ollama_reasoning)
         vision_model = (vlm_ollama_provider or NullChat()).with_config(
             config={
@@ -644,12 +796,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     "temperature": vlm_temp,
                     "top_p": VLM_TOP_P,
                     "num_predict": VLM_NUM_PREDICT,
-                    "num_ctx": entry.options.get(
+                    "num_ctx": options.get(
                         CONF_OLLAMA_VLM_CONTEXT_SIZE, RECOMMENDED_OLLAMA_CONTEXT_SIZE
                     ),
                     "repeat_penalty": VLM_REPEAT_PENALTY,
                     "mirostat": VLM_MIRO_STAT,
-                    "keep_alive": entry.options.get(
+                    "keep_alive": options.get(
                         CONF_OLLAMA_VLM_KEEPALIVE, RECOMMENDED_OLLAMA_VLM_KEEPALIVE
                     ),
                     **rf_vlm,
@@ -658,10 +810,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         )
 
     # SUMMARIZATION
-    sum_provider = entry.options.get(
+    sum_provider = options.get(
         CONF_SUMMARIZATION_MODEL_PROVIDER, RECOMMENDED_SUMMARIZATION_MODEL_PROVIDER
     )
-    sum_temp = entry.options.get(
+    sum_temp = options.get(
         CONF_SUMMARIZATION_MODEL_TEMPERATURE,
         RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
     )
@@ -669,7 +821,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         summarization_model = (openai_provider or NullChat()).with_config(
             config={
                 "configurable": {
-                    "model_name": entry.options.get(
+                    "model_name": options.get(
                         CONF_OPENAI_SUMMARIZATION_MODEL,
                         RECOMMENDED_OPENAI_SUMMARIZATION_MODEL,
                     ),
@@ -682,7 +834,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         summarization_model = (gemini_provider or NullChat()).with_config(
             config={
                 "configurable": {
-                    "model": entry.options.get(
+                    "model": options.get(
                         CONF_GEMINI_SUMMARIZATION_MODEL,
                         RECOMMENDED_GEMINI_SUMMARIZATION_MODEL,
                     ),
@@ -692,7 +844,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             }
         )
     else:
-        ollama_summarization_model = entry.options.get(
+        ollama_summarization_model = options.get(
             CONF_OLLAMA_SUMMARIZATION_MODEL,
             RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL,
         )
@@ -706,13 +858,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     "temperature": sum_temp,
                     "top_p": SUMMARIZATION_MODEL_TOP_P,
                     "num_predict": SUMMARIZATION_MODEL_PREDICT,
-                    "num_ctx": entry.options.get(
+                    "num_ctx": options.get(
                         CONF_OLLAMA_SUMMARIZATION_CONTEXT_SIZE,
                         RECOMMENDED_OLLAMA_CONTEXT_SIZE,
                     ),
                     "repeat_penalty": SUMMARIZATION_MODEL_REPEAT_PENALTY,
                     "mirostat": SUMMARIZATION_MIRO_STAT,
-                    "keep_alive": entry.options.get(
+                    "keep_alive": options.get(
                         CONF_OLLAMA_SUMMARIZATION_KEEPALIVE,
                         RECOMMENDED_OLLAMA_SUMMARIZATION_KEEPALIVE,
                     ),
@@ -723,12 +875,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
     video_analyzer = VideoAnalyzer(hass, entry)
 
-    face_recognition = entry.options.get(
-        CONF_FACE_RECOGNITION, RECOMMENDED_FACE_RECOGNITION
-    )
+    face_recognition = options.get(CONF_FACE_RECOGNITION, RECOMMENDED_FACE_RECOGNITION)
 
     # Save runtime data.
     entry.runtime_data = HGAData(
+        options=options,
         chat_model=chat_model,
         chat_model_options=ollama_chat_model_options,
         vision_model=vision_model,
@@ -745,7 +896,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    if entry.options.get(CONF_VIDEO_ANALYZER_MODE) != "disable":
+    if options.get(CONF_VIDEO_ANALYZER_MODE) != "disable":
         video_analyzer.start()
 
     msg = (
@@ -795,7 +946,309 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
 async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     """Unload the config entry."""
-    await entry.runtime_data.pool.close()
+    if entry.runtime_data.pool is not None:
+        await entry.runtime_data.pool.close()
     await entry.runtime_data.video_analyzer.stop()
     await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    return True
+
+
+async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:  # noqa: C901, PLR0912, PLR0915
+    """
+    Migrate config entry to the latest version.
+
+    - v1 -> v2: move CONF_DB_URI into a database subentry.
+    - v2 -> v3: create model provider + feature subentries from legacy options.
+    - v3 -> v4: move model settings into feature subentries and trim options.
+    """
+    current_version = config_entry.version or 1
+    new_data = dict(config_entry.data)
+    new_options = dict(config_entry.options)
+    merged_options = {**new_data, **new_options}
+
+    if current_version < 2:  # noqa: PLR2004
+        LOGGER.info(
+            "Migrating %s config entry %s -> v2",
+            config_entry.domain,
+            config_entry.entry_id,
+        )
+
+        db_uri = new_data.pop(CONF_DB_URI, None) or new_options.pop(CONF_DB_URI, None)
+
+        if db_uri:
+            parsed = parse_postgres_uri(db_uri)
+
+            db_subentry_data = {
+                CONF_USERNAME: parsed.get("username") or RECOMMENDED_DB_USERNAME,
+                CONF_PASSWORD: parsed.get("password") or RECOMMENDED_DB_PASSWORD,
+                CONF_HOST: parsed.get("host") or RECOMMENDED_DB_HOST,
+                CONF_PORT: parsed.get("port") or RECOMMENDED_DB_PORT,
+                CONF_DB_NAME: parsed.get("dbname") or RECOMMENDED_DB_NAME,
+                CONF_DB_PARAMS: parsed.get("params") or RECOMMENDED_DB_PARAMS,
+            }
+
+            if any(
+                s.subentry_type == SUBENTRY_TYPE_DATABASE
+                for s in config_entry.subentries.values()
+            ):
+                LOGGER.debug(
+                    "Database subentry already exists for entry %s, skipping creation",
+                    config_entry.entry_id,
+                )
+            else:
+                try:
+                    subentry = ConfigSubentry(
+                        subentry_type=SUBENTRY_TYPE_DATABASE,
+                        title="Database",
+                        unique_id=f"{config_entry.entry_id}_database",
+                        data=MappingProxyType(db_subentry_data),
+                    )
+                    hass.config_entries.async_add_subentry(config_entry, subentry)
+                    LOGGER.info(
+                        "Created database subentry for entry %s",
+                        config_entry.entry_id,
+                    )
+                except Exception:
+                    LOGGER.exception(
+                        "Migration failed for entry %s during database creation",
+                        config_entry.entry_id,
+                    )
+                    return False
+        current_version = 2
+        merged_options = {**new_data, **new_options}
+
+    if current_version < 3:  # noqa: PLR2004
+        LOGGER.info(
+            "Migrating %s config entry %s -> v%s",
+            config_entry.domain,
+            config_entry.entry_id,
+            3,
+        )
+
+        existing_provider_subentries = [
+            s
+            for s in config_entry.subentries.values()
+            if s.subentry_type == SUBENTRY_TYPE_MODEL_PROVIDER
+        ]
+        providers = legacy_model_provider_configs(config_entry, merged_options)
+        if not existing_provider_subentries:
+            for provider in providers.values():
+                try:
+                    hass.config_entries.async_add_subentry(
+                        config_entry,
+                        ConfigSubentry(
+                            subentry_type=SUBENTRY_TYPE_MODEL_PROVIDER,
+                            title=provider.name,
+                            unique_id=provider.entry_id,
+                            data=MappingProxyType(
+                                {
+                                    "provider_type": provider.provider_type,
+                                    "capabilities": sorted(provider.capabilities),
+                                    "settings": provider.data.get("settings", {}),
+                                    "name": provider.name,
+                                }
+                            ),
+                        ),
+                    )
+                except Exception:
+                    LOGGER.exception(
+                        "Failed to create model provider subentry for %s",
+                        provider.name,
+                    )
+
+        provider_id_by_type: dict[str, str] = {}
+        for subentry in config_entry.subentries.values():
+            if subentry.subentry_type != SUBENTRY_TYPE_MODEL_PROVIDER:
+                continue
+            provider_type = subentry.data.get("provider_type")
+            if provider_type and provider_type not in provider_id_by_type:
+                provider_id_by_type[provider_type] = subentry.subentry_id
+
+        existing_features = [
+            s
+            for s in config_entry.subentries.values()
+            if s.subentry_type == SUBENTRY_TYPE_FEATURE
+        ]
+        if not existing_features and provider_id_by_type:
+            features = legacy_feature_configs(config_entry, providers, merged_options)
+            provider_lookup = {p.entry_id: p for p in providers.values()}
+            for feature in features.values():
+                provider = provider_lookup.get(feature.model_provider_id or "")
+                provider_id = (
+                    provider_id_by_type.get(provider.provider_type)
+                    if provider
+                    else None
+                )
+                if not provider_id:
+                    continue
+                try:
+                    hass.config_entries.async_add_subentry(
+                        config_entry,
+                        ConfigSubentry(
+                            subentry_type=SUBENTRY_TYPE_FEATURE,
+                            title=feature.name,
+                            unique_id=f"{config_entry.entry_id}_{feature.feature_type}",
+                            data=MappingProxyType(
+                                {
+                                    "feature_type": feature.feature_type,
+                                    "model_provider_id": provider_id,
+                                    "name": feature.name,
+                                    CONF_FEATURE_MODEL: feature.model,
+                                    "config": feature.config,
+                                }
+                            ),
+                        ),
+                    )
+                except Exception:
+                    LOGGER.exception(
+                        "Failed to create feature subentry %s", feature.feature_type
+                    )
+        current_version = 3
+
+    if current_version < CONFIG_ENTRY_VERSION:
+        LOGGER.info(
+            "Migrating %s config entry %s -> v%s",
+            config_entry.domain,
+            config_entry.entry_id,
+            CONFIG_ENTRY_VERSION,
+        )
+
+        provider_settings: dict[str, dict[str, Any]] = {}
+        provider_types: dict[str, str] = {}
+        for subentry in config_entry.subentries.values():
+            if subentry.subentry_type != SUBENTRY_TYPE_MODEL_PROVIDER:
+                continue
+            settings = dict(subentry.data.get("settings", {}))
+            provider_settings[subentry.subentry_id] = settings
+            provider_types[subentry.subentry_id] = subentry.data.get(
+                "provider_type", "ollama"
+            )
+
+        for subentry in list(config_entry.subentries.values()):
+            if subentry.subentry_type != SUBENTRY_TYPE_FEATURE:
+                continue
+            feature_type = subentry.data.get("feature_type")
+            category = (
+                FEATURE_CATEGORY_MAP.get(feature_type)
+                if isinstance(feature_type, str)
+                else None
+            )
+            model_data = dict(subentry.data.get(CONF_FEATURE_MODEL, {}))
+            if not model_data:
+                provider_id = subentry.data.get("model_provider_id")
+                provider_type = provider_types.get(provider_id or "", "ollama")
+                settings = provider_settings.get(provider_id or "", {})
+                spec = MODEL_CATEGORY_SPECS.get(category or "", {})
+                model_name = spec.get("recommended_models", {}).get(provider_type)
+                if category and provider_type in {"ollama", "openai", "gemini"}:
+                    model_name = settings.get(f"{category}_model") or model_name
+
+                if model_name:
+                    model_data[CONF_FEATURE_MODEL_NAME] = model_name
+                temp_key = spec.get("temperature_key")
+                if temp_key and merged_options.get(temp_key) is not None:
+                    model_data[CONF_FEATURE_MODEL_TEMPERATURE] = merged_options.get(
+                        temp_key
+                    )
+                if provider_type == "ollama" and category:
+                    keepalive_key = f"{category}_keepalive"
+                    context_key = f"{category}_context"
+                    if settings.get(keepalive_key) is not None:
+                        model_data[CONF_FEATURE_MODEL_KEEPALIVE] = settings.get(
+                            keepalive_key
+                        )
+                    if settings.get(context_key) is not None:
+                        model_data[CONF_FEATURE_MODEL_CONTEXT_SIZE] = settings.get(
+                            context_key
+                        )
+                    if category == "chat" and settings.get("reasoning") is not None:
+                        model_data[CONF_FEATURE_MODEL_REASONING] = settings.get(
+                            "reasoning"
+                        )
+
+            updated = dict(subentry.data)
+            updated[CONF_FEATURE_MODEL] = model_data
+            updated.setdefault("config", {})
+            hass.config_entries.async_update_subentry(  # type: ignore[attr-defined]
+                config_entry,
+                subentry,
+                data=MappingProxyType(updated),
+                title=subentry.title,
+            )
+
+        for subentry in list(config_entry.subentries.values()):
+            if subentry.subentry_type != SUBENTRY_TYPE_MODEL_PROVIDER:
+                continue
+            settings = dict(subentry.data.get("settings", {}))
+            base_url = (
+                settings.get("base_url")
+                or settings.get("chat_url")
+                or settings.get("vlm_url")
+            )
+            trimmed_settings = {}
+            if base_url:
+                trimmed_settings["base_url"] = base_url
+            if api_key := settings.get("api_key"):
+                trimmed_settings["api_key"] = api_key
+            updated = dict(subentry.data)
+            updated["settings"] = trimmed_settings
+            hass.config_entries.async_update_subentry(  # type: ignore[attr-defined]
+                config_entry,
+                subentry,
+                data=MappingProxyType(updated),
+                title=subentry.title,
+            )
+
+        _ensure_default_feature_subentries(hass, config_entry)
+
+        for key in (
+            CONF_API_KEY,
+            CONF_GEMINI_API_KEY,
+            CONF_OLLAMA_URL,
+            CONF_OLLAMA_CHAT_URL,
+            CONF_OLLAMA_VLM_URL,
+            CONF_OLLAMA_SUMMARIZATION_URL,
+            CONF_CHAT_MODEL_PROVIDER,
+            CONF_VLM_PROVIDER,
+            CONF_SUMMARIZATION_MODEL_PROVIDER,
+            CONF_EMBEDDING_MODEL_PROVIDER,
+            CONF_CHAT_MODEL_TEMPERATURE,
+            CONF_VLM_TEMPERATURE,
+            CONF_SUMMARIZATION_MODEL_TEMPERATURE,
+            CONF_OLLAMA_CHAT_MODEL,
+            CONF_OPENAI_CHAT_MODEL,
+            CONF_GEMINI_CHAT_MODEL,
+            CONF_OLLAMA_VLM,
+            CONF_OPENAI_VLM,
+            CONF_GEMINI_VLM,
+            CONF_OLLAMA_SUMMARIZATION_MODEL,
+            CONF_OPENAI_SUMMARIZATION_MODEL,
+            CONF_GEMINI_SUMMARIZATION_MODEL,
+            CONF_OLLAMA_EMBEDDING_MODEL,
+            CONF_OPENAI_EMBEDDING_MODEL,
+            CONF_GEMINI_EMBEDDING_MODEL,
+            CONF_OLLAMA_CHAT_KEEPALIVE,
+            CONF_OLLAMA_VLM_KEEPALIVE,
+            CONF_OLLAMA_SUMMARIZATION_KEEPALIVE,
+            CONF_OLLAMA_CHAT_CONTEXT_SIZE,
+            CONF_OLLAMA_VLM_CONTEXT_SIZE,
+            CONF_OLLAMA_SUMMARIZATION_CONTEXT_SIZE,
+            CONF_OLLAMA_REASONING,
+        ):
+            new_options.pop(key, None)
+
+        try:
+            hass.config_entries.async_update_entry(
+                config_entry,
+                data=new_data,
+                options=new_options,
+                version=CONFIG_ENTRY_VERSION,
+            )
+        except Exception:
+            LOGGER.exception(
+                "Failed to update config entry %s during migration",
+                config_entry.entry_id,
+            )
+            return False
+
     return True

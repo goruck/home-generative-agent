@@ -349,7 +349,7 @@ class VideoAnalyzer:
         self, msg: str, camera_name: str, notify_img_path: Path
     ) -> None:
         # Prefer configured option; fall back to discovery
-        full_service = self.entry.options.get(CONF_NOTIFY_SERVICE)
+        full_service = self.entry.runtime_data.options.get(CONF_NOTIFY_SERVICE)
         if full_service and full_service.startswith("notify."):
             domain, service = full_service.split(".", 1)
         else:
@@ -728,7 +728,7 @@ class VideoAnalyzer:
         media_dir = "/media/local"
         notify_img = Path(media_dir) / Path(*chosen.parts[-3:])
 
-        mode = self.entry.options.get(CONF_VIDEO_ANALYZER_MODE)
+        mode = self.entry.runtime_data.options.get(CONF_VIDEO_ANALYZER_MODE)
         if mode == "notify_on_anomaly":
             first_snapshot = batch[0].parts[-1]
             LOGGER.debug("[%s] First snapshot: %s", camera_id, first_snapshot)
