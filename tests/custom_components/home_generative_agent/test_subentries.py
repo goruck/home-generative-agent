@@ -170,6 +170,7 @@ async def test_feature_flow_links_provider(hass: HomeAssistant) -> None:
         "type": "abort",
         "reason": kwargs.get("reason"),
     }
+
     def _update_subentry(
         _entry: DummyEntry,
         subentry: DummySubentry,
