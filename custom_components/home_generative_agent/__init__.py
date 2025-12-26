@@ -196,6 +196,7 @@ ENROLL_SCHEMA = vol.Schema(
 
 Embedding = Sequence[float]
 
+
 def _default_feature_payload(feature_type: str) -> dict[str, Any]:
     return {
         "feature_type": feature_type,

@@ -90,6 +90,7 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
+
 def _options_for(entry: ConfigEntry) -> dict[str, Any]:
     """Merge entry data + options for convenience."""
     return {**entry.data, **entry.options}
