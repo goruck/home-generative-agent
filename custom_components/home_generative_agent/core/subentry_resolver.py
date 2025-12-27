@@ -202,57 +202,133 @@ def _legacy_provider_id(entry: ConfigEntry, provider: str) -> str:
     return f"{entry.entry_id}_{provider}_legacy"
 
 
-def _build_ollama_legacy_provider(
-    entry: ConfigEntry, options: Mapping[str, Any]
-) -> ModelProviderConfig | None:
-    """Create a legacy Ollama provider config from options."""
+def _legacy_ollama_urls(options: Mapping[str, Any]) -> dict[str, str]:
+    """Return resolved legacy Ollama URLs by category."""
     base_url = str(options.get(CONF_OLLAMA_URL) or RECOMMENDED_OLLAMA_URL)
+    return {
+        "base": base_url,
+        "chat": str(options.get(CONF_OLLAMA_CHAT_URL) or base_url),
+        "vlm": str(
+            options.get(CONF_OLLAMA_VLM_URL, RECOMMENDED_OLLAMA_VLM_URL) or base_url
+        ),
+        "summarization": str(options.get(CONF_OLLAMA_SUMMARIZATION_URL) or base_url),
+    }
+
+
+def _ollama_legacy_provider_settings(
+    options: Mapping[str, Any],
+    name: str,
+    base_url: str,
+    categories: set[str],
+) -> dict[str, Any]:
+    """Build settings for a legacy Ollama provider."""
     settings: dict[str, Any] = {
-        "name": "Primary Ollama",
+        "name": name,
         "provider_type": "ollama",
         "base_url": base_url,
-        "chat_url": options.get(CONF_OLLAMA_CHAT_URL) or base_url,
-        "vlm_url": options.get(CONF_OLLAMA_VLM_URL, RECOMMENDED_OLLAMA_VLM_URL)
-        or base_url,
-        "summarization_url": options.get(CONF_OLLAMA_SUMMARIZATION_URL) or base_url,
-        "chat_model": options.get(
-            CONF_OLLAMA_CHAT_MODEL, RECOMMENDED_OLLAMA_CHAT_MODEL
-        ),
-        "vlm_model": options.get(CONF_OLLAMA_VLM, RECOMMENDED_OLLAMA_VLM),
-        "summarization_model": options.get(
-            CONF_OLLAMA_SUMMARIZATION_MODEL, RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL
-        ),
-        "embedding_model": options.get(
-            CONF_OLLAMA_EMBEDDING_MODEL, RECOMMENDED_OLLAMA_EMBEDDING_MODEL
-        ),
-        "chat_keepalive": options.get(
-            CONF_OLLAMA_CHAT_KEEPALIVE, RECOMMENDED_OLLAMA_CHAT_KEEPALIVE
-        ),
-        "vlm_keepalive": options.get(
-            CONF_OLLAMA_VLM_KEEPALIVE, RECOMMENDED_OLLAMA_VLM_KEEPALIVE
-        ),
-        "summarization_keepalive": options.get(
-            CONF_OLLAMA_SUMMARIZATION_KEEPALIVE,
-            RECOMMENDED_OLLAMA_SUMMARIZATION_KEEPALIVE,
-        ),
-        "chat_context": options.get(
-            CONF_OLLAMA_CHAT_CONTEXT_SIZE, RECOMMENDED_OLLAMA_CONTEXT_SIZE
-        ),
-        "vlm_context": options.get(
-            CONF_OLLAMA_VLM_CONTEXT_SIZE, RECOMMENDED_OLLAMA_CONTEXT_SIZE
-        ),
-        "summarization_context": options.get(
-            CONF_OLLAMA_SUMMARIZATION_CONTEXT_SIZE, RECOMMENDED_OLLAMA_CONTEXT_SIZE
-        ),
-        "reasoning": options.get(CONF_OLLAMA_REASONING),
     }
-    return ModelProviderConfig(
-        entry_id=_legacy_provider_id(entry, "ollama"),
-        name=settings["name"],
-        provider_type="ollama",
-        capabilities={"chat", "vlm", "summarization", "embedding"},
-        data={"settings": settings},
-    )
+
+    if "chat" in categories:
+        settings.update(
+            {
+                "chat_url": base_url,
+                "chat_model": options.get(
+                    CONF_OLLAMA_CHAT_MODEL, RECOMMENDED_OLLAMA_CHAT_MODEL
+                ),
+                "chat_keepalive": options.get(
+                    CONF_OLLAMA_CHAT_KEEPALIVE, RECOMMENDED_OLLAMA_CHAT_KEEPALIVE
+                ),
+                "chat_context": options.get(
+                    CONF_OLLAMA_CHAT_CONTEXT_SIZE, RECOMMENDED_OLLAMA_CONTEXT_SIZE
+                ),
+                "reasoning": options.get(CONF_OLLAMA_REASONING),
+            }
+        )
+
+    if "vlm" in categories:
+        settings.update(
+            {
+                "vlm_url": base_url,
+                "vlm_model": options.get(CONF_OLLAMA_VLM, RECOMMENDED_OLLAMA_VLM),
+                "vlm_keepalive": options.get(
+                    CONF_OLLAMA_VLM_KEEPALIVE, RECOMMENDED_OLLAMA_VLM_KEEPALIVE
+                ),
+                "vlm_context": options.get(
+                    CONF_OLLAMA_VLM_CONTEXT_SIZE, RECOMMENDED_OLLAMA_CONTEXT_SIZE
+                ),
+            }
+        )
+
+    if "summarization" in categories:
+        settings.update(
+            {
+                "summarization_url": base_url,
+                "summarization_model": options.get(
+                    CONF_OLLAMA_SUMMARIZATION_MODEL,
+                    RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL,
+                ),
+                "summarization_keepalive": options.get(
+                    CONF_OLLAMA_SUMMARIZATION_KEEPALIVE,
+                    RECOMMENDED_OLLAMA_SUMMARIZATION_KEEPALIVE,
+                ),
+                "summarization_context": options.get(
+                    CONF_OLLAMA_SUMMARIZATION_CONTEXT_SIZE,
+                    RECOMMENDED_OLLAMA_CONTEXT_SIZE,
+                ),
+            }
+        )
+
+    if "embedding" in categories:
+        settings["embedding_model"] = options.get(
+            CONF_OLLAMA_EMBEDDING_MODEL, RECOMMENDED_OLLAMA_EMBEDDING_MODEL
+        )
+
+    return settings
+
+
+def _build_ollama_legacy_providers(
+    entry: ConfigEntry, options: Mapping[str, Any]
+) -> dict[str, ModelProviderConfig]:
+    """Create legacy Ollama provider configs from options."""
+    urls = _legacy_ollama_urls(options)
+    category_urls = {
+        "chat": urls["chat"],
+        "vlm": urls["vlm"],
+        "summarization": urls["summarization"],
+        "embedding": urls["chat"],
+    }
+
+    url_groups: dict[str, set[str]] = {}
+    for category, url in category_urls.items():
+        url_groups.setdefault(url, set()).add(category)
+
+    providers: dict[str, ModelProviderConfig] = {}
+    multi_provider = len(url_groups) > 1
+    label_map = {
+        "chat": "Chat",
+        "vlm": "VLM",
+        "summarization": "Summarization",
+        "embedding": "Embedding",
+    }
+    for url, categories in url_groups.items():
+        label_categories = sorted(
+            cat for cat in categories if cat != "embedding"
+        ) or sorted(categories)
+        label = ", ".join(label_map.get(cat, cat.title()) for cat in label_categories)
+        name = "Primary Ollama" if not multi_provider else f"Ollama ({label})"
+        settings = _ollama_legacy_provider_settings(options, name, url, categories)
+        provider_id = _legacy_provider_id(
+            entry, f"ollama_{'_'.join(sorted(categories))}"
+        )
+        providers[provider_id] = ModelProviderConfig(
+            entry_id=provider_id,
+            name=settings["name"],
+            provider_type="ollama",
+            capabilities=categories,
+            data={"settings": settings},
+        )
+
+    return providers
 
 
 def _build_openai_legacy_provider(
@@ -322,11 +398,8 @@ def legacy_model_provider_configs(
 ) -> dict[str, ModelProviderConfig]:
     """Build pseudo provider configs from legacy options."""
     providers: dict[str, ModelProviderConfig] = {}
-    for builder in (
-        _build_ollama_legacy_provider,
-        _build_openai_legacy_provider,
-        _build_gemini_legacy_provider,
-    ):
+    providers.update(_build_ollama_legacy_providers(entry, options))
+    for builder in (_build_openai_legacy_provider, _build_gemini_legacy_provider):
         provider = builder(entry, options)
         if provider:
             providers[provider.entry_id] = provider
@@ -375,9 +448,14 @@ def legacy_feature_configs(
     options: Mapping[str, Any],
 ) -> dict[str, FeatureConfig]:
     """Infer feature configs from legacy options."""
-    providers_by_type: dict[str, ModelProviderConfig] = {}
+    providers_by_type: dict[str, list[ModelProviderConfig]] = {}
+    providers_by_type_category: dict[str, dict[str, ModelProviderConfig]] = {}
     for provider in providers.values():
-        providers_by_type.setdefault(provider.provider_type, provider)
+        providers_by_type.setdefault(provider.provider_type, []).append(provider)
+        for capability in provider.capabilities:
+            providers_by_type_category.setdefault(provider.provider_type, {})[
+                capability
+            ] = provider
 
     def _legacy_model_data(
         category: str | None, provider_type: str, opts: Mapping[str, Any]
@@ -426,10 +504,13 @@ def legacy_feature_configs(
         feature_type: str, provider_type_opt: str, default_provider: str
     ) -> FeatureConfig | None:
         provider_type = str(options.get(provider_type_opt, default_provider))
-        provider = providers_by_type.get(provider_type)
+        category = FEATURE_CATEGORY_MAP.get(feature_type)
+        provider = providers_by_type_category.get(provider_type, {}).get(category or "")
+        if not provider:
+            provider_list = providers_by_type.get(provider_type, [])
+            provider = provider_list[0] if provider_list else None
         if not provider:
             return None
-        category = FEATURE_CATEGORY_MAP.get(feature_type)
         model_data = _legacy_model_data(category, provider.provider_type, options)
         return FeatureConfig(
             entry_id=f"{entry.entry_id}_{feature_type}_legacy",

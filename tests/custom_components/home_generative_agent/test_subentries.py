@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from homeassistant.const import CONF_API_KEY, CONF_HOST, CONF_PASSWORD, CONF_USERNAME
@@ -20,6 +20,10 @@ from custom_components.home_generative_agent.const import (
     CONF_FEATURE_MODEL,
     CONF_FEATURE_MODEL_NAME,
     CONF_OLLAMA_CHAT_MODEL,
+    CONF_OLLAMA_CHAT_URL,
+    CONF_OLLAMA_SUMMARIZATION_URL,
+    CONF_OLLAMA_URL,
+    CONF_OLLAMA_VLM_URL,
     CONF_SUMMARIZATION_MODEL_PROVIDER,
     CONF_VLM_PROVIDER,
     CONFIG_ENTRY_VERSION,
@@ -28,6 +32,7 @@ from custom_components.home_generative_agent.const import (
     SUBENTRY_TYPE_MODEL_PROVIDER,
 )
 from custom_components.home_generative_agent.core.subentry_resolver import (
+    legacy_model_provider_configs,
     resolve_runtime_options,
 )
 from custom_components.home_generative_agent.flows.feature_subentry_flow import (
@@ -40,6 +45,7 @@ from custom_components.home_generative_agent.flows.model_provider_subentry_flow 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
 
 
@@ -229,6 +235,53 @@ def test_resolve_runtime_options_prefers_subentries() -> None:
     options = resolve_runtime_options(entry)  # type: ignore[arg-type]
     assert options[CONF_CHAT_MODEL_PROVIDER] == "ollama"
     assert options[CONF_OLLAMA_CHAT_MODEL] == "chat-ollama"
+
+
+def test_legacy_ollama_urls_split_providers() -> None:
+    """Legacy Ollama URLs should map to separate providers when they differ."""
+    entry = DummyEntry(
+        options={
+            CONF_OLLAMA_URL: "http://ollama-base:11434",
+            CONF_OLLAMA_CHAT_URL: "http://ollama-chat:11434",
+            CONF_OLLAMA_VLM_URL: "http://ollama-vlm:11434",
+            CONF_OLLAMA_SUMMARIZATION_URL: "http://ollama-sum:11434",
+        }
+    )
+
+    providers = legacy_model_provider_configs(
+        cast("ConfigEntry[Any]", entry), entry.options
+    )
+    ollama_providers = [
+        provider
+        for provider in providers.values()
+        if provider.provider_type == "ollama"
+    ]
+    expected_provider_count = 3
+    assert len(ollama_providers) == expected_provider_count
+    assert any(
+        provider.data["settings"]["base_url"] == "http://ollama-chat:11434"
+        and "chat" in provider.capabilities
+        and "embedding" in provider.capabilities
+        for provider in ollama_providers
+    )
+    assert any(
+        provider.data["settings"]["base_url"] == "http://ollama-vlm:11434"
+        and provider.capabilities == {"vlm"}
+        for provider in ollama_providers
+    )
+    assert any(
+        provider.data["settings"]["base_url"] == "http://ollama-sum:11434"
+        and provider.capabilities == {"summarization"}
+        for provider in ollama_providers
+    )
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_CHAT_MODEL_PROVIDER] == "ollama"
+    assert options[CONF_VLM_PROVIDER] == "ollama"
+    assert options[CONF_SUMMARIZATION_MODEL_PROVIDER] == "ollama"
+    assert options[CONF_OLLAMA_CHAT_URL] == "http://ollama-chat:11434"
+    assert options[CONF_OLLAMA_VLM_URL] == "http://ollama-vlm:11434"
+    assert options[CONF_OLLAMA_SUMMARIZATION_URL] == "http://ollama-sum:11434"
 
 
 @pytest.mark.asyncio
