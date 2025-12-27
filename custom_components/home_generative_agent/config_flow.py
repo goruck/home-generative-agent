@@ -45,6 +45,7 @@ from .const import (
     CONF_MAX_TOKENS_IN_CONTEXT,
     CONF_NOTIFY_SERVICE,
     CONF_PROMPT,
+    CONF_SCHEMA_FIRST_YAML,
     CONF_VIDEO_ANALYZER_MODE,
     CONFIG_ENTRY_VERSION,
     CRITICAL_PIN_MAX_LEN,
@@ -83,6 +84,7 @@ LOGGER = logging.getLogger(__name__)
 DEFAULT_OPTIONS = {
     CONF_LLM_HASS_API: llm.LLM_API_ASSIST,
     CONF_PROMPT: llm.DEFAULT_INSTRUCTIONS_PROMPT,
+    CONF_SCHEMA_FIRST_YAML: False,
     CONF_CRITICAL_ACTION_PIN_ENABLED: True,
     CONF_VIDEO_ANALYZER_MODE: RECOMMENDED_VIDEO_ANALYZER_MODE,
     CONF_FACE_RECOGNITION: RECOMMENDED_FACE_RECOGNITION,
@@ -175,6 +177,11 @@ async def _schema_for_options(
                 "suggested_value": opts.get(CONF_CRITICAL_ACTION_PIN_ENABLED, True)
             },
             default=opts.get(CONF_CRITICAL_ACTION_PIN_ENABLED, True),
+        ): BooleanSelector(),
+        vol.Optional(
+            CONF_SCHEMA_FIRST_YAML,
+            description={"suggested_value": opts.get(CONF_SCHEMA_FIRST_YAML, False)},
+            default=opts.get(CONF_SCHEMA_FIRST_YAML, False),
         ): BooleanSelector(),
     }
 

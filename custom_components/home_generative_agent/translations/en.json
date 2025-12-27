@@ -183,10 +183,12 @@
           "max_tokens_in_context": "Max tokens in chat context",
           "max_messages_in_context": "Max messages in chat context",
           "critical_action_pin_enabled": "Require critical action PIN",
-          "critical_action_pin": "Critical action PIN (required to unlock/arm/open sensitive devices)"
+          "critical_action_pin": "Critical action PIN (required to unlock/arm/open sensitive devices)",
+          "schema_first_yaml": "Schema-first JSON for YAML requests"
         },
         "data_description": {
-          "prompt": "Instruct how the LLM should respond. This can be a template."
+          "prompt": "Instruct how the LLM should respond. This can be a template.",
+          "schema_first_yaml": "When enabled, YAML requests are answered with strict JSON that is converted to YAML."
         }
       }
     }

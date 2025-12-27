@@ -538,6 +538,52 @@ async def add_automation(  # noqa: D417
 
 
 @tool(parse_docstring=True)
+async def write_yaml_file(  # noqa: D417
+    yaml_text: str,
+    filename_prefix: str = "hga",
+    *,
+    config: Annotated[RunnableConfig, InjectedToolArg()],
+) -> str:
+    """
+    Write YAML content to a unique file under /config/www.
+
+    Args:
+        yaml_text: The YAML content to write.
+        filename_prefix: Optional filename prefix (letters, numbers, '-' or '_').
+
+    """
+    if "configurable" not in config:
+        return "Configuration not found. Please check your setup."
+
+    hass = config["configurable"]["hass"]
+    config_dir = Path(hass.config.config_dir)
+    www_dir = config_dir / "www"
+    await asyncio.to_thread(www_dir.mkdir, parents=True, exist_ok=True)
+
+    safe_prefix = re.sub(r"[^a-zA-Z0-9_-]+", "_", filename_prefix).strip("_")
+    if not safe_prefix:
+        safe_prefix = "hga"
+    filename = f"{safe_prefix}_{ulid.ulid_now()}.yaml"
+    path = www_dir / filename
+
+    code_fence_min_lines = 2
+    text = str(yaml_text or "").strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if (
+            len(lines) >= code_fence_min_lines
+            and lines[0].startswith("```")
+            and lines[-1].startswith("```")
+        ):
+            text = "\n".join(lines[1:-1]).strip()
+
+    async with aiofiles.open(path, "w", encoding="utf-8") as f:
+        await f.write(text.rstrip() + "\n")
+
+    return f"Saved YAML to {path}. Access it at /local/{filename}"
+
+
+@tool(parse_docstring=True)
 async def confirm_sensitive_action(  # noqa: D417, PLR0911
     action_id: str,
     pin: str,

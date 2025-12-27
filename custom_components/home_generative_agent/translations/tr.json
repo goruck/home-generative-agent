@@ -183,10 +183,12 @@
           "max_tokens_in_context": "Sohbet bağlamındaki maksimum token sayısı",
           "max_messages_in_context": "Sohbet bağlamındaki maksimum mesaj sayısı",
           "critical_action_pin_enabled": "Kritik eylemler için PIN zorunlu",
-          "critical_action_pin": "Kritik eylem PIN’i (kilit açma/kurma/açma için gerekli)"
+          "critical_action_pin": "Kritik eylem PIN’i (kilit açma/kurma/açma için gerekli)",
+          "schema_first_yaml": "YAML istekleri için şema-öncelikli JSON"
         },
         "data_description": {
-          "prompt": "LLM'in nasıl yanıt vermesi gerektiğini belirtin. Bu bir şablon olabilir."
+          "prompt": "LLM'in nasıl yanıt vermesi gerektiğini belirtin. Bu bir şablon olabilir.",
+          "schema_first_yaml": "Etkinleştirildiğinde, YAML istekleri YAML’ye çevrilecek sıkı JSON ile yanıtlanır."
         }
       }
     }
