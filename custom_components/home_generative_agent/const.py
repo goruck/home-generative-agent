@@ -104,6 +104,7 @@ OLLAMA_BOOL_HINT_TAGS = {
 # ---- Global options ----
 CONF_RECOMMENDED = "recommended"
 CONF_PROMPT = "prompt"
+CONF_SCHEMA_FIRST_YAML = "schema_first_yaml"
 CONF_DISABLED_FEATURES = "disabled_features"
 
 # ---- Feature definitions ----
@@ -457,6 +458,55 @@ Critical actions (door/lock/garage/open) require user confirmation.
 - Alarm control uses the alarm system code, not the critical-action PIN. When arming or
   disarming an alarm, ask for the alarm code and include it in the tool call. Do NOT
   call "confirm_sensitive_action" for alarm control.
+"""
+SCHEMA_FIRST_YAML_PROMPT = """
+When the user requests YAML, automations, or Lovelace dashboards, output ONLY valid JSON
+with no prose or code fences. Use double quotes and no trailing commas.
+If the user asks for an automation, output an AutomationSpec JSON object.
+If the user asks for a dashboard or Lovelace view, output a DashboardSpec JSON object.
+If the user asks to save YAML to a file, call the "write_yaml_file" tool.
+
+AutomationSpec:
+{"alias":string,"description"?:string,"mode"?:("single"|"restart"|"queued"|"parallel"),
+"max"?:int,"trigger":[Trigger,...],"condition"?:[Condition,...],"action":[Action,...]}
+Trigger:
+{"platform":"time_pattern","minutes":"/15","hours"?:"/1"}
+{"platform":"time","at":"07:30:00"}
+{"platform":"sun","event":"sunrise"|"sunset","offset"?:"-00:30:00"}
+{"platform":"state","entity_id":"light.kitchen","to"?:string,"for"?:string}
+{"platform":"numeric_state","entity_id":"sensor.temp","above"?:number,"below"?:number}
+Condition:
+{"condition":"state","entity_id":"light.kitchen","state":"off"}
+{"condition":"numeric_state","entity_id":"sensor.temp","above"?:number,"below"?:number}
+{"condition":"time","after":"18:00:00","before":"23:00:00"}
+{"condition":"sun","after":"sunset","before":"sunrise","after_offset"?:string}
+{"condition":"and"|"or","conditions":[Condition,...]}
+{"condition":"not","conditions":[Condition,...]}
+Action:
+{"service":"light.turn_on","target":{"entity_id":["light.kitchen"]},"data"?:object}
+{"delay":"00:05:00"}
+{"choose":[{"conditions":[Condition,...],"sequence":[Action,...]}],"default"?:[Action,...]}
+{"repeat":{"count":int,"sequence":[Action,...]}}
+{"wait_for_trigger":[Trigger,...],"timeout"?:string,"continue_on_timeout"?:false}
+{"stop":"Reason"}
+
+DashboardSpec:
+{"title":string,"views":[View,...]}
+View:
+{"title":string,"path"?:string,"icon"?:string,"cards":[Card,...]}
+Card:
+{"type":"entities","title"?:string,"show_header_toggle"?:bool,"entities":[EntityRow,...]}
+{"type":"glance","title"?:string,"columns"?:number,"entities":[string,...]}
+{"type":"sensor","entity":string,"name"?:string,"graph"?:string}
+{"type":"button","entity":string,"name"?:string,"icon"?:string}
+{"type":"markdown","content":string}
+{"type":"thermostat","entity":string}
+{"type":"history-graph","title"?:string,"hours_to_show"?:number,"entities":[string,...]}
+{"type":"grid","title"?:string,"columns"?:number,"square"?:bool,"cards":[Card,...]}
+{"type":"vertical-stack","cards":[Card,...]}
+{"type":"horizontal-stack","cards":[Card,...]}
+EntityRow:
+"light.kitchen" OR {"entity":"light.kitchen","name"?:string,"icon"?:string}
 """
 HISTORY_TOOL_CONTEXT_LIMIT = 50
 HISTORY_TOOL_PURGE_KEEP_DAYS = 10

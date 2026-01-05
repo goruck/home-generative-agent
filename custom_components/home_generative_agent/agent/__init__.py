@@ -8,6 +8,7 @@ from .tools import (
     get_and_analyze_camera_image,
     get_entity_history,
     upsert_memory,
+    write_yaml_file,
 )
 
 __all__ = [
@@ -19,4 +20,5 @@ __all__ = [
     "get_entity_history",
     "upsert_memory",
     "workflow",
+    "write_yaml_file",
 ]

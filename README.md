@@ -79,6 +79,16 @@ If you want separate Ollama servers per feature, add multiple Model Provider sub
 
 Global options (prompt, face recognition URL, context management, critical-action PIN, etc.) live in the integration’s **Options** flow.
 
+### Schema-first YAML mode
+
+Enable **Schema-first JSON for YAML requests** in the integration’s Options flow to force YAML-style requests (automations, dashboards, or “show me YAML”) to return strict JSON that the integration converts to YAML for display. When this mode is enabled, the agent will NOT auto-register automations; instead it will show the automation YAML in the chat.
+
+If you want a file you can use in Home Assistant, explicitly ask the agent to **save the YAML**. It will write the file under `/config/www/` and return a `/local/...` URL.
+
+Note: the YAML rendered in the chat window may not preserve indentation due to UI rendering, so it may be invalid if copied directly. Use the saved file instead.
+
+Example prompt: “Save this YAML to a file called garage-light.”
+
 ### Critical Action PIN protection
 
 Keep unlocking and opening actions behind a second check. Open Home Assistant → Settings → Devices & Services → Home Generative Agent → Configure and toggle `Require critical action PIN` (on by default). Enter a 4-10 digit PIN to set or replace it; the value is stored as a salted hash. Leaving the field blank while the toggle is on clears the stored PIN, and turning the toggle off removes the guard entirely. In the conversation agent settings for HGA, disable `Prefer handling commands locally` for Critical Action PIN protection to work properly.
@@ -349,6 +359,7 @@ Langchain Tool | Purpose
 `get_and_analyze_camera_image` | run scene analysis on the image from a camera
 `upsert_memory` | add or update a memory
 `add_automation` | create and register a HA automation
+`write_yaml_file` | write YAML to `/config/www/` and return a `/local/...` URL
 `confirm_sensitive_action` | confirm and execute a pending critical action with a PIN
 `alarm_control` | arm or disarm an alarm control panel with the alarm code
 `get_entity_history` | query HA database for entity history
@@ -364,7 +375,7 @@ I built the HA installation on a Raspberry Pi 5 with SSD storage, Zigbee, and LA
 ### Create an automation that runs periodically.
 ![Alt text](./assets/cat_automation.png)
 
-The snippet below shows that the agent is fluent in yaml based on what it generated and registered as an HA automation.
+The snippet below shows that the agent is fluent in yaml based on what it generated and registered as an HA automation (this is disabled when Schema-first YAML mode is enabled).
 
 ```yaml
 alias: Check Litter Box Waste Drawer
