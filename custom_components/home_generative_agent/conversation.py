@@ -62,6 +62,8 @@ YAML_LIST_INDENT = 2
 YAML_NESTED_INDENT = 4
 _ENTITY_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$")
 _ENTITY_ID_TOKEN_PATTERN = re.compile(r"\b[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*\b")
+_ENTITY_ID_MATCH_SCORE_MIN = 0.6
+_ENTITY_ID_TOKEN_OVERLAP_WEIGHT = 0.2
 
 ## json - yaml conversion helpers ##
 # This is needed because LLMs often output JSON inside Markdown code fences,
@@ -100,44 +102,15 @@ def _strip_code_fence(content: str) -> str:
 
 def _extract_json_block(content: str) -> str | None:
     """Extract the first complete JSON object/array from content."""
-    start = None
+    decoder = json.JSONDecoder()
     for idx, char in enumerate(content):
-        if char in "{[":
-            start = idx
-            break
-    if start is None:
-        return None
-
-    stack: list[str] = []
-    in_string = False
-    escape = False
-    for idx in range(start, len(content)):
-        char = content[idx]
-        if in_string:
-            if escape:
-                escape = False
-                continue
-            if char == "\\":
-                escape = True
-            elif char == "\"":
-                in_string = False
+        if char not in "{[":
             continue
-
-        if char == "\"":
-            in_string = True
+        try:
+            _, end = decoder.raw_decode(content[idx:])
+        except json.JSONDecodeError:
             continue
-        if char in "{[":
-            stack.append(char)
-            continue
-        if char in "}]":
-            if not stack:
-                return None
-            opening = stack.pop()
-            if (opening == "{" and char != "}") or (opening == "[" and char != "]"):
-                return None
-            if not stack:
-                return content[start : idx + 1]
-
+        return content[idx : idx + end]
     return None
 
 
@@ -182,12 +155,12 @@ def _resolve_entity_id(entity_id: str, hass: HomeAssistant) -> str:
     def score_match(candidate: str) -> float:
         candidate_obj = candidate.split(".", 1)[1]
         ratio = difflib.SequenceMatcher(None, object_id, candidate_obj).ratio()
-        target_tokens = set(token for token in object_id.split("_") if token)
-        candidate_tokens = set(token for token in candidate_obj.split("_") if token)
+        target_tokens = {token for token in object_id.split("_") if token}
+        candidate_tokens = {token for token in candidate_obj.split("_") if token}
         overlap = 0.0
         if target_tokens:
             overlap = len(target_tokens & candidate_tokens) / len(target_tokens)
-        return ratio + (overlap * 0.2)
+        return ratio + (overlap * _ENTITY_ID_TOKEN_OVERLAP_WEIGHT)
 
     tokens = [token for token in object_id.split("_") if token]
     if tokens:
@@ -198,14 +171,16 @@ def _resolve_entity_id(entity_id: str, hass: HomeAssistant) -> str:
         ]
         if token_matches:
             best_match = max(token_matches, key=score_match)
-            if score_match(best_match) >= 0.6:
+            if score_match(best_match) >= _ENTITY_ID_MATCH_SCORE_MIN:
                 return best_match
 
     scored = max(candidates, key=score_match)
-    if score_match(scored) >= 0.6:
+    if score_match(scored) >= _ENTITY_ID_MATCH_SCORE_MIN:
         return scored
 
-    close = difflib.get_close_matches(entity_id, candidates, n=1, cutoff=0.6)
+    close = difflib.get_close_matches(
+        entity_id, candidates, n=1, cutoff=_ENTITY_ID_MATCH_SCORE_MIN
+    )
     return close[0] if close else entity_id
 
 
@@ -541,7 +516,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         """Return a list of supported languages."""
         return MATCH_ALL
 
-    async def _async_handle_message(  # noqa: PLR0915
+    async def _async_handle_message(  # noqa: PLR0912, PLR0915
         self,
         user_input: conversation.ConversationInput,
         chat_log: conversation.ChatLog,
@@ -602,7 +577,8 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             user_input.text
         ):
             intent_response.async_set_speech(
-                "Please enable 'Schema-first JSON for YAML requests' in HGA's configuration and try again"
+                """Please enable 'Schema-first JSON for YAML requests' in
+                HGA's configuration and try again"""
             )
             return conversation.ConversationResult(
                 response=intent_response, conversation_id=conversation_id
