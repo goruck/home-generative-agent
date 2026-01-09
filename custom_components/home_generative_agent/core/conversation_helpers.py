@@ -67,6 +67,8 @@ def _load_json_payload(content: str) -> tuple[Any | None, str | None]:
     candidate = _strip_code_fence(content)
     if not candidate:
         return None, None
+    if candidate[0] not in "{[":
+        return None, candidate
 
     try:
         return json.loads(candidate), candidate
