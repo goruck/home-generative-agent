@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import difflib
 import json
 import logging
+import re
 import string
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -58,6 +60,8 @@ LOGGER = logging.getLogger(__name__)
 CODE_FENCE_MIN_LINES = 3
 YAML_LIST_INDENT = 2
 YAML_NESTED_INDENT = 4
+_ENTITY_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$")
+_ENTITY_ID_TOKEN_PATTERN = re.compile(r"\b[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*\b")
 
 ## json - yaml conversion helpers ##
 # This is needed because LLMs often output JSON inside Markdown code fences,
@@ -94,6 +98,201 @@ def _strip_code_fence(content: str) -> str:
     return stripped
 
 
+def _extract_json_block(content: str) -> str | None:
+    """Extract the first complete JSON object/array from content."""
+    start = None
+    for idx, char in enumerate(content):
+        if char in "{[":
+            start = idx
+            break
+    if start is None:
+        return None
+
+    stack: list[str] = []
+    in_string = False
+    escape = False
+    for idx in range(start, len(content)):
+        char = content[idx]
+        if in_string:
+            if escape:
+                escape = False
+                continue
+            if char == "\\":
+                escape = True
+            elif char == "\"":
+                in_string = False
+            continue
+
+        if char == "\"":
+            in_string = True
+            continue
+        if char in "{[":
+            stack.append(char)
+            continue
+        if char in "}]":
+            if not stack:
+                return None
+            opening = stack.pop()
+            if (opening == "{" and char != "}") or (opening == "[" and char != "]"):
+                return None
+            if not stack:
+                return content[start : idx + 1]
+
+    return None
+
+
+def _load_json_payload(content: str) -> tuple[Any | None, str | None]:
+    """Load JSON from content, optionally extracting a JSON block."""
+    candidate = _strip_code_fence(content)
+    if not candidate:
+        return None, None
+
+    try:
+        return json.loads(candidate), candidate
+    except json.JSONDecodeError as err:
+        extracted = _extract_json_block(candidate)
+        if extracted and extracted != candidate:
+            try:
+                return json.loads(extracted), extracted
+            except json.JSONDecodeError:
+                pass
+        LOGGER.warning(
+            "Schema-first JSON parsing failed: %s; content=%r", err, candidate[:500]
+        )
+        return None, candidate
+
+
+def _resolve_entity_id(entity_id: str, hass: HomeAssistant) -> str:
+    """Try to resolve a suggested entity_id to an existing entity_id."""
+    if not _ENTITY_ID_PATTERN.match(entity_id):
+        return entity_id
+    if hass.states.get(entity_id):
+        return entity_id
+
+    domain, object_id = entity_id.split(".", 1)
+    prefix = f"{domain}."
+    candidates = [
+        state.entity_id
+        for state in hass.states.async_all()
+        if state.entity_id.startswith(prefix)
+    ]
+    if not candidates:
+        return entity_id
+
+    def score_match(candidate: str) -> float:
+        candidate_obj = candidate.split(".", 1)[1]
+        ratio = difflib.SequenceMatcher(None, object_id, candidate_obj).ratio()
+        target_tokens = set(token for token in object_id.split("_") if token)
+        candidate_tokens = set(token for token in candidate_obj.split("_") if token)
+        overlap = 0.0
+        if target_tokens:
+            overlap = len(target_tokens & candidate_tokens) / len(target_tokens)
+        return ratio + (overlap * 0.2)
+
+    tokens = [token for token in object_id.split("_") if token]
+    if tokens:
+        token_matches = [
+            candidate
+            for candidate in candidates
+            if all(token in candidate.split(".", 1)[1] for token in tokens)
+        ]
+        if token_matches:
+            best_match = max(token_matches, key=score_match)
+            if score_match(best_match) >= 0.6:
+                return best_match
+
+    scored = max(candidates, key=score_match)
+    if score_match(scored) >= 0.6:
+        return scored
+
+    close = difflib.get_close_matches(entity_id, candidates, n=1, cutoff=0.6)
+    return close[0] if close else entity_id
+
+
+def _fix_dashboard_entities(payload: dict[str, Any], hass: HomeAssistant) -> bool:
+    """Update DashboardSpec entity_ids when a close existing match is found."""
+    if not isinstance(payload.get("views"), list):
+        return False
+
+    changed = False
+
+    def update_entity(value: str) -> str:
+        nonlocal changed
+        resolved = _resolve_entity_id(value, hass)
+        if resolved != value:
+            LOGGER.debug("Resolved dashboard entity_id %s -> %s", value, resolved)
+            changed = True
+        return resolved
+
+    def update_entity_rows(entities: list[Any]) -> None:
+        for idx, entity in enumerate(entities):
+            if isinstance(entity, str):
+                entities[idx] = update_entity(entity)
+                continue
+            if isinstance(entity, dict):
+                entity_id = entity.get("entity")
+                if isinstance(entity_id, str):
+                    entity["entity"] = update_entity(entity_id)
+
+    def update_cards(cards: list[Any]) -> None:
+        for card in cards:
+            if not isinstance(card, dict):
+                continue
+            entity_id = card.get("entity")
+            if isinstance(entity_id, str):
+                card["entity"] = update_entity(entity_id)
+
+            entities = card.get("entities")
+            if isinstance(entities, list):
+                update_entity_rows(entities)
+
+            nested_cards = card.get("cards")
+            if isinstance(nested_cards, list):
+                update_cards(nested_cards)
+
+    for view in payload.get("views", []):
+        if not isinstance(view, dict):
+            continue
+        cards = view.get("cards")
+        if isinstance(cards, list):
+            update_cards(cards)
+
+    return changed
+
+
+def _maybe_fix_dashboard_entities(content: str, hass: HomeAssistant) -> str:
+    payload, candidate = _load_json_payload(content)
+    if payload is None or candidate is None:
+        return content
+
+    if not isinstance(payload, dict):
+        return content
+    if not _fix_dashboard_entities(payload, hass):
+        return content
+
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ": "))
+
+
+def _fix_entity_ids_in_text(content: str, hass: HomeAssistant) -> str:
+    """Replace entity_id-like tokens in text with existing entity_ids when possible."""
+
+    def replace(match: re.Match[str]) -> str:
+        entity_id = match.group(0)
+        resolved = _resolve_entity_id(entity_id, hass)
+        if resolved != entity_id:
+            LOGGER.debug("Resolved text entity_id %s -> %s", entity_id, resolved)
+        return resolved
+
+    return _ENTITY_ID_TOKEN_PATTERN.sub(replace, content)
+
+
+def _is_dashboard_request(text: str | None) -> bool:
+    if not text:
+        return False
+    lowered = text.lower()
+    return "dashboard" in lowered or "lovelace" in lowered
+
+
 def _convert_schema_json_to_yaml(  # noqa: PLR0911, PLR0912
     content: str,
     enabled: bool,  # noqa: FBT001
@@ -110,13 +309,13 @@ def _convert_schema_json_to_yaml(  # noqa: PLR0911, PLR0912
         return content
     payload: Any | None = None
     if candidate[0] in "{[":
-        try:
-            payload = json.loads(candidate)
-        except json.JSONDecodeError:
+        payload, _ = _load_json_payload(candidate)
+        if payload is None:
             LOGGER.warning("Schema-first JSON parsing failed; trying YAML fallback.")
             try:
                 payload = yaml.safe_load(candidate)
-            except yaml.YAMLError:
+            except yaml.YAMLError as err:
+                LOGGER.warning("Schema-first YAML fallback failed: %s", err)
                 payload = None
             if payload is None or isinstance(payload, str):
                 return (
@@ -378,6 +577,12 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             message_history = message_history[-diff:]
             self.message_history_len = mhlen
 
+        conversation_id = (
+            ulid.ulid_now()
+            if chat_log.conversation_id is None
+            else chat_log.conversation_id
+        )
+
         # HA tools & schema
         try:
             llm_api = await llm.async_get_api(
@@ -390,7 +595,17 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             LOGGER.exception(msg)
             intent_response.async_set_error(intent.IntentResponseErrorCode.UNKNOWN, msg)
             return conversation.ConversationResult(
-                response=intent_response, conversation_id=user_input.conversation_id
+                response=intent_response, conversation_id=conversation_id
+            )
+
+        if not options.get(CONF_SCHEMA_FIRST_YAML, False) and _is_dashboard_request(
+            user_input.text
+        ):
+            intent_response.async_set_speech(
+                "Please enable 'Schema-first JSON for YAML requests' in HGA's configuration and try again"
+            )
+            return conversation.ConversationResult(
+                response=intent_response, conversation_id=conversation_id
             )
 
         tools = [
@@ -411,11 +626,6 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         tools.extend(langchain_tools.values())
 
         # Conversation ID
-        conversation_id = (
-            ulid.ulid_now()
-            if chat_log.conversation_id is None
-            else chat_log.conversation_id
-        )
         LOGGER.debug("Conversation ID: %s", conversation_id)
 
         # Resolve user name (None means automation)
@@ -554,6 +764,10 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         intent_response = intent.IntentResponse(language=user_input.language)
         final_content = response["messages"][-1].content
         if isinstance(final_content, str):
+            if options.get(CONF_SCHEMA_FIRST_YAML, False):
+                final_content = _maybe_fix_dashboard_entities(final_content, hass)
+            else:
+                final_content = _fix_entity_ids_in_text(final_content, hass)
             final_content = _convert_schema_json_to_yaml(
                 final_content, options.get(CONF_SCHEMA_FIRST_YAML, False)
             )

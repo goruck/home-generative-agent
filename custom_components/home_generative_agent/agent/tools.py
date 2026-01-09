@@ -539,7 +539,7 @@ async def add_automation(  # noqa: D417
 
 @tool(parse_docstring=True)
 async def write_yaml_file(  # noqa: D417
-    yaml_text: str,
+    yaml_text: Any,
     filename_prefix: str = "hga",
     *,
     config: Annotated[RunnableConfig, InjectedToolArg()],
@@ -567,7 +567,12 @@ async def write_yaml_file(  # noqa: D417
     path = www_dir / filename
 
     code_fence_min_lines = 2
-    text = str(yaml_text or "").strip()
+    if isinstance(yaml_text, (dict, list)):
+        text = yaml.dump(
+            yaml_text, allow_unicode=True, sort_keys=False, default_flow_style=False
+        ).strip()
+    else:
+        text = str(yaml_text or "").strip()
     if text.startswith("```"):
         lines = text.splitlines()
         if (

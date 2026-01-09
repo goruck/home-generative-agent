@@ -81,9 +81,17 @@ Global options (prompt, face recognition URL, context management, critical-actio
 
 ### Schema-first YAML mode
 
-Enable **Schema-first JSON for YAML requests** in the integration’s Options flow to force YAML-style requests (automations, dashboards, or “show me YAML”) to return strict JSON that the integration converts to YAML for display. When this mode is enabled, the agent will NOT auto-register automations; instead it will show the automation YAML in the chat.
+**Schema-first JSON for YAML requests** controls how the agent handles YAML-style requests (automations, dashboards, or “show me YAML”).
 
-If you want a file you can use in Home Assistant, explicitly ask the agent to **save the YAML**. It will write the file under `/config/www/` and return a `/local/...` URL.
+When it is **ON**:
+- The agent returns strict JSON that the integration converts to YAML for display.
+- Automations are not auto-registered; the YAML is shown in chat.
+- If you want a file you can use in Home Assistant, explicitly ask the agent to **save the YAML**. It writes under `/config/www/` and returns a `/local/...` URL.
+
+When it is **OFF**:
+- Dashboard generation is disabled; the agent will respond: “Please enable 'Schema-first JSON for YAML requests' in HGA's configuration and try again.”
+- Automations are auto-registered; the YAML is not shown in chat.
+- Other YAML-style requests follow the standard prompt behavior (no schema enforcement).
 
 Note: the YAML rendered in the chat window may not preserve indentation due to UI rendering, so it may be invalid if copied directly. Use the saved file instead.
 
