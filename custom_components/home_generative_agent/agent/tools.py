@@ -59,6 +59,7 @@ from ..const import (  # noqa: TID252
     VLM_USER_KW_TEMPLATE,
     VLM_USER_PROMPT,
 )
+from ..core.conversation_helpers import _resolve_entity_id  # noqa: TID252
 from ..core.utils import extract_final, verify_pin  # noqa: TID252
 from .helpers import (
     ConfigurableData,
@@ -76,6 +77,30 @@ if TYPE_CHECKING:
     from langchain_core.runnables.base import RunnableSerializable
 
 LOGGER = logging.getLogger(__name__)
+
+
+@tool(parse_docstring=True)
+async def resolve_entity_ids(  # noqa: D417
+    entity_ids: list[str],
+    *,
+    config: Annotated[RunnableConfig, InjectedToolArg()],
+) -> dict[str, str]:
+    """
+    Resolve suggested entity_ids to existing Home Assistant entity_ids.
+
+    Args:
+        entity_ids: List of entity_id strings.
+
+    """
+    if "configurable" not in config:
+        return {}
+
+    hass: HomeAssistant = config["configurable"]["hass"]
+    resolved: dict[str, str] = {}
+    for entity_id in entity_ids:
+        if isinstance(entity_id, str):
+            resolved[entity_id] = _resolve_entity_id(entity_id, hass)
+    return resolved
 
 
 def _map_alarm_service(tool_name: str, requested_state: str) -> str:
@@ -539,7 +564,7 @@ async def add_automation(  # noqa: D417
 
 @tool(parse_docstring=True)
 async def write_yaml_file(  # noqa: D417
-    yaml_text: str,
+    yaml_text: Any,
     filename_prefix: str = "hga",
     *,
     config: Annotated[RunnableConfig, InjectedToolArg()],
@@ -567,7 +592,12 @@ async def write_yaml_file(  # noqa: D417
     path = www_dir / filename
 
     code_fence_min_lines = 2
-    text = str(yaml_text or "").strip()
+    if isinstance(yaml_text, (dict, list)):
+        text = yaml.dump(
+            yaml_text, allow_unicode=True, sort_keys=False, default_flow_style=False
+        ).strip()
+    else:
+        text = str(yaml_text or "").strip()
     if text.startswith("```"):
         lines = text.splitlines()
         if (

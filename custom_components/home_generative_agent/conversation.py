@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import string
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal
 
 import homeassistant.util.dt as dt_util
-import yaml
 from homeassistant.components import conversation
 from homeassistant.components.conversation import trace
 from homeassistant.components.conversation.models import AbstractConversationAgent
@@ -29,6 +27,7 @@ from .agent.tools import (
     confirm_sensitive_action,
     get_and_analyze_camera_image,
     get_entity_history,
+    resolve_entity_ids,
     upsert_memory,
     write_yaml_file,
 )
@@ -42,6 +41,12 @@ from .const import (
     SCHEMA_FIRST_YAML_PROMPT,
     TOOL_CALL_ERROR_SYSTEM_MESSAGE,
 )
+from .core.conversation_helpers import (
+    _convert_schema_json_to_yaml,
+    _fix_entity_ids_in_text,
+    _is_dashboard_request,
+    _maybe_fix_dashboard_entities,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -54,202 +59,7 @@ if TYPE_CHECKING:
 
     from .core.runtime import HGAConfigEntry
 
-LOGGER = logging.getLogger(__name__)
-CODE_FENCE_MIN_LINES = 3
-YAML_LIST_INDENT = 2
-YAML_NESTED_INDENT = 4
-
-## json - yaml conversion helpers ##
-# This is needed because LLMs often output JSON inside Markdown code fences,
-# and we want to convert that to properly indented YAML for Home Assistant automations.
-# Additionally, we normalize common automation fields to be nested under trigger/action.
-# The YAML indentation fixup ensures that lists under trigger/action/condition
-# are indented properly for Home Assistant to parse them correctly.
-# This code should be made into a tool at the expense of latency if we find
-# that LLMs frequently output invalid YAML automations.
-
-
-class _IndentDumper(yaml.SafeDumper):
-    """Force YAML lists to indent under their parent key."""
-
-    def increase_indent(
-        self,
-        flow: bool = False,  # noqa: FBT001, FBT002
-        indentless: bool = False,  # noqa: ARG002, FBT001, FBT002
-    ) -> Any:
-        return super().increase_indent(flow, False)  # noqa: FBT003
-
-
-def _strip_code_fence(content: str) -> str:
-    """Remove a surrounding Markdown code fence if present."""
-    stripped = content.strip()
-    if not stripped.startswith("```"):
-        return stripped
-    lines = stripped.splitlines()
-    if len(lines) < CODE_FENCE_MIN_LINES or not lines[0].startswith("```"):
-        return stripped
-    for idx in range(len(lines) - 1, 0, -1):
-        if lines[idx].startswith("```"):
-            return "\n".join(lines[1:idx]).strip()
-    return stripped
-
-
-def _convert_schema_json_to_yaml(  # noqa: PLR0911, PLR0912
-    content: str,
-    enabled: bool,  # noqa: FBT001
-) -> str:
-    """Convert schema-first JSON to YAML when enabled; otherwise passthrough."""
-    if not enabled:
-        return content
-    if "```yaml" in content:
-        inner = _strip_code_fence(content)
-        fixed = _fix_automation_yaml_indentation(inner)
-        return f"```yaml\n{fixed}\n```"
-    candidate = _strip_code_fence(content)
-    if not candidate:
-        return content
-    payload: Any | None = None
-    if candidate[0] in "{[":
-        try:
-            payload = json.loads(candidate)
-        except json.JSONDecodeError:
-            LOGGER.warning("Schema-first JSON parsing failed; trying YAML fallback.")
-            try:
-                payload = yaml.safe_load(candidate)
-            except yaml.YAMLError:
-                payload = None
-            if payload is None or isinstance(payload, str):
-                return (
-                    "Schema-first JSON parsing failed. "
-                    "Please respond with valid JSON only."
-                )
-    else:
-        try:
-            payload = yaml.safe_load(candidate)
-        except yaml.YAMLError:
-            payload = None
-        if payload is None or isinstance(payload, str):
-            return content
-    if isinstance(payload, dict) and "yaml" in payload:
-        raw_yaml = payload.get("yaml")
-        if isinstance(raw_yaml, str):
-            raw_yaml = raw_yaml.replace("\\n", "\n").strip()
-            try:
-                yaml_payload = yaml.safe_load(raw_yaml)
-            except yaml.YAMLError:
-                yaml_payload = None
-            if yaml_payload is not None and not isinstance(yaml_payload, str):
-                yaml_payload = _normalize_automation_payload(yaml_payload)
-                yaml_text = cast("Any", yaml.dump)(
-                    yaml_payload,
-                    sort_keys=False,
-                    default_flow_style=False,
-                    indent=2,
-                    Dumper=_IndentDumper,
-                ).rstrip()
-                yaml_text = _fix_automation_yaml_indentation(yaml_text)
-                return f"```yaml\n{yaml_text}\n```"
-            return f"```yaml\n{raw_yaml}\n```"
-    payload = _normalize_automation_payload(payload)
-    yaml_text = cast("Any", yaml.dump)(
-        payload,
-        sort_keys=False,
-        default_flow_style=False,
-        indent=2,
-        Dumper=_IndentDumper,
-    ).rstrip()
-    yaml_text = _fix_automation_yaml_indentation(yaml_text)
-    return f"```yaml\n{yaml_text}\n```"
-
-
-def _normalize_automation_payload(payload: Any) -> Any:  # noqa: PLR0912
-    """Heuristically nest common automation fields under trigger/action."""
-    if isinstance(payload, list) and payload:
-        payload[0] = _normalize_automation_payload(payload[0])
-        return payload
-    if not isinstance(payload, dict):
-        return payload
-    if "trigger" in payload:
-        if isinstance(payload["trigger"], dict):
-            payload["trigger"] = [payload["trigger"]]
-        if isinstance(payload.get("trigger"), list):
-            trigger_items = payload["trigger"]
-            if trigger_items:
-                first = trigger_items[0]
-                if isinstance(first, dict):
-                    for key in ("entity_id", "to", "from", "for", "attribute"):
-                        if key in payload and key not in first:
-                            first[key] = payload.pop(key)
-    if "action" in payload:
-        if isinstance(payload["action"], dict):
-            payload["action"] = [payload["action"]]
-        if isinstance(payload.get("action"), list):
-            action_items = payload["action"]
-            if action_items:
-                first = action_items[0]
-                if isinstance(first, dict):
-                    for key in ("target", "data", "data_template"):
-                        if key in payload and key not in first:
-                            first[key] = payload.pop(key)
-                    if "alias" in first and "alias" not in payload:
-                        payload["alias"] = first.pop("alias")
-    if "condition" in payload and isinstance(payload["condition"], dict):
-        payload["condition"] = [payload["condition"]]
-    return _reorder_automation_payload(payload)
-
-
-def _reorder_automation_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    """Put common automation keys in a stable, HA-friendly order."""
-    preferred = [
-        "alias",
-        "description",
-        "trigger",
-        "condition",
-        "action",
-        "mode",
-        "max",
-        "id",
-    ]
-    reordered: dict[str, Any] = {}
-    for key in preferred:
-        if key in payload:
-            reordered[key] = payload[key]
-    for key, value in payload.items():
-        if key not in reordered:
-            reordered[key] = value
-    return reordered
-
-
-def _fix_automation_yaml_indentation(yaml_text: str) -> str:
-    """Ensure trigger/action/condition list items are indented under their keys."""
-    if "trigger:" not in yaml_text and "action:" not in yaml_text:
-        return yaml_text
-    lines = yaml_text.splitlines()
-    out: list[str] = []
-    in_block: str | None = None
-    for line in lines:
-        stripped = line.lstrip()
-        indent = len(line) - len(stripped)
-        if indent == 0 and stripped.endswith(":"):
-            key = stripped[:-1]
-            in_block = key if key in {"trigger", "action", "condition"} else None
-            out.append(line)
-            continue
-        if in_block:
-            if stripped.startswith("- ") and indent < YAML_LIST_INDENT:
-                out.append((" " * YAML_LIST_INDENT) + stripped)
-                continue
-            if (
-                stripped
-                and indent < YAML_NESTED_INDENT
-                and not stripped.startswith("- ")
-            ):
-                out.append((" " * YAML_NESTED_INDENT) + stripped)
-                continue
-        if indent == 0 and stripped and not stripped.startswith("- "):
-            in_block = None
-        out.append(line)
-    return "\n".join(out)
+_LOGGER = logging.getLogger(__name__)
 
 
 if LANGCHAIN_LOGGING_LEVEL == "verbose":
@@ -281,7 +91,7 @@ def _convert_content(
 ) -> HumanMessage | AIMessage:
     """Convert HA native chat messages to LangChain messages."""
     if content.content is None:
-        LOGGER.warning("Content is None, returning empty message")
+        _LOGGER.warning("Content is None, returning empty message")
         return HumanMessage(content="")
     if isinstance(content, conversation.UserContent):
         return HumanMessage(content=content.content)
@@ -342,7 +152,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         """Return a list of supported languages."""
         return MATCH_ALL
 
-    async def _async_handle_message(  # noqa: PLR0915
+    async def _async_handle_message(  # noqa: PLR0912, PLR0915
         self,
         user_input: conversation.ConversationInput,
         chat_log: conversation.ChatLog,
@@ -378,6 +188,12 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             message_history = message_history[-diff:]
             self.message_history_len = mhlen
 
+        conversation_id = (
+            ulid.ulid_now()
+            if chat_log.conversation_id is None
+            else chat_log.conversation_id
+        )
+
         # HA tools & schema
         try:
             llm_api = await llm.async_get_api(
@@ -387,10 +203,21 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             )
         except HomeAssistantError:
             msg = "Error getting LLM API, check your configuration."
-            LOGGER.exception(msg)
+            _LOGGER.exception(msg)
             intent_response.async_set_error(intent.IntentResponseErrorCode.UNKNOWN, msg)
             return conversation.ConversationResult(
-                response=intent_response, conversation_id=user_input.conversation_id
+                response=intent_response, conversation_id=conversation_id
+            )
+
+        if not options.get(CONF_SCHEMA_FIRST_YAML, False) and _is_dashboard_request(
+            user_input.text
+        ):
+            intent_response.async_set_speech(
+                """Please enable 'Schema-first JSON for YAML requests' in
+                HGA's configuration and try again"""
+            )
+            return conversation.ConversationResult(
+                response=intent_response, conversation_id=conversation_id
             )
 
         tools = [
@@ -404,6 +231,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             "get_entity_history": get_entity_history,
             "confirm_sensitive_action": confirm_sensitive_action,
             "alarm_control": alarm_control,
+            "resolve_entity_ids": resolve_entity_ids,
             "write_yaml_file": write_yaml_file,
         }
         if not options.get(CONF_SCHEMA_FIRST_YAML, False):
@@ -411,12 +239,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         tools.extend(langchain_tools.values())
 
         # Conversation ID
-        conversation_id = (
-            ulid.ulid_now()
-            if chat_log.conversation_id is None
-            else chat_log.conversation_id
-        )
-        LOGGER.debug("Conversation ID: %s", conversation_id)
+        _LOGGER.debug("Conversation ID: %s", conversation_id)
 
         # Resolve user name (None means automation)
         if (
@@ -458,7 +281,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 )
             ]
         except TemplateError as err:
-            LOGGER.exception("Error rendering prompt.")
+            _LOGGER.exception("Error rendering prompt.")
             intent_response = intent.IntentResponse(language=user_input.language)
             intent_response.async_set_error(
                 intent.IntentResponseErrorCode.UNKNOWN,
@@ -478,7 +301,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         try:
             chat_model_with_tools = base_llm.bind_tools(tools)
         except AttributeError:
-            LOGGER.exception("Error during conversation processing.")
+            _LOGGER.exception("Error during conversation processing.")
             intent_response = intent.IntentResponse(language=user_input.language)
             intent_response.async_set_error(
                 intent.IntentResponseErrorCode.UNKNOWN,
@@ -492,7 +315,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         user_name = "robot" if user_name is None else user_name
         # Remove special characters since memory namespace labels cannot contain them.
         user_name = user_name.translate(str.maketrans("", "", string.punctuation))
-        LOGGER.debug("User name: %s", user_name)
+        _LOGGER.debug("User name: %s", user_name)
 
         app_config: RunnableConfig = {
             "configurable": {
@@ -534,7 +357,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         try:
             response = await app.ainvoke(input=app_input, config=app_config)
         except HomeAssistantError as err:
-            LOGGER.exception("LangGraph error during conversation processing.")
+            _LOGGER.exception("LangGraph error during conversation processing.")
             intent_response = intent.IntentResponse(language=user_input.language)
             intent_response.async_set_error(
                 intent.IntentResponseErrorCode.UNKNOWN,
@@ -549,15 +372,19 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             {"messages": response["messages"], "tools": tools if tools else None},
         )
 
-        LOGGER.debug("====== End of run ======")
+        _LOGGER.debug("====== End of run ======")
 
         intent_response = intent.IntentResponse(language=user_input.language)
         final_content = response["messages"][-1].content
         if isinstance(final_content, str):
+            if options.get(CONF_SCHEMA_FIRST_YAML, False):
+                final_content = _maybe_fix_dashboard_entities(final_content, hass)
+            else:
+                final_content = _fix_entity_ids_in_text(final_content, hass)
             final_content = _convert_schema_json_to_yaml(
                 final_content, options.get(CONF_SCHEMA_FIRST_YAML, False)
             )
-            LOGGER.debug("Final response content: %s", final_content)
+            _LOGGER.debug("Final response content: %s", final_content)
         intent_response.async_set_speech(final_content)
         return conversation.ConversationResult(
             response=intent_response, conversation_id=conversation_id

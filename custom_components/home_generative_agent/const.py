@@ -465,6 +465,7 @@ with no prose or code fences. Use double quotes and no trailing commas.
 If the user asks for an automation, output an AutomationSpec JSON object.
 If the user asks for a dashboard or Lovelace view, output a DashboardSpec JSON object.
 If the user asks to save YAML to a file, call the "write_yaml_file" tool.
+When referencing entities, use the exact entity_id values from the device overview.
 
 AutomationSpec:
 {"alias":string,"description"?:string,"mode"?:("single"|"restart"|"queued"|"parallel"),
