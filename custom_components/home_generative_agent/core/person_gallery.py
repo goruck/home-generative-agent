@@ -7,11 +7,12 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING
 from urllib.parse import urljoin
 
-import httpx
 import numpy as np
+from homeassistant.helpers.httpx_client import get_async_client
 from psycopg.rows import DictRow, dict_row
 
 if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
     from psycopg import AsyncConnection
     from psycopg_pool import AsyncConnectionPool
 
@@ -23,9 +24,14 @@ FACE_EMBEDDING_DIMS = 512
 class PersonGalleryDAO:
     """Access layer for person recognition using pgvector cosine distance."""
 
-    def __init__(self, pool: AsyncConnectionPool[AsyncConnection[DictRow]]) -> None:
+    def __init__(
+        self,
+        pool: AsyncConnectionPool[AsyncConnection[DictRow]],
+        hass: HomeAssistant,
+    ) -> None:
         """Initialize with a psycopg_pool AsyncConnectionPool."""
         self.pool = pool
+        self._client = get_async_client(hass)
 
     def _normalize(self, embedding: Embedding) -> list[float]:
         """Return L2-normalized list of floats."""
@@ -47,20 +53,22 @@ class PersonGalleryDAO:
         self, face_api_url: str, name: str, image_bytes: bytes
     ) -> bool:
         """Detect face in image, extract embedding, and add to gallery."""
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                urljoin(face_api_url.rstrip("/") + "/", "analyze"),
-                files={"file": ("snapshot.jpg", image_bytes, "image/jpeg")},
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        resp = await self._client.post(
+            urljoin(face_api_url.rstrip("/") + "/", "analyze"),
+            files={"file": ("snapshot.jpg", image_bytes, "image/jpeg")},
+        )
+        resp.raise_for_status()
+        data = resp.json()
 
         faces = data.get("faces", [])
-        if not faces:
+        if not isinstance(faces, list) or not faces:
             LOGGER.warning("No face detected for enrollment of %s", name)
             return False
 
-        emb: Embedding = faces[0]["embedding"]
+        emb = faces[0].get("embedding") if isinstance(faces[0], dict) else None
+        if not isinstance(emb, list) or len(emb) != FACE_EMBEDDING_DIMS:
+            LOGGER.warning("Invalid face embedding received for %s", name)
+            return False
         await self.add_person(name, emb)
         LOGGER.info("Enrolled new person '%s' with embedding.", name)
         return True

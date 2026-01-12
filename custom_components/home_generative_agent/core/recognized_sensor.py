@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.sensor import (
@@ -62,6 +61,15 @@ class RecognizedPeopleSensor(SensorEntity, RestoreBase):
         self._last_event_iso: str | None = None
         self._latest_path: str | None = None
         self._attr_native_value = "None"
+        self._attrs: dict[str, Any] = {
+            "recognized_people": self._people,
+            "count": 0,
+            "summary": None,
+            "last_event": None,
+            "latest_path": None,
+            "camera_id": self._camera_id,
+        }
+        self._attr_extra_state_attributes = self._attrs
 
     async def async_added_to_hass(self) -> None:
         """Restore prior state and subscribe to recognition updates."""
@@ -82,6 +90,15 @@ class RecognizedPeopleSensor(SensorEntity, RestoreBase):
             self._last_event_iso = last.attributes.get("last_event")
             self._latest_path = last.attributes.get("latest_path")
             self._attr_native_value = _truncate_state(self._people)
+            self._attrs.update(
+                {
+                    "recognized_people": self._people,
+                    "count": len(self._people),
+                    "summary": self._summary,
+                    "last_event": self._last_event_iso,
+                    "latest_path": self._latest_path,
+                }
+            )
 
         @callback
         def _on_recognized(
@@ -94,28 +111,30 @@ class RecognizedPeopleSensor(SensorEntity, RestoreBase):
             """Update sensor with new recognition results."""
             if camera_id != self._camera_id:
                 return
-            if people == self._people and summary == self._summary:
+            if (
+                people == self._people
+                and summary == self._summary
+                and last_event_iso == self._last_event_iso
+                and latest_path == self._latest_path
+            ):
                 return
             self._people = people
             self._summary = summary
             self._last_event_iso = last_event_iso
             self._latest_path = latest_path
             self._attr_native_value = _truncate_state(self._people)
+            self._attrs.update(
+                {
+                    "recognized_people": self._people,
+                    "count": len(self._people),
+                    "summary": self._summary,
+                    "last_event": self._last_event_iso,
+                    "latest_path": self._latest_path,
+                }
+            )
             self.async_write_ha_state()
 
         remove = async_dispatcher_connect(
             self.hass, SIGNAL_HGA_RECOGNIZED, _on_recognized
         )
         self.async_on_remove(remove)
-
-    @cached_property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        """Return extra attributes with full recognition context."""
-        return {
-            "recognized_people": self._people,
-            "count": len(self._people),
-            "summary": self._summary,
-            "last_event": self._last_event_iso,
-            "latest_path": self._latest_path,
-            "camera_id": self._camera_id,
-        }

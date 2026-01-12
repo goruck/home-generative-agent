@@ -654,7 +654,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             LOGGER.exception("Error migrating person_gallery database schema.")
             return False
 
-        person_gallery = PersonGalleryDAO(pool)
+        person_gallery = PersonGalleryDAO(pool, hass)
 
         async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
             await cur.execute("""

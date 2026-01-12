@@ -465,6 +465,38 @@ The image below is an example of a notification sent to the mobile app.
 
 ![Alt text](./assets/video-analysis-screenshot.jpeg)
 
+## Makefile
+
+The Makefile provides a repeatable local dev workflow. It creates a `hga` venv using Python 3.13 and wires common tasks (deps, lint, tests, type checking).
+
+Common commands:
+
+```bash
+make venv       # create venv with pip/setuptools/wheel
+make devdeps    # install dev-only deps
+make testdeps   # install test deps
+make runtimedeps # regenerate + install runtime deps from manifest
+```
+
+Checks and formatting:
+
+```bash
+make lint       # regenerate runtime deps + ruff check (non-mutating)
+make format     # ruff format (mutating)
+make fix        # ruff --fix (mutating)
+make typecheck  # pyright
+```
+
+Tests and cleanup:
+
+```bash
+make test       # pytest with runtime deps installed
+make all        # devdeps + testdeps + runtimedeps + lint + test + check + typecheck
+make clean      # remove the venv
+```
+
+Note: `make lint` will fail if `requirements_runtime_manifest.txt` is out of date. Run `make runtimedeps` or `make lint` to regenerate it.
+
 ## Contributions are welcome!
 
 If you want to contribute to this, please read the [Contribution guidelines](CONTRIBUTING.md)
