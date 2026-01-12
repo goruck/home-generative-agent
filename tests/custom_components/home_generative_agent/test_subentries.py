@@ -9,7 +9,7 @@ import pytest
 from homeassistant.const import CONF_API_KEY, CONF_HOST, CONF_PASSWORD, CONF_USERNAME
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.home_generative_agent import async_migrate_entry
+import custom_components.home_generative_agent as hga_component
 from custom_components.home_generative_agent.config_flow import (
     HomeGenerativeAgentConfigFlow,
 )
@@ -47,6 +47,13 @@ if TYPE_CHECKING:
 
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
+
+
+_ASYNC_MIGRATE_ATTR = "async_migrate_entry"
+async_migrate_entry = cast(
+    "Any",
+    getattr(hga_component, _ASYNC_MIGRATE_ATTR),
+)
 
 
 class DummySubentry:

@@ -868,13 +868,17 @@ def _filter_data(
             except ValueError:
                 LOGGER.warning("Found string that could not be converted to float.")
                 continue
+        units = state_obj.attributes.get("unit_of_measurement")
+        if not state_values:
+            return {"value": 0.0, "units": units}
         # Check if sensor was reset during the time of interest.
         zero_indices = [i for i, x in enumerate(state_values) if math.isclose(x, 0.0)]
         if zero_indices:
             LOGGER.warning("Sensor was reset during time of interest.")
             state_values = state_values[zero_indices[-1] :]
+        if not state_values:
+            return {"value": 0.0, "units": units}
         state_value_change = max(state_values) - min(state_values)
-        units = state_obj.attributes.get("unit_of_measurement")
         return {"value": state_value_change, "units": units}
 
     return {"values": _get_state_and_decimate(data)}
@@ -1067,11 +1071,18 @@ async def get_entity_history(  # noqa: D417
 
     hass: HomeAssistant = config["configurable"]["hass"]
 
+    if len(friendly_names) != len(domains):
+        LOGGER.warning(
+            "get_entity_history: friendly_names/domains lengths differ (%d vs %d); "
+            "pairing best-effort",
+            len(friendly_names),
+            len(domains),
+        )
+
     try:
         entity_ids = [
             await _get_existing_entity_id(n, hass, d)
-            for n in friendly_names
-            for d in domains
+            for n, d in zip(friendly_names, domains, strict=False)
         ]
     except ValueError:
         LOGGER.exception("Invalid name %s or domain: %s", friendly_names, domains)

@@ -1,0 +1,14 @@
+aiofiles==25.1.0
+langchain==1.0.8
+langchain-core==1.1.0
+langchain-openai==1.0.3
+langchain-ollama==0.3.10
+langgraph==1.0.3
+langgraph-checkpoint-postgres==3.0.1
+openai==2.8.1
+ollama==0.6.1
+psycopg==3.2.13
+psycopg-binary==3.2.13
+psycopg-pool==3.2.8
+transformers==4.57.1
+langchain-google-genai==3.1.0

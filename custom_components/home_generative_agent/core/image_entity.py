@@ -45,12 +45,19 @@ MIME_JPEG: Final = "image/jpeg"
 UNIQUE_PREFIX: Final = "last_event::"
 NAME_SUFFIX: Final = " Last Event"
 
-# Positional index constants
+# Positional index constants (SIGNAL_HGA_NEW_LATEST)
 IDX_CAMERA_ID: Final = 0
 IDX_LATEST_PATH: Final = 1
 IDX_SUMMARY: Final = 2
 IDX_PEOPLE: Final = 3
 IDX_LAST_EVENT_ISO: Final = 4
+
+# Positional index constants (SIGNAL_HGA_RECOGNIZED)
+IDX_RECOGNIZED_CAMERA_ID: Final = 0
+IDX_RECOGNIZED_PEOPLE: Final = 1
+IDX_RECOGNIZED_SUMMARY: Final = 2
+IDX_RECOGNIZED_LAST_EVENT_ISO: Final = 3
+IDX_RECOGNIZED_LATEST_PATH: Final = 4
 
 
 @dataclass(slots=True)
@@ -183,23 +190,27 @@ class LastEventImage(ImageEntity):
     @callback
     def _on_recognized(self, *args: Any) -> None:
         """Handle SIGNAL_HGA_RECOGNIZED."""
-        if not args or cast("str", args[IDX_CAMERA_ID]) != self._camera_id:
+        if not args or cast("str", args[IDX_RECOGNIZED_CAMERA_ID]) != self._camera_id:
             return
 
         people = (
-            cast("Sequence[str] | None", args[IDX_LATEST_PATH])
-            if len(args) > IDX_LATEST_PATH
+            cast("Sequence[str] | None", args[IDX_RECOGNIZED_PEOPLE])
+            if len(args) > IDX_RECOGNIZED_PEOPLE
             else None
         )
         summary = (
-            cast("str | None", args[IDX_SUMMARY]) if len(args) > IDX_SUMMARY else None
+            cast("str | None", args[IDX_RECOGNIZED_SUMMARY])
+            if len(args) > IDX_RECOGNIZED_SUMMARY
+            else None
         )
         last_event_iso = (
-            cast("str | None", args[IDX_PEOPLE]) if len(args) > IDX_PEOPLE else None
+            cast("str | None", args[IDX_RECOGNIZED_LAST_EVENT_ISO])
+            if len(args) > IDX_RECOGNIZED_LAST_EVENT_ISO
+            else None
         )
         latest_path = (
-            cast("str | None", args[IDX_LAST_EVENT_ISO])
-            if len(args) > IDX_LAST_EVENT_ISO
+            cast("str | None", args[IDX_RECOGNIZED_LATEST_PATH])
+            if len(args) > IDX_RECOGNIZED_LATEST_PATH
             else None
         )
 
