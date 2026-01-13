@@ -53,6 +53,7 @@ RECOMMENDED_DB_NAME = "ha_db"
 RECOMMENDED_DB_PARAMS = [{"key": "sslmode", "value": "disable"}]
 
 CONF_DB_BOOTSTRAPPED = "db_bootstrapped"
+CONF_VECTORS_BOOTSTRAPPED = "vectors_bootstrapped"
 
 # ---- Notify service (for mobile push notifications) ----
 CONF_NOTIFY_SERVICE = "notify_service"
