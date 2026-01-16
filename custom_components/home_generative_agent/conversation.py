@@ -39,6 +39,7 @@ from .const import (
     DOMAIN,
     LANGCHAIN_LOGGING_LEVEL,
     SCHEMA_FIRST_YAML_PROMPT,
+    SUBENTRY_TYPE_MODEL_PROVIDER,
     TOOL_CALL_ERROR_SYSTEM_MESSAGE,
 )
 from .core.conversation_helpers import (
@@ -303,9 +304,24 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         except AttributeError:
             _LOGGER.exception("Error during conversation processing.")
             intent_response = intent.IntentResponse(language=user_input.language)
+            has_provider = any(
+                subentry.subentry_type == SUBENTRY_TYPE_MODEL_PROVIDER
+                for subentry in self.entry.subentries.values()
+            )
+            if not has_provider:
+                msg = (
+                    "This integration isn't configured with a model provider. "
+                    "Go to Settings -> Devices & Services -> Home Generative Agent -> "
+                    "Add Model Provider."
+                )
+            else:
+                msg = (
+                    "This model doesn't support tool calling. "
+                    "Choose a compatible model or provider."
+                )
             intent_response.async_set_error(
                 intent.IntentResponseErrorCode.UNKNOWN,
-                f"Model must support tool calling, model = {type(base_llm).__name__}",
+                msg,
             )
             return conversation.ConversationResult(
                 response=intent_response, conversation_id=conversation_id
