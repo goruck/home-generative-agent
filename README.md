@@ -45,6 +45,10 @@ This integration will set up the `conversation` platform, allowing users to conv
 6. (Optional) Install [face-service](https://github.com/goruck/face-service) on your edge device if you want to use face recognition.
 
 - Go to Developers tools -> Actions -> Enroll Person in the HA UI to enroll a new person into the face database from an image file.
+- If you want the dashboard enrollment card, add the Lovelace resource after installing the integration:
+  - Settings -> Dashboards -> Resources -> Add
+  - URL: `/hga-enroll-card/hga-enroll-card.js`
+  - Type: `JavaScript Module`
 
 ### Manual (non-HACS install)
 1. Install PostgreSQL with pgvector as shown above in Step 1.
@@ -56,6 +60,35 @@ This integration will set up the `conversation` platform, allowing users to conv
 7. Restart Home Assistant
 8. In the HA UI, go to "Configuration" -> "Integrations" click "+," and search for "Home Generative Agent"
 9. Follow steps 3 to 6 above.
+
+## Enroll People (Face Recognition)
+
+You can enroll faces either via a service call or through the dashboard card.
+
+### Service (Developer Tools -> Actions)
+
+Service: `home_generative_agent.enroll_person`
+
+```yaml
+service: home_generative_agent.enroll_person
+data:
+  name: "Eva"
+  file_path: "/media/faces/eva_face.jpg"
+```
+
+The file must be inside Home Assistant's `/media` folder so it is accessible to the integration.
+
+### Dashboard Card (File Picker)
+
+Add the custom card to any dashboard after registering the resource in Installation step 6.
+
+```yaml
+type: custom:hga-enroll-card
+title: Enroll Person
+endpoint: /api/home_generative_agent/enroll
+```
+
+Use the file picker or drag-and-drop to upload one or more images. The card will enroll any images that contain a detectable face and skip those that do not.
 
 ## Configuration
 Configuration is done entirely in the Home Assistant UI using subentry flows.
