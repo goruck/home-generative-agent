@@ -9,10 +9,14 @@ from functools import partial
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, cast
+from urllib.parse import unquote
 
 import aiofiles
+import httpx
 import voluptuous as vol
+from homeassistant.components import media_source
 from homeassistant.components.camera.const import DOMAIN as CAMERA_DOMAIN
+from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry, ConfigSubentry
 from homeassistant.const import (
     CONF_API_KEY,
@@ -26,6 +30,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.httpx_client import get_async_client
+from homeassistant.helpers.network import get_url
 from homeassistant.helpers.target import (
     TargetSelectorData,
     async_extract_referenced_entity_ids,
@@ -171,6 +176,7 @@ from .core.utils import (
 )
 from .core.video_analyzer import VideoAnalyzer
 from .core.video_helpers import latest_target, publish_latest_atomic
+from .http import EnrollPersonView
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -191,7 +197,7 @@ SERVICE_ENROLL_PERSON = "enroll_person"
 ENROLL_SCHEMA = vol.Schema(
     {
         vol.Required("name"): cv.string,
-        vol.Required("file_path"): cv.isfile,  # path to a local uploaded snapshot
+        vol.Required("file_path"): cv.string,
     }
 )
 
@@ -206,6 +212,27 @@ def _default_feature_payload(feature_type: str) -> dict[str, Any]:
         CONF_FEATURE_MODEL: {},
         "config": {},
     }
+
+
+async def _read_enroll_image_bytes(hass: HomeAssistant, file_ref: str) -> bytes:
+    if media_source.is_media_source_id(file_ref):
+        if file_ref.startswith("media-source://media_source/local/"):
+            relative = unquote(file_ref.split("/local/", 1)[1])
+            local_path = Path(hass.config.path("media", relative))
+            async with aiofiles.open(local_path, "rb") as f:
+                return await f.read()
+
+        media = await media_source.async_resolve_media(hass, file_ref, None)
+        url = media.url
+        if url.startswith("/"):
+            url = f"{get_url(hass)}{url}"
+        client = get_async_client(hass)
+        response = await client.get(url)
+        response.raise_for_status()
+        return await response.aread()
+
+    async with aiofiles.open(file_ref, "rb") as f:
+        return await f.read()
 
 
 def _default_model_data(category: str, provider_type: str) -> dict[str, Any]:
@@ -923,6 +950,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         pending_actions={},
     )
 
+    if not hass.data[DOMAIN].get("http_registered"):
+        hass.http.register_view(EnrollPersonView(hass, entry))
+        www_dir = Path(__file__).resolve().parent / "www"
+        if www_dir.is_dir():
+            await hass.http.async_register_static_paths(
+                [StaticPathConfig("/hga-enroll-card", str(www_dir), cache_headers=True)]
+            )
+        hass.data[DOMAIN]["http_registered"] = True
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     if options.get(CONF_VIDEO_ANALYZER_MODE) != "disable":
@@ -949,10 +985,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         file_path: str = call.data["file_path"]
 
         try:
-            async with aiofiles.open(file_path, "rb") as f:
-                img_bytes = await f.read()
-        except OSError as err:
-            msg = f"Could not read file: {err}"
+            img_bytes = await _read_enroll_image_bytes(hass, file_path)
+        except (
+            OSError,
+            httpx.HTTPError,
+            media_source.MediaSourceError,
+            ValueError,
+        ) as err:
+            msg = f"Could not read media: {err}"
             raise HomeAssistantError(msg) from err
 
         dao: PersonGalleryDAO = entry.runtime_data.person_gallery
