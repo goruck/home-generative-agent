@@ -3,7 +3,7 @@ langchain==1.0.8
 langchain-core==1.1.0
 langchain-openai==1.0.3
 langchain-ollama==0.3.10
-langgraph==1.0.3
+langgraph==1.0.6
 langgraph-checkpoint-postgres==3.0.1
 openai==2.15.0
 ollama==0.6.1
