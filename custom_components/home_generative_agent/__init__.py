@@ -691,53 +691,63 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             LOGGER.exception("Error opening postgresql db.")
             return False
 
-        # Initialize database for long-term memory.
-        store = AsyncPostgresStore(
-            pool,
-            index=index_config if index_config else None,
-        )
-        # Initialize database for thread-based (short-term) memory.
-        checkpointer = AsyncPostgresSaver(pool)
-        # First-time setup (if needed)
-        await _bootstrap_db_once(hass, entry, store, checkpointer)
-        await _bootstrap_vectors_once(hass, entry, store)
-
-        # Migrate person gallery DB schema (if needed)
         try:
-            await migrate_person_gallery(pool)
+            # Initialize database for long-term memory.
+            store = AsyncPostgresStore(
+                pool,
+                index=index_config if index_config else None,
+            )
+            # Initialize database for thread-based (short-term) memory.
+            checkpointer = AsyncPostgresSaver(pool)
+            # First-time setup (if needed)
+            await _bootstrap_db_once(hass, entry, store, checkpointer)
+            await _bootstrap_vectors_once(hass, entry, store)
+
+            # Migrate person gallery DB schema (if needed)
+            try:
+                await migrate_person_gallery(pool)
+            except Exception:
+                LOGGER.exception("Error migrating person_gallery database schema.")
+                raise
+
+            person_gallery = PersonGalleryDAO(pool, hass)
+
+            async with (
+                pool.connection() as conn,
+                conn.cursor(row_factory=dict_row) as cur,
+            ):
+                await cur.execute("""
+                        SELECT current_database() AS db,
+                            current_user     AS usr,
+                            inet_server_addr()::text AS host,
+                            inet_server_port()       AS port,
+                            current_schemas(true)    AS schemas,
+                            current_setting('search_path', true) AS search_path
+                    """)
+                env = await cur.fetchone()
+                if env:
+                    LOGGER.info(
+                        """
+                        DB env: db=%s user=%s host=%s port=%s schemas=%s search_path=%s
+                        """,
+                        env["db"],
+                        env["usr"],
+                        env["host"],
+                        env["port"],
+                        env["schemas"],
+                        env["search_path"],
+                    )
+
+                await cur.execute("SELECT COUNT(*) AS total FROM public.person_gallery")
+                resp = await cur.fetchone()
+                if resp:
+                    LOGGER.info(
+                        "Gallery rows visible to this connection: %s", resp["total"]
+                    )
         except Exception:
-            LOGGER.exception("Error migrating person_gallery database schema.")
+            LOGGER.exception("Postgresql setup failed; closing pool.")
+            await pool.close()
             return False
-
-        person_gallery = PersonGalleryDAO(pool, hass)
-
-        async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute("""
-                    SELECT current_database() AS db,
-                        current_user     AS usr,
-                        inet_server_addr()::text AS host,
-                        inet_server_port()       AS port,
-                        current_schemas(true)    AS schemas,
-                        current_setting('search_path', true) AS search_path
-                """)
-            env = await cur.fetchone()
-            if env:
-                LOGGER.info(
-                    "DB env: db=%s user=%s host=%s port=%s schemas=%s search_path=%s",
-                    env["db"],
-                    env["usr"],
-                    env["host"],
-                    env["port"],
-                    env["schemas"],
-                    env["search_path"],
-                )
-
-            await cur.execute("SELECT COUNT(*) AS total FROM public.person_gallery")
-            resp = await cur.fetchone()
-            if resp:
-                LOGGER.info(
-                    "Gallery rows visible to this connection: %s", resp["total"]
-                )
     else:
         person_gallery = None
         checkpointer = MemorySaver()
