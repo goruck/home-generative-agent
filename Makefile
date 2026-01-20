@@ -13,10 +13,10 @@ venv:
 	$(PY) -m pip install -U pip setuptools wheel
 
 devdeps: venv
-	$(PIP) install -r requirements_dev.txt
+	$(PIP) install -r requirements/dev.txt
 
 testdeps: venv
-	$(PIP) install -r requirements_test.txt
+	$(PIP) install -r requirements/test.txt
 
 # Generate pinned runtime requirements from manifest and install them into the venv
 runtimedeps: venv
