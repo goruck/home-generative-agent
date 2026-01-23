@@ -85,6 +85,53 @@
         "unknown": "Beklenmeyen hata."
       }
     },
+    "stt_provider": {
+      "entry_type": "service",
+      "abort": {
+        "reconfigure_successful": "STT sağlayıcı güncellendi."
+      },
+      "initiate_flow": {
+        "reconfigure": "STT sağlayıcıyı yeniden yapılandır",
+        "user": "STT sağlayıcı ekle"
+      },
+      "step": {
+        "provider": {
+          "title": "Konuşmadan Metne Sağlayıcı",
+          "description": "Sağlayıcı türünü ve adını seçin.",
+          "data": {
+            "provider_type": "Sağlayıcı",
+            "name": "Sağlayıcı adı"
+          }
+        },
+        "credentials": {
+          "title": "Kimlik bilgileri",
+          "description": "STT sağlayıcısı için kimlik doğrulama seçin.",
+          "data": {
+            "openai_provider_subentry_id": "OpenAI model sağlayıcıyı yeniden kullan",
+            "api_key": "OpenAI API anahtarı"
+          }
+        },
+        "model": {
+          "title": "Model ve gelişmiş seçenekler",
+          "description": "Bir model seçin ve isteğe bağlı gelişmiş ayarları yapılandırın.",
+          "data": {
+            "model_name": "Model",
+            "language": "Dil (isteğe bağlı)",
+            "prompt": "İstem (isteğe bağlı)",
+            "temperature": "Sıcaklık (isteğe bağlı)",
+            "translate": "İngilizceye çevir",
+            "response_format": "Yanıt biçimi"
+          }
+        }
+      },
+      "error": {
+        "cannot_connect": "Sağlayıcıya erişilemiyor.",
+        "invalid_auth": "Geçersiz kimlik bilgileri.",
+        "invalid_model": "Geçerli bir model seçin.",
+        "not_supported": "Sağlayıcı henüz desteklenmiyor.",
+        "unknown": "Beklenmeyen hata."
+      }
+    },
     "feature": {
       "entry_type": "service",
       "abort": {

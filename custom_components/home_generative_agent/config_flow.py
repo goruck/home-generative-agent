@@ -59,6 +59,7 @@ from .const import (
     RECOMMENDED_VIDEO_ANALYZER_MODE,
     SUBENTRY_TYPE_FEATURE,
     SUBENTRY_TYPE_MODEL_PROVIDER,
+    SUBENTRY_TYPE_STT_PROVIDER,
     VIDEO_ANALYZER_MODE_ALWAYS_NOTIFY,
     VIDEO_ANALYZER_MODE_DISABLE,
     VIDEO_ANALYZER_MODE_NOTIFY_ON_ANOMALY,
@@ -72,6 +73,7 @@ from .core.utils import (
 )
 from .flows.feature_subentry_flow import FeatureSubentryFlow
 from .flows.model_provider_subentry_flow import ModelProviderSubentryFlow
+from .flows.stt_provider_subentry_flow import SttProviderSubentryFlow
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -270,6 +272,7 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
         return {
             SUBENTRY_TYPE_MODEL_PROVIDER: ModelProviderSubentryFlow,
             SUBENTRY_TYPE_FEATURE: FeatureSubentryFlow,
+            SUBENTRY_TYPE_STT_PROVIDER: SttProviderSubentryFlow,
         }
 
 

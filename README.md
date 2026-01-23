@@ -112,6 +112,23 @@ If you want separate Ollama servers per feature, add multiple Model Provider sub
 
 Global options (prompt, face recognition URL, context management, critical-action PIN, etc.) live in the integration’s **Options** flow.
 
+### Speech-to-Text (STT)
+
+HGA can provide a built-in STT engine using the OpenAI Whisper API so you can use voice without a separate STT integration.
+
+1. Open Settings → Devices & Services → Home Generative Agent.
+2. Click **+ STT Provider**.
+3. Choose **OpenAI** and give it a name.
+4. On the **Credentials** step, either:
+   - Reuse an existing OpenAI Model Provider subentry, or
+   - Select **Use a separate key** and enter a dedicated OpenAI API key.
+5. On **Model & advanced options**, pick a model (recommended: `gpt-4o-mini-transcribe`) and set optional fields:
+   - `language` (optional): e.g., `en` or `en-US`
+   - `prompt` (optional): hints for domain-specific vocabulary
+   - `temperature` (optional): 0–1
+   - `translate`: only supported by `whisper-1`; other models will fall back to transcription
+6. Go to Settings → Voice assistants → Assist pipelines and select **STT - OpenAI** (or your chosen name) for Speech-to-text.
+
 ### Schema-first YAML mode
 
 **Schema-first JSON for YAML requests** controls how the agent handles YAML-style requests (automations, dashboards, or “show me YAML”).
