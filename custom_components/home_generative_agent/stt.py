@@ -76,6 +76,7 @@ async def _stream_to_bytes(stream: Any) -> bytes:
         )
     return b""
 
+
 def _all_enum_values(enum_cls: Any) -> list[Any]:
     """Return all enum values for an STT capability list."""
     try:
