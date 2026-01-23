@@ -30,6 +30,7 @@ from custom_components.home_generative_agent.const import (
     DOMAIN,
     SUBENTRY_TYPE_FEATURE,
     SUBENTRY_TYPE_MODEL_PROVIDER,
+    SUBENTRY_TYPE_STT_PROVIDER,
 )
 from custom_components.home_generative_agent.core.subentry_resolver import (
     legacy_model_provider_configs,
@@ -40,6 +41,9 @@ from custom_components.home_generative_agent.flows.feature_subentry_flow import 
 )
 from custom_components.home_generative_agent.flows.model_provider_subentry_flow import (
     ModelProviderSubentryFlow,
+)
+from custom_components.home_generative_agent.flows.stt_provider_subentry_flow import (
+    SttProviderSubentryFlow,
 )
 
 if TYPE_CHECKING:
@@ -99,7 +103,126 @@ def test_supported_subentry_types() -> None:
     """Ensure all subentry flow types are registered."""
     entry = MockConfigEntry(domain=DOMAIN, title="Home Generative Agent")
     supported = HomeGenerativeAgentConfigFlow.async_get_supported_subentry_types(entry)
-    assert set(supported) == {SUBENTRY_TYPE_MODEL_PROVIDER, SUBENTRY_TYPE_FEATURE}
+    assert set(supported) == {
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        SUBENTRY_TYPE_FEATURE,
+        SUBENTRY_TYPE_STT_PROVIDER,
+    }
+
+
+@pytest.mark.asyncio
+async def test_stt_provider_flow_reuses_openai_provider(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """STT flow can reuse an existing OpenAI model provider."""
+    entry = DummyEntry()
+    openai_provider = DummySubentry(
+        "openai1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Cloud-LLM OpenAI",
+        {"provider_type": "openai", "settings": {"api_key": "sk-reused"}},
+    )
+    entry.subentries[openai_provider.subentry_id] = openai_provider
+
+    flow = SttProviderSubentryFlow()
+    flow.hass = hass
+    flow.async_show_form = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "form",
+        "data_schema": kwargs["data_schema"],
+        "errors": kwargs.get("errors"),
+    }
+    flow.async_create_entry = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "create_entry",
+        "title": kwargs.get("title"),
+        "data": kwargs.get("data"),
+    }
+    flow.async_abort = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "abort",
+        "reason": kwargs.get("reason"),
+    }
+    flow._schedule_reload = lambda: None  # type: ignore[assignment]  # noqa: SLF001
+    _patch_entry(flow, entry)
+
+    async def _noop_validate(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.flows.stt_provider_subentry_flow.validate_openai_key",
+        _noop_validate,
+    )
+
+    first = await flow.async_step_user()
+    assert first.get("type") == "form"
+
+    second = await flow.async_step_provider(
+        {"provider_type": "openai", "name": "STT - OpenAI"}
+    )
+    assert second.get("type") == "form"
+
+    third = await flow.async_step_credentials(
+        {"openai_provider_subentry_id": "openai1"}
+    )
+    assert third.get("type") == "form"
+
+    result = await flow.async_step_model({"model_name": "whisper-1"})
+    assert result.get("type") == "create_entry"
+    result_data = result.get("data")
+    assert result_data is not None
+    assert result_data["provider_type"] == "openai"
+    assert result_data["settings"]["openai_provider_subentry_id"] == "openai1"
+    assert result_data["settings"]["api_key"] is None
+
+
+@pytest.mark.asyncio
+async def test_stt_provider_flow_uses_separate_key(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """STT flow stores a separate API key when no providers exist."""
+    entry = DummyEntry()
+    flow = SttProviderSubentryFlow()
+    flow.hass = hass
+    flow.async_show_form = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "form",
+        "data_schema": kwargs["data_schema"],
+        "errors": kwargs.get("errors"),
+    }
+    flow.async_create_entry = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "create_entry",
+        "title": kwargs.get("title"),
+        "data": kwargs.get("data"),
+    }
+    flow.async_abort = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "abort",
+        "reason": kwargs.get("reason"),
+    }
+    flow._schedule_reload = lambda: None  # type: ignore[assignment]  # noqa: SLF001
+    _patch_entry(flow, entry)
+
+    async def _noop_validate(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.flows.stt_provider_subentry_flow.validate_openai_key",
+        _noop_validate,
+    )
+
+    first = await flow.async_step_user()
+    assert first.get("type") == "form"
+
+    second = await flow.async_step_provider(
+        {"provider_type": "openai", "name": "STT - OpenAI"}
+    )
+    assert second.get("type") == "form"
+
+    third = await flow.async_step_credentials({"api_key": "sk-separate"})
+    assert third.get("type") == "form"
+
+    result = await flow.async_step_model({"model_name": "gpt-4o-mini-transcribe"})
+    assert result.get("type") == "create_entry"
+    result_data = result.get("data")
+    assert result_data is not None
+    assert result_data["settings"]["api_key"] == "sk-separate"
+    assert result_data["settings"]["openai_provider_subentry_id"] is None
 
 
 @pytest.mark.asyncio

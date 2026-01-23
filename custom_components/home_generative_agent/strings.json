@@ -85,6 +85,53 @@
         "unknown": "Unexpected error."
       }
     },
+    "stt_provider": {
+      "entry_type": "service",
+      "abort": {
+        "reconfigure_successful": "STT provider updated."
+      },
+      "initiate_flow": {
+        "reconfigure": "Reconfigure STT Provider",
+        "user": "Add STT Provider"
+      },
+      "step": {
+        "provider": {
+          "title": "Speech-to-Text Provider",
+          "description": "Select a provider type and name.",
+          "data": {
+            "provider_type": "Provider",
+            "name": "Provider name"
+          }
+        },
+        "credentials": {
+          "title": "Credentials",
+          "description": "Choose how to authenticate the STT provider.",
+          "data": {
+            "openai_provider_subentry_id": "Reuse OpenAI model provider",
+            "api_key": "OpenAI API key"
+          }
+        },
+        "model": {
+          "title": "Model & advanced options",
+          "description": "Select a model and optional advanced settings.",
+          "data": {
+            "model_name": "Model",
+            "language": "Language (optional)",
+            "prompt": "Prompt (optional)",
+            "temperature": "Temperature (optional)",
+            "translate": "Translate to English",
+            "response_format": "Response format"
+          }
+        }
+      },
+      "error": {
+        "cannot_connect": "Can't reach the provider.",
+        "invalid_auth": "Invalid credentials.",
+        "invalid_model": "Select a valid model.",
+        "not_supported": "Provider not supported yet.",
+        "unknown": "Unexpected error."
+      }
+    },
     "feature": {
       "entry_type": "service",
       "abort": {

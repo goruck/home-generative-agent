@@ -11,6 +11,7 @@ CONFIG_ENTRY_VERSION = 4
 SUBENTRY_TYPE_DATABASE = "database"
 SUBENTRY_TYPE_MODEL_PROVIDER = "model_provider"
 SUBENTRY_TYPE_FEATURE = "feature"
+SUBENTRY_TYPE_STT_PROVIDER = "stt_provider"
 
 HTTP_STATUS_UNAUTHORIZED = 401
 HTTP_STATUS_BAD_REQUEST = 400
@@ -143,6 +144,23 @@ CONF_FEATURE_MODEL_CONTEXT_SIZE = "context_size"
 
 # --- Gemini API key (used in config_flow/__init__.py) ---
 CONF_GEMINI_API_KEY = "gemini_api_key"
+
+# ---- Speech-to-Text (STT) ----
+CONF_STT_OPENAI_PROVIDER_ID = "openai_provider_subentry_id"
+CONF_STT_MODEL_NAME = "model_name"
+CONF_STT_LANGUAGE = "language"
+CONF_STT_PROMPT = "prompt"
+CONF_STT_TEMPERATURE = "temperature"
+CONF_STT_TRANSLATE = "translate"
+CONF_STT_RESPONSE_FORMAT = "response_format"
+
+STT_MODEL_OPENAI_SUPPORTED = Literal[
+    "whisper-1",
+    "gpt-4o-transcribe",
+    "gpt-4o-mini-transcribe",
+]
+RECOMMENDED_OPENAI_STT_MODEL: STT_MODEL_OPENAI_SUPPORTED = "gpt-4o-mini-transcribe"
+STT_RESPONSE_FORMATS = ("text", "json", "verbose_json", "srt", "vtt")
 
 # ---------------- Chat model ----------------
 CHAT_MODEL_TOP_P = 1.0

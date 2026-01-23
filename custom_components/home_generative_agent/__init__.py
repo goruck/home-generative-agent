@@ -190,7 +190,7 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = (Platform.CONVERSATION, "image", "sensor")
+PLATFORMS = (Platform.CONVERSATION, Platform.STT, "image", "sensor")
 
 SERVICE_ENROLL_PERSON = "enroll_person"
 
