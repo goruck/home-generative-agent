@@ -53,3 +53,18 @@ save_and_analyze_snapshot:
           step: 1
           unit_of_measurement: min
           mode: box
+
+get_audit_records:
+  name: Get audit records
+  description: Return the latest sentinel audit records (read-only).
+  fields:
+    limit:
+      name: Limit
+      description: Maximum number of records to return.
+      default: 20
+      selector:
+        number:
+          min: 1
+          max: 200
+          step: 1
+          mode: box

@@ -26,7 +26,7 @@ from homeassistant.const import (
     CONF_USERNAME,
     Platform,
 )
-from homeassistant.core import HomeAssistant
+from homeassistant.core import EVENT_HOMEASSISTANT_STARTED, HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.httpx_client import get_async_client
@@ -91,8 +91,10 @@ from .const import (
     CONF_OPENAI_EMBEDDING_MODEL,
     CONF_OPENAI_SUMMARIZATION_MODEL,
     CONF_OPENAI_VLM,
+    CONF_EXPLAIN_ENABLED,
     CONF_SUMMARIZATION_MODEL_PROVIDER,
     CONF_SUMMARIZATION_MODEL_TEMPERATURE,
+    CONF_SENTINEL_ENABLED,
     CONF_VECTORS_BOOTSTRAPPED,
     CONF_VIDEO_ANALYZER_MODE,
     CONF_VLM_PROVIDER,
@@ -134,8 +136,10 @@ from .const import (
     RECOMMENDED_OPENAI_EMBEDDING_MODEL,
     RECOMMENDED_OPENAI_SUMMARIZATION_MODEL,
     RECOMMENDED_OPENAI_VLM,
+    RECOMMENDED_EXPLAIN_ENABLED,
     RECOMMENDED_SUMMARIZATION_MODEL_PROVIDER,
     RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
+    RECOMMENDED_SENTINEL_ENABLED,
     RECOMMENDED_VLM_PROVIDER,
     RECOMMENDED_VLM_TEMPERATURE,
     SIGNAL_HGA_NEW_LATEST,
@@ -177,6 +181,12 @@ from .core.utils import (
 from .core.video_analyzer import VideoAnalyzer
 from .core.video_helpers import latest_target, publish_latest_atomic
 from .http import EnrollPersonView
+from .audit.store import AuditStore
+from .explain.llm_explain import LLMExplainer
+from .notify.actions import ActionHandler
+from .notify.dispatcher import NotificationDispatcher
+from .sentinel.engine import SentinelEngine
+from .sentinel.suppression import SuppressionManager
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -190,14 +200,28 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
+try:
+    from homeassistant.core import ServiceResponseType
+
+    _SERVICE_RESPONSE_ONLY = ServiceResponseType.ONLY
+except ImportError:
+    _SERVICE_RESPONSE_ONLY = True
+
 PLATFORMS = (Platform.CONVERSATION, Platform.STT, "image", "sensor")
 
 SERVICE_ENROLL_PERSON = "enroll_person"
+SERVICE_GET_AUDIT_RECORDS = "get_audit_records"
 
 ENROLL_SCHEMA = vol.Schema(
     {
         vol.Required("name"): cv.string,
         vol.Required("file_path"): cv.string,
+    }
+)
+
+GET_AUDIT_SCHEMA = vol.Schema(
+    {
+        vol.Optional("limit", default=20): vol.Coerce(int),
     }
 )
 
@@ -940,6 +964,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         )
 
     video_analyzer = VideoAnalyzer(hass, entry)
+    suppression = SuppressionManager(hass)
+    await suppression.async_load()
+    audit_store = AuditStore(hass)
+    await audit_store.async_load()
+    action_handler = ActionHandler(hass, suppression, audit_store)
+    notifier = NotificationDispatcher(hass, options, action_handler)
+    notifier.start()
+    explainer = None
+    if options.get(CONF_EXPLAIN_ENABLED, RECOMMENDED_EXPLAIN_ENABLED):
+        explainer = LLMExplainer(chat_model)
+    sentinel = SentinelEngine(hass, options, suppression, notifier, audit_store, explainer)
 
     face_recognition = options.get(CONF_FACE_RECOGNITION, RECOMMENDED_FACE_RECOGNITION)
 
@@ -958,6 +993,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         face_api_url=face_api_url,
         person_gallery=person_gallery,
         pending_actions={},
+        suppression=suppression,
+        sentinel=sentinel,
+        notifier=notifier,
+        action_handler=action_handler,
+        audit_store=audit_store,
+        explainer=explainer,
     )
 
     if not hass.data[DOMAIN].get("http_registered"):
@@ -973,6 +1014,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
     if options.get(CONF_VIDEO_ANALYZER_MODE) != "disable":
         video_analyzer.start()
+    if options.get(CONF_SENTINEL_ENABLED, RECOMMENDED_SENTINEL_ENABLED):
+        if hass.is_running:
+            sentinel.start()
+        else:
+            def _start_sentinel(_event: object) -> None:
+                hass.loop.call_soon_threadsafe(sentinel.start)
+
+            hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _start_sentinel)
 
     msg = (
         "Home Generative Agent initialized with the following models: "
@@ -1020,6 +1069,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         schema=ENROLL_SCHEMA,
     )
 
+    async def _handle_get_audit(call: ServiceCall) -> dict[str, Any]:
+        limit = int(call.data.get("limit", 20))
+        limit = max(1, min(limit, 200))
+        audit_store = entry.runtime_data.audit_store
+        if audit_store is None:
+            return {"records": []}
+        records = await audit_store.async_get_latest(limit)
+        return {"records": records}
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_GET_AUDIT_RECORDS,
+        _handle_get_audit,
+        schema=GET_AUDIT_SCHEMA,
+        supports_response=_SERVICE_RESPONSE_ONLY,
+    )
+
     return True
 
 
@@ -1028,6 +1094,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool
     if entry.runtime_data.pool is not None:
         await entry.runtime_data.pool.close()
     await entry.runtime_data.video_analyzer.stop()
+    if entry.runtime_data.sentinel is not None:
+        await entry.runtime_data.sentinel.stop()
+    if entry.runtime_data.notifier is not None:
+        entry.runtime_data.notifier.stop()
     await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     return True
 

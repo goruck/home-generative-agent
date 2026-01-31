@@ -1,0 +1,121 @@
+name: "Rule Request"
+description: "Request a new deterministic sentinel rule"
+labels:
+  - "enhancement"
+  - "sentinel"
+title: "[Rule] <short description>"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template to propose a new deterministic sentinel rule.
+        LLMs must not decide or detect; rules must be snapshot-driven and testable.
+  - type: input
+    id: rule_name
+    attributes:
+      label: Rule name
+      description: Short, unique identifier (snake_case).
+      placeholder: "unlocked_lock_at_night"
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What anomaly should be detected?
+      placeholder: "Detect unlocked exterior locks after sunset."
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation and safety impact
+      description: Why is this important? Any safety implications?
+      placeholder: "Unsecured entry points at night increase risk."
+    validations:
+      required: true
+  - type: textarea
+    id: snapshot_inputs
+    attributes:
+      label: Required snapshot evidence
+      description: List the snapshot fields needed (entities, attributes, derived context).
+      placeholder: |
+        - entities[*].domain == "lock"
+        - entities[*].state == "unlocked"
+        - derived.is_night == true
+    validations:
+      required: true
+  - type: textarea
+    id: detection_logic
+    attributes:
+      label: Deterministic detection logic
+      description: Clear, step-by-step rule logic with thresholds.
+      placeholder: |
+        1) If derived.is_night is false, return no findings.
+        2) For each lock in exterior areas with state "unlocked", emit finding.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence_mapping
+    attributes:
+      label: Evidence mapping
+      description: Map evidence fields to snapshot fields (no inferred facts).
+      placeholder: |
+        - evidence.entity_id <- entities[*].entity_id
+        - evidence.area <- entities[*].area
+        - evidence.last_changed <- entities[*].last_changed
+    validations:
+      required: true
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - low
+        - medium
+        - high
+    validations:
+      required: true
+  - type: input
+    id: confidence
+    attributes:
+      label: Confidence (0.0-1.0)
+      placeholder: "0.7"
+    validations:
+      required: true
+  - type: checkboxes
+    id: sensitivity
+    attributes:
+      label: Sensitive action?
+      description: Does this involve locks/alarms/doors/covers or exterior access?
+      options:
+        - label: This rule is sensitive and must require confirmation for any action.
+          required: false
+  - type: textarea
+    id: suggested_actions
+    attributes:
+      label: Suggested actions (semantic only)
+      description: List user-facing suggestions, not direct execution.
+      placeholder: |
+        - lock_entity
+        - check_entry
+    validations:
+      required: true
+  - type: textarea
+    id: suppression
+    attributes:
+      label: Suppression/cooldown expectations
+      description: Any special cooldown or suppression behavior beyond defaults?
+      placeholder: "Use default per-type cooldown (30 min)."
+    validations:
+      required: true
+  - type: textarea
+    id: tests
+    attributes:
+      label: Test cases
+      description: Provide minimal snapshot-driven tests (trigger + non-trigger).
+      placeholder: |
+        - Trigger: unlocked exterior lock at night.
+        - Non-trigger: unlocked interior lock at night.
+    validations:
+      required: true

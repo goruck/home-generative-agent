@@ -111,6 +111,18 @@ CONF_PROMPT = "prompt"
 CONF_SCHEMA_FIRST_YAML = "schema_first_yaml"
 CONF_DISABLED_FEATURES = "disabled_features"
 
+# ---- Proactive sentinel ----
+CONF_SENTINEL_ENABLED = "sentinel_enabled"
+CONF_SENTINEL_INTERVAL_SECONDS = "sentinel_interval_seconds"
+CONF_SENTINEL_COOLDOWN_MINUTES = "sentinel_cooldown_minutes"
+CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES = "sentinel_entity_cooldown_minutes"
+CONF_EXPLAIN_ENABLED = "explain_enabled"
+RECOMMENDED_SENTINEL_ENABLED = True
+RECOMMENDED_SENTINEL_INTERVAL_SECONDS = 300
+RECOMMENDED_SENTINEL_COOLDOWN_MINUTES = 30
+RECOMMENDED_SENTINEL_ENTITY_COOLDOWN_MINUTES = 15
+RECOMMENDED_EXPLAIN_ENABLED = False
+
 # ---- Feature definitions ----
 DEFAULT_FEATURE_TYPES: tuple[str, ...] = (
     "conversation",

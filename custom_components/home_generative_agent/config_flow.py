@@ -40,12 +40,17 @@ from .const import (
     CONF_CRITICAL_ACTION_PIN_SALT,
     CONF_FACE_API_URL,
     CONF_FACE_RECOGNITION,
+    CONF_EXPLAIN_ENABLED,
     CONF_MANAGE_CONTEXT_WITH_TOKENS,
     CONF_MAX_MESSAGES_IN_CONTEXT,
     CONF_MAX_TOKENS_IN_CONTEXT,
     CONF_NOTIFY_SERVICE,
     CONF_PROMPT,
     CONF_SCHEMA_FIRST_YAML,
+    CONF_SENTINEL_COOLDOWN_MINUTES,
+    CONF_SENTINEL_ENABLED,
+    CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES,
+    CONF_SENTINEL_INTERVAL_SECONDS,
     CONF_VIDEO_ANALYZER_MODE,
     CONFIG_ENTRY_VERSION,
     CRITICAL_PIN_MAX_LEN,
@@ -53,9 +58,14 @@ from .const import (
     DOMAIN,
     LLM_HASS_API_NONE,
     RECOMMENDED_FACE_RECOGNITION,
+    RECOMMENDED_EXPLAIN_ENABLED,
     RECOMMENDED_MANAGE_CONTEXT_WITH_TOKENS,
     RECOMMENDED_MAX_MESSAGES_IN_CONTEXT,
     RECOMMENDED_MAX_TOKENS_IN_CONTEXT,
+    RECOMMENDED_SENTINEL_COOLDOWN_MINUTES,
+    RECOMMENDED_SENTINEL_ENABLED,
+    RECOMMENDED_SENTINEL_ENTITY_COOLDOWN_MINUTES,
+    RECOMMENDED_SENTINEL_INTERVAL_SECONDS,
     RECOMMENDED_VIDEO_ANALYZER_MODE,
     SUBENTRY_TYPE_FEATURE,
     SUBENTRY_TYPE_MODEL_PROVIDER,
@@ -93,6 +103,11 @@ DEFAULT_OPTIONS = {
     CONF_MANAGE_CONTEXT_WITH_TOKENS: RECOMMENDED_MANAGE_CONTEXT_WITH_TOKENS,
     CONF_MAX_TOKENS_IN_CONTEXT: RECOMMENDED_MAX_TOKENS_IN_CONTEXT,
     CONF_MAX_MESSAGES_IN_CONTEXT: RECOMMENDED_MAX_MESSAGES_IN_CONTEXT,
+    CONF_EXPLAIN_ENABLED: RECOMMENDED_EXPLAIN_ENABLED,
+    CONF_SENTINEL_ENABLED: RECOMMENDED_SENTINEL_ENABLED,
+    CONF_SENTINEL_INTERVAL_SECONDS: RECOMMENDED_SENTINEL_INTERVAL_SECONDS,
+    CONF_SENTINEL_COOLDOWN_MINUTES: RECOMMENDED_SENTINEL_COOLDOWN_MINUTES,
+    CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES: RECOMMENDED_SENTINEL_ENTITY_COOLDOWN_MINUTES,
 }
 
 # ---------------------------
@@ -174,6 +189,33 @@ async def _schema_for_options(
             default=RECOMMENDED_MAX_MESSAGES_IN_CONTEXT,
         ): NumberSelector(NumberSelectorConfig(min=15, max=240, step=1)),
         vol.Optional(
+            CONF_SENTINEL_ENABLED,
+            description={"suggested_value": opts.get(CONF_SENTINEL_ENABLED)},
+            default=RECOMMENDED_SENTINEL_ENABLED,
+        ): BooleanSelector(),
+        vol.Optional(
+            CONF_SENTINEL_INTERVAL_SECONDS,
+            description={"suggested_value": opts.get(CONF_SENTINEL_INTERVAL_SECONDS)},
+            default=RECOMMENDED_SENTINEL_INTERVAL_SECONDS,
+        ): NumberSelector(NumberSelectorConfig(min=60, max=3600, step=30)),
+        vol.Optional(
+            CONF_SENTINEL_COOLDOWN_MINUTES,
+            description={"suggested_value": opts.get(CONF_SENTINEL_COOLDOWN_MINUTES)},
+            default=RECOMMENDED_SENTINEL_COOLDOWN_MINUTES,
+        ): NumberSelector(NumberSelectorConfig(min=5, max=240, step=5)),
+        vol.Optional(
+            CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES,
+            description={
+                "suggested_value": opts.get(CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES)
+            },
+            default=RECOMMENDED_SENTINEL_ENTITY_COOLDOWN_MINUTES,
+        ): NumberSelector(NumberSelectorConfig(min=5, max=240, step=5)),
+        vol.Optional(
+            CONF_EXPLAIN_ENABLED,
+            description={"suggested_value": opts.get(CONF_EXPLAIN_ENABLED)},
+            default=RECOMMENDED_EXPLAIN_ENABLED,
+        ): BooleanSelector(),
+        vol.Optional(
             CONF_CRITICAL_ACTION_PIN_ENABLED,
             description={
                 "suggested_value": opts.get(CONF_CRITICAL_ACTION_PIN_ENABLED, True)
@@ -201,6 +243,8 @@ async def _schema_for_options(
     video_analyzer_mode = opts.get(
         CONF_VIDEO_ANALYZER_MODE, RECOMMENDED_VIDEO_ANALYZER_MODE
     )
+    sentinel_enabled = opts.get(CONF_SENTINEL_ENABLED, RECOMMENDED_SENTINEL_ENABLED)
+
     if video_analyzer_mode != VIDEO_ANALYZER_MODE_DISABLE:
         schema[
             vol.Optional(
@@ -210,6 +254,7 @@ async def _schema_for_options(
             )
         ] = BooleanSelector()
 
+    if video_analyzer_mode != VIDEO_ANALYZER_MODE_DISABLE or sentinel_enabled:
         mobile_opts = list_mobile_notify_services(hass)
         if mobile_opts:
             schema[
