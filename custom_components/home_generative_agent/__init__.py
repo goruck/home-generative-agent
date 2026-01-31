@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from functools import partial
 from pathlib import Path
 from types import MappingProxyType
@@ -46,6 +46,7 @@ from langgraph.store.postgres import AsyncPostgresStore
 from langgraph.store.postgres.base import PostgresIndexConfig
 from psycopg.rows import DictRow, dict_row
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
+from pydantic import SecretStr
 
 from .agent.tools import analyze_image
 from .const import (
@@ -165,6 +166,7 @@ from .core.subentry_resolver import (
     build_database_uri_from_entry,
     legacy_feature_configs,
     legacy_model_provider_configs,
+    resolve_model_provider_configs,
     resolve_runtime_options,
 )
 from .core.utils import (
@@ -197,6 +199,8 @@ if TYPE_CHECKING:
     from langchain_core.language_models import BaseMessage, LanguageModelInput
     from langchain_core.runnables.base import RunnableSerializable
     from psycopg import AsyncConnection
+
+    from .core.subentry_types import ModelProviderConfig
 
 LOGGER = logging.getLogger(__name__)
 
@@ -236,6 +240,19 @@ def _default_feature_payload(feature_type: str) -> dict[str, Any]:
         CONF_FEATURE_MODEL: {},
         "config": {},
     }
+
+
+def _provider_api_key(
+    providers: Mapping[str, ModelProviderConfig], provider_type: str
+) -> str | None:
+    for provider in providers.values():
+        if provider.provider_type != provider_type:
+            continue
+        settings = provider.data.get("settings", {})
+        api_key = settings.get("api_key")
+        if api_key:
+            return str(api_key)
+    return None
 
 
 async def _read_enroll_image_bytes(hass: HomeAssistant, file_ref: str) -> bytes:
@@ -522,8 +539,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     # Resolve effective options (data + options + subentries).
     options = resolve_runtime_options(entry)
     conf = dict(options)
-    api_key = conf.get(CONF_API_KEY)
-    gemini_key = conf.get(CONF_GEMINI_API_KEY)
+    providers = resolve_model_provider_configs(entry, options)
+    api_key = conf.get(CONF_API_KEY) or _provider_api_key(providers, "openai")
+    openai_secret = SecretStr(api_key) if api_key else None
+    gemini_key = conf.get(CONF_GEMINI_API_KEY) or _provider_api_key(providers, "gemini")
+    gemini_secret = SecretStr(gemini_key) if gemini_key else None
     base_ollama_url = ensure_http_url(conf.get(CONF_OLLAMA_URL, RECOMMENDED_OLLAMA_URL))
     ollama_chat_url = (
         ollama_url_for_category(conf, "chat", fallback=base_ollama_url)
@@ -566,7 +586,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     if openai_ok:
         try:
             openai_provider = ChatOpenAI(
-                api_key=api_key,
+                api_key=openai_secret,
                 timeout=120,
                 http_async_client=http_client,
             ).configurable_fields(
@@ -614,7 +634,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     if gemini_ok:
         try:
             gemini_provider = ChatGoogleGenerativeAI(
-                api_key=gemini_key,
+                api_key=gemini_secret,
                 model=RECOMMENDED_GEMINI_CHAT_MODEL,
             ).configurable_fields(
                 model=ConfigurableField(id="model"),
@@ -630,7 +650,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     if openai_ok:
         try:
             openai_embeddings = OpenAIEmbeddings(
-                api_key=api_key,
+                api_key=openai_secret,
                 model=options.get(
                     CONF_OPENAI_EMBEDDING_MODEL, RECOMMENDED_OPENAI_EMBEDDING_MODEL
                 ),
@@ -656,7 +676,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     if gemini_ok:
         try:
             gemini_embeddings = GoogleGenerativeAIEmbeddings(
-                google_api_key=gemini_key,
+                google_api_key=gemini_secret,
                 model=options.get(
                     CONF_GEMINI_EMBEDDING_MODEL, RECOMMENDED_GEMINI_EMBEDDING_MODEL
                 ),
