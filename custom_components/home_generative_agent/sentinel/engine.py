@@ -17,6 +17,7 @@ from ..const import (
     CONF_SENTINEL_INTERVAL_SECONDS,
 )
 from ..snapshot.builder import async_build_full_state_snapshot
+from .dynamic_rules import evaluate_dynamic_rules
 from .models import AnomalyFinding
 from .suppression import (
     SuppressionManager,
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
     from ..explain.llm_explain import LLMExplainer
     from ..notify.dispatcher import NotificationDispatcher
     from ..audit.store import AuditStore
+    from .rule_registry import RuleRegistry
 
 LOGGER = logging.getLogger(__name__)
 
@@ -48,6 +50,8 @@ class SentinelEngine:
         notifier: "NotificationDispatcher",
         audit_store: "AuditStore",
         explainer: "LLMExplainer | None" = None,
+        *,
+        rule_registry: "RuleRegistry | None" = None,
     ) -> None:
         self._hass = hass
         self._options = options
@@ -55,6 +59,7 @@ class SentinelEngine:
         self._notifier = notifier
         self._audit_store = audit_store
         self._explainer = explainer
+        self._rule_registry = rule_registry
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
         self._rules = [
@@ -123,6 +128,26 @@ class SentinelEngine:
                     len(findings),
                 )
             all_findings.extend(findings)
+
+        if self._rule_registry is not None:
+            dynamic_rules = self._rule_registry.list_rules()
+            LOGGER.debug(
+                "Sentinel dynamic registry has %s rule(s).",
+                len(dynamic_rules),
+            )
+            if dynamic_rules:
+                dynamic_findings = evaluate_dynamic_rules(snapshot, dynamic_rules)
+                LOGGER.debug(
+                    "Sentinel evaluated %s dynamic rule(s), produced %s finding(s).",
+                    len(dynamic_rules),
+                    len(dynamic_findings),
+                )
+                if dynamic_findings:
+                    LOGGER.info(
+                        "Sentinel dynamic rules produced %s finding(s).",
+                        len(dynamic_findings),
+                    )
+                all_findings.extend(dynamic_findings)
 
         if not all_findings:
             LOGGER.debug("Sentinel cycle completed with no findings.")

@@ -160,6 +160,120 @@ If you have an alarm control panel, the agent will ask for that alarm's code whe
 
 When you ask the agent to perform a protected action, it queues the request and asks for the PIN. Reply with the digits to complete the action; after five bad attempts or 10 minutes, the queued action expires and you must ask again. If the guard is enabled but no PIN is configured, the agent will reject the request until you set one in options.
 
+## Sentinel (Proactive Anomaly Detection)
+
+Sentinel adds proactive, deterministic anomaly detection and a review pipeline for generated rule proposals.
+
+### Architecture
+
+1. `snapshot`: Builds an authoritative JSON snapshot (entities, camera activity, derived context).
+2. `sentinel`: Runs deterministic rules on that snapshot.
+3. `discovery` (optional): Uses an LLM to suggest rule candidates (advisory only).
+4. `proposal` review: User promotes/approves/rejects candidates.
+5. `rule_registry`: Stores approved generated rules for deterministic runtime evaluation.
+6. `audit`: Persists findings and user action outcomes.
+
+Important: The LLM never executes actions or directly decides runtime safety behavior. Detection and actuation remain deterministic.
+
+### Supported Generated Rule Templates
+
+- `unlocked_lock_when_home`
+- `alarm_disarmed_open_entry`
+- `open_entry_when_home`
+- `open_entry_while_away`
+- `open_entry_at_night_when_home`
+- `open_entry_at_night_while_away`
+- `open_any_window_at_night_while_away`
+- `motion_without_camera_activity`
+
+### Discovery Novelty and Dedupe
+
+Discovery suggestions are deduped in the backend using deterministic semantic keys.
+
+Novelty checks compare candidates against:
+- Active rules in `rule_registry`
+- Existing proposal drafts
+- Recent discovery records
+
+Discovery records may include:
+- `semantic_key`: canonical normalized key for candidate meaning
+- `dedupe_reason`: candidate disposition (`novel`, `existing_semantic_key`, `batch_duplicate`)
+- `filtered_candidates`: candidates removed by dedupe with their reason
+
+### Configuring Discovery
+
+Discovery is configured in the integration Options flow:
+
+1. Home Assistant -> `Settings` -> `Devices & Services`
+2. Open `Home Generative Agent`
+3. Select `Configure`
+4. Set Sentinel discovery options:
+   - `sentinel_discovery_enabled`
+   - `sentinel_discovery_interval_seconds`
+   - `sentinel_discovery_max_records`
+
+Discovery requires a configured chat model. If no model is available, the discovery loop is skipped.
+
+### Proposal Lifecycle
+
+Proposal draft statuses:
+- `draft`
+- `approved`
+- `rejected`
+- `unsupported`
+- `covered_by_existing_rule`
+
+`covered_by_existing_rule` means the candidate is semantically covered by an active rule and should not be approved as a separate rule. `covered_rule_id` is attached when available.
+
+### Sentinel Services
+
+- `home_generative_agent.get_discovery_records`
+- `home_generative_agent.promote_discovery_candidate`
+- `home_generative_agent.get_proposal_drafts`
+- `home_generative_agent.approve_rule_proposal`
+- `home_generative_agent.reject_rule_proposal`
+- `home_generative_agent.get_audit_records`
+
+Typical response fields:
+- `status`
+- `candidate_id`
+- `rule_id`
+- `covered_rule_id`
+
+### Proposals Card (Optional)
+
+If you install `hga-proposals-card.js`, the card can drive the full review flow:
+- Discovery candidates
+- Filtered discovery candidates (with dedupe reasons)
+- Proposal drafts (pending)
+- Proposal history
+
+It also supports:
+- Promote to draft
+- Reject candidate (local dismiss in browser storage)
+- Approve/reject proposal
+- "Request New Template" shortcut to the rule request issue template
+
+When updating card JS, bump the Lovelace resource query string (for example `?v=12`) to avoid stale browser cache.
+
+### Unsupported Proposals
+
+`unsupported` means the candidate could not be mapped to a supported deterministic template.
+
+Preferred handling:
+1. Reject if not useful.
+2. If useful, request a new template via `.github/ISSUE_TEMPLATE/feature_rule_request.yml`.
+3. After template support is added, re-approve the proposal to re-evaluate with current mapping logic.
+
+### Troubleshooting
+
+- If card UI looks unchanged after an update, you are likely serving cached JS.
+- If similar candidates keep appearing, inspect `dedupe_reason` and `filtered_candidates` in discovery records.
+- If a proposal appears duplicate, check logs for:
+  - `Rule registry ignored duplicate rule ...`
+  - `... covered_by_existing_rule ...`
+- Existing stored proposal drafts are not auto-migrated; statuses update when proposals are re-processed.
+
 ## Image and Sensor Entities
 
 This section shows how to display the latest camera image, the AI-generated summary, and recognized people in Home Assistant or use in automations via the image and sensor platforms.

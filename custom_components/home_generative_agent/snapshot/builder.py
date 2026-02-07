@@ -11,8 +11,6 @@ from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 
-import logging
-
 from .camera_activity import extract_camera_activity
 from .derived import derive_context
 from .schema import (
@@ -21,8 +19,6 @@ from .schema import (
     SnapshotEntity,
     validate_snapshot,
 )
-
-LOGGER = logging.getLogger(__name__)
 
 
 def _as_iso(value: datetime) -> str:
@@ -117,5 +113,4 @@ async def async_build_full_state_snapshot(hass: HomeAssistant) -> FullStateSnaps
     }
 
     validated = validate_snapshot(snapshot)
-    LOGGER.debug("Snapshot payload: %s", validated)
     return validated

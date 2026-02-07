@@ -15,6 +15,10 @@ if TYPE_CHECKING:
     from ..explain.llm_explain import LLMExplainer
     from ..notify.actions import ActionHandler
     from ..notify.dispatcher import NotificationDispatcher
+    from ..sentinel.discovery_engine import SentinelDiscoveryEngine
+    from ..sentinel.discovery_store import DiscoveryStore
+    from ..sentinel.proposal_store import ProposalStore
+    from ..sentinel.rule_registry import RuleRegistry
     from ..sentinel.engine import SentinelEngine
     from ..sentinel.suppression import SuppressionManager
     from .video_analyzer import VideoAnalyzer
@@ -43,6 +47,10 @@ class HGAData:
     action_handler: ActionHandler | None
     audit_store: AuditStore | None
     explainer: LLMExplainer | None
+    discovery_store: DiscoveryStore | None
+    discovery_engine: SentinelDiscoveryEngine | None
+    proposal_store: ProposalStore | None
+    rule_registry: RuleRegistry | None
 
 
 type HGAConfigEntry = ConfigEntry[HGAData]
