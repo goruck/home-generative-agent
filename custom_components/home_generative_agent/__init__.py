@@ -117,6 +117,8 @@ from .const import (
     EMBEDDING_MODEL_DIMS,
     FEATURE_CATEGORY_MAP,
     FEATURE_NAMES,
+    HGA_CARD_STATIC_PATH,
+    HGA_CARD_STATIC_PATH_LEGACY,
     MODEL_CATEGORY_SPECS,
     RECOMMENDED_CHAT_MODEL_PROVIDER,
     RECOMMENDED_CHAT_MODEL_TEMPERATURE,
@@ -1138,7 +1140,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         www_dir = Path(__file__).resolve().parent / "www"
         if www_dir.is_dir():
             await hass.http.async_register_static_paths(
-                [StaticPathConfig("/hga-enroll-card", str(www_dir), cache_headers=True)]
+                [
+                    # Canonical prefix for all HGA frontend card modules.
+                    StaticPathConfig(
+                        HGA_CARD_STATIC_PATH, str(www_dir), cache_headers=True
+                    ),
+                    # Backward-compatible alias for existing enroll card resources.
+                    StaticPathConfig(
+                        HGA_CARD_STATIC_PATH_LEGACY,
+                        str(www_dir),
+                        cache_headers=True,
+                    ),
+                ]
             )
         hass.data[DOMAIN]["http_registered"] = True
 

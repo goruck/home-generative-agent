@@ -5,6 +5,8 @@ from typing import Annotated, Any, Literal, get_args
 from annotated_types import Ge, Le
 
 DOMAIN = "home_generative_agent"
+HGA_CARD_STATIC_PATH = "/hga-card"
+HGA_CARD_STATIC_PATH_LEGACY = "/hga-enroll-card"
 
 CONFIG_ENTRY_VERSION = 5
 

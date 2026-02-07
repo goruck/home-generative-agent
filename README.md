@@ -47,7 +47,11 @@ This integration will set up the `conversation` platform, allowing users to conv
 - Go to Developers tools -> Actions -> Enroll Person in the HA UI to enroll a new person into the face database from an image file.
 - If you want the dashboard enrollment card, add the Lovelace resource after installing the integration:
   - Settings -> Dashboards -> Resources -> Add
-  - URL: `/hga-enroll-card/hga-enroll-card.js`
+  - URL: `/hga-card/hga-enroll-card.js`
+  - Type: `JavaScript Module`
+- If you want the Sentinel proposals dashboard card, add this resource as well:
+  - Settings -> Dashboards -> Resources -> Add
+  - URL: `/hga-card/hga-proposals-card.js`
   - Type: `JavaScript Module`
 
 ### Manual (non-HACS install)
@@ -257,6 +261,23 @@ It also supports:
 - Reject candidate (local dismiss in browser storage)
 - Approve/reject proposal
 - "Request New Template" shortcut to the rule request issue template
+
+Installation:
+1. Go to `Settings -> Dashboards -> Resources -> Add Resource`.
+2. Add:
+   - URL: `/hga-card/hga-proposals-card.js`
+   - Type: `JavaScript Module`
+3. Add the card to a dashboard using a manual card config:
+
+```yaml
+type: custom:hga-proposals-card
+title: Sentinel Proposals
+```
+
+Notes:
+- The card type must include the `custom:` prefix.
+- If the card shows as unknown after adding the resource, hard refresh the browser and reload frontend resources.
+- Legacy resource URLs under `/hga-enroll-card/...` still work for backward compatibility.
 
 When updating card JS, bump the Lovelace resource query string (for example `?v=12`) to avoid stale browser cache.
 
