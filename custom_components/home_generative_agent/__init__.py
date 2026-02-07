@@ -53,6 +53,7 @@ from psycopg_pool import AsyncConnectionPool, PoolTimeout
 from pydantic import SecretStr
 
 from .agent.tools import analyze_image
+from .audit.store import AuditStore
 from .const import (
     CHAT_MODEL_MAX_TOKENS,
     CHAT_MODEL_REPEAT_PENALTY,
@@ -64,6 +65,7 @@ from .const import (
     CONF_DB_PARAMS,
     CONF_DB_URI,
     CONF_EMBEDDING_MODEL_PROVIDER,
+    CONF_EXPLAIN_ENABLED,
     CONF_FACE_API_URL,
     CONF_FACE_RECOGNITION,
     CONF_FEATURE_MODEL,
@@ -97,13 +99,15 @@ from .const import (
     CONF_OPENAI_EMBEDDING_MODEL,
     CONF_OPENAI_SUMMARIZATION_MODEL,
     CONF_OPENAI_VLM,
-    CONF_EXPLAIN_ENABLED,
-    CONF_SUMMARIZATION_MODEL_PROVIDER,
-    CONF_SUMMARIZATION_MODEL_TEMPERATURE,
+    CONF_SENTINEL_COOLDOWN_MINUTES,
     CONF_SENTINEL_DISCOVERY_ENABLED,
     CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS,
     CONF_SENTINEL_DISCOVERY_MAX_RECORDS,
     CONF_SENTINEL_ENABLED,
+    CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES,
+    CONF_SENTINEL_INTERVAL_SECONDS,
+    CONF_SUMMARIZATION_MODEL_PROVIDER,
+    CONF_SUMMARIZATION_MODEL_TEMPERATURE,
     CONF_VECTORS_BOOTSTRAPPED,
     CONF_VIDEO_ANALYZER_MODE,
     CONF_VLM_PROVIDER,
@@ -125,6 +129,7 @@ from .const import (
     RECOMMENDED_DB_PORT,
     RECOMMENDED_DB_USERNAME,
     RECOMMENDED_EMBEDDING_MODEL_PROVIDER,
+    RECOMMENDED_EXPLAIN_ENABLED,
     RECOMMENDED_FACE_API_URL,
     RECOMMENDED_FACE_RECOGNITION,
     RECOMMENDED_GEMINI_CHAT_MODEL,
@@ -145,13 +150,15 @@ from .const import (
     RECOMMENDED_OPENAI_EMBEDDING_MODEL,
     RECOMMENDED_OPENAI_SUMMARIZATION_MODEL,
     RECOMMENDED_OPENAI_VLM,
-    RECOMMENDED_EXPLAIN_ENABLED,
-    RECOMMENDED_SUMMARIZATION_MODEL_PROVIDER,
-    RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
+    RECOMMENDED_SENTINEL_COOLDOWN_MINUTES,
     RECOMMENDED_SENTINEL_DISCOVERY_ENABLED,
     RECOMMENDED_SENTINEL_DISCOVERY_INTERVAL_SECONDS,
     RECOMMENDED_SENTINEL_DISCOVERY_MAX_RECORDS,
     RECOMMENDED_SENTINEL_ENABLED,
+    RECOMMENDED_SENTINEL_ENTITY_COOLDOWN_MINUTES,
+    RECOMMENDED_SENTINEL_INTERVAL_SECONDS,
+    RECOMMENDED_SUMMARIZATION_MODEL_PROVIDER,
+    RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
     RECOMMENDED_VLM_PROVIDER,
     RECOMMENDED_VLM_TEMPERATURE,
     SIGNAL_HGA_NEW_LATEST,
@@ -159,6 +166,7 @@ from .const import (
     SUBENTRY_TYPE_DATABASE,
     SUBENTRY_TYPE_FEATURE,
     SUBENTRY_TYPE_MODEL_PROVIDER,
+    SUBENTRY_TYPE_SENTINEL,
     SUMMARIZATION_MIRO_STAT,
     SUMMARIZATION_MODEL_PREDICT,
     SUMMARIZATION_MODEL_REPEAT_PENALTY,
@@ -193,9 +201,8 @@ from .core.utils import (
 )
 from .core.video_analyzer import VideoAnalyzer
 from .core.video_helpers import latest_target, publish_latest_atomic
-from .http import EnrollPersonView
-from .audit.store import AuditStore
 from .explain.llm_explain import LLMExplainer
+from .http import EnrollPersonView
 from .notify.actions import ActionHandler
 from .notify.dispatcher import NotificationDispatcher
 from .sentinel.discovery_engine import SentinelDiscoveryEngine
@@ -400,6 +407,37 @@ def _assign_first_provider_if_needed(hass: HomeAssistant, entry: ConfigEntry) ->
         )
 
 
+def _ensure_default_sentinel_subentry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Ensure a singleton sentinel subentry exists for deterministic settings."""
+    exists = any(
+        s.subentry_type == SUBENTRY_TYPE_SENTINEL for s in entry.subentries.values()
+    )
+    if exists:
+        return
+
+    payload = {
+        CONF_SENTINEL_ENABLED: RECOMMENDED_SENTINEL_ENABLED,
+        CONF_SENTINEL_INTERVAL_SECONDS: RECOMMENDED_SENTINEL_INTERVAL_SECONDS,
+        CONF_SENTINEL_COOLDOWN_MINUTES: RECOMMENDED_SENTINEL_COOLDOWN_MINUTES,
+        CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES: (
+            RECOMMENDED_SENTINEL_ENTITY_COOLDOWN_MINUTES
+        ),
+        CONF_SENTINEL_DISCOVERY_ENABLED: RECOMMENDED_SENTINEL_DISCOVERY_ENABLED,
+        CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS: (
+            RECOMMENDED_SENTINEL_DISCOVERY_INTERVAL_SECONDS
+        ),
+        CONF_SENTINEL_DISCOVERY_MAX_RECORDS: RECOMMENDED_SENTINEL_DISCOVERY_MAX_RECORDS,
+        CONF_EXPLAIN_ENABLED: RECOMMENDED_EXPLAIN_ENABLED,
+    }
+    subentry = ConfigSubentry(
+        subentry_type=SUBENTRY_TYPE_SENTINEL,
+        title="Sentinel",
+        unique_id=f"{entry.entry_id}_sentinel",
+        data=MappingProxyType(payload),
+    )
+    hass.config_entries.async_add_subentry(entry, subentry)
+
+
 # Database and vector index bootstrapping.
 # store.setup() only runs the vector migrations when store.index_config is set.
 # If index_config is None (no embeddings configured yet), setup() runs only the
@@ -582,6 +620,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
     _register_services(hass, entry)
     _ensure_default_feature_subentries(hass, entry)
+    _ensure_default_sentinel_subentry(hass, entry)
     _assign_first_provider_if_needed(hass, entry)
 
     # Resolve effective options (data + options + subentries).
@@ -1122,7 +1161,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 hass.loop.call_soon_threadsafe(sentinel.start)
 
             hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _start_sentinel)
-    if options.get(CONF_SENTINEL_DISCOVERY_ENABLED, RECOMMENDED_SENTINEL_DISCOVERY_ENABLED):
+    if options.get(
+        CONF_SENTINEL_DISCOVERY_ENABLED,
+        RECOMMENDED_SENTINEL_DISCOVERY_ENABLED,
+    ):
         if hass.is_running:
             discovery_engine.start()
         else:
@@ -1272,7 +1314,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     "candidate_id": candidate_id,
                     "rule_id": normalized.rule_id,
                 }
-            if rule_registry is not None and rule_registry.find_rule(normalized.rule_id):
+            if (
+                rule_registry is not None
+                and rule_registry.find_rule(normalized.rule_id)
+            ):
                 LOGGER.info(
                     "Skipping promote for %s: rule %s already active.",
                     candidate_id,
@@ -1306,7 +1351,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 service,
                 {
                     "title": "HGA proposal draft",
-                    "message": f"New proposal draft created for candidate {candidate_id}.",
+                    "message": (
+                        f"New proposal draft created for candidate {candidate_id}."
+                    ),
                     "data": {"tag": f"hga_proposal_{candidate_id[:16]}"},
                 },
                 blocking=False,
@@ -1384,7 +1431,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 notes,
             )
             LOGGER.info(
-                "Proposal %s marked unsupported (candidate could not map to a template).",
+                (
+                    "Proposal %s marked unsupported "
+                    "(candidate could not map to a template)."
+                ),
                 candidate_id,
             )
             return {"status": "unsupported", "candidate_id": candidate_id}
@@ -1479,6 +1529,7 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
     - v1 -> v2: move CONF_DB_URI into a database subentry.
     - v2 -> v3: create model provider + feature subentries from legacy options.
     - v3 -> v4: move model settings into feature subentries and trim options.
+    - v4 -> v5: move sentinel settings into a sentinel subentry.
     """
     current_version = config_entry.version or 1
     new_data = dict(config_entry.data)
@@ -1753,6 +1804,65 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
             CONF_OLLAMA_VLM_CONTEXT_SIZE,
             CONF_OLLAMA_SUMMARIZATION_CONTEXT_SIZE,
             CONF_OLLAMA_REASONING,
+        ):
+            new_options.pop(key, None)
+
+        sentinel_subentry_exists = any(
+            s.subentry_type == SUBENTRY_TYPE_SENTINEL
+            for s in config_entry.subentries.values()
+        )
+        if not sentinel_subentry_exists:
+            sentinel_data = {
+                CONF_SENTINEL_ENABLED: merged_options.get(
+                    CONF_SENTINEL_ENABLED, RECOMMENDED_SENTINEL_ENABLED
+                ),
+                CONF_SENTINEL_INTERVAL_SECONDS: merged_options.get(
+                    CONF_SENTINEL_INTERVAL_SECONDS,
+                    RECOMMENDED_SENTINEL_INTERVAL_SECONDS,
+                ),
+                CONF_SENTINEL_COOLDOWN_MINUTES: merged_options.get(
+                    CONF_SENTINEL_COOLDOWN_MINUTES,
+                    RECOMMENDED_SENTINEL_COOLDOWN_MINUTES,
+                ),
+                CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES: merged_options.get(
+                    CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES,
+                    RECOMMENDED_SENTINEL_ENTITY_COOLDOWN_MINUTES,
+                ),
+                CONF_SENTINEL_DISCOVERY_ENABLED: merged_options.get(
+                    CONF_SENTINEL_DISCOVERY_ENABLED,
+                    RECOMMENDED_SENTINEL_DISCOVERY_ENABLED,
+                ),
+                CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS: merged_options.get(
+                    CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS,
+                    RECOMMENDED_SENTINEL_DISCOVERY_INTERVAL_SECONDS,
+                ),
+                CONF_SENTINEL_DISCOVERY_MAX_RECORDS: merged_options.get(
+                    CONF_SENTINEL_DISCOVERY_MAX_RECORDS,
+                    RECOMMENDED_SENTINEL_DISCOVERY_MAX_RECORDS,
+                ),
+                CONF_EXPLAIN_ENABLED: merged_options.get(
+                    CONF_EXPLAIN_ENABLED, RECOMMENDED_EXPLAIN_ENABLED
+                ),
+            }
+            hass.config_entries.async_add_subentry(
+                config_entry,
+                ConfigSubentry(
+                    subentry_type=SUBENTRY_TYPE_SENTINEL,
+                    title="Sentinel",
+                    unique_id=f"{config_entry.entry_id}_sentinel",
+                    data=MappingProxyType(sentinel_data),
+                ),
+            )
+
+        for key in (
+            CONF_SENTINEL_ENABLED,
+            CONF_SENTINEL_INTERVAL_SECONDS,
+            CONF_SENTINEL_COOLDOWN_MINUTES,
+            CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES,
+            CONF_SENTINEL_DISCOVERY_ENABLED,
+            CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS,
+            CONF_SENTINEL_DISCOVERY_MAX_RECORDS,
+            CONF_EXPLAIN_ENABLED,
         ):
             new_options.pop(key, None)
 

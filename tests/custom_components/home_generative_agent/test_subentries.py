@@ -17,19 +17,24 @@ from custom_components.home_generative_agent.const import (
     CONF_CHAT_MODEL_PROVIDER,
     CONF_DB_NAME,
     CONF_DB_PARAMS,
+    CONF_EXPLAIN_ENABLED,
     CONF_FEATURE_MODEL,
     CONF_FEATURE_MODEL_NAME,
+    CONF_NOTIFY_SERVICE,
     CONF_OLLAMA_CHAT_MODEL,
     CONF_OLLAMA_CHAT_URL,
     CONF_OLLAMA_SUMMARIZATION_URL,
     CONF_OLLAMA_URL,
     CONF_OLLAMA_VLM_URL,
+    CONF_SENTINEL_ENABLED,
+    CONF_SENTINEL_INTERVAL_SECONDS,
     CONF_SUMMARIZATION_MODEL_PROVIDER,
     CONF_VLM_PROVIDER,
     CONFIG_ENTRY_VERSION,
     DOMAIN,
     SUBENTRY_TYPE_FEATURE,
     SUBENTRY_TYPE_MODEL_PROVIDER,
+    SUBENTRY_TYPE_SENTINEL,
     SUBENTRY_TYPE_STT_PROVIDER,
 )
 from custom_components.home_generative_agent.core.subentry_resolver import (
@@ -107,6 +112,7 @@ def test_supported_subentry_types() -> None:
         SUBENTRY_TYPE_MODEL_PROVIDER,
         SUBENTRY_TYPE_FEATURE,
         SUBENTRY_TYPE_STT_PROVIDER,
+        SUBENTRY_TYPE_SENTINEL,
     }
 
 
@@ -414,6 +420,56 @@ def test_legacy_ollama_urls_split_providers() -> None:
     assert options[CONF_OLLAMA_SUMMARIZATION_URL] == "http://ollama-sum:11434"
 
 
+def test_resolve_runtime_options_prefers_sentinel_subentry() -> None:
+    """Sentinel subentry should override legacy sentinel option keys."""
+    sentinel_interval = 120
+    entry = DummyEntry(
+        options={
+            CONF_SENTINEL_ENABLED: False,
+            CONF_SENTINEL_INTERVAL_SECONDS: 999,
+            CONF_EXPLAIN_ENABLED: False,
+        }
+    )
+    sentinel = DummySubentry(
+        "sentinel1",
+        SUBENTRY_TYPE_SENTINEL,
+        "Sentinel",
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: sentinel_interval,
+            CONF_EXPLAIN_ENABLED: True,
+        },
+    )
+    entry.subentries[sentinel.subentry_id] = sentinel
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_SENTINEL_ENABLED] is True
+    assert options[CONF_SENTINEL_INTERVAL_SECONDS] == sentinel_interval
+    assert options[CONF_EXPLAIN_ENABLED] is True
+
+
+def test_resolve_runtime_options_sentinel_notify_fallback() -> None:
+    """Sentinel notify service should override global only when explicitly set."""
+    entry = DummyEntry(options={CONF_NOTIFY_SERVICE: "notify.mobile_app_global"})
+    sentinel = DummySubentry(
+        "sentinel1",
+        SUBENTRY_TYPE_SENTINEL,
+        "Sentinel",
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_NOTIFY_SERVICE: "notify.mobile_app_sentinel",
+        },
+    )
+    entry.subentries[sentinel.subentry_id] = sentinel
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_NOTIFY_SERVICE] == "notify.mobile_app_sentinel"
+
+    sentinel.data.pop(CONF_NOTIFY_SERVICE)
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_NOTIFY_SERVICE] == "notify.mobile_app_global"
+
+
 @pytest.mark.asyncio
 async def test_migration_creates_provider_and_feature_subentries(
     hass: HomeAssistant,
@@ -445,8 +501,16 @@ async def test_migration_creates_provider_and_feature_subentries(
         if s.subentry_type == SUBENTRY_TYPE_MODEL_PROVIDER
     ]
     features = [
-        s for s in entry.subentries.values() if s.subentry_type == SUBENTRY_TYPE_FEATURE
+        s
+        for s in entry.subentries.values()
+        if s.subentry_type == SUBENTRY_TYPE_FEATURE
+    ]
+    sentinel = [
+        s
+        for s in entry.subentries.values()
+        if s.subentry_type == SUBENTRY_TYPE_SENTINEL
     ]
     assert providers
     assert features
+    assert sentinel
     assert entry.version == CONFIG_ENTRY_VERSION

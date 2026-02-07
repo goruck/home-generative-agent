@@ -105,12 +105,14 @@ A "feature" is a discrete capability exposed by the integration (for example Con
 3. Click **+ Model Provider** to add a provider (Edge/Cloud → provider → settings).
    - The first provider is automatically assigned to all features with default models.
 4. Use a feature’s gear icon to adjust that feature’s model settings later.
+5. Click **+ Sentinel** to configure proactive Sentinel behavior.
+   - This is where Sentinel runtime, cooldowns, discovery, explanation, and optional notify service are configured.
 
 Embedding model selection: the integration uses the first model provider that supports embeddings (or the feature’s provider when it advertises embedding capability). If you want a different embedding model, add a provider that supports embeddings and select the desired embedding model name in that provider’s defaults, then re-run Setup or reload the integration.
 
 If you want separate Ollama servers per feature, add multiple Model Provider subentries and assign them in each feature’s settings. For example: create a “Primary Ollama” provider pointing at your chat server and a “Vision Ollama” provider pointing at your camera analysis server, then select the appropriate provider on the feature’s model settings step.
 
-Global options (prompt, face recognition URL, context management, critical-action PIN, etc.) live in the integration’s **Options** flow.
+Global options (prompt, face recognition URL, context management, critical-action PIN, etc.) live in the integration’s **Options** flow. Sentinel settings are configured in the **Sentinel** subentry.
 
 ### Speech-to-Text (STT)
 
@@ -164,6 +166,8 @@ When you ask the agent to perform a protected action, it queues the request and 
 
 Sentinel adds proactive, deterministic anomaly detection and a review pipeline for generated rule proposals.
 
+Sentinel is a singleton service per Home Generative Agent config entry. Configure exactly one Sentinel subentry.
+
 ### Architecture
 
 1. `snapshot`: Builds an authoritative JSON snapshot (entities, camera activity, derived context).
@@ -202,11 +206,11 @@ Discovery records may include:
 
 ### Configuring Discovery
 
-Discovery is configured in the integration Options flow:
+Discovery is configured in the Sentinel subentry:
 
 1. Home Assistant -> `Settings` -> `Devices & Services`
 2. Open `Home Generative Agent`
-3. Select `Configure`
+3. Select `+ Sentinel` (or reconfigure the existing Sentinel subentry)
 4. Set Sentinel discovery options:
    - `sentinel_discovery_enabled`
    - `sentinel_discovery_interval_seconds`

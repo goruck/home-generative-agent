@@ -132,6 +132,33 @@
         "unknown": "Unexpected error."
       }
     },
+    "sentinel": {
+      "entry_type": "service",
+      "abort": {
+        "reconfigure_successful": "Sentinel configuration updated."
+      },
+      "initiate_flow": {
+        "reconfigure": "Reconfigure Sentinel",
+        "user": "Configure Sentinel"
+      },
+      "step": {
+        "settings": {
+          "title": "Sentinel",
+          "description": "Configure proactive Sentinel monitoring and discovery.",
+          "data": {
+            "sentinel_enabled": "Enable proactive sentinel",
+            "sentinel_interval_seconds": "Sentinel interval (seconds)",
+            "sentinel_cooldown_minutes": "Sentinel cooldown per type (minutes)",
+            "sentinel_entity_cooldown_minutes": "Sentinel cooldown per entity (minutes)",
+            "sentinel_discovery_enabled": "Enable sentinel discovery (LLM suggestions)",
+            "sentinel_discovery_interval_seconds": "Discovery interval (seconds)",
+            "sentinel_discovery_max_records": "Max discovery records to retain",
+            "explain_enabled": "Enable LLM explanations for sentinel findings",
+            "notify_service": "Sentinel Notify Service (optional)"
+          }
+        }
+      }
+    },
     "feature": {
       "entry_type": "service",
       "abort": {
@@ -224,19 +251,11 @@
           "prompt": "Instructions",
           "llm_hass_api": "Control Home Assistant",
           "video_analyzer_mode": "Video analyzer mode",
-          "notify_service": "Mobile App Notify Service (optional)",
+          "notify_service": "Video Analyzer Notify Service (optional)",
           "face_recognition": "Enable face recognition",
           "manage_context_with_tokens": "Context management method",
           "max_tokens_in_context": "Max tokens in chat context",
           "max_messages_in_context": "Max messages in chat context",
-          "sentinel_enabled": "Enable proactive sentinel",
-          "sentinel_interval_seconds": "Sentinel interval (seconds)",
-          "sentinel_cooldown_minutes": "Sentinel cooldown per type (minutes)",
-          "sentinel_entity_cooldown_minutes": "Sentinel cooldown per entity (minutes)",
-          "sentinel_discovery_enabled": "Enable sentinel discovery (LLM suggestions)",
-          "sentinel_discovery_interval_seconds": "Discovery interval (seconds)",
-          "sentinel_discovery_max_records": "Max discovery records to retain",
-          "explain_enabled": "Enable LLM explanations for sentinel findings",
           "critical_action_pin_enabled": "Require critical action PIN",
           "critical_action_pin": "Critical action PIN (required to unlock/arm/open sensitive devices)",
           "schema_first_yaml": "Schema-first JSON for YAML requests"

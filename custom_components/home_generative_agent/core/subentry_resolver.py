@@ -20,6 +20,7 @@ from ..const import (  # noqa: TID252
     CONF_DB_PARAMS,
     CONF_DB_URI,
     CONF_EMBEDDING_MODEL_PROVIDER,
+    CONF_EXPLAIN_ENABLED,
     CONF_FEATURE_MODEL,
     CONF_FEATURE_MODEL_CONTEXT_SIZE,
     CONF_FEATURE_MODEL_KEEPALIVE,
@@ -31,6 +32,7 @@ from ..const import (  # noqa: TID252
     CONF_GEMINI_EMBEDDING_MODEL,
     CONF_GEMINI_SUMMARIZATION_MODEL,
     CONF_GEMINI_VLM,
+    CONF_NOTIFY_SERVICE,
     CONF_OLLAMA_CHAT_CONTEXT_SIZE,
     CONF_OLLAMA_CHAT_KEEPALIVE,
     CONF_OLLAMA_CHAT_MODEL,
@@ -50,6 +52,13 @@ from ..const import (  # noqa: TID252
     CONF_OPENAI_EMBEDDING_MODEL,
     CONF_OPENAI_SUMMARIZATION_MODEL,
     CONF_OPENAI_VLM,
+    CONF_SENTINEL_COOLDOWN_MINUTES,
+    CONF_SENTINEL_DISCOVERY_ENABLED,
+    CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS,
+    CONF_SENTINEL_DISCOVERY_MAX_RECORDS,
+    CONF_SENTINEL_ENABLED,
+    CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES,
+    CONF_SENTINEL_INTERVAL_SECONDS,
     CONF_SUMMARIZATION_MODEL_PROVIDER,
     CONF_VLM_PROVIDER,
     FEATURE_CATEGORY_MAP,
@@ -60,6 +69,7 @@ from ..const import (  # noqa: TID252
     RECOMMENDED_DB_PASSWORD,
     RECOMMENDED_DB_PORT,
     RECOMMENDED_DB_USERNAME,
+    RECOMMENDED_EXPLAIN_ENABLED,
     RECOMMENDED_GEMINI_CHAT_MODEL,
     RECOMMENDED_GEMINI_EMBEDDING_MODEL,
     RECOMMENDED_GEMINI_SUMMARIZATION_MODEL,
@@ -78,9 +88,17 @@ from ..const import (  # noqa: TID252
     RECOMMENDED_OPENAI_EMBEDDING_MODEL,
     RECOMMENDED_OPENAI_SUMMARIZATION_MODEL,
     RECOMMENDED_OPENAI_VLM,
+    RECOMMENDED_SENTINEL_COOLDOWN_MINUTES,
+    RECOMMENDED_SENTINEL_DISCOVERY_ENABLED,
+    RECOMMENDED_SENTINEL_DISCOVERY_INTERVAL_SECONDS,
+    RECOMMENDED_SENTINEL_DISCOVERY_MAX_RECORDS,
+    RECOMMENDED_SENTINEL_ENABLED,
+    RECOMMENDED_SENTINEL_ENTITY_COOLDOWN_MINUTES,
+    RECOMMENDED_SENTINEL_INTERVAL_SECONDS,
     SUBENTRY_TYPE_DATABASE,
     SUBENTRY_TYPE_FEATURE,
     SUBENTRY_TYPE_MODEL_PROVIDER,
+    SUBENTRY_TYPE_SENTINEL,
 )
 from .db_utils import build_postgres_uri
 from .subentry_types import FeatureConfig, ModelProviderConfig, ProviderType
@@ -153,6 +171,50 @@ def build_database_uri_from_entry(entry: ConfigEntry) -> str | None:
             CONF_DB_PARAMS: opts.get(CONF_DB_PARAMS, RECOMMENDED_DB_PARAMS),
         }
     )
+
+
+def get_sentinel_subentry(
+    _hass: Any, config_entry: ConfigEntry
+) -> ConfigSubentry | None:
+    """Return the sentinel subentry if present."""
+    for subentry in config_entry.subentries.values():
+        if subentry.subentry_type == SUBENTRY_TYPE_SENTINEL:
+            return subentry
+    return None
+
+
+def _apply_sentinel_options(
+    options: dict[str, Any], sentinel_subentry: ConfigSubentry | None
+) -> None:
+    """Overlay sentinel options from subentry data with deterministic defaults."""
+    sentinel_defaults: dict[str, Any] = {
+        CONF_SENTINEL_ENABLED: RECOMMENDED_SENTINEL_ENABLED,
+        CONF_SENTINEL_INTERVAL_SECONDS: RECOMMENDED_SENTINEL_INTERVAL_SECONDS,
+        CONF_SENTINEL_COOLDOWN_MINUTES: RECOMMENDED_SENTINEL_COOLDOWN_MINUTES,
+        CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES: (
+            RECOMMENDED_SENTINEL_ENTITY_COOLDOWN_MINUTES
+        ),
+        CONF_SENTINEL_DISCOVERY_ENABLED: RECOMMENDED_SENTINEL_DISCOVERY_ENABLED,
+        CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS: (
+            RECOMMENDED_SENTINEL_DISCOVERY_INTERVAL_SECONDS
+        ),
+        CONF_SENTINEL_DISCOVERY_MAX_RECORDS: RECOMMENDED_SENTINEL_DISCOVERY_MAX_RECORDS,
+        CONF_EXPLAIN_ENABLED: RECOMMENDED_EXPLAIN_ENABLED,
+    }
+
+    if sentinel_subentry is None:
+        for key, value in sentinel_defaults.items():
+            options.setdefault(key, value)
+        return
+
+    data = dict(sentinel_subentry.data)
+    for key, value in sentinel_defaults.items():
+        options[key] = data.get(key, value)
+
+    # Sentinel notify service takes precedence when set; otherwise keep global value.
+    sentinel_notify = str(data.get(CONF_NOTIFY_SERVICE, "") or "").strip()
+    if sentinel_notify:
+        options[CONF_NOTIFY_SERVICE] = sentinel_notify
 
 
 def _provider_capabilities_from_settings(settings: Mapping[str, Any]) -> set[str]:
@@ -637,6 +699,8 @@ def resolve_runtime_options(entry: ConfigEntry) -> dict[str, Any]:
     features = resolve_feature_configs(entry, providers, base_options)
 
     options = dict(base_options)
+    sentinel_subentry = get_sentinel_subentry(None, entry)
+    _apply_sentinel_options(options, sentinel_subentry)
     providers_by_id = dict(providers)
 
     category_provider: dict[str, ModelProviderConfig] = {}

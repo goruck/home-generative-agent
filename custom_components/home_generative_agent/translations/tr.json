@@ -132,6 +132,33 @@
         "unknown": "Beklenmeyen hata."
       }
     },
+    "sentinel": {
+      "entry_type": "service",
+      "abort": {
+        "reconfigure_successful": "Sentinel yapılandırması güncellendi."
+      },
+      "initiate_flow": {
+        "reconfigure": "Sentinel yeniden yapılandır",
+        "user": "Sentinel yapılandır"
+      },
+      "step": {
+        "settings": {
+          "title": "Sentinel",
+          "description": "Proaktif Sentinel izleme ve keşif ayarlarını yapılandırın.",
+          "data": {
+            "sentinel_enabled": "Proaktif sentinel etkin",
+            "sentinel_interval_seconds": "Sentinel aralığı (saniye)",
+            "sentinel_cooldown_minutes": "Sentinel tür başına bekleme (dakika)",
+            "sentinel_entity_cooldown_minutes": "Sentinel varlık başına bekleme (dakika)",
+            "sentinel_discovery_enabled": "Sentinel keşfini etkinleştir (LLM önerileri)",
+            "sentinel_discovery_interval_seconds": "Keşif aralığı (saniye)",
+            "sentinel_discovery_max_records": "Saklanacak maksimum keşif kaydı",
+            "explain_enabled": "Sentinel bulguları için LLM açıklamaları",
+            "notify_service": "Sentinel Bildirim Servisi (isteğe bağlı)"
+          }
+        }
+      }
+    },
     "feature": {
       "entry_type": "service",
       "abort": {
@@ -224,19 +251,11 @@
           "prompt": "Talimatlar",
           "llm_hass_api": "Home Assistant'ı kontrol et",
           "video_analyzer_mode": "Video analizci modu",
-          "notify_service": "Mobil Uygulama Bildirim Servisi (isteğe bağlı)",
+          "notify_service": "Video Analizci Bildirim Servisi (isteğe bağlı)",
           "face_recognition": "Yüz tanımayı etkinleştir",
           "manage_context_with_tokens": "Bağlam yönetim yöntemi",
           "max_tokens_in_context": "Sohbet bağlamındaki maksimum token sayısı",
           "max_messages_in_context": "Sohbet bağlamındaki maksimum mesaj sayısı",
-          "sentinel_enabled": "Proaktif sentinel etkin",
-          "sentinel_interval_seconds": "Sentinel aralığı (saniye)",
-          "sentinel_cooldown_minutes": "Sentinel tür başına bekleme (dakika)",
-          "sentinel_entity_cooldown_minutes": "Sentinel varlık başına bekleme (dakika)",
-          "sentinel_discovery_enabled": "Sentinel keşfini etkinleştir (LLM önerileri)",
-          "sentinel_discovery_interval_seconds": "Keşif aralığı (saniye)",
-          "sentinel_discovery_max_records": "Saklanacak maksimum keşif kaydı",
-          "explain_enabled": "Sentinel bulguları için LLM açıklamaları",
           "critical_action_pin_enabled": "Kritik eylemler için PIN zorunlu",
           "critical_action_pin": "Kritik eylem PIN’i (kilit açma/kurma/açma için gerekli)",
           "schema_first_yaml": "YAML istekleri için şema-öncelikli JSON"

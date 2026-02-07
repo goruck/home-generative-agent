@@ -40,20 +40,12 @@ from .const import (
     CONF_CRITICAL_ACTION_PIN_SALT,
     CONF_FACE_API_URL,
     CONF_FACE_RECOGNITION,
-    CONF_EXPLAIN_ENABLED,
     CONF_MANAGE_CONTEXT_WITH_TOKENS,
     CONF_MAX_MESSAGES_IN_CONTEXT,
     CONF_MAX_TOKENS_IN_CONTEXT,
     CONF_NOTIFY_SERVICE,
     CONF_PROMPT,
     CONF_SCHEMA_FIRST_YAML,
-    CONF_SENTINEL_COOLDOWN_MINUTES,
-    CONF_SENTINEL_DISCOVERY_ENABLED,
-    CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS,
-    CONF_SENTINEL_DISCOVERY_MAX_RECORDS,
-    CONF_SENTINEL_ENABLED,
-    CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES,
-    CONF_SENTINEL_INTERVAL_SECONDS,
     CONF_VIDEO_ANALYZER_MODE,
     CONFIG_ENTRY_VERSION,
     CRITICAL_PIN_MAX_LEN,
@@ -61,20 +53,13 @@ from .const import (
     DOMAIN,
     LLM_HASS_API_NONE,
     RECOMMENDED_FACE_RECOGNITION,
-    RECOMMENDED_EXPLAIN_ENABLED,
     RECOMMENDED_MANAGE_CONTEXT_WITH_TOKENS,
     RECOMMENDED_MAX_MESSAGES_IN_CONTEXT,
     RECOMMENDED_MAX_TOKENS_IN_CONTEXT,
-    RECOMMENDED_SENTINEL_COOLDOWN_MINUTES,
-    RECOMMENDED_SENTINEL_DISCOVERY_ENABLED,
-    RECOMMENDED_SENTINEL_DISCOVERY_INTERVAL_SECONDS,
-    RECOMMENDED_SENTINEL_DISCOVERY_MAX_RECORDS,
-    RECOMMENDED_SENTINEL_ENABLED,
-    RECOMMENDED_SENTINEL_ENTITY_COOLDOWN_MINUTES,
-    RECOMMENDED_SENTINEL_INTERVAL_SECONDS,
     RECOMMENDED_VIDEO_ANALYZER_MODE,
     SUBENTRY_TYPE_FEATURE,
     SUBENTRY_TYPE_MODEL_PROVIDER,
+    SUBENTRY_TYPE_SENTINEL,
     SUBENTRY_TYPE_STT_PROVIDER,
     VIDEO_ANALYZER_MODE_ALWAYS_NOTIFY,
     VIDEO_ANALYZER_MODE_DISABLE,
@@ -89,6 +74,7 @@ from .core.utils import (
 )
 from .flows.feature_subentry_flow import FeatureSubentryFlow
 from .flows.model_provider_subentry_flow import ModelProviderSubentryFlow
+from .flows.sentinel_subentry_flow import SentinelSubentryFlow
 from .flows.stt_provider_subentry_flow import SttProviderSubentryFlow
 
 if TYPE_CHECKING:
@@ -109,14 +95,6 @@ DEFAULT_OPTIONS = {
     CONF_MANAGE_CONTEXT_WITH_TOKENS: RECOMMENDED_MANAGE_CONTEXT_WITH_TOKENS,
     CONF_MAX_TOKENS_IN_CONTEXT: RECOMMENDED_MAX_TOKENS_IN_CONTEXT,
     CONF_MAX_MESSAGES_IN_CONTEXT: RECOMMENDED_MAX_MESSAGES_IN_CONTEXT,
-    CONF_EXPLAIN_ENABLED: RECOMMENDED_EXPLAIN_ENABLED,
-    CONF_SENTINEL_ENABLED: RECOMMENDED_SENTINEL_ENABLED,
-    CONF_SENTINEL_INTERVAL_SECONDS: RECOMMENDED_SENTINEL_INTERVAL_SECONDS,
-    CONF_SENTINEL_COOLDOWN_MINUTES: RECOMMENDED_SENTINEL_COOLDOWN_MINUTES,
-    CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES: RECOMMENDED_SENTINEL_ENTITY_COOLDOWN_MINUTES,
-    CONF_SENTINEL_DISCOVERY_ENABLED: RECOMMENDED_SENTINEL_DISCOVERY_ENABLED,
-    CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS: RECOMMENDED_SENTINEL_DISCOVERY_INTERVAL_SECONDS,
-    CONF_SENTINEL_DISCOVERY_MAX_RECORDS: RECOMMENDED_SENTINEL_DISCOVERY_MAX_RECORDS,
 }
 
 # ---------------------------
@@ -198,52 +176,6 @@ async def _schema_for_options(
             default=RECOMMENDED_MAX_MESSAGES_IN_CONTEXT,
         ): NumberSelector(NumberSelectorConfig(min=15, max=240, step=1)),
         vol.Optional(
-            CONF_SENTINEL_ENABLED,
-            description={"suggested_value": opts.get(CONF_SENTINEL_ENABLED)},
-            default=RECOMMENDED_SENTINEL_ENABLED,
-        ): BooleanSelector(),
-        vol.Optional(
-            CONF_SENTINEL_INTERVAL_SECONDS,
-            description={"suggested_value": opts.get(CONF_SENTINEL_INTERVAL_SECONDS)},
-            default=RECOMMENDED_SENTINEL_INTERVAL_SECONDS,
-        ): NumberSelector(NumberSelectorConfig(min=60, max=3600, step=30)),
-        vol.Optional(
-            CONF_SENTINEL_COOLDOWN_MINUTES,
-            description={"suggested_value": opts.get(CONF_SENTINEL_COOLDOWN_MINUTES)},
-            default=RECOMMENDED_SENTINEL_COOLDOWN_MINUTES,
-        ): NumberSelector(NumberSelectorConfig(min=5, max=240, step=5)),
-        vol.Optional(
-            CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES,
-            description={
-                "suggested_value": opts.get(CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES)
-            },
-            default=RECOMMENDED_SENTINEL_ENTITY_COOLDOWN_MINUTES,
-        ): NumberSelector(NumberSelectorConfig(min=5, max=240, step=5)),
-        vol.Optional(
-            CONF_SENTINEL_DISCOVERY_ENABLED,
-            description={"suggested_value": opts.get(CONF_SENTINEL_DISCOVERY_ENABLED)},
-            default=RECOMMENDED_SENTINEL_DISCOVERY_ENABLED,
-        ): BooleanSelector(),
-        vol.Optional(
-            CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS,
-            description={
-                "suggested_value": opts.get(CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS)
-            },
-            default=RECOMMENDED_SENTINEL_DISCOVERY_INTERVAL_SECONDS,
-        ): NumberSelector(NumberSelectorConfig(min=300, max=86400, step=300)),
-        vol.Optional(
-            CONF_SENTINEL_DISCOVERY_MAX_RECORDS,
-            description={
-                "suggested_value": opts.get(CONF_SENTINEL_DISCOVERY_MAX_RECORDS)
-            },
-            default=RECOMMENDED_SENTINEL_DISCOVERY_MAX_RECORDS,
-        ): NumberSelector(NumberSelectorConfig(min=10, max=1000, step=10)),
-        vol.Optional(
-            CONF_EXPLAIN_ENABLED,
-            description={"suggested_value": opts.get(CONF_EXPLAIN_ENABLED)},
-            default=RECOMMENDED_EXPLAIN_ENABLED,
-        ): BooleanSelector(),
-        vol.Optional(
             CONF_CRITICAL_ACTION_PIN_ENABLED,
             description={
                 "suggested_value": opts.get(CONF_CRITICAL_ACTION_PIN_ENABLED, True)
@@ -271,8 +203,6 @@ async def _schema_for_options(
     video_analyzer_mode = opts.get(
         CONF_VIDEO_ANALYZER_MODE, RECOMMENDED_VIDEO_ANALYZER_MODE
     )
-    sentinel_enabled = opts.get(CONF_SENTINEL_ENABLED, RECOMMENDED_SENTINEL_ENABLED)
-
     if video_analyzer_mode != VIDEO_ANALYZER_MODE_DISABLE:
         schema[
             vol.Optional(
@@ -282,7 +212,7 @@ async def _schema_for_options(
             )
         ] = BooleanSelector()
 
-    if video_analyzer_mode != VIDEO_ANALYZER_MODE_DISABLE or sentinel_enabled:
+    if video_analyzer_mode != VIDEO_ANALYZER_MODE_DISABLE:
         mobile_opts = list_mobile_notify_services(hass)
         if mobile_opts:
             schema[
@@ -346,6 +276,7 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
             SUBENTRY_TYPE_MODEL_PROVIDER: ModelProviderSubentryFlow,
             SUBENTRY_TYPE_FEATURE: FeatureSubentryFlow,
             SUBENTRY_TYPE_STT_PROVIDER: SttProviderSubentryFlow,
+            SUBENTRY_TYPE_SENTINEL: SentinelSubentryFlow,
         }
 
 
