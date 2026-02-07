@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from typing import TYPE_CHECKING
 
 from homeassistant.util import dt as dt_util
 
-from ...snapshot.schema import FullStateSnapshot
-from ..models import AnomalyFinding, build_anomaly_id
+from custom_components.home_generative_agent.sentinel.models import (
+    AnomalyFinding,
+    build_anomaly_id,
+)
+
+if TYPE_CHECKING:
+    from custom_components.home_generative_agent.snapshot.schema import (
+        FullStateSnapshot,
+    )
 
 ENTRY_CLASSES = {"door", "window", "opening"}
 ACTIVITY_WINDOW_MIN = 10
@@ -19,6 +27,7 @@ class CameraEntryUnsecuredRule:
     rule_id = "camera_entry_unsecured"
 
     def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:
+        """Return findings for recent camera activity near unsecured entries."""
         findings: list[AnomalyFinding] = []
         now = dt_util.parse_datetime(snapshot["derived"]["now"]) or dt_util.utcnow()
         window = timedelta(minutes=ACTIVITY_WINDOW_MIN)

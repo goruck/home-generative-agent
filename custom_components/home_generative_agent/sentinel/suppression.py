@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
-from .models import AnomalyFinding
+if TYPE_CHECKING:
+    from datetime import datetime, timedelta
+
+    from homeassistant.core import HomeAssistant
+
+    from .models import AnomalyFinding
 
 STORE_VERSION = 1
 STORE_KEY = "home_generative_agent_sentinel_suppression"
@@ -29,7 +32,8 @@ class SuppressionState:
     pending_prompts: dict[str, str] = field(default_factory=dict)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "SuppressionState":
+    def from_dict(cls, data: dict[str, Any]) -> SuppressionState:
+        """Create suppression state from persisted data."""
         return cls(
             last_by_type=dict(data.get("last_by_type", {})),
             last_by_entity={
@@ -40,6 +44,7 @@ class SuppressionState:
         )
 
     def as_dict(self) -> dict[str, Any]:
+        """Convert suppression state to persisted data."""
         return {
             "last_by_type": dict(self.last_by_type),
             "last_by_entity": {
@@ -125,11 +130,13 @@ class SuppressionManager:
     """Manage suppression persistence for sentinel findings."""
 
     def __init__(self, hass: HomeAssistant) -> None:
+        """Initialize persistent suppression state management."""
         self._store = Store(hass, STORE_VERSION, STORE_KEY)
         self._state = SuppressionState()
 
     @property
     def state(self) -> SuppressionState:
+        """Return current suppression state."""
         return self._state
 
     async def async_load(self) -> None:

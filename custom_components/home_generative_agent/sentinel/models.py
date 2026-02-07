@@ -39,8 +39,7 @@ def build_anomaly_id(
         "entities": sorted(triggering_entities),
         "evidence": _jsonify(evidence),
     }
-    digest = hashlib.sha256(repr(payload).encode("utf-8")).hexdigest()
-    return digest
+    return hashlib.sha256(repr(payload).encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)

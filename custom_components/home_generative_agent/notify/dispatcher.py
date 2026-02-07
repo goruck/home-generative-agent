@@ -3,15 +3,22 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.core import callback
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from homeassistant.core import Event, HomeAssistant
 
-from ..const import CONF_NOTIFY_SERVICE
-from ..sentinel.models import AnomalyFinding
+    from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
+    from custom_components.home_generative_agent.snapshot.schema import (
+        FullStateSnapshot,
+    )
+
+from custom_components.home_generative_agent.const import CONF_NOTIFY_SERVICE
+
 from .actions import ACTION_PREFIX, ActionHandler
 
 LOGGER = logging.getLogger(__name__)
@@ -26,6 +33,7 @@ class NotificationDispatcher:
         options: dict[str, Any],
         action_handler: ActionHandler,
     ) -> None:
+        """Initialize notification dispatcher state."""
         self._hass = hass
         self._options = options
         self._action_handler = action_handler
@@ -48,7 +56,7 @@ class NotificationDispatcher:
     async def async_notify(
         self,
         finding: AnomalyFinding,
-        _snapshot: dict[str, Any],
+        _snapshot: FullStateSnapshot,
         explanation: str | None,
     ) -> None:
         """Send a proactive notification for a finding."""
@@ -120,5 +128,6 @@ def _build_actions(finding: AnomalyFinding) -> list[dict[str, Any]]:
 def _fallback_message(finding: AnomalyFinding) -> str:
     entities = ", ".join(finding.triggering_entities) or "unknown"
     return (
-        f"Sentinel detected {finding.type} (severity {finding.severity}) for {entities}."
+        f"Sentinel detected {finding.type} "
+        f"(severity {finding.severity}) for {entities}."
     )

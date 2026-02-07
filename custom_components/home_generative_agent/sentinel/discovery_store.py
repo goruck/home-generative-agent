@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.storage import Store
+
+if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
 
 STORE_VERSION = 1
 STORE_KEY = "home_generative_agent_sentinel_discovery"
@@ -16,6 +18,7 @@ class DiscoveryStore:
     """Persist discovery candidates (advisory only)."""
 
     def __init__(self, hass: HomeAssistant, max_records: int) -> None:
+        """Initialize persistent candidate storage."""
         self._store = Store(hass, STORE_VERSION, STORE_KEY)
         self._records: list[dict[str, Any]] = []
         self._max_records = max_records

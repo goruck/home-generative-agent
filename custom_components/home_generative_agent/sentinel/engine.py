@@ -3,37 +3,45 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
-from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
-from ..const import (
+from custom_components.home_generative_agent.const import (
     CONF_EXPLAIN_ENABLED,
     CONF_SENTINEL_COOLDOWN_MINUTES,
     CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES,
     CONF_SENTINEL_INTERVAL_SECONDS,
 )
-from ..snapshot.builder import async_build_full_state_snapshot
+from custom_components.home_generative_agent.snapshot.builder import (
+    async_build_full_state_snapshot,
+)
+
 from .dynamic_rules import evaluate_dynamic_rules
-from .models import AnomalyFinding
+from .rules.appliance_power_duration import AppliancePowerDurationRule
+from .rules.camera_entry_unsecured import CameraEntryUnsecuredRule
+from .rules.open_entry_while_away import OpenEntryWhileAwayRule
+from .rules.unlocked_lock_at_night import UnlockedLockAtNightRule
 from .suppression import (
     SuppressionManager,
     register_finding,
     register_prompt,
     should_suppress,
 )
-from .rules.appliance_power_duration import AppliancePowerDurationRule
-from .rules.camera_entry_unsecured import CameraEntryUnsecuredRule
-from .rules.open_entry_while_away import OpenEntryWhileAwayRule
-from .rules.unlocked_lock_at_night import UnlockedLockAtNightRule
 
 if TYPE_CHECKING:
-    from ..explain.llm_explain import LLMExplainer
-    from ..notify.dispatcher import NotificationDispatcher
-    from ..audit.store import AuditStore
+    from homeassistant.core import HomeAssistant
+
+    from custom_components.home_generative_agent.audit.store import AuditStore
+    from custom_components.home_generative_agent.explain.llm_explain import LLMExplainer
+    from custom_components.home_generative_agent.notify.dispatcher import (
+        NotificationDispatcher,
+    )
+
+    from .models import AnomalyFinding
     from .rule_registry import RuleRegistry
 
 LOGGER = logging.getLogger(__name__)
@@ -42,17 +50,18 @@ LOGGER = logging.getLogger(__name__)
 class SentinelEngine:
     """Periodic sentinel evaluation loop."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         hass: HomeAssistant,
         options: dict[str, object],
         suppression: SuppressionManager,
-        notifier: "NotificationDispatcher",
-        audit_store: "AuditStore",
-        explainer: "LLMExplainer | None" = None,
+        notifier: NotificationDispatcher,
+        audit_store: AuditStore,
+        explainer: LLMExplainer | None = None,
         *,
-        rule_registry: "RuleRegistry | None" = None,
+        rule_registry: RuleRegistry | None = None,
     ) -> None:
+        """Initialize sentinel dependencies and runtime state."""
         self._hass = hass
         self._options = options
         self._suppression = suppression
@@ -82,20 +91,20 @@ class SentinelEngine:
             return
         self._stop_event.set()
         self._task.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await self._task
-        except asyncio.CancelledError:
-            pass
         self._task = None
 
     async def _run_loop(self) -> None:
-        interval = int(self._options.get(CONF_SENTINEL_INTERVAL_SECONDS, 300))
+        interval = _coerce_int(
+            self._options.get(CONF_SENTINEL_INTERVAL_SECONDS), default=300
+        )
         LOGGER.info("Sentinel loop started (interval=%ss).", interval)
         while not self._stop_event.is_set():
             await self._run_once()
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=interval)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
     async def _run_once(self) -> None:
@@ -107,10 +116,14 @@ class SentinelEngine:
 
         now = dt_util.utcnow()
         cooldown_type = timedelta(
-            minutes=int(self._options.get(CONF_SENTINEL_COOLDOWN_MINUTES, 30))
+            minutes=_coerce_int(
+                self._options.get(CONF_SENTINEL_COOLDOWN_MINUTES), default=30
+            )
         )
         cooldown_entity = timedelta(
-            minutes=int(self._options.get(CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES, 15))
+            minutes=_coerce_int(
+                self._options.get(CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES), default=15
+            )
         )
         explain_enabled = bool(self._options.get(CONF_EXPLAIN_ENABLED, False))
 
@@ -179,3 +192,19 @@ class SentinelEngine:
             await self._notifier.async_notify(finding, snapshot, explanation)
             await self._audit_store.async_append_finding(snapshot, finding, explanation)
         LOGGER.debug("Sentinel cycle completed with %s finding(s).", len(all_findings))
+
+
+def _coerce_int(value: object | None, default: int) -> int:
+    """Coerce option values to int with a deterministic fallback."""
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return default
+    return default

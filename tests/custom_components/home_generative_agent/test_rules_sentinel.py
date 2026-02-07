@@ -15,22 +15,28 @@ from custom_components.home_generative_agent.sentinel.rules.open_entry_while_awa
 from custom_components.home_generative_agent.sentinel.rules.unlocked_lock_at_night import (
     UnlockedLockAtNightRule,
 )
+from custom_components.home_generative_agent.snapshot.schema import (
+    FullStateSnapshot,
+    validate_snapshot,
+)
 
 
-def _base_snapshot() -> dict[str, object]:
-    return {
-        "schema_version": 1,
-        "generated_at": "2025-01-01T00:00:00+00:00",
-        "entities": [],
-        "camera_activity": [],
-        "derived": {
-            "now": "2025-01-01T00:00:00+00:00",
-            "timezone": "UTC",
-            "is_night": False,
-            "anyone_home": True,
-            "last_motion_by_area": {},
-        },
-    }
+def _base_snapshot() -> FullStateSnapshot:
+    return validate_snapshot(
+        {
+            "schema_version": 1,
+            "generated_at": "2025-01-01T00:00:00+00:00",
+            "entities": [],
+            "camera_activity": [],
+            "derived": {
+                "now": "2025-01-01T00:00:00+00:00",
+                "timezone": "UTC",
+                "is_night": False,
+                "anyone_home": True,
+                "last_motion_by_area": {},
+            },
+        }
+    )
 
 
 def test_unlocked_lock_at_night_triggers() -> None:

@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from datetime import datetime
-from homeassistant.core import State
+from typing import TYPE_CHECKING
+
 from homeassistant.util import dt as dt_util
 
-from .schema import DerivedContext
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+    from datetime import datetime
+
+    from homeassistant.core import State
+
+    from .schema import DerivedContext
 
 _MOTION_DEVICE_CLASSES = {"motion", "occupancy"}
 

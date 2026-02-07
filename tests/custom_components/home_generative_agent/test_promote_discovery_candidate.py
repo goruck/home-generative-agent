@@ -5,8 +5,12 @@ from __future__ import annotations
 
 import pytest
 
-from custom_components.home_generative_agent.sentinel.discovery_store import DiscoveryStore
-from custom_components.home_generative_agent.sentinel.proposal_store import ProposalStore
+from custom_components.home_generative_agent.sentinel.discovery_store import (
+    DiscoveryStore,
+)
+from custom_components.home_generative_agent.sentinel.proposal_store import (
+    ProposalStore,
+)
 
 
 @pytest.mark.asyncio

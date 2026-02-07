@@ -11,16 +11,29 @@ if TYPE_CHECKING:
     from psycopg.rows import DictRow
     from psycopg_pool import AsyncConnectionPool
 
-    from ..audit.store import AuditStore
-    from ..explain.llm_explain import LLMExplainer
-    from ..notify.actions import ActionHandler
-    from ..notify.dispatcher import NotificationDispatcher
-    from ..sentinel.discovery_engine import SentinelDiscoveryEngine
-    from ..sentinel.discovery_store import DiscoveryStore
-    from ..sentinel.proposal_store import ProposalStore
-    from ..sentinel.rule_registry import RuleRegistry
-    from ..sentinel.engine import SentinelEngine
-    from ..sentinel.suppression import SuppressionManager
+    from custom_components.home_generative_agent.audit.store import AuditStore
+    from custom_components.home_generative_agent.explain.llm_explain import LLMExplainer
+    from custom_components.home_generative_agent.notify.actions import ActionHandler
+    from custom_components.home_generative_agent.notify.dispatcher import (
+        NotificationDispatcher,
+    )
+    from custom_components.home_generative_agent.sentinel.discovery_engine import (
+        SentinelDiscoveryEngine,
+    )
+    from custom_components.home_generative_agent.sentinel.discovery_store import (
+        DiscoveryStore,
+    )
+    from custom_components.home_generative_agent.sentinel.engine import SentinelEngine
+    from custom_components.home_generative_agent.sentinel.proposal_store import (
+        ProposalStore,
+    )
+    from custom_components.home_generative_agent.sentinel.rule_registry import (
+        RuleRegistry,
+    )
+    from custom_components.home_generative_agent.sentinel.suppression import (
+        SuppressionManager,
+    )
+
     from .video_analyzer import VideoAnalyzer
 
 

@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING
 
-from ...snapshot.schema import FullStateSnapshot
-from ..models import AnomalyFinding, build_anomaly_id
+from custom_components.home_generative_agent.sentinel.models import (
+    AnomalyFinding,
+    build_anomaly_id,
+)
+
+if TYPE_CHECKING:
+    from custom_components.home_generative_agent.snapshot.schema import (
+        FullStateSnapshot,
+        SnapshotEntity,
+    )
 
 EXTERIOR_HINTS = (
     "front",
@@ -26,6 +34,7 @@ class UnlockedLockAtNightRule:
     rule_id = "unlocked_lock_at_night"
 
     def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:
+        """Return findings for exterior locks left unlocked at night."""
         if not snapshot["derived"]["is_night"]:
             return []
 
@@ -62,7 +71,7 @@ class UnlockedLockAtNightRule:
         return findings
 
 
-def _is_exterior_hint(entity: dict[str, Any]) -> bool:
-    area = (entity.get("area") or "").lower()
-    name = (entity.get("friendly_name") or "").lower()
+def _is_exterior_hint(entity: SnapshotEntity) -> bool:
+    area = (entity["area"] or "").lower()
+    name = (entity["friendly_name"] or "").lower()
     return any(hint in area or hint in name for hint in EXTERIOR_HINTS)

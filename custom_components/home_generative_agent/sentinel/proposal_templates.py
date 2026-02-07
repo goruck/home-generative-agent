@@ -30,6 +30,7 @@ class NormalizedRule:
     suggested_actions: list[str]
 
     def as_dict(self) -> dict[str, Any]:
+        """Convert the normalized rule to a persisted mapping."""
         return {
             "rule_id": self.rule_id,
             "template_id": self.template_id,
@@ -41,7 +42,9 @@ class NormalizedRule:
         }
 
 
-def normalize_candidate(candidate: dict[str, Any]) -> NormalizedRule | None:
+def normalize_candidate(  # noqa: PLR0911
+    candidate: dict[str, Any],
+) -> NormalizedRule | None:
     """Map a discovery candidate to a supported template."""
     evidence_paths = candidate.get("evidence_paths", [])
     text = " ".join(
@@ -129,7 +132,11 @@ def normalize_candidate(candidate: dict[str, Any]) -> NormalizedRule | None:
             suggested_actions=["close_entry"],
         )
 
-    if motion_ids and camera_id and _contains_any(text, ("motion", "camera", "activity")):
+    if (
+        motion_ids
+        and camera_id
+        and _contains_any(text, ("motion", "camera", "activity"))
+    ):
         return NormalizedRule(
             rule_id=f"motion_without_camera_{camera_id.replace('.', '_')}",
             template_id="motion_without_camera_activity",
@@ -168,10 +175,11 @@ def _find_entity_id(evidence_paths: list[str], domain: str) -> str | None:
 
 
 def _find_entity_ids(evidence_paths: list[str], domain: str) -> list[str]:
-    ids: list[str] = []
-    for path in evidence_paths:
-        if path.startswith("entities[entity_id=") and f"{domain}." in path:
-            ids.append(path.split("entities[entity_id=", 1)[1].split("]", 1)[0])
+    ids = [
+        path.split("entities[entity_id=", 1)[1].split("]", 1)[0]
+        for path in evidence_paths
+        if path.startswith("entities[entity_id=") and f"{domain}." in path
+    ]
     return sorted(set(ids))
 
 
@@ -209,7 +217,9 @@ def _has_night_signal(evidence_paths: list[str], text: str) -> bool:
 
 
 def _presence_signal(evidence_paths: list[str], text: str) -> str:
-    if _contains_any(text, ("away", "no one home", "nobody home", "empty", "unoccupied")):
+    if _contains_any(
+        text, ("away", "no one home", "nobody home", "empty", "unoccupied")
+    ):
         return "away"
     if _contains_any(text, ("someone home", "occupied", "home", "present")):
         return "home"
@@ -231,7 +241,9 @@ def _find_camera_id(evidence_paths: list[str]) -> str | None:
         if path.startswith("camera_activity[entity_id="):
             return path.split("camera_activity[entity_id=", 1)[1].split("]", 1)[0]
         if path.startswith("camera_activity[camera_entity_id="):
-            return path.split("camera_activity[camera_entity_id=", 1)[1].split("]", 1)[0]
+            return path.split("camera_activity[camera_entity_id=", 1)[1].split("]", 1)[
+                0
+            ]
     return None
 
 

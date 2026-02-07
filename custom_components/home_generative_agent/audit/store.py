@@ -8,19 +8,23 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
+
+    from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
+    from custom_components.home_generative_agent.snapshot.schema import (
+        FullStateSnapshot,
+    )
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .models import AuditRecord
-from ..sentinel.models import AnomalyFinding
 
 STORE_VERSION = 1
 STORE_KEY = "home_generative_agent_audit"
 MAX_RECORDS = 200
 
 
-def _snapshot_ref(snapshot: dict[str, Any]) -> dict[str, Any]:
+def _snapshot_ref(snapshot: FullStateSnapshot) -> dict[str, Any]:
     payload = json.dumps(snapshot, sort_keys=True, default=str)
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
     return {
@@ -38,6 +42,7 @@ class AuditStore:
     """Persistent audit store for sentinel activity."""
 
     def __init__(self, hass: HomeAssistant) -> None:
+        """Initialize the audit store."""
         self._store = Store(hass, STORE_VERSION, STORE_KEY)
         self._records: list[dict[str, Any]] = []
 
@@ -58,7 +63,10 @@ class AuditStore:
             return
 
     async def async_append_finding(
-        self, snapshot: dict[str, Any], finding: AnomalyFinding, explanation: str | None
+        self,
+        snapshot: FullStateSnapshot,
+        finding: AnomalyFinding,
+        explanation: str | None,
     ) -> None:
         """Append a finding audit record."""
         record = AuditRecord(

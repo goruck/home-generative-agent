@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Iterable
+from typing import TYPE_CHECKING, Any, cast
 
-from ..snapshot.schema import FullStateSnapshot
-from .models import AnomalyFinding, build_anomaly_id
+from .models import AnomalyFinding, Severity, build_anomaly_id
 from .proposal_templates import SUPPORTED_TEMPLATES
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Mapping
+
+    from custom_components.home_generative_agent.snapshot.schema import (
+        CameraActivity,
+        FullStateSnapshot,
+        SnapshotEntity,
+    )
 
 LOGGER = logging.getLogger(__name__)
 
@@ -20,7 +28,8 @@ def evaluate_dynamic_rules(
     """Evaluate generated rules deterministically."""
     entity_map = {entity["entity_id"]: entity for entity in snapshot["entities"]}
     camera_map = {
-        activity["camera_entity_id"]: activity for activity in snapshot["camera_activity"]
+        activity["camera_entity_id"]: activity
+        for activity in snapshot["camera_activity"]
     }
 
     findings: list[AnomalyFinding] = []
@@ -91,13 +100,13 @@ def evaluate_dynamic_rules(
 
 
 def _eval_alarm_disarmed_open_entry(
-    snapshot: FullStateSnapshot,
+    _snapshot: FullStateSnapshot,
     rule: dict[str, Any],
-    entity_map: dict[str, dict[str, Any]],
+    entity_map: Mapping[str, SnapshotEntity],
 ) -> list[AnomalyFinding]:
-    params = rule.get("params") or {}
+    params = _rule_params(rule)
     alarm_id = params.get("alarm_entity_id")
-    entry_ids = params.get("entry_entity_ids", [])
+    entry_ids = params.get("entry_entity_ids")
     if not alarm_id or not isinstance(entry_ids, list):
         return []
     alarm = entity_map.get(alarm_id)
@@ -118,20 +127,18 @@ def _eval_alarm_disarmed_open_entry(
             "alarm_state": alarm.get("state"),
             "last_changed": entry.get("last_changed"),
         }
-        findings.append(
-            _build_finding(rule, [alarm_id, entry_id], evidence)
-        )
+        findings.append(_build_finding(rule, [alarm_id, entry_id], evidence))
     return findings
 
 
 def _eval_unlocked_lock_when_home(
     snapshot: FullStateSnapshot,
     rule: dict[str, Any],
-    entity_map: dict[str, dict[str, Any]],
+    entity_map: Mapping[str, SnapshotEntity],
 ) -> list[AnomalyFinding]:
     if not snapshot["derived"]["anyone_home"]:
         return []
-    params = rule.get("params") or {}
+    params = _rule_params(rule)
     lock_id = params.get("lock_entity_id")
     if not lock_id:
         return []
@@ -150,13 +157,13 @@ def _eval_unlocked_lock_when_home(
 
 
 def _eval_motion_without_camera_activity(
-    snapshot: FullStateSnapshot,
+    _snapshot: FullStateSnapshot,
     rule: dict[str, Any],
-    entity_map: dict[str, dict[str, Any]],
-    camera_map: dict[str, dict[str, Any]],
+    entity_map: Mapping[str, SnapshotEntity],
+    camera_map: Mapping[str, CameraActivity],
 ) -> list[AnomalyFinding]:
-    params = rule.get("params") or {}
-    motion_ids = params.get("motion_entity_ids", [])
+    params = _rule_params(rule)
+    motion_ids = params.get("motion_entity_ids")
     camera_id = params.get("camera_entity_id")
     if not camera_id or not isinstance(motion_ids, list):
         return []
@@ -182,10 +189,10 @@ def _eval_motion_without_camera_activity(
     return findings
 
 
-def _eval_open_entry_with_context(
+def _eval_open_entry_with_context(  # noqa: PLR0913
     snapshot: FullStateSnapshot,
     rule: dict[str, Any],
-    entity_map: dict[str, dict[str, Any]],
+    entity_map: Mapping[str, SnapshotEntity],
     *,
     require_home: bool,
     require_away: bool,
@@ -200,8 +207,8 @@ def _eval_open_entry_with_context(
     if require_night and not is_night:
         return []
 
-    params = rule.get("params") or {}
-    entry_ids = params.get("entry_entity_ids", [])
+    params = _rule_params(rule)
+    entry_ids = params.get("entry_entity_ids")
     if not isinstance(entry_ids, list):
         return []
 
@@ -226,7 +233,7 @@ def _eval_open_entry_with_context(
 def _eval_open_any_window_at_night_while_away(
     snapshot: FullStateSnapshot,
     rule: dict[str, Any],
-    entity_map: dict[str, dict[str, Any]],
+    entity_map: Mapping[str, SnapshotEntity],
 ) -> list[AnomalyFinding]:
     if snapshot["derived"]["anyone_home"]:
         return []
@@ -253,7 +260,7 @@ def _eval_open_any_window_at_night_while_away(
 
 
 def _find_open_window_entity_ids(
-    entity_map: dict[str, dict[str, Any]],
+    entity_map: Mapping[str, SnapshotEntity],
 ) -> list[str]:
     window_ids: list[str] = []
     for entity_id, entity in entity_map.items():
@@ -274,8 +281,11 @@ def _build_finding(
     evidence: dict[str, Any],
 ) -> AnomalyFinding:
     rule_id = str(rule.get("rule_id") or "dynamic_rule")
-    severity = str(rule.get("severity") or "low")
-    if severity not in _SEVERITIES:
+    severity_value = str(rule.get("severity") or "low")
+    severity: Severity
+    if severity_value in _SEVERITIES:
+        severity = cast("Severity", severity_value)
+    else:
         severity = "low"
     confidence = _coerce_float(rule.get("confidence"), default=0.5)
     suggested_actions = rule.get("suggested_actions") or []
@@ -300,3 +310,11 @@ def _coerce_float(value: Any, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _rule_params(rule: dict[str, Any]) -> dict[str, Any]:
+    """Return normalized params from a dynamic rule payload."""
+    params = rule.get("params")
+    if isinstance(params, dict):
+        return params
+    return {}

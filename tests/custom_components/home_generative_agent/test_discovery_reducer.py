@@ -6,6 +6,7 @@ from __future__ import annotations
 from custom_components.home_generative_agent.snapshot.discovery_reducer import (
     reduce_snapshot_for_discovery,
 )
+from custom_components.home_generative_agent.snapshot.schema import validate_snapshot
 
 
 def test_reduce_snapshot_filters_entities() -> None:
@@ -65,7 +66,7 @@ def test_reduce_snapshot_filters_entities() -> None:
         },
     }
 
-    reduced = reduce_snapshot_for_discovery(snapshot)
+    reduced = reduce_snapshot_for_discovery(validate_snapshot(snapshot))
     assert len(reduced["entities"]) == 2
     assert reduced["entities"][0]["entity_id"] == "binary_sensor.front_door"
     assert reduced["camera_activity"][0]["camera_entity_id"] == "camera.front"

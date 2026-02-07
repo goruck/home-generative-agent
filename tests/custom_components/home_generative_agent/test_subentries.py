@@ -99,8 +99,8 @@ class DummyEntry:
 
 def _patch_entry(flow: Any, entry: DummyEntry) -> None:
     """Attach hass/entry to a subentry flow."""
-    flow._get_entry = lambda: entry  # type: ignore[attr-defined]  # noqa: SLF001
-    flow._source = "user"  # noqa: SLF001
+    flow._get_entry = lambda: entry  # type: ignore[attr-defined]
+    flow._source = "user"
     flow.context = {"source": "user"}
 
 
@@ -146,7 +146,7 @@ async def test_stt_provider_flow_reuses_openai_provider(
         "type": "abort",
         "reason": kwargs.get("reason"),
     }
-    flow._schedule_reload = lambda: None  # type: ignore[assignment]  # noqa: SLF001
+    flow._schedule_reload = lambda: None  # type: ignore[assignment]
     _patch_entry(flow, entry)
 
     async def _noop_validate(*_args: Any, **_kwargs: Any) -> None:
@@ -201,7 +201,7 @@ async def test_stt_provider_flow_uses_separate_key(
         "type": "abort",
         "reason": kwargs.get("reason"),
     }
-    flow._schedule_reload = lambda: None  # type: ignore[assignment]  # noqa: SLF001
+    flow._schedule_reload = lambda: None  # type: ignore[assignment]
     _patch_entry(flow, entry)
 
     async def _noop_validate(*_args: Any, **_kwargs: Any) -> None:
@@ -252,7 +252,7 @@ async def test_model_provider_flow_creates_ollama(
         "type": "abort",
         "reason": kwargs.get("reason"),
     }
-    flow._schedule_reload = lambda: None  # type: ignore[assignment]  # noqa: SLF001
+    flow._schedule_reload = lambda: None  # type: ignore[assignment]
     _patch_entry(flow, entry)
 
     async def _noop_validate(*_args: Any, **_kwargs: Any) -> None:
@@ -325,7 +325,7 @@ async def test_feature_flow_links_provider(hass: HomeAssistant) -> None:
     flow.hass.config_entries.async_update_subentry = (  # type: ignore[assignment]
         _update_subentry
     )
-    flow._schedule_reload = lambda: None  # type: ignore[assignment]  # noqa: SLF001
+    flow._schedule_reload = lambda: None  # type: ignore[assignment]
     _patch_entry(flow, entry)
     flow.context["subentry_id"] = feature.subentry_id
 
@@ -501,9 +501,7 @@ async def test_migration_creates_provider_and_feature_subentries(
         if s.subentry_type == SUBENTRY_TYPE_MODEL_PROVIDER
     ]
     features = [
-        s
-        for s in entry.subentries.values()
-        if s.subentry_type == SUBENTRY_TYPE_FEATURE
+        s for s in entry.subentries.values() if s.subentry_type == SUBENTRY_TYPE_FEATURE
     ]
     sentinel = [
         s

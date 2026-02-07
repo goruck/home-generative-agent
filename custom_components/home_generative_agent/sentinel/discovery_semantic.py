@@ -5,7 +5,9 @@ from __future__ import annotations
 from typing import Any
 
 
-def candidate_semantic_key(candidate: dict[str, Any]) -> str | None:
+def candidate_semantic_key(  # noqa: PLR0912, PLR0915
+    candidate: dict[str, Any],
+) -> str | None:
     """Build a stable semantic key for a discovery candidate."""
     evidence_paths = _string_list(candidate.get("evidence_paths"))
     text = " ".join(
@@ -17,17 +19,19 @@ def candidate_semantic_key(candidate: dict[str, Any]) -> str | None:
         ]
     ).lower()
     entity_ids = _extract_entity_ids(evidence_paths)
-    lock_ids = sorted(entity_id for entity_id in entity_ids if entity_id.startswith("lock."))
-    window_ids = sorted(
-        entity_id for entity_id in entity_ids if "window" in entity_id
+    lock_ids = sorted(
+        entity_id for entity_id in entity_ids if entity_id.startswith("lock.")
     )
+    window_ids = sorted(entity_id for entity_id in entity_ids if "window" in entity_id)
     door_ids = sorted(
         entity_id
         for entity_id in entity_ids
         if "door" in entity_id or "entry" in entity_id
     )
     motion_ids = sorted(
-        entity_id for entity_id in entity_ids if "motion" in entity_id or "vmd" in entity_id
+        entity_id
+        for entity_id in entity_ids
+        if "motion" in entity_id or "vmd" in entity_id
     )
     alarm_ids = sorted(
         entity_id
@@ -68,7 +72,9 @@ def candidate_semantic_key(candidate: dict[str, Any]) -> str | None:
         night = "1"
 
     home = "any"
-    if _contains_any(text, ("no one home", "nobody home", "away", "empty", "unoccupied")):
+    if _contains_any(
+        text, ("no one home", "nobody home", "away", "empty", "unoccupied")
+    ):
         home = "0"
     elif _contains_any(text, ("someone home", "occupied", "home", "present")):
         home = "1"
@@ -88,7 +94,7 @@ def candidate_semantic_key(candidate: dict[str, Any]) -> str | None:
     )
 
 
-def rule_semantic_key(rule: dict[str, Any]) -> str | None:
+def rule_semantic_key(rule: dict[str, Any]) -> str | None:  # noqa: PLR0911
     """Build a stable semantic key for an active/generated rule."""
     template_id = str(rule.get("template_id", ""))
     params = rule.get("params", {}) or {}
@@ -104,7 +110,11 @@ def rule_semantic_key(rule: dict[str, Any]) -> str | None:
         entry_ids = sorted(set(_string_list(params.get("entry_entity_ids"))))
         if not entry_ids:
             return None
-        entry_subject = "entry_window" if any("window" in item for item in entry_ids) else "entry_door"
+        entry_subject = (
+            "entry_window"
+            if any("window" in item for item in entry_ids)
+            else "entry_door"
+        )
         return (
             f"v1|subject={entry_subject}|predicate=open|night=any|home=any|scope=any|"
             f"entities={','.join(entry_ids)}"

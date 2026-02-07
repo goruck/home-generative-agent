@@ -8,12 +8,17 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
+    from custom_components.home_generative_agent.audit.store import AuditStore
+    from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
+from custom_components.home_generative_agent.sentinel.suppression import (
+    SuppressionManager,
+    resolve_prompt,
+)
+
 LOGGER = logging.getLogger(__name__)
-from ..audit.store import AuditStore
-from ..sentinel.models import AnomalyFinding
-from ..sentinel.suppression import SuppressionManager, resolve_prompt
 
 ACTION_PREFIX = "hga_sentinel_"
+ACTION_ID_PARTS = 2
 
 
 class ActionHandler:
@@ -25,6 +30,7 @@ class ActionHandler:
         suppression: SuppressionManager,
         audit_store: AuditStore,
     ) -> None:
+        """Initialize action handling dependencies."""
         self._suppression = suppression
         self._audit_store = audit_store
         self._pending_findings: dict[str, AnomalyFinding] = {}
@@ -38,7 +44,7 @@ class ActionHandler:
         if not action_id.startswith(ACTION_PREFIX):
             return
         parts = action_id.removeprefix(ACTION_PREFIX).split("_", 1)
-        if len(parts) != 2:
+        if len(parts) != ACTION_ID_PARTS:
             return
         action, anomaly_id = parts
         LOGGER.info("Handling sentinel action %s for %s.", action, anomaly_id)

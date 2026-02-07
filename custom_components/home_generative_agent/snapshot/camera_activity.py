@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from homeassistant.core import State
 from homeassistant.util import dt as dt_util
 
-from .schema import CameraActivity
+if TYPE_CHECKING:
+    from homeassistant.core import State
+
+    from .schema import CameraActivity
 
 _MOTION_KEYS = (
     "motion_detection_entity",
@@ -53,7 +55,7 @@ def _coerce_iso(value: Any) -> str | None:
     return str(value)
 
 
-def extract_camera_activity(
+def extract_camera_activity(  # noqa: PLR0912
     camera_state: State,
     area_name: str | None,
     image_state: State | None = None,

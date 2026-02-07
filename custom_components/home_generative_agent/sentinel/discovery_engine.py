@@ -3,26 +3,36 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import voluptuous as vol
-from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from ..const import (
+from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS,
 )
-from ..explain.discovery_prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
-from ..snapshot.builder import async_build_full_state_snapshot
-from ..snapshot.discovery_reducer import reduce_snapshot_for_discovery
-from .discovery_semantic import candidate_semantic_key, rule_semantic_key
+from custom_components.home_generative_agent.explain.discovery_prompts import (
+    SYSTEM_PROMPT,
+    USER_PROMPT_TEMPLATE,
+)
+from custom_components.home_generative_agent.snapshot.builder import (
+    async_build_full_state_snapshot,
+)
+from custom_components.home_generative_agent.snapshot.discovery_reducer import (
+    reduce_snapshot_for_discovery,
+)
+
 from .discovery_schema import DISCOVERY_OUTPUT_SCHEMA, DISCOVERY_SCHEMA_VERSION
-from .discovery_store import DiscoveryStore
+from .discovery_semantic import candidate_semantic_key, rule_semantic_key
 
 if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
+
+    from .discovery_store import DiscoveryStore
     from .proposal_store import ProposalStore
     from .rule_registry import RuleRegistry
 
@@ -32,15 +42,16 @@ LOGGER = logging.getLogger(__name__)
 class SentinelDiscoveryEngine:
     """Periodic LLM discovery loop (advisory only)."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         hass: HomeAssistant,
         options: dict[str, object],
         model: Any,
         store: DiscoveryStore,
-        rule_registry: "RuleRegistry | None" = None,
-        proposal_store: "ProposalStore | None" = None,
+        rule_registry: RuleRegistry | None = None,
+        proposal_store: ProposalStore | None = None,
     ) -> None:
+        """Initialize advisory discovery dependencies and runtime state."""
         self._hass = hass
         self._options = options
         self._model = model
@@ -63,25 +74,23 @@ class SentinelDiscoveryEngine:
             return
         self._stop_event.set()
         self._task.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await self._task
-        except asyncio.CancelledError:
-            pass
         self._task = None
 
     async def _run_loop(self) -> None:
-        interval = int(
-            self._options.get(CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS, 3600)
+        interval = _coerce_int(
+            self._options.get(CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS), default=3600
         )
         LOGGER.info("Sentinel discovery loop started (interval=%ss).", interval)
         while not self._stop_event.is_set():
             await self._run_once()
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=interval)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
-    async def _run_once(self) -> None:
+    async def _run_once(self) -> None:  # noqa: PLR0911
         if self._model is None:
             LOGGER.debug("Discovery skipped: no model available.")
             return
@@ -125,21 +134,25 @@ class SentinelDiscoveryEngine:
         payload.setdefault("model", str(getattr(self._model, "model", "unknown")))
 
         try:
-            validated = DISCOVERY_OUTPUT_SCHEMA(payload)
+            validated = cast("dict[str, Any]", DISCOVERY_OUTPUT_SCHEMA(payload))
         except vol.Invalid:
             LOGGER.warning("Discovery output failed schema validation.")
             return
 
+        raw_candidates = validated.get("candidates", [])
+        if not isinstance(raw_candidates, list):
+            LOGGER.warning("Discovery output candidates were not a list.")
+            return
+        candidates = [item for item in raw_candidates if isinstance(item, dict)]
         filtered, filtered_candidates = self._filter_novel_candidates(
-            validated.get("candidates", []),
+            candidates,
             existing_keys,
         )
         validated["candidates"] = filtered
         validated["filtered_candidates"] = filtered_candidates
         if not filtered:
             LOGGER.info(
-                "Discovery produced no novel candidates after dedupe "
-                "(filtered=%s).",
+                "Discovery produced no novel candidates after dedupe (filtered=%s).",
                 len(filtered_candidates),
             )
         else:
@@ -154,7 +167,9 @@ class SentinelDiscoveryEngine:
             "Discovery stored %s candidate(s).", len(validated.get("candidates", []))
         )
 
-    async def _existing_semantic_context(self) -> tuple[set[str], set[str]]:
+    async def _existing_semantic_context(  # noqa: PLR0912
+        self,
+    ) -> tuple[set[str], set[str]]:
         active_rule_ids: set[str] = set()
         semantic_keys: set[str] = set()
 
@@ -184,7 +199,9 @@ class SentinelDiscoveryEngine:
             for candidate in payload.get("candidates", []):
                 if not isinstance(candidate, dict):
                     continue
-                key = str(candidate.get("semantic_key", "")) or candidate_semantic_key(candidate)
+                key = str(candidate.get("semantic_key", "")) or candidate_semantic_key(
+                    candidate
+                )
                 if key:
                     semantic_keys.add(key)
 
@@ -227,3 +244,19 @@ class SentinelDiscoveryEngine:
             enriched["dedupe_reason"] = "novel"
             filtered.append(enriched)
         return filtered, dropped
+
+
+def _coerce_int(value: object | None, default: int) -> int:
+    """Coerce option values to int with a deterministic fallback."""
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return default
+    return default

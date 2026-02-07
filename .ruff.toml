@@ -15,6 +15,18 @@ ignore = [
     "ISC001", # incompatible with formatter
 ]
 
+[lint.per-file-ignores]
+"tests/**/*.py" = [
+    "ANN001", # Allow untyped pytest fixture args
+    "ARG002", # Allow unused args in test doubles
+    "D102",   # Test helper methods do not require docstrings
+    "D103",   # Test functions do not require docstrings
+    "D107",   # Test helper initializers do not require docstrings
+    "E501",   # Allow long assertion/import lines in tests
+    "PLR2004", # Magic values in assertions are acceptable in tests
+    "SLF001", # Tests can access private members for white-box behavior checks
+]
+
 [lint.flake8-pytest-style]
 fixture-parentheses = false
 

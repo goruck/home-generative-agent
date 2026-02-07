@@ -97,4 +97,4 @@ SNAPSHOT_SCHEMA = vol.Schema(
 def validate_snapshot(snapshot: dict[str, Any]) -> FullStateSnapshot:
     """Validate and return a snapshot using the canonical schema."""
     validated = SNAPSHOT_SCHEMA(snapshot)
-    return cast(FullStateSnapshot, validated)
+    return cast("FullStateSnapshot", validated)

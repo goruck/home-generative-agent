@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import timedelta
+from typing import TYPE_CHECKING
 
 from homeassistant.util import dt as dt_util
 
-from ...snapshot.schema import FullStateSnapshot
-from ..models import AnomalyFinding, build_anomaly_id
+from custom_components.home_generative_agent.sentinel.models import (
+    AnomalyFinding,
+    build_anomaly_id,
+)
+
+if TYPE_CHECKING:
+    from custom_components.home_generative_agent.snapshot.schema import (
+        FullStateSnapshot,
+    )
 
 DEFAULT_POWER_THRESHOLD_W = 100.0
 DEFAULT_DURATION_MIN = 60
@@ -23,10 +31,12 @@ class AppliancePowerDurationRule:
         power_threshold_w: float = DEFAULT_POWER_THRESHOLD_W,
         duration_min: int = DEFAULT_DURATION_MIN,
     ) -> None:
+        """Initialize thresholds for sustained appliance power usage."""
         self._power_threshold_w = power_threshold_w
         self._duration_min = duration_min
 
     def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:
+        """Return findings for sensors above threshold for a long duration."""
         findings: list[AnomalyFinding] = []
         now = dt_util.parse_datetime(snapshot["derived"]["now"]) or dt_util.utcnow()
         threshold = timedelta(minutes=self._duration_min)

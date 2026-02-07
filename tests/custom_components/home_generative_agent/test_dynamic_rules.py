@@ -3,15 +3,26 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, cast
+
 import pytest
 
 from custom_components.home_generative_agent.sentinel.dynamic_rules import (
     evaluate_dynamic_rules,
 )
 from custom_components.home_generative_agent.sentinel.rule_registry import RuleRegistry
+from custom_components.home_generative_agent.snapshot.schema import (
+    CameraActivity,
+    FullStateSnapshot,
+    SnapshotEntity,
+    validate_snapshot,
+)
+
+if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
 
 
-def _base_entity(entity_id: str, domain: str, state: str) -> dict:
+def _base_entity(entity_id: str, domain: str, state: str) -> SnapshotEntity:
     return {
         "entity_id": entity_id,
         "domain": domain,
@@ -24,14 +35,19 @@ def _base_entity(entity_id: str, domain: str, state: str) -> dict:
     }
 
 
-def _snapshot(entities: list[dict], camera_activity: list[dict], derived: dict) -> dict:
-    return {
+def _snapshot(
+    entities: list[SnapshotEntity],
+    camera_activity: list[CameraActivity],
+    derived: dict[str, object],
+) -> FullStateSnapshot:
+    snapshot = {
         "schema_version": 1,
         "generated_at": "2026-02-01T00:00:00+00:00",
         "entities": entities,
         "camera_activity": camera_activity,
         "derived": derived,
     }
+    return validate_snapshot(snapshot)
 
 
 def test_dynamic_rule_alarm_disarmed_open_entry() -> None:
@@ -209,7 +225,7 @@ def test_dynamic_rule_open_any_window_at_night_while_away() -> None:
 
 @pytest.mark.asyncio
 async def test_rule_registry_add_duplicate(hass) -> None:
-    registry = RuleRegistry(hass)
+    registry = RuleRegistry(hass=cast("HomeAssistant", hass))
     await registry.async_load()
     rule = {"rule_id": "rule_1", "template_id": "alarm_disarmed_open_entry"}
     assert await registry.async_add_rule(rule)

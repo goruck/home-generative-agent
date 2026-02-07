@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from .prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
-from ..sentinel.models import AnomalyFinding
+
+if TYPE_CHECKING:
+    from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
 
 LOGGER = logging.getLogger(__name__)
 
@@ -17,6 +19,7 @@ class LLMExplainer:
     """Generate non-authoritative explanation text for findings."""
 
     def __init__(self, model: Any) -> None:
+        """Initialize the explainer with an optional LLM model."""
         self._model = model
 
     async def async_explain(self, finding: AnomalyFinding) -> str | None:

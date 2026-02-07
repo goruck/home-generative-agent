@@ -24,13 +24,11 @@ from homeassistant.const import (
     CONF_PASSWORD,
     CONF_PORT,
     CONF_USERNAME,
-    Platform,
-)
-from homeassistant.core import (
     EVENT_HOMEASSISTANT_STARTED,
     EVENT_HOMEASSISTANT_STOP,
-    HomeAssistant,
+    Platform,
 )
+from homeassistant.core import HomeAssistant, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.httpx_client import get_async_client
@@ -228,12 +226,7 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
-try:
-    from homeassistant.core import ServiceResponseType
-
-    _SERVICE_RESPONSE_ONLY = ServiceResponseType.ONLY
-except ImportError:
-    _SERVICE_RESPONSE_ONLY = True
+_SERVICE_RESPONSE_ONLY = SupportsResponse.ONLY
 
 PLATFORMS = (Platform.CONVERSATION, Platform.STT, "image", "sensor")
 
@@ -1157,6 +1150,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         if hass.is_running:
             sentinel.start()
         else:
+
             def _start_sentinel(_event: object) -> None:
                 hass.loop.call_soon_threadsafe(sentinel.start)
 
@@ -1168,6 +1162,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         if hass.is_running:
             discovery_engine.start()
         else:
+
             def _start_discovery(_event: object) -> None:
                 hass.loop.call_soon_threadsafe(discovery_engine.start)
 
@@ -1314,9 +1309,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     "candidate_id": candidate_id,
                     "rule_id": normalized.rule_id,
                 }
-            if (
-                rule_registry is not None
-                and rule_registry.find_rule(normalized.rule_id)
+            if rule_registry is not None and rule_registry.find_rule(
+                normalized.rule_id
             ):
                 LOGGER.info(
                     "Skipping promote for %s: rule %s already active.",

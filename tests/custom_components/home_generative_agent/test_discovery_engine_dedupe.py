@@ -3,22 +3,31 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any, cast
+
 from custom_components.home_generative_agent.sentinel.discovery_engine import (
     SentinelDiscoveryEngine,
 )
 
+if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
+
+    from custom_components.home_generative_agent.sentinel.discovery_store import (
+        DiscoveryStore,
+    )
+
 
 class _DummyStore:
-    async def async_get_latest(self, _limit: int):
+    async def async_get_latest(self, _limit: int) -> list[dict[str, Any]]:
         return []
 
 
 def test_filter_novel_candidates_drops_existing_and_batch_duplicates() -> None:
     engine = SentinelDiscoveryEngine(
-        hass=object(),
+        hass=cast("HomeAssistant", object()),
         options={},
         model=None,
-        store=_DummyStore(),
+        store=cast("DiscoveryStore", _DummyStore()),
     )
     candidates = [
         {
@@ -61,10 +70,10 @@ def test_filter_novel_candidates_drops_existing_and_batch_duplicates() -> None:
 
 def test_filter_novel_candidates_sets_novel_reason() -> None:
     engine = SentinelDiscoveryEngine(
-        hass=object(),
+        hass=cast("HomeAssistant", object()),
         options={},
         model=None,
-        store=_DummyStore(),
+        store=cast("DiscoveryStore", _DummyStore()),
     )
     candidates = [
         {

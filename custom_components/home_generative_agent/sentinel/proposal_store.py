@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.storage import Store
+
+if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
 
 STORE_VERSION = 1
 STORE_KEY = "home_generative_agent_sentinel_proposals"
@@ -16,6 +18,7 @@ class ProposalStore:
     """Persist discovery-derived proposal drafts."""
 
     def __init__(self, hass: HomeAssistant) -> None:
+        """Initialize persistent proposal storage."""
         self._store = Store(hass, STORE_VERSION, STORE_KEY)
         self._records: list[dict[str, Any]] = []
 

@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from homeassistant.core import HomeAssistant, State
 from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
@@ -14,11 +13,14 @@ from homeassistant.util import dt as dt_util
 from .camera_activity import extract_camera_activity
 from .derived import derive_context
 from .schema import (
-    FullStateSnapshot,
     SNAPSHOT_SCHEMA_VERSION,
+    FullStateSnapshot,
     SnapshotEntity,
     validate_snapshot,
 )
+
+if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant, State
 
 
 def _as_iso(value: datetime) -> str:
@@ -60,7 +62,7 @@ def _build_area_lookup(hass: HomeAssistant) -> dict[str, str | None]:
     lookup: dict[str, str | None] = {}
     for entity_id, entry in entity_registry.entities.items():
         area_id = entry.area_id
-        lookup[entity_id] = area_names.get(area_id)
+        lookup[entity_id] = area_names.get(area_id) if area_id is not None else None
     return lookup
 
 
@@ -112,5 +114,4 @@ async def async_build_full_state_snapshot(hass: HomeAssistant) -> FullStateSnaps
         "derived": derived,
     }
 
-    validated = validate_snapshot(snapshot)
-    return validated
+    return validate_snapshot(snapshot)

@@ -2,8 +2,17 @@
 
 from __future__ import annotations
 
-from ...snapshot.schema import FullStateSnapshot
-from ..models import AnomalyFinding, build_anomaly_id
+from typing import TYPE_CHECKING
+
+from custom_components.home_generative_agent.sentinel.models import (
+    AnomalyFinding,
+    build_anomaly_id,
+)
+
+if TYPE_CHECKING:
+    from custom_components.home_generative_agent.snapshot.schema import (
+        FullStateSnapshot,
+    )
 
 _ENTRY_CLASSES = {"door", "window", "opening"}
 
@@ -14,6 +23,7 @@ class OpenEntryWhileAwayRule:
     rule_id = "open_entry_while_away"
 
     def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:
+        """Return findings for open entries while nobody is home."""
         if snapshot["derived"]["anyone_home"]:
             return []
 

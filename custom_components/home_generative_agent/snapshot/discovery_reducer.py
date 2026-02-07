@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from .schema import FullStateSnapshot
+if TYPE_CHECKING:
+    from .schema import FullStateSnapshot
 
 _ALLOWED_DOMAINS = {
     "alarm_control_panel",
@@ -50,17 +51,16 @@ def reduce_snapshot_for_discovery(snapshot: FullStateSnapshot) -> dict[str, Any]
     if len(reduced_entities) > _MAX_ENTITIES:
         reduced_entities = reduced_entities[:_MAX_ENTITIES]
 
-    reduced_camera_activity: list[dict[str, Any]] = []
-    for camera in snapshot["camera_activity"]:
-        reduced_camera_activity.append(
-            {
-                "camera_entity_id": camera["camera_entity_id"],
-                "area": camera.get("area"),
-                "last_activity": camera.get("last_activity"),
-                "snapshot_summary": camera.get("snapshot_summary"),
-                "recognized_people": camera.get("recognized_people", []),
-            }
-        )
+    reduced_camera_activity: list[dict[str, Any]] = [
+        {
+            "camera_entity_id": camera["camera_entity_id"],
+            "area": camera.get("area"),
+            "last_activity": camera.get("last_activity"),
+            "snapshot_summary": camera.get("snapshot_summary"),
+            "recognized_people": camera.get("recognized_people", []),
+        }
+        for camera in snapshot["camera_activity"]
+    ]
 
     reduced_camera_activity.sort(key=lambda item: item["camera_entity_id"])
     if len(reduced_camera_activity) > _MAX_CAMERA_ACTIVITY:

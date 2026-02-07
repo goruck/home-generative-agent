@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.storage import Store
+
+if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
 
 STORE_VERSION = 1
 STORE_KEY = "home_generative_agent_sentinel_rule_registry"
@@ -18,6 +20,7 @@ class RuleRegistry:
     """Persist enabled dynamic rules."""
 
     def __init__(self, hass: HomeAssistant) -> None:
+        """Initialize dynamic rule storage."""
         self._store = Store(hass, STORE_VERSION, STORE_KEY)
         self._rules: list[dict[str, Any]] = []
 

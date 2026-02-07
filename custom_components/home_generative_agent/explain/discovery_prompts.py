@@ -23,5 +23,6 @@ USER_PROMPT_TEMPLATE = (
     "Only return novel candidates that are not already covered by active rules "
     "or existing semantic keys.\n"
     "Do NOT output user queries or commands; only anomaly ideas.\n"
-    "Return at most 3 candidates. Each candidate MUST include no more than 8 evidence_paths."
+    "Return at most 3 candidates. "
+    "Each candidate MUST include no more than 8 evidence_paths."
 )
