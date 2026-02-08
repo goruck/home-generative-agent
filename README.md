@@ -166,6 +166,19 @@ Sentinel is a singleton service per Home Generative Agent config entry. Configur
 
 Important: The LLM never executes actions or directly decides runtime safety behavior. Detection and actuation remain deterministic.
 
+### Sentinel Notification Behavior
+
+When Sentinel notifications are enabled:
+
+- Mobile push explanation text is compact and plain-language (targeted for small screens).
+- Explanation text is normalized before send (markdown/backticks removed, whitespace collapsed).
+- If explanation text is missing or too long, Sentinel uses a deterministic fallback message.
+- Fallback urgency wording depends on severity:
+  - `high`: `Urgent: check and secure it now.`
+  - `medium`: `Check soon and secure it if unexpected.`
+  - `low`: `Review when convenient.`
+- Mobile action buttons are: `Acknowledge`, `Ignore`, `Later`.
+
 ### Supported Generated Rule Templates
 
 - `unlocked_lock_when_home`
