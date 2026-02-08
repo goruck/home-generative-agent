@@ -18,7 +18,9 @@ from custom_components.home_generative_agent.const import (
     SIGNAL_HGA_RECOGNIZED,
     VIDEO_ANALYZER_SNAPSHOT_ROOT,
 )
-from custom_components.home_generative_agent.core.video_helpers import latest_target
+from custom_components.home_generative_agent.core.video_helpers import (
+    latest_target,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence

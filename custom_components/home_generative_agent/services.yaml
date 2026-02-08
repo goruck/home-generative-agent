@@ -53,3 +53,102 @@ save_and_analyze_snapshot:
           step: 1
           unit_of_measurement: min
           mode: box
+
+get_audit_records:
+  name: Get audit records
+  description: Return the latest sentinel audit records (read-only).
+  fields:
+    limit:
+      name: Limit
+      description: Maximum number of records to return.
+      default: 20
+      selector:
+        number:
+          min: 1
+          max: 200
+          step: 1
+          mode: box
+
+get_discovery_records:
+  name: Get discovery records
+  description: Return the latest sentinel discovery records (read-only).
+  fields:
+    limit:
+      name: Limit
+      description: Maximum number of records to return.
+      default: 20
+      selector:
+        number:
+          min: 1
+          max: 200
+          step: 1
+          mode: box
+
+promote_discovery_candidate:
+  name: Promote discovery candidate
+  description: Promote a discovery candidate into a proposal draft.
+  fields:
+    candidate_id:
+      name: Candidate ID
+      description: Candidate ID from discovery output.
+      required: true
+      example: "c1"
+      selector:
+        text:
+    notes:
+      name: Notes
+      description: Optional notes to attach to the draft.
+      required: false
+      selector:
+        text:
+
+get_proposal_drafts:
+  name: Get proposal drafts
+  description: Return the latest proposal drafts (read-only).
+  fields:
+    limit:
+      name: Limit
+      description: Maximum number of records to return.
+      default: 50
+      selector:
+        number:
+          min: 1
+          max: 200
+          step: 1
+          mode: box
+
+approve_rule_proposal:
+  name: Approve rule proposal
+  description: Approve a proposal draft by candidate ID and register a deterministic rule if supported.
+  fields:
+    candidate_id:
+      name: Candidate ID
+      description: Candidate ID from discovery output.
+      required: true
+      example: "c1"
+      selector:
+        text:
+    notes:
+      name: Notes
+      description: Optional approval notes.
+      required: false
+      selector:
+        text:
+
+reject_rule_proposal:
+  name: Reject rule proposal
+  description: Reject a proposal draft by candidate ID.
+  fields:
+    candidate_id:
+      name: Candidate ID
+      description: Candidate ID from discovery output.
+      required: true
+      example: "c1"
+      selector:
+        text:
+    notes:
+      name: Notes
+      description: Optional rejection notes.
+      required: false
+      selector:
+        text:

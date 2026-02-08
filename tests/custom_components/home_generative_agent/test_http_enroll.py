@@ -65,6 +65,16 @@ class DummyEntry:
             face_recognition=False,
             person_gallery=dao,
             pending_actions={},
+            suppression=None,
+            sentinel=None,
+            notifier=None,
+            action_handler=None,
+            audit_store=None,
+            explainer=None,
+            discovery_store=None,
+            discovery_engine=None,
+            proposal_store=None,
+            rule_registry=None,
         )
 
 

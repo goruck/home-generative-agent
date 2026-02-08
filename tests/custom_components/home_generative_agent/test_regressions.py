@@ -80,9 +80,7 @@ def test_filter_data_total_increasing_empty(hass: HomeAssistant) -> None:
         },
     )
 
-    result = agent_tools._filter_data(  # noqa: SLF001
-        "sensor.energy", [{"state": "unknown"}], hass
-    )
+    result = agent_tools._filter_data("sensor.energy", [{"state": "unknown"}], hass)
     assert result["value"] == 0.0
     assert result["units"] == "kWh"
 
@@ -116,7 +114,7 @@ def test_last_event_image_recognized_mapping(
     monkeypatch.setattr(entity, "async_write_ha_state", lambda: None)
 
     latest_path = tmp_path / "latest.jpg"
-    entity._on_recognized(  # noqa: SLF001
+    entity._on_recognized(
         "camera.test",
         ["Alice"],
         "Porch activity",
@@ -124,7 +122,7 @@ def test_last_event_image_recognized_mapping(
         str(latest_path),
     )
 
-    attrs = entity._attrs  # noqa: SLF001
+    attrs = entity._attrs
     assert attrs["recognized_people"] == ["Alice"]
     assert attrs["summary"] == "Porch activity"
     assert attrs["last_event"] == "2025-01-01T00:00:00+0000"
@@ -152,7 +150,7 @@ async def test_person_gallery_invalid_embedding(
             return _FakeResp()
 
     dao = PersonGalleryDAO(cast("Any", object()), hass)
-    dao._client = _FakeClient()  # type: ignore[assignment]  # noqa: SLF001
+    dao._client = _FakeClient()  # type: ignore[assignment]
 
     async def _fail_add_person(*_args: object, **_kwargs: object) -> None:
         msg = "add_person should not be called"

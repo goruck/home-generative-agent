@@ -47,7 +47,11 @@ This integration will set up the `conversation` platform, allowing users to conv
 - Go to Developers tools -> Actions -> Enroll Person in the HA UI to enroll a new person into the face database from an image file.
 - If you want the dashboard enrollment card, add the Lovelace resource after installing the integration:
   - Settings -> Dashboards -> Resources -> Add
-  - URL: `/hga-enroll-card/hga-enroll-card.js`
+  - URL: `/hga-card/hga-enroll-card.js`
+  - Type: `JavaScript Module`
+- If you want the Sentinel proposals dashboard card, add this resource as well:
+  - Settings -> Dashboards -> Resources -> Add
+  - URL: `/hga-card/hga-proposals-card.js`
   - Type: `JavaScript Module`
 
 ### Manual (non-HACS install)
@@ -105,12 +109,14 @@ A "feature" is a discrete capability exposed by the integration (for example Con
 3. Click **+ Model Provider** to add a provider (Edge/Cloud → provider → settings).
    - The first provider is automatically assigned to all features with default models.
 4. Use a feature’s gear icon to adjust that feature’s model settings later.
+5. Click **+ Sentinel** to configure proactive Sentinel behavior.
+   - This is where Sentinel runtime, cooldowns, discovery, explanation, and optional notify service are configured.
 
 Embedding model selection: the integration uses the first model provider that supports embeddings (or the feature’s provider when it advertises embedding capability). If you want a different embedding model, add a provider that supports embeddings and select the desired embedding model name in that provider’s defaults, then re-run Setup or reload the integration.
 
 If you want separate Ollama servers per feature, add multiple Model Provider subentries and assign them in each feature’s settings. For example: create a “Primary Ollama” provider pointing at your chat server and a “Vision Ollama” provider pointing at your camera analysis server, then select the appropriate provider on the feature’s model settings step.
 
-Global options (prompt, face recognition URL, context management, critical-action PIN, etc.) live in the integration’s **Options** flow.
+Global options (prompt, face recognition URL, context management, critical-action PIN, etc.) live in the integration’s **Options** flow. Sentinel settings are configured in the **Sentinel** subentry.
 
 ### Speech-to-Text (STT)
 
@@ -159,6 +165,139 @@ The agent will demand the PIN before it:
 If you have an alarm control panel, the agent will ask for that alarm's code when arming or disarming; this code is separate from the critical-action PIN.
 
 When you ask the agent to perform a protected action, it queues the request and asks for the PIN. Reply with the digits to complete the action; after five bad attempts or 10 minutes, the queued action expires and you must ask again. If the guard is enabled but no PIN is configured, the agent will reject the request until you set one in options.
+
+## Sentinel (Proactive Anomaly Detection)
+
+Sentinel adds proactive, deterministic anomaly detection and a review pipeline for generated rule proposals.
+
+Sentinel is a singleton service per Home Generative Agent config entry. Configure exactly one Sentinel subentry.
+
+### Architecture
+
+1. `snapshot`: Builds an authoritative JSON snapshot (entities, camera activity, derived context).
+2. `sentinel`: Runs deterministic rules on that snapshot.
+3. `discovery` (optional): Uses an LLM to suggest rule candidates (advisory only).
+4. `proposal` review: User promotes/approves/rejects candidates.
+5. `rule_registry`: Stores approved generated rules for deterministic runtime evaluation.
+6. `audit`: Persists findings and user action outcomes.
+
+Important: The LLM never executes actions or directly decides runtime safety behavior. Detection and actuation remain deterministic.
+
+### Supported Generated Rule Templates
+
+- `unlocked_lock_when_home`
+- `alarm_disarmed_open_entry`
+- `open_entry_when_home`
+- `open_entry_while_away`
+- `open_entry_at_night_when_home`
+- `open_entry_at_night_while_away`
+- `open_any_window_at_night_while_away`
+- `motion_without_camera_activity`
+
+### Discovery Novelty and Dedupe
+
+Discovery suggestions are deduped in the backend using deterministic semantic keys.
+
+Novelty checks compare candidates against:
+- Active rules in `rule_registry`
+- Existing proposal drafts
+- Recent discovery records
+
+Discovery records may include:
+- `semantic_key`: canonical normalized key for candidate meaning
+- `dedupe_reason`: candidate disposition (`novel`, `existing_semantic_key`, `batch_duplicate`)
+- `filtered_candidates`: candidates removed by dedupe with their reason
+
+### Configuring Discovery
+
+Discovery is configured in the Sentinel subentry:
+
+1. Home Assistant -> `Settings` -> `Devices & Services`
+2. Open `Home Generative Agent`
+3. Select `+ Sentinel` (or reconfigure the existing Sentinel subentry)
+4. Set Sentinel discovery options:
+   - `sentinel_discovery_enabled`
+   - `sentinel_discovery_interval_seconds`
+   - `sentinel_discovery_max_records`
+
+Discovery requires a configured chat model. If no model is available, the discovery loop is skipped.
+
+### Proposal Lifecycle
+
+Proposal draft statuses:
+- `draft`
+- `approved`
+- `rejected`
+- `unsupported`
+- `covered_by_existing_rule`
+
+`covered_by_existing_rule` means the candidate is semantically covered by an active rule and should not be approved as a separate rule. `covered_rule_id` is attached when available.
+
+### Sentinel Services
+
+- `home_generative_agent.get_discovery_records`
+- `home_generative_agent.promote_discovery_candidate`
+- `home_generative_agent.get_proposal_drafts`
+- `home_generative_agent.approve_rule_proposal`
+- `home_generative_agent.reject_rule_proposal`
+- `home_generative_agent.get_audit_records`
+
+Typical response fields:
+- `status`
+- `candidate_id`
+- `rule_id`
+- `covered_rule_id`
+
+### Proposals Card (Optional)
+
+If you install `hga-proposals-card.js`, the card can drive the full review flow:
+- Discovery candidates
+- Filtered discovery candidates (with dedupe reasons)
+- Proposal drafts (pending)
+- Proposal history
+
+It also supports:
+- Promote to draft
+- Reject candidate (local dismiss in browser storage)
+- Approve/reject proposal
+- "Request New Template" shortcut to the rule request issue template
+
+Installation:
+1. Go to `Settings -> Dashboards -> Resources -> Add Resource`.
+2. Add:
+   - URL: `/hga-card/hga-proposals-card.js`
+   - Type: `JavaScript Module`
+3. Add the card to a dashboard using a manual card config:
+
+```yaml
+type: custom:hga-proposals-card
+title: Sentinel Proposals
+```
+
+Notes:
+- The card type must include the `custom:` prefix.
+- If the card shows as unknown after adding the resource, hard refresh the browser and reload frontend resources.
+- Legacy resource URLs under `/hga-enroll-card/...` still work for backward compatibility.
+
+When updating card JS, bump the Lovelace resource query string (for example `?v=12`) to avoid stale browser cache.
+
+### Unsupported Proposals
+
+`unsupported` means the candidate could not be mapped to a supported deterministic template.
+
+Preferred handling:
+1. Reject if not useful.
+2. If useful, request a new template via `.github/ISSUE_TEMPLATE/feature_rule_request.yml`.
+3. After template support is added, re-approve the proposal to re-evaluate with current mapping logic.
+
+### Troubleshooting
+
+- If card UI looks unchanged after an update, you are likely serving cached JS.
+- If similar candidates keep appearing, inspect `dedupe_reason` and `filtered_candidates` in discovery records.
+- If a proposal appears duplicate, check logs for:
+  - `Rule registry ignored duplicate rule ...`
+  - `... covered_by_existing_rule ...`
+- Existing stored proposal drafts are not auto-migrated; statuses update when proposals are re-processed.
 
 ## Image and Sensor Entities
 
