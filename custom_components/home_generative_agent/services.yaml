@@ -152,3 +152,42 @@ reject_rule_proposal:
       required: false
       selector:
         text:
+
+get_dynamic_rules:
+  name: Get dynamic rules
+  description: Return dynamic rule registry records including enabled/disabled state.
+  fields:
+    limit:
+      name: Limit
+      description: Maximum number of records to return.
+      default: 200
+      selector:
+        number:
+          min: 1
+          max: 500
+          step: 1
+          mode: box
+
+deactivate_dynamic_rule:
+  name: Deactivate dynamic rule
+  description: Disable a dynamic deterministic rule without removing it.
+  fields:
+    rule_id:
+      name: Rule ID
+      description: Rule ID to deactivate.
+      required: true
+      example: "open_entry_at_night_while_away_window"
+      selector:
+        text:
+
+reactivate_dynamic_rule:
+  name: Reactivate dynamic rule
+  description: Re-enable a previously deactivated dynamic deterministic rule.
+  fields:
+    rule_id:
+      name: Rule ID
+      description: Rule ID to reactivate.
+      required: true
+      example: "open_entry_at_night_while_away_window"
+      selector:
+        text:

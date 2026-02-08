@@ -239,6 +239,9 @@ SERVICE_PROMOTE_DISCOVERY_CANDIDATE = "promote_discovery_candidate"
 SERVICE_GET_PROPOSAL_DRAFTS = "get_proposal_drafts"
 SERVICE_APPROVE_RULE_PROPOSAL = "approve_rule_proposal"
 SERVICE_REJECT_RULE_PROPOSAL = "reject_rule_proposal"
+SERVICE_GET_DYNAMIC_RULES = "get_dynamic_rules"
+SERVICE_DEACTIVATE_DYNAMIC_RULE = "deactivate_dynamic_rule"
+SERVICE_REACTIVATE_DYNAMIC_RULE = "reactivate_dynamic_rule"
 
 ENROLL_SCHEMA = vol.Schema(
     {
@@ -276,6 +279,18 @@ REVIEW_PROPOSAL_SCHEMA = vol.Schema(
     {
         vol.Required("candidate_id"): cv.string,
         vol.Optional("notes"): cv.string,
+    }
+)
+
+GET_DYNAMIC_RULES_SCHEMA = vol.Schema(
+    {
+        vol.Optional("limit", default=200): vol.Coerce(int),
+    }
+)
+
+TOGGLE_DYNAMIC_RULE_SCHEMA = vol.Schema(
+    {
+        vol.Required("rule_id"): cv.string,
     }
 )
 
@@ -1401,6 +1416,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         supports_response=_SERVICE_RESPONSE_ONLY,
     )
 
+    async def _handle_get_dynamic_rules(call: ServiceCall) -> dict[str, Any]:
+        limit = int(call.data.get("limit", 200))
+        limit = max(1, min(limit, 500))
+        rule_registry = entry.runtime_data.rule_registry
+        if rule_registry is None:
+            return {"records": []}
+        records = rule_registry.list_rules(include_disabled=True)
+        return {"records": records[:limit]}
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_GET_DYNAMIC_RULES,
+        _handle_get_dynamic_rules,
+        schema=GET_DYNAMIC_RULES_SCHEMA,
+        supports_response=_SERVICE_RESPONSE_ONLY,
+    )
+
     async def _handle_approve_proposal(call: ServiceCall) -> dict[str, Any]:
         candidate_id = str(call.data.get("candidate_id"))
         notes = str(call.data.get("notes", "") or "")
@@ -1517,6 +1549,38 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         SERVICE_REJECT_RULE_PROPOSAL,
         _handle_reject_proposal,
         schema=REVIEW_PROPOSAL_SCHEMA,
+        supports_response=_SERVICE_RESPONSE_ONLY,
+    )
+
+    async def _handle_deactivate_dynamic_rule(call: ServiceCall) -> dict[str, Any]:
+        rule_id = str(call.data.get("rule_id"))
+        rule_registry = entry.runtime_data.rule_registry
+        if rule_registry is None:
+            return {"status": "unavailable", "rule_id": rule_id}
+        ok = await rule_registry.async_set_rule_enabled(rule_id, enabled=False)
+        return {"status": "ok" if ok else "not_found", "rule_id": rule_id}
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_DEACTIVATE_DYNAMIC_RULE,
+        _handle_deactivate_dynamic_rule,
+        schema=TOGGLE_DYNAMIC_RULE_SCHEMA,
+        supports_response=_SERVICE_RESPONSE_ONLY,
+    )
+
+    async def _handle_reactivate_dynamic_rule(call: ServiceCall) -> dict[str, Any]:
+        rule_id = str(call.data.get("rule_id"))
+        rule_registry = entry.runtime_data.rule_registry
+        if rule_registry is None:
+            return {"status": "unavailable", "rule_id": rule_id}
+        ok = await rule_registry.async_set_rule_enabled(rule_id, enabled=True)
+        return {"status": "ok" if ok else "not_found", "rule_id": rule_id}
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_REACTIVATE_DYNAMIC_RULE,
+        _handle_reactivate_dynamic_rule,
+        schema=TOGGLE_DYNAMIC_RULE_SCHEMA,
         supports_response=_SERVICE_RESPONSE_ONLY,
     )
 
