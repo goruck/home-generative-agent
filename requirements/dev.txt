@@ -1,5 +1,5 @@
 # Development requirements (editor / lint / local dev tools, etc.)
-ruff==0.14.14
+ruff==0.15.0
 colorlog==6.10.1
 pre-commit>=4.0.0
 pyright==1.1.*
