@@ -305,6 +305,13 @@ def _provider_api_key(
     return None
 
 
+def _resolve_www_dir() -> str | None:
+    www_dir = Path(__file__).resolve().parent / "www"
+    if not www_dir.is_dir():
+        return None
+    return str(www_dir)
+
+
 async def _read_enroll_image_bytes(hass: HomeAssistant, file_ref: str) -> bytes:
     if media_source.is_media_source_id(file_ref):
         if file_ref.startswith("media-source://media_source/local/"):
@@ -821,7 +828,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             # Initialize database for long-term memory.
             store = AsyncPostgresStore(
                 pool,
-                index=index_config if index_config else None,
+                index=index_config or None,
             )
             # Initialize database for thread-based (short-term) memory.
             checkpointer = AsyncPostgresSaver(pool)
@@ -1137,13 +1144,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
     if not hass.data[DOMAIN].get("http_registered"):
         hass.http.register_view(EnrollPersonView(hass, entry))
-        www_dir = Path(__file__).resolve().parent / "www"
-        if www_dir.is_dir():
+        www_dir = await hass.async_add_executor_job(_resolve_www_dir)
+        if www_dir is not None:
             await hass.http.async_register_static_paths(
                 [
                     # Canonical prefix for all HGA frontend card modules.
                     StaticPathConfig(
-                        HGA_CARD_STATIC_PATH, str(www_dir), cache_headers=True
+                        HGA_CARD_STATIC_PATH,
+                        str(www_dir),
+                        cache_headers=True,
                     ),
                     # Backward-compatible alias for existing enroll card resources.
                     StaticPathConfig(

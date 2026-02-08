@@ -394,7 +394,7 @@ class VideoAnalyzer:
             identities = identities or []
 
             subject = format_subject(identities, text)
-            had_known_name = bool(subject and subject not in {"a person"})
+            had_known_name = bool(subject and subject != "a person")
 
             if subject:
                 # If we have a subject, try to weave it in naturally.
@@ -672,7 +672,7 @@ class VideoAnalyzer:
         self, camera_id: str, msg: str, batch: list[Path]
     ) -> None:
         """Decide whether to notify and send if needed."""
-        camera_name = camera_id.split(".")[-1]
+        camera_name = camera_id.rsplit(".", maxsplit=1)[-1]
         chosen = batch[len(batch) // 2]
 
         dst = latest_target(Path(VIDEO_ANALYZER_SNAPSHOT_ROOT), camera_id)
@@ -743,7 +743,7 @@ class VideoAnalyzer:
 
     async def _store_results(self, camera_id: str, batch: list[Path], msg: str) -> None:
         """Store the analysis results in the vector DB."""
-        camera_name = camera_id.split(".")[-1]
+        camera_name = camera_id.rsplit(".", maxsplit=1)[-1]
         async with async_timeout.timeout(10):
             await self.entry.runtime_data.store.aput(
                 namespace=("video_analysis", camera_name),

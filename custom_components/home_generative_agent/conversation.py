@@ -385,7 +385,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
 
         trace.async_conversation_trace_append(
             trace.ConversationTraceEventType.AGENT_DETAIL,
-            {"messages": response["messages"], "tools": tools if tools else None},
+            {"messages": response["messages"], "tools": tools or None},
         )
 
         _LOGGER.debug("====== End of run ======")
