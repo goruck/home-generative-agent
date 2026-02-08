@@ -263,6 +263,7 @@ It also supports:
 - Approve/reject proposal
 - Collapsible sections (Proposal Drafts is expanded by default)
 - "Request New Template" shortcut that opens a prefilled GitHub issue form
+- Immediate "Template Requested" feedback after click (stored per candidate in browser local storage)
 - Deactivate/reactivate controls for historical approved rules
 
 Installation:
@@ -290,7 +291,7 @@ When updating card JS, bump the Lovelace resource query string (for example `?v=
 
 Preferred handling:
 1. Reject if not useful.
-2. If useful, request a new template via `.github/ISSUE_TEMPLATE/feature_rule_request.yml` (the card pre-populates relevant fields from the proposal).
+2. If useful, request a new template via `.github/ISSUE_TEMPLATE/feature_rule_request.yml` (the card pre-populates relevant fields from the proposal and marks the candidate as "Template Requested" locally in the browser).
 3. After template support is added, re-approve the proposal to re-evaluate with current mapping logic.
 
 ### Troubleshooting
