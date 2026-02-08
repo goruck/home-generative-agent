@@ -3,6 +3,7 @@ class HgaProposalsCard extends HTMLElement {
     "https://github.com/goruck/home-generative-agent/issues/new";
   static RULE_REQUEST_TEMPLATE = "feature_rule_request.yml";
   static DISMISSED_KEY = "hga_proposals_card.dismissed_candidates";
+  static TEMPLATE_REQUESTED_KEY = "hga_proposals_card.template_requested_candidates";
 
   constructor() {
     super();
@@ -33,6 +34,7 @@ class HgaProposalsCard extends HTMLElement {
         .card { border: 1px solid #ddd; border-radius: 8px; padding: 12px; margin-bottom: 12px; }
         .meta { color: #666; font-size: 12px; }
         .warn { color: #b45309; font-size: 12px; margin-top: 6px; }
+        .note { color: #0f766e; font-size: 12px; margin-top: 6px; }
         .row { display: flex; gap: 8px; margin-top: 8px; }
         .section { margin-top: 16px; }
         .section summary {
@@ -49,6 +51,11 @@ class HgaProposalsCard extends HTMLElement {
           text-decoration: none;
           color: inherit;
           display: inline-block;
+        }
+        a.btn-link.requested {
+          border-color: #0f766e;
+          color: #0f766e;
+          font-weight: 600;
         }
       </style>
       <div class="wrap">
@@ -122,6 +129,51 @@ class HgaProposalsCard extends HTMLElement {
     const ids = this._getDismissedCandidateIds();
     ids.add(candidateId);
     this._saveDismissedCandidateIds(ids);
+  }
+
+  _getTemplateRequestedCandidateIds() {
+    try {
+      const raw = window.localStorage.getItem(
+        HgaProposalsCard.TEMPLATE_REQUESTED_KEY
+      );
+      if (!raw) {
+        return new Set();
+      }
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) {
+        return new Set();
+      }
+      return new Set(parsed.filter((value) => typeof value === "string"));
+    } catch (_err) {
+      return new Set();
+    }
+  }
+
+  _saveTemplateRequestedCandidateIds(ids) {
+    try {
+      window.localStorage.setItem(
+        HgaProposalsCard.TEMPLATE_REQUESTED_KEY,
+        JSON.stringify(Array.from(ids))
+      );
+    } catch (_err) {
+      // Ignore localStorage write failures.
+    }
+  }
+
+  _markTemplateRequested(candidateId) {
+    if (!candidateId) {
+      return;
+    }
+    const ids = this._getTemplateRequestedCandidateIds();
+    ids.add(candidateId);
+    this._saveTemplateRequestedCandidateIds(ids);
+  }
+
+  _isTemplateRequested(candidateId) {
+    if (!candidateId) {
+      return false;
+    }
+    return this._getTemplateRequestedCandidateIds().has(candidateId);
   }
 
   _proposalDedupKey(record) {
@@ -611,6 +663,7 @@ class HgaProposalsCard extends HTMLElement {
       for (const rec of visiblePendingProposals) {
         const candidate = rec.candidate || {};
         const isUnsupported = rec.status === "unsupported";
+        const templateRequested = this._isTemplateRequested(rec.candidate_id);
         const card = document.createElement("div");
         card.className = "card";
         card.innerHTML = `
@@ -623,6 +676,11 @@ class HgaProposalsCard extends HTMLElement {
           ${
             isUnsupported
               ? `<div class="warn">Unsupported: this proposal cannot be mapped to an existing deterministic template yet.</div>`
+              : ""
+          }
+          ${
+            isUnsupported && templateRequested
+              ? `<div class="note">Template request recorded for this candidate.</div>`
               : ""
           }
         `;
@@ -672,11 +730,27 @@ class HgaProposalsCard extends HTMLElement {
         });
         if (isUnsupported) {
           const requestLink = document.createElement("a");
-          requestLink.className = "btn-link";
+          requestLink.className = `btn-link${templateRequested ? " requested" : ""}`;
           requestLink.href = this._buildRuleRequestUrl(rec);
           requestLink.target = "_blank";
           requestLink.rel = "noopener noreferrer";
-          requestLink.textContent = "Request New Template";
+          requestLink.textContent = templateRequested
+            ? "Template Requested"
+            : "Request New Template";
+          requestLink.addEventListener("click", () => {
+            this._markTemplateRequested(rec.candidate_id);
+            status.textContent = `Template request marked for ${rec.candidate_id}.`;
+            requestLink.classList.add("requested");
+            requestLink.textContent = "Template Requested";
+            const note = card.querySelector(".note");
+            if (!note) {
+              const requestedNote = document.createElement("div");
+              requestedNote.className = "note";
+              requestedNote.textContent =
+                "Template request recorded for this candidate.";
+              card.insertBefore(requestedNote, row);
+            }
+          });
           row.appendChild(requestLink);
         }
         row.appendChild(approve);
