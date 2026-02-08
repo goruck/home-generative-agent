@@ -80,9 +80,7 @@ def test_filter_data_total_increasing_empty(hass: HomeAssistant) -> None:
         },
     )
 
-    result = agent_tools._filter_data(
-        "sensor.energy", [{"state": "unknown"}], hass
-    )
+    result = agent_tools._filter_data("sensor.energy", [{"state": "unknown"}], hass)
     assert result["value"] == 0.0
     assert result["units"] == "kWh"
 
