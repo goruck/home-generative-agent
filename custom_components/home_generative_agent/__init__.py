@@ -1129,6 +1129,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     )
 
     face_recognition = options.get(CONF_FACE_RECOGNITION, RECOMMENDED_FACE_RECOGNITION)
+    if face_recognition and person_gallery is None:
+        LOGGER.warning(
+            "Face recognition is enabled but person gallery is unavailable; "
+            "disabling face recognition for this entry."
+        )
+        face_recognition = False
 
     # Save runtime data.
     entry.runtime_data = HGAData(

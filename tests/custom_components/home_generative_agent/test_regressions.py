@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -16,6 +17,7 @@ from custom_components.home_generative_agent.core.person_gallery import PersonGa
 from custom_components.home_generative_agent.core.recognized_sensor import (
     RecognizedPeopleSensor,
 )
+from custom_components.home_generative_agent.core.video_analyzer import VideoAnalyzer
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -160,3 +162,33 @@ async def test_person_gallery_invalid_embedding(
 
     result = await dao.enroll_from_image("http://face-api", "Alice", b"img")
     assert result is False
+
+
+@pytest.mark.asyncio
+async def test_video_analyzer_recognize_faces_without_gallery(
+    hass: HomeAssistant,
+) -> None:
+    """Face recognition should not crash when person_gallery is unavailable."""
+
+    class _FakeResp:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"faces": [{"embedding": [0.1, 0.2, 0.3]}]}
+
+    class _FakeClient:
+        async def post(self, *_args: object, **_kwargs: object) -> _FakeResp:
+            return _FakeResp()
+
+    runtime_data = SimpleNamespace(
+        face_recognition=True,
+        face_api_url="http://face-api",
+        person_gallery=None,
+    )
+    entry = SimpleNamespace(runtime_data=runtime_data)
+    analyzer = VideoAnalyzer(hass, cast("Any", entry))
+    analyzer._httpx_client = _FakeClient()  # type: ignore[assignment]
+
+    recognized = await analyzer.recognize_faces(b"not-an-image", "camera.test")
+    assert recognized == ["Indeterminate"]
