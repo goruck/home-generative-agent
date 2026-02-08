@@ -230,3 +230,21 @@ async def test_rule_registry_add_duplicate(hass) -> None:
     rule = {"rule_id": "rule_1", "template_id": "alarm_disarmed_open_entry"}
     assert await registry.async_add_rule(rule)
     assert not await registry.async_add_rule(rule)
+
+
+@pytest.mark.asyncio
+async def test_rule_registry_toggle_enabled(hass) -> None:
+    registry = RuleRegistry(hass=cast("HomeAssistant", hass))
+    await registry.async_load()
+    rule = {"rule_id": "rule_toggle", "template_id": "open_entry_while_away"}
+    assert await registry.async_add_rule(rule)
+    assert len(registry.list_rules()) == 1
+    assert await registry.async_set_rule_enabled("rule_toggle", enabled=False)
+    assert registry.list_rules() == []
+    all_rules = registry.list_rules(include_disabled=True)
+    assert len(all_rules) == 1
+    assert all_rules[0]["enabled"] is False
+    assert await registry.async_set_rule_enabled("rule_toggle", enabled=True)
+    enabled_rules = registry.list_rules()
+    assert len(enabled_rules) == 1
+    assert enabled_rules[0]["rule_id"] == "rule_toggle"

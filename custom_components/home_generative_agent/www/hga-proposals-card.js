@@ -1,6 +1,7 @@
 class HgaProposalsCard extends HTMLElement {
   static RULE_REQUEST_URL =
-    "https://github.com/goruck/home_generative_agent/issues/new?template=feature_rule_request.yml";
+    "https://github.com/goruck/home-generative-agent/issues/new";
+  static RULE_REQUEST_TEMPLATE = "feature_rule_request.yml";
   static DISMISSED_KEY = "hga_proposals_card.dismissed_candidates";
 
   constructor() {
@@ -34,7 +35,13 @@ class HgaProposalsCard extends HTMLElement {
         .warn { color: #b45309; font-size: 12px; margin-top: 6px; }
         .row { display: flex; gap: 8px; margin-top: 8px; }
         .section { margin-top: 16px; }
-        .section h4 { margin: 0 0 8px 0; }
+        .section summary {
+          cursor: pointer;
+          font-weight: 600;
+          margin-bottom: 8px;
+        }
+        .section summary::marker { font-size: 0.95em; }
+        .section-content { margin-top: 8px; }
         button, a.btn-link { padding: 6px 10px; }
         a.btn-link {
           border: 1px solid #ddd;
@@ -50,22 +57,22 @@ class HgaProposalsCard extends HTMLElement {
           <button id="refresh">Refresh</button>
         </div>
         <div id="status" class="meta"></div>
-        <div class="section">
-          <h4>Discovery Candidates</h4>
-          <div id="discovery"></div>
-        </div>
-        <div class="section">
-          <h4>Filtered Discovery Candidates</h4>
-          <div id="discovery_filtered"></div>
-        </div>
-        <div class="section">
-          <h4>Proposal Drafts (Pending)</h4>
-          <div id="proposals_pending"></div>
-        </div>
-        <div class="section">
-          <h4>Proposal History</h4>
-          <div id="proposals_history"></div>
-        </div>
+        <details class="section">
+          <summary>Discovery Candidates</summary>
+          <div id="discovery" class="section-content"></div>
+        </details>
+        <details class="section">
+          <summary>Filtered Discovery Candidates</summary>
+          <div id="discovery_filtered" class="section-content"></div>
+        </details>
+        <details class="section" open>
+          <summary>Proposal Drafts (Pending)</summary>
+          <div id="proposals_pending" class="section-content"></div>
+        </details>
+        <details class="section">
+          <summary>Proposal History</summary>
+          <div id="proposals_history" class="section-content"></div>
+        </details>
       </div>
     `;
     this.shadowRoot.getElementById("refresh").addEventListener("click", () => {
@@ -246,6 +253,125 @@ class HgaProposalsCard extends HTMLElement {
     return null;
   }
 
+  _sanitizeRuleName(value) {
+    return String(value || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "")
+      .slice(0, 80);
+  }
+
+  _severityForCandidate(candidate) {
+    const text = [
+      String(candidate?.title || ""),
+      String(candidate?.summary || ""),
+      String(candidate?.pattern || ""),
+      String(candidate?.suggested_type || ""),
+    ]
+      .join(" ")
+      .toLowerCase();
+    const hasNight =
+      (Array.isArray(candidate?.evidence_paths)
+        ? candidate.evidence_paths
+        : []
+      ).includes("derived.is_night") || text.includes("night");
+    const isAway =
+      text.includes("away") ||
+      text.includes("no one home") ||
+      text.includes("nobody home") ||
+      text.includes("empty") ||
+      text.includes("unoccupied");
+    if (isAway || hasNight) {
+      return "high";
+    }
+    if (text.includes("motion") && text.includes("camera")) {
+      return "low";
+    }
+    return "medium";
+  }
+
+  _buildRuleRequestUrl(record) {
+    const candidate = record?.candidate || {};
+    const evidencePaths = Array.isArray(candidate?.evidence_paths)
+      ? candidate.evidence_paths.filter((path) => typeof path === "string")
+      : [];
+    const candidateTitle = String(candidate?.title || "").trim();
+    const candidateSummary = String(candidate?.summary || "").trim();
+    const candidatePattern = String(candidate?.pattern || "").trim();
+    const displayTitle =
+      candidateTitle || String(record?.candidate_id || "New deterministic rule");
+    const inferredRuleId =
+      String(record?.rule_id || "").trim() || this._inferRuleIdFromCandidate(candidate);
+    const ruleName = this._sanitizeRuleName(inferredRuleId || displayTitle) || "new_rule";
+    const confidenceHint = Number(candidate?.confidence_hint);
+    const confidenceValue = Number.isFinite(confidenceHint)
+      ? String(Math.max(0, Math.min(1, confidenceHint)))
+      : "0.6";
+    const suggestedActions = Array.isArray(candidate?.suggested_actions)
+      ? candidate.suggested_actions.filter((item) => typeof item === "string")
+      : [];
+
+    const params = new URLSearchParams();
+    params.set("template", HgaProposalsCard.RULE_REQUEST_TEMPLATE);
+    params.set("title", `[Rule] ${displayTitle}`);
+    params.set("rule_name", ruleName);
+    params.set(
+      "summary",
+      candidateSummary ||
+        `Detected candidate ${String(record?.candidate_id || "").trim()} appears useful but is currently unsupported.`
+    );
+    params.set(
+      "motivation",
+      [
+        "This proposal is currently marked unsupported in HGA and needs a deterministic template.",
+        `Candidate ID: ${String(record?.candidate_id || "unknown")}`,
+        candidatePattern ? `Observed pattern: ${candidatePattern}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n")
+    );
+    params.set(
+      "snapshot_inputs",
+      evidencePaths.length
+        ? evidencePaths.map((path) => `- ${path}`).join("\n")
+        : "- No explicit evidence_paths were included; infer from candidate description."
+    );
+    params.set(
+      "detection_logic",
+      [
+        "1) Evaluate only snapshot fields listed in required evidence.",
+        "2) Trigger when the candidate condition is true.",
+        "3) Return no findings when any required condition is missing.",
+      ].join("\n")
+    );
+    params.set(
+      "evidence_mapping",
+      evidencePaths.length
+        ? evidencePaths
+            .map((path, index) => `- evidence.path_${index + 1} <- ${path}`)
+            .join("\n")
+        : "- Map evidence fields to concrete snapshot paths used by the rule."
+    );
+    params.set("severity", this._severityForCandidate(candidate));
+    params.set("confidence", confidenceValue);
+    params.set(
+      "suggested_actions",
+      suggestedActions.length
+        ? suggestedActions.map((action) => `- ${action}`).join("\n")
+        : "- close_entry"
+    );
+    params.set("suppression", "Use default per-type cooldown (30 min).");
+    params.set(
+      "tests",
+      [
+        `- Trigger: ${candidateSummary || candidatePattern || "candidate condition is present in snapshot."}`,
+        "- Non-trigger: same snapshot context but with condition absent.",
+      ].join("\n")
+    );
+
+    return `${HgaProposalsCard.RULE_REQUEST_URL}?${params.toString()}`;
+  }
+
   async _load() {
     if (this._loading) {
       return;
@@ -266,6 +392,7 @@ class HgaProposalsCard extends HTMLElement {
     status.textContent = "Refreshing discovery and proposals...";
     let discoveryResult;
     let proposalResult;
+    let dynamicRuleResult;
     try {
       discoveryResult = await this._callService(
         "home_generative_agent",
@@ -276,6 +403,11 @@ class HgaProposalsCard extends HTMLElement {
         "home_generative_agent",
         "get_proposal_drafts",
         { limit: 50 }
+      );
+      dynamicRuleResult = await this._callService(
+        "home_generative_agent",
+        "get_dynamic_rules",
+        { limit: 500 }
       );
     } catch (err) {
       discovery.innerHTML = `<div class="meta">Failed to load discovery candidates.</div>`;
@@ -299,6 +431,12 @@ class HgaProposalsCard extends HTMLElement {
     const proposalRecords =
       (proposalResult && proposalResult.response && proposalResult.response.records) ||
       (proposalResult && proposalResult.records) ||
+      [];
+    const dynamicRuleRecords =
+      (dynamicRuleResult &&
+        dynamicRuleResult.response &&
+        dynamicRuleResult.response.records) ||
+      (dynamicRuleResult && dynamicRuleResult.records) ||
       [];
     const dedupedProposals = [];
     const seenProposalIds = new Set();
@@ -432,13 +570,31 @@ class HgaProposalsCard extends HTMLElement {
         proposal?.status === "rejected" ||
         proposal?.status === "covered_by_existing_rule"
     );
-    const activeRuleIds = new Set(
-      historicalProposals
-        .map((proposal) =>
-          proposal?.rule_id || this._inferRuleIdFromCandidate(proposal?.candidate || {})
-        )
-        .filter((ruleId) => !!ruleId)
-    );
+    const ruleStateById = new Map();
+    for (const rule of dynamicRuleRecords) {
+      const ruleId = String(rule?.rule_id || "");
+      if (!ruleId) {
+        continue;
+      }
+      ruleStateById.set(ruleId, Boolean(rule?.enabled ?? true));
+    }
+    const activeRuleIds = new Set();
+    if (ruleStateById.size > 0) {
+      for (const [ruleId, isEnabled] of ruleStateById.entries()) {
+        if (isEnabled) {
+          activeRuleIds.add(ruleId);
+        }
+      }
+    } else {
+      for (const proposal of historicalProposals) {
+        const ruleId =
+          proposal?.rule_id ||
+          this._inferRuleIdFromCandidate(proposal?.candidate || {});
+        if (ruleId) {
+          activeRuleIds.add(ruleId);
+        }
+      }
+    }
     const visiblePendingProposals = pendingProposals.filter((proposal) => {
       const effectiveRuleId =
         proposal?.rule_id ||
@@ -517,7 +673,7 @@ class HgaProposalsCard extends HTMLElement {
         if (isUnsupported) {
           const requestLink = document.createElement("a");
           requestLink.className = "btn-link";
-          requestLink.href = HgaProposalsCard.RULE_REQUEST_URL;
+          requestLink.href = this._buildRuleRequestUrl(rec);
           requestLink.target = "_blank";
           requestLink.rel = "noopener noreferrer";
           requestLink.textContent = "Request New Template";
@@ -535,6 +691,10 @@ class HgaProposalsCard extends HTMLElement {
     } else {
       for (const rec of historicalProposals) {
         const candidate = rec.candidate || {};
+        const historyRuleId = rec.rule_id || rec.covered_rule_id || null;
+        const isRuleEnabled = historyRuleId
+          ? ruleStateById.get(historyRuleId)
+          : undefined;
         const card = document.createElement("div");
         card.className = "card";
         card.innerHTML = `
@@ -544,7 +704,64 @@ class HgaProposalsCard extends HTMLElement {
           <div class="meta">Candidate ID: ${rec.candidate_id}</div>
           <div class="meta">Rule ID: ${rec.rule_id || "-"}</div>
           <div class="meta">Covered Rule: ${rec.covered_rule_id || "-"}</div>
+          <div class="meta">Rule State: ${
+            historyRuleId
+              ? isRuleEnabled === false
+                ? "inactive"
+                : "active"
+              : "-"
+          }</div>
         `;
+        if (historyRuleId) {
+          const row = document.createElement("div");
+          row.className = "row";
+          if (isRuleEnabled === false) {
+            const reactivate = document.createElement("button");
+            reactivate.textContent = "Reactivate";
+            reactivate.addEventListener("click", async () => {
+              status.textContent = `Reactivating ${historyRuleId}...`;
+              try {
+                const response = await this._callService(
+                  "home_generative_agent",
+                  "reactivate_dynamic_rule",
+                  { rule_id: historyRuleId }
+                );
+                const resultStatus =
+                  response?.response?.status || response?.status || "ok";
+                status.textContent = `Reactivate result: ${resultStatus}`;
+                await this._load();
+              } catch (err) {
+                status.textContent = `Reactivate failed: ${
+                  err?.message || "unknown error"
+                }`;
+              }
+            });
+            row.appendChild(reactivate);
+          } else {
+            const deactivate = document.createElement("button");
+            deactivate.textContent = "Deactivate";
+            deactivate.addEventListener("click", async () => {
+              status.textContent = `Deactivating ${historyRuleId}...`;
+              try {
+                const response = await this._callService(
+                  "home_generative_agent",
+                  "deactivate_dynamic_rule",
+                  { rule_id: historyRuleId }
+                );
+                const resultStatus =
+                  response?.response?.status || response?.status || "ok";
+                status.textContent = `Deactivate result: ${resultStatus}`;
+                await this._load();
+              } catch (err) {
+                status.textContent = `Deactivate failed: ${
+                  err?.message || "unknown error"
+                }`;
+              }
+            });
+            row.appendChild(deactivate);
+          }
+          card.appendChild(row);
+        }
         proposalsHistory.appendChild(card);
       }
     }

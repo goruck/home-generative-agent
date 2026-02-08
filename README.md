@@ -19,6 +19,18 @@ These are some of the features currently supported:
 
 This integration will set up the `conversation` platform, allowing users to converse directly with the Home Generative Assistant, and the `image` and `sensor` platforms which create entities to display the latest camera image, the AI-generated summary, and recognized people in HA's UI or they can be used to create automations.
 
+## Table of Contents
+
+- [Installation](#installation)
+- [Configuration](#configuration)
+- [Sentinel (Proactive Anomaly Detection)](#sentinel-proactive-anomaly-detection)
+- [Image and Sensor Entities](#image-and-sensor-entities)
+- [Enroll People (Face Recognition)](#enroll-people-face-recognition)
+- [Architecture and Design](#architecture-and-design)
+- [Example Use Cases](#example-use-cases)
+- [Makefile](#makefile)
+- [Contributions are welcome!](#contributions-are-welcome)
+
 ## Installation
 
 ### HACS
@@ -64,35 +76,6 @@ This integration will set up the `conversation` platform, allowing users to conv
 7. Restart Home Assistant
 8. In the HA UI, go to "Configuration" -> "Integrations" click "+," and search for "Home Generative Agent"
 9. Follow steps 3 to 6 above.
-
-## Enroll People (Face Recognition)
-
-You can enroll faces either via a service call or through the dashboard card.
-
-### Service (Developer Tools -> Actions)
-
-Service: `home_generative_agent.enroll_person`
-
-```yaml
-service: home_generative_agent.enroll_person
-data:
-  name: "Eva"
-  file_path: "/media/faces/eva_face.jpg"
-```
-
-The file must be inside Home Assistant's `/media` folder so it is accessible to the integration.
-
-### Dashboard Card (File Picker)
-
-Add the custom card to any dashboard after registering the resource in Installation step 6.
-
-```yaml
-type: custom:hga-enroll-card
-title: Enroll Person
-endpoint: /api/home_generative_agent/enroll
-```
-
-Use the file picker or drag-and-drop to upload one or more images. The card will enroll any images that contain a detectable face and skip those that do not.
 
 ## Configuration
 Configuration is done entirely in the Home Assistant UI using subentry flows.
@@ -178,7 +161,7 @@ Sentinel is a singleton service per Home Generative Agent config entry. Configur
 2. `sentinel`: Runs deterministic rules on that snapshot.
 3. `discovery` (optional): Uses an LLM to suggest rule candidates (advisory only).
 4. `proposal` review: User promotes/approves/rejects candidates.
-5. `rule_registry`: Stores approved generated rules for deterministic runtime evaluation.
+5. `rule_registry`: Stores approved generated rules (including active/inactive state) for deterministic runtime evaluation.
 6. `audit`: Persists findings and user action outcomes.
 
 Important: The LLM never executes actions or directly decides runtime safety behavior. Detection and actuation remain deterministic.
@@ -240,6 +223,9 @@ Proposal draft statuses:
 - `home_generative_agent.get_proposal_drafts`
 - `home_generative_agent.approve_rule_proposal`
 - `home_generative_agent.reject_rule_proposal`
+- `home_generative_agent.get_dynamic_rules`
+- `home_generative_agent.deactivate_dynamic_rule`
+- `home_generative_agent.reactivate_dynamic_rule`
 - `home_generative_agent.get_audit_records`
 
 Typical response fields:
@@ -247,6 +233,8 @@ Typical response fields:
 - `candidate_id`
 - `rule_id`
 - `covered_rule_id`
+- `records`
+- `enabled`
 
 ### Proposals Card (Optional)
 
@@ -260,7 +248,9 @@ It also supports:
 - Promote to draft
 - Reject candidate (local dismiss in browser storage)
 - Approve/reject proposal
-- "Request New Template" shortcut to the rule request issue template
+- Collapsible sections (Proposal Drafts is expanded by default)
+- "Request New Template" shortcut that opens a prefilled GitHub issue form
+- Deactivate/reactivate controls for historical approved rules
 
 Installation:
 1. Go to `Settings -> Dashboards -> Resources -> Add Resource`.
@@ -287,7 +277,7 @@ When updating card JS, bump the Lovelace resource query string (for example `?v=
 
 Preferred handling:
 1. Reject if not useful.
-2. If useful, request a new template via `.github/ISSUE_TEMPLATE/feature_rule_request.yml`.
+2. If useful, request a new template via `.github/ISSUE_TEMPLATE/feature_rule_request.yml` (the card pre-populates relevant fields from the proposal).
 3. After template support is added, re-approve the proposal to re-evaluate with current mapping logic.
 
 ### Troubleshooting
@@ -489,6 +479,35 @@ action:
 
 Most users won’t need to consume these directly; the platform entities update automatically.
 
+## Enroll People (Face Recognition)
+
+You can enroll faces either via a service call or through the dashboard card.
+
+### Service (Developer Tools -> Actions)
+
+Service: `home_generative_agent.enroll_person`
+
+```yaml
+service: home_generative_agent.enroll_person
+data:
+  name: "Eva"
+  file_path: "/media/faces/eva_face.jpg"
+```
+
+The file must be inside Home Assistant's `/media` folder so it is accessible to the integration.
+
+### Dashboard Card (File Picker)
+
+Add the custom card to any dashboard after registering the resource in Installation step 6.
+
+```yaml
+type: custom:hga-enroll-card
+title: Enroll Person
+endpoint: /api/home_generative_agent/enroll
+```
+
+Use the file picker or drag-and-drop to upload one or more images. The card will enroll any images that contain a detectable face and skip those that do not.
+
 ## Architecture and Design
 
 Below is a high-level view of the architecture.
@@ -555,11 +574,12 @@ Langchain Tool | Purpose
 -- | -- |
 `get_and_analyze_camera_image` | run scene analysis on the image from a camera
 `upsert_memory` | add or update a memory
-`add_automation` | create and register a HA automation
+`add_automation` | create and register a HA automation (available when Schema-first YAML mode is disabled)
 `write_yaml_file` | write YAML to `/config/www/` and return a `/local/...` URL
 `confirm_sensitive_action` | confirm and execute a pending critical action with a PIN
 `alarm_control` | arm or disarm an alarm control panel with the alarm code
 `get_entity_history` | query HA database for entity history
+`resolve_entity_ids` | resolve entity IDs from friendly names, areas, labels, and domains
 <del>`get_current_device_state`</del> | <del>get the current state of one or more Home Assistant devices</del> (deprecated, using native HA GetLiveContext tool instead)
 
 ### Hardware

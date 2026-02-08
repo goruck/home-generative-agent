@@ -32,6 +32,10 @@ class RuleRegistry:
             return
         if isinstance(data, list):
             self._rules = list(data)
+        for rule in self._rules:
+            if not isinstance(rule, dict):
+                continue
+            rule.setdefault("enabled", True)
 
     async def async_save(self) -> None:
         """Persist registry."""
@@ -40,9 +44,11 @@ class RuleRegistry:
         except (HomeAssistantError, OSError, ValueError):
             return
 
-    def list_rules(self) -> list[dict[str, Any]]:
-        """Return rules list."""
-        return list(self._rules)
+    def list_rules(self, *, include_disabled: bool = False) -> list[dict[str, Any]]:
+        """Return rules list, optionally including disabled rules."""
+        if include_disabled:
+            return list(self._rules)
+        return [rule for rule in self._rules if bool(rule.get("enabled", True))]
 
     def find_rule(self, rule_id: str) -> dict[str, Any] | None:
         """Return a rule by id."""
@@ -60,7 +66,9 @@ class RuleRegistry:
         if self.find_rule(str(rule_id)):
             LOGGER.info("Rule registry ignored duplicate rule %s.", rule_id)
             return False
-        self._rules.append(rule)
+        stored_rule = dict(rule)
+        stored_rule.setdefault("enabled", True)
+        self._rules.append(stored_rule)
         await self.async_save()
         LOGGER.info("Rule registry added dynamic rule %s.", rule_id)
         return True
@@ -72,4 +80,21 @@ class RuleRegistry:
                 self._rules.pop(idx)
                 await self.async_save()
                 return True
+        return False
+
+    async def async_set_rule_enabled(self, rule_id: str, *, enabled: bool) -> bool:
+        """Set rule enabled state by id."""
+        for rule in self._rules:
+            if rule.get("rule_id") != rule_id:
+                continue
+            if bool(rule.get("enabled", True)) == enabled:
+                return True
+            rule["enabled"] = enabled
+            await self.async_save()
+            LOGGER.info(
+                "Rule registry %s dynamic rule %s.",
+                "activated" if enabled else "deactivated",
+                rule_id,
+            )
+            return True
         return False
