@@ -7,6 +7,7 @@ from typing import Any
 
 SUPPORTED_TEMPLATES = {
     "alarm_disarmed_open_entry",
+    "unavailable_sensors_while_home",
     "open_any_window_at_night_while_away",
     "open_entry_when_home",
     "open_entry_while_away",
@@ -59,6 +60,7 @@ def normalize_candidate(  # noqa: PLR0911
     alarm_id = _find_entity_id(evidence_paths, "alarm_control_panel")
     entry_ids = _find_entry_entity_ids(evidence_paths)
     motion_ids = _find_motion_entity_ids(evidence_paths)
+    sensor_ids = _find_sensor_entity_ids(evidence_paths)
     camera_id = _find_camera_id(evidence_paths)
     has_night = _has_night_signal(evidence_paths, text)
     presence = _presence_signal(evidence_paths, text)
@@ -147,6 +149,21 @@ def normalize_candidate(  # noqa: PLR0911
             suggested_actions=["check_camera"],
         )
 
+    if (
+        sensor_ids
+        and presence == "home"
+        and _contains_any(text, ("unavailable", "offline", "unreachable"))
+    ):
+        return NormalizedRule(
+            rule_id="unavailable_sensors_while_home",
+            template_id="unavailable_sensors_while_home",
+            params={"sensor_entity_ids": sensor_ids},
+            severity="low",
+            confidence=float(candidate.get("confidence_hint", 0.8)),
+            is_sensitive=False,
+            suggested_actions=["check_sensor"],
+        )
+
     return None
 
 
@@ -206,6 +223,22 @@ def _find_motion_entity_ids(evidence_paths: list[str]) -> list[str]:
             continue
         entity_id = path.split("entities[entity_id=", 1)[1].split("]", 1)[0]
         if "motion" in entity_id or "vmd" in entity_id:
+            ids.append(entity_id)
+    return sorted(set(ids))
+
+
+def _find_sensor_entity_ids(evidence_paths: list[str]) -> list[str]:
+    ids: list[str] = []
+    for path in evidence_paths:
+        if not path.startswith("entities[entity_id="):
+            continue
+        entity_id = path.split("entities[entity_id=", 1)[1].split("]", 1)[0]
+        if "." not in entity_id:
+            # Legacy discovery drafts may store object IDs without domain.
+            ids.append(entity_id)
+            continue
+        domain = entity_id.split(".", 1)[0]
+        if domain in {"sensor", "binary_sensor"}:
             ids.append(entity_id)
     return sorted(set(ids))
 

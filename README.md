@@ -294,6 +294,8 @@ Preferred handling:
 2. If useful, request a new template via `.github/ISSUE_TEMPLATE/feature_rule_request.yml` (the card pre-populates relevant fields from the proposal and marks the candidate as "Template Requested" locally in the browser).
 3. After template support is added, re-approve the proposal to re-evaluate with current mapping logic.
 
+Compatibility note: `unavailable_sensors_while_home` supports re-approving legacy drafts whose `evidence_paths` used domainless entity IDs (for example `entities[entity_id=backyard_vmd3_0].state`).
+
 ### Troubleshooting
 
 - If card UI looks unchanged after an update, you are likely serving cached JS.

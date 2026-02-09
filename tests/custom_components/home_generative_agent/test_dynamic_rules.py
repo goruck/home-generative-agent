@@ -223,6 +223,114 @@ def test_dynamic_rule_open_any_window_at_night_while_away() -> None:
     assert findings[0].type == "entry_rule_2"
 
 
+def test_dynamic_rule_unavailable_sensors_while_home() -> None:
+    snapshot = _snapshot(
+        [
+            _base_entity("sensor.backyard_vmd3_0", "sensor", "unavailable"),
+            _base_entity("sensor.backyard_vmd4_camera1profile1", "sensor", "idle"),
+        ],
+        [],
+        {
+            "now": "2026-02-01T00:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": False,
+            "anyone_home": True,
+            "last_motion_by_area": {},
+        },
+    )
+    rules = [
+        {
+            "rule_id": "availability_rule_1",
+            "template_id": "unavailable_sensors_while_home",
+            "params": {
+                "sensor_entity_ids": [
+                    "sensor.backyard_vmd3_0",
+                    "sensor.backyard_vmd4_camera1profile1",
+                ]
+            },
+            "severity": "low",
+            "confidence": 0.8,
+            "is_sensitive": False,
+            "suggested_actions": ["check_sensor"],
+        }
+    ]
+    findings = evaluate_dynamic_rules(snapshot, rules)
+    assert len(findings) == 1
+    assert findings[0].type == "availability_rule_1"
+    assert findings[0].triggering_entities == ["sensor.backyard_vmd3_0"]
+
+
+def test_dynamic_rule_unavailable_sensors_while_home_missing_required_entity() -> None:
+    snapshot = _snapshot(
+        [
+            _base_entity("sensor.backyard_vmd3_0", "sensor", "unavailable"),
+        ],
+        [],
+        {
+            "now": "2026-02-01T00:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": False,
+            "anyone_home": True,
+            "last_motion_by_area": {},
+        },
+    )
+    rules = [
+        {
+            "rule_id": "availability_rule_2",
+            "template_id": "unavailable_sensors_while_home",
+            "params": {
+                "sensor_entity_ids": [
+                    "sensor.backyard_vmd3_0",
+                    "sensor.backyard_vmd4_camera1profile1",
+                ]
+            },
+            "severity": "low",
+            "confidence": 0.8,
+            "is_sensitive": False,
+            "suggested_actions": ["check_sensor"],
+        }
+    ]
+    findings = evaluate_dynamic_rules(snapshot, rules)
+    assert findings == []
+
+
+def test_dynamic_rule_unavailable_sensors_while_home_legacy_entity_ids() -> None:
+    snapshot = _snapshot(
+        [
+            _base_entity("sensor.backyard_vmd3_0", "sensor", "unavailable"),
+            _base_entity("sensor.backyard_vmd4_camera1profile1", "sensor", "idle"),
+        ],
+        [],
+        {
+            "now": "2026-02-01T00:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": False,
+            "anyone_home": True,
+            "last_motion_by_area": {},
+        },
+    )
+    rules = [
+        {
+            "rule_id": "availability_rule_legacy",
+            "template_id": "unavailable_sensors_while_home",
+            "params": {
+                "sensor_entity_ids": [
+                    "backyard_vmd3_0",
+                    "backyard_vmd4_camera1profile1",
+                ]
+            },
+            "severity": "low",
+            "confidence": 0.8,
+            "is_sensitive": False,
+            "suggested_actions": ["check_sensor"],
+        }
+    ]
+    findings = evaluate_dynamic_rules(snapshot, rules)
+    assert len(findings) == 1
+    assert findings[0].type == "availability_rule_legacy"
+    assert findings[0].triggering_entities == ["sensor.backyard_vmd3_0"]
+
+
 @pytest.mark.asyncio
 async def test_rule_registry_add_duplicate(hass) -> None:
     registry = RuleRegistry(hass=cast("HomeAssistant", hass))

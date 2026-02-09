@@ -33,6 +33,11 @@ def candidate_semantic_key(  # noqa: PLR0912, PLR0915
         for entity_id in entity_ids
         if "motion" in entity_id or "vmd" in entity_id
     )
+    sensor_ids = sorted(
+        entity_id
+        for entity_id in entity_ids
+        if entity_id.startswith(("sensor.", "binary_sensor."))
+    )
     alarm_ids = sorted(
         entity_id
         for entity_id in entity_ids
@@ -56,6 +61,9 @@ def candidate_semantic_key(  # noqa: PLR0912, PLR0915
     elif alarm_ids:
         subject = "alarm"
         entities = alarm_ids
+    elif sensor_ids:
+        subject = "sensor"
+        entities = sensor_ids
 
     predicate = "unknown"
     if "unlocked" in text:
@@ -64,8 +72,13 @@ def candidate_semantic_key(  # noqa: PLR0912, PLR0915
         predicate = "open"
     elif "disarmed" in text:
         predicate = "disarmed"
+    elif _contains_any(text, ("unavailable", "offline", "unreachable")):
+        predicate = "unavailable"
     elif "motion" in text or "activity" in text:
         predicate = "active"
+    if predicate == "unavailable" and sensor_ids:
+        subject = "sensor"
+        entities = sensor_ids
 
     night = "any"
     if "night" in text or "derived.is_night" in evidence_paths:
@@ -130,6 +143,14 @@ def rule_semantic_key(rule: dict[str, Any]) -> str | None:  # noqa: PLR0911
         return (
             "v1|subject=motion|predicate=active|night=any|home=any|scope=any|"
             f"entities={','.join(motion_ids)}"
+        )
+    if template_id == "unavailable_sensors_while_home":
+        sensor_ids = sorted(set(_string_list(params.get("sensor_entity_ids"))))
+        if not sensor_ids:
+            return None
+        return (
+            "v1|subject=sensor|predicate=unavailable|night=any|home=1|scope=any|"
+            f"entities={','.join(sensor_ids)}"
         )
     return None
 

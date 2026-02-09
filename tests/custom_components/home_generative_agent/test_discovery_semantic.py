@@ -60,3 +60,39 @@ def test_candidate_semantic_key_any_window_no_entity_paths() -> None:
     assert "subject=entry_window" in key
     assert "predicate=open" in key
     assert "home=0" in key
+
+
+def test_candidate_semantic_key_unavailable_sensor_while_home() -> None:
+    candidate = {
+        "title": "Unavailable sensors while home",
+        "summary": "Detects any sensor reporting unavailable while occupied.",
+        "pattern": "sensor unavailable while home",
+        "suggested_type": "availability",
+        "evidence_paths": [
+            "derived.anyone_home",
+            "entities[entity_id=sensor.backyard_vmd3_0].state",
+        ],
+    }
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert "subject=sensor" in key
+    assert "predicate=unavailable" in key
+    assert "home=1" in key
+
+
+def test_rule_semantic_key_unavailable_sensors_while_home() -> None:
+    rule = {
+        "rule_id": "unavailable_sensors_while_home",
+        "template_id": "unavailable_sensors_while_home",
+        "params": {
+            "sensor_entity_ids": [
+                "sensor.backyard_vmd3_0",
+                "sensor.backyard_vmd4_camera1profile1",
+            ]
+        },
+    }
+    key = rule_semantic_key(rule)
+    assert key is not None
+    assert "subject=sensor" in key
+    assert "predicate=unavailable" in key
+    assert "home=1" in key
