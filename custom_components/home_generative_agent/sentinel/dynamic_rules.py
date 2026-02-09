@@ -96,6 +96,10 @@ def evaluate_dynamic_rules(
                     snapshot, rule, entity_map, camera_map
                 )
             )
+        elif template_id == "unavailable_sensors_while_home":
+            findings.extend(
+                _eval_unavailable_sensors_while_home(snapshot, rule, entity_map)
+            )
     return findings
 
 
@@ -186,6 +190,41 @@ def _eval_motion_without_camera_activity(
             "last_changed": motion.get("last_changed"),
         }
         findings.append(_build_finding(rule, [motion_id, camera_id], evidence))
+    return findings
+
+
+def _eval_unavailable_sensors_while_home(
+    snapshot: FullStateSnapshot,
+    rule: dict[str, Any],
+    entity_map: Mapping[str, SnapshotEntity],
+) -> list[AnomalyFinding]:
+    if not snapshot["derived"]["anyone_home"]:
+        return []
+    params = _rule_params(rule)
+    sensor_ids = params.get("sensor_entity_ids")
+    if not isinstance(sensor_ids, list):
+        return []
+
+    required_entities: list[SnapshotEntity] = []
+    for sensor_id in sensor_ids:
+        entity = entity_map.get(sensor_id)
+        if entity is None:
+            return []
+        required_entities.append(entity)
+
+    findings: list[AnomalyFinding] = []
+    for sensor_id, sensor in zip(sensor_ids, required_entities, strict=False):
+        if sensor.get("state") != "unavailable":
+            continue
+        evidence = {
+            "rule_id": rule.get("rule_id"),
+            "template_id": rule.get("template_id"),
+            "sensor_entity_id": sensor_id,
+            "sensor_state": sensor.get("state"),
+            "anyone_home": snapshot["derived"]["anyone_home"],
+            "last_changed": sensor.get("last_changed"),
+        }
+        findings.append(_build_finding(rule, [sensor_id], evidence))
     return findings
 
 

@@ -102,3 +102,29 @@ def test_normalize_candidate_any_window_night_away_template() -> None:
     assert normalized is not None
     assert normalized.template_id == "open_any_window_at_night_while_away"
     assert normalized.rule_id == "open_any_window_at_night_while_away"
+
+
+def test_normalize_candidate_unavailable_sensors_while_home_template() -> None:
+    candidate = {
+        "candidate_id": "sensor_unavailable_home",
+        "title": "Unavailable sensors while home",
+        "summary": "Detects any sensor reporting unavailable while someone is home.",
+        "pattern": "derived.anyone_home AND sensor state unavailable",
+        "suggested_type": "availability",
+        "confidence_hint": 0.8,
+        "evidence_paths": [
+            "derived.anyone_home",
+            "entities[entity_id=sensor.backyard_vmd3_0].state",
+            "entities[entity_id=sensor.backyard_vmd4_camera1profile1].state",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "unavailable_sensors_while_home"
+    assert normalized.rule_id == "unavailable_sensors_while_home"
+    assert normalized.params == {
+        "sensor_entity_ids": [
+            "sensor.backyard_vmd3_0",
+            "sensor.backyard_vmd4_camera1profile1",
+        ]
+    }
