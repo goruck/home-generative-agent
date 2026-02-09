@@ -780,7 +780,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     if gemini_ok:
         try:
             gemini_embeddings = GoogleGenerativeAIEmbeddings(
-                api_key=gemini_secret,
+                google_api_key=gemini_secret,
                 model=options.get(
                     CONF_GEMINI_EMBEDDING_MODEL, RECOMMENDED_GEMINI_EMBEDDING_MODEL
                 ),
