@@ -497,7 +497,7 @@ class VideoAnalyzer:
                 except OSError as err:
                     LOGGER.warning("[%s] Failed to delete %s: %s", camera_id, old, err)
 
-    async def recognize_faces(self, data: bytes, camera_id: str) -> list[str]:  # noqa: PLR0912, PLR0915
+    async def recognize_faces(self, data: bytes, camera_id: str) -> list[str]:  # noqa: PLR0911, PLR0912, PLR0915
         """Call face API to recognize faces in the snapshot image."""
         face_recognition = self.entry.runtime_data.face_recognition
         if not face_recognition:
@@ -533,6 +533,14 @@ class VideoAnalyzer:
         if not faces:
             return ["Indeterminate"]
 
+        dao = self.entry.runtime_data.person_gallery
+        if dao is None:
+            LOGGER.debug(
+                "[%s] Person gallery unavailable; returning indeterminate faces.",
+                camera_id,
+            )
+            return ["Indeterminate"] * len(faces)
+
         # --- decode snapshot off the loop (Pillow is sync) ---
         try:
             img = await self.hass.async_add_executor_job(load_image_rgb, data)
@@ -542,7 +550,6 @@ class VideoAnalyzer:
             LOGGER.warning("Failed to decode snapshot for crops: %s", err)
             img = None  # still return recognition results below
 
-        dao = self.entry.runtime_data.person_gallery
         recognized: list[str] = []
 
         timestamp = dt_util.now().strftime("%Y%m%d_%H%M%S")
