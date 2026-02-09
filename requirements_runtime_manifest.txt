@@ -5,7 +5,7 @@ langchain-openai==1.0.3
 langchain-ollama==0.3.10
 langgraph==1.0.3
 langgraph-checkpoint-postgres==3.0.1
-openai==2.8.1
+openai>=2.8.1
 ollama==0.6.1
 psycopg==3.2.13
 psycopg-binary==3.2.13
