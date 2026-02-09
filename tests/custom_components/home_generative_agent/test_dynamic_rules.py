@@ -227,9 +227,7 @@ def test_dynamic_rule_unavailable_sensors_while_home() -> None:
     snapshot = _snapshot(
         [
             _base_entity("sensor.backyard_vmd3_0", "sensor", "unavailable"),
-            _base_entity(
-                "sensor.backyard_vmd4_camera1profile1", "sensor", "idle"
-            ),
+            _base_entity("sensor.backyard_vmd4_camera1profile1", "sensor", "idle"),
         ],
         [],
         {
@@ -300,9 +298,7 @@ def test_dynamic_rule_unavailable_sensors_while_home_legacy_entity_ids() -> None
     snapshot = _snapshot(
         [
             _base_entity("sensor.backyard_vmd3_0", "sensor", "unavailable"),
-            _base_entity(
-                "sensor.backyard_vmd4_camera1profile1", "sensor", "idle"
-            ),
+            _base_entity("sensor.backyard_vmd4_camera1profile1", "sensor", "idle"),
         ],
         [],
         {
