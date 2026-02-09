@@ -128,3 +128,28 @@ def test_normalize_candidate_unavailable_sensors_while_home_template() -> None:
             "sensor.backyard_vmd4_camera1profile1",
         ]
     }
+
+
+def test_normalize_candidate_unavailable_sensors_while_home_legacy_entity_ids() -> None:
+    candidate = {
+        "candidate_id": "sensor_unavailable_home",
+        "title": "Unavailable sensors while home",
+        "summary": "Detects any sensor reporting unavailable while someone is home.",
+        "pattern": "derived.anyone_home AND sensor state unavailable",
+        "suggested_type": "availability",
+        "confidence_hint": 0.8,
+        "evidence_paths": [
+            "derived.anyone_home",
+            "entities[entity_id=backyard_vmd3_0].state",
+            "entities[entity_id=backyard_vmd4_camera1profile1].state",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "unavailable_sensors_while_home"
+    assert normalized.params == {
+        "sensor_entity_ids": [
+            "backyard_vmd3_0",
+            "backyard_vmd4_camera1profile1",
+        ]
+    }

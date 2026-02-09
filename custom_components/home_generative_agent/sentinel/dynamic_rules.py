@@ -206,14 +206,19 @@ def _eval_unavailable_sensors_while_home(
         return []
 
     required_entities: list[SnapshotEntity] = []
+    resolved_sensor_ids: list[str] = []
     for sensor_id in sensor_ids:
-        entity = entity_map.get(sensor_id)
+        resolved_sensor_id = _resolve_sensor_entity_id(sensor_id, entity_map)
+        if resolved_sensor_id is None:
+            return []
+        entity = entity_map.get(resolved_sensor_id)
         if entity is None:
             return []
+        resolved_sensor_ids.append(resolved_sensor_id)
         required_entities.append(entity)
 
     findings: list[AnomalyFinding] = []
-    for sensor_id, sensor in zip(sensor_ids, required_entities, strict=False):
+    for sensor_id, sensor in zip(resolved_sensor_ids, required_entities, strict=False):
         if sensor.get("state") != "unavailable":
             continue
         evidence = {
@@ -226,6 +231,21 @@ def _eval_unavailable_sensors_while_home(
         }
         findings.append(_build_finding(rule, [sensor_id], evidence))
     return findings
+
+
+def _resolve_sensor_entity_id(
+    sensor_id: Any, entity_map: Mapping[str, SnapshotEntity]
+) -> str | None:
+    if not isinstance(sensor_id, str) or not sensor_id:
+        return None
+    if sensor_id in entity_map:
+        return sensor_id
+    if "." in sensor_id:
+        return None
+    for candidate in (f"sensor.{sensor_id}", f"binary_sensor.{sensor_id}"):
+        if candidate in entity_map:
+            return candidate
+    return None
 
 
 def _eval_open_entry_with_context(  # noqa: PLR0913

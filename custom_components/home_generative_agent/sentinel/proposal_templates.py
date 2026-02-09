@@ -234,6 +234,8 @@ def _find_sensor_entity_ids(evidence_paths: list[str]) -> list[str]:
             continue
         entity_id = path.split("entities[entity_id=", 1)[1].split("]", 1)[0]
         if "." not in entity_id:
+            # Legacy discovery drafts may store object IDs without domain.
+            ids.append(entity_id)
             continue
         domain = entity_id.split(".", 1)[0]
         if domain in {"sensor", "binary_sensor"}:
