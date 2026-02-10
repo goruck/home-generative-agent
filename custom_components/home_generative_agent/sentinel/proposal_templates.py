@@ -78,8 +78,7 @@ def normalize_candidate(  # noqa: PLR0911
         and _contains_any(text, ("alarm", "disarmed"))
     ):
         default_rule_id = (
-            "motion_while_alarm_disarmed_and_home_present_"
-            f"{alarm_id.replace('.', '_')}"
+            f"motion_while_alarm_disarmed_and_home_present_{alarm_id.replace('.', '_')}"
         )
         return NormalizedRule(
             rule_id=_candidate_rule_id(
