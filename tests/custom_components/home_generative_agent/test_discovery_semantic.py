@@ -96,3 +96,21 @@ def test_rule_semantic_key_unavailable_sensors_while_home() -> None:
     assert "subject=sensor" in key
     assert "predicate=unavailable" in key
     assert "home=1" in key
+
+
+def test_rule_semantic_key_unavailable_sensors_any_home_state() -> None:
+    rule = {
+        "rule_id": "backyard_sensors_unavailable",
+        "template_id": "unavailable_sensors",
+        "params": {
+            "sensor_entity_ids": [
+                "backyard_vmd3_0",
+                "backyard_vmd4_camera1profile1",
+            ]
+        },
+    }
+    key = rule_semantic_key(rule)
+    assert key is not None
+    assert "subject=sensor" in key
+    assert "predicate=unavailable" in key
+    assert "home=any" in key

@@ -7,6 +7,7 @@ from typing import Any
 
 SUPPORTED_TEMPLATES = {
     "alarm_disarmed_open_entry",
+    "unavailable_sensors",
     "unavailable_sensors_while_home",
     "open_any_window_at_night_while_away",
     "open_entry_when_home",
@@ -149,17 +150,23 @@ def normalize_candidate(  # noqa: PLR0911
             suggested_actions=["check_camera"],
         )
 
-    if (
-        sensor_ids
-        and presence == "home"
-        and _contains_any(text, ("unavailable", "offline", "unreachable"))
-    ):
+    if sensor_ids and _contains_any(text, ("unavailable", "offline", "unreachable")):
+        if presence == "home":
+            return NormalizedRule(
+                rule_id="unavailable_sensors_while_home",
+                template_id="unavailable_sensors_while_home",
+                params={"sensor_entity_ids": sensor_ids},
+                severity="low",
+                confidence=float(candidate.get("confidence_hint", 0.8)),
+                is_sensitive=False,
+                suggested_actions=["check_sensor"],
+            )
         return NormalizedRule(
-            rule_id="unavailable_sensors_while_home",
-            template_id="unavailable_sensors_while_home",
+            rule_id=_candidate_rule_id(candidate, default="unavailable_sensors"),
+            template_id="unavailable_sensors",
             params={"sensor_entity_ids": sensor_ids},
             severity="low",
-            confidence=float(candidate.get("confidence_hint", 0.8)),
+            confidence=float(candidate.get("confidence_hint", 0.6)),
             is_sensitive=False,
             suggested_actions=["check_sensor"],
         )
@@ -282,3 +289,13 @@ def _find_camera_id(evidence_paths: list[str]) -> str | None:
 
 def _contains_any(text: str, words: tuple[str, ...]) -> bool:
     return any(word in text for word in words)
+
+
+def _candidate_rule_id(candidate: dict[str, Any], *, default: str) -> str:
+    candidate_id = candidate.get("candidate_id")
+    if not isinstance(candidate_id, str):
+        return default
+    slug = "".join(
+        char if (char.isalnum() or char == "_") else "_" for char in candidate_id
+    ).strip("_")
+    return slug.lower() or default

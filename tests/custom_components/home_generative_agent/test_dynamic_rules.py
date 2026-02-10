@@ -331,6 +331,83 @@ def test_dynamic_rule_unavailable_sensors_while_home_legacy_entity_ids() -> None
     assert findings[0].triggering_entities == ["sensor.backyard_vmd3_0"]
 
 
+def test_dynamic_rule_unavailable_sensors_issue_223_triggers() -> None:
+    snapshot = _snapshot(
+        [
+            _base_entity("sensor.backyard_vmd3_0", "sensor", "unavailable"),
+            _base_entity(
+                "sensor.backyard_vmd4_camera1profile1", "sensor", "unavailable"
+            ),
+        ],
+        [],
+        {
+            "now": "2026-02-01T00:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": False,
+            "anyone_home": False,
+            "last_motion_by_area": {},
+        },
+    )
+    rules = [
+        {
+            "rule_id": "backyard_sensors_unavailable",
+            "template_id": "unavailable_sensors",
+            "params": {
+                "sensor_entity_ids": [
+                    "backyard_vmd3_0",
+                    "backyard_vmd4_camera1profile1",
+                ]
+            },
+            "severity": "low",
+            "confidence": 0.6,
+            "is_sensitive": False,
+            "suggested_actions": ["close_entry"],
+        }
+    ]
+    findings = evaluate_dynamic_rules(snapshot, rules)
+    assert len(findings) == 1
+    assert findings[0].type == "backyard_sensors_unavailable"
+    assert findings[0].triggering_entities == [
+        "sensor.backyard_vmd3_0",
+        "sensor.backyard_vmd4_camera1profile1",
+    ]
+
+
+def test_dynamic_rule_unavailable_sensors_issue_223_non_trigger() -> None:
+    snapshot = _snapshot(
+        [
+            _base_entity("sensor.backyard_vmd3_0", "sensor", "unavailable"),
+            _base_entity("sensor.backyard_vmd4_camera1profile1", "sensor", "idle"),
+        ],
+        [],
+        {
+            "now": "2026-02-01T00:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": False,
+            "anyone_home": False,
+            "last_motion_by_area": {},
+        },
+    )
+    rules = [
+        {
+            "rule_id": "backyard_sensors_unavailable",
+            "template_id": "unavailable_sensors",
+            "params": {
+                "sensor_entity_ids": [
+                    "backyard_vmd3_0",
+                    "backyard_vmd4_camera1profile1",
+                ]
+            },
+            "severity": "low",
+            "confidence": 0.6,
+            "is_sensitive": False,
+            "suggested_actions": ["close_entry"],
+        }
+    ]
+    findings = evaluate_dynamic_rules(snapshot, rules)
+    assert findings == []
+
+
 @pytest.mark.asyncio
 async def test_rule_registry_add_duplicate(hass) -> None:
     registry = RuleRegistry(hass=cast("HomeAssistant", hass))

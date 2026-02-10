@@ -153,3 +153,34 @@ def test_normalize_candidate_unavailable_sensors_while_home_legacy_entity_ids() 
             "backyard_vmd4_camera1profile1",
         ]
     }
+
+
+def test_normalize_candidate_unavailable_sensors_template_issue_223() -> None:
+    candidate = {
+        "candidate_id": "backyard_sensors_unavailable",
+        "title": "Backyard sensors unavailable",
+        "summary": (
+            "Backyard motion sensors are reporting unavailable, which could indicate "
+            "a malfunction or connectivity issue."
+        ),
+        "pattern": (
+            "entities[entity_id=backyard_vmd3_0].state == 'unavailable' AND "
+            "entities[entity_id=backyard_vmd4_camera1profile1].state == 'unavailable'"
+        ),
+        "suggested_type": "availability",
+        "confidence_hint": 0.6,
+        "evidence_paths": [
+            "entities[entity_id=backyard_vmd3_0].state",
+            "entities[entity_id=backyard_vmd4_camera1profile1].state",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "unavailable_sensors"
+    assert normalized.rule_id == "backyard_sensors_unavailable"
+    assert normalized.params == {
+        "sensor_entity_ids": [
+            "backyard_vmd3_0",
+            "backyard_vmd4_camera1profile1",
+        ]
+    }

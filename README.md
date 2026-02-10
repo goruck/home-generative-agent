@@ -183,6 +183,7 @@ When Sentinel notifications are enabled:
 
 - `unlocked_lock_when_home`
 - `alarm_disarmed_open_entry`
+- `unavailable_sensors`
 - `open_entry_when_home`
 - `open_entry_while_away`
 - `open_entry_at_night_when_home`
@@ -295,6 +296,8 @@ Preferred handling:
 3. After template support is added, re-approve the proposal to re-evaluate with current mapping logic.
 
 Compatibility note: `unavailable_sensors_while_home` supports re-approving legacy drafts whose `evidence_paths` used domainless entity IDs (for example `entities[entity_id=backyard_vmd3_0].state`).
+
+`unavailable_sensors` is also supported for candidates without explicit occupancy context (for example `backyard_sensors_unavailable`). It triggers only when all listed sensors are `unavailable`; if any required sensor is missing or not unavailable, no finding is produced.
 
 ### Troubleshooting
 

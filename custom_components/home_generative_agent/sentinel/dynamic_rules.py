@@ -100,6 +100,8 @@ def evaluate_dynamic_rules(
             findings.extend(
                 _eval_unavailable_sensors_while_home(snapshot, rule, entity_map)
             )
+        elif template_id == "unavailable_sensors":
+            findings.extend(_eval_unavailable_sensors(snapshot, rule, entity_map))
     return findings
 
 
@@ -231,6 +233,48 @@ def _eval_unavailable_sensors_while_home(
         }
         findings.append(_build_finding(rule, [sensor_id], evidence))
     return findings
+
+
+def _eval_unavailable_sensors(
+    snapshot: FullStateSnapshot,
+    rule: dict[str, Any],
+    entity_map: Mapping[str, SnapshotEntity],
+) -> list[AnomalyFinding]:
+    params = _rule_params(rule)
+    sensor_ids = params.get("sensor_entity_ids")
+    if not isinstance(sensor_ids, list):
+        return []
+
+    required_entities: list[SnapshotEntity] = []
+    resolved_sensor_ids: list[str] = []
+    for sensor_id in sensor_ids:
+        resolved_sensor_id = _resolve_sensor_entity_id(sensor_id, entity_map)
+        if resolved_sensor_id is None:
+            return []
+        entity = entity_map.get(resolved_sensor_id)
+        if entity is None:
+            return []
+        resolved_sensor_ids.append(resolved_sensor_id)
+        required_entities.append(entity)
+
+    if not required_entities:
+        return []
+    if any(entity.get("state") != "unavailable" for entity in required_entities):
+        return []
+
+    evidence = {
+        "rule_id": rule.get("rule_id"),
+        "template_id": rule.get("template_id"),
+        "sensor_entity_ids": resolved_sensor_ids,
+        "sensor_states": {
+            sensor_id: entity.get("state")
+            for sensor_id, entity in zip(
+                resolved_sensor_ids, required_entities, strict=False
+            )
+        },
+        "anyone_home": snapshot["derived"]["anyone_home"],
+    }
+    return [_build_finding(rule, resolved_sensor_ids, evidence)]
 
 
 def _resolve_sensor_entity_id(
