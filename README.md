@@ -190,6 +190,7 @@ When Sentinel notifications are enabled:
 - `open_entry_at_night_while_away`
 - `open_any_window_at_night_while_away`
 - `motion_without_camera_activity`
+- `motion_while_alarm_disarmed_and_home_present`
 
 ### Discovery Novelty and Dedupe
 
@@ -298,6 +299,8 @@ Preferred handling:
 Compatibility note: `unavailable_sensors_while_home` supports re-approving legacy drafts whose `evidence_paths` used domainless entity IDs (for example `entities[entity_id=backyard_vmd3_0].state`).
 
 `unavailable_sensors` is also supported for candidates without explicit occupancy context (for example `backyard_sensors_unavailable`). It triggers only when all listed sensors are `unavailable`; if any required sensor is missing or not unavailable, no finding is produced.
+
+`motion_while_alarm_disarmed_and_home_present` is supported for candidates that provide motion entities, an alarm entity, and one or more `person.*` entities in evidence paths. It triggers only when all required entities are present and states match exactly: alarm `disarmed`, motion `on`, and person `home`.
 
 ### Troubleshooting
 

@@ -7,6 +7,7 @@ from typing import Any
 
 SUPPORTED_TEMPLATES = {
     "alarm_disarmed_open_entry",
+    "motion_while_alarm_disarmed_and_home_present",
     "unavailable_sensors",
     "unavailable_sensors_while_home",
     "open_any_window_at_night_while_away",
@@ -61,11 +62,40 @@ def normalize_candidate(  # noqa: PLR0911
     alarm_id = _find_entity_id(evidence_paths, "alarm_control_panel")
     entry_ids = _find_entry_entity_ids(evidence_paths)
     motion_ids = _find_motion_entity_ids(evidence_paths)
+    person_ids = _find_entity_ids(evidence_paths, "person")
     sensor_ids = _find_sensor_entity_ids(evidence_paths)
     camera_id = _find_camera_id(evidence_paths)
     has_night = _has_night_signal(evidence_paths, text)
     presence = _presence_signal(evidence_paths, text)
     entry_kind = _entry_kind(entry_ids)
+
+    if (
+        alarm_id
+        and motion_ids
+        and person_ids
+        and presence == "home"
+        and _contains_any(text, ("motion", "vmd"))
+        and _contains_any(text, ("alarm", "disarmed"))
+    ):
+        default_rule_id = (
+            f"motion_while_alarm_disarmed_and_home_present_{alarm_id.replace('.', '_')}"
+        )
+        return NormalizedRule(
+            rule_id=_candidate_rule_id(
+                candidate,
+                default=default_rule_id,
+            ),
+            template_id="motion_while_alarm_disarmed_and_home_present",
+            params={
+                "alarm_entity_id": alarm_id,
+                "motion_entity_ids": motion_ids,
+                "home_entity_ids": person_ids,
+            },
+            severity="low",
+            confidence=float(candidate.get("confidence_hint", 0.75)),
+            is_sensitive=False,
+            suggested_actions=["close_entry"],
+        )
 
     if alarm_id and entry_ids and _contains_any(text, ("alarm", "disarmed", "armed")):
         return NormalizedRule(

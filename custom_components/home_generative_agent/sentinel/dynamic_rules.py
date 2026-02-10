@@ -31,6 +31,69 @@ def evaluate_dynamic_rules(
         activity["camera_entity_id"]: activity
         for activity in snapshot["camera_activity"]
     }
+    template_evaluators = {
+        "alarm_disarmed_open_entry": lambda rule: _eval_alarm_disarmed_open_entry(
+            snapshot, rule, entity_map
+        ),
+        "motion_while_alarm_disarmed_and_home_present": (
+            lambda rule: _eval_motion_while_alarm_disarmed_and_home_present(
+                snapshot, rule, entity_map
+            )
+        ),
+        "open_any_window_at_night_while_away": (
+            lambda rule: _eval_open_any_window_at_night_while_away(
+                snapshot, rule, entity_map
+            )
+        ),
+        "unlocked_lock_when_home": lambda rule: _eval_unlocked_lock_when_home(
+            snapshot, rule, entity_map
+        ),
+        "open_entry_when_home": lambda rule: _eval_open_entry_with_context(
+            snapshot,
+            rule,
+            entity_map,
+            require_home=True,
+            require_away=False,
+            require_night=False,
+        ),
+        "open_entry_while_away": lambda rule: _eval_open_entry_with_context(
+            snapshot,
+            rule,
+            entity_map,
+            require_home=False,
+            require_away=True,
+            require_night=False,
+        ),
+        "open_entry_at_night_when_home": lambda rule: _eval_open_entry_with_context(
+            snapshot,
+            rule,
+            entity_map,
+            require_home=True,
+            require_away=False,
+            require_night=True,
+        ),
+        "open_entry_at_night_while_away": lambda rule: _eval_open_entry_with_context(
+            snapshot,
+            rule,
+            entity_map,
+            require_home=False,
+            require_away=True,
+            require_night=True,
+        ),
+        "motion_without_camera_activity": (
+            lambda rule: _eval_motion_without_camera_activity(
+                snapshot, rule, entity_map, camera_map
+            )
+        ),
+        "unavailable_sensors_while_home": (
+            lambda rule: _eval_unavailable_sensors_while_home(
+                snapshot, rule, entity_map
+            )
+        ),
+        "unavailable_sensors": lambda rule: _eval_unavailable_sensors(
+            snapshot, rule, entity_map
+        ),
+    }
 
     findings: list[AnomalyFinding] = []
     for rule in rules:
@@ -38,70 +101,10 @@ def evaluate_dynamic_rules(
         if template_id not in SUPPORTED_TEMPLATES:
             LOGGER.debug("Skipping unsupported dynamic template: %s", template_id)
             continue
-        if template_id == "alarm_disarmed_open_entry":
-            findings.extend(_eval_alarm_disarmed_open_entry(snapshot, rule, entity_map))
-        elif template_id == "open_any_window_at_night_while_away":
-            findings.extend(
-                _eval_open_any_window_at_night_while_away(snapshot, rule, entity_map)
-            )
-        elif template_id == "unlocked_lock_when_home":
-            findings.extend(_eval_unlocked_lock_when_home(snapshot, rule, entity_map))
-        elif template_id == "open_entry_when_home":
-            findings.extend(
-                _eval_open_entry_with_context(
-                    snapshot,
-                    rule,
-                    entity_map,
-                    require_home=True,
-                    require_away=False,
-                    require_night=False,
-                )
-            )
-        elif template_id == "open_entry_while_away":
-            findings.extend(
-                _eval_open_entry_with_context(
-                    snapshot,
-                    rule,
-                    entity_map,
-                    require_home=False,
-                    require_away=True,
-                    require_night=False,
-                )
-            )
-        elif template_id == "open_entry_at_night_when_home":
-            findings.extend(
-                _eval_open_entry_with_context(
-                    snapshot,
-                    rule,
-                    entity_map,
-                    require_home=True,
-                    require_away=False,
-                    require_night=True,
-                )
-            )
-        elif template_id == "open_entry_at_night_while_away":
-            findings.extend(
-                _eval_open_entry_with_context(
-                    snapshot,
-                    rule,
-                    entity_map,
-                    require_home=False,
-                    require_away=True,
-                    require_night=True,
-                )
-            )
-        elif template_id == "motion_without_camera_activity":
-            findings.extend(
-                _eval_motion_without_camera_activity(
-                    snapshot, rule, entity_map, camera_map
-                )
-            )
-        elif template_id == "unavailable_sensors_while_home":
-            findings.extend(
-                _eval_unavailable_sensors_while_home(snapshot, rule, entity_map)
-            )
-        elif template_id == "unavailable_sensors":
-            findings.extend(_eval_unavailable_sensors(snapshot, rule, entity_map))
+        evaluator = template_evaluators.get(template_id)
+        if evaluator is None:
+            continue
+        findings.extend(evaluator(rule))
     return findings
 
 
@@ -135,6 +138,58 @@ def _eval_alarm_disarmed_open_entry(
         }
         findings.append(_build_finding(rule, [alarm_id, entry_id], evidence))
     return findings
+
+
+def _eval_motion_while_alarm_disarmed_and_home_present(
+    _snapshot: FullStateSnapshot,
+    rule: dict[str, Any],
+    entity_map: Mapping[str, SnapshotEntity],
+) -> list[AnomalyFinding]:
+    params = _rule_params(rule)
+    alarm_id = params.get("alarm_entity_id")
+    motion_ids = params.get("motion_entity_ids")
+    home_ids = params.get("home_entity_ids")
+    if (
+        not alarm_id
+        or not isinstance(motion_ids, list)
+        or not motion_ids
+        or not isinstance(home_ids, list)
+        or not home_ids
+    ):
+        return []
+
+    alarm = entity_map.get(alarm_id)
+    if alarm is None or alarm.get("state") != "disarmed":
+        return []
+
+    motion_entities = _resolve_required_entities(motion_ids, entity_map)
+    home_entities = _resolve_required_entities(home_ids, entity_map)
+    if motion_entities is None or home_entities is None:
+        return []
+
+    if any(motion.get("state") != "on" for motion in motion_entities):
+        return []
+
+    if any(home_entity.get("state") != "home" for home_entity in home_entities):
+        return []
+
+    evidence = {
+        "rule_id": rule.get("rule_id"),
+        "template_id": rule.get("template_id"),
+        "alarm_entity_id": alarm_id,
+        "alarm_state": alarm.get("state"),
+        "motion_entity_ids": list(motion_ids),
+        "motion_states": {
+            motion_id: motion.get("state")
+            for motion_id, motion in zip(motion_ids, motion_entities, strict=False)
+        },
+        "home_entity_ids": list(home_ids),
+        "home_states": {
+            home_id: home_entity.get("state")
+            for home_id, home_entity in zip(home_ids, home_entities, strict=False)
+        },
+    }
+    return [_build_finding(rule, [alarm_id, *motion_ids, *home_ids], evidence)]
 
 
 def _eval_unlocked_lock_when_home(
@@ -290,6 +345,18 @@ def _resolve_sensor_entity_id(
         if candidate in entity_map:
             return candidate
     return None
+
+
+def _resolve_required_entities(
+    entity_ids: list[str], entity_map: Mapping[str, SnapshotEntity]
+) -> list[SnapshotEntity] | None:
+    entities: list[SnapshotEntity] = []
+    for entity_id in entity_ids:
+        entity = entity_map.get(entity_id)
+        if entity is None:
+            return None
+        entities.append(entity)
+    return entities
 
 
 def _eval_open_entry_with_context(  # noqa: PLR0913
