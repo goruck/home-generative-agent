@@ -152,6 +152,14 @@ def rule_semantic_key(rule: dict[str, Any]) -> str | None:  # noqa: PLR0911
             "v1|subject=sensor|predicate=unavailable|night=any|home=1|scope=any|"
             f"entities={','.join(sensor_ids)}"
         )
+    if template_id == "unavailable_sensors":
+        sensor_ids = sorted(set(_string_list(params.get("sensor_entity_ids"))))
+        if not sensor_ids:
+            return None
+        return (
+            "v1|subject=sensor|predicate=unavailable|night=any|home=any|scope=any|"
+            f"entities={','.join(sensor_ids)}"
+        )
     return None
 
 
