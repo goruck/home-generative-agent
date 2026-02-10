@@ -184,3 +184,40 @@ def test_normalize_candidate_unavailable_sensors_template_issue_223() -> None:
             "backyard_vmd4_camera1profile1",
         ]
     }
+
+
+def test_normalize_candidate_motion_alarm_disarmed_home_issue_225() -> None:
+    candidate = {
+        "candidate_id": "motion_frontgate_disarmed_home",
+        "title": "Motion detected at front gate while alarm disarmed and home present",
+        "summary": (
+            "Motion is detected at the front gate while the alarm is disarmed and a "
+            "person is at home."
+        ),
+        "pattern": (
+            "frontgate_vmd3_0.state == 'on' AND "
+            "frontgate_vmd4_camera1profile1.state == 'on' AND "
+            "alarm_control_panel.home_alarm.state == 'disarmed' AND "
+            "person.lindo_st_angel.state == 'home'"
+        ),
+        "suggested_type": "security",
+        "confidence_hint": 0.75,
+        "evidence_paths": [
+            "entities[entity_id=frontgate_vmd3_0].state",
+            "entities[entity_id=frontgate_vmd4_camera1profile1].state",
+            "entities[entity_id=alarm_control_panel.home_alarm].state",
+            "entities[entity_id=person.lindo_st_angel].state",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "motion_while_alarm_disarmed_and_home_present"
+    assert normalized.rule_id == "motion_frontgate_disarmed_home"
+    assert normalized.params == {
+        "alarm_entity_id": "alarm_control_panel.home_alarm",
+        "motion_entity_ids": [
+            "frontgate_vmd3_0",
+            "frontgate_vmd4_camera1profile1",
+        ],
+        "home_entity_ids": ["person.lindo_st_angel"],
+    }
