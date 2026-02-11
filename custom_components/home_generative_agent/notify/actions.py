@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from homeassistant.util import dt as dt_util
+
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
@@ -19,6 +21,7 @@ LOGGER = logging.getLogger(__name__)
 
 ACTION_PREFIX = "hga_sentinel_"
 ACTION_ID_PARTS = 2
+EVENT_SENTINEL_EXECUTE_REQUESTED = "hga_sentinel_execute_requested"
 
 
 class ActionHandler:
@@ -26,11 +29,12 @@ class ActionHandler:
 
     def __init__(
         self,
-        _hass: HomeAssistant,
+        hass: HomeAssistant,
         suppression: SuppressionManager,
         audit_store: AuditStore,
     ) -> None:
         """Initialize action handling dependencies."""
+        self._hass = hass
         self._suppression = suppression
         self._audit_store = audit_store
         self._pending_findings: dict[str, AnomalyFinding] = {}
@@ -66,9 +70,14 @@ class ActionHandler:
                     "reason": "Sensitive action requires explicit confirmation.",
                 }
             else:
+                event_data = _build_execute_event_data(finding, payload)
+                self._hass.bus.async_fire(
+                    EVENT_SENTINEL_EXECUTE_REQUESTED,
+                    event_data,
+                )
                 outcome = {
-                    "status": "skipped",
-                    "reason": "No deterministic executor configured.",
+                    "status": "event_fired",
+                    "event_type": EVENT_SENTINEL_EXECUTE_REQUESTED,
                 }
 
         if anomaly_id:
@@ -78,3 +87,21 @@ class ActionHandler:
                 response=response,
                 outcome=outcome,
             )
+
+
+def _build_execute_event_data(
+    finding: AnomalyFinding, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """Build deterministic payload for automation execution hooks."""
+    return {
+        "requested_at": dt_util.as_utc(dt_util.utcnow()).isoformat(),
+        "anomaly_id": finding.anomaly_id,
+        "type": finding.type,
+        "severity": finding.severity,
+        "confidence": finding.confidence,
+        "triggering_entities": list(finding.triggering_entities),
+        "suggested_actions": list(finding.suggested_actions),
+        "is_sensitive": finding.is_sensitive,
+        "evidence": finding.evidence,
+        "mobile_action_payload": dict(payload),
+    }

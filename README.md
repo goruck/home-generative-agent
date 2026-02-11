@@ -178,6 +178,148 @@ When Sentinel notifications are enabled:
   - `medium`: `Check soon and secure it if unexpected.`
   - `low`: `Review when convenient.`
 - Mobile action buttons are: `Acknowledge`, `Ignore`, `Later`.
+- `Execute` is shown only for non-sensitive findings that include suggested actions.
+
+### Sentinel Execute Automation Bridge
+
+When a user taps `Execute` on a non-sensitive finding, Sentinel emits a deterministic Home Assistant event:
+
+- Event type: `hga_sentinel_execute_requested`
+- Typical payload fields:
+  - `requested_at`
+  - `anomaly_id`
+  - `type`
+  - `severity`
+  - `confidence`
+  - `triggering_entities`
+  - `suggested_actions`
+  - `is_sensitive`
+  - `evidence`
+  - `mobile_action_payload`
+
+This lets users define automations/scripts for execute behavior without giving direct action authority to the LLM.
+
+### Sentinel Execute Blueprints
+
+Two draft blueprints are included in the `blueprints/` folder for the execute event bridge:
+
+- `hga_sentinel_execute_router.yaml`
+- `hga_sentinel_execute_escalate_high.yaml`
+
+How to import in Home Assistant:
+
+1. Open `Settings` -> `Automations & Scenes` -> `Blueprints`.
+2. Import each YAML from this repository's `blueprints/` directory.
+3. Create automations from the imported blueprints and configure inputs.
+
+What each blueprint does:
+
+- `hga_sentinel_execute_router.yaml`: routes `hga_sentinel_execute_requested` by `suggested_actions` to scripts (`check_appliance`, `check_camera`, `check_sensor`, `close_entry`, `lock_entity`) with default fallback support.
+- `hga_sentinel_execute_escalate_high.yaml`: handles only `severity: high` execute events and can send persistent notifications, mobile push, and optional TTS.
+
+Recommended usage:
+
+- Start with `hga_sentinel_execute_escalate_high.yaml` for immediate high-priority visibility.
+- Add `hga_sentinel_execute_router.yaml` when you have scripts ready for action-specific handling.
+
+Script contract for router targets:
+
+- Router script calls pass one object in `data.sentinel_event`.
+- `sentinel_event` matches the execute event payload and includes:
+  - `requested_at`
+  - `anomaly_id`
+  - `type`
+  - `severity`
+  - `confidence`
+  - `triggering_entities`
+  - `suggested_actions`
+  - `is_sensitive`
+  - `evidence`
+  - `mobile_action_payload`
+
+Where to store these scripts in Home Assistant:
+
+- Create them as regular HA scripts: `Settings` -> `Automations & Scenes` -> `Scripts` -> `+ Create Script` -> `Edit in YAML`.
+- Save each with a stable script entity ID (for example `script.hga_check_camera_flow`) so it can be selected in `hga_sentinel_execute_router.yaml`.
+- If you manage YAML directly, store them in `scripts.yaml` (or an included scripts file) and reload scripts.
+
+Example script target for `check_appliance`:
+
+```yaml
+alias: HGA Check Appliance Flow
+mode: queued
+fields:
+  sentinel_event:
+    description: Sentinel execute event payload
+sequence:
+  - action: persistent_notification.create
+    data:
+      title: "HGA Appliance Follow-up"
+      message: >
+        Type={{ sentinel_event.type }},
+        severity={{ sentinel_event.severity }},
+        entities={{ sentinel_event.triggering_entities | join(', ') }}.
+  - action: notify.mobile_app_phone
+    data:
+      title: "HGA Appliance Follow-up"
+      message: >
+        Suggested actions:
+        {{ sentinel_event.suggested_actions | join(', ') if sentinel_event.suggested_actions else 'none' }}
+```
+
+Example script target for `check_camera`:
+
+```yaml
+alias: HGA Check Camera Flow
+mode: queued
+fields:
+  sentinel_event:
+    description: Sentinel execute event payload
+sequence:
+  - action: notify.mobile_app_phone
+    data:
+      title: "HGA Camera Follow-up"
+      message: >
+        Camera-related event {{ sentinel_event.type }}.
+        Entities={{ sentinel_event.triggering_entities | join(', ') if sentinel_event.triggering_entities else 'none' }}.
+  - action: persistent_notification.create
+    data:
+      title: "HGA Camera Follow-up"
+      message: >
+        Evidence: {{ sentinel_event.evidence }}
+```
+
+Example script target for `lock_entity`:
+
+```yaml
+alias: HGA Lock Entity Follow-up
+mode: queued
+fields:
+  sentinel_event:
+    description: Sentinel execute event payload
+sequence:
+  - variables:
+      lock_id: >
+        {% set ids = sentinel_event.triggering_entities | default([], true) %}
+        {{ ids[0] if ids else '' }}
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ lock_id.startswith('lock.') }}"
+        sequence:
+          - action: lock.lock
+            target:
+              entity_id: "{{ lock_id }}"
+    default:
+      - action: persistent_notification.create
+        data:
+          title: "HGA Lock Entity Follow-up"
+          message: >
+            Could not resolve lock entity from event:
+            {{ sentinel_event.triggering_entities | default([], true) }}
+```
+
+Tip: if your script needs the raw mobile action callback details, read `sentinel_event.mobile_action_payload`.
 
 ### Supported Generated Rule Templates
 
