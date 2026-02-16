@@ -35,9 +35,7 @@ def evaluate_dynamic_rules(
         "alarm_disarmed_open_entry": lambda rule: _eval_alarm_disarmed_open_entry(
             snapshot, rule, entity_map
         ),
-        "low_battery_sensors": lambda rule: _eval_low_battery_sensors(
-            rule, entity_map
-        ),
+        "low_battery_sensors": lambda rule: _eval_low_battery_sensors(rule, entity_map),
         "motion_while_alarm_disarmed_and_home_present": (
             lambda rule: _eval_motion_while_alarm_disarmed_and_home_present(
                 snapshot, rule, entity_map
