@@ -8,8 +8,14 @@ Home Assistant custom integration providing a generative agent. Core code lives 
 - `custom_components/home_generative_agent/` — integration code
 - `tests/` — pytest suite
 - `blueprints/` — HA blueprints used by the integration
-- `scripts/` — helper scripts (deps, lint)
+- `scripts/` — helper scripts (notably `gen_manifest_requirements.py`)
 - `requirements/` + `requirements_runtime_manifest.txt` — dependency management
+
+## Integration module map
+- `sentinel/` — anomaly detection engine, dynamic rules, proposals, suppression
+- `snapshot/` — snapshot schema/builders/reducers used by Sentinel and explain flows
+- `notify/` — mobile notification dispatch and action helpers
+- `explain/` — prompt templates and LLM-backed explanation/discovery helpers
 
 ## Development environment
 - Python: 3.13
@@ -52,3 +58,5 @@ Runtime dependencies are sourced from
 
 ## Notes
 - The integration is a Home Assistant service integration (`manifest.json`).
+- Prefer the Makefile workflow for setup/tasks (`make devdeps`, `make testdeps`,
+  `make runtimedeps`) over legacy helper scripts.
