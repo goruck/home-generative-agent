@@ -408,6 +408,115 @@ def test_dynamic_rule_unavailable_sensors_issue_223_non_trigger() -> None:
     assert findings == []
 
 
+def test_dynamic_rule_low_battery_sensors_issue_236_triggers() -> None:
+    snapshot = _snapshot(
+        [
+            _base_entity("sensor.elias_t_h_battery", "sensor", "37"),
+            _base_entity("sensor.girls_t_h_battery", "sensor", "53"),
+        ],
+        [],
+        {
+            "now": "2026-02-01T00:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": False,
+            "anyone_home": True,
+            "last_motion_by_area": {},
+        },
+    )
+    rules = [
+        {
+            "rule_id": "low_battery_room_sensors_v1",
+            "template_id": "low_battery_sensors",
+            "params": {
+                "sensor_entity_ids": [
+                    "sensor.elias_t_h_battery",
+                    "sensor.girls_t_h_battery",
+                ],
+                "threshold": 40,
+            },
+            "severity": "low",
+            "confidence": 0.62,
+            "is_sensitive": False,
+            "suggested_actions": ["check_sensor"],
+        }
+    ]
+    findings = evaluate_dynamic_rules(snapshot, rules)
+    assert len(findings) == 1
+    assert findings[0].type == "low_battery_room_sensors_v1"
+    assert findings[0].triggering_entities == ["sensor.elias_t_h_battery"]
+
+
+def test_dynamic_rule_low_battery_sensors_issue_236_non_trigger() -> None:
+    snapshot = _snapshot(
+        [
+            _base_entity("sensor.elias_t_h_battery", "sensor", "44"),
+            _base_entity("sensor.girls_t_h_battery", "sensor", "53"),
+        ],
+        [],
+        {
+            "now": "2026-02-01T00:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": False,
+            "anyone_home": True,
+            "last_motion_by_area": {},
+        },
+    )
+    rules = [
+        {
+            "rule_id": "low_battery_room_sensors_v1",
+            "template_id": "low_battery_sensors",
+            "params": {
+                "sensor_entity_ids": [
+                    "sensor.elias_t_h_battery",
+                    "sensor.girls_t_h_battery",
+                ],
+                "threshold": 40,
+            },
+            "severity": "low",
+            "confidence": 0.62,
+            "is_sensitive": False,
+            "suggested_actions": ["check_sensor"],
+        }
+    ]
+    findings = evaluate_dynamic_rules(snapshot, rules)
+    assert findings == []
+
+
+def test_dynamic_rule_low_battery_sensors_issue_236_missing_required_entity() -> None:
+    snapshot = _snapshot(
+        [
+            _base_entity("sensor.elias_t_h_battery", "sensor", "35"),
+        ],
+        [],
+        {
+            "now": "2026-02-01T00:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": False,
+            "anyone_home": True,
+            "last_motion_by_area": {},
+        },
+    )
+    rules = [
+        {
+            "rule_id": "low_battery_room_sensors_v1",
+            "template_id": "low_battery_sensors",
+            "params": {
+                "sensor_entity_ids": [
+                    "sensor.elias_t_h_battery",
+                    "sensor.girls_t_h_battery",
+                ],
+                "threshold": 40,
+            },
+            "severity": "low",
+            "confidence": 0.62,
+            "is_sensitive": False,
+            "suggested_actions": ["check_sensor"],
+        }
+    ]
+    findings = evaluate_dynamic_rules(snapshot, rules)
+    assert findings == []
+
+
 def test_dynamic_rule_motion_alarm_disarmed_home_issue_225_triggers() -> None:
     snapshot = _snapshot(
         [

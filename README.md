@@ -183,6 +183,7 @@ When Sentinel notifications are enabled:
 
 - `unlocked_lock_when_home`
 - `alarm_disarmed_open_entry`
+- `low_battery_sensors`
 - `unavailable_sensors`
 - `open_entry_when_home`
 - `open_entry_while_away`
@@ -301,6 +302,8 @@ Compatibility note: `unavailable_sensors_while_home` supports re-approving legac
 `unavailable_sensors` is also supported for candidates without explicit occupancy context (for example `backyard_sensors_unavailable`). It triggers only when all listed sensors are `unavailable`; if any required sensor is missing or not unavailable, no finding is produced.
 
 `motion_while_alarm_disarmed_and_home_present` is supported for candidates that provide motion entities, an alarm entity, and one or more `person.*` entities in evidence paths. It triggers only when all required entities are present and states match exactly: alarm `disarmed`, motion `on`, and person `home`.
+
+`low_battery_sensors` is supported for battery entity candidates (for example `sensor.elias_t_h_battery` and `sensor.girls_t_h_battery`). It triggers when any listed sensor is at or below the configured threshold (default `40%`) and produces no findings if any required entity is missing or has a non-numeric state.
 
 ### Troubleshooting
 
