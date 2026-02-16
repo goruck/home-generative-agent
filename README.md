@@ -190,6 +190,7 @@ When Sentinel notifications are enabled:
 - `open_entry_at_night_when_home`
 - `open_entry_at_night_while_away`
 - `open_any_window_at_night_while_away`
+- `motion_detected_at_night_while_alarm_disarmed`
 - `motion_without_camera_activity`
 - `motion_while_alarm_disarmed_and_home_present`
 
@@ -302,6 +303,8 @@ Compatibility note: `unavailable_sensors_while_home` supports re-approving legac
 `unavailable_sensors` is also supported for candidates without explicit occupancy context (for example `backyard_sensors_unavailable`). It triggers only when all listed sensors are `unavailable`; if any required sensor is missing or not unavailable, no finding is produced.
 
 `motion_while_alarm_disarmed_and_home_present` is supported for candidates that provide motion entities, an alarm entity, and one or more `person.*` entities in evidence paths. It triggers only when all required entities are present and states match exactly: alarm `disarmed`, motion `on`, and person `home`.
+
+`motion_detected_at_night_while_alarm_disarmed` is supported for candidates that provide motion entities, an alarm entity, and `derived.is_night` evidence (for example candidate `motion_at_night_disarmed`). It triggers only when all required entities referenced by the rule are present, snapshot `derived.is_night` is `true`, alarm state is `disarmed`, and at least one motion entity is `on`. It returns no findings when required entities are missing.
 
 `low_battery_sensors` is supported for battery entity candidates (for example `sensor.elias_t_h_battery` and `sensor.girls_t_h_battery`). It triggers when any listed sensor is at or below the configured threshold (default `40%`) and produces no findings if any required entity is missing or has a non-numeric state.
 

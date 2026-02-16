@@ -250,3 +250,36 @@ def test_normalize_candidate_motion_alarm_disarmed_home_issue_225() -> None:
         ],
         "home_entity_ids": ["person.lindo_st_angel"],
     }
+
+
+def test_normalize_candidate_motion_night_alarm_disarmed_issue_235() -> None:
+    candidate = {
+        "candidate_id": "motion_at_night_disarmed",
+        "title": "Motion detected at night while alarm disarmed",
+        "summary": (
+            "Detects any motion sensor activation during nighttime when the home "
+            "alarm is disarmed."
+        ),
+        "pattern": "motion active & night & alarm disarmed",
+        "suggested_type": "security",
+        "confidence_hint": 0.8,
+        "evidence_paths": [
+            "derived.is_night",
+            "entities[entity_id=alarm_control_panel.home_alarm].state",
+            "entities[entity_id=binary_sensor.backyard_vmd3_0].state",
+            "entities[entity_id=binary_sensor.backyard_vmd4_camera1profile1].state",
+            "entities[entity_id=person.lindo_st_angel].state",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "motion_detected_at_night_while_alarm_disarmed"
+    assert normalized.rule_id == "motion_at_night_disarmed"
+    assert normalized.params == {
+        "alarm_entity_id": "alarm_control_panel.home_alarm",
+        "motion_entity_ids": [
+            "binary_sensor.backyard_vmd3_0",
+            "binary_sensor.backyard_vmd4_camera1profile1",
+        ],
+        "required_entity_ids": ["person.lindo_st_angel"],
+    }

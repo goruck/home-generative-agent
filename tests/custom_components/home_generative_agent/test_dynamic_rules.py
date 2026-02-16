@@ -606,6 +606,141 @@ def test_dynamic_rule_motion_alarm_disarmed_home_issue_225_non_trigger() -> None
     assert findings == []
 
 
+def test_dynamic_rule_motion_night_alarm_disarmed_issue_235_triggers() -> None:
+    snapshot = _snapshot(
+        [
+            _base_entity(
+                "alarm_control_panel.home_alarm", "alarm_control_panel", "disarmed"
+            ),
+            _base_entity("binary_sensor.backyard_vmd3_0", "binary_sensor", "on"),
+            _base_entity(
+                "binary_sensor.backyard_vmd4_camera1profile1", "binary_sensor", "off"
+            ),
+            _base_entity("person.lindo_st_angel", "person", "home"),
+        ],
+        [],
+        {
+            "now": "2026-02-01T00:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": True,
+            "anyone_home": True,
+            "last_motion_by_area": {},
+        },
+    )
+    rules = [
+        {
+            "rule_id": "motion_at_night_disarmed",
+            "template_id": "motion_detected_at_night_while_alarm_disarmed",
+            "params": {
+                "alarm_entity_id": "alarm_control_panel.home_alarm",
+                "motion_entity_ids": [
+                    "binary_sensor.backyard_vmd3_0",
+                    "binary_sensor.backyard_vmd4_camera1profile1",
+                ],
+                "required_entity_ids": ["person.lindo_st_angel"],
+            },
+            "severity": "low",
+            "confidence": 0.8,
+            "is_sensitive": False,
+            "suggested_actions": ["close_entry"],
+        }
+    ]
+    findings = evaluate_dynamic_rules(snapshot, rules)
+    assert len(findings) == 1
+    assert findings[0].type == "motion_at_night_disarmed"
+    assert findings[0].triggering_entities == [
+        "alarm_control_panel.home_alarm",
+        "binary_sensor.backyard_vmd3_0",
+        "binary_sensor.backyard_vmd4_camera1profile1",
+        "person.lindo_st_angel",
+    ]
+
+
+def test_dynamic_rule_motion_night_alarm_disarmed_issue_235_non_trigger() -> None:
+    snapshot = _snapshot(
+        [
+            _base_entity(
+                "alarm_control_panel.home_alarm", "alarm_control_panel", "disarmed"
+            ),
+            _base_entity("binary_sensor.backyard_vmd3_0", "binary_sensor", "off"),
+            _base_entity(
+                "binary_sensor.backyard_vmd4_camera1profile1", "binary_sensor", "off"
+            ),
+            _base_entity("person.lindo_st_angel", "person", "home"),
+        ],
+        [],
+        {
+            "now": "2026-02-01T00:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": True,
+            "anyone_home": True,
+            "last_motion_by_area": {},
+        },
+    )
+    rules = [
+        {
+            "rule_id": "motion_at_night_disarmed",
+            "template_id": "motion_detected_at_night_while_alarm_disarmed",
+            "params": {
+                "alarm_entity_id": "alarm_control_panel.home_alarm",
+                "motion_entity_ids": [
+                    "binary_sensor.backyard_vmd3_0",
+                    "binary_sensor.backyard_vmd4_camera1profile1",
+                ],
+                "required_entity_ids": ["person.lindo_st_angel"],
+            },
+            "severity": "low",
+            "confidence": 0.8,
+            "is_sensitive": False,
+            "suggested_actions": ["close_entry"],
+        }
+    ]
+    findings = evaluate_dynamic_rules(snapshot, rules)
+    assert findings == []
+
+
+def test_dynamic_rule_motion_night_alarm_disarmed_issue_235_missing_required() -> None:
+    snapshot = _snapshot(
+        [
+            _base_entity(
+                "alarm_control_panel.home_alarm", "alarm_control_panel", "disarmed"
+            ),
+            _base_entity("binary_sensor.backyard_vmd3_0", "binary_sensor", "on"),
+            _base_entity(
+                "binary_sensor.backyard_vmd4_camera1profile1", "binary_sensor", "off"
+            ),
+        ],
+        [],
+        {
+            "now": "2026-02-01T00:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": True,
+            "anyone_home": True,
+            "last_motion_by_area": {},
+        },
+    )
+    rules = [
+        {
+            "rule_id": "motion_at_night_disarmed",
+            "template_id": "motion_detected_at_night_while_alarm_disarmed",
+            "params": {
+                "alarm_entity_id": "alarm_control_panel.home_alarm",
+                "motion_entity_ids": [
+                    "binary_sensor.backyard_vmd3_0",
+                    "binary_sensor.backyard_vmd4_camera1profile1",
+                ],
+                "required_entity_ids": ["person.lindo_st_angel"],
+            },
+            "severity": "low",
+            "confidence": 0.8,
+            "is_sensitive": False,
+            "suggested_actions": ["close_entry"],
+        }
+    ]
+    findings = evaluate_dynamic_rules(snapshot, rules)
+    assert findings == []
+
+
 @pytest.mark.asyncio
 async def test_rule_registry_add_duplicate(hass) -> None:
     registry = RuleRegistry(hass=cast("HomeAssistant", hass))

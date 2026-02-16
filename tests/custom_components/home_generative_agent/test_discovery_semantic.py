@@ -133,3 +133,23 @@ def test_rule_semantic_key_low_battery_sensors() -> None:
     assert "subject=sensor" in key
     assert "predicate=low_battery" in key
     assert "home=any" in key
+
+
+def test_rule_semantic_key_motion_night_alarm_disarmed_issue_235() -> None:
+    rule = {
+        "rule_id": "motion_at_night_disarmed",
+        "template_id": "motion_detected_at_night_while_alarm_disarmed",
+        "params": {
+            "alarm_entity_id": "alarm_control_panel.home_alarm",
+            "motion_entity_ids": [
+                "binary_sensor.backyard_vmd3_0",
+                "binary_sensor.backyard_vmd4_camera1profile1",
+            ],
+            "required_entity_ids": ["person.lindo_st_angel"],
+        },
+    }
+    key = rule_semantic_key(rule)
+    assert key is not None
+    assert "subject=motion" in key
+    assert "predicate=active" in key
+    assert "night=1" in key
