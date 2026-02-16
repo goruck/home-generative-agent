@@ -146,6 +146,14 @@ def rule_semantic_key(rule: dict[str, Any]) -> str | None:  # noqa: PLR0911, PLR
             "v1|subject=motion|predicate=active|night=any|home=any|scope=any|"
             f"entities={','.join(motion_ids)}"
         )
+    if template_id == "motion_detected_at_night_while_alarm_disarmed":
+        motion_ids = sorted(set(_string_list(params.get("motion_entity_ids"))))
+        if not motion_ids:
+            return None
+        return (
+            "v1|subject=motion|predicate=active|night=1|home=any|scope=any|"
+            f"entities={','.join(motion_ids)}"
+        )
     if template_id == "unavailable_sensors_while_home":
         sensor_ids = sorted(set(_string_list(params.get("sensor_entity_ids"))))
         if not sensor_ids:

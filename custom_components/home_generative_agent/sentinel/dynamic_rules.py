@@ -36,6 +36,11 @@ def evaluate_dynamic_rules(
             snapshot, rule, entity_map
         ),
         "low_battery_sensors": lambda rule: _eval_low_battery_sensors(rule, entity_map),
+        "motion_detected_at_night_while_alarm_disarmed": (
+            lambda rule: _eval_motion_detected_at_night_while_alarm_disarmed(
+                snapshot, rule, entity_map
+            )
+        ),
         "motion_while_alarm_disarmed_and_home_present": (
             lambda rule: _eval_motion_while_alarm_disarmed_and_home_present(
                 snapshot, rule, entity_map
@@ -191,6 +196,60 @@ def _eval_motion_while_alarm_disarmed_and_home_present(
         },
     }
     return [_build_finding(rule, [alarm_id, *motion_ids, *home_ids], evidence)]
+
+
+def _eval_motion_detected_at_night_while_alarm_disarmed(
+    snapshot: FullStateSnapshot,
+    rule: dict[str, Any],
+    entity_map: Mapping[str, SnapshotEntity],
+) -> list[AnomalyFinding]:
+    params = _rule_params(rule)
+    alarm_id = params.get("alarm_entity_id")
+    motion_ids = params.get("motion_entity_ids")
+    required_ids = params.get("required_entity_ids", [])
+    if (
+        not alarm_id
+        or not isinstance(motion_ids, list)
+        or not motion_ids
+        or not isinstance(required_ids, list)
+    ):
+        return []
+
+    if not snapshot["derived"]["is_night"]:
+        return []
+
+    alarm = entity_map.get(alarm_id)
+    if alarm is None or alarm.get("state") != "disarmed":
+        return []
+
+    motion_entities = _resolve_required_entities(motion_ids, entity_map)
+    required_entities = _resolve_required_entities(required_ids, entity_map)
+    if motion_entities is None or required_entities is None:
+        return []
+
+    if not any(motion.get("state") == "on" for motion in motion_entities):
+        return []
+
+    evidence = {
+        "rule_id": rule.get("rule_id"),
+        "template_id": rule.get("template_id"),
+        "is_night": snapshot["derived"]["is_night"],
+        "alarm_entity_id": alarm_id,
+        "alarm_state": alarm.get("state"),
+        "motion_entity_ids": list(motion_ids),
+        "motion_states": {
+            motion_id: motion.get("state")
+            for motion_id, motion in zip(motion_ids, motion_entities, strict=False)
+        },
+        "required_entity_ids": list(required_ids),
+        "required_states": {
+            required_id: required_entity.get("state")
+            for required_id, required_entity in zip(
+                required_ids, required_entities, strict=False
+            )
+        },
+    }
+    return [_build_finding(rule, [alarm_id, *motion_ids, *required_ids], evidence)]
 
 
 def _eval_unlocked_lock_when_home(
