@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
 SUPPORTED_TEMPLATES = {
     "alarm_disarmed_open_entry",
+    "low_battery_sensors",
     "motion_while_alarm_disarmed_and_home_present",
     "unavailable_sensors",
     "unavailable_sensors_while_home",
@@ -18,6 +20,12 @@ SUPPORTED_TEMPLATES = {
     "unlocked_lock_when_home",
     "motion_without_camera_activity",
 }
+
+_PERCENT_THRESHOLD_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*%")
+_RELATIVE_THRESHOLD_PATTERN = re.compile(
+    r"(?:at\s+or\s+below|below|under|<=|less than)\s*(\d+(?:\.\d+)?)"
+)
+_MAX_PERCENT = 100.0
 
 
 @dataclass(frozen=True)
@@ -45,7 +53,7 @@ class NormalizedRule:
         }
 
 
-def normalize_candidate(  # noqa: PLR0911
+def normalize_candidate(  # noqa: PLR0911, PLR0912
     candidate: dict[str, Any],
 ) -> NormalizedRule | None:
     """Map a discovery candidate to a supported template."""
@@ -64,6 +72,7 @@ def normalize_candidate(  # noqa: PLR0911
     motion_ids = _find_motion_entity_ids(evidence_paths)
     person_ids = _find_entity_ids(evidence_paths, "person")
     sensor_ids = _find_sensor_entity_ids(evidence_paths)
+    battery_sensor_ids = _find_battery_sensor_entity_ids(evidence_paths)
     camera_id = _find_camera_id(evidence_paths)
     has_night = _has_night_signal(evidence_paths, text)
     presence = _presence_signal(evidence_paths, text)
@@ -180,6 +189,20 @@ def normalize_candidate(  # noqa: PLR0911
             suggested_actions=["check_camera"],
         )
 
+    if battery_sensor_ids and _contains_any(text, ("battery", "low", "below")):
+        return NormalizedRule(
+            rule_id=_candidate_rule_id(candidate, default="low_battery_sensors"),
+            template_id="low_battery_sensors",
+            params={
+                "sensor_entity_ids": battery_sensor_ids,
+                "threshold": _extract_threshold_percent(text, default=40.0),
+            },
+            severity="low",
+            confidence=float(candidate.get("confidence_hint", 0.62)),
+            is_sensitive=False,
+            suggested_actions=["check_sensor"],
+        )
+
     if sensor_ids and _contains_any(text, ("unavailable", "offline", "unreachable")):
         if presence == "home":
             return NormalizedRule(
@@ -278,6 +301,37 @@ def _find_sensor_entity_ids(evidence_paths: list[str]) -> list[str]:
         if domain in {"sensor", "binary_sensor"}:
             ids.append(entity_id)
     return sorted(set(ids))
+
+
+def _find_battery_sensor_entity_ids(evidence_paths: list[str]) -> list[str]:
+    ids: list[str] = []
+    for path in evidence_paths:
+        if not path.startswith("entities[entity_id="):
+            continue
+        entity_id = path.split("entities[entity_id=", 1)[1].split("]", 1)[0]
+        if "battery" not in entity_id.lower():
+            continue
+        if "." not in entity_id:
+            ids.append(entity_id)
+            continue
+        domain = entity_id.split(".", 1)[0]
+        if domain in {"sensor", "binary_sensor"}:
+            ids.append(entity_id)
+    return sorted(set(ids))
+
+
+def _extract_threshold_percent(text: str, *, default: float) -> float:
+    for pattern in (_PERCENT_THRESHOLD_PATTERN, _RELATIVE_THRESHOLD_PATTERN):
+        match = pattern.search(text)
+        if not match:
+            continue
+        try:
+            value = float(match.group(1))
+        except ValueError:
+            continue
+        if 0 <= value <= _MAX_PERCENT:
+            return value
+    return default
 
 
 def _has_night_signal(evidence_paths: list[str], text: str) -> bool:

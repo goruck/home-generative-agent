@@ -186,6 +186,35 @@ def test_normalize_candidate_unavailable_sensors_template_issue_223() -> None:
     }
 
 
+def test_normalize_candidate_low_battery_sensors_issue_236() -> None:
+    candidate = {
+        "candidate_id": "low_battery_room_sensors_v1",
+        "title": "Low battery on room sensors",
+        "summary": "Room T/H sensors show low battery levels.",
+        "pattern": (
+            "Notify when any of [sensor.elias_t_h_battery, "
+            "sensor.girls_t_h_battery] is at or below 40%."
+        ),
+        "suggested_type": "maintenance",
+        "confidence_hint": 0.62,
+        "evidence_paths": [
+            "entities[entity_id=sensor.elias_t_h_battery].state",
+            "entities[entity_id=sensor.girls_t_h_battery].state",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "low_battery_sensors"
+    assert normalized.rule_id == "low_battery_room_sensors_v1"
+    assert normalized.params == {
+        "sensor_entity_ids": [
+            "sensor.elias_t_h_battery",
+            "sensor.girls_t_h_battery",
+        ],
+        "threshold": 40.0,
+    }
+
+
 def test_normalize_candidate_motion_alarm_disarmed_home_issue_225() -> None:
     candidate = {
         "candidate_id": "motion_frontgate_disarmed_home",

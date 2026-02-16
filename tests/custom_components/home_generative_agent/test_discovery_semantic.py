@@ -114,3 +114,22 @@ def test_rule_semantic_key_unavailable_sensors_any_home_state() -> None:
     assert "subject=sensor" in key
     assert "predicate=unavailable" in key
     assert "home=any" in key
+
+
+def test_rule_semantic_key_low_battery_sensors() -> None:
+    rule = {
+        "rule_id": "low_battery_room_sensors_v1",
+        "template_id": "low_battery_sensors",
+        "params": {
+            "sensor_entity_ids": [
+                "sensor.elias_t_h_battery",
+                "sensor.girls_t_h_battery",
+            ],
+            "threshold": 40,
+        },
+    }
+    key = rule_semantic_key(rule)
+    assert key is not None
+    assert "subject=sensor" in key
+    assert "predicate=low_battery" in key
+    assert "home=any" in key

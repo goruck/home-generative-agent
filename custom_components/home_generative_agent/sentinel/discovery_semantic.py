@@ -72,6 +72,8 @@ def candidate_semantic_key(  # noqa: PLR0912, PLR0915
         predicate = "open"
     elif "disarmed" in text:
         predicate = "disarmed"
+    elif "battery" in text and _contains_any(text, ("low", "below", "under")):
+        predicate = "low_battery"
     elif _contains_any(text, ("unavailable", "offline", "unreachable")):
         predicate = "unavailable"
     elif "motion" in text or "activity" in text:
@@ -107,7 +109,7 @@ def candidate_semantic_key(  # noqa: PLR0912, PLR0915
     )
 
 
-def rule_semantic_key(rule: dict[str, Any]) -> str | None:  # noqa: PLR0911
+def rule_semantic_key(rule: dict[str, Any]) -> str | None:  # noqa: PLR0911, PLR0912
     """Build a stable semantic key for an active/generated rule."""
     template_id = str(rule.get("template_id", ""))
     params = rule.get("params", {}) or {}
@@ -158,6 +160,14 @@ def rule_semantic_key(rule: dict[str, Any]) -> str | None:  # noqa: PLR0911
             return None
         return (
             "v1|subject=sensor|predicate=unavailable|night=any|home=any|scope=any|"
+            f"entities={','.join(sensor_ids)}"
+        )
+    if template_id == "low_battery_sensors":
+        sensor_ids = sorted(set(_string_list(params.get("sensor_entity_ids"))))
+        if not sensor_ids:
+            return None
+        return (
+            "v1|subject=sensor|predicate=low_battery|night=any|home=any|scope=any|"
             f"entities={','.join(sensor_ids)}"
         )
     return None

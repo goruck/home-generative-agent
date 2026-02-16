@@ -35,6 +35,7 @@ def evaluate_dynamic_rules(
         "alarm_disarmed_open_entry": lambda rule: _eval_alarm_disarmed_open_entry(
             snapshot, rule, entity_map
         ),
+        "low_battery_sensors": lambda rule: _eval_low_battery_sensors(rule, entity_map),
         "motion_while_alarm_disarmed_and_home_present": (
             lambda rule: _eval_motion_while_alarm_disarmed_and_home_present(
                 snapshot, rule, entity_map
@@ -332,6 +333,50 @@ def _eval_unavailable_sensors(
     return [_build_finding(rule, resolved_sensor_ids, evidence)]
 
 
+def _eval_low_battery_sensors(
+    rule: dict[str, Any],
+    entity_map: Mapping[str, SnapshotEntity],
+) -> list[AnomalyFinding]:
+    params = _rule_params(rule)
+    sensor_ids = params.get("sensor_entity_ids")
+    if not isinstance(sensor_ids, list) or not sensor_ids:
+        return []
+
+    threshold = _coerce_float(params.get("threshold"), default=40.0)
+    resolved_ids: list[str] = []
+    readings: dict[str, float] = {}
+    states: dict[str, Any] = {}
+    for sensor_id in sensor_ids:
+        resolved_sensor_id = _resolve_sensor_entity_id(sensor_id, entity_map)
+        if resolved_sensor_id is None:
+            return []
+        entity = entity_map.get(resolved_sensor_id)
+        if entity is None:
+            return []
+        value = _coerce_optional_float(entity.get("state"))
+        if value is None:
+            return []
+        resolved_ids.append(resolved_sensor_id)
+        readings[resolved_sensor_id] = value
+        states[resolved_sensor_id] = entity.get("state")
+
+    triggering_ids = [
+        sensor_id for sensor_id, value in readings.items() if value <= threshold
+    ]
+    if not triggering_ids:
+        return []
+
+    evidence = {
+        "rule_id": rule.get("rule_id"),
+        "template_id": rule.get("template_id"),
+        "sensor_entity_ids": resolved_ids,
+        "sensor_states": states,
+        "sensor_levels": readings,
+        "threshold": threshold,
+    }
+    return [_build_finding(rule, triggering_ids, evidence)]
+
+
 def _resolve_sensor_entity_id(
     sensor_id: Any, entity_map: Mapping[str, SnapshotEntity]
 ) -> str | None:
@@ -480,6 +525,13 @@ def _coerce_float(value: Any, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _coerce_optional_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _rule_params(rule: dict[str, Any]) -> dict[str, Any]:
