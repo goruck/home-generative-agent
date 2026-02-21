@@ -178,33 +178,50 @@ When Sentinel notifications are enabled:
   - `medium`: `Check soon and secure it if unexpected.`
   - `low`: `Review when convenient.`
 - Mobile action buttons are: `Acknowledge`, `Ignore`, `Later`.
-- `Execute` is shown only for non-sensitive findings that include suggested actions.
+- `Execute` is shown for non-sensitive findings that include suggested actions.
+- `Ask Agent` is shown for sensitive findings that include suggested actions. This hands the finding to the conversation agent, which can verify a PIN or alarm code before acting.
 
-### Sentinel Execute Automation Bridge
+### Sentinel Action Flows
 
-When a user taps `Execute` on a non-sensitive finding, Sentinel emits a deterministic Home Assistant event:
+When a user taps an action button, Sentinel uses a two-tier dispatch strategy: it first attempts to call the HGA conversation agent directly via `conversation.process`; if no conversation entity is available it falls back to firing a Home Assistant event so blueprints/automations can handle the request.
 
-- Event type: `hga_sentinel_execute_requested`
-- Typical payload fields:
-  - `requested_at`
-  - `anomaly_id`
-  - `type`
-  - `severity`
-  - `confidence`
-  - `triggering_entities`
-  - `suggested_actions`
-  - `is_sensitive`
-  - `evidence`
-  - `mobile_action_payload`
+#### Execute (non-sensitive findings)
 
-This lets users define automations/scripts for execute behavior without giving direct action authority to the LLM.
+1. **Agent available** — calls the conversation agent with a natural-language prompt describing the finding and suggested actions. The agent checks live context, takes action, and its reply is pushed back as a mobile notification (when `notify_service` is configured).
+2. **Agent unavailable** — fires `hga_sentinel_execute_requested` so a blueprint or automation can handle it.
+3. **Sensitive finding** — blocked with status `blocked`.
 
-### Sentinel Execute Blueprints
+#### Ask Agent / Handoff (sensitive findings)
 
-Two draft blueprints are included in the `blueprints/` folder for the execute event bridge:
+1. **Agent available** — calls the conversation agent with a security-focused prompt. The agent can verify a PIN or alarm code (if configured under Critical Action settings) before executing. Its reply is pushed back as a mobile notification.
+2. **Agent unavailable** — fires `hga_sentinel_ask_requested` (includes a `suggested_prompt` field) so a blueprint can route it to the agent.
+
+#### Event payloads
+
+Both `hga_sentinel_execute_requested` and `hga_sentinel_ask_requested` share these fields:
+
+- `requested_at`
+- `anomaly_id`
+- `type`
+- `severity`
+- `confidence`
+- `triggering_entities`
+- `suggested_actions`
+- `is_sensitive`
+- `evidence`
+- `mobile_action_payload`
+
+`hga_sentinel_ask_requested` additionally includes:
+
+- `suggested_prompt` — a ready-to-use natural-language prompt for the conversation agent.
+
+### Sentinel Blueprints
+
+Three draft blueprints are included in the `blueprints/` folder:
 
 - `hga_sentinel_execute_router.yaml`
 - `hga_sentinel_execute_escalate_high.yaml`
+- `hga_sentinel_ask_router.yaml`
 
 How to import in Home Assistant:
 
@@ -216,11 +233,13 @@ What each blueprint does:
 
 - `hga_sentinel_execute_router.yaml`: routes `hga_sentinel_execute_requested` by `suggested_actions` to scripts (`check_appliance`, `check_camera`, `check_sensor`, `close_entry`, `lock_entity`) with default fallback support.
 - `hga_sentinel_execute_escalate_high.yaml`: handles only `severity: high` execute events and can send persistent notifications, mobile push, and optional TTS.
+- `hga_sentinel_ask_router.yaml`: routes `hga_sentinel_ask_requested` events to the HGA conversation agent. The agent receives the `suggested_prompt` from the event, can verify a PIN if needed, and sends its response back as a notification.
 
 Recommended usage:
 
 - Start with `hga_sentinel_execute_escalate_high.yaml` for immediate high-priority visibility.
 - Add `hga_sentinel_execute_router.yaml` when you have scripts ready for action-specific handling.
+- Add `hga_sentinel_ask_router.yaml` as a fallback for sensitive findings when the built-in agent dispatch is not available (e.g., the conversation entity is not yet registered at startup).
 
 Script contract for router targets:
 
