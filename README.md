@@ -178,6 +178,167 @@ When Sentinel notifications are enabled:
   - `medium`: `Check soon and secure it if unexpected.`
   - `low`: `Review when convenient.`
 - Mobile action buttons are: `Acknowledge`, `Ignore`, `Later`.
+- `Execute` is shown for non-sensitive findings that include suggested actions.
+- `Ask Agent` is shown for sensitive findings that include suggested actions. This hands the finding to the conversation agent, which can verify a PIN or alarm code before acting.
+
+### Sentinel Action Flows
+
+When a user taps an action button, Sentinel uses a two-tier dispatch strategy: it first attempts to call the HGA conversation agent directly via `conversation.process`; if no conversation entity is available it falls back to firing a Home Assistant event so blueprints/automations can handle the request.
+
+#### Execute (non-sensitive findings)
+
+1. **Agent available** — calls the conversation agent with a natural-language prompt describing the finding and suggested actions. The agent checks live context, takes action, and its reply is pushed back as a mobile notification (when `notify_service` is configured).
+2. **Agent unavailable** — fires `hga_sentinel_execute_requested` so a blueprint or automation can handle it.
+3. **Sensitive finding** — blocked with status `blocked`.
+
+#### Ask Agent / Handoff (sensitive findings)
+
+1. **Agent available** — calls the conversation agent with a security-focused prompt. The agent can verify a PIN or alarm code (if configured under Critical Action settings) before executing. Its reply is pushed back as a mobile notification.
+2. **Agent unavailable** — fires `hga_sentinel_ask_requested` (includes a `suggested_prompt` field) so a blueprint can route it to the agent.
+
+#### Event payloads
+
+Both `hga_sentinel_execute_requested` and `hga_sentinel_ask_requested` share these fields:
+
+- `requested_at`
+- `anomaly_id`
+- `type`
+- `severity`
+- `confidence`
+- `triggering_entities`
+- `suggested_actions`
+- `is_sensitive`
+- `evidence`
+- `mobile_action_payload`
+
+`hga_sentinel_ask_requested` additionally includes:
+
+- `suggested_prompt` — a ready-to-use natural-language prompt for the conversation agent.
+
+### Sentinel Blueprints
+
+Three draft blueprints are included in the `blueprints/` folder:
+
+- `hga_sentinel_execute_router.yaml`
+- `hga_sentinel_execute_escalate_high.yaml`
+- `hga_sentinel_ask_router.yaml`
+
+How to import in Home Assistant:
+
+1. Open `Settings` -> `Automations & Scenes` -> `Blueprints`.
+2. Import each YAML from this repository's `blueprints/` directory.
+3. Create automations from the imported blueprints and configure inputs.
+
+What each blueprint does:
+
+- `hga_sentinel_execute_router.yaml`: routes `hga_sentinel_execute_requested` by `suggested_actions` to scripts (`check_appliance`, `check_camera`, `check_sensor`, `close_entry`, `lock_entity`) with default fallback support.
+- `hga_sentinel_execute_escalate_high.yaml`: handles only `severity: high` execute events and can send persistent notifications, mobile push, and optional TTS.
+- `hga_sentinel_ask_router.yaml`: routes `hga_sentinel_ask_requested` events to the HGA conversation agent. The agent receives the `suggested_prompt` from the event, can verify a PIN if needed, and sends its response back as a notification.
+
+Recommended usage:
+
+- Start with `hga_sentinel_execute_escalate_high.yaml` for immediate high-priority visibility.
+- Add `hga_sentinel_execute_router.yaml` when you have scripts ready for action-specific handling.
+- Add `hga_sentinel_ask_router.yaml` as a fallback for sensitive findings when the built-in agent dispatch is not available (e.g., the conversation entity is not yet registered at startup).
+
+Script contract for router targets:
+
+- Router script calls pass one object in `data.sentinel_event`.
+- `sentinel_event` matches the execute event payload and includes:
+  - `requested_at`
+  - `anomaly_id`
+  - `type`
+  - `severity`
+  - `confidence`
+  - `triggering_entities`
+  - `suggested_actions`
+  - `is_sensitive`
+  - `evidence`
+  - `mobile_action_payload`
+
+Where to store these scripts in Home Assistant:
+
+- Create them as regular HA scripts: `Settings` -> `Automations & Scenes` -> `Scripts` -> `+ Create Script` -> `Edit in YAML`.
+- Save each with a stable script entity ID (for example `script.hga_check_camera_flow`) so it can be selected in `hga_sentinel_execute_router.yaml`.
+- If you manage YAML directly, store them in `scripts.yaml` (or an included scripts file) and reload scripts.
+
+Example script target for `check_appliance`:
+
+```yaml
+alias: HGA Check Appliance Flow
+mode: queued
+fields:
+  sentinel_event:
+    description: Sentinel execute event payload
+sequence:
+  - action: persistent_notification.create
+    data:
+      title: "HGA Appliance Follow-up"
+      message: >
+        Type={{ sentinel_event.type }},
+        severity={{ sentinel_event.severity }},
+        entities={{ sentinel_event.triggering_entities | join(', ') }}.
+  - action: notify.mobile_app_phone
+    data:
+      title: "HGA Appliance Follow-up"
+      message: >
+        Suggested actions:
+        {{ sentinel_event.suggested_actions | join(', ') if sentinel_event.suggested_actions else 'none' }}
+```
+
+Example script target for `check_camera`:
+
+```yaml
+alias: HGA Check Camera Flow
+mode: queued
+fields:
+  sentinel_event:
+    description: Sentinel execute event payload
+sequence:
+  - action: notify.mobile_app_phone
+    data:
+      title: "HGA Camera Follow-up"
+      message: >
+        Camera-related event {{ sentinel_event.type }}.
+        Entities={{ sentinel_event.triggering_entities | join(', ') if sentinel_event.triggering_entities else 'none' }}.
+  - action: persistent_notification.create
+    data:
+      title: "HGA Camera Follow-up"
+      message: >
+        Evidence: {{ sentinel_event.evidence }}
+```
+
+Example script target for `lock_entity`:
+
+```yaml
+alias: HGA Lock Entity Follow-up
+mode: queued
+fields:
+  sentinel_event:
+    description: Sentinel execute event payload
+sequence:
+  - variables:
+      lock_id: >
+        {% set ids = sentinel_event.triggering_entities | default([], true) %}
+        {{ ids[0] if ids else '' }}
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ lock_id.startswith('lock.') }}"
+        sequence:
+          - action: lock.lock
+            target:
+              entity_id: "{{ lock_id }}"
+    default:
+      - action: persistent_notification.create
+        data:
+          title: "HGA Lock Entity Follow-up"
+          message: >
+            Could not resolve lock entity from event:
+            {{ sentinel_event.triggering_entities | default([], true) }}
+```
+
+Tip: if your script needs the raw mobile action callback details, read `sentinel_event.mobile_action_payload`.
 
 ### Supported Generated Rule Templates
 

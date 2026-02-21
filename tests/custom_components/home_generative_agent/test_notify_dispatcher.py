@@ -7,8 +7,10 @@ from typing import Any
 
 import pytest
 
+from custom_components.home_generative_agent.notify.actions import ACTION_PREFIX
 from custom_components.home_generative_agent.notify.dispatcher import (
     NotificationDispatcher,
+    _build_actions,
 )
 from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
 
@@ -106,7 +108,12 @@ async def test_mobile_notify_uses_compact_message_and_short_labels() -> None:
     assert "`" not in message
     assert "open_entry_at_night_when_home_window" not in message
     actions = call["data"]["data"]["actions"]
-    assert [a["title"] for a in actions] == ["Acknowledge", "Ignore", "Later"]
+    assert [a["title"] for a in actions] == [
+        "Acknowledge",
+        "Ignore",
+        "Later",
+        "Ask Agent",
+    ]
 
 
 @pytest.mark.asyncio
@@ -148,3 +155,60 @@ async def test_persistent_notify_low_severity_uses_relaxed_hint() -> None:
     message = str(call["data"]["message"])
     assert "severity low" in message
     assert "Review when convenient." in message
+
+
+# ---------------------------------------------------------------------------
+# _build_actions button logic tests
+# ---------------------------------------------------------------------------
+
+
+def _non_sensitive_finding() -> AnomalyFinding:
+    return AnomalyFinding(
+        anomaly_id="ns1",
+        type="appliance_power_duration",
+        severity="medium",
+        confidence=0.6,
+        triggering_entities=["sensor.fridge_power"],
+        evidence={},
+        suggested_actions=["check_appliance"],
+        is_sensitive=False,
+    )
+
+
+def _sensitive_finding_no_actions() -> AnomalyFinding:
+    return AnomalyFinding(
+        anomaly_id="s2",
+        type="unlocked_lock_at_night",
+        severity="high",
+        confidence=0.7,
+        triggering_entities=["lock.front_door"],
+        evidence={},
+        suggested_actions=[],
+        is_sensitive=True,
+    )
+
+
+def test_sensitive_finding_shows_ask_agent_button() -> None:
+    finding = _finding()  # is_sensitive=True, has suggested_actions
+    actions = _build_actions(finding)
+    titles = [a["title"] for a in actions]
+    ids = [a["action"] for a in actions]
+    assert "Ask Agent" in titles
+    assert "Execute" not in titles
+    assert "Confirm to Execute" not in titles
+    assert any(aid.startswith(f"{ACTION_PREFIX}handoff_") for aid in ids)
+
+
+def test_non_sensitive_finding_shows_execute_button() -> None:
+    finding = _non_sensitive_finding()
+    actions = _build_actions(finding)
+    titles = [a["title"] for a in actions]
+    assert "Execute" in titles
+    assert "Confirm to Execute" not in titles
+
+
+def test_sensitive_finding_without_suggested_actions_has_no_extra_button() -> None:
+    finding = _sensitive_finding_no_actions()
+    actions = _build_actions(finding)
+    titles = [a["title"] for a in actions]
+    assert titles == ["Acknowledge", "Ignore", "Later"]
