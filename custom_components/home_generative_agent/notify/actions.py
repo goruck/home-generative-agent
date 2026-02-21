@@ -222,9 +222,7 @@ def _build_execute_prompt(finding: AnomalyFinding) -> str:
         finding.triggering_entities[0] if finding.triggering_entities else None
     )
     friendly = finding.evidence.get("friendly_name") or (
-        entity_id.split(".")[-1].replace("_", " ").title()
-        if entity_id
-        else "an entity"
+        entity_id.split(".")[-1].replace("_", " ").title() if entity_id else "an entity"
     )
     suggested = (
         ", ".join(finding.suggested_actions)
@@ -250,9 +248,7 @@ def _build_ask_prompt(finding: AnomalyFinding) -> str:
         finding.triggering_entities[0] if finding.triggering_entities else None
     )
     friendly = finding.evidence.get("friendly_name") or (
-        entity_id.split(".")[-1].replace("_", " ").title()
-        if entity_id
-        else "an entity"
+        entity_id.split(".")[-1].replace("_", " ").title() if entity_id else "an entity"
     )
     suggested = (
         ", ".join(finding.suggested_actions)
