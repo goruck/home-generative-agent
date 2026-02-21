@@ -118,13 +118,21 @@ def _build_actions(finding: AnomalyFinding) -> list[dict[str, Any]]:
         {"action": f"{ACTION_PREFIX}ignore_{finding.anomaly_id}", "title": "Ignore"},
         {"action": f"{ACTION_PREFIX}later_{finding.anomaly_id}", "title": "Later"},
     ]
-    if not finding.is_sensitive and finding.suggested_actions:
-        base.append(
-            {
-                "action": f"{ACTION_PREFIX}execute_{finding.anomaly_id}",
-                "title": "Execute",
-            }
-        )
+    if finding.suggested_actions:
+        if finding.is_sensitive:
+            base.append(
+                {
+                    "action": f"{ACTION_PREFIX}handoff_{finding.anomaly_id}",
+                    "title": "Ask Agent",
+                }
+            )
+        else:
+            base.append(
+                {
+                    "action": f"{ACTION_PREFIX}execute_{finding.anomaly_id}",
+                    "title": "Execute",
+                }
+            )
     return base
 
 

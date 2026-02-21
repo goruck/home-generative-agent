@@ -1,0 +1,66 @@
+blueprint:
+  name: Home Generative Agent Sentinel Ask Router
+  author: goruck
+  description: >
+    Routes hga_sentinel_ask_requested events to the HGA conversation agent.
+    When a user taps "Ask Agent" on a sensitive Sentinel alert, this blueprint
+    passes the anomaly context to the agent as a natural-language prompt.
+    The agent can verify a PIN (if configured under Critical Action settings)
+    before executing the action, and sends its response back as a notification.
+  domain: automation
+  source_url: https://github.com/goruck/home-generative-agent
+
+  input:
+    conversation_agent:
+      name: HGA Conversation Agent
+      description: >
+        Select the Home Generative Agent conversation entity. Found under
+        Settings → Devices & Services → Home Generative Agent.
+      selector:
+        conversation_agent:
+
+    notify_service:
+      name: Notify service for agent response (Optional)
+      description: >
+        notify service used to send the agent's reply back to you
+        (for example notify.mobile_app_phone). Leave blank to skip.
+      default: ""
+      selector:
+        text:
+          multiline: false
+
+variables:
+  v_notify_service: !input notify_service
+  v_prompt: "{{ trigger.event.data.suggested_prompt | default('') }}"
+  v_type: "{{ trigger.event.data.type | default('unknown') | replace('_', ' ') | capitalize }}"
+  v_severity: "{{ trigger.event.data.severity | default('unknown') }}"
+  v_entities: "{{ trigger.event.data.triggering_entities | default([], true) }}"
+
+trigger:
+  - platform: event
+    event_type: hga_sentinel_ask_requested
+
+action:
+  - service: conversation.process
+    data:
+      agent_id: !input conversation_agent
+      text: "{{ v_prompt }}"
+    response_variable: agent_response
+
+  - variables:
+      v_reply: >
+        {{ agent_response.response.speech.plain.speech
+           | default('Action completed.') }}
+
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ v_notify_service != '' }}"
+        sequence:
+          - service: "{{ v_notify_service }}"
+            data:
+              title: "Home Generative Agent"
+              message: "{{ v_reply }}"
+
+mode: queued
+max: 5

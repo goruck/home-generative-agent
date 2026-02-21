@@ -1104,7 +1104,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     await proposal_store.async_load()
     rule_registry = RuleRegistry(hass)
     await rule_registry.async_load()
-    action_handler = ActionHandler(hass, suppression, audit_store)
+    action_handler = ActionHandler(
+        hass,
+        suppression,
+        audit_store,
+        entry_id=entry.entry_id,
+        notify_service=options.get(CONF_NOTIFY_SERVICE),
+    )
     notifier = NotificationDispatcher(hass, options, action_handler)
     notifier.start()
     explainer = None
