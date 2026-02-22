@@ -9,7 +9,7 @@ SYSTEM_PROMPT = (
 
 USER_PROMPT_TEMPLATE = (
     "User goal: propose candidate anomaly ideas from the snapshot.\n"
-    "Snapshot (authoritative): {snapshot}.\n"
+    "Snapshot (authoritative, compact JSON): {snapshot}\n"
     "Already active rule IDs: {active_rule_ids}.\n"
     "Existing semantic keys (do not duplicate): {existing_semantic_keys}.\n"
     "Return JSON with fields: schema_version, generated_at, model, candidates[].\n"
@@ -18,8 +18,11 @@ USER_PROMPT_TEMPLATE = (
     "No other keys are allowed.\n"
     "schema_version MUST be the integer 1.\n"
     "confidence_hint MUST be a number between 0.0 and 1.0 (not a word).\n"
+    "Entities are grouped by shared state. Each group has entity_ids (list), "
+    "state, and optional area/device_class/last_changed. "
+    "The entity domain is the prefix before the first dot in each entity_id.\n"
     "evidence_paths MUST be snapshot paths (e.g., derived.is_night, "
-    "entities[entity_id=lock.front_door].state).\n"
+    "entities[entity_ids contains lock.front_door].state).\n"
     "Only return novel candidates that are not already covered by active rules "
     "or existing semantic keys.\n"
     "Do NOT output user queries or commands; only anomaly ideas.\n"
