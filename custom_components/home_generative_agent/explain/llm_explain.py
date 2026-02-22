@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -32,7 +33,7 @@ class LLMExplainer:
         prompt = USER_PROMPT_TEMPLATE.format(
             anomaly_type=finding.type,
             severity=finding.severity,
-            evidence=finding.evidence,
+            evidence=_relativize_timestamps(finding.evidence),
             suggested_actions=finding.suggested_actions,
         )
         messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
@@ -99,3 +100,42 @@ def _severity_action_hint(severity: str) -> str:
     if severity == "medium":
         return "Check soon and secure it if unexpected."
     return "Review when convenient."
+
+
+_SECONDS_PER_MINUTE = 60
+_MINUTES_PER_HOUR = 60
+
+
+def _iso_to_relative(value: str) -> str:
+    """Convert an ISO-8601 timestamp to a relative duration string."""
+    try:
+        dt = datetime.fromisoformat(value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        delta = datetime.now(tz=UTC) - dt
+        total_seconds = int(delta.total_seconds())
+        if total_seconds < _SECONDS_PER_MINUTE:
+            return "just now"
+        minutes = total_seconds // _SECONDS_PER_MINUTE
+        if minutes < _MINUTES_PER_HOUR:
+            return f"about {minutes} minute{'s' if minutes != 1 else ''} ago"
+        hours = minutes // _MINUTES_PER_HOUR
+    except (ValueError, TypeError):
+        return value
+    else:
+        return f"about {hours} hour{'s' if hours != 1 else ''} ago"
+
+
+# Regex matching full ISO-8601 timestamps (e.g. 2025-01-15T20:09:00+00:00)
+_ISO_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[^\s,}]*")
+
+
+def _relativize_timestamps(evidence: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of evidence with ISO timestamps as relative durations."""
+    out: dict[str, Any] = {}
+    for key, value in evidence.items():
+        if isinstance(value, str) and _ISO_RE.fullmatch(value):
+            out[key] = _iso_to_relative(value)
+        else:
+            out[key] = value
+    return out
