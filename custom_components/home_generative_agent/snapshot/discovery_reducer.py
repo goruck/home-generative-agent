@@ -201,8 +201,7 @@ def reduce_snapshot_for_discovery(snapshot: FullStateSnapshot) -> dict[str, Any]
     motion_by_area = derived.get("last_motion_by_area")
     if isinstance(motion_by_area, dict):
         derived["last_motion_by_area"] = {
-            area: _truncate_iso(str(ts))
-            for area, ts in motion_by_area.items()
+            area: _truncate_iso(str(ts)) for area, ts in motion_by_area.items()
         }
     now_val = derived.get("now")
     if isinstance(now_val, str):

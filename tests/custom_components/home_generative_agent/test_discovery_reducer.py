@@ -88,7 +88,10 @@ def test_reduce_snapshot_filters_entities() -> None:
     snapshot = _make_snapshot(
         entities=[
             _make_entity(
-                "light.kitchen", "light", "on", area="Kitchen",
+                "light.kitchen",
+                "light",
+                "on",
+                area="Kitchen",
             ),
             _make_entity(
                 "binary_sensor.front_door",
@@ -126,10 +129,7 @@ def test_reduce_snapshot_filters_entities() -> None:
     assert "sensor.washer_power" in all_ids
     assert "light.kitchen" not in all_ids
     # Camera preserved
-    assert (
-        reduced["camera_activity"][0]["camera_entity_id"]
-        == "camera.front"
-    )
+    assert reduced["camera_activity"][0]["camera_entity_id"] == "camera.front"
 
 
 def test_sensor_without_allowed_device_class_excluded() -> None:
@@ -251,10 +251,7 @@ def test_entities_with_different_areas_not_grouped() -> None:
 
 
 def test_truncate_iso_to_minute() -> None:
-    assert (
-        _truncate_iso("2026-02-22T05:56:11.988456+00:00")
-        == "2026-02-22T05:56"
-    )
+    assert _truncate_iso("2026-02-22T05:56:11.988456+00:00") == "2026-02-22T05:56"
     assert _truncate_iso("2026-02-22T05:56:11") == "2026-02-22T05:56"
     assert _truncate_iso(None) is None
     assert _truncate_iso("") is None
@@ -314,7 +311,9 @@ def test_camera_empty_fields_omitted() -> None:
     snapshot = _make_snapshot(
         camera_activity=[
             _make_camera(
-                "camera.front", summary=None, people=[],
+                "camera.front",
+                summary=None,
+                people=[],
             ),
         ],
     )
@@ -340,7 +339,10 @@ def test_anomalous_states_prioritized_over_normal() -> None:
         for i in range(_MAX_ENTITIES + 5)
     ]
     anomalous = _make_entity(
-        "lock.front_door", "lock", "unlocked", area="Front",
+        "lock.front_door",
+        "lock",
+        "unlocked",
+        area="Front",
     )
     entities = [*normal_entities, anomalous]
 
@@ -360,7 +362,10 @@ def test_domain_not_in_grouped_output() -> None:
     snapshot = _make_snapshot(
         entities=[
             _make_entity(
-                "lock.front_door", "lock", "locked", area="Front",
+                "lock.front_door",
+                "lock",
+                "locked",
+                area="Front",
             ),
         ],
     )
