@@ -18,5 +18,7 @@ USER_PROMPT_TEMPLATE = (
     "- No markdown, no backticks.\n"
     "- No rule IDs or raw entity IDs unless unavoidable.\n"
     "- Include: what happened, and one immediate action.\n"
+    "- Never mention specific clock times or absolute timestamps; "
+    "use relative phrasing like 'recently' or 'a few minutes ago' instead.\n"
     "Return only the final message."
 )
