@@ -102,13 +102,17 @@ class SentinelDiscoveryEngine:
             return
 
         reduced_snapshot = reduce_snapshot_for_discovery(snapshot)
-        safe_snapshot = json.loads(json.dumps(reduced_snapshot, default=str))
+        compact_snapshot = json.dumps(
+            reduced_snapshot, default=str, separators=(",", ":")
+        )
         active_rule_ids, existing_keys = await self._existing_semantic_context()
         now = dt_util.utcnow().isoformat()
         prompt = USER_PROMPT_TEMPLATE.format(
-            snapshot=safe_snapshot,
-            active_rule_ids=sorted(active_rule_ids),
-            existing_semantic_keys=sorted(existing_keys),
+            snapshot=compact_snapshot,
+            active_rule_ids=json.dumps(sorted(active_rule_ids), separators=(",", ":")),
+            existing_semantic_keys=json.dumps(
+                sorted(existing_keys), separators=(",", ":")
+            ),
         )
         messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
 
