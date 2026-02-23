@@ -354,6 +354,7 @@ Tip: if your script needs the raw mobile action callback details, read `sentinel
 - `motion_detected_at_night_while_alarm_disarmed`
 - `motion_without_camera_activity`
 - `motion_while_alarm_disarmed_and_home_present`
+- `unknown_person_camera_no_home`
 
 ### Discovery Novelty and Dedupe
 
