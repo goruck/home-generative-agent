@@ -24,6 +24,7 @@ from .dynamic_rules import evaluate_dynamic_rules
 from .rules.appliance_power_duration import AppliancePowerDurationRule
 from .rules.camera_entry_unsecured import CameraEntryUnsecuredRule
 from .rules.open_entry_while_away import OpenEntryWhileAwayRule
+from .rules.unknown_person_camera_no_home import UnknownPersonCameraNoHomeRule
 from .rules.unlocked_lock_at_night import UnlockedLockAtNightRule
 from .suppression import (
     SuppressionManager,
@@ -76,6 +77,7 @@ class SentinelEngine:
             OpenEntryWhileAwayRule(),
             AppliancePowerDurationRule(),
             CameraEntryUnsecuredRule(),
+            UnknownPersonCameraNoHomeRule(),
         ]
 
     def start(self) -> None:

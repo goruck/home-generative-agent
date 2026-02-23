@@ -91,6 +91,11 @@ def evaluate_dynamic_rules(
                 snapshot, rule, entity_map, camera_map
             )
         ),
+        "unknown_person_camera_no_home": (
+            lambda rule: _eval_unknown_person_camera_no_home(
+                snapshot, rule, camera_map
+            )
+        ),
         "unavailable_sensors_while_home": (
             lambda rule: _eval_unavailable_sensors_while_home(
                 snapshot, rule, entity_map
@@ -308,6 +313,39 @@ def _eval_motion_without_camera_activity(
         }
         findings.append(_build_finding(rule, [motion_id, camera_id], evidence))
     return findings
+
+
+def _eval_unknown_person_camera_no_home(
+    snapshot: FullStateSnapshot,
+    rule: dict[str, Any],
+    camera_map: Mapping[str, CameraActivity],
+) -> list[AnomalyFinding]:
+    if snapshot["derived"]["anyone_home"]:
+        return []
+    params = _rule_params(rule)
+    camera_id = params.get("camera_entity_id")
+    camera = camera_map.get(camera_id) if camera_id else None
+    if not camera or camera_id is None:
+        return []
+    if not camera.get("last_activity"):
+        return []
+    if not camera.get("motion_entities") and not camera.get("vmd_entities"):
+        return []
+    if camera.get("recognized_people"):
+        return []
+    evidence = {
+        "rule_id": rule.get("rule_id"),
+        "template_id": rule.get("template_id"),
+        "camera_entity_id": camera_id,
+        "area": camera.get("area"),
+        "last_activity": camera.get("last_activity"),
+        "recognized_people": camera.get("recognized_people", []),
+        "motion_entities": camera.get("motion_entities", []),
+        "vmd_entities": camera.get("vmd_entities", []),
+        "anyone_home": snapshot["derived"]["anyone_home"],
+        "is_night": snapshot["derived"]["is_night"],
+    }
+    return [_build_finding(rule, [camera_id], evidence)]
 
 
 def _eval_unavailable_sensors_while_home(
