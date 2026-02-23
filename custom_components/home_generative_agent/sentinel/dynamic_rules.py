@@ -92,9 +92,7 @@ def evaluate_dynamic_rules(
             )
         ),
         "unknown_person_camera_no_home": (
-            lambda rule: _eval_unknown_person_camera_no_home(
-                snapshot, rule, camera_map
-            )
+            lambda rule: _eval_unknown_person_camera_no_home(snapshot, rule, camera_map)
         ),
         "unavailable_sensors_while_home": (
             lambda rule: _eval_unavailable_sensors_while_home(
