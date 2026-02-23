@@ -20,6 +20,7 @@ SUPPORTED_TEMPLATES = {
     "open_entry_at_night_while_away",
     "unlocked_lock_when_home",
     "motion_without_camera_activity",
+    "unknown_person_camera_no_home",
 }
 
 _PERCENT_THRESHOLD_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*%")
@@ -193,6 +194,25 @@ def normalize_candidate(  # noqa: PLR0911, PLR0912
             params={"entry_selector": "window"},
             severity="high",
             confidence=float(candidate.get("confidence_hint", 0.6)),
+            is_sensitive=True,
+            suggested_actions=["close_entry"],
+        )
+
+    if (
+        camera_id
+        and presence == "away"
+        and _contains_any(text, ("unknown", "unrecognized", "stranger"))
+        and _contains_any(text, ("person", "people", "face"))
+    ):
+        return NormalizedRule(
+            rule_id=_candidate_rule_id(
+                candidate,
+                default=f"unknown_person_camera_no_home_{camera_id.replace('.', '_')}",
+            ),
+            template_id="unknown_person_camera_no_home",
+            params={"camera_entity_id": camera_id},
+            severity="low",
+            confidence=float(candidate.get("confidence_hint", 0.85)),
             is_sensitive=True,
             suggested_actions=["close_entry"],
         )

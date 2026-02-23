@@ -12,6 +12,9 @@ from custom_components.home_generative_agent.sentinel.rules.camera_entry_unsecur
 from custom_components.home_generative_agent.sentinel.rules.open_entry_while_away import (
     OpenEntryWhileAwayRule,
 )
+from custom_components.home_generative_agent.sentinel.rules.unknown_person_camera_no_home import (
+    UnknownPersonCameraNoHomeRule,
+)
 from custom_components.home_generative_agent.sentinel.rules.unlocked_lock_at_night import (
     UnlockedLockAtNightRule,
 )
@@ -133,3 +136,91 @@ def test_camera_entry_unsecured_triggers() -> None:
 
     findings = CameraEntryUnsecuredRule().evaluate(snapshot)
     assert len(findings) == 1
+
+
+def test_unknown_person_camera_no_home_triggers() -> None:
+    """Unknown person on camera should trigger when no one is home."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["anyone_home"] = False
+    snapshot["camera_activity"] = [
+        {
+            "camera_entity_id": "camera.backyard",
+            "area": "Backyard",
+            "last_activity": "2025-01-01T00:04:00+00:00",
+            "motion_entities": ["binary_sensor.backyard_motion"],
+            "vmd_entities": [],
+            "snapshot_summary": None,
+            "recognized_people": [],
+            "latest_path": None,
+        }
+    ]
+
+    findings = UnknownPersonCameraNoHomeRule().evaluate(snapshot)
+    assert len(findings) == 1
+    assert findings[0].type == "unknown_person_camera_no_home"
+    assert findings[0].severity == "low"
+    assert findings[0].confidence == 0.85
+    assert "close_entry" in findings[0].suggested_actions
+
+
+def test_unknown_person_camera_no_home_no_trigger_when_home() -> None:
+    """No finding when someone is home, even if an unknown person is on camera."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["camera_activity"] = [
+        {
+            "camera_entity_id": "camera.backyard",
+            "area": "Backyard",
+            "last_activity": "2025-01-01T00:04:00+00:00",
+            "motion_entities": ["binary_sensor.backyard_motion"],
+            "vmd_entities": [],
+            "snapshot_summary": None,
+            "recognized_people": [],
+            "latest_path": None,
+        }
+    ]
+
+    findings = UnknownPersonCameraNoHomeRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_unknown_person_camera_no_home_no_trigger_when_recognized() -> None:
+    """No finding when the detected person is recognized."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["anyone_home"] = False
+    snapshot["camera_activity"] = [
+        {
+            "camera_entity_id": "camera.backyard",
+            "area": "Backyard",
+            "last_activity": "2025-01-01T00:04:00+00:00",
+            "motion_entities": ["binary_sensor.backyard_motion"],
+            "vmd_entities": [],
+            "snapshot_summary": None,
+            "recognized_people": ["person.jane"],
+            "latest_path": None,
+        }
+    ]
+
+    findings = UnknownPersonCameraNoHomeRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_unknown_person_camera_no_home_no_trigger_without_motion() -> None:
+    """No finding when camera has activity but no motion or VMD entities."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["anyone_home"] = False
+    snapshot["camera_activity"] = [
+        {
+            "camera_entity_id": "camera.backyard",
+            "area": "Backyard",
+            "last_activity": "2025-01-01T00:04:00+00:00",
+            "motion_entities": [],
+            "vmd_entities": [],
+            "snapshot_summary": None,
+            "recognized_people": [],
+            "latest_path": None,
+        }
+    ]
+
+    findings = UnknownPersonCameraNoHomeRule().evaluate(snapshot)
+    assert len(findings) == 0

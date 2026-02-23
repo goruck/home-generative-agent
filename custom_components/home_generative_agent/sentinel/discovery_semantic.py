@@ -19,6 +19,7 @@ def candidate_semantic_key(  # noqa: PLR0912, PLR0915
         ]
     ).lower()
     entity_ids = _extract_entity_ids(evidence_paths)
+    camera_ids = sorted(_extract_camera_ids(evidence_paths))
     lock_ids = sorted(
         entity_id for entity_id in entity_ids if entity_id.startswith("lock.")
     )
@@ -78,6 +79,14 @@ def candidate_semantic_key(  # noqa: PLR0912, PLR0915
         predicate = "unavailable"
     elif "motion" in text or "activity" in text:
         predicate = "active"
+    elif (
+        camera_ids
+        and _contains_any(text, ("unknown", "unrecognized", "stranger"))
+        and _contains_any(text, ("person", "people", "face"))
+    ):
+        subject = "camera"
+        predicate = "unknown_person"
+        entities = camera_ids
     if predicate == "unavailable" and sensor_ids:
         subject = "sensor"
         entities = sensor_ids
@@ -138,6 +147,14 @@ def rule_semantic_key(rule: dict[str, Any]) -> str | None:  # noqa: PLR0911, PLR
         return (
             "v1|subject=entry_window|predicate=open|night=1|home=0|scope=any|entities="
         )
+    if template_id == "unknown_person_camera_no_home":
+        camera_id = str(params.get("camera_entity_id", ""))
+        if not camera_id:
+            return None
+        return (
+            "v1|subject=camera|predicate=unknown_person|night=any|home=0|scope=any|"
+            f"entities={camera_id}"
+        )
     if template_id == "motion_without_camera_activity":
         motion_ids = sorted(set(_string_list(params.get("motion_entity_ids"))))
         if not motion_ids:
@@ -179,6 +196,20 @@ def rule_semantic_key(rule: dict[str, Any]) -> str | None:  # noqa: PLR0911, PLR
             f"entities={','.join(sensor_ids)}"
         )
     return None
+
+
+def _extract_camera_ids(evidence_paths: list[str]) -> list[str]:
+    camera_ids: list[str] = []
+    for path in evidence_paths:
+        if path.startswith("camera_activity[entity_id="):
+            camera_ids.append(
+                path.split("camera_activity[entity_id=", 1)[1].split("]", 1)[0]
+            )
+        elif path.startswith("camera_activity[camera_entity_id="):
+            camera_ids.append(
+                path.split("camera_activity[camera_entity_id=", 1)[1].split("]", 1)[0]
+            )
+    return camera_ids
 
 
 def _extract_entity_ids(evidence_paths: list[str]) -> list[str]:
