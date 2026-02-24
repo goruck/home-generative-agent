@@ -61,6 +61,7 @@ from ..const import (  # noqa: TID252
 )
 from ..core.conversation_helpers import _resolve_entity_id  # noqa: TID252
 from ..core.utils import extract_final, verify_pin  # noqa: TID252
+from .camera_activity import get_camera_last_events_from_states
 from .helpers import (
     ConfigurableData,
     maybe_fill_lock_entity,
@@ -1196,3 +1197,39 @@ async def get_current_device_state(  # noqa: D417
         state_dict[name] = state
 
     return state_dict
+
+
+@tool(parse_docstring=True)
+async def get_camera_last_events(  # noqa: D417
+    camera_entity_id: str | None = None,
+    *,
+    config: Annotated[RunnableConfig, InjectedToolArg()],
+) -> str:
+    """
+    Get the latest video analysis events from home cameras.
+
+    Returns face recognition results, AI-generated scene descriptions, and
+    event timestamps from the most recent video analysis for each camera.
+    Use this when handling camera-related security alerts, or when you need
+    to know who or what the cameras have recently observed.
+
+    Args:
+        camera_entity_id: Optional camera entity ID to limit results to one
+            camera (e.g. 'camera.front_door'). If omitted, returns all cameras.
+
+    """
+    if "configurable" not in config:
+        return "Configuration not found. Please check your setup."
+
+    hass = config["configurable"]["hass"]
+    results = get_camera_last_events_from_states(hass, camera_entity_id)
+
+    if not results:
+        return "No camera last event data available."
+
+    return yaml.dump(
+        {"camera_last_events": results},
+        default_flow_style=False,
+        allow_unicode=True,
+        sort_keys=False,
+    )

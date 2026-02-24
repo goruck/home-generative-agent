@@ -26,6 +26,7 @@ from .agent.tools import (
     alarm_control,
     confirm_sensitive_action,
     get_and_analyze_camera_image,
+    get_camera_last_events,
     get_entity_history,
     resolve_entity_ids,
     upsert_memory,
@@ -228,6 +229,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         # Add LangChain-native tools (wired in graph via config).
         langchain_tools: dict[str, Any] = {
             "get_and_analyze_camera_image": get_and_analyze_camera_image,
+            "get_camera_last_events": get_camera_last_events,
             "upsert_memory": upsert_memory,
             "get_entity_history": get_entity_history,
             "confirm_sensitive_action": confirm_sensitive_action,

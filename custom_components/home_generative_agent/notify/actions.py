@@ -216,6 +216,11 @@ def _extract_speech(response: dict[str, Any] | None) -> str | None:
         return None
 
 
+def _involves_camera(finding: AnomalyFinding) -> bool:
+    """Return True if any triggering entity is a camera."""
+    return any(e.startswith("camera.") for e in finding.triggering_entities)
+
+
 def _build_execute_prompt(finding: AnomalyFinding) -> str:
     """Build a natural-language prompt for non-sensitive execute actions."""
     entity_id = finding.evidence.get("entity_id") or (
@@ -232,12 +237,19 @@ def _build_execute_prompt(finding: AnomalyFinding) -> str:
     entity_clause = f" (entity_id: {entity_id})" if entity_id else ""
     extra = [e for e in finding.triggering_entities if e != entity_id]
     extra_clause = f" Also involved: {', '.join(extra)}." if extra else ""
+    camera_clause = (
+        " Also call get_camera_last_events to retrieve face recognition results"
+        " and scene descriptions for the relevant camera(s)."
+        if _involves_camera(finding)
+        else ""
+    )
     return (
         f"Sentinel alert — {finding.severity} severity, "
         f"{finding.confidence:.0%} confidence. "
         f"Primary device: {friendly}{entity_clause}.{extra_clause} "
         f"Suggested action: {suggested}. "
-        f"Use GetLiveContext to check current state, then take appropriate action. "
+        f"Use GetLiveContext to check current state.{camera_clause} "
+        f"Then take appropriate action. "
         f"Report what you did or if you need additional information."
     )
 
@@ -258,12 +270,19 @@ def _build_ask_prompt(finding: AnomalyFinding) -> str:
     entity_clause = f" (entity_id: {entity_id})" if entity_id else ""
     extra = [e for e in finding.triggering_entities if e != entity_id]
     extra_clause = f" Also involved: {', '.join(extra)}." if extra else ""
+    camera_clause = (
+        " Also call get_camera_last_events to retrieve face recognition results"
+        " and scene descriptions for the relevant camera(s)."
+        if _involves_camera(finding)
+        else ""
+    )
     return (
         f"Sentinel security alert — {finding.severity} severity, "
         f"{finding.confidence:.0%} confidence. "
         f"Primary device: {friendly}{entity_clause}.{extra_clause} "
         f"Suggested remediation: {suggested}. "
-        f"Use GetLiveContext to check current state if needed, then act. "
+        f"Use GetLiveContext to check current state if needed.{camera_clause} "
+        f"Then act. "
         f"Do not ask clarifying questions — proceed autonomously based on available "
         f"context. If the action requires a PIN or alarm code that you cannot obtain, "
         f"report that you cannot complete the action in this automated alert context "
