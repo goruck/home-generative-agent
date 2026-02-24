@@ -32,8 +32,6 @@ from homeassistant.const import (
 )
 from homeassistant.core import State
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import area_registry as ar
-from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import llm
 from homeassistant.helpers.recorder import get_instance as get_recorder_instance
 from homeassistant.helpers.recorder import session_scope as recorder_session_scope
@@ -63,6 +61,7 @@ from ..const import (  # noqa: TID252
 )
 from ..core.conversation_helpers import _resolve_entity_id  # noqa: TID252
 from ..core.utils import extract_final, verify_pin  # noqa: TID252
+from .camera_activity import get_camera_last_events_from_states
 from .helpers import (
     ConfigurableData,
     maybe_fill_lock_entity,
@@ -1223,35 +1222,7 @@ async def get_camera_last_events(  # noqa: D417
         return "Configuration not found. Please check your setup."
 
     hass = config["configurable"]["hass"]
-    entity_reg = er.async_get(hass)
-    area_reg = ar.async_get(hass)
-
-    results = []
-    for image_state in hass.states.async_all("image"):
-        cam_id: str | None = image_state.attributes.get("camera_id")
-        if not isinstance(cam_id, str):
-            continue
-        if camera_entity_id is not None and cam_id != camera_entity_id:
-            continue
-
-        area_name: str | None = None
-        entity_entry = entity_reg.async_get(cam_id)
-        if entity_entry and entity_entry.area_id:
-            area_entry = area_reg.async_get_area(entity_entry.area_id)
-            if area_entry:
-                area_name = area_entry.name
-
-        results.append(
-            {
-                "camera_entity_id": cam_id,
-                "area": area_name,
-                "last_event": image_state.attributes.get("last_event"),
-                "summary": image_state.attributes.get("summary"),
-                "recognized_people": image_state.attributes.get(
-                    "recognized_people", []
-                ),
-            }
-        )
+    results = get_camera_last_events_from_states(hass, camera_entity_id)
 
     if not results:
         return "No camera last event data available."

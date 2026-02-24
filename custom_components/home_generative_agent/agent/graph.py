@@ -52,6 +52,7 @@ from ..const import (  # noqa: TID252
     TOOL_CALL_ERROR_TEMPLATE,
 )
 from ..core.utils import extract_final  # noqa: TID252
+from .camera_activity import get_recent_camera_activity
 from .helpers import (
     maybe_fill_lock_entity,
     normalize_intent_for_alarm,
@@ -74,37 +75,6 @@ class State(MessagesState):
     summary: str
     chat_model_usage_metadata: dict[str, Any]
     messages_to_remove: list[AnyMessage]
-
-
-# ----- Utilities -----
-
-
-async def _retrieve_camera_activity(
-    hass: HomeAssistant, store: BaseStore
-) -> list[dict[str, dict[str, str]]]:
-    """Retrieve most recent camera activity from video analysis by the VLM."""
-    camera_activity: list[dict[str, dict[str, str]]] = []
-    for entity_id in hass.states.async_entity_ids():
-        if not entity_id.startswith("camera."):
-            continue
-        camera = entity_id.split(".")[-1]
-        results = await store.asearch(("video_analysis", camera), limit=1)
-        if results and (la := results[0].value.get("content")):
-            camera_activity.append(
-                {
-                    camera: {
-                        "last activity": la,
-                        "date_time": results[0].updated_at.strftime(
-                            "%Y-%m-%d %H:%M:%S"
-                        ),
-                    }
-                }
-            )
-    if camera_activity:
-        LOGGER.debug("Recent camera activity: %s", camera_activity)
-        return camera_activity
-    LOGGER.debug("No recent camera activity found.")
-    return []
 
 
 def _determine_model_name(provider: str, opts: dict[str, Any]) -> str:
@@ -593,7 +563,7 @@ async def _call_model(
     mems = await store.asearch((user_id, "memories"), query=query_prompt, limit=10)
 
     # Recent camera activity.
-    camera_activity = await _retrieve_camera_activity(hass, store)
+    camera_activity = await get_recent_camera_activity(hass, store)
 
     # Build system message.
     system_message = config["configurable"]["prompt"]
