@@ -3,6 +3,9 @@
     "dockerComposeFile": [ "docker-compose.yaml" ],
     "service": "devcontainer",
     "workspaceFolder": "/workspaces",
+    "features": {
+        "ghcr.io/devcontainers/features/github-cli:1": {}
+    },
     "postCreateCommand": "scripts/setup",
     "forwardPorts": [ 8123 ],
     "portsAttributes": {

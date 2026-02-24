@@ -1,4 +1,8 @@
 # Development requirements (editor / lint / local dev tools, etc.)
+#
+# System tools (install separately):
+#   gh (GitHub CLI) -- https://cli.github.com/
+#   Ubuntu: add GitHub apt repo then: sudo apt install gh
 ruff==0.15.2
 colorlog==6.10.1
 pre-commit>=4.0.0
