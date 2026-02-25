@@ -42,9 +42,18 @@ def derive_context(
     if sun_state is not None:
         is_night = sun_state.state == "below_horizon"
 
-    anyone_home = any(
-        state.domain == "person" and state.state == "home" for state in all_states
-    )
+    people_home: list[str] = []
+    people_away: list[str] = []
+    for state in all_states:
+        if state.domain != "person":
+            continue
+        name = state.attributes.get("friendly_name") or state.entity_id
+        if state.state == "home":
+            people_home.append(name)
+        else:
+            people_away.append(name)
+
+    anyone_home = len(people_home) > 0
 
     last_motion_by_area: dict[str, str] = {}
     for state in _iter_motion_entities(all_states):
@@ -61,5 +70,7 @@ def derive_context(
         "timezone": timezone,
         "is_night": is_night,
         "anyone_home": anyone_home,
+        "people_home": sorted(people_home),
+        "people_away": sorted(people_away),
         "last_motion_by_area": dict(sorted(last_motion_by_area.items())),
     }

@@ -114,6 +114,12 @@ CONF_PROMPT = "prompt"
 CONF_SCHEMA_FIRST_YAML = "schema_first_yaml"
 CONF_DISABLED_FEATURES = "disabled_features"
 
+# ---- Audit store ----
+CONF_AUDIT_HOT_MAX_RECORDS = "audit_hot_max_records"
+CONF_AUDIT_ARCHIVAL_BACKLOG_MAX = "audit_archival_backlog_max"
+CONF_AUDIT_RETENTION_DAYS = "audit_retention_days"
+CONF_AUDIT_HIGH_RETENTION_DAYS = "audit_high_retention_days"
+
 # ---- Proactive sentinel ----
 CONF_SENTINEL_ENABLED = "sentinel_enabled"
 CONF_SENTINEL_INTERVAL_SECONDS = "sentinel_interval_seconds"
@@ -131,6 +137,18 @@ RECOMMENDED_EXPLAIN_ENABLED = False
 RECOMMENDED_SENTINEL_DISCOVERY_ENABLED = False
 RECOMMENDED_SENTINEL_DISCOVERY_INTERVAL_SECONDS = 3600
 RECOMMENDED_SENTINEL_DISCOVERY_MAX_RECORDS = 200
+
+# ---- Sentinel autonomy level (runtime kill-switch) ----
+# 0 = fully passive (no notifications, no actions)
+# 1 = notify only (default)
+# 2 = suggest actions (notify + recommend)
+# 3 = act autonomously
+CONF_SENTINEL_AUTONOMY_LEVEL = "sentinel_autonomy_level"
+CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES = "sentinel_runtime_override_ttl_minutes"
+CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE = "sentinel_require_pin_for_level_increase"
+RECOMMENDED_SENTINEL_AUTONOMY_LEVEL: int = 1
+RECOMMENDED_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES: int = 60
+RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: bool = False
 
 # ---- Feature definitions ----
 DEFAULT_FEATURE_TYPES: tuple[str, ...] = (

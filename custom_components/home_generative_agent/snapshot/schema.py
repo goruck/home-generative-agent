@@ -42,6 +42,8 @@ class DerivedContext(TypedDict):
     timezone: str
     is_night: bool
     anyone_home: bool
+    people_home: list[str]
+    people_away: list[str]
     last_motion_by_area: dict[str, str]
 
 
@@ -88,6 +90,8 @@ SNAPSHOT_SCHEMA = vol.Schema(
             vol.Required("timezone"): str,
             vol.Required("is_night"): bool,
             vol.Required("anyone_home"): bool,
+            vol.Required("people_home"): [str],
+            vol.Required("people_away"): [str],
             vol.Required("last_motion_by_area"): dict,
         },
     }
