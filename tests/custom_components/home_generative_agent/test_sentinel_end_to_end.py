@@ -56,8 +56,16 @@ class DummyAudit:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
 
-    async def async_append_finding(self, snapshot, finding, explanation) -> None:  # type: ignore[no-untyped-def]
-        self.calls.append({"finding": finding, "snapshot": snapshot})
+    async def async_append_finding(  # type: ignore[no-untyped-def]
+        self, snapshot, finding, explanation, **kwargs: Any
+    ) -> None:
+        self.calls.append(
+            {
+                "finding": finding,
+                "snapshot": snapshot,
+                "suppression_reason_code": kwargs.get("suppression_reason_code"),
+            }
+        )
 
 
 @pytest.mark.asyncio
@@ -118,3 +126,4 @@ async def test_sentinel_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
     audit_store = cast("DummyAudit", cast("Any", engine)._audit_store)
     assert notifier.calls
     assert audit_store.calls
+    assert audit_store.calls[0]["suppression_reason_code"] == "not_suppressed"

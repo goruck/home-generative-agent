@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import logging
 from datetime import timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 from homeassistant.util import dt as dt_util
 
@@ -40,6 +41,9 @@ if TYPE_CHECKING:
     from custom_components.home_generative_agent.explain.llm_explain import LLMExplainer
     from custom_components.home_generative_agent.notify.dispatcher import (
         NotificationDispatcher,
+    )
+    from custom_components.home_generative_agent.snapshot.schema import (
+        FullStateSnapshot,
     )
 
     from .models import AnomalyFinding
@@ -169,13 +173,15 @@ class SentinelEngine:
             return
 
         for finding in all_findings:
-            if should_suppress(
+            suppression_decision = should_suppress(
                 self._suppression.state, finding, now, cooldown_type, cooldown_entity
-            ):
+            )
+            if suppression_decision.suppress:
                 LOGGER.debug(
-                    "Suppressed finding %s for %s.",
+                    "Suppressed finding %s for %s (%s).",
                     finding.anomaly_id,
                     finding.type,
+                    suppression_decision.reason_code,
                 )
                 continue
             register_finding(self._suppression.state, finding, now)
@@ -192,7 +198,13 @@ class SentinelEngine:
                 explanation = await self._explainer.async_explain(finding)
 
             await self._notifier.async_notify(finding, snapshot, explanation)
-            await self._audit_store.async_append_finding(snapshot, finding, explanation)
+            await _append_finding_audit(
+                self._audit_store,
+                snapshot,
+                finding,
+                explanation,
+                suppression_decision.reason_code,
+            )
         LOGGER.debug("Sentinel cycle completed with %s finding(s).", len(all_findings))
 
 
@@ -210,3 +222,38 @@ def _coerce_int(value: object | None, default: int) -> int:
         except ValueError:
             return default
     return default
+
+
+def _supports_suppression_reason_code(callable_obj: object) -> bool:
+    """Check whether an audit append callable can accept suppression reason metadata."""
+    try:
+        signature = inspect.signature(cast("Any", callable_obj))
+    except (TypeError, ValueError):
+        return False
+
+    if "suppression_reason_code" in signature.parameters:
+        return True
+
+    for parameter in signature.parameters.values():
+        if parameter.kind == inspect.Parameter.VAR_KEYWORD:
+            return True
+    return False
+
+
+async def _append_finding_audit(
+    audit_store: AuditStore,
+    snapshot: FullStateSnapshot,
+    finding: AnomalyFinding,
+    explanation: str | None,
+    suppression_reason_code: str,
+) -> None:
+    """Append a finding to audit with optional suppression reason metadata."""
+    if _supports_suppression_reason_code(audit_store.async_append_finding):
+        await cast("Any", audit_store).async_append_finding(
+            snapshot,
+            finding,
+            explanation,
+            suppression_reason_code=suppression_reason_code,
+        )
+        return
+    await audit_store.async_append_finding(snapshot, finding, explanation)
