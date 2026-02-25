@@ -22,6 +22,20 @@ STORE_KEY = "home_generative_agent_sentinel_suppression"
 
 LOGGER = logging.getLogger(__name__)
 
+SUPPRESSION_REASON_NOT_SUPPRESSED = "not_suppressed"
+SUPPRESSION_REASON_PENDING_PROMPT = "pending_prompt"
+SUPPRESSION_REASON_TYPE_COOLDOWN = "type_cooldown"
+SUPPRESSION_REASON_ENTITY_COOLDOWN = "entity_cooldown"
+
+
+@dataclass(frozen=True)
+class SuppressionDecision:
+    """Structured suppression decision."""
+
+    suppress: bool
+    reason_code: str
+    context: dict[str, Any] = field(default_factory=dict)
+
 
 @dataclass
 class SuppressionState:
@@ -66,15 +80,23 @@ def should_suppress(
     now: datetime,
     cooldown_type: timedelta,
     cooldown_entity: timedelta,
-) -> bool:
+) -> SuppressionDecision:
     """Determine whether a finding should be suppressed."""
+    pending_prompt_last_seen = state.pending_prompts.get(finding.anomaly_id)
     if finding.anomaly_id in state.pending_prompts:
         LOGGER.debug(
             "Suppressing %s (%s): pending prompt exists.",
             finding.anomaly_id,
             finding.type,
         )
-        return True
+        return SuppressionDecision(
+            suppress=True,
+            reason_code=SUPPRESSION_REASON_PENDING_PROMPT,
+            context={
+                "anomaly_id": finding.anomaly_id,
+                "last_seen": pending_prompt_last_seen,
+            },
+        )
 
     last_type = _parse_dt(state.last_by_type.get(finding.type))
     if last_type is not None and now - last_type < cooldown_type:
@@ -84,7 +106,14 @@ def should_suppress(
             finding.type,
             state.last_by_type.get(finding.type),
         )
-        return True
+        return SuppressionDecision(
+            suppress=True,
+            reason_code=SUPPRESSION_REASON_TYPE_COOLDOWN,
+            context={
+                "type": finding.type,
+                "last_seen": state.last_by_type.get(finding.type),
+            },
+        )
 
     for entity_id in finding.triggering_entities:
         last_entity = _parse_dt(
@@ -98,9 +127,23 @@ def should_suppress(
                 entity_id,
                 state.last_by_entity.get(entity_id, {}).get(finding.type),
             )
-            return True
+            return SuppressionDecision(
+                suppress=True,
+                reason_code=SUPPRESSION_REASON_ENTITY_COOLDOWN,
+                context={
+                    "entity_id": entity_id,
+                    "type": finding.type,
+                    "last_seen": state.last_by_entity.get(entity_id, {}).get(
+                        finding.type
+                    ),
+                },
+            )
 
-    return False
+    return SuppressionDecision(
+        suppress=False,
+        reason_code=SUPPRESSION_REASON_NOT_SUPPRESSED,
+        context={},
+    )
 
 
 def register_finding(

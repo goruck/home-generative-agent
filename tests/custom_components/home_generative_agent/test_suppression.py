@@ -9,6 +9,10 @@ from homeassistant.util import dt as dt_util
 
 from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
 from custom_components.home_generative_agent.sentinel.suppression import (
+    SUPPRESSION_REASON_ENTITY_COOLDOWN,
+    SUPPRESSION_REASON_NOT_SUPPRESSED,
+    SUPPRESSION_REASON_PENDING_PROMPT,
+    SUPPRESSION_REASON_TYPE_COOLDOWN,
     SuppressionState,
     register_finding,
     register_prompt,
@@ -36,13 +40,16 @@ def test_cooldown_suppresses() -> None:
     now = dt_util.utcnow()
     register_finding(state, finding, now)
 
-    assert should_suppress(
+    decision = should_suppress(
         state,
         finding,
         now + timedelta(minutes=1),
         cooldown_type=timedelta(minutes=10),
         cooldown_entity=timedelta(minutes=5),
     )
+    assert decision.suppress
+    assert decision.reason_code == SUPPRESSION_REASON_TYPE_COOLDOWN
+    assert decision.context["type"] == finding.type
 
 
 def test_prompt_suppresses_until_resolved() -> None:
@@ -51,19 +58,42 @@ def test_prompt_suppresses_until_resolved() -> None:
     now = dt_util.utcnow()
     register_prompt(state, finding, now)
 
-    assert should_suppress(
+    decision = should_suppress(
         state,
         finding,
         now,
         cooldown_type=timedelta(minutes=0),
         cooldown_entity=timedelta(minutes=0),
     )
+    assert decision.suppress
+    assert decision.reason_code == SUPPRESSION_REASON_PENDING_PROMPT
 
     resolve_prompt(state, finding.anomaly_id)
-    assert not should_suppress(
+    decision = should_suppress(
         state,
         finding,
         now,
         cooldown_type=timedelta(minutes=0),
         cooldown_entity=timedelta(minutes=0),
     )
+    assert not decision.suppress
+    assert decision.reason_code == SUPPRESSION_REASON_NOT_SUPPRESSED
+
+
+def test_entity_cooldown_suppresses() -> None:
+    now = dt_util.utcnow()
+    state = SuppressionState(
+        last_by_entity={"lock.front": {"rule": dt_util.as_utc(now).isoformat()}}
+    )
+    finding = _finding()
+
+    decision = should_suppress(
+        state,
+        finding,
+        now + timedelta(minutes=1),
+        cooldown_type=timedelta(minutes=0),
+        cooldown_entity=timedelta(minutes=5),
+    )
+    assert decision.suppress
+    assert decision.reason_code == SUPPRESSION_REASON_ENTITY_COOLDOWN
+    assert decision.context["entity_id"] == "lock.front"
