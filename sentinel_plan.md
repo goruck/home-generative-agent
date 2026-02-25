@@ -600,25 +600,30 @@ Each issue is a self-contained PR targeting main. Every PR must leave tests gree
 ### Dependency Graph
 
 ```
-#1  #2  #3  #4
- \   |   |   |
-  \  |   |   |
-   #9  #8   #5
-    |   |    |
-   #10 #11  #6
-        |
-       #12  #7
-        |
-       #13
-        |
-       #14
-        |
-       #15
+#1  -> #9
+#2  -> #9
+#9  -> #10
+
+#3  -> #8
+#4  -> #8
+#3  -> #11
+#8  -> #11
+#8  -> #12
+#11 -> #12
+#12 -> #13
+
+#8  -> #14
+#14 -> #15
+
+#5  -> #6
+
+#7  (independent)
 ```
 
 Issues #1, #2, #3, #4, #5, and #7 have no mutual dependencies and can all be opened simultaneously as individual PRs.
 
 Declared issue dependencies (authoritative):
+
 - `#6 -> #5`
 - `#8 -> #3, #4`
 - `#9 -> #1, #2`
