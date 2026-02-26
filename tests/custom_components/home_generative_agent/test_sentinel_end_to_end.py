@@ -93,6 +93,8 @@ async def test_sentinel_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
                 "timezone": "UTC",
                 "is_night": False,
                 "anyone_home": False,
+                "people_home": [],
+                "people_away": [],
                 "last_motion_by_area": {},
             },
         }

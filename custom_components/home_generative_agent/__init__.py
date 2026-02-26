@@ -242,6 +242,7 @@ SERVICE_REJECT_RULE_PROPOSAL = "reject_rule_proposal"
 SERVICE_GET_DYNAMIC_RULES = "get_dynamic_rules"
 SERVICE_DEACTIVATE_DYNAMIC_RULE = "deactivate_dynamic_rule"
 SERVICE_REACTIVATE_DYNAMIC_RULE = "reactivate_dynamic_rule"
+SERVICE_SENTINEL_SET_AUTONOMY_LEVEL = "sentinel_set_autonomy_level"
 
 ENROLL_SCHEMA = vol.Schema(
     {
@@ -291,6 +292,14 @@ GET_DYNAMIC_RULES_SCHEMA = vol.Schema(
 TOGGLE_DYNAMIC_RULE_SCHEMA = vol.Schema(
     {
         vol.Required("rule_id"): cv.string,
+    }
+)
+
+SET_AUTONOMY_LEVEL_SCHEMA = vol.Schema(
+    {
+        vol.Required("entry_id"): cv.string,
+        vol.Required("level"): vol.All(vol.Coerce(int), vol.In([0, 1, 2, 3])),
+        vol.Optional("pin"): cv.string,
     }
 )
 
@@ -1593,6 +1602,36 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         SERVICE_REACTIVATE_DYNAMIC_RULE,
         _handle_reactivate_dynamic_rule,
         schema=TOGGLE_DYNAMIC_RULE_SCHEMA,
+        supports_response=_SERVICE_RESPONSE_ONLY,
+    )
+
+    async def _handle_sentinel_set_autonomy_level(call: ServiceCall) -> dict[str, Any]:
+        """Set the runtime autonomy level for a specific config entry (admin-only)."""
+        requested_entry_id = str(call.data["entry_id"])
+        level = int(call.data["level"])
+        pin: str | None = call.data.get("pin")
+
+        # Restrict to admin users only.
+        if not call.context.user_id:
+            msg = "sentinel_set_autonomy_level requires an authenticated user."
+            raise HomeAssistantError(msg)
+        user = await hass.auth.async_get_user(call.context.user_id)
+        if user is None or not user.is_admin:
+            msg = "sentinel_set_autonomy_level is restricted to admin users."
+            raise HomeAssistantError(msg)
+
+        sentinel = entry.runtime_data.sentinel
+        if sentinel is None:
+            return {"status": "unavailable", "entry_id": requested_entry_id}
+
+        sentinel.set_autonomy_level(requested_entry_id, level, pin=pin)
+        return {"status": "ok", "entry_id": requested_entry_id, "level": level}
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SENTINEL_SET_AUTONOMY_LEVEL,
+        _handle_sentinel_set_autonomy_level,
+        schema=SET_AUTONOMY_LEVEL_SCHEMA,
         supports_response=_SERVICE_RESPONSE_ONLY,
     )
 

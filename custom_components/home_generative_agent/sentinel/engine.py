@@ -6,22 +6,31 @@ import asyncio
 import contextlib
 import inspect
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util import dt as dt_util
 
 from custom_components.home_generative_agent.const import (
     CONF_EXPLAIN_ENABLED,
+    CONF_SENTINEL_AUTONOMY_LEVEL,
     CONF_SENTINEL_COOLDOWN_MINUTES,
     CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES,
     CONF_SENTINEL_INTERVAL_SECONDS,
+    CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
+    CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
+    RECOMMENDED_SENTINEL_AUTONOMY_LEVEL,
+    RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
+    RECOMMENDED_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
 )
 from custom_components.home_generative_agent.snapshot.builder import (
     async_build_full_state_snapshot,
 )
 
+from .correlator import SentinelCorrelator
 from .dynamic_rules import evaluate_dynamic_rules
+from .models import CompoundFinding
 from .rules.appliance_power_duration import AppliancePowerDurationRule
 from .rules.camera_entry_unsecured import CameraEntryUnsecuredRule
 from .rules.open_entry_while_away import OpenEntryWhileAwayRule
@@ -33,6 +42,7 @@ from .suppression import (
     register_prompt,
     should_suppress,
 )
+from .trigger_scheduler import SentinelTriggerScheduler
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -51,6 +61,10 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
+# Module-level in-memory store for runtime autonomy-level overrides.
+# Maps entry_id -> (level: int, expires_at: datetime)
+_AUTONOMY_OVERRIDES: dict[str, tuple[int, datetime]] = {}
+
 
 class SentinelEngine:
     """Periodic sentinel evaluation loop."""
@@ -65,6 +79,7 @@ class SentinelEngine:
         explainer: LLMExplainer | None = None,
         *,
         rule_registry: RuleRegistry | None = None,
+        entry_id: str | None = None,
     ) -> None:
         """Initialize sentinel dependencies and runtime state."""
         self._hass = hass
@@ -74,8 +89,11 @@ class SentinelEngine:
         self._audit_store = audit_store
         self._explainer = explainer
         self._rule_registry = rule_registry
+        self._entry_id = entry_id
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
+        self._correlator = SentinelCorrelator()
+        self._trigger_scheduler = SentinelTriggerScheduler()
         self._rules = [
             UnlockedLockAtNightRule(),
             OpenEntryWhileAwayRule(),
@@ -83,6 +101,64 @@ class SentinelEngine:
             CameraEntryUnsecuredRule(),
             UnknownPersonCameraNoHomeRule(),
         ]
+
+    def set_autonomy_level(
+        self, entry_id: str, level: int, pin: str | None = None
+    ) -> None:
+        """
+        Set a runtime autonomy-level override (TTL-bounded).
+
+        Raises HomeAssistantError if a PIN is required for a level increase and
+        no PIN is supplied.  (PIN validation is a TODO; the stub just checks
+        presence when the option is enabled.)
+        """
+        require_pin = bool(
+            self._options.get(
+                CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
+                RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
+            )
+        )
+        current_level = self.get_autonomy_level(entry_id)
+        if require_pin and level > current_level and not pin:
+            msg = (
+                "A PIN is required to increase the autonomy level. "
+                "Provide 'pin' in the service call data."
+            )
+            raise HomeAssistantError(msg)
+        if require_pin and level > current_level:
+            pass  # Stub: actual PIN hash validation is left for a follow-up PR.
+        ttl_minutes = _coerce_int(
+            self._options.get(CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES),
+            default=RECOMMENDED_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
+        )
+        expires_at = dt_util.utcnow() + timedelta(minutes=ttl_minutes)
+        _AUTONOMY_OVERRIDES[entry_id] = (level, expires_at)
+        LOGGER.info(
+            "Sentinel autonomy level set to %s for entry %s (expires %s).",
+            level,
+            entry_id,
+            expires_at.isoformat(),
+        )
+
+    def get_autonomy_level(self, entry_id: str) -> int:
+        """
+        Return the current effective autonomy level.
+
+        Checks the in-memory override (respecting TTL); falls back to the
+        config value ``CONF_SENTINEL_AUTONOMY_LEVEL``, then the recommended
+        default.
+        """
+        override = _AUTONOMY_OVERRIDES.get(entry_id)
+        if override is not None:
+            level, expires_at = override
+            if dt_util.utcnow() < expires_at:
+                return level
+            # TTL expired - clean up and fall through to config default
+            del _AUTONOMY_OVERRIDES[entry_id]
+        return _coerce_int(
+            self._options.get(CONF_SENTINEL_AUTONOMY_LEVEL),
+            default=RECOMMENDED_SENTINEL_AUTONOMY_LEVEL,
+        )
 
     def start(self) -> None:
         """Start the sentinel loop."""
@@ -107,7 +183,17 @@ class SentinelEngine:
         )
         LOGGER.info("Sentinel loop started (interval=%ss).", interval)
         while not self._stop_event.is_set():
-            await self._run_once()
+            # Check the trigger scheduler first.  If a queued trigger is ready
+            # the single-flight lock inside the scheduler wraps _run_once().
+            # When no trigger is ready (or the lock is already held) fall
+            # through to the normal polling path, which also runs _run_once()
+            # under the same single-flight guard so concurrent runs are
+            # prevented regardless of the execution path taken.
+            triggered = await self._trigger_scheduler.run_once_if_triggered(
+                self._run_once
+            )
+            if not triggered:
+                await self._trigger_scheduler.run_polling(self._run_once)
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=interval)
             except TimeoutError:
@@ -172,40 +258,129 @@ class SentinelEngine:
             LOGGER.debug("Sentinel cycle completed with no findings.")
             return
 
-        for finding in all_findings:
-            suppression_decision = should_suppress(
-                self._suppression.state, finding, now, cooldown_type, cooldown_entity
-            )
-            if suppression_decision.suppress:
-                LOGGER.debug(
-                    "Suppressed finding %s for %s (%s).",
-                    finding.anomaly_id,
-                    finding.type,
-                    suppression_decision.reason_code,
-                )
-                continue
-            register_finding(self._suppression.state, finding, now)
-            register_prompt(self._suppression.state, finding, now)
-            await self._suppression.async_save()
-            LOGGER.info(
-                "Dispatching finding %s (%s).",
-                finding.anomaly_id,
-                finding.type,
-            )
+        # Correlation pass: group related findings from this single cycle.
+        # Each call to correlate() is stateless — no cross-run merging occurs.
+        correlated = self._correlator.correlate(all_findings)
 
-            explanation = None
-            if explain_enabled and self._explainer is not None:
-                explanation = await self._explainer.async_explain(finding)
-
-            await self._notifier.async_notify(finding, snapshot, explanation)
-            await _append_finding_audit(
-                self._audit_store,
-                snapshot,
-                finding,
-                explanation,
-                suppression_decision.reason_code,
+        for item in correlated:
+            await self._dispatch_item(
+                item, snapshot, now, cooldown_type, cooldown_entity, explain_enabled
             )
         LOGGER.debug("Sentinel cycle completed with %s finding(s).", len(all_findings))
+
+    async def _dispatch_item(  # noqa: PLR0913
+        self,
+        item: AnomalyFinding | CompoundFinding,
+        snapshot: FullStateSnapshot,
+        now: datetime,
+        cooldown_type: timedelta,
+        cooldown_entity: timedelta,
+        explain_enabled: bool,  # noqa: FBT001
+    ) -> None:
+        """Route a finding or compound finding through suppression and dispatch."""
+        if isinstance(item, CompoundFinding):
+            await self._dispatch_compound(
+                item, snapshot, now, cooldown_type, cooldown_entity, explain_enabled
+            )
+            return
+
+        # Plain AnomalyFinding — use existing suppression logic unchanged.
+        finding: AnomalyFinding = item
+        suppression_decision = should_suppress(
+            self._suppression.state, finding, now, cooldown_type, cooldown_entity
+        )
+        if suppression_decision.suppress:
+            LOGGER.debug(
+                "Suppressed finding %s for %s (%s).",
+                finding.anomaly_id,
+                finding.type,
+                suppression_decision.reason_code,
+            )
+            return
+        register_finding(self._suppression.state, finding, now)
+        register_prompt(self._suppression.state, finding, now)
+        await self._suppression.async_save()
+        LOGGER.info(
+            "Dispatching finding %s (%s).",
+            finding.anomaly_id,
+            finding.type,
+        )
+
+        explanation = None
+        if explain_enabled and self._explainer is not None:
+            explanation = await self._explainer.async_explain(finding)
+
+        await self._notifier.async_notify(finding, snapshot, explanation)
+        await _append_finding_audit(
+            self._audit_store,
+            snapshot,
+            finding,
+            explanation,
+            suppression_decision.reason_code,
+        )
+
+    async def _dispatch_compound(  # noqa: PLR0913
+        self,
+        compound: CompoundFinding,
+        snapshot: FullStateSnapshot,
+        now: datetime,
+        cooldown_type: timedelta,
+        cooldown_entity: timedelta,
+        explain_enabled: bool,  # noqa: FBT001
+    ) -> None:
+        """
+        Apply suppression to a CompoundFinding and dispatch it when appropriate.
+
+        A compound finding is suppressed only when **all** of its constituents
+        would individually be suppressed.  When at least one constituent passes
+        the suppression check, the compound is dispatched and all passing
+        constituents are registered for cooldown tracking.
+        """
+        passing: list[tuple[AnomalyFinding, str]] = []
+        for constituent in compound.constituent_findings:
+            decision = should_suppress(
+                self._suppression.state,
+                constituent,
+                now,
+                cooldown_type,
+                cooldown_entity,
+            )
+            if not decision.suppress:
+                passing.append((constituent, decision.reason_code))
+
+        if not passing:
+            LOGGER.debug(
+                "Suppressed compound finding %s (all %d constituents suppressed).",
+                compound.compound_id,
+                len(compound.constituent_findings),
+            )
+            return
+
+        for constituent, _reason in passing:
+            register_finding(self._suppression.state, constituent, now)
+            register_prompt(self._suppression.state, constituent, now)
+        await self._suppression.async_save()
+
+        LOGGER.info(
+            "Dispatching compound finding %s (%d constituents, %d passed suppression).",
+            compound.compound_id,
+            len(compound.constituent_findings),
+            len(passing),
+        )
+
+        best = max(compound.constituent_findings, key=lambda f: f.confidence)
+        explanation = None
+        if explain_enabled and self._explainer is not None:
+            explanation = await self._explainer.async_explain(best)
+
+        await self._notifier.async_notify(best, snapshot, explanation)
+        await _append_finding_audit(
+            self._audit_store,
+            snapshot,
+            compound,
+            explanation,
+            "not_suppressed",
+        )
 
 
 def _coerce_int(value: object | None, default: int) -> int:
@@ -243,7 +418,7 @@ def _supports_suppression_reason_code(callable_obj: object) -> bool:
 async def _append_finding_audit(
     audit_store: AuditStore,
     snapshot: FullStateSnapshot,
-    finding: AnomalyFinding,
+    finding: AnomalyFinding | CompoundFinding,
     explanation: str | None,
     suppression_reason_code: str,
 ) -> None:
@@ -256,4 +431,4 @@ async def _append_finding_audit(
             suppression_reason_code=suppression_reason_code,
         )
         return
-    await audit_store.async_append_finding(snapshot, finding, explanation)
+    await cast("Any", audit_store).async_append_finding(snapshot, finding, explanation)

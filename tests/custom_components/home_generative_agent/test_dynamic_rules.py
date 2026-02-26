@@ -64,6 +64,8 @@ def test_dynamic_rule_alarm_disarmed_open_entry() -> None:
             "timezone": "UTC",
             "is_night": False,
             "anyone_home": True,
+            "people_home": [],
+            "people_away": [],
             "last_motion_by_area": {},
         },
     )
@@ -98,6 +100,8 @@ def test_dynamic_rule_unlocked_lock_when_home() -> None:
             "timezone": "UTC",
             "is_night": False,
             "anyone_home": True,
+            "people_home": [],
+            "people_away": [],
             "last_motion_by_area": {},
         },
     )
@@ -139,6 +143,8 @@ def test_dynamic_rule_motion_without_camera_activity() -> None:
             "timezone": "UTC",
             "is_night": False,
             "anyone_home": True,
+            "people_home": [],
+            "people_away": [],
             "last_motion_by_area": {},
         },
     )
@@ -172,6 +178,8 @@ def test_dynamic_rule_open_entry_at_night_when_home() -> None:
             "timezone": "UTC",
             "is_night": True,
             "anyone_home": True,
+            "people_home": [],
+            "people_away": [],
             "last_motion_by_area": {},
         },
     )
@@ -203,6 +211,8 @@ def test_dynamic_rule_open_any_window_at_night_while_away() -> None:
             "timezone": "UTC",
             "is_night": True,
             "anyone_home": False,
+            "people_home": [],
+            "people_away": [],
             "last_motion_by_area": {},
         },
     )
@@ -235,6 +245,8 @@ def test_dynamic_rule_unavailable_sensors_while_home() -> None:
             "timezone": "UTC",
             "is_night": False,
             "anyone_home": True,
+            "people_home": [],
+            "people_away": [],
             "last_motion_by_area": {},
         },
     )
@@ -271,6 +283,8 @@ def test_dynamic_rule_unavailable_sensors_while_home_missing_required_entity() -
             "timezone": "UTC",
             "is_night": False,
             "anyone_home": True,
+            "people_home": [],
+            "people_away": [],
             "last_motion_by_area": {},
         },
     )
@@ -306,6 +320,8 @@ def test_dynamic_rule_unavailable_sensors_while_home_legacy_entity_ids() -> None
             "timezone": "UTC",
             "is_night": False,
             "anyone_home": True,
+            "people_home": [],
+            "people_away": [],
             "last_motion_by_area": {},
         },
     )
@@ -345,6 +361,8 @@ def test_dynamic_rule_unavailable_sensors_issue_223_triggers() -> None:
             "timezone": "UTC",
             "is_night": False,
             "anyone_home": False,
+            "people_home": [],
+            "people_away": [],
             "last_motion_by_area": {},
         },
     )
@@ -385,6 +403,8 @@ def test_dynamic_rule_unavailable_sensors_issue_223_non_trigger() -> None:
             "timezone": "UTC",
             "is_night": False,
             "anyone_home": False,
+            "people_home": [],
+            "people_away": [],
             "last_motion_by_area": {},
         },
     )
@@ -420,6 +440,8 @@ def test_dynamic_rule_low_battery_sensors_issue_236_triggers() -> None:
             "timezone": "UTC",
             "is_night": False,
             "anyone_home": True,
+            "people_home": [],
+            "people_away": [],
             "last_motion_by_area": {},
         },
     )
@@ -458,6 +480,8 @@ def test_dynamic_rule_low_battery_sensors_issue_236_non_trigger() -> None:
             "timezone": "UTC",
             "is_night": False,
             "anyone_home": True,
+            "people_home": [],
+            "people_away": [],
             "last_motion_by_area": {},
         },
     )
@@ -493,6 +517,8 @@ def test_dynamic_rule_low_battery_sensors_issue_236_missing_required_entity() ->
             "timezone": "UTC",
             "is_night": False,
             "anyone_home": True,
+            "people_home": [],
+            "people_away": [],
             "last_motion_by_area": {},
         },
     )
@@ -533,6 +559,8 @@ def test_dynamic_rule_motion_alarm_disarmed_home_issue_225_triggers() -> None:
             "timezone": "UTC",
             "is_night": False,
             "anyone_home": True,
+            "people_home": [],
+            "people_away": [],
             "last_motion_by_area": {},
         },
     )
@@ -581,6 +609,8 @@ def test_dynamic_rule_motion_alarm_disarmed_home_issue_225_non_trigger() -> None
             "timezone": "UTC",
             "is_night": False,
             "anyone_home": True,
+            "people_home": [],
+            "people_away": [],
             "last_motion_by_area": {},
         },
     )
@@ -624,6 +654,8 @@ def test_dynamic_rule_motion_night_alarm_disarmed_issue_235_triggers() -> None:
             "timezone": "UTC",
             "is_night": True,
             "anyone_home": True,
+            "people_home": [],
+            "people_away": [],
             "last_motion_by_area": {},
         },
     )
@@ -674,6 +706,8 @@ def test_dynamic_rule_motion_night_alarm_disarmed_issue_235_non_trigger() -> Non
             "timezone": "UTC",
             "is_night": True,
             "anyone_home": True,
+            "people_home": [],
+            "people_away": [],
             "last_motion_by_area": {},
         },
     )
@@ -716,6 +750,8 @@ def test_dynamic_rule_motion_night_alarm_disarmed_issue_235_missing_required() -
             "timezone": "UTC",
             "is_night": True,
             "anyone_home": True,
+            "people_home": [],
+            "people_away": [],
             "last_motion_by_area": {},
         },
     )

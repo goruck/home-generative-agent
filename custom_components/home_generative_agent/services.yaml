@@ -191,3 +191,35 @@ reactivate_dynamic_rule:
       example: "open_entry_at_night_while_away_window"
       selector:
         text:
+
+sentinel_set_autonomy_level:
+  name: Set sentinel autonomy level
+  description: >
+    Set the runtime autonomy level for the sentinel engine (admin-only, TTL-bounded).
+    Level 0 = fully passive; 1 = notify only; 2 = suggest; 3 = act autonomously.
+    The override reverts to the config default when the TTL expires.
+  fields:
+    entry_id:
+      name: Entry ID
+      description: The config entry ID to target.
+      required: true
+      example: "abc123def456"
+      selector:
+        text:
+    level:
+      name: Autonomy level
+      description: "New autonomy level: 0 (passive), 1 (notify), 2 (suggest), 3 (act)."
+      required: true
+      example: 1
+      selector:
+        number:
+          min: 0
+          max: 3
+          step: 1
+          mode: box
+    pin:
+      name: PIN
+      description: PIN required when increasing the level and require_pin_for_level_increase is enabled.
+      required: false
+      selector:
+        text:

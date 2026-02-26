@@ -29,6 +29,8 @@ def _make_snapshot(**overrides: Any) -> FullStateSnapshot:
             "timezone": "UTC",
             "is_night": False,
             "anyone_home": True,
+            "people_home": [],
+            "people_away": [],
             "last_motion_by_area": {},
         },
     }
