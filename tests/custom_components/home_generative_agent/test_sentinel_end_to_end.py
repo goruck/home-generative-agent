@@ -31,10 +31,15 @@ class DummySuppression(SuppressionManager):
 
     def __init__(self) -> None:  # type: ignore[override]
         self._state = SuppressionState()
+        self._read_only = False
 
     @property
     def state(self) -> SuppressionState:  # type: ignore[override]
         return self._state
+
+    @property
+    def is_read_only(self) -> bool:  # type: ignore[override]
+        return self._read_only
 
     async def async_save(self) -> None:  # type: ignore[override]
         return None
