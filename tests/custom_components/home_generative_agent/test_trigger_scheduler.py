@@ -175,7 +175,9 @@ async def test_ttl_expired_trigger_is_discarded() -> None:
         call_count += 1
 
     # Insert a record that is well past its TTL directly into the queue.
-    expired = _make_record("open_entry_while_away", age_seconds=TRIGGER_TTL_SECONDS + 5.0)
+    expired = _make_record(
+        "open_entry_while_away", age_seconds=TRIGGER_TTL_SECONDS + 5.0
+    )
     scheduler._queue.append(expired)
 
     result = await scheduler.run_once_if_triggered(fake_run_once)

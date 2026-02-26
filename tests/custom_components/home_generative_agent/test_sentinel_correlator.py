@@ -32,7 +32,9 @@ def _finding(  # noqa: PLR0913
     is_sensitive: bool = True,  # noqa: FBT001, FBT002
 ) -> AnomalyFinding:
     """Build a minimal AnomalyFinding for testing."""
-    entities = triggering_entities if triggering_entities is not None else ["lock.front"]
+    entities = (
+        triggering_entities if triggering_entities is not None else ["lock.front"]
+    )
     evidence: dict[str, Any] = {"entity_id": entities[0] if entities else "unknown"}
     if area is not None:
         evidence["area"] = area
@@ -120,10 +122,18 @@ def test_complementary_rule_types_group() -> None:
 
 def test_unrelated_findings_pass_through() -> None:
     """Findings with no relation are returned as individual AnomalyFindings."""
-    f1 = _finding(anomaly_id="a1", rule_type="appliance_power_duration", area="Laundry",
-                  triggering_entities=["sensor.washer_power"])
-    f2 = _finding(anomaly_id="a2", rule_type="unlocked_lock_at_night", area="Garage",
-                  triggering_entities=["lock.garage_door"])
+    f1 = _finding(
+        anomaly_id="a1",
+        rule_type="appliance_power_duration",
+        area="Laundry",
+        triggering_entities=["sensor.washer_power"],
+    )
+    f2 = _finding(
+        anomaly_id="a2",
+        rule_type="unlocked_lock_at_night",
+        area="Garage",
+        triggering_entities=["lock.garage_door"],
+    )
 
     correlator = SentinelCorrelator()
     result = correlator.correlate([f1, f2])
@@ -150,12 +160,24 @@ def test_single_finding_passes_through() -> None:
 
 def test_three_way_group_via_area() -> None:
     """Three findings in the same area are grouped into one CompoundFinding."""
-    f1 = _finding(anomaly_id="a1", rule_type="unlocked_lock_at_night", area="Front",
-                  triggering_entities=["lock.front"])
-    f2 = _finding(anomaly_id="a2", rule_type="camera_entry_unsecured", area="Front",
-                  triggering_entities=["camera.front"])
-    f3 = _finding(anomaly_id="a3", rule_type="open_entry_while_away", area="Front",
-                  triggering_entities=["binary_sensor.front_window"])
+    f1 = _finding(
+        anomaly_id="a1",
+        rule_type="unlocked_lock_at_night",
+        area="Front",
+        triggering_entities=["lock.front"],
+    )
+    f2 = _finding(
+        anomaly_id="a2",
+        rule_type="camera_entry_unsecured",
+        area="Front",
+        triggering_entities=["camera.front"],
+    )
+    f3 = _finding(
+        anomaly_id="a3",
+        rule_type="open_entry_while_away",
+        area="Front",
+        triggering_entities=["binary_sensor.front_window"],
+    )
 
     correlator = SentinelCorrelator()
     result = correlator.correlate([f1, f2, f3])
@@ -172,10 +194,18 @@ def test_three_way_group_via_area() -> None:
 
 def test_cross_run_isolation() -> None:
     """Findings from separate correlate() calls are never merged."""
-    f1 = _finding(anomaly_id="a1", rule_type="unlocked_lock_at_night", area="Front",
-                  triggering_entities=["lock.front"])
-    f2 = _finding(anomaly_id="a2", rule_type="camera_entry_unsecured", area="Front",
-                  triggering_entities=["camera.front"])
+    f1 = _finding(
+        anomaly_id="a1",
+        rule_type="unlocked_lock_at_night",
+        area="Front",
+        triggering_entities=["lock.front"],
+    )
+    f2 = _finding(
+        anomaly_id="a2",
+        rule_type="camera_entry_unsecured",
+        area="Front",
+        triggering_entities=["camera.front"],
+    )
 
     correlator = SentinelCorrelator()
     # First run: both findings
@@ -215,10 +245,20 @@ def test_correlator_is_stateless_across_calls() -> None:
 
 def test_compound_finding_has_expected_fields() -> None:
     """CompoundFinding contains all required fields with correct types."""
-    f1 = _finding(anomaly_id="a1", rule_type="unlocked_lock_at_night", area="Front",
-                  confidence=0.9, triggering_entities=["lock.front"])
-    f2 = _finding(anomaly_id="a2", rule_type="camera_entry_unsecured", area="Front",
-                  confidence=0.6, triggering_entities=["camera.front"])
+    f1 = _finding(
+        anomaly_id="a1",
+        rule_type="unlocked_lock_at_night",
+        area="Front",
+        confidence=0.9,
+        triggering_entities=["lock.front"],
+    )
+    f2 = _finding(
+        anomaly_id="a2",
+        rule_type="camera_entry_unsecured",
+        area="Front",
+        confidence=0.6,
+        triggering_entities=["camera.front"],
+    )
 
     correlator = SentinelCorrelator()
     result = correlator.correlate([f1, f2])
@@ -255,10 +295,20 @@ def test_compound_finding_has_expected_fields() -> None:
 
 def test_compound_severity_is_max() -> None:
     """CompoundFinding severity equals the highest among constituents."""
-    f_low = _finding(anomaly_id="a1", rule_type="appliance_power_duration",
-                     area="Kitchen", severity="low", triggering_entities=["sensor.oven_power"])
-    f_medium = _finding(anomaly_id="a2", rule_type="camera_entry_unsecured",
-                        area="Kitchen", severity="medium", triggering_entities=["camera.kitchen"])
+    f_low = _finding(
+        anomaly_id="a1",
+        rule_type="appliance_power_duration",
+        area="Kitchen",
+        severity="low",
+        triggering_entities=["sensor.oven_power"],
+    )
+    f_medium = _finding(
+        anomaly_id="a2",
+        rule_type="camera_entry_unsecured",
+        area="Kitchen",
+        severity="medium",
+        triggering_entities=["camera.kitchen"],
+    )
 
     correlator = SentinelCorrelator()
     result = correlator.correlate([f_low, f_medium])
@@ -271,11 +321,19 @@ def test_compound_severity_is_max() -> None:
 
 def test_compound_is_sensitive_if_any_constituent_is() -> None:
     """CompoundFinding is sensitive when any constituent is sensitive."""
-    f_sensitive = _finding(anomaly_id="a1", area="Front",
-                           triggering_entities=["lock.front"], is_sensitive=True)
-    f_not_sensitive = _finding(anomaly_id="a2", rule_type="appliance_power_duration",
-                               area="Front", triggering_entities=["sensor.washer"],
-                               is_sensitive=False)
+    f_sensitive = _finding(
+        anomaly_id="a1",
+        area="Front",
+        triggering_entities=["lock.front"],
+        is_sensitive=True,
+    )
+    f_not_sensitive = _finding(
+        anomaly_id="a2",
+        rule_type="appliance_power_duration",
+        area="Front",
+        triggering_entities=["sensor.washer"],
+        is_sensitive=False,
+    )
 
     correlator = SentinelCorrelator()
     result = correlator.correlate([f_sensitive, f_not_sensitive])
@@ -289,8 +347,12 @@ def test_compound_is_sensitive_if_any_constituent_is() -> None:
 def test_compound_as_dict_serializes_correctly() -> None:
     """CompoundFinding.as_dict() returns all expected keys."""
     f1 = _finding(anomaly_id="a1", area="Front", triggering_entities=["lock.front"])
-    f2 = _finding(anomaly_id="a2", rule_type="camera_entry_unsecured", area="Front",
-                  triggering_entities=["camera.front"])
+    f2 = _finding(
+        anomaly_id="a2",
+        rule_type="camera_entry_unsecured",
+        area="Front",
+        triggering_entities=["camera.front"],
+    )
 
     correlator = SentinelCorrelator()
     result = correlator.correlate([f1, f2])
@@ -324,8 +386,12 @@ def test_compound_finding_from_findings_raises_on_empty() -> None:
 def test_compound_finding_is_immutable() -> None:
     """Attempting to set an attribute on CompoundFinding raises FrozenInstanceError."""
     f1 = _finding(anomaly_id="a1", area="Front", triggering_entities=["lock.front"])
-    f2 = _finding(anomaly_id="a2", rule_type="camera_entry_unsecured", area="Front",
-                  triggering_entities=["camera.front"])
+    f2 = _finding(
+        anomaly_id="a2",
+        rule_type="camera_entry_unsecured",
+        area="Front",
+        triggering_entities=["camera.front"],
+    )
 
     correlator = SentinelCorrelator()
     result = correlator.correlate([f1, f2])
@@ -340,8 +406,12 @@ def test_compound_finding_is_immutable() -> None:
 def test_compound_constituent_tuple_is_immutable() -> None:
     """constituent_findings is a tuple (immutable sequence)."""
     f1 = _finding(anomaly_id="a1", area="Front", triggering_entities=["lock.front"])
-    f2 = _finding(anomaly_id="a2", rule_type="camera_entry_unsecured", area="Front",
-                  triggering_entities=["camera.front"])
+    f2 = _finding(
+        anomaly_id="a2",
+        rule_type="camera_entry_unsecured",
+        area="Front",
+        triggering_entities=["camera.front"],
+    )
 
     correlator = SentinelCorrelator()
     compound = correlator.correlate([f1, f2])[0]
@@ -355,8 +425,12 @@ def test_compound_constituent_tuple_is_immutable() -> None:
 def test_compound_triggering_entities_is_immutable() -> None:
     """triggering_entities is a tuple (immutable sequence)."""
     f1 = _finding(anomaly_id="a1", area="Front", triggering_entities=["lock.front"])
-    f2 = _finding(anomaly_id="a2", rule_type="camera_entry_unsecured", area="Front",
-                  triggering_entities=["camera.front"])
+    f2 = _finding(
+        anomaly_id="a2",
+        rule_type="camera_entry_unsecured",
+        area="Front",
+        triggering_entities=["camera.front"],
+    )
 
     correlator = SentinelCorrelator()
     compound = correlator.correlate([f1, f2])[0]

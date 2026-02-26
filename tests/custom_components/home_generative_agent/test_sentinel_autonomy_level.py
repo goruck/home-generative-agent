@@ -113,7 +113,9 @@ def test_get_autonomy_level_returns_config_default_when_no_override() -> None:
 def test_get_autonomy_level_returns_recommended_default_when_no_config() -> None:
     """get_autonomy_level returns the recommended default when options is empty."""
     engine = _make_engine(options={})
-    assert engine.get_autonomy_level("test-entry-1") == RECOMMENDED_SENTINEL_AUTONOMY_LEVEL
+    assert (
+        engine.get_autonomy_level("test-entry-1") == RECOMMENDED_SENTINEL_AUTONOMY_LEVEL
+    )
 
 
 # ---------------------------------------------------------------------------

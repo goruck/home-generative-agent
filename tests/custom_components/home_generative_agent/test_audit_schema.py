@@ -115,9 +115,15 @@ def test_audit_record_v2_fields_settable() -> None:
 def _make_v1_record() -> dict[str, object]:
     """Return a raw dict that mimics a v1 audit record (no version key)."""
     return {
-        "snapshot_ref": {"schema_version": 1, "generated_at": "2025-01-01T00:00:00+00:00"},
+        "snapshot_ref": {
+            "schema_version": 1,
+            "generated_at": "2025-01-01T00:00:00+00:00",
+        },
         "finding": {"anomaly_id": "old-1", "type": "rule"},
-        "notification": {"explanation": None, "notified_at": "2025-01-01T00:00:00+00:00"},
+        "notification": {
+            "explanation": None,
+            "notified_at": "2025-01-01T00:00:00+00:00",
+        },
         "user_response": None,
         "action_outcome": None,
         # No version key — classic v1 record
@@ -228,4 +234,6 @@ def test_conf_audit_constants_are_distinct() -> None:
         CONF_AUDIT_RETENTION_DAYS,
         CONF_AUDIT_HIGH_RETENTION_DAYS,
     ]
-    assert len(constants) == len(set(constants)), "Duplicate CONF_AUDIT_* constant values"
+    assert len(constants) == len(set(constants)), (
+        "Duplicate CONF_AUDIT_* constant values"
+    )
