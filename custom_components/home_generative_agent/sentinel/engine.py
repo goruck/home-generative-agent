@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
 from homeassistant.const import EVENT_STATE_CHANGED
+from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util import dt as dt_util
 
@@ -257,6 +258,7 @@ class SentinelEngine:
     # Event-driven triggering
     # ---------------------------------------------------------------------- #
 
+    @callback
     def _on_state_changed(self, event: Event[EventStateChangedData]) -> None:
         """
         Handle a HA state-change event.
@@ -303,7 +305,13 @@ class SentinelEngine:
             if not triggered:
                 await self._trigger_scheduler.run_polling(self._run_once)
             try:
-                await asyncio.wait_for(self._stop_event.wait(), timeout=interval)
+                # Wait for a new trigger or the polling interval — whichever
+                # comes first.  Using wait_for_trigger() means the loop wakes
+                # up immediately when _on_state_changed enqueues a record
+                # instead of sleeping for the full interval.
+                await asyncio.wait_for(
+                    self._trigger_scheduler.wait_for_trigger(), timeout=interval
+                )
             except TimeoutError:
                 continue
 

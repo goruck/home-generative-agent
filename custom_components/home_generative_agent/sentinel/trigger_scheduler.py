@@ -136,6 +136,9 @@ class SentinelTriggerScheduler:
         # the coalescing look-ahead and the priority-drop policy.
         self._queue: list[TriggerRecord] = []
         self._lock = asyncio.Lock()
+        # Signalled whenever a trigger is successfully enqueued so the run
+        # loop can wake up immediately rather than waiting for the next poll.
+        self._trigger_available = asyncio.Event()
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -197,6 +200,7 @@ class SentinelTriggerScheduler:
 
         # --- 3. Enqueue ---
         self._queue.append(record)
+        self._trigger_available.set()
         LOGGER.debug(
             "Trigger enqueued: type=%s queue_depth=%d",
             record.anomaly_type,
@@ -244,6 +248,17 @@ class SentinelTriggerScheduler:
             await run_once()
 
         return True
+
+    async def wait_for_trigger(self) -> None:
+        """
+        Wait until a trigger is enqueued, then clear the signal.
+
+        Intended to be used with ``asyncio.wait_for`` so the run loop wakes
+        up immediately when a new trigger arrives rather than sleeping for the
+        full polling interval.
+        """
+        await self._trigger_available.wait()
+        self._trigger_available.clear()
 
     async def run_polling(
         self,

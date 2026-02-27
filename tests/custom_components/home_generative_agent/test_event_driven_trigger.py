@@ -234,7 +234,9 @@ def test_start_registers_event_listener() -> None:
     hass = MagicMock()
     # async_listen returns an unsubscribe callable
     hass.bus.async_listen.return_value = MagicMock()
-    hass.async_create_task.return_value = MagicMock()
+    # Close the coroutine to prevent "coroutine was never awaited" warnings.
+    _task_mock = MagicMock()
+    hass.async_create_task.side_effect = lambda coro, **_kw: (coro.close(), _task_mock)[1]
 
     engine = _make_engine(hass)
     engine.start()
@@ -253,10 +255,8 @@ async def test_stop_unsubscribes_event_listener() -> None:
     task = MagicMock()
     task.cancel = MagicMock()
 
-    async def _fake_run_loop() -> None:
-        pass
-
-    hass.async_create_task.return_value = task
+    # Close the coroutine to prevent "coroutine was never awaited" warnings.
+    hass.async_create_task.side_effect = lambda coro, **_kw: (coro.close(), task)[1]
 
     engine = _make_engine(hass)
     engine.start()
