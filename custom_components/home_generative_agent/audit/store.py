@@ -98,6 +98,7 @@ class AuditStore:
         execution_id: str | None = None,
         rule_version: str | None = None,
         autonomy_level_at_decision: str | None = None,
+        action_policy_path: str | None = None,
     ) -> None:
         """Append a finding audit record."""
         record = AuditRecord(
@@ -118,6 +119,7 @@ class AuditStore:
             execution_id=execution_id,
             rule_version=rule_version,
             autonomy_level_at_decision=autonomy_level_at_decision,
+            action_policy_path=action_policy_path,
         )
         self._records.append(record.__dict__)
         if len(self._records) > MAX_RECORDS:

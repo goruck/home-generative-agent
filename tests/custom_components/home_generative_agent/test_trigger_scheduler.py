@@ -308,3 +308,42 @@ async def test_lock_prevents_polling_concurrent_with_triggered_run() -> None:
 
     # The triggered run must complete entirely before polling starts.
     assert order == ["triggered_start", "triggered_end", "polling"]
+
+
+# ---------------------------------------------------------------------------
+# wait_for_trigger wakeup tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_wait_for_trigger_wakes_on_enqueue() -> None:
+    """wait_for_trigger returns as soon as a trigger is enqueued."""
+    scheduler = SentinelTriggerScheduler()
+
+    async def _enqueue_after_delay() -> None:
+        await asyncio.sleep(0.05)
+        scheduler.enqueue(TriggerRecord(anomaly_type="open_entry_while_away"))
+
+    task = asyncio.create_task(_enqueue_after_delay())
+    # Should complete well within 1 s once the enqueue fires.
+    await asyncio.wait_for(scheduler.wait_for_trigger(), timeout=1.0)
+    await task
+    # Event is cleared after wait_for_trigger returns.
+    assert not scheduler._trigger_available.is_set()
+
+
+@pytest.mark.asyncio
+async def test_wait_for_trigger_times_out_when_no_enqueue() -> None:
+    """wait_for_trigger raises TimeoutError if no trigger arrives within the deadline."""
+    scheduler = SentinelTriggerScheduler()
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(scheduler.wait_for_trigger(), timeout=0.05)
+
+
+@pytest.mark.asyncio
+async def test_enqueue_sets_trigger_available_event() -> None:
+    """Successful enqueue signals _trigger_available."""
+    scheduler = SentinelTriggerScheduler()
+    assert not scheduler._trigger_available.is_set()
+    scheduler.enqueue(TriggerRecord(anomaly_type="unlocked_lock_at_night"))
+    assert scheduler._trigger_available.is_set()

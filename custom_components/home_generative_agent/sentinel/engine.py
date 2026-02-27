@@ -9,6 +9,8 @@ import logging
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
+from homeassistant.const import EVENT_STATE_CHANGED
+from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util import dt as dt_util
 
@@ -18,9 +20,15 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_COOLDOWN_MINUTES,
     CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES,
     CONF_SENTINEL_INTERVAL_SECONDS,
+    CONF_SENTINEL_PRESENCE_GRACE_MINUTES,
+    CONF_SENTINEL_QUIET_HOURS_END,
+    CONF_SENTINEL_QUIET_HOURS_SEVERITIES,
+    CONF_SENTINEL_QUIET_HOURS_START,
     CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
     CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
     RECOMMENDED_SENTINEL_AUTONOMY_LEVEL,
+    RECOMMENDED_SENTINEL_PRESENCE_GRACE_MINUTES,
+    RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES,
     RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
     RECOMMENDED_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
 )
@@ -30,6 +38,7 @@ from custom_components.home_generative_agent.snapshot.builder import (
 
 from .correlator import SentinelCorrelator
 from .dynamic_rules import evaluate_dynamic_rules
+from .execution import SentinelExecutionService
 from .models import CompoundFinding
 from .rules.appliance_power_duration import AppliancePowerDurationRule
 from .rules.camera_entry_unsecured import CameraEntryUnsecuredRule
@@ -39,13 +48,16 @@ from .rules.unlocked_lock_at_night import UnlockedLockAtNightRule
 from .suppression import (
     SuppressionManager,
     register_finding,
+    register_presence_grace,
     register_prompt,
     should_suppress,
 )
-from .trigger_scheduler import SentinelTriggerScheduler
+from .trigger_scheduler import SentinelTriggerScheduler, TriggerRecord
 
 if TYPE_CHECKING:
-    from homeassistant.core import HomeAssistant
+    from collections.abc import Callable
+
+    from homeassistant.core import Event, EventStateChangedData, HomeAssistant, State
 
     from custom_components.home_generative_agent.audit.store import AuditStore
     from custom_components.home_generative_agent.explain.llm_explain import LLMExplainer
@@ -64,6 +76,44 @@ LOGGER = logging.getLogger(__name__)
 # Module-level in-memory store for runtime autonomy-level overrides.
 # Maps entry_id -> (level: int, expires_at: datetime)
 _AUTONOMY_OVERRIDES: dict[str, tuple[int, datetime]] = {}
+
+# ---------------------------------------------------------------------------
+# Entity → anomaly-type mapping for event-driven triggering
+# ---------------------------------------------------------------------------
+
+# Domains always mapped to a specific anomaly type.
+_DOMAIN_TO_ANOMALY_TYPE: dict[str, str] = {
+    "lock": "unlocked_lock_at_night",
+    "camera": "camera_entry_unsecured",
+    "person": "open_entry_while_away",
+}
+
+# Binary-sensor device classes mapped to anomaly types.
+_DEVICE_CLASS_TO_ANOMALY_TYPE: dict[str, str] = {
+    "door": "open_entry_while_away",
+    "window": "open_entry_while_away",
+    "gate": "open_entry_while_away",
+    "motion": "camera_entry_unsecured",
+    "occupancy": "unknown_person_camera_no_home",
+}
+
+
+def _anomaly_type_for_state(entity_id: str, new_state: State) -> str | None:
+    """
+    Return the sentinel anomaly type for an entity state change.
+
+    Returns None if the entity is not relevant for event-driven triggering.
+    """
+    domain = entity_id.split(".", maxsplit=1)[0] if "." in entity_id else ""
+
+    if domain in _DOMAIN_TO_ANOMALY_TYPE:
+        return _DOMAIN_TO_ANOMALY_TYPE[domain]
+
+    if domain == "binary_sensor":
+        device_class = new_state.attributes.get("device_class", "")
+        return _DEVICE_CLASS_TO_ANOMALY_TYPE.get(device_class)
+
+    return None
 
 
 class SentinelEngine:
@@ -94,6 +144,7 @@ class SentinelEngine:
         self._stop_event = asyncio.Event()
         self._correlator = SentinelCorrelator()
         self._trigger_scheduler = SentinelTriggerScheduler()
+        self._execution_service = SentinelExecutionService(dict(options))
         self._rules = [
             UnlockedLockAtNightRule(),
             OpenEntryWhileAwayRule(),
@@ -101,6 +152,15 @@ class SentinelEngine:
             CameraEntryUnsecuredRule(),
             UnknownPersonCameraNoHomeRule(),
         ]
+        # Event-driven triggering — unsubscribe callbacks.
+        self._event_unsubscribers: list[Callable[[], None]] = []
+        # Presence tracking for grace-window registration.
+        # Stores the set of person entity IDs known to be home from the last run.
+        self._last_people_home: set[str] = set()
+
+    # ---------------------------------------------------------------------- #
+    # Autonomy level management
+    # ---------------------------------------------------------------------- #
 
     def set_autonomy_level(
         self, entry_id: str, level: int, pin: str | None = None
@@ -160,15 +220,25 @@ class SentinelEngine:
             default=RECOMMENDED_SENTINEL_AUTONOMY_LEVEL,
         )
 
+    # ---------------------------------------------------------------------- #
+    # Lifecycle
+    # ---------------------------------------------------------------------- #
+
     def start(self) -> None:
-        """Start the sentinel loop."""
+        """Start the sentinel loop and subscribe to HA state-change events."""
         if self._task is not None:
             return
         self._stop_event.clear()
+
+        # Subscribe to state-change events for relevant entity domains.
+        unsub = self._hass.bus.async_listen(EVENT_STATE_CHANGED, self._on_state_changed)
+        self._event_unsubscribers.append(unsub)
+
         self._task = self._hass.async_create_task(self._run_loop())
+        LOGGER.debug("Sentinel engine started (event-driven triggering active).")
 
     async def stop(self) -> None:
-        """Stop the sentinel loop."""
+        """Stop the sentinel loop and unsubscribe from HA events."""
         if self._task is None:
             return
         self._stop_event.set()
@@ -176,6 +246,44 @@ class SentinelEngine:
         with contextlib.suppress(asyncio.CancelledError):
             await self._task
         self._task = None
+
+        # Unsubscribe event listeners.
+        for unsub in self._event_unsubscribers:
+            unsub()
+        self._event_unsubscribers.clear()
+
+    # ---------------------------------------------------------------------- #
+    # Event-driven triggering
+    # ---------------------------------------------------------------------- #
+
+    @callback
+    def _on_state_changed(self, event: Event[EventStateChangedData]) -> None:
+        """
+        Handle a HA state-change event.
+
+        Maps the changed entity to a sentinel anomaly type and enqueues a
+        trigger in the scheduler.  Irrelevant entities are silently ignored.
+        """
+        entity_id: str = event.data.get("entity_id", "")
+        new_state: State | None = event.data.get("new_state")
+        if new_state is None:
+            # Entity was removed — ignore.
+            return
+
+        anomaly_type = _anomaly_type_for_state(entity_id, new_state)
+        if anomaly_type is None:
+            return
+
+        LOGGER.debug(
+            "State change on %s → anomaly type %s; enqueueing trigger.",
+            entity_id,
+            anomaly_type,
+        )
+        self._trigger_scheduler.enqueue(TriggerRecord(anomaly_type=anomaly_type))
+
+    # ---------------------------------------------------------------------- #
+    # Run loop
+    # ---------------------------------------------------------------------- #
 
     async def _run_loop(self) -> None:
         interval = _coerce_int(
@@ -195,7 +303,13 @@ class SentinelEngine:
             if not triggered:
                 await self._trigger_scheduler.run_polling(self._run_once)
             try:
-                await asyncio.wait_for(self._stop_event.wait(), timeout=interval)
+                # Wait for a new trigger or the polling interval — whichever
+                # comes first.  Using wait_for_trigger() means the loop wakes
+                # up immediately when _on_state_changed enqueues a record
+                # instead of sleeping for the full interval.
+                await asyncio.wait_for(
+                    self._trigger_scheduler.wait_for_trigger(), timeout=interval
+                )
             except TimeoutError:
                 continue
 
@@ -205,6 +319,15 @@ class SentinelEngine:
         except (ValueError, TypeError, KeyError):
             LOGGER.warning("Failed to build snapshot for sentinel.")
             return
+
+        # Force Level 0 when suppression state is in read-only mode (version
+        # mismatch after a downgrade).
+        if self._suppression.is_read_only:
+            LOGGER.warning(
+                "Suppression state is read-only (schema version mismatch); "
+                "sentinel forced to Level 0 (notify-only)."
+            )
+            # Continue but will not dispatch (autonomy level effectively 0).
 
         now = dt_util.utcnow()
         cooldown_type = timedelta(
@@ -218,6 +341,10 @@ class SentinelEngine:
             )
         )
         explain_enabled = bool(self._options.get(CONF_EXPLAIN_ENABLED, False))
+
+        # Update presence grace windows by comparing current people_home to
+        # the last known set.  Register grace for any person whose state changed.
+        self._update_presence_grace(snapshot, now)
 
         all_findings: list[AnomalyFinding] = []
         for rule in self._rules:
@@ -268,6 +395,47 @@ class SentinelEngine:
             )
         LOGGER.debug("Sentinel cycle completed with %s finding(s).", len(all_findings))
 
+    # ---------------------------------------------------------------------- #
+    # Presence grace window maintenance
+    # ---------------------------------------------------------------------- #
+
+    def _update_presence_grace(
+        self,
+        snapshot: FullStateSnapshot,
+        now: datetime,
+    ) -> None:
+        """
+        Compare current ``people_home`` to the last known set.
+
+        For every person whose state has changed (departed or arrived), open a
+        presence-grace window in the suppression state.
+        """
+        current_people_home: set[str] = set(
+            snapshot.get("derived", {}).get("people_home", [])
+        )
+
+        grace_minutes = _coerce_int(
+            self._options.get(CONF_SENTINEL_PRESENCE_GRACE_MINUTES),
+            default=RECOMMENDED_SENTINEL_PRESENCE_GRACE_MINUTES,
+        )
+
+        changed_persons = self._last_people_home.symmetric_difference(
+            current_people_home
+        )
+        for person_id in changed_persons:
+            register_presence_grace(
+                self._suppression.state,
+                person_id,
+                now,
+                grace_minutes=grace_minutes,
+            )
+
+        self._last_people_home = current_people_home
+
+    # ---------------------------------------------------------------------- #
+    # Dispatch
+    # ---------------------------------------------------------------------- #
+
     async def _dispatch_item(  # noqa: PLR0913
         self,
         item: AnomalyFinding | CompoundFinding,
@@ -284,10 +452,19 @@ class SentinelEngine:
             )
             return
 
-        # Plain AnomalyFinding — use existing suppression logic unchanged.
+        # Plain AnomalyFinding
         finding: AnomalyFinding = item
+
+        # Build suppression kwargs from options.
+        suppress_kwargs = _build_suppress_kwargs(self._options, snapshot)
+
         suppression_decision = should_suppress(
-            self._suppression.state, finding, now, cooldown_type, cooldown_entity
+            self._suppression.state,
+            finding,
+            now,
+            cooldown_type,
+            cooldown_entity,
+            **suppress_kwargs,
         )
         if suppression_decision.suppress:
             LOGGER.debug(
@@ -297,13 +474,29 @@ class SentinelEngine:
                 suppression_decision.reason_code,
             )
             return
+
+        # Suppression state is read-only → downgrade to Level 0.
+        effective_autonomy = (
+            0
+            if self._suppression.is_read_only
+            else (
+                self.get_autonomy_level(self._entry_id or "") if self._entry_id else 1
+            )
+        )
+
+        # Execution policy evaluation.
+        exec_result = self._execution_service.evaluate(
+            finding, snapshot, effective_autonomy, now
+        )
+
         register_finding(self._suppression.state, finding, now)
         register_prompt(self._suppression.state, finding, now)
         await self._suppression.async_save()
         LOGGER.info(
-            "Dispatching finding %s (%s).",
+            "Dispatching finding %s (%s) → policy=%s.",
             finding.anomaly_id,
             finding.type,
+            exec_result.action_policy_path,
         )
 
         explanation = None
@@ -317,6 +510,10 @@ class SentinelEngine:
             finding,
             explanation,
             suppression_decision.reason_code,
+            data_quality=exec_result.data_quality,
+            action_policy_path=exec_result.action_policy_path,
+            execution_id=exec_result.execution_id,
+            autonomy_level_at_decision=effective_autonomy,
         )
 
     async def _dispatch_compound(  # noqa: PLR0913
@@ -336,6 +533,15 @@ class SentinelEngine:
         the suppression check, the compound is dispatched and all passing
         constituents are registered for cooldown tracking.
         """
+        suppress_kwargs = _build_suppress_kwargs(self._options, snapshot)
+        effective_autonomy = (
+            0
+            if self._suppression.is_read_only
+            else (
+                self.get_autonomy_level(self._entry_id or "") if self._entry_id else 1
+            )
+        )
+
         passing: list[tuple[AnomalyFinding, str]] = []
         for constituent in compound.constituent_findings:
             decision = should_suppress(
@@ -344,6 +550,7 @@ class SentinelEngine:
                 now,
                 cooldown_type,
                 cooldown_entity,
+                **suppress_kwargs,
             )
             if not decision.suppress:
                 passing.append((constituent, decision.reason_code))
@@ -369,6 +576,11 @@ class SentinelEngine:
         )
 
         best = max(compound.constituent_findings, key=lambda f: f.confidence)
+
+        exec_result = self._execution_service.evaluate(
+            best, snapshot, effective_autonomy, now
+        )
+
         explanation = None
         if explain_enabled and self._explainer is not None:
             explanation = await self._explainer.async_explain(best)
@@ -380,7 +592,16 @@ class SentinelEngine:
             compound,
             explanation,
             "not_suppressed",
+            data_quality=exec_result.data_quality,
+            action_policy_path=exec_result.action_policy_path,
+            execution_id=exec_result.execution_id,
+            autonomy_level_at_decision=effective_autonomy,
         )
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
 def _coerce_int(value: object | None, default: int) -> int:
@@ -399,6 +620,34 @@ def _coerce_int(value: object | None, default: int) -> int:
     return default
 
 
+def _build_suppress_kwargs(
+    options: dict[str, Any],
+    snapshot: FullStateSnapshot,
+) -> dict[str, Any]:
+    """Build keyword args for ``should_suppress()`` from options + snapshot."""
+    timezone: str | None = snapshot.get("derived", {}).get("timezone")
+
+    quiet_start_raw = options.get(CONF_SENTINEL_QUIET_HOURS_START)
+    quiet_end_raw = options.get(CONF_SENTINEL_QUIET_HOURS_END)
+    quiet_start: int | None = (
+        int(quiet_start_raw) if quiet_start_raw is not None else None
+    )
+    quiet_end: int | None = int(quiet_end_raw) if quiet_end_raw is not None else None
+    quiet_severities: list[str] = list(
+        options.get(
+            CONF_SENTINEL_QUIET_HOURS_SEVERITIES,
+            RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES,
+        )
+    )
+
+    return {
+        "snapshot_timezone": timezone,
+        "quiet_hours_start": quiet_start,
+        "quiet_hours_end": quiet_end,
+        "quiet_hours_severities": quiet_severities,
+    }
+
+
 def _supports_suppression_reason_code(callable_obj: object) -> bool:
     """Check whether an audit append callable can accept suppression reason metadata."""
     try:
@@ -415,20 +664,33 @@ def _supports_suppression_reason_code(callable_obj: object) -> bool:
     return False
 
 
-async def _append_finding_audit(
+async def _append_finding_audit(  # noqa: PLR0913
     audit_store: AuditStore,
     snapshot: FullStateSnapshot,
     finding: AnomalyFinding | CompoundFinding,
     explanation: str | None,
     suppression_reason_code: str,
+    *,
+    data_quality: str | None = None,
+    action_policy_path: str | None = None,
+    execution_id: str | None = None,
+    autonomy_level_at_decision: int | None = None,
 ) -> None:
-    """Append a finding to audit with optional suppression reason metadata."""
+    """Append a finding to audit with suppression reason and execution metadata."""
     if _supports_suppression_reason_code(audit_store.async_append_finding):
         await cast("Any", audit_store).async_append_finding(
             snapshot,
             finding,
             explanation,
             suppression_reason_code=suppression_reason_code,
+            data_quality={"quality": data_quality} if data_quality else None,
+            action_policy_path=action_policy_path,
+            execution_id=execution_id,
+            autonomy_level_at_decision=(
+                str(autonomy_level_at_decision)
+                if autonomy_level_at_decision is not None
+                else None
+            ),
         )
         return
     await cast("Any", audit_store).async_append_finding(snapshot, finding, explanation)

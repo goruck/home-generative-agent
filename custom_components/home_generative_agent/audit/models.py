@@ -35,6 +35,7 @@ class AuditRecord:
     execution_id: str | None = field(default=None)
     rule_version: str | None = field(default=None)
     autonomy_level_at_decision: str | None = field(default=None)
+    action_policy_path: str | None = field(default=None)
 
     # Schema version — increment when new fields are added
     version: int = field(default=2)
