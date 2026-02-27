@@ -78,7 +78,9 @@ def test_snooze_24h_suppresses() -> None:
 
     register_snooze(state, finding.type, SNOOZE_24H, now)
 
-    decision = should_suppress(state, finding, now + timedelta(hours=1), _ZERO_COOLDOWN, _ZERO_COOLDOWN)
+    decision = should_suppress(
+        state, finding, now + timedelta(hours=1), _ZERO_COOLDOWN, _ZERO_COOLDOWN
+    )
     assert decision.suppress is True
     assert decision.reason_code == SUPPRESSION_REASON_USER_SNOOZE_24H
 
@@ -91,7 +93,9 @@ def test_snooze_7d_suppresses() -> None:
 
     register_snooze(state, finding.type, SNOOZE_7D, now)
 
-    decision = should_suppress(state, finding, now + timedelta(days=3), _ZERO_COOLDOWN, _ZERO_COOLDOWN)
+    decision = should_suppress(
+        state, finding, now + timedelta(days=3), _ZERO_COOLDOWN, _ZERO_COOLDOWN
+    )
     assert decision.suppress is True
     assert decision.reason_code == SUPPRESSION_REASON_USER_SNOOZE_7D
 
@@ -104,7 +108,9 @@ def test_snooze_permanent_suppresses_indefinitely() -> None:
 
     register_snooze(state, finding.type, SNOOZE_PERMANENT, now)
 
-    decision = should_suppress(state, finding, now + timedelta(days=365), _ZERO_COOLDOWN, _ZERO_COOLDOWN)
+    decision = should_suppress(
+        state, finding, now + timedelta(days=365), _ZERO_COOLDOWN, _ZERO_COOLDOWN
+    )
     assert decision.suppress is True
     assert decision.reason_code == SUPPRESSION_REASON_USER_SNOOZE_PERMANENT
 
@@ -132,7 +138,9 @@ def test_snooze_different_type_does_not_suppress_other_type() -> None:
     register_snooze(state, "open_entry_while_away", SNOOZE_PERMANENT, now)
 
     other_finding = _finding(finding_type="unlocked_lock_at_night")
-    decision = should_suppress(state, other_finding, now, _ZERO_COOLDOWN, _ZERO_COOLDOWN)
+    decision = should_suppress(
+        state, other_finding, now, _ZERO_COOLDOWN, _ZERO_COOLDOWN
+    )
     assert decision.suppress is False
 
 
@@ -149,7 +157,9 @@ def test_presence_grace_suppresses_presence_sensitive_type() -> None:
     register_presence_grace(state, "person.alice", now, grace_minutes=10)
 
     finding = _finding(finding_type="open_entry_while_away")
-    decision = should_suppress(state, finding, now + timedelta(minutes=5), _ZERO_COOLDOWN, _ZERO_COOLDOWN)
+    decision = should_suppress(
+        state, finding, now + timedelta(minutes=5), _ZERO_COOLDOWN, _ZERO_COOLDOWN
+    )
     assert decision.suppress is True
     assert decision.reason_code == SUPPRESSION_REASON_PRESENCE_GRACE
 
@@ -163,7 +173,9 @@ def test_presence_grace_does_not_suppress_non_sensitive_type() -> None:
 
     # appliance_power_duration is not presence-sensitive
     finding = _finding(finding_type="appliance_power_duration")
-    decision = should_suppress(state, finding, now + timedelta(minutes=5), _ZERO_COOLDOWN, _ZERO_COOLDOWN)
+    decision = should_suppress(
+        state, finding, now + timedelta(minutes=5), _ZERO_COOLDOWN, _ZERO_COOLDOWN
+    )
     assert decision.suppress is False
 
 
@@ -188,11 +200,15 @@ def test_multiple_persons_grace_any_active_suppresses() -> None:
     now = dt_util.utcnow()
 
     register_presence_grace(state, "person.alice", now, grace_minutes=10)
-    register_presence_grace(state, "person.bob", now - timedelta(minutes=15), grace_minutes=10)
+    register_presence_grace(
+        state, "person.bob", now - timedelta(minutes=15), grace_minutes=10
+    )
 
     finding = _finding(finding_type="open_entry_while_away")
     # alice's window is active, bob's is expired
-    decision = should_suppress(state, finding, now + timedelta(minutes=5), _ZERO_COOLDOWN, _ZERO_COOLDOWN)
+    decision = should_suppress(
+        state, finding, now + timedelta(minutes=5), _ZERO_COOLDOWN, _ZERO_COOLDOWN
+    )
     assert decision.suppress is True
     assert decision.reason_code == SUPPRESSION_REASON_PRESENCE_GRACE
     # Bob's expired entry cleaned up
@@ -217,7 +233,11 @@ def test_quiet_hours_suppresses_matching_severity() -> None:
 
     finding = _finding(severity="low")
     decision = should_suppress(
-        state, finding, now, _ZERO_COOLDOWN, _ZERO_COOLDOWN,
+        state,
+        finding,
+        now,
+        _ZERO_COOLDOWN,
+        _ZERO_COOLDOWN,
         snapshot_timezone="UTC",
         quiet_hours_start=22,
         quiet_hours_end=6,
@@ -235,7 +255,11 @@ def test_quiet_hours_does_not_suppress_high_severity() -> None:
 
     finding = _finding(severity="high")
     decision = should_suppress(
-        state, finding, now, _ZERO_COOLDOWN, _ZERO_COOLDOWN,
+        state,
+        finding,
+        now,
+        _ZERO_COOLDOWN,
+        _ZERO_COOLDOWN,
         snapshot_timezone="UTC",
         quiet_hours_start=22,
         quiet_hours_end=6,
@@ -253,7 +277,11 @@ def test_outside_quiet_hours_does_not_suppress() -> None:
 
     finding = _finding(severity="low")
     decision = should_suppress(
-        state, finding, now, _ZERO_COOLDOWN, _ZERO_COOLDOWN,
+        state,
+        finding,
+        now,
+        _ZERO_COOLDOWN,
+        _ZERO_COOLDOWN,
         snapshot_timezone="UTC",
         quiet_hours_start=22,
         quiet_hours_end=6,
@@ -270,7 +298,11 @@ def test_quiet_hours_disabled_when_start_is_none() -> None:
 
     finding = _finding(severity="low")
     decision = should_suppress(
-        state, finding, now, _ZERO_COOLDOWN, _ZERO_COOLDOWN,
+        state,
+        finding,
+        now,
+        _ZERO_COOLDOWN,
+        _ZERO_COOLDOWN,
         quiet_hours_start=None,
         quiet_hours_end=6,
         quiet_hours_severities=["low"],
@@ -302,7 +334,9 @@ def test_type_cooldown_reason_code_unchanged() -> None:
     finding = _finding()
     register_finding(state, finding, now)
 
-    decision = should_suppress(state, finding, now + timedelta(minutes=5), _COOLDOWN_10M, _ZERO_COOLDOWN)
+    decision = should_suppress(
+        state, finding, now + timedelta(minutes=5), _COOLDOWN_10M, _ZERO_COOLDOWN
+    )
     assert decision.suppress is True
     assert decision.reason_code == SUPPRESSION_REASON_TYPE_COOLDOWN
 
@@ -368,7 +402,9 @@ def test_migrate_v1_adds_version_and_new_fields() -> None:
 def test_migrate_v1_preserves_existing_data() -> None:
     data = _v1_data()
     _migrate_suppression_state(data)
-    assert data["last_by_type"] == {"open_entry_while_away": "2025-01-01T00:00:00+00:00"}
+    assert data["last_by_type"] == {
+        "open_entry_while_away": "2025-01-01T00:00:00+00:00"
+    }
 
 
 def test_migrate_is_idempotent() -> None:

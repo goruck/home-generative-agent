@@ -231,9 +231,7 @@ class SentinelEngine:
         self._stop_event.clear()
 
         # Subscribe to state-change events for relevant entity domains.
-        unsub = self._hass.bus.async_listen(
-            EVENT_STATE_CHANGED, self._on_state_changed
-        )
+        unsub = self._hass.bus.async_listen(EVENT_STATE_CHANGED, self._on_state_changed)
         self._event_unsubscribers.append(unsub)
 
         self._task = self._hass.async_create_task(self._run_loop())
@@ -479,8 +477,11 @@ class SentinelEngine:
 
         # Suppression state is read-only → downgrade to Level 0.
         effective_autonomy = (
-            0 if self._suppression.is_read_only else
-            (self.get_autonomy_level(self._entry_id or "") if self._entry_id else 1)
+            0
+            if self._suppression.is_read_only
+            else (
+                self.get_autonomy_level(self._entry_id or "") if self._entry_id else 1
+            )
         )
 
         # Execution policy evaluation.
@@ -534,8 +535,11 @@ class SentinelEngine:
         """
         suppress_kwargs = _build_suppress_kwargs(self._options, snapshot)
         effective_autonomy = (
-            0 if self._suppression.is_read_only else
-            (self.get_autonomy_level(self._entry_id or "") if self._entry_id else 1)
+            0
+            if self._suppression.is_read_only
+            else (
+                self.get_autonomy_level(self._entry_id or "") if self._entry_id else 1
+            )
         )
 
         passing: list[tuple[AnomalyFinding, str]] = []
@@ -628,9 +632,7 @@ def _build_suppress_kwargs(
     quiet_start: int | None = (
         int(quiet_start_raw) if quiet_start_raw is not None else None
     )
-    quiet_end: int | None = (
-        int(quiet_end_raw) if quiet_end_raw is not None else None
-    )
+    quiet_end: int | None = int(quiet_end_raw) if quiet_end_raw is not None else None
     quiet_severities: list[str] = list(
         options.get(
             CONF_SENTINEL_QUIET_HOURS_SEVERITIES,

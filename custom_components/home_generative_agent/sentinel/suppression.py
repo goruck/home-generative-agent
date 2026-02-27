@@ -137,9 +137,7 @@ def _migrate_suppression_state(data: dict[str, Any]) -> dict[str, Any]:
         data.setdefault("snoozed_until", {})
         data.setdefault("presence_grace_until", {})
         data["version"] = 2
-        LOGGER.info(
-            "Suppression state migrated from v%d to v2.", stored_version
-        )
+        LOGGER.info("Suppression state migrated from v%d to v2.", stored_version)
 
     return data
 
@@ -537,9 +535,7 @@ class SuppressionManager:
     async def async_save(self) -> None:
         """Persist suppression state to storage."""
         if self._read_only:
-            LOGGER.debug(
-                "Suppression state is read-only; skipping save."
-            )
+            LOGGER.debug("Suppression state is read-only; skipping save.")
             return
         try:
             await self._store.async_save(self._state.as_dict())

@@ -458,6 +458,4 @@ class SentinelExecutionService:
             ),
             "effective_rule_threshold": effective_rule_threshold,
         }
-        return hashlib.sha256(
-            json.dumps(policy, sort_keys=True).encode()
-        ).hexdigest()
+        return hashlib.sha256(json.dumps(policy, sort_keys=True).encode()).hexdigest()

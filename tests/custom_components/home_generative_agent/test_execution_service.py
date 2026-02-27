@@ -267,9 +267,7 @@ def test_empty_allowlist_blocks_when_actions_present() -> None:
     svc = SentinelExecutionService(opts)
     recent = "2025-01-01T00:59:50+00:00"
     snapshot = _make_snapshot(last_changed=recent)
-    finding = _make_finding(
-        suggested_actions=["light.turn_off"]
-    )
+    finding = _make_finding(suggested_actions=["light.turn_off"])
 
     result = svc.evaluate(finding, snapshot, 2, _NOW)
 
@@ -309,7 +307,10 @@ def test_rate_limit_blocks_after_max_actions() -> None:
     snapshot = _make_snapshot(last_changed=recent)
 
     # Pre-fill the rate-limit counter with two recent actions.
-    svc._recent_action_times = [_NOW - timedelta(minutes=10), _NOW - timedelta(minutes=5)]
+    svc._recent_action_times = [
+        _NOW - timedelta(minutes=10),
+        _NOW - timedelta(minutes=5),
+    ]
 
     finding = _make_finding(anomaly_id="fresh_a1", suggested_actions=[])
     result = svc.evaluate(finding, snapshot, 2, _NOW)

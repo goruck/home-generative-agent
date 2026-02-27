@@ -119,7 +119,9 @@ def test_lock_domain_maps_to_unlocked_lock_at_night() -> None:
 
 def test_camera_domain_maps_to_camera_entry_unsecured() -> None:
     state = _make_state("camera.front_porch", "camera")
-    assert _anomaly_type_for_state("camera.front_porch", state) == "camera_entry_unsecured"
+    assert (
+        _anomaly_type_for_state("camera.front_porch", state) == "camera_entry_unsecured"
+    )
 
 
 def test_person_domain_maps_to_open_entry_while_away() -> None:
@@ -128,27 +130,46 @@ def test_person_domain_maps_to_open_entry_while_away() -> None:
 
 
 def test_binary_sensor_door_maps_correctly() -> None:
-    state = _make_state("binary_sensor.front_door", "binary_sensor", device_class="door")
-    assert _anomaly_type_for_state("binary_sensor.front_door", state) == "open_entry_while_away"
+    state = _make_state(
+        "binary_sensor.front_door", "binary_sensor", device_class="door"
+    )
+    assert (
+        _anomaly_type_for_state("binary_sensor.front_door", state)
+        == "open_entry_while_away"
+    )
 
 
 def test_binary_sensor_window_maps_correctly() -> None:
-    state = _make_state("binary_sensor.kitchen_window", "binary_sensor", device_class="window")
-    assert _anomaly_type_for_state("binary_sensor.kitchen_window", state) == "open_entry_while_away"
+    state = _make_state(
+        "binary_sensor.kitchen_window", "binary_sensor", device_class="window"
+    )
+    assert (
+        _anomaly_type_for_state("binary_sensor.kitchen_window", state)
+        == "open_entry_while_away"
+    )
 
 
 def test_binary_sensor_gate_maps_correctly() -> None:
     state = _make_state("binary_sensor.gate", "binary_sensor", device_class="gate")
-    assert _anomaly_type_for_state("binary_sensor.gate", state) == "open_entry_while_away"
+    assert (
+        _anomaly_type_for_state("binary_sensor.gate", state) == "open_entry_while_away"
+    )
 
 
 def test_binary_sensor_motion_maps_correctly() -> None:
-    state = _make_state("binary_sensor.hallway_motion", "binary_sensor", device_class="motion")
-    assert _anomaly_type_for_state("binary_sensor.hallway_motion", state) == "camera_entry_unsecured"
+    state = _make_state(
+        "binary_sensor.hallway_motion", "binary_sensor", device_class="motion"
+    )
+    assert (
+        _anomaly_type_for_state("binary_sensor.hallway_motion", state)
+        == "camera_entry_unsecured"
+    )
 
 
 def test_binary_sensor_occupancy_maps_correctly() -> None:
-    state = _make_state("binary_sensor.living_room_occ", "binary_sensor", device_class="occupancy")
+    state = _make_state(
+        "binary_sensor.living_room_occ", "binary_sensor", device_class="occupancy"
+    )
     result = _anomaly_type_for_state("binary_sensor.living_room_occ", state)
     assert result == "unknown_person_camera_no_home"
 
@@ -236,7 +257,9 @@ def test_start_registers_event_listener() -> None:
     hass.bus.async_listen.return_value = MagicMock()
     # Close the coroutine to prevent "coroutine was never awaited" warnings.
     _task_mock = MagicMock()
-    hass.async_create_task.side_effect = lambda coro, **_kw: (coro.close(), _task_mock)[1]
+    hass.async_create_task.side_effect = lambda coro, **_kw: (coro.close(), _task_mock)[
+        1
+    ]
 
     engine = _make_engine(hass)
     engine.start()
