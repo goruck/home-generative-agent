@@ -20,6 +20,7 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_COOLDOWN_MINUTES,
     CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES,
     CONF_SENTINEL_INTERVAL_SECONDS,
+    CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
     CONF_SENTINEL_PRESENCE_GRACE_MINUTES,
     CONF_SENTINEL_QUIET_HOURS_END,
     CONF_SENTINEL_QUIET_HOURS_SEVERITIES,
@@ -27,6 +28,7 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
     CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
     RECOMMENDED_SENTINEL_AUTONOMY_LEVEL,
+    RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
     RECOMMENDED_SENTINEL_PRESENCE_GRACE_MINUTES,
     RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES,
     RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
@@ -47,6 +49,7 @@ from .rules.unknown_person_camera_no_home import UnknownPersonCameraNoHomeRule
 from .rules.unlocked_lock_at_night import UnlockedLockAtNightRule
 from .suppression import (
     SuppressionManager,
+    purge_expired_prompts,
     register_finding,
     register_presence_grace,
     register_prompt,
@@ -341,6 +344,19 @@ class SentinelEngine:
             )
         )
         explain_enabled = bool(self._options.get(CONF_EXPLAIN_ENABLED, False))
+        pending_prompt_ttl = timedelta(
+            minutes=_coerce_int(
+                self._options.get(CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES),
+                default=RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
+            )
+        )
+
+        if purge_expired_prompts(
+            self._suppression.state,
+            now,
+            pending_prompt_ttl=pending_prompt_ttl,
+        ):
+            await self._suppression.async_save()
 
         # Update presence grace windows by comparing current people_home to
         # the last known set.  Register grace for any person whose state changed.
@@ -641,6 +657,12 @@ def _build_suppress_kwargs(
     )
 
     return {
+        "pending_prompt_ttl": timedelta(
+            minutes=_coerce_int(
+                options.get(CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES),
+                default=RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
+            )
+        ),
         "snapshot_timezone": timezone,
         "quiet_hours_start": quiet_start,
         "quiet_hours_end": quiet_end,

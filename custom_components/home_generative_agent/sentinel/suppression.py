@@ -39,6 +39,7 @@ SUPPRESSION_REASON_PRESENCE_GRACE = "presence_grace"
 SUPPRESSION_REASON_USER_SNOOZE_24H = "user_snooze_24h"
 SUPPRESSION_REASON_USER_SNOOZE_7D = "user_snooze_7d"
 SUPPRESSION_REASON_USER_SNOOZE_PERMANENT = "user_snooze_permanent"
+PENDING_PROMPT_DEFAULT_TTL = timedelta(hours=4)
 
 # Snooze duration tokens
 SNOOZE_24H = "24h"
@@ -153,6 +154,87 @@ def _parse_dt(value: str | None) -> datetime | None:
     return dt_util.parse_datetime(value)
 
 
+def _is_pending_prompt_expired(
+    last_seen: datetime | None,
+    now: datetime,
+    *,
+    pending_prompt_ttl: timedelta,
+) -> bool:
+    """Return True when a pending prompt timestamp is missing/invalid/expired."""
+    if last_seen is None or last_seen.tzinfo is None:
+        return True
+    try:
+        return (now - last_seen) >= pending_prompt_ttl
+    except TypeError:
+        return True
+
+
+def _check_pending_prompt(
+    state: SuppressionState,
+    finding: AnomalyFinding,
+    now: datetime,
+    *,
+    pending_prompt_ttl: timedelta,
+) -> SuppressionDecision | None:
+    """
+    Return a suppression decision for a pending prompt, if still active.
+
+    Entries with missing/invalid timestamps are treated as expired and removed.
+    """
+    pending_prompt_last_seen = state.pending_prompts.get(finding.anomaly_id)
+    if pending_prompt_last_seen is None:
+        return None
+
+    parsed_last_seen = _parse_dt(pending_prompt_last_seen)
+    if _is_pending_prompt_expired(
+        parsed_last_seen,
+        now,
+        pending_prompt_ttl=pending_prompt_ttl,
+    ):
+        del state.pending_prompts[finding.anomaly_id]
+        return None
+
+    LOGGER.debug(
+        "Suppressing %s (%s): pending prompt exists.",
+        finding.anomaly_id,
+        finding.type,
+    )
+    return SuppressionDecision(
+        suppress=True,
+        reason_code=SUPPRESSION_REASON_PENDING_PROMPT,
+        context={
+            "anomaly_id": finding.anomaly_id,
+            "last_seen": pending_prompt_last_seen,
+        },
+    )
+
+
+def purge_expired_prompts(
+    state: SuppressionState,
+    now: datetime,
+    *,
+    pending_prompt_ttl: timedelta,
+) -> bool:
+    """
+    Remove expired pending prompts in-place.
+
+    Returns True if any entries were removed.
+    """
+    expired: list[str] = []
+    for anomaly_id, last_seen_iso in state.pending_prompts.items():
+        last_seen = _parse_dt(last_seen_iso)
+        if _is_pending_prompt_expired(
+            last_seen,
+            now,
+            pending_prompt_ttl=pending_prompt_ttl,
+        ):
+            expired.append(anomaly_id)
+
+    for anomaly_id in expired:
+        del state.pending_prompts[anomaly_id]
+    return bool(expired)
+
+
 def _check_snooze(
     state: SuppressionState, finding: AnomalyFinding, now: datetime
 ) -> str | None:
@@ -258,6 +340,7 @@ def should_suppress(  # noqa: PLR0911, PLR0913
     cooldown_type: timedelta,
     cooldown_entity: timedelta,
     *,
+    pending_prompt_ttl: timedelta = PENDING_PROMPT_DEFAULT_TTL,
     snapshot_timezone: str | None = None,
     quiet_hours_start: int | None = None,
     quiet_hours_end: int | None = None,
@@ -276,21 +359,14 @@ def should_suppress(  # noqa: PLR0911, PLR0913
     6. Entity cooldown
     """
     # 1. Pending prompt
-    pending_prompt_last_seen = state.pending_prompts.get(finding.anomaly_id)
-    if finding.anomaly_id in state.pending_prompts:
-        LOGGER.debug(
-            "Suppressing %s (%s): pending prompt exists.",
-            finding.anomaly_id,
-            finding.type,
-        )
-        return SuppressionDecision(
-            suppress=True,
-            reason_code=SUPPRESSION_REASON_PENDING_PROMPT,
-            context={
-                "anomaly_id": finding.anomaly_id,
-                "last_seen": pending_prompt_last_seen,
-            },
-        )
+    pending_prompt_decision = _check_pending_prompt(
+        state,
+        finding,
+        now,
+        pending_prompt_ttl=pending_prompt_ttl,
+    )
+    if pending_prompt_decision is not None:
+        return pending_prompt_decision
 
     # 2. Snooze
     snooze_code = _check_snooze(state, finding, now)

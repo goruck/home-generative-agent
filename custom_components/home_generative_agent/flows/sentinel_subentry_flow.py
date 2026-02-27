@@ -35,6 +35,7 @@ from ..const import (  # noqa: TID252
     CONF_SENTINEL_ENABLED,
     CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES,
     CONF_SENTINEL_INTERVAL_SECONDS,
+    CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
     RECOMMENDED_EXPLAIN_ENABLED,
     RECOMMENDED_SENTINEL_COOLDOWN_MINUTES,
     RECOMMENDED_SENTINEL_DISCOVERY_ENABLED,
@@ -43,6 +44,7 @@ from ..const import (  # noqa: TID252
     RECOMMENDED_SENTINEL_ENABLED,
     RECOMMENDED_SENTINEL_ENTITY_COOLDOWN_MINUTES,
     RECOMMENDED_SENTINEL_INTERVAL_SECONDS,
+    RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
     SUBENTRY_TYPE_SENTINEL,
 )
 from ..core.utils import list_mobile_notify_services  # noqa: TID252
@@ -75,6 +77,9 @@ def _default_payload() -> dict[str, Any]:
         CONF_SENTINEL_COOLDOWN_MINUTES: RECOMMENDED_SENTINEL_COOLDOWN_MINUTES,
         CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES: (
             RECOMMENDED_SENTINEL_ENTITY_COOLDOWN_MINUTES
+        ),
+        CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES: (
+            RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES
         ),
         CONF_SENTINEL_DISCOVERY_ENABLED: RECOMMENDED_SENTINEL_DISCOVERY_ENABLED,
         CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS: (
@@ -130,6 +135,15 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                     )
                 ),
             ): NumberSelector(NumberSelectorConfig(min=5, max=240, step=5)),
+            vol.Required(
+                CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
+                default=int(
+                    payload.get(
+                        CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
+                        RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
+                    )
+                ),
+            ): NumberSelector(NumberSelectorConfig(min=5, max=1440, step=5)),
             vol.Required(
                 CONF_SENTINEL_DISCOVERY_ENABLED,
                 default=bool(
