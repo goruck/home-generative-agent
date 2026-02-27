@@ -150,6 +150,7 @@
             "sentinel_interval_seconds": "Sentinel interval (seconds)",
             "sentinel_cooldown_minutes": "Sentinel cooldown per type (minutes)",
             "sentinel_entity_cooldown_minutes": "Sentinel cooldown per entity (minutes)",
+            "sentinel_pending_prompt_ttl_minutes": "Pending prompt TTL (minutes)",
             "sentinel_discovery_enabled": "Enable sentinel discovery (LLM suggestions)",
             "sentinel_discovery_interval_seconds": "Discovery interval (seconds)",
             "sentinel_discovery_max_records": "Max discovery records to retain",

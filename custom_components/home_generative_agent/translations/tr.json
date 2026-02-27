@@ -150,6 +150,7 @@
             "sentinel_interval_seconds": "Sentinel aralığı (saniye)",
             "sentinel_cooldown_minutes": "Sentinel tür başına bekleme (dakika)",
             "sentinel_entity_cooldown_minutes": "Sentinel varlık başına bekleme (dakika)",
+            "sentinel_pending_prompt_ttl_minutes": "Bekleyen istem TTL (dakika)",
             "sentinel_discovery_enabled": "Sentinel keşfini etkinleştir (LLM önerileri)",
             "sentinel_discovery_interval_seconds": "Keşif aralığı (saniye)",
             "sentinel_discovery_max_records": "Saklanacak maksimum keşif kaydı",
