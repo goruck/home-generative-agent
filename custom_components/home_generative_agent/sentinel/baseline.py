@@ -170,9 +170,7 @@ class SentinelBaselineUpdater:
             default=RECOMMENDED_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES,
         )
         interval_seconds = interval_minutes * 60
-        LOGGER.info(
-            "Baseline update loop started (interval=%d min).", interval_minutes
-        )
+        LOGGER.info("Baseline update loop started (interval=%d min).", interval_minutes)
         while not self._stop_event.is_set():
             try:
                 from custom_components.home_generative_agent.snapshot.builder import (  # noqa: PLC0415

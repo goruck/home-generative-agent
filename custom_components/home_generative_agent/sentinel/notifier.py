@@ -165,9 +165,7 @@ class SentinelNotifier:
                 "data": {"actions": actions, "tag": tag},
             }
             LOGGER.info("Sending sentinel notification via %s.", target_service)
-            await self._hass.services.async_call(
-                domain, service, data, blocking=False
-            )
+            await self._hass.services.async_call(domain, service, data, blocking=False)
         else:
             LOGGER.info("Sending sentinel notification via persistent_notification.")
             await self._hass.services.async_call(
@@ -200,10 +198,8 @@ class SentinelNotifier:
         for verb in _SNOOZE_VERBS:
             prefix = f"{verb}_"
             if stripped.startswith(prefix):
-                anomaly_id = stripped[len(prefix):]
-                self._hass.async_create_task(
-                    self._handle_snooze(verb, anomaly_id)
-                )
+                anomaly_id = stripped[len(prefix) :]
+                self._hass.async_create_task(self._handle_snooze(verb, anomaly_id))
                 return
 
         # Non-snooze action — delegate to ActionHandler.
@@ -220,23 +216,15 @@ class SentinelNotifier:
 
         if verb == _ACT_SNOOZE_24H:
             if finding:
-                register_snooze(
-                    self._suppression.state, finding.type, SNOOZE_24H, now
-                )
+                register_snooze(self._suppression.state, finding.type, SNOOZE_24H, now)
                 await self._suppression.async_save()
-                LOGGER.info(
-                    "Snooze 24 h registered for finding type %s.", finding.type
-                )
+                LOGGER.info("Snooze 24 h registered for finding type %s.", finding.type)
 
         elif verb == _ACT_SNOOZE_7D:
             if finding:
-                register_snooze(
-                    self._suppression.state, finding.type, SNOOZE_7D, now
-                )
+                register_snooze(self._suppression.state, finding.type, SNOOZE_7D, now)
                 await self._suppression.async_save()
-                LOGGER.info(
-                    "Snooze 7 d registered for finding type %s.", finding.type
-                )
+                LOGGER.info("Snooze 7 d registered for finding type %s.", finding.type)
 
         elif verb == _ACT_SNOOZE_ALWAYS:
             # Guard: send confirmation notification; do NOT write snooze yet.
@@ -279,12 +267,8 @@ class SentinelNotifier:
             return
 
         friendly = _friendly_type(finding.type)
-        confirm_action = (
-            f"{ACTION_PREFIX}{_ACT_SNOOZE_CONFIRM}_{finding.anomaly_id}"
-        )
-        cancel_action = (
-            f"{ACTION_PREFIX}{_ACT_SNOOZE_CANCEL}_{finding.anomaly_id}"
-        )
+        confirm_action = f"{ACTION_PREFIX}{_ACT_SNOOZE_CONFIRM}_{finding.anomaly_id}"
+        cancel_action = f"{ACTION_PREFIX}{_ACT_SNOOZE_CANCEL}_{finding.anomaly_id}"
         domain, _, service = notify_service.partition(".")
         if not service:
             service = notify_service
@@ -304,9 +288,7 @@ class SentinelNotifier:
                 "tag": f"hga_sentinel_snooze_{finding.anomaly_id[:32]}",
             },
         }
-        await self._hass.services.async_call(
-            domain, service, data, blocking=False
-        )
+        await self._hass.services.async_call(domain, service, data, blocking=False)
         LOGGER.debug(
             "Permanent snooze confirmation sent for finding %s.", finding.anomaly_id
         )

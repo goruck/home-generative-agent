@@ -269,9 +269,7 @@ def _parse_response(result: Any, elapsed_ms: int) -> TriageDecision:  # noqa: AR
     decision_raw = str(parsed.get("decision", TRIAGE_NOTIFY)).lower().strip()
     decision = TRIAGE_SUPPRESS if decision_raw == TRIAGE_SUPPRESS else TRIAGE_NOTIFY
 
-    reason_code = str(
-        parsed.get("reason_code", TRIAGE_REASON_LLM_NOTIFY)
-    ).strip() or (
+    reason_code = str(parsed.get("reason_code", TRIAGE_REASON_LLM_NOTIFY)).strip() or (
         TRIAGE_REASON_LLM_SUPPRESS
         if decision == TRIAGE_SUPPRESS
         else TRIAGE_REASON_LLM_NOTIFY

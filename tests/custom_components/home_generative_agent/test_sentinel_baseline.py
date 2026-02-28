@@ -56,21 +56,24 @@ def _snapshot(
     anyone_home: bool = True,  # noqa: FBT001, FBT002
     now: str = "2025-01-01T10:00:00+00:00",
 ) -> FullStateSnapshot:
-    return cast("FullStateSnapshot", {
-        "schema_version": 1,
-        "generated_at": "2025-01-01T00:00:00+00:00",
-        "entities": entities or [],
-        "camera_activity": [],
-        "derived": {
-            "now": now,
-            "timezone": "UTC",
-            "is_night": is_night,
-            "anyone_home": anyone_home,
-            "people_home": [],
-            "people_away": [],
-            "last_motion_by_area": {},
+    return cast(
+        "FullStateSnapshot",
+        {
+            "schema_version": 1,
+            "generated_at": "2025-01-01T00:00:00+00:00",
+            "entities": entities or [],
+            "camera_activity": [],
+            "derived": {
+                "now": now,
+                "timezone": "UTC",
+                "is_night": is_night,
+                "anyone_home": anyone_home,
+                "people_home": [],
+                "people_away": [],
+                "last_motion_by_area": {},
+            },
         },
-    })
+    )
 
 
 def _rule(  # noqa: PLR0913
@@ -472,10 +475,12 @@ async def test_update_baselines_upserts_two_rows_per_numeric_entity() -> None:
     mock_hass = MagicMock()
     updater = SentinelBaselineUpdater(mock_hass, mock_pool, {})
 
-    snapshot = _snapshot([
-        _entity("sensor.temperature", "22.5"),
-        _entity("binary_sensor.door", "on"),  # non-numeric, must be skipped
-    ])
+    snapshot = _snapshot(
+        [
+            _entity("sensor.temperature", "22.5"),
+            _entity("binary_sensor.door", "on"),  # non-numeric, must be skipped
+        ]
+    )
 
     await updater._update_baselines(snapshot)
 
@@ -517,11 +522,13 @@ async def test_update_baselines_skips_non_numeric_entities() -> None:
     mock_hass = MagicMock()
     updater = SentinelBaselineUpdater(mock_hass, mock_pool, {})
 
-    snapshot = _snapshot([
-        _entity("binary_sensor.door", "on"),
-        _entity("binary_sensor.motion", "off"),
-        _entity("select.mode", "auto"),
-    ])
+    snapshot = _snapshot(
+        [
+            _entity("binary_sensor.door", "on"),
+            _entity("binary_sensor.motion", "off"),
+            _entity("select.mode", "auto"),
+        ]
+    )
 
     await updater._update_baselines(snapshot)
 

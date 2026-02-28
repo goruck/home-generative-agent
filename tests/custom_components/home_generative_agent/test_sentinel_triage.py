@@ -77,21 +77,24 @@ def _finding(
 
 
 def _snapshot(is_night: bool = False, anyone_home: bool = False) -> FullStateSnapshot:  # noqa: FBT001, FBT002
-    return cast("FullStateSnapshot", {
-        "schema_version": 1,
-        "generated_at": "2025-01-01T00:00:00+00:00",
-        "entities": [],
-        "camera_activity": [],
-        "derived": {
-            "now": "2025-01-01T10:00:00+00:00",
-            "timezone": "UTC",
-            "is_night": is_night,
-            "anyone_home": anyone_home,
-            "people_home": [],
-            "people_away": [],
-            "last_motion_by_area": {},
+    return cast(
+        "FullStateSnapshot",
+        {
+            "schema_version": 1,
+            "generated_at": "2025-01-01T00:00:00+00:00",
+            "entities": [],
+            "camera_activity": [],
+            "derived": {
+                "now": "2025-01-01T10:00:00+00:00",
+                "timezone": "UTC",
+                "is_night": is_night,
+                "anyone_home": anyone_home,
+                "people_home": [],
+                "people_away": [],
+                "last_motion_by_area": {},
+            },
         },
-    })
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -186,13 +189,16 @@ def test_prompt_entity_count_and_actions_count_match_finding() -> None:
 def test_prompt_without_evidence_has_no_evidence_block() -> None:
     """When no allowed evidence fields are present the evidence block is omitted."""
     finding = _finding(evidence={})
-    minimal_snapshot = cast("FullStateSnapshot", {
-        "schema_version": 1,
-        "generated_at": "2025-01-01T00:00:00+00:00",
-        "entities": [],
-        "camera_activity": [],
-        "derived": {},
-    })
+    minimal_snapshot = cast(
+        "FullStateSnapshot",
+        {
+            "schema_version": 1,
+            "generated_at": "2025-01-01T00:00:00+00:00",
+            "entities": [],
+            "camera_activity": [],
+            "derived": {},
+        },
+    )
 
     prompt = _build_prompt(finding, minimal_snapshot)
 
