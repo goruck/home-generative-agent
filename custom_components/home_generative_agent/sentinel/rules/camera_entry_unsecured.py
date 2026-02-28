@@ -75,6 +75,17 @@ class CameraEntryUnsecuredRule:
                     for sid in sensor_ids
                     if sid in last_changed_by_id
                 ]
+                if not candidates:
+                    # No linked sensors in camera_activity (camera doesn't
+                    # advertise vmd_entity_id etc.); scan all motion binary
+                    # sensors in the same area as a last resort.
+                    candidates = [
+                        e["last_changed"]
+                        for e in snapshot["entities"]
+                        if e.get("area") == area
+                        and e["domain"] == "binary_sensor"
+                        and e["attributes"].get("device_class") == "motion"
+                    ]
                 last_activity = max(candidates) if candidates else None
             if not last_activity:
                 continue
