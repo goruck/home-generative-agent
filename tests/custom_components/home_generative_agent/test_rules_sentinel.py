@@ -140,6 +140,50 @@ def test_camera_entry_unsecured_triggers() -> None:
     assert len(findings) == 1
 
 
+def test_camera_entry_unsecured_vmd_last_changed_fallback() -> None:
+    """When camera has no last_activity, use VMD sensor last_changed as proxy."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["now"] = "2025-01-01T00:05:00+00:00"
+    snapshot["entities"] = [
+        {
+            "entity_id": "lock.garage_door",
+            "domain": "lock",
+            "state": "unlocked",
+            "friendly_name": "Garage Door",
+            "area": "Garage",
+            "attributes": {},
+            "last_changed": "2025-01-01T00:00:00+00:00",
+            "last_updated": "2025-01-01T00:00:00+00:00",
+        },
+        {
+            "entity_id": "binary_sensor.frontporch_vmd4",
+            "domain": "binary_sensor",
+            "state": "on",
+            "friendly_name": "Front Porch VMD4",
+            "area": "Outside",
+            "attributes": {"device_class": "motion"},
+            "last_changed": "2025-01-01T00:04:30+00:00",
+            "last_updated": "2025-01-01T00:04:30+00:00",
+        },
+    ]
+    snapshot["camera_activity"] = [
+        {
+            "camera_entity_id": "camera.frontporch",
+            "area": "Outside",
+            "last_activity": None,  # camera has no activity timestamp attribute
+            "motion_entities": [],
+            "vmd_entities": ["binary_sensor.frontporch_vmd4"],
+            "snapshot_summary": None,
+            "recognized_people": [],
+            "latest_path": None,
+        }
+    ]
+
+    findings = CameraEntryUnsecuredRule().evaluate(snapshot)
+    assert len(findings) == 1
+    assert findings[0].evidence["unsecured_entities"] == ["lock.garage_door"]
+
+
 def test_camera_entry_unsecured_exterior_area_fallback() -> None:
     """Camera in an exterior area falls back to home-wide unsecured entities."""
     snapshot = _base_snapshot()

@@ -26,7 +26,7 @@ class CameraEntryUnsecuredRule:
 
     rule_id = "camera_entry_unsecured"
 
-    def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:
+    def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:  # noqa: PLR0912
         """Return findings for recent camera activity near unsecured entries."""
         findings: list[AnomalyFinding] = []
         now = dt_util.parse_datetime(snapshot["derived"]["now"]) or dt_util.utcnow()
@@ -54,11 +54,28 @@ class CameraEntryUnsecuredRule:
             {e for entities in unsecured_by_area.values() for e in entities}
         )
 
+        # Index entity last_changed by entity_id for VMD/motion fallback lookup.
+        last_changed_by_id: dict[str, str] = {
+            e["entity_id"]: e["last_changed"] for e in snapshot["entities"]
+        }
+
         for activity in snapshot["camera_activity"]:
             area = activity.get("area")
             if not area:
                 continue
             last_activity = activity.get("last_activity")
+            if not last_activity:
+                # Camera has no activity timestamp attribute; use the most
+                # recent last_changed of its associated VMD/motion sensors.
+                sensor_ids = activity.get("vmd_entities", []) + activity.get(
+                    "motion_entities", []
+                )
+                candidates = [
+                    last_changed_by_id[sid]
+                    for sid in sensor_ids
+                    if sid in last_changed_by_id
+                ]
+                last_activity = max(candidates) if candidates else None
             if not last_activity:
                 continue
             last_dt = dt_util.parse_datetime(last_activity)
