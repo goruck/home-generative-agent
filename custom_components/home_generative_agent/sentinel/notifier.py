@@ -1,0 +1,499 @@
+"""
+Sentinel notification orchestrator — Issue #261.
+
+Provides ``SentinelNotifier``, which wraps the notification dispatch layer
+with:
+
+* Snooze actions (24 h / 7 d / permanent) embedded in mobile notifications.
+* ``always`` confirmation guard: a permanent snooze fires a confirmation
+  notification before writing to ``SuppressionState``; no HA service is
+  called until the user explicitly confirms.
+* Per-area routing: when ``CONF_SENTINEL_AREA_NOTIFY_MAP`` maps an area name
+  to a notify service, findings whose triggering entities belong to that area
+  are routed to that service instead of the global one.
+* ``is_sensitive`` redaction: recognised-person names in the explanation text
+  are replaced with ``"a recognised person"`` before the message is sent.
+
+``SentinelNotifier`` replaces ``NotificationDispatcher`` as the object
+injected into ``SentinelEngine``.  It delegates non-snooze action callbacks
+(``execute``, ``handoff``, ``ack``, ``ignore``, ``later``) to the existing
+``ActionHandler``.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+from typing import TYPE_CHECKING, Any
+
+from homeassistant.core import callback
+from homeassistant.util import dt as dt_util
+
+from custom_components.home_generative_agent.const import (
+    CONF_NOTIFY_SERVICE,
+    CONF_SENTINEL_AREA_NOTIFY_MAP,
+)
+from custom_components.home_generative_agent.sentinel.suppression import (
+    SNOOZE_7D,
+    SNOOZE_24H,
+    SNOOZE_PERMANENT,
+    register_snooze,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from homeassistant.core import Event, HomeAssistant
+
+    from custom_components.home_generative_agent.notify.actions import ActionHandler
+    from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
+    from custom_components.home_generative_agent.snapshot.schema import (
+        FullStateSnapshot,
+    )
+
+    from .suppression import SuppressionManager
+
+LOGGER = logging.getLogger(__name__)
+
+# Action prefix shared with the existing ActionHandler.
+ACTION_PREFIX = "hga_sentinel_"
+MAX_MOBILE_MESSAGE_CHARS = 220
+
+# Snooze action verb tokens (without the trailing underscore+anomaly_id).
+_ACT_SNOOZE_24H = "snooze24h"
+_ACT_SNOOZE_7D = "snooze7d"
+_ACT_SNOOZE_ALWAYS = "snoozealways"
+_ACT_SNOOZE_CONFIRM = "snoozeconfirm"
+_ACT_SNOOZE_CANCEL = "snoozecancel"
+
+_SNOOZE_VERBS = frozenset(
+    {
+        _ACT_SNOOZE_24H,
+        _ACT_SNOOZE_7D,
+        _ACT_SNOOZE_ALWAYS,
+        _ACT_SNOOZE_CONFIRM,
+        _ACT_SNOOZE_CANCEL,
+    }
+)
+
+
+class SentinelNotifier:
+    """
+    Notification orchestrator for sentinel findings.
+
+    Drop-in replacement for ``NotificationDispatcher`` from the engine's
+    perspective: exposes the same ``async_notify(finding, snapshot,
+    explanation)`` coroutine and ``start()`` / ``stop()`` lifecycle methods.
+    """
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        options: dict[str, Any],
+        suppression: SuppressionManager,
+        action_handler: ActionHandler,
+    ) -> None:
+        """Initialise the sentinel notifier."""
+        self._hass = hass
+        self._options = options
+        self._suppression = suppression
+        self._action_handler = action_handler
+        self._unsub: Callable[[], None] | None = None
+        # Pending permanent-snooze intents: anomaly_id -> finding_type.
+        # Written when the user taps "Snooze Always"; cleared on confirm/cancel.
+        self._pending_always_snooze: dict[str, str] = {}
+
+    # ---------------------------------------------------------------------- #
+    # Lifecycle
+    # ---------------------------------------------------------------------- #
+
+    def start(self) -> None:
+        """Subscribe to mobile app action events."""
+        if self._unsub is not None:
+            return
+        self._unsub = self._hass.bus.async_listen(
+            "mobile_app_notification_action",
+            self._handle_action_event,
+        )
+
+    def stop(self) -> None:
+        """Unsubscribe from action events."""
+        if self._unsub is not None:
+            self._unsub()
+            self._unsub = None
+
+    # ---------------------------------------------------------------------- #
+    # Notification dispatch
+    # ---------------------------------------------------------------------- #
+
+    async def async_notify(
+        self,
+        finding: AnomalyFinding,
+        snapshot: FullStateSnapshot,
+        explanation: str | None,
+    ) -> None:
+        """
+        Send a proactive notification for *finding*.
+
+        * Adds snooze action buttons.
+        * Redacts person names when ``finding.is_sensitive`` is True.
+        * Routes to a per-area notify service when configured.
+        """
+        # Register finding with the action handler so execute/handoff work.
+        self._action_handler.register_finding(finding)
+
+        # Sensitive redaction before building the message.
+        clean_explanation = _redact_if_sensitive(explanation, finding)
+
+        title = "Home Generative Agent alert"
+        mobile_msg = _mobile_message(clean_explanation, finding)
+        persistent_msg = _persistent_message(clean_explanation, finding)
+        actions = _build_actions(finding)
+
+        # Per-area routing.
+        target_service = _resolve_notify_service(finding, snapshot, self._options)
+
+        if target_service:
+            domain, _, service = target_service.partition(".")
+            if not service:
+                service = target_service
+                domain = "notify"
+            tag = f"hga_sentinel_{finding.anomaly_id[:32]}"
+            data: dict[str, Any] = {
+                "title": title,
+                "message": mobile_msg,
+                "data": {"actions": actions, "tag": tag},
+            }
+            LOGGER.info("Sending sentinel notification via %s.", target_service)
+            await self._hass.services.async_call(
+                domain, service, data, blocking=False
+            )
+        else:
+            LOGGER.info("Sending sentinel notification via persistent_notification.")
+            await self._hass.services.async_call(
+                "persistent_notification",
+                "create",
+                {
+                    "title": title,
+                    "message": persistent_msg,
+                    "notification_id": f"hga_sentinel_{finding.anomaly_id}",
+                },
+                blocking=False,
+            )
+
+    # ---------------------------------------------------------------------- #
+    # Action event handling
+    # ---------------------------------------------------------------------- #
+
+    @callback
+    def _handle_action_event(self, event: Event) -> None:
+        """Dispatch incoming mobile-action events."""
+        action = event.data.get("action")
+        if not isinstance(action, str):
+            return
+        if not action.startswith(ACTION_PREFIX):
+            return
+
+        stripped = action.removeprefix(ACTION_PREFIX)
+
+        # Try to match a snooze verb prefix.
+        for verb in _SNOOZE_VERBS:
+            prefix = f"{verb}_"
+            if stripped.startswith(prefix):
+                anomaly_id = stripped[len(prefix):]
+                self._hass.async_create_task(
+                    self._handle_snooze(verb, anomaly_id)
+                )
+                return
+
+        # Non-snooze action — delegate to ActionHandler.
+        self._hass.async_create_task(
+            self._action_handler.handle_action(action, dict(event.data))
+        )
+
+    async def _handle_snooze(self, verb: str, anomaly_id: str) -> None:
+        """Process a snooze action for *anomaly_id*."""
+        now = dt_util.utcnow()
+        finding = self._action_handler._pending_findings.get(  # noqa: SLF001
+            anomaly_id
+        )
+
+        if verb == _ACT_SNOOZE_24H:
+            if finding:
+                register_snooze(
+                    self._suppression.state, finding.type, SNOOZE_24H, now
+                )
+                await self._suppression.async_save()
+                LOGGER.info(
+                    "Snooze 24 h registered for finding type %s.", finding.type
+                )
+
+        elif verb == _ACT_SNOOZE_7D:
+            if finding:
+                register_snooze(
+                    self._suppression.state, finding.type, SNOOZE_7D, now
+                )
+                await self._suppression.async_save()
+                LOGGER.info(
+                    "Snooze 7 d registered for finding type %s.", finding.type
+                )
+
+        elif verb == _ACT_SNOOZE_ALWAYS:
+            # Guard: send confirmation notification; do NOT write snooze yet.
+            if finding:
+                self._pending_always_snooze[anomaly_id] = finding.type
+                await self._send_always_confirmation(finding)
+
+        elif verb == _ACT_SNOOZE_CONFIRM:
+            # User confirmed — write permanent snooze now.
+            finding_type = self._pending_always_snooze.pop(anomaly_id, None)
+            if finding_type:
+                register_snooze(
+                    self._suppression.state, finding_type, SNOOZE_PERMANENT, now
+                )
+                await self._suppression.async_save()
+                LOGGER.info(
+                    "Permanent snooze confirmed for finding type %s.", finding_type
+                )
+            else:
+                LOGGER.debug(
+                    "Snooze confirm for %s but no pending intent; ignoring.",
+                    anomaly_id,
+                )
+
+        elif verb == _ACT_SNOOZE_CANCEL:
+            self._pending_always_snooze.pop(anomaly_id, None)
+            LOGGER.debug("Permanent snooze cancelled for %s.", anomaly_id)
+
+    async def _send_always_confirmation(self, finding: AnomalyFinding) -> None:
+        """
+        Send a mobile confirmation notification for permanent snooze.
+
+        No HA action is taken until the user taps Confirm.
+        """
+        notify_service = self._options.get(CONF_NOTIFY_SERVICE)
+        if not notify_service or not isinstance(notify_service, str):
+            LOGGER.debug(
+                "No notify_service configured; cannot send snooze confirmation."
+            )
+            return
+
+        friendly = _friendly_type(finding.type)
+        confirm_action = (
+            f"{ACTION_PREFIX}{_ACT_SNOOZE_CONFIRM}_{finding.anomaly_id}"
+        )
+        cancel_action = (
+            f"{ACTION_PREFIX}{_ACT_SNOOZE_CANCEL}_{finding.anomaly_id}"
+        )
+        domain, _, service = notify_service.partition(".")
+        if not service:
+            service = notify_service
+            domain = "notify"
+
+        data: dict[str, Any] = {
+            "title": "Confirm permanent snooze",
+            "message": (
+                f"Permanently suppress '{friendly}' alerts? "
+                "This can only be undone from settings."
+            ),
+            "data": {
+                "actions": [
+                    {"action": confirm_action, "title": "Confirm"},
+                    {"action": cancel_action, "title": "Cancel"},
+                ],
+                "tag": f"hga_sentinel_snooze_{finding.anomaly_id[:32]}",
+            },
+        }
+        await self._hass.services.async_call(
+            domain, service, data, blocking=False
+        )
+        LOGGER.debug(
+            "Permanent snooze confirmation sent for finding %s.", finding.anomaly_id
+        )
+
+
+# ---------------------------------------------------------------------------
+# Action list builder
+# ---------------------------------------------------------------------------
+
+
+def _build_actions(finding: AnomalyFinding) -> list[dict[str, Any]]:
+    """
+    Build mobile action buttons for *finding*.
+
+    Primary action (execute or ask) is first.  Snooze options follow.
+    """
+    actions: list[dict[str, Any]] = []
+
+    if finding.suggested_actions:
+        if finding.is_sensitive:
+            actions.append(
+                {
+                    "action": f"{ACTION_PREFIX}handoff_{finding.anomaly_id}",
+                    "title": "Ask Agent",
+                }
+            )
+        else:
+            actions.append(
+                {
+                    "action": f"{ACTION_PREFIX}execute_{finding.anomaly_id}",
+                    "title": "Execute",
+                }
+            )
+
+    actions.extend(
+        [
+            {
+                "action": f"{ACTION_PREFIX}{_ACT_SNOOZE_24H}_{finding.anomaly_id}",
+                "title": "Snooze 24 h",
+            },
+            {
+                "action": f"{ACTION_PREFIX}{_ACT_SNOOZE_7D}_{finding.anomaly_id}",
+                "title": "Snooze 7 d",
+            },
+            {
+                "action": f"{ACTION_PREFIX}{_ACT_SNOOZE_ALWAYS}_{finding.anomaly_id}",
+                "title": "Snooze Always",
+            },
+        ]
+    )
+    return actions
+
+
+# ---------------------------------------------------------------------------
+# Message helpers
+# ---------------------------------------------------------------------------
+
+
+def _redact_if_sensitive(
+    explanation: str | None, finding: AnomalyFinding
+) -> str | None:
+    """
+    Return *explanation* with recognised person names replaced.
+
+    When ``finding.is_sensitive`` is True, any string values in
+    ``finding.evidence["recognized_people"]`` are replaced with the generic
+    phrase ``"a recognised person"``.  Returns the original string unchanged
+    when the finding is not sensitive or there are no names to redact.
+    """
+    if not explanation or not finding.is_sensitive:
+        return explanation
+
+    recognized: list[Any] = finding.evidence.get("recognized_people", [])
+    if not recognized:
+        return explanation
+
+    redacted = explanation
+    for person in recognized:
+        if isinstance(person, str) and person:
+            redacted = re.sub(
+                re.escape(person), "a recognised person", redacted, flags=re.IGNORECASE
+            )
+    return redacted
+
+
+def _resolve_notify_service(
+    finding: AnomalyFinding,
+    snapshot: FullStateSnapshot,
+    options: dict[str, Any],
+) -> str | None:
+    """
+    Return the notify service to use for *finding*.
+
+    Checks the per-area map first; falls back to the global notify service.
+    Returns ``None`` when neither is configured (→ persistent notification).
+    """
+    area_map: dict[str, str] = options.get(CONF_SENTINEL_AREA_NOTIFY_MAP) or {}
+    if area_map:
+        area = _get_finding_area(finding, snapshot)
+        if area and area in area_map:
+            return area_map[area]
+
+    global_service = options.get(CONF_NOTIFY_SERVICE)
+    return global_service if isinstance(global_service, str) else None
+
+
+def _get_finding_area(
+    finding: AnomalyFinding, snapshot: FullStateSnapshot
+) -> str | None:
+    """Return the area of the first triggering entity found in the snapshot."""
+    entity_map = {e["entity_id"]: e for e in snapshot.get("entities", [])}
+    for entity_id in finding.triggering_entities:
+        entity = entity_map.get(entity_id)
+        if entity:
+            area = entity.get("area")
+            if area:
+                return str(area)
+    return None
+
+
+def _normalize_text(text: str) -> str:
+    normalized = text.replace("**", "").replace("`", "")
+    normalized = normalized.replace("\r", " ").replace("\n", " ")
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def _friendly_type(anomaly_type: str) -> str:
+    known = {
+        "open_entry_while_away": "Open entry while away",
+        "open_entry_at_night_when_home": "Open entry at night",
+        "open_entry_at_night_when_home_window": "Open entry at night",
+        "open_entry_at_night_while_away": "Open entry at night",
+        "open_any_window_at_night_while_away": "Window open at night",
+        "unlocked_lock_at_night": "Door lock left unlocked",
+        "camera_entry_unsecured": "Activity near unsecured entry",
+    }
+    if anomaly_type in known:
+        return known[anomaly_type]
+    return anomaly_type.replace("_", " ").strip().capitalize()
+
+
+def _friendly_entity(entity_id: str) -> str:
+    if "." in entity_id:
+        _, _, name = entity_id.partition(".")
+    else:
+        name = entity_id
+    return name.replace("_", " ").strip().title()
+
+
+def _fallback_message(finding: AnomalyFinding) -> str:
+    summary = _friendly_type(finding.type)
+    entity = (
+        _friendly_entity(finding.triggering_entities[0])
+        if finding.triggering_entities
+        else "Unknown entity"
+    )
+    return f"{summary}: {entity}. {_severity_action_hint(finding.severity)}"
+
+
+def _mobile_message(explanation: str | None, finding: AnomalyFinding) -> str:
+    if explanation:
+        text = _normalize_text(explanation)
+        if text and len(text) <= MAX_MOBILE_MESSAGE_CHARS:
+            return text
+    return _fallback_message(finding)[:MAX_MOBILE_MESSAGE_CHARS].rstrip()
+
+
+def _persistent_message(explanation: str | None, finding: AnomalyFinding) -> str:
+    if explanation:
+        text = _normalize_text(explanation)
+        if text:
+            return text
+
+    entities = ", ".join(
+        _friendly_entity(entity) for entity in finding.triggering_entities
+    )
+    entities = entities or "Unknown entity"
+    return (
+        f"{_friendly_type(finding.type)} "
+        f"(severity {finding.severity}) for {entities}. "
+        + _severity_action_hint(finding.severity)
+    )
+
+
+def _severity_action_hint(severity: str) -> str:
+    if severity == "high":
+        return "Urgent: check and secure it now."
+    if severity == "medium":
+        return "Check soon and secure it if unexpected."
+    return "Review when convenient."

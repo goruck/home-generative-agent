@@ -18,6 +18,8 @@ class AuditRecord:
     v2 (issue #254): adds data_quality, trigger_source,
         suppression_reason_code, triage_confidence, canary_would_execute,
         execution_id, rule_version, autonomy_level_at_decision, version
+    v2 (issue #262): adds triage_decision, triage_reason_code
+        (backward-compatible additions; no version bump needed)
     """
 
     snapshot_ref: dict[str, Any]
@@ -36,6 +38,10 @@ class AuditRecord:
     rule_version: str | None = field(default=None)
     autonomy_level_at_decision: str | None = field(default=None)
     action_policy_path: str | None = field(default=None)
+
+    # --- triage fields (Issue #262) ---
+    triage_decision: str | None = field(default=None)
+    triage_reason_code: str | None = field(default=None)
 
     # Schema version — increment when new fields are added
     version: int = field(default=2)

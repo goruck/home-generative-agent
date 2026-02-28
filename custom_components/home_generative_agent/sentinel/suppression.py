@@ -214,11 +214,11 @@ def purge_expired_prompts(
     now: datetime,
     *,
     pending_prompt_ttl: timedelta,
-) -> bool:
+) -> int:
     """
     Remove expired pending prompts in-place.
 
-    Returns True if any entries were removed.
+    Returns the number of entries removed (0 when nothing was purged).
     """
     expired: list[str] = []
     for anomaly_id, last_seen_iso in state.pending_prompts.items():
@@ -232,7 +232,7 @@ def purge_expired_prompts(
 
     for anomaly_id in expired:
         del state.pending_prompts[anomaly_id]
-    return bool(expired)
+    return len(expired)
 
 
 def _check_snooze(
