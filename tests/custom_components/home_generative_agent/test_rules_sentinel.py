@@ -140,6 +140,73 @@ def test_camera_entry_unsecured_triggers() -> None:
     assert len(findings) == 1
 
 
+def test_camera_entry_unsecured_exterior_area_fallback() -> None:
+    """Camera in an exterior area falls back to home-wide unsecured entities."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["now"] = "2025-01-01T00:05:00+00:00"
+    snapshot["entities"] = [
+        {
+            "entity_id": "lock.garage_door",
+            "domain": "lock",
+            "state": "unlocked",
+            "friendly_name": "Garage Door",
+            "area": "Garage",
+            "attributes": {},
+            "last_changed": "2025-01-01T00:00:00+00:00",
+            "last_updated": "2025-01-01T00:00:00+00:00",
+        }
+    ]
+    snapshot["camera_activity"] = [
+        {
+            "camera_entity_id": "camera.east",
+            "area": "Outside",
+            "last_activity": "2025-01-01T00:04:00+00:00",
+            "motion_entities": [],
+            "vmd_entities": [],
+            "snapshot_summary": None,
+            "recognized_people": [],
+            "latest_path": None,
+        }
+    ]
+
+    findings = CameraEntryUnsecuredRule().evaluate(snapshot)
+    assert len(findings) == 1
+    assert findings[0].evidence["unsecured_entities"] == ["lock.garage_door"]
+
+
+def test_camera_entry_unsecured_no_trigger_when_all_secured() -> None:
+    """No finding when camera fires but all entries are secured."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["now"] = "2025-01-01T00:05:00+00:00"
+    snapshot["entities"] = [
+        {
+            "entity_id": "lock.front_door",
+            "domain": "lock",
+            "state": "locked",
+            "friendly_name": "Front Door",
+            "area": "Outside",
+            "attributes": {},
+            "last_changed": "2025-01-01T00:00:00+00:00",
+            "last_updated": "2025-01-01T00:00:00+00:00",
+        }
+    ]
+    snapshot["camera_activity"] = [
+        {
+            "camera_entity_id": "camera.east",
+            "area": "Outside",
+            "last_activity": "2025-01-01T00:04:00+00:00",
+            "motion_entities": [],
+            "vmd_entities": [],
+            "snapshot_summary": None,
+            "recognized_people": [],
+            "latest_path": None,
+        }
+    ]
+
+    findings = CameraEntryUnsecuredRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
 def test_unknown_person_camera_no_home_triggers() -> None:
     """Unknown person on camera should trigger when no one is home."""
     snapshot = _base_snapshot()

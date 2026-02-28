@@ -48,9 +48,15 @@ class CameraEntryUnsecuredRule:
                 continue
             unsecured_by_area.setdefault(area, []).append(entity["entity_id"])
 
+        # All unsecured entities across the home, used as a fallback for
+        # cameras whose area (e.g. "Outside") contains no entry-point sensors.
+        all_unsecured: list[str] = sorted(
+            {e for entities in unsecured_by_area.values() for e in entities}
+        )
+
         for activity in snapshot["camera_activity"]:
             area = activity.get("area")
-            if not area or area not in unsecured_by_area:
+            if not area:
                 continue
             last_activity = activity.get("last_activity")
             if not last_activity:
@@ -60,11 +66,16 @@ class CameraEntryUnsecuredRule:
                 continue
             if now - last_dt > window:
                 continue
+            # Prefer same-area unsecured entities; fall back to home-wide list
+            # for exterior cameras whose area has no entry-point sensors.
+            unsecured = unsecured_by_area.get(area) or all_unsecured
+            if not unsecured:
+                continue
             evidence = {
                 "camera_entity_id": activity["camera_entity_id"],
                 "area": area,
                 "last_activity": last_activity,
-                "unsecured_entities": sorted(unsecured_by_area[area]),
+                "unsecured_entities": sorted(unsecured),
             }
             anomaly_id = build_anomaly_id(
                 self.rule_id, [activity["camera_entity_id"]], evidence
@@ -79,6 +90,6 @@ class CameraEntryUnsecuredRule:
                     evidence=evidence,
                     suggested_actions=["check_entry"],
                     is_sensitive=True,
-                )
+                ),
             )
         return findings
