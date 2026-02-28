@@ -308,7 +308,6 @@ TOGGLE_DYNAMIC_RULE_SCHEMA = vol.Schema(
 
 SET_AUTONOMY_LEVEL_SCHEMA = vol.Schema(
     {
-        vol.Required("entry_id"): cv.string,
         vol.Required("level"): vol.All(vol.Coerce(int), vol.In([0, 1, 2, 3])),
         vol.Optional("pin"): cv.string,
     }
@@ -1651,8 +1650,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     )
 
     async def _handle_sentinel_set_autonomy_level(call: ServiceCall) -> dict[str, Any]:
-        """Set the runtime autonomy level for a specific config entry (admin-only)."""
-        requested_entry_id = str(call.data["entry_id"])
+        """Set the runtime autonomy level (admin-only)."""
         level = int(call.data["level"])
         pin: str | None = call.data.get("pin")
 
@@ -1667,10 +1665,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
         sentinel = entry.runtime_data.sentinel
         if sentinel is None:
-            return {"status": "unavailable", "entry_id": requested_entry_id}
+            return {"status": "unavailable", "entry_id": entry.entry_id}
 
-        sentinel.set_autonomy_level(requested_entry_id, level, pin=pin)
-        return {"status": "ok", "entry_id": requested_entry_id, "level": level}
+        sentinel.set_autonomy_level(entry.entry_id, level, pin=pin)
+        return {"status": "ok", "entry_id": entry.entry_id, "level": level}
 
     hass.services.async_register(
         DOMAIN,
