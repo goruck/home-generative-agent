@@ -26,12 +26,15 @@ from custom_components.home_generative_agent.const import (
     CONF_OLLAMA_SUMMARIZATION_URL,
     CONF_OLLAMA_URL,
     CONF_OLLAMA_VLM_URL,
+    CONF_OPENAI_COMPATIBLE_API_KEY,
+    CONF_OPENAI_COMPATIBLE_BASE_URL,
     CONF_SENTINEL_ENABLED,
     CONF_SENTINEL_INTERVAL_SECONDS,
     CONF_SUMMARIZATION_MODEL_PROVIDER,
     CONF_VLM_PROVIDER,
     CONFIG_ENTRY_VERSION,
     DOMAIN,
+    MODEL_CATEGORY_SPECS,
     SUBENTRY_TYPE_FEATURE,
     SUBENTRY_TYPE_MODEL_PROVIDER,
     SUBENTRY_TYPE_SENTINEL,
@@ -40,6 +43,10 @@ from custom_components.home_generative_agent.const import (
 from custom_components.home_generative_agent.core.subentry_resolver import (
     legacy_model_provider_configs,
     resolve_runtime_options,
+)
+from custom_components.home_generative_agent.core.utils import (
+    CannotConnectError,
+    InvalidAuthError,
 )
 from custom_components.home_generative_agent.flows.feature_subentry_flow import (
     FeatureSubentryFlow,
@@ -512,3 +519,218 @@ async def test_migration_creates_provider_and_feature_subentries(
     assert features
     assert sentinel
     assert entry.version == CONFIG_ENTRY_VERSION
+
+
+# ---------------------------------------------------------------------------
+# openai_compatible provider tests
+# ---------------------------------------------------------------------------
+
+
+def _make_compat_flow(hass: Any, entry: DummyEntry) -> ModelProviderSubentryFlow:
+    """Return a ModelProviderSubentryFlow wired up for testing."""
+    flow = ModelProviderSubentryFlow()
+    flow.hass = hass
+    flow.async_show_form = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "form",
+        "data_schema": kwargs["data_schema"],
+        "errors": kwargs.get("errors"),
+    }
+    flow.async_create_entry = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "create_entry",
+        "title": kwargs.get("title"),
+        "data": kwargs.get("data"),
+    }
+    flow.async_abort = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "abort",
+        "reason": kwargs.get("reason"),
+    }
+    flow._schedule_reload = lambda: None  # type: ignore[assignment]
+    _patch_entry(flow, entry)
+    return flow
+
+
+@pytest.mark.asyncio
+async def test_model_provider_flow_creates_openai_compatible(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Model provider flow creates an openai_compatible subentry with base_url and api_key."""
+    entry = DummyEntry()
+    flow = _make_compat_flow(hass, entry)
+
+    async def _noop_validate(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.flows.model_provider_subentry_flow.validate_openai_compatible_url",
+        _noop_validate,
+    )
+
+    first = await flow.async_step_user()
+    assert first.get("type") == "form"
+
+    second = await flow.async_step_deployment({"deployment": "edge"})
+    assert second.get("type") == "form"
+
+    third = await flow.async_step_provider(
+        {"provider_type": "openai_compatible", "name": "Edge-LLM OpenAI Compatible"}
+    )
+    assert third.get("type") == "form"
+
+    result = await flow.async_step_settings(
+        {"base_url": "http://localhost:8000", CONF_API_KEY: "sk-local"}
+    )
+    assert result.get("type") == "create_entry"
+    data = result.get("data")
+    assert data is not None
+    assert data["provider_type"] == "openai_compatible"
+    assert data["deployment"] == "edge"
+    settings = data["settings"]
+    assert settings["base_url"] == "http://localhost:8000"
+    assert settings["api_key"] == "sk-local"
+
+
+@pytest.mark.asyncio
+async def test_model_provider_flow_openai_compatible_defaults_api_key(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """openai_compatible flow stores 'none' when no api_key is supplied."""
+    entry = DummyEntry()
+    flow = _make_compat_flow(hass, entry)
+
+    async def _noop_validate(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.flows.model_provider_subentry_flow.validate_openai_compatible_url",
+        _noop_validate,
+    )
+
+    await flow.async_step_deployment({"deployment": "edge"})
+    await flow.async_step_provider({"provider_type": "openai_compatible"})
+
+    # Omit api_key entirely — should default to "none"
+    result = await flow.async_step_settings({"base_url": "http://vllm:8000"})
+    assert result.get("type") == "create_entry"
+    result_data = result.get("data")
+    assert result_data is not None
+    assert result_data["settings"]["api_key"] == "none"
+
+
+@pytest.mark.asyncio
+async def test_model_provider_flow_openai_compatible_cannot_connect(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Validation failure shows cannot_connect error and re-displays the form."""
+    entry = DummyEntry()
+    flow = _make_compat_flow(hass, entry)
+
+    async def _raise_connect(*_args: Any, **_kwargs: Any) -> None:
+        raise CannotConnectError
+
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.flows.model_provider_subentry_flow.validate_openai_compatible_url",
+        _raise_connect,
+    )
+
+    await flow.async_step_deployment({"deployment": "edge"})
+    await flow.async_step_provider({"provider_type": "openai_compatible"})
+
+    result = await flow.async_step_settings({"base_url": "http://bad-host:8000"})
+    assert result.get("type") == "form"
+    assert (result.get("errors") or {}).get("base") == "cannot_connect"
+
+
+@pytest.mark.asyncio
+async def test_model_provider_flow_openai_compatible_invalid_auth(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Validation 401 shows invalid_auth error and re-displays the form."""
+    entry = DummyEntry()
+    flow = _make_compat_flow(hass, entry)
+
+    async def _raise_auth(*_args: Any, **_kwargs: Any) -> None:
+        raise InvalidAuthError
+
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.flows.model_provider_subentry_flow.validate_openai_compatible_url",
+        _raise_auth,
+    )
+
+    await flow.async_step_deployment({"deployment": "edge"})
+    await flow.async_step_provider({"provider_type": "openai_compatible"})
+
+    result = await flow.async_step_settings(
+        {"base_url": "http://vllm:8000", CONF_API_KEY: "bad-key"}
+    )
+    assert result.get("type") == "form"
+    assert (result.get("errors") or {}).get("base") == "invalid_auth"
+
+
+def test_model_provider_flow_openai_compatible_only_in_edge() -> None:
+    """openai_compatible must appear in edge options but NOT in cloud options."""
+    flow = ModelProviderSubentryFlow()
+
+    flow._deployment = "edge"
+    edge_values = [opt["value"] for opt in flow._provider_options()]
+    assert "openai_compatible" in edge_values
+    assert "ollama" in edge_values
+    assert "openai" not in edge_values  # openai is cloud-only
+
+    flow._deployment = "cloud"
+    cloud_values = [opt["value"] for opt in flow._provider_options()]
+    assert "openai_compatible" not in cloud_values
+    assert "openai" in cloud_values
+    assert "gemini" in cloud_values
+
+
+def test_resolve_runtime_options_openai_compatible() -> None:
+    """openai_compatible subentry propagates base_url and api_key into runtime options."""
+    provider = DummySubentry(
+        "compat1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Edge-LLM OpenAI Compatible",
+        {
+            "provider_type": "openai_compatible",
+            "capabilities": ["chat", "vlm", "summarization", "embedding"],
+            "settings": {
+                "base_url": "http://localhost:8000",
+                "api_key": "sk-local",
+            },
+        },
+    )
+    feature = DummySubentry(
+        "feature1",
+        SUBENTRY_TYPE_FEATURE,
+        "Conversation",
+        {
+            "feature_type": "conversation",
+            "model_provider_id": "compat1",
+            "name": "Conversation",
+            CONF_FEATURE_MODEL: {CONF_FEATURE_MODEL_NAME: "gpt-4o"},
+        },
+    )
+    entry = DummyEntry()
+    entry.subentries = {
+        provider.subentry_id: provider,
+        feature.subentry_id: feature,
+    }
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_CHAT_MODEL_PROVIDER] == "openai_compatible"
+    assert options[CONF_OPENAI_COMPATIBLE_BASE_URL] == "http://localhost:8000"
+    assert options[CONF_OPENAI_COMPATIBLE_API_KEY] == "sk-local"
+
+
+def test_provider_capabilities_includes_openai_compatible() -> None:
+    """MODEL_CATEGORY_SPECS includes openai_compatible in all four model categories."""
+    for category in ("chat", "vlm", "summarization", "embedding"):
+        spec = MODEL_CATEGORY_SPECS[category]
+        assert "openai_compatible" in spec["providers"], (
+            f"openai_compatible missing from {category} providers"
+        )
+        assert "openai_compatible" in spec["recommended_models"], (
+            f"openai_compatible missing from {category} recommended_models"
+        )
+        assert "openai_compatible" in spec["model_keys"], (
+            f"openai_compatible missing from {category} model_keys"
+        )

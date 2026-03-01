@@ -44,6 +44,7 @@ from ..const import (  # noqa: TID252
     CONF_MAX_TOKENS_IN_CONTEXT,
     CONF_OLLAMA_CHAT_MODEL,
     CONF_OPENAI_CHAT_MODEL,
+    CONF_OPENAI_COMPATIBLE_CHAT_MODEL,
     EMBEDDING_MODEL_PROMPT_TEMPLATE,
     RECOMMENDED_CRITICAL_ACTIONS,
     SUMMARIZATION_INITIAL_PROMPT,
@@ -81,6 +82,8 @@ def _determine_model_name(provider: str, opts: dict[str, Any]) -> str:
     """Determine model name based on provider and options."""
     if provider == "openai":
         return opts.get(CONF_OPENAI_CHAT_MODEL, "")
+    if provider == "openai_compatible":
+        return opts.get(CONF_OPENAI_COMPATIBLE_CHAT_MODEL, "")
     if provider == "gemini":
         return opts.get(CONF_GEMINI_CHAT_MODEL, "")
     return opts.get(CONF_OLLAMA_CHAT_MODEL, "")

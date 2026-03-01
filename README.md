@@ -50,7 +50,7 @@ This integration will set up the `conversation` platform, allowing users to conv
 
 4. Install all the Blueprints in the `blueprints` directory. You can manually create automations using these that converse directly with the Agent (the Agent can also create automations for you from your your conversations with it, see examples below.)
 
-5. (Optional) Install `ollama` on your edge device by following the instructions [here](https://ollama.com/download).
+5. (Optional) Install `ollama` on your edge device by following the instructions [here](https://ollama.com/download), **or** run any OpenAI-compatible server (vLLM, llama.cpp, LiteLLM, etc.) and add it as an **OpenAI Compatible** edge provider.
 
 - Pull `ollama` models `gpt-oss`, `qwen3:8b`, `qwen3:1.7b`, `qwen2.5vl:7b` and `mxbai-embed-large`.
 
@@ -97,7 +97,7 @@ A "feature" is a discrete capability exposed by the integration (for example Con
 
 Embedding model selection: the integration uses the first model provider that supports embeddings (or the feature’s provider when it advertises embedding capability). If you want a different embedding model, add a provider that supports embeddings and select the desired embedding model name in that provider’s defaults, then re-run Setup or reload the integration.
 
-If you want separate Ollama servers per feature, add multiple Model Provider subentries and assign them in each feature’s settings. For example: create a “Primary Ollama” provider pointing at your chat server and a “Vision Ollama” provider pointing at your camera analysis server, then select the appropriate provider on the feature’s model settings step.
+If you want separate servers per feature, add multiple Model Provider subentries and assign them in each feature’s settings. For example: create a “Primary Ollama” provider pointing at your chat server and a “Vision Ollama” provider pointing at your camera analysis server, then select the appropriate provider on the feature’s model settings step. You can mix provider types — for example a local vLLM server added as an **OpenAI Compatible** provider alongside an Ollama provider.
 
 Global options (prompt, face recognition URL, context management, critical-action PIN, etc.) live in the integration’s **Options** flow. Sentinel settings are configured in the **Sentinel** subentry.
 
@@ -751,22 +751,26 @@ Below is a high-level view of the architecture.
 
 The general integration architecture follows the best practices as described in [Home Assistant Core](https://developers.home-assistant.io/docs/development_index/) and is compliant with [Home Assistant Community Store](https://www.hacs.xyz/) (HACS) publishing requirements.
 
-The agent is built using LangGraph and uses the HA `conversation` component to interact with the user. The agent uses the Home Assistant LLM API to fetch the state of the home and understand the HA native tools it has at its disposal. I implemented all other tools available to the agent using LangChain. The agent employs several LLMs, a large and very accurate primary model for high-level reasoning, smaller specialized helper models for camera image analysis, primary model context summarization, and embedding generation for long-term semantic search. The models can be either cloud (best accuracy, highest cost) or edge-based (good accuracy, lowest cost). The edge models run under the [Ollama](https://ollama.com/) framework on a computer located in the home. Recommended defaults and supported models are configurable in the integration UI, with defaults defined in `const.py`.
+The agent is built using LangGraph and uses the HA `conversation` component to interact with the user. The agent uses the Home Assistant LLM API to fetch the state of the home and understand the HA native tools it has at its disposal. I implemented all other tools available to the agent using LangChain. The agent employs several LLMs, a large and very accurate primary model for high-level reasoning, smaller specialized helper models for camera image analysis, primary model context summarization, and embedding generation for long-term semantic search. The models can be either cloud (best accuracy, highest cost) or edge-based (good accuracy, lowest cost). Edge models run under the [Ollama](https://ollama.com/) framework or any OpenAI-compatible server (vLLM, llama.cpp, LiteLLM, etc.) on a computer located in the home. Recommended defaults and supported models are configurable in the integration UI, with defaults defined in `const.py`.
 
 Category | Provider | Default model | Purpose
 -- | -- | -- | -- |
 Chat | OpenAI | gpt-5 | High-level reasoning and planning
 Chat | Ollama | gpt-oss | High-level reasoning and planning
 Chat | Gemini | gemini-2.5-flash-lite | High-level reasoning and planning
+Chat | OpenAI Compatible | gpt-4o | High-level reasoning and planning
 VLM | Ollama | qwen3-vl:8b | Image scene analysis
 VLM | OpenAI | gpt-5-nano | Image scene analysis
 VLM | Gemini | gemini-2.5-flash-lite | Image scene analysis
+VLM | OpenAI Compatible | gpt-4o | Image scene analysis
 Summarization | Ollama | qwen3:1.7b | Primary model context summarization
 Summarization | OpenAI | gpt-5-nano | Primary model context summarization
 Summarization | Gemini | gemini-2.5-flash-lite | Primary model context summarization
+Summarization | OpenAI Compatible | gpt-4o | Primary model context summarization
 Embeddings | Ollama | mxbai-embed-large | Embedding generation for semantic search
 Embeddings | OpenAI | text-embedding-3-small | Embedding generation for semantic search
 Embeddings | Gemini | gemini-embedding-001 | Embedding generation for semantic search
+Embeddings | OpenAI Compatible | gpt-4o | Embedding generation for semantic search
 
 ### LangGraph-based Agent
 LangGraph powers the conversation agent, enabling you to create stateful, multi-actor applications utilizing LLMs as quickly as possible. It extends LangChain's capabilities, introducing the ability to create and manage cyclical graphs essential for developing complex agent runtimes. A graph models the agent workflow, as seen in the image below.

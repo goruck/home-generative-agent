@@ -94,6 +94,12 @@ from .const import (
     CONF_OLLAMA_VLM_KEEPALIVE,
     CONF_OLLAMA_VLM_URL,
     CONF_OPENAI_CHAT_MODEL,
+    CONF_OPENAI_COMPATIBLE_API_KEY,
+    CONF_OPENAI_COMPATIBLE_BASE_URL,
+    CONF_OPENAI_COMPATIBLE_CHAT_MODEL,
+    CONF_OPENAI_COMPATIBLE_EMBEDDING_MODEL,
+    CONF_OPENAI_COMPATIBLE_SUMMARIZATION_MODEL,
+    CONF_OPENAI_COMPATIBLE_VLM,
     CONF_OPENAI_EMBEDDING_MODEL,
     CONF_OPENAI_SUMMARIZATION_MODEL,
     CONF_OPENAI_VLM,
@@ -151,6 +157,10 @@ from .const import (
     RECOMMENDED_OLLAMA_VLM,
     RECOMMENDED_OLLAMA_VLM_KEEPALIVE,
     RECOMMENDED_OPENAI_CHAT_MODEL,
+    RECOMMENDED_OPENAI_COMPATIBLE_CHAT_MODEL,
+    RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_MODEL,
+    RECOMMENDED_OPENAI_COMPATIBLE_SUMMARIZATION_MODEL,
+    RECOMMENDED_OPENAI_COMPATIBLE_VLM,
     RECOMMENDED_OPENAI_EMBEDDING_MODEL,
     RECOMMENDED_OPENAI_SUMMARIZATION_MODEL,
     RECOMMENDED_OPENAI_VLM,
@@ -204,6 +214,7 @@ from .core.utils import (
     generate_embeddings,
     ollama_healthy,
     ollama_url_for_category,
+    openai_compatible_healthy,
     openai_healthy,
     reasoning_field,
 )
@@ -336,6 +347,19 @@ def _provider_api_key(
         api_key = settings.get("api_key")
         if api_key:
             return str(api_key)
+    return None
+
+
+def _provider_setting(
+    providers: Mapping[str, ModelProviderConfig], provider_type: str, key: str
+) -> str | None:
+    """Return a named setting for the first matching provider type, or None."""
+    for provider in providers.values():
+        if provider.provider_type != provider_type:
+            continue
+        value = provider.data.get("settings", {}).get(key)
+        if value:
+            return str(value)
     return None
 
 
@@ -670,6 +694,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     openai_secret = SecretStr(api_key) if api_key else None
     gemini_key = conf.get(CONF_GEMINI_API_KEY) or _provider_api_key(providers, "gemini")
     gemini_secret = SecretStr(gemini_key) if gemini_key else None
+    openai_compatible_base_url = conf.get(
+        CONF_OPENAI_COMPATIBLE_BASE_URL
+    ) or _provider_setting(providers, "openai_compatible", "base_url")
+    openai_compatible_api_key = (
+        conf.get(CONF_OPENAI_COMPATIBLE_API_KEY)
+        or _provider_setting(providers, "openai_compatible", "api_key")
+        or "none"
+    )
     base_ollama_url = ensure_http_url(conf.get(CONF_OLLAMA_URL, RECOMMENDED_OLLAMA_URL))
     ollama_chat_url = (
         ollama_url_for_category(conf, "chat", fallback=base_ollama_url)
@@ -699,9 +731,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         )
         ollama_health = dict(zip(ollama_urls, ollama_results, strict=False))
 
-    openai_ok, gemini_ok = await asyncio.gather(
+    openai_ok, gemini_ok, openai_compatible_ok = await asyncio.gather(
         openai_healthy(hass, api_key, timeout_s=health_timeout),
         gemini_healthy(hass, gemini_key, timeout_s=health_timeout),
+        openai_compatible_healthy(
+            hass,
+            openai_compatible_base_url,
+            openai_compatible_api_key,
+            timeout_s=health_timeout,
+        ),
     )
     ollama_any_ok = any(ollama_health.values())
 
@@ -771,6 +809,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         except Exception:
             LOGGER.exception("Gemini provider init failed; continuing without it.")
 
+    openai_compatible_provider: (
+        RunnableSerializable[LanguageModelInput, BaseMessage] | None
+    ) = None
+    if openai_compatible_ok and openai_compatible_base_url:
+        try:
+            openai_compatible_provider = ChatOpenAI(
+                api_key=SecretStr(openai_compatible_api_key),
+                base_url=openai_compatible_base_url,
+                timeout=120,
+                http_async_client=http_client,
+            ).configurable_fields(
+                model_name=ConfigurableField(id="model_name"),
+                temperature=ConfigurableField(id="temperature"),
+                top_p=ConfigurableField(id="top_p"),
+                max_tokens=ConfigurableField(id="max_tokens"),
+            )
+        except Exception:
+            LOGGER.exception(
+                "OpenAI-compatible provider init failed; continuing without it."
+            )
+
     # Embeddings: instantiate both, then select based on provider
     openai_embeddings: OpenAIEmbeddings | None = None
     if openai_ok:
@@ -810,6 +869,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         except Exception:
             LOGGER.exception("Gemini embeddings init failed; continuing without them.")
 
+    openai_compatible_embeddings: OpenAIEmbeddings | None = None
+    if openai_compatible_ok and openai_compatible_base_url:
+        try:
+            openai_compatible_embeddings = OpenAIEmbeddings(
+                api_key=SecretStr(openai_compatible_api_key),
+                base_url=openai_compatible_base_url,
+                model=options.get(
+                    CONF_OPENAI_COMPATIBLE_EMBEDDING_MODEL,
+                    RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_MODEL,
+                ),
+                dimensions=EMBEDDING_MODEL_DIMS,
+            )
+        except Exception:
+            LOGGER.exception(
+                "OpenAI-compatible embeddings init failed; continuing without them."
+            )
+
     # Choose active embedding provider
     embedding_model: (
         OpenAIEmbeddings | OllamaEmbeddings | GoogleGenerativeAIEmbeddings | None
@@ -820,6 +896,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     index_config: PostgresIndexConfig | None = None
     if embedding_provider == "openai":
         embedding_model = openai_embeddings
+    elif embedding_provider == "openai_compatible":
+        embedding_model = openai_compatible_embeddings
     elif embedding_provider == "gemini":
         embedding_model = gemini_embeddings
     else:
@@ -966,6 +1044,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 }
             }
         )
+    elif chat_provider == "openai_compatible":
+        chat_model = (openai_compatible_provider or NullChat()).with_config(
+            config={
+                "configurable": {
+                    "model_name": options.get(
+                        CONF_OPENAI_COMPATIBLE_CHAT_MODEL,
+                        RECOMMENDED_OPENAI_COMPATIBLE_CHAT_MODEL,
+                    ),
+                    "temperature": chat_temp,
+                    "top_p": CHAT_MODEL_TOP_P,
+                }
+            }
+        )
     elif chat_provider == "gemini":
         chat_model = (gemini_provider or NullChat()).with_config(
             config={
@@ -1007,6 +1098,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             config={
                 "configurable": {
                     "model_name": options.get(CONF_OPENAI_VLM, RECOMMENDED_OPENAI_VLM),
+                    "temperature": vlm_temp,
+                    "top_p": VLM_TOP_P,
+                }
+            }
+        )
+    elif vlm_provider == "openai_compatible":
+        vision_model = (openai_compatible_provider or NullChat()).with_config(
+            config={
+                "configurable": {
+                    "model_name": options.get(
+                        CONF_OPENAI_COMPATIBLE_VLM, RECOMMENDED_OPENAI_COMPATIBLE_VLM
+                    ),
                     "temperature": vlm_temp,
                     "top_p": VLM_TOP_P,
                 }
@@ -1060,6 +1163,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     "model_name": options.get(
                         CONF_OPENAI_SUMMARIZATION_MODEL,
                         RECOMMENDED_OPENAI_SUMMARIZATION_MODEL,
+                    ),
+                    "temperature": sum_temp,
+                    "top_p": SUMMARIZATION_MODEL_TOP_P,
+                }
+            }
+        )
+    elif sum_provider == "openai_compatible":
+        summarization_model = (openai_compatible_provider or NullChat()).with_config(
+            config={
+                "configurable": {
+                    "model_name": options.get(
+                        CONF_OPENAI_COMPATIBLE_SUMMARIZATION_MODEL,
+                        RECOMMENDED_OPENAI_COMPATIBLE_SUMMARIZATION_MODEL,
                     ),
                     "temperature": sum_temp,
                     "top_p": SUMMARIZATION_MODEL_TOP_P,

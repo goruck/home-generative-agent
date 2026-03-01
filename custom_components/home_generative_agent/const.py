@@ -272,7 +272,7 @@ CHAT_MODEL_GEMINI_SUPPORTED = Literal[
 ]
 
 CONF_CHAT_MODEL_PROVIDER = "chat_model_provider"
-PROVIDERS = Literal["openai", "ollama", "gemini"]
+PROVIDERS = Literal["openai", "openai_compatible", "ollama", "gemini"]
 RECOMMENDED_CHAT_MODEL_PROVIDER: PROVIDERS = "ollama"
 
 CONF_OLLAMA_CHAT_MODEL = "ollama_chat_model"
@@ -285,6 +285,9 @@ CHAT_MODEL_REPEAT_PENALTY = 1.05  # Ollama only
 
 CONF_OPENAI_CHAT_MODEL = "openai_chat_model"
 RECOMMENDED_OPENAI_CHAT_MODEL: CHAT_MODEL_OPENAI_SUPPORTED = "gpt-5"
+
+CONF_OPENAI_COMPATIBLE_CHAT_MODEL = "openai_compatible_chat_model"
+RECOMMENDED_OPENAI_COMPATIBLE_CHAT_MODEL = "gpt-4o"
 
 CONF_GEMINI_CHAT_MODEL = "gemini_chat_model"
 RECOMMENDED_GEMINI_CHAT_MODEL: CHAT_MODEL_GEMINI_SUPPORTED = "gemini-2.5-flash-lite"
@@ -331,6 +334,9 @@ VLM_MIRO_STAT = 0  # Ollama only
 
 CONF_OPENAI_VLM = "openai_vlm"
 RECOMMENDED_OPENAI_VLM: VLM_OPENAI_SUPPORTED = "gpt-5-nano"
+
+CONF_OPENAI_COMPATIBLE_VLM = "openai_compatible_vlm"
+RECOMMENDED_OPENAI_COMPATIBLE_VLM = "gpt-4o"
 
 CONF_GEMINI_VLM = "gemini_vlm"
 RECOMMENDED_GEMINI_VLM: VLM_GEMINI_SUPPORTED = "gemini-2.5-flash-lite"
@@ -422,6 +428,9 @@ RECOMMENDED_OPENAI_SUMMARIZATION_MODEL: SUMMARIZATION_MODEL_OPENAI_SUPPORTED = (
     "gpt-5-nano"
 )
 
+CONF_OPENAI_COMPATIBLE_SUMMARIZATION_MODEL = "openai_compatible_summarization_model"
+RECOMMENDED_OPENAI_COMPATIBLE_SUMMARIZATION_MODEL = "gpt-4o"
+
 CONF_GEMINI_SUMMARIZATION_MODEL = "gemini_summarization_model"
 RECOMMENDED_GEMINI_SUMMARIZATION_MODEL: SUMMARIZATION_MODEL_GEMINI_SUPPORTED = (
     "gemini-2.5-flash-lite"
@@ -461,6 +470,9 @@ RECOMMENDED_OPENAI_EMBEDDING_MODEL: EMBEDDING_MODEL_OPENAI_SUPPORTED = (
     "text-embedding-3-small"
 )
 
+CONF_OPENAI_COMPATIBLE_EMBEDDING_MODEL = "openai_compatible_embedding_model"
+RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_MODEL = "gpt-4o"
+
 CONF_GEMINI_EMBEDDING_MODEL = "gemini_embedding_model"
 RECOMMENDED_GEMINI_EMBEDDING_MODEL: EMBEDDING_MODEL_GEMINI_SUPPORTED = (
     "gemini-embedding-001"
@@ -471,6 +483,10 @@ EMBEDDING_MODEL_CTX = 512
 EMBEDDING_MODEL_PROMPT_TEMPLATE = """
 Represent this sentence for searching relevant passages: {query}
 """
+
+# ---------------- OpenAI-compatible endpoint (edge) ----------------
+CONF_OPENAI_COMPATIBLE_BASE_URL = "openai_compatible_base_url"
+CONF_OPENAI_COMPATIBLE_API_KEY = "openai_compatible_api_key"
 
 # ---------------- Camera video analyzer ----------------
 CONF_VIDEO_ANALYZER_MODE = "video_analyzer_mode"
@@ -644,16 +660,19 @@ MODEL_CATEGORY_SPECS: dict[str, dict[str, Any]] = {
         "recommended_temperature": RECOMMENDED_CHAT_MODEL_TEMPERATURE,
         "providers": {
             "openai": list(get_args(CHAT_MODEL_OPENAI_SUPPORTED)),
+            "openai_compatible": list(get_args(CHAT_MODEL_OPENAI_SUPPORTED)),
             "ollama": list(get_args(CHAT_MODEL_OLLAMA_SUPPORTED)),
             "gemini": list(get_args(CHAT_MODEL_GEMINI_SUPPORTED)),
         },
         "recommended_models": {
             "openai": RECOMMENDED_OPENAI_CHAT_MODEL,
+            "openai_compatible": RECOMMENDED_OPENAI_COMPATIBLE_CHAT_MODEL,
             "ollama": RECOMMENDED_OLLAMA_CHAT_MODEL,
             "gemini": RECOMMENDED_GEMINI_CHAT_MODEL,
         },
         "model_keys": {
             "openai": CONF_OPENAI_CHAT_MODEL,
+            "openai_compatible": CONF_OPENAI_COMPATIBLE_CHAT_MODEL,
             "ollama": CONF_OLLAMA_CHAT_MODEL,
             "gemini": CONF_GEMINI_CHAT_MODEL,
         },
@@ -665,16 +684,19 @@ MODEL_CATEGORY_SPECS: dict[str, dict[str, Any]] = {
         "recommended_temperature": RECOMMENDED_VLM_TEMPERATURE,
         "providers": {
             "openai": list(get_args(VLM_OPENAI_SUPPORTED)),
+            "openai_compatible": list(get_args(VLM_OPENAI_SUPPORTED)),
             "ollama": list(get_args(VLM_OLLAMA_SUPPORTED)),
             "gemini": list(get_args(VLM_GEMINI_SUPPORTED)),
         },
         "recommended_models": {
             "openai": RECOMMENDED_OPENAI_VLM,
+            "openai_compatible": RECOMMENDED_OPENAI_COMPATIBLE_VLM,
             "ollama": RECOMMENDED_OLLAMA_VLM,
             "gemini": RECOMMENDED_GEMINI_VLM,
         },
         "model_keys": {
             "openai": CONF_OPENAI_VLM,
+            "openai_compatible": CONF_OPENAI_COMPATIBLE_VLM,
             "ollama": CONF_OLLAMA_VLM,
             "gemini": CONF_GEMINI_VLM,
         },
@@ -686,16 +708,19 @@ MODEL_CATEGORY_SPECS: dict[str, dict[str, Any]] = {
         "recommended_temperature": RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
         "providers": {
             "openai": list(get_args(SUMMARIZATION_MODEL_OPENAI_SUPPORTED)),
+            "openai_compatible": list(get_args(SUMMARIZATION_MODEL_OPENAI_SUPPORTED)),
             "ollama": list(get_args(SUMMARIZATION_MODEL_OLLAMA_SUPPORTED)),
             "gemini": list(get_args(SUMMARIZATION_MODEL_GEMINI_SUPPORTED)),
         },
         "recommended_models": {
             "openai": RECOMMENDED_OPENAI_SUMMARIZATION_MODEL,
+            "openai_compatible": RECOMMENDED_OPENAI_COMPATIBLE_SUMMARIZATION_MODEL,
             "ollama": RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL,
             "gemini": RECOMMENDED_GEMINI_SUMMARIZATION_MODEL,
         },
         "model_keys": {
             "openai": CONF_OPENAI_SUMMARIZATION_MODEL,
+            "openai_compatible": CONF_OPENAI_COMPATIBLE_SUMMARIZATION_MODEL,
             "ollama": CONF_OLLAMA_SUMMARIZATION_MODEL,
             "gemini": CONF_GEMINI_SUMMARIZATION_MODEL,
         },
@@ -707,16 +732,19 @@ MODEL_CATEGORY_SPECS: dict[str, dict[str, Any]] = {
         "recommended_temperature": None,
         "providers": {
             "openai": list(get_args(EMBEDDING_MODEL_OPENAI_SUPPORTED)),
+            "openai_compatible": list(get_args(EMBEDDING_MODEL_OPENAI_SUPPORTED)),
             "ollama": list(get_args(EMBEDDING_MODEL_OLLAMA_SUPPORTED)),
             "gemini": list(get_args(EMBEDDING_MODEL_GEMINI_SUPPORTED)),
         },
         "recommended_models": {
             "openai": RECOMMENDED_OPENAI_EMBEDDING_MODEL,
+            "openai_compatible": RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_MODEL,
             "ollama": RECOMMENDED_OLLAMA_EMBEDDING_MODEL,
             "gemini": RECOMMENDED_GEMINI_EMBEDDING_MODEL,
         },
         "model_keys": {
             "openai": CONF_OPENAI_EMBEDDING_MODEL,
+            "openai_compatible": CONF_OPENAI_COMPATIBLE_EMBEDDING_MODEL,
             "ollama": CONF_OLLAMA_EMBEDDING_MODEL,
             "gemini": CONF_GEMINI_EMBEDDING_MODEL,
         },

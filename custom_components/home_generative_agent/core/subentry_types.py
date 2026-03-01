@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 ProviderType = Literal[
     "ollama",
     "openai",
+    "openai_compatible",
     "gemini",
     "anthropic",
     "triton",
