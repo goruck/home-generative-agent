@@ -328,6 +328,52 @@ async def validate_openai_key(
             raise CannotConnectError
 
 
+async def validate_openai_compatible_url(
+    hass: HomeAssistant,
+    base_url: str,
+    api_key: str | None = None,
+    timeout_s: float = 10.0,
+) -> None:
+    """Validate an OpenAI-compatible endpoint by calling its /v1/models path."""
+    if not base_url:
+        raise CannotConnectError
+    url = urljoin(base_url.rstrip("/") + "/", "v1/models")
+    headers: dict[str, str] = {}
+    if api_key and api_key != "none":
+        headers["Authorization"] = f"Bearer {api_key}"
+    client = get_async_client(hass)
+    try:
+        async with async_timeout.timeout(timeout_s):
+            resp = await client.get(url, headers=headers)
+    except (TimeoutError, httpx.RequestError) as err:
+        LOGGER.debug("OpenAI-compatible connectivity exception: %s", err)
+        raise CannotConnectError from err
+    else:
+        if resp.status_code == HTTP_STATUS_UNAUTHORIZED:
+            raise InvalidAuthError
+        if resp.status_code >= HTTP_STATUS_BAD_REQUEST:
+            raise CannotConnectError
+
+
+async def openai_compatible_healthy(
+    hass: HomeAssistant,
+    base_url: str | None,
+    api_key: str | None = None,
+    timeout_s: float = 2.0,
+) -> bool:
+    """Return True if an OpenAI-compatible endpoint is reachable, False otherwise."""
+    if not base_url:
+        LOGGER.warning("OpenAI-compatible health check skipped: missing base URL.")
+        return False
+    try:
+        await validate_openai_compatible_url(hass, base_url, api_key, timeout_s)
+    except (CannotConnectError, InvalidAuthError) as err:
+        LOGGER.warning("OpenAI-compatible health check failed (%s): %s", base_url, err)
+        return False
+    else:
+        return True
+
+
 async def validate_gemini_key(
     hass: HomeAssistant, api_key: str, timeout_s: float = 10.0
 ) -> None:

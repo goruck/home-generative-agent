@@ -282,7 +282,7 @@ def count_tokens_cross_provider(
     ollama  -> If model looks like OpenAI (e.g., gpt-oss), use tiktoken;
                otherwise /api/tokenize (fast) or /api/generate with (exact)
     """
-    if provider == "openai":
+    if provider in ("openai", "openai_compatible"):
         return _count_tokens_tiktoken(messages, model=model)
 
     if provider == "gemini":

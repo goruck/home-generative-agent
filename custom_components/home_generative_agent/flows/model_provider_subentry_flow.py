@@ -35,6 +35,7 @@ from ..core.utils import (  # noqa: TID252
     ensure_http_url,
     validate_gemini_key,
     validate_ollama_url,
+    validate_openai_compatible_url,
     validate_openai_key,
 )
 
@@ -42,6 +43,7 @@ LOGGER = logging.getLogger(__name__)
 
 ProviderNames = {
     "ollama": "Primary Ollama",
+    "openai_compatible": "Edge-LLM OpenAI Compatible",
     "openai": "Cloud-LLM OpenAI",
     "gemini": "Cloud-LLM Gemini",
 }
@@ -103,6 +105,9 @@ class ModelProviderSubentryFlow(ConfigSubentryFlow):
         opts: list[SelectOptionDict] = []
         if self._deployment == "edge":
             opts.append(SelectOptionDict(label="Ollama", value="ollama"))
+            opts.append(
+                SelectOptionDict(label="OpenAI Compatible", value="openai_compatible")
+            )
         if self._deployment == "cloud":
             opts.extend(
                 [
@@ -197,7 +202,7 @@ class ModelProviderSubentryFlow(ConfigSubentryFlow):
         )
         return self.async_show_form(step_id="provider", data_schema=schema)
 
-    async def async_step_settings(  # noqa: PLR0912, PLR0915
+    async def async_step_settings(  # noqa: C901, PLR0912, PLR0915
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
         """Configure provider-specific settings."""
@@ -220,6 +225,27 @@ class ModelProviderSubentryFlow(ConfigSubentryFlow):
                         errors["base"] = "cannot_connect"
                     except Exception:
                         LOGGER.exception("Unexpected exception validating Ollama URL")
+                        errors["base"] = "unknown"
+            elif provider_type == "openai_compatible":
+                base_url = user_input.get("base_url")
+                if not base_url:
+                    errors["base"] = "cannot_connect"
+                else:
+                    settings["base_url"] = ensure_http_url(str(base_url))
+                    api_key = user_input.get(CONF_API_KEY) or "none"
+                    settings["api_key"] = api_key
+                    try:
+                        await validate_openai_compatible_url(
+                            self.hass, settings["base_url"], api_key
+                        )
+                    except CannotConnectError:
+                        errors["base"] = "cannot_connect"
+                    except InvalidAuthError:
+                        errors["base"] = "invalid_auth"
+                    except Exception:
+                        LOGGER.exception(
+                            "Unexpected exception validating OpenAI-compatible URL"
+                        )
                         errors["base"] = "unknown"
             elif provider_type == "openai":
                 api_key = user_input.get(CONF_API_KEY)
@@ -292,6 +318,25 @@ class ModelProviderSubentryFlow(ConfigSubentryFlow):
                         },
                         default=current_settings.get("base_url") or "",
                     ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT))
+                }
+            )
+        elif provider_type == "openai_compatible":
+            schema = vol.Schema(
+                {
+                    vol.Required(
+                        "base_url",
+                        description={
+                            "suggested_value": current_settings.get("base_url")
+                        },
+                        default=current_settings.get("base_url") or "",
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+                    vol.Optional(
+                        CONF_API_KEY,
+                        description={
+                            "suggested_value": current_settings.get("api_key")
+                        },
+                        default=current_settings.get("api_key") or "",
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
                 }
             )
         elif provider_type == "openai":

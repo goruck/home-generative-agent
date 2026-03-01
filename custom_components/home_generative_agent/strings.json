@@ -76,6 +76,9 @@
             "base_url": "Base URL",
             "api_key": "API key",
             "gemini_api_key": "Gemini API key"
+          },
+          "data_description": {
+            "api_key": "Required for OpenAI. For OpenAI Compatible providers, leave blank or enter 'none' if the endpoint requires no authentication."
           }
         }
       },

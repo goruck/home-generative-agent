@@ -85,6 +85,7 @@ async def test_setup_closes_pool_on_migration_failure(
     monkeypatch.setattr(hga_component, "openai_healthy", _false_health)
     monkeypatch.setattr(hga_component, "gemini_healthy", _false_health)
     monkeypatch.setattr(hga_component, "ollama_healthy", _false_health)
+    monkeypatch.setattr(hga_component, "openai_compatible_healthy", _false_health)
     monkeypatch.setattr(hga_component, "_register_services", lambda *_args: None)
     monkeypatch.setattr(
         hga_component, "_ensure_default_feature_subentries", lambda *_args: None
