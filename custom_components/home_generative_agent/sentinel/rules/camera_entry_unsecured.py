@@ -79,8 +79,9 @@ class CameraEntryUnsecuredRule:
                     # No linked sensors in camera_activity (camera doesn't
                     # advertise vmd_entity_id etc.); scan all binary sensors
                     # in the same area as a last resort.  Device-class is not
-                    # checked because VMD sensors (e.g. Hikvision) often have
-                    # no device_class; the area constraint is sufficient.
+                    # checked because VMD sensors vary by manufacturer and
+                    # often have no device_class; the area constraint is
+                    # sufficient.
                     candidates = [
                         e["last_changed"]
                         for e in snapshot["entities"]

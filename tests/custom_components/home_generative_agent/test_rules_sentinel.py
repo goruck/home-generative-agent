@@ -185,7 +185,7 @@ def test_camera_entry_unsecured_vmd_last_changed_fallback() -> None:
 
 
 def test_camera_entry_unsecured_area_binary_scan_fallback() -> None:
-    """Area binary sensor scan works without device_class (Hikvision VMD sensors)."""
+    """Area binary sensor scan works without device_class (manufacturer-agnostic)."""
     snapshot = _base_snapshot()
     snapshot["derived"]["now"] = "2025-01-01T00:05:00+00:00"
     snapshot["entities"] = [
