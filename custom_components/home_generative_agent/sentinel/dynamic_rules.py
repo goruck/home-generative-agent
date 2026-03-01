@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any, cast
 
+from .baseline import evaluate_baseline_deviation, evaluate_time_of_day_anomaly
 from .models import AnomalyFinding, Severity, build_anomaly_id
 from .proposal_templates import SUPPORTED_TEMPLATES
 
@@ -23,9 +24,19 @@ _SEVERITIES = {"low", "medium", "high"}
 
 
 def evaluate_dynamic_rules(
-    snapshot: FullStateSnapshot, rules: Iterable[dict[str, Any]]
+    snapshot: FullStateSnapshot,
+    rules: Iterable[dict[str, Any]],
+    baselines: dict[str, dict[str, float]] | None = None,
 ) -> list[AnomalyFinding]:
-    """Evaluate generated rules deterministically."""
+    """
+    Evaluate generated rules deterministically.
+
+    *baselines* is an optional mapping ``{entity_id: {metric: float}}``
+    populated by ``SentinelBaselineUpdater``.  When ``None``, baseline-driven
+    templates (``baseline_deviation``, ``time_of_day_anomaly``) return empty
+    lists silently.
+    """
+    _baselines: dict[str, dict[str, float]] = baselines or {}
     entity_map = {entity["entity_id"]: entity for entity in snapshot["entities"]}
     camera_map = {
         activity["camera_entity_id"]: activity
@@ -101,6 +112,13 @@ def evaluate_dynamic_rules(
         ),
         "unavailable_sensors": lambda rule: _eval_unavailable_sensors(
             snapshot, rule, entity_map
+        ),
+        # Issue #265 — baseline-driven detectors
+        "baseline_deviation": (
+            lambda rule: evaluate_baseline_deviation(snapshot, rule, _baselines)
+        ),
+        "time_of_day_anomaly": (
+            lambda rule: evaluate_time_of_day_anomaly(snapshot, rule, _baselines)
         ),
     }
 

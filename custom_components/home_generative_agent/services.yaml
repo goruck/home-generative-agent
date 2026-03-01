@@ -199,13 +199,6 @@ sentinel_set_autonomy_level:
     Level 0 = fully passive; 1 = notify only; 2 = suggest; 3 = act autonomously.
     The override reverts to the config default when the TTL expires.
   fields:
-    entry_id:
-      name: Entry ID
-      description: The config entry ID to target.
-      required: true
-      example: "abc123def456"
-      selector:
-        text:
     level:
       name: Autonomy level
       description: "New autonomy level: 0 (passive), 1 (notify), 2 (suggest), 3 (act)."

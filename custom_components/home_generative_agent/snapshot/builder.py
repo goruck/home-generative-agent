@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.helpers import area_registry as ar
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 
@@ -56,12 +57,19 @@ def _build_entity_snapshot(state: State, area_name: str | None) -> SnapshotEntit
 
 def _build_area_lookup(hass: HomeAssistant) -> dict[str, str | None]:
     entity_registry = er.async_get(hass)
+    device_registry = dr.async_get(hass)
     area_registry = ar.async_get(hass)
     area_names = {area_id: area.name for area_id, area in area_registry.areas.items()}
 
     lookup: dict[str, str | None] = {}
     for entity_id, entry in entity_registry.entities.items():
+        # Entity-level area takes precedence; fall back to the parent device's
+        # area, which is how areas are most commonly assigned in HA.
         area_id = entry.area_id
+        if area_id is None and entry.device_id is not None:
+            device = device_registry.devices.get(entry.device_id)
+            if device is not None:
+                area_id = device.area_id
         lookup[entity_id] = area_names.get(area_id) if area_id is not None else None
     return lookup
 

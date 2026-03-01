@@ -21,6 +21,9 @@ SUPPORTED_TEMPLATES = {
     "unlocked_lock_when_home",
     "motion_without_camera_activity",
     "unknown_person_camera_no_home",
+    # Issue #265 — baseline-driven detectors
+    "baseline_deviation",
+    "time_of_day_anomaly",
 }
 
 _PERCENT_THRESHOLD_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*%")

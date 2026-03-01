@@ -97,6 +97,7 @@ from .const import (
     CONF_OPENAI_EMBEDDING_MODEL,
     CONF_OPENAI_SUMMARIZATION_MODEL,
     CONF_OPENAI_VLM,
+    CONF_SENTINEL_BASELINE_ENABLED,
     CONF_SENTINEL_COOLDOWN_MINUTES,
     CONF_SENTINEL_DISCOVERY_ENABLED,
     CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS,
@@ -105,6 +106,8 @@ from .const import (
     CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES,
     CONF_SENTINEL_INTERVAL_SECONDS,
     CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
+    CONF_SENTINEL_TRIAGE_ENABLED,
+    CONF_SENTINEL_TRIAGE_TIMEOUT_SECONDS,
     CONF_SUMMARIZATION_MODEL_PROVIDER,
     CONF_SUMMARIZATION_MODEL_TEMPERATURE,
     CONF_VECTORS_BOOTSTRAPPED,
@@ -151,6 +154,7 @@ from .const import (
     RECOMMENDED_OPENAI_EMBEDDING_MODEL,
     RECOMMENDED_OPENAI_SUMMARIZATION_MODEL,
     RECOMMENDED_OPENAI_VLM,
+    RECOMMENDED_SENTINEL_BASELINE_ENABLED,
     RECOMMENDED_SENTINEL_COOLDOWN_MINUTES,
     RECOMMENDED_SENTINEL_DISCOVERY_ENABLED,
     RECOMMENDED_SENTINEL_DISCOVERY_INTERVAL_SECONDS,
@@ -159,6 +163,8 @@ from .const import (
     RECOMMENDED_SENTINEL_ENTITY_COOLDOWN_MINUTES,
     RECOMMENDED_SENTINEL_INTERVAL_SECONDS,
     RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
+    RECOMMENDED_SENTINEL_TRIAGE_ENABLED,
+    RECOMMENDED_SENTINEL_TRIAGE_TIMEOUT_SECONDS,
     RECOMMENDED_SUMMARIZATION_MODEL_PROVIDER,
     RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
     RECOMMENDED_VLM_PROVIDER,
@@ -207,14 +213,17 @@ from .explain.llm_explain import LLMExplainer
 from .http import EnrollPersonView
 from .notify.actions import ActionHandler
 from .notify.dispatcher import NotificationDispatcher
+from .sentinel.baseline import SentinelBaselineUpdater
 from .sentinel.discovery_engine import SentinelDiscoveryEngine
 from .sentinel.discovery_semantic import candidate_semantic_key, rule_semantic_key
 from .sentinel.discovery_store import DiscoveryStore
 from .sentinel.engine import SentinelEngine
+from .sentinel.notifier import SentinelNotifier
 from .sentinel.proposal_store import ProposalStore
 from .sentinel.proposal_templates import normalize_candidate
 from .sentinel.rule_registry import RuleRegistry
 from .sentinel.suppression import SuppressionManager
+from .sentinel.triage import SentinelTriageService
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -299,7 +308,6 @@ TOGGLE_DYNAMIC_RULE_SCHEMA = vol.Schema(
 
 SET_AUTONOMY_LEVEL_SCHEMA = vol.Schema(
     {
-        vol.Required("entry_id"): cv.string,
         vol.Required("level"): vol.All(vol.Coerce(int), vol.In([0, 1, 2, 3])),
         vol.Optional("pin"): cv.string,
     }
@@ -1125,11 +1133,39 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         entry_id=entry.entry_id,
         notify_service=options.get(CONF_NOTIFY_SERVICE),
     )
-    notifier = NotificationDispatcher(hass, options, action_handler)
+    # Issue #261: SentinelNotifier replaces NotificationDispatcher as the
+    # primary notifier.  The legacy NotificationDispatcher is kept in
+    # runtime_data for any callers that still reference it by name.
+    notifier = SentinelNotifier(hass, options, suppression, action_handler)
     notifier.start()
+    # Keep a legacy dispatcher instance so existing runtime_data consumers
+    # (e.g. tests, services) that reference NotificationDispatcher continue
+    # to work.  It is not started — SentinelNotifier owns the event loop.
+    _legacy_dispatcher = NotificationDispatcher(hass, options, action_handler)
     explainer = None
     if options.get(CONF_EXPLAIN_ENABLED, RECOMMENDED_EXPLAIN_ENABLED):
         explainer = LLMExplainer(chat_model)
+    # Issue #262: optional LLM triage service.
+    triage_service: SentinelTriageService | None = None
+    if options.get(CONF_SENTINEL_TRIAGE_ENABLED, RECOMMENDED_SENTINEL_TRIAGE_ENABLED):
+        triage_timeout = int(
+            options.get(
+                CONF_SENTINEL_TRIAGE_TIMEOUT_SECONDS,
+                RECOMMENDED_SENTINEL_TRIAGE_TIMEOUT_SECONDS,
+            )
+        )
+        triage_service = SentinelTriageService(
+            chat_model, timeout_seconds=triage_timeout
+        )
+        LOGGER.info("Sentinel LLM triage enabled (timeout=%ds).", triage_timeout)
+    # Issue #265: optional baseline updater (requires PostgreSQL pool).
+    baseline_updater: SentinelBaselineUpdater | None = None
+    if pool is not None and options.get(
+        CONF_SENTINEL_BASELINE_ENABLED, RECOMMENDED_SENTINEL_BASELINE_ENABLED
+    ):
+        baseline_updater = SentinelBaselineUpdater(hass, pool, dict(options))
+        await baseline_updater.async_initialize()
+        LOGGER.info("Sentinel baseline updater enabled.")
     sentinel = SentinelEngine(
         hass,
         options,
@@ -1138,6 +1174,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         audit_store,
         explainer,
         rule_registry=rule_registry,
+        entry_id=entry.entry_id,
+        triage_service=triage_service,
+        baseline_updater=baseline_updater,
     )
     discovery_engine = SentinelDiscoveryEngine(
         hass=hass,
@@ -1611,8 +1650,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     )
 
     async def _handle_sentinel_set_autonomy_level(call: ServiceCall) -> dict[str, Any]:
-        """Set the runtime autonomy level for a specific config entry (admin-only)."""
-        requested_entry_id = str(call.data["entry_id"])
+        """Set the runtime autonomy level (admin-only)."""
         level = int(call.data["level"])
         pin: str | None = call.data.get("pin")
 
@@ -1627,10 +1665,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
         sentinel = entry.runtime_data.sentinel
         if sentinel is None:
-            return {"status": "unavailable", "entry_id": requested_entry_id}
+            return {"status": "unavailable", "entry_id": entry.entry_id}
 
-        sentinel.set_autonomy_level(requested_entry_id, level, pin=pin)
-        return {"status": "ok", "entry_id": requested_entry_id, "level": level}
+        sentinel.set_autonomy_level(entry.entry_id, level, pin=pin)
+        return {"status": "ok", "entry_id": entry.entry_id, "level": level}
 
     hass.services.async_register(
         DOMAIN,

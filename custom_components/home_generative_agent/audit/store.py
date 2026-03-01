@@ -33,6 +33,9 @@ _V2_FIELD_DEFAULTS: dict[str, Any] = {
     "execution_id": None,
     "rule_version": None,
     "autonomy_level_at_decision": None,
+    # Issue #262 additions (backward-compatible; same version bucket)
+    "triage_decision": None,
+    "triage_reason_code": None,
 }
 
 
@@ -94,6 +97,8 @@ class AuditStore:
         trigger_source: str | None = None,
         data_quality: dict[str, Any] | None = None,
         triage_confidence: float | None = None,
+        triage_decision: str | None = None,
+        triage_reason_code: str | None = None,
         canary_would_execute: bool | None = None,
         execution_id: str | None = None,
         rule_version: str | None = None,
@@ -115,6 +120,8 @@ class AuditStore:
             trigger_source=trigger_source,
             suppression_reason_code=suppression_reason_code,
             triage_confidence=triage_confidence,
+            triage_decision=triage_decision,
+            triage_reason_code=triage_reason_code,
             canary_would_execute=canary_would_execute,
             execution_id=execution_id,
             rule_version=rule_version,

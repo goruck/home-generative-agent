@@ -150,7 +150,7 @@ def test_purge_expired_prompts_removes_only_expired() -> None:
         pending_prompt_ttl=PENDING_PROMPT_DEFAULT_TTL,
     )
 
-    assert changed is True
+    assert changed == 2
     assert "expired" not in state.pending_prompts
     assert "invalid" not in state.pending_prompts
     assert "fresh" in state.pending_prompts

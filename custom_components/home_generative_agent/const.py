@@ -187,6 +187,28 @@ RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES: list[str] = ["low"]
 CONF_SENTINEL_PRESENCE_GRACE_MINUTES = "sentinel_presence_grace_minutes"
 RECOMMENDED_SENTINEL_PRESENCE_GRACE_MINUTES: int = 10
 
+# ---- Sentinel notification routing (Issue #261) ----
+# Maps area name -> notify service, e.g. {"bedroom": "notify.mobile_app_alice"}
+CONF_SENTINEL_AREA_NOTIFY_MAP = "sentinel_area_notify_map"
+
+# ---- Sentinel LLM triage (Issue #262) ----
+CONF_SENTINEL_TRIAGE_ENABLED = "sentinel_triage_enabled"
+CONF_SENTINEL_TRIAGE_TIMEOUT_SECONDS = "sentinel_triage_timeout_seconds"
+RECOMMENDED_SENTINEL_TRIAGE_ENABLED: bool = False
+RECOMMENDED_SENTINEL_TRIAGE_TIMEOUT_SECONDS: int = 10
+
+# ---- Sentinel baseline storage (Issue #265) ----
+CONF_SENTINEL_BASELINE_ENABLED = "sentinel_baseline_enabled"
+CONF_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES = (
+    "sentinel_baseline_update_interval_minutes"
+)
+CONF_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS = (
+    "sentinel_baseline_freshness_threshold_seconds"
+)
+RECOMMENDED_SENTINEL_BASELINE_ENABLED: bool = False
+RECOMMENDED_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES: int = 15
+RECOMMENDED_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS: int = 3600
+
 # ---- Feature definitions ----
 DEFAULT_FEATURE_TYPES: tuple[str, ...] = (
     "conversation",

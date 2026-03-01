@@ -24,6 +24,9 @@ if TYPE_CHECKING:
         DiscoveryStore,
     )
     from custom_components.home_generative_agent.sentinel.engine import SentinelEngine
+    from custom_components.home_generative_agent.sentinel.notifier import (
+        SentinelNotifier,
+    )
     from custom_components.home_generative_agent.sentinel.proposal_store import (
         ProposalStore,
     )
@@ -56,7 +59,7 @@ class HGAData:
     pending_actions: dict[str, dict[str, Any]]
     suppression: SuppressionManager | None
     sentinel: SentinelEngine | None
-    notifier: NotificationDispatcher | None
+    notifier: SentinelNotifier | NotificationDispatcher | None
     action_handler: ActionHandler | None
     audit_store: AuditStore | None
     explainer: LLMExplainer | None

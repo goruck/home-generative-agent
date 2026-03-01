@@ -55,6 +55,7 @@ from .suppression import (
     register_prompt,
     should_suppress,
 )
+from .triage import TRIAGE_SUPPRESS, SentinelTriageService
 from .trigger_scheduler import SentinelTriggerScheduler, TriggerRecord
 
 if TYPE_CHECKING:
@@ -71,7 +72,9 @@ if TYPE_CHECKING:
         FullStateSnapshot,
     )
 
+    from .baseline import SentinelBaselineUpdater
     from .models import AnomalyFinding
+    from .notifier import SentinelNotifier
     from .rule_registry import RuleRegistry
 
 LOGGER = logging.getLogger(__name__)
@@ -127,12 +130,14 @@ class SentinelEngine:
         hass: HomeAssistant,
         options: dict[str, object],
         suppression: SuppressionManager,
-        notifier: NotificationDispatcher,
+        notifier: SentinelNotifier | NotificationDispatcher,
         audit_store: AuditStore,
         explainer: LLMExplainer | None = None,
         *,
         rule_registry: RuleRegistry | None = None,
         entry_id: str | None = None,
+        triage_service: SentinelTriageService | None = None,
+        baseline_updater: SentinelBaselineUpdater | None = None,
     ) -> None:
         """Initialize sentinel dependencies and runtime state."""
         self._hass = hass
@@ -143,6 +148,8 @@ class SentinelEngine:
         self._explainer = explainer
         self._rule_registry = rule_registry
         self._entry_id = entry_id
+        self._triage_service = triage_service
+        self._baseline_updater = baseline_updater
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
         self._correlator = SentinelCorrelator()
@@ -238,6 +245,11 @@ class SentinelEngine:
         self._event_unsubscribers.append(unsub)
 
         self._task = self._hass.async_create_task(self._run_loop())
+
+        # Start the baseline updater independently if configured.
+        if self._baseline_updater is not None:
+            self._baseline_updater.start()
+
         LOGGER.debug("Sentinel engine started (event-driven triggering active).")
 
     async def stop(self) -> None:
@@ -249,6 +261,10 @@ class SentinelEngine:
         with contextlib.suppress(asyncio.CancelledError):
             await self._task
         self._task = None
+
+        # Stop baseline updater.
+        if self._baseline_updater is not None:
+            await self._baseline_updater.stop()
 
         # Unsubscribe event listeners.
         for unsub in self._event_unsubscribers:
@@ -351,11 +367,17 @@ class SentinelEngine:
             )
         )
 
-        if purge_expired_prompts(
+        purged = purge_expired_prompts(
             self._suppression.state,
             now,
             pending_prompt_ttl=pending_prompt_ttl,
-        ):
+        )
+        if purged:
+            LOGGER.debug(
+                "Purged %d expired pending prompt(s) (TTL=%s).",
+                purged,
+                pending_prompt_ttl,
+            )
             await self._suppression.async_save()
 
         # Update presence grace windows by comparing current people_home to
@@ -500,6 +522,35 @@ class SentinelEngine:
             )
         )
 
+        # LLM triage pass (Level 1+): may suppress the finding.
+        triage_decision_value: str | None = None
+        triage_reason_code_value: str | None = None
+        triage_confidence_value: float | None = None
+        if effective_autonomy >= 1 and self._triage_service is not None:
+            triage_result = await self._triage_service.triage(finding, snapshot)
+            triage_decision_value = triage_result.decision
+            triage_reason_code_value = triage_result.reason_code
+            triage_confidence_value = triage_result.triage_confidence
+            if triage_result.decision == TRIAGE_SUPPRESS:
+                LOGGER.info(
+                    "Triage suppressed finding %s (%s): reason=%s.",
+                    finding.anomaly_id,
+                    finding.type,
+                    triage_result.reason_code,
+                )
+                await _append_finding_audit(
+                    self._audit_store,
+                    snapshot,
+                    finding,
+                    None,
+                    suppression_decision.reason_code,
+                    triage_decision=triage_decision_value,
+                    triage_reason_code=triage_reason_code_value,
+                    triage_confidence=triage_confidence_value,
+                    autonomy_level_at_decision=effective_autonomy,
+                )
+                return
+
         # Execution policy evaluation.
         exec_result = self._execution_service.evaluate(
             finding, snapshot, effective_autonomy, now
@@ -526,6 +577,9 @@ class SentinelEngine:
             finding,
             explanation,
             suppression_decision.reason_code,
+            triage_decision=triage_decision_value,
+            triage_reason_code=triage_reason_code_value,
+            triage_confidence=triage_confidence_value,
             data_quality=exec_result.data_quality,
             action_policy_path=exec_result.action_policy_path,
             execution_id=exec_result.execution_id,
@@ -608,6 +662,9 @@ class SentinelEngine:
             compound,
             explanation,
             "not_suppressed",
+            triage_decision=None,
+            triage_reason_code=None,
+            triage_confidence=None,
             data_quality=exec_result.data_quality,
             action_policy_path=exec_result.action_policy_path,
             execution_id=exec_result.execution_id,
@@ -693,6 +750,9 @@ async def _append_finding_audit(  # noqa: PLR0913
     explanation: str | None,
     suppression_reason_code: str,
     *,
+    triage_decision: str | None = None,
+    triage_reason_code: str | None = None,
+    triage_confidence: float | None = None,
     data_quality: str | None = None,
     action_policy_path: str | None = None,
     execution_id: str | None = None,
@@ -705,6 +765,9 @@ async def _append_finding_audit(  # noqa: PLR0913
             finding,
             explanation,
             suppression_reason_code=suppression_reason_code,
+            triage_decision=triage_decision,
+            triage_reason_code=triage_reason_code,
+            triage_confidence=triage_confidence,
             data_quality={"quality": data_quality} if data_quality else None,
             action_policy_path=action_policy_path,
             execution_id=execution_id,

@@ -1,0 +1,692 @@
+# ruff: noqa: S101
+"""Tests for SentinelNotifier — sentinel/notifier.py (Issue #261)."""
+
+from __future__ import annotations
+
+import asyncio
+from typing import Any
+
+import pytest
+
+from custom_components.home_generative_agent.const import (
+    CONF_NOTIFY_SERVICE,
+    CONF_SENTINEL_AREA_NOTIFY_MAP,
+)
+from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
+from custom_components.home_generative_agent.sentinel.notifier import (
+    _ACT_SNOOZE_7D,
+    _ACT_SNOOZE_24H,
+    _ACT_SNOOZE_ALWAYS,
+    _ACT_SNOOZE_CANCEL,
+    _ACT_SNOOZE_CONFIRM,
+    ACTION_PREFIX,
+    SentinelNotifier,
+    _redact_if_sensitive,
+)
+from custom_components.home_generative_agent.sentinel.suppression import (
+    SNOOZE_PERMANENT,
+    SuppressionState,
+)
+
+# ---------------------------------------------------------------------------
+# Minimal stubs
+# ---------------------------------------------------------------------------
+
+
+class DummyServices:
+    """Records async_call() invocations."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def async_call(
+        self,
+        domain: str,
+        service: str,
+        data: dict[str, Any] | None = None,
+        *,
+        blocking: bool = False,
+        return_response: bool = False,
+    ) -> None:
+        self.calls.append({"domain": domain, "service": service, "data": data or {}})
+
+
+class DummyBus:
+    """Records async_listen() subscriptions and returns a no-op unsub."""
+
+    def async_listen(self, event_type: str, callback: Any) -> Any:
+        return lambda: None
+
+
+class DummyHass:
+    """Minimal HomeAssistant stub with task draining support."""
+
+    def __init__(self) -> None:
+        self.services = DummyServices()
+        self.bus = DummyBus()
+        self._pending_tasks: list[asyncio.Task[Any]] = []
+
+    def async_create_task(self, coro: Any) -> asyncio.Task[Any]:
+        loop = asyncio.get_event_loop()
+        task = loop.create_task(coro)
+        self._pending_tasks.append(task)
+        return task
+
+    async def drain_tasks(self) -> None:
+        while self._pending_tasks:
+            task = self._pending_tasks.pop(0)
+            await task
+
+
+class DummySuppressionManager:
+    """SuppressionManager stub."""
+
+    def __init__(self) -> None:
+        self.state = SuppressionState()
+        self.is_read_only = False
+        self.save_called = False
+        self.save_count = 0
+
+    async def async_save(self) -> None:
+        self.save_called = True
+        self.save_count += 1
+
+
+class DummyActionHandler:
+    """ActionHandler stub recording register_finding and handle_action calls."""
+
+    def __init__(self) -> None:
+        self._pending_findings: dict[str, AnomalyFinding] = {}
+        self.register_calls: list[AnomalyFinding] = []
+        self.handle_calls: list[tuple[str, dict[str, Any]]] = []
+
+    def register_finding(self, finding: AnomalyFinding) -> None:
+        self._pending_findings[finding.anomaly_id] = finding
+        self.register_calls.append(finding)
+
+    async def handle_action(self, action_id: str, payload: dict[str, Any]) -> None:
+        self.handle_calls.append((action_id, payload))
+
+
+class DummyEvent:
+    """Minimal HA Event stub."""
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        self._data = data
+
+    @property
+    def data(self) -> dict[str, Any]:
+        return self._data
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _finding(
+    anomaly_id: str = "abc123",
+    ftype: str = "open_entry_while_away",
+    is_sensitive: bool = False,  # noqa: FBT001, FBT002
+    recognized_people: list[str] | None = None,
+) -> AnomalyFinding:
+    evidence: dict[str, Any] = {}
+    if recognized_people is not None:
+        evidence["recognized_people"] = recognized_people
+    return AnomalyFinding(
+        anomaly_id=anomaly_id,
+        type=ftype,
+        severity="medium",
+        confidence=0.75,
+        triggering_entities=["binary_sensor.front_door"],
+        evidence=evidence,
+        suggested_actions=["close_entry"],
+        is_sensitive=is_sensitive,
+    )
+
+
+def _make_notifier(
+    options: dict[str, Any] | None = None,
+    hass: DummyHass | None = None,
+    suppression: DummySuppressionManager | None = None,
+    action_handler: DummyActionHandler | None = None,
+) -> tuple[SentinelNotifier, DummyHass, DummySuppressionManager, DummyActionHandler]:
+    h = hass or DummyHass()
+    s = suppression or DummySuppressionManager()
+    a = action_handler or DummyActionHandler()
+    opts = options if options is not None else {}
+    notifier = SentinelNotifier(
+        hass=h,  # type: ignore[arg-type]
+        options=opts,
+        suppression=s,  # type: ignore[arg-type]
+        action_handler=a,  # type: ignore[arg-type]
+    )
+    return notifier, h, s, a
+
+
+def _minimal_snapshot(area: str = "Living Room") -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "generated_at": "2025-01-01T00:00:00+00:00",
+        "entities": [
+            {
+                "entity_id": "binary_sensor.front_door",
+                "state": "on",
+                "domain": "binary_sensor",
+                "area": area,
+                "attributes": {},
+                "last_changed": "2025-01-01T00:00:00+00:00",
+                "last_updated": "2025-01-01T00:00:00+00:00",
+            }
+        ],
+        "camera_activity": [],
+        "derived": {
+            "now": "2025-01-01T10:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": False,
+            "anyone_home": False,
+            "people_home": [],
+            "people_away": [],
+            "last_motion_by_area": {},
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# 1. ``always`` confirmation guard
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_snooze_always_sends_confirmation_not_snooze() -> None:
+    """
+    Tapping 'Snooze Always' sends a confirmation notification.
+
+    register_snooze must NOT be called at this point.
+    """
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, hass, suppression, action_handler = _make_notifier(options)
+    finding = _finding(anomaly_id="abc123")
+    action_handler.register_finding(finding)
+
+    await notifier._handle_snooze(_ACT_SNOOZE_ALWAYS, "abc123")
+
+    # A confirmation notification must have been sent.
+    assert len(hass.services.calls) == 1
+    call = hass.services.calls[0]
+    assert call["domain"] == "notify"
+    assert call["service"] == "mobile_app_phone"
+    assert "Confirm permanent snooze" in call["data"]["title"]
+
+    # Snooze must NOT have been written to suppression state yet.
+    assert finding.type not in suppression.state.snoozed_until
+    assert suppression.save_called is False
+
+    # The pending intent must be recorded.
+    assert "abc123" in notifier._pending_always_snooze
+    assert notifier._pending_always_snooze["abc123"] == finding.type
+
+
+@pytest.mark.asyncio
+async def test_snooze_confirm_writes_permanent_after_always() -> None:
+    """After 'Snooze Always' → 'Confirm', SNOOZE_PERMANENT is written."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, _hass, suppression, action_handler = _make_notifier(options)
+    finding = _finding(anomaly_id="abc123")
+    action_handler.register_finding(finding)
+
+    await notifier._handle_snooze(_ACT_SNOOZE_ALWAYS, "abc123")
+    assert finding.type not in suppression.state.snoozed_until
+
+    await notifier._handle_snooze(_ACT_SNOOZE_CONFIRM, "abc123")
+
+    assert finding.type in suppression.state.snoozed_until
+    entry = suppression.state.snoozed_until[finding.type]
+    assert entry["until"] == SNOOZE_PERMANENT
+    assert suppression.save_called is True
+    assert "abc123" not in notifier._pending_always_snooze
+
+
+@pytest.mark.asyncio
+async def test_snooze_confirm_without_prior_always_is_noop() -> None:
+    """A stray 'Confirm' with no prior 'Snooze Always' must be a no-op."""
+    notifier, hass, suppression, action_handler = _make_notifier()
+    finding = _finding(anomaly_id="abc123")
+    action_handler.register_finding(finding)
+
+    await notifier._handle_snooze(_ACT_SNOOZE_CONFIRM, "abc123")
+
+    assert finding.type not in suppression.state.snoozed_until
+    assert suppression.save_called is False
+    assert hass.services.calls == []
+
+
+# ---------------------------------------------------------------------------
+# 2. Snooze 24 h
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_snooze_24h_writes_to_suppression() -> None:
+    """snooze24h registers a 24-hour snooze and calls async_save()."""
+    notifier, _hass, suppression, action_handler = _make_notifier()
+    finding = _finding(anomaly_id="abc123", ftype="open_entry_while_away")
+    action_handler.register_finding(finding)
+
+    await notifier._handle_snooze(_ACT_SNOOZE_24H, "abc123")
+
+    assert finding.type in suppression.state.snoozed_until
+    entry = suppression.state.snoozed_until[finding.type]
+    assert entry["until"] != SNOOZE_PERMANENT
+    assert suppression.save_called is True
+    assert suppression.save_count == 1
+
+
+@pytest.mark.asyncio
+async def test_snooze_24h_unknown_finding_is_noop() -> None:
+    """snooze24h for an unknown anomaly_id must not crash or write state."""
+    notifier, _hass, suppression, _action_handler = _make_notifier()
+
+    await notifier._handle_snooze(_ACT_SNOOZE_24H, "nonexistent")
+
+    assert suppression.state.snoozed_until == {}
+    assert suppression.save_called is False
+
+
+# ---------------------------------------------------------------------------
+# 3. Snooze 7 d
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_snooze_7d_writes_to_suppression() -> None:
+    """snooze7d registers a 7-day snooze and calls async_save()."""
+    notifier, _hass, suppression, action_handler = _make_notifier()
+    finding = _finding(anomaly_id="abc123", ftype="open_entry_while_away")
+    action_handler.register_finding(finding)
+
+    await notifier._handle_snooze(_ACT_SNOOZE_7D, "abc123")
+
+    assert finding.type in suppression.state.snoozed_until
+    entry = suppression.state.snoozed_until[finding.type]
+    assert entry["until"] != SNOOZE_PERMANENT
+    assert suppression.save_called is True
+
+
+@pytest.mark.asyncio
+async def test_snooze_7d_unknown_finding_is_noop() -> None:
+    """snooze7d for an unknown anomaly_id must not crash or write state."""
+    notifier, _hass, suppression, _action_handler = _make_notifier()
+
+    await notifier._handle_snooze(_ACT_SNOOZE_7D, "nonexistent")
+
+    assert suppression.state.snoozed_until == {}
+    assert suppression.save_called is False
+
+
+# ---------------------------------------------------------------------------
+# 4. Sensitive-flag redacts person names
+# ---------------------------------------------------------------------------
+
+
+def test_redact_if_sensitive_replaces_names() -> None:
+    """_redact_if_sensitive replaces known names with 'a recognised person'."""
+    finding = _finding(is_sensitive=True, recognized_people=["John Doe"])
+    explanation = "John Doe was seen near the front door."
+
+    result = _redact_if_sensitive(explanation, finding)
+
+    assert result is not None
+    assert "John Doe" not in result
+    assert "a recognised person" in result
+
+
+def test_redact_if_sensitive_multiple_names() -> None:
+    """All names in recognized_people are redacted."""
+    finding = _finding(
+        is_sensitive=True, recognized_people=["Alice Smith", "Bob Jones"]
+    )
+    explanation = "Alice Smith and Bob Jones were detected."
+
+    result = _redact_if_sensitive(explanation, finding)
+
+    assert result is not None
+    assert "Alice Smith" not in result
+    assert "Bob Jones" not in result
+    assert result.count("a recognised person") == 2
+
+
+def test_redact_if_sensitive_case_insensitive() -> None:
+    """Redaction is case-insensitive."""
+    finding = _finding(is_sensitive=True, recognized_people=["John Doe"])
+    explanation = "JOHN DOE was detected."
+
+    result = _redact_if_sensitive(explanation, finding)
+
+    assert result is not None
+    assert "JOHN DOE" not in result
+    assert "a recognised person" in result
+
+
+def test_no_redaction_when_not_sensitive() -> None:
+    """Names are NOT redacted when is_sensitive=False."""
+    finding = _finding(is_sensitive=False, recognized_people=["John Doe"])
+    explanation = "John Doe was seen near the front door."
+
+    result = _redact_if_sensitive(explanation, finding)
+
+    assert result == explanation
+
+
+def test_no_redaction_when_no_recognized_people() -> None:
+    """Explanation is returned unchanged when recognized_people is empty."""
+    finding = _finding(is_sensitive=True, recognized_people=None)
+    explanation = "Motion detected near the front door."
+
+    result = _redact_if_sensitive(explanation, finding)
+
+    assert result == explanation
+
+
+@pytest.mark.asyncio
+async def test_async_notify_redacts_sensitive_message() -> None:
+    """async_notify sends a redacted message when finding.is_sensitive=True."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    snapshot = _minimal_snapshot()
+
+    sensitive_finding = _finding(
+        anomaly_id="sens1",
+        is_sensitive=True,
+        recognized_people=["John Doe"],
+    )
+    explanation = "John Doe was seen near the front door at 10 PM."
+
+    await notifier.async_notify(sensitive_finding, snapshot, explanation)  # type: ignore[arg-type]
+
+    assert len(hass.services.calls) == 1
+    call = hass.services.calls[0]
+    message = call["data"]["message"]
+    assert "John Doe" not in message
+    assert "a recognised person" in message
+
+
+# ---------------------------------------------------------------------------
+# 5. Per-area routing
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_area_routing_uses_mapped_service() -> None:
+    """When entity area matches CONF_SENTINEL_AREA_NOTIFY_MAP, use mapped service."""
+    options = {
+        CONF_NOTIFY_SERVICE: "notify.mobile_app_global",
+        CONF_SENTINEL_AREA_NOTIFY_MAP: {"Living Room": "notify.mobile_app_alice"},
+    }
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    snapshot = _minimal_snapshot(area="Living Room")
+    finding = _finding(anomaly_id="route1")
+
+    await notifier.async_notify(finding, snapshot, "Door is open.")  # type: ignore[arg-type]
+
+    assert len(hass.services.calls) == 1
+    call = hass.services.calls[0]
+    assert call["domain"] == "notify"
+    assert call["service"] == "mobile_app_alice"
+
+
+@pytest.mark.asyncio
+async def test_area_routing_falls_back_to_global_service() -> None:
+    """When no area matches the map, the global notify service is used."""
+    options = {
+        CONF_NOTIFY_SERVICE: "notify.mobile_app_global",
+        CONF_SENTINEL_AREA_NOTIFY_MAP: {"Kitchen": "notify.mobile_app_bob"},
+    }
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    snapshot = _minimal_snapshot(area="Living Room")
+    finding = _finding(anomaly_id="route2")
+
+    await notifier.async_notify(finding, snapshot, "Door is open.")  # type: ignore[arg-type]
+
+    assert len(hass.services.calls) == 1
+    call = hass.services.calls[0]
+    assert call["domain"] == "notify"
+    assert call["service"] == "mobile_app_global"
+
+
+@pytest.mark.asyncio
+async def test_no_notify_service_uses_persistent_notification() -> None:
+    """When no notify service is configured, a persistent notification is sent."""
+    notifier, hass, _suppression, _action_handler = _make_notifier(options={})
+    snapshot = _minimal_snapshot()
+    finding = _finding(anomaly_id="persist1")
+
+    await notifier.async_notify(finding, snapshot, "Door is open.")  # type: ignore[arg-type]
+
+    assert len(hass.services.calls) == 1
+    call = hass.services.calls[0]
+    assert call["domain"] == "persistent_notification"
+    assert call["service"] == "create"
+
+
+@pytest.mark.asyncio
+async def test_area_map_only_without_global_service_routes_correctly() -> None:
+    """Area map works even when no global CONF_NOTIFY_SERVICE is set."""
+    options = {
+        CONF_SENTINEL_AREA_NOTIFY_MAP: {"Living Room": "notify.mobile_app_alice"},
+    }
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    snapshot = _minimal_snapshot(area="Living Room")
+    finding = _finding(anomaly_id="route3")
+
+    await notifier.async_notify(finding, snapshot, "Door is open.")  # type: ignore[arg-type]
+
+    assert len(hass.services.calls) == 1
+    call = hass.services.calls[0]
+    assert call["service"] == "mobile_app_alice"
+
+
+# ---------------------------------------------------------------------------
+# 6. Non-snooze actions delegated to ActionHandler
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_execute_action_delegated_to_action_handler() -> None:
+    """execute_<id> mobile actions are delegated to ActionHandler.handle_action()."""
+    notifier, hass, _suppression, action_handler = _make_notifier()
+    finding = _finding(anomaly_id="abc123")
+    action_handler.register_finding(finding)
+    notifier.start()
+
+    action_str = f"{ACTION_PREFIX}execute_abc123"
+    event = DummyEvent({"action": action_str, "extra": "payload"})
+    notifier._handle_action_event(event)  # type: ignore[arg-type]
+
+    await hass.drain_tasks()
+
+    assert len(action_handler.handle_calls) == 1
+    called_action_id, called_payload = action_handler.handle_calls[0]
+    assert called_action_id == action_str
+    assert called_payload["action"] == action_str
+
+
+@pytest.mark.asyncio
+async def test_non_prefixed_action_not_delegated() -> None:
+    """Actions not starting with ACTION_PREFIX are silently ignored."""
+    notifier, hass, _suppression, action_handler = _make_notifier()
+    notifier.start()
+
+    event = DummyEvent({"action": "some_other_app_action"})
+    notifier._handle_action_event(event)  # type: ignore[arg-type]
+
+    await hass.drain_tasks()
+
+    assert action_handler.handle_calls == []
+    assert hass.services.calls == []
+
+
+@pytest.mark.asyncio
+async def test_handoff_action_delegated_to_action_handler() -> None:
+    """handoff_<id> mobile actions are delegated to ActionHandler."""
+    notifier, hass, _suppression, action_handler = _make_notifier()
+    finding = _finding(anomaly_id="abc123")
+    action_handler.register_finding(finding)
+    notifier.start()
+
+    action_str = f"{ACTION_PREFIX}handoff_abc123"
+    event = DummyEvent({"action": action_str})
+    notifier._handle_action_event(event)  # type: ignore[arg-type]
+
+    await hass.drain_tasks()
+
+    assert len(action_handler.handle_calls) == 1
+    assert action_handler.handle_calls[0][0] == action_str
+
+
+# ---------------------------------------------------------------------------
+# 7. Snooze cancel clears pending state
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_snooze_cancel_clears_pending_always() -> None:
+    """'Snooze Cancel' after 'Snooze Always' discards the pending intent."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, _hass, suppression, action_handler = _make_notifier(options)
+    finding = _finding(anomaly_id="abc123")
+    action_handler.register_finding(finding)
+
+    await notifier._handle_snooze(_ACT_SNOOZE_ALWAYS, "abc123")
+    assert "abc123" in notifier._pending_always_snooze
+
+    await notifier._handle_snooze(_ACT_SNOOZE_CANCEL, "abc123")
+
+    assert "abc123" not in notifier._pending_always_snooze
+    assert finding.type not in suppression.state.snoozed_until
+    assert suppression.save_called is False
+
+
+@pytest.mark.asyncio
+async def test_snooze_cancel_without_prior_always_is_noop() -> None:
+    """A stray 'Cancel' with no prior 'Snooze Always' must be a silent no-op."""
+    notifier, _hass, suppression, action_handler = _make_notifier()
+    finding = _finding(anomaly_id="abc123")
+    action_handler.register_finding(finding)
+
+    await notifier._handle_snooze(_ACT_SNOOZE_CANCEL, "abc123")
+
+    assert "abc123" not in notifier._pending_always_snooze
+    assert suppression.state.snoozed_until == {}
+    assert suppression.save_called is False
+
+
+@pytest.mark.asyncio
+async def test_confirm_after_cancel_is_noop() -> None:
+    """Confirm after Cancel finds no pending intent and must be a no-op."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, hass, suppression, action_handler = _make_notifier(options)
+    finding = _finding(anomaly_id="abc123")
+    action_handler.register_finding(finding)
+
+    await notifier._handle_snooze(_ACT_SNOOZE_ALWAYS, "abc123")
+    await notifier._handle_snooze(_ACT_SNOOZE_CANCEL, "abc123")
+
+    hass.services.calls.clear()
+    suppression.save_called = False
+
+    await notifier._handle_snooze(_ACT_SNOOZE_CONFIRM, "abc123")
+
+    assert finding.type not in suppression.state.snoozed_until
+    assert suppression.save_called is False
+    assert hass.services.calls == []
+
+
+# ---------------------------------------------------------------------------
+# 8. End-to-end event-driven paths
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_event_driven_snooze_24h_via_handle_action_event() -> None:
+    """End-to-end: a mobile_app_notification_action event for snooze24h writes to suppression."""
+    notifier, hass, suppression, action_handler = _make_notifier()
+    finding = _finding(anomaly_id="abc123")
+    action_handler.register_finding(finding)
+    notifier.start()
+
+    action_str = f"{ACTION_PREFIX}{_ACT_SNOOZE_24H}_abc123"
+    event = DummyEvent({"action": action_str})
+    notifier._handle_action_event(event)  # type: ignore[arg-type]
+
+    await hass.drain_tasks()
+
+    assert finding.type in suppression.state.snoozed_until
+    assert suppression.save_called is True
+
+
+@pytest.mark.asyncio
+async def test_event_driven_snooze_always_via_handle_action_event() -> None:
+    """End-to-end: snoozealways mobile event stores pending intent."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, hass, suppression, action_handler = _make_notifier(options)
+    finding = _finding(anomaly_id="abc123")
+    action_handler.register_finding(finding)
+    notifier.start()
+
+    action_str = f"{ACTION_PREFIX}{_ACT_SNOOZE_ALWAYS}_abc123"
+    event = DummyEvent({"action": action_str})
+    notifier._handle_action_event(event)  # type: ignore[arg-type]
+
+    await hass.drain_tasks()
+
+    assert len(hass.services.calls) == 1
+    assert "abc123" in notifier._pending_always_snooze
+    assert finding.type not in suppression.state.snoozed_until
+
+
+# ---------------------------------------------------------------------------
+# 9. Lifecycle: start / stop
+# ---------------------------------------------------------------------------
+
+
+def test_start_subscribes_to_event_bus() -> None:
+    """start() registers an event listener; calling it twice is idempotent."""
+    subscribe_calls: list[str] = []
+
+    class TrackingBus:
+        def async_listen(self, event_type: str, callback: Any) -> Any:
+            subscribe_calls.append(event_type)
+            return lambda: None
+
+    hass = DummyHass()
+    hass.bus = TrackingBus()  # type: ignore[assignment]
+    notifier, *_ = _make_notifier(hass=hass)
+
+    notifier.start()
+    notifier.start()  # idempotent
+
+    assert len(subscribe_calls) == 1
+    assert subscribe_calls[0] == "mobile_app_notification_action"
+
+
+def test_stop_unsubscribes_and_is_idempotent() -> None:
+    """stop() calls the unsub callback and is safe to call multiple times."""
+    unsub_calls: list[int] = []
+
+    class TrackingBus:
+        def async_listen(self, event_type: str, callback: Any) -> Any:
+            def _unsub() -> None:
+                unsub_calls.append(1)
+
+            return _unsub
+
+    hass = DummyHass()
+    hass.bus = TrackingBus()  # type: ignore[assignment]
+    notifier, *_ = _make_notifier(hass=hass)
+
+    notifier.start()
+    notifier.stop()
+    notifier.stop()  # idempotent
+
+    assert len(unsub_calls) == 1
