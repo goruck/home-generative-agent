@@ -159,12 +159,15 @@ Sentinel is a singleton service per Home Generative Agent config entry. Configur
 
 1. `snapshot`: Builds an authoritative JSON snapshot (entities, camera activity, derived context).
 2. `sentinel`: Runs deterministic rules on that snapshot.
-3. `discovery` (optional): Uses an LLM to suggest rule candidates (advisory only).
-4. `proposal` review: User promotes/approves/rejects candidates.
-5. `rule_registry`: Stores approved generated rules (including active/inactive state) for deterministic runtime evaluation.
-6. `audit`: Persists findings and user action outcomes.
+3. `triage` (optional): LLM triage pass that evaluates findings and can suppress low-value alerts before notification (autonomy level ≥ 1). Fails open — on error the finding is always notified.
+4. `notifier`: Orchestrates mobile push and persistent notifications with snooze actions and per-area routing.
+5. `baseline` (optional): Background service that writes rolling statistical summaries per entity to a PostgreSQL table and fires temporal anomaly findings (deviation from rolling average or expected hour-of-day pattern).
+6. `discovery` (optional): Uses an LLM to suggest rule candidates (advisory only).
+7. `proposal` review: User promotes/approves/rejects candidates.
+8. `rule_registry`: Stores approved generated rules (including active/inactive state) for deterministic runtime evaluation.
+9. `audit`: Persists findings and user action outcomes.
 
-Important: The LLM never executes actions or directly decides runtime safety behavior. Detection and actuation remain deterministic.
+Important: The LLM never executes actions or directly decides runtime safety behavior. Detection and actuation remain deterministic. Triage can suppress low-value notifications but cannot alter any finding field or gate execution.
 
 ### Sentinel Notification Behavior
 
@@ -177,9 +180,50 @@ When Sentinel notifications are enabled:
   - `high`: `Urgent: check and secure it now.`
   - `medium`: `Check soon and secure it if unexpected.`
   - `low`: `Review when convenient.`
-- Mobile action buttons are: `Acknowledge`, `Ignore`, `Later`.
-- `Execute` is shown for non-sensitive findings that include suggested actions.
-- `Ask Agent` is shown for sensitive findings that include suggested actions. This hands the finding to the conversation agent, which can verify a PIN or alarm code before acting.
+- For `is_sensitive` findings, recognized person names in the explanation text are replaced with `"a recognised person"` before the message is sent.
+- Mobile action buttons (primary action first, then snooze options):
+  - `Execute` — shown for non-sensitive findings with suggested actions. Calls the conversation agent or fires `hga_sentinel_execute_requested`.
+  - `Ask Agent` — shown for sensitive findings with suggested actions. Hands the finding to the conversation agent, which can verify a PIN or alarm code before acting.
+  - `Snooze 24 h` — suppresses this finding type for 24 hours.
+  - `Snooze 7 d` — suppresses this finding type for 7 days.
+  - `Snooze Always` — suppresses this finding type permanently. A confirmation notification is sent first; the snooze is only written after the user taps **Confirm** in the follow-up notification.
+- Per-area routing: when `sentinel_area_notify_map` maps an area name to a notify service, findings whose triggering entities belong to that area are routed to that service instead of the global `notify_service`.
+
+### LLM Triage (Optional)
+
+When `sentinel_triage_enabled` is `true`, each finding passes through an LLM triage step before notification (requires autonomy level ≥ 1).
+
+- The triage prompt uses a restricted input allowlist — only sanitized fields are sent: `type`, `severity`, `confidence`, `is_sensitive`, `entity_count`, `suggested_actions_count`, and a small set of optional derived evidence (`is_night`, `anyone_home`, `recognized_people_count`, `last_changed_age_seconds`). Raw entity state values, attribute strings, area names, and free-form evidence text are never included.
+- Triage returns a `decision` (`notify` or `suppress`) and a `reason_code` for audit.
+- `triage_confidence` is recorded in the audit log but does not gate execution.
+- Triage cannot alter any finding field — it can only gate the notification.
+- Fails open: on timeout or error the decision becomes `notify` with `reason_code: triage_error`.
+
+Configuration options (in the Sentinel subentry):
+
+- `sentinel_triage_enabled` — enable LLM triage (default: `false`)
+- `sentinel_triage_timeout_seconds` — max time to wait for triage LLM response (default: `10`)
+
+### Baseline Detection (Optional)
+
+When `sentinel_baseline_enabled` is `true`, a background `SentinelBaselineUpdater` task writes rolling statistical summaries (per entity, per metric) to a `sentinel_baselines` PostgreSQL table on a configurable cadence.
+
+Two temporal detection helpers can be registered as dynamic-rule evaluators:
+
+- `evaluate_baseline_deviation` — fires when a numeric entity state deviates from its rolling average by more than a configured threshold percent.
+- `evaluate_time_of_day_anomaly` — fires when a numeric entity state differs from the expected hour-of-day rolling average by more than a configured threshold percent.
+
+Baseline freshness states (returned by `check_baseline_freshness`):
+
+- `fresh` — baseline was updated within the freshness threshold
+- `stale` — baseline exists but is older than the freshness threshold
+- `unavailable` — no baseline record exists for this entity/metric
+
+Configuration options (in the Sentinel subentry):
+
+- `sentinel_baseline_enabled` — enable baseline tracking (default: `false`)
+- `sentinel_baseline_update_interval_minutes` — how often baselines are recalculated (default: `15`)
+- `sentinel_baseline_freshness_threshold_seconds` — age after which a baseline is considered stale (default: `3600`)
 
 ### Sentinel Action Flows
 
@@ -370,19 +414,20 @@ Discovery records may include:
 - `dedupe_reason`: candidate disposition (`novel`, `existing_semantic_key`, `batch_duplicate`)
 - `filtered_candidates`: candidates removed by dedupe with their reason
 
-### Configuring Discovery
+### Configuring Discovery, Triage, and Baseline
 
-Discovery is configured in the Sentinel subentry:
+These optional features are configured in the Sentinel subentry:
 
 1. Home Assistant -> `Settings` -> `Devices & Services`
 2. Open `Home Generative Agent`
 3. Select `+ Sentinel` (or reconfigure the existing Sentinel subentry)
-4. Set Sentinel discovery options:
-   - `sentinel_discovery_enabled`
-   - `sentinel_discovery_interval_seconds`
-   - `sentinel_discovery_max_records`
+4. Set options:
+   - Discovery: `sentinel_discovery_enabled`, `sentinel_discovery_interval_seconds`, `sentinel_discovery_max_records`
+   - Triage: `sentinel_triage_enabled`, `sentinel_triage_timeout_seconds`
+   - Baseline: `sentinel_baseline_enabled`, `sentinel_baseline_update_interval_minutes`, `sentinel_baseline_freshness_threshold_seconds`
+   - Per-area notifications: `sentinel_area_notify_map` (area name → notify service, e.g. `{"Garage": "notify.mobile_app_garage_tablet"}`)
 
-Discovery requires a configured chat model. If no model is available, the discovery loop is skipped.
+Discovery and triage both require a configured chat model. If no model is available, those loops are skipped.
 
 ### Proposal Lifecycle
 
