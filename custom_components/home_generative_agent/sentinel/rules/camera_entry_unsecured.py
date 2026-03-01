@@ -90,8 +90,7 @@ class CameraEntryUnsecuredRule:
                     candidates = [
                         e["last_changed"]
                         for e in snapshot["entities"]
-                        if e.get("area") == area
-                        and e["domain"] == "binary_sensor"
+                        if e.get("area") == area and e["domain"] == "binary_sensor"
                     ]
                     LOGGER.debug(
                         "%s: area=%s area_binary_sensor_candidates=%s",
