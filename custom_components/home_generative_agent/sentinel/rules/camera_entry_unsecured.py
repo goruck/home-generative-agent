@@ -77,14 +77,15 @@ class CameraEntryUnsecuredRule:
                 ]
                 if not candidates:
                     # No linked sensors in camera_activity (camera doesn't
-                    # advertise vmd_entity_id etc.); scan all motion binary
-                    # sensors in the same area as a last resort.
+                    # advertise vmd_entity_id etc.); scan all binary sensors
+                    # in the same area as a last resort.  Device-class is not
+                    # checked because VMD sensors (e.g. Hikvision) often have
+                    # no device_class; the area constraint is sufficient.
                     candidates = [
                         e["last_changed"]
                         for e in snapshot["entities"]
                         if e.get("area") == area
                         and e["domain"] == "binary_sensor"
-                        and e["attributes"].get("device_class") == "motion"
                     ]
                 last_activity = max(candidates) if candidates else None
             if not last_activity:

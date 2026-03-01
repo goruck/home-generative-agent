@@ -184,8 +184,8 @@ def test_camera_entry_unsecured_vmd_last_changed_fallback() -> None:
     assert findings[0].evidence["unsecured_entities"] == ["lock.garage_door"]
 
 
-def test_camera_entry_unsecured_area_motion_scan_fallback() -> None:
-    """When camera has no last_activity and no linked sensors, scan area motion sensors."""
+def test_camera_entry_unsecured_area_binary_scan_fallback() -> None:
+    """Area binary sensor scan works without device_class (Hikvision VMD sensors)."""
     snapshot = _base_snapshot()
     snapshot["derived"]["now"] = "2025-01-01T00:05:00+00:00"
     snapshot["entities"] = [
@@ -205,7 +205,7 @@ def test_camera_entry_unsecured_area_motion_scan_fallback() -> None:
             "state": "on",
             "friendly_name": "Playroom Door VMD3",
             "area": "Outside",
-            "attributes": {"device_class": "motion"},
+            "attributes": {},  # no device_class — typical for Hikvision VMD sensors
             "last_changed": "2025-01-01T00:04:30+00:00",
             "last_updated": "2025-01-01T00:04:30+00:00",
         },
@@ -214,9 +214,9 @@ def test_camera_entry_unsecured_area_motion_scan_fallback() -> None:
         {
             "camera_entity_id": "camera.playroomdoor",
             "area": "Outside",
-            "last_activity": None,   # camera exposes no activity timestamp
+            "last_activity": None,
             "motion_entities": [],
-            "vmd_entities": [],      # camera doesn't advertise vmd_entity_id
+            "vmd_entities": [],
             "snapshot_summary": None,
             "recognized_people": [],
             "latest_path": None,
