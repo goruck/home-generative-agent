@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -11,6 +12,8 @@ from custom_components.home_generative_agent.sentinel.models import (
     AnomalyFinding,
     build_anomaly_id,
 )
+
+LOGGER = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from custom_components.home_generative_agent.snapshot.schema import (
@@ -60,8 +63,10 @@ class CameraEntryUnsecuredRule:
         }
 
         for activity in snapshot["camera_activity"]:
+            cam = activity["camera_entity_id"]
             area = activity.get("area")
             if not area:
+                LOGGER.debug("%s: skipped — no area assigned in snapshot.", cam)
                 continue
             last_activity = activity.get("last_activity")
             if not last_activity:
@@ -88,13 +93,31 @@ class CameraEntryUnsecuredRule:
                         if e.get("area") == area
                         and e["domain"] == "binary_sensor"
                     ]
+                    LOGGER.debug(
+                        "%s: area=%s area_binary_sensor_candidates=%s",
+                        cam,
+                        area,
+                        candidates,
+                    )
                 last_activity = max(candidates) if candidates else None
             if not last_activity:
+                LOGGER.debug("%s: skipped — no activity timestamp resolved.", cam)
                 continue
             last_dt = dt_util.parse_datetime(last_activity)
             if last_dt is None:
+                LOGGER.debug(
+                    "%s: skipped — could not parse last_activity=%s.",
+                    cam,
+                    last_activity,
+                )
                 continue
             if now - last_dt > window:
+                LOGGER.debug(
+                    "%s: skipped — last_activity=%s is outside %d-min window.",
+                    cam,
+                    last_activity,
+                    ACTIVITY_WINDOW_MIN,
+                )
                 continue
             # Prefer same-area unsecured entities; fall back to home-wide list
             # for exterior cameras whose area has no entry-point sensors.
