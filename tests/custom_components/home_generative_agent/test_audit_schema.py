@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import fields
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -331,7 +331,7 @@ async def test_update_response_no_match_is_noop() -> None:
     record = store._records[0]
     assert record["user_response"] is None
     assert record["action_outcome"] is None
-    store._store.async_save.assert_not_called()
+    cast(AsyncMock, store._store.async_save).assert_not_called()
 
 
 @pytest.mark.asyncio
