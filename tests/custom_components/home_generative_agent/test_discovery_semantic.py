@@ -153,3 +153,16 @@ def test_rule_semantic_key_motion_night_alarm_disarmed_issue_235() -> None:
     assert "subject=motion" in key
     assert "predicate=active" in key
     assert "night=1" in key
+
+
+def test_rule_semantic_key_unknown_person_camera_when_home_issue_278() -> None:
+    rule = {
+        "rule_id": "unknown_person_camera_when_home",
+        "template_id": "unknown_person_camera_when_home",
+        "params": {"camera_entity_id": "camera.backyard"},
+    }
+    key = rule_semantic_key(rule)
+    assert key is not None
+    assert "subject=camera" in key
+    assert "predicate=unknown_person" in key
+    assert "home=1" in key

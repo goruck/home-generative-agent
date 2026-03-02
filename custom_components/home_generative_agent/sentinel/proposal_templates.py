@@ -21,6 +21,7 @@ SUPPORTED_TEMPLATES = {
     "unlocked_lock_when_home",
     "motion_without_camera_activity",
     "unknown_person_camera_no_home",
+    "unknown_person_camera_when_home",
     # Issue #265 — baseline-driven detectors
     "baseline_deviation",
     "time_of_day_anomaly",
@@ -217,6 +218,27 @@ def normalize_candidate(  # noqa: PLR0911, PLR0912
             severity="low",
             confidence=float(candidate.get("confidence_hint", 0.85)),
             is_sensitive=True,
+            suggested_actions=["close_entry"],
+        )
+    if (
+        camera_id
+        and presence == "home"
+        and _contains_any(text, ("unknown", "unrecognized", "stranger"))
+        and _contains_any(text, ("person", "people", "face"))
+    ):
+        default_rule_id = (
+            f"unknown_person_camera_when_home_{camera_id.replace('.', '_')}"
+        )
+        return NormalizedRule(
+            rule_id=_candidate_rule_id(
+                candidate,
+                default=default_rule_id,
+            ),
+            template_id="unknown_person_camera_when_home",
+            params={"camera_entity_id": camera_id},
+            severity="low",
+            confidence=float(candidate.get("confidence_hint", 0.7)),
+            is_sensitive=False,
             suggested_actions=["close_entry"],
         )
 

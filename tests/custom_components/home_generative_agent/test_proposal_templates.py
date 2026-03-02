@@ -283,3 +283,26 @@ def test_normalize_candidate_motion_night_alarm_disarmed_issue_235() -> None:
         ],
         "required_entity_ids": ["person.lindo_st_angel"],
     }
+
+
+def test_normalize_candidate_unknown_person_camera_when_home_issue_278() -> None:
+    candidate = {
+        "candidate_id": "unknown_person_camera_when_home",
+        "title": "Unknown person detected by camera while someone is home",
+        "summary": (
+            "A camera reports an unknown person while a person is present at home."
+        ),
+        "pattern": "recognized_people contains 'Indeterminate' and derived.anyone_home",
+        "suggested_type": "security",
+        "confidence_hint": 0.7,
+        "evidence_paths": [
+            "camera_activity[entity_id=camera.backyard].recognized_people",
+            "derived.anyone_home",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "unknown_person_camera_when_home"
+    assert normalized.rule_id == "unknown_person_camera_when_home"
+    assert normalized.params == {"camera_entity_id": "camera.backyard"}
+    assert normalized.is_sensitive is False
