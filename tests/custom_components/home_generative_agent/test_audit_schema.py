@@ -251,7 +251,7 @@ def _make_store() -> AuditStore:
     """Return an AuditStore with a no-op HA Store underneath."""
     hass = MagicMock()
     store = AuditStore(hass)
-    store._store = MagicMock()  # noqa: SLF001
+    store._store = MagicMock()
     store._store.async_save = AsyncMock()
     return store
 
@@ -283,7 +283,7 @@ def _compound_record(compound_id: str, constituent_ids: list[str]) -> dict[str, 
 async def test_update_response_matches_simple_finding() -> None:
     """async_update_response updates a simple finding by its anomaly_id."""
     store = _make_store()
-    store._records = [_simple_record("aaa111")]  # noqa: SLF001
+    store._records = [_simple_record("aaa111")]
 
     await store.async_update_response(
         anomaly_id="aaa111",
@@ -291,7 +291,7 @@ async def test_update_response_matches_simple_finding() -> None:
         outcome={"status": "dismissed"},
     )
 
-    record = store._records[0]  # noqa: SLF001
+    record = store._records[0]
     assert record["user_response"] == {"action": "dismiss", "false_positive": True}
     assert record["action_outcome"] == {"status": "dismissed"}
     assert "responded_at" in record["notification"]
@@ -302,7 +302,7 @@ async def test_update_response_matches_compound_finding_via_constituent() -> Non
     """async_update_response matches a compound finding by a constituent anomaly_id."""
     store = _make_store()
     best_id = "constituent-best"
-    store._records = [_compound_record("compound-uuid-1", ["constituent-a", best_id])]  # noqa: SLF001
+    store._records = [_compound_record("compound-uuid-1", ["constituent-a", best_id])]
 
     await store.async_update_response(
         anomaly_id=best_id,
@@ -310,7 +310,7 @@ async def test_update_response_matches_compound_finding_via_constituent() -> Non
         outcome={"status": "dismissed"},
     )
 
-    record = store._records[0]  # noqa: SLF001
+    record = store._records[0]
     assert record["user_response"] == {"action": "dismiss", "false_positive": True}
     assert record["action_outcome"] == {"status": "dismissed"}
     assert "responded_at" in record["notification"]
@@ -320,7 +320,7 @@ async def test_update_response_matches_compound_finding_via_constituent() -> Non
 async def test_update_response_no_match_is_noop() -> None:
     """async_update_response does nothing when anomaly_id is not found."""
     store = _make_store()
-    store._records = [_simple_record("aaa111")]  # noqa: SLF001
+    store._records = [_simple_record("aaa111")]
 
     await store.async_update_response(
         anomaly_id="nonexistent",
@@ -328,10 +328,10 @@ async def test_update_response_no_match_is_noop() -> None:
         outcome={"status": "dismissed"},
     )
 
-    record = store._records[0]  # noqa: SLF001
+    record = store._records[0]
     assert record["user_response"] is None
     assert record["action_outcome"] is None
-    store._store.async_save.assert_not_called()  # noqa: SLF001
+    store._store.async_save.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -340,7 +340,7 @@ async def test_update_response_picks_most_recent_compound_record() -> None:
     store = _make_store()
     old = _compound_record("compound-old", ["cid-shared"])
     new = _compound_record("compound-new", ["cid-shared"])
-    store._records = [old, new]  # noqa: SLF001
+    store._records = [old, new]
 
     await store.async_update_response(
         anomaly_id="cid-shared",
@@ -349,5 +349,5 @@ async def test_update_response_picks_most_recent_compound_record() -> None:
     )
 
     # newest record (index 1) updated; oldest (index 0) untouched
-    assert store._records[1]["user_response"] == {"action": "dismiss", "false_positive": True}  # noqa: SLF001
-    assert store._records[0]["user_response"] is None  # noqa: SLF001
+    assert store._records[1]["user_response"] == {"action": "dismiss", "false_positive": True}
+    assert store._records[0]["user_response"] is None

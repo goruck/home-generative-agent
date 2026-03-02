@@ -136,7 +136,8 @@ class AuditStore:
     async def async_update_response(
         self, anomaly_id: str, response: dict[str, Any], outcome: dict[str, Any] | None
     ) -> None:
-        """Update the latest record for an anomaly with user response.
+        """
+        Update the latest record for an anomaly with user response.
 
         Matches simple findings by ``finding.anomaly_id`` and compound findings
         by any ``finding.constituent_findings[].anomaly_id``, since compound
