@@ -303,6 +303,84 @@ def test_normalize_candidate_unknown_person_camera_when_home_issue_278() -> None
     normalized = normalize_candidate(candidate)
     assert normalized is not None
     assert normalized.template_id == "unknown_person_camera_when_home"
-    assert normalized.rule_id == "unknown_person_camera_when_home"
+    assert normalized.rule_id == "unknown_person_camera_when_home_camera_backyard"
     assert normalized.params == {"camera_entity_id": "camera.backyard"}
     assert normalized.is_sensitive is False
+
+
+def test_normalize_candidate_unknown_person_camera_when_home_rule_id_is_deterministic() -> None:
+    candidate = {
+        "candidate_id": "different_candidate_id_same_semantics",
+        "title": "Unknown person detected by camera while someone is home",
+        "summary": (
+            "A camera reports an unknown person while a person is present at home."
+        ),
+        "pattern": "recognized_people contains 'Indeterminate' and derived.anyone_home",
+        "suggested_type": "security",
+        "confidence_hint": 0.7,
+        "evidence_paths": [
+            "camera_activity[entity_id=camera.backyard].recognized_people",
+            "derived.anyone_home",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "unknown_person_camera_when_home"
+    assert normalized.rule_id == "unknown_person_camera_when_home_camera_backyard"
+
+
+def test_normalize_candidate_unknown_person_camera_no_home_rule_id_is_deterministic() -> None:
+    candidate = {
+        "candidate_id": "arbitrary_unknown_person_candidate",
+        "title": "Unknown person detected by camera while no one is home",
+        "summary": "A camera reports an unknown person while the home is unoccupied.",
+        "pattern": "recognized_people contains 'Indeterminate' and no one home",
+        "suggested_type": "security",
+        "confidence_hint": 0.85,
+        "evidence_paths": [
+            "camera_activity[entity_id=camera.backyard].recognized_people",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "unknown_person_camera_no_home"
+    assert normalized.rule_id == "unknown_person_camera_no_home_camera_backyard"
+
+
+def test_normalize_candidate_unknown_person_camera_when_home_from_entities_path() -> None:
+    candidate = {
+        "candidate_id": "entities_path_unknown_person_home",
+        "title": "Unknown person detected by front gate camera while occupants at home",
+        "summary": "An unidentified person is seen while the house is occupied.",
+        "pattern": "unknown person face while present",
+        "suggested_type": "security",
+        "confidence_hint": 0.7,
+        "evidence_paths": [
+            "entities[entity_id=camera.front_gate].attributes.last_event",
+            "derived.anyone_home",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "unknown_person_camera_when_home"
+    assert normalized.rule_id == "unknown_person_camera_when_home_camera_front_gate"
+    assert normalized.params == {"camera_entity_id": "camera.front_gate"}
+
+
+def test_normalize_candidate_unknown_person_camera_no_home_from_entities_path() -> None:
+    candidate = {
+        "candidate_id": "entities_path_unknown_person_away",
+        "title": "Unknown person detected by front gate camera while no one is home",
+        "summary": "An unidentified person is seen while the home is unoccupied.",
+        "pattern": "unknown person face while no one home",
+        "suggested_type": "security",
+        "confidence_hint": 0.85,
+        "evidence_paths": [
+            "entities[entity_id=camera.front_gate].attributes.last_event",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "unknown_person_camera_no_home"
+    assert normalized.rule_id == "unknown_person_camera_no_home_camera_front_gate"
+    assert normalized.params == {"camera_entity_id": "camera.front_gate"}

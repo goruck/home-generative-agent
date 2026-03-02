@@ -208,11 +208,9 @@ def normalize_candidate(  # noqa: PLR0911, PLR0912
         and _contains_any(text, ("unknown", "unrecognized", "stranger"))
         and _contains_any(text, ("person", "people", "face"))
     ):
+        rule_id = f"unknown_person_camera_no_home_{camera_id.replace('.', '_')}"
         return NormalizedRule(
-            rule_id=_candidate_rule_id(
-                candidate,
-                default=f"unknown_person_camera_no_home_{camera_id.replace('.', '_')}",
-            ),
+            rule_id=rule_id,
             template_id="unknown_person_camera_no_home",
             params={"camera_entity_id": camera_id},
             severity="low",
@@ -230,10 +228,7 @@ def normalize_candidate(  # noqa: PLR0911, PLR0912
             f"unknown_person_camera_when_home_{camera_id.replace('.', '_')}"
         )
         return NormalizedRule(
-            rule_id=_candidate_rule_id(
-                candidate,
-                default=default_rule_id,
-            ),
+            rule_id=default_rule_id,
             template_id="unknown_person_camera_when_home",
             params={"camera_entity_id": camera_id},
             severity="low",
@@ -436,6 +431,8 @@ def _find_camera_id(evidence_paths: list[str]) -> str | None:
             return path.split("camera_activity[camera_entity_id=", 1)[1].split("]", 1)[
                 0
             ]
+        if path.startswith("entities[entity_id=camera."):
+            return path.split("entities[entity_id=", 1)[1].split("]", 1)[0]
     return None
 
 

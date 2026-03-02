@@ -1626,26 +1626,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             )
             return {"status": "not_found", "candidate_id": candidate_id}
 
+        covered_rule_id = _covered_rule_id_for_candidate(candidate)
+        if covered_rule_id is not None:
+            await proposal_store.async_update_status(
+                candidate_id,
+                "covered_by_existing_rule",
+                notes,
+                extra={"covered_rule_id": covered_rule_id},
+            )
+            LOGGER.info(
+                "Proposal %s marked covered_by_existing_rule (%s).",
+                candidate_id,
+                covered_rule_id,
+            )
+            return {
+                "status": "covered_by_existing_rule",
+                "candidate_id": candidate_id,
+                "rule_id": covered_rule_id,
+            }
+
         normalized = normalize_candidate(candidate)
         if normalized is None:
-            covered_rule_id = _covered_rule_id_for_candidate(candidate)
-            if covered_rule_id is not None:
-                await proposal_store.async_update_status(
-                    candidate_id,
-                    "covered_by_existing_rule",
-                    notes,
-                    extra={"covered_rule_id": covered_rule_id},
-                )
-                LOGGER.info(
-                    "Proposal %s marked covered_by_existing_rule (%s).",
-                    candidate_id,
-                    covered_rule_id,
-                )
-                return {
-                    "status": "covered_by_existing_rule",
-                    "candidate_id": candidate_id,
-                    "rule_id": covered_rule_id,
-                }
             await proposal_store.async_update_status(
                 candidate_id,
                 "unsupported",
