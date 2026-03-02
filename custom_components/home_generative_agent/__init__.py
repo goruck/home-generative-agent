@@ -223,7 +223,6 @@ from .core.video_helpers import latest_target, publish_latest_atomic
 from .explain.llm_explain import LLMExplainer
 from .http import EnrollPersonView
 from .notify.actions import ActionHandler
-from .notify.dispatcher import NotificationDispatcher
 from .sentinel.baseline import SentinelBaselineUpdater
 from .sentinel.discovery_engine import SentinelDiscoveryEngine
 from .sentinel.discovery_semantic import candidate_semantic_key, rule_semantic_key
@@ -1249,15 +1248,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         entry_id=entry.entry_id,
         notify_service=options.get(CONF_NOTIFY_SERVICE),
     )
-    # Issue #261: SentinelNotifier replaces NotificationDispatcher as the
-    # primary notifier.  The legacy NotificationDispatcher is kept in
-    # runtime_data for any callers that still reference it by name.
     notifier = SentinelNotifier(hass, options, suppression, action_handler)
     notifier.start()
-    # Keep a legacy dispatcher instance so existing runtime_data consumers
-    # (e.g. tests, services) that reference NotificationDispatcher continue
-    # to work.  It is not started — SentinelNotifier owns the event loop.
-    _legacy_dispatcher = NotificationDispatcher(hass, options, action_handler)
     explainer = None
     if options.get(CONF_EXPLAIN_ENABLED, RECOMMENDED_EXPLAIN_ENABLED):
         explainer = LLMExplainer(chat_model)

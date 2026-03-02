@@ -181,11 +181,11 @@ When Sentinel notifications are enabled:
   - `medium`: `Check soon and secure it if unexpected.`
   - `low`: `Review when convenient.`
 - For `is_sensitive` findings, recognized person names in the explanation text are replaced with `"a recognised person"` before the message is sent.
-- Mobile action buttons (primary action first, then snooze options):
+- Mobile action buttons (primary action first, then False Alarm, then snooze options):
   - `Execute` — shown for non-sensitive findings with suggested actions. Calls the conversation agent or fires `hga_sentinel_execute_requested`.
   - `Ask Agent` — shown for sensitive findings with suggested actions. Hands the finding to the conversation agent, which can verify a PIN or alarm code before acting.
+  - `False Alarm` — marks the alert as a false positive. Sets `user_response.false_positive = true` in the audit record, which is used to calculate the false-positive rate KPI.
   - `Snooze 24 h` — suppresses this finding type for 24 hours.
-  - `Snooze 7 d` — suppresses this finding type for 7 days.
   - `Snooze Always` — suppresses this finding type permanently. A confirmation notification is sent first; the snooze is only written after the user taps **Confirm** in the follow-up notification.
 - Per-area routing: when `sentinel_area_notify_map` maps an area name to a notify service, findings whose triggering entities belong to that area are routed to that service instead of the global `notify_service`.
 

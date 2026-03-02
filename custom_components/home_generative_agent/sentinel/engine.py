@@ -65,9 +65,6 @@ if TYPE_CHECKING:
 
     from custom_components.home_generative_agent.audit.store import AuditStore
     from custom_components.home_generative_agent.explain.llm_explain import LLMExplainer
-    from custom_components.home_generative_agent.notify.dispatcher import (
-        NotificationDispatcher,
-    )
     from custom_components.home_generative_agent.snapshot.schema import (
         FullStateSnapshot,
     )
@@ -130,7 +127,7 @@ class SentinelEngine:
         hass: HomeAssistant,
         options: dict[str, object],
         suppression: SuppressionManager,
-        notifier: SentinelNotifier | NotificationDispatcher,
+        notifier: SentinelNotifier,
         audit_store: AuditStore,
         explainer: LLMExplainer | None = None,
         *,

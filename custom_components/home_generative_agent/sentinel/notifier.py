@@ -4,7 +4,8 @@ Sentinel notification orchestrator — Issue #261.
 Provides ``SentinelNotifier``, which wraps the notification dispatch layer
 with:
 
-* Snooze actions (24 h / 7 d / permanent) embedded in mobile notifications.
+* Action buttons: primary action (Ask Agent / Execute), False Alarm, Snooze
+  24 h, Snooze Always.
 * ``always`` confirmation guard: a permanent snooze fires a confirmation
   notification before writing to ``SuppressionState``; no HA service is
   called until the user explicitly confirms.
@@ -14,10 +15,9 @@ with:
 * ``is_sensitive`` redaction: recognised-person names in the explanation text
   are replaced with ``"a recognised person"`` before the message is sent.
 
-``SentinelNotifier`` replaces ``NotificationDispatcher`` as the object
-injected into ``SentinelEngine``.  It delegates non-snooze action callbacks
-(``execute``, ``handoff``, ``ack``, ``ignore``, ``later``) to the existing
-``ActionHandler``.
+Non-snooze action callbacks (``execute``, ``handoff``, ``dismiss``) are
+delegated to ``ActionHandler``.  The ``dismiss`` action sets
+``user_response.false_positive = True`` in the audit record.
 """
 
 from __future__ import annotations
@@ -34,7 +34,6 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_AREA_NOTIFY_MAP,
 )
 from custom_components.home_generative_agent.sentinel.suppression import (
-    SNOOZE_7D,
     SNOOZE_24H,
     SNOOZE_PERMANENT,
     register_snooze,
@@ -61,7 +60,6 @@ MAX_MOBILE_MESSAGE_CHARS = 220
 
 # Snooze action verb tokens (without the trailing underscore+anomaly_id).
 _ACT_SNOOZE_24H = "snooze24h"
-_ACT_SNOOZE_7D = "snooze7d"
 _ACT_SNOOZE_ALWAYS = "snoozealways"
 _ACT_SNOOZE_CONFIRM = "snoozeconfirm"
 _ACT_SNOOZE_CANCEL = "snoozecancel"
@@ -69,7 +67,6 @@ _ACT_SNOOZE_CANCEL = "snoozecancel"
 _SNOOZE_VERBS = frozenset(
     {
         _ACT_SNOOZE_24H,
-        _ACT_SNOOZE_7D,
         _ACT_SNOOZE_ALWAYS,
         _ACT_SNOOZE_CONFIRM,
         _ACT_SNOOZE_CANCEL,
@@ -81,9 +78,9 @@ class SentinelNotifier:
     """
     Notification orchestrator for sentinel findings.
 
-    Drop-in replacement for ``NotificationDispatcher`` from the engine's
-    perspective: exposes the same ``async_notify(finding, snapshot,
-    explanation)`` coroutine and ``start()`` / ``stop()`` lifecycle methods.
+    Notification orchestrator injected into ``SentinelEngine``.  Exposes
+    ``async_notify(finding, snapshot, explanation)`` and ``start()`` /
+    ``stop()`` lifecycle methods.
     """
 
     def __init__(
@@ -220,12 +217,6 @@ class SentinelNotifier:
                 await self._suppression.async_save()
                 LOGGER.info("Snooze 24 h registered for finding type %s.", finding.type)
 
-        elif verb == _ACT_SNOOZE_7D:
-            if finding:
-                register_snooze(self._suppression.state, finding.type, SNOOZE_7D, now)
-                await self._suppression.async_save()
-                LOGGER.info("Snooze 7 d registered for finding type %s.", finding.type)
-
         elif verb == _ACT_SNOOZE_ALWAYS:
             # Guard: send confirmation notification; do NOT write snooze yet.
             if finding:
@@ -303,7 +294,7 @@ def _build_actions(finding: AnomalyFinding) -> list[dict[str, Any]]:
     """
     Build mobile action buttons for *finding*.
 
-    Primary action (execute or ask) is first.  Snooze options follow.
+    Primary action (execute or ask) is first, then False Alarm, then snooze.
     """
     actions: list[dict[str, Any]] = []
 
@@ -326,12 +317,12 @@ def _build_actions(finding: AnomalyFinding) -> list[dict[str, Any]]:
     actions.extend(
         [
             {
-                "action": f"{ACTION_PREFIX}{_ACT_SNOOZE_24H}_{finding.anomaly_id}",
-                "title": "Snooze 24 h",
+                "action": f"{ACTION_PREFIX}dismiss_{finding.anomaly_id}",
+                "title": "False Alarm",
             },
             {
-                "action": f"{ACTION_PREFIX}{_ACT_SNOOZE_7D}_{finding.anomaly_id}",
-                "title": "Snooze 7 d",
+                "action": f"{ACTION_PREFIX}{_ACT_SNOOZE_24H}_{finding.anomaly_id}",
+                "title": "Snooze 24 h",
             },
             {
                 "action": f"{ACTION_PREFIX}{_ACT_SNOOZE_ALWAYS}_{finding.anomaly_id}",

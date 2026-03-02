@@ -14,9 +14,6 @@ if TYPE_CHECKING:
     from custom_components.home_generative_agent.audit.store import AuditStore
     from custom_components.home_generative_agent.explain.llm_explain import LLMExplainer
     from custom_components.home_generative_agent.notify.actions import ActionHandler
-    from custom_components.home_generative_agent.notify.dispatcher import (
-        NotificationDispatcher,
-    )
     from custom_components.home_generative_agent.sentinel.discovery_engine import (
         SentinelDiscoveryEngine,
     )
@@ -59,7 +56,7 @@ class HGAData:
     pending_actions: dict[str, dict[str, Any]]
     suppression: SuppressionManager | None
     sentinel: SentinelEngine | None
-    notifier: SentinelNotifier | NotificationDispatcher | None
+    notifier: SentinelNotifier | None
     action_handler: ActionHandler | None
     audit_store: AuditStore | None
     explainer: LLMExplainer | None
