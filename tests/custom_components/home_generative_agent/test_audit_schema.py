@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 from dataclasses import fields
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from custom_components.home_generative_agent.audit.models import AuditRecord
 from custom_components.home_generative_agent.audit.store import (
+    AuditStore,
     _migrate_record,
 )
 from custom_components.home_generative_agent.const import (
@@ -237,3 +240,114 @@ def test_conf_audit_constants_are_distinct() -> None:
     assert len(constants) == len(set(constants)), (
         "Duplicate CONF_AUDIT_* constant values"
     )
+
+
+# ---------------------------------------------------------------------------
+# async_update_response — simple and compound finding write-back
+# ---------------------------------------------------------------------------
+
+
+def _make_store() -> AuditStore:
+    """Return an AuditStore with a no-op HA Store underneath."""
+    hass = MagicMock()
+    store = AuditStore(hass)
+    store._store = MagicMock()  # noqa: SLF001
+    store._store.async_save = AsyncMock()
+    return store
+
+
+def _simple_record(anomaly_id: str) -> dict[str, Any]:
+    return {
+        "finding": {"anomaly_id": anomaly_id, "type": "open_entry"},
+        "notification": {"notified_at": "2026-01-01T00:00:00+00:00"},
+        "user_response": None,
+        "action_outcome": None,
+    }
+
+
+def _compound_record(compound_id: str, constituent_ids: list[str]) -> dict[str, Any]:
+    return {
+        "finding": {
+            "compound_id": compound_id,
+            "constituent_findings": [
+                {"anomaly_id": aid, "type": "open_entry"} for aid in constituent_ids
+            ],
+        },
+        "notification": {"notified_at": "2026-01-01T00:00:00+00:00"},
+        "user_response": None,
+        "action_outcome": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_update_response_matches_simple_finding() -> None:
+    """async_update_response updates a simple finding by its anomaly_id."""
+    store = _make_store()
+    store._records = [_simple_record("aaa111")]  # noqa: SLF001
+
+    await store.async_update_response(
+        anomaly_id="aaa111",
+        response={"action": "dismiss", "false_positive": True},
+        outcome={"status": "dismissed"},
+    )
+
+    record = store._records[0]  # noqa: SLF001
+    assert record["user_response"] == {"action": "dismiss", "false_positive": True}
+    assert record["action_outcome"] == {"status": "dismissed"}
+    assert "responded_at" in record["notification"]
+
+
+@pytest.mark.asyncio
+async def test_update_response_matches_compound_finding_via_constituent() -> None:
+    """async_update_response matches a compound finding by a constituent anomaly_id."""
+    store = _make_store()
+    best_id = "constituent-best"
+    store._records = [_compound_record("compound-uuid-1", ["constituent-a", best_id])]  # noqa: SLF001
+
+    await store.async_update_response(
+        anomaly_id=best_id,
+        response={"action": "dismiss", "false_positive": True},
+        outcome={"status": "dismissed"},
+    )
+
+    record = store._records[0]  # noqa: SLF001
+    assert record["user_response"] == {"action": "dismiss", "false_positive": True}
+    assert record["action_outcome"] == {"status": "dismissed"}
+    assert "responded_at" in record["notification"]
+
+
+@pytest.mark.asyncio
+async def test_update_response_no_match_is_noop() -> None:
+    """async_update_response does nothing when anomaly_id is not found."""
+    store = _make_store()
+    store._records = [_simple_record("aaa111")]  # noqa: SLF001
+
+    await store.async_update_response(
+        anomaly_id="nonexistent",
+        response={"action": "dismiss", "false_positive": True},
+        outcome={"status": "dismissed"},
+    )
+
+    record = store._records[0]  # noqa: SLF001
+    assert record["user_response"] is None
+    assert record["action_outcome"] is None
+    store._store.async_save.assert_not_called()  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_update_response_picks_most_recent_compound_record() -> None:
+    """async_update_response updates the latest matching record, not an older one."""
+    store = _make_store()
+    old = _compound_record("compound-old", ["cid-shared"])
+    new = _compound_record("compound-new", ["cid-shared"])
+    store._records = [old, new]  # noqa: SLF001
+
+    await store.async_update_response(
+        anomaly_id="cid-shared",
+        response={"action": "dismiss", "false_positive": True},
+        outcome={"status": "dismissed"},
+    )
+
+    # newest record (index 1) updated; oldest (index 0) untouched
+    assert store._records[1]["user_response"] == {"action": "dismiss", "false_positive": True}  # noqa: SLF001
+    assert store._records[0]["user_response"] is None  # noqa: SLF001
