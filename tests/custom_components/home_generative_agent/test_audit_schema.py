@@ -349,5 +349,8 @@ async def test_update_response_picks_most_recent_compound_record() -> None:
     )
 
     # newest record (index 1) updated; oldest (index 0) untouched
-    assert store._records[1]["user_response"] == {"action": "dismiss", "false_positive": True}
+    assert store._records[1]["user_response"] == {
+        "action": "dismiss",
+        "false_positive": True,
+    }
     assert store._records[0]["user_response"] is None
