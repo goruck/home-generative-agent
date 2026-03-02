@@ -77,6 +77,10 @@ class ActionHandler:
         elif action == "handoff":
             # Delegate to the conversation agent for PIN-gated or sensitive actions.
             outcome = await self._outcome_for_handoff(finding, payload)
+        elif action == "dismiss":
+            # User explicitly marked this alert as a false positive.
+            response["false_positive"] = True
+            outcome = {"status": "dismissed"}
 
         if anomaly_id:
             self._pending_findings.pop(anomaly_id, None)

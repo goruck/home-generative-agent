@@ -33,8 +33,8 @@ if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
     from custom_components.home_generative_agent.audit.store import AuditStore
-    from custom_components.home_generative_agent.notify.dispatcher import (
-        NotificationDispatcher,
+    from custom_components.home_generative_agent.sentinel.notifier import (
+        SentinelNotifier,
     )
 
 
@@ -79,7 +79,7 @@ def _make_engine(options: dict[str, object] | None = None) -> SentinelEngine:
         hass=cast("HomeAssistant", object()),
         options=options or {},
         suppression=DummySuppression(),
-        notifier=cast("NotificationDispatcher", DummyNotifier()),
+        notifier=cast("SentinelNotifier", DummyNotifier()),
         audit_store=cast("AuditStore", DummyAudit()),
         explainer=None,
         entry_id="test-entry-1",

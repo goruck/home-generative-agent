@@ -136,10 +136,20 @@ class AuditStore:
     async def async_update_response(
         self, anomaly_id: str, response: dict[str, Any], outcome: dict[str, Any] | None
     ) -> None:
-        """Update the latest record for an anomaly with user response."""
+        """
+        Update the latest record for an anomaly with user response.
+
+        Matches simple findings by ``finding.anomaly_id`` and compound findings
+        by any ``finding.constituent_findings[].anomaly_id``, since compound
+        notifications are dispatched using the highest-confidence constituent's
+        anomaly_id.
+        """
         for record in reversed(self._records):
             finding = record.get("finding", {})
-            if finding.get("anomaly_id") == anomaly_id:
+            if finding.get("anomaly_id") == anomaly_id or any(
+                cf.get("anomaly_id") == anomaly_id
+                for cf in finding.get("constituent_findings", [])
+            ):
                 record["user_response"] = response
                 record["action_outcome"] = outcome
                 record.setdefault("notification", {})["responded_at"] = _now_iso()

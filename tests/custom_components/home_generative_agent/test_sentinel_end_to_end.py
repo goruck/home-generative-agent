@@ -21,8 +21,8 @@ if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
     from custom_components.home_generative_agent.audit.store import AuditStore
-    from custom_components.home_generative_agent.notify.dispatcher import (
-        NotificationDispatcher,
+    from custom_components.home_generative_agent.sentinel.notifier import (
+        SentinelNotifier,
     )
 
 
@@ -122,7 +122,7 @@ async def test_sentinel_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
             "explain_enabled": False,
         },
         suppression=DummySuppression(),
-        notifier=cast("NotificationDispatcher", DummyNotifier()),
+        notifier=cast("SentinelNotifier", DummyNotifier()),
         audit_store=cast("AuditStore", DummyAudit()),
         explainer=None,
     )

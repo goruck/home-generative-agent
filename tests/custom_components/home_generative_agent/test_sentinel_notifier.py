@@ -14,7 +14,6 @@ from custom_components.home_generative_agent.const import (
 )
 from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
 from custom_components.home_generative_agent.sentinel.notifier import (
-    _ACT_SNOOZE_7D,
     _ACT_SNOOZE_24H,
     _ACT_SNOOZE_ALWAYS,
     _ACT_SNOOZE_CANCEL,
@@ -294,38 +293,7 @@ async def test_snooze_24h_unknown_finding_is_noop() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 3. Snooze 7 d
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_snooze_7d_writes_to_suppression() -> None:
-    """snooze7d registers a 7-day snooze and calls async_save()."""
-    notifier, _hass, suppression, action_handler = _make_notifier()
-    finding = _finding(anomaly_id="abc123", ftype="open_entry_while_away")
-    action_handler.register_finding(finding)
-
-    await notifier._handle_snooze(_ACT_SNOOZE_7D, "abc123")
-
-    assert finding.type in suppression.state.snoozed_until
-    entry = suppression.state.snoozed_until[finding.type]
-    assert entry["until"] != SNOOZE_PERMANENT
-    assert suppression.save_called is True
-
-
-@pytest.mark.asyncio
-async def test_snooze_7d_unknown_finding_is_noop() -> None:
-    """snooze7d for an unknown anomaly_id must not crash or write state."""
-    notifier, _hass, suppression, _action_handler = _make_notifier()
-
-    await notifier._handle_snooze(_ACT_SNOOZE_7D, "nonexistent")
-
-    assert suppression.state.snoozed_until == {}
-    assert suppression.save_called is False
-
-
-# ---------------------------------------------------------------------------
-# 4. Sensitive-flag redacts person names
+# 3. Sensitive-flag redacts person names
 # ---------------------------------------------------------------------------
 
 
@@ -412,7 +380,7 @@ async def test_async_notify_redacts_sensitive_message() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 5. Per-area routing
+# 4. Per-area routing
 # ---------------------------------------------------------------------------
 
 
@@ -487,7 +455,7 @@ async def test_area_map_only_without_global_service_routes_correctly() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 6. Non-snooze actions delegated to ActionHandler
+# 5. Non-snooze actions delegated to ActionHandler
 # ---------------------------------------------------------------------------
 
 
@@ -545,7 +513,7 @@ async def test_handoff_action_delegated_to_action_handler() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 7. Snooze cancel clears pending state
+# 6. Snooze cancel clears pending state
 # ---------------------------------------------------------------------------
 
 
@@ -603,7 +571,7 @@ async def test_confirm_after_cancel_is_noop() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 8. End-to-end event-driven paths
+# 7. End-to-end event-driven paths
 # ---------------------------------------------------------------------------
 
 
@@ -646,7 +614,7 @@ async def test_event_driven_snooze_always_via_handle_action_event() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 9. Lifecycle: start / stop
+# 8. Lifecycle: start / stop
 # ---------------------------------------------------------------------------
 
 
