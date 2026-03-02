@@ -167,6 +167,88 @@ def test_dynamic_rule_motion_without_camera_activity() -> None:
     assert findings[0].type == "motion_rule_1"
 
 
+def test_dynamic_rule_unknown_person_camera_when_home() -> None:
+    snapshot = _snapshot(
+        [],
+        [
+            {
+                "camera_entity_id": "camera.backyard",
+                "area": "Backyard",
+                "last_activity": "2026-02-01T00:00:00+00:00",
+                "motion_entities": ["binary_sensor.backyard_motion"],
+                "vmd_entities": [],
+                "snapshot_summary": None,
+                "recognized_people": [],
+                "latest_path": None,
+            }
+        ],
+        {
+            "now": "2026-02-01T00:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": False,
+            "anyone_home": True,
+            "people_home": [],
+            "people_away": [],
+            "last_motion_by_area": {},
+        },
+    )
+    rules = [
+        {
+            "rule_id": "unknown_person_camera_when_home",
+            "template_id": "unknown_person_camera_when_home",
+            "params": {"camera_entity_id": "camera.backyard"},
+            "severity": "low",
+            "confidence": 0.7,
+            "is_sensitive": False,
+            "suggested_actions": ["close_entry"],
+        }
+    ]
+    findings = evaluate_dynamic_rules(snapshot, rules)
+    assert len(findings) == 1
+    assert findings[0].type == "unknown_person_camera_when_home"
+    assert findings[0].evidence["anyone_home"] is True
+
+
+def test_dynamic_rule_unknown_person_camera_when_home_no_trigger_when_away() -> None:
+    snapshot = _snapshot(
+        [],
+        [
+            {
+                "camera_entity_id": "camera.backyard",
+                "area": "Backyard",
+                "last_activity": "2026-02-01T00:00:00+00:00",
+                "motion_entities": ["binary_sensor.backyard_motion"],
+                "vmd_entities": [],
+                "snapshot_summary": None,
+                "recognized_people": [],
+                "latest_path": None,
+            }
+        ],
+        {
+            "now": "2026-02-01T00:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": False,
+            "anyone_home": False,
+            "people_home": [],
+            "people_away": [],
+            "last_motion_by_area": {},
+        },
+    )
+    rules = [
+        {
+            "rule_id": "unknown_person_camera_when_home",
+            "template_id": "unknown_person_camera_when_home",
+            "params": {"camera_entity_id": "camera.backyard"},
+            "severity": "low",
+            "confidence": 0.7,
+            "is_sensitive": False,
+            "suggested_actions": ["close_entry"],
+        }
+    ]
+    findings = evaluate_dynamic_rules(snapshot, rules)
+    assert findings == []
+
+
 def test_dynamic_rule_open_entry_at_night_when_home() -> None:
     snapshot = _snapshot(
         [

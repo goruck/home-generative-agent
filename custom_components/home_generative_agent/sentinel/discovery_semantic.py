@@ -155,6 +155,14 @@ def rule_semantic_key(rule: dict[str, Any]) -> str | None:  # noqa: PLR0911, PLR
             "v1|subject=camera|predicate=unknown_person|night=any|home=0|scope=any|"
             f"entities={camera_id}"
         )
+    if template_id == "unknown_person_camera_when_home":
+        camera_id = str(params.get("camera_entity_id", ""))
+        if not camera_id:
+            return None
+        return (
+            "v1|subject=camera|predicate=unknown_person|night=any|home=1|scope=any|"
+            f"entities={camera_id}"
+        )
     if template_id == "motion_without_camera_activity":
         motion_ids = sorted(set(_string_list(params.get("motion_entity_ids"))))
         if not motion_ids:
