@@ -331,7 +331,7 @@ async def test_update_response_no_match_is_noop() -> None:
     record = store._records[0]
     assert record["user_response"] is None
     assert record["action_outcome"] is None
-    cast(AsyncMock, store._store.async_save).assert_not_called()
+    cast("AsyncMock", store._store.async_save).assert_not_called()
 
 
 @pytest.mark.asyncio
