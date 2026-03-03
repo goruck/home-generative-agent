@@ -64,7 +64,7 @@ rule_version: "1.0"                    # required on all rules
 - Level 0 Notify-only: no autonomous execution.
 - Level 1 LLM triage (notify-only): triage may suppress or enrich notifications; no actions executed.
 - Level 2 Guarded auto-execute: non-sensitive, allowlisted services, `finding.confidence` gate, rate limits, idempotency, and stale-data block.
-- Level 3 Broad autonomy: expanded execution scope, but PIN/critical actions still blocked from autonomous path unless explicitly policy-approved.
+- Level 3 Broad autonomy: expanded execution scope, but PIN/critical actions still blocked from autonomous path unless explicitly policy-approved. **Level 3 is intentionally not specified in this plan beyond the KPI gate in Section 17. It requires a dedicated design issue after L2 has completed its 30-day burn-in and all L2→L3 KPI thresholds are met.**
 
 ### Runtime kill switch and override lifecycle
 
@@ -355,7 +355,7 @@ Prerequisite: all items in Section 15 are completed.
 11. Level 2 guarded auto-execute live mode (allowlist, confidence thresholds, stale-data block, rate limits, idempotency).
 12. Temporal/baseline anomaly detectors (depends on step 1).
 13. Lambda rule review and approval UI; engine skips `lambda_pending_review`.
-14. Level 3 expansion only after burn-in KPIs and stability gates are met.
+14. Level 3 expansion only after burn-in KPIs and stability gates are met. *(Not specified in this plan — requires a dedicated design issue once L2 is proven in production.)*
 
 ---
 
@@ -600,6 +600,8 @@ Each issue is a self-contained PR targeting main. Every PR must leave tests gree
 ### Milestone 4 — Advanced Rules and Level 3 (Issues #14–#15; merge in order)
 
 > **Note:** Issue #14 was completed alongside Milestone 2/3 work (GitHub #265, merged 2026-03-01), ahead of the original milestone order. This was valid since its only dependency is Issue #8. Issue #15 can proceed since its dependency (#14) is done.
+>
+> **Level 3 is not implemented in this milestone.** The milestone title reflects the original roadmap grouping; Issues #14 and #15 are prerequisites for advanced autonomy but do not constitute Level 3 itself. Level 3 requires a separate design issue that should only be opened after L2 has completed its 30-day minimum stable period and all L2→L3 KPI thresholds from Section 17 are met in production.
 
 **Issue #14 — Baseline storage and temporal detectors** *(Done — GitHub #265)*
 
