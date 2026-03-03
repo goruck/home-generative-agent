@@ -32,6 +32,41 @@ _RELATIVE_THRESHOLD_PATTERN = re.compile(
     r"(?:at\s+or\s+below|below|under|<=|less than)\s*(\d+(?:\.\d+)?)"
 )
 _MAX_PERCENT = 100.0
+_UNKNOWN_TERMS = (
+    "unknown",
+    "unrecognized",
+    "stranger",
+    "unidentified",
+    "indeterminate",
+)
+_PERSON_TERMS = (
+    "person",
+    "people",
+    "face",
+    "occupant",
+    "occupants",
+    "resident",
+    "residents",
+)
+_CAMERA_TERMS = ("camera", "cam")
+_MIN_CAMERA_TOKEN_LEN = 3
+_AWAY_TERMS = (
+    "away",
+    "no one home",
+    "nobody home",
+    "empty",
+    "unoccupied",
+    "no occupants",
+    "without occupants",
+)
+_HOME_TERMS = (
+    "someone home",
+    "occupied",
+    "home",
+    "present",
+    "occupants",
+    "residents",
+)
 
 
 @dataclass(frozen=True)
@@ -79,10 +114,14 @@ def normalize_candidate(  # noqa: PLR0911, PLR0912
     person_ids = _find_entity_ids(evidence_paths, "person")
     sensor_ids = _find_sensor_entity_ids(evidence_paths)
     battery_sensor_ids = _find_battery_sensor_entity_ids(evidence_paths)
-    camera_id = _find_camera_id(evidence_paths)
+    camera_id = _find_camera_id(evidence_paths, candidate)
     has_night = _has_night_signal(evidence_paths, text)
     presence = _presence_signal(evidence_paths, text)
     entry_kind = _entry_kind(entry_ids)
+    has_unknown_person_signal = _contains_any(text, _UNKNOWN_TERMS) and _contains_any(
+        text, _PERSON_TERMS
+    )
+    has_camera_signal = camera_id is not None or _contains_any(text, _CAMERA_TERMS)
 
     if (
         alarm_id
@@ -202,40 +241,35 @@ def normalize_candidate(  # noqa: PLR0911, PLR0912
             suggested_actions=["close_entry"],
         )
 
-    if (
-        camera_id
-        and presence == "away"
-        and _contains_any(text, ("unknown", "unrecognized", "stranger"))
-        and _contains_any(text, ("person", "people", "face"))
-    ):
+    if has_camera_signal and presence == "away" and has_unknown_person_signal:
+        if camera_id:
+            rule_id = f"unknown_person_camera_no_home_{camera_id.replace('.', '_')}"
+            params = {"camera_entity_id": camera_id}
+        else:
+            rule_id = "unknown_person_camera_no_home_any_camera"
+            params = {"camera_selector": "any"}
         return NormalizedRule(
-            rule_id=_candidate_rule_id(
-                candidate,
-                default=f"unknown_person_camera_no_home_{camera_id.replace('.', '_')}",
-            ),
+            rule_id=rule_id,
             template_id="unknown_person_camera_no_home",
-            params={"camera_entity_id": camera_id},
+            params=params,
             severity="low",
             confidence=float(candidate.get("confidence_hint", 0.85)),
             is_sensitive=True,
             suggested_actions=["close_entry"],
         )
-    if (
-        camera_id
-        and presence == "home"
-        and _contains_any(text, ("unknown", "unrecognized", "stranger"))
-        and _contains_any(text, ("person", "people", "face"))
-    ):
-        default_rule_id = (
-            f"unknown_person_camera_when_home_{camera_id.replace('.', '_')}"
-        )
+    if has_camera_signal and presence == "home" and has_unknown_person_signal:
+        if camera_id:
+            default_rule_id = (
+                f"unknown_person_camera_when_home_{camera_id.replace('.', '_')}"
+            )
+            params = {"camera_entity_id": camera_id}
+        else:
+            default_rule_id = "unknown_person_camera_when_home_any_camera"
+            params = {"camera_selector": "any"}
         return NormalizedRule(
-            rule_id=_candidate_rule_id(
-                candidate,
-                default=default_rule_id,
-            ),
+            rule_id=default_rule_id,
             template_id="unknown_person_camera_when_home",
-            params={"camera_entity_id": camera_id},
+            params=params,
             severity="low",
             confidence=float(candidate.get("confidence_hint", 0.7)),
             is_sensitive=False,
@@ -409,11 +443,9 @@ def _has_night_signal(evidence_paths: list[str], text: str) -> bool:
 
 
 def _presence_signal(evidence_paths: list[str], text: str) -> str:
-    if _contains_any(
-        text, ("away", "no one home", "nobody home", "empty", "unoccupied")
-    ):
+    if _contains_any(text, _AWAY_TERMS):
         return "away"
-    if _contains_any(text, ("someone home", "occupied", "home", "present")):
+    if _contains_any(text, _HOME_TERMS):
         return "home"
     if "derived.anyone_home" in evidence_paths:
         return "home"
@@ -428,7 +460,9 @@ def _entry_kind(entry_ids: list[str]) -> str:
     return "entry"
 
 
-def _find_camera_id(evidence_paths: list[str]) -> str | None:
+def _find_camera_id(  # noqa: PLR0911
+    evidence_paths: list[str], candidate: dict[str, Any]
+) -> str | None:
     for path in evidence_paths:
         if path.startswith("camera_activity[entity_id="):
             return path.split("camera_activity[entity_id=", 1)[1].split("]", 1)[0]
@@ -436,6 +470,42 @@ def _find_camera_id(evidence_paths: list[str]) -> str | None:
             return path.split("camera_activity[camera_entity_id=", 1)[1].split("]", 1)[
                 0
             ]
+        if path.startswith("entities[entity_id=camera."):
+            return path.split("entities[entity_id=", 1)[1].split("]", 1)[0]
+    candidate_id = candidate.get("candidate_id")
+    if not isinstance(candidate_id, str):
+        return None
+    normalized = re.sub(r"[^a-z0-9_]+", "_", candidate_id.lower())
+    tokens = [token for token in normalized.split("_") if token]
+    try:
+        camera_idx = tokens.index("camera")
+    except ValueError:
+        return None
+    suffix = tokens[camera_idx + 1 :]
+    stopwords = {
+        "home",
+        "away",
+        "while",
+        "when",
+        "day",
+        "night",
+        "during",
+        "outside",
+        "inside",
+        "unknown",
+        "person",
+        "people",
+        "and",
+        "motion",
+    }
+    object_candidates = [
+        token
+        for token in suffix
+        if token and token not in stopwords and len(token) >= _MIN_CAMERA_TOKEN_LEN
+    ]
+    if not object_candidates:
+        return None
+    return f"camera.{object_candidates[-1]}"
     return None
 
 

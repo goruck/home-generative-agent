@@ -344,29 +344,29 @@ def _eval_unknown_person_camera_no_home(
     if snapshot["derived"]["anyone_home"]:
         return []
     params = _rule_params(rule)
-    camera_id = params.get("camera_entity_id")
-    camera = camera_map.get(camera_id) if camera_id else None
-    if not camera or camera_id is None:
-        return []
-    if not camera.get("last_activity"):
-        return []
-    if not camera.get("motion_entities") and not camera.get("vmd_entities"):
-        return []
-    if camera.get("recognized_people"):
-        return []
-    evidence = {
-        "rule_id": rule.get("rule_id"),
-        "template_id": rule.get("template_id"),
-        "camera_entity_id": camera_id,
-        "area": camera.get("area"),
-        "last_activity": camera.get("last_activity"),
-        "recognized_people": camera.get("recognized_people", []),
-        "motion_entities": camera.get("motion_entities", []),
-        "vmd_entities": camera.get("vmd_entities", []),
-        "anyone_home": snapshot["derived"]["anyone_home"],
-        "is_night": snapshot["derived"]["is_night"],
-    }
-    return [_build_finding(rule, [camera_id], evidence)]
+    findings: list[AnomalyFinding] = []
+    for camera_id, camera in _iter_target_cameras(params, camera_map):
+        if not camera.get("last_activity"):
+            continue
+        if not camera.get("motion_entities") and not camera.get("vmd_entities"):
+            continue
+        if camera.get("recognized_people"):
+            continue
+        evidence = {
+            "rule_id": rule.get("rule_id"),
+            "template_id": rule.get("template_id"),
+            "camera_entity_id": camera_id,
+            "camera_selector": params.get("camera_selector"),
+            "area": camera.get("area"),
+            "last_activity": camera.get("last_activity"),
+            "recognized_people": camera.get("recognized_people", []),
+            "motion_entities": camera.get("motion_entities", []),
+            "vmd_entities": camera.get("vmd_entities", []),
+            "anyone_home": snapshot["derived"]["anyone_home"],
+            "is_night": snapshot["derived"]["is_night"],
+        }
+        findings.append(_build_finding(rule, [camera_id], evidence))
+    return findings
 
 
 def _eval_unknown_person_camera_when_home(
@@ -377,29 +377,44 @@ def _eval_unknown_person_camera_when_home(
     if not snapshot["derived"]["anyone_home"]:
         return []
     params = _rule_params(rule)
+    findings: list[AnomalyFinding] = []
+    for camera_id, camera in _iter_target_cameras(params, camera_map):
+        if not camera.get("last_activity"):
+            continue
+        if not camera.get("motion_entities") and not camera.get("vmd_entities"):
+            continue
+        if camera.get("recognized_people"):
+            continue
+        evidence = {
+            "rule_id": rule.get("rule_id"),
+            "template_id": rule.get("template_id"),
+            "camera_entity_id": camera_id,
+            "camera_selector": params.get("camera_selector"),
+            "area": camera.get("area"),
+            "last_activity": camera.get("last_activity"),
+            "recognized_people": camera.get("recognized_people", []),
+            "motion_entities": camera.get("motion_entities", []),
+            "vmd_entities": camera.get("vmd_entities", []),
+            "anyone_home": snapshot["derived"]["anyone_home"],
+            "is_night": snapshot["derived"]["is_night"],
+        }
+        findings.append(_build_finding(rule, [camera_id], evidence))
+    return findings
+
+
+def _iter_target_cameras(
+    params: dict[str, Any],
+    camera_map: Mapping[str, CameraActivity],
+) -> list[tuple[str, CameraActivity]]:
     camera_id = params.get("camera_entity_id")
-    camera = camera_map.get(camera_id) if camera_id else None
-    if not camera or camera_id is None:
-        return []
-    if not camera.get("last_activity"):
-        return []
-    if not camera.get("motion_entities") and not camera.get("vmd_entities"):
-        return []
-    if camera.get("recognized_people"):
-        return []
-    evidence = {
-        "rule_id": rule.get("rule_id"),
-        "template_id": rule.get("template_id"),
-        "camera_entity_id": camera_id,
-        "area": camera.get("area"),
-        "last_activity": camera.get("last_activity"),
-        "recognized_people": camera.get("recognized_people", []),
-        "motion_entities": camera.get("motion_entities", []),
-        "vmd_entities": camera.get("vmd_entities", []),
-        "anyone_home": snapshot["derived"]["anyone_home"],
-        "is_night": snapshot["derived"]["is_night"],
-    }
-    return [_build_finding(rule, [camera_id], evidence)]
+    if isinstance(camera_id, str) and camera_id:
+        camera = camera_map.get(camera_id)
+        if camera is None:
+            return []
+        return [(camera_id, camera)]
+    if params.get("camera_selector") == "any":
+        return list(camera_map.items())
+    return []
 
 
 def _eval_unavailable_sensors_while_home(

@@ -1479,7 +1479,37 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 return rule_id
         return None
 
-    async def _handle_promote_discovery(call: ServiceCall) -> dict[str, Any]:
+    def _covered_specific_rule_for_any_camera_normalized(
+        template_id: str,
+        params: dict[str, Any],
+    ) -> str | None:
+        rule_registry = entry.runtime_data.rule_registry
+        if rule_registry is None:
+            return None
+        if params.get("camera_selector") != "any":
+            return None
+        if template_id not in {
+            "unknown_person_camera_no_home",
+            "unknown_person_camera_when_home",
+        }:
+            return None
+        for rule in rule_registry.list_rules():
+            if str(rule.get("template_id", "")) != template_id:
+                continue
+            rule_params = rule.get("params") or {}
+            if not isinstance(rule_params, dict):
+                continue
+            camera_entity_id = str(rule_params.get("camera_entity_id", ""))
+            if not camera_entity_id:
+                continue
+            rule_id = str(rule.get("rule_id", ""))
+            if rule_id:
+                return rule_id
+        return None
+
+    async def _handle_promote_discovery(  # noqa: PLR0911
+        call: ServiceCall,
+    ) -> dict[str, Any]:
         candidate_id = str(call.data.get("candidate_id"))
         notes = str(call.data.get("notes", "") or "")
         discovery_store = entry.runtime_data.discovery_store
@@ -1507,6 +1537,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
         normalized = normalize_candidate(candidate)
         if normalized is not None:
+            covered_specific_rule_id = _covered_specific_rule_for_any_camera_normalized(
+                normalized.template_id,
+                normalized.params,
+            )
+            if covered_specific_rule_id is not None:
+                LOGGER.info(
+                    (
+                        "Skipping promote for %s: any-camera proposal covered by "
+                        "specific rule %s."
+                    ),
+                    candidate_id,
+                    covered_specific_rule_id,
+                )
+                return {
+                    "status": "already_active",
+                    "candidate_id": candidate_id,
+                    "rule_id": covered_specific_rule_id,
+                }
             existing_draft = proposal_store.find_by_rule_id(normalized.rule_id)
             if existing_draft is not None:
                 LOGGER.info(
@@ -1606,7 +1654,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         supports_response=_SERVICE_RESPONSE_ONLY,
     )
 
-    async def _handle_approve_proposal(call: ServiceCall) -> dict[str, Any]:
+    async def _handle_approve_proposal(  # noqa: PLR0911
+        call: ServiceCall,
+    ) -> dict[str, Any]:
         candidate_id = str(call.data.get("candidate_id"))
         notes = str(call.data.get("notes", "") or "")
         proposal_store = entry.runtime_data.proposal_store
@@ -1626,26 +1676,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             )
             return {"status": "not_found", "candidate_id": candidate_id}
 
+        covered_rule_id = _covered_rule_id_for_candidate(candidate)
+        if covered_rule_id is not None:
+            await proposal_store.async_update_status(
+                candidate_id,
+                "covered_by_existing_rule",
+                notes,
+                extra={"covered_rule_id": covered_rule_id},
+            )
+            LOGGER.info(
+                "Proposal %s marked covered_by_existing_rule (%s).",
+                candidate_id,
+                covered_rule_id,
+            )
+            return {
+                "status": "covered_by_existing_rule",
+                "candidate_id": candidate_id,
+                "rule_id": covered_rule_id,
+            }
+
         normalized = normalize_candidate(candidate)
         if normalized is None:
-            covered_rule_id = _covered_rule_id_for_candidate(candidate)
-            if covered_rule_id is not None:
-                await proposal_store.async_update_status(
-                    candidate_id,
-                    "covered_by_existing_rule",
-                    notes,
-                    extra={"covered_rule_id": covered_rule_id},
-                )
-                LOGGER.info(
-                    "Proposal %s marked covered_by_existing_rule (%s).",
-                    candidate_id,
-                    covered_rule_id,
-                )
-                return {
-                    "status": "covered_by_existing_rule",
-                    "candidate_id": candidate_id,
-                    "rule_id": covered_rule_id,
-                }
             await proposal_store.async_update_status(
                 candidate_id,
                 "unsupported",
@@ -1659,6 +1710,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 candidate_id,
             )
             return {"status": "unsupported", "candidate_id": candidate_id}
+        covered_specific_rule_id = _covered_specific_rule_for_any_camera_normalized(
+            normalized.template_id,
+            normalized.params,
+        )
+        if covered_specific_rule_id is not None:
+            await proposal_store.async_update_status(
+                candidate_id,
+                "covered_by_existing_rule",
+                notes,
+                extra={"covered_rule_id": covered_specific_rule_id},
+            )
+            LOGGER.info(
+                (
+                    "Proposal %s marked covered_by_existing_rule (%s): any-camera "
+                    "proposal superseded by camera-specific rule."
+                ),
+                candidate_id,
+                covered_specific_rule_id,
+            )
+            return {
+                "status": "covered_by_existing_rule",
+                "candidate_id": candidate_id,
+                "rule_id": covered_specific_rule_id,
+            }
 
         rule_spec = normalized.as_dict()
         rule_spec["created_at"] = dt_util.utcnow().isoformat()
