@@ -70,7 +70,7 @@ rule_version: "1.0"                    # required on all rules
 
 - Service: `home_generative_agent.sentinel_set_autonomy_level`.
 - `level: 0` is the kill-switch call and must take effect immediately without restart.
-- Service is admin-only and requires explicit `entry_id`.
+- Service is admin-only. Does not require an explicit `entry_id` in the service call; the engine derives the active entry internally.
 - Runtime override is in-memory by default. If `CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES` is set, override auto-expires and reverts to config default, with an audit event.
 - `CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: true` (default) enforces PIN verification for level increases into 2 or 3. Never required for lowering. This is a declared policy with a fixed default, not optional hardening.
 
@@ -174,6 +174,7 @@ rule_version: "1.0"                    # required on all rules
 - Attach camera snapshots where available and permissioned.
 - Digest mode for burst findings.
 - Structured snooze options (`24h`, `7d`, `always`) shown in notification and written through suppression path (Section 8).
+- False Alarm action button included on every notification; tapping it sets `user_response.false_positive = True` in the audit record. *(Implemented)*
 - Sensitive finding notifications may include occupant context from `derived.people_away` when policy allows.
 
 ---
@@ -288,7 +289,7 @@ The following architecture refactors are required before the feature sequence ca
    - Do not rely on mutating static `options` payload for runtime changes.
 2. Autonomy service authorization layer (depends on 1):
    - Gate `home_generative_agent.sentinel_set_autonomy_level` with admin-only checks.
-   - Require explicit `entry_id` targeting.
+   - Entry is resolved internally; callers do not pass `entry_id` in the service call.
    - Enforce PIN verification for increases into levels 2/3 when `CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE=true`.
 3. Structured suppression decision model:
    - Replace boolean suppression outcome with structured result (`suppressed`, `reason_code`, `expires_at`, metadata).
@@ -375,7 +376,7 @@ Prerequisite: all items in Section 15 are completed.
 
 - Canary mode (L1 → L2 sub-phase) has no KPI gate. It exists solely for operator confidence - review `canary_would_execute` decisions in the audit log before enabling live execution. The L1 → L2 KPI thresholds apply only to live execution data.
 - Rolling KPI values are exposed on health entity for operator visibility.
-- One-click rollback to Level 0 via `sentinel_set_autonomy_level` service call (`level: 0`, explicit `entry_id`).
+- One-click rollback to Level 0 via `sentinel_set_autonomy_level` service call (`level: 0`; no `entry_id` required in call).
 
 ---
 
@@ -427,7 +428,7 @@ Autonomy progression:
 | 6 | Suppression | Snooze routing, per-person presence grace, quiet-hours, reason codes |
 | 7 | Triage | Allowlist/sanitized evidence enforcement, timeout fail-open, triage_confidence audit-only |
 | 8 | Notification UX | Snooze writes to suppression, `always` confirmation required |
-| 9 | Execution service + runtime overrides | Admin-only level changes, explicit `entry_id`, TTL expiry revert to default |
+| 9 | Execution service + runtime overrides | Admin-only level changes, TTL expiry revert to default |
 | 10 | Canary mode | `would_auto_execute` accuracy, no side effects |
 | 11 | Auto-exec guardrails | Allowlist/confidence/stale/rate/idempotency/PIN gate enforcement |
 | 12 | Temporal/baseline detectors | Deviation trigger correctness, baseline freshness handling |
@@ -440,11 +441,32 @@ Autonomy progression:
 
 Each issue is a self-contained PR targeting main. Every PR must leave tests green and behavior backward-compatible unless the issue explicitly permits a behavioral change.
 
+**Status as of 2026-03-03:** Issues #1–#11 and #14 are done. Issues #12, #13, and #15 remain open. One unplanned issue (#9b, GitHub #269) covered pending-prompt TTL separately. See individual entries below for GitHub issue numbers.
+
+| Plan # | GitHub # | Status | Title |
+|---|---|---|---|
+| #1 | #251 | Done | Structured suppression decision model |
+| #2 | #253 | Done | Snapshot per-person presence |
+| #3 | #254 | Done | Versioned audit schema and config surface |
+| #4 | #255 | Done | Runtime autonomy level and kill-switch service |
+| #5 | #256 | Done | Trigger scheduler |
+| #6 | #257 | Done | Event-driven triggering |
+| #7 | #258 | Done | Correlation pass |
+| #8 | #259 | Done | Decouple execution service |
+| #9 | #260 | Done | Suppression upgrades |
+| #9b | #269 | Done | Pending-prompt TTL (unplanned follow-on) |
+| #10 | #261 | Done | Notification routing and UX |
+| #11 | #262 | Done | Level 1: LLM triage |
+| #12 | #263 | **Open** | Level 2: Canary mode |
+| #13 | #264 | **Open** | Level 2: Live auto-execute |
+| #14 | #265 | Done | Baseline storage and temporal detectors |
+| #15 | #266 | **Open** | Lambda rule review/approval UI |
+
 ---
 
 ### Milestone 0 — Parallel Refactors (no external behavioral change; all four may be opened and merged in any order)
 
-**Issue #1 — Structured suppression decision model**
+**Issue #1 — Structured suppression decision model** *(Done — GitHub #251)*
 
 - Plan coverage: Prerequisite 3, Section 8
 - Scope: Change `should_suppress()` to return a `SuppressionDecision(suppress: bool, reason_code: str, context: dict)` dataclass. Update all call sites in `engine.py`. No change to suppression logic.
@@ -453,7 +475,7 @@ Each issue is a self-contained PR targeting main. Every PR must leave tests gree
 - Size: S
 - Dependencies: none
 
-**Issue #2 — Snapshot per-person presence**
+**Issue #2 — Snapshot per-person presence** *(Done — GitHub #253)*
 
 - Plan coverage: Prerequisite 8, Section 15 (multi-occupant)
 - Scope: Add `people_home: list[str]` and `people_away: list[str]` to `DerivedContext` TypedDict and `SNAPSHOT_SCHEMA`. Keep `anyone_home` and all existing fields; new fields default to `[]` if person-tracking entities are unavailable. Update `snapshot/builder.py` to populate them.
@@ -462,7 +484,7 @@ Each issue is a self-contained PR targeting main. Every PR must leave tests gree
 - Size: S
 - Dependencies: none
 
-**Issue #3 — Versioned audit schema and config surface**
+**Issue #3 — Versioned audit schema and config surface** *(Done — GitHub #254)*
 
 - Plan coverage: Prerequisite 5 (partial), Prerequisite 6 (partial), Section 12, Section 13
 - Scope: Expand `AuditRecord` with the full field set from Section 12 (`data_quality`, `trigger_source`, `suppression_reason_code`, `triage_confidence`, `canary_would_execute`, `execution_id`, `rule_version`, `autonomy_level_at_decision`). Add `version: int = 1` field. Implement v1→v2 migration in `audit/store.py`. Add `CONF_AUDIT_HOT_MAX_RECORDS`, `CONF_AUDIT_ARCHIVAL_BACKLOG_MAX`, `CONF_AUDIT_RETENTION_DAYS`, `CONF_AUDIT_HIGH_RETENTION_DAYS` to `const.py`. Populate new fields with `None` / sentinel defaults at all existing call sites.
@@ -471,10 +493,10 @@ Each issue is a self-contained PR targeting main. Every PR must leave tests gree
 - Size: M
 - Dependencies: none
 
-**Issue #4 — Runtime autonomy level and kill-switch service**
+**Issue #4 — Runtime autonomy level and kill-switch service** *(Done — GitHub #255)*
 
 - Plan coverage: Prerequisite 1, Prerequisite 2, Section 3, Section 5 (kill switch)
-- Scope: Register `home_generative_agent.sentinel_set_autonomy_level` HA service (admin-only, requires `entry_id` and `level: 0|1|2|3`). Read runtime level from in-memory override (TTL-bounded) falling back to `CONF_SENTINEL_AUTONOMY_LEVEL`. Add `CONF_SENTINEL_AUTONOMY_LEVEL`, `CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES`, `CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE` to `const.py`. No behavioral change to detection logic.
+- Scope: Register `home_generative_agent.sentinel_set_autonomy_level` HA service (admin-only, `level: 0|1|2|3`; entry resolved internally, no `entry_id` in call schema). Read runtime level from in-memory override (TTL-bounded) falling back to `CONF_SENTINEL_AUTONOMY_LEVEL`. Add `CONF_SENTINEL_AUTONOMY_LEVEL`, `CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES`, `CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE` to `const.py`. No behavioral change to detection logic.
 - Files: `__init__.py`, `sentinel/engine.py`, `const.py`, `services.yaml`
 - Tests: Service call sets level; TTL expiry reverts to config default; level increase blocked without PIN when required; level decrease never requires PIN.
 - Size: M
@@ -484,7 +506,7 @@ Each issue is a self-contained PR targeting main. Every PR must leave tests gree
 
 ### Milestone 1 — Pipeline Infrastructure (Issues #5–#8; merge in order)
 
-**Issue #5 — Trigger scheduler**
+**Issue #5 — Trigger scheduler** *(Done — GitHub #256)*
 
 - Plan coverage: Prerequisite 7, Section 6
 - Scope: Extract `SentinelTriggerScheduler` with bounded queue (max 10), coalescing window (5 s default), TTL (30 s), deterministic drop policy (prefer security-critical), and `asyncio.Lock` single-flight. Wire into `engine._run_loop()` without changing polling behavior.
@@ -493,7 +515,7 @@ Each issue is a self-contained PR targeting main. Every PR must leave tests gree
 - Size: M
 - Dependencies: none (can open alongside Milestone 0 issues)
 
-**Issue #6 — Event-driven triggering**
+**Issue #6 — Event-driven triggering** *(Done — GitHub #257)*
 
 - Plan coverage: Prerequisite 7 (complete), Section 6
 - Scope: Subscribe to HA state-change events for sentinel-watched entity IDs. On qualifying change, enqueue a trigger via `SentinelTriggerScheduler`. Retain polling as fallback when queue is empty.
@@ -502,7 +524,7 @@ Each issue is a self-contained PR targeting main. Every PR must leave tests gree
 - Size: M
 - Dependencies: Issue #5
 
-**Issue #7 — Correlation pass**
+**Issue #7 — Correlation pass** *(Done — GitHub #258)*
 
 - Plan coverage: Section 7
 - Scope: Implement `SentinelCorrelator.correlate(findings)` producing `CompoundFinding` for related findings within a single `_run_once()` call. Compound findings are immutable once emitted. Wire into pipeline between rule evaluation and suppression.
@@ -511,7 +533,7 @@ Each issue is a self-contained PR targeting main. Every PR must leave tests gree
 - Size: M
 - Dependencies: none (can open alongside Issue #5)
 
-**Issue #8 — Decouple execution service**
+**Issue #8 — Decouple execution service** *(Done — GitHub #259)*
 
 - Plan coverage: Prerequisite 4, Section 4 (guardrails), Section 2 (staleness validation)
 - Scope: Extract `SentinelExecutionService` from `engine.py`. Implement idempotency key (`sha256(anomaly_id + action_policy_path + policy_version + window_bucket)`), allowlist enforcement, sensitivity-flag block, stale-data block, rate limiter, and PIN gate stub. `policy_version` computed as `sha256(json.dumps({...}, sort_keys=True))` over global policy config fields including `effective_rule_threshold`. Add staleness validation pass using `CONF_SENTINEL_STALENESS_THRESHOLD_SECONDS`.
@@ -524,16 +546,16 @@ Each issue is a self-contained PR targeting main. Every PR must leave tests gree
 
 ### Milestone 2 — Suppression and Notification (Issues #9–#10; merge in order)
 
-**Issue #9 — Suppression upgrades**
+**Issue #9 — Suppression upgrades** *(Done — GitHub #260; pending-prompt TTL done separately as GitHub #269)*
 
 - Plan coverage: Section 8 (full), Prerequisite 3 (complete), Prerequisite 8 (consumed)
-- Scope: Add snooze routing (snooze writes to `SuppressionState` not `pending_prompts`), per-person presence-grace window, quiet-hours enforcement, `SuppressionState.version` with v1→v2 migration, read-only compatibility mode on downgrade. All suppression paths emit `suppression_reason_code` via `SuppressionDecision`.
+- Scope: Add snooze routing (snooze writes to `SuppressionState` not `pending_prompts`), per-person presence-grace window, quiet-hours enforcement, `SuppressionState.version` with v1→v2 migration, read-only compatibility mode on downgrade. All suppression paths emit `suppression_reason_code` via `SuppressionDecision`. Pending-prompt TTL and expiry was implemented as a follow-on PR (GitHub #269/PR #273).
 - Files: `sentinel/suppression.py`, `sentinel/engine.py`
 - Tests: Snooze-as-suppression; per-person grace (occupied vs. vacated areas); quiet-hours; reason codes for all paths; migration and downgrade-safe read.
 - Size: M
 - Dependencies: Issues #1, #2
 
-**Issue #10 — Notification routing and UX**
+**Issue #10 — Notification routing and UX** *(Done — GitHub #261)*
 
 - Plan coverage: Section 9
 - Scope: Implement `SentinelNotifier` with `always` confirmation guard, per-area/per-person routing, snooze action that calls suppression, and `is_sensitive` redaction in notification text. Wire into pipeline after suppression pass.
@@ -546,7 +568,7 @@ Each issue is a self-contained PR targeting main. Every PR must leave tests gree
 
 ### Milestone 3 — Autonomy Features (Issues #11–#13; strictly sequential)
 
-**Issue #11 — Level 1: LLM triage**
+**Issue #11 — Level 1: LLM triage** *(Done — GitHub #262)*
 
 - Plan coverage: Section 7 (triage pass)
 - Scope: Implement `SentinelTriageService`. Build triage prompt from the Section 6 allowlist only (`type`, `severity`, `confidence`, `is_sensitive`, `entity_count`, `suggested_actions_count`) plus explicitly allowed sanitized evidence fields (`is_night`, `anyone_home`, `recognized_people_count`, `last_changed_age_seconds`) when available. Timeout fail-open (treat as `notify`). Record `triage_confidence` in `AuditRecord` (audit-only; never gates execution). Triage output gates only `notify` vs. `suppress`.
@@ -555,7 +577,7 @@ Each issue is a self-contained PR targeting main. Every PR must leave tests gree
 - Size: M
 - Dependencies: Issues #3, #8
 
-**Issue #12 — Level 2: Canary mode**
+**Issue #12 — Level 2: Canary mode** *(Open — GitHub #263)*
 
 - Plan coverage: Section 3 (canary), Section 17 (KPI)
 - Scope: When `CONF_SENTINEL_AUTO_EXEC_CANARY_MODE=true`, compute `would_auto_execute` using full guardrail logic and record in `AuditRecord.canary_would_execute`. No action taken. No KPI gate for canary-to-live transition (operator decides). False-positive rate notification-quality KPI still applies during canary.
@@ -564,7 +586,7 @@ Each issue is a self-contained PR targeting main. Every PR must leave tests gree
 - Size: S
 - Dependencies: Issues #8, #11
 
-**Issue #13 — Level 2: Live auto-execute**
+**Issue #13 — Level 2: Live auto-execute** *(Open — GitHub #264)*
 
 - Plan coverage: Section 4, Section 17 (L1→L2 action KPIs)
 - Scope: Enable live auto-execution behind all guardrails from Issue #8. Idempotency key prevents double-fire. Rate limiter enforced. L1→L2 rollout thresholds from Section 17 (false-positive rate < 10% notification-quality gate; action KPIs N/A during canary) and zero unintended irreversible actions must be met before enabling in production — enforced by rollout process, not code gate.
@@ -577,7 +599,9 @@ Each issue is a self-contained PR targeting main. Every PR must leave tests gree
 
 ### Milestone 4 — Advanced Rules and Level 3 (Issues #14–#15; merge in order)
 
-**Issue #14 — Baseline storage and temporal detectors**
+> **Note:** Issue #14 was completed alongside Milestone 2/3 work (GitHub #265, merged 2026-03-01), ahead of the original milestone order. This was valid since its only dependency is Issue #8. Issue #15 can proceed since its dependency (#14) is done.
+
+**Issue #14 — Baseline storage and temporal detectors** *(Done — GitHub #265)*
 
 - Plan coverage: Section 10 (baseline rules), Section 16 step 1
 - Scope: Implement `SentinelBaselineUpdater` (15-min cadence) writing rolling stats to `sentinel_baselines` PostgreSQL table. Implement temporal-deviation and time-of-day anomaly detector templates that read from baseline. Add `baseline_freshness` check to staleness validation.
@@ -586,7 +610,7 @@ Each issue is a self-contained PR targeting main. Every PR must leave tests gree
 - Size: L
 - Dependencies: Issue #8
 
-**Issue #15 — Lambda rule review/approval UI**
+**Issue #15 — Lambda rule review/approval UI** *(Open — GitHub #266)*
 
 - Plan coverage: Section 11 (lambda rules), Section 19 (lambda approval gate test)
 - Scope: Implement lambda rule receipt: AST validation at receipt (reject non-compliant immediately), status set to `pending`. Implement approval service call (`sentinel_approve_rule`) that transitions `pending` → `active` in registry. Pending rules are skipped by the evaluation loop. Add Lovelace card stub for review UI or document manual service-call workflow.
