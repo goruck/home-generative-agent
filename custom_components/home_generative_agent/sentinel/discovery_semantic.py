@@ -149,7 +149,7 @@ def rule_semantic_key(rule: dict[str, Any]) -> str | None:  # noqa: PLR0911, PLR
         )
     if template_id == "unknown_person_camera_no_home":
         camera_id = str(params.get("camera_entity_id", ""))
-        if not camera_id:
+        if not camera_id and params.get("camera_selector") != "any":
             return None
         return (
             "v1|subject=camera|predicate=unknown_person|night=any|home=0|scope=any|"
@@ -157,7 +157,7 @@ def rule_semantic_key(rule: dict[str, Any]) -> str | None:  # noqa: PLR0911, PLR
         )
     if template_id == "unknown_person_camera_when_home":
         camera_id = str(params.get("camera_entity_id", ""))
-        if not camera_id:
+        if not camera_id and params.get("camera_selector") != "any":
             return None
         return (
             "v1|subject=camera|predicate=unknown_person|night=any|home=1|scope=any|"

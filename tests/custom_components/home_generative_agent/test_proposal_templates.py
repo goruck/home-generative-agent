@@ -384,3 +384,54 @@ def test_normalize_candidate_unknown_person_camera_no_home_from_entities_path() 
     assert normalized.template_id == "unknown_person_camera_no_home"
     assert normalized.rule_id == "unknown_person_camera_no_home_camera_front_gate"
     assert normalized.params == {"camera_entity_id": "camera.front_gate"}
+
+
+def test_normalize_candidate_unknown_person_camera_no_home_any_camera() -> None:
+    candidate = {
+        "candidate_id": "candidate_unknown_person_camera_no_home",
+        "title": "Unknown Person Detected by Camera When No One Home",
+        "summary": "Triggers when a camera records an unknown person while no occupants are present at home.",
+        "pattern": "unknown person while no occupants present",
+        "suggested_type": "security",
+        "confidence_hint": 0.8,
+        "evidence_paths": ["derived.is_night"],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "unknown_person_camera_no_home"
+    assert normalized.rule_id == "unknown_person_camera_no_home_any_camera"
+    assert normalized.params == {"camera_selector": "any"}
+
+
+def test_normalize_candidate_unknown_person_camera_when_home_any_camera_indeterminate() -> None:
+    candidate = {
+        "candidate_id": "unknown_person_camera_day",
+        "title": "Unknown Person Detected by Camera While Home During Day",
+        "summary": "Detects any camera that recognizes an unknown or indeterminate person while residents are home and it is daytime.",
+        "pattern": "indeterminate face while residents present",
+        "suggested_type": "security",
+        "confidence_hint": 0.7,
+        "evidence_paths": ["derived.anyone_home"],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "unknown_person_camera_when_home"
+    assert normalized.rule_id == "unknown_person_camera_when_home_any_camera"
+    assert normalized.params == {"camera_selector": "any"}
+
+
+def test_normalize_candidate_unknown_person_camera_infers_camera_from_candidate_id() -> None:
+    candidate = {
+        "candidate_id": "unknown_person_camera_home_frontgate",
+        "title": "Unknown person detected while residents are home",
+        "summary": "Unknown person event near the front gate while occupants are present.",
+        "pattern": "unknown person while home",
+        "suggested_type": "security",
+        "confidence_hint": 0.7,
+        "evidence_paths": ["derived.anyone_home"],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "unknown_person_camera_when_home"
+    assert normalized.rule_id == "unknown_person_camera_when_home_camera_frontgate"
+    assert normalized.params == {"camera_entity_id": "camera.frontgate"}
