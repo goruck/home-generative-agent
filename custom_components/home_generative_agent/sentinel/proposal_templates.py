@@ -25,6 +25,8 @@ SUPPORTED_TEMPLATES = {
     # Issue #265 — baseline-driven detectors
     "baseline_deviation",
     "time_of_day_anomaly",
+    # Issue #266 — lambda/expression rules
+    "lambda",
 }
 
 _PERCENT_THRESHOLD_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*%")

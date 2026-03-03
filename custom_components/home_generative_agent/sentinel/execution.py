@@ -262,6 +262,162 @@ class SentinelExecutionService:
             block_reason=None,
         )
 
+    def evaluate_canary(  # noqa: PLR0911
+        self,
+        finding: AnomalyFinding,
+        snapshot: FullStateSnapshot,
+        autonomy_level: int,
+        now: datetime,
+    ) -> ActionPolicyResult:
+        """
+        Evaluate execution policy **without mutating any instance state**.
+
+        Identical logic to ``evaluate()`` but uses snapshot copies of the
+        rate-limit and idempotency state so that canary decisions leave no
+        side effects.  Returns the hypothetical ``ActionPolicyResult`` that
+        *would* have been returned if live execution were enabled.
+        """
+        # 1. Autonomy level gate.
+        if autonomy_level < _MIN_AUTO_EXECUTE_LEVEL:
+            return ActionPolicyResult(
+                action_policy_path=ACTION_POLICY_PROMPT_USER,
+                data_quality=DATA_QUALITY_FRESH,
+                data_quality_details={},
+                execution_id=None,
+                block_reason="autonomy_level_below_2",
+            )
+
+        # 2. Data quality gate.
+        dq, dq_details = self._compute_data_quality(finding, snapshot, now)
+        if dq == DATA_QUALITY_UNAVAILABLE:
+            high_sev = finding.severity == "high"
+            path = ACTION_POLICY_PROMPT_USER if high_sev else ACTION_POLICY_BLOCKED
+            return ActionPolicyResult(
+                action_policy_path=path,
+                data_quality=dq,
+                data_quality_details=dq_details,
+                execution_id=None,
+                block_reason="data_quality_unavailable",
+            )
+        if dq == DATA_QUALITY_STALE:
+            return ActionPolicyResult(
+                action_policy_path=ACTION_POLICY_PROMPT_USER,
+                data_quality=dq,
+                data_quality_details=dq_details,
+                execution_id=None,
+                block_reason="data_quality_stale",
+            )
+
+        # 3. Sensitivity gate.
+        if finding.is_sensitive:
+            return ActionPolicyResult(
+                action_policy_path=ACTION_POLICY_HANDOFF,
+                data_quality=dq,
+                data_quality_details=dq_details,
+                execution_id=None,
+                block_reason="finding_sensitive",
+            )
+
+        # 4. Auto-execution enabled gate.
+        auto_enabled = bool(
+            self._options.get(
+                CONF_SENTINEL_AUTO_EXECUTION_ENABLED,
+                RECOMMENDED_SENTINEL_AUTO_EXECUTION_ENABLED,
+            )
+        )
+        if not auto_enabled:
+            return ActionPolicyResult(
+                action_policy_path=ACTION_POLICY_PROMPT_USER,
+                data_quality=dq,
+                data_quality_details=dq_details,
+                execution_id=None,
+                block_reason="auto_execution_disabled",
+            )
+
+        # 5. Confidence gate.
+        min_confidence = float(
+            self._options.get(
+                CONF_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE,
+                RECOMMENDED_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE,
+            )
+        )
+        if finding.confidence < min_confidence:
+            return ActionPolicyResult(
+                action_policy_path=ACTION_POLICY_PROMPT_USER,
+                data_quality=dq,
+                data_quality_details=dq_details,
+                execution_id=None,
+                block_reason="confidence_below_threshold",
+            )
+
+        # 6. Service allowlist gate.
+        if not self._passes_allowlist(finding):
+            return ActionPolicyResult(
+                action_policy_path=ACTION_POLICY_PROMPT_USER,
+                data_quality=dq,
+                data_quality_details=dq_details,
+                execution_id=None,
+                block_reason="service_not_allowlisted",
+            )
+
+        # 7. Rate limit gate — use a read-only snapshot of the action-time list.
+        window_start = now - timedelta(hours=1)
+        recent_snapshot = [t for t in self._recent_action_times if t > window_start]
+        max_per_hour = int(
+            self._options.get(
+                CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR,
+                RECOMMENDED_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR,
+            )
+        )
+        if len(recent_snapshot) >= max_per_hour:
+            return ActionPolicyResult(
+                action_policy_path=ACTION_POLICY_PROMPT_USER,
+                data_quality=dq,
+                data_quality_details=dq_details,
+                execution_id=None,
+                block_reason="rate_limit_exceeded",
+            )
+
+        # 8. Idempotency gate — use a read-only snapshot of the seen set.
+        policy_version = self._compute_policy_version(autonomy_level, min_confidence)
+        execution_id = self._compute_execution_id(
+            finding.anomaly_id, ACTION_POLICY_AUTO_EXECUTE, policy_version
+        )
+        # Refresh window check against monotonic clock without mutating state.
+        window_minutes = int(
+            self._options.get(
+                CONF_SENTINEL_EXECUTION_IDEMPOTENCY_WINDOW_MINUTES,
+                RECOMMENDED_SENTINEL_EXECUTION_IDEMPOTENCY_WINDOW_MINUTES,
+            )
+        )
+        window_seconds = window_minutes * 60
+        elapsed = time.monotonic() - self._idempotency_window_reset_at
+        idempotency_snapshot = (
+            set() if elapsed >= window_seconds else set(self._idempotency_seen)
+        )
+        if execution_id in idempotency_snapshot:
+            return ActionPolicyResult(
+                action_policy_path=ACTION_POLICY_PROMPT_USER,
+                data_quality=dq,
+                data_quality_details=dq_details,
+                execution_id=execution_id,
+                block_reason="idempotency_duplicate",
+            )
+
+        # All guardrails pass — hypothetical auto-execute (no state mutation).
+        LOGGER.debug(
+            "Canary: would auto-execute finding %s (execution_id=%s).",
+            finding.anomaly_id,
+            execution_id,
+        )
+        return ActionPolicyResult(
+            action_policy_path=ACTION_POLICY_AUTO_EXECUTE,
+            data_quality=dq,
+            data_quality_details=dq_details,
+            execution_id=execution_id,
+            block_reason=None,
+        )
+
     # ---------------------------------------------------------------------- #
     # Data quality / staleness
     # ---------------------------------------------------------------------- #

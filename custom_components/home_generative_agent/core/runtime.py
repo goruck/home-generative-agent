@@ -21,6 +21,9 @@ if TYPE_CHECKING:
         DiscoveryStore,
     )
     from custom_components.home_generative_agent.sentinel.engine import SentinelEngine
+    from custom_components.home_generative_agent.sentinel.lambda_registry import (
+        LambdaRuleRegistry,
+    )
     from custom_components.home_generative_agent.sentinel.notifier import (
         SentinelNotifier,
     )
@@ -64,6 +67,7 @@ class HGAData:
     discovery_engine: SentinelDiscoveryEngine | None
     proposal_store: ProposalStore | None
     rule_registry: RuleRegistry | None
+    lambda_registry: LambdaRuleRegistry | None
 
 
 type HGAConfigEntry = ConfigEntry[HGAData]

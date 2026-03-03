@@ -192,6 +192,71 @@ reactivate_dynamic_rule:
       selector:
         text:
 
+sentinel_receive_lambda_rule:
+  name: Receive lambda rule
+  description: >
+    Submit a lambda/expression rule for AST validation.
+    On success, status is set to pending until operator approval.
+  fields:
+    rule_id:
+      name: Rule ID
+      description: Unique identifier for the rule.
+      required: true
+      example: "high_temp_alert"
+      selector:
+        text:
+    expression:
+      name: Expression
+      description: >
+        Python boolean expression evaluated against the snapshot.
+        Must pass AST safety validation (no function calls, imports, etc.).
+      required: true
+      example: "anyone_home and is_night"
+      selector:
+        text:
+    severity:
+      name: Severity
+      description: "Severity level: low, medium, or high."
+      required: false
+      default: "low"
+      selector:
+        select:
+          options:
+            - low
+            - medium
+            - high
+    confidence:
+      name: Confidence
+      description: Detection confidence between 0.0 and 1.0.
+      required: false
+      default: 0.5
+      selector:
+        number:
+          min: 0.0
+          max: 1.0
+          step: 0.05
+          mode: box
+    description:
+      name: Description
+      description: Human-readable description of what the rule detects.
+      required: false
+      selector:
+        text:
+
+sentinel_approve_lambda_rule:
+  name: Approve lambda rule
+  description: >
+    Approve a pending lambda rule, transitioning it to active so it
+    is evaluated by the sentinel engine.
+  fields:
+    rule_id:
+      name: Rule ID
+      description: Rule ID of the pending lambda rule to approve.
+      required: true
+      example: "high_temp_alert"
+      selector:
+        text:
+
 sentinel_set_autonomy_level:
   name: Set sentinel autonomy level
   description: >

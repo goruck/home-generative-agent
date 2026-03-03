@@ -7,6 +7,14 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
+from custom_components.home_generative_agent.const import (
+    CONF_SENTINEL_AUTO_EXEC_CANARY_MODE,
+    CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES,
+    CONF_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE,
+    CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR,
+    CONF_SENTINEL_AUTO_EXECUTION_ENABLED,
+    CONF_SENTINEL_STALENESS_THRESHOLD_SECONDS,
+)
 from custom_components.home_generative_agent.sentinel.engine import SentinelEngine
 from custom_components.home_generative_agent.sentinel.suppression import (
     SuppressionManager,
@@ -69,6 +77,9 @@ class DummyAudit:
                 "finding": finding,
                 "snapshot": snapshot,
                 "suppression_reason_code": kwargs.get("suppression_reason_code"),
+                "canary_would_execute": kwargs.get("canary_would_execute"),
+                "action_policy_path": kwargs.get("action_policy_path"),
+                "action_outcome": kwargs.get("action_outcome"),
             }
         )
 
@@ -134,3 +145,79 @@ async def test_sentinel_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
     assert notifier.calls
     assert audit_store.calls
     assert audit_store.calls[0]["suppression_reason_code"] == "not_suppressed"
+
+
+@pytest.mark.asyncio
+async def test_sentinel_canary_mode_records_would_execute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Canary mode records canary_would_execute=True without executing services."""
+    snapshot: FullStateSnapshot = validate_snapshot(
+        {
+            "schema_version": 1,
+            "generated_at": "2025-01-01T01:00:00+00:00",
+            "entities": [
+                {
+                    "entity_id": "binary_sensor.front_door",
+                    "domain": "binary_sensor",
+                    "state": "on",
+                    "friendly_name": "Front Door",
+                    "area": "Front",
+                    "attributes": {"device_class": "door"},
+                    "last_changed": "2025-01-01T00:59:50+00:00",
+                    "last_updated": "2025-01-01T00:59:50+00:00",
+                }
+            ],
+            "camera_activity": [],
+            "derived": {
+                "now": "2025-01-01T01:00:00+00:00",
+                "timezone": "UTC",
+                "is_night": False,
+                "anyone_home": False,
+                "people_home": [],
+                "people_away": [],
+                "last_motion_by_area": {},
+            },
+        }
+    )
+
+    async def _fake_build(_hass: HomeAssistant) -> FullStateSnapshot:
+        return snapshot
+
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.sentinel.engine.async_build_full_state_snapshot",
+        _fake_build,
+    )
+
+    engine = SentinelEngine(
+        hass=cast("HomeAssistant", object()),
+        options={
+            "sentinel_cooldown_minutes": 0,
+            "sentinel_entity_cooldown_minutes": 0,
+            "sentinel_interval_seconds": 60,
+            "explain_enabled": False,
+            CONF_SENTINEL_AUTO_EXEC_CANARY_MODE: True,
+            CONF_SENTINEL_AUTO_EXECUTION_ENABLED: True,
+            CONF_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE: 0.0,
+            CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR: 10,
+            CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: [],
+            CONF_SENTINEL_STALENESS_THRESHOLD_SECONDS: 3600,
+            "sentinel_autonomy_level": 2,
+        },
+        suppression=DummySuppression(),
+        notifier=cast("SentinelNotifier", DummyNotifier()),
+        audit_store=cast("AuditStore", DummyAudit()),
+        explainer=None,
+    )
+
+    # Patch get_autonomy_level so the engine uses level 2.
+    monkeypatch.setattr(engine, "get_autonomy_level", lambda _entry_id: 2)
+    engine._entry_id = "test_entry"
+
+    await engine._run_once()
+
+    audit_store = cast("DummyAudit", cast("Any", engine)._audit_store)
+    assert audit_store.calls
+    # At least one finding should have canary_would_execute recorded (True or False).
+    canary_values = [c["canary_would_execute"] for c in audit_store.calls]
+    assert any(v is not None for v in canary_values)

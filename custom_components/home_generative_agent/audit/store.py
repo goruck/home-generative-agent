@@ -104,6 +104,7 @@ class AuditStore:
         rule_version: str | None = None,
         autonomy_level_at_decision: str | None = None,
         action_policy_path: str | None = None,
+        action_outcome: dict[str, Any] | None = None,
     ) -> None:
         """Append a finding audit record."""
         record = AuditRecord(
@@ -114,7 +115,7 @@ class AuditStore:
                 "notified_at": _now_iso(),
             },
             user_response=None,
-            action_outcome=None,
+            action_outcome=action_outcome,
             # v2 fields
             data_quality=data_quality,
             trigger_source=trigger_source,
