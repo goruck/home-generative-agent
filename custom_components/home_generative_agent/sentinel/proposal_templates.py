@@ -241,11 +241,7 @@ def normalize_candidate(  # noqa: PLR0911, PLR0912
             suggested_actions=["close_entry"],
         )
 
-    if (
-        has_camera_signal
-        and presence == "away"
-        and has_unknown_person_signal
-    ):
+    if has_camera_signal and presence == "away" and has_unknown_person_signal:
         if camera_id:
             rule_id = f"unknown_person_camera_no_home_{camera_id.replace('.', '_')}"
             params = {"camera_entity_id": camera_id}
@@ -261,11 +257,7 @@ def normalize_candidate(  # noqa: PLR0911, PLR0912
             is_sensitive=True,
             suggested_actions=["close_entry"],
         )
-    if (
-        has_camera_signal
-        and presence == "home"
-        and has_unknown_person_signal
-    ):
+    if has_camera_signal and presence == "home" and has_unknown_person_signal:
         if camera_id:
             default_rule_id = (
                 f"unknown_person_camera_when_home_{camera_id.replace('.', '_')}"
@@ -509,9 +501,7 @@ def _find_camera_id(  # noqa: PLR0911
     object_candidates = [
         token
         for token in suffix
-        if token
-        and token not in stopwords
-        and len(token) >= _MIN_CAMERA_TOKEN_LEN
+        if token and token not in stopwords and len(token) >= _MIN_CAMERA_TOKEN_LEN
     ]
     if not object_candidates:
         return None

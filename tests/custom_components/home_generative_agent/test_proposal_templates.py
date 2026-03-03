@@ -308,7 +308,9 @@ def test_normalize_candidate_unknown_person_camera_when_home_issue_278() -> None
     assert normalized.is_sensitive is False
 
 
-def test_normalize_candidate_unknown_person_camera_when_home_rule_id_is_deterministic() -> None:
+def test_normalize_candidate_unknown_person_camera_when_home_rule_id_is_deterministic() -> (
+    None
+):
     candidate = {
         "candidate_id": "different_candidate_id_same_semantics",
         "title": "Unknown person detected by camera while someone is home",
@@ -329,7 +331,9 @@ def test_normalize_candidate_unknown_person_camera_when_home_rule_id_is_determin
     assert normalized.rule_id == "unknown_person_camera_when_home_camera_backyard"
 
 
-def test_normalize_candidate_unknown_person_camera_no_home_rule_id_is_deterministic() -> None:
+def test_normalize_candidate_unknown_person_camera_no_home_rule_id_is_deterministic() -> (
+    None
+):
     candidate = {
         "candidate_id": "arbitrary_unknown_person_candidate",
         "title": "Unknown person detected by camera while no one is home",
@@ -347,7 +351,9 @@ def test_normalize_candidate_unknown_person_camera_no_home_rule_id_is_determinis
     assert normalized.rule_id == "unknown_person_camera_no_home_camera_backyard"
 
 
-def test_normalize_candidate_unknown_person_camera_when_home_from_entities_path() -> None:
+def test_normalize_candidate_unknown_person_camera_when_home_from_entities_path() -> (
+    None
+):
     candidate = {
         "candidate_id": "entities_path_unknown_person_home",
         "title": "Unknown person detected by front gate camera while occupants at home",
@@ -403,7 +409,9 @@ def test_normalize_candidate_unknown_person_camera_no_home_any_camera() -> None:
     assert normalized.params == {"camera_selector": "any"}
 
 
-def test_normalize_candidate_unknown_person_camera_when_home_any_camera_indeterminate() -> None:
+def test_normalize_candidate_unknown_person_camera_when_home_any_camera_indeterminate() -> (
+    None
+):
     candidate = {
         "candidate_id": "unknown_person_camera_day",
         "title": "Unknown Person Detected by Camera While Home During Day",
@@ -420,7 +428,9 @@ def test_normalize_candidate_unknown_person_camera_when_home_any_camera_indeterm
     assert normalized.params == {"camera_selector": "any"}
 
 
-def test_normalize_candidate_unknown_person_camera_infers_camera_from_candidate_id() -> None:
+def test_normalize_candidate_unknown_person_camera_infers_camera_from_candidate_id() -> (
+    None
+):
     candidate = {
         "candidate_id": "unknown_person_camera_home_frontgate",
         "title": "Unknown person detected while residents are home",

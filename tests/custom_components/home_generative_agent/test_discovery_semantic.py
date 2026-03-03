@@ -175,4 +175,7 @@ def test_rule_semantic_key_unknown_person_camera_no_home_any_camera() -> None:
         "params": {"camera_selector": "any"},
     }
     key = rule_semantic_key(rule)
-    assert key == "v1|subject=camera|predicate=unknown_person|night=any|home=0|scope=any|entities="
+    assert (
+        key
+        == "v1|subject=camera|predicate=unknown_person|night=any|home=0|scope=any|entities="
+    )
