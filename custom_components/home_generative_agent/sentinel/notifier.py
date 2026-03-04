@@ -33,6 +33,7 @@ from custom_components.home_generative_agent.const import (
     CONF_NOTIFY_SERVICE,
     CONF_SENTINEL_AREA_NOTIFY_MAP,
 )
+from custom_components.home_generative_agent.core.utils import extract_final
 from custom_components.home_generative_agent.sentinel.suppression import (
     SNOOZE_24H,
     SNOOZE_PERMANENT,
@@ -401,9 +402,8 @@ def _get_finding_area(
 
 
 def _normalize_text(text: str) -> str:
-    normalized = text.replace("**", "").replace("`", "")
-    normalized = normalized.replace("\r", " ").replace("\n", " ")
-    return re.sub(r"\s+", " ", normalized).strip()
+    text = extract_final(text)  # strips <think> blocks and collapses whitespace
+    return text.replace("**", "").replace("`", "")
 
 
 def _friendly_type(anomaly_type: str) -> str:

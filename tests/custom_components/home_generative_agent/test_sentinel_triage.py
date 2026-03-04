@@ -505,6 +505,30 @@ async def test_markdown_wrapped_json_is_parsed_correctly() -> None:
 
 
 @pytest.mark.asyncio
+async def test_think_block_before_json_is_stripped() -> None:
+    """<think> block preceding JSON (qwen3/qwen3.5 output) must be stripped before parsing."""
+    finding = _finding()
+    snapshot = _snapshot()
+
+    think_content = (
+        "<think>evaluating risk level for open entry</think>\n"
+        '{"decision": "suppress", "reason_code": "routine_state", '
+        '"triage_confidence": 0.9, "summary": "Routine door open."}'
+    )
+
+    class ThinkingLLM:
+        async def ainvoke(self, messages: list[Any]) -> Any:
+            return type("Result", (), {"content": think_content})()
+
+    svc = SentinelTriageService(ThinkingLLM())
+    result = await svc.triage(finding, snapshot)
+
+    assert result.decision == TRIAGE_SUPPRESS
+    assert result.reason_code == "routine_state"
+    assert result.triage_confidence == pytest.approx(0.9)
+
+
+@pytest.mark.asyncio
 async def test_unknown_decision_value_defaults_to_notify() -> None:
     """Unrecognised decision tokens in LLM response default to notify."""
     finding = _finding()

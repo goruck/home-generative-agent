@@ -62,6 +62,18 @@ async def test_async_explain_sanitizes_markdown() -> None:
 
 
 @pytest.mark.asyncio
+async def test_async_explain_strips_think_blocks() -> None:
+    """<think> reasoning blocks emitted by qwen3/qwen3.5 must be stripped."""
+    content = "<think>reasoning here</think>Door open recently. Close it now."
+    explainer = LLMExplainer(DummyModel(content))
+    result = await explainer.async_explain(_finding())
+    assert result is not None
+    assert "<think>" not in result
+    assert "reasoning here" not in result
+    assert "Door open recently." in result
+
+
+@pytest.mark.asyncio
 async def test_async_explain_falls_back_when_too_long() -> None:
     long_text = "very long explanation " * 30
     explainer = LLMExplainer(DummyModel(long_text))
