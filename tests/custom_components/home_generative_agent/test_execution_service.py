@@ -518,7 +518,9 @@ def test_canary_rate_limit_is_read_only() -> None:
     assert len(svc._recent_action_times) == max_actions
 
     # Canary on a new finding should report rate_limit_exceeded without mutating.
-    new_finding = _make_finding(anomaly_id="new_canary", confidence=0.95, suggested_actions=[])
+    new_finding = _make_finding(
+        anomaly_id="new_canary", confidence=0.95, suggested_actions=[]
+    )
     result = svc.evaluate_canary(new_finding, snapshot, 2, _NOW)
     assert result.action_policy_path == ACTION_POLICY_PROMPT_USER
     assert result.block_reason == "rate_limit_exceeded"

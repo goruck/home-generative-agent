@@ -173,9 +173,7 @@ async def test_receive_invalid_expression_returns_false() -> None:
     store_mock.async_load = AsyncMock(return_value=None)
     store_mock.async_save = AsyncMock(return_value=None)
 
-    ok, reason = await registry.async_receive(
-        _base_rule(expression="os.system('id')")
-    )
+    ok, reason = await registry.async_receive(_base_rule(expression="os.system('id')"))
 
     assert ok is False
     assert "disallowed" in reason
@@ -289,9 +287,7 @@ async def test_active_truthy_lambda_rule_produces_finding() -> None:
     store_mock.async_load = AsyncMock(return_value=None)
     store_mock.async_save = AsyncMock(return_value=None)
 
-    await registry.async_receive(
-        _base_rule(rule_id="active_r1", expression="True")
-    )
+    await registry.async_receive(_base_rule(rule_id="active_r1", expression="True"))
     await registry.async_approve("active_r1")
 
     active_rules = registry.list_active()
@@ -309,9 +305,7 @@ async def test_active_falsy_lambda_rule_produces_no_findings() -> None:
     store_mock.async_load = AsyncMock(return_value=None)
     store_mock.async_save = AsyncMock(return_value=None)
 
-    await registry.async_receive(
-        _base_rule(rule_id="falsy_r1", expression="False")
-    )
+    await registry.async_receive(_base_rule(rule_id="falsy_r1", expression="False"))
     await registry.async_approve("falsy_r1")
 
     active_rules = registry.list_active()

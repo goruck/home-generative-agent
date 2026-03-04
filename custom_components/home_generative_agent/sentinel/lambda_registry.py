@@ -276,9 +276,7 @@ class LambdaRuleRegistry:
         expression = str(rule.get("expression", "")).strip()
         reason = _validate_expression(expression)
         if reason is not None:
-            LOGGER.info(
-                "Lambda registry rejected rule %s: %s", rule_id, reason
-            )
+            LOGGER.info("Lambda registry rejected rule %s: %s", rule_id, reason)
             return False, reason
 
         stored: dict[str, Any] = {
