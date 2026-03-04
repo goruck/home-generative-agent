@@ -195,7 +195,9 @@ class ActionHandler:
             service = self._notify_service
             domain = "notify"
         # Add notification data to make it actionable when tapped.
-        cleaned = extract_final(reply_text).replace("**", "").replace("`", "")
+        cleaned = (
+            extract_final(reply_text, max_chars=220).replace("**", "").replace("`", "")
+        )
         notification_data = {
             "title": "Home Generative Agent",
             "message": cleaned,
@@ -256,7 +258,7 @@ def _build_execute_prompt(finding: AnomalyFinding) -> str:
         f"Suggested action: {suggested}. "
         f"Use GetLiveContext to check current state.{camera_clause} "
         f"Then take appropriate action. "
-        f"Reply in plain text, no markdown, 1-3 sentences. "
+        f"Reply in plain text, no markdown, 1-2 sentences, under 220 characters. "
         f"State what you did, or why you could not and what the user should do."
     )
 
@@ -293,7 +295,7 @@ def _build_ask_prompt(finding: AnomalyFinding) -> str:
         f"Do not ask clarifying questions — proceed autonomously based on available "
         f"context. If the action requires a PIN or alarm code that you cannot obtain, "
         f"report that you cannot complete it; instruct the user to handle it manually."
-        f" Reply in plain text, no markdown, 1-3 sentences."
+        f" Reply in plain text, no markdown, 1-2 sentences, under 220 characters."
     )
 
 
