@@ -11,12 +11,43 @@ import pytest
 from custom_components.home_generative_agent.core.utils import (
     CannotConnectError,
     InvalidAuthError,
+    extract_final,
     openai_compatible_healthy,
     validate_openai_compatible_url,
 )
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
+
+# ---------------------------------------------------------------------------
+# extract_final tests
+# ---------------------------------------------------------------------------
+
+
+def test_extract_final_strips_think_block() -> None:
+    assert extract_final("<think>reasoning</think>answer") == "answer"
+
+
+def test_extract_final_no_max_chars_returns_full() -> None:
+    text = "word " * 50
+    assert extract_final(text.strip()) == text.strip()
+
+
+def test_extract_final_max_chars_fits_exactly() -> None:
+    assert extract_final("hello world", max_chars=11) == "hello world"
+
+
+def test_extract_final_max_chars_truncates_at_word_boundary() -> None:
+    # 20 chars would cut mid-word in "boundary"
+    result = extract_final("truncate at word boundary here", max_chars=20)
+    assert result == "truncate at word"
+    assert len(result) <= 20
+
+
+def test_extract_final_max_chars_no_space_falls_back_to_hard_cut() -> None:
+    result = extract_final("superlongwordwithoutspaces", max_chars=10)
+    assert len(result) <= 10
+
 
 # ---------------------------------------------------------------------------
 # Fake HTTP helpers

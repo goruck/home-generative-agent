@@ -501,4 +501,10 @@ def extract_final(raw: str, max_chars: int | None = None) -> str:
     # Char-limit (if specified)
     if max_chars is None:
         return s
-    return s[:max_chars].rstrip()
+    if len(s) <= max_chars:
+        return s
+    segment = s[:max_chars]
+    last_space = segment.rfind(" ")
+    if last_space > 0:
+        return segment[:last_space].rstrip(" ,;")
+    return segment.rstrip(" ,;")
