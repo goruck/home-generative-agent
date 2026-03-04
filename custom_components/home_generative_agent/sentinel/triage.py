@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -39,6 +40,8 @@ if TYPE_CHECKING:
     )
 
 LOGGER = logging.getLogger(__name__)
+
+_THINK_BLOCK = re.compile(r"<think>.*?(?:</think>|$)", re.IGNORECASE | re.DOTALL)
 
 # Triage decision tokens.
 TRIAGE_NOTIFY = "notify"
@@ -80,8 +83,9 @@ Rules:
 - "suppress" means the alert is routine or low-value and can be skipped.
 - "triage_confidence" reflects your confidence in this specific decision
   (0=uncertain, 1=certain).
-- Keep "summary" under 120 characters.
-- If you are uncertain, default to "notify"."""
+- HARD LIMIT: "summary" must be under 120 characters. Stop writing when you reach it.
+- If you are uncertain, default to "notify".
+- Return only the JSON object. Do not explain your reasoning."""
 
 _USER_PROMPT_TEMPLATE = """\
 Security alert to triage:
@@ -247,8 +251,8 @@ def _parse_response(result: Any, elapsed_ms: int) -> TriageDecision:  # noqa: AR
     if not isinstance(content, str):
         content = str(content)
 
-    # Strip markdown fences if the model wrapped the JSON.
-    content = content.strip()
+    # Strip think blocks, then markdown fences if the model wrapped the JSON.
+    content = _THINK_BLOCK.sub("", content).strip()
     if content.startswith("```"):
         content = content.split("```")[1].lstrip("json").strip()
 

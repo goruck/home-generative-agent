@@ -380,6 +380,31 @@ async def test_async_notify_redacts_sensitive_message() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 3b. _normalize_text strips think blocks
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_async_notify_strips_think_blocks_from_explanation() -> None:
+    """<think> blocks in explanation text must be stripped before the notification is sent."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    snapshot = _minimal_snapshot()
+    finding = _finding(anomaly_id="think1")
+
+    explanation = (
+        "<think>internal reasoning</think>Front door open recently. Close it now."
+    )
+    await notifier.async_notify(finding, snapshot, explanation)  # type: ignore[arg-type]
+
+    assert len(hass.services.calls) == 1
+    message = hass.services.calls[0]["data"]["message"]
+    assert "<think>" not in message
+    assert "internal reasoning" not in message
+    assert "Front door open recently." in message
+
+
+# ---------------------------------------------------------------------------
 # 4. Per-area routing
 # ---------------------------------------------------------------------------
 

@@ -360,11 +360,12 @@ class VideoAnalyzer:
                 return
             domain = "notify"
 
+        clean_msg = msg.replace("**", "").replace("`", "")
         await self.hass.services.async_call(
             domain,
             service,
             {
-                "message": msg,
+                "message": clean_msg,
                 "title": f"Camera Alert from {camera_name}!",
                 "data": {"image": str(notify_img_path)},
             },
@@ -439,7 +440,7 @@ class VideoAnalyzer:
         summary = await model.ainvoke(messages)
         LOGGER.debug("Raw video analyzer summary: %s", summary)
 
-        text = extract_final(getattr(summary, "content", "") or "")
+        text = extract_final(getattr(summary, "content", "") or "", max_chars=150)
         if text:
             return text
 

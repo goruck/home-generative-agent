@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from custom_components.home_generative_agent.core.utils import extract_final
+
 from .prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
 
 if TYPE_CHECKING:
@@ -47,19 +49,12 @@ class LLMExplainer:
         content = getattr(result, "content", None)
         if not content:
             return None
-        text = _sanitize_text(str(content))
+        text = extract_final(str(content)).replace("**", "").replace("`", "")
         if not text:
             return _compact_fallback(finding)
         if len(text) > MAX_EXPLANATION_CHARS:
             return _compact_fallback(finding)
         return text
-
-
-def _sanitize_text(text: str) -> str:
-    """Normalize model text for mobile notifications."""
-    normalized = text.replace("**", "").replace("`", "")
-    normalized = normalized.replace("\r", " ").replace("\n", " ")
-    return re.sub(r"\s+", " ", normalized).strip()
 
 
 def _friendly_type(anomaly_type: str) -> str:

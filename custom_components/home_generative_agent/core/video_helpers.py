@@ -238,10 +238,20 @@ def limit_sentences_and_chars(
     max_chars: int = _MAX_CHARS,
     max_sentences: int = _MAX_SENTENCES,
 ) -> str:
-    """Split on sentence enders, keep up to 2 sentences, then enforce char cap."""
+    """Keep as many sentences as fit within max_chars; trim at word boundary."""
     parts = re.split(r"(?<=[.!?])\s+", text)
-    clipped = " ".join(parts[:max_sentences]).strip()
-    return clipped[:max_chars].rstrip(" ,;")
+    # Try progressively fewer sentences until one fits.
+    for n in range(min(max_sentences, len(parts)), 0, -1):
+        candidate = " ".join(parts[:n]).strip()
+        if len(candidate) <= max_chars:
+            return candidate
+    # Last resort: trim the first sentence at a word boundary.
+    first = parts[0].strip()
+    segment = first[:max_chars]
+    last_space = segment.rfind(" ")
+    if last_space > 0:
+        return segment[:last_space].rstrip(" ,;")
+    return segment.rstrip(" ,;")
 
 
 def has_human_terms(text: str) -> bool:

@@ -9,6 +9,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 
 from custom_components.home_generative_agent.const import DOMAIN
+from custom_components.home_generative_agent.core.utils import extract_final
 from custom_components.home_generative_agent.sentinel.suppression import (
     SuppressionManager,
     resolve_prompt,
@@ -194,9 +195,12 @@ class ActionHandler:
             service = self._notify_service
             domain = "notify"
         # Add notification data to make it actionable when tapped.
+        cleaned = (
+            extract_final(reply_text, max_chars=220).replace("**", "").replace("`", "")
+        )
         notification_data = {
             "title": "Home Generative Agent",
-            "message": reply_text,
+            "message": cleaned,
             "data": {
                 # Tag to group with other HGA notifications
                 "tag": "hga_sentinel_reply",
@@ -253,8 +257,9 @@ def _build_execute_prompt(finding: AnomalyFinding) -> str:
         f"Primary device: {friendly}{entity_clause}.{extra_clause} "
         f"Suggested action: {suggested}. "
         f"Use GetLiveContext to check current state.{camera_clause} "
-        f"Then take appropriate action. "
-        f"Report what you did or if you need additional information."
+        f"Use your Home Assistant tools to take the suggested action now. "
+        f"After acting, reply in 1-2 plain-text sentences under 220 characters: "
+        f"state what you did, or why you could not and what the user should do."
     )
 
 
@@ -286,11 +291,12 @@ def _build_ask_prompt(finding: AnomalyFinding) -> str:
         f"Primary device: {friendly}{entity_clause}.{extra_clause} "
         f"Suggested remediation: {suggested}. "
         f"Use GetLiveContext to check current state if needed.{camera_clause} "
-        f"Then act. "
-        f"Do not ask clarifying questions — proceed autonomously based on available "
-        f"context. If the action requires a PIN or alarm code that you cannot obtain, "
-        f"report that you cannot complete the action in this automated alert context "
-        f"and instruct the user to handle it manually via the Home Assistant app."
+        f"Use your Home Assistant tools to perform the suggested action now. "
+        f"Do not ask clarifying questions — proceed autonomously. "
+        f"If the action requires a PIN or alarm code you cannot obtain, "
+        f"report that you cannot complete it; instruct the user to handle it manually. "
+        f"After acting, reply in 1-2 plain-text sentences under 220 characters: "
+        f"state what you did or could not do."
     )
 
 
