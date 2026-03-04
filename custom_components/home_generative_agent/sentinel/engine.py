@@ -16,6 +16,7 @@ from homeassistant.util import dt as dt_util
 
 from custom_components.home_generative_agent.const import (
     CONF_EXPLAIN_ENABLED,
+    CONF_SENTINEL_AUTO_EXEC_CANARY_MODE,
     CONF_SENTINEL_AUTONOMY_LEVEL,
     CONF_SENTINEL_COOLDOWN_MINUTES,
     CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES,
@@ -27,6 +28,7 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_QUIET_HOURS_START,
     CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
     CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
+    RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE,
     RECOMMENDED_SENTINEL_AUTONOMY_LEVEL,
     RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
     RECOMMENDED_SENTINEL_PRESENCE_GRACE_MINUTES,
@@ -40,8 +42,8 @@ from custom_components.home_generative_agent.snapshot.builder import (
 
 from .correlator import SentinelCorrelator
 from .dynamic_rules import evaluate_dynamic_rules
-from .execution import SentinelExecutionService
-from .models import CompoundFinding
+from .execution import ACTION_POLICY_AUTO_EXECUTE, SentinelExecutionService
+from .models import AnomalyFinding, CompoundFinding
 from .rules.appliance_power_duration import AppliancePowerDurationRule
 from .rules.camera_entry_unsecured import CameraEntryUnsecuredRule
 from .rules.open_entry_while_away import OpenEntryWhileAwayRule
@@ -70,7 +72,7 @@ if TYPE_CHECKING:
     )
 
     from .baseline import SentinelBaselineUpdater
-    from .models import AnomalyFinding
+    from .lambda_registry import LambdaRuleRegistry
     from .notifier import SentinelNotifier
     from .rule_registry import RuleRegistry
 
@@ -132,6 +134,7 @@ class SentinelEngine:
         explainer: LLMExplainer | None = None,
         *,
         rule_registry: RuleRegistry | None = None,
+        lambda_registry: LambdaRuleRegistry | None = None,
         entry_id: str | None = None,
         triage_service: SentinelTriageService | None = None,
         baseline_updater: SentinelBaselineUpdater | None = None,
@@ -144,6 +147,7 @@ class SentinelEngine:
         self._audit_store = audit_store
         self._explainer = explainer
         self._rule_registry = rule_registry
+        self._lambda_registry = lambda_registry
         self._entry_id = entry_id
         self._triage_service = triage_service
         self._baseline_updater = baseline_updater
@@ -329,7 +333,7 @@ class SentinelEngine:
             except TimeoutError:
                 continue
 
-    async def _run_once(self) -> None:
+    async def _run_once(self) -> None:  # noqa: PLR0912
         try:
             snapshot = await async_build_full_state_snapshot(self._hass)
         except (ValueError, TypeError, KeyError):
@@ -415,6 +419,21 @@ class SentinelEngine:
                         len(dynamic_findings),
                     )
                 all_findings.extend(dynamic_findings)
+
+        if self._lambda_registry is not None:
+            lambda_rules = self._lambda_registry.list_active()
+            if lambda_rules:
+                LOGGER.debug(
+                    "Sentinel lambda registry has %s active rule(s).",
+                    len(lambda_rules),
+                )
+                lambda_findings = evaluate_dynamic_rules(snapshot, lambda_rules)
+                if lambda_findings:
+                    LOGGER.info(
+                        "Sentinel lambda rules produced %s finding(s).",
+                        len(lambda_findings),
+                    )
+                all_findings.extend(lambda_findings)
 
         if not all_findings:
             LOGGER.debug("Sentinel cycle completed with no findings.")
@@ -549,9 +568,41 @@ class SentinelEngine:
                 return
 
         # Execution policy evaluation.
+        canary_mode = bool(
+            self._options.get(
+                CONF_SENTINEL_AUTO_EXEC_CANARY_MODE,
+                RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE,
+            )
+        )
         exec_result = self._execution_service.evaluate(
             finding, snapshot, effective_autonomy, now
         )
+
+        # Canary: record would_auto_execute without acting.
+        canary_would_execute: bool | None = None
+        if canary_mode:
+            canary_result = self._execution_service.evaluate_canary(
+                finding, snapshot, effective_autonomy, now
+            )
+            canary_would_execute = (
+                canary_result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
+            )
+            if canary_would_execute:
+                LOGGER.info(
+                    "Canary: would auto-execute finding %s (execution_id=%s).",
+                    finding.anomaly_id,
+                    canary_result.execution_id,
+                )
+
+        # Live auto-execute: call HA services when policy approves and canary is off.
+        action_outcome: dict[str, Any] | None = None
+        if (
+            exec_result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
+            and not canary_mode
+        ):
+            action_outcome = await _auto_execute_finding(
+                self._hass, finding, exec_result.execution_id
+            )
 
         register_finding(self._suppression.state, finding, now)
         register_prompt(self._suppression.state, finding, now)
@@ -580,6 +631,8 @@ class SentinelEngine:
             data_quality=exec_result.data_quality,
             action_policy_path=exec_result.action_policy_path,
             execution_id=exec_result.execution_id,
+            canary_would_execute=canary_would_execute,
+            action_outcome=action_outcome,
             autonomy_level_at_decision=effective_autonomy,
         )
 
@@ -644,9 +697,33 @@ class SentinelEngine:
 
         best = max(compound.constituent_findings, key=lambda f: f.confidence)
 
+        canary_mode = bool(
+            self._options.get(
+                CONF_SENTINEL_AUTO_EXEC_CANARY_MODE,
+                RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE,
+            )
+        )
         exec_result = self._execution_service.evaluate(
             best, snapshot, effective_autonomy, now
         )
+
+        canary_would_execute: bool | None = None
+        if canary_mode:
+            canary_result = self._execution_service.evaluate_canary(
+                best, snapshot, effective_autonomy, now
+            )
+            canary_would_execute = (
+                canary_result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
+            )
+
+        action_outcome: dict[str, Any] | None = None
+        if (
+            exec_result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
+            and not canary_mode
+        ):
+            action_outcome = await _auto_execute_finding(
+                self._hass, best, exec_result.execution_id
+            )
 
         explanation = None
         if explain_enabled and self._explainer is not None:
@@ -665,6 +742,8 @@ class SentinelEngine:
             data_quality=exec_result.data_quality,
             action_policy_path=exec_result.action_policy_path,
             execution_id=exec_result.execution_id,
+            canary_would_execute=canary_would_execute,
+            action_outcome=action_outcome,
             autonomy_level_at_decision=effective_autonomy,
         )
 
@@ -672,6 +751,79 @@ class SentinelEngine:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+async def _auto_execute_finding(
+    hass: Any,
+    finding: AnomalyFinding,
+    execution_id: str | None,
+) -> dict[str, Any]:
+    """
+    Execute suggested actions for *finding* by calling HA services.
+
+    Only actions in ``domain.service`` format are dispatched.  Actions that
+    are advisory strings (no ``.``) are silently skipped.
+
+    Returns an ``action_outcome`` dict with:
+    - ``status``: ``"success"`` | ``"partial"`` | ``"error"`` | ``"no_actions"``
+    - ``actions``: list of per-action result dicts
+    - ``execution_id``: echoed from the caller
+    """
+    service_actions = [a for a in finding.suggested_actions if "." in a]
+
+    if not service_actions:
+        return {
+            "status": "no_actions",
+            "actions": [],
+            "execution_id": execution_id,
+        }
+
+    results: list[dict[str, Any]] = []
+    for action in service_actions:
+        domain, _, service = action.partition(".")
+        service_data: dict[str, Any] = {}
+        if finding.triggering_entities:
+            service_data["entity_id"] = (
+                finding.triggering_entities[0]
+                if len(finding.triggering_entities) == 1
+                else list(finding.triggering_entities)
+            )
+        try:
+            await hass.services.async_call(
+                domain,
+                service,
+                service_data,
+                blocking=False,
+            )
+            results.append({"service": action, "status": "ok", "error": None})
+            LOGGER.info(
+                "Auto-executed service %s for finding %s (execution_id=%s).",
+                action,
+                finding.anomaly_id,
+                execution_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            results.append({"service": action, "status": "error", "error": str(exc)})
+            LOGGER.warning(
+                "Auto-execute service %s failed for finding %s: %s.",
+                action,
+                finding.anomaly_id,
+                exc,
+            )
+
+    error_count = sum(1 for r in results if r["status"] == "error")
+    if error_count == 0:
+        status = "success"
+    elif error_count < len(results):
+        status = "partial"
+    else:
+        status = "error"
+
+    return {
+        "status": status,
+        "actions": results,
+        "execution_id": execution_id,
+    }
 
 
 def _coerce_int(value: object | None, default: int) -> int:
@@ -753,6 +905,8 @@ async def _append_finding_audit(  # noqa: PLR0913
     data_quality: str | None = None,
     action_policy_path: str | None = None,
     execution_id: str | None = None,
+    canary_would_execute: bool | None = None,
+    action_outcome: dict | None = None,
     autonomy_level_at_decision: int | None = None,
 ) -> None:
     """Append a finding to audit with suppression reason and execution metadata."""
@@ -768,6 +922,8 @@ async def _append_finding_audit(  # noqa: PLR0913
             data_quality={"quality": data_quality} if data_quality else None,
             action_policy_path=action_policy_path,
             execution_id=execution_id,
+            canary_would_execute=canary_would_execute,
+            action_outcome=action_outcome,
             autonomy_level_at_decision=(
                 str(autonomy_level_at_decision)
                 if autonomy_level_at_decision is not None

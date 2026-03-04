@@ -75,6 +75,7 @@ class DummyEntry:
             discovery_engine=None,
             proposal_store=None,
             rule_registry=None,
+            lambda_registry=None,
         )
 
 

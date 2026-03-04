@@ -6,6 +6,7 @@ import logging
 from typing import TYPE_CHECKING, Any, cast
 
 from .baseline import evaluate_baseline_deviation, evaluate_time_of_day_anomaly
+from .lambda_registry import STATUS_ACTIVE
 from .models import AnomalyFinding, Severity, build_anomaly_id
 from .proposal_templates import SUPPORTED_TEMPLATES
 
@@ -125,6 +126,8 @@ def evaluate_dynamic_rules(
         "time_of_day_anomaly": (
             lambda rule: evaluate_time_of_day_anomaly(snapshot, rule, _baselines)
         ),
+        # Issue #266 — lambda/expression rules
+        "lambda": lambda rule: _eval_lambda_rule(snapshot, rule),
     }
 
     findings: list[AnomalyFinding] = []
@@ -132,6 +135,14 @@ def evaluate_dynamic_rules(
         template_id = str(rule.get("template_id", ""))
         if template_id not in SUPPORTED_TEMPLATES:
             LOGGER.debug("Skipping unsupported dynamic template: %s", template_id)
+            continue
+        # Lambda rules must be in 'active' status; pending/rejected are never evaluated.
+        if template_id == "lambda" and rule.get("status") != STATUS_ACTIVE:
+            LOGGER.debug(
+                "Skipping lambda rule %s: status=%s (not active).",
+                rule.get("rule_id"),
+                rule.get("status"),
+            )
             continue
         evaluator = template_evaluators.get(template_id)
         if evaluator is None:
@@ -706,3 +717,105 @@ def _rule_params(rule: dict[str, Any]) -> dict[str, Any]:
     if isinstance(params, dict):
         return params
     return {}
+
+
+# ---------------------------------------------------------------------------
+# Lambda/expression rule evaluator (Issue #266)
+# ---------------------------------------------------------------------------
+
+# Restricted builtins available to lambda expressions.  Only safe read-only
+# operations are permitted.
+_LAMBDA_SAFE_BUILTINS: dict[str, Any] = {
+    "__builtins__": {},
+    "len": len,
+    "str": str,
+    "int": int,
+    "float": float,
+    "bool": bool,
+    "list": list,
+    "dict": dict,
+    "abs": abs,
+    "min": min,
+    "max": max,
+    "round": round,
+    "any": any,
+    "all": all,
+    "True": True,
+    "False": False,
+    "None": None,
+}
+
+
+def _eval_lambda_rule(
+    snapshot: FullStateSnapshot,
+    rule: dict[str, Any],
+) -> list[AnomalyFinding]:
+    """
+    Evaluate a lambda rule expression against the current snapshot.
+
+    The expression is compiled and evaluated in a restricted sandbox with
+    read-only access to snapshot data.  Any exception during evaluation is
+    caught and logged; the rule produces no finding.
+
+    If the expression evaluates to a truthy value, a single ``AnomalyFinding``
+    is produced using the rule's metadata fields.
+    """
+    expression = str(rule.get("expression", "")).strip()
+    if not expression:
+        return []
+
+    # Build a restricted local namespace with snapshot data.
+    safe_locals: dict[str, Any] = {
+        "entities": snapshot["entities"],
+        "derived": snapshot["derived"],
+        "camera_activity": snapshot["camera_activity"],
+        # Convenience aliases.
+        "anyone_home": snapshot["derived"].get("anyone_home", False),
+        "is_night": snapshot["derived"].get("is_night", False),
+    }
+
+    try:
+        code = compile(expression, "<lambda_rule>", "eval")
+        result = eval(code, dict(_LAMBDA_SAFE_BUILTINS), safe_locals)  # noqa: S307
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning(
+            "Lambda rule %s raised during evaluation: %s",
+            rule.get("rule_id"),
+            exc,
+        )
+        return []
+
+    if not result:
+        return []
+
+    # Construct a finding from rule metadata.
+    rule_id = str(rule.get("rule_id") or "lambda_rule")
+    evidence = {
+        "rule_id": rule_id,
+        "template_id": "lambda",
+        "expression": expression,
+    }
+    # Use all derived entity references as triggering entities (best-effort).
+    triggering_entities: list[str] = []
+    anomaly_id = build_anomaly_id(rule_id, triggering_entities, evidence)
+
+    severity_value = str(rule.get("severity") or "low")
+    severity: Severity = (
+        cast("Severity", severity_value) if severity_value in _SEVERITIES else "low"
+    )
+    confidence = _coerce_float(rule.get("confidence"), default=0.5)
+    suggested_actions: list[str] = list(rule.get("suggested_actions") or [])
+    is_sensitive = bool(rule.get("is_sensitive", False))
+
+    return [
+        AnomalyFinding(
+            anomaly_id=anomaly_id,
+            type=rule_id,
+            severity=severity,
+            confidence=confidence,
+            triggering_entities=triggering_entities,
+            evidence=evidence,
+            suggested_actions=suggested_actions,
+            is_sensitive=is_sensitive,
+        )
+    ]

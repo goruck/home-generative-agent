@@ -26,10 +26,11 @@ runtimedeps: venv
 check: venv
 	$(PIP) check
 
-# Non-mutating checks: enforce generated runtime requirements + lint
+# Non-mutating checks: enforce generated runtime requirements + lint + format
 lint: devdeps
 	$(PY) scripts/gen_manifest_requirements.py
 	git diff --exit-code -- requirements_runtime_manifest.txt
+	$(RUFF) format --check custom_components tests
 	$(RUFF) check custom_components tests
 
 # Mutating formatting

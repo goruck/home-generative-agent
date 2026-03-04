@@ -434,3 +434,95 @@ def test_policy_version_changes_on_config_change() -> None:
     v1 = svc._compute_policy_version(2, 0.70)
     v2 = svc._compute_policy_version(3, 0.70)  # autonomy level changed
     assert v1 != v2
+
+
+# ---------------------------------------------------------------------------
+# 10. Canary mode — evaluate_canary() has no side effects
+# ---------------------------------------------------------------------------
+
+
+def test_canary_no_side_effects_when_would_auto_execute() -> None:
+    """evaluate_canary() returns auto_execute but does not mutate rate/idempotency state."""
+    recent = "2025-01-01T00:59:50+00:00"
+    snapshot = _make_snapshot(last_changed=recent)
+    svc = SentinelExecutionService(
+        {
+            **_FULL_OPTIONS,
+            CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: [],
+        }
+    )
+    finding = _make_finding(
+        anomaly_id="canary_happy",
+        confidence=0.95,
+        suggested_actions=[],
+    )
+
+    # Capture state before canary call.
+    times_before = list(svc._recent_action_times)
+    seen_before = set(svc._idempotency_seen)
+
+    result = svc.evaluate_canary(finding, snapshot, 2, _NOW)
+
+    assert result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
+    assert result.execution_id is not None
+    # State must be unchanged.
+    assert svc._recent_action_times == times_before
+    assert svc._idempotency_seen == seen_before
+
+
+def test_canary_distinguishable_from_live() -> None:
+    """Live evaluate() mutates state; evaluate_canary() does not."""
+    recent = "2025-01-01T00:59:50+00:00"
+    snapshot = _make_snapshot(last_changed=recent)
+    svc = SentinelExecutionService(
+        {
+            **_FULL_OPTIONS,
+            CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: [],
+        }
+    )
+    finding = _make_finding(
+        anomaly_id="live_vs_canary",
+        confidence=0.95,
+        suggested_actions=[],
+    )
+
+    # Canary first — no state change.
+    canary = svc.evaluate_canary(finding, snapshot, 2, _NOW)
+    assert canary.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
+    assert not svc._recent_action_times
+    assert not svc._idempotency_seen
+
+    # Live evaluate — mutates state.
+    live = svc.evaluate(finding, snapshot, 2, _NOW)
+    assert live.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
+    assert len(svc._recent_action_times) == 1
+    assert live.execution_id in svc._idempotency_seen
+
+
+def test_canary_rate_limit_is_read_only() -> None:
+    """Canary respects rate limit without consuming the slot."""
+    recent = "2025-01-01T00:59:50+00:00"
+    snapshot = _make_snapshot(last_changed=recent)
+    max_actions = 2
+    svc = SentinelExecutionService(
+        {
+            **_FULL_OPTIONS,
+            CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: [],
+            CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR: max_actions,
+        }
+    )
+    # Fill rate-limit bucket with live calls.
+    for i in range(max_actions):
+        f = _make_finding(anomaly_id=f"fill_{i}", confidence=0.95, suggested_actions=[])
+        svc.evaluate(f, snapshot, 2, _NOW)
+    assert len(svc._recent_action_times) == max_actions
+
+    # Canary on a new finding should report rate_limit_exceeded without mutating.
+    new_finding = _make_finding(
+        anomaly_id="new_canary", confidence=0.95, suggested_actions=[]
+    )
+    result = svc.evaluate_canary(new_finding, snapshot, 2, _NOW)
+    assert result.action_policy_path == ACTION_POLICY_PROMPT_USER
+    assert result.block_reason == "rate_limit_exceeded"
+    # Still the same count — canary didn't add another slot.
+    assert len(svc._recent_action_times) == max_actions
