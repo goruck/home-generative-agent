@@ -228,7 +228,6 @@ from .sentinel.discovery_engine import SentinelDiscoveryEngine
 from .sentinel.discovery_semantic import candidate_semantic_key, rule_semantic_key
 from .sentinel.discovery_store import DiscoveryStore
 from .sentinel.engine import SentinelEngine
-from .sentinel.lambda_registry import LambdaRuleRegistry
 from .sentinel.notifier import SentinelNotifier
 from .sentinel.proposal_store import ProposalStore
 from .sentinel.proposal_templates import normalize_candidate
@@ -265,8 +264,6 @@ SERVICE_GET_DYNAMIC_RULES = "get_dynamic_rules"
 SERVICE_DEACTIVATE_DYNAMIC_RULE = "deactivate_dynamic_rule"
 SERVICE_REACTIVATE_DYNAMIC_RULE = "reactivate_dynamic_rule"
 SERVICE_SENTINEL_SET_AUTONOMY_LEVEL = "sentinel_set_autonomy_level"
-SERVICE_SENTINEL_RECEIVE_LAMBDA_RULE = "sentinel_receive_lambda_rule"
-SERVICE_SENTINEL_APPROVE_LAMBDA_RULE = "sentinel_approve_lambda_rule"
 
 ENROLL_SCHEMA = vol.Schema(
     {
@@ -323,26 +320,6 @@ SET_AUTONOMY_LEVEL_SCHEMA = vol.Schema(
     {
         vol.Required("level"): vol.All(vol.Coerce(int), vol.In([0, 1, 2, 3])),
         vol.Optional("pin"): cv.string,
-    }
-)
-
-RECEIVE_LAMBDA_RULE_SCHEMA = vol.Schema(
-    {
-        vol.Required("rule_id"): cv.string,
-        vol.Required("expression"): cv.string,
-        vol.Optional("severity", default="low"): cv.string,
-        vol.Optional("confidence", default=0.5): vol.Coerce(float),
-        vol.Optional("is_sensitive", default=False): cv.boolean,
-        vol.Optional("suggested_actions", default=[]): vol.All(
-            cv.ensure_list, [cv.string]
-        ),
-        vol.Optional("description", default=""): cv.string,
-    }
-)
-
-APPROVE_LAMBDA_RULE_SCHEMA = vol.Schema(
-    {
-        vol.Required("rule_id"): cv.string,
     }
 )
 
@@ -1264,8 +1241,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     await proposal_store.async_load()
     rule_registry = RuleRegistry(hass)
     await rule_registry.async_load()
-    lambda_registry = LambdaRuleRegistry(hass)
-    await lambda_registry.async_load()
     action_handler = ActionHandler(
         hass,
         suppression,
@@ -1307,7 +1282,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         audit_store,
         explainer,
         rule_registry=rule_registry,
-        lambda_registry=lambda_registry,
         entry_id=entry.entry_id,
         triage_service=triage_service,
         baseline_updater=baseline_updater,
@@ -1354,7 +1328,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         discovery_engine=discovery_engine,
         proposal_store=proposal_store,
         rule_registry=rule_registry,
-        lambda_registry=lambda_registry,
     )
 
     if not hass.data[DOMAIN].get("http_registered"):
@@ -1885,54 +1858,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         SERVICE_SENTINEL_SET_AUTONOMY_LEVEL,
         _handle_sentinel_set_autonomy_level,
         schema=SET_AUTONOMY_LEVEL_SCHEMA,
-        supports_response=_SERVICE_RESPONSE_ONLY,
-    )
-
-    async def _handle_receive_lambda_rule(call: ServiceCall) -> dict[str, Any]:
-        """Submit a lambda rule for AST validation and pending approval."""
-        lambda_reg = entry.runtime_data.lambda_registry
-        if lambda_reg is None:
-            return {"status": "unavailable"}
-        rule = {
-            "rule_id": str(call.data["rule_id"]),
-            "expression": str(call.data["expression"]),
-            "severity": str(call.data.get("severity", "low")),
-            "confidence": float(call.data.get("confidence", 0.5)),
-            "is_sensitive": bool(call.data.get("is_sensitive", False)),
-            "suggested_actions": list(call.data.get("suggested_actions") or []),
-            "description": str(call.data.get("description", "")),
-        }
-        ok, reason = await lambda_reg.async_receive(rule)
-        if not ok:
-            msg = f"Lambda rule rejected: {reason}"
-            raise HomeAssistantError(msg)
-        return {"status": reason, "rule_id": rule["rule_id"]}
-
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_SENTINEL_RECEIVE_LAMBDA_RULE,
-        _handle_receive_lambda_rule,
-        schema=RECEIVE_LAMBDA_RULE_SCHEMA,
-        supports_response=_SERVICE_RESPONSE_ONLY,
-    )
-
-    async def _handle_approve_lambda_rule(call: ServiceCall) -> dict[str, Any]:
-        """Approve a pending lambda rule, transitioning it to active."""
-        lambda_reg = entry.runtime_data.lambda_registry
-        if lambda_reg is None:
-            return {"status": "unavailable"}
-        rule_id = str(call.data["rule_id"])
-        ok = await lambda_reg.async_approve(rule_id)
-        if not ok:
-            msg = f"Lambda rule approval failed for rule_id={rule_id!r}"
-            raise HomeAssistantError(msg)
-        return {"status": "ok", "rule_id": rule_id}
-
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_SENTINEL_APPROVE_LAMBDA_RULE,
-        _handle_approve_lambda_rule,
-        schema=APPROVE_LAMBDA_RULE_SCHEMA,
         supports_response=_SERVICE_RESPONSE_ONLY,
     )
 
