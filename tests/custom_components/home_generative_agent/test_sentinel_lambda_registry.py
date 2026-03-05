@@ -328,3 +328,34 @@ async def test_lambda_rule_cannot_call_builtins() -> None:
 
     assert ok is False
     assert registry.list_pending() == []
+
+
+@pytest.mark.asyncio
+async def test_full_lifecycle_receive_approve_evaluate() -> None:
+    """End-to-end: receive → approve → evaluate produces a finding."""
+    registry, store_mock = await _make_registry()
+    store_mock.async_load = AsyncMock(return_value=None)
+    store_mock.async_save = AsyncMock(return_value=None)
+
+    snapshot = _minimal_snapshot()
+    rule = _base_rule(rule_id="lifecycle_rule", expression="1 == 1")
+
+    # Step 1: receive → status is pending; engine must not evaluate it yet.
+    ok, _reason = await registry.async_receive(rule)
+    assert ok is True
+    assert len(registry.list_pending()) == 1
+    assert registry.list_pending()[0]["status"] == STATUS_PENDING
+
+    pre_findings = evaluate_dynamic_rules(snapshot, registry.list_active())
+    assert pre_findings == [], "Pending rule must not produce findings before approval"
+
+    # Step 2: approve → status transitions to active.
+    approved = await registry.async_approve("lifecycle_rule")
+    assert approved is True
+    assert len(registry.list_active()) == 1
+    assert registry.list_active()[0]["status"] == STATUS_ACTIVE
+    assert registry.list_pending() == []
+
+    # Step 3: active rule is evaluated and produces a finding.
+    post_findings = evaluate_dynamic_rules(snapshot, registry.list_active())
+    assert len(post_findings) == 1
