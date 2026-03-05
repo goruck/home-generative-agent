@@ -441,7 +441,7 @@ Autonomy progression:
 
 Each issue is a self-contained PR targeting main. Every PR must leave tests green and behavior backward-compatible unless the issue explicitly permits a behavioral change.
 
-**Status as of 2026-03-03:** Issues #1–#11 and #14 are done. Issues #12, #13, and #15 remain open. One unplanned issue (#9b, GitHub #269) covered pending-prompt TTL separately. See individual entries below for GitHub issue numbers.
+**Status as of 2026-03-05:** Issues #1–#15 have implementation complete and tests passing. Issues #13 and #15 remain open pending live/production verification. One unplanned issue (#9b, GitHub #269) covered pending-prompt TTL separately. See individual entries below for GitHub issue numbers.
 
 | Plan # | GitHub # | Status | Title |
 |---|---|---|---|
@@ -457,10 +457,10 @@ Each issue is a self-contained PR targeting main. Every PR must leave tests gree
 | #9b | #269 | Done | Pending-prompt TTL (unplanned follow-on) |
 | #10 | #261 | Done | Notification routing and UX |
 | #11 | #262 | Done | Level 1: LLM triage |
-| #12 | #263 | **Open** | Level 2: Canary mode |
-| #13 | #264 | **Open** | Level 2: Live auto-execute |
+| #12 | #263 | Done | Level 2: Canary mode |
+| #13 | #264 | **Open (pending live test)** | Level 2: Live auto-execute |
 | #14 | #265 | Done | Baseline storage and temporal detectors |
-| #15 | #266 | **Open** | Lambda rule review/approval UI |
+| #15 | #266 | **Open (pending live test)** | Lambda rule review/approval UI |
 
 ---
 
@@ -577,7 +577,7 @@ Each issue is a self-contained PR targeting main. Every PR must leave tests gree
 - Size: M
 - Dependencies: Issues #3, #8
 
-**Issue #12 — Level 2: Canary mode** *(Open — GitHub #263)*
+**Issue #12 — Level 2: Canary mode** *(Done — GitHub #263)*
 
 - Plan coverage: Section 3 (canary), Section 17 (KPI)
 - Scope: When `CONF_SENTINEL_AUTO_EXEC_CANARY_MODE=true`, compute `would_auto_execute` using full guardrail logic and record in `AuditRecord.canary_would_execute`. No action taken. No KPI gate for canary-to-live transition (operator decides). False-positive rate notification-quality KPI still applies during canary.

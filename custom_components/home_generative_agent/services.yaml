@@ -192,6 +192,13 @@ reactivate_dynamic_rule:
       selector:
         text:
 
+# Lambda rule review workflow:
+#   1. Submit:  home_generative_agent.sentinel_receive_lambda_rule
+#              Returns {status: "pending"} on success or an error if AST validation fails.
+#   2. Review:  home_generative_agent.get_dynamic_rules
+#              Lists all rules including those with status "pending".
+#   3. Approve: home_generative_agent.sentinel_approve_lambda_rule  {rule_id: "..."}
+#              Transitions the rule to "active" so the sentinel engine evaluates it.
 sentinel_receive_lambda_rule:
   name: Receive lambda rule
   description: >

@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -13,9 +15,11 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE,
     CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR,
     CONF_SENTINEL_AUTO_EXECUTION_ENABLED,
+    CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
     CONF_SENTINEL_STALENESS_THRESHOLD_SECONDS,
 )
 from custom_components.home_generative_agent.sentinel.engine import SentinelEngine
+from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
 from custom_components.home_generative_agent.sentinel.suppression import (
     SuppressionManager,
     SuppressionState,
@@ -221,3 +225,203 @@ async def test_sentinel_canary_mode_records_would_execute(
     # At least one finding should have canary_would_execute recorded (True or False).
     canary_values = [c["canary_would_execute"] for c in audit_store.calls]
     assert any(v is not None for v in canary_values)
+
+
+# ---------------------------------------------------------------------------
+# Issue #264 — Level 2 live auto-execute integration tests
+# ---------------------------------------------------------------------------
+
+_AE_SNAPSHOT: FullStateSnapshot = validate_snapshot(
+    {
+        "schema_version": 1,
+        "generated_at": "2025-01-01T01:00:00+00:00",
+        "entities": [
+            {
+                "entity_id": "lock.front_door",
+                "domain": "lock",
+                "state": "unlocked",
+                "friendly_name": "Front Door Lock",
+                "area": "Front",
+                "attributes": {},
+                "last_changed": "2025-01-01T00:59:50+00:00",
+                "last_updated": "2025-01-01T00:59:50+00:00",
+            }
+        ],
+        "camera_activity": [],
+        "derived": {
+            "now": "2025-01-01T01:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": False,
+            "anyone_home": False,
+            "people_home": [],
+            "people_away": [],
+            "last_motion_by_area": {},
+        },
+    }
+)
+
+
+class StubAutoExecRule:
+    """Rule that always emits a finding with a lock.lock service action."""
+
+    rule_id = "stub_auto_exec"
+
+    def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:  # type: ignore[override]
+        """Return a fixed finding with a service-type suggested action."""
+        return [
+            AnomalyFinding(
+                anomaly_id="stub-ae-finding",
+                type="stub_auto_exec",
+                severity="medium",
+                confidence=0.9,
+                triggering_entities=["lock.front_door"],
+                evidence={},
+                suggested_actions=["lock.lock"],
+                is_sensitive=False,
+            )
+        ]
+
+
+_AE_FROZEN_NOW = datetime(2025, 1, 1, 1, 0, 0, tzinfo=UTC)
+
+
+def _make_ae_engine(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    autonomy_level: int = 2,
+    max_actions_per_hour: int = 5,
+) -> tuple[SentinelEngine, MagicMock]:
+    """
+    Build a live-auto-execute engine backed by a MagicMock hass.
+
+    ``dt_util.utcnow`` is frozen to ``_AE_FROZEN_NOW`` so that the snapshot
+    entity (last_changed 10 s before now) is always considered fresh, and
+    time-sensitive guardrails (rate limit, idempotency) behave deterministically.
+    ``CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES`` is set to 0 so that pending
+    prompts expire immediately — allowing consecutive ``_run_once()`` calls to
+    reach the execution-policy layer without being short-circuited by suppression.
+    """
+    hass = MagicMock()
+    hass.services.async_call = AsyncMock(return_value=None)
+
+    # Freeze time so snapshot entities are always fresh and guardrails are deterministic.
+    monkeypatch.setattr(
+        "homeassistant.util.dt.utcnow",
+        lambda: _AE_FROZEN_NOW,
+    )
+
+    async def _fake_build(_hass: Any) -> FullStateSnapshot:
+        return _AE_SNAPSHOT
+
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.sentinel.engine.async_build_full_state_snapshot",
+        _fake_build,
+    )
+
+    engine = SentinelEngine(
+        hass=hass,
+        options={
+            "sentinel_cooldown_minutes": 0,
+            "sentinel_entity_cooldown_minutes": 0,
+            "sentinel_interval_seconds": 60,
+            "explain_enabled": False,
+            CONF_SENTINEL_AUTO_EXEC_CANARY_MODE: False,
+            CONF_SENTINEL_AUTO_EXECUTION_ENABLED: True,
+            CONF_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE: 0.0,
+            CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR: max_actions_per_hour,
+            CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: ["lock.lock"],
+            CONF_SENTINEL_STALENESS_THRESHOLD_SECONDS: 3600,
+            CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES: 0,
+            "sentinel_autonomy_level": autonomy_level,
+        },
+        suppression=DummySuppression(),
+        notifier=cast("SentinelNotifier", DummyNotifier()),
+        audit_store=cast("AuditStore", DummyAudit()),
+        explainer=None,
+    )
+    engine._rules = [StubAutoExecRule()]  # type: ignore[assignment]
+    monkeypatch.setattr(engine, "get_autonomy_level", lambda _entry_id: autonomy_level)
+    engine._entry_id = "test_entry"
+    return engine, hass
+
+
+@pytest.mark.asyncio
+async def test_live_auto_execute_calls_ha_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Engine dispatches auto-execute finding and calls hass.services.async_call."""
+    engine, hass = _make_ae_engine(monkeypatch)
+
+    await engine._run_once()
+
+    hass.services.async_call.assert_called_once_with(
+        "lock",
+        "lock",
+        {"entity_id": "lock.front_door"},
+        blocking=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_live_auto_execute_audit_outcome_populated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Audit record includes action_policy_path=auto_execute and action_outcome."""
+    engine, _hass = _make_ae_engine(monkeypatch)
+
+    await engine._run_once()
+
+    audit = cast("DummyAudit", cast("Any", engine)._audit_store)
+    ae_calls = [c for c in audit.calls if c["action_policy_path"] == "auto_execute"]
+    assert ae_calls, "Expected at least one auto_execute audit record"
+    assert cast("dict[str, str]", ae_calls[0]["action_outcome"])["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_live_auto_execute_blocked_below_level_2(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Autonomy level < 2 prevents hass.services.async_call from being invoked."""
+    engine, hass = _make_ae_engine(monkeypatch, autonomy_level=1)
+
+    await engine._run_once()
+
+    hass.services.async_call.assert_not_called()
+    audit = cast("DummyAudit", cast("Any", engine)._audit_store)
+    assert audit.calls, "Expected audit records"
+    assert all(c["action_policy_path"] != "auto_execute" for c in audit.calls)
+
+
+@pytest.mark.asyncio
+async def test_live_auto_execute_idempotency_prevents_double_fire(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same finding in two consecutive runs triggers hass.services.async_call only once."""
+    # Use a high rate limit so only idempotency can block the second run.
+    engine, hass = _make_ae_engine(monkeypatch, max_actions_per_hour=100)
+
+    await engine._run_once()
+    await engine._run_once()
+
+    assert hass.services.async_call.call_count == 1
+    audit = cast("DummyAudit", cast("Any", engine)._audit_store)
+    paths = [c["action_policy_path"] for c in audit.calls]
+    assert "auto_execute" in paths
+    assert "prompt_user" in paths
+
+
+@pytest.mark.asyncio
+async def test_live_auto_execute_rate_limit_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rate limiter blocks auto-execution once max_actions_per_hour is exhausted."""
+    engine, hass = _make_ae_engine(monkeypatch, max_actions_per_hour=1)
+
+    await engine._run_once()
+    await engine._run_once()
+
+    assert hass.services.async_call.call_count == 1
+    audit = cast("DummyAudit", cast("Any", engine)._audit_store)
+    paths = [c["action_policy_path"] for c in audit.calls]
+    assert "auto_execute" in paths
+    assert "prompt_user" in paths
