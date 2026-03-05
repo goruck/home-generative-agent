@@ -72,7 +72,6 @@ if TYPE_CHECKING:
     )
 
     from .baseline import SentinelBaselineUpdater
-    from .lambda_registry import LambdaRuleRegistry
     from .notifier import SentinelNotifier
     from .rule_registry import RuleRegistry
 
@@ -134,7 +133,6 @@ class SentinelEngine:
         explainer: LLMExplainer | None = None,
         *,
         rule_registry: RuleRegistry | None = None,
-        lambda_registry: LambdaRuleRegistry | None = None,
         entry_id: str | None = None,
         triage_service: SentinelTriageService | None = None,
         baseline_updater: SentinelBaselineUpdater | None = None,
@@ -147,7 +145,6 @@ class SentinelEngine:
         self._audit_store = audit_store
         self._explainer = explainer
         self._rule_registry = rule_registry
-        self._lambda_registry = lambda_registry
         self._entry_id = entry_id
         self._triage_service = triage_service
         self._baseline_updater = baseline_updater
@@ -333,7 +330,7 @@ class SentinelEngine:
             except TimeoutError:
                 continue
 
-    async def _run_once(self) -> None:  # noqa: PLR0912
+    async def _run_once(self) -> None:
         try:
             snapshot = await async_build_full_state_snapshot(self._hass)
         except (ValueError, TypeError, KeyError):
@@ -419,21 +416,6 @@ class SentinelEngine:
                         len(dynamic_findings),
                     )
                 all_findings.extend(dynamic_findings)
-
-        if self._lambda_registry is not None:
-            lambda_rules = self._lambda_registry.list_active()
-            if lambda_rules:
-                LOGGER.debug(
-                    "Sentinel lambda registry has %s active rule(s).",
-                    len(lambda_rules),
-                )
-                lambda_findings = evaluate_dynamic_rules(snapshot, lambda_rules)
-                if lambda_findings:
-                    LOGGER.info(
-                        "Sentinel lambda rules produced %s finding(s).",
-                        len(lambda_findings),
-                    )
-                all_findings.extend(lambda_findings)
 
         if not all_findings:
             LOGGER.debug("Sentinel cycle completed with no findings.")
