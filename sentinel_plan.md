@@ -625,18 +625,6 @@ Each issue is a self-contained PR targeting main. Every PR must leave tests gree
 
 ---
 
-### Practical Notes
-
-- Each issue should reference the relevant plan sections in its description body.
-- Milestone 0 issues can be merged in any order and independently reviewed.
-- Milestone 1–4 issues should be merged in the numbered order within each milestone.
-- The `execution_id` idempotency implementation in Issue #8 must be complete before any auto-execution work in Issues #12–#13.
-- Canary mode (Issue #12) must be run in production for a minimum observation period before Issue #13 is enabled; this gate is a rollout process control, not a code gate.
-- Issue #14 requires a PostgreSQL instance; it is safely skippable if that dependency is not available in the deployment environment.
-- Milestone 5 issues (#16–#22) are independent of each other except #21 (preview depends on #18 for the immediate-activation path) and can be opened and merged in any order.
-
----
-
 ## Milestone 5 — Discovery Pipeline Improvements (Issues #16–#22)
 
 The original Issue #15 (lambda rule review/approval UI) was implemented and subsequently removed (PR #285) because lambda rules were detection-only, invisible from the review UI, and provided no path to full autonomy. Milestone 5 addresses the underlying need properly: making the discovery pipeline fast, transparent, and capable of producing rules that can trigger autonomous action.
@@ -751,3 +739,15 @@ Declared issue dependencies (authoritative):
 - `#13 -> #12`
 - `#14 -> #8`
 - `#21 -> #18`
+
+---
+
+### Practical Notes
+
+- Each issue should reference the relevant plan sections in its description body.
+- Milestone 0 issues can be merged in any order and independently reviewed.
+- Milestone 1–4 issues should be merged in the numbered order within each milestone.
+- The `execution_id` idempotency implementation in Issue #8 must be complete before any auto-execution work in Issues #12–#13.
+- Canary mode (Issue #12) must be run in production for a minimum observation period before Issue #13 is enabled; this gate is a rollout process control, not a code gate.
+- Issue #14 requires a PostgreSQL instance; it is safely skippable if that dependency is not available in the deployment environment.
+- Milestone 5 issues (#16–#22) are independent of each other except #21 (preview depends on #18 for the immediate-activation path) and can be opened and merged in any order.
