@@ -771,7 +771,7 @@ Summarization | OpenAI Compatible | gpt-4o | Primary model context summarization
 Embeddings | Ollama | mxbai-embed-large | Embedding generation for semantic search
 Embeddings | OpenAI | text-embedding-3-small | Embedding generation for semantic search
 Embeddings | Gemini | gemini-embedding-001 | Embedding generation for semantic search
-Embeddings | OpenAI Compatible | gpt-4o | Embedding generation for semantic search
+Embeddings | OpenAI Compatible | text-embedding-3-small | Embedding generation for semantic search
 
 ### LangGraph-based Agent
 LangGraph powers the conversation agent, enabling you to create stateful, multi-actor applications utilizing LLMs as quickly as possible. It extends LangChain's capabilities, introducing the ability to create and manage cyclical graphs essential for developing complex agent runtimes. A graph models the agent workflow, as seen in the image below.
