@@ -9,23 +9,59 @@
 - Human override and kill switch are always available as runtime operations (not config-file edits).
 - Detection rule configs are version-controlled and reviewed before deployment. Rule schema versions are stored in every audit record.
 
+## Current Status Snapshot (as of 2026-03-06)
+
+- This document mixes current implementation, accepted design targets, and remaining work. Unless a section explicitly says `Implemented`, treat it as target-state design rather than current behavior.
+- Implemented in code today:
+  - Runtime autonomy override service (`home_generative_agent.sentinel_set_autonomy_level`) with admin-only access and TTL-bounded in-memory overrides.
+  - Event-driven triggering with a bounded queue, coalescing, TTL discard, and single-flight lock.
+  - Correlation within a single `_run_once()` call only.
+  - Suppression reason codes, quiet hours, pending-prompt TTL, snooze (`24h`, permanent), and presence-grace windows.
+  - LLM triage with a strict prompt allowlist and fail-open behavior.
+  - Execution policy service with stale/unavailable handling at the execution gate (autonomy level 2+), plus allowlist, confidence threshold, rate limit, idempotency, canary mode, and live auto-execute.
+  - Baseline updater and temporal/baseline detector support.
+- Partially implemented or still open (see Known Current Gaps below for the summary list):
+  - Rule/suppression-state-suppressed findings are not written to the audit store (engine silently returns at the suppression gate). Triage-suppressed findings *are* written to audit.
+  - `ACTION_POLICY_BLOCKED` blocks execution but does not suppress notification dispatch.
+  - Audit schema/retention/archival health in this document is ahead of the current `audit/store.py` implementation. `CONF_AUDIT_HOT_MAX_RECORDS` is defined in `const.py` but the store still uses a hardcoded `MAX_RECORDS = 200` constant — the config value is not wired up.
+  - `trigger_source` field exists in `AuditRecord` and migration defaults but is never populated by any engine call — it is always `None` in practice.
+  - `action_policy_path` is present in `AuditRecord` and `async_append_finding` but is absent from `_V2_FIELD_DEFAULTS` in `audit/store.py` — v1→v2 migration does not backfill this field.
+  - PIN presence is enforced for autonomy-level increases when configured, but PIN value validation is still open.
+  - `derived.people_home` / `derived.people_away` currently contain friendly names when available, not stable person entity IDs.
+
+### Known Current Gaps
+
+- Suppressed findings from the rule/suppression gate are not audited.
+- `ACTION_POLICY_BLOCKED` does not currently suppress notification dispatch.
+- `trigger_source` is never populated in audit records.
+- `CONF_AUDIT_HOT_MAX_RECORDS` is defined but not wired into `audit/store.py`.
+- `action_policy_path` is not backfilled during v1→v2 audit migration.
+- Presence-grace identity currently uses display-name-derived values, not stable person entity IDs.
+- PIN validation for autonomy-level increases is still a stub.
+
 ---
 
 ## 2. Target Detection/Response Pipeline
 
+Status: `Partially implemented`. Steps 1, 2, 4, 5, 6, 7, 8, and 9 exist in some form, but rule/suppression-state-suppressed findings are not audited (silent return before audit append), triage-suppressed findings are audited, and notification dispatch is not yet suppressed for all `blocked` policy outcomes.
+
 1. Trigger received (polling or event-driven).
 2. Snapshot built deterministically.
-3. Staleness validation pass:
+3. Staleness/data-quality validation pass:
    - Triggering entities checked against `CONF_SENTINEL_STALENESS_THRESHOLD_SECONDS`.
-   - `data_quality="stale"` findings are notify-only regardless of autonomy level.
-   - `data_quality="unavailable"` findings are suppressed by default, except `severity="high"` which is notify-only.
+   - Target state: `data_quality="stale"` findings are notify-only regardless of autonomy level.
+   - Target state: `data_quality="unavailable"` findings are suppressed by default, except `severity="high"` which is notify-only.
+   - Current code: stale/unavailable handling happens inside the execution service only after the autonomy-level gate is reached (`autonomy_level >= 2`). At lower autonomy levels, findings route to `prompt_user` before data quality is evaluated there.
+   - Current code: at autonomy level 2+, low/medium unavailable findings return `action_policy_path="blocked"` from the execution service, but the engine still notifies them. This remains an implementation gap.
 4. Rules evaluated deterministically.
 5. Correlation pass merges related findings deterministically (within the current `_run_once()` call only; compound findings are immutable once emitted).
-6. Suppression pass evaluates cooldowns, quiet-hours, snooze policies, and presence-grace windows. Every suppressed finding receives an explicit `suppression_reason_code`.
+6. Suppression pass evaluates cooldowns, quiet-hours, snooze policies, and presence-grace windows.
+   - Target state: every suppressed finding receives an explicit `suppression_reason_code` in audit.
+   - Current code: suppression reason codes exist, but suppressed findings return before audit append.
 7. Triage pass (optional, autonomy level >= 1) decides `notify` vs `suppress` only. Triage output is informational; it does not influence execution eligibility.
-8. Action policy gate decides `prompt_user`, `handoff`, `auto_execute_candidate`, or `blocked`.
+8. Action policy gate decides `prompt_user`, `handoff`, `auto_execute`, or `blocked`.
 9. For autonomy level >= 2, optional canary mode evaluates `would_auto_execute` and records decisions without executing.
-10. Notification dispatch (or audit-only for low-severity policy cases).
+10. Notification dispatch (or audit-only for policy cases where notification is intentionally skipped).
 11. Full audit append with reasons, timings, data quality, and outcomes at every stage.
 
 ---
@@ -45,7 +81,7 @@ CONF_SENTINEL_STALENESS_THRESHOLD_SECONDS: 1800
 CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES: 120
 CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: true   # applies to increases into level 2 or 3 only; never required for lowering
 CONF_SENTINEL_EXECUTION_IDEMPOTENCY_WINDOW_MINUTES: 15  # deduplication window; align with entity cooldown period when possible
-CONF_AUDIT_HOT_MAX_RECORDS: 500
+CONF_AUDIT_HOT_MAX_RECORDS: 500        # defined in const.py; audit/store.py still uses hardcoded MAX_RECORDS = 200
 CONF_AUDIT_ARCHIVAL_BACKLOG_MAX: 100
 CONF_AUDIT_RETENTION_DAYS: 90
 CONF_AUDIT_HIGH_RETENTION_DAYS: 365
@@ -59,6 +95,8 @@ auto_execute_min_confidence: 0.0-1.0   # overrides global default; checked again
 rule_version: "1.0"                    # required on all rules
 ```
 
+Status: `Planned, not yet wired end-to-end`. Current `AnomalyFinding` does not carry these fields, and current audit records do not reliably persist `rule_version`.
+
 ### Levels
 
 - Level 0 Notify-only: no autonomous execution.
@@ -71,16 +109,20 @@ rule_version: "1.0"                    # required on all rules
 - Service: `home_generative_agent.sentinel_set_autonomy_level`.
 - `level: 0` is the kill-switch call and must take effect immediately without restart.
 - Service is admin-only. Does not require an explicit `entry_id` in the service call; the engine derives the active entry internally.
-- Runtime override is in-memory by default. If `CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES` is set, override auto-expires and reverts to config default, with an audit event.
-- `CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: true` (default) enforces PIN verification for level increases into 2 or 3. Never required for lowering. This is a declared policy with a fixed default, not optional hardening.
+- Runtime override is in-memory by default. If `CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES` is set, override auto-expires and reverts to config default.
+- Target state: override expiry should emit an audit event.
+- `CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: true` (default) currently enforces PIN presence for level increases into 2 or 3. Full PIN value verification is still open. Never required for lowering.
 
 ---
 
 ## 4. Execution Guardrails
 
+Status: `Mostly implemented`, with open gaps around per-rule thresholds and exact notification behavior for blocked outcomes.
+
 - Sensitive or PIN-gated actions are never auto-executed by default.
 - Strict domain/service allowlist required for auto-execution.
-- Per-rule and global `finding.confidence` thresholds both must pass. Triage confidence does not influence execution eligibility.
+- Target state: per-rule and global `finding.confidence` thresholds both must pass.
+- Current code: only the global threshold is enforced. Triage confidence does not influence execution eligibility.
 - `auto_execute` is unconditionally disabled for `data_quality != "fresh"`.
 - Rate limiter: max actions per time window (per-hour counter, burst-protected).
 - Idempotency key required for autonomous actions:
@@ -90,27 +132,33 @@ rule_version: "1.0"                    # required on all rules
   - Duplicate `execution_id` attempts are blocked and audited.
 - Runtime kill switch disables all autonomous execution immediately.
 - If policy evaluation fails for any reason, default to notify (safe fallback).
-- Rejected auto-execute attempts (allowlist/confidence/rate/idempotency blocks) are queued as user-prompt actions, not silently dropped.
+- Rejected auto-execute attempts (allowlist/confidence/rate/idempotency blocks) route to `prompt_user`, not silent drop.
+- Target state: `blocked` outcomes should also skip notification when policy intends suppression. Current engine behavior does not fully enforce that distinction yet.
 
 ---
 
 ## 5. Event-Driven Triggering Design
 
+Status: `Implemented in simplified form`.
+
 - Add entity-filtered listeners for locks, entries, windows, motion, and cameras.
 - Keep periodic polling for duration/baseline rules.
-- Debounce/coalescing window (configurable, default 5 s): triggers are coalesced if they share `entity_id + trigger_type` within the window.
+- Current code coalesces by anomaly type only, not `entity_id + trigger_type`.
+- Target refinement: coalesce by `entity_id + trigger_type` if per-entity event fidelity becomes necessary.
 - Single-flight run lock (`asyncio.Lock`) prevents overlapping `_run_once()` calls.
-- Bounded trigger queue: max depth `TRIGGER_QUEUE_MAX` (default 10).
+- Bounded trigger queue: max depth `TRIGGER_QUEUE_MAX` (current code uses constant `QUEUE_MAX_SIZE = 10`).
 - Queue overload policy (deterministic):
   - Prefer retaining security-critical triggers (lock/entry/camera).
-  - Drop oldest non-critical trigger first.
-  - Emit `drop_reason_code` (`queue_full_non_critical`, `queue_full_oldest`, etc.).
-- Trigger TTL: queued entries older than `ttl_seconds` (default 30 s) at lock-acquisition time are discarded with reason code `trigger_ttl_expired`.
-- All trigger drops/discards are counted and exposed on health entity; no silent discard.
+  - Current code drops the lowest-priority queued item, oldest first within a priority tier, and drops the incoming item when the queue contains only security-critical entries.
+  - Target state: emit structured `drop_reason_code` values.
+- Trigger TTL: queued entries older than `ttl_seconds` (default 30 s) at dequeue time are discarded.
+- Target state: trigger drops/discards should be counted and exposed on a health entity; current code logs them only.
 
 ---
 
 ## 6. LLM Triage Design (Level 1+)
+
+Status: `Implemented, minus some audit metadata`.
 
 - Input allowlist:
   - Always allowed: `type`, `severity`, `confidence`, `is_sensitive`, `entity_count`, `suggested_actions_count`.
@@ -124,7 +172,8 @@ rule_version: "1.0"                    # required on all rules
 - Output schema: `decision=notify|suppress`, `reason_code`, `triage_confidence` (audit-only), `summary`.
 - Triage cannot alter any finding fields.
 - Timeout/error path: fail-open to notify, audit `triage_error`.
-- Store triage latency, model/provider metadata, and `triage_confidence` in audit record.
+- Target state: store triage latency, model/provider metadata, and `triage_confidence` in audit record.
+- Current code stores `triage_confidence`, `triage_decision`, and `triage_reason_code`, but not latency or provider/model metadata.
 
 ---
 
@@ -151,31 +200,41 @@ rule_version: "1.0"                    # required on all rules
 
 ## 8. Suppression Enhancements
 
+Status: `Mostly implemented`.
+
 - Existing type-based and entity-based cooldowns retained.
 - Add quiet-hours policy by severity.
 - Per-person presence-grace windows:
-  - On person departure/arrival, write `person_entity_id -> ISO expiry` in `SuppressionState.presence_grace_until` (default 10 min).
+  - Target state: on person departure/arrival, write `person_entity_id -> ISO expiry` in `SuppressionState.presence_grace_until` (default 10 min).
+  - Current code: writes a person key derived from `derived.people_home`; because `derived.people_home` currently uses friendly names when available, this key is not yet a stable entity ID.
   - Presence-sensitive findings suppressed during active grace windows with reason `presence_grace`.
 - Snooze routes through suppression:
-  - Options `24h`, `7d`, `always` write to `SuppressionState.snoozed_until` keyed by finding type.
+  - Current code supports `24h` and permanent snooze. `7d` remains defined in suppression code but is not surfaced in the notifier.
+  - Target state: options `24h`, `always` write to `SuppressionState.snoozed_until` keyed by finding type. `7d` is not exposed and should not be added to notification UX without removing another button.
   - `always` requires explicit confirmation before write.
-  - Reason codes: `user_snooze_24h`, `user_snooze_7d`, `user_snooze_permanent`.
+  - Reason codes: `user_snooze_24h`, `user_snooze_permanent`.
 - Pending-prompt TTL and auto-resolution states.
-- Every suppressed finding gets explicit `suppression_reason_code` in audit.
+- Target state: every suppressed finding gets explicit `suppression_reason_code` in audit.
+- Current code computes reason codes. Triage-suppressed findings are appended to audit with their reason code. Rule/suppression-state-suppressed findings return before the audit append — they are not yet written to the audit store.
 
 ---
 
 ## 9. Notification UX Improvements
 
+Status: `Partially implemented`.
+
 - Severity routing policy:
-  - `high`: push + persistent
-  - `medium`: persistent + optional push
-  - `low`: audit-only or digest
-- Attach camera snapshots where available and permissioned.
-- Digest mode for burst findings.
-- Structured snooze options (`24h`, `7d`, `always`) shown in notification and written through suppression path (Section 8).
+  - Target state:
+    - `high`: push + persistent
+    - `medium`: persistent + optional push
+    - `low`: audit-only or digest
+- Current code supports push via configured notify service or persistent notifications, plus per-area routing; it does not yet implement digest mode or severity-tiered audit-only behavior.
+- Attach camera snapshots where available and permissioned. `Planned`.
+- Digest mode for burst findings. `Planned`.
+- Structured snooze options (`24h`, `always`) shown in notification and written through suppression path (Section 8). `7d` is not offered — the action button slot it would occupy is reserved for the False Alarm button due to iOS action button count limits (see Section 8 for the design constraint).
+  - Current code exposes `24h` and permanent snooze with confirmation.
 - False Alarm action button included on every notification; tapping it sets `user_response.false_positive = True` in the audit record. *(Implemented)*
-- Sensitive finding notifications may include occupant context from `derived.people_away` when policy allows.
+- Sensitive finding notifications may include occupant context from `derived.people_away` when policy allows. `Planned`.
 
 ---
 
@@ -191,6 +250,8 @@ rule_version: "1.0"                    # required on all rules
 ---
 
 ## 11. Operational Health and Observability
+
+Status: `Largely planned`. No health sensor entity is registered anywhere in the codebase today — the entire section is target state. None of the attributes below are currently exposed to Home Assistant.
 
 - Sentinel health entity attributes:
   - `last_run_start`, `last_run_end`, `run_duration_ms`
@@ -209,6 +270,8 @@ rule_version: "1.0"                    # required on all rules
 
 ## 12. Audit Schema
 
+Status: `Partially implemented`. The current audit store has a subset of the fields below and uses a fixed-cap local store; treat the dataclass below as target state, not current code. Known gaps beyond the schema itself: `trigger_source` is never populated by any engine call (always `None`); `action_policy_path` is missing from `_V2_FIELD_DEFAULTS` so v1→v2 migration does not backfill it; `CONF_AUDIT_HOT_MAX_RECORDS` is defined but the store uses a hardcoded `MAX_RECORDS = 200`.
+
 For each finding record, persist:
 
 ```python
@@ -216,34 +279,39 @@ For each finding record, persist:
 class AuditRecord:
     snapshot_ref: dict
     finding: dict
-    data_quality: str                    # "fresh" | "stale" | "unavailable"
+    data_quality: str                    # target state; current code stores {"quality": "..."} or None
     trigger_source: str                  # "poll" | "event"
-    correlation_metadata: dict | None
-    suppression_decision: str | None     # "suppressed" | "passed"
+    correlation_metadata: dict | None    # planned
+    suppression_decision: str | None     # planned
     suppression_reason_code: str | None
     triage_decision: str | None          # "notify" | "suppress" | "error" | None
     triage_reason_code: str | None
     triage_confidence: float | None      # audit-only
-    triage_model: str | None
-    triage_latency_ms: int | None
+    triage_model: str | None             # planned
+    triage_latency_ms: int | None        # planned
     action_policy_path: str | None       # "prompt_user" | "handoff" | "auto_execute" | "blocked"
     canary_would_execute: bool | None
     execution_id: str | None
     notification: dict
     user_response: dict | None
     action_outcome: dict | None
-    rule_version: str
-    autonomy_level_at_decision: int
+    rule_version: str                    # planned end-to-end; currently usually None
+    autonomy_level_at_decision: int      # current store serializes this as string
     # timestamps in UTC ISO 8601
 ```
 
 PII minimization:
-- If `finding.is_sensitive` is `True`, replace `evidence.recognized_people` with `recognized_people_count: int` before storage.
+
+- Target state: if `finding.is_sensitive` is `True`, replace `evidence.recognized_people` with `recognized_people_count: int` before storage.
+- Current code redacts recognized-person names in notification text, but audit-side evidence minimization is not fully implemented here.
 
 Retention model:
-- Hot local store (`Store`): capped by `CONF_AUDIT_HOT_MAX_RECORDS`.
-- Time pruning: default `CONF_AUDIT_RETENTION_DAYS=90`.
-- High-severity SLA (`CONF_AUDIT_HIGH_RETENTION_DAYS=365`) requires PostgreSQL archival backend.
+
+- Target state:
+  - Hot local store (`Store`): capped by `CONF_AUDIT_HOT_MAX_RECORDS`.
+  - Time pruning: default `CONF_AUDIT_RETENTION_DAYS=90`.
+  - High-severity SLA (`CONF_AUDIT_HIGH_RETENTION_DAYS=365`) requires PostgreSQL archival backend.
+- Current code: local store is capped by a fixed `MAX_RECORDS = 200` and has no severity-aware retention or archival backend management.
 - Archival unavailability policy:
   - Hot store continues accepting records up to `CONF_AUDIT_HOT_MAX_RECORDS`; once at cap, overwrite deterministically by dropping oldest `low`, then oldest `medium`, and only then oldest `high` if no other choice remains.
   - Invariant: never drop `high`-severity records while any `low` or `medium` records remain in hot store.
@@ -256,6 +324,8 @@ Retention model:
 
 ## 13. Schema Versioning and Migrations
 
+Status: `Partially implemented`.
+
 - Add explicit versions:
   - `SuppressionState.version`
   - `AuditRecord.version`
@@ -264,28 +334,34 @@ Retention model:
   - Backfill missing fields with safe defaults.
   - Preserve old records if migration partially fails; mark degraded mode.
   - Emit migration summary metrics (`migrated`, `skipped`, `failed`).
+- Known migration gap: `action_policy_path` is present in `AuditRecord` and accepted by `async_append_finding`, but absent from `_V2_FIELD_DEFAULTS` in `audit/store.py`. Any v1 record migrated to v2 will not have this field backfilled. Must be patched before v1 records exist in production with this field expected.
 - Rollback policy:
   - Never destructive rewrite in place without backup snapshot.
-  - If downgrade is attempted, load in read-only compatibility mode: the store accepts no new writes, the engine is forced to Level 0 (notify-only), and a persistent health warning is emitted until the version mismatch is explicitly resolved.
+  - Suppression state already supports read-only compatibility mode on downgrade and forces Level 0 behavior.
+  - Target state: the audit store should offer equivalent read-only compatibility handling plus a persistent health warning. Current audit store does not yet do this.
 
 ---
 
 ## 14. Deterministic Time and Ordering Rules
 
+Status: `Partially implemented`.
+
 - All timestamps are UTC ISO 8601 from a single clock helper.
 - Window calculations (staleness, TTL, correlation, rate limit) use monotonic elapsed checks where possible; UTC timestamps are persisted for audit.
-- Tie-breakers for equal timestamps are deterministic: `anomaly_id` lexical order, then `entity_id` lexical order.
+- Tie-breakers for equal timestamps are deterministic: `anomaly_id` lexical order, then `entity_id` lexical order. `Planned; not explicitly enforced everywhere today.`
 - Queue ordering is FIFO after coalescing and priority/drop policy.
 
 ---
 
 ## 15. Implementation-Architecture Prerequisites
 
+Status note: this section is now mostly historical. Several items were completed directly in existing modules rather than the exact file layout originally proposed.
+
 The following architecture refactors are required before the feature sequence can be delivered safely:
 
 1. Runtime autonomy state owner:
-   - Add a dedicated runtime controller for autonomy level, override expiry, and kill-switch state.
-   - Do not rely on mutating static `options` payload for runtime changes.
+   - Completed in `sentinel/engine.py` using a module-level runtime override store.
+   - Follow-up opportunity: extract this to a dedicated controller if lifecycle/test isolation becomes painful.
 2. Autonomy service authorization layer (depends on 1):
    - Gate `home_generative_agent.sentinel_set_autonomy_level` with admin-only checks.
    - Entry is resolved internally; callers do not pass `entry_id` in the service call.
@@ -295,7 +371,7 @@ The following architecture refactors are required before the feature sequence ca
    - Required for quiet-hours, snooze routing, presence-grace windows, and deterministic audit reasoning.
 4. Decoupled execution service (depends on 1, 3):
    - Extract execution/handoff policy from notification action callbacks into a shared service callable.
-   - Both mobile-action flow and autonomous flow must use the same policy evaluation path.
+   - Current code achieved this partially via `sentinel/execution.py`, but user-driven mobile actions and autonomous execution still do not share a single identical evaluation entrypoint.
 5. Versioned audit subsystem expansion:
    - Introduce the expanded audit schema fields and versioned writer before autonomy/canary rollout.
    - Add degraded archival status/backlog counters as first-class health metrics.
@@ -304,15 +380,18 @@ The following architecture refactors are required before the feature sequence ca
 7. Trigger scheduler extraction:
    - Implement queue/coalescing/TTL/drop-policy/single-flight in a dedicated scheduler component, separate from rule evaluation logic.
 8. Snapshot schema extension for per-person presence:
-   - Extend `DerivedContext` to include `people_home: list[str]` and `people_away: list[str]` (person entity IDs).
+   - Extend `DerivedContext` to include `people_home: list[str]` and `people_away: list[str]`.
    - Update `snapshot/schema.py`, `snapshot/derived.py`, and `snapshot/builder.py`.
    - `anyone_home` remains (`len(people_home) > 0`) to preserve backward compatibility with existing rules.
+   - Current code uses friendly names when available. If stable identity matters for suppression and audit, switch these lists to person entity IDs and add separate display-name fields.
    - Required by: per-person presence-grace windows (3), notification occupant context (Section 9), and suppression upgrades (implementation step 6).
 
 ### Prerequisite Refactor Task Map (Files + Tests)
 
+Historical note: several file/test paths below do not match the final repo layout. Keep this table as intent only; do not treat it as the current source-of-truth for file locations.
+
 | Prerequisite | Primary files to change | Test targets |
-|---|---|---|
+| --- | --- | --- |
 | Runtime autonomy state owner | `custom_components/home_generative_agent/sentinel/engine.py`, new `custom_components/home_generative_agent/sentinel/autonomy_runtime.py`, `custom_components/home_generative_agent/__init__.py` | `tests/custom_components/home_generative_agent/sentinel/test_autonomy_runtime.py`, `tests/custom_components/home_generative_agent/sentinel/test_engine_runtime_level.py` |
 | Autonomy service authorization layer *(depends on 1)* | `custom_components/home_generative_agent/__init__.py`, `custom_components/home_generative_agent/services.yaml`, `custom_components/home_generative_agent/const.py` | `tests/custom_components/home_generative_agent/test_services_sentinel_autonomy.py` |
 | Structured suppression decision model | `custom_components/home_generative_agent/sentinel/suppression.py`, `custom_components/home_generative_agent/sentinel/engine.py` | `tests/custom_components/home_generative_agent/sentinel/test_suppression_reason_codes.py`, `tests/custom_components/home_generative_agent/sentinel/test_snooze_presence_grace.py` |
@@ -335,7 +414,7 @@ The following architecture refactors are required before the feature sequence ca
 
 ## 16. Implementation Sequence
 
-Prerequisite: all items in Section 15 are completed.
+Status note: this sequence is historical. Steps 1-12 have substantial implementation in the current repo, but not all target-state acceptance criteria are met yet.
 
 1. Baseline storage provisioning:
    - Add `sentinel_baselines` table in PostgreSQL.
@@ -367,7 +446,7 @@ Prerequisite: all items in Section 15 are completed.
   - User override rate: `count(action_outcome.overridden_by_user == true) / count(total_auto_exec_successful)`
 
 | KPI | L0 -> L1 | L1 -> L2 (canary -> live) | L2 -> L3 |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | False-positive rate (14d) | < 15% | < 10% (notification-quality gate; action KPIs remain N/A in canary) | < 5% |
 | Action success rate | N/A | N/A (canary has no gate; exists for operator confidence only) | > 95% over >= 20 real actions |
 | User override rate | N/A | N/A (canary has no gate) | < 10% |
@@ -380,6 +459,8 @@ Prerequisite: all items in Section 15 are completed.
 ---
 
 ## 18. Acceptance Criteria
+
+Status note: the items below are target-state gates, not statements of current compliance.
 
 Detection integrity:
 
@@ -416,8 +497,10 @@ Autonomy progression:
 
 ## 19. Testing Strategy
 
+Status note: the repo contains many sentinel tests, but several test module paths named below were never created under the exact directories listed in Section 15. Prefer the actual `tests/custom_components/home_generative_agent/` tree over the historical names in this plan.
+
 | Implementation step | Test category | Key scenarios |
-|---|---|---|
+| --- | --- | --- |
 | 1 | Baseline storage | Rolling stats accuracy, upsert idempotency, schema migration |
 | 2 | Audit schema + reason codes | Field completeness, PII minimization, degraded-retention warning behavior |
 | 3 | State migrations | v1->v2 backfill defaults, partial-failure handling, read-only compatibility mode |
@@ -439,10 +522,12 @@ Autonomy progression:
 
 Each issue is a self-contained PR targeting main. Every PR must leave tests green and behavior backward-compatible unless the issue explicitly permits a behavioral change.
 
-**Status as of 2026-03-06:** All 15 original issues closed on GitHub. One unplanned issue (#9b, GitHub #269) covered pending-prompt TTL separately. Issue #15 (lambda rule review/approval UI) was implemented then removed — lambda rules were detection-only (no service-type suggested actions), invisible from `get_dynamic_rules`, and added no value for full autonomy; see PR #285 and Milestone 5. Discovery pipeline improvements that properly enable full autonomy are tracked as issues #16–#21 in Milestone 5 below.
+Historical note: the issue-status details below come from project history, not from repository-code inspection alone.
+
+**Status as of 2026-03-06:** All 15 original issues were closed on GitHub, but “closed” here means implementation work landed, not that every target-state behavior in Sections 2-19 is complete. Remaining known gaps include suppressed-finding audit coverage, blocked-vs-notified behavior, audit retention/archival, stable person identifiers in derived presence, and full PIN validation. One unplanned issue (#9b, GitHub #269) covered pending-prompt TTL separately. Issue #15 (lambda rule review/approval UI) was implemented then removed — lambda rules were detection-only (no service-type suggested actions), invisible from `get_dynamic_rules`, and added no value for full autonomy; see PR #285 and Milestone 5. Discovery pipeline improvements that properly enable full autonomy are tracked as issues #16–#21 in Milestone 5 below.
 
 | Plan # | GitHub # | Status | Title |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | #1 | #251 | Done | Structured suppression decision model |
 | #2 | #253 | Done | Snapshot per-person presence |
 | #3 | #254 | Done | Versioned audit schema and config surface |
@@ -685,6 +770,8 @@ The original Issue #15 (lambda rule review/approval UI) was implemented and subs
 - Dependencies: Issue #18 (shares immediate-snapshot evaluation path)
 
 **Issue #22 — PIN validation for autonomy level increase** *(Open — GitHub TBD)*
+
+> **Priority note:** This is a security gap against an already-live feature (Issue #13 is Done). Live auto-execute at Level 2 is operational, but the PIN gate protecting level increases is a no-op stub. This issue should be treated as higher-priority than the UX polish issues (#19, #20) and should be resolved before any production L2 deployment where `CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE=true` is relied upon for access control.
 
 - Plan coverage: Section 3 (runtime kill switch and override lifecycle), Section 15 (Prerequisite 2)
 - Scope: `sentinel_set_autonomy_level` accepts `pin` in the service call data but does not validate it — the check is an explicit stub (`pass`) in `engine.py`. Implement actual PIN hash validation: store PIN hash in config (not plaintext), compare on level increase when `CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE=true`. Level decreases and level 0 (kill switch) never require PIN.
