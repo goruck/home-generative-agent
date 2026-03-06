@@ -186,8 +186,7 @@ rule_version: "1.0"                    # required on all rules
   - Frequency rules (N in T)
   - Baseline deviation rules (moving averages, bounded windows) - requires baseline storage from implementation step 1
   - Composite AND/OR templates
-- Keep expression/lambda mode only with AST-safe validator (at receipt time), strict sandbox, and explicit operator approval.
-- Rules in `lambda_pending_review` are never evaluated.
+- User-defined custom conditions are addressed through discovery pipeline improvements (see Milestone 5). Lambda/expression rules were considered and removed — they were detection-only (no service-type suggested actions), invisible from `get_dynamic_rules`, and duplicated the pipeline without enabling full autonomy.
 
 ---
 
@@ -354,7 +353,7 @@ Prerequisite: all items in Section 15 are completed.
 10. Level 2 canary mode (no execution): compute and audit `would_auto_execute`.
 11. Level 2 guarded auto-execute live mode (allowlist, confidence thresholds, stale-data block, rate limits, idempotency).
 12. Temporal/baseline anomaly detectors (depends on step 1).
-13. Lambda rule review and approval UI; engine skips `lambda_pending_review`.
+13. Discovery pipeline improvements: service-mapped suggested actions, on-demand discovery trigger, immediate rule activation, normalization transparency (see Milestone 5, Issues #16–#21).
 14. Level 3 expansion only after burn-in KPIs and stability gates are met. *(Not specified in this plan — requires a dedicated design issue once L2 is proven in production.)*
 
 ---
@@ -401,7 +400,6 @@ Auditability:
 Security:
 
 - Triage prompt contains no raw entity state strings, attribute text, area names, or unsanitized evidence.
-- No lambda rule is evaluated without explicit approved status.
 - Auto-exec never bypasses allowlist, sensitivity flag, PIN gate, stale-data block, rate limits, or idempotency.
 - Kill switch transitions engine to Level 0 immediately via service call.
 
@@ -432,7 +430,7 @@ Autonomy progression:
 | 10 | Canary mode | `would_auto_execute` accuracy, no side effects |
 | 11 | Auto-exec guardrails | Allowlist/confidence/stale/rate/idempotency/PIN gate enforcement |
 | 12 | Temporal/baseline detectors | Deviation trigger correctness, baseline freshness handling |
-| 13 | Lambda approval gate | Pending rules skipped, approval transition to registry, AST rejection at receipt |
+| 13 | Discovery pipeline improvements | Service-mapped actions produce `domain.service` format; on-demand trigger; immediate activation on approval; normalization failure reason codes |
 | All | End-to-end integration | Full pipeline with mocked LLM triage and mocked HA service calls; extend `test_sentinel_end_to_end.py` incrementally |
 
 ---
@@ -441,7 +439,7 @@ Autonomy progression:
 
 Each issue is a self-contained PR targeting main. Every PR must leave tests green and behavior backward-compatible unless the issue explicitly permits a behavioral change.
 
-**Status as of 2026-03-05:** Issues #1–#15 have implementation complete and tests passing. Issues #13 and #15 remain open pending live/production verification. One unplanned issue (#9b, GitHub #269) covered pending-prompt TTL separately. See individual entries below for GitHub issue numbers.
+**Status as of 2026-03-06:** All 15 original issues closed on GitHub. One unplanned issue (#9b, GitHub #269) covered pending-prompt TTL separately. Issue #15 (lambda rule review/approval UI) was implemented then removed — lambda rules were detection-only (no service-type suggested actions), invisible from `get_dynamic_rules`, and added no value for full autonomy; see PR #285 and Milestone 5. Discovery pipeline improvements that properly enable full autonomy are tracked as issues #16–#21 in Milestone 5 below.
 
 | Plan # | GitHub # | Status | Title |
 |---|---|---|---|
@@ -458,9 +456,16 @@ Each issue is a self-contained PR targeting main. Every PR must leave tests gree
 | #10 | #261 | Done | Notification routing and UX |
 | #11 | #262 | Done | Level 1: LLM triage |
 | #12 | #263 | Done | Level 2: Canary mode |
-| #13 | #264 | **Open (pending live test)** | Level 2: Live auto-execute |
+| #13 | #264 | Done | Level 2: Live auto-execute |
 | #14 | #265 | Done | Baseline storage and temporal detectors |
-| #15 | #266 | **Open (pending live test)** | Lambda rule review/approval UI |
+| #15 | #266 | Done → Removed | Lambda rule review/approval UI (removed in PR #285) |
+| #16 | TBD | Open | Service-mapped suggested actions in normalization |
+| #17 | TBD | Open | On-demand discovery trigger |
+| #18 | TBD | Open | Immediate rule activation on approval |
+| #19 | TBD | Open | Explain normalization failures |
+| #20 | TBD | Open | Richer proposal draft notifications |
+| #21 | TBD | Open | Rule preview before commit |
+| #22 | TBD | Open | PIN validation for autonomy level increase |
 
 ---
 
@@ -586,7 +591,7 @@ Each issue is a self-contained PR targeting main. Every PR must leave tests gree
 - Size: S
 - Dependencies: Issues #8, #11
 
-**Issue #13 — Level 2: Live auto-execute** *(Open — GitHub #264)*
+**Issue #13 — Level 2: Live auto-execute** *(Done — GitHub #264, closed 2026-03-05)*
 
 - Plan coverage: Section 4, Section 17 (L1→L2 action KPIs)
 - Scope: Enable live auto-execution behind all guardrails from Issue #8. Idempotency key prevents double-fire. Rate limiter enforced. L1→L2 rollout thresholds from Section 17 (false-positive rate < 10% notification-quality gate; action KPIs N/A during canary) and zero unintended irreversible actions must be met before enabling in production — enforced by rollout process, not code gate.
@@ -612,20 +617,99 @@ Each issue is a self-contained PR targeting main. Every PR must leave tests gree
 - Size: L
 - Dependencies: Issue #8
 
-**Issue #15 — Lambda rule review/approval UI** *(Open — GitHub #266)*
+**Issue #15 — Lambda rule review/approval UI** *(Done → Removed — GitHub #266, closed 2026-03-05; feature removed in PR #285)*
 
-- Plan coverage: Section 11 (lambda rules), Section 19 (lambda approval gate test)
-- Scope: Implement lambda rule receipt: AST validation at receipt (reject non-compliant immediately), status set to `pending`. Implement approval service call (`sentinel_approve_rule`) that transitions `pending` → `active` in registry. Pending rules are skipped by the evaluation loop. Add Lovelace card stub for review UI or document manual service-call workflow.
-- Files: `sentinel/dynamic_rules.py`, `sentinel/lambda_registry.py` (new), `services.yaml`
-- Tests: Non-compliant AST rejected at receipt; pending rules skipped; approval transitions to active; active rules evaluated.
-- Size: L
-- Dependencies: Issue #14
+- Originally implemented: AST-validated expression rules with `pending → active` lifecycle and two service calls (`sentinel_receive_lambda_rule`, `sentinel_approve_lambda_rule`).
+- Removed because: lambda rules were detection-only (no `suggested_actions` field exposed in the service, so `_auto_execute_finding` always returned `no_actions`); pending rules were invisible from `get_dynamic_rules` (stored in a separate registry); the feature added a third rule lifecycle alongside built-in rules and the discovery pipeline without enabling full autonomy.
+- Successor: Milestone 5 (Issues #16–#21) addresses the underlying need through discovery pipeline improvements.
+
+---
+
+### Practical Notes
+
+- Each issue should reference the relevant plan sections in its description body.
+- Milestone 0 issues can be merged in any order and independently reviewed.
+- Milestone 1–4 issues should be merged in the numbered order within each milestone.
+- The `execution_id` idempotency implementation in Issue #8 must be complete before any auto-execution work in Issues #12–#13.
+- Canary mode (Issue #12) must be run in production for a minimum observation period before Issue #13 is enabled; this gate is a rollout process control, not a code gate.
+- Issue #14 requires a PostgreSQL instance; it is safely skippable if that dependency is not available in the deployment environment.
+- Milestone 5 issues (#16–#22) are independent of each other except #21 (preview depends on #18 for the immediate-activation path) and can be opened and merged in any order.
+
+---
+
+## Milestone 5 — Discovery Pipeline Improvements (Issues #16–#22)
+
+The original Issue #15 (lambda rule review/approval UI) was implemented and subsequently removed (PR #285) because lambda rules were detection-only, invisible from the review UI, and provided no path to full autonomy. Milestone 5 addresses the underlying need properly: making the discovery pipeline fast, transparent, and capable of producing rules that can trigger autonomous action.
+
+**Issue #16 — Service-mapped suggested actions** *(Open — GitHub TBD)*
+
+- Plan coverage: Section 4 (auto-execute guardrails), Section 3 (Level 2/3 autonomy)
+- Scope: Update `normalize_candidate()` in `proposal_templates.py` to produce HA service calls (e.g. `lock.lock`) as `suggested_actions` for templates where a safe, deterministic action exists. `is_sensitive=True` templates remain blocked from auto-execute by execution guardrail #3 regardless of suggested actions. Templates with no safe automated action continue to produce advisory text only.
+- Files: `sentinel/proposal_templates.py`
+- Tests: `normalize_candidate()` produces `domain.service` format for applicable lock/entry templates; `is_sensitive=True` templates still blocked at execution guardrail; advisory-only templates produce no service-type actions; existing auto-execute integration tests pass unchanged.
+- Size: S
+- Dependencies: none
+- **This is the single highest-value change for full autonomy — without it, no discovered rule can ever trigger auto-execute.**
+
+**Issue #17 — On-demand discovery trigger** *(Open — GitHub TBD)*
+
+- Plan coverage: Section 16 (discovery latency)
+- Scope: Add `trigger_sentinel_discovery` HA service that runs the LLM discovery cycle against the current snapshot immediately, bypassing the periodic timer. Deduplication and semantic key filtering still apply. Periodic timer is unaffected.
+- Files: `sentinel/discovery_engine.py`, `__init__.py`, `services.yaml`
+- Tests: Service call triggers a discovery run and stores results; duplicate candidates are filtered; timer interval unchanged.
+- Size: S
+- Dependencies: none
+
+**Issue #18 — Immediate rule activation on approval** *(Open — GitHub TBD)*
+
+- Plan coverage: Section 16 (approval latency)
+- Scope: After `approve_rule_proposal` successfully adds a rule to `RuleRegistry`, trigger a single `_run_once()` against the current snapshot. Rule becomes live in seconds rather than waiting up to one hour for the next scheduled cycle.
+- Files: `__init__.py` (approve handler), `sentinel/engine.py`
+- Tests: Approval triggers an immediate evaluation run; new rule fires on current snapshot if conditions met; no double-run if engine is already mid-cycle.
+- Size: S
+- Dependencies: none
+
+**Issue #19 — Explain normalization failures** *(Open — GitHub TBD)*
+
+- Plan coverage: Section 16 (transparency)
+- Scope: When `normalize_candidate()` returns `None`, return a structured reason to the caller (e.g. `no_matching_entity_types`, `unsupported_pattern`, `missing_required_entities`). Surface this reason in the `promote_discovery_candidate` and `approve_rule_proposal` service responses. When `promote` or `approve` returns `already_active`, include the covering rule ID and which entity IDs overlapped.
+- Files: `sentinel/proposal_templates.py`, `__init__.py`
+- Tests: Each normalization failure path returns a distinct reason code; `promote` and `approve` service responses include reason; `already_active` response includes covering rule ID and overlapping entities.
+- Size: S
+- Dependencies: none
+
+**Issue #20 — Richer proposal draft notifications** *(Open — GitHub TBD)*
+
+- Plan coverage: Section 9 (notification UX)
+- Scope: Include `template_id`, `severity`, and `confidence` in the notification sent when a proposal draft is created. Example: *"New HIGH-severity proposal: alarm disarmed + entry open (80% confident) — call approve_rule_proposal to activate."*
+- Files: `__init__.py` (promote handler)
+- Tests: Notification payload includes template_id, severity, confidence, and actionable service call hint.
+- Size: XS
+- Dependencies: none
+
+**Issue #21 — Rule preview before commit** *(Open — GitHub TBD)*
+
+- Plan coverage: Section 16 (operator control)
+- Scope: Add `preview_rule_proposal` HA service that evaluates the normalized rule spec against the current snapshot without writing to the registry. Returns whether the rule would trigger right now, and against which entities. Intended as a dry-run step before calling `approve_rule_proposal`.
+- Files: `__init__.py`, `sentinel/dynamic_rules.py`, `services.yaml`
+- Tests: Preview evaluates rule correctly; no registry mutation; returns trigger status and matching entities; behaves identically to a live evaluation for the same snapshot.
+- Size: M
+- Dependencies: Issue #18 (shares immediate-snapshot evaluation path)
+
+**Issue #22 — PIN validation for autonomy level increase** *(Open — GitHub TBD)*
+
+- Plan coverage: Section 3 (runtime kill switch and override lifecycle), Section 15 (Prerequisite 2)
+- Scope: `sentinel_set_autonomy_level` accepts `pin` in the service call data but does not validate it — the check is an explicit stub (`pass`) in `engine.py`. Implement actual PIN hash validation: store PIN hash in config (not plaintext), compare on level increase when `CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE=true`. Level decreases and level 0 (kill switch) never require PIN.
+- Files: `sentinel/engine.py`, `flows/sentinel_subentry_flow.py`, `const.py`, `strings.json`, `translations/en.json`
+- Tests: Correct PIN allows increase; wrong PIN rejected; no PIN required for decrease; kill-switch (`level=0`) never gated; PIN stored as hash not plaintext.
+- Size: M
+- Dependencies: none
 
 ---
 
 ### Dependency Graph
 
-```
+```text
 #1  -> #9
 #2  -> #9
 #9  -> #10
@@ -639,11 +723,19 @@ Each issue is a self-contained PR targeting main. Every PR must leave tests gree
 #12 -> #13
 
 #8  -> #14
-#14 -> #15
+#14 -> #15 (removed)
 
 #5  -> #6
 
 #7  (independent)
+
+#16 (independent)
+#17 (independent)
+#18 (independent)
+#19 (independent)
+#20 (independent)
+#21 -> #18
+#22 (independent)
 ```
 
 Issues #1, #2, #3, #4, #5, and #7 have no mutual dependencies and can all be opened simultaneously as individual PRs.
@@ -658,15 +750,4 @@ Declared issue dependencies (authoritative):
 - `#12 -> #8, #11`
 - `#13 -> #12`
 - `#14 -> #8`
-- `#15 -> #14`
-
----
-
-### Practical Notes
-
-- Each issue should reference the relevant plan sections in its description body.
-- Milestone 0 issues can be merged in any order and independently reviewed.
-- Milestone 1–4 issues should be merged in the numbered order within each milestone.
-- The `execution_id` idempotency implementation in Issue #8 must be complete before any auto-execution work in Issues #12–#13.
-- Canary mode (Issue #12) must be run in production for a minimum observation period before Issue #13 is enabled; this gate is a rollout process control, not a code gate.
-- Issues #14 and #15 require a PostgreSQL instance; they are safely skippable if that dependency is not available in the deployment environment.
+- `#21 -> #18`
