@@ -9,24 +9,25 @@
 - Human override and kill switch are always available as runtime operations (not config-file edits).
 - Detection rule configs are version-controlled and reviewed before deployment. Rule schema versions are stored in every audit record.
 
-## Current Status Snapshot (as of 2026-03-06)
+## Current Status Snapshot (as of 2026-03-07)
 
 - This document mixes current implementation, accepted design targets, and remaining work. Unless a section explicitly says `Implemented`, treat it as target-state design rather than current behavior.
 - Implemented in code today:
   - Runtime autonomy override service (`home_generative_agent.sentinel_set_autonomy_level`) with admin-only access and TTL-bounded in-memory overrides.
+  - PIN hash storage and PIN value validation for autonomy-level increases, including Sentinel subentry flow support for storing only hashed PIN material.
   - Event-driven triggering with a bounded queue, coalescing, TTL discard, and single-flight lock.
   - Correlation within a single `_run_once()` call only.
   - Suppression reason codes, quiet hours, pending-prompt TTL, snooze (`24h`, permanent), and presence-grace windows.
   - LLM triage with a strict prompt allowlist and fail-open behavior.
   - Execution policy service with stale/unavailable handling at the execution gate (autonomy level 2+), plus allowlist, confidence threshold, rate limit, idempotency, canary mode, and live auto-execute.
   - Baseline updater and temporal/baseline detector support.
+  - Discovery pipeline improvements from Milestone 5 except rule preview: service-mapped suggested actions, on-demand discovery trigger service, immediate rule activation on proposal approval, structured normalization failure reasons, overlap metadata, and richer draft notifications.
 - Partially implemented or still open (see Known Current Gaps below for the summary list):
   - Rule/suppression-state-suppressed findings are not written to the audit store (engine silently returns at the suppression gate). Triage-suppressed findings *are* written to audit.
   - `ACTION_POLICY_BLOCKED` blocks execution but does not suppress notification dispatch.
   - Audit schema/retention/archival health in this document is ahead of the current `audit/store.py` implementation. `CONF_AUDIT_HOT_MAX_RECORDS` is defined in `const.py` but the store still uses a hardcoded `MAX_RECORDS = 200` constant — the config value is not wired up.
   - `trigger_source` field exists in `AuditRecord` and migration defaults but is never populated by any engine call — it is always `None` in practice.
   - `action_policy_path` is present in `AuditRecord` and `async_append_finding` but is absent from `_V2_FIELD_DEFAULTS` in `audit/store.py` — v1→v2 migration does not backfill this field.
-  - PIN presence is enforced for autonomy-level increases when configured, but PIN value validation is still open.
   - `derived.people_home` / `derived.people_away` currently contain friendly names when available, not stable person entity IDs.
 
 ### Known Current Gaps
@@ -37,7 +38,6 @@
 - `CONF_AUDIT_HOT_MAX_RECORDS` is defined but not wired into `audit/store.py`.
 - `action_policy_path` is not backfilled during v1→v2 audit migration.
 - Presence-grace identity currently uses display-name-derived values, not stable person entity IDs.
-- PIN validation for autonomy-level increases is still a stub.
 
 ---
 
@@ -111,7 +111,7 @@ Status: `Planned, not yet wired end-to-end`. Current `AnomalyFinding` does not c
 - Service is admin-only. Does not require an explicit `entry_id` in the service call; the engine derives the active entry internally.
 - Runtime override is in-memory by default. If `CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES` is set, override auto-expires and reverts to config default.
 - Target state: override expiry should emit an audit event.
-- `CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: true` (default) currently enforces PIN presence for level increases into 2 or 3. Full PIN value verification is still open. Never required for lowering.
+- `CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: true` enforces Sentinel PIN verification for level increases. The PIN is stored as salted hash material in the Sentinel subentry. Level decreases and the Level 0 kill switch are never PIN-gated.
 
 ---
 
@@ -432,7 +432,7 @@ Status note: this sequence is historical. Steps 1-12 have substantial implementa
 10. Level 2 canary mode (no execution): compute and audit `would_auto_execute`.
 11. Level 2 guarded auto-execute live mode (allowlist, confidence thresholds, stale-data block, rate limits, idempotency).
 12. Temporal/baseline anomaly detectors (depends on step 1).
-13. Discovery pipeline improvements: service-mapped suggested actions, on-demand discovery trigger, immediate rule activation, normalization transparency (see Milestone 5, Issues #16–#21).
+13. Discovery pipeline improvements: service-mapped suggested actions, on-demand discovery trigger, immediate rule activation, normalization transparency, richer draft notifications, and level-increase PIN validation (see Milestone 5, Issues #16–#22).
 14. Level 3 expansion only after burn-in KPIs and stability gates are met. *(Not specified in this plan — requires a dedicated design issue once L2 is proven in production.)*
 
 ---
@@ -522,9 +522,9 @@ Status note: the repo contains many sentinel tests, but several test module path
 
 Each issue is a self-contained PR targeting main. Every PR must leave tests green and behavior backward-compatible unless the issue explicitly permits a behavioral change.
 
-Historical note: the issue-status details below come from project history, not from repository-code inspection alone.
+Historical note: the issue-status details below mix repository history with current main-branch state. Milestone 5 statuses below reflect the latest implementation work merged in PR #296, even where the corresponding GitHub issues may still need manual status cleanup on GitHub.
 
-**Status as of 2026-03-06:** All 15 original issues were closed on GitHub, but “closed” here means implementation work landed, not that every target-state behavior in Sections 2-19 is complete. Remaining known gaps include suppressed-finding audit coverage, blocked-vs-notified behavior, audit retention/archival, stable person identifiers in derived presence, and full PIN validation. One unplanned issue (#9b, GitHub #269) covered pending-prompt TTL separately. Issue #15 (lambda rule review/approval UI) was implemented then removed — lambda rules were detection-only (no service-type suggested actions), invisible from `get_dynamic_rules`, and added no value for full autonomy; see PR #285 and Milestone 5. Discovery pipeline improvements that properly enable full autonomy are tracked as issues #16–#21 in Milestone 5 below.
+**Status as of 2026-03-07:** All 15 original issues were closed on GitHub, but “closed” here means implementation work landed, not that every target-state behavior in Sections 2-19 is complete. Remaining known gaps include suppressed-finding audit coverage, blocked-vs-notified behavior, audit retention/archival, and stable person identifiers in derived presence. One unplanned issue (#9b, GitHub #269) covered pending-prompt TTL separately. Issue #15 (lambda rule review/approval UI) was implemented then removed — lambda rules were detection-only (no service-type suggested actions), invisible from `get_dynamic_rules`, and added no value for full autonomy; see PR #285 and Milestone 5. In Milestone 5, issues #16, #17, #18, #19, #20, and #22 are now implemented in code; only #21 remains open.
 
 | Plan # | GitHub # | Status | Title |
 | --- | --- | --- | --- |
@@ -544,13 +544,13 @@ Historical note: the issue-status details below come from project history, not f
 | #13 | #264 | Done | Level 2: Live auto-execute |
 | #14 | #265 | Done | Baseline storage and temporal detectors |
 | #15 | #266 | Done → Removed | Lambda rule review/approval UI (removed in PR #285) |
-| #16 | TBD | Open | Service-mapped suggested actions in normalization |
-| #17 | TBD | Open | On-demand discovery trigger |
-| #18 | TBD | Open | Immediate rule activation on approval |
-| #19 | TBD | Open | Explain normalization failures |
-| #20 | TBD | Open | Richer proposal draft notifications |
+| #16 | #288 | Done (PR #296) | Service-mapped suggested actions in normalization |
+| #17 | #289 | Done (PR #296) | On-demand discovery trigger |
+| #18 | #290 | Done (PR #296) | Immediate rule activation on approval |
+| #19 | #291 | Done (PR #296) | Explain normalization failures |
+| #20 | #292 | Done (PR #296) | Richer proposal draft notifications |
 | #21 | TBD | Open | Rule preview before commit |
-| #22 | TBD | Open | PIN validation for autonomy level increase |
+| #22 | #294 | Done (PR #296) | PIN validation for autonomy level increase |
 
 ---
 
@@ -706,7 +706,7 @@ Historical note: the issue-status details below come from project history, not f
 
 - Originally implemented: AST-validated expression rules with `pending → active` lifecycle and two service calls (`sentinel_receive_lambda_rule`, `sentinel_approve_lambda_rule`).
 - Removed because: lambda rules were detection-only (no `suggested_actions` field exposed in the service, so `_auto_execute_finding` always returned `no_actions`); pending rules were invisible from `get_dynamic_rules` (stored in a separate registry); the feature added a third rule lifecycle alongside built-in rules and the discovery pipeline without enabling full autonomy.
-- Successor: Milestone 5 (Issues #16–#21) addresses the underlying need through discovery pipeline improvements.
+- Successor: Milestone 5 (Issues #16–#22) addresses the underlying need through discovery pipeline improvements.
 
 ---
 
@@ -714,7 +714,7 @@ Historical note: the issue-status details below come from project history, not f
 
 The original Issue #15 (lambda rule review/approval UI) was implemented and subsequently removed (PR #285) because lambda rules were detection-only, invisible from the review UI, and provided no path to full autonomy. Milestone 5 addresses the underlying need properly: making the discovery pipeline fast, transparent, and capable of producing rules that can trigger autonomous action.
 
-**Issue #16 — Service-mapped suggested actions** *(Open — [GitHub #288](https://github.com/goruck/home-generative-agent/issues/288))*
+**Issue #16 — Service-mapped suggested actions** *(Done — [GitHub #288](https://github.com/goruck/home-generative-agent/issues/288), merged in PR #296)*
 
 - Plan coverage: Section 4 (auto-execute guardrails), Section 3 (Level 2/3 autonomy)
 - Scope: Update `normalize_candidate()` in `proposal_templates.py` to produce HA service calls (e.g. `lock.lock`) as `suggested_actions` for templates where a safe, deterministic action exists. `is_sensitive=True` templates remain blocked from auto-execute by execution guardrail #3 regardless of suggested actions. Templates with no safe automated action continue to produce advisory text only.
@@ -723,8 +723,9 @@ The original Issue #15 (lambda rule review/approval UI) was implemented and subs
 - Size: S
 - Dependencies: none
 - **This is the single highest-value change for full autonomy — without it, no discovered rule can ever trigger auto-execute.**
+ - Implemented outcome: normalized proposals now emit service-mapped `suggested_actions` where safe deterministic actions exist.
 
-**Issue #17 — On-demand discovery trigger** *(Open — [GitHub #289](https://github.com/goruck/home-generative-agent/issues/289))*
+**Issue #17 — On-demand discovery trigger** *(Done — [GitHub #289](https://github.com/goruck/home-generative-agent/issues/289), merged in PR #296)*
 
 - Plan coverage: Section 16 (discovery latency)
 - Scope: Add `trigger_sentinel_discovery` HA service that runs the LLM discovery cycle against the current snapshot immediately, bypassing the periodic timer. Deduplication and semantic key filtering still apply. Periodic timer is unaffected.
@@ -732,8 +733,9 @@ The original Issue #15 (lambda rule review/approval UI) was implemented and subs
 - Tests: Service call triggers a discovery run and stores results; duplicate candidates are filtered; timer interval unchanged.
 - Size: S
 - Dependencies: none
+ - Implemented outcome: `home_generative_agent.trigger_sentinel_discovery` runs one discovery cycle immediately when called.
 
-**Issue #18 — Immediate rule activation on approval** *(Open — [GitHub #290](https://github.com/goruck/home-generative-agent/issues/290))*
+**Issue #18 — Immediate rule activation on approval** *(Done — [GitHub #290](https://github.com/goruck/home-generative-agent/issues/290), merged in PR #296)*
 
 - Plan coverage: Section 16 (approval latency)
 - Scope: After `approve_rule_proposal` successfully adds a rule to `RuleRegistry`, trigger a single `_run_once()` against the current snapshot. Rule becomes live in seconds rather than waiting up to one hour for the next scheduled cycle.
@@ -741,8 +743,9 @@ The original Issue #15 (lambda rule review/approval UI) was implemented and subs
 - Tests: Approval triggers an immediate evaluation run; new rule fires on current snapshot if conditions met; no double-run if engine is already mid-cycle.
 - Size: S
 - Dependencies: none
+ - Implemented outcome: successful proposal approval now triggers an immediate Sentinel evaluation cycle through the scheduler's single-flight path.
 
-**Issue #19 — Explain normalization failures** *(Open — [GitHub #291](https://github.com/goruck/home-generative-agent/issues/291))*
+**Issue #19 — Explain normalization failures** *(Done — [GitHub #291](https://github.com/goruck/home-generative-agent/issues/291), merged in PR #296)*
 
 - Plan coverage: Section 16 (transparency)
 - Scope: When `normalize_candidate()` returns `None`, return a structured reason to the caller (e.g. `no_matching_entity_types`, `unsupported_pattern`, `missing_required_entities`). Surface this reason in the `promote_discovery_candidate` and `approve_rule_proposal` service responses. When `promote` or `approve` returns `already_active`, include the covering rule ID and which entity IDs overlapped.
@@ -750,8 +753,9 @@ The original Issue #15 (lambda rule review/approval UI) was implemented and subs
 - Tests: Each normalization failure path returns a distinct reason code; `promote` and `approve` service responses include reason; `already_active` response includes covering rule ID and overlapping entities.
 - Size: S
 - Dependencies: none
+ - Implemented outcome: promote/approve responses now return structured `reason_code`, `details`, `covered_rule_id`, and `overlapping_entity_ids` when applicable.
 
-**Issue #20 — Richer proposal draft notifications** *(Open — [GitHub #292](https://github.com/goruck/home-generative-agent/issues/292))*
+**Issue #20 — Richer proposal draft notifications** *(Done — [GitHub #292](https://github.com/goruck/home-generative-agent/issues/292), merged in PR #296)*
 
 - Plan coverage: Section 9 (notification UX)
 - Scope: Include `template_id`, `severity`, and `confidence` in the notification sent when a proposal draft is created. Example: *"New HIGH-severity proposal: alarm disarmed + entry open (80% confident) — call approve_rule_proposal to activate."*
@@ -759,6 +763,7 @@ The original Issue #15 (lambda rule review/approval UI) was implemented and subs
 - Tests: Notification payload includes template_id, severity, confidence, and actionable service call hint.
 - Size: XS
 - Dependencies: none
+ - Implemented outcome: draft notifications now include template context and actionable approval guidance instead of a generic message.
 
 **Issue #21 — Rule preview before commit** *(Open — [GitHub #293](https://github.com/goruck/home-generative-agent/issues/293))*
 
@@ -768,17 +773,17 @@ The original Issue #15 (lambda rule review/approval UI) was implemented and subs
 - Tests: Preview evaluates rule correctly; no registry mutation; returns trigger status and matching entities; behaves identically to a live evaluation for the same snapshot.
 - Size: M
 - Dependencies: Issue #18 (shares immediate-snapshot evaluation path)
+ - Current note: Issue #18 is now implemented, so the immediate-snapshot evaluation path exists and this is the primary remaining Milestone 5 item.
 
-**Issue #22 — PIN validation for autonomy level increase** *(Open — [GitHub #294](https://github.com/goruck/home-generative-agent/issues/294))*
-
-> **Priority note:** This is a security gap against an already-live feature (Issue #13 is Done). Live auto-execute at Level 2 is operational, but the PIN gate protecting level increases is a no-op stub. This issue should be treated as higher-priority than the UX polish issues (#19, #20) and should be resolved before any production L2 deployment where `CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE=true` is relied upon for access control.
+**Issue #22 — PIN validation for autonomy level increase** *(Done — [GitHub #294](https://github.com/goruck/home-generative-agent/issues/294), merged in PR #296)*
 
 - Plan coverage: Section 3 (runtime kill switch and override lifecycle), Section 15 (Prerequisite 2)
-- Scope: `sentinel_set_autonomy_level` accepts `pin` in the service call data but does not validate it — the check is an explicit stub (`pass`) in `engine.py`. Implement actual PIN hash validation: store PIN hash in config (not plaintext), compare on level increase when `CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE=true`. Level decreases and level 0 (kill switch) never require PIN.
+- Scope: `sentinel_set_autonomy_level` now validates `pin` on level increases. Sentinel stores salted hash material in config (not plaintext) and compares the provided PIN when `CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE=true`. Level decreases and level 0 (kill switch) never require PIN.
 - Files: `sentinel/engine.py`, `flows/sentinel_subentry_flow.py`, `const.py`, `strings.json`, `translations/en.json`
 - Tests: Correct PIN allows increase; wrong PIN rejected; no PIN required for decrease; kill-switch (`level=0`) never gated; PIN stored as hash not plaintext.
 - Size: M
 - Dependencies: none
+ - Implemented outcome: Sentinel now persists hashed level-increase PIN material in subentry config and validates the provided PIN on autonomy increases.
 
 ---
 
