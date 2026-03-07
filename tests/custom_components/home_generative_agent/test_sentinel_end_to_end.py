@@ -227,6 +227,35 @@ async def test_sentinel_canary_mode_records_would_execute(
     assert any(v is not None for v in canary_values)
 
 
+@pytest.mark.asyncio
+async def test_sentinel_canary_mode_does_not_consume_live_auto_execute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A canary-only pass must not burn the later live auto-execute slot."""
+    engine, hass = _make_ae_engine(monkeypatch)
+    engine._options[CONF_SENTINEL_AUTO_EXEC_CANARY_MODE] = True
+
+    await engine._run_once()
+
+    hass.services.async_call.assert_not_called()
+    audit = cast("DummyAudit", cast("Any", engine)._audit_store)
+    assert audit.calls
+    assert audit.calls[0]["canary_would_execute"] is True
+    assert audit.calls[0]["action_policy_path"] == "auto_execute"
+
+    engine._options[CONF_SENTINEL_AUTO_EXEC_CANARY_MODE] = False
+    await engine._run_once()
+
+    hass.services.async_call.assert_called_once_with(
+        "lock",
+        "lock",
+        {"entity_id": "lock.front_door"},
+        blocking=True,
+    )
+    assert len(audit.calls) >= 2
+    assert audit.calls[-1]["action_policy_path"] == "auto_execute"
+
+
 # ---------------------------------------------------------------------------
 # Issue #264 — Level 2 live auto-execute integration tests
 # ---------------------------------------------------------------------------
@@ -290,6 +319,7 @@ def _make_ae_engine(
     *,
     autonomy_level: int = 2,
     max_actions_per_hour: int = 5,
+    service_side_effect: Any = None,
 ) -> tuple[SentinelEngine, MagicMock]:
     """
     Build a live-auto-execute engine backed by a MagicMock hass.
@@ -302,7 +332,10 @@ def _make_ae_engine(
     reach the execution-policy layer without being short-circuited by suppression.
     """
     hass = MagicMock()
-    hass.services.async_call = AsyncMock(return_value=None)
+    if service_side_effect is None:
+        hass.services.async_call = AsyncMock(return_value=None)
+    else:
+        hass.services.async_call = AsyncMock(side_effect=service_side_effect)
 
     # Freeze time so snapshot entities are always fresh and guardrails are deterministic.
     monkeypatch.setattr(
@@ -358,7 +391,7 @@ async def test_live_auto_execute_calls_ha_service(
         "lock",
         "lock",
         {"entity_id": "lock.front_door"},
-        blocking=False,
+        blocking=True,
     )
 
 
@@ -425,3 +458,47 @@ async def test_live_auto_execute_rate_limit_blocks(
     paths = [c["action_policy_path"] for c in audit.calls]
     assert "auto_execute" in paths
     assert "prompt_user" in paths
+
+
+@pytest.mark.asyncio
+async def test_live_auto_execute_failure_does_not_consume_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed service call must not burn idempotency or the rate-limit slot."""
+    first_call = True
+
+    async def _service_side_effect(*_args: Any, **_kwargs: Any) -> None:
+        nonlocal first_call
+        if first_call:
+            first_call = False
+            msg = "temporary HA failure"
+            raise RuntimeError(msg)
+
+    engine, hass = _make_ae_engine(
+        monkeypatch,
+        service_side_effect=_service_side_effect,
+    )
+
+    await engine._run_once()
+    await engine._run_once()
+
+    assert hass.services.async_call.call_count == 2
+    audit = cast("DummyAudit", cast("Any", engine)._audit_store)
+    first_outcome = cast("dict[str, Any]", audit.calls[0]["action_outcome"])
+    second_outcome = cast("dict[str, Any]", audit.calls[1]["action_outcome"])
+    assert first_outcome == {
+        "status": "error",
+        "actions": [
+            {
+                "service": "lock.lock",
+                "status": "error",
+                "error": "temporary HA failure",
+            }
+        ],
+        "execution_id": first_outcome["execution_id"],
+    }
+    assert second_outcome == {
+        "status": "success",
+        "actions": [{"service": "lock.lock", "status": "ok", "error": None}],
+        "execution_id": second_outcome["execution_id"],
+    }

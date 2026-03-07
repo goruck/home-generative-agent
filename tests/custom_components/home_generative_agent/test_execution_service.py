@@ -526,3 +526,57 @@ def test_canary_rate_limit_is_read_only() -> None:
     assert result.block_reason == "rate_limit_exceeded"
     # Still the same count — canary didn't add another slot.
     assert len(svc._recent_action_times) == max_actions
+
+
+def test_commit_auto_execute_records_state_after_pure_evaluation() -> None:
+    """Pure evaluation stays read-only until commit_auto_execute() is called."""
+    recent = "2025-01-01T00:59:50+00:00"
+    snapshot = _make_snapshot(last_changed=recent)
+    svc = SentinelExecutionService(
+        {
+            **_FULL_OPTIONS,
+            CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: [],
+        }
+    )
+    finding = _make_finding(
+        anomaly_id="commit_me",
+        confidence=0.95,
+        suggested_actions=[],
+    )
+
+    result = svc.evaluate_canary(finding, snapshot, 2, _NOW)
+
+    assert result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
+    assert result.execution_id is not None
+    assert not svc._recent_action_times
+    assert not svc._idempotency_seen
+
+    svc.commit_auto_execute(cast("str", result.execution_id), _NOW)
+
+    assert len(svc._recent_action_times) == 1
+    assert result.execution_id in svc._idempotency_seen
+
+
+def test_commit_auto_execute_enables_future_duplicate_block() -> None:
+    """Once committed, the same decision is blocked by idempotency."""
+    recent = "2025-01-01T00:59:50+00:00"
+    snapshot = _make_snapshot(last_changed=recent)
+    svc = SentinelExecutionService(
+        {
+            **_FULL_OPTIONS,
+            CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: [],
+        }
+    )
+    finding = _make_finding(
+        anomaly_id="dup_after_commit",
+        confidence=0.95,
+        suggested_actions=[],
+    )
+
+    first = svc.evaluate_canary(finding, snapshot, 2, _NOW)
+    svc.commit_auto_execute(cast("str", first.execution_id), _NOW)
+    second = svc.evaluate_canary(finding, snapshot, 2, _NOW)
+
+    assert first.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
+    assert second.action_policy_path == ACTION_POLICY_PROMPT_USER
+    assert second.block_reason == "idempotency_duplicate"
