@@ -97,7 +97,7 @@ async def test_auto_execute_domain_service_calls_ha() -> None:
         "lock",
         "lock",
         {"entity_id": "lock.front_door"},
-        blocking=False,
+        blocking=True,
     )
 
 
@@ -117,7 +117,7 @@ async def test_auto_execute_multiple_triggering_entities_passed_as_list() -> Non
         "lock",
         "lock",
         {"entity_id": ["lock.front_door", "lock.back_door"]},
-        blocking=False,
+        blocking=True,
     )
 
 
@@ -193,5 +193,5 @@ async def test_auto_execute_no_triggering_entities_omits_entity_id() -> None:
         "lock",
         "lock",
         {},
-        blocking=False,
+        blocking=True,
     )

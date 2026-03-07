@@ -108,6 +108,22 @@ class SentinelExecutionService:
     # Public API
     # ---------------------------------------------------------------------- #
 
+    def commit_auto_execute(self, execution_id: str, now: datetime) -> None:
+        """
+        Record a successful live auto-execution after the service call completes.
+
+        This is used by the engine's live path so rate-limit and idempotency
+        state reflect actual completed actions rather than optimistic approval.
+        """
+        window_start = now - timedelta(hours=1)
+        self._recent_action_times = [
+            t for t in self._recent_action_times if t > window_start
+        ]
+        self._refresh_idempotency_window()
+        self._recent_action_times.append(now)
+        self._idempotency_seen.add(execution_id)
+        LOGGER.info("Recorded auto-execute completion (execution_id=%s).", execution_id)
+
     def evaluate(  # noqa: PLR0911
         self,
         finding: AnomalyFinding,

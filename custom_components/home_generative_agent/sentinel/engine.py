@@ -556,24 +556,23 @@ class SentinelEngine:
                 RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE,
             )
         )
-        exec_result = self._execution_service.evaluate(
+        # Use the side-effect-free evaluator here; live execution state is
+        # committed only after the HA service call actually succeeds.
+        exec_result = self._execution_service.evaluate_canary(
             finding, snapshot, effective_autonomy, now
         )
 
         # Canary: record would_auto_execute without acting.
         canary_would_execute: bool | None = None
         if canary_mode:
-            canary_result = self._execution_service.evaluate_canary(
-                finding, snapshot, effective_autonomy, now
-            )
             canary_would_execute = (
-                canary_result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
+                exec_result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
             )
             if canary_would_execute:
                 LOGGER.info(
                     "Canary: would auto-execute finding %s (execution_id=%s).",
                     finding.anomaly_id,
-                    canary_result.execution_id,
+                    exec_result.execution_id,
                 )
 
         # Live auto-execute: call HA services when policy approves and canary is off.
@@ -585,6 +584,13 @@ class SentinelEngine:
             action_outcome = await _auto_execute_finding(
                 self._hass, finding, exec_result.execution_id
             )
+            if exec_result.execution_id is not None and action_outcome["status"] in {
+                "success",
+                "partial",
+            }:
+                self._execution_service.commit_auto_execute(
+                    exec_result.execution_id, now
+                )
 
         register_finding(self._suppression.state, finding, now)
         register_prompt(self._suppression.state, finding, now)
@@ -685,17 +691,16 @@ class SentinelEngine:
                 RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE,
             )
         )
-        exec_result = self._execution_service.evaluate(
+        # Use the side-effect-free evaluator here; live execution state is
+        # committed only after the HA service call actually succeeds.
+        exec_result = self._execution_service.evaluate_canary(
             best, snapshot, effective_autonomy, now
         )
 
         canary_would_execute: bool | None = None
         if canary_mode:
-            canary_result = self._execution_service.evaluate_canary(
-                best, snapshot, effective_autonomy, now
-            )
             canary_would_execute = (
-                canary_result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
+                exec_result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
             )
 
         action_outcome: dict[str, Any] | None = None
@@ -706,6 +711,13 @@ class SentinelEngine:
             action_outcome = await _auto_execute_finding(
                 self._hass, best, exec_result.execution_id
             )
+            if exec_result.execution_id is not None and action_outcome["status"] in {
+                "success",
+                "partial",
+            }:
+                self._execution_service.commit_auto_execute(
+                    exec_result.execution_id, now
+                )
 
         explanation = None
         if explain_enabled and self._explainer is not None:
@@ -775,7 +787,7 @@ async def _auto_execute_finding(
                 domain,
                 service,
                 service_data,
-                blocking=False,
+                blocking=True,
             )
             results.append({"service": action, "status": "ok", "error": None})
             LOGGER.info(
