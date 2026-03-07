@@ -96,10 +96,24 @@ class NormalizedRule:
         }
 
 
-def normalize_candidate(  # noqa: PLR0911, PLR0912
-    candidate: dict[str, Any],
-) -> NormalizedRule | None:
+@dataclass(frozen=True)
+class NormalizationResult:
+    """Structured normalization result for a discovery candidate."""
+
+    normalized: NormalizedRule | None
+    reason_code: str | None = None
+    details: dict[str, Any] | None = None
+
+
+def normalize_candidate(candidate: dict[str, Any]) -> NormalizedRule | None:
     """Map a discovery candidate to a supported template."""
+    return explain_normalize_candidate(candidate).normalized
+
+
+def explain_normalize_candidate(  # noqa: PLR0911, PLR0912
+    candidate: dict[str, Any],
+) -> NormalizationResult:
+    """Map a discovery candidate to a supported template with failure reasons."""
     evidence_paths = candidate.get("evidence_paths", [])
     text = " ".join(
         [
@@ -124,6 +138,18 @@ def normalize_candidate(  # noqa: PLR0911, PLR0912
         text, _PERSON_TERMS
     )
     has_camera_signal = camera_id is not None or _contains_any(text, _CAMERA_TERMS)
+    summary = {
+        "alarm_id": alarm_id,
+        "lock_ids": lock_ids,
+        "entry_ids": entry_ids,
+        "motion_ids": motion_ids,
+        "person_ids": person_ids,
+        "sensor_ids": sensor_ids,
+        "battery_sensor_ids": battery_sensor_ids,
+        "camera_id": camera_id,
+        "presence": presence,
+        "has_night": has_night,
+    }
 
     if (
         alarm_id
@@ -133,18 +159,20 @@ def normalize_candidate(  # noqa: PLR0911, PLR0912
         and _contains_any(text, ("alarm", "disarmed"))
     ):
         default_rule_id = "motion_detected_at_night_while_alarm_disarmed"
-        return NormalizedRule(
-            rule_id=_candidate_rule_id(candidate, default=default_rule_id),
-            template_id="motion_detected_at_night_while_alarm_disarmed",
-            params={
-                "alarm_entity_id": alarm_id,
-                "motion_entity_ids": motion_ids,
-                "required_entity_ids": person_ids,
-            },
-            severity="low",
-            confidence=float(candidate.get("confidence_hint", 0.8)),
-            is_sensitive=False,
-            suggested_actions=["close_entry"],
+        return NormalizationResult(
+            normalized=NormalizedRule(
+                rule_id=_candidate_rule_id(candidate, default=default_rule_id),
+                template_id="motion_detected_at_night_while_alarm_disarmed",
+                params={
+                    "alarm_entity_id": alarm_id,
+                    "motion_entity_ids": motion_ids,
+                    "required_entity_ids": person_ids,
+                },
+                severity="low",
+                confidence=float(candidate.get("confidence_hint", 0.8)),
+                is_sensitive=False,
+                suggested_actions=["close_entry"],
+            )
         )
 
     if (
@@ -158,74 +186,88 @@ def normalize_candidate(  # noqa: PLR0911, PLR0912
         default_rule_id = (
             f"motion_while_alarm_disarmed_and_home_present_{alarm_id.replace('.', '_')}"
         )
-        return NormalizedRule(
-            rule_id=_candidate_rule_id(
-                candidate,
-                default=default_rule_id,
-            ),
-            template_id="motion_while_alarm_disarmed_and_home_present",
-            params={
-                "alarm_entity_id": alarm_id,
-                "motion_entity_ids": motion_ids,
-                "home_entity_ids": person_ids,
-            },
-            severity="low",
-            confidence=float(candidate.get("confidence_hint", 0.75)),
-            is_sensitive=False,
-            suggested_actions=["close_entry"],
+        return NormalizationResult(
+            normalized=NormalizedRule(
+                rule_id=_candidate_rule_id(
+                    candidate,
+                    default=default_rule_id,
+                ),
+                template_id="motion_while_alarm_disarmed_and_home_present",
+                params={
+                    "alarm_entity_id": alarm_id,
+                    "motion_entity_ids": motion_ids,
+                    "home_entity_ids": person_ids,
+                },
+                severity="low",
+                confidence=float(candidate.get("confidence_hint", 0.75)),
+                is_sensitive=False,
+                suggested_actions=["close_entry"],
+            )
         )
 
     if alarm_id and entry_ids and _contains_any(text, ("alarm", "disarmed", "armed")):
-        return NormalizedRule(
-            rule_id=f"alarm_disarmed_open_entry_{alarm_id.replace('.', '_')}",
-            template_id="alarm_disarmed_open_entry",
-            params={"alarm_entity_id": alarm_id, "entry_entity_ids": entry_ids},
-            severity="high",
-            confidence=float(candidate.get("confidence_hint", 0.6)),
-            is_sensitive=True,
-            suggested_actions=["close_entry"],
+        return NormalizationResult(
+            normalized=NormalizedRule(
+                rule_id=f"alarm_disarmed_open_entry_{alarm_id.replace('.', '_')}",
+                template_id="alarm_disarmed_open_entry",
+                params={"alarm_entity_id": alarm_id, "entry_entity_ids": entry_ids},
+                severity="high",
+                confidence=float(candidate.get("confidence_hint", 0.6)),
+                is_sensitive=True,
+                suggested_actions=_entry_suggested_actions(entry_ids),
+            )
         )
 
     if lock_ids and not entry_ids and _contains_any(text, ("lock", "unlocked")):
         lock_id = lock_ids[0]
-        return NormalizedRule(
-            rule_id=f"unlocked_lock_when_home_{lock_id.replace('.', '_')}",
-            template_id="unlocked_lock_when_home",
-            params={"lock_entity_id": lock_id},
-            severity="medium",
-            confidence=float(candidate.get("confidence_hint", 0.5)),
-            is_sensitive=True,
-            suggested_actions=["lock_entity"],
+        return NormalizationResult(
+            normalized=NormalizedRule(
+                rule_id=f"unlocked_lock_when_home_{lock_id.replace('.', '_')}",
+                template_id="unlocked_lock_when_home",
+                params={"lock_entity_id": lock_id},
+                severity="medium",
+                confidence=float(candidate.get("confidence_hint", 0.5)),
+                is_sensitive=True,
+                suggested_actions=["lock.lock", "lock_entity"],
+            )
         )
 
     if entry_ids and _contains_any(text, ("open", "window", "door", "entry")):
         if has_night and presence == "away":
-            return _build_entry_rule(
-                candidate,
-                "open_entry_at_night_while_away",
-                f"open_entry_at_night_while_away_{entry_kind}",
-                entry_ids,
+            return NormalizationResult(
+                normalized=_build_entry_rule(
+                    candidate,
+                    "open_entry_at_night_while_away",
+                    f"open_entry_at_night_while_away_{entry_kind}",
+                    entry_ids,
+                )
             )
         if has_night and presence == "home":
-            return _build_entry_rule(
-                candidate,
-                "open_entry_at_night_when_home",
-                f"open_entry_at_night_when_home_{entry_kind}",
-                entry_ids,
+            return NormalizationResult(
+                normalized=_build_entry_rule(
+                    candidate,
+                    "open_entry_at_night_when_home",
+                    f"open_entry_at_night_when_home_{entry_kind}",
+                    entry_ids,
+                )
             )
         if presence == "away":
-            return _build_entry_rule(
-                candidate,
-                "open_entry_while_away",
-                f"open_entry_while_away_{entry_kind}",
-                entry_ids,
+            return NormalizationResult(
+                normalized=_build_entry_rule(
+                    candidate,
+                    "open_entry_while_away",
+                    f"open_entry_while_away_{entry_kind}",
+                    entry_ids,
+                )
             )
         if presence == "home":
-            return _build_entry_rule(
-                candidate,
-                "open_entry_when_home",
-                f"open_entry_when_home_{entry_kind}",
-                entry_ids,
+            return NormalizationResult(
+                normalized=_build_entry_rule(
+                    candidate,
+                    "open_entry_when_home",
+                    f"open_entry_when_home_{entry_kind}",
+                    entry_ids,
+                )
             )
     if (
         not entry_ids
@@ -233,14 +275,16 @@ def normalize_candidate(  # noqa: PLR0911, PLR0912
         and presence == "away"
         and _contains_any(text, ("open", "window"))
     ):
-        return NormalizedRule(
-            rule_id="open_any_window_at_night_while_away",
-            template_id="open_any_window_at_night_while_away",
-            params={"entry_selector": "window"},
-            severity="high",
-            confidence=float(candidate.get("confidence_hint", 0.6)),
-            is_sensitive=True,
-            suggested_actions=["close_entry"],
+        return NormalizationResult(
+            normalized=NormalizedRule(
+                rule_id="open_any_window_at_night_while_away",
+                template_id="open_any_window_at_night_while_away",
+                params={"entry_selector": "window"},
+                severity="high",
+                confidence=float(candidate.get("confidence_hint", 0.6)),
+                is_sensitive=True,
+                suggested_actions=["close_entry"],
+            )
         )
 
     if has_camera_signal and presence == "away" and has_unknown_person_signal:
@@ -250,14 +294,16 @@ def normalize_candidate(  # noqa: PLR0911, PLR0912
         else:
             rule_id = "unknown_person_camera_no_home_any_camera"
             params = {"camera_selector": "any"}
-        return NormalizedRule(
-            rule_id=rule_id,
-            template_id="unknown_person_camera_no_home",
-            params=params,
-            severity="low",
-            confidence=float(candidate.get("confidence_hint", 0.85)),
-            is_sensitive=True,
-            suggested_actions=["close_entry"],
+        return NormalizationResult(
+            normalized=NormalizedRule(
+                rule_id=rule_id,
+                template_id="unknown_person_camera_no_home",
+                params=params,
+                severity="low",
+                confidence=float(candidate.get("confidence_hint", 0.85)),
+                is_sensitive=True,
+                suggested_actions=["close_entry"],
+            )
         )
     if has_camera_signal and presence == "home" and has_unknown_person_signal:
         if camera_id:
@@ -268,14 +314,16 @@ def normalize_candidate(  # noqa: PLR0911, PLR0912
         else:
             default_rule_id = "unknown_person_camera_when_home_any_camera"
             params = {"camera_selector": "any"}
-        return NormalizedRule(
-            rule_id=default_rule_id,
-            template_id="unknown_person_camera_when_home",
-            params=params,
-            severity="low",
-            confidence=float(candidate.get("confidence_hint", 0.7)),
-            is_sensitive=False,
-            suggested_actions=["close_entry"],
+        return NormalizationResult(
+            normalized=NormalizedRule(
+                rule_id=default_rule_id,
+                template_id="unknown_person_camera_when_home",
+                params=params,
+                severity="low",
+                confidence=float(candidate.get("confidence_hint", 0.7)),
+                is_sensitive=False,
+                suggested_actions=["close_entry"],
+            )
         )
 
     if (
@@ -283,52 +331,77 @@ def normalize_candidate(  # noqa: PLR0911, PLR0912
         and camera_id
         and _contains_any(text, ("motion", "camera", "activity"))
     ):
-        return NormalizedRule(
-            rule_id=f"motion_without_camera_{camera_id.replace('.', '_')}",
-            template_id="motion_without_camera_activity",
-            params={"motion_entity_ids": motion_ids, "camera_entity_id": camera_id},
-            severity="low",
-            confidence=float(candidate.get("confidence_hint", 0.5)),
-            is_sensitive=False,
-            suggested_actions=["check_camera"],
+        return NormalizationResult(
+            normalized=NormalizedRule(
+                rule_id=f"motion_without_camera_{camera_id.replace('.', '_')}",
+                template_id="motion_without_camera_activity",
+                params={
+                    "motion_entity_ids": motion_ids,
+                    "camera_entity_id": camera_id,
+                },
+                severity="low",
+                confidence=float(candidate.get("confidence_hint", 0.5)),
+                is_sensitive=False,
+                suggested_actions=["check_camera"],
+            )
         )
 
     if battery_sensor_ids and _contains_any(text, ("battery", "low", "below")):
-        return NormalizedRule(
-            rule_id=_candidate_rule_id(candidate, default="low_battery_sensors"),
-            template_id="low_battery_sensors",
-            params={
-                "sensor_entity_ids": battery_sensor_ids,
-                "threshold": _extract_threshold_percent(text, default=40.0),
-            },
-            severity="low",
-            confidence=float(candidate.get("confidence_hint", 0.62)),
-            is_sensitive=False,
-            suggested_actions=["check_sensor"],
+        return NormalizationResult(
+            normalized=NormalizedRule(
+                rule_id=_candidate_rule_id(candidate, default="low_battery_sensors"),
+                template_id="low_battery_sensors",
+                params={
+                    "sensor_entity_ids": battery_sensor_ids,
+                    "threshold": _extract_threshold_percent(text, default=40.0),
+                },
+                severity="low",
+                confidence=float(candidate.get("confidence_hint", 0.62)),
+                is_sensitive=False,
+                suggested_actions=["check_sensor"],
+            )
         )
 
     if sensor_ids and _contains_any(text, ("unavailable", "offline", "unreachable")):
         if presence == "home":
-            return NormalizedRule(
-                rule_id="unavailable_sensors_while_home",
-                template_id="unavailable_sensors_while_home",
+            return NormalizationResult(
+                normalized=NormalizedRule(
+                    rule_id="unavailable_sensors_while_home",
+                    template_id="unavailable_sensors_while_home",
+                    params={"sensor_entity_ids": sensor_ids},
+                    severity="low",
+                    confidence=float(candidate.get("confidence_hint", 0.8)),
+                    is_sensitive=False,
+                    suggested_actions=["check_sensor"],
+                )
+            )
+        return NormalizationResult(
+            normalized=NormalizedRule(
+                rule_id=_candidate_rule_id(candidate, default="unavailable_sensors"),
+                template_id="unavailable_sensors",
                 params={"sensor_entity_ids": sensor_ids},
                 severity="low",
-                confidence=float(candidate.get("confidence_hint", 0.8)),
+                confidence=float(candidate.get("confidence_hint", 0.6)),
                 is_sensitive=False,
                 suggested_actions=["check_sensor"],
             )
-        return NormalizedRule(
-            rule_id=_candidate_rule_id(candidate, default="unavailable_sensors"),
-            template_id="unavailable_sensors",
-            params={"sensor_entity_ids": sensor_ids},
-            severity="low",
-            confidence=float(candidate.get("confidence_hint", 0.6)),
-            is_sensitive=False,
-            suggested_actions=["check_sensor"],
         )
 
-    return None
+    return _normalization_failure(
+        text=text,
+        summary=summary,
+        candidate=candidate,
+        alarm_id=alarm_id,
+        lock_ids=lock_ids,
+        entry_ids=entry_ids,
+        motion_ids=motion_ids,
+        person_ids=person_ids,
+        sensor_ids=sensor_ids,
+        battery_sensor_ids=battery_sensor_ids,
+        camera_id=camera_id,
+        presence=presence,
+        has_night=has_night,
+    )
 
 
 def _build_entry_rule(
@@ -344,7 +417,108 @@ def _build_entry_rule(
         severity="high" if "away" in template_id else "medium",
         confidence=float(candidate.get("confidence_hint", 0.6)),
         is_sensitive=True,
-        suggested_actions=["close_entry"],
+        suggested_actions=_entry_suggested_actions(entry_ids),
+    )
+
+
+def _entry_suggested_actions(entry_ids: list[str]) -> list[str]:
+    if entry_ids and all(entity_id.startswith("cover.") for entity_id in entry_ids):
+        return ["cover.close_cover", "close_entry"]
+    return ["close_entry"]
+
+
+def _normalization_failure(  # noqa: PLR0911, PLR0913
+    *,
+    text: str,
+    summary: dict[str, Any],
+    candidate: dict[str, Any],
+    alarm_id: str | None,
+    lock_ids: list[str],
+    entry_ids: list[str],
+    motion_ids: list[str],
+    person_ids: list[str],
+    sensor_ids: list[str],
+    battery_sensor_ids: list[str],
+    camera_id: str | None,
+    presence: str,
+    has_night: bool,
+) -> NormalizationResult:
+    if _contains_any(text, ("alarm", "disarmed", "armed")) and not alarm_id:
+        return NormalizationResult(
+            normalized=None,
+            reason_code="missing_required_entities",
+            details={"required": ["alarm_control_panel"], **summary},
+        )
+    if _contains_any(text, ("lock", "unlocked")) and not lock_ids:
+        return NormalizationResult(
+            normalized=None,
+            reason_code="missing_required_entities",
+            details={"required": ["lock"], **summary},
+        )
+    if _contains_any(text, ("open", "window", "door", "entry")) and not entry_ids:
+        return NormalizationResult(
+            normalized=None,
+            reason_code="missing_required_entities",
+            details={"required": ["entry"], **summary},
+        )
+    if _contains_any(text, ("motion", "vmd")) and not motion_ids:
+        return NormalizationResult(
+            normalized=None,
+            reason_code="missing_required_entities",
+            details={"required": ["motion"], **summary},
+        )
+    if _contains_any(text, ("battery", "low", "below")) and not battery_sensor_ids:
+        return NormalizationResult(
+            normalized=None,
+            reason_code="missing_required_entities",
+            details={"required": ["battery_sensor"], **summary},
+        )
+    if (
+        _contains_any(text, ("unavailable", "offline", "unreachable"))
+        and not sensor_ids
+    ):
+        return NormalizationResult(
+            normalized=None,
+            reason_code="missing_required_entities",
+            details={"required": ["sensor"], **summary},
+        )
+    if (
+        _contains_any(text, _CAMERA_TERMS)
+        and camera_id is None
+        and "camera" in text
+        and _contains_any(text, _UNKNOWN_TERMS)
+        and _contains_any(text, _PERSON_TERMS)
+    ):
+        return NormalizationResult(
+            normalized=None,
+            reason_code="missing_required_entities",
+            details={"required": ["camera"], **summary},
+        )
+    if (
+        any(
+            (
+                alarm_id,
+                lock_ids,
+                entry_ids,
+                motion_ids,
+                person_ids,
+                sensor_ids,
+                battery_sensor_ids,
+                camera_id,
+            )
+        )
+        or has_night
+        or presence != "any"
+    ):
+        return NormalizationResult(
+            normalized=None,
+            reason_code="unsupported_pattern",
+            details={"candidate_id": candidate.get("candidate_id"), **summary},
+        )
+    return NormalizationResult(
+        normalized=None,
+        reason_code="no_matching_entity_types",
+        details={"candidate_id": candidate.get("candidate_id"), **summary},
     )
 
 

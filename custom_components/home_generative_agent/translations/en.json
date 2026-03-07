@@ -158,6 +158,8 @@
             "sentinel_discovery_interval_seconds": "Discovery interval (seconds)",
             "sentinel_discovery_max_records": "Max discovery records to retain",
             "explain_enabled": "Enable LLM explanations for sentinel findings",
+            "sentinel_require_pin_for_level_increase": "Require PIN for autonomy level increases",
+            "critical_action_pin": "Sentinel level-increase PIN (optional)",
             "notify_service": "Sentinel Notify Service (optional)"
           }
         }

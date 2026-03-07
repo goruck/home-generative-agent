@@ -13,10 +13,13 @@ from homeassistant.util import dt as dt_util
 
 from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_AUTONOMY_LEVEL,
+    CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH,
+    CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT,
     CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
     CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
     RECOMMENDED_SENTINEL_AUTONOMY_LEVEL,
 )
+from custom_components.home_generative_agent.core.utils import hash_pin
 from custom_components.home_generative_agent.sentinel import engine as engine_module
 from custom_components.home_generative_agent.sentinel.engine import (
     _AUTONOMY_OVERRIDES,
@@ -159,15 +162,32 @@ def test_set_autonomy_level_increase_blocked_without_pin() -> None:
 
 def test_set_autonomy_level_increase_allowed_with_pin() -> None:
     """Level increase is allowed when require_pin is True and a PIN is provided."""
+    pin_hash, pin_salt = hash_pin("1234")
     engine = _make_engine(
         options={
             CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: True,
             CONF_SENTINEL_AUTONOMY_LEVEL: 0,
+            CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH: pin_hash,
+            CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT: pin_salt,
         }
     )
-    # Should not raise; actual PIN validation is a TODO stub.
     engine.set_autonomy_level("test-entry-1", 2, pin="1234")
     assert engine.get_autonomy_level("test-entry-1") == 2
+
+
+def test_set_autonomy_level_increase_rejects_wrong_pin() -> None:
+    """Wrong PIN blocks the autonomy level increase."""
+    pin_hash, pin_salt = hash_pin("1234")
+    engine = _make_engine(
+        options={
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: True,
+            CONF_SENTINEL_AUTONOMY_LEVEL: 0,
+            CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH: pin_hash,
+            CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT: pin_salt,
+        }
+    )
+    with pytest.raises(HomeAssistantError, match="Invalid PIN"):
+        engine.set_autonomy_level("test-entry-1", 2, pin="9999")
 
 
 def test_set_autonomy_level_increase_allowed_when_pin_not_required() -> None:

@@ -60,6 +60,7 @@ class SentinelDiscoveryEngine:
         self._proposal_store = proposal_store
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
+        self._run_lock = asyncio.Lock()
 
     def start(self) -> None:
         """Start the discovery loop."""
@@ -84,11 +85,23 @@ class SentinelDiscoveryEngine:
         )
         LOGGER.info("Sentinel discovery loop started (interval=%ss).", interval)
         while not self._stop_event.is_set():
-            await self._run_once()
+            await self._run_once_guarded()
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=interval)
             except TimeoutError:
                 continue
+
+    async def async_run_now(self) -> bool:
+        """Run one discovery cycle immediately if idle."""
+        if self._run_lock.locked():
+            LOGGER.debug("Discovery run already in progress; skipping manual trigger.")
+            return False
+        await self._run_once_guarded()
+        return True
+
+    async def _run_once_guarded(self) -> None:
+        async with self._run_lock:
+            await self._run_once()
 
     async def _run_once(self) -> None:  # noqa: PLR0911
         if self._model is None:

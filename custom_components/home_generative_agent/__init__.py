@@ -230,7 +230,7 @@ from .sentinel.discovery_store import DiscoveryStore
 from .sentinel.engine import SentinelEngine
 from .sentinel.notifier import SentinelNotifier
 from .sentinel.proposal_store import ProposalStore
-from .sentinel.proposal_templates import normalize_candidate
+from .sentinel.proposal_templates import explain_normalize_candidate
 from .sentinel.rule_registry import RuleRegistry
 from .sentinel.suppression import SuppressionManager
 from .sentinel.triage import SentinelTriageService
@@ -256,6 +256,7 @@ PLATFORMS = (Platform.CONVERSATION, Platform.STT, "image", "sensor")
 SERVICE_ENROLL_PERSON = "enroll_person"
 SERVICE_GET_AUDIT_RECORDS = "get_audit_records"
 SERVICE_GET_DISCOVERY_RECORDS = "get_discovery_records"
+SERVICE_TRIGGER_SENTINEL_DISCOVERY = "trigger_sentinel_discovery"
 SERVICE_PROMOTE_DISCOVERY_CANDIDATE = "promote_discovery_candidate"
 SERVICE_GET_PROPOSAL_DRAFTS = "get_proposal_drafts"
 SERVICE_APPROVE_RULE_PROPOSAL = "approve_rule_proposal"
@@ -283,6 +284,8 @@ GET_DISCOVERY_SCHEMA = vol.Schema(
         vol.Optional("limit", default=20): vol.Coerce(int),
     }
 )
+
+TRIGGER_DISCOVERY_SCHEMA = vol.Schema({})
 
 PROMOTE_DISCOVERY_SCHEMA = vol.Schema(
     {
@@ -324,6 +327,328 @@ SET_AUTONOMY_LEVEL_SCHEMA = vol.Schema(
 )
 
 Embedding = Sequence[float]
+
+
+def _rule_entity_ids(params: dict[str, Any]) -> list[str]:
+    entity_ids: list[str] = []
+    for key, value in params.items():
+        if key.endswith("_entity_id") and isinstance(value, str) and value:
+            entity_ids.append(value)
+        elif key.endswith("_entity_ids") and isinstance(value, list):
+            entity_ids.extend(item for item in value if isinstance(item, str) and item)
+    return sorted(set(entity_ids))
+
+
+def _candidate_entity_ids(candidate: dict[str, Any]) -> list[str]:
+    explain = explain_normalize_candidate(candidate)
+    normalized = explain.normalized
+    if normalized is None:
+        return []
+    return _rule_entity_ids(normalized.params)
+
+
+def _covered_rule_for_candidate(
+    entry: HGAConfigEntry,
+    candidate: dict[str, Any],
+) -> tuple[str, list[str]] | None:
+    rule_registry = entry.runtime_data.rule_registry
+    if rule_registry is None:
+        return None
+    candidate_key = candidate_semantic_key(candidate)
+    if not candidate_key:
+        return None
+    candidate_entities = _candidate_entity_ids(candidate)
+    for rule in rule_registry.list_rules():
+        if rule_semantic_key(rule) != candidate_key:
+            continue
+        rule_id = str(rule.get("rule_id", ""))
+        if rule_id:
+            overlapping_entities = sorted(
+                set(candidate_entities).intersection(
+                    _rule_entity_ids(rule.get("params") or {})
+                )
+            )
+            return rule_id, overlapping_entities
+    return None
+
+
+def _covered_specific_rule_for_any_camera_normalized(
+    entry: HGAConfigEntry,
+    template_id: str,
+    params: dict[str, Any],
+) -> tuple[str, list[str]] | None:
+    rule_registry = entry.runtime_data.rule_registry
+    if rule_registry is None:
+        return None
+    if params.get("camera_selector") != "any":
+        return None
+    if template_id not in {
+        "unknown_person_camera_no_home",
+        "unknown_person_camera_when_home",
+    }:
+        return None
+    for rule in rule_registry.list_rules():
+        if str(rule.get("template_id", "")) != template_id:
+            continue
+        rule_params = rule.get("params") or {}
+        if not isinstance(rule_params, dict):
+            continue
+        camera_entity_id = str(rule_params.get("camera_entity_id", ""))
+        if not camera_entity_id:
+            continue
+        rule_id = str(rule.get("rule_id", ""))
+        if rule_id:
+            return rule_id, [camera_entity_id]
+    return None
+
+
+async def _trigger_sentinel_discovery(entry: HGAConfigEntry) -> dict[str, Any]:
+    discovery_engine = entry.runtime_data.discovery_engine
+    if discovery_engine is None:
+        return {"status": "unavailable"}
+    started = await discovery_engine.async_run_now()
+    return {"status": "ok" if started else "busy"}
+
+
+async def _promote_discovery_candidate(  # noqa: PLR0911
+    hass: HomeAssistant,
+    entry: HGAConfigEntry,
+    *,
+    candidate_id: str,
+    notes: str = "",
+) -> dict[str, Any]:
+    discovery_store = entry.runtime_data.discovery_store
+    proposal_store = entry.runtime_data.proposal_store
+    rule_registry = entry.runtime_data.rule_registry
+    if discovery_store is None or proposal_store is None:
+        return {"status": "unavailable"}
+
+    candidate = discovery_store.find_candidate(candidate_id)
+    if candidate is None:
+        return {"status": "not_found"}
+
+    covered = _covered_rule_for_candidate(entry, candidate)
+    if covered is not None:
+        covered_rule_id, overlapping_entities = covered
+        return {
+            "status": "already_active",
+            "candidate_id": candidate_id,
+            "rule_id": covered_rule_id,
+            "overlapping_entity_ids": overlapping_entities,
+        }
+
+    normalization = explain_normalize_candidate(candidate)
+    normalized = normalization.normalized
+    if normalized is not None:
+        covered_specific = _covered_specific_rule_for_any_camera_normalized(
+            entry,
+            normalized.template_id,
+            normalized.params,
+        )
+        if covered_specific is not None:
+            covered_specific_rule_id, overlapping_entities = covered_specific
+            return {
+                "status": "already_active",
+                "candidate_id": candidate_id,
+                "rule_id": covered_specific_rule_id,
+                "overlapping_entity_ids": overlapping_entities,
+            }
+        existing_draft = proposal_store.find_by_rule_id(normalized.rule_id)
+        if existing_draft is not None:
+            return {
+                "status": "exists",
+                "candidate_id": candidate_id,
+                "rule_id": normalized.rule_id,
+            }
+        if rule_registry is not None and rule_registry.find_rule(normalized.rule_id):
+            overlapping_entities = _rule_entity_ids(normalized.params)
+            return {
+                "status": "already_active",
+                "candidate_id": candidate_id,
+                "rule_id": normalized.rule_id,
+                "overlapping_entity_ids": overlapping_entities,
+            }
+
+    draft = {
+        "candidate_id": candidate_id,
+        "candidate": candidate,
+        "notes": notes,
+        "status": "draft",
+        "created_at": dt_util.utcnow().isoformat(),
+    }
+    if normalized is not None:
+        draft["rule_id"] = normalized.rule_id
+        draft["template_id"] = normalized.template_id
+        draft["severity"] = normalized.severity
+        draft["confidence"] = normalized.confidence
+    await proposal_store.async_append(draft)
+    notify_service = entry.runtime_data.options.get(CONF_NOTIFY_SERVICE)
+    if notify_service and isinstance(notify_service, str):
+        domain, _, service = notify_service.partition(".")
+        if not service:
+            service = notify_service
+            domain = "notify"
+        if normalized is None:
+            message = f"New proposal draft created for candidate {candidate_id}."
+            data: dict[str, Any] = {"tag": f"hga_proposal_{candidate_id[:16]}"}
+        else:
+            confidence_pct = round(normalized.confidence * 100)
+            message = (
+                f"New {normalized.severity.upper()}-severity proposal: "
+                f"{normalized.template_id} ({confidence_pct}% confident) - "
+                "call approve_rule_proposal to activate."
+            )
+            data = {
+                "tag": f"hga_proposal_{candidate_id[:16]}",
+                "candidate_id": candidate_id,
+                "template_id": normalized.template_id,
+                "severity": normalized.severity,
+                "confidence": normalized.confidence,
+                "service_hint": "approve_rule_proposal",
+            }
+        await hass.services.async_call(
+            domain,
+            service,
+            {
+                "title": "HGA proposal draft",
+                "message": message,
+                "data": data,
+            },
+            blocking=False,
+        )
+    return {"status": "ok", "candidate_id": candidate_id}
+
+
+async def _approve_rule_proposal(  # noqa: PLR0911
+    entry: HGAConfigEntry,
+    *,
+    candidate_id: str,
+    notes: str = "",
+) -> dict[str, Any]:
+    proposal_store = entry.runtime_data.proposal_store
+    rule_registry = entry.runtime_data.rule_registry
+    if proposal_store is None or rule_registry is None:
+        return {"status": "unavailable"}
+    record = proposal_store.find_by_candidate_id(candidate_id)
+    candidate = record.get("candidate") if record else None
+    if not candidate:
+        return {"status": "not_found", "candidate_id": candidate_id}
+
+    covered = _covered_rule_for_candidate(entry, candidate)
+    if covered is not None:
+        covered_rule_id, overlapping_entities = covered
+        await proposal_store.async_update_status(
+            candidate_id,
+            "covered_by_existing_rule",
+            notes,
+            extra={
+                "covered_rule_id": covered_rule_id,
+                "overlapping_entity_ids": overlapping_entities,
+            },
+        )
+        return {
+            "status": "covered_by_existing_rule",
+            "candidate_id": candidate_id,
+            "rule_id": covered_rule_id,
+            "overlapping_entity_ids": overlapping_entities,
+        }
+
+    normalization = explain_normalize_candidate(candidate)
+    normalized = normalization.normalized
+    if normalized is None:
+        await proposal_store.async_update_status(
+            candidate_id,
+            "unsupported",
+            notes,
+            extra={
+                "normalization_reason": normalization.reason_code,
+                "normalization_details": normalization.details or {},
+            },
+        )
+        return {
+            "status": "unsupported",
+            "candidate_id": candidate_id,
+            "reason_code": normalization.reason_code,
+            "details": normalization.details or {},
+        }
+
+    covered_specific = _covered_specific_rule_for_any_camera_normalized(
+        entry,
+        normalized.template_id,
+        normalized.params,
+    )
+    if covered_specific is not None:
+        covered_specific_rule_id, overlapping_entities = covered_specific
+        await proposal_store.async_update_status(
+            candidate_id,
+            "covered_by_existing_rule",
+            notes,
+            extra={
+                "covered_rule_id": covered_specific_rule_id,
+                "overlapping_entity_ids": overlapping_entities,
+            },
+        )
+        return {
+            "status": "covered_by_existing_rule",
+            "candidate_id": candidate_id,
+            "rule_id": covered_specific_rule_id,
+            "overlapping_entity_ids": overlapping_entities,
+        }
+
+    existing_rule = rule_registry.find_rule(normalized.rule_id)
+    if existing_rule is not None:
+        overlapping_entities = sorted(
+            set(_rule_entity_ids(normalized.params)).intersection(
+                _rule_entity_ids(existing_rule.get("params") or {})
+            )
+        )
+        await proposal_store.async_update_status(
+            candidate_id,
+            "covered_by_existing_rule",
+            notes,
+            extra={
+                "covered_rule_id": normalized.rule_id,
+                "overlapping_entity_ids": overlapping_entities,
+            },
+        )
+        return {
+            "status": "covered_by_existing_rule",
+            "candidate_id": candidate_id,
+            "rule_id": normalized.rule_id,
+            "overlapping_entity_ids": overlapping_entities,
+        }
+
+    rule_spec = normalized.as_dict()
+    rule_spec["created_at"] = dt_util.utcnow().isoformat()
+    rule_spec["source_candidate_id"] = candidate_id
+    added = await rule_registry.async_add_rule(rule_spec)
+    await proposal_store.async_update_status(
+        candidate_id,
+        "approved",
+        notes,
+        extra={"rule_id": rule_spec["rule_id"], "rule_spec": rule_spec},
+    )
+    if added:
+        sentinel = entry.runtime_data.sentinel
+        if sentinel is not None:
+            await sentinel.async_run_now()
+        return {
+            "status": "ok",
+            "candidate_id": candidate_id,
+            "rule_id": rule_spec["rule_id"],
+        }
+
+    await proposal_store.async_update_status(
+        candidate_id,
+        "covered_by_existing_rule",
+        notes,
+        extra={"covered_rule_id": rule_spec["rule_id"]},
+    )
+    return {
+        "status": "covered_by_existing_rule",
+        "candidate_id": candidate_id,
+        "rule_id": rule_spec["rule_id"],
+    }
 
 
 def _default_feature_payload(feature_type: str) -> dict[str, Any]:
@@ -1464,25 +1789,62 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         supports_response=_SERVICE_RESPONSE_ONLY,
     )
 
-    def _covered_rule_id_for_candidate(candidate: dict[str, Any]) -> str | None:
+    async def _handle_trigger_discovery(_call: ServiceCall) -> dict[str, Any]:
+        return await _trigger_sentinel_discovery(entry)
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_TRIGGER_SENTINEL_DISCOVERY,
+        _handle_trigger_discovery,
+        schema=TRIGGER_DISCOVERY_SCHEMA,
+        supports_response=_SERVICE_RESPONSE_ONLY,
+    )
+
+    def _rule_entity_ids(params: dict[str, Any]) -> list[str]:
+        entity_ids: list[str] = []
+        for key, value in params.items():
+            if key.endswith("_entity_id") and isinstance(value, str) and value:
+                entity_ids.append(value)
+            elif key.endswith("_entity_ids") and isinstance(value, list):
+                entity_ids.extend(
+                    item for item in value if isinstance(item, str) and item
+                )
+        return sorted(set(entity_ids))
+
+    def _candidate_entity_ids(candidate: dict[str, Any]) -> list[str]:
+        explain = explain_normalize_candidate(candidate)
+        normalized = explain.normalized
+        if normalized is None:
+            return []
+        return _rule_entity_ids(normalized.params)
+
+    def _covered_rule_for_candidate(
+        candidate: dict[str, Any],
+    ) -> tuple[str, list[str]] | None:
         rule_registry = entry.runtime_data.rule_registry
         if rule_registry is None:
             return None
         candidate_key = candidate_semantic_key(candidate)
         if not candidate_key:
             return None
+        candidate_entities = _candidate_entity_ids(candidate)
         for rule in rule_registry.list_rules():
             if rule_semantic_key(rule) != candidate_key:
                 continue
             rule_id = str(rule.get("rule_id", ""))
             if rule_id:
-                return rule_id
+                overlapping_entities = sorted(
+                    set(candidate_entities).intersection(
+                        _rule_entity_ids(rule.get("params") or {})
+                    )
+                )
+                return rule_id, overlapping_entities
         return None
 
     def _covered_specific_rule_for_any_camera_normalized(
         template_id: str,
         params: dict[str, Any],
-    ) -> str | None:
+    ) -> tuple[str, list[str]] | None:
         rule_registry = entry.runtime_data.rule_registry
         if rule_registry is None:
             return None
@@ -1504,113 +1866,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 continue
             rule_id = str(rule.get("rule_id", ""))
             if rule_id:
-                return rule_id
+                return rule_id, [camera_entity_id]
         return None
 
-    async def _handle_promote_discovery(  # noqa: PLR0911
+    async def _handle_promote_discovery(
         call: ServiceCall,
     ) -> dict[str, Any]:
         candidate_id = str(call.data.get("candidate_id"))
         notes = str(call.data.get("notes", "") or "")
-        discovery_store = entry.runtime_data.discovery_store
-        proposal_store = entry.runtime_data.proposal_store
-        rule_registry = entry.runtime_data.rule_registry
-        if discovery_store is None or proposal_store is None:
-            return {"status": "unavailable"}
-
-        candidate = discovery_store.find_candidate(candidate_id)
-        if candidate is None:
-            return {"status": "not_found"}
-
-        covered_rule_id = _covered_rule_id_for_candidate(candidate)
-        if covered_rule_id is not None:
-            LOGGER.info(
-                "Skipping promote for %s: candidate already covered by %s.",
-                candidate_id,
-                covered_rule_id,
-            )
-            return {
-                "status": "already_active",
-                "candidate_id": candidate_id,
-                "rule_id": covered_rule_id,
-            }
-
-        normalized = normalize_candidate(candidate)
-        if normalized is not None:
-            covered_specific_rule_id = _covered_specific_rule_for_any_camera_normalized(
-                normalized.template_id,
-                normalized.params,
-            )
-            if covered_specific_rule_id is not None:
-                LOGGER.info(
-                    (
-                        "Skipping promote for %s: any-camera proposal covered by "
-                        "specific rule %s."
-                    ),
-                    candidate_id,
-                    covered_specific_rule_id,
-                )
-                return {
-                    "status": "already_active",
-                    "candidate_id": candidate_id,
-                    "rule_id": covered_specific_rule_id,
-                }
-            existing_draft = proposal_store.find_by_rule_id(normalized.rule_id)
-            if existing_draft is not None:
-                LOGGER.info(
-                    "Skipping promote for %s: draft already exists for rule %s.",
-                    candidate_id,
-                    normalized.rule_id,
-                )
-                return {
-                    "status": "exists",
-                    "candidate_id": candidate_id,
-                    "rule_id": normalized.rule_id,
-                }
-            if rule_registry is not None and rule_registry.find_rule(
-                normalized.rule_id
-            ):
-                LOGGER.info(
-                    "Skipping promote for %s: rule %s already active.",
-                    candidate_id,
-                    normalized.rule_id,
-                )
-                return {
-                    "status": "already_active",
-                    "candidate_id": candidate_id,
-                    "rule_id": normalized.rule_id,
-                }
-
-        draft = {
-            "candidate_id": candidate_id,
-            "candidate": candidate,
-            "notes": notes,
-            "status": "draft",
-            "created_at": dt_util.utcnow().isoformat(),
-        }
-        if normalized is not None:
-            draft["rule_id"] = normalized.rule_id
-            draft["template_id"] = normalized.template_id
-        await proposal_store.async_append(draft)
-        notify_service = entry.runtime_data.options.get(CONF_NOTIFY_SERVICE)
-        if notify_service and isinstance(notify_service, str):
-            domain, _, service = notify_service.partition(".")
-            if not service:
-                service = notify_service
-                domain = "notify"
-            await hass.services.async_call(
-                domain,
-                service,
-                {
-                    "title": "HGA proposal draft",
-                    "message": (
-                        f"New proposal draft created for candidate {candidate_id}."
-                    ),
-                    "data": {"tag": f"hga_proposal_{candidate_id[:16]}"},
-                },
-                blocking=False,
-            )
-        return {"status": "ok", "candidate_id": candidate_id}
+        return await _promote_discovery_candidate(
+            hass,
+            entry,
+            candidate_id=candidate_id,
+            notes=notes,
+        )
 
     hass.services.async_register(
         DOMAIN,
@@ -1654,126 +1923,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         supports_response=_SERVICE_RESPONSE_ONLY,
     )
 
-    async def _handle_approve_proposal(  # noqa: PLR0911
+    async def _handle_approve_proposal(
         call: ServiceCall,
     ) -> dict[str, Any]:
         candidate_id = str(call.data.get("candidate_id"))
         notes = str(call.data.get("notes", "") or "")
-        proposal_store = entry.runtime_data.proposal_store
-        rule_registry = entry.runtime_data.rule_registry
-        if proposal_store is None or rule_registry is None:
-            LOGGER.info(
-                "Proposal approval unavailable for candidate %s (stores not ready).",
-                candidate_id,
-            )
-            return {"status": "unavailable"}
-        record = proposal_store.find_by_candidate_id(candidate_id)
-        candidate = record.get("candidate") if record else None
-        if not candidate:
-            LOGGER.info(
-                "Proposal approval failed: candidate %s not found.",
-                candidate_id,
-            )
-            return {"status": "not_found", "candidate_id": candidate_id}
-
-        covered_rule_id = _covered_rule_id_for_candidate(candidate)
-        if covered_rule_id is not None:
-            await proposal_store.async_update_status(
-                candidate_id,
-                "covered_by_existing_rule",
-                notes,
-                extra={"covered_rule_id": covered_rule_id},
-            )
-            LOGGER.info(
-                "Proposal %s marked covered_by_existing_rule (%s).",
-                candidate_id,
-                covered_rule_id,
-            )
-            return {
-                "status": "covered_by_existing_rule",
-                "candidate_id": candidate_id,
-                "rule_id": covered_rule_id,
-            }
-
-        normalized = normalize_candidate(candidate)
-        if normalized is None:
-            await proposal_store.async_update_status(
-                candidate_id,
-                "unsupported",
-                notes,
-            )
-            LOGGER.info(
-                (
-                    "Proposal %s marked unsupported "
-                    "(candidate could not map to a template)."
-                ),
-                candidate_id,
-            )
-            return {"status": "unsupported", "candidate_id": candidate_id}
-        covered_specific_rule_id = _covered_specific_rule_for_any_camera_normalized(
-            normalized.template_id,
-            normalized.params,
+        return await _approve_rule_proposal(
+            entry,
+            candidate_id=candidate_id,
+            notes=notes,
         )
-        if covered_specific_rule_id is not None:
-            await proposal_store.async_update_status(
-                candidate_id,
-                "covered_by_existing_rule",
-                notes,
-                extra={"covered_rule_id": covered_specific_rule_id},
-            )
-            LOGGER.info(
-                (
-                    "Proposal %s marked covered_by_existing_rule (%s): any-camera "
-                    "proposal superseded by camera-specific rule."
-                ),
-                candidate_id,
-                covered_specific_rule_id,
-            )
-            return {
-                "status": "covered_by_existing_rule",
-                "candidate_id": candidate_id,
-                "rule_id": covered_specific_rule_id,
-            }
-
-        rule_spec = normalized.as_dict()
-        rule_spec["created_at"] = dt_util.utcnow().isoformat()
-        rule_spec["source_candidate_id"] = candidate_id
-        added = await rule_registry.async_add_rule(rule_spec)
-        await proposal_store.async_update_status(
-            candidate_id,
-            "approved",
-            notes,
-            extra={"rule_id": rule_spec["rule_id"], "rule_spec": rule_spec},
-        )
-        if added:
-            LOGGER.info(
-                "Approved proposal %s and registered dynamic rule %s (%s).",
-                candidate_id,
-                rule_spec["rule_id"],
-                rule_spec["template_id"],
-            )
-        else:
-            await proposal_store.async_update_status(
-                candidate_id,
-                "covered_by_existing_rule",
-                notes,
-                extra={"covered_rule_id": rule_spec["rule_id"]},
-            )
-            LOGGER.info(
-                "Approved proposal %s but dynamic rule %s already existed.",
-                candidate_id,
-                rule_spec["rule_id"],
-            )
-            return {
-                "status": "covered_by_existing_rule",
-                "candidate_id": candidate_id,
-                "rule_id": rule_spec["rule_id"],
-            }
-        return {
-            "status": "ok",
-            "candidate_id": candidate_id,
-            "rule_id": rule_spec["rule_id"],
-        }
 
     hass.services.async_register(
         DOMAIN,

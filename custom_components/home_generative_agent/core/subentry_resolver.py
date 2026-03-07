@@ -61,7 +61,10 @@ from ..const import (  # noqa: TID252
     CONF_SENTINEL_ENABLED,
     CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES,
     CONF_SENTINEL_INTERVAL_SECONDS,
+    CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH,
+    CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT,
     CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
+    CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
     CONF_SUMMARIZATION_MODEL_PROVIDER,
     CONF_VLM_PROVIDER,
     FEATURE_CATEGORY_MAP,
@@ -99,6 +102,7 @@ from ..const import (  # noqa: TID252
     RECOMMENDED_SENTINEL_ENTITY_COOLDOWN_MINUTES,
     RECOMMENDED_SENTINEL_INTERVAL_SECONDS,
     RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
+    RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
     SUBENTRY_TYPE_DATABASE,
     SUBENTRY_TYPE_FEATURE,
     SUBENTRY_TYPE_MODEL_PROVIDER,
@@ -207,6 +211,9 @@ def _apply_sentinel_options(
         ),
         CONF_SENTINEL_DISCOVERY_MAX_RECORDS: RECOMMENDED_SENTINEL_DISCOVERY_MAX_RECORDS,
         CONF_EXPLAIN_ENABLED: RECOMMENDED_EXPLAIN_ENABLED,
+        CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: (
+            RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE
+        ),
     }
 
     if sentinel_subentry is None:
@@ -217,6 +224,15 @@ def _apply_sentinel_options(
     data = dict(sentinel_subentry.data)
     for key, value in sentinel_defaults.items():
         options[key] = data.get(key, value)
+
+    for key in (
+        CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH,
+        CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT,
+    ):
+        if data.get(key):
+            options[key] = data[key]
+        else:
+            options.pop(key, None)
 
     # Sentinel notify service takes precedence when set; otherwise keep global value.
     sentinel_notify = str(data.get(CONF_NOTIFY_SERVICE, "") or "").strip()
