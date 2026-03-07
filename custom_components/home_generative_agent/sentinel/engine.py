@@ -21,6 +21,8 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_COOLDOWN_MINUTES,
     CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES,
     CONF_SENTINEL_INTERVAL_SECONDS,
+    CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH,
+    CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT,
     CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
     CONF_SENTINEL_PRESENCE_GRACE_MINUTES,
     CONF_SENTINEL_QUIET_HOURS_END,
@@ -36,6 +38,7 @@ from custom_components.home_generative_agent.const import (
     RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
     RECOMMENDED_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
 )
+from custom_components.home_generative_agent.core.utils import verify_pin
 from custom_components.home_generative_agent.snapshot.builder import (
     async_build_full_state_snapshot,
 )
@@ -194,7 +197,17 @@ class SentinelEngine:
             )
             raise HomeAssistantError(msg)
         if require_pin and level > current_level:
-            pass  # Stub: actual PIN hash validation is left for a follow-up PR.
+            pin_hash = str(self._options.get(CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH, ""))
+            pin_salt = str(self._options.get(CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT, ""))
+            if not pin_hash or not pin_salt:
+                msg = (
+                    "Sentinel level-increase PIN validation is enabled, but no PIN "
+                    "hash is configured."
+                )
+                raise HomeAssistantError(msg)
+            if not verify_pin(str(pin), hashed=pin_hash, salt=pin_salt):
+                msg = "Invalid PIN for autonomy level increase."
+                raise HomeAssistantError(msg)
         ttl_minutes = _coerce_int(
             self._options.get(CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES),
             default=RECOMMENDED_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
@@ -329,6 +342,10 @@ class SentinelEngine:
                 )
             except TimeoutError:
                 continue
+
+    async def async_run_now(self) -> bool:
+        """Run one sentinel evaluation cycle immediately if idle."""
+        return await self._trigger_scheduler.run_now(self._run_once)
 
     async def _run_once(self) -> None:
         try:

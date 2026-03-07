@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from custom_components.home_generative_agent.sentinel.proposal_templates import (
+    explain_normalize_candidate,
     normalize_candidate,
 )
 
@@ -25,6 +26,7 @@ def test_normalize_candidate_lock_only_security() -> None:
     assert normalized is not None
     assert normalized.template_id == "unlocked_lock_when_home"
     assert normalized.rule_id == "unlocked_lock_when_home_lock_garage_door_lock"
+    assert "lock.lock" in normalized.suggested_actions
 
 
 def test_normalize_candidate_prefers_window_template_over_lock_rule() -> None:
@@ -65,6 +67,75 @@ def test_normalize_candidate_window_night_home_template() -> None:
     assert normalized is not None
     assert normalized.template_id == "open_entry_at_night_when_home"
     assert normalized.rule_id == "open_entry_at_night_when_home_window"
+
+
+def test_normalize_candidate_cover_entry_adds_service_action() -> None:
+    candidate = {
+        "candidate_id": "cover_night_home",
+        "title": "Patio cover open at night while home",
+        "summary": "Detect patio cover left open during nighttime while someone is home.",
+        "pattern": "cover open at night while home",
+        "suggested_type": "security_state",
+        "confidence_hint": 0.7,
+        "evidence_paths": [
+            "entities[entity_id=cover.patio_door].state",
+            "derived.is_night",
+            "derived.anyone_home",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "open_entry_at_night_when_home"
+    assert "cover.close_cover" in normalized.suggested_actions
+
+
+def test_normalize_candidate_advisory_only_template_has_no_service_action() -> None:
+    candidate = {
+        "candidate_id": "battery_room_sensors_v1",
+        "title": "Low battery on room sensors",
+        "summary": "Room sensors show low battery levels.",
+        "pattern": "battery below 40%",
+        "suggested_type": "maintenance",
+        "confidence_hint": 0.62,
+        "evidence_paths": [
+            "entities[entity_id=sensor.elias_t_h_battery].state",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert not any("." in action for action in normalized.suggested_actions)
+
+
+def test_explain_normalize_candidate_returns_missing_required_entities() -> None:
+    result = explain_normalize_candidate(
+        {
+            "candidate_id": "missing_lock",
+            "title": "Front lock unlocked while home",
+            "summary": "Detect unlocked lock with someone present.",
+            "pattern": "lock unlocked while home",
+            "suggested_type": "security",
+            "confidence_hint": 0.8,
+            "evidence_paths": ["derived.anyone_home"],
+        }
+    )
+    assert result.normalized is None
+    assert result.reason_code == "missing_required_entities"
+
+
+def test_explain_normalize_candidate_returns_no_matching_entity_types() -> None:
+    result = explain_normalize_candidate(
+        {
+            "candidate_id": "no_match",
+            "title": "General weirdness",
+            "summary": "Something odd happened.",
+            "pattern": "odd pattern",
+            "suggested_type": "misc",
+            "confidence_hint": 0.3,
+            "evidence_paths": [],
+        }
+    )
+    assert result.normalized is None
+    assert result.reason_code == "no_matching_entity_types"
 
 
 def test_normalize_candidate_window_night_away_template() -> None:

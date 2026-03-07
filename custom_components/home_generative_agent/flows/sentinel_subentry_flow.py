@@ -26,6 +26,7 @@ from homeassistant.helpers.selector import (
 )
 
 from ..const import (  # noqa: TID252
+    CONF_CRITICAL_ACTION_PIN,
     CONF_EXPLAIN_ENABLED,
     CONF_NOTIFY_SERVICE,
     CONF_SENTINEL_COOLDOWN_MINUTES,
@@ -35,7 +36,12 @@ from ..const import (  # noqa: TID252
     CONF_SENTINEL_ENABLED,
     CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES,
     CONF_SENTINEL_INTERVAL_SECONDS,
+    CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH,
+    CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT,
     CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
+    CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
+    CRITICAL_PIN_MAX_LEN,
+    CRITICAL_PIN_MIN_LEN,
     RECOMMENDED_EXPLAIN_ENABLED,
     RECOMMENDED_SENTINEL_COOLDOWN_MINUTES,
     RECOMMENDED_SENTINEL_DISCOVERY_ENABLED,
@@ -45,9 +51,10 @@ from ..const import (  # noqa: TID252
     RECOMMENDED_SENTINEL_ENTITY_COOLDOWN_MINUTES,
     RECOMMENDED_SENTINEL_INTERVAL_SECONDS,
     RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
+    RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
     SUBENTRY_TYPE_SENTINEL,
 )
-from ..core.utils import list_mobile_notify_services  # noqa: TID252
+from ..core.utils import hash_pin, list_mobile_notify_services  # noqa: TID252
 
 
 def _current_subentry(flow: ConfigSubentryFlow) -> ConfigSubentry | None:
@@ -87,6 +94,9 @@ def _default_payload() -> dict[str, Any]:
         ),
         CONF_SENTINEL_DISCOVERY_MAX_RECORDS: RECOMMENDED_SENTINEL_DISCOVERY_MAX_RECORDS,
         CONF_EXPLAIN_ENABLED: RECOMMENDED_EXPLAIN_ENABLED,
+        CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: (
+            RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE
+        ),
     }
 
 
@@ -177,6 +187,22 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                     payload.get(CONF_EXPLAIN_ENABLED, RECOMMENDED_EXPLAIN_ENABLED)
                 ),
             ): BooleanSelector(),
+            vol.Required(
+                CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
+                default=bool(
+                    payload.get(
+                        CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
+                        RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
+                    )
+                ),
+            ): BooleanSelector(),
+            vol.Optional(
+                CONF_CRITICAL_ACTION_PIN,
+                description={
+                    "suggested_value": "",
+                },
+                default="",
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
         }
 
         mobile_opts = list_mobile_notify_services(self.hass)
@@ -217,7 +243,7 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
         """Entry point for Sentinel setup/reconfigure."""
         return await self.async_step_settings(user_input)
 
-    async def async_step_settings(
+    async def async_step_settings(  # noqa: PLR0912
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
         """Create or edit Sentinel configuration."""
@@ -233,11 +259,45 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
             )
 
         data = dict(user_input)
+        errors: dict[str, str] = {}
         notify_service = str(data.get(CONF_NOTIFY_SERVICE, "") or "").strip()
         if notify_service:
             data[CONF_NOTIFY_SERVICE] = notify_service
         else:
             data.pop(CONF_NOTIFY_SERVICE, None)
+
+        raw_pin = str(data.get(CONF_CRITICAL_ACTION_PIN, "") or "").strip()
+        data.pop(CONF_CRITICAL_ACTION_PIN, None)
+        if raw_pin:
+            if (
+                not raw_pin.isdigit()
+                or not CRITICAL_PIN_MIN_LEN <= len(raw_pin) <= CRITICAL_PIN_MAX_LEN
+            ):
+                errors["base"] = "invalid_pin"
+            else:
+                hashed, salt = hash_pin(raw_pin)
+                data[CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH] = hashed
+                data[CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT] = salt
+        elif not data.get(CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE, False):
+            data.pop(CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH, None)
+            data.pop(CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT, None)
+        elif current is not None:
+            existing_data = dict(current.data)
+            if existing_data.get(CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH):
+                data[CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH] = existing_data[
+                    CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH
+                ]
+            if existing_data.get(CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT):
+                data[CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT] = existing_data[
+                    CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT
+                ]
+
+        if errors:
+            return self.async_show_form(
+                step_id="settings",
+                data_schema=self._schema({**payload, **data}),
+                errors=errors,
+            )
 
         if current is None:
             if self.source not in (SOURCE_USER, SOURCE_RECONFIGURE):

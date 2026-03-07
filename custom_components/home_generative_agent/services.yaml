@@ -84,6 +84,10 @@ get_discovery_records:
           step: 1
           mode: box
 
+trigger_sentinel_discovery:
+  name: Trigger sentinel discovery
+  description: Run one Sentinel discovery cycle immediately using the current snapshot.
+
 promote_discovery_candidate:
   name: Promote discovery candidate
   description: Promote a discovery candidate into a proposal draft.

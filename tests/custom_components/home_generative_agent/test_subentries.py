@@ -15,6 +15,7 @@ from custom_components.home_generative_agent.config_flow import (
 )
 from custom_components.home_generative_agent.const import (
     CONF_CHAT_MODEL_PROVIDER,
+    CONF_CRITICAL_ACTION_PIN,
     CONF_DB_NAME,
     CONF_DB_PARAMS,
     CONF_EXPLAIN_ENABLED,
@@ -30,6 +31,9 @@ from custom_components.home_generative_agent.const import (
     CONF_OPENAI_COMPATIBLE_BASE_URL,
     CONF_SENTINEL_ENABLED,
     CONF_SENTINEL_INTERVAL_SECONDS,
+    CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH,
+    CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT,
+    CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
     CONF_SUMMARIZATION_MODEL_PROVIDER,
     CONF_VLM_PROVIDER,
     CONFIG_ENTRY_VERSION,
@@ -53,6 +57,9 @@ from custom_components.home_generative_agent.flows.feature_subentry_flow import 
 )
 from custom_components.home_generative_agent.flows.model_provider_subentry_flow import (
     ModelProviderSubentryFlow,
+)
+from custom_components.home_generative_agent.flows.sentinel_subentry_flow import (
+    SentinelSubentryFlow,
 )
 from custom_components.home_generative_agent.flows.stt_provider_subentry_flow import (
     SttProviderSubentryFlow,
@@ -236,6 +243,58 @@ async def test_stt_provider_flow_uses_separate_key(
     assert result_data is not None
     assert result_data["settings"]["api_key"] == "sk-separate"
     assert result_data["settings"]["openai_provider_subentry_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_sentinel_subentry_flow_hashes_level_increase_pin(
+    hass: HomeAssistant,
+) -> None:
+    """Sentinel flow stores only the hashed level-increase PIN."""
+    entry = DummyEntry()
+    flow = SentinelSubentryFlow()
+    flow.hass = hass
+    flow.async_show_form = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "form",
+        "data_schema": kwargs["data_schema"],
+        "errors": kwargs.get("errors"),
+    }
+    flow.async_create_entry = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "create_entry",
+        "title": kwargs.get("title"),
+        "data": kwargs.get("data"),
+    }
+    flow.async_abort = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "abort",
+        "reason": kwargs.get("reason"),
+    }
+    flow._schedule_reload = lambda: None  # type: ignore[assignment]
+    _patch_entry(flow, entry)
+
+    first = await flow.async_step_user()
+    assert first.get("type") == "form"
+
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            "sentinel_cooldown_minutes": 30,
+            "sentinel_entity_cooldown_minutes": 15,
+            "sentinel_pending_prompt_ttl_minutes": 240,
+            "sentinel_discovery_enabled": False,
+            "sentinel_discovery_interval_seconds": 3600,
+            "sentinel_discovery_max_records": 200,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: True,
+            CONF_CRITICAL_ACTION_PIN: "1234",
+        }
+    )
+    assert result.get("type") == "create_entry"
+    data = result.get("data")
+    assert data is not None
+    assert CONF_CRITICAL_ACTION_PIN not in data
+    assert data[CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE] is True
+    assert data[CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH]
+    assert data[CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT]
 
 
 @pytest.mark.asyncio
@@ -445,6 +504,9 @@ def test_resolve_runtime_options_prefers_sentinel_subentry() -> None:
             CONF_SENTINEL_ENABLED: True,
             CONF_SENTINEL_INTERVAL_SECONDS: sentinel_interval,
             CONF_EXPLAIN_ENABLED: True,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: True,
+            CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH: "hash",
+            CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT: "salt",
         },
     )
     entry.subentries[sentinel.subentry_id] = sentinel
@@ -453,6 +515,9 @@ def test_resolve_runtime_options_prefers_sentinel_subentry() -> None:
     assert options[CONF_SENTINEL_ENABLED] is True
     assert options[CONF_SENTINEL_INTERVAL_SECONDS] == sentinel_interval
     assert options[CONF_EXPLAIN_ENABLED] is True
+    assert options[CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE] is True
+    assert options[CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH] == "hash"
+    assert options[CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT] == "salt"
 
 
 def test_resolve_runtime_options_sentinel_notify_fallback() -> None:

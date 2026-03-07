@@ -249,6 +249,19 @@ class SentinelTriggerScheduler:
 
         return True
 
+    async def run_now(
+        self,
+        run_once: Callable[[], Coroutine[Any, Any, None]],
+    ) -> bool:
+        """Execute *run_once* immediately under the single-flight lock."""
+        if self._lock.locked():
+            LOGGER.debug("Single-flight lock held; skipping immediate run request.")
+            return False
+        async with self._lock:
+            LOGGER.debug("Executing immediate _run_once request.")
+            await run_once()
+        return True
+
     async def wait_for_trigger(self) -> None:
         """
         Wait until a trigger is enqueued, then clear the signal.
