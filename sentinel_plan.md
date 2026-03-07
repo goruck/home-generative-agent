@@ -714,7 +714,7 @@ Historical note: the issue-status details below come from project history, not f
 
 The original Issue #15 (lambda rule review/approval UI) was implemented and subsequently removed (PR #285) because lambda rules were detection-only, invisible from the review UI, and provided no path to full autonomy. Milestone 5 addresses the underlying need properly: making the discovery pipeline fast, transparent, and capable of producing rules that can trigger autonomous action.
 
-**Issue #16 — Service-mapped suggested actions** *(Open — GitHub TBD)*
+**Issue #16 — Service-mapped suggested actions** *(Open — [GitHub #288](https://github.com/goruck/home-generative-agent/issues/288))*
 
 - Plan coverage: Section 4 (auto-execute guardrails), Section 3 (Level 2/3 autonomy)
 - Scope: Update `normalize_candidate()` in `proposal_templates.py` to produce HA service calls (e.g. `lock.lock`) as `suggested_actions` for templates where a safe, deterministic action exists. `is_sensitive=True` templates remain blocked from auto-execute by execution guardrail #3 regardless of suggested actions. Templates with no safe automated action continue to produce advisory text only.
@@ -724,7 +724,7 @@ The original Issue #15 (lambda rule review/approval UI) was implemented and subs
 - Dependencies: none
 - **This is the single highest-value change for full autonomy — without it, no discovered rule can ever trigger auto-execute.**
 
-**Issue #17 — On-demand discovery trigger** *(Open — GitHub TBD)*
+**Issue #17 — On-demand discovery trigger** *(Open — [GitHub #289](https://github.com/goruck/home-generative-agent/issues/289))*
 
 - Plan coverage: Section 16 (discovery latency)
 - Scope: Add `trigger_sentinel_discovery` HA service that runs the LLM discovery cycle against the current snapshot immediately, bypassing the periodic timer. Deduplication and semantic key filtering still apply. Periodic timer is unaffected.
@@ -733,7 +733,7 @@ The original Issue #15 (lambda rule review/approval UI) was implemented and subs
 - Size: S
 - Dependencies: none
 
-**Issue #18 — Immediate rule activation on approval** *(Open — GitHub TBD)*
+**Issue #18 — Immediate rule activation on approval** *(Open — [GitHub #290](https://github.com/goruck/home-generative-agent/issues/290))*
 
 - Plan coverage: Section 16 (approval latency)
 - Scope: After `approve_rule_proposal` successfully adds a rule to `RuleRegistry`, trigger a single `_run_once()` against the current snapshot. Rule becomes live in seconds rather than waiting up to one hour for the next scheduled cycle.
@@ -742,7 +742,7 @@ The original Issue #15 (lambda rule review/approval UI) was implemented and subs
 - Size: S
 - Dependencies: none
 
-**Issue #19 — Explain normalization failures** *(Open — GitHub TBD)*
+**Issue #19 — Explain normalization failures** *(Open — [GitHub #291](https://github.com/goruck/home-generative-agent/issues/291))*
 
 - Plan coverage: Section 16 (transparency)
 - Scope: When `normalize_candidate()` returns `None`, return a structured reason to the caller (e.g. `no_matching_entity_types`, `unsupported_pattern`, `missing_required_entities`). Surface this reason in the `promote_discovery_candidate` and `approve_rule_proposal` service responses. When `promote` or `approve` returns `already_active`, include the covering rule ID and which entity IDs overlapped.
@@ -751,7 +751,7 @@ The original Issue #15 (lambda rule review/approval UI) was implemented and subs
 - Size: S
 - Dependencies: none
 
-**Issue #20 — Richer proposal draft notifications** *(Open — GitHub TBD)*
+**Issue #20 — Richer proposal draft notifications** *(Open — [GitHub #292](https://github.com/goruck/home-generative-agent/issues/292))*
 
 - Plan coverage: Section 9 (notification UX)
 - Scope: Include `template_id`, `severity`, and `confidence` in the notification sent when a proposal draft is created. Example: *"New HIGH-severity proposal: alarm disarmed + entry open (80% confident) — call approve_rule_proposal to activate."*
@@ -760,7 +760,7 @@ The original Issue #15 (lambda rule review/approval UI) was implemented and subs
 - Size: XS
 - Dependencies: none
 
-**Issue #21 — Rule preview before commit** *(Open — GitHub TBD)*
+**Issue #21 — Rule preview before commit** *(Open — [GitHub #293](https://github.com/goruck/home-generative-agent/issues/293))*
 
 - Plan coverage: Section 16 (operator control)
 - Scope: Add `preview_rule_proposal` HA service that evaluates the normalized rule spec against the current snapshot without writing to the registry. Returns whether the rule would trigger right now, and against which entities. Intended as a dry-run step before calling `approve_rule_proposal`.
@@ -769,7 +769,7 @@ The original Issue #15 (lambda rule review/approval UI) was implemented and subs
 - Size: M
 - Dependencies: Issue #18 (shares immediate-snapshot evaluation path)
 
-**Issue #22 — PIN validation for autonomy level increase** *(Open — GitHub TBD)*
+**Issue #22 — PIN validation for autonomy level increase** *(Open — [GitHub #294](https://github.com/goruck/home-generative-agent/issues/294))*
 
 > **Priority note:** This is a security gap against an already-live feature (Issue #13 is Done). Live auto-execute at Level 2 is operational, but the PIN gate protecting level increases is a no-op stub. This issue should be treated as higher-priority than the UX polish issues (#19, #20) and should be resolved before any production L2 deployment where `CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE=true` is relied upon for access control.
 
