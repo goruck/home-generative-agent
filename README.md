@@ -93,7 +93,7 @@ A "feature" is a discrete capability exposed by the integration (for example Con
    - The first provider is automatically assigned to all features with default models.
 4. Use a feature’s gear icon to adjust that feature’s model settings later.
 5. Click **+ Sentinel** to configure proactive Sentinel behavior.
-   - This is where Sentinel runtime, cooldowns, discovery, explanation, and optional notify service are configured.
+   - This is where Sentinel runtime, cooldowns, discovery, explanation, optional notify service, and autonomy level guardrails are configured.
 
 Embedding model selection: the integration uses the first model provider that supports embeddings (or the feature’s provider when it advertises embedding capability). If you want a different embedding model, add a provider that supports embeddings and select the desired embedding model name in that provider’s defaults, then re-run Setup or reload the integration.
 
@@ -426,6 +426,7 @@ These optional features are configured in the Sentinel subentry:
    - Discovery: `sentinel_discovery_enabled`, `sentinel_discovery_interval_seconds`, `sentinel_discovery_max_records`
    - Triage: `sentinel_triage_enabled`, `sentinel_triage_timeout_seconds`
    - Baseline: `sentinel_baseline_enabled`, `sentinel_baseline_update_interval_minutes`, `sentinel_baseline_freshness_threshold_seconds`
+   - Autonomy guardrails: `sentinel_require_pin_for_level_increase` and the Sentinel autonomy-level increase PIN
    - Per-area notifications: `sentinel_area_notify_map` (area name → notify service, e.g. `{"Garage": "notify.mobile_app_garage_tablet"}`)
 
 Discovery and triage both require a configured chat model. If no model is available, those loops are skipped.
@@ -439,11 +440,14 @@ Proposal draft statuses:
 - `unsupported`
 - `covered_by_existing_rule`
 
-`covered_by_existing_rule` means the candidate is semantically covered by an active rule and should not be approved as a separate rule. `covered_rule_id` is attached when available.
+`covered_by_existing_rule` means the candidate is semantically covered by an active rule and should not be approved as a separate rule. `covered_rule_id` is attached when available, and overlap metadata such as `overlapping_entity_ids` may also be returned to show which entities drove the match.
+
+When a proposal is approved and successfully mapped to a supported deterministic template, Sentinel registers the dynamic rule and runs an immediate evaluation cycle so the new rule can take effect without waiting for the next scheduled loop.
 
 ### Sentinel Services
 
 - `home_generative_agent.get_discovery_records`
+- `home_generative_agent.trigger_sentinel_discovery`
 - `home_generative_agent.promote_discovery_candidate`
 - `home_generative_agent.get_proposal_drafts`
 - `home_generative_agent.approve_rule_proposal`
@@ -452,14 +456,23 @@ Proposal draft statuses:
 - `home_generative_agent.deactivate_dynamic_rule`
 - `home_generative_agent.reactivate_dynamic_rule`
 - `home_generative_agent.get_audit_records`
+- `home_generative_agent.sentinel_set_autonomy_level`
 
 Typical response fields:
 - `status`
 - `candidate_id`
 - `rule_id`
 - `covered_rule_id`
+- `reason_code`
+- `details`
+- `overlapping_entity_ids`
 - `records`
 - `enabled`
+
+Notable service behavior:
+- `home_generative_agent.trigger_sentinel_discovery` runs one discovery cycle immediately using the current snapshot.
+- `home_generative_agent.sentinel_set_autonomy_level` is admin-only and applies a TTL-bounded runtime override. If `sentinel_require_pin_for_level_increase` is enabled, increasing the level requires the Sentinel PIN.
+- Proposal approval responses may include structured normalization failures such as `reason_code: missing_required_entities` with a `details` payload, rather than a plain unsupported status.
 
 ### Proposals Card (Optional)
 
@@ -499,7 +512,7 @@ When updating card JS, bump the Lovelace resource query string (for example `?v=
 
 ### Unsupported Proposals
 
-`unsupported` means the candidate could not be mapped to a supported deterministic template.
+`unsupported` means the candidate could not be mapped to a supported deterministic template. Approval responses can also include structured normalization details such as `reason_code` and `details` to explain why mapping failed, for example `missing_required_entities`, `no_matching_entity_types`, or `unsupported_pattern`.
 
 Preferred handling:
 1. Reject if not useful.
