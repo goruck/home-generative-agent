@@ -21,7 +21,7 @@
   - LLM triage with a strict prompt allowlist and fail-open behavior.
   - Execution policy service with stale/unavailable handling at the execution gate (autonomy level 2+), plus allowlist, confidence threshold, rate limit, idempotency, canary mode, and live auto-execute.
   - Baseline updater and temporal/baseline detector support.
-  - Discovery pipeline improvements from Milestone 5 except rule preview: service-mapped suggested actions, on-demand discovery trigger service, immediate rule activation on proposal approval, structured normalization failure reasons, overlap metadata, and richer draft notifications.
+  - Discovery pipeline improvements from Milestone 5: service-mapped suggested actions, on-demand discovery trigger service, immediate rule activation on proposal approval, structured normalization failure reasons, overlap metadata, richer draft notifications, and an in-progress rule preview service.
 - Partially implemented or still open (see Known Current Gaps below for the summary list):
   - Rule/suppression-state-suppressed findings are not written to the audit store (engine silently returns at the suppression gate). Triage-suppressed findings *are* written to audit.
   - `ACTION_POLICY_BLOCKED` blocks execution but does not suppress notification dispatch.
@@ -524,7 +524,7 @@ Each issue is a self-contained PR targeting main. Every PR must leave tests gree
 
 Historical note: the issue-status details below mix repository history with current main-branch state. Milestone 5 statuses below reflect the latest implementation work merged in PR #296, even where the corresponding GitHub issues may still need manual status cleanup on GitHub.
 
-**Status as of 2026-03-07:** All 15 original issues were closed on GitHub, but “closed” here means implementation work landed, not that every target-state behavior in Sections 2-19 is complete. Remaining known gaps include suppressed-finding audit coverage, blocked-vs-notified behavior, audit retention/archival, and stable person identifiers in derived presence. One unplanned issue (#9b, GitHub #269) covered pending-prompt TTL separately. Issue #15 (lambda rule review/approval UI) was implemented then removed — lambda rules were detection-only (no service-type suggested actions), invisible from `get_dynamic_rules`, and added no value for full autonomy; see PR #285 and Milestone 5. In Milestone 5, issues #16, #17, #18, #19, #20, and #22 are now implemented in code; only #21 remains open.
+**Status as of 2026-03-07:** All 15 original issues were closed on GitHub, but “closed” here means implementation work landed, not that every target-state behavior in Sections 2-19 is complete. Remaining known gaps include suppressed-finding audit coverage, blocked-vs-notified behavior, audit retention/archival, and stable person identifiers in derived presence. One unplanned issue (#9b, GitHub #269) covered pending-prompt TTL separately. Issue #15 (lambda rule review/approval UI) was implemented then removed — lambda rules were detection-only (no service-type suggested actions), invisible from `get_dynamic_rules`, and added no value for full autonomy; see PR #285 and Milestone 5. In Milestone 5, issues #16, #17, #18, #19, #20, and #22 are implemented in code, and issue #21 is now in progress on branch `sentinel-issue-293-rule-preview`.
 
 | Plan # | GitHub # | Status | Title |
 | --- | --- | --- | --- |
@@ -549,7 +549,7 @@ Historical note: the issue-status details below mix repository history with curr
 | #18 | #290 | Done (PR #296) | Immediate rule activation on approval |
 | #19 | #291 | Done (PR #296) | Explain normalization failures |
 | #20 | #292 | Done (PR #296) | Richer proposal draft notifications |
-| #21 | TBD | Open | Rule preview before commit |
+| #21 | #293 | In progress on branch | Rule preview before commit |
 | #22 | #294 | Done (PR #296) | PIN validation for autonomy level increase |
 
 ---
@@ -765,7 +765,7 @@ The original Issue #15 (lambda rule review/approval UI) was implemented and subs
 - Dependencies: none
  - Implemented outcome: draft notifications now include template context and actionable approval guidance instead of a generic message.
 
-**Issue #21 — Rule preview before commit** *(Open — [GitHub #293](https://github.com/goruck/home-generative-agent/issues/293))*
+**Issue #21 — Rule preview before commit** *(In progress on branch — [GitHub #293](https://github.com/goruck/home-generative-agent/issues/293))*
 
 - Plan coverage: Section 16 (operator control)
 - Scope: Add `preview_rule_proposal` HA service that evaluates the normalized rule spec against the current snapshot without writing to the registry. Returns whether the rule would trigger right now, and against which entities. Intended as a dry-run step before calling `approve_rule_proposal`.
@@ -773,7 +773,7 @@ The original Issue #15 (lambda rule review/approval UI) was implemented and subs
 - Tests: Preview evaluates rule correctly; no registry mutation; returns trigger status and matching entities; behaves identically to a live evaluation for the same snapshot.
 - Size: M
 - Dependencies: Issue #18 (shares immediate-snapshot evaluation path)
- - Current note: Issue #18 is now implemented, so the immediate-snapshot evaluation path exists and this is the primary remaining Milestone 5 item.
+ - Current note: Issue #18 is now implemented, so the immediate-snapshot evaluation path exists. Initial implementation work for preview is underway on branch `sentinel-issue-293-rule-preview`.
 
 **Issue #22 — PIN validation for autonomy level increase** *(Done — [GitHub #294](https://github.com/goruck/home-generative-agent/issues/294), merged in PR #296)*
 

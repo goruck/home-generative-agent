@@ -444,12 +444,15 @@ Proposal draft statuses:
 
 When a proposal is approved and successfully mapped to a supported deterministic template, Sentinel registers the dynamic rule and runs an immediate evaluation cycle so the new rule can take effect without waiting for the next scheduled loop.
 
+If you want a dry-run before approval, use `preview_rule_proposal`. It evaluates the normalized rule against the current snapshot without mutating the dynamic rule registry.
+
 ### Sentinel Services
 
 - `home_generative_agent.get_discovery_records`
 - `home_generative_agent.trigger_sentinel_discovery`
 - `home_generative_agent.promote_discovery_candidate`
 - `home_generative_agent.get_proposal_drafts`
+- `home_generative_agent.preview_rule_proposal`
 - `home_generative_agent.approve_rule_proposal`
 - `home_generative_agent.reject_rule_proposal`
 - `home_generative_agent.get_dynamic_rules`
@@ -462,15 +465,20 @@ Typical response fields:
 - `status`
 - `candidate_id`
 - `rule_id`
+- `template_id`
 - `covered_rule_id`
 - `reason_code`
 - `details`
+- `would_trigger`
+- `matching_entity_ids`
+- `findings`
 - `overlapping_entity_ids`
 - `records`
 - `enabled`
 
 Notable service behavior:
 - `home_generative_agent.trigger_sentinel_discovery` runs one discovery cycle immediately using the current snapshot.
+- `home_generative_agent.preview_rule_proposal` evaluates a stored proposal draft against the current snapshot without registering the rule and returns whether it would trigger right now.
 - `home_generative_agent.sentinel_set_autonomy_level` is admin-only and applies a TTL-bounded runtime override. If `sentinel_require_pin_for_level_increase` is enabled, increasing the level requires the Sentinel PIN.
 - Proposal approval responses may include structured normalization failures such as `reason_code: missing_required_entities` with a `details` payload, rather than a plain unsupported status.
 
@@ -484,6 +492,7 @@ If you install `hga-proposals-card.js`, the card can drive the full review flow:
 
 It also supports:
 - Promote to draft
+- Preview rule proposal before approval
 - Reject candidate (local dismiss in browser storage)
 - Approve/reject proposal
 - Collapsible sections (Proposal Drafts is expanded by default)

@@ -14,8 +14,14 @@ from custom_components.home_generative_agent.const import CONF_NOTIFY_SERVICE
 from custom_components.home_generative_agent.sentinel.discovery_store import (
     DiscoveryStore,
 )
+from custom_components.home_generative_agent.sentinel.dynamic_rules import (
+    evaluate_dynamic_rule,
+)
 from custom_components.home_generative_agent.sentinel.proposal_store import (
     ProposalStore,
+)
+from custom_components.home_generative_agent.snapshot.builder import (
+    async_build_full_state_snapshot,
 )
 
 _hga_component = cast("Any", hga_component)
@@ -221,6 +227,96 @@ async def test_approve_rule_proposal_returns_overlap_when_already_active(hass) -
     assert response["status"] == "covered_by_existing_rule"
     assert response["rule_id"] == "unlocked_lock_when_home_lock_garage_door_lock"
     assert response["overlapping_entity_ids"] == ["lock.garage_door_lock"]
+
+
+@pytest.mark.asyncio
+async def test_preview_rule_proposal_returns_current_trigger_state(hass) -> None:
+    hass.states.async_set("person.alex", "home")
+    hass.states.async_set("lock.garage_door_lock", "unlocked")
+
+    proposal_store = ProposalStore(hass)
+    candidate = {
+        "candidate_id": "c_lock",
+        "title": "Garage lock unlocked while home",
+        "summary": "Detect lock left unlocked with someone present.",
+        "pattern": "lock unlocked while home",
+        "suggested_type": "security",
+        "confidence_hint": 0.8,
+        "evidence_paths": [
+            "entities[entity_id=lock.garage_door_lock].state",
+            "derived.anyone_home",
+        ],
+    }
+    await proposal_store.async_append(
+        {
+            "candidate_id": "c_lock",
+            "candidate": candidate,
+            "notes": "",
+            "status": "draft",
+        }
+    )
+    registry = DummyRuleRegistry()
+    entry = _make_entry(proposal_store=proposal_store, rule_registry=registry)
+
+    response = await _hga_component._preview_rule_proposal(
+        hass,
+        entry,
+        candidate_id="c_lock",
+    )
+
+    snapshot = await async_build_full_state_snapshot(hass)
+    expected_findings = evaluate_dynamic_rule(
+        snapshot,
+        {
+            "rule_id": "unlocked_lock_when_home_lock_garage_door_lock",
+            "template_id": "unlocked_lock_when_home",
+            "params": {"lock_entity_id": "lock.garage_door_lock"},
+            "severity": "medium",
+            "confidence": 0.8,
+            "is_sensitive": True,
+            "suggested_actions": ["lock.lock", "lock_entity"],
+        },
+    )
+
+    assert response["status"] == "ok"
+    assert response["would_trigger"] is True
+    assert response["matching_entity_ids"] == ["lock.garage_door_lock"]
+    assert response["findings"] == [finding.as_dict() for finding in expected_findings]
+    assert registry.added_rules == []
+
+
+@pytest.mark.asyncio
+async def test_preview_rule_proposal_returns_unsupported_reason(hass) -> None:
+    proposal_store = ProposalStore(hass)
+    await proposal_store.async_append(
+        {
+            "candidate_id": "bad_lock",
+            "candidate": {
+                "candidate_id": "bad_lock",
+                "title": "Front lock unlocked while home",
+                "summary": "Detect unlocked lock with someone present.",
+                "pattern": "lock unlocked while home",
+                "suggested_type": "security",
+                "confidence_hint": 0.8,
+                "evidence_paths": ["derived.anyone_home"],
+            },
+            "notes": "",
+            "status": "draft",
+        }
+    )
+    entry = _make_entry(
+        proposal_store=proposal_store,
+        rule_registry=DummyRuleRegistry(),
+    )
+
+    response = await _hga_component._preview_rule_proposal(
+        hass,
+        entry,
+        candidate_id="bad_lock",
+    )
+
+    assert response["status"] == "unsupported"
+    assert response["reason_code"] == "missing_required_entities"
 
 
 @pytest.mark.asyncio

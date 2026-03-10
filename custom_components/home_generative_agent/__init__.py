@@ -227,6 +227,7 @@ from .sentinel.baseline import SentinelBaselineUpdater
 from .sentinel.discovery_engine import SentinelDiscoveryEngine
 from .sentinel.discovery_semantic import candidate_semantic_key, rule_semantic_key
 from .sentinel.discovery_store import DiscoveryStore
+from .sentinel.dynamic_rules import evaluate_dynamic_rule
 from .sentinel.engine import SentinelEngine
 from .sentinel.notifier import SentinelNotifier
 from .sentinel.proposal_store import ProposalStore
@@ -234,6 +235,7 @@ from .sentinel.proposal_templates import explain_normalize_candidate
 from .sentinel.rule_registry import RuleRegistry
 from .sentinel.suppression import SuppressionManager
 from .sentinel.triage import SentinelTriageService
+from .snapshot.builder import async_build_full_state_snapshot
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -259,6 +261,7 @@ SERVICE_GET_DISCOVERY_RECORDS = "get_discovery_records"
 SERVICE_TRIGGER_SENTINEL_DISCOVERY = "trigger_sentinel_discovery"
 SERVICE_PROMOTE_DISCOVERY_CANDIDATE = "promote_discovery_candidate"
 SERVICE_GET_PROPOSAL_DRAFTS = "get_proposal_drafts"
+SERVICE_PREVIEW_RULE_PROPOSAL = "preview_rule_proposal"
 SERVICE_APPROVE_RULE_PROPOSAL = "approve_rule_proposal"
 SERVICE_REJECT_RULE_PROPOSAL = "reject_rule_proposal"
 SERVICE_GET_DYNAMIC_RULES = "get_dynamic_rules"
@@ -297,6 +300,12 @@ PROMOTE_DISCOVERY_SCHEMA = vol.Schema(
 GET_PROPOSAL_SCHEMA = vol.Schema(
     {
         vol.Optional("limit", default=50): vol.Coerce(int),
+    }
+)
+
+PREVIEW_PROPOSAL_SCHEMA = vol.Schema(
+    {
+        vol.Required("candidate_id"): cv.string,
     }
 )
 
@@ -648,6 +657,51 @@ async def _approve_rule_proposal(  # noqa: PLR0911
         "status": "covered_by_existing_rule",
         "candidate_id": candidate_id,
         "rule_id": rule_spec["rule_id"],
+    }
+
+
+async def _preview_rule_proposal(
+    hass: HomeAssistant,
+    entry: HGAConfigEntry,
+    *,
+    candidate_id: str,
+) -> dict[str, Any]:
+    proposal_store = entry.runtime_data.proposal_store
+    if proposal_store is None:
+        return {"status": "unavailable"}
+
+    record = proposal_store.find_by_candidate_id(candidate_id)
+    candidate = record.get("candidate") if record else None
+    if not candidate:
+        return {"status": "not_found", "candidate_id": candidate_id}
+
+    normalization = explain_normalize_candidate(candidate)
+    normalized = normalization.normalized
+    if normalized is None:
+        return {
+            "status": "unsupported",
+            "candidate_id": candidate_id,
+            "reason_code": normalization.reason_code,
+            "details": normalization.details or {},
+        }
+
+    snapshot = await async_build_full_state_snapshot(hass)
+    findings = evaluate_dynamic_rule(snapshot, normalized.as_dict())
+    matching_entity_ids = sorted(
+        {
+            entity_id
+            for finding in findings
+            for entity_id in finding.triggering_entities
+        }
+    )
+    return {
+        "status": "ok",
+        "candidate_id": candidate_id,
+        "rule_id": normalized.rule_id,
+        "template_id": normalized.template_id,
+        "would_trigger": bool(findings),
+        "matching_entity_ids": matching_entity_ids,
+        "findings": [finding.as_dict() for finding in findings],
     }
 
 
@@ -1903,6 +1957,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         SERVICE_GET_PROPOSAL_DRAFTS,
         _handle_get_proposals,
         schema=GET_PROPOSAL_SCHEMA,
+        supports_response=_SERVICE_RESPONSE_ONLY,
+    )
+
+    async def _handle_preview_proposal(
+        call: ServiceCall,
+    ) -> dict[str, Any]:
+        candidate_id = str(call.data.get("candidate_id"))
+        return await _preview_rule_proposal(
+            hass,
+            entry,
+            candidate_id=candidate_id,
+        )
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_PREVIEW_RULE_PROPOSAL,
+        _handle_preview_proposal,
+        schema=PREVIEW_PROPOSAL_SCHEMA,
         supports_response=_SERVICE_RESPONSE_ONLY,
     )
 

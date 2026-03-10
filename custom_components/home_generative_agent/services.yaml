@@ -121,6 +121,18 @@ get_proposal_drafts:
           step: 1
           mode: box
 
+preview_rule_proposal:
+  name: Preview rule proposal
+  description: Evaluate a proposal draft against the current snapshot without registering the rule.
+  fields:
+    candidate_id:
+      name: Candidate ID
+      description: Candidate ID from a stored proposal draft.
+      required: true
+      example: "c1"
+      selector:
+        text:
+
 approve_rule_proposal:
   name: Approve rule proposal
   description: Approve a proposal draft by candidate ID and register a deterministic rule if supported.
