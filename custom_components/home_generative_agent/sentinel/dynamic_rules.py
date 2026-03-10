@@ -140,6 +140,15 @@ def evaluate_dynamic_rules(
     return findings
 
 
+def evaluate_dynamic_rule(
+    snapshot: FullStateSnapshot,
+    rule: dict[str, Any],
+    baselines: dict[str, dict[str, float]] | None = None,
+) -> list[AnomalyFinding]:
+    """Evaluate a single generated rule deterministically."""
+    return evaluate_dynamic_rules(snapshot, [rule], baselines=baselines)
+
+
 def _eval_alarm_disarmed_open_entry(
     _snapshot: FullStateSnapshot,
     rule: dict[str, Any],
