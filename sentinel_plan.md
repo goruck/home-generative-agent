@@ -21,7 +21,7 @@
   - LLM triage with a strict prompt allowlist and fail-open behavior.
   - Execution policy service with stale/unavailable handling at the execution gate (autonomy level 2+), plus allowlist, confidence threshold, rate limit, idempotency, canary mode, and live auto-execute.
   - Baseline updater and temporal/baseline detector support.
-  - Discovery pipeline improvements from Milestone 5: service-mapped suggested actions, on-demand discovery trigger service, immediate rule activation on proposal approval, structured normalization failure reasons, overlap metadata, richer draft notifications, and an in-progress rule preview service.
+  - Discovery pipeline improvements from Milestone 5: service-mapped suggested actions, on-demand discovery trigger service, immediate rule activation on proposal approval, structured normalization failure reasons, overlap metadata, richer draft notifications, and rule preview before commit.
 - Partially implemented or still open (see Known Current Gaps below for the summary list):
   - Rule/suppression-state-suppressed findings are not written to the audit store (engine silently returns at the suppression gate). Triage-suppressed findings *are* written to audit.
   - `ACTION_POLICY_BLOCKED` blocks execution but does not suppress notification dispatch.
@@ -723,7 +723,7 @@ The original Issue #15 (lambda rule review/approval UI) was implemented and subs
 - Size: S
 - Dependencies: none
 - **This is the single highest-value change for full autonomy — without it, no discovered rule can ever trigger auto-execute.**
- - Implemented outcome: normalized proposals now emit service-mapped `suggested_actions` where safe deterministic actions exist.
+- Implemented outcome: normalized proposals now emit service-mapped `suggested_actions` where safe deterministic actions exist.
 
 **Issue #17 — On-demand discovery trigger** *(Done — [GitHub #289](https://github.com/goruck/home-generative-agent/issues/289), merged in PR #296)*
 
@@ -733,7 +733,7 @@ The original Issue #15 (lambda rule review/approval UI) was implemented and subs
 - Tests: Service call triggers a discovery run and stores results; duplicate candidates are filtered; timer interval unchanged.
 - Size: S
 - Dependencies: none
- - Implemented outcome: `home_generative_agent.trigger_sentinel_discovery` runs one discovery cycle immediately when called.
+- Implemented outcome: `home_generative_agent.trigger_sentinel_discovery` runs one discovery cycle immediately when called.
 
 **Issue #18 — Immediate rule activation on approval** *(Done — [GitHub #290](https://github.com/goruck/home-generative-agent/issues/290), merged in PR #296)*
 
@@ -743,7 +743,7 @@ The original Issue #15 (lambda rule review/approval UI) was implemented and subs
 - Tests: Approval triggers an immediate evaluation run; new rule fires on current snapshot if conditions met; no double-run if engine is already mid-cycle.
 - Size: S
 - Dependencies: none
- - Implemented outcome: successful proposal approval now triggers an immediate Sentinel evaluation cycle through the scheduler's single-flight path.
+- Implemented outcome: successful proposal approval now triggers an immediate Sentinel evaluation cycle through the scheduler's single-flight path.
 
 **Issue #19 — Explain normalization failures** *(Done — [GitHub #291](https://github.com/goruck/home-generative-agent/issues/291), merged in PR #296)*
 
@@ -753,7 +753,7 @@ The original Issue #15 (lambda rule review/approval UI) was implemented and subs
 - Tests: Each normalization failure path returns a distinct reason code; `promote` and `approve` service responses include reason; `already_active` response includes covering rule ID and overlapping entities.
 - Size: S
 - Dependencies: none
- - Implemented outcome: promote/approve responses now return structured `reason_code`, `details`, `covered_rule_id`, and `overlapping_entity_ids` when applicable.
+- Implemented outcome: promote/approve responses now return structured `reason_code`, `details`, `covered_rule_id`, and `overlapping_entity_ids` when applicable.
 
 **Issue #20 — Richer proposal draft notifications** *(Done — [GitHub #292](https://github.com/goruck/home-generative-agent/issues/292), merged in PR #296)*
 
@@ -763,7 +763,7 @@ The original Issue #15 (lambda rule review/approval UI) was implemented and subs
 - Tests: Notification payload includes template_id, severity, confidence, and actionable service call hint.
 - Size: XS
 - Dependencies: none
- - Implemented outcome: draft notifications now include template context and actionable approval guidance instead of a generic message.
+- Implemented outcome: draft notifications now include template context and actionable approval guidance instead of a generic message.
 
 **Issue #21 — Rule preview before commit** *(Done — [GitHub #293](https://github.com/goruck/home-generative-agent/issues/293), merged in PR #297)*
 
@@ -773,7 +773,7 @@ The original Issue #15 (lambda rule review/approval UI) was implemented and subs
 - Tests: Preview evaluates rule correctly; no registry mutation; returns trigger status and matching entities; behaves identically to a live evaluation for the same snapshot.
 - Size: M
 - Dependencies: Issue #18 (shares immediate-snapshot evaluation path)
- - Implemented outcome: `home_generative_agent.preview_rule_proposal` performs a read-only evaluation of a stored proposal draft against the current snapshot, reusing the dynamic rule evaluation path so preview behavior matches live deterministic evaluation.
+- Implemented outcome: `home_generative_agent.preview_rule_proposal` performs a read-only evaluation of a stored proposal draft against the current snapshot, reusing the dynamic rule evaluation path so preview behavior matches live deterministic evaluation.
 
 **Issue #22 — PIN validation for autonomy level increase** *(Done — [GitHub #294](https://github.com/goruck/home-generative-agent/issues/294), merged in PR #296)*
 
@@ -783,7 +783,7 @@ The original Issue #15 (lambda rule review/approval UI) was implemented and subs
 - Tests: Correct PIN allows increase; wrong PIN rejected; no PIN required for decrease; kill-switch (`level=0`) never gated; PIN stored as hash not plaintext.
 - Size: M
 - Dependencies: none
- - Implemented outcome: Sentinel now persists hashed level-increase PIN material in subentry config and validates the provided PIN on autonomy increases.
+- Implemented outcome: Sentinel now persists hashed level-increase PIN material in subentry config and validates the provided PIN on autonomy increases.
 
 ---
 
