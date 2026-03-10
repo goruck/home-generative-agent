@@ -688,11 +688,7 @@ async def _preview_rule_proposal(
     snapshot = await async_build_full_state_snapshot(hass)
     findings = evaluate_dynamic_rule(snapshot, normalized.as_dict())
     matching_entity_ids = sorted(
-        {
-            entity_id
-            for finding in findings
-            for entity_id in finding.triggering_entities
-        }
+        {entity_id for finding in findings for entity_id in finding.triggering_entities}
     )
     return {
         "status": "ok",
