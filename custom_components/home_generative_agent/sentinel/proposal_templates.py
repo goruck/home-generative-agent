@@ -745,6 +745,20 @@ def _normalization_failure(  # noqa: PLR0911, PLR0913
     )
 
 
+def _extract_entity_id_from_evidence_path(path: str) -> str | None:
+    """Extract entity_id from an evidence path in either known format.
+
+    Handles both:
+    - ``entities[entity_id=domain.object_id]`` (snapshot query format)
+    - ``entities[entity_ids contains domain.object_id].attr`` (discovery format)
+    """
+    if path.startswith("entities[entity_id="):
+        return path.split("entities[entity_id=", 1)[1].split("]", 1)[0]
+    if path.startswith("entities[entity_ids contains "):
+        return path.split("entities[entity_ids contains ", 1)[1].split("]", 1)[0]
+    return None
+
+
 def _find_entity_id(evidence_paths: list[str], domain: str) -> str | None:
     ids = _find_entity_ids(evidence_paths, domain)
     if not ids:
@@ -754,9 +768,10 @@ def _find_entity_id(evidence_paths: list[str], domain: str) -> str | None:
 
 def _find_entity_ids(evidence_paths: list[str], domain: str) -> list[str]:
     ids = [
-        path.split("entities[entity_id=", 1)[1].split("]", 1)[0]
+        eid
         for path in evidence_paths
-        if path.startswith("entities[entity_id=") and f"{domain}." in path
+        if (eid := _extract_entity_id_from_evidence_path(path)) is not None
+        and f"{domain}." in eid
     ]
     return sorted(set(ids))
 
@@ -764,9 +779,9 @@ def _find_entity_ids(evidence_paths: list[str], domain: str) -> list[str]:
 def _find_entry_entity_ids(evidence_paths: list[str]) -> list[str]:
     ids: list[str] = []
     for path in evidence_paths:
-        if not path.startswith("entities[entity_id="):
+        entity_id = _extract_entity_id_from_evidence_path(path)
+        if entity_id is None:
             continue
-        entity_id = path.split("entities[entity_id=", 1)[1].split("]", 1)[0]
         if "." not in entity_id:
             # Object ID without domain — check for entry keywords and accept
             # as-is (same tolerant pattern used by _find_sensor_entity_ids).
@@ -784,9 +799,9 @@ def _find_entry_entity_ids(evidence_paths: list[str]) -> list[str]:
 def _find_motion_entity_ids(evidence_paths: list[str]) -> list[str]:
     ids: list[str] = []
     for path in evidence_paths:
-        if not path.startswith("entities[entity_id="):
+        entity_id = _extract_entity_id_from_evidence_path(path)
+        if entity_id is None:
             continue
-        entity_id = path.split("entities[entity_id=", 1)[1].split("]", 1)[0]
         if "motion" in entity_id or "vmd" in entity_id:
             ids.append(entity_id)
     return sorted(set(ids))
@@ -795,9 +810,9 @@ def _find_motion_entity_ids(evidence_paths: list[str]) -> list[str]:
 def _find_sensor_entity_ids(evidence_paths: list[str]) -> list[str]:
     ids: list[str] = []
     for path in evidence_paths:
-        if not path.startswith("entities[entity_id="):
+        entity_id = _extract_entity_id_from_evidence_path(path)
+        if entity_id is None:
             continue
-        entity_id = path.split("entities[entity_id=", 1)[1].split("]", 1)[0]
         if "." not in entity_id:
             # Legacy discovery drafts may store object IDs without domain.
             ids.append(entity_id)
@@ -811,9 +826,9 @@ def _find_sensor_entity_ids(evidence_paths: list[str]) -> list[str]:
 def _find_battery_sensor_entity_ids(evidence_paths: list[str]) -> list[str]:
     ids: list[str] = []
     for path in evidence_paths:
-        if not path.startswith("entities[entity_id="):
+        entity_id = _extract_entity_id_from_evidence_path(path)
+        if entity_id is None:
             continue
-        entity_id = path.split("entities[entity_id=", 1)[1].split("]", 1)[0]
         if "battery" not in entity_id.lower():
             continue
         if "." not in entity_id:

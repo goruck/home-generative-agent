@@ -768,3 +768,49 @@ def test_normalize_candidate_multiple_entries_open_simultaneously() -> None:
     assert len(normalized.params["entry_entity_ids"]) == 3
     assert normalized.params["require_home"] is True
     assert normalized.params["require_away"] is False
+
+
+# ---------------------------------------------------------------------------
+# entity_ids contains path format (discovery engine output)
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_candidate_entity_ids_contains_path_format_lock() -> None:
+    """Discovery engine stores paths as 'entities[entity_ids contains ...]'."""
+    candidate = {
+        "candidate_id": "garage_lock_away",
+        "title": "Garage door lock unlocked while no one home",
+        "summary": "Lock left unlocked while away.",
+        "pattern": "lock_state=unlocked AND anyone_home=false",
+        "suggested_type": "security",
+        "confidence_hint": 0.85,
+        "evidence_paths": [
+            "derived.anyone_home",
+            "entities[entity_ids contains lock.garage_door_lock].state",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "unlocked_lock_while_away"
+    assert normalized.params["lock_entity_id"] == "lock.garage_door_lock"
+
+
+def test_normalize_candidate_entity_ids_contains_path_format_sensor() -> None:
+    """Power sensor via discovery 'entity_ids contains' path routes to sensor_threshold_condition."""
+    candidate = {
+        "candidate_id": "washing_machine_night",
+        "title": "Washing Machine Power Usage During Night Hours",
+        "summary": "The washing machine is drawing significant power (112.6W) during the night.",
+        "pattern": "night=1|appliance_power>50",
+        "suggested_type": "anomaly",
+        "confidence_hint": 0.85,
+        "evidence_paths": [
+            "derived.is_night",
+            "entities[entity_ids contains sensor.washing_machine_switch_0_power].state",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "sensor_threshold_condition"
+    assert normalized.params["sensor_entity_id"] == "sensor.washing_machine_switch_0_power"
+    assert normalized.params["require_night"] is True
