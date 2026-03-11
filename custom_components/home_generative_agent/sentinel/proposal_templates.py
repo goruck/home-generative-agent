@@ -19,6 +19,7 @@ SUPPORTED_TEMPLATES = {
     "open_entry_at_night_when_home",
     "open_entry_at_night_while_away",
     "unlocked_lock_when_home",
+    "unlocked_lock_while_away",
     "motion_without_camera_activity",
     "unknown_person_camera_no_home",
     "unknown_person_camera_when_home",
@@ -27,13 +28,63 @@ SUPPORTED_TEMPLATES = {
     "time_of_day_anomaly",
     # Issue #266 — lambda/expression rules
     "lambda",
+    # Flexible templates for common patterns
+    "alarm_state_mismatch",
+    "entity_state_duration",
+    "sensor_threshold_condition",
+    "entity_staleness",
+    "multiple_entries_open_count",
 }
 
 _PERCENT_THRESHOLD_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*%")
 _RELATIVE_THRESHOLD_PATTERN = re.compile(
     r"(?:at\s+or\s+below|below|under|<=|less than)\s*(\d+(?:\.\d+)?)"
 )
+_HOURS_THRESHOLD_PATTERN = re.compile(
+    r"(\d+(?:\.\d+)?)\s*(?:hour|hr)s?",
+    re.IGNORECASE,
+)
+_NUMERIC_THRESHOLD_PATTERN = re.compile(
+    r"(?:>|above|exceeds?|over|more than|greater than)\s*(\d+(?:\.\d+)?)"
+)
 _MAX_PERCENT = 100.0
+_DEFAULT_DURATION_HOURS = 2.0
+_DEFAULT_STALE_HOURS = 24.0
+_DURATION_TERMS = (
+    "duration",
+    "extended",
+    "prolonged",
+    "for",
+    "since",
+    "hours",
+    "long",
+)
+_STALENESS_TERMS = (
+    "stale",
+    "not updated",
+    "tracking",
+    "staleness",
+    "last seen",
+    "last updated",
+    "gps",
+)
+_MULTIPLE_TERMS = (
+    "multiple",
+    "simultaneous",
+    "several",
+    "more than",
+    "at once",
+    "at the same time",
+)
+_POWER_ENERGY_TERMS = (
+    "power",
+    "energy",
+    "watt",
+    "consumption",
+    "usage",
+    "kilowatt",
+)
+_ALARM_STATES = ("armed_home", "armed_away", "armed_night", "disarmed", "triggered")
 _UNKNOWN_TERMS = (
     "unknown",
     "unrecognized",
@@ -218,6 +269,101 @@ def explain_normalize_candidate(  # noqa: PLR0911, PLR0912
             )
         )
 
+    # alarm_state_mismatch: alarm in a specific state that contradicts occupancy.
+    # Must follow alarm+motion and alarm+entry branches above.
+    if (
+        alarm_id
+        and not motion_ids
+        and not entry_ids
+        and _contains_any(text, ("armed_home", "armed_away", "armed_night"))
+        and presence in ("away", "home")
+    ):
+        detected_state = _extract_alarm_state(text) or "armed_home"
+        default_rule_id = (
+            f"alarm_state_mismatch_{detected_state}_{presence}_{alarm_id.replace('.', '_')}"
+        )
+        return NormalizationResult(
+            normalized=NormalizedRule(
+                rule_id=_candidate_rule_id(candidate, default=default_rule_id),
+                template_id="alarm_state_mismatch",
+                params={
+                    "alarm_entity_id": alarm_id,
+                    "alarm_state": detected_state,
+                    "expected_presence": presence,
+                },
+                severity="low",
+                confidence=float(candidate.get("confidence_hint", 0.85)),
+                is_sensitive=False,
+                suggested_actions=["alarm_control_panel.alarm_disarm"],
+            )
+        )
+
+    # entity_state_duration: lock unlocked for too long.
+    if (
+        lock_ids
+        and not entry_ids
+        and _has_duration_signal(text)
+        and _contains_any(text, ("lock", "unlocked"))
+    ):
+        lock_id = lock_ids[0]
+        threshold_hours = _extract_threshold_hours(text)
+        default_rule_id = f"lock_unlocked_duration_{lock_id.replace('.', '_')}"
+        return NormalizationResult(
+            normalized=NormalizedRule(
+                rule_id=_candidate_rule_id(candidate, default=default_rule_id),
+                template_id="entity_state_duration",
+                params={
+                    "entity_id": lock_id,
+                    "target_state": "unlocked",
+                    "threshold_hours": threshold_hours,
+                },
+                severity="medium",
+                confidence=float(candidate.get("confidence_hint", 0.75)),
+                is_sensitive=True,
+                suggested_actions=["lock.lock", "lock_entity"],
+            )
+        )
+
+    # entity_state_duration: entry sensor open for too long.
+    if (
+        entry_ids
+        and _has_duration_signal(text)
+        and _contains_any(text, ("open", "window", "door", "entry"))
+    ):
+        entry_id = entry_ids[0]
+        threshold_hours = _extract_threshold_hours(text)
+        default_rule_id = f"entry_open_duration_{entry_id.replace('.', '_')}"
+        return NormalizationResult(
+            normalized=NormalizedRule(
+                rule_id=_candidate_rule_id(candidate, default=default_rule_id),
+                template_id="entity_state_duration",
+                params={
+                    "entity_id": entry_id,
+                    "target_state": "on",
+                    "threshold_hours": threshold_hours,
+                },
+                severity="medium",
+                confidence=float(candidate.get("confidence_hint", 0.7)),
+                is_sensitive=False,
+                suggested_actions=["close_entry"],
+            )
+        )
+
+    # unlocked_lock_while_away: lock unlocked when nobody is home.
+    if lock_ids and not entry_ids and presence == "away" and _contains_any(text, ("lock", "unlocked")):
+        lock_id = lock_ids[0]
+        return NormalizationResult(
+            normalized=NormalizedRule(
+                rule_id=f"unlocked_lock_while_away_{lock_id.replace('.', '_')}",
+                template_id="unlocked_lock_while_away",
+                params={"lock_entity_id": lock_id},
+                severity="high",
+                confidence=float(candidate.get("confidence_hint", 0.85)),
+                is_sensitive=True,
+                suggested_actions=["lock.lock", "lock_entity"],
+            )
+        )
+
     if lock_ids and not entry_ids and _contains_any(text, ("lock", "unlocked")):
         lock_id = lock_ids[0]
         return NormalizationResult(
@@ -229,6 +375,33 @@ def explain_normalize_candidate(  # noqa: PLR0911, PLR0912
                 confidence=float(candidate.get("confidence_hint", 0.5)),
                 is_sensitive=True,
                 suggested_actions=["lock.lock", "lock_entity"],
+            )
+        )
+
+    # multiple_entries_open_count: several entries open simultaneously.
+    # Must precede the per-entry open branches below.
+    if (
+        len(entry_ids) >= 2
+        and _has_multiple_signal(text)
+        and _contains_any(text, ("open", "window", "door", "entry"))
+    ):
+        require_home = presence == "home"
+        require_away = presence == "away"
+        default_rule_id = "multiple_entries_open_count"
+        return NormalizationResult(
+            normalized=NormalizedRule(
+                rule_id=_candidate_rule_id(candidate, default=default_rule_id),
+                template_id="multiple_entries_open_count",
+                params={
+                    "entry_entity_ids": entry_ids,
+                    "min_count": 2,
+                    "require_home": require_home,
+                    "require_away": require_away,
+                },
+                severity="high",
+                confidence=float(candidate.get("confidence_hint", 0.75)),
+                is_sensitive=True,
+                suggested_actions=_entry_suggested_actions(entry_ids),
             )
         )
 
@@ -362,6 +535,35 @@ def explain_normalize_candidate(  # noqa: PLR0911, PLR0912
             )
         )
 
+    # sensor_threshold_condition: numeric sensor exceeds a threshold, with optional
+    # night/away/home condition. Excludes battery sensors (handled above).
+    non_battery_sensor_ids = [s for s in sensor_ids if s not in battery_sensor_ids]
+    if (
+        non_battery_sensor_ids
+        and _has_power_energy_signal(text)
+    ):
+        threshold = _extract_threshold_numeric(text)
+        if threshold is not None:
+            sensor_id = non_battery_sensor_ids[0]
+            default_rule_id = f"sensor_threshold_{sensor_id.replace('.', '_')}"
+            return NormalizationResult(
+                normalized=NormalizedRule(
+                    rule_id=_candidate_rule_id(candidate, default=default_rule_id),
+                    template_id="sensor_threshold_condition",
+                    params={
+                        "sensor_entity_id": sensor_id,
+                        "threshold": threshold,
+                        "require_night": has_night,
+                        "require_away": presence == "away",
+                        "require_home": presence == "home",
+                    },
+                    severity="low",
+                    confidence=float(candidate.get("confidence_hint", 0.7)),
+                    is_sensitive=False,
+                    suggested_actions=["check_appliance"],
+                )
+            )
+
     if sensor_ids and _contains_any(text, ("unavailable", "offline", "unreachable")):
         if presence == "home":
             return NormalizationResult(
@@ -382,6 +584,27 @@ def explain_normalize_candidate(  # noqa: PLR0911, PLR0912
                 params={"sensor_entity_ids": sensor_ids},
                 severity="low",
                 confidence=float(candidate.get("confidence_hint", 0.6)),
+                is_sensitive=False,
+                suggested_actions=["check_sensor"],
+            )
+        )
+
+    # entity_staleness: entity last_changed has not advanced past a threshold.
+    # Matches person tracking (person_ids) or explicit sensor staleness signals.
+    if (person_ids or sensor_ids) and _has_staleness_signal(text):
+        entity_id = (person_ids or sensor_ids)[0]
+        max_stale_hours = _extract_threshold_hours(text, default=_DEFAULT_STALE_HOURS)
+        default_rule_id = f"entity_staleness_{entity_id.replace('.', '_')}"
+        return NormalizationResult(
+            normalized=NormalizedRule(
+                rule_id=_candidate_rule_id(candidate, default=default_rule_id),
+                template_id="entity_staleness",
+                params={
+                    "entity_id": entity_id,
+                    "max_stale_hours": max_stale_hours,
+                },
+                severity="low",
+                confidence=float(candidate.get("confidence_hint", 0.7)),
                 is_sensitive=False,
                 suggested_actions=["check_sensor"],
             )
@@ -545,6 +768,10 @@ def _find_entry_entity_ids(evidence_paths: list[str]) -> list[str]:
             continue
         entity_id = path.split("entities[entity_id=", 1)[1].split("]", 1)[0]
         if "." not in entity_id:
+            # Object ID without domain — check for entry keywords and accept
+            # as-is (same tolerant pattern used by _find_sensor_entity_ids).
+            if any(key in entity_id for key in ("door", "window", "entry")):
+                ids.append(entity_id)
             continue
         domain = entity_id.split(".", 1)[0]
         if domain not in {"binary_sensor", "sensor", "cover"}:
@@ -683,6 +910,49 @@ def _find_camera_id(  # noqa: PLR0911
         return None
     return f"camera.{object_candidates[-1]}"
     return None
+
+
+def _extract_threshold_hours(text: str, *, default: float = _DEFAULT_DURATION_HOURS) -> float:
+    match = _HOURS_THRESHOLD_PATTERN.search(text)
+    if match:
+        try:
+            return float(match.group(1))
+        except ValueError:
+            pass
+    return default
+
+
+def _extract_threshold_numeric(text: str) -> float | None:
+    match = _NUMERIC_THRESHOLD_PATTERN.search(text)
+    if not match:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
+def _extract_alarm_state(text: str) -> str | None:
+    for state in _ALARM_STATES:
+        if state in text:
+            return state
+    return None
+
+
+def _has_duration_signal(text: str) -> bool:
+    return _contains_any(text, _DURATION_TERMS)
+
+
+def _has_staleness_signal(text: str) -> bool:
+    return _contains_any(text, _STALENESS_TERMS)
+
+
+def _has_multiple_signal(text: str) -> bool:
+    return _contains_any(text, _MULTIPLE_TERMS)
+
+
+def _has_power_energy_signal(text: str) -> bool:
+    return _contains_any(text, _POWER_ENERGY_TERMS)
 
 
 def _contains_any(text: str, words: tuple[str, ...]) -> bool:

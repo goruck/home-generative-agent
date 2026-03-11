@@ -516,3 +516,255 @@ def test_normalize_candidate_unknown_person_camera_infers_camera_from_candidate_
     assert normalized.template_id == "unknown_person_camera_when_home"
     assert normalized.rule_id == "unknown_person_camera_when_home_camera_frontgate"
     assert normalized.params == {"camera_entity_id": "camera.frontgate"}
+
+
+# ---------------------------------------------------------------------------
+# Fix C: _find_entry_entity_ids domain-prefix resolution
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_candidate_entry_without_domain_prefix_resolves() -> None:
+    """Entity IDs without domain prefix containing entry keywords should normalize."""
+    candidate = {
+        "candidate_id": "windows_open_while_away",
+        "title": "Windows Open While Away",
+        "summary": "Detects any window sensor reporting open while no occupants are home.",
+        "pattern": "window_open AND not anyone_home",
+        "suggested_type": "security",
+        "confidence_hint": 0.8,
+        "evidence_paths": [
+            "entities[entity_id=breakfast_nook_side_right_window].state",
+            "entities[entity_id=garage_and_play_room_windows].state",
+            "derived.anyone_home",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "open_entry_while_away"
+    assert "breakfast_nook_side_right_window" in normalized.params["entry_entity_ids"]
+    assert "garage_and_play_room_windows" in normalized.params["entry_entity_ids"]
+
+
+# ---------------------------------------------------------------------------
+# unlocked_lock_while_away
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_candidate_lock_away_routes_to_unlocked_lock_while_away() -> None:
+    candidate = {
+        "candidate_id": "garage_door_lock_unlocked_while_away",
+        "title": "Garage door lock unlocked while away",
+        "summary": "Alerts when the garage door lock is unlocked while no one is home.",
+        "pattern": "anyone_home=false AND lock_state=unlocked",
+        "suggested_type": "security",
+        "confidence_hint": 0.85,
+        "evidence_paths": [
+            "entities[entity_id=lock.garage_door_lock].state",
+            "derived.anyone_home",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "unlocked_lock_while_away"
+    assert normalized.params == {"lock_entity_id": "lock.garage_door_lock"}
+    assert normalized.severity == "high"
+    assert "lock.lock" in normalized.suggested_actions
+
+
+def test_normalize_candidate_lock_without_away_still_routes_to_when_home() -> None:
+    """Lock candidate with no presence signal should still route to unlocked_lock_when_home."""
+    candidate = {
+        "candidate_id": "lock_candidate_no_presence",
+        "title": "Front lock unlocked",
+        "summary": "The front door lock is unlocked.",
+        "pattern": "lock unlocked",
+        "suggested_type": "security",
+        "confidence_hint": 0.5,
+        "evidence_paths": [
+            "entities[entity_id=lock.front_door].state",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "unlocked_lock_when_home"
+
+
+# ---------------------------------------------------------------------------
+# alarm_state_mismatch
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_candidate_alarm_armed_home_while_away() -> None:
+    candidate = {
+        "candidate_id": "alarm_armed_home_while_away",
+        "title": "Alarm Armed Home While Away",
+        "summary": "Security system is in armed home mode despite no occupants.",
+        "pattern": "alarm_state == armed_home AND anyone_home == false",
+        "suggested_type": "security",
+        "confidence_hint": 0.9,
+        "evidence_paths": [
+            "entities[entity_id=alarm_control_panel.home_alarm].state",
+            "derived.anyone_home",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "alarm_state_mismatch"
+    assert normalized.params["alarm_entity_id"] == "alarm_control_panel.home_alarm"
+    assert normalized.params["alarm_state"] == "armed_home"
+    assert normalized.params["expected_presence"] == "away"
+
+
+# ---------------------------------------------------------------------------
+# entity_state_duration (lock)
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_candidate_lock_unlocked_duration() -> None:
+    candidate = {
+        "candidate_id": "extended_garage_door_unlock_time",
+        "title": "Extended Garage Door Unlock Time",
+        "summary": "Garage door lock remains unlocked for an extended duration.",
+        "pattern": "lock_state == unlocked AND (now - last_changed) > threshold_hours",
+        "suggested_type": "security",
+        "confidence_hint": 0.85,
+        "evidence_paths": [
+            "entities[entity_id=lock.garage_door_lock].state",
+            "entities[entity_id=lock.garage_door_lock].last_changed",
+            "derived.now",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "entity_state_duration"
+    assert normalized.params["entity_id"] == "lock.garage_door_lock"
+    assert normalized.params["target_state"] == "unlocked"
+    assert isinstance(normalized.params["threshold_hours"], float)
+
+
+# ---------------------------------------------------------------------------
+# entity_state_duration (entry)
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_candidate_window_open_duration() -> None:
+    candidate = {
+        "candidate_id": "window_open_for_extended_duration",
+        "title": "Window Open for Extended Duration",
+        "summary": "Window sensor has been in the open state for a prolonged duration.",
+        "pattern": "entry state == on AND (now - last_changed) > 2 hours",
+        "suggested_type": "security",
+        "confidence_hint": 0.9,
+        "evidence_paths": [
+            "entities[entity_id=binary_sensor.garage_and_play_room_windows].state",
+            "entities[entity_id=binary_sensor.garage_and_play_room_windows].last_changed",
+            "derived.now",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "entity_state_duration"
+    assert normalized.params["entity_id"] == "binary_sensor.garage_and_play_room_windows"
+    assert normalized.params["target_state"] == "on"
+    assert normalized.params["threshold_hours"] == 2.0
+
+
+# ---------------------------------------------------------------------------
+# sensor_threshold_condition
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_candidate_power_sensor_threshold_while_home() -> None:
+    candidate = {
+        "candidate_id": "high_microwave_power_while_home",
+        "title": "High Microwave Power While Home",
+        "summary": "Microwave power exceeds 1000W while someone is home.",
+        "pattern": "sensor.microwave_switch_0_power > 1000 AND derived.anyone_home = true",
+        "suggested_type": "energy",
+        "confidence_hint": 0.7,
+        "evidence_paths": [
+            "entities[entity_id=sensor.microwave_switch_0_power].state",
+            "derived.anyone_home",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "sensor_threshold_condition"
+    assert normalized.params["sensor_entity_id"] == "sensor.microwave_switch_0_power"
+    assert normalized.params["threshold"] == 1000.0
+    assert normalized.params["require_home"] is True
+    assert normalized.params["require_away"] is False
+
+
+def test_normalize_candidate_power_sensor_threshold_at_night() -> None:
+    candidate = {
+        "candidate_id": "washing_machine_power_usage_during_night_hours",
+        "title": "Washing Machine Power Usage During Night Hours",
+        "summary": "Washing machine drawing 112W during the night.",
+        "pattern": "night=1 AND appliance_power > 50",
+        "suggested_type": "energy",
+        "confidence_hint": 0.85,
+        "evidence_paths": [
+            "entities[entity_id=sensor.washing_machine_switch_0_power].state",
+            "derived.is_night",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "sensor_threshold_condition"
+    assert normalized.params["sensor_entity_id"] == "sensor.washing_machine_switch_0_power"
+    assert normalized.params["threshold"] == 50.0
+    assert normalized.params["require_night"] is True
+
+
+# ---------------------------------------------------------------------------
+# entity_staleness
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_candidate_person_tracking_staleness() -> None:
+    candidate = {
+        "candidate_id": "person_tracking_staleness",
+        "title": "Occupant Tracking Device Offline",
+        "summary": "Primary occupant tracking device not updated for over 40 hours.",
+        "pattern": "person.lindo_st_angel last_changed stale > 40 hours",
+        "suggested_type": "availability",
+        "confidence_hint": 0.7,
+        "evidence_paths": [
+            "entities[entity_id=person.lindo_st_angel].last_changed",
+            "derived.now",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "entity_staleness"
+    assert normalized.params["entity_id"] == "person.lindo_st_angel"
+    assert normalized.params["max_stale_hours"] == 40.0
+
+
+# ---------------------------------------------------------------------------
+# multiple_entries_open_count
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_candidate_multiple_entries_open_simultaneously() -> None:
+    candidate = {
+        "candidate_id": "multiple_openings_simultaneous",
+        "title": "Multiple Entry Points Open Simultaneously",
+        "summary": "Multiple opening sensors activate at the same time while home.",
+        "pattern": "count(open_sensors) > 3 AND home == true",
+        "suggested_type": "security",
+        "confidence_hint": 0.85,
+        "evidence_paths": [
+            "entities[entity_id=binary_sensor.breakfast_nook_side_right_window].state",
+            "entities[entity_id=binary_sensor.family_room_right_window].state",
+            "entities[entity_id=binary_sensor.garage_and_play_room_windows].state",
+            "derived.anyone_home",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "multiple_entries_open_count"
+    assert len(normalized.params["entry_entity_ids"]) == 3
+    assert normalized.params["require_home"] is True
+    assert normalized.params["require_away"] is False
