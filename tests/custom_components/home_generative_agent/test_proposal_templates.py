@@ -616,7 +616,7 @@ def test_normalize_candidate_alarm_armed_home_while_away() -> None:
 
 
 # ---------------------------------------------------------------------------
-# entity_state_duration (lock)
+# entity_state_duration - lock variant
 # ---------------------------------------------------------------------------
 
 
@@ -643,7 +643,7 @@ def test_normalize_candidate_lock_unlocked_duration() -> None:
 
 
 # ---------------------------------------------------------------------------
-# entity_state_duration (entry)
+# entity_state_duration - entry variant
 # ---------------------------------------------------------------------------
 
 
@@ -664,7 +664,9 @@ def test_normalize_candidate_window_open_duration() -> None:
     normalized = normalize_candidate(candidate)
     assert normalized is not None
     assert normalized.template_id == "entity_state_duration"
-    assert normalized.params["entity_id"] == "binary_sensor.garage_and_play_room_windows"
+    assert (
+        normalized.params["entity_id"] == "binary_sensor.garage_and_play_room_windows"
+    )
     assert normalized.params["target_state"] == "on"
     assert normalized.params["threshold_hours"] == 2.0
 
@@ -712,7 +714,9 @@ def test_normalize_candidate_power_sensor_threshold_at_night() -> None:
     normalized = normalize_candidate(candidate)
     assert normalized is not None
     assert normalized.template_id == "sensor_threshold_condition"
-    assert normalized.params["sensor_entity_id"] == "sensor.washing_machine_switch_0_power"
+    assert (
+        normalized.params["sensor_entity_id"] == "sensor.washing_machine_switch_0_power"
+    )
     assert normalized.params["threshold"] == 50.0
     assert normalized.params["require_night"] is True
 
@@ -812,5 +816,7 @@ def test_normalize_candidate_entity_ids_contains_path_format_sensor() -> None:
     normalized = normalize_candidate(candidate)
     assert normalized is not None
     assert normalized.template_id == "sensor_threshold_condition"
-    assert normalized.params["sensor_entity_id"] == "sensor.washing_machine_switch_0_power"
+    assert (
+        normalized.params["sensor_entity_id"] == "sensor.washing_machine_switch_0_power"
+    )
     assert normalized.params["require_night"] is True

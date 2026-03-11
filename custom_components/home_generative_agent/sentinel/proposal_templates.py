@@ -50,6 +50,7 @@ _NUMERIC_THRESHOLD_PATTERN = re.compile(
 _MAX_PERCENT = 100.0
 _DEFAULT_DURATION_HOURS = 2.0
 _DEFAULT_STALE_HOURS = 24.0
+_MIN_MULTI_ENTRY_COUNT = 2
 _DURATION_TERMS = (
     "duration",
     "extended",
@@ -161,7 +162,7 @@ def normalize_candidate(candidate: dict[str, Any]) -> NormalizedRule | None:
     return explain_normalize_candidate(candidate).normalized
 
 
-def explain_normalize_candidate(  # noqa: PLR0911, PLR0912
+def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
     candidate: dict[str, Any],
 ) -> NormalizationResult:
     """Map a discovery candidate to a supported template with failure reasons."""
@@ -279,8 +280,9 @@ def explain_normalize_candidate(  # noqa: PLR0911, PLR0912
         and presence in ("away", "home")
     ):
         detected_state = _extract_alarm_state(text) or "armed_home"
+        alarm_slug = alarm_id.replace(".", "_")
         default_rule_id = (
-            f"alarm_state_mismatch_{detected_state}_{presence}_{alarm_id.replace('.', '_')}"
+            f"alarm_state_mismatch_{detected_state}_{presence}_{alarm_slug}"
         )
         return NormalizationResult(
             normalized=NormalizedRule(
@@ -350,7 +352,12 @@ def explain_normalize_candidate(  # noqa: PLR0911, PLR0912
         )
 
     # unlocked_lock_while_away: lock unlocked when nobody is home.
-    if lock_ids and not entry_ids and presence == "away" and _contains_any(text, ("lock", "unlocked")):
+    if (
+        lock_ids
+        and not entry_ids
+        and presence == "away"
+        and _contains_any(text, ("lock", "unlocked"))
+    ):
         lock_id = lock_ids[0]
         return NormalizationResult(
             normalized=NormalizedRule(
@@ -381,7 +388,7 @@ def explain_normalize_candidate(  # noqa: PLR0911, PLR0912
     # multiple_entries_open_count: several entries open simultaneously.
     # Must precede the per-entry open branches below.
     if (
-        len(entry_ids) >= 2
+        len(entry_ids) >= _MIN_MULTI_ENTRY_COUNT
         and _has_multiple_signal(text)
         and _contains_any(text, ("open", "window", "door", "entry"))
     ):
@@ -538,10 +545,7 @@ def explain_normalize_candidate(  # noqa: PLR0911, PLR0912
     # sensor_threshold_condition: numeric sensor exceeds a threshold, with optional
     # night/away/home condition. Excludes battery sensors (handled above).
     non_battery_sensor_ids = [s for s in sensor_ids if s not in battery_sensor_ids]
-    if (
-        non_battery_sensor_ids
-        and _has_power_energy_signal(text)
-    ):
+    if non_battery_sensor_ids and _has_power_energy_signal(text):
         threshold = _extract_threshold_numeric(text)
         if threshold is not None:
             sensor_id = non_battery_sensor_ids[0]
@@ -746,7 +750,8 @@ def _normalization_failure(  # noqa: PLR0911, PLR0913
 
 
 def _extract_entity_id_from_evidence_path(path: str) -> str | None:
-    """Extract entity_id from an evidence path in either known format.
+    """
+    Extract entity_id from an evidence path in either known format.
 
     Handles both:
     - ``entities[entity_id=domain.object_id]`` (snapshot query format)
@@ -927,7 +932,9 @@ def _find_camera_id(  # noqa: PLR0911
     return None
 
 
-def _extract_threshold_hours(text: str, *, default: float = _DEFAULT_DURATION_HOURS) -> float:
+def _extract_threshold_hours(
+    text: str, *, default: float = _DEFAULT_DURATION_HOURS
+) -> float:
     match = _HOURS_THRESHOLD_PATTERN.search(text)
     if match:
         try:

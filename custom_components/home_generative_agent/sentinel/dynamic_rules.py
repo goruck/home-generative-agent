@@ -775,7 +775,7 @@ def _eval_entity_state_duration(
     return [_build_finding(rule, [entity_id], evidence)]
 
 
-def _eval_sensor_threshold_condition(
+def _eval_sensor_threshold_condition(  # noqa: PLR0911
     snapshot: FullStateSnapshot,
     rule: dict[str, Any],
     entity_map: Mapping[str, SnapshotEntity],
