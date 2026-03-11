@@ -386,20 +386,40 @@ Tip: if your script needs the raw mobile action callback details, read `sentinel
 
 ### Supported Generated Rule Templates
 
-- `unlocked_lock_when_home`
-- `alarm_disarmed_open_entry`
-- `low_battery_sensors`
-- `unavailable_sensors`
-- `open_entry_when_home`
-- `open_entry_while_away`
-- `open_entry_at_night_when_home`
-- `open_entry_at_night_while_away`
-- `open_any_window_at_night_while_away`
-- `motion_detected_at_night_while_alarm_disarmed`
-- `motion_without_camera_activity`
-- `motion_while_alarm_disarmed_and_home_present`
-- `unknown_person_camera_no_home`
-- `unknown_person_camera_when_home`
+Security / presence:
+
+- `unlocked_lock_when_home` — lock unlocked while someone is home
+- `unlocked_lock_while_away` — lock unlocked while no one is home
+- `alarm_disarmed_open_entry` — alarm disarmed with an entry sensor open
+- `alarm_state_mismatch` — alarm in an armed state that contradicts current occupancy
+- `open_entry_when_home` — entry open while someone is home
+- `open_entry_while_away` — entry open while away
+- `open_entry_at_night_when_home` — entry open at night while home
+- `open_entry_at_night_while_away` — entry open at night while away
+- `open_any_window_at_night_while_away` — any window open at night while away
+- `multiple_entries_open_count` — N or more entries open simultaneously
+- `unknown_person_camera_no_home` — unrecognized person on camera while away
+- `unknown_person_camera_when_home` — unrecognized person on camera while home
+- `motion_detected_at_night_while_alarm_disarmed` — motion at night with alarm disarmed
+- `motion_without_camera_activity` — motion sensor active without corresponding camera activity
+- `motion_while_alarm_disarmed_and_home_present` — motion with alarm disarmed and person home
+
+Duration / staleness:
+
+- `entity_state_duration` — lock or entry held in a state (e.g. unlocked, open) beyond a time threshold
+- `entity_staleness` — person or sensor entity not updated within an expected window
+
+Sensors / appliances:
+
+- `sensor_threshold_condition` — numeric sensor (e.g. power, energy) exceeds a threshold, with optional night/away/home condition
+- `low_battery_sensors` — battery sensor at or below a threshold
+- `unavailable_sensors` — sensors in `unavailable` state
+- `unavailable_sensors_while_home` — sensors in `unavailable` state while someone is home
+
+Baseline / temporal:
+
+- `baseline_deviation` — numeric entity deviates from its rolling average
+- `time_of_day_anomaly` — numeric entity differs from expected hour-of-day rolling average
 
 ### Discovery Novelty and Dedupe
 
@@ -528,7 +548,7 @@ Preferred handling:
 2. If useful, request a new template via `.github/ISSUE_TEMPLATE/feature_rule_request.yml` (the card pre-populates relevant fields from the proposal and marks the candidate as "Template Requested" locally in the browser).
 3. After template support is added, re-approve the proposal to re-evaluate with current mapping logic.
 
-Compatibility note: `unavailable_sensors_while_home` supports re-approving legacy drafts whose `evidence_paths` used domainless entity IDs (for example `entities[entity_id=backyard_vmd3_0].state`).
+Compatibility note: the normalization engine handles both evidence path formats produced by the discovery engine — `entities[entity_id=domain.object_id]` and `entities[entity_ids contains domain.object_id].attr` — so stored drafts from any discovery version can be re-approved without modification. Domainless object IDs (for example `entities[entity_id=backyard_vmd3_0].state`) are also accepted for entry and sensor templates.
 
 `unavailable_sensors` is also supported for candidates without explicit occupancy context (for example `backyard_sensors_unavailable`). It triggers only when all listed sensors are `unavailable`; if any required sensor is missing or not unavailable, no finding is produced.
 
