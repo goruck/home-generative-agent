@@ -9,7 +9,7 @@
 - Human override and kill switch are always available as runtime operations (not config-file edits).
 - Detection rule configs are version-controlled and reviewed before deployment. Rule schema versions are stored in every audit record.
 
-## Current Status Snapshot (as of 2026-03-09)
+## Current Status Snapshot (as of 2026-03-11)
 
 - This document mixes current implementation, accepted design targets, and remaining work. Unless a section explicitly says `Implemented`, treat it as target-state design rather than current behavior.
 - Implemented in code today:
@@ -22,6 +22,8 @@
   - Execution policy service with stale/unavailable handling at the execution gate (autonomy level 2+), plus allowlist, confidence threshold, rate limit, idempotency, canary mode, and live auto-execute.
   - Baseline updater and temporal/baseline detector support.
   - Discovery pipeline improvements from Milestone 5: service-mapped suggested actions, on-demand discovery trigger service, immediate rule activation on proposal approval, structured normalization failure reasons, overlap metadata, richer draft notifications, and rule preview before commit.
+  - Portable dynamic rule templates (PR #321, merged 2026-03-11): six new templates (`unlocked_lock_while_away`, `alarm_state_mismatch`, `entity_state_duration`, `sensor_threshold_condition`, `entity_staleness`, `multiple_entries_open_count`) covering the most common discovery-generated candidate patterns across arbitrary HA configurations. Evidence-path parser updated to handle both `entities[entity_id=...]` and `entities[entity_ids contains ...]` formats. Lock normalization routing bug fixed. Closed 19 open Rule issues (#298–#308, #310, #313–#317, #319, #320).
+  - Four Rule issues remain open as novel patterns requiring separate design: #309 (alarm disarmed during external threat), #311 (camera snapshot quality), #312 (vehicle detection), #318 (unknown person without camera entity).
 - Partially implemented or still open (see Known Current Gaps below for the summary list):
   - Rule/suppression-state-suppressed findings are not written to the audit store (engine silently returns at the suppression gate). Triage-suppressed findings *are* written to audit.
   - `ACTION_POLICY_BLOCKED` blocks execution but does not suppress notification dispatch.
