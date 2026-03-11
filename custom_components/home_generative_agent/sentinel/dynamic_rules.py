@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any, cast
+
+from homeassistant.util import dt as dt_util
 
 from .baseline import evaluate_baseline_deviation, evaluate_time_of_day_anomaly
 from .models import AnomalyFinding, Severity, build_anomaly_id
@@ -124,6 +127,25 @@ def evaluate_dynamic_rules(
         ),
         "time_of_day_anomaly": (
             lambda rule: evaluate_time_of_day_anomaly(snapshot, rule, _baselines)
+        ),
+        # Flexible templates
+        "unlocked_lock_while_away": lambda rule: _eval_unlocked_lock_while_away(
+            snapshot, rule, entity_map
+        ),
+        "alarm_state_mismatch": lambda rule: _eval_alarm_state_mismatch(
+            snapshot, rule, entity_map
+        ),
+        "entity_state_duration": lambda rule: _eval_entity_state_duration(
+            snapshot, rule, entity_map
+        ),
+        "sensor_threshold_condition": lambda rule: _eval_sensor_threshold_condition(
+            snapshot, rule, entity_map
+        ),
+        "entity_staleness": lambda rule: _eval_entity_staleness(
+            snapshot, rule, entity_map
+        ),
+        "multiple_entries_open_count": lambda rule: _eval_multiple_entries_open_count(
+            snapshot, rule, entity_map
         ),
     }
 
@@ -663,6 +685,208 @@ def _find_open_window_entity_ids(
         if device_class == "window" or "window" in entity_id:
             window_ids.append(entity_id)
     return sorted(set(window_ids))
+
+
+def _eval_unlocked_lock_while_away(
+    snapshot: FullStateSnapshot,
+    rule: dict[str, Any],
+    entity_map: Mapping[str, SnapshotEntity],
+) -> list[AnomalyFinding]:
+    if snapshot["derived"]["anyone_home"]:
+        return []
+    params = _rule_params(rule)
+    lock_id = params.get("lock_entity_id")
+    if not lock_id:
+        return []
+    lock = entity_map.get(lock_id)
+    if not lock or lock.get("state") != "unlocked":
+        return []
+    evidence = {
+        "rule_id": rule.get("rule_id"),
+        "template_id": rule.get("template_id"),
+        "lock_entity_id": lock_id,
+        "lock_state": lock.get("state"),
+        "anyone_home": snapshot["derived"]["anyone_home"],
+        "last_changed": lock.get("last_changed"),
+    }
+    return [_build_finding(rule, [lock_id], evidence)]
+
+
+def _eval_alarm_state_mismatch(
+    snapshot: FullStateSnapshot,
+    rule: dict[str, Any],
+    entity_map: Mapping[str, SnapshotEntity],
+) -> list[AnomalyFinding]:
+    params = _rule_params(rule)
+    alarm_id = params.get("alarm_entity_id")
+    alarm_state = params.get("alarm_state")
+    expected_presence = params.get("expected_presence")
+    if not alarm_id or not alarm_state or not expected_presence:
+        return []
+    anyone_home = snapshot["derived"]["anyone_home"]
+    if expected_presence == "away" and anyone_home:
+        return []
+    if expected_presence == "home" and not anyone_home:
+        return []
+    alarm = entity_map.get(alarm_id)
+    if not alarm or alarm.get("state") != alarm_state:
+        return []
+    evidence = {
+        "rule_id": rule.get("rule_id"),
+        "template_id": rule.get("template_id"),
+        "alarm_entity_id": alarm_id,
+        "alarm_state": alarm.get("state"),
+        "expected_presence": expected_presence,
+        "anyone_home": anyone_home,
+    }
+    return [_build_finding(rule, [alarm_id], evidence)]
+
+
+def _eval_entity_state_duration(
+    snapshot: FullStateSnapshot,
+    rule: dict[str, Any],
+    entity_map: Mapping[str, SnapshotEntity],
+) -> list[AnomalyFinding]:
+    params = _rule_params(rule)
+    entity_id = params.get("entity_id")
+    target_state = params.get("target_state")
+    threshold_hours = _coerce_float(params.get("threshold_hours"), default=2.0)
+    if not entity_id or not target_state:
+        return []
+    entity = entity_map.get(entity_id)
+    if not entity or entity.get("state") != target_state:
+        return []
+    now = dt_util.parse_datetime(snapshot["derived"]["now"]) or dt_util.utcnow()
+    last_changed = dt_util.parse_datetime(str(entity.get("last_changed") or ""))
+    if last_changed is None:
+        return []
+    if (now - last_changed) < timedelta(hours=threshold_hours):
+        return []
+    evidence = {
+        "rule_id": rule.get("rule_id"),
+        "template_id": rule.get("template_id"),
+        "entity_id": entity_id,
+        "state": entity.get("state"),
+        "target_state": target_state,
+        "threshold_hours": threshold_hours,
+        "duration_hours": (now - last_changed).total_seconds() / 3600,
+        "last_changed": entity.get("last_changed"),
+    }
+    return [_build_finding(rule, [entity_id], evidence)]
+
+
+def _eval_sensor_threshold_condition(  # noqa: PLR0911
+    snapshot: FullStateSnapshot,
+    rule: dict[str, Any],
+    entity_map: Mapping[str, SnapshotEntity],
+) -> list[AnomalyFinding]:
+    params = _rule_params(rule)
+    sensor_id = params.get("sensor_entity_id")
+    threshold = _coerce_float(params.get("threshold"), default=0.0)
+    require_night = bool(params.get("require_night", False))
+    require_away = bool(params.get("require_away", False))
+    require_home = bool(params.get("require_home", False))
+    if not sensor_id:
+        return []
+    if require_night and not snapshot["derived"]["is_night"]:
+        return []
+    anyone_home = snapshot["derived"]["anyone_home"]
+    if require_away and anyone_home:
+        return []
+    if require_home and not anyone_home:
+        return []
+    sensor = entity_map.get(sensor_id)
+    if not sensor:
+        return []
+    value = _coerce_optional_float(sensor.get("state"))
+    if value is None or value <= threshold:
+        return []
+    evidence = {
+        "rule_id": rule.get("rule_id"),
+        "template_id": rule.get("template_id"),
+        "sensor_entity_id": sensor_id,
+        "sensor_value": value,
+        "threshold": threshold,
+        "require_night": require_night,
+        "require_away": require_away,
+        "require_home": require_home,
+        "anyone_home": anyone_home,
+        "is_night": snapshot["derived"]["is_night"],
+    }
+    return [_build_finding(rule, [sensor_id], evidence)]
+
+
+def _eval_entity_staleness(
+    snapshot: FullStateSnapshot,
+    rule: dict[str, Any],
+    entity_map: Mapping[str, SnapshotEntity],
+) -> list[AnomalyFinding]:
+    params = _rule_params(rule)
+    entity_id = params.get("entity_id")
+    max_stale_hours = _coerce_float(params.get("max_stale_hours"), default=24.0)
+    if not entity_id:
+        return []
+    entity = entity_map.get(entity_id)
+    if not entity:
+        return []
+    now = dt_util.parse_datetime(snapshot["derived"]["now"]) or dt_util.utcnow()
+    last_changed = dt_util.parse_datetime(str(entity.get("last_changed") or ""))
+    if last_changed is None:
+        return []
+    age_hours = (now - last_changed).total_seconds() / 3600
+    if age_hours <= max_stale_hours:
+        return []
+    evidence = {
+        "rule_id": rule.get("rule_id"),
+        "template_id": rule.get("template_id"),
+        "entity_id": entity_id,
+        "state": entity.get("state"),
+        "max_stale_hours": max_stale_hours,
+        "age_hours": age_hours,
+        "last_changed": entity.get("last_changed"),
+    }
+    return [_build_finding(rule, [entity_id], evidence)]
+
+
+def _eval_multiple_entries_open_count(
+    snapshot: FullStateSnapshot,
+    rule: dict[str, Any],
+    entity_map: Mapping[str, SnapshotEntity],
+) -> list[AnomalyFinding]:
+    params = _rule_params(rule)
+    entry_ids = params.get("entry_entity_ids")
+    min_count = int(_coerce_float(params.get("min_count"), default=2.0))
+    require_home = bool(params.get("require_home", False))
+    require_away = bool(params.get("require_away", False))
+    if not isinstance(entry_ids, list) or not entry_ids:
+        return []
+    anyone_home = snapshot["derived"]["anyone_home"]
+    if require_home and not anyone_home:
+        return []
+    if require_away and anyone_home:
+        return []
+    triggering: list[str] = []
+    states: dict[str, Any] = {}
+    for entry_id in entry_ids:
+        entity = entity_map.get(entry_id)
+        if not entity:
+            continue
+        states[entry_id] = entity.get("state")
+        if entity.get("state") == "on":
+            triggering.append(entry_id)
+    if len(triggering) < min_count:
+        return []
+    evidence = {
+        "rule_id": rule.get("rule_id"),
+        "template_id": rule.get("template_id"),
+        "entry_entity_ids": list(entry_ids),
+        "triggering_entity_ids": triggering,
+        "open_count": len(triggering),
+        "min_count": min_count,
+        "entry_states": states,
+        "anyone_home": anyone_home,
+    }
+    return [_build_finding(rule, triggering, evidence)]
 
 
 def _build_finding(

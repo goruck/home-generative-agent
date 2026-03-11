@@ -10,6 +10,7 @@ __pycache__
 # misc
 .coverage
 .claude/settings.local.json
+.claude/settings.json
 .vscode/settings.json
 coverage.xml
 .ruff_cache
