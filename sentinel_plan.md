@@ -703,7 +703,7 @@ Historical note: the issue-status details below mix repository history with curr
 - Tests: Rolling stats accuracy; upsert idempotency; schema migration; deviation trigger correctness; stale baseline handling.
 - Size: L
 - Dependencies: Issue #8
-- Post-merge fixes (2026-03-12, branch `feat/sentinel-baseline-detection-complete`):
+- Post-merge fixes (2026-03-12, PR #323, branch `feat/sentinel-baseline-detection-complete`):
   - Added `async_fetch_baselines()` to `SentinelBaselineUpdater` — bulk-reads all `sentinel_baselines` rows into `{entity_id: {metric: float}}`.
   - Wired `engine.py` `_run_once()` to call `async_fetch_baselines()` and forward the result to `evaluate_dynamic_rules()`; previously the `baselines` argument was always an empty dict so neither template ever fired.
   - Added the three baseline config constants to `SentinelSubentryFlow`: `CONF_SENTINEL_BASELINE_ENABLED`, `CONF_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES`, `CONF_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS` — they were defined in `const.py` but never imported or shown in the UI.
