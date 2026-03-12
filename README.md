@@ -208,12 +208,14 @@ Configuration options (in the Sentinel subentry):
 
 When `sentinel_baseline_enabled` is `true`, a background `SentinelBaselineUpdater` task writes rolling statistical summaries (per entity, per metric) to a `sentinel_baselines` PostgreSQL table on a configurable cadence.
 
-Two temporal detection helpers can be registered as dynamic-rule evaluators:
+On each detection cycle the engine calls `async_fetch_baselines()` to read current baseline values from PostgreSQL and passes them to the dynamic-rule evaluators. Two temporal templates are always registered:
 
-- `evaluate_baseline_deviation` — fires when a numeric entity state deviates from its rolling average by more than a configured threshold percent.
-- `evaluate_time_of_day_anomaly` — fires when a numeric entity state differs from the expected hour-of-day rolling average by more than a configured threshold percent.
+- `baseline_deviation` — fires when a numeric entity state deviates from its rolling average by more than `threshold_pct` percent (default `50.0`).
+- `time_of_day_anomaly` — fires when a numeric entity state differs from the expected hour-of-day rolling average by more than `threshold_pct` percent (default `50.0`).
 
-Baseline freshness states (returned by `check_baseline_freshness`):
+`threshold_pct`, `entity_id`, and `metric` are per-rule `params` stored in the rule registry — they are set when a rule is created via discovery or the `hga_sentinel_add_rule` service, not in the subentry. Both templates produce no findings while the table is empty (baselines accumulate over time).
+
+Baseline freshness states (returned by `SentinelBaselineUpdater.check_freshness()`):
 
 - `fresh` — baseline was updated within the freshness threshold
 - `stale` — baseline exists but is older than the freshness threshold

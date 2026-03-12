@@ -101,6 +101,11 @@ WHERE entity_id = %s AND metric = %s AND period = %s
 LIMIT 1
 """
 
+_FETCH_ALL_SQL = """
+SELECT entity_id, metric, value
+FROM sentinel_baselines
+"""
+
 
 class SentinelBaselineUpdater:
     """
@@ -292,6 +297,37 @@ class SentinelBaselineUpdater:
         if age_seconds <= freshness_threshold_seconds:
             return BASELINE_FRESH
         return BASELINE_STALE
+
+    async def async_fetch_baselines(self) -> dict[str, dict[str, float]]:
+        """
+        Return all current baseline values as ``{entity_id: {metric: value}}``.
+
+        Used by the sentinel engine to supply baselines to dynamic-rule
+        evaluators (``baseline_deviation``, ``time_of_day_anomaly``) on each
+        detection cycle.  Returns an empty dict on any DB error.
+        """
+        try:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(_FETCH_ALL_SQL)
+                rows = await cur.fetchall()
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("Baseline fetch failed; returning empty baselines.")
+            return {}
+
+        result: dict[str, dict[str, float]] = {}
+        for row in rows:
+            if isinstance(row, dict):
+                entity_id = row.get("entity_id", "")
+                metric = row.get("metric", "")
+                value = row.get("value")
+            else:
+                entity_id, metric, value = row[0], row[1], row[2]
+            if not entity_id or not metric or value is None:
+                continue
+            result.setdefault(entity_id, {})[metric] = float(value)
+
+        LOGGER.debug("Fetched baselines for %d entities.", len(result))
+        return result
 
 
 # ---------------------------------------------------------------------------
