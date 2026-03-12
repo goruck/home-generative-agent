@@ -29,6 +29,9 @@ from ..const import (  # noqa: TID252
     CONF_CRITICAL_ACTION_PIN,
     CONF_EXPLAIN_ENABLED,
     CONF_NOTIFY_SERVICE,
+    CONF_SENTINEL_BASELINE_ENABLED,
+    CONF_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS,
+    CONF_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES,
     CONF_SENTINEL_COOLDOWN_MINUTES,
     CONF_SENTINEL_DISCOVERY_ENABLED,
     CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS,
@@ -43,6 +46,9 @@ from ..const import (  # noqa: TID252
     CRITICAL_PIN_MAX_LEN,
     CRITICAL_PIN_MIN_LEN,
     RECOMMENDED_EXPLAIN_ENABLED,
+    RECOMMENDED_SENTINEL_BASELINE_ENABLED,
+    RECOMMENDED_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS,
+    RECOMMENDED_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES,
     RECOMMENDED_SENTINEL_COOLDOWN_MINUTES,
     RECOMMENDED_SENTINEL_DISCOVERY_ENABLED,
     RECOMMENDED_SENTINEL_DISCOVERY_INTERVAL_SECONDS,
@@ -93,6 +99,13 @@ def _default_payload() -> dict[str, Any]:
             RECOMMENDED_SENTINEL_DISCOVERY_INTERVAL_SECONDS
         ),
         CONF_SENTINEL_DISCOVERY_MAX_RECORDS: RECOMMENDED_SENTINEL_DISCOVERY_MAX_RECORDS,
+        CONF_SENTINEL_BASELINE_ENABLED: RECOMMENDED_SENTINEL_BASELINE_ENABLED,
+        CONF_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES: (
+            RECOMMENDED_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES
+        ),
+        CONF_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS: (
+            RECOMMENDED_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS
+        ),
         CONF_EXPLAIN_ENABLED: RECOMMENDED_EXPLAIN_ENABLED,
         CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: (
             RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE
@@ -181,6 +194,33 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                     )
                 ),
             ): NumberSelector(NumberSelectorConfig(min=10, max=1000, step=10)),
+            vol.Required(
+                CONF_SENTINEL_BASELINE_ENABLED,
+                default=bool(
+                    payload.get(
+                        CONF_SENTINEL_BASELINE_ENABLED,
+                        RECOMMENDED_SENTINEL_BASELINE_ENABLED,
+                    )
+                ),
+            ): BooleanSelector(),
+            vol.Required(
+                CONF_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES,
+                default=int(
+                    payload.get(
+                        CONF_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES,
+                        RECOMMENDED_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES,
+                    )
+                ),
+            ): NumberSelector(NumberSelectorConfig(min=1, max=1440, step=1)),
+            vol.Required(
+                CONF_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS,
+                default=int(
+                    payload.get(
+                        CONF_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS,
+                        RECOMMENDED_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS,
+                    )
+                ),
+            ): NumberSelector(NumberSelectorConfig(min=60, max=86400, step=60)),
             vol.Required(
                 CONF_EXPLAIN_ENABLED,
                 default=bool(

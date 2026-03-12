@@ -9,7 +9,7 @@
 - Human override and kill switch are always available as runtime operations (not config-file edits).
 - Detection rule configs are version-controlled and reviewed before deployment. Rule schema versions are stored in every audit record.
 
-## Current Status Snapshot (as of 2026-03-11)
+## Current Status Snapshot (as of 2026-03-12)
 
 - This document mixes current implementation, accepted design targets, and remaining work. Unless a section explicitly says `Implemented`, treat it as target-state design rather than current behavior.
 - Implemented in code today:
@@ -20,7 +20,7 @@
   - Suppression reason codes, quiet hours, pending-prompt TTL, snooze (`24h`, permanent), and presence-grace windows.
   - LLM triage with a strict prompt allowlist and fail-open behavior.
   - Execution policy service with stale/unavailable handling at the execution gate (autonomy level 2+), plus allowlist, confidence threshold, rate limit, idempotency, canary mode, and live auto-execute.
-  - Baseline updater and temporal/baseline detector support.
+  - Baseline updater and temporal/baseline detector support — fully wired end-to-end (2026-03-12): `async_fetch_baselines()` added to `SentinelBaselineUpdater`; engine now calls it each cycle and passes the result to `evaluate_dynamic_rules()`; baseline config fields (`sentinel_baseline_enabled`, `sentinel_baseline_update_interval_minutes`, `sentinel_baseline_freshness_threshold_seconds`) exposed in the Sentinel subentry flow. Prior to this fix the `baseline_deviation` and `time_of_day_anomaly` evaluators always received an empty baselines dict and never fired.
   - Discovery pipeline improvements from Milestone 5: service-mapped suggested actions, on-demand discovery trigger service, immediate rule activation on proposal approval, structured normalization failure reasons, overlap metadata, richer draft notifications, and rule preview before commit.
   - Portable dynamic rule templates (PR #321, merged 2026-03-11): six new templates (`unlocked_lock_while_away`, `alarm_state_mismatch`, `entity_state_duration`, `sensor_threshold_condition`, `entity_staleness`, `multiple_entries_open_count`) covering the most common discovery-generated candidate patterns across arbitrary HA configurations. Evidence-path parser updated to handle both `entities[entity_id=...]` and `entities[entity_ids contains ...]` formats. Lock normalization routing bug fixed. Closed 19 open Rule issues (#298–#308, #310, #313–#317, #319, #320).
   - Four Rule issues remain open as novel patterns requiring separate design: #309 (alarm disarmed during external threat), #311 (camera snapshot quality), #312 (vehicle detection), #318 (unknown person without camera entity).
@@ -703,6 +703,13 @@ Historical note: the issue-status details below mix repository history with curr
 - Tests: Rolling stats accuracy; upsert idempotency; schema migration; deviation trigger correctness; stale baseline handling.
 - Size: L
 - Dependencies: Issue #8
+- Post-merge fixes (2026-03-12, branch `feat/sentinel-baseline-detection-complete`):
+  - Added `async_fetch_baselines()` to `SentinelBaselineUpdater` — bulk-reads all `sentinel_baselines` rows into `{entity_id: {metric: float}}`.
+  - Wired `engine.py` `_run_once()` to call `async_fetch_baselines()` and forward the result to `evaluate_dynamic_rules()`; previously the `baselines` argument was always an empty dict so neither template ever fired.
+  - Added the three baseline config constants to `SentinelSubentryFlow`: `CONF_SENTINEL_BASELINE_ENABLED`, `CONF_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES`, `CONF_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS` — they were defined in `const.py` but never imported or shown in the UI.
+  - Added translations for the three new fields in `strings.json`, `translations/en.json`, and `translations/tr.json`.
+  - Added 4 unit tests for `async_fetch_baselines` (dict rows, tuple rows, DB error, empty result).
+  - Updated README Baseline Detection section: correct method name (`check_freshness`), accurate `threshold_pct` per-rule description, removed "can be registered" phrasing.
 
 **Issue #15 — Lambda rule review/approval UI** *(Done → Removed — GitHub #266, closed 2026-03-05; feature removed in PR #285)*
 

@@ -546,3 +546,89 @@ async def test_update_baselines_empty_snapshot_is_noop() -> None:
 
     await updater._update_baselines(_snapshot([]))
     # No AssertionError raised means the pool was not accessed.
+
+
+# ---------------------------------------------------------------------------
+# 6. async_fetch_baselines
+# ---------------------------------------------------------------------------
+
+
+def _make_pool_with_rows(rows: list[Any]) -> MagicMock:
+    """Return a mock pool whose fetchall() returns *rows*."""
+    mock_cursor = MagicMock()
+    mock_cursor.execute = AsyncMock()
+    mock_cursor.fetchall = AsyncMock(return_value=rows)
+    mock_cursor.__aenter__ = AsyncMock(return_value=mock_cursor)
+    mock_cursor.__aexit__ = AsyncMock(return_value=False)
+
+    mock_conn = MagicMock()
+    mock_conn.cursor = MagicMock(return_value=mock_cursor)
+    mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_conn.__aexit__ = AsyncMock(return_value=False)
+
+    mock_pool = MagicMock()
+    mock_pool.connection = MagicMock(return_value=mock_conn)
+    return mock_pool
+
+
+@pytest.mark.asyncio
+async def test_fetch_baselines_returns_nested_dict_from_dict_rows() -> None:
+    """async_fetch_baselines builds {entity_id: {metric: value}} from dict rows."""
+    rows = [
+        {
+            "entity_id": "sensor.temperature",
+            "metric": METRIC_ROLLING_AVG,
+            "value": 21.5,
+        },
+        {
+            "entity_id": "sensor.temperature",
+            "metric": f"{METRIC_HOURLY_PREFIX}10",
+            "value": 20.0,
+        },
+        {"entity_id": "sensor.power", "metric": METRIC_ROLLING_AVG, "value": 150.0},
+    ]
+    updater = SentinelBaselineUpdater(MagicMock(), _make_pool_with_rows(rows), {})
+
+    result = await updater.async_fetch_baselines()
+
+    assert result["sensor.temperature"][METRIC_ROLLING_AVG] == pytest.approx(21.5)
+    assert result["sensor.temperature"][f"{METRIC_HOURLY_PREFIX}10"] == pytest.approx(
+        20.0
+    )
+    assert result["sensor.power"][METRIC_ROLLING_AVG] == pytest.approx(150.0)
+
+
+@pytest.mark.asyncio
+async def test_fetch_baselines_returns_nested_dict_from_tuple_rows() -> None:
+    """async_fetch_baselines handles tuple rows (non-dict cursor)."""
+    rows = [
+        ("sensor.temperature", METRIC_ROLLING_AVG, 21.5),
+        ("sensor.power", METRIC_ROLLING_AVG, 150.0),
+    ]
+    updater = SentinelBaselineUpdater(MagicMock(), _make_pool_with_rows(rows), {})
+
+    result = await updater.async_fetch_baselines()
+
+    assert result["sensor.temperature"][METRIC_ROLLING_AVG] == pytest.approx(21.5)
+    assert result["sensor.power"][METRIC_ROLLING_AVG] == pytest.approx(150.0)
+
+
+@pytest.mark.asyncio
+async def test_fetch_baselines_returns_empty_dict_on_db_error() -> None:
+    """async_fetch_baselines returns {} when the DB query raises."""
+    mock_pool = MagicMock()
+    mock_pool.connection = MagicMock(side_effect=OSError("DB down"))
+
+    updater = SentinelBaselineUpdater(MagicMock(), mock_pool, {})
+    result = await updater.async_fetch_baselines()
+
+    assert result == {}
+
+
+@pytest.mark.asyncio
+async def test_fetch_baselines_returns_empty_dict_when_no_rows() -> None:
+    """async_fetch_baselines returns {} when the table is empty."""
+    updater = SentinelBaselineUpdater(MagicMock(), _make_pool_with_rows([]), {})
+    result = await updater.async_fetch_baselines()
+
+    assert result == {}

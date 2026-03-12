@@ -421,7 +421,12 @@ class SentinelEngine:
                 len(dynamic_rules),
             )
             if dynamic_rules:
-                dynamic_findings = evaluate_dynamic_rules(snapshot, dynamic_rules)
+                baselines: dict[str, dict[str, float]] = {}
+                if self._baseline_updater is not None:
+                    baselines = await self._baseline_updater.async_fetch_baselines()
+                dynamic_findings = evaluate_dynamic_rules(
+                    snapshot, dynamic_rules, baselines=baselines
+                )
                 LOGGER.debug(
                     "Sentinel evaluated %s dynamic rule(s), produced %s finding(s).",
                     len(dynamic_rules),
