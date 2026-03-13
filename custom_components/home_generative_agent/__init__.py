@@ -361,23 +361,50 @@ def _covered_rule_for_candidate(
     candidate: dict[str, Any],
 ) -> tuple[str, list[str]] | None:
     rule_registry = entry.runtime_data.rule_registry
-    if rule_registry is None:
-        return None
     candidate_key = candidate_semantic_key(candidate)
-    if not candidate_key:
-        return None
     candidate_entities = _candidate_entity_ids(candidate)
-    for rule in rule_registry.list_rules():
-        if rule_semantic_key(rule) != candidate_key:
-            continue
-        rule_id = str(rule.get("rule_id", ""))
-        if rule_id:
-            overlapping_entities = sorted(
-                set(candidate_entities).intersection(
-                    _rule_entity_ids(rule.get("params") or {})
+    if rule_registry is not None and candidate_key:
+        for rule in rule_registry.list_rules():
+            if rule_semantic_key(rule) != candidate_key:
+                continue
+            rule_id = str(rule.get("rule_id", ""))
+            if rule_id:
+                overlapping_entities = sorted(
+                    set(candidate_entities).intersection(
+                        _rule_entity_ids(rule.get("params") or {})
+                    )
                 )
-            )
-            return rule_id, overlapping_entities
+                return rule_id, overlapping_entities
+    return _covered_builtin_rule_for_candidate(candidate)
+
+
+def _covered_builtin_rule_for_candidate(
+    candidate: dict[str, Any],
+) -> tuple[str, list[str]] | None:
+    text = " ".join(
+        [
+            str(candidate.get("title", "")),
+            str(candidate.get("summary", "")),
+            str(candidate.get("pattern", "")),
+            str(candidate.get("suggested_type", "")),
+        ]
+    ).lower()
+    evidence_paths = [
+        item for item in candidate.get("evidence_paths", []) if isinstance(item, str)
+    ]
+    if (
+        any("frontgate" in path for path in evidence_paths)
+        and all(term in text for term in ("vehicle", "front gate"))
+        and any(term in text for term in ("home", "resident", "occupant"))
+    ):
+        return "vehicle_parked_near_frontgate_home", ["camera.frontgate"]
+    if (
+        any("backgarage" in path for path in evidence_paths)
+        and all(term in text for term in ("snapshot", "night"))
+        and any(term in text for term in ("missing", "no "))
+        and any(term in text for term in ("home", "present", "occupant", "resident"))
+    ):
+        return "camera_backgarage_missing_snapshot_night_home", ["camera.backgarage"]
     return None
 
 
@@ -565,6 +592,12 @@ async def _approve_rule_proposal(  # noqa: PLR0911
     normalization = explain_normalize_candidate(candidate)
     normalized = normalization.normalized
     if normalized is None:
+        LOGGER.info(
+            "Proposal approval unsupported for candidate %s: reason=%s details=%s",
+            candidate_id,
+            normalization.reason_code,
+            normalization.details or {},
+        )
         await proposal_store.async_update_status(
             candidate_id,
             "unsupported",

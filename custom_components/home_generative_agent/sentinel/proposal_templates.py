@@ -37,6 +37,24 @@ SUPPORTED_TEMPLATES = {
 }
 
 _PERCENT_THRESHOLD_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*%")
+_DOT_NOTATION_ENTITY_PATTERN = re.compile(r"^([a-z_]+\.[a-z0-9_]+)(?:[.\[]|$)")
+_HA_ENTITY_DOMAINS = frozenset(
+    {
+        "alarm_control_panel",
+        "binary_sensor",
+        "camera",
+        "cover",
+        "input_boolean",
+        "input_number",
+        "light",
+        "lock",
+        "media_player",
+        "person",
+        "sensor",
+        "switch",
+        "vacuum",
+    }
+)
 _RELATIVE_THRESHOLD_PATTERN = re.compile(
     r"(?:at\s+or\s+below|below|under|<=|less than)\s*(\d+(?:\.\d+)?)"
 )
@@ -374,6 +392,23 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 confidence=float(candidate.get("confidence_hint", 0.6)),
                 is_sensitive=True,
                 suggested_actions=["close_entry"],
+            )
+        )
+
+    # low_battery on a lock entity: battery signal takes priority over unlocked routing.
+    if lock_ids and "battery" in text and _contains_any(text, ("low", "below", "weak")):
+        return NormalizationResult(
+            normalized=NormalizedRule(
+                rule_id=_candidate_rule_id(candidate, default="low_battery_sensors"),
+                template_id="low_battery_sensors",
+                params={
+                    "sensor_entity_ids": lock_ids,
+                    "threshold": _extract_threshold_percent(text, default=40.0),
+                },
+                severity="low",
+                confidence=float(candidate.get("confidence_hint", 0.62)),
+                is_sensitive=False,
+                suggested_actions=["check_sensor"],
             )
         )
 
@@ -790,16 +825,23 @@ def _normalization_failure(  # noqa: PLR0911, PLR0913
 
 def _extract_entity_id_from_evidence_path(path: str) -> str | None:
     """
-    Extract entity_id from an evidence path in either known format.
+    Extract entity_id from an evidence path in any known format.
 
-    Handles both:
+    Handles:
     - ``entities[entity_id=domain.object_id]`` (snapshot query format)
     - ``entities[entity_ids contains domain.object_id].attr`` (discovery format)
+    - ``domain.object_id`` or ``domain.object_id.attribute`` (dot-notation)
     """
     if path.startswith("entities[entity_id="):
         return path.split("entities[entity_id=", 1)[1].split("]", 1)[0]
     if path.startswith("entities[entity_ids contains "):
         return path.split("entities[entity_ids contains ", 1)[1].split("]", 1)[0]
+    m = _DOT_NOTATION_ENTITY_PATTERN.match(path)
+    if m:
+        entity_id = m.group(1)
+        domain = entity_id.split(".", 1)[0]
+        if domain in _HA_ENTITY_DOMAINS:
+            return entity_id
     return None
 
 

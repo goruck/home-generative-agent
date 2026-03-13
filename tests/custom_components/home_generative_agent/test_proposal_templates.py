@@ -899,3 +899,48 @@ def test_normalize_candidate_window_open_duration_no_entry_ids_falls_back() -> N
     assert normalized is not None
     assert normalized.template_id == "open_any_window_at_night_while_away"
     assert normalized.params["entry_selector"] == "window"
+
+
+# ---------------------------------------------------------------------------
+# Dot-notation evidence path extraction
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_candidate_power_sensor_dot_notation_evidence_paths() -> None:
+    """Sensor entity IDs in dot-notation paths (e.g. sensor.foo.state) are extracted."""
+    candidate = {
+        "candidate_id": "high_energy_consumption_night",
+        "title": "High Energy Consumption at Night",
+        "summary": "Anomalously high energy consumption detected during overnight hours.",
+        "pattern": "is_night AND sensor.power_meter > baseline",
+        "suggested_type": "energy",
+        "confidence_hint": 0.75,
+        "evidence_paths": [
+            "derived.is_night",
+            "sensor.power_meter_energy.state",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "baseline_deviation"
+    assert normalized.params["entity_id"] == "sensor.power_meter_energy"
+
+
+def test_normalize_candidate_lock_battery_dot_notation_evidence_paths() -> None:
+    """Lock entity IDs in dot-notation paths (e.g. lock.foo.battery_level) are extracted."""
+    candidate = {
+        "candidate_id": "playroom_lock_battery_low",
+        "title": "Playroom Lock Battery Low",
+        "summary": "The playroom door lock battery is below 20%.",
+        "pattern": "lock.playroom_door_lock.battery_level < 20",
+        "suggested_type": "maintenance",
+        "confidence_hint": 0.9,
+        "evidence_paths": [
+            "lock.playroom_door_lock.battery_level",
+            "derived.anyone_home",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "low_battery_sensors"
+    assert "lock.playroom_door_lock" in normalized.params.get("sensor_entity_ids", [])
