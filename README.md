@@ -574,12 +574,19 @@ Preferred handling:
 2. If useful, request a new template via `.github/ISSUE_TEMPLATE/feature_rule_request.yml` (the card pre-populates relevant fields from the proposal and marks the candidate as "Template Requested" locally in the browser).
 3. After template support is added, re-approve the proposal to re-evaluate with current mapping logic.
 
-Compatibility note: the normalization engine handles both evidence path formats produced by the discovery engine — `entities[entity_id=domain.object_id]` and `entities[entity_ids contains domain.object_id].attr` — so stored drafts from any discovery version can be re-approved without modification. Domainless object IDs (for example `entities[entity_id=backyard_vmd3_0].state`) are also accepted for entry and sensor templates.
+Compatibility note: the normalization engine handles all evidence path formats produced by the discovery engine:
+
+- `entities[entity_id=domain.object_id]` (snapshot query format)
+- `entities[entity_ids contains domain.object_id].attr` (discovery format)
+- `domain.object_id.attribute` (dot-notation, e.g. `sensor.power_meter.state`, `lock.front_door.battery_level`)
+
+Domainless object IDs (for example `entities[entity_id=backyard_vmd3_0].state`) are also accepted for entry and sensor templates. Stored drafts from any discovery version can be re-approved without modification.
 
 Normalization fallbacks for common LLM-generated patterns:
 
 - **Power/energy sensor without numeric threshold** (e.g. `high_energy_consumption_night`): when no explicit value like "above 500W" appears in the candidate text, normalization falls back to `baseline_deviation` so the rule fires when the sensor deviates from its rolling average rather than a fixed threshold.
-- **Alarm disarmed with no occupancy signal** (e.g. `alarm_disarmed_during_external_threat`): `alarm_state_mismatch` now also matches candidates whose text contains "disarmed" without an armed-state keyword, and defaults `expected_presence` to `"home"` when no home/away signal is present.
+- **Lock battery low** (e.g. `playroom_lock_battery_low`): when a lock entity appears in evidence paths alongside "battery low/below" text, normalization routes to `low_battery_sensors` rather than `unlocked_lock_when_home`.
+- **Alarm disarmed with no occupancy signal** (e.g. `alarm_disarmed_during_external_threat`): `alarm_state_mismatch` also matches candidates whose text contains "disarmed" without an armed-state keyword, and defaults `expected_presence` to `"home"` when no home/away signal is present.
 - **Window/entry open duration without entity IDs in evidence** (e.g. `window_open_duration_exceeded`): when evidence paths contain no window entity references, normalization falls back to `open_any_window_at_night_while_away` using a selector-based approach that checks all window sensors.
 
 `unavailable_sensors` is also supported for candidates without explicit occupancy context (for example `backyard_sensors_unavailable`). It triggers only when all listed sensors are `unavailable`; if any required sensor is missing or not unavailable, no finding is produced.
