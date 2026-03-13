@@ -1,4 +1,4 @@
-# ruff: noqa: S101
+# ruff: noqa: S101, PLR0913
 """Tests for sentinel rules."""
 
 from __future__ import annotations
@@ -8,11 +8,17 @@ from typing import Any
 from custom_components.home_generative_agent.sentinel.dynamic_rules import (
     evaluate_dynamic_rule,
 )
+from custom_components.home_generative_agent.sentinel.rules.alarm_disarmed_external_threat import (
+    AlarmDisarmedDuringExternalThreatRule,
+)
 from custom_components.home_generative_agent.sentinel.rules.appliance_power_duration import (
     AppliancePowerDurationRule,
 )
 from custom_components.home_generative_agent.sentinel.rules.camera_entry_unsecured import (
     CameraEntryUnsecuredRule,
+)
+from custom_components.home_generative_agent.sentinel.rules.camera_missing_snapshot import (
+    CameraBackgarageMissingSnapshotRule,
 )
 from custom_components.home_generative_agent.sentinel.rules.open_entry_while_away import (
     OpenEntryWhileAwayRule,
@@ -20,10 +26,17 @@ from custom_components.home_generative_agent.sentinel.rules.open_entry_while_awa
 from custom_components.home_generative_agent.sentinel.rules.unknown_person_camera_no_home import (
     UnknownPersonCameraNoHomeRule,
 )
+from custom_components.home_generative_agent.sentinel.rules.unknown_person_frontporch_night_home import (
+    UnknownPersonAtNightWhileHomeRule,
+)
 from custom_components.home_generative_agent.sentinel.rules.unlocked_lock_at_night import (
     UnlockedLockAtNightRule,
 )
+from custom_components.home_generative_agent.sentinel.rules.vehicle_parked_near_frontgate import (
+    VehicleParkedNearFrontGateRule,
+)
 from custom_components.home_generative_agent.snapshot.schema import (
+    CameraActivity,
     FullStateSnapshot,
     SnapshotEntity,
     validate_snapshot,
@@ -848,4 +861,334 @@ def test_dynamic_multiple_entries_open_count_no_trigger_presence_unmet() -> None
         },
     )
     findings = evaluate_dynamic_rule(snapshot, rule)
+    assert len(findings) == 0
+
+
+# ---------------------------------------------------------------------------
+# UnknownPersonAtNightWhileHomeRule
+# ---------------------------------------------------------------------------
+
+
+def _camera_activity(
+    camera_entity_id: str,
+    *,
+    snapshot_summary: str | None = None,
+    recognized_people: list[str] | None = None,
+    last_activity: str | None = "2025-01-01T00:04:00+00:00",
+    motion_entities: list[str] | None = None,
+    vmd_entities: list[str] | None = None,
+    area: str | None = "Outside",
+) -> CameraActivity:
+    return CameraActivity(
+        camera_entity_id=camera_entity_id,
+        area=area,
+        last_activity=last_activity,
+        motion_entities=motion_entities or [],
+        vmd_entities=vmd_entities or [],
+        snapshot_summary=snapshot_summary,
+        recognized_people=recognized_people or [],
+        latest_path=None,
+    )
+
+
+def test_unknown_person_at_night_while_home_triggers() -> None:
+    """Unknown person on camera at night while home should trigger."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = True
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.frontporch",
+            snapshot_summary="Person holding a dark garment standing at door.",
+        )
+    ]
+    findings = UnknownPersonAtNightWhileHomeRule().evaluate(snapshot)
+    assert len(findings) == 1
+    assert findings[0].type == "unknown_person_frontporch_night_home"
+    assert findings[0].severity == "low"
+    assert findings[0].confidence == 0.7
+
+
+def test_unknown_person_at_night_while_home_no_trigger_when_day() -> None:
+    """No finding during the day."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = False
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["camera_activity"] = [
+        _camera_activity("camera.frontporch", snapshot_summary="Person at door.")
+    ]
+    findings = UnknownPersonAtNightWhileHomeRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_unknown_person_at_night_while_home_no_trigger_when_away() -> None:
+    """No finding when no one is home (handled by the no-home rule instead)."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = True
+    snapshot["derived"]["anyone_home"] = False
+    snapshot["camera_activity"] = [
+        _camera_activity("camera.frontporch", snapshot_summary="Person at door.")
+    ]
+    findings = UnknownPersonAtNightWhileHomeRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_unknown_person_at_night_while_home_no_trigger_when_recognized() -> None:
+    """No finding when the person is recognized."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = True
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.frontporch",
+            snapshot_summary="Lindo at door.",
+            recognized_people=["person.lindo_st_angel"],
+        )
+    ]
+    findings = UnknownPersonAtNightWhileHomeRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_unknown_person_at_night_while_home_no_trigger_without_summary() -> None:
+    """No finding when camera has no snapshot summary."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = True
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["camera_activity"] = [
+        _camera_activity("camera.frontporch", snapshot_summary=None)
+    ]
+    findings = UnknownPersonAtNightWhileHomeRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+# ---------------------------------------------------------------------------
+# VehicleParkedNearFrontGateRule
+# ---------------------------------------------------------------------------
+
+
+def test_vehicle_parked_near_frontgate_triggers() -> None:
+    """Vehicle in snapshot summary at frontgate while home should trigger."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.frontgate",
+            snapshot_summary="A white SUV is parked near the front gate.",
+        )
+    ]
+    findings = VehicleParkedNearFrontGateRule().evaluate(snapshot)
+    assert len(findings) == 1
+    assert findings[0].type == "vehicle_parked_near_frontgate_home"
+
+
+def test_vehicle_parked_near_frontgate_no_trigger_when_away() -> None:
+    """No finding when no one is home."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["anyone_home"] = False
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.frontgate", snapshot_summary="White SUV parked outside."
+        )
+    ]
+    findings = VehicleParkedNearFrontGateRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_vehicle_parked_near_frontgate_no_trigger_without_vehicle_keyword() -> None:
+    """No finding when summary doesn't mention a vehicle."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.frontgate", snapshot_summary="Person walking past the gate."
+        )
+    ]
+    findings = VehicleParkedNearFrontGateRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_vehicle_parked_near_frontgate_no_trigger_wrong_camera() -> None:
+    """No finding when vehicle is seen on a different camera."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.backyard",
+            snapshot_summary="A white car is parked in the driveway.",
+        )
+    ]
+    findings = VehicleParkedNearFrontGateRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_vehicle_parked_near_frontgate_no_trigger_no_summary() -> None:
+    """No finding when frontgate camera has no snapshot summary."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["camera_activity"] = [
+        _camera_activity("camera.frontgate", snapshot_summary=None)
+    ]
+    findings = VehicleParkedNearFrontGateRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+# ---------------------------------------------------------------------------
+# CameraBackgarageMissingSnapshotRule
+# ---------------------------------------------------------------------------
+
+
+def test_camera_backgarage_missing_snapshot_triggers() -> None:
+    """Missing snapshot on backgarage at night while home should trigger."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = True
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["camera_activity"] = [
+        _camera_activity("camera.backgarage", snapshot_summary=None, last_activity=None)
+    ]
+    findings = CameraBackgarageMissingSnapshotRule().evaluate(snapshot)
+    assert len(findings) == 1
+    assert findings[0].type == "camera_backgarage_missing_snapshot_night_home"
+
+
+def test_camera_backgarage_missing_snapshot_no_trigger_when_summary_present() -> None:
+    """No finding when backgarage camera has a snapshot summary."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = True
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.backgarage",
+            snapshot_summary="Empty driveway, no activity.",
+        )
+    ]
+    findings = CameraBackgarageMissingSnapshotRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_camera_backgarage_missing_snapshot_no_trigger_during_day() -> None:
+    """No finding during the day even if snapshot is missing."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = False
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["camera_activity"] = [
+        _camera_activity("camera.backgarage", snapshot_summary=None, last_activity=None)
+    ]
+    findings = CameraBackgarageMissingSnapshotRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_camera_backgarage_missing_snapshot_no_trigger_when_away() -> None:
+    """No finding when no one is home."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = True
+    snapshot["derived"]["anyone_home"] = False
+    snapshot["camera_activity"] = [
+        _camera_activity("camera.backgarage", snapshot_summary=None, last_activity=None)
+    ]
+    findings = CameraBackgarageMissingSnapshotRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_camera_backgarage_missing_snapshot_triggers_when_camera_absent() -> None:
+    """Trigger when backgarage camera is absent from snapshot entirely."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = True
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["camera_activity"] = []
+    findings = CameraBackgarageMissingSnapshotRule().evaluate(snapshot)
+    assert len(findings) == 1
+
+
+# ---------------------------------------------------------------------------
+# AlarmDisarmedDuringExternalThreatRule
+# ---------------------------------------------------------------------------
+
+
+def _alarm_entity(state: str) -> SnapshotEntity:
+    return SnapshotEntity(
+        entity_id="alarm_control_panel.home_alarm",
+        domain="alarm_control_panel",
+        state=state,
+        friendly_name="Home Alarm",
+        area=None,
+        attributes={},
+        last_changed="2025-01-01T00:00:00+00:00",
+        last_updated="2025-01-01T00:00:00+00:00",
+    )
+
+
+def test_alarm_disarmed_external_threat_triggers() -> None:
+    """Disarmed alarm with unknown person on outdoor camera should trigger."""
+    snapshot = _base_snapshot()
+    snapshot["entities"] = [_alarm_entity("disarmed")]
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.backyard",
+            snapshot_summary="Unknown person in backyard.",
+        )
+    ]
+    findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
+    assert len(findings) == 1
+    assert findings[0].type == "alarm_disarmed_during_external_threat"
+    assert findings[0].confidence == 0.9
+    assert findings[0].evidence["alarm_state"] == "disarmed"
+
+
+def test_alarm_disarmed_external_threat_no_trigger_when_armed() -> None:
+    """No finding when alarm is armed."""
+    snapshot = _base_snapshot()
+    snapshot["entities"] = [_alarm_entity("armed_away")]
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.backyard",
+            snapshot_summary="Unknown person in backyard.",
+        )
+    ]
+    findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_alarm_disarmed_external_threat_no_trigger_when_recognized() -> None:
+    """No finding when detected person is recognized."""
+    snapshot = _base_snapshot()
+    snapshot["entities"] = [_alarm_entity("disarmed")]
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.backyard",
+            snapshot_summary="Lindo in backyard.",
+            recognized_people=["person.lindo_st_angel"],
+        )
+    ]
+    findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_alarm_disarmed_external_threat_no_trigger_without_activity() -> None:
+    """No finding when camera has no activity."""
+    snapshot = _base_snapshot()
+    snapshot["entities"] = [_alarm_entity("disarmed")]
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.backyard",
+            snapshot_summary=None,
+            last_activity=None,
+            motion_entities=[],
+            vmd_entities=[],
+        )
+    ]
+    findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_alarm_disarmed_external_threat_no_trigger_without_alarm_entity() -> None:
+    """No finding when alarm entity is not in snapshot."""
+    snapshot = _base_snapshot()
+    snapshot["entities"] = []
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.backyard",
+            snapshot_summary="Unknown person detected.",
+        )
+    ]
+    findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
     assert len(findings) == 0

@@ -179,6 +179,127 @@ async def test_approve_rule_proposal_returns_normalization_reason(hass) -> None:
 
 
 @pytest.mark.asyncio
+async def test_approve_rule_proposal_returns_builtin_vehicle_rule_coverage(
+    hass,
+) -> None:
+    proposal_store = ProposalStore(hass)
+    await proposal_store.async_append(
+        {
+            "candidate_id": "vehicle_parked_frontgate_home",
+            "candidate": {
+                "candidate_id": "vehicle_parked_frontgate_home",
+                "title": "Vehicle Parked Near Front Gate While Home",
+                "summary": "A vehicle is parked near the front gate while residents are home.",
+                "pattern": "camera.frontgate vehicle while home",
+                "suggested_type": "security",
+                "confidence_hint": 0.8,
+                "evidence_paths": [
+                    "camera_activity[camera_entity_id=camera.frontgate].snapshot_summary",
+                    "derived.anyone_home",
+                ],
+            },
+            "notes": "",
+            "status": "draft",
+        }
+    )
+    entry = _make_entry(
+        proposal_store=proposal_store,
+        rule_registry=DummyRuleRegistry(),
+        sentinel=SimpleNamespace(async_run_now=AsyncMock(return_value=True)),
+    )
+
+    response = await _hga_component._approve_rule_proposal(
+        entry,
+        candidate_id="vehicle_parked_frontgate_home",
+    )
+
+    assert response["status"] == "covered_by_existing_rule"
+    assert response["rule_id"] == "vehicle_parked_near_frontgate_home"
+    assert response["overlapping_entity_ids"] == ["camera.frontgate"]
+
+
+@pytest.mark.asyncio
+async def test_approve_rule_proposal_returns_builtin_vehicle_rule_coverage_no_domain_prefix(
+    hass,
+) -> None:
+    """LLM-generated evidence paths without 'camera.' prefix still match the static rule."""
+    proposal_store = ProposalStore(hass)
+    await proposal_store.async_append(
+        {
+            "candidate_id": "vehicle_parked_frontgate_home",
+            "candidate": {
+                "candidate_id": "vehicle_parked_frontgate_home",
+                "title": "Vehicle Parked Near Front Gate While Home",
+                "summary": "A vehicle is parked near the front gate while residents are home.",
+                "pattern": "camera.frontgate vehicle while home",
+                "suggested_type": "security",
+                "confidence_hint": 0.8,
+                "evidence_paths": [
+                    "camera_activity[camera_entity_id=frontgate].snapshot_summary",
+                    "derived.anyone_home",
+                ],
+            },
+            "notes": "",
+            "status": "draft",
+        }
+    )
+    entry = _make_entry(
+        proposal_store=proposal_store,
+        rule_registry=DummyRuleRegistry(),
+        sentinel=SimpleNamespace(async_run_now=AsyncMock(return_value=True)),
+    )
+
+    response = await _hga_component._approve_rule_proposal(
+        entry,
+        candidate_id="vehicle_parked_frontgate_home",
+    )
+
+    assert response["status"] == "covered_by_existing_rule"
+    assert response["rule_id"] == "vehicle_parked_near_frontgate_home"
+
+
+@pytest.mark.asyncio
+async def test_approve_rule_proposal_returns_builtin_camera_snapshot_coverage(
+    hass,
+) -> None:
+    proposal_store = ProposalStore(hass)
+    await proposal_store.async_append(
+        {
+            "candidate_id": "camera_backgarage_missing_snapshot_night_home",
+            "candidate": {
+                "candidate_id": "camera_backgarage_missing_snapshot_night_home",
+                "title": "Camera backgarage missing snapshot summary at night while home present",
+                "summary": "The backgarage camera has no snapshot summary recorded during nighttime while someone is home.",
+                "pattern": "camera.backgarage missing snapshot at night while home",
+                "suggested_type": "availability",
+                "confidence_hint": 0.8,
+                "evidence_paths": [
+                    "camera_activity[camera_entity_id=camera.backgarage].snapshot_summary",
+                    "derived.is_night",
+                    "derived.anyone_home",
+                ],
+            },
+            "notes": "",
+            "status": "draft",
+        }
+    )
+    entry = _make_entry(
+        proposal_store=proposal_store,
+        rule_registry=DummyRuleRegistry(),
+        sentinel=SimpleNamespace(async_run_now=AsyncMock(return_value=True)),
+    )
+
+    response = await _hga_component._approve_rule_proposal(
+        entry,
+        candidate_id="camera_backgarage_missing_snapshot_night_home",
+    )
+
+    assert response["status"] == "covered_by_existing_rule"
+    assert response["rule_id"] == "camera_backgarage_missing_snapshot_night_home"
+    assert response["overlapping_entity_ids"] == ["camera.backgarage"]
+
+
+@pytest.mark.asyncio
 async def test_approve_rule_proposal_returns_overlap_when_already_active(hass) -> None:
     proposal_store = ProposalStore(hass)
     candidate = {

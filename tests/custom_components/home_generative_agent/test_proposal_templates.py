@@ -820,3 +820,127 @@ def test_normalize_candidate_entity_ids_contains_path_format_sensor() -> None:
         normalized.params["sensor_entity_id"] == "sensor.washing_machine_switch_0_power"
     )
     assert normalized.params["require_night"] is True
+
+
+# ---------------------------------------------------------------------------
+# Regression: high_energy_consumption_night — no numeric threshold in text
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_candidate_power_sensor_no_numeric_threshold_falls_back_to_baseline() -> (
+    None
+):
+    """Candidate with power signal but no numeric threshold normalizes via baseline_deviation."""
+    candidate = {
+        "candidate_id": "high_energy_consumption_night",
+        "title": "High Energy Consumption at Night",
+        "summary": "Anomalously high energy consumption detected during overnight hours.",
+        "pattern": "is_night AND sensor.power_meter > baseline",
+        "suggested_type": "energy",
+        "confidence_hint": 0.75,
+        "evidence_paths": [
+            "derived.is_night",
+            "entities[entity_ids contains sensor.power_meter_energy].state",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "baseline_deviation"
+    assert normalized.params["entity_id"] == "sensor.power_meter_energy"
+
+
+# ---------------------------------------------------------------------------
+# Regression: alarm disarmed during external threat — presence is "any"
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_candidate_alarm_disarmed_any_presence_routes_to_alarm_state_mismatch() -> (
+    None
+):
+    """Alarm disarmed + no presence signal normalizes to alarm_state_mismatch with home default."""
+    candidate = {
+        "candidate_id": "alarm_disarmed_during_external_threat",
+        "title": "Alarm Disarmed During External Threat",
+        "summary": "Security alarm is disarmed while an unrecognized person is detected.",
+        "pattern": "alarm_state == disarmed AND camera_activity.recognized_people == []",
+        "suggested_type": "security",
+        "confidence_hint": 0.9,
+        "evidence_paths": [
+            "entities[entity_id=alarm_control_panel.home_alarm].state",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "alarm_state_mismatch"
+    assert normalized.params["alarm_entity_id"] == "alarm_control_panel.home_alarm"
+    assert normalized.params["alarm_state"] == "disarmed"
+    assert normalized.params["expected_presence"] == "home"
+
+
+# ---------------------------------------------------------------------------
+# Regression: window_open_duration_exceeded — no entry entity IDs in evidence
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_candidate_window_open_duration_no_entry_ids_falls_back() -> None:
+    """Window open duration candidate with no entity IDs in evidence uses selector fallback."""
+    candidate = {
+        "candidate_id": "window_open_duration_exceeded",
+        "title": "Window Open Duration Exceeded",
+        "summary": "A window has been open for an extended duration.",
+        "pattern": "window_state == open AND open_duration > threshold",
+        "suggested_type": "security",
+        "confidence_hint": 0.7,
+        "evidence_paths": [
+            "derived.anyone_home",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "open_any_window_at_night_while_away"
+    assert normalized.params["entry_selector"] == "window"
+
+
+# ---------------------------------------------------------------------------
+# Dot-notation evidence path extraction
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_candidate_power_sensor_dot_notation_evidence_paths() -> None:
+    """Sensor entity IDs in dot-notation paths (e.g. sensor.foo.state) are extracted."""
+    candidate = {
+        "candidate_id": "high_energy_consumption_night",
+        "title": "High Energy Consumption at Night",
+        "summary": "Anomalously high energy consumption detected during overnight hours.",
+        "pattern": "is_night AND sensor.power_meter > baseline",
+        "suggested_type": "energy",
+        "confidence_hint": 0.75,
+        "evidence_paths": [
+            "derived.is_night",
+            "sensor.power_meter_energy.state",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "baseline_deviation"
+    assert normalized.params["entity_id"] == "sensor.power_meter_energy"
+
+
+def test_normalize_candidate_lock_battery_dot_notation_evidence_paths() -> None:
+    """Lock entity IDs in dot-notation paths (e.g. lock.foo.battery_level) are extracted."""
+    candidate = {
+        "candidate_id": "playroom_lock_battery_low",
+        "title": "Playroom Lock Battery Low",
+        "summary": "The playroom door lock battery is below 20%.",
+        "pattern": "lock.playroom_door_lock.battery_level < 20",
+        "suggested_type": "maintenance",
+        "confidence_hint": 0.9,
+        "evidence_paths": [
+            "lock.playroom_door_lock.battery_level",
+            "derived.anyone_home",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "low_battery_sensors"
+    assert "lock.playroom_door_lock" in normalized.params.get("sensor_entity_ids", [])

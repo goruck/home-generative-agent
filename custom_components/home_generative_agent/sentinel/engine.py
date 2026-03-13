@@ -47,11 +47,17 @@ from .correlator import SentinelCorrelator
 from .dynamic_rules import evaluate_dynamic_rules
 from .execution import ACTION_POLICY_AUTO_EXECUTE, SentinelExecutionService
 from .models import AnomalyFinding, CompoundFinding
+from .rules.alarm_disarmed_external_threat import AlarmDisarmedDuringExternalThreatRule
 from .rules.appliance_power_duration import AppliancePowerDurationRule
 from .rules.camera_entry_unsecured import CameraEntryUnsecuredRule
+from .rules.camera_missing_snapshot import CameraBackgarageMissingSnapshotRule
 from .rules.open_entry_while_away import OpenEntryWhileAwayRule
 from .rules.unknown_person_camera_no_home import UnknownPersonCameraNoHomeRule
+from .rules.unknown_person_frontporch_night_home import (
+    UnknownPersonAtNightWhileHomeRule,
+)
 from .rules.unlocked_lock_at_night import UnlockedLockAtNightRule
+from .rules.vehicle_parked_near_frontgate import VehicleParkedNearFrontGateRule
 from .suppression import (
     SuppressionManager,
     purge_expired_prompts,
@@ -93,6 +99,7 @@ _DOMAIN_TO_ANOMALY_TYPE: dict[str, str] = {
     "lock": "unlocked_lock_at_night",
     "camera": "camera_entry_unsecured",
     "person": "open_entry_while_away",
+    "alarm_control_panel": "alarm_disarmed_during_external_threat",
 }
 
 # Binary-sensor device classes mapped to anomaly types.
@@ -162,6 +169,10 @@ class SentinelEngine:
             AppliancePowerDurationRule(),
             CameraEntryUnsecuredRule(),
             UnknownPersonCameraNoHomeRule(),
+            UnknownPersonAtNightWhileHomeRule(),
+            VehicleParkedNearFrontGateRule(),
+            CameraBackgarageMissingSnapshotRule(),
+            AlarmDisarmedDuringExternalThreatRule(),
         ]
         # Event-driven triggering — unsubscribe callbacks.
         self._event_unsubscribers: list[Callable[[], None]] = []
