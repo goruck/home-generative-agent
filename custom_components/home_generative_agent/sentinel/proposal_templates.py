@@ -272,17 +272,20 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
     # alarm_state_mismatch: alarm in a specific state that contradicts occupancy.
     # Must follow alarm+motion and alarm+entry branches above.
+    # Also matches "disarmed" as a detected alarm state (e.g. "alarm disarmed during
+    # external threat"). When presence is unknown ("any"), default to "home" so the
+    # dynamic rule fires when someone is present with the alarm in this state.
     if (
         alarm_id
         and not motion_ids
         and not entry_ids
-        and _contains_any(text, ("armed_home", "armed_away", "armed_night"))
-        and presence in ("away", "home")
+        and _contains_any(text, ("armed_home", "armed_away", "armed_night", "disarmed"))
     ):
         detected_state = _extract_alarm_state(text) or "armed_home"
+        effective_presence = presence if presence != "any" else "home"
         alarm_slug = alarm_id.replace(".", "_")
         default_rule_id = (
-            f"alarm_state_mismatch_{detected_state}_{presence}_{alarm_slug}"
+            f"alarm_state_mismatch_{detected_state}_{effective_presence}_{alarm_slug}"
         )
         return NormalizationResult(
             normalized=NormalizedRule(
@@ -291,7 +294,7 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 params={
                     "alarm_entity_id": alarm_id,
                     "alarm_state": detected_state,
-                    "expected_presence": presence,
+                    "expected_presence": effective_presence,
                 },
                 severity="low",
                 confidence=float(candidate.get("confidence_hint", 0.85)),
@@ -347,6 +350,29 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 severity="medium",
                 confidence=float(candidate.get("confidence_hint", 0.7)),
                 is_sensitive=False,
+                suggested_actions=["close_entry"],
+            )
+        )
+
+    # open_any_window_at_night_while_away: window/entry open too long, but evidence
+    # paths lack explicit entry entity IDs (e.g. candidate uses generic evidence).
+    # Fall back to the selector-based window rule rather than returning unsupported.
+    if (
+        not entry_ids
+        and _has_duration_signal(text)
+        and _contains_any(text, ("window", "open", "door", "entry"))
+        and not lock_ids
+    ):
+        return NormalizationResult(
+            normalized=NormalizedRule(
+                rule_id=_candidate_rule_id(
+                    candidate, default="open_any_window_at_night_while_away"
+                ),
+                template_id="open_any_window_at_night_while_away",
+                params={"entry_selector": "window"},
+                severity="medium",
+                confidence=float(candidate.get("confidence_hint", 0.6)),
+                is_sensitive=True,
                 suggested_actions=["close_entry"],
             )
         )
@@ -547,8 +573,8 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
     non_battery_sensor_ids = [s for s in sensor_ids if s not in battery_sensor_ids]
     if non_battery_sensor_ids and _has_power_energy_signal(text):
         threshold = _extract_threshold_numeric(text)
+        sensor_id = non_battery_sensor_ids[0]
         if threshold is not None:
-            sensor_id = non_battery_sensor_ids[0]
             default_rule_id = f"sensor_threshold_{sensor_id.replace('.', '_')}"
             return NormalizationResult(
                 normalized=NormalizedRule(
@@ -567,6 +593,19 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     suggested_actions=["check_appliance"],
                 )
             )
+        # No numeric threshold in text — fall back to baseline deviation detection.
+        default_rule_id = f"sensor_baseline_{sensor_id.replace('.', '_')}"
+        return NormalizationResult(
+            normalized=NormalizedRule(
+                rule_id=_candidate_rule_id(candidate, default=default_rule_id),
+                template_id="baseline_deviation",
+                params={"entity_id": sensor_id},
+                severity="low",
+                confidence=float(candidate.get("confidence_hint", 0.65)),
+                is_sensitive=False,
+                suggested_actions=["check_appliance"],
+            )
+        )
 
     if sensor_ids and _contains_any(text, ("unavailable", "offline", "unreachable")):
         if presence == "home":
