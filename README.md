@@ -169,6 +169,30 @@ Sentinel is a singleton service per Home Generative Agent config entry. Configur
 
 Important: The LLM never executes actions or directly decides runtime safety behavior. Detection and actuation remain deterministic. Triage can suppress low-value notifications but cannot alter any finding field or gate execution.
 
+### Built-in Static Rules
+
+These rules run on every detection cycle without any configuration or approval. They cover the most common security and safety patterns out of the box:
+
+Security / presence:
+
+- `unlocked_lock_at_night` — exterior lock unlocked while it is night
+- `open_entry_while_away` — door or window open while everyone is away
+- `camera_entry_unsecured` — camera activity detected near an unsecured entry point
+- `unknown_person_camera_no_home` — unrecognized person on any camera while no one is home
+- `unknown_person_frontporch_night_home` — unrecognized person on any camera at night while someone is home
+- `alarm_disarmed_during_external_threat` — security alarm disarmed while an unrecognized person is detected on an outdoor camera
+
+Appliances / sensors:
+
+- `appliance_power_duration` — appliance drawing power beyond a configurable duration threshold
+
+Cameras:
+
+- `vehicle_parked_near_frontgate_home` — vehicle detected near the front gate while residents are home
+- `camera_backgarage_missing_snapshot_night_home` — back-garage camera has no snapshot summary at night while the home is occupied (possible obstruction or outage)
+
+Static rules are registered automatically at startup. They cannot be deactivated through the proposal flow; they are always evaluated as part of the deterministic detection cycle.
+
 ### Sentinel Notification Behavior
 
 When Sentinel notifications are enabled:
@@ -393,7 +417,7 @@ Security / presence:
 - `unlocked_lock_when_home` — lock unlocked while someone is home
 - `unlocked_lock_while_away` — lock unlocked while no one is home
 - `alarm_disarmed_open_entry` — alarm disarmed with an entry sensor open
-- `alarm_state_mismatch` — alarm in an armed state that contradicts current occupancy
+- `alarm_state_mismatch` — alarm in a specific state (armed or disarmed) that contradicts current or expected occupancy
 - `open_entry_when_home` — entry open while someone is home
 - `open_entry_while_away` — entry open while away
 - `open_entry_at_night_when_home` — entry open at night while home
@@ -551,6 +575,12 @@ Preferred handling:
 3. After template support is added, re-approve the proposal to re-evaluate with current mapping logic.
 
 Compatibility note: the normalization engine handles both evidence path formats produced by the discovery engine — `entities[entity_id=domain.object_id]` and `entities[entity_ids contains domain.object_id].attr` — so stored drafts from any discovery version can be re-approved without modification. Domainless object IDs (for example `entities[entity_id=backyard_vmd3_0].state`) are also accepted for entry and sensor templates.
+
+Normalization fallbacks for common LLM-generated patterns:
+
+- **Power/energy sensor without numeric threshold** (e.g. `high_energy_consumption_night`): when no explicit value like "above 500W" appears in the candidate text, normalization falls back to `baseline_deviation` so the rule fires when the sensor deviates from its rolling average rather than a fixed threshold.
+- **Alarm disarmed with no occupancy signal** (e.g. `alarm_disarmed_during_external_threat`): `alarm_state_mismatch` now also matches candidates whose text contains "disarmed" without an armed-state keyword, and defaults `expected_presence` to `"home"` when no home/away signal is present.
+- **Window/entry open duration without entity IDs in evidence** (e.g. `window_open_duration_exceeded`): when evidence paths contain no window entity references, normalization falls back to `open_any_window_at_night_while_away` using a selector-based approach that checks all window sensors.
 
 `unavailable_sensors` is also supported for candidates without explicit occupancy context (for example `backyard_sensors_unavailable`). It triggers only when all listed sensors are `unavailable`; if any required sensor is missing or not unavailable, no finding is produced.
 
