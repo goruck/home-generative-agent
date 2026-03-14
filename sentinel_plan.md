@@ -9,7 +9,7 @@
 - Human override and kill switch are always available as runtime operations (not config-file edits).
 - Detection rule configs are version-controlled and reviewed before deployment. Rule schema versions are stored in every audit record.
 
-## Current Status Snapshot (as of 2026-03-12)
+## Current Status Snapshot (as of 2026-03-13)
 
 - This document mixes current implementation, accepted design targets, and remaining work. Unless a section explicitly says `Implemented`, treat it as target-state design rather than current behavior.
 - Implemented in code today:
@@ -22,8 +22,9 @@
   - Execution policy service with stale/unavailable handling at the execution gate (autonomy level 2+), plus allowlist, confidence threshold, rate limit, idempotency, canary mode, and live auto-execute.
   - Baseline updater and temporal/baseline detector support — fully wired end-to-end (2026-03-12): `async_fetch_baselines()` added to `SentinelBaselineUpdater`; engine now calls it each cycle and passes the result to `evaluate_dynamic_rules()`; baseline config fields (`sentinel_baseline_enabled`, `sentinel_baseline_update_interval_minutes`, `sentinel_baseline_freshness_threshold_seconds`) exposed in the Sentinel subentry flow. Prior to this fix the `baseline_deviation` and `time_of_day_anomaly` evaluators always received an empty baselines dict and never fired.
   - Discovery pipeline improvements from Milestone 5: service-mapped suggested actions, on-demand discovery trigger service, immediate rule activation on proposal approval, structured normalization failure reasons, overlap metadata, richer draft notifications, and rule preview before commit.
-  - Portable dynamic rule templates (PR #321, merged 2026-03-11): six new templates (`unlocked_lock_while_away`, `alarm_state_mismatch`, `entity_state_duration`, `sensor_threshold_condition`, `entity_staleness`, `multiple_entries_open_count`) covering the most common discovery-generated candidate patterns across arbitrary HA configurations. Evidence-path parser updated to handle both `entities[entity_id=...]` and `entities[entity_ids contains ...]` formats. Lock normalization routing bug fixed. Closed 19 open Rule issues (#298–#308, #310, #313–#317, #319, #320).
-  - Four Rule issues remain open as novel patterns requiring separate design: #309 (alarm disarmed during external threat), #311 (camera snapshot quality), #312 (vehicle detection), #318 (unknown person without camera entity).
+  - Portable dynamic rule templates (PR #321, merged 2026-03-11) plus follow-on normalization fixes (2026-03-13): six new templates (`unlocked_lock_while_away`, `alarm_state_mismatch`, `entity_state_duration`, `sensor_threshold_condition`, `entity_staleness`, `multiple_entries_open_count`) cover the most common discovery-generated candidate patterns across arbitrary HA configurations. The normalization/evidence-path parser now handles `entities[entity_id=...]`, `entities[entity_ids contains ...]`, and LLM-emitted dot-notation paths like `sensor.foo.state` / `lock.foo.battery_level`; lock battery-low candidates route to `low_battery_sensors`; text-signal fallbacks now cover `high_energy_consumption_night`, `alarm_disarmed_during_external_threat`, and selector-based window-duration candidates; built-in coverage detection now accepts `frontgate` / `backgarage` substrings even when the LLM omits the domain prefix.
+  - The four remaining Rule issues called out in the 2026-03-12 snapshot are now closed in code via new static rules (2026-03-12/13): `alarm_disarmed_during_external_threat` (#309), `camera_backgarage_missing_snapshot_night_home` (#311), `vehicle_parked_near_frontgate_home` (#312), and `unknown_person_frontporch_night_home` (#318).
+  - No Rule issues remain open from the #298–#320 coverage sweep. Remaining gaps are infrastructure/behavioral rather than missing detector patterns: suppressed-finding audit coverage, blocked-vs-notified policy behavior, audit retention/archival wiring, `trigger_source` population, and stable person identifiers in derived presence.
 - Partially implemented or still open (see Known Current Gaps below for the summary list):
   - Rule/suppression-state-suppressed findings are not written to the audit store (engine silently returns at the suppression gate). Triage-suppressed findings *are* written to audit.
   - `ACTION_POLICY_BLOCKED` blocks execution but does not suppress notification dispatch.
@@ -524,9 +525,9 @@ Status note: the repo contains many sentinel tests, but several test module path
 
 Each issue is a self-contained PR targeting main. Every PR must leave tests green and behavior backward-compatible unless the issue explicitly permits a behavioral change.
 
-Historical note: the issue-status details below mix repository history with current main-branch state. Milestone 5 statuses below reflect the latest implementation work merged in PR #296, even where the corresponding GitHub issues may still need manual status cleanup on GitHub.
+Historical note: the issue-status details below mix repository history with current main-branch state. Milestone 5 statuses below include the original PR #296 work plus the follow-on rule/template/evidence-path fixes that landed on 2026-03-12/13.
 
-**Status as of 2026-03-09:** All 15 original issues were closed on GitHub, but “closed” here means implementation work landed, not that every target-state behavior in Sections 2-19 is complete. Remaining known gaps include suppressed-finding audit coverage, blocked-vs-notified behavior, audit retention/archival, and stable person identifiers in derived presence. One unplanned issue (#9b, GitHub #269) covered pending-prompt TTL separately. Issue #15 (lambda rule review/approval UI) was implemented then removed — lambda rules were detection-only (no service-type suggested actions), invisible from `get_dynamic_rules`, and added no value for full autonomy; see PR #285 and Milestone 5. In Milestone 5, all issues #16–#22 are implemented in code and merged to main.
+**Status as of 2026-03-13:** All 15 original issues were closed on GitHub, and the later Sentinel rule/template gaps from the #298–#320 sweep are now also implemented in code. “Closed” here still means implementation work landed, not that every target-state behavior in Sections 2-19 is complete. Remaining known gaps include suppressed-finding audit coverage, blocked-vs-notified behavior, audit retention/archival, `trigger_source` population, and stable person identifiers in derived presence. One unplanned issue (#9b, GitHub #269) covered pending-prompt TTL separately. Issue #15 (lambda rule review/approval UI) was implemented then removed — lambda rules were detection-only (no service-type suggested actions), invisible from `get_dynamic_rules`, and added no value for full autonomy; see PR #285 and Milestone 5. Milestone 5 plus its 2026-03-12/13 follow-on fixes now cover the discovery/rule work reflected in the current repo.
 
 | Plan # | GitHub # | Status | Title |
 | --- | --- | --- | --- |
@@ -793,6 +794,14 @@ The original Issue #15 (lambda rule review/approval UI) was implemented and subs
 - Size: M
 - Dependencies: none
 - Implemented outcome: Sentinel now persists hashed level-increase PIN material in subentry config and validates the provided PIN on autonomy increases.
+
+Post-merge follow-on fixes now also landed in the repo (2026-03-12/13):
+
+- Baseline detection wiring fix: `SentinelBaselineUpdater.async_fetch_baselines()` is now called from `engine.py`, and the baseline config fields are exposed in the Sentinel subentry flow. Before this, `baseline_deviation` / `time_of_day_anomaly` always saw an empty baselines dict.
+- Static rule coverage expansion: four new built-in rules closed the remaining novel-pattern issues from the #298–#320 sweep: `alarm_disarmed_during_external_threat` (#309), `camera_backgarage_missing_snapshot_night_home` (#311), `vehicle_parked_near_frontgate_home` (#312), and `unknown_person_frontporch_night_home` (#318).
+- Proposal normalization gap fixes: discovery candidates for high-energy-at-night, alarm-disarmed-during-threat, and window-duration cases now normalize to supported deterministic templates instead of returning `unsupported`.
+- Evidence-path parsing now accepts dot-notation entity references like `sensor.foo.state` and `lock.foo.battery_level`, which matches the LLM output seen in discovery records and fixes several false `unsupported` approvals.
+- Built-in rule overlap detection is more tolerant of LLM evidence paths that omit the domain prefix (`frontgate`, `backgarage`), and battery-low lock candidates no longer misroute to unlocked-lock templates.
 
 ---
 
