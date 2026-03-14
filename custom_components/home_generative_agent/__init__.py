@@ -1690,10 +1690,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     # Issue #265: optional baseline updater (requires PostgreSQL pool).
     # Baseline collection is gated on sentinel_enabled acting as master switch.
     baseline_updater: SentinelBaselineUpdater | None = None
-    if pool is not None and options.get(
-        CONF_SENTINEL_ENABLED, RECOMMENDED_SENTINEL_ENABLED
-    ) and options.get(
-        CONF_SENTINEL_BASELINE_ENABLED, RECOMMENDED_SENTINEL_BASELINE_ENABLED
+    if (
+        pool is not None
+        and options.get(CONF_SENTINEL_ENABLED, RECOMMENDED_SENTINEL_ENABLED)
+        and options.get(
+            CONF_SENTINEL_BASELINE_ENABLED, RECOMMENDED_SENTINEL_BASELINE_ENABLED
+        )
     ):
         baseline_updater = SentinelBaselineUpdater(hass, pool, dict(options))
         await baseline_updater.async_initialize()
