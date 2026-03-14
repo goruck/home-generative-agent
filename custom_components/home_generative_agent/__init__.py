@@ -1688,9 +1688,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         )
         LOGGER.info("Sentinel LLM triage enabled (timeout=%ds).", triage_timeout)
     # Issue #265: optional baseline updater (requires PostgreSQL pool).
+    # Baseline collection is gated on sentinel_enabled acting as master switch.
     baseline_updater: SentinelBaselineUpdater | None = None
-    if pool is not None and options.get(
-        CONF_SENTINEL_BASELINE_ENABLED, RECOMMENDED_SENTINEL_BASELINE_ENABLED
+    if (
+        pool is not None
+        and options.get(CONF_SENTINEL_ENABLED, RECOMMENDED_SENTINEL_ENABLED)
+        and options.get(
+            CONF_SENTINEL_BASELINE_ENABLED, RECOMMENDED_SENTINEL_BASELINE_ENABLED
+        )
     ):
         baseline_updater = SentinelBaselineUpdater(hass, pool, dict(options))
         await baseline_updater.async_initialize()
@@ -1786,7 +1791,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 hass.loop.call_soon_threadsafe(sentinel.start)
 
             hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _start_sentinel)
-    if options.get(
+    if options.get(CONF_SENTINEL_ENABLED, RECOMMENDED_SENTINEL_ENABLED) and options.get(
         CONF_SENTINEL_DISCOVERY_ENABLED,
         RECOMMENDED_SENTINEL_DISCOVERY_ENABLED,
     ):
