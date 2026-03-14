@@ -138,8 +138,14 @@ def dhash_bytes(buf: bytes, size: int = _UNIQUENESS_HASH_SIZE) -> int:
         for y in range(size):
             row_off = y * width
             for x in range(size):
-                left = pixels[row_off + x]
-                right = pixels[row_off + x + 1]
+                left_raw = pixels[row_off + x]
+                right_raw = pixels[row_off + x + 1]
+                if not isinstance(left_raw, int | float) or not isinstance(
+                    right_raw, int | float
+                ):
+                    continue
+                left = int(left_raw)
+                right = int(right_raw)
                 if left > right:  # set bit if left > right
                     bits |= 1 << bitpos
                 bitpos += 1

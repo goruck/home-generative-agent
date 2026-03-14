@@ -18,7 +18,7 @@ Home Assistant custom integration providing a generative agent. Core code lives 
 - `explain/` — prompt templates and LLM-backed explanation/discovery helpers
 
 ## Development environment
-- Python: 3.13
+- Python: 3.14
 - Virtualenv: `hga/` (managed by Makefile)
 - Primary tools: `ruff` (format + lint), `pyright` (types), `pytest`
 

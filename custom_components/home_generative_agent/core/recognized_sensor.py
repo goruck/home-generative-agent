@@ -43,8 +43,8 @@ class RecognizedPeopleSensor(SensorEntity, RestoreBase):
 
     # Match SensorEntity base types EXACTLY:
     entity_description: SensorEntityDescription = RECOGNIZED_DESC
-    _attr_device_class: SensorDeviceClass | None = None  # no 'str' here
-    _attr_state_class: SensorStateClass | str | None = None  # include 'str'
+    _attr_device_class: SensorDeviceClass | None = None
+    _attr_state_class: SensorStateClass | None = None
     _attr_native_unit_of_measurement: str | None = None
     _attr_has_entity_name = True
     _attr_icon = "mdi:account-group"
