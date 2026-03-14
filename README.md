@@ -228,9 +228,9 @@ Configuration options (in the Sentinel subentry):
 - `sentinel_triage_enabled` — enable LLM triage (default: `false`)
 - `sentinel_triage_timeout_seconds` — max time to wait for triage LLM response (default: `10`)
 
-### Baseline Detection (Optional)
+### Baseline Collection (Optional)
 
-When `sentinel_baseline_enabled` is `true`, a background `SentinelBaselineUpdater` task writes rolling statistical summaries (per entity, per metric) to a `sentinel_baselines` PostgreSQL table on a configurable cadence.
+When `sentinel_baseline_enabled` is `true` **and** `sentinel_enabled` is `true`, a background `SentinelBaselineUpdater` task writes rolling statistical summaries (per entity, per metric) to a `sentinel_baselines` PostgreSQL table on a configurable cadence.
 
 On each detection cycle the engine calls `async_fetch_baselines()` to read current baseline values from PostgreSQL and passes them to the dynamic-rule evaluators. Two temporal templates are always registered:
 
@@ -247,7 +247,7 @@ Baseline freshness states (returned by `SentinelBaselineUpdater.check_freshness(
 
 Configuration options (in the Sentinel subentry):
 
-- `sentinel_baseline_enabled` — enable baseline tracking (default: `false`)
+- `sentinel_baseline_enabled` — enable baseline collection (default: `false`); has no effect unless `sentinel_enabled` is also `true`
 - `sentinel_baseline_update_interval_minutes` — how often baselines are recalculated (default: `15`)
 - `sentinel_baseline_freshness_threshold_seconds` — age after which a baseline is considered stale (default: `3600`)
 
@@ -475,7 +475,7 @@ These optional features are configured in the Sentinel subentry:
    - Autonomy guardrails: `sentinel_require_pin_for_level_increase` and the Sentinel autonomy-level increase PIN
    - Per-area notifications: `sentinel_area_notify_map` (area name → notify service, e.g. `{"Garage": "notify.mobile_app_garage_tablet"}`)
 
-Discovery and triage both require a configured chat model. If no model is available, those loops are skipped.
+Discovery and baseline both require `sentinel_enabled` to be `true` — they will not start if anomaly alerting is disabled. Discovery and triage also require a configured chat model; if no model is available, those loops are skipped.
 
 ### Proposal Lifecycle
 
