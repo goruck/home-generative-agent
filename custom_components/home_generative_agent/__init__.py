@@ -954,7 +954,7 @@ async def _bootstrap_vectors_once(
 
 
 class NullChat:
-    """Non-throwing fallback implementing ainvoke/astream/with_config."""
+    """Non-throwing fallback implementing common chat model methods."""
 
     async def ainvoke(self, _input: Any, **_kw: Any) -> str:
         """Return a placeholder response."""
@@ -963,6 +963,10 @@ class NullChat:
     async def astream(self, _input: Any, **_kw: Any) -> AsyncGenerator[str, Any]:
         """Return a placeholder response."""
         yield "LLM unavailable."
+
+    def bind_tools(self, _tools: Any) -> NullChat:
+        """Return self, as tool binding is a no-op for the fallback model."""
+        return self
 
     def with_config(self, **_cfg: Any) -> NullChat:
         """Return self, as this is a no-op."""
@@ -1150,7 +1154,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     )
     ollama_any_ok = any(ollama_health.values())
 
-    http_client = get_async_client(hass)
+    http_async_client = get_async_client(hass)
+    openai_http_client = await hass.async_add_executor_job(
+        partial(httpx.Client, timeout=120)
+    )
 
     # Instantiate providers.
     openai_provider: RunnableSerializable[LanguageModelInput, BaseMessage] | None = None
@@ -1159,7 +1166,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             openai_provider = ChatOpenAI(
                 api_key=openai_secret,
                 timeout=120,
-                http_async_client=http_client,
+                http_client=openai_http_client,
+                http_async_client=http_async_client,
             ).configurable_fields(
                 model_name=ConfigurableField(id="model_name"),
                 temperature=ConfigurableField(id="temperature"),
@@ -1205,7 +1213,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     if gemini_ok:
         try:
             gemini_provider = ChatGoogleGenerativeAI(
-                api_key=gemini_secret,
+                google_api_key=gemini_secret,
                 model=RECOMMENDED_GEMINI_CHAT_MODEL,
             ).configurable_fields(
                 model=ConfigurableField(id="model"),
@@ -1225,7 +1233,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 api_key=SecretStr(openai_compatible_api_key),
                 base_url=openai_compatible_base_url,
                 timeout=120,
-                http_async_client=http_client,
+                http_client=openai_http_client,
+                http_async_client=http_async_client,
             ).configurable_fields(
                 model_name=ConfigurableField(id="model_name"),
                 temperature=ConfigurableField(id="temperature"),
@@ -1247,6 +1256,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     CONF_OPENAI_EMBEDDING_MODEL, RECOMMENDED_OPENAI_EMBEDDING_MODEL
                 ),
                 dimensions=EMBEDDING_MODEL_DIMS,
+                http_client=openai_http_client,
+                http_async_client=http_async_client,
             )
         except Exception:
             LOGGER.exception("OpenAI embeddings init failed; continuing without them.")
@@ -1287,6 +1298,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_MODEL,
                 ),
                 dimensions=EMBEDDING_MODEL_DIMS,
+                http_client=openai_http_client,
+                http_async_client=http_async_client,
             )
         except Exception:
             LOGGER.exception(
@@ -1789,6 +1802,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     async def _stop_background_tasks(_event: object) -> None:
         await sentinel.stop()
         await discovery_engine.stop()
+        await hass.async_add_executor_job(openai_http_client.close)
 
     hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _stop_background_tasks)
 
