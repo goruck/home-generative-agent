@@ -997,7 +997,7 @@ The image below is an example of a notification sent to the mobile app.
 
 ## Makefile
 
-The Makefile provides a repeatable local dev workflow. It creates a `hga` venv using Python 3.13 and wires common tasks (deps, lint, tests, type checking).
+The Makefile provides a repeatable local dev workflow. It creates a `hga` venv using Python 3.14 and wires common tasks (deps, lint, tests, type checking).
 
 Common commands:
 

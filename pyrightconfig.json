@@ -44,5 +44,5 @@
   "reportUnknownParameterType": "information",
   "reportUnknownLambdaType": "information",
 
-  "pythonVersion": "3.13"
+  "pythonVersion": "3.14"
 }

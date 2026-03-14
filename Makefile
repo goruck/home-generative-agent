@@ -1,4 +1,5 @@
 VENV := hga
+PYTHON_BIN ?= $(shell command -v python3.14 2>/dev/null || printf '%s' "$(HOME)/.pyenv/shims/python3.14")
 PY := $(VENV)/bin/python
 PIP := $(VENV)/bin/pip
 RUFF := $(VENV)/bin/ruff
@@ -9,7 +10,7 @@ PYRIGHT := $(VENV)/bin/pyright
 
 # Create venv and basic packaging tooling only. No linting here.
 venv:
-	python3.13 -m venv $(VENV)
+	$(PYTHON_BIN) -m venv $(VENV)
 	$(PY) -m pip install -U pip setuptools wheel
 
 devdeps: venv
