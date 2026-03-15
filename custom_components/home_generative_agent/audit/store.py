@@ -21,7 +21,6 @@ from .models import AuditRecord
 
 STORE_VERSION = 1
 STORE_KEY = "home_generative_agent_audit"
-MAX_RECORDS = 200
 
 # v2 fields that must be present after migration; maps field name -> default
 _V2_FIELD_DEFAULTS: dict[str, Any] = {
@@ -36,6 +35,9 @@ _V2_FIELD_DEFAULTS: dict[str, Any] = {
     # Issue #262 additions (backward-compatible; same version bucket)
     "triage_decision": None,
     "triage_reason_code": None,
+    # action_policy_path was present in async_append_finding but missing from
+    # _V2_FIELD_DEFAULTS, so v1→v2 migration did not backfill it.
+    "action_policy_path": None,
 }
 
 
@@ -66,10 +68,11 @@ def _migrate_record(record: dict[str, Any]) -> dict[str, Any]:
 class AuditStore:
     """Persistent audit store for sentinel activity."""
 
-    def __init__(self, hass: HomeAssistant) -> None:
+    def __init__(self, hass: HomeAssistant, max_records: int = 200) -> None:
         """Initialize the audit store."""
         self._store = Store(hass, STORE_VERSION, STORE_KEY)
         self._records: list[dict[str, Any]] = []
+        self._max_records = max_records
 
     async def async_load(self) -> None:
         """Load audit records from storage, migrating old records on the fly."""
@@ -130,8 +133,8 @@ class AuditStore:
             action_policy_path=action_policy_path,
         )
         self._records.append(record.__dict__)
-        if len(self._records) > MAX_RECORDS:
-            self._records = self._records[-MAX_RECORDS:]
+        if len(self._records) > self._max_records:
+            self._records = self._records[-self._max_records :]
         await self.async_save()
 
     async def async_update_response(
