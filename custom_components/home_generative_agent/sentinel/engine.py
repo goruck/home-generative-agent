@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import inspect
 import logging
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.const import EVENT_STATE_CHANGED
 from homeassistant.core import callback
@@ -995,22 +994,6 @@ def _build_suppress_kwargs(
     }
 
 
-def _supports_suppression_reason_code(callable_obj: object) -> bool:
-    """Check whether an audit append callable can accept suppression reason metadata."""
-    try:
-        signature = inspect.signature(cast("Any", callable_obj))
-    except (TypeError, ValueError):
-        return False
-
-    if "suppression_reason_code" in signature.parameters:
-        return True
-
-    for parameter in signature.parameters.values():
-        if parameter.kind == inspect.Parameter.VAR_KEYWORD:
-            return True
-    return False
-
-
 async def _append_finding_audit(  # noqa: PLR0913
     audit_store: AuditStore,
     snapshot: FullStateSnapshot,
@@ -1030,26 +1013,23 @@ async def _append_finding_audit(  # noqa: PLR0913
     trigger_source: str | None = None,
 ) -> None:
     """Append a finding to audit with suppression reason and execution metadata."""
-    if _supports_suppression_reason_code(audit_store.async_append_finding):
-        await cast("Any", audit_store).async_append_finding(
-            snapshot,
-            finding,
-            explanation,
-            suppression_reason_code=suppression_reason_code,
-            triage_decision=triage_decision,
-            triage_reason_code=triage_reason_code,
-            triage_confidence=triage_confidence,
-            data_quality={"quality": data_quality} if data_quality else None,
-            action_policy_path=action_policy_path,
-            execution_id=execution_id,
-            canary_would_execute=canary_would_execute,
-            action_outcome=action_outcome,
-            autonomy_level_at_decision=(
-                str(autonomy_level_at_decision)
-                if autonomy_level_at_decision is not None
-                else None
-            ),
-            trigger_source=trigger_source,
-        )
-        return
-    await cast("Any", audit_store).async_append_finding(snapshot, finding, explanation)
+    await audit_store.async_append_finding(
+        snapshot,
+        finding,
+        explanation,
+        suppression_reason_code=suppression_reason_code,
+        triage_decision=triage_decision,
+        triage_reason_code=triage_reason_code,
+        triage_confidence=triage_confidence,
+        data_quality={"quality": data_quality} if data_quality else None,
+        action_policy_path=action_policy_path,
+        execution_id=execution_id,
+        canary_would_execute=canary_would_execute,
+        action_outcome=action_outcome,
+        autonomy_level_at_decision=(
+            str(autonomy_level_at_decision)
+            if autonomy_level_at_decision is not None
+            else None
+        ),
+        trigger_source=trigger_source,
+    )
