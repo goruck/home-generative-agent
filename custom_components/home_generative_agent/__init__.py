@@ -56,6 +56,7 @@ from .const import (
     CHAT_MODEL_MAX_TOKENS,
     CHAT_MODEL_REPEAT_PENALTY,
     CHAT_MODEL_TOP_P,
+    CONF_AUDIT_HOT_MAX_RECORDS,
     CONF_CHAT_MODEL_PROVIDER,
     CONF_CHAT_MODEL_TEMPERATURE,
     CONF_DB_BOOTSTRAPPED,
@@ -130,6 +131,7 @@ from .const import (
     HGA_CARD_STATIC_PATH,
     HGA_CARD_STATIC_PATH_LEGACY,
     MODEL_CATEGORY_SPECS,
+    RECOMMENDED_AUDIT_HOT_MAX_RECORDS,
     RECOMMENDED_CHAT_MODEL_PROVIDER,
     RECOMMENDED_CHAT_MODEL_TEMPERATURE,
     RECOMMENDED_DB_HOST,
@@ -1648,7 +1650,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     video_analyzer = VideoAnalyzer(hass, entry)
     suppression = SuppressionManager(hass)
     await suppression.async_load()
-    audit_store = AuditStore(hass)
+    audit_max = int(
+        options.get(CONF_AUDIT_HOT_MAX_RECORDS, RECOMMENDED_AUDIT_HOT_MAX_RECORDS)
+    )
+    audit_store = AuditStore(hass, max_records=audit_max)
     await audit_store.async_load()
     discovery_max = int(
         options.get(

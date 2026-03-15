@@ -19,6 +19,7 @@ from custom_components.home_generative_agent.const import (
     CONF_AUDIT_HIGH_RETENTION_DAYS,
     CONF_AUDIT_HOT_MAX_RECORDS,
     CONF_AUDIT_RETENTION_DAYS,
+    RECOMMENDED_AUDIT_HOT_MAX_RECORDS,
 )
 
 # ---------------------------------------------------------------------------
@@ -354,3 +355,56 @@ async def test_update_response_picks_most_recent_compound_record() -> None:
         "false_positive": True,
     }
     assert store._records[0]["user_response"] is None
+
+
+# ---------------------------------------------------------------------------
+# Gap 5: action_policy_path backfilled by v1→v2 migration
+# ---------------------------------------------------------------------------
+
+
+def test_migrate_record_backfills_action_policy_path() -> None:
+    """_migrate_record must add action_policy_path=None to a v1 record."""
+    record = _make_v1_record()
+    assert "action_policy_path" not in record
+    _migrate_record(record)
+    assert "action_policy_path" in record
+    assert record["action_policy_path"] is None
+
+
+def test_migrate_record_preserves_action_policy_path_if_set() -> None:
+    """_migrate_record must not overwrite an existing action_policy_path value."""
+    record = _make_v1_record()
+    record["action_policy_path"] = "prompt_user"
+    _migrate_record(record)
+    assert record["action_policy_path"] == "prompt_user"
+
+
+# ---------------------------------------------------------------------------
+# Gap 4: AuditStore max_records is config-driven
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_audit_store_respects_config_max_records() -> None:
+    """AuditStore must enforce the max_records cap passed at construction."""
+    store = _make_store()
+    store._max_records = 3
+
+    snapshot = MagicMock()
+    snapshot.get = MagicMock(return_value=None)
+
+    finding = MagicMock()
+    finding.as_dict.return_value = {"anomaly_id": "x", "type": "t"}
+
+    for _ in range(5):
+        await store.async_append_finding(snapshot, finding, None)
+
+    assert len(store._records) == 3
+
+
+@pytest.mark.asyncio
+async def test_audit_store_default_max_records() -> None:
+    """AuditStore constructed without max_records uses RECOMMENDED_AUDIT_HOT_MAX_RECORDS."""
+    hass = MagicMock()
+    store = AuditStore(hass)
+    assert store._max_records == RECOMMENDED_AUDIT_HOT_MAX_RECORDS

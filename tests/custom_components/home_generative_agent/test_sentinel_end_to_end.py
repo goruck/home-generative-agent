@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -19,6 +19,10 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_STALENESS_THRESHOLD_SECONDS,
 )
 from custom_components.home_generative_agent.sentinel.engine import SentinelEngine
+from custom_components.home_generative_agent.sentinel.execution import (
+    ACTION_POLICY_BLOCKED,
+    ActionPolicyResult,
+)
 from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
 from custom_components.home_generative_agent.sentinel.suppression import (
     SuppressionManager,
@@ -84,6 +88,7 @@ class DummyAudit:
                 "canary_would_execute": kwargs.get("canary_would_execute"),
                 "action_policy_path": kwargs.get("action_policy_path"),
                 "action_outcome": kwargs.get("action_outcome"),
+                "trigger_source": kwargs.get("trigger_source"),
             }
         )
 
@@ -502,3 +507,257 @@ async def test_live_auto_execute_failure_does_not_consume_retry(
         "actions": [{"service": "lock.lock", "status": "ok", "error": None}],
         "execution_id": second_outcome["execution_id"],
     }
+
+
+# ---------------------------------------------------------------------------
+# Helpers shared by Gap 1/2/3 tests
+# ---------------------------------------------------------------------------
+
+
+def _make_snapshot() -> FullStateSnapshot:
+    return validate_snapshot(
+        {
+            "schema_version": 1,
+            "generated_at": "2025-01-01T00:00:00+00:00",
+            "entities": [
+                {
+                    "entity_id": "binary_sensor.front_door",
+                    "domain": "binary_sensor",
+                    "state": "on",
+                    "friendly_name": "Front Door",
+                    "area": "Front",
+                    "attributes": {"device_class": "door"},
+                    "last_changed": "2025-01-01T00:00:00+00:00",
+                    "last_updated": "2025-01-01T00:00:00+00:00",
+                }
+            ],
+            "camera_activity": [],
+            "derived": {
+                "now": "2025-01-01T00:00:00+00:00",
+                "timezone": "UTC",
+                "is_night": False,
+                "anyone_home": False,
+                "people_home": [],
+                "people_away": [],
+                "last_motion_by_area": {},
+            },
+        }
+    )
+
+
+def _make_engine(
+    monkeypatch: pytest.MonkeyPatch,
+    snapshot: FullStateSnapshot,
+    *,
+    cooldown_minutes: int = 30,
+) -> tuple[SentinelEngine, DummyNotifier, DummyAudit]:
+    """Return a wired SentinelEngine with DummyNotifier and DummyAudit."""
+
+    async def _fake_build(_hass: HomeAssistant) -> FullStateSnapshot:
+        return snapshot
+
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.sentinel.engine.async_build_full_state_snapshot",
+        _fake_build,
+    )
+    notifier = DummyNotifier()
+    audit = DummyAudit()
+    engine = SentinelEngine(
+        hass=cast("HomeAssistant", object()),
+        options={
+            "sentinel_cooldown_minutes": cooldown_minutes,
+            "sentinel_entity_cooldown_minutes": cooldown_minutes,
+            "sentinel_interval_seconds": 60,
+            "explain_enabled": False,
+        },
+        suppression=DummySuppression(),
+        notifier=cast("SentinelNotifier", notifier),
+        audit_store=cast("AuditStore", audit),
+        explainer=None,
+    )
+    return engine, notifier, audit
+
+
+# ---------------------------------------------------------------------------
+# Gap 1: suppressed findings produce an audit record
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_suppressed_finding_creates_audit_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A finding suppressed by cooldown must still produce an audit record."""
+    snapshot = _make_snapshot()
+    engine, notifier, audit = _make_engine(monkeypatch, snapshot, cooldown_minutes=30)
+
+    # First run: finding fires and registers a cooldown.
+    await engine._run_once("poll")
+    assert len(notifier.calls) == 1
+
+    # Second run: same finding is in cooldown — suppressed.
+    await engine._run_once("poll")
+
+    # Notifier must not have fired a second time.
+    assert len(notifier.calls) == 1
+
+    # Audit must have a second record for the suppressed finding.
+    assert len(audit.calls) == 2
+    suppressed_record = audit.calls[1]
+    assert suppressed_record["suppression_reason_code"] is not None
+    assert suppressed_record["suppression_reason_code"] != "not_suppressed"
+    assert suppressed_record["action_policy_path"] is None
+
+
+@pytest.mark.asyncio
+async def test_suppression_gate_fires_before_triage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A suppressed finding must produce exactly one audit record (no triage call)."""
+    snapshot = _make_snapshot()
+    engine, _notifier, audit = _make_engine(monkeypatch, snapshot, cooldown_minutes=30)
+
+    # Prime the cooldown with first run.
+    await engine._run_once("poll")
+    first_count = len(audit.calls)
+
+    # Second run: suppressed — must produce exactly one more audit record.
+    await engine._run_once("poll")
+    assert len(audit.calls) == first_count + 1
+
+    # The suppressed record must have no triage decision (triage never ran).
+    suppressed = audit.calls[-1]
+    assert suppressed.get("suppression_reason_code") not in (None, "not_suppressed")
+
+
+# ---------------------------------------------------------------------------
+# Gap 2: BLOCKED findings do not notify but do produce an audit record
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_blocked_finding_no_notification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A BLOCKED finding must not trigger async_notify."""
+    snapshot = _make_snapshot()
+    engine, notifier, _audit = _make_engine(monkeypatch, snapshot, cooldown_minutes=0)
+
+    blocked_result = ActionPolicyResult(
+        action_policy_path=ACTION_POLICY_BLOCKED,
+        data_quality="unavailable",
+        data_quality_details={},
+        execution_id=None,
+        block_reason="data_quality_unavailable",
+    )
+
+    with patch.object(
+        cast("Any", engine)._execution_service,
+        "evaluate_canary",
+        return_value=blocked_result,
+    ):
+        await engine._run_once("poll")
+
+    assert len(notifier.calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_blocked_finding_creates_audit_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A BLOCKED finding must produce an audit record with action_policy_path='blocked'."""
+    snapshot = _make_snapshot()
+    engine, _notifier, audit = _make_engine(monkeypatch, snapshot, cooldown_minutes=0)
+
+    blocked_result = ActionPolicyResult(
+        action_policy_path=ACTION_POLICY_BLOCKED,
+        data_quality="unavailable",
+        data_quality_details={},
+        execution_id=None,
+        block_reason="data_quality_unavailable",
+    )
+
+    with patch.object(
+        cast("Any", engine)._execution_service,
+        "evaluate_canary",
+        return_value=blocked_result,
+    ):
+        await engine._run_once("poll")
+
+    assert len(audit.calls) == 1
+    assert audit.calls[0]["action_policy_path"] == ACTION_POLICY_BLOCKED
+
+
+@pytest.mark.asyncio
+async def test_blocked_finding_registers_cooldown_not_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A BLOCKED finding must register a type cooldown but not a pending prompt."""
+    snapshot = _make_snapshot()
+    engine, _notifier, _audit = _make_engine(monkeypatch, snapshot, cooldown_minutes=0)
+
+    suppression = cast("DummySuppression", cast("Any", engine)._suppression)
+
+    blocked_result = ActionPolicyResult(
+        action_policy_path=ACTION_POLICY_BLOCKED,
+        data_quality="unavailable",
+        data_quality_details={},
+        execution_id=None,
+        block_reason="data_quality_unavailable",
+    )
+
+    with patch.object(
+        cast("Any", engine)._execution_service,
+        "evaluate_canary",
+        return_value=blocked_result,
+    ):
+        await engine._run_once("poll")
+
+    # Cooldown (last_by_type) must be registered.
+    assert suppression.state.last_by_type  # non-empty
+
+    # No pending prompt must be registered (BLOCKED never sends user a prompt).
+    assert not suppression.state.pending_prompts
+
+
+# ---------------------------------------------------------------------------
+# Gap 3: trigger_source is populated in audit records
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_trigger_source_poll_in_audit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Audit records from the polling path must have trigger_source='poll'."""
+    snapshot = _make_snapshot()
+    engine, _notifier, audit = _make_engine(monkeypatch, snapshot, cooldown_minutes=0)
+
+    await engine._run_once("poll")
+
+    assert audit.calls
+    assert audit.calls[0]["trigger_source"] == "poll"
+
+
+@pytest.mark.asyncio
+async def test_trigger_source_event_in_audit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Audit records from the event-driven path must have trigger_source='event'."""
+    snapshot = _make_snapshot()
+    engine, _notifier, audit = _make_engine(monkeypatch, snapshot, cooldown_minutes=0)
+
+    await engine._run_once("event")
+
+    assert audit.calls
+    assert audit.calls[0]["trigger_source"] == "event"
+
+
+@pytest.mark.asyncio
+async def test_trigger_source_on_demand_in_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Audit records from the on-demand path must have trigger_source='on_demand'."""
+    snapshot = _make_snapshot()
+    engine, _notifier, audit = _make_engine(monkeypatch, snapshot, cooldown_minutes=0)
+
+    await engine._run_once("on_demand")
+
+    assert audit.calls
+    assert audit.calls[0]["trigger_source"] == "on_demand"
