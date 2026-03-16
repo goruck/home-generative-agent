@@ -22,7 +22,7 @@ STORE_VERSION = 1
 STORE_KEY = "home_generative_agent_sentinel_suppression"
 
 # Current in-memory schema version.  Increment when new fields are added.
-SUPPRESSION_STATE_VERSION = 2
+SUPPRESSION_STATE_VERSION = 3
 
 LOGGER = logging.getLogger(__name__)
 
@@ -126,6 +126,8 @@ def _migrate_suppression_state(data: dict[str, Any]) -> dict[str, Any]:
     Migrate persisted suppression state to the current version in-place.
 
     v1 → v2: add ``snoozed_until``, ``presence_grace_until``, ``version``.
+    v2 → v3: drop ``presence_grace_until`` keys that are not ``person.*``
+             entity IDs (previously keyed by friendly name).
 
     Returns the same dict object (mutations are in-place).
     """
@@ -134,11 +136,29 @@ def _migrate_suppression_state(data: dict[str, Any]) -> dict[str, Any]:
         return data
 
     # v1 → v2
-    if stored_version < SUPPRESSION_STATE_VERSION:
+    if stored_version < 2:  # noqa: PLR2004
         data.setdefault("snoozed_until", {})
         data.setdefault("presence_grace_until", {})
         data["version"] = 2
-        LOGGER.info("Suppression state migrated from v%d to v2.", stored_version)
+        stored_version = 2
+        LOGGER.info("Suppression state migrated from v1 to v2.")
+
+    # v2 → v3: presence_grace_until keys must be person entity IDs
+    if stored_version < 3:  # noqa: PLR2004
+        stale_keys = [
+            k
+            for k in data.get("presence_grace_until", {})
+            if not k.startswith("person.")
+        ]
+        for key in stale_keys:
+            LOGGER.warning(
+                "Dropping stale presence_grace_until key %r "
+                "(not a person entity ID — was written using friendly name).",
+                key,
+            )
+            del data["presence_grace_until"][key]
+        data["version"] = 3
+        LOGGER.info("Suppression state migrated from v2 to v3.")
 
     return data
 

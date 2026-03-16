@@ -47,7 +47,7 @@ def derive_context(
     for state in all_states:
         if state.domain != "person":
             continue
-        name = state.attributes.get("friendly_name") or state.entity_id
+        name = state.entity_id
         if state.state == "home":
             people_home.append(name)
         else:

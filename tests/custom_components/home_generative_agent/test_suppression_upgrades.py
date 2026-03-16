@@ -394,7 +394,7 @@ def test_migrate_v1_adds_version_and_new_fields() -> None:
     result = _migrate_suppression_state(data)
 
     assert result is data  # in-place
-    assert result["version"] == 2
+    assert result["version"] == 3
     assert "snoozed_until" in result
     assert "presence_grace_until" in result
 
@@ -415,12 +415,12 @@ def test_migrate_is_idempotent() -> None:
     assert data == snapshot
 
 
-def test_migrate_skips_already_v2() -> None:
+def test_migrate_skips_already_v3() -> None:
     data: dict = {
         "last_by_type": {},
         "last_by_entity": {},
         "pending_prompts": {},
-        "version": 2,
+        "version": 3,
         "snoozed_until": {},
         "presence_grace_until": {},
     }
@@ -436,7 +436,7 @@ def test_from_dict_handles_v1_data() -> None:
     _migrate_suppression_state(data)
     state = SuppressionState.from_dict(data)
 
-    assert state.version == 2
+    assert state.version == 3
     assert state.snoozed_until == {}
     assert state.presence_grace_until == {}
     assert "open_entry_while_away" in state.last_by_type
@@ -471,3 +471,71 @@ def test_snooze_takes_priority_over_presence_grace() -> None:
 
     decision = should_suppress(state, finding, now, _ZERO_COOLDOWN, _ZERO_COOLDOWN)
     assert decision.reason_code == SUPPRESSION_REASON_USER_SNOOZE_PERMANENT
+
+
+# ---------------------------------------------------------------------------
+# v2 → v3 migration: presence_grace_until key cleanup
+# ---------------------------------------------------------------------------
+
+
+def _v2_data_with_friendly_name_keys() -> dict:
+    """Return a v2 suppression record with a mix of entity-ID and friendly-name keys."""
+    return {
+        "last_by_type": {},
+        "last_by_entity": {},
+        "pending_prompts": {},
+        "version": 2,
+        "snoozed_until": {},
+        "presence_grace_until": {
+            "Alice": "2099-01-01T00:00:00+00:00",  # stale friendly-name key
+            "person.bob": "2099-01-01T00:00:00+00:00",  # valid entity-ID key
+        },
+    }
+
+
+def test_migrate_v2_drops_friendly_name_presence_grace_keys() -> None:
+    """v2→v3 migration must drop presence_grace_until keys that aren't person entity IDs."""
+    data = _v2_data_with_friendly_name_keys()
+    _migrate_suppression_state(data)
+
+    assert "Alice" not in data["presence_grace_until"]
+    assert "person.bob" in data["presence_grace_until"]
+    assert data["version"] == 3
+
+
+def test_migrate_v2_preserves_valid_entity_id_keys() -> None:
+    """v2→v3 migration must not drop keys that already start with 'person.'."""
+    data: dict = {
+        "last_by_type": {},
+        "last_by_entity": {},
+        "pending_prompts": {},
+        "version": 2,
+        "snoozed_until": {},
+        "presence_grace_until": {"person.alice": "2099-01-01T00:00:00+00:00"},
+    }
+    _migrate_suppression_state(data)
+    assert data["presence_grace_until"] == {"person.alice": "2099-01-01T00:00:00+00:00"}
+
+
+def test_migrate_v2_to_v3_is_idempotent() -> None:
+    """Running migration twice on the same v2 record must be a no-op on the second pass."""
+    data = _v2_data_with_friendly_name_keys()
+    _migrate_suppression_state(data)
+    snapshot = dict(data)
+    snapshot["presence_grace_until"] = dict(data["presence_grace_until"])
+    _migrate_suppression_state(data)
+    assert data == snapshot
+
+
+def test_migrate_v2_logs_warning_for_dropped_keys() -> None:
+    """v2→v3 migration must emit a warning for each dropped friendly-name key."""
+    from unittest.mock import patch  # noqa: PLC0415
+
+    import custom_components.home_generative_agent.sentinel.suppression as _mod  # noqa: PLC0415
+
+    data = _v2_data_with_friendly_name_keys()
+    with patch.object(_mod.LOGGER, "warning") as mock_warn:
+        _migrate_suppression_state(data)
+
+    mock_warn.assert_called_once()
+    assert "Alice" in mock_warn.call_args[0][1]

@@ -40,7 +40,7 @@ def _derive(states: list[_FakeState]) -> dict[str, Any]:
 
 
 def test_all_home_populates_people_home() -> None:
-    """When every person entity is 'home', people_home lists them all."""
+    """When every person entity is 'home', people_home lists their entity IDs."""
     states = [
         _FakeState(
             "person.alice",
@@ -57,7 +57,7 @@ def test_all_home_populates_people_home() -> None:
     ]
     ctx = _derive(states)
 
-    assert ctx["people_home"] == ["Alice", "Bob"]
+    assert ctx["people_home"] == ["person.alice", "person.bob"]
     assert ctx["people_away"] == []
     assert ctx["anyone_home"] is True
 
@@ -68,7 +68,7 @@ def test_all_home_populates_people_home() -> None:
 
 
 def test_none_home_populates_people_away() -> None:
-    """When no person entity is 'home', people_away lists them all."""
+    """When no person entity is 'home', people_away lists their entity IDs."""
     states = [
         _FakeState(
             "person.alice",
@@ -86,7 +86,7 @@ def test_none_home_populates_people_away() -> None:
     ctx = _derive(states)
 
     assert ctx["people_home"] == []
-    assert ctx["people_away"] == ["Alice", "Bob"]
+    assert ctx["people_away"] == ["person.alice", "person.bob"]
     assert ctx["anyone_home"] is False
 
 
@@ -96,7 +96,7 @@ def test_none_home_populates_people_away() -> None:
 
 
 def test_partial_presence_splits_correctly() -> None:
-    """When only some people are home, each list contains only the right names."""
+    """When only some people are home, each list contains the right entity IDs."""
     states = [
         _FakeState(
             "person.alice",
@@ -119,8 +119,8 @@ def test_partial_presence_splits_correctly() -> None:
     ]
     ctx = _derive(states)
 
-    assert ctx["people_home"] == ["Alice"]
-    assert ctx["people_away"] == ["Bob", "Carol"]
+    assert ctx["people_home"] == ["person.alice"]
+    assert ctx["people_away"] == ["person.bob", "person.carol"]
     assert ctx["anyone_home"] is True
 
 
@@ -184,14 +184,20 @@ def test_no_person_entities_gives_empty_lists() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_falls_back_to_entity_id_when_no_friendly_name() -> None:
-    """If friendly_name attribute is absent, entity_id is used as the name."""
+def test_always_uses_entity_id_regardless_of_friendly_name() -> None:
+    """people_home/people_away always use entity_id, never the friendly_name attribute."""
     states = [
-        _FakeState("person.alice", "person", "home", attributes={}),
+        _FakeState(
+            "person.alice",
+            "person",
+            "home",
+            attributes={"friendly_name": "Alice"},
+        ),
     ]
     ctx = _derive(states)
 
     assert ctx["people_home"] == ["person.alice"]
+    assert "Alice" not in ctx["people_home"]
     assert ctx["anyone_home"] is True
 
 
@@ -201,7 +207,7 @@ def test_falls_back_to_entity_id_when_no_friendly_name() -> None:
 
 
 def test_people_lists_are_sorted() -> None:
-    """Both people_home and people_away must be sorted alphabetically."""
+    """Both people_home and people_away must be sorted by entity_id."""
     states = [
         _FakeState(
             "person.zara",
@@ -230,5 +236,5 @@ def test_people_lists_are_sorted() -> None:
     ]
     ctx = _derive(states)
 
-    assert ctx["people_home"] == ["Alice", "Zara"]
-    assert ctx["people_away"] == ["Ben", "Mike"]
+    assert ctx["people_home"] == ["person.alice", "person.zara"]
+    assert ctx["people_away"] == ["person.ben", "person.mike"]
