@@ -1,22 +1,18 @@
 # TODOS
 
-## Sentinel
+## Completed
 
 ### Build Operational Health Entity (sentinel_plan.md §11)
 
-**What:** Register a Home Assistant sensor entity that exposes Sentinel operational KPIs as attributes: `last_run_start`, `last_run_end`, `run_duration_ms`, `trigger_source_stats`, `triggers_dropped`, `active_rule_count`, `findings_count_by_severity`, `triage_suppress_rate`, `auto_exec_count`, `auto_exec_failures`, `false_positive_rate_14d`, `action_success_rate`, `user_override_rate`.
+**What:** Registered `SentinelHealthSensor` (`core/sentinel_health_sensor.py`) — a `SensorEntity` that exposes Sentinel KPIs as HA attributes: `last_run_start`, `last_run_end`, `run_duration_ms`, `active_rule_count`, `trigger_source_stats`, `findings_count_by_severity`, `triage_suppress_rate`, `auto_exec_count`, `auto_exec_failures`, `false_positive_rate_14d`, `action_success_rate`, `user_override_rate`. Added `_timed_run` wrapper to `SentinelEngine` for per-run timing telemetry and `SIGNAL_SENTINEL_RUN_COMPLETE` dispatcher signal. State: `"ok"` / `"disabled"`.
 
-**Why:** No health sensor entity exists anywhere in the codebase today (sentinel_plan.md §11 is entirely target state). Without it: (a) the L2→L3 KPI gate (false-positive rate < 5%, action success rate > 95%) is invisible to operators; (b) there is no way to know if Sentinel is running, how often, or why it suppressed something without reading raw audit records; (c) Lovelace dashboards and automations cannot consume Sentinel state.
-
-**Context:** This is the highest-value post-audit-integrity work. It directly unblocks: L2→L3 transition gating, operational runbooks, and user-facing Lovelace dashboards. The audit integrity gaps (gaps 1–5) must be closed first — KPI calculations require complete audit data. Start in `sensor.py` (existing platform file) following the pattern of existing sensor registrations. Rolling KPI values (14d false-positive rate etc.) should be computed from `AuditStore.async_get_latest()` on a background timer. The health entity's state value should be `"ok"` / `"degraded"` / `"disabled"` mirroring `audit_archival_status`.
+**Why:** No health sensor entity existed — the L2→L3 KPI gate (false-positive rate < 5%, action success rate > 95%) was invisible to operators; Lovelace dashboards and automations could not consume Sentinel state.
 
 **Effort:** XL
 **Priority:** P1
-**Depends on:** Audit integrity gaps PR (closes gaps 1–5)
+**Completed:** v3.6.0 (2026-03-15)
 
 ---
-
-## Completed
 
 ### Fix `people_home`/`people_away` to use stable entity IDs
 

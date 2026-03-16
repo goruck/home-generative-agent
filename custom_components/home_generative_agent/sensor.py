@@ -1,4 +1,4 @@
-"""Set up one recognized-people sensor per camera."""
+"""Set up one recognized-people sensor per camera and the sentinel health sensor."""
 
 from __future__ import annotations
 
@@ -7,9 +7,12 @@ from typing import TYPE_CHECKING, Any
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 
 from .core.recognized_sensor import RecognizedPeopleSensor
+from .core.sentinel_health_sensor import SentinelHealthSensor
 
 if TYPE_CHECKING:
     from homeassistant.core import Event, HomeAssistant
+
+    from .core.runtime import HGAConfigEntry
 
 
 def _discover_cameras(hass: HomeAssistant) -> list[str]:
@@ -19,15 +22,29 @@ def _discover_cameras(hass: HomeAssistant) -> list[str]:
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: Any,  # noqa: ARG001
+    entry: HGAConfigEntry,
     async_add_entities: Any,
 ) -> None:
     """
-    Set up one recognized-people sensor per camera.
+    Set up the sentinel health sensor and one recognized-people sensor per camera.
 
     If no cameras exist yet, wait for Home Assistant to finish starting,
     then try discovery again.
     """
+    # Sentinel health sensor is always registered; it handles "disabled" internally.
+    data = entry.runtime_data
+    async_add_entities(
+        [
+            SentinelHealthSensor(
+                hass,
+                data.options,
+                data.audit_store,
+                data.sentinel,
+                entry.entry_id,
+            )
+        ]
+    )
+
     cams = _discover_cameras(hass)
     if cams:
         async_add_entities([RecognizedPeopleSensor(hass, cam) for cam in cams])
