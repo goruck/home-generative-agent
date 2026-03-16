@@ -9,7 +9,10 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
-    from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
+    from custom_components.home_generative_agent.sentinel.models import (
+        AnomalyFinding,
+        CompoundFinding,
+    )
     from custom_components.home_generative_agent.snapshot.schema import (
         FullStateSnapshot,
     )
@@ -93,7 +96,7 @@ class AuditStore:
     async def async_append_finding(  # noqa: PLR0913
         self,
         snapshot: FullStateSnapshot,
-        finding: AnomalyFinding,
+        finding: AnomalyFinding | CompoundFinding,
         explanation: str | None,
         *,
         suppression_reason_code: str | None = None,
