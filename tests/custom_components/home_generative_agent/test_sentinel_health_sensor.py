@@ -87,7 +87,11 @@ def test_compute_kpis_auto_exec_count_and_failures() -> None:
         {"finding": {}, "action_outcome": {"status": "partial"}},
         {"finding": {}, "action_outcome": {"status": "error"}},
         {"finding": {}, "action_outcome": {"status": "no_actions"}},
-        {"finding": {}, "action_outcome": {"status": "dismissed"}},  # not auto-exec
+        {
+            "finding": {},
+            "action_outcome": {"status": "agent_called"},
+        },  # user-triggered, not auto-exec
+        {"finding": {}, "action_outcome": {"status": "dismissed"}},  # not counted
         {"finding": {}},  # no action_outcome
     ]
     kpis = _compute_kpis(records)
@@ -96,8 +100,23 @@ def test_compute_kpis_auto_exec_count_and_failures() -> None:
     assert kpis["auto_exec_failures"] == 1
 
 
-def test_compute_kpis_action_success_rate_75pct() -> None:
-    """action_success_rate is (success+partial) / auto_exec_total * 100."""
+def test_compute_kpis_action_success_rate_includes_user_triggered() -> None:
+    """action_success_rate counts both auto-exec and user-triggered outcomes."""
+    records = [
+        {"finding": {}, "action_outcome": {"status": "success"}},  # auto, success
+        {"finding": {}, "action_outcome": {"status": "agent_called"}},  # user, success
+        {"finding": {}, "action_outcome": {"status": "event_fired"}},  # user, success
+        {"finding": {}, "action_outcome": {"status": "error"}},  # auto, failure
+        {"finding": {}, "action_outcome": {"status": "blocked"}},  # user, failure
+    ]
+    kpis = _compute_kpis(records)
+
+    # 3 successes (success, agent_called, event_fired), 5 total → 60%
+    assert kpis["action_success_rate"] == 60.0
+
+
+def test_compute_kpis_action_success_rate_auto_exec_only() -> None:
+    """action_success_rate handles pure auto-exec mix."""
     records = [
         {"finding": {}, "action_outcome": {"status": "success"}},
         {"finding": {}, "action_outcome": {"status": "partial"}},
@@ -106,61 +125,83 @@ def test_compute_kpis_action_success_rate_75pct() -> None:
     ]
     kpis = _compute_kpis(records)
 
-    # 2 success/partial, 4 total auto-exec → 50%
+    # 2 success/partial, 4 total → 50%
     assert kpis["action_success_rate"] == 50.0
 
 
 def test_compute_kpis_user_override_rate() -> None:
-    """user_override_rate is (records with user_response / total) * 100."""
+    """user_override_rate counts only not_suppressed records with user_response."""
     records = [
-        {"finding": {}, "user_response": {"action": "dismiss"}},
-        {"finding": {}, "user_response": {"action": "execute"}},
-        {"finding": {}},
-        {"finding": {}},
+        {
+            "finding": {},
+            "suppression_reason_code": "not_suppressed",
+            "user_response": {"action": "dismiss"},
+        },
+        {
+            "finding": {},
+            "suppression_reason_code": "not_suppressed",
+            "user_response": {"action": "execute"},
+        },
+        # suppressed — user never saw it, should not count toward total
+        {"finding": {}, "suppression_reason_code": "suppressed", "user_response": None},
+        # not_suppressed but no response
+        {"finding": {}, "suppression_reason_code": "not_suppressed"},
     ]
     kpis = _compute_kpis(records)
 
-    assert kpis["user_override_rate"] == 50.0
+    # 2 responses out of 3 not_suppressed → 66.7%
+    assert kpis["user_override_rate"] == 66.7
 
 
 def test_compute_kpis_false_positive_rate_14d() -> None:
-    """false_positive_rate_14d: % of last-14d notified records with false_positive=True."""
+    """false_positive_rate_14d: % of last-14d not_suppressed records with false_positive."""
     now = datetime.now(UTC)
     recent_str = (now - timedelta(days=1)).isoformat()
     old_str = (now - timedelta(days=20)).isoformat()
 
     records = [
-        # Recent, false positive
+        # Recent, not_suppressed, false positive
         {
             "finding": {},
+            "suppression_reason_code": "not_suppressed",
             "notification": {"notified_at": recent_str},
             "user_response": {"false_positive": True},
         },
-        # Recent, not false positive
+        # Recent, not_suppressed, not false positive
         {
             "finding": {},
+            "suppression_reason_code": "not_suppressed",
             "notification": {"notified_at": recent_str},
             "user_response": None,
         },
-        # Old — outside 14d window, should not count
+        # Recent but suppressed — must not count even if it had false_positive
         {
             "finding": {},
+            "suppression_reason_code": "suppressed",
+            "notification": {"notified_at": recent_str},
+            "user_response": {"false_positive": True},
+        },
+        # Old not_suppressed — outside 14d window
+        {
+            "finding": {},
+            "suppression_reason_code": "not_suppressed",
             "notification": {"notified_at": old_str},
             "user_response": {"false_positive": True},
         },
     ]
     kpis = _compute_kpis(records)
 
-    # 1 FP out of 2 within-window records → 50%
+    # 1 FP out of 2 not_suppressed within-window records → 50%
     assert kpis["false_positive_rate_14d"] == 50.0
 
 
 def test_compute_kpis_false_positive_rate_14d_none_when_no_recent() -> None:
-    """false_positive_rate_14d is None when no records fall within the 14d window."""
+    """false_positive_rate_14d is None when no not_suppressed records are in the 14d window."""
     old_str = (datetime.now(UTC) - timedelta(days=30)).isoformat()
     records = [
         {
             "finding": {},
+            "suppression_reason_code": "not_suppressed",
             "notification": {"notified_at": old_str},
             "user_response": {"false_positive": True},
         },
@@ -173,10 +214,22 @@ def test_compute_kpis_false_positive_rate_14d_none_when_no_recent() -> None:
 def test_compute_kpis_bad_notified_at_does_not_crash() -> None:
     """Malformed notified_at strings should be silently skipped."""
     records = [
-        {"finding": {}, "notification": {"notified_at": "not-a-date"}},
-        {"finding": {}, "notification": {"notified_at": None}},
-        {"finding": {}, "notification": {}},
-        {"finding": {}},
+        {
+            "finding": {},
+            "suppression_reason_code": "not_suppressed",
+            "notification": {"notified_at": "not-a-date"},
+        },
+        {
+            "finding": {},
+            "suppression_reason_code": "not_suppressed",
+            "notification": {"notified_at": None},
+        },
+        {
+            "finding": {},
+            "suppression_reason_code": "not_suppressed",
+            "notification": {},
+        },
+        {"finding": {}, "suppression_reason_code": "not_suppressed"},
     ]
     kpis = _compute_kpis(records)
 

@@ -27,13 +27,19 @@ _DESC = SensorEntityDescription(
     icon="mdi:shield-check",
 )
 
-# action_outcome statuses that represent a completed auto-execute attempt.
+# action_outcome statuses that represent a completed autonomous-execute attempt.
 _AUTO_EXEC_TERMINAL: frozenset[str] = frozenset(
     {"success", "partial", "error", "no_actions"}
 )
 
+# action_outcome statuses written by ActionHandler for user-triggered executions.
+# "agent_called" = conversation agent invoked; "event_fired" = blueprint hook fired.
+# Both are treated as successful for action_success_rate purposes.
+_USER_EXEC_SUCCESS: frozenset[str] = frozenset({"agent_called", "event_fired"})
+_USER_EXEC_FAILURE: frozenset[str] = frozenset({"blocked", "missing_finding"})
 
-def _compute_kpis(records: list[dict[str, Any]]) -> dict[str, Any]:  # noqa: PLR0912
+
+def _compute_kpis(records: list[dict[str, Any]]) -> dict[str, Any]:  # noqa: PLR0912, PLR0915
     """Compute Sentinel KPIs from a list of raw audit record dicts."""
     cutoff_14d = datetime.now(UTC) - timedelta(days=14)
 
@@ -75,23 +81,35 @@ def _compute_kpis(records: list[dict[str, Any]]) -> dict[str, Any]:  # noqa: PLR
                     action_success_count += 1
                 elif status == "error":
                     auto_exec_failure_count += 1
+            elif status in _USER_EXEC_SUCCESS:
+                action_total += 1
+                action_success_count += 1
+            elif status in _USER_EXEC_FAILURE:
+                action_total += 1
+
+        # Only count user-facing metrics for findings that were actually notified.
+        # Suppressed findings never reach the user and cannot receive responses.
+        notified = r.get("suppression_reason_code") == "not_suppressed"
 
         user_response = r.get("user_response")
-        if user_response is not None:
+        if notified and user_response is not None:
             user_response_count += 1
 
-        notified_at_str = r.get("notification", {}).get("notified_at")
-        if notified_at_str:
-            try:
-                notified_dt = datetime.fromisoformat(notified_at_str)
-                if notified_dt >= cutoff_14d:
-                    fp_14d_total += 1
-                    if user_response and user_response.get("false_positive"):
-                        fp_14d_count += 1
-            except (ValueError, TypeError):
-                pass
+        if notified:
+            notified_at_str = r.get("notification", {}).get("notified_at")
+            if notified_at_str:
+                try:
+                    notified_dt = datetime.fromisoformat(notified_at_str)
+                    if notified_dt >= cutoff_14d:
+                        fp_14d_total += 1
+                        if user_response and user_response.get("false_positive"):
+                            fp_14d_count += 1
+                except (ValueError, TypeError):
+                    pass
 
-    total = len(records)
+    notified_total = sum(
+        1 for r in records if r.get("suppression_reason_code") == "not_suppressed"
+    )
     return {
         "findings_count_by_severity": severity_counts,
         "trigger_source_stats": trigger_source_counts,
@@ -106,7 +124,9 @@ def _compute_kpis(records: list[dict[str, Any]]) -> dict[str, Any]:  # noqa: PLR
             else None
         ),
         "user_override_rate": (
-            round(user_response_count / total * 100, 1) if total > 0 else None
+            round(user_response_count / notified_total * 100, 1)
+            if notified_total > 0
+            else None
         ),
         "false_positive_rate_14d": (
             round(fp_14d_count / fp_14d_total * 100, 1) if fp_14d_total > 0 else None
