@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 from homeassistant.const import EVENT_STATE_CHANGED
 from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.util import dt as dt_util
 
 from custom_components.home_generative_agent.const import (
@@ -36,6 +37,7 @@ from custom_components.home_generative_agent.const import (
     RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES,
     RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
     RECOMMENDED_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
+    SIGNAL_SENTINEL_RUN_COMPLETE,
 )
 from custom_components.home_generative_agent.core.utils import verify_pin
 from custom_components.home_generative_agent.snapshot.builder import (
@@ -182,6 +184,8 @@ class SentinelEngine:
         # Presence tracking for grace-window registration.
         # Stores the set of person entity IDs known to be home from the last run.
         self._last_people_home: set[str] = set()
+        # Run telemetry exposed to SentinelHealthSensor.
+        self.run_stats: dict[str, Any] = {}
 
     # ---------------------------------------------------------------------- #
     # Autonomy level management
@@ -342,11 +346,11 @@ class SentinelEngine:
             # under the same single-flight guard so concurrent runs are
             # prevented regardless of the execution path taken.
             triggered = await self._trigger_scheduler.run_once_if_triggered(
-                lambda: self._run_once("event")
+                lambda: self._timed_run("event")
             )
             if not triggered:
                 await self._trigger_scheduler.run_polling(
-                    lambda: self._run_once("poll")
+                    lambda: self._timed_run("poll")
                 )
             try:
                 # Wait for a new trigger or the polling interval — whichever
@@ -362,8 +366,27 @@ class SentinelEngine:
     async def async_run_now(self) -> bool:
         """Run one sentinel evaluation cycle immediately if idle."""
         return await self._trigger_scheduler.run_now(
-            lambda: self._run_once("on_demand")
+            lambda: self._timed_run("on_demand")
         )
+
+    async def _timed_run(self, trigger_source: str = "poll") -> None:
+        """Record run timing, call _run_once, then fire the run-complete signal."""
+        _start = dt_util.utcnow()
+        self.run_stats["last_run_start"] = _start.isoformat()
+        try:
+            await self._run_once(trigger_source)
+        finally:
+            _end = dt_util.utcnow()
+            self.run_stats["last_run_end"] = _end.isoformat()
+            self.run_stats["run_duration_ms"] = int(
+                (_end - _start).total_seconds() * 1000
+            )
+            self.run_stats["active_rule_count"] = len(self._rules) + (
+                len(self._rule_registry.list_rules())
+                if self._rule_registry is not None
+                else 0
+            )
+            async_dispatcher_send(self._hass, SIGNAL_SENTINEL_RUN_COMPLETE)
 
     async def _run_once(self, trigger_source: str = "poll") -> None:
         try:
