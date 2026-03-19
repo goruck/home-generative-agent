@@ -408,3 +408,116 @@ async def test_audit_store_default_max_records() -> None:
     hass = MagicMock()
     store = AuditStore(hass)
     assert store._max_records == RECOMMENDED_AUDIT_HOT_MAX_RECORDS
+
+
+# ---------------------------------------------------------------------------
+# Priority eviction: not_suppressed records are preserved over suppressed ones
+# ---------------------------------------------------------------------------
+
+
+def _record_with_code(anomaly_id: str, code: str | None) -> dict[str, Any]:
+    """Build a minimal audit record with the given suppression_reason_code."""
+    r = _simple_record(anomaly_id)
+    r["suppression_reason_code"] = code
+    return r
+
+
+@pytest.mark.asyncio
+async def test_eviction_priority_spares_not_suppressed() -> None:
+    """Suppressed records are evicted before not_suppressed records."""
+    store = _make_store()
+    store._max_records = 5
+    # Seed: 3 not_suppressed + 2 suppressed
+    store._records = [
+        _record_with_code("ns1", "not_suppressed"),
+        _record_with_code("ns2", "not_suppressed"),
+        _record_with_code("s1", "type_cooldown"),
+        _record_with_code("ns3", "not_suppressed"),
+        _record_with_code("s2", "suppressed"),
+    ]
+    # Append one more suppressed record to trigger eviction.
+    store._records.append(_record_with_code("s3", "type_cooldown"))
+    store._evict_one()
+
+    assert len(store._records) == 5
+    ids = {r["finding"]["anomaly_id"] for r in store._records}
+    # All three not_suppressed records must survive.
+    assert {"ns1", "ns2", "ns3"} <= ids
+    # The oldest suppressed (s1) should have been evicted.
+    assert "s1" not in ids
+
+
+@pytest.mark.asyncio
+async def test_eviction_last_resort_when_all_not_suppressed() -> None:
+    """When every record is not_suppressed, the oldest is evicted as last resort."""
+    store = _make_store()
+    store._max_records = 3
+    store._records = [
+        _record_with_code("ns1", "not_suppressed"),
+        _record_with_code("ns2", "not_suppressed"),
+        _record_with_code("ns3", "not_suppressed"),
+        _record_with_code("ns4", "not_suppressed"),  # triggers eviction
+    ]
+    store._evict_one()
+
+    assert len(store._records) == 3
+    ids = [r["finding"]["anomaly_id"] for r in store._records]
+    # Oldest (ns1) should be evicted.
+    assert "ns1" not in ids
+    assert ids == ["ns2", "ns3", "ns4"]
+
+
+@pytest.mark.asyncio
+async def test_eviction_v1_record_without_code_treated_as_evictable() -> None:
+    """Records missing suppression_reason_code (v1) are treated as evictable."""
+    store = _make_store()
+    store._max_records = 2
+    v1_record = _simple_record("v1")  # no suppression_reason_code key
+    not_suppressed = _record_with_code("ns1", "not_suppressed")
+    store._records = [v1_record, not_suppressed, _record_with_code("s1", "suppressed")]
+    store._evict_one()
+
+    assert len(store._records) == 2
+    ids = {r["finding"]["anomaly_id"] for r in store._records}
+    # v1 record should have been evicted (oldest evictable).
+    assert "v1" not in ids
+    assert "ns1" in ids
+
+
+@pytest.mark.asyncio
+async def test_eviction_boundary_at_exactly_max() -> None:
+    """No eviction occurs when the store is exactly at max_records capacity."""
+    store = _make_store()
+    store._max_records = 3
+    store._records = [
+        _record_with_code("s1", "suppressed"),
+        _record_with_code("s2", "suppressed"),
+        _record_with_code("s3", "suppressed"),
+    ]
+    # Should not evict — we're at capacity, not over it.
+    assert len(store._records) == store._max_records
+
+
+@pytest.mark.asyncio
+async def test_flood_survival_exact_count() -> None:
+    """not_suppressed records survive a flood of suppressed appends."""
+    store = _make_store()
+    store._max_records = 10
+    # Seed: 2 not_suppressed records.
+    store._records = [
+        _record_with_code("ns1", "not_suppressed"),
+        _record_with_code("ns2", "not_suppressed"),
+    ]
+    # Flood with 18 suppressed records (total will hit 20 → 10 evictions).
+    for i in range(18):
+        store._records.append(_record_with_code(f"s{i}", "type_cooldown"))
+        if len(store._records) > store._max_records:
+            store._evict_one()
+
+    assert len(store._records) == store._max_records
+    not_suppressed = [
+        r
+        for r in store._records
+        if r.get("suppression_reason_code") == "not_suppressed"
+    ]
+    assert len(not_suppressed) == 2  # exact count preserved
