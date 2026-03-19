@@ -347,3 +347,94 @@ async def test_enqueue_sets_trigger_available_event() -> None:
     assert not scheduler._trigger_available.is_set()
     scheduler.enqueue(TriggerRecord(anomaly_type="unlocked_lock_at_night"))
     assert scheduler._trigger_available.is_set()
+
+
+# ---------------------------------------------------------------------------
+# Trigger scheduler statistics
+# ---------------------------------------------------------------------------
+
+
+def test_stats_initial_values_are_zero() -> None:
+    """All counters start at zero."""
+    scheduler = SentinelTriggerScheduler()
+    s = scheduler.stats
+    assert s["triggers_coalesced"] == 0
+    assert s["triggers_dropped_incoming"] == 0
+    assert s["triggers_dropped_queued"] == 0
+    assert s["triggers_ttl_expired"] == 0
+
+
+def test_stats_coalesced_increments_on_coalesce() -> None:
+    """triggers_coalesced increments when a trigger is merged into a pending one."""
+    scheduler = SentinelTriggerScheduler()
+    scheduler.enqueue(TriggerRecord(anomaly_type="camera_entry_unsecured"))
+    # Second enqueue of same type within coalesce window → coalesced.
+    scheduler.enqueue(TriggerRecord(anomaly_type="camera_entry_unsecured"))
+
+    assert scheduler.stats["triggers_coalesced"] == 1
+    assert scheduler.queue_depth == 1  # only one in queue
+
+
+def test_stats_dropped_incoming_increments_when_queue_all_critical() -> None:
+    """triggers_dropped_incoming increments when incoming trigger is dropped."""
+    scheduler = SentinelTriggerScheduler()
+    # Pre-fill queue with security-critical items by injecting directly (bypassing
+    # coalescing) so we can use more than one record per type.
+    _critical_types = [
+        "camera_entry_unsecured",
+        "unknown_person_camera_no_home",
+        "open_entry_while_away",
+        "unlocked_lock_at_night",
+    ]
+    # All injected records must be older than COALESCE_WINDOW_SECONDS (5 s) so the
+    # incoming enqueue below cannot coalesce with any of them.
+    for i in range(QUEUE_MAX_SIZE):
+        scheduler._queue.append(
+            _make_record(_critical_types[i % 4], age_seconds=(i + 1) * 10.0)
+        )
+    initial_depth = scheduler.queue_depth
+
+    # Enqueueing one more item when queue is full of critical items → incoming dropped.
+    scheduler.enqueue(TriggerRecord(anomaly_type="camera_entry_unsecured"))
+
+    assert scheduler.stats["triggers_dropped_incoming"] == 1
+    assert scheduler.queue_depth == initial_depth  # nothing evicted
+
+
+def test_stats_dropped_queued_increments_when_item_evicted() -> None:
+    """triggers_dropped_queued increments when a queued item is bumped out."""
+    scheduler = SentinelTriggerScheduler()
+    # Fill queue with non-critical items aged far apart so coalescing doesn't trigger.
+    for i in range(QUEUE_MAX_SIZE):
+        scheduler.enqueue(
+            _make_record(f"open_entry_while_away_{i}", age_seconds=i * 10.0)
+        )
+    # Enqueue a security-critical item → oldest non-critical item evicted.
+    scheduler.enqueue(TriggerRecord(anomaly_type="camera_entry_unsecured"))
+
+    assert scheduler.stats["triggers_dropped_queued"] == 1
+    assert scheduler.queue_depth == QUEUE_MAX_SIZE
+
+
+def test_stats_ttl_expired_increments_in_pop_next_valid() -> None:
+    """triggers_ttl_expired increments when an expired trigger is discarded at dequeue."""
+    scheduler = SentinelTriggerScheduler()
+    # Directly inject an expired record bypassing the coalescing check.
+    expired = _make_record(
+        "camera_entry_unsecured", age_seconds=TRIGGER_TTL_SECONDS + 5.0
+    )
+    scheduler._queue.append(expired)
+
+    result = scheduler._pop_next_valid()
+
+    assert result is None
+    assert scheduler.stats["triggers_ttl_expired"] == 1
+
+
+def test_stats_returns_snapshot_not_reference() -> None:
+    """Stats property returns a copy — mutations do not affect internal counters."""
+    scheduler = SentinelTriggerScheduler()
+    snapshot = scheduler.stats
+    snapshot["triggers_coalesced"] = 999
+
+    assert scheduler._stats["triggers_coalesced"] == 0

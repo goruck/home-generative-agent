@@ -386,6 +386,7 @@ class SentinelEngine:
                 if self._rule_registry is not None
                 else 0
             )
+            self.run_stats["scheduler"] = self._trigger_scheduler.stats
             async_dispatcher_send(self._hass, SIGNAL_SENTINEL_RUN_COMPLETE)
 
     async def _run_once(self, trigger_source: str = "poll") -> None:
