@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -349,3 +349,59 @@ def test_unique_id_uses_entry_id() -> None:
     """unique_id should incorporate the entry_id for per-entry uniqueness."""
     sensor = _make_sensor()
     assert sensor._attr_unique_id == "sentinel_health::test_entry"
+
+
+@pytest.mark.asyncio
+async def test_refresh_includes_scheduler_stats_from_run_stats() -> None:
+    """Scheduler stats nested in run_stats['scheduler'] appear as sensor attributes."""
+    run_stats = {
+        "last_run_start": "2025-01-01T12:00:00+00:00",
+        "scheduler": {
+            "triggers_coalesced": 5,
+            "triggers_dropped_incoming": 1,
+            "triggers_dropped_queued": 2,
+            "triggers_ttl_expired": 0,
+        },
+    }
+    sensor = _make_sensor(run_stats=run_stats)
+    sensor.async_write_ha_state = MagicMock()
+
+    await sensor._async_refresh()
+
+    assert sensor._attrs["triggers_coalesced"] == 5
+    assert sensor._attrs["triggers_dropped_incoming"] == 1
+    assert sensor._attrs["triggers_dropped_queued"] == 2
+    assert sensor._attrs["triggers_ttl_expired"] == 0
+
+
+@pytest.mark.asyncio
+async def test_refresh_scheduler_stats_absent_when_no_engine() -> None:
+    """No scheduler stats in attrs when sentinel engine is None (no scheduler key)."""
+    hass = MagicMock()
+    sensor = SentinelHealthSensor(
+        hass=hass,
+        options={"sentinel_enabled": True},
+        audit_store=None,
+        sentinel=None,
+        entry_id="test_entry",
+    )
+    sensor.async_write_ha_state = MagicMock()
+
+    await sensor._async_refresh()
+
+    # Scheduler stat keys should not appear when there is no engine.
+    for key in ("triggers_coalesced", "triggers_dropped_incoming"):
+        assert key not in sensor._attrs
+
+
+@pytest.mark.asyncio
+async def test_refresh_requests_all_available_records() -> None:
+    """_async_refresh requests 1000 records so all available data contributes to KPIs."""
+    sensor = _make_sensor(records=[])
+    sensor.async_write_ha_state = MagicMock()
+
+    await sensor._async_refresh()
+
+    cast("MagicMock", sensor._audit_store).async_get_latest.assert_called_once_with(
+        1000
+    )
