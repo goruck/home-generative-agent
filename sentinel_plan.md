@@ -29,7 +29,7 @@
 - Partially implemented or still open (see Known Current Gaps below for the summary list):
   - Rule/suppression-state-suppressed findings are not written to the audit store (engine silently returns at the suppression gate). Triage-suppressed findings *are* written to audit.
   - `ACTION_POLICY_BLOCKED` blocks execution but does not suppress notification dispatch.
-  - Audit schema/retention/archival health in this document is ahead of the current `audit/store.py` implementation. `CONF_AUDIT_HOT_MAX_RECORDS` is defined in `const.py` but the store still uses a hardcoded `MAX_RECORDS = 200` constant — the config value is not wired up.
+  - Audit schema/retention/archival health in this document is ahead of the current `audit/store.py` implementation. `CONF_AUDIT_HOT_MAX_RECORDS` is now wired: the store default is 500 records with priority eviction (suppressed records evicted before `not_suppressed`); severity-aware eviction and archival backend remain unimplemented.
   - `trigger_source` field exists in `AuditRecord` and migration defaults but is never populated by any engine call — it is always `None` in practice.
   - `action_policy_path` is present in `AuditRecord` and `async_append_finding` but is absent from `_V2_FIELD_DEFAULTS` in `audit/store.py` — v1→v2 migration does not backfill this field.
   - `derived.people_home` / `derived.people_away` currently contain friendly names when available, not stable person entity IDs.
@@ -39,7 +39,7 @@
 - Suppressed findings from the rule/suppression gate are not audited.
 - `ACTION_POLICY_BLOCKED` does not currently suppress notification dispatch.
 - `trigger_source` is never populated in audit records.
-- `CONF_AUDIT_HOT_MAX_RECORDS` is defined but not wired into `audit/store.py`.
+- `CONF_AUDIT_HOT_MAX_RECORDS` is wired and the default is 500. Eviction is priority-based (suppressed evicted before `not_suppressed`). Severity-aware eviction (P3) and the archival backend remain unimplemented.
 - `action_policy_path` is not backfilled during v1→v2 audit migration.
 - Presence-grace identity currently uses display-name-derived values, not stable person entity IDs.
 
@@ -85,7 +85,7 @@ CONF_SENTINEL_STALENESS_THRESHOLD_SECONDS: 1800
 CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES: 120
 CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: true   # applies to increases into level 2 or 3 only; never required for lowering
 CONF_SENTINEL_EXECUTION_IDEMPOTENCY_WINDOW_MINUTES: 15  # deduplication window; align with entity cooldown period when possible
-CONF_AUDIT_HOT_MAX_RECORDS: 500        # defined in const.py; audit/store.py still uses hardcoded MAX_RECORDS = 200
+CONF_AUDIT_HOT_MAX_RECORDS: 500        # wired; AuditStore default is 500 with priority eviction (suppressed evicted first)
 CONF_AUDIT_ARCHIVAL_BACKLOG_MAX: 100
 CONF_AUDIT_RETENTION_DAYS: 90
 CONF_AUDIT_HIGH_RETENTION_DAYS: 365
@@ -255,26 +255,29 @@ Status: `Partially implemented`.
 
 ## 11. Operational Health and Observability
 
-Status: `Largely planned`. No health sensor entity is registered anywhere in the codebase today — the entire section is target state. None of the attributes below are currently exposed to Home Assistant.
+Status: `Implemented` (v3.6.1, PR #334; scheduler stats added in fix/sentinel-audit-flood). `sensor.sentinel_health` is registered and refreshed after every Sentinel run.
 
-- Sentinel health entity attributes:
-  - `last_run_start`, `last_run_end`, `run_duration_ms`
-  - `trigger_source_stats`: `{poll: N, event: N}`
-  - `triggers_dropped`: cumulative count
-  - `trigger_drop_reason_counts`: per-reason counters
-  - `active_rule_count`
-  - `findings_count_by_severity`
-  - `triage_suppress_rate`
-  - `auto_exec_count`, `auto_exec_failures`, `auto_exec_would_execute_count` (canary)
-  - Rolling KPI values: `false_positive_rate_14d`, `action_success_rate`, `user_override_rate`
-- Static availability checks for critical sensors/entities.
-- Export counters suitable for Lovelace dashboards.
+Implemented health entity attributes (exposed today):
+
+- `last_run_start`, `last_run_end`, `run_duration_ms`, `active_rule_count`
+- `trigger_source_stats`: `{poll: N, event: N}`
+- `triggers_coalesced`, `triggers_dropped_incoming`, `triggers_dropped_queued`, `triggers_ttl_expired` — cumulative scheduler counters
+- `findings_count_by_severity`: `{low: N, medium: N, high: N}`
+- `triage_suppress_rate`
+- `auto_exec_count`, `auto_exec_failures`
+- Rolling KPI values (based on up to 1000 most recent audit records): `false_positive_rate_14d`, `action_success_rate`, `user_override_rate`
+
+Planned / still target state:
+
+- `auto_exec_would_execute_count` (canary mode) — not yet implemented
+- `audit_archival_drop_count`, `audit_archival_status` — archival backend not yet implemented
+- Static availability checks for critical sensors/entities
 
 ---
 
 ## 12. Audit Schema
 
-Status: `Partially implemented`. The current audit store has a subset of the fields below and uses a fixed-cap local store; treat the dataclass below as target state, not current code. Known gaps beyond the schema itself: `trigger_source` is never populated by any engine call (always `None`); `action_policy_path` is missing from `_V2_FIELD_DEFAULTS` so v1→v2 migration does not backfill it; `CONF_AUDIT_HOT_MAX_RECORDS` is defined but the store uses a hardcoded `MAX_RECORDS = 200`.
+Status: `Partially implemented`. The current audit store has a subset of the fields below and uses a fixed-cap local store; treat the dataclass below as target state, not current code. Known gaps beyond the schema itself: `trigger_source` is never populated by any engine call (always `None`); `action_policy_path` is missing from `_V2_FIELD_DEFAULTS` so v1→v2 migration does not backfill it.
 
 For each finding record, persist:
 
@@ -315,7 +318,7 @@ Retention model:
   - Hot local store (`Store`): capped by `CONF_AUDIT_HOT_MAX_RECORDS`.
   - Time pruning: default `CONF_AUDIT_RETENTION_DAYS=90`.
   - High-severity SLA (`CONF_AUDIT_HIGH_RETENTION_DAYS=365`) requires PostgreSQL archival backend.
-- Current code: local store is capped by a fixed `MAX_RECORDS = 200` and has no severity-aware retention or archival backend management.
+- Current code: local store is capped by `CONF_AUDIT_HOT_MAX_RECORDS` (default 500). Eviction is priority-based: suppressed records are evicted before `not_suppressed` records; when all records are `not_suppressed`, the oldest is evicted with a warning log. No severity-aware eviction or archival backend yet.
 - Archival unavailability policy:
   - Hot store continues accepting records up to `CONF_AUDIT_HOT_MAX_RECORDS`; once at cap, overwrite deterministically by dropping oldest `low`, then oldest `medium`, and only then oldest `high` if no other choice remains.
   - Invariant: never drop `high`-severity records while any `low` or `medium` records remain in hot store.

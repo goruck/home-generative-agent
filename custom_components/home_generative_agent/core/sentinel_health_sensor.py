@@ -27,6 +27,10 @@ _DESC = SensorEntityDescription(
     icon="mdi:shield-check",
 )
 
+# Maximum audit records to fetch per health-sensor refresh.  Using a value well
+# above any realistic hot-store size ensures all records contribute to KPI accuracy.
+_MAX_AUDIT_RECORDS = 1000
+
 # action_outcome statuses that represent a completed autonomous-execute attempt.
 _AUTO_EXEC_TERMINAL: frozenset[str] = frozenset(
     {"success", "partial", "error", "no_actions"}
@@ -186,7 +190,7 @@ class SentinelHealthSensor(SensorEntity):
 
         records: list[dict[str, Any]] = []
         if self._audit_store is not None:
-            records = await self._audit_store.async_get_latest(200)
+            records = await self._audit_store.async_get_latest(_MAX_AUDIT_RECORDS)
 
         kpis = _compute_kpis(records)
         self._attrs.update(kpis)
@@ -202,6 +206,11 @@ class SentinelHealthSensor(SensorEntity):
             "active_rule_count",
         ):
             self._attrs[key] = run_stats.get(key)
+
+        # Merge trigger scheduler statistics.
+        scheduler_stats: dict[str, Any] = run_stats.get("scheduler", {})
+        for key, val in scheduler_stats.items():
+            self._attrs[key] = val
 
         self._attr_native_value = "ok"
         self.async_write_ha_state()

@@ -474,6 +474,7 @@ These optional features are configured in the Sentinel subentry:
    - Baseline: `sentinel_baseline_enabled`, `sentinel_baseline_update_interval_minutes`, `sentinel_baseline_freshness_threshold_seconds`
    - Autonomy guardrails: `sentinel_require_pin_for_level_increase` and the Sentinel autonomy-level increase PIN
    - Per-area notifications: `sentinel_area_notify_map` (area name → notify service, e.g. `{"Garage": "notify.mobile_app_garage_tablet"}`)
+   - Audit store size: `audit_hot_max_records` (default 500) — maximum records kept in the local hot store. Records with `suppression_reason_code == "not_suppressed"` (user-visible findings) are always preserved in preference to suppressed records when the store is at capacity.
 
 Discovery and baseline both require `sentinel_enabled` to be `true` — they will not start if anomaly alerting is disabled. Discovery and triage also require a configured chat model; if no model is available, those loops are skipped.
 
@@ -527,6 +528,56 @@ Notable service behavior:
 - `home_generative_agent.preview_rule_proposal` evaluates a stored proposal draft against the current snapshot without registering the rule and returns whether it would trigger right now.
 - `home_generative_agent.sentinel_set_autonomy_level` is admin-only and applies a TTL-bounded runtime override. If `sentinel_require_pin_for_level_increase` is enabled, increasing the level requires the Sentinel PIN.
 - Proposal approval responses may include structured normalization failures such as `reason_code: missing_required_entities` with a `details` payload, rather than a plain unsupported status.
+
+### Sentinel Health Sensor
+
+Sentinel registers a `sensor.sentinel_health` entity that is updated after every detection run. Its state is `ok` when Sentinel is enabled and `disabled` otherwise.
+
+Attributes:
+
+| Attribute | Description |
+|---|---|
+| `last_run_start` | UTC ISO 8601 timestamp when the last run started |
+| `last_run_end` | UTC ISO 8601 timestamp when the last run ended |
+| `run_duration_ms` | Last run duration in milliseconds |
+| `active_rule_count` | Number of active rules evaluated |
+| `trigger_source_stats` | Map of trigger source to run count: `{poll: N, event: N}` |
+| `triggers_coalesced` | Cumulative events merged into an existing queued trigger (deduplication) |
+| `triggers_dropped_incoming` | Cumulative triggers dropped on arrival because all queue slots held security-critical triggers |
+| `triggers_dropped_queued` | Cumulative lower-priority queued triggers evicted to make room for a security-critical incoming trigger |
+| `triggers_ttl_expired` | Cumulative queued triggers discarded because they aged past the TTL before the engine could process them |
+| `findings_count_by_severity` | Count of findings by severity: `{low: N, medium: N, high: N}` |
+| `triage_suppress_rate` | Percentage of triaged findings suppressed by triage (null if no findings were triaged) |
+| `auto_exec_count` | Number of autonomous execution attempts |
+| `auto_exec_failures` | Number of autonomous execution errors |
+| `action_success_rate` | Overall action success rate including user-triggered executions (null if no actions recorded) |
+| `user_override_rate` | Percentage of user-visible findings that received a user response (null if no user-visible findings) |
+| `false_positive_rate_14d` | Percentage of user-visible findings in the last 14 days marked as false positives (null if no data) |
+
+Example Lovelace Markdown card:
+
+```yaml
+type: markdown
+content: |
+  ## Sentinel Health
+  **State:** {{ states('sensor.sentinel_health') }}
+
+  **Last run:** {{ state_attr('sensor.sentinel_health', 'last_run_start') or '—' }}
+  **Duration:** {{ state_attr('sensor.sentinel_health', 'run_duration_ms') or '—' }} ms
+  **Active rules:** {{ state_attr('sensor.sentinel_health', 'active_rule_count') or '—' }}
+
+  **Trigger drops (incoming / queued / TTL):**
+  {{ state_attr('sensor.sentinel_health', 'triggers_dropped_incoming') or 0 }} /
+  {{ state_attr('sensor.sentinel_health', 'triggers_dropped_queued') or 0 }} /
+  {{ state_attr('sensor.sentinel_health', 'triggers_ttl_expired') or 0 }}
+
+  **Findings (low / med / high):**
+  {% set sev = state_attr('sensor.sentinel_health', 'findings_count_by_severity') or {} %}
+  {{ sev.get('low', 0) }} / {{ sev.get('medium', 0) }} / {{ sev.get('high', 0) }}
+
+  **Action success rate:** {{ state_attr('sensor.sentinel_health', 'action_success_rate') or '—' }}%
+  **False positive rate (14d):** {{ state_attr('sensor.sentinel_health', 'false_positive_rate_14d') or '—' }}%
+```
 
 ### Proposals Card (Optional)
 

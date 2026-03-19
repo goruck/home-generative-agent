@@ -139,6 +139,13 @@ class SentinelTriggerScheduler:
         # Signalled whenever a trigger is successfully enqueued so the run
         # loop can wake up immediately rather than waiting for the next poll.
         self._trigger_available = asyncio.Event()
+        # Cumulative trigger statistics; read by SentinelEngine via .stats.
+        self._stats: dict[str, int] = {
+            "triggers_coalesced": 0,
+            "triggers_dropped_incoming": 0,
+            "triggers_dropped_queued": 0,
+            "triggers_ttl_expired": 0,
+        }
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -176,6 +183,7 @@ class SentinelTriggerScheduler:
                     record.anomaly_type,
                     pending.age(now),
                 )
+                self._stats["triggers_coalesced"] += 1
                 return
 
         # --- 2. Drop policy when full ---
@@ -188,6 +196,7 @@ class SentinelTriggerScheduler:
                     "trigger type=%s.",
                     record.anomaly_type,
                 )
+                self._stats["triggers_dropped_incoming"] += 1
                 return
             dropped = self._queue.pop(drop_idx)
             LOGGER.warning(
@@ -197,6 +206,7 @@ class SentinelTriggerScheduler:
                 dropped.is_security_critical,
                 record.anomaly_type,
             )
+            self._stats["triggers_dropped_queued"] += 1
 
         # --- 3. Enqueue ---
         self._queue.append(record)
@@ -294,6 +304,11 @@ class SentinelTriggerScheduler:
         """Return the number of items currently waiting in the queue."""
         return len(self._queue)
 
+    @property
+    def stats(self) -> dict[str, int]:
+        """Return a snapshot of cumulative trigger scheduler statistics."""
+        return dict(self._stats)
+
     # ------------------------------------------------------------------ #
     # Internal helpers
     # ------------------------------------------------------------------ #
@@ -314,6 +329,7 @@ class SentinelTriggerScheduler:
                     candidate.anomaly_type,
                     candidate.age(now),
                 )
+                self._stats["triggers_ttl_expired"] += 1
                 continue
             return candidate
         return None

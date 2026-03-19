@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -21,6 +22,8 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .models import AuditRecord
+
+LOGGER = logging.getLogger(__name__)
 
 STORE_VERSION = 1
 STORE_KEY = "home_generative_agent_audit"
@@ -58,6 +61,18 @@ def _now_iso() -> str:
     return dt_util.as_utc(dt_util.utcnow()).isoformat()
 
 
+def _is_evictable(record: dict[str, Any]) -> bool:
+    """
+    Return True when *record* may be evicted to make room for a newer entry.
+
+    Records explicitly marked as user-facing (``suppression_reason_code ==
+    "not_suppressed"``) are preserved in preference to suppressed records.
+    Records missing the field (e.g. migrated v1 records) are treated as
+    evictable — we don't know whether they were user-facing.
+    """
+    return record.get("suppression_reason_code") != "not_suppressed"
+
+
 def _migrate_record(record: dict[str, Any]) -> dict[str, Any]:
     """Backfill missing v2 fields into a raw record dict (in-place, returns it)."""
     record_version = record.get("version", 1)
@@ -71,7 +86,7 @@ def _migrate_record(record: dict[str, Any]) -> dict[str, Any]:
 class AuditStore:
     """Persistent audit store for sentinel activity."""
 
-    def __init__(self, hass: HomeAssistant, max_records: int = 200) -> None:
+    def __init__(self, hass: HomeAssistant, max_records: int = 500) -> None:
         """Initialize the audit store."""
         self._store = Store(hass, STORE_VERSION, STORE_KEY)
         self._records: list[dict[str, Any]] = []
@@ -137,8 +152,34 @@ class AuditStore:
         )
         self._records.append(record.__dict__)
         if len(self._records) > self._max_records:
-            self._records = self._records[-self._max_records :]
+            self._evict_one()
         await self.async_save()
+
+    def _evict_one(self) -> None:
+        """
+        Evict one record to keep the store within *_max_records*.
+
+        Eviction priority: prefer dropping the oldest evictable (suppressed)
+        record before touching any ``not_suppressed`` record so that
+        user-facing KPI history is preserved during high-volume periods.
+
+        # O(n) scan; acceptable at typical store sizes (<=500 records).
+        """
+        evict_idx = next(
+            (i for i, r in enumerate(self._records) if _is_evictable(r)),
+            None,
+        )
+        if evict_idx is not None:
+            self._records.pop(evict_idx)
+        else:
+            # Last resort: every record is not_suppressed.  Evict oldest overall.
+            LOGGER.warning(
+                "Audit store at capacity (%d records) with no evictable records; "
+                "evicting oldest not_suppressed record. "
+                "Consider increasing audit_hot_max_records.",
+                self._max_records,
+            )
+            self._records.pop(0)
 
     async def async_update_response(
         self, anomaly_id: str, response: dict[str, Any], outcome: dict[str, Any] | None
