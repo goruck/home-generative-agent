@@ -399,14 +399,14 @@ def _covered_builtin_rule_for_candidate(
         and all(term in text for term in ("vehicle", "front gate"))
         and any(term in text for term in ("home", "resident", "occupant"))
     ):
-        return "vehicle_parked_near_frontgate_home", ["camera.frontgate"]
+        return "vehicle_detected_near_camera_home", ["camera.frontgate"]
     if (
         any("backgarage" in path for path in evidence_paths)
         and all(term in text for term in ("snapshot", "night"))
         and any(term in text for term in ("missing", "no "))
         and any(term in text for term in ("home", "present", "occupant", "resident"))
     ):
-        return "camera_backgarage_missing_snapshot_night_home", ["camera.backgarage"]
+        return "camera_missing_snapshot_night_home", ["camera.backgarage"]
     return None
 
 

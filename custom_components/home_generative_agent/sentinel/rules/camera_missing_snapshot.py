@@ -14,70 +14,50 @@ if TYPE_CHECKING:
         FullStateSnapshot,
     )
 
-_BACKGARAGE_CAM = "camera.backgarage"
 
+class CameraMissingSnapshotRule:
+    """Detect any monitored camera without a snapshot summary at night while home."""
 
-class CameraBackgarageMissingSnapshotRule:
-    """Detect when the backgarage camera has no snapshot summary at night while home."""
-
-    rule_id = "camera_backgarage_missing_snapshot_night_home"
+    rule_id = "camera_missing_snapshot_night_home"
 
     def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:
-        """Return a finding when backgarage camera is missing a snapshot at night."""
+        """Return findings for monitored cameras missing a snapshot at night."""
         if not snapshot["derived"]["is_night"]:
             return []
 
         if not snapshot["derived"]["anyone_home"]:
             return []
 
+        findings: list[AnomalyFinding] = []
         for activity in snapshot["camera_activity"]:
-            if activity["camera_entity_id"] != _BACKGARAGE_CAM:
+            # Only fire for cameras with active motion sensors — best proxy for
+            # "expected to capture" without hardcoding entity IDs.
+            if not activity.get("motion_entities"):
+                continue
+            # Camera is capturing images — no anomaly.
+            if activity.get("snapshot_summary"):
                 continue
 
-            snapshot_summary = activity.get("snapshot_summary")
-            if snapshot_summary:
-                # Camera is capturing images — no anomaly.
-                return []
-
             evidence = {
-                "camera_entity_id": _BACKGARAGE_CAM,
+                "camera_entity_id": activity["camera_entity_id"],
                 "area": activity.get("area"),
                 "snapshot_summary": None,
                 "is_night": snapshot["derived"]["is_night"],
                 "anyone_home": snapshot["derived"]["anyone_home"],
             }
-            anomaly_id = build_anomaly_id(self.rule_id, [_BACKGARAGE_CAM], evidence)
-            return [
+            anomaly_id = build_anomaly_id(
+                self.rule_id, [activity["camera_entity_id"]], evidence
+            )
+            findings.append(
                 AnomalyFinding(
                     anomaly_id=anomaly_id,
                     type=self.rule_id,
                     severity="low",
                     confidence=0.6,
-                    triggering_entities=[_BACKGARAGE_CAM],
+                    triggering_entities=[activity["camera_entity_id"]],
                     evidence=evidence,
                     suggested_actions=["check_camera"],
                     is_sensitive=False,
                 )
-            ]
-
-        # Camera entity not present in snapshot at all — also anomalous.
-        evidence = {
-            "camera_entity_id": _BACKGARAGE_CAM,
-            "area": None,
-            "snapshot_summary": None,
-            "is_night": snapshot["derived"]["is_night"],
-            "anyone_home": snapshot["derived"]["anyone_home"],
-        }
-        anomaly_id = build_anomaly_id(self.rule_id, [_BACKGARAGE_CAM], evidence)
-        return [
-            AnomalyFinding(
-                anomaly_id=anomaly_id,
-                type=self.rule_id,
-                severity="low",
-                confidence=0.6,
-                triggering_entities=[_BACKGARAGE_CAM],
-                evidence=evidence,
-                suggested_actions=["check_camera"],
-                is_sensitive=False,
             )
-        ]
+        return findings
