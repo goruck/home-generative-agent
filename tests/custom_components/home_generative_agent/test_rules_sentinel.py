@@ -18,7 +18,7 @@ from custom_components.home_generative_agent.sentinel.rules.camera_entry_unsecur
     CameraEntryUnsecuredRule,
 )
 from custom_components.home_generative_agent.sentinel.rules.camera_missing_snapshot import (
-    CameraBackgarageMissingSnapshotRule,
+    CameraMissingSnapshotRule,
 )
 from custom_components.home_generative_agent.sentinel.rules.open_entry_while_away import (
     OpenEntryWhileAwayRule,
@@ -33,7 +33,7 @@ from custom_components.home_generative_agent.sentinel.rules.unlocked_lock_at_nig
     UnlockedLockAtNightRule,
 )
 from custom_components.home_generative_agent.sentinel.rules.vehicle_parked_near_frontgate import (
-    VehicleParkedNearFrontGateRule,
+    VehicleDetectedNearCameraRule,
 )
 from custom_components.home_generative_agent.snapshot.schema import (
     CameraActivity,
@@ -962,141 +962,250 @@ def test_unknown_person_at_night_while_home_no_trigger_without_summary() -> None
 
 
 # ---------------------------------------------------------------------------
-# VehicleParkedNearFrontGateRule
+# VehicleDetectedNearCameraRule
 # ---------------------------------------------------------------------------
 
 
-def test_vehicle_parked_near_frontgate_triggers() -> None:
-    """Vehicle in snapshot summary at frontgate while home should trigger."""
+def test_vehicle_detected_near_camera_triggers() -> None:
+    """Vehicle in snapshot summary with motion context while home should trigger."""
     snapshot = _base_snapshot()
     snapshot["derived"]["anyone_home"] = True
     snapshot["camera_activity"] = [
         _camera_activity(
-            "camera.frontgate",
-            snapshot_summary="A white SUV is parked near the front gate.",
+            "camera.driveway",
+            snapshot_summary="A white SUV is parked in the driveway.",
+            motion_entities=["binary_sensor.driveway_motion"],
         )
     ]
-    findings = VehicleParkedNearFrontGateRule().evaluate(snapshot)
+    findings = VehicleDetectedNearCameraRule().evaluate(snapshot)
     assert len(findings) == 1
-    assert findings[0].type == "vehicle_parked_near_frontgate_home"
+    assert findings[0].type == "vehicle_detected_near_camera_home"
+    assert findings[0].triggering_entities == ["camera.driveway"]
 
 
-def test_vehicle_parked_near_frontgate_no_trigger_when_away() -> None:
-    """No finding when no one is home."""
-    snapshot = _base_snapshot()
-    snapshot["derived"]["anyone_home"] = False
-    snapshot["camera_activity"] = [
-        _camera_activity(
-            "camera.frontgate", snapshot_summary="White SUV parked outside."
-        )
-    ]
-    findings = VehicleParkedNearFrontGateRule().evaluate(snapshot)
-    assert len(findings) == 0
-
-
-def test_vehicle_parked_near_frontgate_no_trigger_without_vehicle_keyword() -> None:
-    """No finding when summary doesn't mention a vehicle."""
-    snapshot = _base_snapshot()
-    snapshot["derived"]["anyone_home"] = True
-    snapshot["camera_activity"] = [
-        _camera_activity(
-            "camera.frontgate", snapshot_summary="Person walking past the gate."
-        )
-    ]
-    findings = VehicleParkedNearFrontGateRule().evaluate(snapshot)
-    assert len(findings) == 0
-
-
-def test_vehicle_parked_near_frontgate_no_trigger_wrong_camera() -> None:
-    """No finding when vehicle is seen on a different camera."""
+def test_vehicle_detected_near_camera_triggers_backyard() -> None:
+    """Vehicle on any camera (e.g. backyard) should also trigger."""
     snapshot = _base_snapshot()
     snapshot["derived"]["anyone_home"] = True
     snapshot["camera_activity"] = [
         _camera_activity(
             "camera.backyard",
             snapshot_summary="A white car is parked in the driveway.",
+            motion_entities=["binary_sensor.backyard_motion"],
         )
     ]
-    findings = VehicleParkedNearFrontGateRule().evaluate(snapshot)
-    assert len(findings) == 0
-
-
-def test_vehicle_parked_near_frontgate_no_trigger_no_summary() -> None:
-    """No finding when frontgate camera has no snapshot summary."""
-    snapshot = _base_snapshot()
-    snapshot["derived"]["anyone_home"] = True
-    snapshot["camera_activity"] = [
-        _camera_activity("camera.frontgate", snapshot_summary=None)
-    ]
-    findings = VehicleParkedNearFrontGateRule().evaluate(snapshot)
-    assert len(findings) == 0
-
-
-# ---------------------------------------------------------------------------
-# CameraBackgarageMissingSnapshotRule
-# ---------------------------------------------------------------------------
-
-
-def test_camera_backgarage_missing_snapshot_triggers() -> None:
-    """Missing snapshot on backgarage at night while home should trigger."""
-    snapshot = _base_snapshot()
-    snapshot["derived"]["is_night"] = True
-    snapshot["derived"]["anyone_home"] = True
-    snapshot["camera_activity"] = [
-        _camera_activity("camera.backgarage", snapshot_summary=None, last_activity=None)
-    ]
-    findings = CameraBackgarageMissingSnapshotRule().evaluate(snapshot)
+    findings = VehicleDetectedNearCameraRule().evaluate(snapshot)
     assert len(findings) == 1
-    assert findings[0].type == "camera_backgarage_missing_snapshot_night_home"
+    assert findings[0].triggering_entities == ["camera.backyard"]
 
 
-def test_camera_backgarage_missing_snapshot_no_trigger_when_summary_present() -> None:
-    """No finding when backgarage camera has a snapshot summary."""
+def test_vehicle_detected_near_camera_two_cameras_two_findings() -> None:
+    """Two cameras with vehicles and motion context yield two findings."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.front",
+            snapshot_summary="SUV parked near entrance.",
+            motion_entities=["binary_sensor.front_motion"],
+        ),
+        _camera_activity(
+            "camera.side",
+            snapshot_summary="Van parked along the side fence.",
+            motion_entities=["binary_sensor.side_motion"],
+        ),
+    ]
+    findings = VehicleDetectedNearCameraRule().evaluate(snapshot)
+    assert len(findings) == 2
+    entity_ids = {f.triggering_entities[0] for f in findings}
+    assert entity_ids == {"camera.front", "camera.side"}
+
+
+def test_vehicle_detected_near_camera_no_trigger_when_away() -> None:
+    """No finding when no one is home."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["anyone_home"] = False
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.driveway",
+            snapshot_summary="White SUV parked outside.",
+            motion_entities=["binary_sensor.driveway_motion"],
+        )
+    ]
+    findings = VehicleDetectedNearCameraRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_vehicle_detected_near_camera_no_trigger_without_vehicle_keyword() -> None:
+    """No finding when summary doesn't mention a vehicle."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.front",
+            snapshot_summary="Person walking past the gate.",
+            motion_entities=["binary_sensor.front_motion"],
+        )
+    ]
+    findings = VehicleDetectedNearCameraRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_vehicle_detected_near_camera_no_trigger_no_motion_context() -> None:
+    """No finding when camera has vehicle summary but no motion context."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.indoor",
+            snapshot_summary="A sedan is visible through the window.",
+            motion_entities=None,
+            vmd_entities=None,
+            last_activity=None,
+        )
+    ]
+    findings = VehicleDetectedNearCameraRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_vehicle_detected_near_camera_no_trigger_no_summary() -> None:
+    """No finding when camera has no snapshot summary."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.driveway",
+            snapshot_summary=None,
+            motion_entities=["binary_sensor.driveway_motion"],
+        )
+    ]
+    findings = VehicleDetectedNearCameraRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+# ---------------------------------------------------------------------------
+# CameraMissingSnapshotRule
+# ---------------------------------------------------------------------------
+
+
+def test_camera_missing_snapshot_triggers() -> None:
+    """Missing snapshot on a monitored camera at night while home should trigger."""
     snapshot = _base_snapshot()
     snapshot["derived"]["is_night"] = True
     snapshot["derived"]["anyone_home"] = True
     snapshot["camera_activity"] = [
         _camera_activity(
-            "camera.backgarage",
-            snapshot_summary="Empty driveway, no activity.",
+            "camera.outdoor_front",
+            snapshot_summary=None,
+            last_activity=None,
+            motion_entities=["binary_sensor.outdoor_front_motion"],
         )
     ]
-    findings = CameraBackgarageMissingSnapshotRule().evaluate(snapshot)
+    findings = CameraMissingSnapshotRule().evaluate(snapshot)
+    assert len(findings) == 1
+    assert findings[0].type == "camera_missing_snapshot_night_home"
+    assert findings[0].triggering_entities == ["camera.outdoor_front"]
+
+
+def test_camera_missing_snapshot_no_trigger_when_summary_present() -> None:
+    """No finding when the camera has a snapshot summary."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = True
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.outdoor_front",
+            snapshot_summary="Empty driveway, no activity.",
+            motion_entities=["binary_sensor.outdoor_front_motion"],
+        )
+    ]
+    findings = CameraMissingSnapshotRule().evaluate(snapshot)
     assert len(findings) == 0
 
 
-def test_camera_backgarage_missing_snapshot_no_trigger_during_day() -> None:
+def test_camera_missing_snapshot_no_trigger_during_day() -> None:
     """No finding during the day even if snapshot is missing."""
     snapshot = _base_snapshot()
     snapshot["derived"]["is_night"] = False
     snapshot["derived"]["anyone_home"] = True
     snapshot["camera_activity"] = [
-        _camera_activity("camera.backgarage", snapshot_summary=None, last_activity=None)
+        _camera_activity(
+            "camera.outdoor_front",
+            snapshot_summary=None,
+            last_activity=None,
+            motion_entities=["binary_sensor.outdoor_front_motion"],
+        )
     ]
-    findings = CameraBackgarageMissingSnapshotRule().evaluate(snapshot)
+    findings = CameraMissingSnapshotRule().evaluate(snapshot)
     assert len(findings) == 0
 
 
-def test_camera_backgarage_missing_snapshot_no_trigger_when_away() -> None:
+def test_camera_missing_snapshot_no_trigger_when_away() -> None:
     """No finding when no one is home."""
     snapshot = _base_snapshot()
     snapshot["derived"]["is_night"] = True
     snapshot["derived"]["anyone_home"] = False
     snapshot["camera_activity"] = [
-        _camera_activity("camera.backgarage", snapshot_summary=None, last_activity=None)
+        _camera_activity(
+            "camera.outdoor_front",
+            snapshot_summary=None,
+            last_activity=None,
+            motion_entities=["binary_sensor.outdoor_front_motion"],
+        )
     ]
-    findings = CameraBackgarageMissingSnapshotRule().evaluate(snapshot)
+    findings = CameraMissingSnapshotRule().evaluate(snapshot)
     assert len(findings) == 0
 
 
-def test_camera_backgarage_missing_snapshot_triggers_when_camera_absent() -> None:
-    """Trigger when backgarage camera is absent from snapshot entirely."""
+def test_camera_missing_snapshot_no_trigger_when_empty_camera_activity() -> None:
+    """No finding when camera_activity is empty — generalized rule has no expected-camera concept."""
     snapshot = _base_snapshot()
     snapshot["derived"]["is_night"] = True
     snapshot["derived"]["anyone_home"] = True
     snapshot["camera_activity"] = []
-    findings = CameraBackgarageMissingSnapshotRule().evaluate(snapshot)
+    findings = CameraMissingSnapshotRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_camera_missing_snapshot_no_trigger_without_motion_entities() -> None:
+    """No finding for a camera without motion_entities even if summary is absent."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = True
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.indoor",
+            snapshot_summary=None,
+            last_activity=None,
+            motion_entities=None,
+        )
+    ]
+    findings = CameraMissingSnapshotRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_camera_missing_snapshot_multiple_cameras_one_finding() -> None:
+    """One finding for the camera with motion_entities + no summary; none for the other."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = True
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.outdoor_back",
+            snapshot_summary=None,
+            last_activity=None,
+            motion_entities=["binary_sensor.back_motion"],
+        ),
+        _camera_activity(
+            "camera.indoor",
+            snapshot_summary=None,
+            last_activity=None,
+            motion_entities=None,
+        ),
+    ]
+    findings = CameraMissingSnapshotRule().evaluate(snapshot)
     assert len(findings) == 1
+    assert findings[0].triggering_entities == ["camera.outdoor_back"]
 
 
 # ---------------------------------------------------------------------------

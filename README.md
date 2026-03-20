@@ -188,8 +188,8 @@ Appliances / sensors:
 
 Cameras:
 
-- `vehicle_parked_near_frontgate_home` — vehicle detected near the front gate while residents are home
-- `camera_backgarage_missing_snapshot_night_home` — back-garage camera has no snapshot summary at night while the home is occupied (possible obstruction or outage)
+- `vehicle_detected_near_camera_home` — vehicle detected on any monitored camera while residents are home
+- `camera_missing_snapshot_night_home` — any monitored camera (with active motion sensors) has no snapshot summary at night while the home is occupied (possible obstruction or outage)
 
 Static rules are registered automatically at startup. They cannot be deactivated through the proposal flow; they are always evaluated as part of the deterministic detection cycle.
 

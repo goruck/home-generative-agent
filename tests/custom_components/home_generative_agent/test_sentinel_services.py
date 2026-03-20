@@ -214,7 +214,7 @@ async def test_approve_rule_proposal_returns_builtin_vehicle_rule_coverage(
     )
 
     assert response["status"] == "covered_by_existing_rule"
-    assert response["rule_id"] == "vehicle_parked_near_frontgate_home"
+    assert response["rule_id"] == "vehicle_detected_near_camera_home"
     assert response["overlapping_entity_ids"] == ["camera.frontgate"]
 
 
@@ -255,7 +255,7 @@ async def test_approve_rule_proposal_returns_builtin_vehicle_rule_coverage_no_do
     )
 
     assert response["status"] == "covered_by_existing_rule"
-    assert response["rule_id"] == "vehicle_parked_near_frontgate_home"
+    assert response["rule_id"] == "vehicle_detected_near_camera_home"
 
 
 @pytest.mark.asyncio
@@ -295,7 +295,7 @@ async def test_approve_rule_proposal_returns_builtin_camera_snapshot_coverage(
     )
 
     assert response["status"] == "covered_by_existing_rule"
-    assert response["rule_id"] == "camera_backgarage_missing_snapshot_night_home"
+    assert response["rule_id"] == "camera_missing_snapshot_night_home"
     assert response["overlapping_entity_ids"] == ["camera.backgarage"]
 
 

@@ -55,14 +55,14 @@ from .models import AnomalyFinding, CompoundFinding
 from .rules.alarm_disarmed_external_threat import AlarmDisarmedDuringExternalThreatRule
 from .rules.appliance_power_duration import AppliancePowerDurationRule
 from .rules.camera_entry_unsecured import CameraEntryUnsecuredRule
-from .rules.camera_missing_snapshot import CameraBackgarageMissingSnapshotRule
+from .rules.camera_missing_snapshot import CameraMissingSnapshotRule
 from .rules.open_entry_while_away import OpenEntryWhileAwayRule
 from .rules.unknown_person_camera_no_home import UnknownPersonCameraNoHomeRule
 from .rules.unknown_person_frontporch_night_home import (
     UnknownPersonAtNightWhileHomeRule,
 )
 from .rules.unlocked_lock_at_night import UnlockedLockAtNightRule
-from .rules.vehicle_parked_near_frontgate import VehicleParkedNearFrontGateRule
+from .rules.vehicle_parked_near_frontgate import VehicleDetectedNearCameraRule
 from .suppression import (
     SuppressionManager,
     purge_expired_prompts,
@@ -175,8 +175,8 @@ class SentinelEngine:
             CameraEntryUnsecuredRule(),
             UnknownPersonCameraNoHomeRule(),
             UnknownPersonAtNightWhileHomeRule(),
-            VehicleParkedNearFrontGateRule(),
-            CameraBackgarageMissingSnapshotRule(),
+            VehicleDetectedNearCameraRule(),
+            CameraMissingSnapshotRule(),
             AlarmDisarmedDuringExternalThreatRule(),
         ]
         # Event-driven triggering — unsubscribe callbacks.

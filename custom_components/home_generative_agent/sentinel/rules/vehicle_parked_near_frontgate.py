@@ -1,4 +1,4 @@
-"""Rule: vehicle parked near front gate while residents are home."""
+"""Rule: vehicle detected near any monitored camera while residents are home."""
 
 from __future__ import annotations
 
@@ -13,8 +13,6 @@ if TYPE_CHECKING:
     from custom_components.home_generative_agent.snapshot.schema import (
         FullStateSnapshot,
     )
-
-_FRONTGATE_CAM = "camera.frontgate"
 
 _VEHICLE_KEYWORDS = frozenset(
     {
@@ -37,49 +35,54 @@ def _snapshot_mentions_vehicle(summary: str) -> bool:
     return any(kw in lower for kw in _VEHICLE_KEYWORDS)
 
 
-class VehicleParkedNearFrontGateRule:
-    """Detect a vehicle parked near the front gate while residents are home."""
+class VehicleDetectedNearCameraRule:
+    """Detect a vehicle on any monitored camera while residents are home."""
 
-    rule_id = "vehicle_parked_near_frontgate_home"
+    rule_id = "vehicle_detected_near_camera_home"
 
     def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:
-        """Return a finding when a vehicle is observed near the front gate."""
+        """Return findings when a vehicle is observed on any monitored camera."""
         if not snapshot["derived"]["anyone_home"]:
             return []
 
+        findings: list[AnomalyFinding] = []
         for activity in snapshot["camera_activity"]:
-            if activity["camera_entity_id"] != _FRONTGATE_CAM:
+            summary = activity.get("snapshot_summary")
+            if not summary:
+                continue
+            # Require motion context — scopes to actively monitored/outdoor cameras.
+            if (
+                not activity.get("motion_entities")
+                and not activity.get("vmd_entities")
+                and not activity.get("last_activity")
+            ):
+                continue
+            if not _snapshot_mentions_vehicle(summary):
                 continue
 
-            snapshot_summary = activity.get("snapshot_summary")
-            if not snapshot_summary:
-                return []
-
-            if not _snapshot_mentions_vehicle(snapshot_summary):
-                return []
-
             evidence = {
-                "camera_entity_id": _FRONTGATE_CAM,
+                "camera_entity_id": activity["camera_entity_id"],
                 "area": activity.get("area"),
-                "snapshot_summary": snapshot_summary,
+                "snapshot_summary": summary,
                 "recognized_people": activity.get("recognized_people", []),
                 "last_activity": activity.get("last_activity"),
                 "is_night": snapshot["derived"]["is_night"],
                 "anyone_home": snapshot["derived"]["anyone_home"],
                 "people_home": snapshot["derived"]["people_home"],
             }
-            anomaly_id = build_anomaly_id(self.rule_id, [_FRONTGATE_CAM], evidence)
-            return [
+            anomaly_id = build_anomaly_id(
+                self.rule_id, [activity["camera_entity_id"]], evidence
+            )
+            findings.append(
                 AnomalyFinding(
                     anomaly_id=anomaly_id,
                     type=self.rule_id,
                     severity="low",
                     confidence=0.6,
-                    triggering_entities=[_FRONTGATE_CAM],
+                    triggering_entities=[activity["camera_entity_id"]],
                     evidence=evidence,
                     suggested_actions=["close_entry"],
                     is_sensitive=False,
                 )
-            ]
-
-        return []
+            )
+        return findings
