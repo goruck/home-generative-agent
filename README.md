@@ -449,16 +449,18 @@ Baseline / temporal:
 
 ### Discovery Novelty and Dedupe
 
-Discovery suggestions are deduped in the backend using deterministic semantic keys.
+Discovery suggestions are deduped in the backend before being stored.
 
 Novelty checks compare candidates against:
-- Active rules in `rule_registry`
-- Existing proposal drafts
+- Active static and dynamic rules (static built-in rule IDs are always included so the LLM is informed which topics are already covered)
+- Existing proposal drafts in all statuses, including `rejected` (rejected proposals block re-suggestion just as approved ones do)
 - Recent discovery records
+
+Candidates with a resolvable subject and predicate are matched by a deterministic semantic key (`v1|subject=...|predicate=...|...`). Candidates that do not resolve to a known subject/predicate (for example, abstract data-quality observations with no entity references) fall back to a title+summary hash (`ident|sha256=...`) so they are still suppressed across cycles.
 
 Discovery records may include:
 - `semantic_key`: canonical normalized key for candidate meaning
-- `dedupe_reason`: candidate disposition (`novel`, `existing_semantic_key`, `batch_duplicate`)
+- `dedupe_reason`: candidate disposition (`novel`, `existing_semantic_key`, `existing_identity_hash`, `batch_duplicate`)
 - `filtered_candidates`: candidates removed by dedupe with their reason
 
 ### Configuring Discovery, Triage, and Baseline
@@ -621,9 +623,11 @@ When updating card JS, bump the Lovelace resource query string (for example `?v=
 `unsupported` means the candidate could not be mapped to a supported deterministic template. Approval responses can also include structured normalization details such as `reason_code` and `details` to explain why mapping failed, for example `missing_required_entities`, `no_matching_entity_types`, or `unsupported_pattern`.
 
 Preferred handling:
-1. Reject if not useful.
+1. Reject if not useful. Once rejected, the candidate is excluded from all future discovery cycles (its semantic key or identity hash is added to the exclusion context).
 2. If useful, request a new template via `.github/ISSUE_TEMPLATE/feature_rule_request.yml` (the card pre-populates relevant fields from the proposal and marks the candidate as "Template Requested" locally in the browser).
 3. After template support is added, re-approve the proposal to re-evaluate with current mapping logic.
+
+Unsupported proposals that are never acted on are automatically removed after 30 days.
 
 Compatibility note: the normalization engine handles all evidence path formats produced by the discovery engine:
 

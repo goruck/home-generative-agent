@@ -25,14 +25,15 @@
   - Discovery pipeline improvements from Milestone 5: service-mapped suggested actions, on-demand discovery trigger service, immediate rule activation on proposal approval, structured normalization failure reasons, overlap metadata, richer draft notifications, and rule preview before commit.
   - Portable dynamic rule templates (PR #321, merged 2026-03-11) plus follow-on normalization fixes (2026-03-13): six new templates (`unlocked_lock_while_away`, `alarm_state_mismatch`, `entity_state_duration`, `sensor_threshold_condition`, `entity_staleness`, `multiple_entries_open_count`) cover the most common discovery-generated candidate patterns across arbitrary HA configurations. The normalization/evidence-path parser now handles `entities[entity_id=...]`, `entities[entity_ids contains ...]`, and LLM-emitted dot-notation paths like `sensor.foo.state` / `lock.foo.battery_level`; lock battery-low candidates route to `low_battery_sensors`; text-signal fallbacks now cover `high_energy_consumption_night`, `alarm_disarmed_during_external_threat`, and selector-based window-duration candidates; built-in coverage detection now accepts `frontgate` / `backgarage` substrings even when the LLM omits the domain prefix.
   - The four remaining Rule issues called out in the 2026-03-12 snapshot are now closed in code via new static rules (2026-03-12/13): `alarm_disarmed_during_external_threat` (#309), `camera_backgarage_missing_snapshot_night_home` (#311), `vehicle_parked_near_frontgate_home` (#312), and `unknown_person_frontporch_night_home` (#318).
-  - No Rule issues remain open from the #298–#320 coverage sweep. Remaining gaps are infrastructure/behavioral rather than missing detector patterns: suppressed-finding audit coverage, blocked-vs-notified policy behavior, audit retention/archival wiring, `trigger_source` population, and stable person identifiers in derived presence.
+  - No Rule issues remain open from the #298–#320 coverage sweep. Remaining gaps are infrastructure/behavioral rather than missing detector patterns: suppressed-finding audit coverage, blocked-vs-notified policy behavior, audit retention/archival wiring, and `trigger_source` population.
+  - Discovery dedup noise fixed (fix/discovery-dedup-noise, 2026-03-20): four bugs in `_existing_semantic_context()` corrected — (1) rejected proposals now add their candidate key to the exclusion set; (2) null-key candidates (unknown subject/predicate) fall back to a title+summary SHA-256 hash so they are suppressed across cycles; (3) `ProposalStore.cleanup_unsupported_ttl()` auto-expires unsupported proposals after 30 days each discovery cycle; (4) static built-in rule IDs are seeded into `active_rule_ids` sent to the LLM so it knows which topics are already covered.
 - Partially implemented or still open (see Known Current Gaps below for the summary list):
   - Rule/suppression-state-suppressed findings are not written to the audit store (engine silently returns at the suppression gate). Triage-suppressed findings *are* written to audit.
   - `ACTION_POLICY_BLOCKED` blocks execution but does not suppress notification dispatch.
   - Audit schema/retention/archival health in this document is ahead of the current `audit/store.py` implementation. `CONF_AUDIT_HOT_MAX_RECORDS` is now wired: the store default is 500 records with priority eviction (suppressed records evicted before `not_suppressed`); severity-aware eviction and archival backend remain unimplemented.
   - `trigger_source` field exists in `AuditRecord` and migration defaults but is never populated by any engine call — it is always `None` in practice.
   - `action_policy_path` is present in `AuditRecord` and `async_append_finding` but is absent from `_V2_FIELD_DEFAULTS` in `audit/store.py` — v1→v2 migration does not backfill this field.
-  - `derived.people_home` / `derived.people_away` currently contain friendly names when available, not stable person entity IDs.
+  - `derived.people_home` / `derived.people_away` use stable entity IDs (fixed v3.5.3, PR #333).
 
 ### Known Current Gaps
 
@@ -41,7 +42,7 @@
 - `trigger_source` is never populated in audit records.
 - `CONF_AUDIT_HOT_MAX_RECORDS` is wired and the default is 500. Eviction is priority-based (suppressed evicted before `not_suppressed`). Severity-aware eviction (P3) and the archival backend remain unimplemented.
 - `action_policy_path` is not backfilled during v1→v2 audit migration.
-- Presence-grace identity currently uses display-name-derived values, not stable person entity IDs.
+- Presence-grace identity uses stable person entity IDs (fixed v3.5.3, PR #333).
 
 ---
 
