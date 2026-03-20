@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import datetime
+import logging
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.exceptions import HomeAssistantError
@@ -12,6 +14,11 @@ if TYPE_CHECKING:
 
 STORE_VERSION = 1
 STORE_KEY = "home_generative_agent_sentinel_proposals"
+
+# Unsupported proposals older than this are pruned each discovery cycle.
+_UNSUPPORTED_TTL_DAYS = 30
+
+LOGGER = logging.getLogger(__name__)
 
 
 class ProposalStore:
@@ -62,6 +69,47 @@ class ProposalStore:
             if record.get("rule_id") == rule_id:
                 return record
         return None
+
+    async def cleanup_unsupported_ttl(self) -> int:
+        """
+        Remove unsupported proposals older than _UNSUPPORTED_TTL_DAYS days.
+
+        Returns the number of records removed. Iterates a snapshot of
+        self._records so that list mutation is safe. Records with a missing or
+        unparseable created_at are left in place rather than silently dropped.
+        """
+        cutoff = datetime.datetime.now(datetime.UTC) - datetime.timedelta(
+            days=_UNSUPPORTED_TTL_DAYS
+        )
+        keep: list[dict[str, Any]] = []
+        removed = 0
+        for record in list(self._records):
+            if record.get("status") != "unsupported":
+                keep.append(record)
+                continue
+            try:
+                created_raw = record.get("created_at")
+                if created_raw is None:
+                    keep.append(record)
+                    continue
+                created_at = datetime.datetime.fromisoformat(str(created_raw))
+                if created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=datetime.UTC)
+            except (ValueError, TypeError):
+                keep.append(record)
+                continue
+            if created_at < cutoff:
+                removed += 1
+            else:
+                keep.append(record)
+        if removed:
+            self._records = keep
+            LOGGER.debug(
+                "ProposalStore TTL: removed %d expired unsupported proposal(s).",
+                removed,
+            )
+            await self.async_save()
+        return removed
 
     async def async_update_status(
         self,
