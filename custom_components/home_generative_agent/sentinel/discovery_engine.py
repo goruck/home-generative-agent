@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 from typing import TYPE_CHECKING, Any, cast
@@ -37,6 +38,23 @@ if TYPE_CHECKING:
     from .rule_registry import RuleRegistry
 
 LOGGER = logging.getLogger(__name__)
+
+# Rule IDs for static built-in rules (deterministic, always active).
+# Included in active_rule_ids so the LLM knows these topics are already covered
+# and does not re-suggest candidates that map to an existing static rule.
+_STATIC_RULE_IDS: frozenset[str] = frozenset(
+    {
+        "unlocked_lock_at_night",
+        "open_entry_while_away",
+        "appliance_power_duration",
+        "camera_entry_unsecured",
+        "unknown_person_camera_no_home",
+        "unknown_person_frontporch_night_home",
+        "vehicle_parked_near_frontgate_home",
+        "camera_backgarage_missing_snapshot_night_home",
+        "alarm_disarmed_during_external_threat",
+    }
+)
 
 
 class SentinelDiscoveryEngine:
@@ -118,6 +136,21 @@ class SentinelDiscoveryEngine:
         compact_snapshot = json.dumps(
             reduced_snapshot, default=str, separators=(",", ":")
         )
+        # Bug 3 fix: prune stale unsupported proposals before building exclusion
+        # context so they stop blocking the card indefinitely.  Wrapped in
+        # try/except so a cleanup failure never aborts the discovery cycle.
+        if self._proposal_store is not None:
+            try:
+                expired = await self._proposal_store.cleanup_unsupported_ttl()
+                if expired:
+                    LOGGER.info(
+                        "Discovery TTL cleanup: expired %d unsupported proposal(s).",
+                        expired,
+                    )
+            except Exception:  # noqa: BLE001
+                LOGGER.warning(
+                    "Discovery TTL cleanup failed; continuing.", exc_info=True
+                )
         active_rule_ids, existing_keys = await self._existing_semantic_context()
         now = dt_util.utcnow().isoformat()
         prompt = USER_PROMPT_TEMPLATE.format(
@@ -187,7 +220,9 @@ class SentinelDiscoveryEngine:
     async def _existing_semantic_context(  # noqa: PLR0912
         self,
     ) -> tuple[set[str], set[str]]:
-        active_rule_ids: set[str] = set()
+        # Bug 4 fix: seed with static built-in rule IDs so the LLM is told
+        # those topics are already covered and stops re-suggesting them.
+        active_rule_ids: set[str] = set(_STATIC_RULE_IDS)
         semantic_keys: set[str] = set()
 
         if self._rule_registry is not None:
@@ -202,14 +237,19 @@ class SentinelDiscoveryEngine:
         if self._proposal_store is not None:
             proposals = await self._proposal_store.async_get_latest(200)
             for proposal in proposals:
-                status = str(proposal.get("status", "draft"))
-                if status == "rejected":
-                    continue
+                # Bug 1 fix: rejected proposals must still block re-suggestion.
+                # The old `continue` meant rejected candidates' keys were never
+                # added to the exclusion set, letting identical proposals recur.
                 candidate = proposal.get("candidate")
                 if isinstance(candidate, dict):
                     key = candidate_semantic_key(candidate)
                     if key:
                         semantic_keys.add(key)
+                    else:
+                        # Bug 2 fix: null-key candidates (e.g. "stale tracking"
+                        # patterns that don't resolve to a known subject/predicate)
+                        # use a title+summary hash so they are still excluded.
+                        semantic_keys.add(_candidate_identity_hash(candidate))
 
         discovery_records = await self._store.async_get_latest(200)
         for payload in discovery_records:
@@ -221,6 +261,9 @@ class SentinelDiscoveryEngine:
                 )
                 if key:
                     semantic_keys.add(key)
+                else:
+                    # Bug 2 fix: same null-key hash fallback for past records.
+                    semantic_keys.add(_candidate_identity_hash(candidate))
 
         return active_rule_ids, semantic_keys
 
@@ -234,16 +277,21 @@ class SentinelDiscoveryEngine:
         dropped: list[dict[str, str]] = []
         for candidate in candidates:
             key = candidate_semantic_key(candidate)
+            # Bug 2 fix: null-key candidates (unknown subject/predicate) fall
+            # back to a title+summary hash so they are still deduplicated.
+            identity_key = key or _candidate_identity_hash(candidate)
             dedupe_reason: str | None = None
-            if key and key in existing_keys:
-                dedupe_reason = "existing_semantic_key"
-            elif key and key in seen_batch:
+            if identity_key in existing_keys:
+                dedupe_reason = (
+                    "existing_semantic_key" if key else "existing_identity_hash"
+                )
+            elif identity_key in seen_batch:
                 dedupe_reason = "batch_duplicate"
             if dedupe_reason is not None:
                 LOGGER.debug(
-                    "Discovery dropped candidate %s with semantic key %s (%s).",
+                    "Discovery dropped candidate %s with key %s (%s).",
                     candidate.get("candidate_id"),
-                    key,
+                    identity_key,
                     dedupe_reason,
                 )
                 dropped_entry: dict[str, str] = {
@@ -252,15 +300,31 @@ class SentinelDiscoveryEngine:
                 }
                 if key:
                     dropped_entry["semantic_key"] = key
+                else:
+                    dropped_entry["identity_hash"] = identity_key
                 dropped.append(dropped_entry)
                 continue
             enriched = dict(candidate)
             if key:
                 enriched["semantic_key"] = key
-                seen_batch.add(key)
+            seen_batch.add(identity_key)
             enriched["dedupe_reason"] = "novel"
             filtered.append(enriched)
         return filtered, dropped
+
+
+def _candidate_identity_hash(candidate: dict[str, Any]) -> str:
+    """
+    Return a stable identity key for candidates that have no semantic key.
+
+    Uses the first 16 hex digits of SHA-256(title + NUL + summary) so that
+    two candidates with identical wording collide even if their other fields
+    differ (e.g. different confidence_hint or candidate_id).
+    """
+    title = str(candidate.get("title", "")).strip().lower()
+    summary = str(candidate.get("summary", "")).strip().lower()
+    blob = f"{title}\x00{summary}".encode()
+    return "ident|sha256=" + hashlib.sha256(blob).hexdigest()[:16]
 
 
 def _coerce_int(value: object | None, default: int) -> int:
