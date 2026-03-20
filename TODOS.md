@@ -30,6 +30,36 @@
 
 ---
 
+## Discovery
+
+### Tighten discovery prompt to require entity-backed evidence paths
+
+**What:** Add an instruction to `USER_PROMPT_TEMPLATE` in `explain/discovery_prompts.py` requiring that each candidate cite at least one `entities[entity_ids contains <entity_id>].state` path referencing a concrete entity from the snapshot. Candidates that concern a specific entity but can only cite `derived.*` paths (e.g. `derived.anyone_home`) should be omitted rather than submitted with abstract evidence.
+
+**Why:** The LLM currently generates candidates like "Stale Person Tracking While Away" with `evidence_paths` containing only `derived.*` entries and no concrete entity IDs. The normalization engine (`proposal_templates.py:explain_normalize_candidate`) requires at least one extractable entity ID to map a candidate to a supported rule template. Without it, approval always fails with `unsupported_pattern`, leaving a stuck proposal in the card that can only be dismissed by rejection and eventually expires via the 30-day TTL. The prompt is the only enforcement point — the schema validates structure but not content.
+
+**How to apply:** In `USER_PROMPT_TEMPLATE`, add after the current `evidence_paths` instruction: *"If a candidate concerns specific entities, at least one evidence_path MUST reference a concrete entity_id using the format `entities[entity_ids contains domain.object_id].state`. Omit the candidate entirely if no such entity can be cited from the snapshot."* Add a corresponding test in `tests/` that verifies a candidate with only `derived.*` paths and no concrete entity references is not generated (or is filtered pre-store).
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** Discovery deduplication fix PR (fix/discovery-dedup-noise)
+
+---
+
+### Discovery quality metrics on health sensor
+
+**What:** Expose per-cycle discovery counters on `sensor.sentinel_health`: `candidates_generated`, `candidates_novel` (passed dedup), `candidates_deduplicated` (rejected by semantic key or title hash), `proposals_promoted`, `unsupported_ttl_expired` (cleaned up this cycle).
+
+**Why:** After the deduplication fix, operators have no visibility into whether dedup is actually working — they can't distinguish "LLM is generating zero new ideas" from "LLM is generating many ideas but all are caught by dedup." Without counters, a misconfigured semantic key map or broken hash exclusion would be invisible until a repeat proposal slips through to the card.
+
+**How to apply:** Add a `_discovery_cycle_stats: dict` field to `DiscoveryEngine` (reset at start of `_run_once()`). Increment counters at each decision point in `_filter_novel_candidates()` and `cleanup_unsupported_ttl()`. Include the stats dict in the `SIGNAL_SENTINEL_RUN_COMPLETE` payload so `SentinelHealthSensor` can expose them as attributes alongside existing KPIs.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** Discovery deduplication fix PR
+
+---
+
 ## Completed
 
 ### Build Operational Health Entity (sentinel_plan.md §11)
