@@ -58,12 +58,10 @@ from .rules.camera_entry_unsecured import CameraEntryUnsecuredRule
 from .rules.camera_missing_snapshot import CameraMissingSnapshotRule
 from .rules.open_entry_while_away import OpenEntryWhileAwayRule
 from .rules.phone_battery_low_at_night import PhoneBatteryLowAtNightRule
+from .rules.unknown_person_camera_night_home import UnknownPersonAtNightWhileHomeRule
 from .rules.unknown_person_camera_no_home import UnknownPersonCameraNoHomeRule
-from .rules.unknown_person_frontporch_night_home import (
-    UnknownPersonAtNightWhileHomeRule,
-)
 from .rules.unlocked_lock_at_night import UnlockedLockAtNightRule
-from .rules.vehicle_parked_near_frontgate import VehicleDetectedNearCameraRule
+from .rules.vehicle_detected_near_camera import VehicleDetectedNearCameraRule
 from .suppression import (
     SuppressionManager,
     purge_expired_prompts,

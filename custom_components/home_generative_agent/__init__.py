@@ -380,6 +380,33 @@ def _covered_rule_for_candidate(
     return _covered_builtin_rule_for_candidate(candidate)
 
 
+def _camera_entity_from_paths(paths: list[str]) -> str | None:
+    """
+    Return the first camera.entity_id found in evidence paths.
+
+    Handles two formats:
+      camera_activity[camera_entity_id=camera.front_porch].snapshot_summary
+      camera_activity[camera_entity_id=front_porch].snapshot_summary  (no domain)
+    In the second case the "camera." domain prefix is prepended automatically.
+    """
+    _key = "camera_entity_id="
+    for path in paths:
+        # Format 1: full entity_id with "camera." domain prefix anywhere in path.
+        idx = path.find("camera.")
+        if idx >= 0:
+            end = path.find("]", idx)
+            return path[idx:end] if end >= 0 else path[idx:]
+        # Format 2: camera_entity_id=<object_id> without domain prefix.
+        kidx = path.find(_key)
+        if kidx >= 0:
+            start = kidx + len(_key)
+            end = path.find("]", start)
+            object_id = path[start:end] if end >= 0 else path[start:]
+            if object_id:
+                return object_id if "." in object_id else f"camera.{object_id}"
+    return None
+
+
 def _covered_builtin_rule_for_candidate(
     candidate: dict[str, Any],
 ) -> tuple[str, list[str]] | None:
@@ -394,19 +421,20 @@ def _covered_builtin_rule_for_candidate(
     evidence_paths = [
         item for item in candidate.get("evidence_paths", []) if isinstance(item, str)
     ]
+    camera_entity = _camera_entity_from_paths(evidence_paths)
     if (
-        any("frontgate" in path for path in evidence_paths)
-        and all(term in text for term in ("vehicle", "front gate"))
+        camera_entity is not None
+        and "vehicle" in text
         and any(term in text for term in ("home", "resident", "occupant"))
     ):
-        return "vehicle_detected_near_camera_home", ["camera.frontgate"]
+        return "vehicle_detected_near_camera_home", [camera_entity]
     if (
-        any("backgarage" in path for path in evidence_paths)
+        camera_entity is not None
         and all(term in text for term in ("snapshot", "night"))
         and any(term in text for term in ("missing", "no "))
         and any(term in text for term in ("home", "present", "occupant", "resident"))
     ):
-        return "camera_missing_snapshot_night_home", ["camera.backgarage"]
+        return "camera_missing_snapshot_night_home", [camera_entity]
     _phone_keywords = {
         "phone",
         "iphone",

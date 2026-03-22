@@ -26,16 +26,16 @@ from custom_components.home_generative_agent.sentinel.rules.open_entry_while_awa
 from custom_components.home_generative_agent.sentinel.rules.phone_battery_low_at_night import (
     PhoneBatteryLowAtNightRule,
 )
+from custom_components.home_generative_agent.sentinel.rules.unknown_person_camera_night_home import (
+    UnknownPersonAtNightWhileHomeRule,
+)
 from custom_components.home_generative_agent.sentinel.rules.unknown_person_camera_no_home import (
     UnknownPersonCameraNoHomeRule,
-)
-from custom_components.home_generative_agent.sentinel.rules.unknown_person_frontporch_night_home import (
-    UnknownPersonAtNightWhileHomeRule,
 )
 from custom_components.home_generative_agent.sentinel.rules.unlocked_lock_at_night import (
     UnlockedLockAtNightRule,
 )
-from custom_components.home_generative_agent.sentinel.rules.vehicle_parked_near_frontgate import (
+from custom_components.home_generative_agent.sentinel.rules.vehicle_detected_near_camera import (
     VehicleDetectedNearCameraRule,
 )
 from custom_components.home_generative_agent.snapshot.schema import (
@@ -83,6 +83,46 @@ def test_unlocked_lock_at_night_triggers() -> None:
         }
     ]
 
+    findings = UnlockedLockAtNightRule().evaluate(snapshot)
+    assert len(findings) == 1
+
+
+def test_unlocked_lock_main_hint_triggers() -> None:
+    """Lock with 'main' in friendly_name triggers with expanded EXTERIOR_HINTS."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = True
+    snapshot["entities"] = [
+        {
+            "entity_id": "lock.smart_lock_1",
+            "domain": "lock",
+            "state": "unlocked",
+            "friendly_name": "Main Entrance Lock",
+            "area": None,
+            "attributes": {},
+            "last_changed": "2025-01-01T00:00:00+00:00",
+            "last_updated": "2025-01-01T00:00:00+00:00",
+        }
+    ]
+    findings = UnlockedLockAtNightRule().evaluate(snapshot)
+    assert len(findings) == 1
+
+
+def test_unlocked_lock_driveway_area_triggers() -> None:
+    """Lock with area 'Driveway' triggers with expanded EXTERIOR_HINTS."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = True
+    snapshot["entities"] = [
+        {
+            "entity_id": "lock.gate_lock",
+            "domain": "lock",
+            "state": "unlocked",
+            "friendly_name": "Smart Lock Pro",
+            "area": "Driveway",
+            "attributes": {},
+            "last_changed": "2025-01-01T00:00:00+00:00",
+            "last_updated": "2025-01-01T00:00:00+00:00",
+        }
+    ]
     findings = UnlockedLockAtNightRule().evaluate(snapshot)
     assert len(findings) == 1
 
@@ -907,7 +947,7 @@ def test_unknown_person_at_night_while_home_triggers() -> None:
     ]
     findings = UnknownPersonAtNightWhileHomeRule().evaluate(snapshot)
     assert len(findings) == 1
-    assert findings[0].type == "unknown_person_frontporch_night_home"
+    assert findings[0].type == "unknown_person_camera_night_home"
     assert findings[0].severity == "low"
     assert findings[0].confidence == 0.7
 
@@ -1299,6 +1339,89 @@ def test_alarm_disarmed_external_threat_no_trigger_without_alarm_entity() -> Non
     snapshot["camera_activity"] = [
         _camera_activity(
             "camera.backyard",
+            snapshot_summary="Unknown person detected.",
+        )
+    ]
+    findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_alarm_disarmed_non_standard_entity_name_triggers() -> None:
+    """Alarm panel with any entity_id triggers when disarmed — not just home_alarm."""
+    snapshot = _base_snapshot()
+    snapshot["entities"] = [
+        SnapshotEntity(
+            entity_id="alarm_control_panel.my_security_system",
+            domain="alarm_control_panel",
+            state="disarmed",
+            friendly_name="My Security System",
+            area=None,
+            attributes={},
+            last_changed="2025-01-01T00:00:00+00:00",
+            last_updated="2025-01-01T00:00:00+00:00",
+        )
+    ]
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.front_porch",
+            snapshot_summary="Unknown person at front porch.",
+        )
+    ]
+    findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
+    assert len(findings) == 1
+    assert (
+        findings[0].evidence["alarm_entity_id"]
+        == "alarm_control_panel.my_security_system"
+    )
+    assert findings[0].evidence["alarm_entity_ids"] == [
+        "alarm_control_panel.my_security_system"
+    ]
+
+
+def test_alarm_disarmed_multiple_panels_one_disarmed_triggers() -> None:
+    """When multiple panels exist and one is disarmed, rule fires for active camera."""
+    snapshot = _base_snapshot()
+    snapshot["entities"] = [
+        SnapshotEntity(
+            entity_id="alarm_control_panel.main",
+            domain="alarm_control_panel",
+            state="armed_away",
+            friendly_name="Main Alarm",
+            area=None,
+            attributes={},
+            last_changed="2025-01-01T00:00:00+00:00",
+            last_updated="2025-01-01T00:00:00+00:00",
+        ),
+        SnapshotEntity(
+            entity_id="alarm_control_panel.garage",
+            domain="alarm_control_panel",
+            state="disarmed",
+            friendly_name="Garage Alarm",
+            area=None,
+            attributes={},
+            last_changed="2025-01-01T00:00:00+00:00",
+            last_updated="2025-01-01T00:00:00+00:00",
+        ),
+    ]
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.driveway",
+            snapshot_summary="Unknown person near driveway.",
+        )
+    ]
+    findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
+    assert len(findings) == 1
+    assert findings[0].evidence["alarm_entity_id"] == "alarm_control_panel.garage"
+    assert "alarm_control_panel.garage" in findings[0].evidence["alarm_entity_ids"]
+
+
+def test_alarm_disarmed_zero_alarm_panels_no_findings() -> None:
+    """No alarm_control_panel entities in snapshot → no findings."""
+    snapshot = _base_snapshot()
+    snapshot["entities"] = []
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.front_porch",
             snapshot_summary="Unknown person detected.",
         )
     ]

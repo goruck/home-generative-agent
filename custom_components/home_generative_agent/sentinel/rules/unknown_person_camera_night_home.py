@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 class UnknownPersonAtNightWhileHomeRule:
     """Detect an unrecognized person on camera at night while the home is occupied."""
 
-    rule_id = "unknown_person_frontporch_night_home"
+    rule_id = "unknown_person_camera_night_home"
 
     def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:
         """Return findings when an unknown person is seen on camera at night."""

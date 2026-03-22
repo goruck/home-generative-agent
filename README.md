@@ -179,7 +179,7 @@ Security / presence:
 - `open_entry_while_away` — door or window open while everyone is away
 - `camera_entry_unsecured` — camera activity detected near an unsecured entry point
 - `unknown_person_camera_no_home` — unrecognized person on any camera while no one is home
-- `unknown_person_frontporch_night_home` — unrecognized person on any camera at night while someone is home
+- `unknown_person_camera_night_home` — unrecognized person on any camera at night while someone is home
 - `alarm_disarmed_during_external_threat` — security alarm disarmed while an unrecognized person is detected on an outdoor camera
 
 Appliances / sensors:

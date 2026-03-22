@@ -49,7 +49,7 @@ _STATIC_RULE_IDS: frozenset[str] = frozenset(
         "appliance_power_duration",
         "camera_entry_unsecured",
         "unknown_person_camera_no_home",
-        "unknown_person_frontporch_night_home",
+        "unknown_person_camera_night_home",
         "vehicle_detected_near_camera_home",
         "camera_missing_snapshot_night_home",
         "alarm_disarmed_during_external_threat",
