@@ -23,6 +23,9 @@ from custom_components.home_generative_agent.sentinel.rules.camera_missing_snaps
 from custom_components.home_generative_agent.sentinel.rules.open_entry_while_away import (
     OpenEntryWhileAwayRule,
 )
+from custom_components.home_generative_agent.sentinel.rules.phone_battery_low_at_night import (
+    PhoneBatteryLowAtNightRule,
+)
 from custom_components.home_generative_agent.sentinel.rules.unknown_person_camera_no_home import (
     UnknownPersonCameraNoHomeRule,
 )
@@ -1300,4 +1303,157 @@ def test_alarm_disarmed_external_threat_no_trigger_without_alarm_entity() -> Non
         )
     ]
     findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+# ---------------------------------------------------------------------------
+# PhoneBatteryLowAtNightRule
+# ---------------------------------------------------------------------------
+
+
+def _phone_battery_entity(
+    entity_id: str = "sensor.lindos_iphone_battery_level",
+    state: str = "15",
+    friendly_name: str = "Lindo's iPhone Battery Level",
+) -> SnapshotEntity:
+    return SnapshotEntity(
+        entity_id=entity_id,
+        domain="sensor",
+        state=state,
+        friendly_name=friendly_name,
+        area="Bedroom",
+        attributes={"device_class": "battery"},
+        last_changed="2025-01-01T00:00:00+00:00",
+        last_updated="2025-01-01T00:00:00+00:00",
+    )
+
+
+def test_phone_battery_low_triggers() -> None:
+    """Phone sensor with device_class=battery, state 15, night + home → 1 finding."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = True
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["entities"] = [_phone_battery_entity()]
+    findings = PhoneBatteryLowAtNightRule().evaluate(snapshot)
+    assert len(findings) == 1
+    assert findings[0].type == "phone_battery_low_at_night_home"
+    assert findings[0].severity == "low"
+    assert findings[0].confidence == 0.7
+    assert findings[0].suggested_actions == ["charge_device"]
+    assert findings[0].is_sensitive is False
+    assert findings[0].evidence["battery_level"] == 15.0
+    assert findings[0].triggering_entities == ["sensor.lindos_iphone_battery_level"]
+
+
+def test_phone_battery_low_two_phones_two_findings() -> None:
+    """Two qualifying phone battery sensors → 2 findings."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = True
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["entities"] = [
+        _phone_battery_entity(
+            "sensor.alice_iphone_battery_level", "10", "Alice's iPhone Battery"
+        ),
+        _phone_battery_entity(
+            "sensor.bob_pixel_battery_level", "5", "Bob's Pixel Battery"
+        ),
+    ]
+    findings = PhoneBatteryLowAtNightRule().evaluate(snapshot)
+    assert len(findings) == 2
+    entity_ids = {f.triggering_entities[0] for f in findings}
+    assert entity_ids == {
+        "sensor.alice_iphone_battery_level",
+        "sensor.bob_pixel_battery_level",
+    }
+
+
+def test_phone_battery_low_no_trigger_during_day() -> None:
+    """No finding during the day even if battery is low."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = False
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["entities"] = [_phone_battery_entity()]
+    findings = PhoneBatteryLowAtNightRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_phone_battery_low_no_trigger_when_away() -> None:
+    """No finding when no one is home."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = True
+    snapshot["derived"]["anyone_home"] = False
+    snapshot["entities"] = [_phone_battery_entity()]
+    findings = PhoneBatteryLowAtNightRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_phone_battery_low_no_trigger_above_threshold() -> None:
+    """No finding when battery is at or above 20%."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = True
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["entities"] = [_phone_battery_entity(state="50")]
+    findings = PhoneBatteryLowAtNightRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_phone_battery_low_no_trigger_at_threshold() -> None:
+    """No finding when battery is exactly 20%."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = True
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["entities"] = [_phone_battery_entity(state="20")]
+    findings = PhoneBatteryLowAtNightRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_phone_battery_low_no_trigger_non_phone_battery() -> None:
+    """Battery sensor without a phone keyword (door sensor battery) should not fire."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = True
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["entities"] = [
+        SnapshotEntity(
+            entity_id="sensor.door_sensor_battery",
+            domain="sensor",
+            state="10",
+            friendly_name="Door Sensor Battery",
+            area="Front",
+            attributes={"device_class": "battery"},
+            last_changed="2025-01-01T00:00:00+00:00",
+            last_updated="2025-01-01T00:00:00+00:00",
+        )
+    ]
+    findings = PhoneBatteryLowAtNightRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_phone_battery_low_no_trigger_unavailable() -> None:
+    """Unavailable state should not raise and should produce no finding."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = True
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["entities"] = [_phone_battery_entity(state="unavailable")]
+    findings = PhoneBatteryLowAtNightRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_phone_battery_low_no_trigger_missing_device_class() -> None:
+    """Phone-named sensor without device_class=battery should not fire."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = True
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["entities"] = [
+        SnapshotEntity(
+            entity_id="sensor.iphone_battery_level",
+            domain="sensor",
+            state="10",
+            friendly_name="iPhone Battery Level",
+            area="Bedroom",
+            attributes={},
+            last_changed="2025-01-01T00:00:00+00:00",
+            last_updated="2025-01-01T00:00:00+00:00",
+        )
+    ]
+    findings = PhoneBatteryLowAtNightRule().evaluate(snapshot)
     assert len(findings) == 0
