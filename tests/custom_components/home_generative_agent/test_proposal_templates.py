@@ -823,6 +823,40 @@ def test_normalize_candidate_entity_ids_contains_path_format_sensor() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Regression: power keyword in entity_id only (not in LLM text)
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_candidate_power_signal_from_entity_id_only() -> None:
+    """
+    Power keyword in entity_id (not in text) should still route to baseline_deviation.
+
+    The LLM described the candidate as "washing machine active while away at night"
+    — no power/energy keyword in title/summary/pattern — but the entity ID
+    sensor.washing_machine_switch_0_power contains "power".  Before the fix this
+    fell through to unsupported_pattern.
+    """
+    candidate = {
+        "candidate_id": "candidate_washing_machine_active_away_night",
+        "title": "Washing Machine Active While Away at Night",
+        "summary": "The washing machine is running while no one is home at night.",
+        "pattern": "is_night AND presence=away AND washing_machine=active",
+        "suggested_type": "appliance",
+        "confidence_hint": 0.7,
+        "evidence_paths": [
+            "entities[entity_id=sensor.washing_machine_switch_0_power].state",
+            "derived.is_night",
+            "derived.anyone_home",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    # No numeric threshold in text → falls back to baseline_deviation
+    assert normalized.template_id == "baseline_deviation"
+    assert normalized.params["entity_id"] == "sensor.washing_machine_switch_0_power"
+
+
+# ---------------------------------------------------------------------------
 # Regression: high_energy_consumption_night — no numeric threshold in text
 # ---------------------------------------------------------------------------
 

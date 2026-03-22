@@ -605,8 +605,14 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
     # sensor_threshold_condition: numeric sensor exceeds a threshold, with optional
     # night/away/home condition. Excludes battery sensors (handled above).
+    # Also check entity IDs for power/energy keywords — the LLM may describe an
+    # appliance as "active" or "running" rather than mentioning "power" or "watt",
+    # but the entity ID (e.g. sensor.washing_machine_switch_0_power) is unambiguous.
     non_battery_sensor_ids = [s for s in sensor_ids if s not in battery_sensor_ids]
-    if non_battery_sensor_ids and _has_power_energy_signal(text):
+    if non_battery_sensor_ids and (
+        _has_power_energy_signal(text)
+        or any(_has_power_energy_signal(eid) for eid in non_battery_sensor_ids)
+    ):
         threshold = _extract_threshold_numeric(text)
         sensor_id = non_battery_sensor_ids[0]
         if threshold is not None:
