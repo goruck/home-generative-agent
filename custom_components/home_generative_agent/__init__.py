@@ -407,6 +407,30 @@ def _covered_builtin_rule_for_candidate(
         and any(term in text for term in ("home", "present", "occupant", "resident"))
     ):
         return "camera_missing_snapshot_night_home", ["camera.backgarage"]
+    _phone_keywords = {
+        "phone",
+        "iphone",
+        "android",
+        "pixel",
+        "galaxy",
+        "mobile",
+        "smartphone",
+        "handset",
+    }
+    if (
+        "battery" in text
+        and "night" in text
+        and any(kw in text for kw in _phone_keywords)
+    ):
+        entity_id = next(
+            (
+                path
+                for path in evidence_paths
+                if "battery" in path and any(kw in path for kw in _phone_keywords)
+            ),
+            None,
+        )
+        return "phone_battery_low_at_night_home", ([entity_id] if entity_id else [])
     return None
 
 

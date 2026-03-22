@@ -191,6 +191,10 @@ Cameras:
 - `vehicle_detected_near_camera_home` — vehicle detected on any monitored camera while residents are home
 - `camera_missing_snapshot_night_home` — any monitored camera (with active motion sensors) has no snapshot summary at night while the home is occupied (possible obstruction or outage)
 
+Devices:
+
+- `phone_battery_low_at_night_home` — any phone battery sensor (device_class: battery, phone keyword in entity_id or friendly name) below 20% at night while someone is home
+
 Static rules are registered automatically at startup. They cannot be deactivated through the proposal flow; they are always evaluated as part of the deterministic detection cycle.
 
 ### Sentinel Notification Behavior
