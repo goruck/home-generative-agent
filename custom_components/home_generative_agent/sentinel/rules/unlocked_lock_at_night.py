@@ -25,6 +25,13 @@ EXTERIOR_HINTS = (
     "garage",
     "gate",
     "patio",
+    "main",
+    "side",
+    "yard",
+    "alley",
+    "carport",
+    "driveway",
+    "outdoor",
 )
 
 

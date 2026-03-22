@@ -477,3 +477,85 @@ async def test_approve_rule_proposal_triggers_immediate_activation(hass) -> None
     assert response["status"] == "ok"
     assert registry.added_rules
     sentinel.async_run_now.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# covered builtin rule detection — generic camera entity extraction
+# ---------------------------------------------------------------------------
+
+
+def test_covered_builtin_vehicle_generic_camera() -> None:
+    """Vehicle candidate with any camera entity in evidence_paths matches static rule."""
+    candidate = {
+        "candidate_id": "vehicle_near_driveway",
+        "title": "Vehicle detected near driveway camera",
+        "summary": "A vehicle was detected near the driveway while someone is home.",
+        "pattern": "camera.driveway vehicle while home",
+        "suggested_type": "security",
+        "confidence_hint": 0.7,
+        "evidence_paths": [
+            "camera_activity[camera_entity_id=camera.driveway].snapshot_summary",
+            "derived.anyone_home",
+        ],
+    }
+    result = _hga_component._covered_builtin_rule_for_candidate(candidate)
+    assert result is not None
+    rule_id, entity_ids = result
+    assert rule_id == "vehicle_detected_near_camera_home"
+    assert entity_ids == ["camera.driveway"]
+
+
+def test_covered_builtin_vehicle_no_camera_in_paths_returns_none() -> None:
+    """Vehicle candidate with no camera entity in evidence_paths returns None."""
+    candidate = {
+        "candidate_id": "vehicle_no_camera",
+        "title": "Vehicle detected while home",
+        "summary": "A vehicle was detected while someone is home.",
+        "pattern": "vehicle while home",
+        "suggested_type": "security",
+        "confidence_hint": 0.7,
+        "evidence_paths": [
+            "derived.anyone_home",
+        ],
+    }
+    result = _hga_component._covered_builtin_rule_for_candidate(candidate)
+    assert result is None
+
+
+def test_covered_builtin_snapshot_generic_camera() -> None:
+    """Camera-snapshot candidate with any camera entity matches static rule."""
+    candidate = {
+        "candidate_id": "camera_garage_missing_snapshot",
+        "title": "Camera garage missing snapshot summary at night while home present",
+        "summary": "The garage camera has no snapshot summary recorded during nighttime while someone is home.",
+        "pattern": "camera.garage missing snapshot at night while home",
+        "suggested_type": "reliability",
+        "confidence_hint": 0.8,
+        "evidence_paths": [
+            "camera_activity[camera_entity_id=camera.garage].snapshot_summary",
+            "derived.anyone_home",
+        ],
+    }
+    result = _hga_component._covered_builtin_rule_for_candidate(candidate)
+    assert result is not None
+    rule_id, entity_ids = result
+    assert rule_id == "camera_missing_snapshot_night_home"
+    assert entity_ids == ["camera.garage"]
+
+
+def test_covered_builtin_snapshot_no_camera_in_paths_returns_none() -> None:
+    """Camera-snapshot candidate with no camera entity in paths returns None."""
+    candidate = {
+        "candidate_id": "snapshot_no_camera",
+        "title": "Missing snapshot summary at night while home present",
+        "summary": "No snapshot summary recorded during nighttime while someone is home.",
+        "pattern": "missing snapshot at night while home",
+        "suggested_type": "reliability",
+        "confidence_hint": 0.8,
+        "evidence_paths": [
+            "derived.anyone_home",
+            "derived.is_night",
+        ],
+    }
+    result = _hga_component._covered_builtin_rule_for_candidate(candidate)
+    assert result is None
