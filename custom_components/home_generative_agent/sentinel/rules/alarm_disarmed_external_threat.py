@@ -74,7 +74,7 @@ class AlarmDisarmedDuringExternalThreatRule:
                     confidence=0.9,
                     triggering_entities=[primary_alarm_id, cam],
                     evidence=evidence,
-                    suggested_actions=["close_entry"],
+                    suggested_actions=["arm_alarm"],
                     is_sensitive=False,
                 )
             )

@@ -1284,6 +1284,7 @@ def test_alarm_disarmed_external_threat_triggers() -> None:
     assert findings[0].type == "alarm_disarmed_during_external_threat"
     assert findings[0].confidence == 0.9
     assert findings[0].evidence["alarm_state"] == "disarmed"
+    assert findings[0].suggested_actions == ["arm_alarm"]
 
 
 def test_alarm_disarmed_external_threat_no_trigger_when_armed() -> None:
