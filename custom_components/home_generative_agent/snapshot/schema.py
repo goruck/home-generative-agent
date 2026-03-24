@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, TypedDict, cast
+from typing import Any, NotRequired, TypedDict, cast
 
 import voluptuous as vol
 
@@ -45,6 +45,7 @@ class DerivedContext(TypedDict):
     people_home: list[str]
     people_away: list[str]
     last_motion_by_area: dict[str, str]
+    baseline_ready_entities: NotRequired[list[str]]
 
 
 class FullStateSnapshot(TypedDict):

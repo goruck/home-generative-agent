@@ -27,5 +27,8 @@ USER_PROMPT_TEMPLATE = (
     "or existing semantic keys.\n"
     "Do NOT output user queries or commands; only anomaly ideas.\n"
     "Return at most 3 candidates. "
-    "Each candidate MUST include no more than 8 evidence_paths."
+    "Each candidate MUST include no more than 8 evidence_paths.\n"
+    "BASELINE HINT: derived.baseline_ready_entities lists entity_ids with enough "
+    "historical data for statistical anomaly detection. Prefer baseline-based "
+    "candidates for entities in this list (pattern: deviation from normal)."
 )

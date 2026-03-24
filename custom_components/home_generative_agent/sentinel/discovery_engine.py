@@ -33,6 +33,7 @@ from .discovery_semantic import candidate_semantic_key, rule_semantic_key
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
+    from .baseline import SentinelBaselineUpdater
     from .discovery_store import DiscoveryStore
     from .proposal_store import ProposalStore
     from .rule_registry import RuleRegistry
@@ -69,6 +70,7 @@ class SentinelDiscoveryEngine:
         store: DiscoveryStore,
         rule_registry: RuleRegistry | None = None,
         proposal_store: ProposalStore | None = None,
+        baseline_updater: SentinelBaselineUpdater | None = None,
     ) -> None:
         """Initialize advisory discovery dependencies and runtime state."""
         self._hass = hass
@@ -77,6 +79,7 @@ class SentinelDiscoveryEngine:
         self._store = store
         self._rule_registry = rule_registry
         self._proposal_store = proposal_store
+        self._baseline_updater = baseline_updater
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
         self._run_lock = asyncio.Lock()
@@ -122,7 +125,7 @@ class SentinelDiscoveryEngine:
         async with self._run_lock:
             await self._run_once()
 
-    async def _run_once(self) -> None:  # noqa: PLR0911
+    async def _run_once(self) -> None:  # noqa: PLR0911, PLR0912, PLR0915
         if self._model is None:
             LOGGER.debug("Discovery skipped: no model available.")
             return
@@ -132,6 +135,10 @@ class SentinelDiscoveryEngine:
         except (ValueError, TypeError, KeyError):
             LOGGER.warning("Failed to build snapshot for discovery.")
             return
+
+        if self._baseline_updater is not None:
+            ready_ids = await self._baseline_updater.async_fetch_ready_entity_ids()
+            snapshot["derived"]["baseline_ready_entities"] = ready_ids
 
         reduced_snapshot = reduce_snapshot_for_discovery(snapshot)
         compact_snapshot = json.dumps(
