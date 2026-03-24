@@ -35,9 +35,15 @@ from typing import TYPE_CHECKING, Any
 from homeassistant.util import dt as dt_util
 
 from custom_components.home_generative_agent.const import (
+    CONF_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT,
     CONF_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS,
+    CONF_SENTINEL_BASELINE_MAX_SAMPLES,
+    CONF_SENTINEL_BASELINE_MIN_SAMPLES,
     CONF_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES,
+    RECOMMENDED_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT,
     RECOMMENDED_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS,
+    RECOMMENDED_SENTINEL_BASELINE_MAX_SAMPLES,
+    RECOMMENDED_SENTINEL_BASELINE_MIN_SAMPLES,
     RECOMMENDED_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES,
 )
 
@@ -68,17 +74,34 @@ METRIC_HOURLY_PREFIX = "hourly_avg_"
 # DDL for the baseline table.
 _CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS sentinel_baselines (
-    entity_id   TEXT NOT NULL,
-    metric      TEXT NOT NULL,
-    period      TEXT NOT NULL,
-    value       DOUBLE PRECISION NOT NULL,
-    sample_count INTEGER NOT NULL DEFAULT 0,
-    updated_at  TIMESTAMPTZ NOT NULL,
+    entity_id       TEXT NOT NULL,
+    metric          TEXT NOT NULL,
+    period          TEXT NOT NULL,
+    value           DOUBLE PRECISION NOT NULL,
+    sample_count    INTEGER NOT NULL DEFAULT 0,
+    updated_at      TIMESTAMPTZ NOT NULL,
+    reference_value DOUBLE PRECISION,
+    reference_at    TIMESTAMPTZ,
     PRIMARY KEY (entity_id, metric, period)
 )
 """
 
-# Upsert that maintains an exponential moving average with exact sample count.
+# ALTER TABLE migrations for columns added after initial release.
+_MIGRATE_REFERENCE_VALUE_SQL = """
+ALTER TABLE sentinel_baselines
+ADD COLUMN IF NOT EXISTS reference_value DOUBLE PRECISION
+"""
+
+_MIGRATE_REFERENCE_AT_SQL = """
+ALTER TABLE sentinel_baselines
+ADD COLUMN IF NOT EXISTS reference_at TIMESTAMPTZ
+"""
+
+# Upsert that maintains a capped EMA.
+# MAX_SAMPLES (%s) caps old-count so new-sample weight stays >= 1/MAX_SAMPLES.
+# Params: (entity_id, metric, period, value, updated_at, max_samples x3).
+# The last three params are all MAX_SAMPLES (same value, used in LEAST expressions).
+# RETURNING sample_count eliminates a post-commit SELECT per entity.
 _UPSERT_SQL = """
 INSERT INTO sentinel_baselines
     (entity_id, metric, period, value, sample_count, updated_at)
@@ -87,11 +110,34 @@ VALUES
 ON CONFLICT (entity_id, metric, period) DO UPDATE SET
     value = (
         sentinel_baselines.value
-        * sentinel_baselines.sample_count
+        * LEAST(sentinel_baselines.sample_count, %s - 1)
         + EXCLUDED.value
-    ) / (sentinel_baselines.sample_count + 1),
-    sample_count = sentinel_baselines.sample_count + 1,
+    ) / (LEAST(sentinel_baselines.sample_count, %s - 1) + 1),
+    sample_count = LEAST(sentinel_baselines.sample_count + 1, %s),
     updated_at   = EXCLUDED.updated_at
+RETURNING sample_count
+"""
+
+# Upsert that also updates the drift reference columns.
+# Params: (entity_id, metric, period, value, updated_at, max_samples x3, ref_value, ref_at)  # noqa: E501
+# RETURNING sample_count eliminates a post-commit SELECT per entity.
+_UPSERT_WITH_REF_SQL = """
+INSERT INTO sentinel_baselines
+    (entity_id, metric, period, value, sample_count,
+     updated_at, reference_value, reference_at)
+VALUES
+    (%s, %s, %s, %s, 1, %s, %s, %s)
+ON CONFLICT (entity_id, metric, period) DO UPDATE SET
+    value = (
+        sentinel_baselines.value
+        * LEAST(sentinel_baselines.sample_count, %s - 1)
+        + EXCLUDED.value
+    ) / (LEAST(sentinel_baselines.sample_count, %s - 1) + 1),
+    sample_count    = LEAST(sentinel_baselines.sample_count + 1, %s),
+    updated_at      = EXCLUDED.updated_at,
+    reference_value = EXCLUDED.reference_value,
+    reference_at    = EXCLUDED.reference_at
+RETURNING sample_count
 """
 
 _FRESHNESS_SQL = """
@@ -101,8 +147,54 @@ WHERE entity_id = %s AND metric = %s AND period = %s
 LIMIT 1
 """
 
+# Fast fetch for rule evaluation — only returns entities above min_samples threshold.
 _FETCH_ALL_SQL = """
 SELECT entity_id, metric, value
+FROM sentinel_baselines
+WHERE sample_count >= %s
+"""
+
+# Rich fetch for the sentinel_get_baselines service — returns all columns.
+_FETCH_FULL_SQL = """
+SELECT entity_id, metric, value, sample_count, updated_at
+FROM sentinel_baselines
+ORDER BY entity_id, metric
+"""
+
+# Fetch reference values for drift detection (rolling_avg only).
+_FETCH_REFS_SQL = """
+SELECT entity_id, reference_value, reference_at
+FROM sentinel_baselines
+WHERE metric = %s AND period = 'rolling' AND entity_id = ANY(%s)
+"""
+
+# Seed the established set at startup: entities already above min_samples.
+_FETCH_ESTABLISHED_SQL = """
+SELECT DISTINCT entity_id
+FROM sentinel_baselines
+WHERE metric = %s AND sample_count >= %s
+"""
+
+# Delete all baselines for a specific entity (or all entities if no filter).
+_DELETE_ENTITY_SQL = """
+DELETE FROM sentinel_baselines WHERE entity_id = %s
+"""
+
+_DELETE_ALL_SQL = """
+DELETE FROM sentinel_baselines
+"""
+
+# Aggregate stats query for health sensor — avoids full table scan.
+# Params: (metric, freshness_threshold_seconds, min_samples).
+_FETCH_STATS_SQL = """
+SELECT
+    COUNT(DISTINCT entity_id)                                           AS entity_count,
+    COUNT(*) FILTER (WHERE metric = %s
+        AND EXTRACT(EPOCH FROM (NOW() - updated_at)) <= %s)             AS fresh_count,
+    COUNT(*) FILTER (WHERE metric = %s
+        AND EXTRACT(EPOCH FROM (NOW() - updated_at)) > %s)              AS stale_count,
+    COUNT(*) FILTER (WHERE metric = %s AND sample_count < %s)  AS rules_waiting,
+    MAX(updated_at)                                                     AS latest_update
 FROM sentinel_baselines
 """
 
@@ -128,18 +220,39 @@ class SentinelBaselineUpdater:
         self._options = options
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
+        # entity_ids that crossed MIN_SAMPLES (no re-notification on restart).
+        self._established: set[str] = set()
 
     # ---------------------------------------------------------------------- #
     # Lifecycle
     # ---------------------------------------------------------------------- #
 
     async def async_initialize(self) -> None:
-        """Create the ``sentinel_baselines`` table if it does not exist."""
+        """Create/migrate the ``sentinel_baselines`` table and seed state."""
         try:
             async with self._pool.connection() as conn, conn.cursor() as cur:
                 await cur.execute(_CREATE_TABLE_SQL)
+                # Idempotent migrations for columns added after initial release.
+                await cur.execute(_MIGRATE_REFERENCE_VALUE_SQL)
+                await cur.execute(_MIGRATE_REFERENCE_AT_SQL)
                 await conn.commit()
-            LOGGER.debug("sentinel_baselines table ready.")
+                # Seed the established set so restarts don't re-fire notifications.
+                min_samples = _coerce_int(
+                    self._options.get(CONF_SENTINEL_BASELINE_MIN_SAMPLES),
+                    default=RECOMMENDED_SENTINEL_BASELINE_MIN_SAMPLES,
+                )
+                await cur.execute(
+                    _FETCH_ESTABLISHED_SQL, (METRIC_ROLLING_AVG, min_samples)
+                )
+                rows = await cur.fetchall()
+                for row in rows:
+                    eid = row.get("entity_id") if isinstance(row, dict) else row[0]
+                    if eid:
+                        self._established.add(str(eid))
+            LOGGER.debug(
+                "sentinel_baselines table ready; %d baselines already established.",
+                len(self._established),
+            )
         except Exception:
             LOGGER.exception(
                 "Failed to initialise sentinel_baselines table; "
@@ -201,12 +314,29 @@ class SentinelBaselineUpdater:
     # Baseline writes
     # ---------------------------------------------------------------------- #
 
-    async def _update_baselines(self, snapshot: FullStateSnapshot) -> None:
+    async def _update_baselines(self, snapshot: FullStateSnapshot) -> None:  # noqa: PLR0912, PLR0915
         """Upsert rolling stats for all numeric entities in *snapshot*."""
         now = dt_util.utcnow()
         hour_str = str(now.hour)
 
-        rows: list[tuple[str, str, str, float, Any]] = []
+        min_samples = _coerce_int(
+            self._options.get(CONF_SENTINEL_BASELINE_MIN_SAMPLES),
+            default=RECOMMENDED_SENTINEL_BASELINE_MIN_SAMPLES,
+        )
+        max_samples = max(
+            1,
+            _coerce_int(
+                self._options.get(CONF_SENTINEL_BASELINE_MAX_SAMPLES),
+                default=RECOMMENDED_SENTINEL_BASELINE_MAX_SAMPLES,
+            ),
+        )
+        drift_threshold_pct = _coerce_float(
+            self._options.get(CONF_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT),
+            default=RECOMMENDED_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT,
+        )
+
+        # Collect numeric entities and their current values.
+        entity_values: dict[str, float] = {}
         for entity in snapshot.get("entities", []):
             entity_id = entity.get("entity_id", "")
             if not entity_id:
@@ -215,35 +345,205 @@ class SentinelBaselineUpdater:
                 value = float(str(entity.get("state", "")))
             except (TypeError, ValueError):
                 continue
-            # Global rolling average.
-            rows.append((entity_id, METRIC_ROLLING_AVG, "rolling", value, now))
-            # Hour-of-day rolling average.
-            rows.append(
-                (
-                    entity_id,
-                    f"{METRIC_HOURLY_PREFIX}{hour_str}",
-                    "hourly",
-                    value,
-                    now,
-                )
-            )
+            entity_values[entity_id] = value
 
-        if not rows:
+        if not entity_values:
             return
 
         try:
             async with self._pool.connection() as conn, conn.cursor() as cur:
-                for entity_id, metric, period, value, updated_at in rows:
+                # Batch-fetch reference values for drift detection (rolling_avg only).
+                entity_ids_list = list(entity_values.keys())
+                await cur.execute(
+                    _FETCH_REFS_SQL, (METRIC_ROLLING_AVG, entity_ids_list)
+                )
+                ref_rows = await cur.fetchall()
+                refs: dict[str, float | None] = {}
+                for row in ref_rows:
+                    if isinstance(row, dict):
+                        eid = row.get("entity_id", "")
+                        rv = row.get("reference_value")
+                    else:
+                        eid, rv = row[0], row[1]
+                    if eid:
+                        refs[str(eid)] = rv
+
+                # Collect sample_count from RETURNING clause — eliminates N+1 SELECTs.
+                rolling_sample_counts: dict[str, int] = {}
+
+                for entity_id, value in entity_values.items():
+                    # --- rolling_avg upsert ---
+                    ref_val = refs.get(entity_id)
+                    drift_detected = False
+                    if ref_val is not None:
+                        if ref_val == 0.0:
+                            drift_pct = 100.0 if value != 0.0 else 0.0
+                        else:
+                            drift_pct = abs(value - ref_val) / abs(ref_val) * 100.0
+                        drift_detected = drift_pct >= drift_threshold_pct
+
+                    if drift_detected:
+                        await cur.execute(
+                            _UPSERT_WITH_REF_SQL,
+                            (
+                                entity_id,
+                                METRIC_ROLLING_AVG,
+                                "rolling",
+                                value,
+                                now,
+                                value,  # new reference_value
+                                now,  # new reference_at
+                                max_samples,
+                                max_samples,
+                                max_samples,
+                            ),
+                        )
+                    else:
+                        await cur.execute(
+                            _UPSERT_SQL,
+                            (
+                                entity_id,
+                                METRIC_ROLLING_AVG,
+                                "rolling",
+                                value,
+                                now,
+                                max_samples,
+                                max_samples,
+                                max_samples,
+                            ),
+                        )
+                    row = await cur.fetchone()
+                    if row is not None:
+                        sc = (
+                            row.get("sample_count") if isinstance(row, dict) else row[0]
+                        )
+                        if sc is not None:
+                            rolling_sample_counts[entity_id] = int(sc)
+
+                    # --- hourly_avg upsert ---
+                    hourly_metric = f"{METRIC_HOURLY_PREFIX}{hour_str}"
                     await cur.execute(
                         _UPSERT_SQL,
-                        (entity_id, metric, period, value, updated_at),
+                        (
+                            entity_id,
+                            hourly_metric,
+                            "hourly",
+                            value,
+                            now,
+                            max_samples,
+                            max_samples,
+                            max_samples,
+                        ),
                     )
+                    # Discard hourly RETURNING row (not used for establishment).
+                    await cur.fetchone()
+
                 await conn.commit()
+
+                # Check establishment crossings using RETURNING sample_count values.
+                for entity_id, count in rolling_sample_counts.items():
+                    if entity_id in self._established:
+                        continue
+                    if count >= min_samples:
+                        self._established.add(entity_id)
+                        await self._fire_establishment_notification(
+                            entity_id, entity_values[entity_id], snapshot
+                        )
+
             LOGGER.debug(
-                "Baseline upsert completed for %d entity-metric pairs.", len(rows)
+                "Baseline upsert completed for %d entities.", len(entity_values)
             )
+
+            # Fire drift notifications after commit (outside the conn context).
+            # Only fire for established entities — skip entities still in build-up.
+            for entity_id, value in entity_values.items():
+                if entity_id not in self._established:
+                    continue
+                ref_val = refs.get(entity_id)
+                if ref_val is None:
+                    continue
+                if ref_val == 0.0:
+                    drift_pct = 100.0 if value != 0.0 else 0.0
+                else:
+                    drift_pct = abs(value - ref_val) / abs(ref_val) * 100.0
+                if drift_pct >= drift_threshold_pct:
+                    await self._fire_drift_notification(
+                        entity_id, value, ref_val, drift_pct, snapshot
+                    )
+
         except Exception:
             LOGGER.exception("Baseline DB write failed.")
+
+    async def _fire_establishment_notification(
+        self,
+        entity_id: str,
+        value: float,
+        snapshot: FullStateSnapshot,
+    ) -> None:
+        """Fire a persistent HA notification when a baseline is established."""
+        # Attempt to find a friendly name from the snapshot entities.
+        friendly_name = entity_id
+        for entity in snapshot.get("entities", []):
+            if entity.get("entity_id") == entity_id:
+                friendly_name = entity.get("friendly_name") or entity_id
+                break
+        message = (
+            f"Baseline established for {friendly_name}: normal \u2248 {value:.2f}."
+        )
+        LOGGER.info("Baseline established for %s (value=%.2f).", entity_id, value)
+        try:
+            await self._hass.services.async_call(
+                "persistent_notification",
+                "create",
+                {
+                    "title": "Sentinel Baseline Established",
+                    "message": message,
+                    "notification_id": f"hga_baseline_established_{entity_id}",
+                },
+                blocking=False,
+            )
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("Could not fire establishment notification for %s.", entity_id)
+
+    async def _fire_drift_notification(
+        self,
+        entity_id: str,
+        current_value: float,
+        reference_value: float,
+        drift_pct: float,
+        snapshot: FullStateSnapshot,
+    ) -> None:
+        """Fire a persistent HA notification when an entity's baseline drifts."""
+        friendly_name = entity_id
+        for entity in snapshot.get("entities", []):
+            if entity.get("entity_id") == entity_id:
+                friendly_name = entity.get("friendly_name") or entity_id
+                break
+        message = (
+            f"Baseline drift detected for {friendly_name}: "
+            f"was {reference_value:.2f}, now {current_value:.2f} "
+            f"({drift_pct:.1f}% change). Reference updated."
+        )
+        LOGGER.info(
+            "Baseline drift for %s: %.2f -> %.2f (%.1f%%).",
+            entity_id,
+            reference_value,
+            current_value,
+            drift_pct,
+        )
+        try:
+            await self._hass.services.async_call(
+                "persistent_notification",
+                "create",
+                {
+                    "title": "Sentinel Baseline Drift Detected",
+                    "message": message,
+                    "notification_id": f"hga_baseline_drift_{entity_id}",
+                },
+                blocking=False,
+            )
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("Could not fire drift notification for %s.", entity_id)
 
     # ---------------------------------------------------------------------- #
     # Freshness query
@@ -298,17 +598,25 @@ class SentinelBaselineUpdater:
             return BASELINE_FRESH
         return BASELINE_STALE
 
-    async def async_fetch_baselines(self) -> dict[str, dict[str, float]]:
+    async def async_fetch_baselines(
+        self, min_samples: int | None = None
+    ) -> dict[str, dict[str, float]]:
         """
-        Return all current baseline values as ``{entity_id: {metric: value}}``.
+        Return baseline values for entities above the min-sample threshold.
 
-        Used by the sentinel engine to supply baselines to dynamic-rule
-        evaluators (``baseline_deviation``, ``time_of_day_anomaly``) on each
-        detection cycle.  Returns an empty dict on any DB error.
+        ``{entity_id: {metric: value}}`` — used by the sentinel engine every
+        detection cycle.  Entities with fewer than *min_samples* rows are
+        excluded so rules don't fire on statistically insufficient data.
+        Returns an empty dict on any DB error.
         """
+        if min_samples is None:
+            min_samples = _coerce_int(
+                self._options.get(CONF_SENTINEL_BASELINE_MIN_SAMPLES),
+                default=RECOMMENDED_SENTINEL_BASELINE_MIN_SAMPLES,
+            )
         try:
             async with self._pool.connection() as conn, conn.cursor() as cur:
-                await cur.execute(_FETCH_ALL_SQL)
+                await cur.execute(_FETCH_ALL_SQL, (min_samples,))
                 rows = await cur.fetchall()
         except Exception:  # noqa: BLE001
             LOGGER.debug("Baseline fetch failed; returning empty baselines.")
@@ -326,7 +634,178 @@ class SentinelBaselineUpdater:
                 continue
             result.setdefault(entity_id, {})[metric] = float(value)
 
-        LOGGER.debug("Fetched baselines for %d entities.", len(result))
+        LOGGER.debug(
+            "Fetched baselines for %d entities (min_samples=%d).",
+            len(result),
+            min_samples,
+        )
+        return result
+
+    async def async_fetch_full_baselines(self) -> dict[str, dict[str, Any]] | None:
+        """
+        Return rich baseline data for all entities.
+
+        ``{entity_id: {metric: {value, sample_count, updated_at, freshness}}}``
+        Used by the ``sentinel_get_baselines`` service.
+        Returns ``None`` on any DB error so callers can distinguish "no baselines
+        yet" from "backend broken".
+        """
+        freshness_threshold = _coerce_int(
+            self._options.get(CONF_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS),
+            default=RECOMMENDED_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS,
+        )
+        now = dt_util.utcnow()
+        try:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(_FETCH_FULL_SQL)
+                rows = await cur.fetchall()
+        except Exception:  # noqa: BLE001
+            LOGGER.warning("Full baseline fetch failed.", exc_info=True)
+            return None
+
+        result: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            if isinstance(row, dict):
+                entity_id = row.get("entity_id", "")
+                metric = row.get("metric", "")
+                value = row.get("value")
+                sample_count = row.get("sample_count", 0)
+                updated_at = row.get("updated_at")
+            else:
+                entity_id, metric, value, sample_count, updated_at = (
+                    row[0],
+                    row[1],
+                    row[2],
+                    row[3],
+                    row[4],
+                )
+            if not entity_id or not metric or value is None:
+                continue
+            freshness = BASELINE_UNAVAILABLE
+            if updated_at is not None:
+                try:
+                    age = (now - updated_at).total_seconds()
+                    freshness = (
+                        BASELINE_FRESH if age <= freshness_threshold else BASELINE_STALE
+                    )
+                except (TypeError, AttributeError):
+                    freshness = BASELINE_STALE
+            result.setdefault(entity_id, {})[metric] = {
+                "value": float(value),
+                "sample_count": int(sample_count or 0),
+                "updated_at": updated_at.isoformat()
+                if updated_at is not None
+                else None,
+                "freshness": freshness,
+            }
+
+        return result
+
+    async def async_fetch_baseline_stats(self) -> dict[str, Any] | None:
+        """
+        Return aggregate baseline statistics for health monitoring.
+
+        Runs a single SQL aggregate query instead of a full table scan.
+        Returns a dict with keys: entity_count, fresh_count, stale_count,
+        rules_waiting, latest_update.  Returns ``None`` on any DB error so
+        callers can avoid caching zeros that misrepresent the system state.
+        """
+        freshness_threshold = _coerce_int(
+            self._options.get(CONF_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS),
+            default=RECOMMENDED_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS,
+        )
+        min_samples = _coerce_int(
+            self._options.get(CONF_SENTINEL_BASELINE_MIN_SAMPLES),
+            default=RECOMMENDED_SENTINEL_BASELINE_MIN_SAMPLES,
+        )
+        try:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    _FETCH_STATS_SQL,
+                    (
+                        METRIC_ROLLING_AVG,
+                        freshness_threshold,
+                        METRIC_ROLLING_AVG,
+                        freshness_threshold,
+                        METRIC_ROLLING_AVG,
+                        min_samples,
+                    ),
+                )
+                row = await cur.fetchone()
+        except Exception:  # noqa: BLE001
+            LOGGER.warning("Baseline stats fetch failed.", exc_info=True)
+            return None
+        if row is None:
+            return {}
+        if isinstance(row, dict):
+            return {
+                "entity_count": int(row.get("entity_count") or 0),
+                "fresh_count": int(row.get("fresh_count") or 0),
+                "stale_count": int(row.get("stale_count") or 0),
+                "rules_waiting": int(row.get("rules_waiting") or 0),
+                "latest_update": row.get("latest_update"),
+            }
+        return {
+            "entity_count": int(row[0] or 0),
+            "fresh_count": int(row[1] or 0),
+            "stale_count": int(row[2] or 0),
+            "rules_waiting": int(row[3] or 0),
+            "latest_update": row[4],
+        }
+
+    async def async_reset_baseline(self, entity_id: str | None) -> int:
+        """
+        Delete baseline rows for *entity_id* (or all rows if ``None``).
+
+        Returns the number of rows deleted.  The entity_id must already be
+        validated by the caller (``domain.object_id`` format or ``None``).
+        """
+        try:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                if entity_id is not None:
+                    await cur.execute(_DELETE_ENTITY_SQL, (entity_id,))
+                else:
+                    await cur.execute(_DELETE_ALL_SQL)
+                deleted = cur.rowcount if cur.rowcount is not None else 0
+                await conn.commit()
+                # Update in-memory state only after the DB commit succeeds.
+                if entity_id is not None:
+                    self._established.discard(entity_id)
+                else:
+                    self._established.clear()
+        except Exception:
+            LOGGER.exception("Baseline reset failed.")
+            return -1
+        LOGGER.info(
+            "Baseline reset: deleted %d rows (entity_id=%s).", deleted, entity_id
+        )
+        return int(deleted)
+
+    async def async_fetch_ready_entity_ids(self) -> list[str]:
+        """
+        Return entity_ids whose rolling_avg has crossed min_samples.
+
+        Used by the sentinel engine to inject ``baseline_ready_entities`` into
+        the discovery snapshot so the LLM can propose baseline rules.
+        """
+        min_samples = _coerce_int(
+            self._options.get(CONF_SENTINEL_BASELINE_MIN_SAMPLES),
+            default=RECOMMENDED_SENTINEL_BASELINE_MIN_SAMPLES,
+        )
+        try:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    _FETCH_ESTABLISHED_SQL, (METRIC_ROLLING_AVG, min_samples)
+                )
+                rows = await cur.fetchall()
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("Could not fetch baseline-ready entity ids.")
+            return []
+        result = []
+        for row in rows:
+            eid = row.get("entity_id") if isinstance(row, dict) else row[0]
+            if eid:
+                result.append(str(eid))
         return result
 
 

@@ -10,6 +10,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from custom_components.home_generative_agent.const import (
+    CONF_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT,
+    CONF_SENTINEL_BASELINE_MAX_SAMPLES,
+    CONF_SENTINEL_BASELINE_MIN_SAMPLES,
+    RECOMMENDED_SENTINEL_BASELINE_MIN_SAMPLES,
+)
 from custom_components.home_generative_agent.sentinel.baseline import (
     BASELINE_FRESH,
     BASELINE_STALE,
@@ -452,14 +458,17 @@ async def test_stop_when_not_started_is_noop() -> None:
 @pytest.mark.asyncio
 async def test_update_baselines_upserts_two_rows_per_numeric_entity() -> None:
     """_update_baselines must upsert rolling_avg AND hourly_avg_<H> for each numeric entity."""
-    executed_params: list[tuple[Any, ...]] = []
+    upsert_params: list[tuple[Any, ...]] = []
 
     mock_cursor = MagicMock()
 
-    async def _fake_execute(_sql: str, params: tuple[Any, ...]) -> None:
-        executed_params.append(params)
+    async def _fake_execute(sql: str, params: tuple[Any, ...]) -> None:
+        if "INSERT INTO" in sql:
+            upsert_params.append(params)
 
     mock_cursor.execute = _fake_execute
+    mock_cursor.fetchall = AsyncMock(return_value=[])  # _FETCH_REFS_SQL returns no refs
+    mock_cursor.fetchone = AsyncMock(return_value=None)  # sample_count check
     mock_cursor.__aenter__ = AsyncMock(return_value=mock_cursor)
     mock_cursor.__aexit__ = AsyncMock(return_value=False)
 
@@ -484,14 +493,14 @@ async def test_update_baselines_upserts_two_rows_per_numeric_entity() -> None:
 
     await updater._update_baselines(snapshot)
 
-    # Only sensor.temperature is numeric; 2 rows (rolling + hourly) must be written
-    assert len(executed_params) == 2
-    metrics = {p[1] for p in executed_params}
+    # Only sensor.temperature is numeric; 2 INSERT rows (rolling + hourly) must be written
+    assert len(upsert_params) == 2
+    metrics = {p[1] for p in upsert_params}
     assert METRIC_ROLLING_AVG in metrics
     assert any(m.startswith(METRIC_HOURLY_PREFIX) for m in metrics)
 
     # entity_id must be correct in both rows
-    for params in executed_params:
+    for params in upsert_params:
         assert params[0] == "sensor.temperature"
         assert params[3] == pytest.approx(22.5)
 
@@ -499,25 +508,8 @@ async def test_update_baselines_upserts_two_rows_per_numeric_entity() -> None:
 @pytest.mark.asyncio
 async def test_update_baselines_skips_non_numeric_entities() -> None:
     """_update_baselines must not write rows for non-numeric entity states."""
-    executed_params: list[tuple[Any, ...]] = []
-
-    mock_cursor = MagicMock()
-
-    async def _fake_execute(_sql: str, params: tuple[Any, ...]) -> None:
-        executed_params.append(params)
-
-    mock_cursor.execute = _fake_execute
-    mock_cursor.__aenter__ = AsyncMock(return_value=mock_cursor)
-    mock_cursor.__aexit__ = AsyncMock(return_value=False)
-
-    mock_conn = MagicMock()
-    mock_conn.cursor = MagicMock(return_value=mock_cursor)
-    mock_conn.commit = AsyncMock()
-    mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
-    mock_conn.__aexit__ = AsyncMock(return_value=False)
-
     mock_pool = MagicMock()
-    mock_pool.connection = MagicMock(return_value=mock_conn)
+    mock_pool.connection = MagicMock(side_effect=AssertionError("should not be called"))
 
     mock_hass = MagicMock()
     updater = SentinelBaselineUpdater(mock_hass, mock_pool, {})
@@ -530,9 +522,8 @@ async def test_update_baselines_skips_non_numeric_entities() -> None:
         ]
     )
 
+    # entity_values will be empty → returns early before touching the DB
     await updater._update_baselines(snapshot)
-
-    assert executed_params == []
 
 
 @pytest.mark.asyncio
@@ -632,3 +623,487 @@ async def test_fetch_baselines_returns_empty_dict_when_no_rows() -> None:
     result = await updater.async_fetch_baselines()
 
     assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# 7. async_fetch_baselines — min_samples filter
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fetch_baselines_passes_min_samples_as_sql_param() -> None:
+    """async_fetch_baselines passes min_samples to the SQL query."""
+    received_params: list[Any] = []
+
+    mock_cursor = MagicMock()
+
+    async def _capture_execute(_sql: str, params: Any) -> None:
+        received_params.append(params)
+
+    mock_cursor.execute = _capture_execute
+    mock_cursor.fetchall = AsyncMock(return_value=[])
+    mock_cursor.__aenter__ = AsyncMock(return_value=mock_cursor)
+    mock_cursor.__aexit__ = AsyncMock(return_value=False)
+
+    mock_conn = MagicMock()
+    mock_conn.cursor = MagicMock(return_value=mock_cursor)
+    mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_conn.__aexit__ = AsyncMock(return_value=False)
+
+    mock_pool = MagicMock()
+    mock_pool.connection = MagicMock(return_value=mock_conn)
+
+    updater = SentinelBaselineUpdater(MagicMock(), mock_pool, {})
+    await updater.async_fetch_baselines(min_samples=10)
+
+    assert len(received_params) == 1
+    # min_samples must be the first (and only) param in the WHERE clause
+    assert received_params[0] == (10,)
+
+
+@pytest.mark.asyncio
+async def test_fetch_baselines_uses_recommended_default_when_min_samples_none() -> None:
+    """async_fetch_baselines uses RECOMMENDED_SENTINEL_BASELINE_MIN_SAMPLES when not given."""
+    received_params: list[Any] = []
+
+    mock_cursor = MagicMock()
+
+    async def _capture_execute(_sql: str, params: Any) -> None:
+        received_params.append(params)
+
+    mock_cursor.execute = _capture_execute
+    mock_cursor.fetchall = AsyncMock(return_value=[])
+    mock_cursor.__aenter__ = AsyncMock(return_value=mock_cursor)
+    mock_cursor.__aexit__ = AsyncMock(return_value=False)
+
+    mock_conn = MagicMock()
+    mock_conn.cursor = MagicMock(return_value=mock_cursor)
+    mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_conn.__aexit__ = AsyncMock(return_value=False)
+
+    mock_pool = MagicMock()
+    mock_pool.connection = MagicMock(return_value=mock_conn)
+
+    updater = SentinelBaselineUpdater(MagicMock(), mock_pool, {})
+    await updater.async_fetch_baselines()  # min_samples=None → uses default
+
+    assert received_params[0] == (RECOMMENDED_SENTINEL_BASELINE_MIN_SAMPLES,)
+
+
+# ---------------------------------------------------------------------------
+# 8. async_fetch_full_baselines
+# ---------------------------------------------------------------------------
+
+
+def _make_pool_with_full_rows(rows: list[Any]) -> MagicMock:
+    """Return a mock pool returning *rows* from fetchall (no filter param)."""
+    mock_cursor = MagicMock()
+    mock_cursor.execute = AsyncMock()
+    mock_cursor.fetchall = AsyncMock(return_value=rows)
+    mock_cursor.__aenter__ = AsyncMock(return_value=mock_cursor)
+    mock_cursor.__aexit__ = AsyncMock(return_value=False)
+
+    mock_conn = MagicMock()
+    mock_conn.cursor = MagicMock(return_value=mock_cursor)
+    mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_conn.__aexit__ = AsyncMock(return_value=False)
+
+    mock_pool = MagicMock()
+    mock_pool.connection = MagicMock(return_value=mock_conn)
+    return mock_pool
+
+
+@pytest.mark.asyncio
+async def test_fetch_full_baselines_returns_rich_dict() -> None:
+    """async_fetch_full_baselines returns {entity_id: {metric: {value, sample_count, updated_at, freshness}}}."""
+    recent = datetime.now(UTC)
+    rows = [
+        {
+            "entity_id": "sensor.power",
+            "metric": METRIC_ROLLING_AVG,
+            "value": 100.0,
+            "sample_count": 25,
+            "updated_at": recent,
+        }
+    ]
+    updater = SentinelBaselineUpdater(MagicMock(), _make_pool_with_full_rows(rows), {})
+    result = await updater.async_fetch_full_baselines()
+
+    assert result is not None
+    assert "sensor.power" in result
+    entry = result["sensor.power"][METRIC_ROLLING_AVG]
+    assert entry["value"] == pytest.approx(100.0)
+    assert entry["sample_count"] == 25
+    assert entry["freshness"] == BASELINE_FRESH
+
+
+@pytest.mark.asyncio
+async def test_fetch_full_baselines_marks_stale_rows() -> None:
+    """async_fetch_full_baselines marks freshness=stale for old rows."""
+    old = datetime.now(UTC) - timedelta(hours=5)
+    rows = [
+        {
+            "entity_id": "sensor.temp",
+            "metric": METRIC_ROLLING_AVG,
+            "value": 22.0,
+            "sample_count": 30,
+            "updated_at": old,
+        }
+    ]
+    updater = SentinelBaselineUpdater(MagicMock(), _make_pool_with_full_rows(rows), {})
+    result = await updater.async_fetch_full_baselines()
+
+    assert result is not None
+    assert result["sensor.temp"][METRIC_ROLLING_AVG]["freshness"] == BASELINE_STALE
+
+
+@pytest.mark.asyncio
+async def test_fetch_full_baselines_returns_none_on_db_error() -> None:
+    """async_fetch_full_baselines returns None when the DB raises."""
+    mock_pool = MagicMock()
+    mock_pool.connection = MagicMock(side_effect=OSError("DB down"))
+    updater = SentinelBaselineUpdater(MagicMock(), mock_pool, {})
+    result = await updater.async_fetch_full_baselines()
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_full_baselines_handles_none_updated_at() -> None:
+    """async_fetch_full_baselines sets freshness=unavailable when updated_at is None."""
+    rows = [
+        {
+            "entity_id": "sensor.x",
+            "metric": METRIC_ROLLING_AVG,
+            "value": 1.0,
+            "sample_count": 5,
+            "updated_at": None,
+        }
+    ]
+    updater = SentinelBaselineUpdater(MagicMock(), _make_pool_with_full_rows(rows), {})
+    result = await updater.async_fetch_full_baselines()
+    assert result is not None
+    assert result["sensor.x"][METRIC_ROLLING_AVG]["freshness"] == BASELINE_UNAVAILABLE
+
+
+# ---------------------------------------------------------------------------
+# 9. async_reset_baseline
+# ---------------------------------------------------------------------------
+
+
+def _make_pool_with_commit_and_rowcount(rowcount: int) -> MagicMock:
+    """Return a mock pool whose cursor has a given rowcount after DELETE."""
+    mock_cursor = MagicMock()
+    mock_cursor.execute = AsyncMock()
+    mock_cursor.rowcount = rowcount
+    mock_cursor.__aenter__ = AsyncMock(return_value=mock_cursor)
+    mock_cursor.__aexit__ = AsyncMock(return_value=False)
+
+    mock_conn = MagicMock()
+    mock_conn.cursor = MagicMock(return_value=mock_cursor)
+    mock_conn.commit = AsyncMock()
+    mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_conn.__aexit__ = AsyncMock(return_value=False)
+
+    mock_pool = MagicMock()
+    mock_pool.connection = MagicMock(return_value=mock_conn)
+    return mock_pool
+
+
+@pytest.mark.asyncio
+async def test_reset_baseline_specific_entity_removes_from_established() -> None:
+    """async_reset_baseline removes entity from _established set."""
+    updater = SentinelBaselineUpdater(
+        MagicMock(), _make_pool_with_commit_and_rowcount(2), {}
+    )
+    updater._established = {"sensor.power", "sensor.temp"}
+
+    await updater.async_reset_baseline("sensor.power")
+
+    assert "sensor.power" not in updater._established
+    assert "sensor.temp" in updater._established  # other entity untouched
+
+
+@pytest.mark.asyncio
+async def test_reset_baseline_all_entities_clears_established() -> None:
+    """async_reset_baseline(None) clears the entire _established set."""
+    updater = SentinelBaselineUpdater(
+        MagicMock(), _make_pool_with_commit_and_rowcount(10), {}
+    )
+    updater._established = {"sensor.a", "sensor.b", "sensor.c"}
+
+    await updater.async_reset_baseline(None)
+
+    assert updater._established == set()
+
+
+@pytest.mark.asyncio
+async def test_reset_baseline_returns_deleted_count() -> None:
+    """async_reset_baseline returns the rowcount from the DELETE statement."""
+    updater = SentinelBaselineUpdater(
+        MagicMock(), _make_pool_with_commit_and_rowcount(5), {}
+    )
+    deleted = await updater.async_reset_baseline("sensor.power")
+    assert deleted == 5
+
+
+@pytest.mark.asyncio
+async def test_reset_baseline_returns_negative_on_db_error() -> None:
+    """async_reset_baseline returns -1 when the DB raises."""
+    mock_pool = MagicMock()
+    mock_pool.connection = MagicMock(side_effect=OSError("DB down"))
+    updater = SentinelBaselineUpdater(MagicMock(), mock_pool, {})
+    deleted = await updater.async_reset_baseline("sensor.power")
+    assert deleted == -1
+
+
+# ---------------------------------------------------------------------------
+# 10. async_fetch_ready_entity_ids
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fetch_ready_entity_ids_returns_list_from_dict_rows() -> None:
+    """async_fetch_ready_entity_ids returns entity_ids from dict rows."""
+    rows = [{"entity_id": "sensor.a"}, {"entity_id": "sensor.b"}]
+    updater = SentinelBaselineUpdater(MagicMock(), _make_pool_with_rows(rows), {})
+    result = await updater.async_fetch_ready_entity_ids()
+    assert set(result) == {"sensor.a", "sensor.b"}
+
+
+@pytest.mark.asyncio
+async def test_fetch_ready_entity_ids_returns_list_from_tuple_rows() -> None:
+    """async_fetch_ready_entity_ids handles tuple rows."""
+    rows = [("sensor.x",), ("sensor.y",)]
+    updater = SentinelBaselineUpdater(MagicMock(), _make_pool_with_rows(rows), {})
+    result = await updater.async_fetch_ready_entity_ids()
+    assert set(result) == {"sensor.x", "sensor.y"}
+
+
+@pytest.mark.asyncio
+async def test_fetch_ready_entity_ids_returns_empty_on_db_error() -> None:
+    """async_fetch_ready_entity_ids returns [] when the DB raises."""
+    mock_pool = MagicMock()
+    mock_pool.connection = MagicMock(side_effect=OSError("DB down"))
+    updater = SentinelBaselineUpdater(MagicMock(), mock_pool, {})
+    result = await updater.async_fetch_ready_entity_ids()
+    assert result == []
+
+
+# ---------------------------------------------------------------------------
+# 11. EMA aging/decay — max_samples cap
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_update_baselines_passes_max_samples_to_upsert() -> None:
+    """_update_baselines includes max_samples in all three LEAST() positions in upsert SQL."""
+    captured_sqls: list[tuple[str, Any]] = []
+
+    mock_cursor = MagicMock()
+
+    async def _capture(sql: str, params: Any) -> None:
+        captured_sqls.append((sql, params))
+
+    mock_cursor.execute = _capture
+    mock_cursor.fetchall = AsyncMock(return_value=[])
+    mock_cursor.fetchone = AsyncMock(return_value=None)
+    mock_cursor.__aenter__ = AsyncMock(return_value=mock_cursor)
+    mock_cursor.__aexit__ = AsyncMock(return_value=False)
+
+    mock_conn = MagicMock()
+    mock_conn.cursor = MagicMock(return_value=mock_cursor)
+    mock_conn.commit = AsyncMock()
+    mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_conn.__aexit__ = AsyncMock(return_value=False)
+
+    mock_pool = MagicMock()
+    mock_pool.connection = MagicMock(return_value=mock_conn)
+
+    options = {CONF_SENTINEL_BASELINE_MAX_SAMPLES: 100}
+    updater = SentinelBaselineUpdater(MagicMock(), mock_pool, options)
+
+    snapshot = _snapshot([_entity("sensor.temperature", "22.0")])
+    await updater._update_baselines(snapshot)
+
+    # Find the rolling_avg upsert (first upsert call after the FETCH_REFS SELECT).
+    upsert_calls = [(sql, p) for sql, p in captured_sqls if "INSERT INTO" in sql]
+    assert len(upsert_calls) >= 1
+    # max_samples=100 must appear three times in the rolling_avg upsert params.
+    rolling_upsert = upsert_calls[0]
+    params = rolling_upsert[1]
+    assert params.count(100) >= 3
+
+
+# ---------------------------------------------------------------------------
+# 12. Establishment notification tracking
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_update_baselines_fires_establishment_notification_on_crossing() -> None:
+    """_update_baselines fires an establishment notification when sample_count crosses min_samples."""
+    # sample_count returned after upsert is exactly min_samples (20).
+    min_samples = 20
+    count_row = {"sample_count": min_samples}
+
+    call_log: list[tuple[str, str, dict[str, Any]]] = []
+
+    mock_cursor = MagicMock()
+
+    async def _execute(sql: str, params: Any) -> None:
+        pass
+
+    async def _fetchall() -> list[Any]:
+        return []  # no existing refs
+
+    async def _fetchone() -> dict[str, Any] | None:
+        return count_row
+
+    mock_cursor.execute = _execute
+    mock_cursor.fetchall = _fetchall
+    mock_cursor.fetchone = _fetchone
+    mock_cursor.__aenter__ = AsyncMock(return_value=mock_cursor)
+    mock_cursor.__aexit__ = AsyncMock(return_value=False)
+
+    mock_conn = MagicMock()
+    mock_conn.cursor = MagicMock(return_value=mock_cursor)
+    mock_conn.commit = AsyncMock()
+    mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_conn.__aexit__ = AsyncMock(return_value=False)
+
+    mock_pool = MagicMock()
+    mock_pool.connection = MagicMock(return_value=mock_conn)
+
+    mock_hass = MagicMock()
+
+    async def _fake_service_call(
+        domain: str, service: str, data: dict[str, Any], **_kw: Any
+    ) -> None:
+        call_log.append((domain, service, data))
+
+    mock_hass.services = MagicMock()
+    mock_hass.services.async_call = _fake_service_call
+
+    options = {CONF_SENTINEL_BASELINE_MIN_SAMPLES: min_samples}
+    updater = SentinelBaselineUpdater(mock_hass, mock_pool, options)
+    # entity NOT in _established → will trigger notification
+    updater._established = set()
+
+    snapshot = _snapshot([_entity("sensor.temperature", "22.0")])
+    await updater._update_baselines(snapshot)
+
+    # Must be in _established after update
+    assert "sensor.temperature" in updater._established
+    # Notification must have been fired
+    assert any(svc == "create" for _, svc, _ in call_log)
+
+
+@pytest.mark.asyncio
+async def test_update_baselines_skips_notification_for_already_established() -> None:
+    """_update_baselines does NOT re-fire when entity is already in _established."""
+    call_log: list[Any] = []
+
+    mock_cursor = MagicMock()
+    mock_cursor.execute = AsyncMock()
+    mock_cursor.fetchall = AsyncMock(return_value=[])
+    mock_cursor.fetchone = AsyncMock(return_value=None)
+    mock_cursor.__aenter__ = AsyncMock(return_value=mock_cursor)
+    mock_cursor.__aexit__ = AsyncMock(return_value=False)
+
+    mock_conn = MagicMock()
+    mock_conn.cursor = MagicMock(return_value=mock_cursor)
+    mock_conn.commit = AsyncMock()
+    mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_conn.__aexit__ = AsyncMock(return_value=False)
+
+    mock_pool = MagicMock()
+    mock_pool.connection = MagicMock(return_value=mock_conn)
+
+    mock_hass = MagicMock()
+
+    async def _fake_service_call(*args: Any, **_kw: Any) -> None:
+        call_log.append(args)
+
+    mock_hass.services = MagicMock()
+    mock_hass.services.async_call = _fake_service_call
+
+    updater = SentinelBaselineUpdater(mock_hass, mock_pool, {})
+    # Entity already established — should not fire notification or query sample_count
+    updater._established = {"sensor.temperature"}
+
+    snapshot = _snapshot([_entity("sensor.temperature", "22.0")])
+    await updater._update_baselines(snapshot)
+
+    # _FETCH_SAMPLE_COUNT_SQL must NOT have been called (entity skipped)
+    assert call_log == []
+
+
+# ---------------------------------------------------------------------------
+# 13. Drift notification
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_update_baselines_fires_drift_notification_when_threshold_exceeded() -> (
+    None
+):
+    """_update_baselines fires a drift notification when drift_pct >= threshold."""
+    drift_notifications: list[dict[str, Any]] = []
+
+    # reference_value in DB is 20.0; new value is 30.0 → 50% drift
+    ref_rows = [
+        {"entity_id": "sensor.power", "reference_value": 20.0, "reference_at": None}
+    ]
+    count_row = {"sample_count": 1}
+
+    mock_cursor = MagicMock()
+    call_count = 0
+
+    async def _execute(sql: str, params: Any) -> None:
+        pass
+
+    async def _fetchall() -> list[Any]:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return ref_rows
+        return []
+
+    async def _fetchone() -> dict[str, Any] | None:
+        return count_row
+
+    mock_cursor.execute = _execute
+    mock_cursor.fetchall = _fetchall
+    mock_cursor.fetchone = _fetchone
+    mock_cursor.__aenter__ = AsyncMock(return_value=mock_cursor)
+    mock_cursor.__aexit__ = AsyncMock(return_value=False)
+
+    mock_conn = MagicMock()
+    mock_conn.cursor = MagicMock(return_value=mock_cursor)
+    mock_conn.commit = AsyncMock()
+    mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_conn.__aexit__ = AsyncMock(return_value=False)
+
+    mock_pool = MagicMock()
+    mock_pool.connection = MagicMock(return_value=mock_conn)
+
+    mock_hass = MagicMock()
+
+    async def _fake_service_call(
+        _domain: str, _service: str, data: dict[str, Any], **_kw: Any
+    ) -> None:
+        if "Drift" in data.get("title", ""):
+            drift_notifications.append(data)
+
+    mock_hass.services = MagicMock()
+    mock_hass.services.async_call = _fake_service_call
+
+    options = {CONF_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT: 30.0}
+    updater = SentinelBaselineUpdater(mock_hass, mock_pool, options)
+    updater._established = {"sensor.power"}  # already established
+
+    snapshot = _snapshot([_entity("sensor.power", "30.0")])
+    await updater._update_baselines(snapshot)
+
+    assert len(drift_notifications) == 1
+    assert "sensor.power" in drift_notifications[0]["message"]

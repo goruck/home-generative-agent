@@ -270,6 +270,8 @@ SERVICE_GET_DYNAMIC_RULES = "get_dynamic_rules"
 SERVICE_DEACTIVATE_DYNAMIC_RULE = "deactivate_dynamic_rule"
 SERVICE_REACTIVATE_DYNAMIC_RULE = "reactivate_dynamic_rule"
 SERVICE_SENTINEL_SET_AUTONOMY_LEVEL = "sentinel_set_autonomy_level"
+SERVICE_SENTINEL_GET_BASELINES = "sentinel_get_baselines"
+SERVICE_SENTINEL_RESET_BASELINE = "sentinel_reset_baseline"
 
 ENROLL_SCHEMA = vol.Schema(
     {
@@ -334,6 +336,21 @@ SET_AUTONOMY_LEVEL_SCHEMA = vol.Schema(
     {
         vol.Required("level"): vol.All(vol.Coerce(int), vol.In([0, 1, 2, 3])),
         vol.Optional("pin"): cv.string,
+    }
+)
+
+SENTINEL_GET_BASELINES_SCHEMA = vol.Schema({})
+
+_ENTITY_ID_RE = r"^[a-z_]+\.[a-z0-9_-]+$"
+
+SENTINEL_RESET_BASELINE_SCHEMA = vol.Schema(
+    {
+        vol.Optional("entity_id"): vol.All(
+            cv.string,
+            vol.Match(
+                _ENTITY_ID_RE, msg="entity_id must match domain.object_id pattern"
+            ),
+        ),
     }
 )
 
@@ -1776,6 +1793,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         store=discovery_store,
         rule_registry=rule_registry,
         proposal_store=proposal_store,
+        baseline_updater=baseline_updater,
     )
 
     face_recognition = options.get(CONF_FACE_RECOGNITION, RECOMMENDED_FACE_RECOGNITION)
@@ -1811,6 +1829,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         discovery_engine=discovery_engine,
         proposal_store=proposal_store,
         rule_registry=rule_registry,
+        baseline_updater=baseline_updater,
     )
 
     if not hass.data[DOMAIN].get("http_registered"):
@@ -1861,9 +1880,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
             hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _start_discovery)
 
+    if baseline_updater is not None:
+        if hass.is_running:
+            baseline_updater.start()
+        else:
+
+            def _start_baseline(_event: object) -> None:
+                hass.loop.call_soon_threadsafe(baseline_updater.start)  # type: ignore[union-attr]
+
+            hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _start_baseline)
+
     async def _stop_background_tasks(_event: object) -> None:
         await sentinel.stop()
         await discovery_engine.stop()
+        if baseline_updater is not None:
+            await baseline_updater.stop()
         await hass.async_add_executor_job(openai_http_client.close)
 
     hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _stop_background_tasks)
@@ -2197,20 +2228,77 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         supports_response=_SERVICE_RESPONSE_ONLY,
     )
 
+    async def _handle_sentinel_get_baselines(call: ServiceCall) -> dict[str, Any]:  # noqa: ARG001
+        """Return full baseline statistics for entities above min-sample threshold."""
+        baseline_updater = entry.runtime_data.baseline_updater
+        if baseline_updater is None:
+            return {"status": "unavailable", "baselines": {}}
+        baselines = await baseline_updater.async_fetch_full_baselines()
+        if baselines is None:
+            return {
+                "status": "error",
+                "message": "DB query failed; see logs for details.",
+            }
+        return {"status": "ok", "baselines": baselines}
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SENTINEL_GET_BASELINES,
+        _handle_sentinel_get_baselines,
+        schema=SENTINEL_GET_BASELINES_SCHEMA,
+        supports_response=_SERVICE_RESPONSE_ONLY,
+    )
+
+    async def _handle_sentinel_reset_baseline(call: ServiceCall) -> dict[str, Any]:
+        """Delete baseline data for one entity or all entities."""
+        entity_id: str | None = call.data.get("entity_id")
+        baseline_updater = entry.runtime_data.baseline_updater
+        if baseline_updater is None:
+            return {"status": "unavailable"}
+        deleted = await baseline_updater.async_reset_baseline(entity_id)
+        if deleted < 0:
+            return {
+                "status": "error",
+                "message": "DB reset failed; see logs for details.",
+                "entity_id": entity_id,
+            }
+        scope = entity_id or "all entities"
+        await hass.services.async_call(
+            "persistent_notification",
+            "create",
+            {
+                "title": "Sentinel Baseline Reset",
+                "message": f"Baseline reset for {scope}. {deleted} record(s) removed.",
+                "notification_id": f"sentinel_baseline_reset_{entry.entry_id}",
+            },
+            blocking=False,
+        )
+        return {"status": "ok", "entity_id": entity_id, "deleted": deleted}
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SENTINEL_RESET_BASELINE,
+        _handle_sentinel_reset_baseline,
+        schema=SENTINEL_RESET_BASELINE_SCHEMA,
+        supports_response=_SERVICE_RESPONSE_ONLY,
+    )
+
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     """Unload the config entry."""
-    if entry.runtime_data.pool is not None:
-        await entry.runtime_data.pool.close()
     await entry.runtime_data.video_analyzer.stop()
     if entry.runtime_data.sentinel is not None:
         await entry.runtime_data.sentinel.stop()
     if entry.runtime_data.discovery_engine is not None:
         await entry.runtime_data.discovery_engine.stop()
+    if entry.runtime_data.baseline_updater is not None:
+        await entry.runtime_data.baseline_updater.stop()
     if entry.runtime_data.notifier is not None:
         entry.runtime_data.notifier.stop()
+    if entry.runtime_data.pool is not None:
+        await entry.runtime_data.pool.close()
     await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     return True
 

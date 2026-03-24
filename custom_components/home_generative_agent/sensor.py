@@ -41,6 +41,7 @@ async def async_setup_entry(
                 data.audit_store,
                 data.sentinel,
                 entry.entry_id,
+                baseline_updater=data.baseline_updater,
             )
         ]
     )

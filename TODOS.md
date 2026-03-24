@@ -46,6 +46,50 @@
 
 ---
 
+## Baseline
+
+### Config flow UI for CONF_SENTINEL_BASELINE_MIN_SAMPLES
+
+**What:** Add a `NumberSelector` to the Sentinel subentry options flow for `sentinel_baseline_min_samples` (min: 1, max: 500, step: 1, default: 20). Update `sentinel_subentry_flow.py` and `const.py`.
+
+**Why:** Without a UI control, users can't tune how many samples are required before baseline rules fire. The feature is invisible to anyone who doesn't read the source code. A user who enables baseline collection and sees no rule firings needs a way to discover and adjust this threshold.
+
+**How to apply:** Add `CONF_SENTINEL_BASELINE_MIN_SAMPLES` to `const.py` (if not already added by the baseline enhancement PR). In `sentinel_subentry_flow.py`, add a `NumberSelector` in the baseline section alongside the existing update interval and freshness threshold controls.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** Baseline enhancement PR (sentinel-baseline-enhancement)
+
+---
+
+### Lovelace health card example for baseline attrs
+
+**What:** Add a Lovelace dashboard card YAML snippet to `README.md` showing `baseline_entity_count`, `baseline_fresh_count`, and `baseline_rules_waiting` from `sensor.sentinel_health`.
+
+**Why:** Users enabling baseline collection have no visual confirmation it's working. The new health attrs are invisible unless a user knows to inspect the sensor. A dashboard example closes the discoverability gap and pairs naturally with the existing trigger-drop alert example.
+
+**How to apply:** Under the Baseline section of `README.md`, add a Lovelace glance card example using `sensor.sentinel_health` attributes: `baseline_entity_count` (how many entities are tracked), `baseline_fresh_count` (how many have recent updates), `baseline_rules_waiting` (rules not yet firing due to min-sample gate).
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** Baseline enhancement PR (sentinel-baseline-enhancement)
+
+---
+
+### Weekly / day-of-week baseline patterns
+
+**What:** Extend baseline collection to store `hourly_avg_{DOW}_{H}` metrics (e.g., `hourly_avg_1_14` = Monday 2PM). Gives 7×24=168 time slots per entity instead of 24, enabling time-of-day anomaly detection that accounts for weekday vs. weekend patterns.
+
+**Why:** The current `hourly_avg_H` treats all Mondays and Sundays at 2PM the same. For most households, weekday and weekend patterns differ significantly (cooking appliances, HVAC, occupancy). A washing machine running at 3AM on a Saturday is less anomalous than at 3AM on a Tuesday. Without DOW awareness, `time_of_day_anomaly` generates false positives on weekends.
+
+**How to apply:** Add `hourly_avg_{DOW}_{H}` as a third metric row per entity per update cycle. Update `evaluate_time_of_day_anomaly()` to prefer the DOW-specific metric when available, falling back to the global `hourly_avg_H` if not yet established. New config option `CONF_SENTINEL_BASELINE_WEEKLY_PATTERNS` (default: False) to opt in.
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** Baseline enhancement PR
+
+---
+
 ## Discovery
 
 ### Tighten discovery prompt to require entity-backed evidence paths

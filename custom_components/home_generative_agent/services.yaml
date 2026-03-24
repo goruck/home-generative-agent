@@ -232,3 +232,31 @@ sentinel_set_autonomy_level:
       required: false
       selector:
         text:
+
+sentinel_get_baselines:
+  name: Get sentinel baselines
+  description: >
+    Return raw baseline statistics for all tracked entities regardless of sample
+    count. Includes entities still in the build-up phase. Returns entity_id →
+    metric → {value, sample_count, updated_at, freshness} mapping.
+  fields: {}
+
+sentinel_reset_baseline:
+  name: Reset sentinel baseline
+  description: >
+    Delete baseline data for one entity or all entities. Use after a device
+    replacement, firmware update, or any event that makes historical baseline
+    data invalid. A confirmation notification is fired after deletion.
+  fields:
+    entity_id:
+      name: Entity ID
+      description: >
+        Entity to reset (e.g. sensor.hvac_power). Omit to reset all entities.
+      required: false
+      example: "sensor.hvac_power"
+      selector:
+        entity:
+          domain:
+            - sensor
+            - number
+            - input_number

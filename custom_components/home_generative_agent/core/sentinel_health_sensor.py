@@ -18,6 +18,9 @@ from ..const import (  # noqa: TID252
 
 if TYPE_CHECKING:
     from custom_components.home_generative_agent.audit.store import AuditStore
+    from custom_components.home_generative_agent.sentinel.baseline import (
+        SentinelBaselineUpdater,
+    )
     from custom_components.home_generative_agent.sentinel.engine import SentinelEngine
 
 LOGGER = logging.getLogger(__name__)
@@ -145,24 +148,29 @@ class SentinelHealthSensor(SensorEntity):
     _attr_has_entity_name = True
     _attr_icon = "mdi:shield-check"
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         hass: HomeAssistant,
         options: dict[str, Any],
         audit_store: AuditStore | None,
         sentinel: SentinelEngine | None,
         entry_id: str,
+        baseline_updater: SentinelBaselineUpdater | None = None,
     ) -> None:
         """Initialize the sentinel health sensor."""
         self.hass = hass
         self._options = options
         self._audit_store = audit_store
         self._sentinel = sentinel
+        self._baseline_updater = baseline_updater
         self._attr_name = "Sentinel Health"
         self._attr_unique_id = f"sentinel_health::{entry_id}"
         self._attr_native_value = "ok"
         self._attrs: dict[str, Any] = {}
         self._attr_extra_state_attributes = self._attrs
+        self._baseline_stats_cache: dict[str, Any] = {}
+        self._baseline_stats_cache_ts: datetime | None = None
+        self._baseline_stats_ttl = timedelta(seconds=60)
 
     async def async_added_to_hass(self) -> None:
         """Subscribe to run-complete signal and perform an initial refresh."""
@@ -212,5 +220,49 @@ class SentinelHealthSensor(SensorEntity):
         for key, val in scheduler_stats.items():
             self._attrs[key] = val
 
+        # Baseline health statistics.
+        await self._refresh_baseline_attrs()
+
         self._attr_native_value = "ok"
         self.async_write_ha_state()
+
+    async def _refresh_baseline_attrs(self) -> None:
+        """Populate baseline_* attributes from the baseline updater."""
+        if self._baseline_updater is None:
+            for key in (
+                "baseline_entity_count",
+                "baseline_fresh_count",
+                "baseline_stale_count",
+                "baseline_rules_waiting",
+                "baseline_last_update",
+            ):
+                self._attrs[key] = None
+            return
+
+        # Use a 60-second TTL cache to avoid a DB round-trip on every HA state refresh.
+        now = datetime.now(tz=UTC)
+        if (
+            self._baseline_stats_cache_ts is None
+            or (now - self._baseline_stats_cache_ts) >= self._baseline_stats_ttl
+        ):
+            fetched = await self._baseline_updater.async_fetch_baseline_stats()
+            # Only update the cache on success; a None return means DB error —
+            # keep the previous cached values so the sensor doesn't report "0
+            # baselines" when the backend is temporarily unavailable.
+            if fetched is not None:
+                self._baseline_stats_cache = fetched
+            else:
+                LOGGER.warning("Baseline stats unavailable; using cached values.")
+            self._baseline_stats_cache_ts = now
+
+        stats = self._baseline_stats_cache
+        updated_at = stats.get("latest_update")
+        self._attrs["baseline_entity_count"] = stats.get("entity_count", 0)
+        self._attrs["baseline_fresh_count"] = stats.get("fresh_count", 0)
+        self._attrs["baseline_stale_count"] = stats.get("stale_count", 0)
+        self._attrs["baseline_rules_waiting"] = stats.get("rules_waiting", 0)
+        self._attrs["baseline_last_update"] = (
+            updated_at.isoformat()
+            if updated_at is not None and hasattr(updated_at, "isoformat")
+            else updated_at
+        )

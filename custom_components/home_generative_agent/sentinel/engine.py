@@ -466,6 +466,12 @@ class SentinelEngine:
                 baselines: dict[str, dict[str, float]] = {}
                 if self._baseline_updater is not None:
                     baselines = await self._baseline_updater.async_fetch_baselines()
+                    # Inject baseline_ready_entities into derived so the discovery
+                    # reducer passes them through to the LLM prompt context.
+                    ready_ids = (
+                        await self._baseline_updater.async_fetch_ready_entity_ids()
+                    )
+                    snapshot["derived"]["baseline_ready_entities"] = ready_ids
                 dynamic_findings = evaluate_dynamic_rules(
                     snapshot, dynamic_rules, baselines=baselines
                 )
