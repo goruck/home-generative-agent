@@ -14,6 +14,9 @@ if TYPE_CHECKING:
     from custom_components.home_generative_agent.audit.store import AuditStore
     from custom_components.home_generative_agent.explain.llm_explain import LLMExplainer
     from custom_components.home_generative_agent.notify.actions import ActionHandler
+    from custom_components.home_generative_agent.sentinel.baseline import (
+        SentinelBaselineUpdater,
+    )
     from custom_components.home_generative_agent.sentinel.discovery_engine import (
         SentinelDiscoveryEngine,
     )
@@ -64,6 +67,7 @@ class HGAData:
     discovery_engine: SentinelDiscoveryEngine | None
     proposal_store: ProposalStore | None
     rule_registry: RuleRegistry | None
+    baseline_updater: SentinelBaselineUpdater | None = None
 
 
 type HGAConfigEntry = ConfigEntry[HGAData]
