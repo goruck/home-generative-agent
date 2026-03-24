@@ -874,6 +874,7 @@ def evaluate_baseline_deviation(  # noqa: PLR0911
         "current_value": current_value,
         "baseline_value": baseline_value,
         "deviation_pct": round(deviation_pct, 2),
+        "deviation_direction": "above" if current_value > baseline_value else "below",
         "threshold_pct": threshold_pct,
         "metric": metric,
         "last_changed": entity.get("last_changed"),

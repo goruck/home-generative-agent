@@ -180,6 +180,7 @@ def test_baseline_deviation_zero_baseline_non_zero_current_fires() -> None:
 
     assert len(findings) == 1
     assert findings[0].evidence["deviation_pct"] == pytest.approx(100.0)
+    assert findings[0].evidence["deviation_direction"] == "above"
 
 
 def test_baseline_deviation_zero_baseline_zero_current_no_finding() -> None:
@@ -220,6 +221,19 @@ def test_baseline_deviation_finding_has_correct_evidence_fields() -> None:
     assert ev["metric"] == METRIC_ROLLING_AVG
     assert ev["threshold_pct"] == pytest.approx(50.0)
     assert "deviation_pct" in ev
+    assert ev["deviation_direction"] == "above"
+
+
+def test_baseline_deviation_direction_below() -> None:
+    """deviation_direction is 'below' when current is less than baseline."""
+    snapshot = _snapshot([_entity("sensor.power", "0.5")])
+    baselines = {"sensor.power": {METRIC_ROLLING_AVG: 40.7}}
+    rule = _rule(entity_id="sensor.power", threshold_pct=50.0)
+
+    findings = evaluate_baseline_deviation(snapshot, rule, baselines)
+
+    assert len(findings) == 1
+    assert findings[0].evidence["deviation_direction"] == "below"
 
 
 # ---------------------------------------------------------------------------

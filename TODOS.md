@@ -1,5 +1,21 @@
 # TODOS
 
+## Explain / Prompts
+
+### Centralize action code vocabulary in `const.py`
+
+**What:** Define `ACTION_CODES: dict[str, str]` in `const.py` mapping action code → plain English description (e.g., `"arm_alarm"` → `"re-arm the security alarm"`). Import it in `explain/prompts.py` to build the `SYSTEM_PROMPT` vocabulary line dynamically, and use the constants in all rule files instead of bare strings.
+
+**Why:** `SYSTEM_PROMPT` now contains a hardcoded list of 7 action codes. Any new rule that introduces a new action code (e.g., `notify_neighbor`, `call_emergency`) will silently cause the LLM to invent its own English meaning for it — recreating the exact class of production bug fixed in PR #346. This drift surface was flagged independently by both the eng review and the Codex outside voice.
+
+**How to apply:** In `const.py`, add `ACTION_CODES = {"arm_alarm": "re-arm the security alarm", "disarm_alarm": "disarm the alarm", ...}`. In `prompts.py`, replace the hardcoded vocabulary string with `"; ".join(f"{k}={v}" for k, v in ACTION_CODES.items())`. In rule files, import `ACTION_CODES` keys as named constants rather than bare strings. Add a test that asserts every action code used in any rule file exists in `ACTION_CODES`.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** None
+
+---
+
 ## Sentinel Rules
 
 ### Add `unknown_person_camera_night_home` branch to `_covered_builtin_rule_for_candidate()`
