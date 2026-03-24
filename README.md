@@ -254,6 +254,9 @@ Configuration options (in the Sentinel subentry):
 - `sentinel_baseline_enabled` — enable baseline collection (default: `false`); has no effect unless `sentinel_enabled` is also `true`
 - `sentinel_baseline_update_interval_minutes` — how often baselines are recalculated (default: `15`)
 - `sentinel_baseline_freshness_threshold_seconds` — age after which a baseline is considered stale (default: `3600`)
+- `sentinel_baseline_min_samples` — minimum number of samples before a baseline is considered usable (default: `10`)
+- `sentinel_baseline_max_samples` — rolling window size; older samples are discarded when this is reached (default: `288`)
+- `sentinel_baseline_drift_threshold_pct` — default percent deviation that triggers a `baseline_deviation` or `time_of_day_anomaly` finding (default: `50.0`)
 
 ### Sentinel Action Flows
 
@@ -513,6 +516,8 @@ If you want a dry-run before approval, use `preview_rule_proposal`. It evaluates
 - `home_generative_agent.reactivate_dynamic_rule`
 - `home_generative_agent.get_audit_records`
 - `home_generative_agent.sentinel_set_autonomy_level`
+- `home_generative_agent.sentinel_get_baselines`
+- `home_generative_agent.sentinel_reset_baseline`
 
 Typical response fields:
 - `status`
@@ -533,6 +538,8 @@ Notable service behavior:
 - `home_generative_agent.trigger_sentinel_discovery` runs one discovery cycle immediately using the current snapshot.
 - `home_generative_agent.preview_rule_proposal` evaluates a stored proposal draft against the current snapshot without registering the rule and returns whether it would trigger right now.
 - `home_generative_agent.sentinel_set_autonomy_level` is admin-only and applies a TTL-bounded runtime override. If `sentinel_require_pin_for_level_increase` is enabled, increasing the level requires the Sentinel PIN.
+- `home_generative_agent.sentinel_get_baselines` returns raw baseline statistics for all tracked entities regardless of sample count; returns `{"status": "error"}` when the DB is unreachable.
+- `home_generative_agent.sentinel_reset_baseline` deletes baseline data for one entity or all entities. Omit `entity_id` to reset all. Fires a confirmation notification after deletion; returns `{"status": "error"}` when the DB is unreachable.
 - Proposal approval responses may include structured normalization failures such as `reason_code: missing_required_entities` with a `details` payload, rather than a plain unsupported status.
 
 ### Sentinel Health Sensor
@@ -559,6 +566,11 @@ Attributes:
 | `action_success_rate` | Overall action success rate including user-triggered executions (null if no actions recorded) |
 | `user_override_rate` | Percentage of user-visible findings that received a user response (null if no user-visible findings) |
 | `false_positive_rate_14d` | Percentage of user-visible findings in the last 14 days marked as false positives (null if no data) |
+| `baseline_entity_count` | Total number of entities with at least one baseline record |
+| `baseline_fresh_count` | Number of entities whose baseline was updated within the freshness threshold |
+| `baseline_stale_count` | Number of entities whose baseline exists but is older than the freshness threshold |
+| `baseline_rules_waiting` | Number of active baseline rules whose entity has not yet reached `sentinel_baseline_min_samples` |
+| `baseline_last_update` | UTC ISO 8601 timestamp of the most recent baseline write (null if no baselines yet) |
 
 Example Lovelace Markdown card:
 
@@ -583,6 +595,15 @@ content: |
 
   **Action success rate:** {{ state_attr('sensor.sentinel_health', 'action_success_rate') or '—' }}%
   **False positive rate (14d):** {{ state_attr('sensor.sentinel_health', 'false_positive_rate_14d') or '—' }}%
+
+  **Baselines (fresh / stale / total):**
+  {{ state_attr('sensor.sentinel_health', 'baseline_fresh_count') or 0 }} /
+  {{ state_attr('sensor.sentinel_health', 'baseline_stale_count') or 0 }} /
+  {{ state_attr('sensor.sentinel_health', 'baseline_entity_count') or 0 }}
+  {% if state_attr('sensor.sentinel_health', 'baseline_rules_waiting') %}
+  **Rules waiting for baseline:** {{ state_attr('sensor.sentinel_health', 'baseline_rules_waiting') }}
+  {% endif %}
+  **Baseline last updated:** {{ state_attr('sensor.sentinel_health', 'baseline_last_update') or '—' }}
 ```
 
 ### Proposals Card (Optional)
