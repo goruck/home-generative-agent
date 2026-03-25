@@ -177,7 +177,7 @@ Security / presence:
 
 - `unlocked_lock_at_night` — exterior lock unlocked while it is night
 - `open_entry_while_away` — door or window open while everyone is away
-- `camera_entry_unsecured` — camera activity detected near an unsecured entry point
+- `camera_entry_unsecured` — camera activity detected in the same area as an unsecured entry point (door, window, or lock)
 - `unknown_person_camera_no_home` — unrecognized person on any camera while no one is home
 - `unknown_person_camera_night_home` — unrecognized person on any camera at night while someone is home
 - `alarm_disarmed_during_external_threat` — security alarm disarmed while an unrecognized person is detected on an outdoor camera
