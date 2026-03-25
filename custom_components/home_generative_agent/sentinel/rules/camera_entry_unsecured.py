@@ -51,11 +51,11 @@ class CameraEntryUnsecuredRule:
                 continue
             unsecured_by_area.setdefault(area, []).append(entity["entity_id"])
 
-        # All unsecured entities across the home, used as a fallback for
-        # cameras whose area (e.g. "Outside") contains no entry-point sensors.
-        all_unsecured: list[str] = sorted(
-            {e for entities in unsecured_by_area.values() for e in entities}
-        )
+        # Reverse map: entity_id → area, used to populate unsecured_entity_areas
+        # in evidence so the LLM and correlator know where each entity lives.
+        entity_area_map: dict[str, str] = {
+            eid: area for area, eids in unsecured_by_area.items() for eid in eids
+        }
 
         # Index entity last_changed by entity_id for VMD/motion fallback lookup.
         last_changed_by_id: dict[str, str] = {
@@ -118,19 +118,34 @@ class CameraEntryUnsecuredRule:
                     ACTIVITY_WINDOW_MIN,
                 )
                 continue
-            # Prefer same-area unsecured entities; fall back to home-wide list
-            # for exterior cameras whose area has no entry-point sensors.
-            unsecured = unsecured_by_area.get(area) or all_unsecured
+            # Only fire when there are verified same-area unsecured entries.
+            # A camera can only be spatially associated with entries in its own
+            # area; home-wide fallback produces false spatial claims.
+            unsecured = unsecured_by_area.get(area)
             if not unsecured:
                 continue
             evidence = {
                 "camera_entity_id": activity["camera_entity_id"],
-                "area": area,
+                "area": area,  # kept for correlator Rule 1 compatibility
+                "camera_area": area,  # explicit field for LLM spatial grounding
                 "last_activity": last_activity,
                 "unsecured_entities": sorted(unsecured),
+                "unsecured_entity_areas": {
+                    eid: entity_area_map.get(eid, "unknown") for eid in unsecured
+                },
             }
+            # Hash only the original identifying fields so that adding new
+            # informational fields (camera_area, unsecured_entity_areas) does
+            # not invalidate suppression state for already-notified findings.
             anomaly_id = build_anomaly_id(
-                self.rule_id, [activity["camera_entity_id"]], evidence
+                self.rule_id,
+                [activity["camera_entity_id"]],
+                {
+                    "camera_entity_id": activity["camera_entity_id"],
+                    "area": area,
+                    "last_activity": last_activity,
+                    "unsecured_entities": sorted(unsecured),
+                },
             )
             findings.append(
                 AnomalyFinding(

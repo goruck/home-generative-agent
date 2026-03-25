@@ -16,7 +16,49 @@
 
 ---
 
+### Sanitize area/entity strings before injecting into LLM prompts
+
+**What:** Strip or truncate user-editable strings (area names, entity IDs, friendly names) to a safe character set before including them in `USER_PROMPT_TEMPLATE` evidence interpolation.
+
+**Why:** HA area names are user-editable via UI or YAML and flow into `USER_PROMPT_TEMPLATE.format(evidence=...)` as raw Python dict repr without sanitization. A malicious area name (e.g., `"Front\nIgnore all previous instructions."`) constitutes a prompt injection vector. The `camera_area` and `unsecured_entity_areas` fields added in PR fixing camera_entry_unsecured notifications increase the surface area (same area string, multiple occurrences). Flagged as P3 since it requires a coordinated attacker with HA admin access to be exploitable.
+
+**How to apply:** Add a sanitization helper in `explain/` that replaces non-printable characters and control sequences in string values before dict repr serialization. Alternatively, serialize evidence as JSON with explicit schema validation rather than using Python repr. Add a test with a crafted area name containing injection characters.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+---
+
 ## Sentinel Rules
+
+### Fix transitive union-find spatial contamination in correlator
+
+**What:** Post-grouping validation in `SentinelCorrelator._build_groups()` to prevent `camera_entry_unsecured` findings from ending up in a compound finding with findings from a different area via transitive bridging.
+
+**Why:** The area-aware `_COMPLEMENTARY_PAIRS_REQUIRE_AREA_MATCH` guard only protects direct pairwise checks. With three simultaneous findings (e.g., `camera_entry_unsecured` (Front) + `unlocked_lock_at_night` (Front) + `open_entry_while_away` (Garage)), the camera in Front ends up in a compound with `open_entry_while_away` in Garage via the bridging lock in Front — the exact false spatial claim the camera_entry_unsecured fix was designed to prevent. Flagged by adversarial review during PR #XXX ship workflow.
+
+**How to apply:** After `_build_groups()` returns groups, add a post-processing pass: for any group containing a `camera_entry_unsecured` finding, assert that all other findings in the group share the camera's area. Eject any finding that does not match; return it as a singleton. Alternatively, add `frozenset({"unlocked_lock_at_night", "open_entry_while_away"})` and other at-risk transitivity chains to `_COMPLEMENTARY_PAIRS_REQUIRE_AREA_MATCH` — but verify this doesn't over-restrict legitimate cross-area correlation for those pair types.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** None
+
+---
+
+### Add `sentinel_camera_entry_links` config for explicit camera-to-entry mapping
+
+**What:** Add a `sentinel_camera_entry_links` config key (Sentinel subentry options flow) that allows users to explicitly associate cameras with entry sensors regardless of HA area assignment. Format: `{camera_entity_id: [entry_entity_id, ...]}`.
+
+**Why:** Removing the home-wide fallback from `camera_entry_unsecured` (PR fixing cross-area false spatial claims) creates false negatives for adjacent-area setups — e.g., a driveway camera in "Outside" area should still fire when the front door lock in "Front" area is unsecured. Area-based association is insufficient for these layouts. Flagged as an accepted trade-off during eng review and Codex outside voice.
+
+**How to apply:** In `const.py`, add `CONF_SENTINEL_CAMERA_ENTRY_LINKS`. In the Sentinel config flow subentry, add an optional text/JSON field. In `camera_entry_unsecured.py`, after the same-area unsecured lookup, check the config for explicit links for the current camera; merge any linked entities into `unsecured`. Add `unsecured_entity_areas` entries for the linked entities with their actual areas.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** None
+
+---
 
 ### Add `unknown_person_camera_night_home` branch to `_covered_builtin_rule_for_candidate()`
 

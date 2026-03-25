@@ -49,6 +49,22 @@ _COMPLEMENTARY_PAIRS: frozenset[frozenset[str]] = frozenset(
     }
 )
 
+# Complementary pairs that involve camera_entry_unsecured require an area match
+# before being correlated.  Cameras are spatially bound: a camera in one area
+# cannot be said to have observed an entry in a different area.  Without this
+# guard, a lock finding in "Garage" and a camera finding in "Front" would be
+# merged into a compound notification implying a false spatial relationship.
+#
+# Same-area pairings are already handled by Rule 1 (_are_related step 1),
+# so reaching the Rule 3 check with matching areas is a no-op; the guard only
+# fires when areas differ, in which case it returns False.
+_COMPLEMENTARY_PAIRS_REQUIRE_AREA_MATCH: frozenset[frozenset[str]] = frozenset(
+    {
+        frozenset({"unlocked_lock_at_night", "camera_entry_unsecured"}),
+        frozenset({"open_entry_while_away", "camera_entry_unsecured"}),
+    }
+)
+
 
 def _area_of(finding: AnomalyFinding) -> str:
     """Return the normalised area string from evidence, or empty string."""
@@ -72,7 +88,12 @@ def _are_related(a: AnomalyFinding, b: AnomalyFinding) -> bool:
 
     # 3. Complementary rule-type pairs.
     pair: frozenset[str] = frozenset({a.type, b.type})
-    return pair in _COMPLEMENTARY_PAIRS
+    if pair not in _COMPLEMENTARY_PAIRS:
+        return False
+    if pair in _COMPLEMENTARY_PAIRS_REQUIRE_AREA_MATCH:
+        # Spatially-bound pairs must have matching, non-empty areas.
+        return bool(area_a and area_b and area_a == area_b)
+    return True
 
 
 def _build_groups(findings: list[AnomalyFinding]) -> list[list[AnomalyFinding]]:

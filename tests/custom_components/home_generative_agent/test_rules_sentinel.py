@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from custom_components.home_generative_agent.explain.prompts import SYSTEM_PROMPT
 from custom_components.home_generative_agent.sentinel.dynamic_rules import (
     evaluate_dynamic_rule,
 )
@@ -200,6 +201,11 @@ def test_camera_entry_unsecured_triggers() -> None:
 
     findings = CameraEntryUnsecuredRule().evaluate(snapshot)
     assert len(findings) == 1
+    assert findings[0].evidence["area"] == "Front"
+    assert findings[0].evidence["camera_area"] == "Front"
+    assert findings[0].evidence["unsecured_entity_areas"] == {
+        "lock.front_door": "Front"
+    }
 
 
 def test_camera_entry_unsecured_vmd_last_changed_fallback() -> None:
@@ -208,11 +214,11 @@ def test_camera_entry_unsecured_vmd_last_changed_fallback() -> None:
     snapshot["derived"]["now"] = "2025-01-01T00:05:00+00:00"
     snapshot["entities"] = [
         {
-            "entity_id": "lock.garage_door",
+            "entity_id": "lock.outside_gate",
             "domain": "lock",
             "state": "unlocked",
-            "friendly_name": "Garage Door",
-            "area": "Garage",
+            "friendly_name": "Outside Gate",
+            "area": "Outside",  # same area as camera — valid same-area relationship
             "attributes": {},
             "last_changed": "2025-01-01T00:00:00+00:00",
             "last_updated": "2025-01-01T00:00:00+00:00",
@@ -243,7 +249,7 @@ def test_camera_entry_unsecured_vmd_last_changed_fallback() -> None:
 
     findings = CameraEntryUnsecuredRule().evaluate(snapshot)
     assert len(findings) == 1
-    assert findings[0].evidence["unsecured_entities"] == ["lock.garage_door"]
+    assert findings[0].evidence["unsecured_entities"] == ["lock.outside_gate"]
 
 
 def test_camera_entry_unsecured_area_binary_scan_fallback() -> None:
@@ -252,11 +258,11 @@ def test_camera_entry_unsecured_area_binary_scan_fallback() -> None:
     snapshot["derived"]["now"] = "2025-01-01T00:05:00+00:00"
     snapshot["entities"] = [
         {
-            "entity_id": "lock.garage_door",
+            "entity_id": "lock.outside_gate",
             "domain": "lock",
             "state": "unlocked",
-            "friendly_name": "Garage Door",
-            "area": "Garage",
+            "friendly_name": "Outside Gate",
+            "area": "Outside",  # same area as camera — valid same-area relationship
             "attributes": {},
             "last_changed": "2025-01-01T00:00:00+00:00",
             "last_updated": "2025-01-01T00:00:00+00:00",
@@ -287,11 +293,17 @@ def test_camera_entry_unsecured_area_binary_scan_fallback() -> None:
 
     findings = CameraEntryUnsecuredRule().evaluate(snapshot)
     assert len(findings) == 1
-    assert findings[0].evidence["unsecured_entities"] == ["lock.garage_door"]
+    assert findings[0].evidence["unsecured_entities"] == ["lock.outside_gate"]
 
 
 def test_camera_entry_unsecured_exterior_area_fallback() -> None:
-    """Camera in an exterior area falls back to home-wide unsecured entities."""
+    """
+    Camera in exterior area with cross-area unsecured entities fires no finding.
+
+    Previously a home-wide fallback caused exterior cameras to report unsecured
+    entries from unrelated areas.  The fix removes the fallback: only same-area
+    unsecured entries are associated with a camera.
+    """
     snapshot = _base_snapshot()
     snapshot["derived"]["now"] = "2025-01-01T00:05:00+00:00"
     snapshot["entities"] = [
@@ -300,7 +312,7 @@ def test_camera_entry_unsecured_exterior_area_fallback() -> None:
             "domain": "lock",
             "state": "unlocked",
             "friendly_name": "Garage Door",
-            "area": "Garage",
+            "area": "Garage",  # different area from camera ("Outside")
             "attributes": {},
             "last_changed": "2025-01-01T00:00:00+00:00",
             "last_updated": "2025-01-01T00:00:00+00:00",
@@ -320,8 +332,7 @@ def test_camera_entry_unsecured_exterior_area_fallback() -> None:
     ]
 
     findings = CameraEntryUnsecuredRule().evaluate(snapshot)
-    assert len(findings) == 1
-    assert findings[0].evidence["unsecured_entities"] == ["lock.garage_door"]
+    assert len(findings) == 0  # no same-area unsecured entries → no finding
 
 
 def test_camera_entry_unsecured_no_trigger_when_all_secured() -> None:
@@ -344,6 +355,44 @@ def test_camera_entry_unsecured_no_trigger_when_all_secured() -> None:
         {
             "camera_entity_id": "camera.east",
             "area": "Outside",
+            "last_activity": "2025-01-01T00:04:00+00:00",
+            "motion_entities": [],
+            "vmd_entities": [],
+            "snapshot_summary": None,
+            "recognized_people": [],
+            "latest_path": None,
+        }
+    ]
+
+    findings = CameraEntryUnsecuredRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_camera_entry_unsecured_interior_area_no_fallback() -> None:
+    """
+    Interior camera with only cross-area unsecured entries fires no finding.
+
+    The same-area-only rule applies to all cameras, not just exterior ones.
+    A camera in 'Garage' should not report a lock unsecured in 'Front'.
+    """
+    snapshot = _base_snapshot()
+    snapshot["derived"]["now"] = "2025-01-01T00:05:00+00:00"
+    snapshot["entities"] = [
+        {
+            "entity_id": "lock.front_door",
+            "domain": "lock",
+            "state": "unlocked",
+            "friendly_name": "Front Door",
+            "area": "Front",  # different area from camera ("Garage")
+            "attributes": {},
+            "last_changed": "2025-01-01T00:00:00+00:00",
+            "last_updated": "2025-01-01T00:00:00+00:00",
+        }
+    ]
+    snapshot["camera_activity"] = [
+        {
+            "camera_entity_id": "camera.garage_interior",
+            "area": "Garage",
             "last_activity": "2025-01-01T00:04:00+00:00",
             "motion_entities": [],
             "vmd_entities": [],
@@ -1581,3 +1630,15 @@ def test_phone_battery_low_no_trigger_missing_device_class() -> None:
     ]
     findings = PhoneBatteryLowAtNightRule().evaluate(snapshot)
     assert len(findings) == 0
+
+
+def test_system_prompt_camera_entry_cooccurrence_grounding() -> None:
+    """
+    SYSTEM_PROMPT contains co-occurrence grounding for camera_entry_unsecured.
+
+    Regression guard: ensures the spatial grounding instruction is never
+    accidentally removed during future SYSTEM_PROMPT edits.
+    """
+    assert "camera_entry_unsecured" in SYSTEM_PROMPT
+    assert "co-occurrence" in SYSTEM_PROMPT
+    assert "camera area proximity does not imply" in SYSTEM_PROMPT.lower()
