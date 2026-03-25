@@ -13,7 +13,11 @@ SYSTEM_PROMPT = (
     "normal. If deviation_direction='above', the current value is HIGHER than normal. "
     "Never invert this direction.\n"
     "If evidence contains alarm_state='disarmed', the alarm is already off; "
-    "never tell the user to disarm it."
+    "never tell the user to disarm it.\n"
+    "For camera_entry_unsecured anomalies: use co-occurrence language only. "
+    "Say 'camera activity was detected in the same area where an entry was "
+    "unsecured' — never say the camera 'saw' or 'detected' the specific entry "
+    "device. Camera area proximity does not imply the camera has a view of the entry."
 )
 
 USER_PROMPT_TEMPLATE = (

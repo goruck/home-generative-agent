@@ -446,3 +446,63 @@ def test_anomaly_finding_is_also_immutable() -> None:
     f = _finding()
     with pytest.raises(dataclasses.FrozenInstanceError):
         f.type = "mutated"  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# Area-aware complementary pair tests (regression guards)
+# ---------------------------------------------------------------------------
+
+
+def test_camera_entry_unsecured_cross_area_not_correlated() -> None:
+    """
+    camera_entry_unsecured and unlocked_lock_at_night in different areas are NOT correlated.
+
+    Regression guard: ensures the area-aware Rule 3 check is never removed.
+    Without it, a camera in 'Front' and a lock in 'Garage' would be merged
+    into a compound notification implying a false spatial relationship.
+    """
+    f_camera = _finding(
+        anomaly_id="cam1",
+        rule_type="camera_entry_unsecured",
+        area="Front",
+        triggering_entities=["camera.front"],
+    )
+    f_lock = _finding(
+        anomaly_id="lock1",
+        rule_type="unlocked_lock_at_night",
+        area="Garage",
+        triggering_entities=["lock.garage_door"],
+    )
+
+    correlator = SentinelCorrelator()
+    result = correlator.correlate([f_camera, f_lock])
+
+    assert len(result) == 2  # not correlated — different areas
+    assert all(isinstance(r, AnomalyFinding) for r in result)
+
+
+def test_camera_entry_unsecured_same_area_still_correlated() -> None:
+    """
+    camera_entry_unsecured and unlocked_lock_at_night in the SAME area still correlate.
+
+    Verifies Rule 1 (same area) continues to group findings when spatial
+    relationship is valid.  The area-aware Rule 3 change must not break this.
+    """
+    f_camera = _finding(
+        anomaly_id="cam1",
+        rule_type="camera_entry_unsecured",
+        area="Front",
+        triggering_entities=["camera.front"],
+    )
+    f_lock = _finding(
+        anomaly_id="lock1",
+        rule_type="unlocked_lock_at_night",
+        area="Front",
+        triggering_entities=["lock.front_door"],
+    )
+
+    correlator = SentinelCorrelator()
+    result = correlator.correlate([f_camera, f_lock])
+
+    assert len(result) == 1
+    assert isinstance(result[0], CompoundFinding)
