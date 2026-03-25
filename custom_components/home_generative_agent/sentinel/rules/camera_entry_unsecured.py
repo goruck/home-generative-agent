@@ -134,8 +134,18 @@ class CameraEntryUnsecuredRule:
                     eid: entity_area_map.get(eid, "unknown") for eid in unsecured
                 },
             }
+            # Hash only the original identifying fields so that adding new
+            # informational fields (camera_area, unsecured_entity_areas) does
+            # not invalidate suppression state for already-notified findings.
             anomaly_id = build_anomaly_id(
-                self.rule_id, [activity["camera_entity_id"]], evidence
+                self.rule_id,
+                [activity["camera_entity_id"]],
+                {
+                    "camera_entity_id": activity["camera_entity_id"],
+                    "area": area,
+                    "last_activity": last_activity,
+                    "unsecured_entities": sorted(unsecured),
+                },
             )
             findings.append(
                 AnomalyFinding(
