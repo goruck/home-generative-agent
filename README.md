@@ -1,4 +1,27 @@
-# home-generative-agent
+# home-generative-agent-multi-tool
+
+> **This is a community fork of [goruck/home-generative-agent](https://github.com/goruck/home-generative-agent).**
+> 
+> The primary change in this fork is **multi-select support for the "Control Home Assistant" tool set**. 
+> The original integration only allows a single tool set to be active at a time (Assist, Search Services, 
+> Weather Forecast, Media Services, or Basic Utilities). This fork changes the selector to multi-select, 
+> allowing all tool sets to be active simultaneously. A `MultiLLMAPI` wrapper handles tool call routing 
+> across all active APIs transparently, so the correct API handles each tool call regardless of which 
+> set it belongs to. Existing installations are automatically migrated on first boot with no data loss.
+> 
+> All other functionality, architecture, and configuration is identical to the upstream project. 
+> This fork will attempt to track upstream changes where possible. If this feature gets merged 
+> upstream this fork will be retired.
+>
+> **Note:** This fork will inherently use more tokens than the original integration because tool 
+> definitions for all active tool sets are sent to the LLM on every request. More tools selected 
+> means more tokens used - not a dramatic amount, but worth being transparent about.
+>
+> **Known limitation:** If two active tool sets expose a tool with the same name, one will shadow 
+> the other. The shadowed tool's serializer may also be used incorrectly for the wrong provider, 
+> leading to unexpected behavior. A proper fix would be a pre-computed tool-to-provider map that 
+> gives each tool name a canonical owner, which would also eliminate any serializer mismatch. 
+> Will probably add this soon <3
 
 [![GitHub Release][releases-shield]][releases]
 [![GitHub Activity][commits-shield]][commits]
