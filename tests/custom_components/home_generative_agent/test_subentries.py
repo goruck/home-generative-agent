@@ -799,3 +799,89 @@ def test_provider_capabilities_includes_openai_compatible() -> None:
         assert "openai_compatible" in spec["model_keys"], (
             f"openai_compatible missing from {category} model_keys"
         )
+
+@pytest.mark.asyncio
+async def test_migration_v5_to_v6_converts_string_to_list(
+    hass: HomeAssistant,
+) -> None:
+    """Migration should convert a single string LLM API to a list."""
+    from homeassistant.const import CONF_LLM_HASS_API
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Home Generative Agent",
+        version=5,
+        data={},
+        options={
+            CONF_LLM_HASS_API: "assist",
+        },
+    )
+    entry.add_to_hass(hass)
+
+    assert await async_migrate_entry(hass, entry)
+    assert entry.version == 6
+    assert entry.options.get(CONF_LLM_HASS_API) == ["assist"]
+
+
+@pytest.mark.asyncio
+async def test_migration_v5_to_v6_none_sentinel_removed(
+    hass: HomeAssistant,
+) -> None:
+    """Migration should remove the LLM_HASS_API key if its value is 'none'."""
+    from homeassistant.const import CONF_LLM_HASS_API
+    from custom_components.home_generative_agent.const import LLM_HASS_API_NONE
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Home Generative Agent",
+        version=5,
+        data={},
+        options={
+            CONF_LLM_HASS_API: LLM_HASS_API_NONE,
+        },
+    )
+    entry.add_to_hass(hass)
+
+    assert await async_migrate_entry(hass, entry)
+    assert entry.version == 6
+    assert CONF_LLM_HASS_API not in entry.options
+
+
+@pytest.mark.asyncio
+async def test_migration_v5_to_v6_missing_key_unchanged(
+    hass: HomeAssistant,
+) -> None:
+    """Migration should leave an absent LLM_HASS_API key absent."""
+    from homeassistant.const import CONF_LLM_HASS_API
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Home Generative Agent",
+        version=5,
+        data={},
+        options={},
+    )
+    entry.add_to_hass(hass)
+
+    assert await async_migrate_entry(hass, entry)
+    assert entry.version == 6
+    assert CONF_LLM_HASS_API not in entry.options
+
+
+@pytest.mark.asyncio
+async def test_migration_v5_to_v6_already_list_unchanged(
+    hass: HomeAssistant,
+) -> None:
+    """Migration should not modify a value that is already a list."""
+    from homeassistant.const import CONF_LLM_HASS_API
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Home Generative Agent",
+        version=5,
+        data={},
+        options={
+            CONF_LLM_HASS_API: ["search_services", "weather_forecast"],
+        },
+    )
+    entry.add_to_hass(hass)
+
+    assert await async_migrate_entry(hass, entry)
+    assert entry.version == 6
+    assert entry.options.get(CONF_LLM_HASS_API) == ["search_services", "weather_forecast"]

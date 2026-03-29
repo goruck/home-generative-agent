@@ -21,6 +21,7 @@ from homeassistant.config_entries import ConfigEntry, ConfigSubentry
 from homeassistant.const import (
     CONF_API_KEY,
     CONF_HOST,
+    CONF_LLM_HASS_API,
     CONF_PASSWORD,
     CONF_PORT,
     CONF_USERNAME,
@@ -130,6 +131,7 @@ from .const import (
     FEATURE_NAMES,
     HGA_CARD_STATIC_PATH,
     HGA_CARD_STATIC_PATH_LEGACY,
+    LLM_HASS_API_NONE,
     MODEL_CATEGORY_SPECS,
     RECOMMENDED_AUDIT_HOT_MAX_RECORDS,
     RECOMMENDED_CHAT_MODEL_PROVIDER,
@@ -2651,6 +2653,24 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
             CONF_EXPLAIN_ENABLED,
         ):
             new_options.pop(key, None)
+
+        current_version = 5
+
+    if current_version < 6:
+        LOGGER.info(
+            "Migrating %s config entry %s -> v6",
+            config_entry.domain,
+            config_entry.entry_id,
+        )
+
+        raw = new_options.get(CONF_LLM_HASS_API)
+        if isinstance(raw, str):
+            if raw == LLM_HASS_API_NONE or not raw:
+                new_options.pop(CONF_LLM_HASS_API, None)
+            else:
+                new_options[CONF_LLM_HASS_API] = [raw]
+
+        current_version = 6
 
         try:
             hass.config_entries.async_update_entry(

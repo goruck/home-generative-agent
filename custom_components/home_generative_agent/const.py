@@ -8,7 +8,7 @@ DOMAIN = "home_generative_agent"
 HGA_CARD_STATIC_PATH = "/hga-card"
 HGA_CARD_STATIC_PATH_LEGACY = "/hga-enroll-card"
 
-CONFIG_ENTRY_VERSION = 5
+CONFIG_ENTRY_VERSION = 6
 
 SUBENTRY_TYPE_DATABASE = "database"
 SUBENTRY_TYPE_MODEL_PROVIDER = "model_provider"

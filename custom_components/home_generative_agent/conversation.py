@@ -19,6 +19,7 @@ from langchain_core.caches import InMemoryCache
 from langchain_core.globals import set_debug, set_llm_cache, set_verbose
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
 from voluptuous_openapi import convert
+import voluptuous as vol
 
 from .agent.graph import workflow
 from .agent.tools import (
@@ -98,6 +99,39 @@ def _convert_content(
     if isinstance(content, conversation.UserContent):
         return HumanMessage(content=content.content)
     return AIMessage(content=content.content)
+
+
+class MultiLLMAPI:
+    """Wrapper to route tool calls across multiple LLM APIs."""
+
+    def __init__(self, apis: list[llm.API]) -> None:
+        """Initialize the wrapper."""
+        self.apis = apis
+
+    @property
+    def api_prompt(self) -> str:
+        """Return the concatenated API prompts."""
+        return "\n".join(api.api_prompt for api in self.apis if api.api_prompt)
+
+    @property
+    def custom_serializer(self) -> Callable[[Any], Any] | None:
+        """Return the custom serializer from the first API."""
+        return self.apis[0].custom_serializer if self.apis else None
+
+    async def async_call_tool(self, tool_input: llm.ToolInput) -> Any:
+        """Try calling the tool across all APIs."""
+        last_err: Exception | None = None
+        for api in self.apis:
+            try:
+                return await api.async_call_tool(tool_input)
+            except (HomeAssistantError, vol.Invalid) as err:
+                last_err = err
+
+        if last_err:
+            raise last_err
+        
+        msg = f"No APIs available to handle tool {tool_input.tool_name}"
+        raise HomeAssistantError(msg)
 
 
 async def async_setup_entry(
@@ -197,14 +231,17 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         )
 
         # HA tools & schema
-        try:
-            llm_api = await llm.async_get_api(
-                hass,
-                options[CONF_LLM_HASS_API],
-                llm_context,
-            )
-        except HomeAssistantError:
-            msg = "Error getting LLM API, check your configuration."
+        llm_api_ids: list[str] = options.get(CONF_LLM_HASS_API) or []
+        llm_apis: list[llm.API] = []
+        for api_id in llm_api_ids:
+            try:
+                api = await llm.async_get_api(hass, api_id, llm_context)
+                llm_apis.append(api)
+            except HomeAssistantError:
+                _LOGGER.warning("Could not load LLM API %s", api_id)
+
+        if llm_api_ids and not llm_apis:
+            msg = "Error getting LLM APIs, check your configuration."
             _LOGGER.exception(msg)
             intent_response.async_set_error(intent.IntentResponseErrorCode.UNKNOWN, msg)
             return conversation.ConversationResult(
@@ -222,9 +259,10 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 response=intent_response, conversation_id=conversation_id
             )
 
-        tools = [
-            _format_tool(tool, llm_api.custom_serializer) for tool in llm_api.tools
-        ]
+        custom_serializer = llm_apis[0].custom_serializer if llm_apis else None
+        tools = []
+        for api in llm_apis:
+            tools.extend(_format_tool(tool, custom_serializer) for tool in api.tools)
 
         # Add LangChain-native tools (wired in graph via config).
         langchain_tools: dict[str, Any] = {
@@ -294,8 +332,9 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 response=intent_response, conversation_id=conversation_id
             )
 
-        if llm_api:
-            prompt_parts.append(llm_api.api_prompt)
+        api_prompt = "\n".join(api.api_prompt for api in llm_apis if api.api_prompt)
+        if api_prompt:
+            prompt_parts.append(api_prompt)
 
         prompt = "\n".join(prompt_parts)
 
@@ -346,7 +385,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 "vlm_model": runtime_data.vision_model,
                 "summarization_model": runtime_data.summarization_model,
                 "langchain_tools": langchain_tools,
-                "ha_llm_api": llm_api or None,
+                "ha_llm_api": MultiLLMAPI(llm_apis) if llm_apis else None,
                 "hass": hass,
                 "pending_actions": runtime_data.pending_actions,
             },

@@ -86,7 +86,7 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_OPTIONS = {
-    CONF_LLM_HASS_API: llm.LLM_API_ASSIST,
+    CONF_LLM_HASS_API: [llm.LLM_API_ASSIST],
     CONF_PROMPT: llm.DEFAULT_INSTRUCTIONS_PROMPT,
     CONF_SCHEMA_FIRST_YAML: False,
     CONF_CRITICAL_ACTION_PIN_ENABLED: True,
@@ -139,9 +139,9 @@ async def _schema_for_options(
         ): TemplateSelector(),
         vol.Optional(
             CONF_LLM_HASS_API,
-            description={"suggested_value": opts.get(CONF_LLM_HASS_API)},
-            default=LLM_HASS_API_NONE,
-        ): SelectSelector(SelectSelectorConfig(options=hass_apis)),
+            description={"suggested_value": opts.get(CONF_LLM_HASS_API, [])},
+            default=[],
+        ): SelectSelector(SelectSelectorConfig(options=hass_apis, multiple=True)),
         vol.Optional(
             CONF_VIDEO_ANALYZER_MODE,
             description={"suggested_value": opts.get(CONF_VIDEO_ANALYZER_MODE)},
@@ -369,10 +369,7 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
             if not _get_str(final_options, k):
                 final_options.pop(k, None)
 
-    def _cleanup_none_llm_api(self, options: dict[str, Any]) -> None:
-        """Remove the 'none' sentinel so options omit the key when unset."""
-        if options.get(CONF_LLM_HASS_API) == LLM_HASS_API_NONE:
-            options.pop(CONF_LLM_HASS_API, None)
+    # Removed _cleanup_none_llm_api
 
     # ---- main step ----
 
@@ -408,6 +405,7 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
                 errors=errors,
             )
 
-        self._cleanup_none_llm_api(options)
+        if not options.get(CONF_LLM_HASS_API):
+            options.pop(CONF_LLM_HASS_API, None)
         self._drop_empty_fields(options)
         return self.async_create_entry(title="", data=options)
