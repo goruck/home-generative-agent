@@ -29,7 +29,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from datetime import UTC
+from datetime import UTC, timedelta
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.util import dt as dt_util
@@ -60,6 +60,41 @@ if TYPE_CHECKING:
     )
 
 LOGGER = logging.getLogger(__name__)
+
+# Appliance cycle-completion threshold: <10% of baseline → treat as cycle end.
+COMPLETION_THRESHOLD_PCT = 0.10  # <10% of baseline → treat as cycle completion
+# Minimum baseline power to consider a completion event meaningful.  A baseline
+# below this value means the appliance was in standby (not an active cycle), so
+# a drop to near-zero is just "turned off", not "cycle finished".
+# Typical active draw: dishwasher ~1200 W, washer ~500 W, dryer ~3000 W.
+# 100 W is safely above any standby level while below any active cycle.
+COMPLETION_MIN_ACTIVE_WATTS = 100.0
+# Recency window: only flag completion if last_changed is within this window.
+# Prevents stale-baseline false positives when an appliance has been idle for
+# hours but the rolling average hasn't converged to the new resting state yet.
+# Set to 3x the default evaluation interval (3 x 300 s = 900 s / 15 min).
+COMPLETION_RECENCY_SECS = 900
+
+# Entity-name keywords that identify dedicated appliance circuits.  Only these
+# entities qualify for completion detection; generic power sensors (UPS, fridge,
+# whole-home, server rack) are intentionally excluded.
+_APPLIANCE_HINTS: frozenset[str] = frozenset(
+    {
+        "washer",
+        "dryer",
+        "dishwasher",
+        "washing",
+        "laundry",
+        "oven",
+        "microwave",
+        "coffee",
+        "kettle",
+        "toaster",
+        "iron",
+        "vacuum",
+        "robot",
+    }
+)
 
 # Baseline freshness states.
 BASELINE_FRESH = "fresh"
@@ -814,7 +849,7 @@ class SentinelBaselineUpdater:
 # ---------------------------------------------------------------------------
 
 
-def evaluate_baseline_deviation(  # noqa: PLR0911
+def evaluate_baseline_deviation(  # noqa: PLR0911, PLR0912
     snapshot: FullStateSnapshot,
     rule: dict[str, Any],
     baselines: dict[str, dict[str, float]],
@@ -879,10 +914,49 @@ def evaluate_baseline_deviation(  # noqa: PLR0911
         "metric": metric,
         "last_changed": entity.get("last_changed"),
     }
+
+    # Appliance completion detection: power-class entity whose name identifies
+    # a dedicated appliance circuit (washer, dryer, dishwasher, etc.).
+    # Generic power sensors (UPS, fridge, whole-home, server rack) are
+    # intentionally excluded to avoid silencing real faults.
+    device_class = str(entity.get("attributes", {}).get("device_class") or "")
+    unit = str(entity.get("attributes", {}).get("unit_of_measurement") or "")
+    is_power_entity = device_class == "power" or unit in {"W", "kW"}
+    friendly_name = str(entity.get("friendly_name") or "").lower()
+    is_appliance = is_power_entity and any(
+        hint in entity_id.lower() or hint in friendly_name for hint in _APPLIANCE_HINTS
+    )
+    if (
+        is_appliance
+        and baseline_value >= COMPLETION_MIN_ACTIVE_WATTS
+        and current_value < COMPLETION_THRESHOLD_PCT * baseline_value
+    ):
+        # Only treat as completion if the state changed recently.  If the
+        # appliance has been idle for longer than COMPLETION_RECENCY_SECS the
+        # low reading is just its resting state — not a fresh cycle end — and
+        # the rolling average baseline hasn't converged yet.
+        last_changed_raw = entity.get("last_changed")
+        recently_changed = False
+        if last_changed_raw:
+            try:
+                last_changed_dt = dt_util.parse_datetime(str(last_changed_raw))
+                if last_changed_dt is not None:
+                    now_utc = dt_util.utcnow()
+                    recently_changed = (now_utc - last_changed_dt) <= timedelta(
+                        seconds=COMPLETION_RECENCY_SECS
+                    )
+            except (ValueError, TypeError):
+                pass
+        if recently_changed:
+            evidence["is_completion"] = True
+
     severity_raw = str(rule.get("severity") or "low")
     severity: Severity = (  # type: ignore[assignment]
         severity_raw if severity_raw in {"low", "medium", "high"} else "low"
     )
+    # Override severity to low for appliance cycle completions.
+    if evidence.get("is_completion"):
+        severity = "low"
     confidence = _coerce_float(rule.get("confidence"), default=0.7)
     suggested_actions = rule.get("suggested_actions") or []
     anomaly_id = build_anomaly_id(rule_id, [entity_id], evidence)

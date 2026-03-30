@@ -45,6 +45,8 @@ class UnlockedLockAtNightRule:
         if not snapshot["derived"]["is_night"]:
             return []
 
+        anyone_home: bool = bool(snapshot["derived"].get("anyone_home", False))
+
         findings: list[AnomalyFinding] = []
         for entity in snapshot["entities"]:
             if entity["domain"] != "lock":
@@ -61,18 +63,19 @@ class UnlockedLockAtNightRule:
                 "state": entity["state"],
                 "last_changed": entity["last_changed"],
                 "is_night": snapshot["derived"]["is_night"],
+                "anyone_home": anyone_home,
             }
             anomaly_id = build_anomaly_id(self.rule_id, [entity["entity_id"]], evidence)
             findings.append(
                 AnomalyFinding(
                     anomaly_id=anomaly_id,
                     type=self.rule_id,
-                    severity="high",
+                    severity="low" if anyone_home else "high",
                     confidence=0.7,
                     triggering_entities=[entity["entity_id"]],
                     evidence=evidence,
                     suggested_actions=["lock_entity"],
-                    is_sensitive=True,
+                    is_sensitive=True,  # lock location is always sensitive
                 )
             )
         return findings

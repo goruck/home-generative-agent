@@ -24,9 +24,11 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.core import callback
+from homeassistant.helpers.event import async_call_later
 from homeassistant.util import dt as dt_util
 
 from custom_components.home_generative_agent.const import (
@@ -58,6 +60,22 @@ LOGGER = logging.getLogger(__name__)
 # Action prefix shared with the existing ActionHandler.
 ACTION_PREFIX = "hga_sentinel_"
 MAX_MOBILE_MESSAGE_CHARS = 220
+
+_SEVERITY_INTERRUPT_LEVEL: dict[str, str] = {
+    "high": "time-sensitive",
+    "medium": "active",
+    "low": "passive",
+}
+_SEVERITY_TITLE: dict[str, str] = {
+    "high": "Security Alert",
+    "medium": "Home Alert",
+    "low": "Home Update",
+}
+
+# Notification batching / rate-limiting.
+_BATCH_RATE_LIMIT = 3
+_BATCH_RATE_WINDOW_SECS = 60
+_BATCH_FLUSH_DELAY_SECS = 30
 
 # Snooze action verb tokens (without the trailing underscore+anomaly_id).
 _ACT_SNOOZE_24H = "snooze24h"
@@ -100,6 +118,10 @@ class SentinelNotifier:
         # Pending permanent-snooze intents: anomaly_id -> finding_type.
         # Written when the user taps "Snooze Always"; cleared on confirm/cancel.
         self._pending_always_snooze: dict[str, str] = {}
+        # Notification batching state.
+        self._notification_times: list[datetime] = []
+        self._held_batch: list[tuple[AnomalyFinding, str | None, str | None]] = []
+        self._batch_cancel: Callable[[], None] | None = None
 
     # ---------------------------------------------------------------------- #
     # Lifecycle
@@ -119,6 +141,9 @@ class SentinelNotifier:
         if self._unsub is not None:
             self._unsub()
             self._unsub = None
+        if self._batch_cancel is not None:
+            self._batch_cancel()
+            self._batch_cancel = None
 
     # ---------------------------------------------------------------------- #
     # Notification dispatch
@@ -143,13 +168,35 @@ class SentinelNotifier:
         # Sensitive redaction before building the message.
         clean_explanation = _redact_if_sensitive(explanation, finding)
 
-        title = "Home Generative Agent alert"
+        severity = finding.severity
+        title = _SEVERITY_TITLE.get(severity, "Home Alert")
+        interrupt_level = _SEVERITY_INTERRUPT_LEVEL.get(severity, "active")
+        subtitle = _friendly_type(finding.type)
         mobile_msg = _mobile_message(clean_explanation, finding)
         persistent_msg = _persistent_message(clean_explanation, finding)
         actions = _build_actions(finding)
 
         # Per-area routing.
         target_service = _resolve_notify_service(finding, snapshot, self._options)
+
+        # Batching / rate-limiting for non-high severity.
+        if severity != "high":
+            now_dt = datetime.now()  # noqa: DTZ005
+            cutoff = now_dt - timedelta(seconds=_BATCH_RATE_WINDOW_SECS)
+            self._notification_times = [
+                t for t in self._notification_times if t >= cutoff
+            ]
+            if len(self._notification_times) >= _BATCH_RATE_LIMIT:
+                # Rate limit exceeded — buffer this finding.
+                self._held_batch.append((finding, explanation, target_service))
+                if self._batch_cancel is None:
+                    self._batch_cancel = async_call_later(
+                        self._hass,
+                        _BATCH_FLUSH_DELAY_SECS,
+                        self._async_flush_batch,
+                    )
+                return
+            self._notification_times.append(now_dt)
 
         if target_service:
             domain, _, service = target_service.partition(".")
@@ -160,7 +207,12 @@ class SentinelNotifier:
             data: dict[str, Any] = {
                 "title": title,
                 "message": mobile_msg,
-                "data": {"actions": actions, "tag": tag},
+                "data": {
+                    "actions": actions,
+                    "tag": tag,
+                    "subtitle": subtitle,
+                    "push": {"interruption-level": interrupt_level},
+                },
             }
             LOGGER.info("Sending sentinel notification via %s.", target_service)
             await self._hass.services.async_call(domain, service, data, blocking=False)
@@ -244,6 +296,55 @@ class SentinelNotifier:
         elif verb == _ACT_SNOOZE_CANCEL:
             self._pending_always_snooze.pop(anomaly_id, None)
             LOGGER.debug("Permanent snooze cancelled for %s.", anomaly_id)
+
+    @callback
+    def _async_flush_batch(self, _now: Any = None) -> None:
+        """Flush held batch of non-high-severity notifications as a single summary."""
+        self._batch_cancel = None
+        held = self._held_batch[:]
+        self._held_batch.clear()
+        if not held:
+            return
+
+        count = len(held)
+        types = list({_friendly_type(f.type) for f, _, _svc in held})
+        type_summary = ", ".join(types)
+        message = f"{count} home update{'s' if count > 1 else ''}: {type_summary}."
+
+        # Use the first non-None resolved service from the held batch (which
+        # already incorporated the area map), then fall back to the global service.
+        target_service = next(
+            (svc for _f, _e, svc in held if svc is not None), None
+        ) or self._options.get(CONF_NOTIFY_SERVICE)
+        if target_service and isinstance(target_service, str):
+            domain, _, service = target_service.partition(".")
+            if not service:
+                service = target_service
+                domain = "notify"
+            data: dict[str, Any] = {
+                "title": "Home Update",
+                "message": message,
+                "data": {
+                    "tag": "hga_sentinel_batch_summary",
+                    "push": {"interruption-level": "passive"},
+                },
+            }
+            self._hass.async_create_task(
+                self._hass.services.async_call(domain, service, data, blocking=False)
+            )
+        else:
+            self._hass.async_create_task(
+                self._hass.services.async_call(
+                    "persistent_notification",
+                    "create",
+                    {
+                        "title": "Home Update",
+                        "message": message,
+                        "notification_id": "hga_sentinel_batch_summary",
+                    },
+                    blocking=False,
+                )
+            )
 
     async def _send_always_confirmation(self, finding: AnomalyFinding) -> None:
         """
