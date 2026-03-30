@@ -490,8 +490,22 @@ def reasoning_field(
     return {"reasoning": value} if supported else {}
 
 
-def extract_final(raw: str, max_chars: int | None = None) -> str:
+def extract_final(raw: str | list[str | dict[str, Any]], max_chars: int | None = None) -> str:
     """Return plain text with <think> blocks removed."""
+    if not raw:
+        return ""
+        
+    if isinstance(raw, list):
+        text_parts = []
+        for block in raw:
+            if isinstance(block, str):
+                text_parts.append(block)
+            elif isinstance(block, dict) and block.get("type") == "text":
+                text_parts.append(str(block.get("text", "")))
+        raw = "".join(text_parts)
+    elif not isinstance(raw, str):
+        raw = str(raw)
+
     if not raw:
         return ""
     # Remove any leaked reasoning
