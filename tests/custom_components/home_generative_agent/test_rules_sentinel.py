@@ -1642,3 +1642,52 @@ def test_system_prompt_camera_entry_cooccurrence_grounding() -> None:
     assert "camera_entry_unsecured" in SYSTEM_PROMPT
     assert "co-occurrence" in SYSTEM_PROMPT
     assert "camera area proximity does not imply" in SYSTEM_PROMPT.lower()
+
+
+# ---------------------------------------------------------------------------
+# Presence-aware lock severity
+# ---------------------------------------------------------------------------
+
+
+def _lock_entity(entity_id: str = "lock.front_door") -> SnapshotEntity:
+    return SnapshotEntity(
+        entity_id=entity_id,
+        domain="lock",
+        state="unlocked",
+        friendly_name="Front Door",
+        area="front",
+        attributes={},
+        last_changed="2025-01-01T00:00:00+00:00",
+        last_updated="2025-01-01T00:00:00+00:00",
+    )
+
+
+def test_unlocked_lock_at_night_someone_home_is_low_severity() -> None:
+    """anyone_home=True → severity=='low', is_sensitive==True, evidence['anyone_home']==True."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = True
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["entities"] = [_lock_entity()]
+
+    findings = UnlockedLockAtNightRule().evaluate(snapshot)
+
+    assert len(findings) == 1
+    f = findings[0]
+    assert f.severity == "low"
+    assert f.is_sensitive is True  # lock location is always sensitive
+    assert f.evidence["anyone_home"] is True
+
+
+def test_unlocked_lock_at_night_no_one_home_is_high_severity() -> None:
+    """anyone_home=False → severity=='high', is_sensitive==True."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = True
+    snapshot["derived"]["anyone_home"] = False
+    snapshot["entities"] = [_lock_entity()]
+
+    findings = UnlockedLockAtNightRule().evaluate(snapshot)
+
+    assert len(findings) == 1
+    f = findings[0]
+    assert f.severity == "high"
+    assert f.is_sensitive is True

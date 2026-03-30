@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+import custom_components.home_generative_agent.sentinel.notifier as _notifier_mod
 from custom_components.home_generative_agent.const import (
     CONF_NOTIFY_SERVICE,
     CONF_SENTINEL_AREA_NOTIFY_MAP,
@@ -683,3 +684,146 @@ def test_stop_unsubscribes_and_is_idempotent() -> None:
     notifier.stop()  # idempotent
 
     assert len(unsub_calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# 9. iOS notification priority tiers
+# ---------------------------------------------------------------------------
+
+
+def _finding_with_severity(
+    severity: str,
+    anomaly_id: str = "sev1",
+    ftype: str = "open_entry_while_away",
+) -> AnomalyFinding:
+    return AnomalyFinding(
+        anomaly_id=anomaly_id,
+        type=ftype,
+        severity=severity,  # type: ignore[arg-type]
+        confidence=0.75,
+        triggering_entities=["binary_sensor.front_door"],
+        evidence={},
+        suggested_actions=["close_entry"],
+        is_sensitive=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_async_notify_high_severity_uses_time_sensitive_interruption() -> None:
+    """severity=high → push interruption-level == 'time-sensitive', title == 'Security Alert'."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    snapshot = _minimal_snapshot()
+    finding = _finding_with_severity("high", anomaly_id="high1")
+
+    await notifier.async_notify(finding, snapshot, "Front door unlocked.")  # type: ignore[arg-type]
+
+    assert len(hass.services.calls) == 1
+    call = hass.services.calls[0]
+    assert call["data"]["title"] == "Security Alert"
+    assert call["data"]["data"]["push"]["interruption-level"] == "time-sensitive"
+
+
+@pytest.mark.asyncio
+async def test_async_notify_low_severity_uses_passive_interruption() -> None:
+    """severity=low → push interruption-level == 'passive', title == 'Home Update'."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    snapshot = _minimal_snapshot()
+    finding = _finding_with_severity("low", anomaly_id="low1")
+
+    await notifier.async_notify(finding, snapshot, "Appliance finished.")  # type: ignore[arg-type]
+
+    assert len(hass.services.calls) == 1
+    call = hass.services.calls[0]
+    assert call["data"]["title"] == "Home Update"
+    assert call["data"]["data"]["push"]["interruption-level"] == "passive"
+
+
+@pytest.mark.asyncio
+async def test_async_notify_subtitle_is_friendly_type() -> None:
+    """data['data']['subtitle'] is a non-empty string derived from finding type."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    snapshot = _minimal_snapshot()
+    finding = _finding_with_severity(
+        "medium", anomaly_id="sub1", ftype="unlocked_lock_at_night"
+    )
+
+    await notifier.async_notify(finding, snapshot, "Lock left unlocked.")  # type: ignore[arg-type]
+
+    assert len(hass.services.calls) == 1
+    subtitle = hass.services.calls[0]["data"]["data"]["subtitle"]
+    assert isinstance(subtitle, str)
+    assert len(subtitle) > 0
+
+
+# ---------------------------------------------------------------------------
+# 10. Notification batching
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_async_notify_batching_holds_after_rate_limit() -> None:
+    """Send 4 low-severity notifications; first 3 dispatched; 4th held in _held_batch."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+
+    cancel_calls: list[int] = []
+
+    def _fake_async_call_later(_hass: Any, _delay: float, _cb: Any) -> Any:
+        def _cancel() -> None:
+            cancel_calls.append(1)
+
+        return _cancel
+
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    snapshot = _minimal_snapshot()
+
+    # Patch async_call_later via the top-level module reference.
+    original = _notifier_mod.async_call_later
+    _notifier_mod.async_call_later = _fake_async_call_later  # type: ignore[assignment]
+    try:
+        for i in range(4):
+            f = _finding_with_severity("low", anomaly_id=f"batch{i}")
+            await notifier.async_notify(f, snapshot, f"msg {i}")  # type: ignore[arg-type]
+    finally:
+        _notifier_mod.async_call_later = original  # type: ignore[assignment]
+
+    # First 3 dispatched, 4th held.
+    assert len(hass.services.calls) == 3
+    assert len(notifier._held_batch) == 1
+
+
+@pytest.mark.asyncio
+async def test_async_flush_batch_sends_summary_no_actions() -> None:
+    """After _async_flush_batch(), dispatched message has no 'actions' key in data['data']."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+
+    # Pre-load the held batch.
+    finding = _finding_with_severity("low", anomaly_id="flush1")
+    notifier._held_batch.append((finding, "Some message", "notify.mobile_app_phone"))
+
+    notifier._async_flush_batch()
+    await hass.drain_tasks()
+
+    assert len(hass.services.calls) == 1
+    call = hass.services.calls[0]
+    assert "actions" not in call["data"]["data"]
+    assert call["data"]["title"] == "Home Update"
+
+
+@pytest.mark.asyncio
+async def test_high_severity_bypasses_batch() -> None:
+    """More than 3 high-severity notifications all dispatched immediately (no batching)."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    snapshot = _minimal_snapshot()
+
+    for i in range(5):
+        f = _finding_with_severity("high", anomaly_id=f"high{i}")
+        await notifier.async_notify(f, snapshot, f"urgent {i}")  # type: ignore[arg-type]
+
+    # All 5 dispatched immediately; nothing held.
+    assert len(hass.services.calls) == 5
+    assert len(notifier._held_batch) == 0

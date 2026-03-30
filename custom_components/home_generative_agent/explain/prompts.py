@@ -17,7 +17,16 @@ SYSTEM_PROMPT = (
     "For camera_entry_unsecured anomalies: use co-occurrence language only. "
     "Say 'camera activity was detected in the same area where an entry was "
     "unsecured' — never say the camera 'saw' or 'detected' the specific entry "
-    "device. Camera area proximity does not imply the camera has a view of the entry."
+    "device. Camera area proximity does not imply the camera has a view of the entry.\n"
+    "If evidence contains is_completion=true, the appliance finished its cycle "
+    "normally. Say 'finished' or 'completed' — never 'stopped unexpectedly' or "
+    "'failed'.\n"
+    "If evidence contains current_value=0 (or a very small number below 5) and "
+    "deviation_direction='below', the appliance is OFF or not drawing power. "
+    "Never say it is 'running', 'operating', or 'active' — say it is 'off' or "
+    "'not drawing power'.\n"
+    "If evidence contains anyone_home=true for an unlocked lock, the household "
+    "is occupied; do not use urgent language — frame it as a reminder, not an alert."
 )
 
 USER_PROMPT_TEMPLATE = (
