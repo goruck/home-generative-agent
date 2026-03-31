@@ -143,7 +143,7 @@
 **How to apply:** Add `hourly_avg_{DOW}_{H}` as a third metric row per entity per update cycle. Update `evaluate_time_of_day_anomaly()` to prefer the DOW-specific metric when available, falling back to the global `hourly_avg_H` if not yet established. New config option `CONF_SENTINEL_BASELINE_WEEKLY_PATTERNS` (default: False) to opt in.
 
 **Effort:** M
-**Priority:** P3
+**Priority:** P2
 **Depends on:** Baseline enhancement PR
 
 ---
@@ -159,7 +159,7 @@
 **How to apply:** In `USER_PROMPT_TEMPLATE`, add after the current `evidence_paths` instruction: *"If a candidate concerns specific entities, at least one evidence_path MUST reference a concrete entity_id using the format `entities[entity_ids contains domain.object_id].state`. Omit the candidate entirely if no such entity can be cited from the snapshot."* Add a corresponding test in `tests/` that verifies a candidate with only `derived.*` paths and no concrete entity references is not generated (or is filtered pre-store).
 
 **Effort:** S
-**Priority:** P3
+**Priority:** P2
 **Depends on:** Discovery deduplication fix PR (fix/discovery-dedup-noise)
 
 ---
@@ -173,8 +173,52 @@
 **How to apply:** Add a `_discovery_cycle_stats: dict` field to `DiscoveryEngine` (reset at start of `_run_once()`). Increment counters at each decision point in `_filter_novel_candidates()` and `cleanup_unsupported_ttl()`. Include the stats dict in the `SIGNAL_SENTINEL_RUN_COMPLETE` payload so `SentinelHealthSensor` can expose them as attributes alongside existing KPIs.
 
 **Effort:** S
-**Priority:** P3
+**Priority:** P2
 **Depends on:** Discovery deduplication fix PR
+
+---
+
+## Notifier / Observability
+
+### Feedback-trained per-entity cooldowns
+
+**What:** When a user snoozes or dismisses the same entity+rule combination ≥3 times in a rolling 7-day window, automatically double the base cooldown for that combination. Cap at 8× multiplier (30 min base → 4h max). Decay: halve the multiplier if the entity+rule fires without a dismiss for 14 days.
+
+**Why:** The 30-min per-finding cooldown shipped in v3.6.9 is a static global value. Repeated dismissals of the same finding (e.g. fridge compressor noise at night) mean the user doesn't care — Sentinel should learn that without requiring manual config edits.
+
+**How to apply:** Add `learned_cooldown_multipliers: dict[str, int]` to `SuppressionState` (keyed by `{rule_type}:{entity_id}`). In `engine.py`, on snooze/dismiss action receipt, increment the dismiss counter for the combination. In `SentinelNotifier.async_notify()`, look up the multiplier before computing the cooldown cutoff. Schema migration: `SuppressionState` v3→v4.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** None
+
+---
+
+### Daily digest notification
+
+**What:** A single passive-priority push at a configurable time (default: 8AM) summarizing what Sentinel did in the past 24h: `"Sentinel summary: N findings (M notified, K suppressed). J auto-executed."` Opt-in via `sentinel_daily_digest_enabled` (default: False), time via `sentinel_daily_digest_time` (HH:MM).
+
+**Why:** Operators have no visibility into what Sentinel is doing without actively checking the audit store or Lovelace. A morning summary gives awareness without adding intra-day noise.
+
+**How to apply:** Add config keys to `const.py` and Sentinel subentry options flow. Schedule via `async_track_time_change` in `__init__.py`. In the scheduled callback, query `AuditStore` for last 24h records, aggregate counts, and call `SentinelNotifier` with `interruption-level: passive` and title `"Sentinel Summary"`. No action buttons.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** None
+
+---
+
+### trigger_source breakdown on health sensor
+
+**What:** Add `trigger_source_breakdown: {"poll": N, "event": M, "on_demand": K}` attribute to `sensor.sentinel_health` covering the last 24h, populated by querying `AuditStore` during the health update cycle.
+
+**Why:** `trigger_source` is now populated in all audit records (fixed 2026-03-15) but the data is not surfaced anywhere useful. Operators can't tell if Sentinel is poll-heavy vs event-driven without inspecting raw audit records.
+
+**How to apply:** In `core/sentinel_health_sensor.py`, add a query to `AuditStore` in `async_update()` counting records by `trigger_source` for the last 24h. Add the result dict as a new attribute. Emit `{"poll": 0, "event": 0, "on_demand": 0}` if no records in window.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** None
 
 ---
 
