@@ -74,6 +74,11 @@ COMPLETION_MIN_ACTIVE_WATTS = 100.0
 # hours but the rolling average hasn't converged to the new resting state yet.
 # Set to 3x the default evaluation interval (3 x 300 s = 900 s / 15 min).
 COMPLETION_RECENCY_SECS = 900
+# Minimum absolute power deviation (watts) required to fire a baseline anomaly
+# on a power-class entity.  A 2.9 W → 0 W swing is 100% relative deviation but
+# is purely standby-level noise.  Any swing below this threshold is suppressed
+# regardless of the configured threshold_pct.
+MINIMUM_POWER_DEVIATION_WATTS = 50.0
 
 # Entity-name keywords that identify dedicated appliance circuits.  Only these
 # entities qualify for completion detection; generic power sensors (UPS, fridge,
@@ -849,7 +854,7 @@ class SentinelBaselineUpdater:
 # ---------------------------------------------------------------------------
 
 
-def evaluate_baseline_deviation(  # noqa: PLR0911, PLR0912
+def evaluate_baseline_deviation(  # noqa: PLR0911, PLR0912, PLR0915
     snapshot: FullStateSnapshot,
     rule: dict[str, Any],
     baselines: dict[str, dict[str, float]],
@@ -901,11 +906,35 @@ def evaluate_baseline_deviation(  # noqa: PLR0911, PLR0912
     if deviation_pct < threshold_pct:
         return []
 
+    # Determine power-class and appliance-class early; both are used for the
+    # standby guard and for completion detection below.
+    _attrs: dict[str, Any] = (entity.get("attributes") or {}) if entity else {}
+    _unit = str(_attrs.get("unit_of_measurement") or "")
+    is_power_entity = str(_attrs.get("device_class") or "") == "power" or _unit in {
+        "W",
+        "kW",
+    }
+    friendly_name = str(entity.get("friendly_name") or "").lower()
+    is_appliance = is_power_entity and any(
+        hint in entity_id.lower() or hint in friendly_name for hint in _APPLIANCE_HINTS
+    )
+
+    # Suppress standby-noise false positives for *appliance* circuits only.
+    # A 2.9 W → 0 W swing on a washer sensor is pure noise; a 40 W UPS or
+    # 30 W switch going dark is a real event worth notifying on.
+    # Normalize to watts first: kW entities report values like 30.0 (kW).
+    _deviation_w = abs(current_value - baseline_value) * (
+        1000.0 if _unit == "kW" else 1.0
+    )
+    if is_appliance and _deviation_w < MINIMUM_POWER_DEVIATION_WATTS:
+        return []
+
     rule_id = str(rule.get("rule_id") or "baseline_deviation")
     evidence = {
         "rule_id": rule_id,
         "template_id": rule.get("template_id", "baseline_deviation"),
         "entity_id": entity_id,
+        "friendly_name": entity.get("friendly_name") or "",
         "current_value": current_value,
         "baseline_value": baseline_value,
         "deviation_pct": round(deviation_pct, 2),
@@ -919,13 +948,7 @@ def evaluate_baseline_deviation(  # noqa: PLR0911, PLR0912
     # a dedicated appliance circuit (washer, dryer, dishwasher, etc.).
     # Generic power sensors (UPS, fridge, whole-home, server rack) are
     # intentionally excluded to avoid silencing real faults.
-    device_class = str(entity.get("attributes", {}).get("device_class") or "")
-    unit = str(entity.get("attributes", {}).get("unit_of_measurement") or "")
-    is_power_entity = device_class == "power" or unit in {"W", "kW"}
-    friendly_name = str(entity.get("friendly_name") or "").lower()
-    is_appliance = is_power_entity and any(
-        hint in entity_id.lower() or hint in friendly_name for hint in _APPLIANCE_HINTS
-    )
+    # (is_appliance already computed above for the standby guard)
     if (
         is_appliance
         and baseline_value >= COMPLETION_MIN_ACTIVE_WATTS
@@ -959,7 +982,13 @@ def evaluate_baseline_deviation(  # noqa: PLR0911, PLR0912
         severity = "low"
     confidence = _coerce_float(rule.get("confidence"), default=0.7)
     suggested_actions = rule.get("suggested_actions") or []
-    anomaly_id = build_anomaly_id(rule_id, [entity_id], evidence)
+    # Appliance finished its cycle normally — no user action required.
+    if evidence.get("is_completion"):
+        suggested_actions = []
+    # Exclude display-only fields from the hash so anomaly_id is stable even
+    # when friendly_name is temporarily unavailable (returns "").
+    _hash_evidence = {k: v for k, v in evidence.items() if k != "friendly_name"}
+    anomaly_id = build_anomaly_id(rule_id, [entity_id], _hash_evidence)
 
     return [
         AnomalyFinding(

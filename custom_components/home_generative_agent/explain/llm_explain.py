@@ -33,7 +33,7 @@ class LLMExplainer:
             return None
 
         prompt = USER_PROMPT_TEMPLATE.format(
-            anomaly_type=finding.type,
+            anomaly_type=_friendly_type(finding.type),
             severity=finding.severity,
             evidence=_relativize_timestamps(finding.evidence),
             suggested_actions=finding.suggested_actions,
@@ -69,7 +69,12 @@ def _friendly_type(anomaly_type: str) -> str:
     }
     if anomaly_type in known:
         return known[anomaly_type]
-    return anomaly_type.replace("_", " ").strip().capitalize()
+    display = anomaly_type.removeprefix("candidate_")
+    # Strip "rule_<digits>_" prefix (e.g. "rule_02_high_energy_consumption_away")
+    parts = display.split("_")
+    if len(parts) >= 3 and parts[0] == "rule" and parts[1].isdigit():  # noqa: PLR2004
+        display = "_".join(parts[2:])
+    return display.replace("_", " ").strip().capitalize()
 
 
 def _friendly_entity(entity_id: str) -> str:
