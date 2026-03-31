@@ -831,7 +831,64 @@ async def test_high_severity_bypasses_batch() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 13. _friendly_type — candidate_ prefix stripping
+# 13. Per-finding cooldown
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_async_notify_cooldown_suppresses_duplicate() -> None:
+    """Second notification for the same anomaly_id within cooldown is suppressed."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    snapshot = _minimal_snapshot()
+
+    f = _finding_with_severity("medium", anomaly_id="fridge_abc")
+    await notifier.async_notify(f, snapshot, "Fridge running high.")  # type: ignore[arg-type]
+    # Second call with the same anomaly_id should be silently dropped.
+    await notifier.async_notify(f, snapshot, "Fridge still running high.")  # type: ignore[arg-type]
+
+    assert len(hass.services.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_async_notify_cooldown_allows_after_expiry() -> None:
+    """Notification fires again once the cooldown entry expires."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier_obj, hass, _suppression, _action_handler = _make_notifier(options)
+    snapshot = _minimal_snapshot()
+
+    f = _finding_with_severity("medium", anomaly_id="fridge_exp")
+    await notifier_obj.async_notify(f, snapshot, "First.")  # type: ignore[arg-type]
+    assert len(hass.services.calls) == 1
+
+    # Simulate expiry: temporarily zero the cooldown window so the next call passes.
+    old_cd = _notifier_mod._FINDING_COOLDOWN_SECS
+    _notifier_mod._FINDING_COOLDOWN_SECS = 0  # type: ignore[attr-defined]
+    try:
+        await notifier_obj.async_notify(f, snapshot, "After expiry.")  # type: ignore[arg-type]
+    finally:
+        _notifier_mod._FINDING_COOLDOWN_SECS = old_cd  # type: ignore[attr-defined]
+
+    assert len(hass.services.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_async_notify_cooldown_bypassed_for_high_severity() -> None:
+    """High-severity findings always fire even if the same anomaly_id was seen recently."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier_obj, hass, _suppression, _action_handler = _make_notifier(options)
+    snapshot = _minimal_snapshot()
+
+    f = _finding_with_severity("high", anomaly_id="camera_xyz")
+    await notifier_obj.async_notify(f, snapshot, "Alert 1.")  # type: ignore[arg-type]
+    await notifier_obj.async_notify(f, snapshot, "Alert 2.")  # type: ignore[arg-type]
+    await notifier_obj.async_notify(f, snapshot, "Alert 3.")  # type: ignore[arg-type]
+
+    assert len(hass.services.calls) == 3
+
+
+# ---------------------------------------------------------------------------
+# 14. _friendly_type — prefix stripping
 # ---------------------------------------------------------------------------
 
 

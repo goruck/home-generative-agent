@@ -77,6 +77,9 @@ _BATCH_RATE_LIMIT = 3
 _BATCH_RATE_WINDOW_SECS = 60
 _BATCH_FLUSH_DELAY_SECS = 30
 
+# Per-finding cooldown: suppress repeated notifications for the same anomaly.
+_FINDING_COOLDOWN_SECS = 1800  # 30 minutes
+
 # Snooze action verb tokens (without the trailing underscore+anomaly_id).
 _ACT_SNOOZE_24H = "snooze24h"
 _ACT_SNOOZE_ALWAYS = "snoozealways"
@@ -122,6 +125,8 @@ class SentinelNotifier:
         self._notification_times: list[datetime] = []
         self._held_batch: list[tuple[AnomalyFinding, str | None, str | None]] = []
         self._batch_cancel: Callable[[], None] | None = None
+        # Per-finding cooldown: anomaly_id -> time of last dispatch.
+        self._cooldown_times: dict[str, datetime] = {}
 
     # ---------------------------------------------------------------------- #
     # Lifecycle
@@ -192,9 +197,34 @@ class SentinelNotifier:
         # Per-area routing.
         target_service = _resolve_notify_service(finding, snapshot, self._options)
 
+        # Shared timestamp for both cooldown and burst-batching guards.
+        now_dt = datetime.now()  # noqa: DTZ005
+
+        # Per-finding cooldown: suppress if the same anomaly fired recently.
+        # High-severity always bypasses so security events are never silenced.
+        if severity != "high":
+            last_fired = self._cooldown_times.get(finding.anomaly_id)
+            if (
+                last_fired is not None
+                and (now_dt - last_fired).total_seconds() < _FINDING_COOLDOWN_SECS
+            ):
+                LOGGER.debug(
+                    "Sentinel suppressed duplicate finding %s (cooldown %ds).",
+                    finding.anomaly_id,
+                    _FINDING_COOLDOWN_SECS,
+                )
+                return
+            # Record cooldown before the batch check so that batched findings
+            # also consume their cooldown slot (prevents re-fire after flush).
+            self._cooldown_times[finding.anomaly_id] = now_dt
+            # Prune entries older than 2x the cooldown window to bound memory.
+            cutoff_cd = now_dt - timedelta(seconds=_FINDING_COOLDOWN_SECS * 2)
+            self._cooldown_times = {
+                aid: ts for aid, ts in self._cooldown_times.items() if ts >= cutoff_cd
+            }
+
         # Batching / rate-limiting for non-high severity.
         if severity != "high":
-            now_dt = datetime.now()  # noqa: DTZ005
             cutoff = now_dt - timedelta(seconds=_BATCH_RATE_WINDOW_SECS)
             self._notification_times = [
                 t for t in self._notification_times if t >= cutoff
