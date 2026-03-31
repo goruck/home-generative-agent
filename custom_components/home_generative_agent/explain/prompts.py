@@ -26,7 +26,10 @@ SYSTEM_PROMPT = (
     "Never say it is 'running', 'operating', or 'active' — say it is 'off' or "
     "'not drawing power'.\n"
     "If evidence contains anyone_home=true for an unlocked lock, the household "
-    "is occupied; do not use urgent language — frame it as a reminder, not an alert."
+    "is occupied; do not use urgent language — frame it as a reminder, not an alert.\n"
+    "Never repeat the anomaly type identifier (e.g. 'baseline_deviation', "
+    "'time_of_day_anomaly', or any underscore-joined slug) verbatim or "
+    "paraphrased in your output. Describe what happened in plain English only."
 )
 
 USER_PROMPT_TEMPLATE = (

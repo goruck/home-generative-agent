@@ -21,6 +21,7 @@ from custom_components.home_generative_agent.sentinel.notifier import (
     _ACT_SNOOZE_CONFIRM,
     ACTION_PREFIX,
     SentinelNotifier,
+    _friendly_type,
     _redact_if_sensitive,
 )
 from custom_components.home_generative_agent.sentinel.suppression import (
@@ -827,3 +828,94 @@ async def test_high_severity_bypasses_batch() -> None:
     # All 5 dispatched immediately; nothing held.
     assert len(hass.services.calls) == 5
     assert len(notifier._held_batch) == 0
+
+
+# ---------------------------------------------------------------------------
+# 13. _friendly_type — candidate_ prefix stripping
+# ---------------------------------------------------------------------------
+
+
+def test_friendly_type_strips_candidate_prefix() -> None:
+    """'candidate_foo_bar' should display as 'Foo bar', not 'Candidate foo bar'."""
+    assert (
+        _friendly_type("candidate_appliance_power_spike_away")
+        == "Appliance power spike away"
+    )
+    assert _friendly_type("candidate_washing_machine_away") == "Washing machine away"
+    # Known types are unaffected.
+    assert _friendly_type("unlocked_lock_at_night") == "Door lock left unlocked"
+    # Non-candidate unknown types still work.
+    assert _friendly_type("time_of_day_anomaly") == "Time of day anomaly"
+
+
+def test_friendly_type_strips_rule_number_prefix() -> None:
+    """'rule_NN_...' IDs strip the internal numbering prefix."""
+    # The fridge notification bug: "rule_02_high_energy_consumption_away"
+    # was showing as "Rule 02 high energy consumption away".
+    assert (
+        _friendly_type("rule_02_high_energy_consumption_away")
+        == "High energy consumption away"
+    )
+    assert _friendly_type("rule_01_door_open_at_night") == "Door open at night"
+    # Multi-digit numbers.
+    assert _friendly_type("rule_12_motion_while_away") == "Motion while away"
+    # candidate_ + rule_NN_ combined (LLM-proposed numbered rule).
+    assert (
+        _friendly_type("candidate_rule_03_fridge_power_spike") == "Fridge power spike"
+    )
+    # No rule_NN prefix — unchanged stripping behaviour.
+    assert _friendly_type("rule_custom_check") == "Rule custom check"
+
+
+# ---------------------------------------------------------------------------
+# 14. Appliance completion subtitle
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_async_notify_completion_subtitle_uses_appliance_name() -> None:
+    """is_completion=True findings use '[Appliance name] finished' as subtitle."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    snapshot = _minimal_snapshot()
+    finding = AnomalyFinding(
+        anomaly_id="comp1",
+        type="candidate_appliance_power_spike_away",
+        severity="low",
+        confidence=0.8,
+        triggering_entities=["sensor.dishwasher_power"],
+        evidence={"is_completion": True, "friendly_name": "Dishwasher Power"},
+        suggested_actions=[],
+        is_sensitive=False,
+    )
+
+    await notifier.async_notify(finding, snapshot, "Dishwasher finished its cycle.")  # type: ignore[arg-type]
+
+    assert len(hass.services.calls) == 1
+    subtitle = hass.services.calls[0]["data"]["data"]["subtitle"]
+    assert subtitle == "Dishwasher finished"
+
+
+@pytest.mark.asyncio
+async def test_async_notify_non_completion_subtitle_uses_friendly_type() -> None:
+    """Without is_completion, subtitle falls back to _friendly_type(finding.type)."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    snapshot = _minimal_snapshot()
+    finding = AnomalyFinding(
+        anomaly_id="noncomp1",
+        type="candidate_appliance_power_spike_away",
+        severity="medium",
+        confidence=0.8,
+        triggering_entities=["sensor.dishwasher_power"],
+        evidence={},
+        suggested_actions=["check_appliance"],
+        is_sensitive=False,
+    )
+
+    await notifier.async_notify(finding, snapshot, "Dishwasher may have stopped.")  # type: ignore[arg-type]
+
+    assert len(hass.services.calls) == 1
+    subtitle = hass.services.calls[0]["data"]["data"]["subtitle"]
+    # "candidate_" stripped → "Appliance power spike away"
+    assert subtitle == "Appliance power spike away"

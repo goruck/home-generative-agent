@@ -171,7 +171,20 @@ class SentinelNotifier:
         severity = finding.severity
         title = _SEVERITY_TITLE.get(severity, "Home Alert")
         interrupt_level = _SEVERITY_INTERRUPT_LEVEL.get(severity, "active")
-        subtitle = _friendly_type(finding.type)
+        if finding.evidence.get("is_completion"):
+            # Use the appliance's display name so the subtitle reads
+            # "Dishwasher finished" rather than a raw rule-type slug.
+            # Strip trailing power-sensor suffixes ("Power", "Wattage", etc.)
+            # so "Dishwasher Power" → "Dishwasher" → "Dishwasher finished".
+            raw_name = str(finding.evidence.get("friendly_name") or "").strip()
+            if not raw_name and finding.triggering_entities:
+                raw_name = _friendly_entity(finding.triggering_entities[0])
+            appliance = _strip_power_suffix(raw_name).title()
+            subtitle = (
+                f"{appliance} finished" if appliance else "Appliance cycle complete"
+            )
+        else:
+            subtitle = _friendly_type(finding.type)
         mobile_msg = _mobile_message(clean_explanation, finding)
         persistent_msg = _persistent_message(clean_explanation, finding)
         actions = _build_actions(finding)
@@ -519,7 +532,16 @@ def _friendly_type(anomaly_type: str) -> str:
     }
     if anomaly_type in known:
         return known[anomaly_type]
-    return anomaly_type.replace("_", " ").strip().capitalize()
+    # Strip internal prefixes so they never appear in user-visible text:
+    # • "candidate_"          — LLM-proposed dynamic rules awaiting approval
+    # • "rule_NN_"            — LLM-generated rules with sequential numbering
+    #                           e.g. "rule_02_high_energy_consumption_away"
+    display = anomaly_type.removeprefix("candidate_")
+    # Strip "rule_<digits>_" prefix (e.g. "rule_02_")
+    parts = display.split("_")
+    if len(parts) >= 3 and parts[0] == "rule" and parts[1].isdigit():  # noqa: PLR2004
+        display = "_".join(parts[2:])
+    return display.replace("_", " ").strip().capitalize()
 
 
 def _friendly_entity(entity_id: str) -> str:
@@ -528,6 +550,27 @@ def _friendly_entity(entity_id: str) -> str:
     else:
         name = entity_id
     return name.replace("_", " ").strip().title()
+
+
+# Suffixes appended to HA power-sensor entity names that don't describe the
+# appliance itself (e.g. "Dishwasher Power" → strip " Power" → "Dishwasher").
+_POWER_SUFFIXES: tuple[str, ...] = (
+    " Power",
+    " Wattage",
+    " Energy",
+    " Consumption",
+    " Usage",
+    " Draw",
+    " Load",
+)
+
+
+def _strip_power_suffix(name: str) -> str:
+    """Remove trailing power-sensor label words from an appliance display name."""
+    for suffix in _POWER_SUFFIXES:
+        if name.endswith(suffix):
+            return name[: -len(suffix)].strip()
+    return name
 
 
 def _fallback_message(finding: AnomalyFinding) -> str:
