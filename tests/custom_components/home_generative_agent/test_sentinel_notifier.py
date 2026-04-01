@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+import custom_components.home_generative_agent.sentinel.notifier as _notifier_mod
 from custom_components.home_generative_agent.const import (
     CONF_NOTIFY_SERVICE,
     CONF_SENTINEL_AREA_NOTIFY_MAP,
@@ -20,6 +21,7 @@ from custom_components.home_generative_agent.sentinel.notifier import (
     _ACT_SNOOZE_CONFIRM,
     ACTION_PREFIX,
     SentinelNotifier,
+    _friendly_type,
     _redact_if_sensitive,
 )
 from custom_components.home_generative_agent.sentinel.suppression import (
@@ -683,3 +685,294 @@ def test_stop_unsubscribes_and_is_idempotent() -> None:
     notifier.stop()  # idempotent
 
     assert len(unsub_calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# 9. iOS notification priority tiers
+# ---------------------------------------------------------------------------
+
+
+def _finding_with_severity(
+    severity: str,
+    anomaly_id: str = "sev1",
+    ftype: str = "open_entry_while_away",
+) -> AnomalyFinding:
+    return AnomalyFinding(
+        anomaly_id=anomaly_id,
+        type=ftype,
+        severity=severity,  # type: ignore[arg-type]
+        confidence=0.75,
+        triggering_entities=["binary_sensor.front_door"],
+        evidence={},
+        suggested_actions=["close_entry"],
+        is_sensitive=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_async_notify_high_severity_uses_time_sensitive_interruption() -> None:
+    """severity=high → push interruption-level == 'time-sensitive', title == 'Security Alert'."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    snapshot = _minimal_snapshot()
+    finding = _finding_with_severity("high", anomaly_id="high1")
+
+    await notifier.async_notify(finding, snapshot, "Front door unlocked.")  # type: ignore[arg-type]
+
+    assert len(hass.services.calls) == 1
+    call = hass.services.calls[0]
+    assert call["data"]["title"] == "Security Alert"
+    assert call["data"]["data"]["push"]["interruption-level"] == "time-sensitive"
+
+
+@pytest.mark.asyncio
+async def test_async_notify_low_severity_uses_passive_interruption() -> None:
+    """severity=low → push interruption-level == 'passive', title == 'Home Update'."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    snapshot = _minimal_snapshot()
+    finding = _finding_with_severity("low", anomaly_id="low1")
+
+    await notifier.async_notify(finding, snapshot, "Appliance finished.")  # type: ignore[arg-type]
+
+    assert len(hass.services.calls) == 1
+    call = hass.services.calls[0]
+    assert call["data"]["title"] == "Home Update"
+    assert call["data"]["data"]["push"]["interruption-level"] == "passive"
+
+
+@pytest.mark.asyncio
+async def test_async_notify_subtitle_is_friendly_type() -> None:
+    """data['data']['subtitle'] is a non-empty string derived from finding type."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    snapshot = _minimal_snapshot()
+    finding = _finding_with_severity(
+        "medium", anomaly_id="sub1", ftype="unlocked_lock_at_night"
+    )
+
+    await notifier.async_notify(finding, snapshot, "Lock left unlocked.")  # type: ignore[arg-type]
+
+    assert len(hass.services.calls) == 1
+    subtitle = hass.services.calls[0]["data"]["data"]["subtitle"]
+    assert isinstance(subtitle, str)
+    assert len(subtitle) > 0
+
+
+# ---------------------------------------------------------------------------
+# 10. Notification batching
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_async_notify_batching_holds_after_rate_limit() -> None:
+    """Send 4 low-severity notifications; first 3 dispatched; 4th held in _held_batch."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+
+    cancel_calls: list[int] = []
+
+    def _fake_async_call_later(_hass: Any, _delay: float, _cb: Any) -> Any:
+        def _cancel() -> None:
+            cancel_calls.append(1)
+
+        return _cancel
+
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    snapshot = _minimal_snapshot()
+
+    # Patch async_call_later via the top-level module reference.
+    original = _notifier_mod.async_call_later
+    _notifier_mod.async_call_later = _fake_async_call_later  # type: ignore[assignment]
+    try:
+        for i in range(4):
+            f = _finding_with_severity("low", anomaly_id=f"batch{i}")
+            await notifier.async_notify(f, snapshot, f"msg {i}")  # type: ignore[arg-type]
+    finally:
+        _notifier_mod.async_call_later = original  # type: ignore[assignment]
+
+    # First 3 dispatched, 4th held.
+    assert len(hass.services.calls) == 3
+    assert len(notifier._held_batch) == 1
+
+
+@pytest.mark.asyncio
+async def test_async_flush_batch_sends_summary_no_actions() -> None:
+    """After _async_flush_batch(), dispatched message has no 'actions' key in data['data']."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+
+    # Pre-load the held batch.
+    finding = _finding_with_severity("low", anomaly_id="flush1")
+    notifier._held_batch.append((finding, "Some message", "notify.mobile_app_phone"))
+
+    notifier._async_flush_batch()
+    await hass.drain_tasks()
+
+    assert len(hass.services.calls) == 1
+    call = hass.services.calls[0]
+    assert "actions" not in call["data"]["data"]
+    assert call["data"]["title"] == "Home Update"
+
+
+@pytest.mark.asyncio
+async def test_high_severity_bypasses_batch() -> None:
+    """More than 3 high-severity notifications all dispatched immediately (no batching)."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    snapshot = _minimal_snapshot()
+
+    for i in range(5):
+        f = _finding_with_severity("high", anomaly_id=f"high{i}")
+        await notifier.async_notify(f, snapshot, f"urgent {i}")  # type: ignore[arg-type]
+
+    # All 5 dispatched immediately; nothing held.
+    assert len(hass.services.calls) == 5
+    assert len(notifier._held_batch) == 0
+
+
+# ---------------------------------------------------------------------------
+# 13. Per-finding cooldown
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_async_notify_cooldown_suppresses_duplicate() -> None:
+    """Second notification for the same anomaly_id within cooldown is suppressed."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    snapshot = _minimal_snapshot()
+
+    f = _finding_with_severity("medium", anomaly_id="fridge_abc")
+    await notifier.async_notify(f, snapshot, "Fridge running high.")  # type: ignore[arg-type]
+    # Second call with the same anomaly_id should be silently dropped.
+    await notifier.async_notify(f, snapshot, "Fridge still running high.")  # type: ignore[arg-type]
+
+    assert len(hass.services.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_async_notify_cooldown_allows_after_expiry() -> None:
+    """Notification fires again once the cooldown entry expires."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier_obj, hass, _suppression, _action_handler = _make_notifier(options)
+    snapshot = _minimal_snapshot()
+
+    f = _finding_with_severity("medium", anomaly_id="fridge_exp")
+    await notifier_obj.async_notify(f, snapshot, "First.")  # type: ignore[arg-type]
+    assert len(hass.services.calls) == 1
+
+    # Simulate expiry: temporarily zero the cooldown window so the next call passes.
+    old_cd = _notifier_mod._FINDING_COOLDOWN_SECS
+    _notifier_mod._FINDING_COOLDOWN_SECS = 0  # type: ignore[attr-defined]
+    try:
+        await notifier_obj.async_notify(f, snapshot, "After expiry.")  # type: ignore[arg-type]
+    finally:
+        _notifier_mod._FINDING_COOLDOWN_SECS = old_cd  # type: ignore[attr-defined]
+
+    assert len(hass.services.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_async_notify_cooldown_bypassed_for_high_severity() -> None:
+    """High-severity findings always fire even if the same anomaly_id was seen recently."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier_obj, hass, _suppression, _action_handler = _make_notifier(options)
+    snapshot = _minimal_snapshot()
+
+    f = _finding_with_severity("high", anomaly_id="camera_xyz")
+    await notifier_obj.async_notify(f, snapshot, "Alert 1.")  # type: ignore[arg-type]
+    await notifier_obj.async_notify(f, snapshot, "Alert 2.")  # type: ignore[arg-type]
+    await notifier_obj.async_notify(f, snapshot, "Alert 3.")  # type: ignore[arg-type]
+
+    assert len(hass.services.calls) == 3
+
+
+# ---------------------------------------------------------------------------
+# 14. _friendly_type — prefix stripping
+# ---------------------------------------------------------------------------
+
+
+def test_friendly_type_strips_candidate_prefix() -> None:
+    """'candidate_foo_bar' should display as 'Foo bar', not 'Candidate foo bar'."""
+    assert (
+        _friendly_type("candidate_appliance_power_spike_away")
+        == "Appliance power spike away"
+    )
+    assert _friendly_type("candidate_washing_machine_away") == "Washing machine away"
+    # Known types are unaffected.
+    assert _friendly_type("unlocked_lock_at_night") == "Door lock left unlocked"
+    # Non-candidate unknown types still work.
+    assert _friendly_type("time_of_day_anomaly") == "Time of day anomaly"
+
+
+def test_friendly_type_strips_rule_number_prefix() -> None:
+    """'rule_NN_...' IDs strip the internal numbering prefix."""
+    # The fridge notification bug: "rule_02_high_energy_consumption_away"
+    # was showing as "Rule 02 high energy consumption away".
+    assert (
+        _friendly_type("rule_02_high_energy_consumption_away")
+        == "High energy consumption away"
+    )
+    assert _friendly_type("rule_01_door_open_at_night") == "Door open at night"
+    # Multi-digit numbers.
+    assert _friendly_type("rule_12_motion_while_away") == "Motion while away"
+    # candidate_ + rule_NN_ combined (LLM-proposed numbered rule).
+    assert (
+        _friendly_type("candidate_rule_03_fridge_power_spike") == "Fridge power spike"
+    )
+    # No rule_NN prefix — unchanged stripping behaviour.
+    assert _friendly_type("rule_custom_check") == "Rule custom check"
+
+
+# ---------------------------------------------------------------------------
+# 14. Appliance completion subtitle
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_async_notify_completion_subtitle_uses_appliance_name() -> None:
+    """is_completion=True findings use '[Appliance name] finished' as subtitle."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    snapshot = _minimal_snapshot()
+    finding = AnomalyFinding(
+        anomaly_id="comp1",
+        type="candidate_appliance_power_spike_away",
+        severity="low",
+        confidence=0.8,
+        triggering_entities=["sensor.dishwasher_power"],
+        evidence={"is_completion": True, "friendly_name": "Dishwasher Power"},
+        suggested_actions=[],
+        is_sensitive=False,
+    )
+
+    await notifier.async_notify(finding, snapshot, "Dishwasher finished its cycle.")  # type: ignore[arg-type]
+
+    assert len(hass.services.calls) == 1
+    subtitle = hass.services.calls[0]["data"]["data"]["subtitle"]
+    assert subtitle == "Dishwasher finished"
+
+
+@pytest.mark.asyncio
+async def test_async_notify_non_completion_subtitle_uses_friendly_type() -> None:
+    """Without is_completion, subtitle falls back to _friendly_type(finding.type)."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    snapshot = _minimal_snapshot()
+    finding = AnomalyFinding(
+        anomaly_id="noncomp1",
+        type="candidate_appliance_power_spike_away",
+        severity="medium",
+        confidence=0.8,
+        triggering_entities=["sensor.dishwasher_power"],
+        evidence={},
+        suggested_actions=["check_appliance"],
+        is_sensitive=False,
+    )
+
+    await notifier.async_notify(finding, snapshot, "Dishwasher may have stopped.")  # type: ignore[arg-type]
+
+    assert len(hass.services.calls) == 1
+    subtitle = hass.services.calls[0]["data"]["data"]["subtitle"]
+    # "candidate_" stripped → "Appliance power spike away"
+    assert subtitle == "Appliance power spike away"

@@ -9,7 +9,7 @@
 - Human override and kill switch are always available as runtime operations (not config-file edits).
 - Detection rule configs are version-controlled and reviewed before deployment. Rule schema versions are stored in every audit record.
 
-## Current Status Snapshot (as of 2026-03-14)
+## Current Status Snapshot (as of 2026-03-31)
 
 - This document mixes current implementation, accepted design targets, and remaining work. Unless a section explicitly says `Implemented`, treat it as target-state design rather than current behavior.
 - Implemented in code today:
@@ -25,31 +25,26 @@
   - Discovery pipeline improvements from Milestone 5: service-mapped suggested actions, on-demand discovery trigger service, immediate rule activation on proposal approval, structured normalization failure reasons, overlap metadata, richer draft notifications, and rule preview before commit.
   - Portable dynamic rule templates (PR #321, merged 2026-03-11) plus follow-on normalization fixes (2026-03-13): six new templates (`unlocked_lock_while_away`, `alarm_state_mismatch`, `entity_state_duration`, `sensor_threshold_condition`, `entity_staleness`, `multiple_entries_open_count`) cover the most common discovery-generated candidate patterns across arbitrary HA configurations. The normalization/evidence-path parser now handles `entities[entity_id=...]`, `entities[entity_ids contains ...]`, and LLM-emitted dot-notation paths like `sensor.foo.state` / `lock.foo.battery_level`; lock battery-low candidates route to `low_battery_sensors`; text-signal fallbacks now cover `high_energy_consumption_night`, `alarm_disarmed_during_external_threat`, and selector-based window-duration candidates; built-in coverage detection now accepts `frontgate` / `backgarage` substrings even when the LLM omits the domain prefix.
   - The four remaining Rule issues called out in the 2026-03-12 snapshot are now closed in code via new static rules (2026-03-12/13): `alarm_disarmed_during_external_threat` (#309), `camera_missing_snapshot_night_home` (#311, generalized from `camera_backgarage_missing_snapshot_night_home`), `vehicle_detected_near_camera_home` (#312, generalized from `vehicle_parked_near_frontgate_home`), and `unknown_person_frontporch_night_home` (#318).
-  - No Rule issues remain open from the #298–#320 coverage sweep. Remaining gaps are infrastructure/behavioral rather than missing detector patterns: suppressed-finding audit coverage, blocked-vs-notified policy behavior, audit retention/archival wiring, and `trigger_source` population.
+  - No Rule issues remain open from the #298–#320 coverage sweep. Remaining infrastructure gaps: audit retention/archival wiring, severity-aware eviction.
   - Discovery dedup noise fixed (fix/discovery-dedup-noise, 2026-03-20): four bugs in `_existing_semantic_context()` corrected — (1) rejected proposals now add their candidate key to the exclusion set; (2) null-key candidates (unknown subject/predicate) fall back to a title+summary SHA-256 hash so they are suppressed across cycles; (3) `ProposalStore.cleanup_unsupported_ttl()` auto-expires unsupported proposals after 30 days each discovery cycle; (4) static built-in rule IDs are seeded into `active_rule_ids` sent to the LLM so it knows which topics are already covered.
   - `phone_battery_low_at_night_home` static rule added (2026-03-21, issue #341): fires when any phone battery sensor (identified by `device_class: battery` plus phone keyword in entity_id or friendly name) is below 20% at night while someone is home. Generalizes the hardcoded `sensor.lindos_iphone_battery_level` LLM candidate to any HA instance. Advisory action is `charge_device`. Coverage detection added to `_covered_builtin_rule_for_candidate()` so the discovery engine will not re-propose this pattern.
+  - Three audit/notification gaps closed (2026-03-15, commit 09bc5c9): (1) suppressed findings from the rule/suppression gate are now written to the audit store with their `suppression_reason_code`; (2) `ACTION_POLICY_BLOCKED` findings now skip notification dispatch (early return before `async_notify()`); (3) `trigger_source` is now propagated through all `_run_once()` call sites (`"poll"`, `"event"`, `"on_demand"`) and written to every audit record.
+  - `action_policy_path` added to `_V2_FIELD_DEFAULTS` in `audit/store.py` so v1→v2 migrations backfill the field. Note: records migrated before this fix will lack the field.
+  - Notification UX improvements shipped (2026-03-31, PR #351 + #352, v3.6.9): iOS priority tiers (`time-sensitive` / `active` / `passive`), severity-aware titles, burst batching (>3 pushes/60s), per-finding 30-min cooldown, appliance completion detection with kW normalization, presence-aware lock severity, friendly type names for dynamic rules (`rule_NN_` prefix stripped), `_strip_power_suffix()` for appliance subtitle names, `anomaly_id` stability fix (excludes `friendly_name` from hash).
 - Partially implemented or still open (see Known Current Gaps below for the summary list):
-  - Rule/suppression-state-suppressed findings are not written to the audit store (engine silently returns at the suppression gate). Triage-suppressed findings *are* written to audit.
-  - `ACTION_POLICY_BLOCKED` blocks execution but does not suppress notification dispatch.
   - Audit schema/retention/archival health in this document is ahead of the current `audit/store.py` implementation. `CONF_AUDIT_HOT_MAX_RECORDS` is now wired: the store default is 500 records with priority eviction (suppressed records evicted before `not_suppressed`); severity-aware eviction and archival backend remain unimplemented.
-  - `trigger_source` field exists in `AuditRecord` and migration defaults but is never populated by any engine call — it is always `None` in practice.
-  - `action_policy_path` is present in `AuditRecord` and `async_append_finding` but is absent from `_V2_FIELD_DEFAULTS` in `audit/store.py` — v1→v2 migration does not backfill this field.
   - `derived.people_home` / `derived.people_away` use stable entity IDs (fixed v3.5.3, PR #333).
 
 ### Known Current Gaps
 
-- Suppressed findings from the rule/suppression gate are not audited.
-- `ACTION_POLICY_BLOCKED` does not currently suppress notification dispatch.
-- `trigger_source` is never populated in audit records.
 - `CONF_AUDIT_HOT_MAX_RECORDS` is wired and the default is 500. Eviction is priority-based (suppressed evicted before `not_suppressed`). Severity-aware eviction (P3) and the archival backend remain unimplemented.
-- `action_policy_path` is not backfilled during v1→v2 audit migration.
-- Presence-grace identity uses stable person entity IDs (fixed v3.5.3, PR #333).
+- Records migrated from v1→v2 before 2026-03-15 will lack `action_policy_path` (field was not in the original `_V2_FIELD_DEFAULTS`). New records are correct.
 
 ---
 
 ## 2. Target Detection/Response Pipeline
 
-Status: `Partially implemented`. Steps 1, 2, 4, 5, 6, 7, 8, and 9 exist in some form, but rule/suppression-state-suppressed findings are not audited (silent return before audit append), triage-suppressed findings are audited, and notification dispatch is not yet suppressed for all `blocked` policy outcomes.
+Status: `Partially implemented`. Steps 1, 2, 4, 5, 6, 7, 8, 9, 10, and 11 are implemented. Suppressed findings are now audited with reason codes (fixed 2026-03-15). BLOCKED policy outcomes now skip notification dispatch (fixed 2026-03-15). Remaining gaps: data-quality/unavailable handling at lower autonomy levels (step 3), and audit archival backend (step 11).
 
 1. Trigger received (polling or event-driven).
 2. Snapshot built deterministically.
@@ -58,12 +53,11 @@ Status: `Partially implemented`. Steps 1, 2, 4, 5, 6, 7, 8, and 9 exist in some 
    - Target state: `data_quality="stale"` findings are notify-only regardless of autonomy level.
    - Target state: `data_quality="unavailable"` findings are suppressed by default, except `severity="high"` which is notify-only.
    - Current code: stale/unavailable handling happens inside the execution service only after the autonomy-level gate is reached (`autonomy_level >= 2`). At lower autonomy levels, findings route to `prompt_user` before data quality is evaluated there.
-   - Current code: at autonomy level 2+, low/medium unavailable findings return `action_policy_path="blocked"` from the execution service, but the engine still notifies them. This remains an implementation gap.
+   - Current code: at autonomy level 2+, low/medium unavailable findings return `action_policy_path="blocked"` from the execution service; notification dispatch is now correctly suppressed for BLOCKED findings (fixed 2026-03-15).
 4. Rules evaluated deterministically.
 5. Correlation pass merges related findings deterministically (within the current `_run_once()` call only; compound findings are immutable once emitted).
 6. Suppression pass evaluates cooldowns, quiet-hours, snooze policies, and presence-grace windows.
-   - Target state: every suppressed finding receives an explicit `suppression_reason_code` in audit.
-   - Current code: suppression reason codes exist, but suppressed findings return before audit append.
+   - Implemented: every suppressed finding receives an explicit `suppression_reason_code` in audit (fixed 2026-03-15).
 7. Triage pass (optional, autonomy level >= 1) decides `notify` vs `suppress` only. Triage output is informational; it does not influence execution eligibility.
 8. Action policy gate decides `prompt_user`, `handoff`, `auto_execute`, or `blocked`.
 9. For autonomy level >= 2, optional canary mode evaluates `would_auto_execute` and records decisions without executing.

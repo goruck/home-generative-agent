@@ -1121,3 +1121,279 @@ async def test_update_baselines_fires_drift_notification_when_threshold_exceeded
 
     assert len(drift_notifications) == 1
     assert "sensor.power" in drift_notifications[0]["message"]
+
+
+# ---------------------------------------------------------------------------
+# 14. Appliance completion detection
+# ---------------------------------------------------------------------------
+
+
+def _power_entity(
+    entity_id: str,
+    state: str,
+    device_class: str = "power",
+    unit: str = "W",
+    last_changed: str | None = None,
+) -> dict[str, Any]:
+    """Return a snapshot entity with power-related attributes."""
+    ts = last_changed or datetime.now(UTC).isoformat()
+    return {
+        "entity_id": entity_id,
+        "state": state,
+        "domain": "sensor",
+        "area": "Laundry",
+        "attributes": {
+            "device_class": device_class,
+            "unit_of_measurement": unit,
+        },
+        "last_changed": ts,
+        "last_updated": ts,
+    }
+
+
+def test_baseline_deviation_near_zero_power_is_completion() -> None:
+    """Power entity dropping to <10% of active baseline → is_completion=True, severity='low'."""
+    snapshot = _snapshot(
+        [_power_entity("sensor.washer_power", "0.5", device_class="power", unit="W")]
+    )
+    # 800 W is a realistic active-cycle baseline (>= COMPLETION_MIN_ACTIVE_WATTS).
+    baselines = {"sensor.washer_power": {METRIC_ROLLING_AVG: 800.0}}
+    rule = _rule(entity_id="sensor.washer_power", threshold_pct=50.0, severity="medium")
+
+    findings = evaluate_baseline_deviation(snapshot, rule, baselines)
+
+    assert len(findings) == 1
+    f = findings[0]
+    assert f.evidence.get("is_completion") is True
+    assert f.severity == "low"
+    assert f.suggested_actions == []  # no action needed for a completed cycle
+
+
+def test_baseline_deviation_standby_baseline_not_completion() -> None:
+    """
+    Appliance with low standby baseline dropping to 0 W → finding suppressed entirely.
+
+    Reproduces the dishwasher/washer false-positive where the rolling average
+    reflects standby power (~21 W) rather than an active cycle (~1200 W).
+    A 21 W → 0 W swing is below MINIMUM_POWER_DEVIATION_WATTS and is pure
+    standby noise — no finding should be emitted at all.
+    """
+    snapshot = _snapshot(
+        [
+            _power_entity(
+                "sensor.dishwasher_power", "0.0", device_class="power", unit="W"
+            )
+        ]
+    )
+    # 21 W is a standby/idle baseline — absolute swing of 21 W is below the
+    # MINIMUM_POWER_DEVIATION_WATTS threshold, so no finding should fire.
+    baselines = {"sensor.dishwasher_power": {METRIC_ROLLING_AVG: 21.0}}
+    rule = _rule(
+        entity_id="sensor.dishwasher_power", threshold_pct=50.0, severity="medium"
+    )
+
+    findings = evaluate_baseline_deviation(snapshot, rule, baselines)
+
+    # Standby-level noise is suppressed — no actionable finding.
+    assert len(findings) == 0
+
+
+def test_baseline_deviation_stale_idle_appliance_not_completion() -> None:
+    """
+    Appliance idle for longer than COMPLETION_RECENCY_SECS → no is_completion.
+
+    Reproduces the dishwasher false-positive: the rolling average still reflects
+    historical active power but the appliance has been idle for hours.  Without
+    the recency guard this fires every evaluation cycle.
+    """
+    snapshot = _snapshot(
+        [
+            _power_entity(
+                "sensor.dishwasher_power",
+                "0.5",
+                device_class="power",
+                unit="W",
+                last_changed="2025-01-01T00:00:00+00:00",  # hours ago
+            )
+        ]
+    )
+    baselines = {"sensor.dishwasher_power": {METRIC_ROLLING_AVG: 800.0}}
+    rule = _rule(
+        entity_id="sensor.dishwasher_power", threshold_pct=50.0, severity="medium"
+    )
+
+    findings = evaluate_baseline_deviation(snapshot, rule, baselines)
+
+    assert len(findings) == 1
+    f = findings[0]
+    assert "is_completion" not in f.evidence
+    assert f.severity == "medium"
+
+
+def test_baseline_deviation_mid_cycle_power_drop_not_completion() -> None:
+    """
+    Power entity at 50% of baseline — above completion threshold, above min-watt guard.
+
+    400 W is 50% of 800 W baseline (above COMPLETION_THRESHOLD_PCT=10%) and the
+    absolute swing of 400 W is above MINIMUM_POWER_DEVIATION_WATTS=50 W.  The
+    rule should emit a finding with no is_completion flag.
+    """
+    snapshot = _snapshot(
+        [_power_entity("sensor.washer_power", "400.0", device_class="power", unit="W")]
+    )
+    baselines = {"sensor.washer_power": {METRIC_ROLLING_AVG: 800.0}}
+    rule = _rule(entity_id="sensor.washer_power", threshold_pct=40.0, severity="medium")
+
+    findings = evaluate_baseline_deviation(snapshot, rule, baselines)
+
+    assert len(findings) == 1
+    f = findings[0]
+    assert "is_completion" not in f.evidence
+    assert f.severity == "medium"
+
+
+def test_baseline_deviation_generic_power_sensor_no_completion() -> None:
+    """
+    Generic power sensor (no appliance keyword) near zero → no is_completion.
+
+    UPS, whole-home power, server rack, fridge, etc. must not be silently
+    downgraded to low severity by the completion heuristic.  The standby guard
+    is scoped to appliance circuits only, so a 40 W UPS dropping to 5 W fires
+    normally even though the absolute swing (35 W) is below MINIMUM_POWER_DEVIATION_WATTS.
+    """
+    snapshot = _snapshot(
+        [_power_entity("sensor.ups_power", "5.0", device_class="power", unit="W")]
+    )
+    # 40 W is a realistic UPS idle baseline.  Absolute swing ~35 W — this would
+    # have been suppressed by the old broad guard; with the appliance-scoped guard
+    # it fires correctly because "ups" is not in _APPLIANCE_HINTS.
+    baselines = {"sensor.ups_power": {METRIC_ROLLING_AVG: 40.0}}
+    rule = _rule(entity_id="sensor.ups_power", threshold_pct=50.0, severity="medium")
+
+    findings = evaluate_baseline_deviation(snapshot, rule, baselines)
+
+    assert len(findings) == 1
+    f = findings[0]
+    assert "is_completion" not in f.evidence
+    assert f.severity == "medium"
+
+
+def test_baseline_deviation_kw_standby_suppressed() -> None:
+    """
+    Power entity reporting in kW with small standby-level deviation is suppressed.
+
+    0.03 kW → 0 kW is 30 W in absolute terms — below MINIMUM_POWER_DEVIATION_WATTS.
+    Without kW-normalisation the guard would compare 0.03 < 50 (true) and suppress,
+    but with the correct normalisation 0.03 kW * 1000 = 30 W < 50 W → still suppressed.
+    Verifies the normalisation path for the "correctly suppressed" case.
+    """
+    snapshot = _snapshot(
+        [_power_entity("sensor.dryer_power_kw", "0.0", device_class="power", unit="kW")]
+    )
+    baselines = {"sensor.dryer_power_kw": {METRIC_ROLLING_AVG: 0.03}}
+    rule = _rule(
+        entity_id="sensor.dryer_power_kw", threshold_pct=50.0, severity="medium"
+    )
+
+    findings = evaluate_baseline_deviation(snapshot, rule, baselines)
+
+    # 30 W equivalent — standby noise, no finding.
+    assert len(findings) == 0
+
+
+def test_baseline_deviation_kw_large_drop_fires() -> None:
+    """
+    Power entity reporting in kW with a large absolute deviation is NOT suppressed.
+
+    30 kW → 0 kW is 30,000 W equivalent, well above MINIMUM_POWER_DEVIATION_WATTS=50.
+    Without kW-normalisation abs(30.0 - 0.0) = 30 < 50 → wrongly suppressed.
+    With normalisation 30 * 1000 = 30,000 W > 50 W → finding fires correctly.
+    """
+    snapshot = _snapshot(
+        [
+            _power_entity(
+                "sensor.washer_power_kw", "0.0", device_class="power", unit="kW"
+            )
+        ]
+    )
+    baselines = {"sensor.washer_power_kw": {METRIC_ROLLING_AVG: 30.0}}  # 30 kW
+    rule = _rule(
+        entity_id="sensor.washer_power_kw", threshold_pct=50.0, severity="medium"
+    )
+
+    findings = evaluate_baseline_deviation(snapshot, rule, baselines)
+
+    # 30 kW load going dark — real event, not noise.
+    assert len(findings) == 1
+
+
+def test_baseline_deviation_anomaly_id_stable_without_friendly_name() -> None:
+    """
+    anomaly_id is identical regardless of whether friendly_name is present.
+
+    friendly_name is excluded from the hash to prevent duplicate audit records
+    when the entity is briefly unavailable and friendly_name="" differs from
+    the normal-case "Dishwasher Power".
+    """
+    pinned_ts = "2025-01-15T10:00:00+00:00"
+
+    entity_with_name = _power_entity(
+        "sensor.dishwasher_power",
+        "0.5",
+        device_class="power",
+        unit="W",
+        last_changed=pinned_ts,
+    )
+    entity_with_name["friendly_name"] = "Dishwasher Power"
+
+    entity_no_name = _power_entity(
+        "sensor.dishwasher_power",
+        "0.5",
+        device_class="power",
+        unit="W",
+        last_changed=pinned_ts,
+    )
+    entity_no_name["friendly_name"] = ""
+
+    baselines = {"sensor.dishwasher_power": {METRIC_ROLLING_AVG: 800.0}}
+    rule = _rule(
+        entity_id="sensor.dishwasher_power", threshold_pct=50.0, severity="medium"
+    )
+
+    findings_with = evaluate_baseline_deviation(
+        _snapshot([entity_with_name]), rule, baselines
+    )
+    findings_without = evaluate_baseline_deviation(
+        _snapshot([entity_no_name]), rule, baselines
+    )
+
+    assert len(findings_with) == 1
+    assert len(findings_without) == 1
+    assert findings_with[0].anomaly_id == findings_without[0].anomaly_id
+
+
+def test_baseline_deviation_non_power_entity_no_completion() -> None:
+    """Non-power entity (device_class=temperature) near zero → no is_completion key."""
+    snapshot = _snapshot(
+        [
+            {
+                "entity_id": "sensor.temp",
+                "state": "0.5",
+                "domain": "sensor",
+                "area": "Living Room",
+                "attributes": {
+                    "device_class": "temperature",
+                    "unit_of_measurement": "°C",
+                },
+                "last_changed": "2025-01-01T00:00:00+00:00",
+                "last_updated": "2025-01-01T00:00:00+00:00",
+            }
+        ]
+    )
+    baselines = {"sensor.temp": {METRIC_ROLLING_AVG: 20.0}}
+    rule = _rule(entity_id="sensor.temp", threshold_pct=50.0, severity="medium")
+
+    findings = evaluate_baseline_deviation(snapshot, rule, baselines)
+
+    assert len(findings) == 1
+    assert "is_completion" not in findings[0].evidence
