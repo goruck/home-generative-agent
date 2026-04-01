@@ -1,4 +1,4 @@
-> # home-generative-agent-multi-tool (Gen-Assembly Fork)
+> # MOCHI: Modular On-demand Cognitive Hydration and Injection (Home-Generative-Agent Fork)
 > 
 > **This is a community fork of [goruck/home-generative-agent](https://github.com/goruck/home-generative-agent).**
 > 
