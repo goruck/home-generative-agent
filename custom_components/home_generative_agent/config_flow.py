@@ -46,6 +46,8 @@ from .const import (
     CONF_NOTIFY_SERVICE,
     CONF_PROMPT,
     CONF_SCHEMA_FIRST_YAML,
+    CONF_TOOL_RELEVANCE_THRESHOLD,
+    CONF_TOOL_RETRIEVAL_LIMIT,
     CONF_VIDEO_ANALYZER_MODE,
     CONFIG_ENTRY_VERSION,
     CRITICAL_PIN_MAX_LEN,
@@ -56,11 +58,14 @@ from .const import (
     RECOMMENDED_MANAGE_CONTEXT_WITH_TOKENS,
     RECOMMENDED_MAX_MESSAGES_IN_CONTEXT,
     RECOMMENDED_MAX_TOKENS_IN_CONTEXT,
+    RECOMMENDED_TOOL_RELEVANCE_THRESHOLD,
+    RECOMMENDED_TOOL_RETRIEVAL_LIMIT,
     RECOMMENDED_VIDEO_ANALYZER_MODE,
     SUBENTRY_TYPE_FEATURE,
     SUBENTRY_TYPE_MODEL_PROVIDER,
     SUBENTRY_TYPE_SENTINEL,
     SUBENTRY_TYPE_STT_PROVIDER,
+    SUBENTRY_TYPE_TOOL_MANAGER,
     VIDEO_ANALYZER_MODE_ALWAYS_NOTIFY,
     VIDEO_ANALYZER_MODE_DISABLE,
     VIDEO_ANALYZER_MODE_NOTIFY_ON_ANOMALY,
@@ -76,6 +81,7 @@ from .flows.feature_subentry_flow import FeatureSubentryFlow
 from .flows.model_provider_subentry_flow import ModelProviderSubentryFlow
 from .flows.sentinel_subentry_flow import SentinelSubentryFlow
 from .flows.stt_provider_subentry_flow import SttProviderSubentryFlow
+from .flows.tool_manager_subentry_flow import ToolManagerSubentryFlow
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -86,7 +92,6 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_OPTIONS = {
-    CONF_LLM_HASS_API: [llm.LLM_API_ASSIST],
     CONF_PROMPT: llm.DEFAULT_INSTRUCTIONS_PROMPT,
     CONF_SCHEMA_FIRST_YAML: False,
     CONF_CRITICAL_ACTION_PIN_ENABLED: True,
@@ -110,12 +115,6 @@ def _get_str(src: Mapping[str, Any], key: str) -> str:
 async def _schema_for_options(
     hass: HomeAssistant, opts: Mapping[str, Any]
 ) -> VolDictType:
-    """Generate the options schema for non-provider settings."""
-    hass_apis = [SelectOptionDict(label="No control", value=LLM_HASS_API_NONE)] + [
-        SelectOptionDict(label=api.name, value=api.id)
-        for api in llm.async_get_apis(hass)
-    ]
-
     video_analyzer_mode_opts: list[SelectOptionDict] = [
         SelectOptionDict(label="Disable", value=VIDEO_ANALYZER_MODE_DISABLE),
         SelectOptionDict(
@@ -137,11 +136,6 @@ async def _schema_for_options(
             description={"suggested_value": opts.get(CONF_PROMPT)},
             default=llm.DEFAULT_INSTRUCTIONS_PROMPT,
         ): TemplateSelector(),
-        vol.Optional(
-            CONF_LLM_HASS_API,
-            description={"suggested_value": opts.get(CONF_LLM_HASS_API, [])},
-            default=[],
-        ): SelectSelector(SelectSelectorConfig(options=hass_apis, multiple=True)),
         vol.Optional(
             CONF_VIDEO_ANALYZER_MODE,
             description={"suggested_value": opts.get(CONF_VIDEO_ANALYZER_MODE)},
@@ -277,6 +271,7 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
             SUBENTRY_TYPE_FEATURE: FeatureSubentryFlow,
             SUBENTRY_TYPE_STT_PROVIDER: SttProviderSubentryFlow,
             SUBENTRY_TYPE_SENTINEL: SentinelSubentryFlow,
+            SUBENTRY_TYPE_TOOL_MANAGER: ToolManagerSubentryFlow,
         }
 
 
@@ -405,7 +400,5 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
                 errors=errors,
             )
 
-        if not options.get(CONF_LLM_HASS_API):
-            options.pop(CONF_LLM_HASS_API, None)
         self._drop_empty_fields(options)
         return self.async_create_entry(title="", data=options)

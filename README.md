@@ -1,27 +1,38 @@
-# home-generative-agent-multi-tool
-
+> # home-generative-agent-multi-tool (Gen-Assembly Fork)
+> 
 > **This is a community fork of [goruck/home-generative-agent](https://github.com/goruck/home-generative-agent).**
 > 
-> The primary change in this fork is **multi-select support for the "Control Home Assistant" tool set**. 
-> The original integration only allows a single tool set to be active at a time (Assist, Search Services, 
-> Weather Forecast, Media Services, or Basic Utilities). This fork changes the selector to multi-select, 
-> allowing all tool sets to be active simultaneously. A `MultiLLMAPI` wrapper handles tool call routing 
-> across all active APIs transparently, so the correct API handles each tool call regardless of which 
-> set it belongs to. Existing installations are automatically migrated on first boot with no data loss.
+> So, this actually started because I was trying to integrate an LLM directly into Home Assistant, and it was horrible. HA just wall dumps your entire entity list into the LLM context. I moved over to HGA because it swapped to a much better tool-based architecture.
 > 
-> All other functionality, architecture, and configuration is identical to the upstream project. 
-> This fork will attempt to track upstream changes where possible. If this feature gets merged 
-> upstream this fork will be retired.
->
-> **Note:** This fork will inherently use more tokens than the original integration because tool 
-> definitions for all active tool sets are sent to the LLM on every request. More tools selected 
-> means more tokens used - not a dramatic amount, but worth being transparent about.
->
-> **Known limitation:** If two active tool sets expose a tool with the same name, one will shadow 
-> the other. The shadowed tool's serializer may also be used incorrectly for the wrong provider, 
-> leading to unexpected behavior. A proper fix would be a pre-computed tool-to-provider map that 
-> gives each tool name a canonical owner, which would also eliminate any serializer mismatch. 
-> Will probably add this soon <3
+> But then I hit another wall: HGA dumps *every single tool* into every prompt, and its design is hard-limited to only allow one tool provider at a time. I wanted to add more tools and use multiple providers, but I quickly realized that doing so would just pollute the prompt all over again with massive tool lists.
+> 
+> To fix that, I added the RAG tool system so it only pulls the tools it actually needs. But I didn't stop there. I wanted the ability to do exact prompt assembly because I was tired of trying to pack every single behavioral rule into one massive system prompt or a bunch of hacked up tool prompts/descriptions. So, I added custom tags and the ability to attach custom prompt chunks directly to specific tools (on top of their standard descriptions) to help alleviate that and allow for fine-tuning.
+> 
+> The trick is that, if the system is set up correctly, every single prompt becomes highly specialized. It only has exactly what it needs for that specific task. Instead of feeding an 8B model a 1k+ token system prompt that causes it to go insane, it gets a lean, laser-focused instruction set.
+> 
+> ### The Core Architecture Shift
+> 
+> * **Dynamic Tool RAG:** Instead of feeding the model every tool at once, this uses semantic RAG to only bind the tools relevant to the current conversation.
+> * **The 3.5-Tier System:** The prompt is broken down so it only has the pieces it needs, exactly when it needs them:
+>   * **Tier 1 (Core):** The generalized system prompt (persona, etc.).
+>   * **Tier 1.5 (Retrieved):** Custom instruction chunks dynamically injected via RAG.
+>   * **Tier 2 (Provider):** Specific context for the tool provider (e.g., local Ollama vs. Cloud).
+>   * **Tier 3 (Tool-Level):** Specialized Jinja2 prompt chunks for the individual tools.
+> * **Jinja2 Logic Injection:** This is the crazy part. Because Jinja2 can do logic, sorting, and filtering, we can build intelligent templates that execute *before* generation. For example, if you ask about your house, it triggers the template, grabs the sensor state, does an image description, and injects that directly into the prompt chunk.
+> 
+> ### Why This Matters
+> 
+> * **Zero-Turn Generation:** In most situations, I've completely cut out the step where the LLM has to make a tool call and wait for the response. The self-hydrating chunks already have the information.
+> * **Tokenomics:** It massively chomps down the token count. 4B and 7B models won't care that they are small models because they aren't processing giant prompts full of noise. You get huge intelligence with fewer cycles.
+> 
+> ### Other Fixes & Features
+> 
+> * **Multi-Select Tooling:** A `MultiLLMAPI` wrapper handles the routing across all active APIs transparently so you aren't limited to a single tool provider.
+> * **Async Provider Init:** Moved Ollama init to the executor to stop it from blocking the event loop.
+> * **Pre-Warmed Models:** Chat, Vision, and Summarization models now pre-warm at startup to kill the lag on the first interaction.
+> * **Langgraph Stability:** Explicitly cleans up background tasks during unload to fix the "Task was destroyed but it is pending!" errors.
+> 
+> **Note:** Existing installations are automatically migrated on first boot. I will attempt to track upstream changes where possible, but honestly, this is a very novel system at this point.
 
 [![GitHub Release][releases-shield]][releases]
 [![GitHub Activity][commits-shield]][commits]

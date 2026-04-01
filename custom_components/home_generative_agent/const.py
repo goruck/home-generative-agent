@@ -15,6 +15,7 @@ SUBENTRY_TYPE_MODEL_PROVIDER = "model_provider"
 SUBENTRY_TYPE_FEATURE = "feature"
 SUBENTRY_TYPE_STT_PROVIDER = "stt_provider"
 SUBENTRY_TYPE_SENTINEL = "sentinel"
+SUBENTRY_TYPE_TOOL_MANAGER = "tool_manager"
 
 HTTP_STATUS_UNAUTHORIZED = 401
 HTTP_STATUS_BAD_REQUEST = 400
@@ -589,6 +590,21 @@ RECOMMENDED_FACE_API_URL = "http://face-recog-server.local:8000"
 
 
 # ---------------- Tools ----------------
+CONF_TOOL_RETRIEVAL_LIMIT = "tool_retrieval_limit"
+RECOMMENDED_TOOL_RETRIEVAL_LIMIT = 5
+
+CONF_TOOL_RELEVANCE_THRESHOLD = "tool_relevance_threshold"
+RECOMMENDED_TOOL_RELEVANCE_THRESHOLD = (
+    0.5  # Lower default for better variety, users can tune up
+)
+
+CONF_INSTRUCTIONS_CONFIG = "instructions"
+CONF_INSTRUCTION_RETRIEVAL_LIMIT = "instruction_retrieval_limit"
+RECOMMENDED_INSTRUCTION_RETRIEVAL_LIMIT = 5
+
+CONF_INSTRUCTION_RELEVANCE_THRESHOLD = "instruction_relevance_threshold"
+RECOMMENDED_INSTRUCTION_RELEVANCE_THRESHOLD = 0.5
+
 TOOL_CALL_ERROR_SYSTEM_MESSAGE = """
 
 Always call tools again with your mistakes corrected. Do not repeat mistakes.

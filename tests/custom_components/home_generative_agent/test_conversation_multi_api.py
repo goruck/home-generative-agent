@@ -12,7 +12,7 @@ from custom_components.home_generative_agent.conversation import MultiLLMAPI
 @pytest.fixture
 def mock_api_1():
     """Create a mock home assistant LLM API."""
-    api = AsyncMock(spec=llm.API)
+    api = AsyncMock(spec=llm.APIInstance)
     api.api_prompt = "Prompt 1"
     api.custom_serializer = lambda x: x
     return api
@@ -21,7 +21,7 @@ def mock_api_1():
 @pytest.fixture
 def mock_api_2():
     """Create a second mock home assistant LLM API."""
-    api = AsyncMock(spec=llm.API)
+    api = AsyncMock(spec=llm.APIInstance)
     api.api_prompt = "Prompt 2"
     api.custom_serializer = None
     return api
@@ -91,5 +91,7 @@ async def test_multi_llm_api_empty_list():
     multi_api = MultiLLMAPI([])
     tool_input = llm.ToolInput(tool_name="test_tool", tool_args={})
 
-    with pytest.raises(HomeAssistantError, match="No APIs available to handle tool test_tool"):
+    with pytest.raises(
+        HomeAssistantError, match="No APIs available to handle tool test_tool"
+    ):
         await multi_api.async_call_tool(tool_input)

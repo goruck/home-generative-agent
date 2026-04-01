@@ -189,6 +189,7 @@ from .const import (
     SUBENTRY_TYPE_FEATURE,
     SUBENTRY_TYPE_MODEL_PROVIDER,
     SUBENTRY_TYPE_SENTINEL,
+    SUBENTRY_TYPE_TOOL_MANAGER,
     SUMMARIZATION_MIRO_STAT,
     SUMMARIZATION_MODEL_PREDICT,
     SUMMARIZATION_MODEL_REPEAT_PENALTY,
@@ -980,6 +981,30 @@ def _ensure_default_sentinel_subentry(hass: HomeAssistant, entry: ConfigEntry) -
     )
     hass.config_entries.async_add_subentry(entry, subentry)
 
+def _ensure_default_tool_manager_subentry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Ensure a singleton tool manager subentry exists for deterministic settings."""
+    from .const import CONF_TOOL_RELEVANCE_THRESHOLD, CONF_TOOL_RETRIEVAL_LIMIT, RECOMMENDED_TOOL_RELEVANCE_THRESHOLD, RECOMMENDED_TOOL_RETRIEVAL_LIMIT
+    
+    exists = any(
+        s.subentry_type == SUBENTRY_TYPE_TOOL_MANAGER for s in entry.subentries.values()
+    )
+    if exists:
+        return
+
+    payload = {
+        CONF_TOOL_RETRIEVAL_LIMIT: entry.options.get(CONF_TOOL_RETRIEVAL_LIMIT, RECOMMENDED_TOOL_RETRIEVAL_LIMIT),
+        CONF_TOOL_RELEVANCE_THRESHOLD: entry.options.get(CONF_TOOL_RELEVANCE_THRESHOLD, RECOMMENDED_TOOL_RELEVANCE_THRESHOLD),
+        "tool_providers": {},
+        "tools": {}
+    }
+    subentry = ConfigSubentry(
+        subentry_type=SUBENTRY_TYPE_TOOL_MANAGER,
+        title="Tool Manager",
+        unique_id=f"{entry.entry_id}_tool_manager",
+        data=MappingProxyType(payload),
+    )
+    hass.config_entries.async_add_subentry(entry, subentry)
+
 
 # Database and vector index bootstrapping.
 # store.setup() only runs the vector migrations when store.index_config is set.
@@ -1168,6 +1193,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     _register_services(hass, entry)
     _ensure_default_feature_subentries(hass, entry)
     _ensure_default_sentinel_subentry(hass, entry)
+    _ensure_default_tool_manager_subentry(hass, entry)
     _assign_first_provider_if_needed(hass, entry)
 
     # Resolve effective options (data + options + subentries).
@@ -1276,7 +1302,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         if not healthy:
             continue
         try:
-            ollama_providers[url] = _build_ollama_provider(url)
+            ollama_providers[url] = await hass.async_add_executor_job(
+            _build_ollama_provider, url
+        )
         except Exception:
             LOGGER.exception(
                 "Ollama provider init failed for %s; continuing without it.", url
@@ -2285,6 +2313,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         supports_response=_SERVICE_RESPONSE_ONLY,
     )
 
+    # Pre-warm models to avoid lazy-loading imports in the event loop during the first interaction.
+    async def _pre_warm_model(m):
+        if m and hasattr(m, "bind_tools"):
+            try:
+                await hass.async_add_executor_job(m.bind_tools, [])
+            except Exception:
+                LOGGER.debug("Failed to pre-warm model tools, it might not support bind_tools")
+
+    await _pre_warm_model(chat_model)
+    await _pre_warm_model(vision_model)
+    await _pre_warm_model(summarization_model)
+
     return True
 
 
@@ -2299,6 +2339,19 @@ async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool
         await entry.runtime_data.baseline_updater.stop()
     if entry.runtime_data.notifier is not None:
         entry.runtime_data.notifier.stop()
+
+    # Explicitly clean up the store's background task if it exists.
+    # Langgraph's AsyncBatchedBaseStore (base of PostgresStore) uses a background _task
+    # that can trigger "Task was destroyed but it is pending!" if not properly awaited during unload.
+    store = entry.runtime_data.store
+    if store and hasattr(store, "_task") and store._task:
+        LOGGER.debug("Stopping langgraph store background task")
+        store._task.cancel()
+        try:
+            await store._task
+        except asyncio.CancelledError:
+            pass
+
     if entry.runtime_data.pool is not None:
         await entry.runtime_data.pool.close()
     await hass.config_entries.async_unload_platforms(entry, PLATFORMS)

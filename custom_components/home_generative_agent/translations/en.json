@@ -135,6 +135,51 @@
         "unknown": "Unexpected error."
       }
     },
+    "tool_manager": {
+      "entry_type": "service",
+      "abort": {
+        "reconfigure_successful": "RAG tool configuration updated."
+      },
+      "initiate_flow": {
+        "reconfigure": "Reconfigure Tools",
+        "user": "Configure Tools"
+      },
+      "step": {
+        "user": {
+          "title": "{tool_manager_title}",
+          "description": "Configure global RAG values and choose a provider or tool to edit.",
+          "data": {
+            "tool_retrieval_limit": "Top N Tool Retrieval Limit",
+            "tool_relevance_threshold": "Tool Relevance Threshold (0.0 - 1.0)",
+            "next_action": "Next Action"
+          }
+        },
+        "provider_editor": {
+          "title": "Provider: {provider_name}",
+          "description": "Enable/disable or inject instructions for all tools in this provider.",
+          "data": {
+            "enabled": "Enabled",
+            "prompt": "{provider_injection_label}",
+            "tags": "Custom Semantic Tags"
+          },
+          "data_description": {
+            "tags": "{semantic_tags_hint}"
+          }
+        },
+        "tool_editor": {
+          "title": "Tool: {tool_name}",
+          "description": "Enable/disable, add tags, or inject a specific tier-3 prompt for this tool.",
+          "data": {
+            "enabled": "Enabled",
+            "prompt": "{tool_injection_label}",
+            "tags": "Custom Semantic Tags"
+          },
+          "data_description": {
+            "tags": "{semantic_tags_hint}"
+          }
+        }
+      }
+    },
     "sentinel": {
       "entry_type": "service",
       "abort": {

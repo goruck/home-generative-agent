@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import logging
@@ -15,8 +16,8 @@ from typing import (
 )
 
 import voluptuous as vol
-from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import llm
+from homeassistant.exceptions import HomeAssistantError, TemplateError
+from homeassistant.helpers import llm, template
 from homeassistant.util import dt as dt_util
 from homeassistant.util import ulid
 from langchain_core.messages import (
@@ -29,6 +30,7 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langchain_core.messages.utils import trim_messages
+import langchain_core.utils.function_calling  # Pre-warm tool conversion logic
 from langgraph.graph import END, START, MessagesState, StateGraph
 from pydantic import ValidationError
 
@@ -42,11 +44,19 @@ from ..const import (  # noqa: TID252
     CONF_MANAGE_CONTEXT_WITH_TOKENS,
     CONF_MAX_MESSAGES_IN_CONTEXT,
     CONF_MAX_TOKENS_IN_CONTEXT,
+    CONF_INSTRUCTION_RELEVANCE_THRESHOLD,
+    CONF_INSTRUCTION_RETRIEVAL_LIMIT,
     CONF_OLLAMA_CHAT_MODEL,
     CONF_OPENAI_CHAT_MODEL,
     CONF_OPENAI_COMPATIBLE_CHAT_MODEL,
+    CONF_TOOL_RELEVANCE_THRESHOLD,
+    CONF_TOOL_RETRIEVAL_LIMIT,
     EMBEDDING_MODEL_PROMPT_TEMPLATE,
     RECOMMENDED_CRITICAL_ACTIONS,
+    RECOMMENDED_INSTRUCTION_RELEVANCE_THRESHOLD,
+    RECOMMENDED_INSTRUCTION_RETRIEVAL_LIMIT,
+    RECOMMENDED_TOOL_RELEVANCE_THRESHOLD,
+    RECOMMENDED_TOOL_RETRIEVAL_LIMIT,
     SUMMARIZATION_INITIAL_PROMPT,
     SUMMARIZATION_PROMPT_TEMPLATE,
     SUMMARIZATION_SYSTEM_PROMPT,
@@ -76,6 +86,8 @@ class State(MessagesState):
     summary: str
     chat_model_usage_metadata: dict[str, Any]
     messages_to_remove: list[AnyMessage]
+    selected_tools: list[str]
+    selected_instructions: list[str]
 
 
 def _determine_model_name(provider: str, opts: dict[str, Any]) -> str:
@@ -541,6 +553,76 @@ async def _find_open_entries(
 # ----- Graph nodes and edges -----
 
 
+async def _retrieve_tools(
+    state: State, config: RunnableConfig, *, store: BaseStore
+) -> dict[str, Any]:
+    """Retrieve relevant tools based on user's message."""
+    if "configurable" not in config:
+        raise HomeAssistantError("Configuration is missing.")
+
+    # Only retrieve if the last message is from the user
+    last_message = state["messages"][-1]
+    last_message_from_user = isinstance(last_message, HumanMessage)
+    if not last_message_from_user:
+        return {
+            "selected_tools": state.get("selected_tools", []),
+            "selected_instructions": state.get("selected_instructions", [])
+        }
+
+    tool_mgr_data = config["configurable"].get("tool_mgr_data", {})
+    limit = tool_mgr_data.get(CONF_TOOL_RETRIEVAL_LIMIT, RECOMMENDED_TOOL_RETRIEVAL_LIMIT)
+    threshold = tool_mgr_data.get(
+        CONF_TOOL_RELEVANCE_THRESHOLD, RECOMMENDED_TOOL_RELEVANCE_THRESHOLD
+    )
+
+    query_prompt = EMBEDDING_MODEL_PROMPT_TEMPLATE.format(query=last_message.content)
+    tool_items = await store.asearch(
+        ("system", "tools"), query=query_prompt, limit=limit
+    )
+
+    retrieved_names = set()
+    for item in tool_items:
+        # Most vector stores return a score (cosine similarity). 
+        # For Postgres vector store, higher is more relevant.
+        if hasattr(item, "score") and item.score is not None:
+            if item.score < threshold:
+                LOGGER.debug(
+                    "Skipping tool %s due to low relevance score: %0.4f < %0.4f",
+                    item.key, item.score, threshold
+                )
+                continue
+        retrieved_names.add(item.key)
+
+    # Always include the escape hatch tool
+    retrieved_names.add("get_available_tools")
+
+    # Retrieve relevant instructions
+    instruction_limit = tool_mgr_data.get(CONF_INSTRUCTION_RETRIEVAL_LIMIT, RECOMMENDED_INSTRUCTION_RETRIEVAL_LIMIT)
+    instruction_threshold = tool_mgr_data.get(
+        CONF_INSTRUCTION_RELEVANCE_THRESHOLD, RECOMMENDED_INSTRUCTION_RELEVANCE_THRESHOLD
+    )
+    
+    instruction_items = await store.asearch(
+        ("system", "instructions"), query=query_prompt, limit=instruction_limit
+    )
+    
+    retrieved_instructions = []
+    for item in instruction_items:
+        if hasattr(item, "score") and item.score is not None:
+            if item.score < instruction_threshold:
+                LOGGER.debug(
+                    "Skipping instruction %s due to low relevance score: %0.4f < %0.4f",
+                    item.key, item.score, instruction_threshold
+                )
+                continue
+        retrieved_instructions.append(item.key)
+
+    return {
+        "selected_tools": list(retrieved_names),
+        "selected_instructions": retrieved_instructions
+    }
+
+
 async def _call_model(
     state: State, config: RunnableConfig, *, store: BaseStore
 ) -> dict[str, Any]:
@@ -549,11 +631,68 @@ async def _call_model(
         msg = "Configuration for the model is missing."
         raise HomeAssistantError(msg)
 
-    model = config["configurable"]["chat_model"]
+    model_without_tools = config["configurable"]["chat_model"]
     user_id = config["configurable"]["user_id"]
     hass = config["configurable"]["hass"]
     opts = config["configurable"]["options"]
     chat_model_options = config["configurable"].get("chat_model_options", {})
+    
+    available_tools = config["configurable"].get("available_tools", [])
+    selected_tool_names = set(state.get("selected_tools", []))
+    
+    tools_to_bind = [
+        t for t in available_tools 
+        if (t["function"]["name"] if isinstance(t, dict) else getattr(t, "name", "")) in selected_tool_names
+    ]
+    model = (
+        await asyncio.to_thread(model_without_tools.bind_tools, tools_to_bind)
+        if tools_to_bind
+        else model_without_tools
+    )
+    
+    def _render_prompt(text: str) -> str:
+        """Render a Jinja template string."""
+        if not text:
+            return ""
+        try:
+            return template.Template(text, hass).async_render(
+                {
+                    "ha_name": hass.config.location_name,
+                    "user_name": user_id,
+                },
+                parse_result=False,
+            )
+        except TemplateError as err:
+            LOGGER.error("Error rendering template prompt: %s", err)
+            return f"Error rendering template: {text}"
+
+    # Extract Tool Manager settings for tiered prompts
+    tool_mgr_data = config["configurable"].get("tool_mgr_data", {})
+    providers_cfg = tool_mgr_data.get("tool_providers", {})
+    tools_cfg = tool_mgr_data.get("tools", {})
+    
+    provider_prompts = []
+    for p_id, p_cfg in providers_cfg.items():
+        if p_cfg.get("enabled", True) and p_cfg.get("prompt"):
+            rendered_prompt = _render_prompt(p_cfg["prompt"])
+            provider_prompts.append(f"Provider `{p_id}` Context: {rendered_prompt}")
+            
+    instruction_prompts = []
+    selected_instruction_names = state.get("selected_instructions", [])
+    if selected_instruction_names:
+        instructions_cfg = tool_mgr_data.get("instructions", {})
+        for i_name in selected_instruction_names:
+            i_cfg = instructions_cfg.get(i_name, {})
+            if i_cfg.get("prompt"):
+                rendered_prompt = _render_prompt(i_cfg["prompt"])
+                instruction_prompts.append(f"Instruction `{i_name}`:\n{rendered_prompt}")
+
+    tool_prompts = []
+    for t_name in selected_tool_names:
+        t_cfg = tools_cfg.get(t_name, {})
+        if t_cfg.get("prompt"):
+            rendered_prompt = _render_prompt(t_cfg["prompt"])
+            tool_prompts.append(f"Tool `{t_name}` Instructions:\n{rendered_prompt}")
 
     # Retrieve memories (semantic if last message is from user).
     last_message = state["messages"][-1]
@@ -570,6 +709,11 @@ async def _call_model(
 
     # Build system message.
     system_message = config["configurable"]["prompt"]
+    
+    # Tier 1.5: Custom retrieval-based instructions
+    if instruction_prompts:
+        system_message += "\n\n<custom_instructions>\n" + "\n\n".join(instruction_prompts) + "\n</custom_instructions>"
+
     if mems:
         formatted_mems = "\n".join(f"[{mem.key}]: {mem.value}" for mem in mems)
         system_message += f"\n<memories>\n{formatted_mems}\n</memories>"
@@ -580,6 +724,13 @@ async def _call_model(
         system_message += (
             f"\n<past_conversation_summary>\n{summary}\n</past_conversation_summary>"
         )
+
+    # 3-Tiered Prompt Assembly: System -> Provider -> Tool
+    if provider_prompts:
+        system_message += "\n\n<provider_context>\n" + "\n\n".join(provider_prompts) + "\n</provider_context>"
+        
+    if tool_prompts:
+        system_message += "\n\n<tool_specific_instructions>\n" + "\n\n".join(tool_prompts) + "\n</tool_specific_instructions>"
 
     # Model input = System + current messages.
     messages = [SystemMessage(content=system_message)] + state["messages"]
@@ -869,7 +1020,21 @@ async def _call_tools(
         LOGGER.debug("Tool response: %s", tool_response)
         tool_responses.append(tool_response)
 
-    return {"messages": tool_responses}
+    new_selected_tools = set(state.get("selected_tools", []))
+    for tool_response in tool_responses:
+        if tool_response.name == "get_available_tools":
+            try:
+                parsed = json.loads(str(tool_response.content))
+                if "tools" in parsed:
+                    new_selected_tools.update(parsed["tools"])
+                    tool_response.content = parsed.get("result", tool_response.content)
+            except Exception:
+                pass
+
+    res: dict[str, Any] = {"messages": tool_responses}
+    if new_selected_tools != set(state.get("selected_tools", [])):
+        res["selected_tools"] = list(new_selected_tools)
+    return res
 
 
 def _should_continue(
@@ -886,12 +1051,14 @@ def _should_continue(
 workflow = StateGraph(State)
 
 # Define nodes.
+workflow.add_node("retrieve_tools", _retrieve_tools)
 workflow.add_node("agent", _call_model)
 workflow.add_node("action", _call_tools)
 workflow.add_node("summarize_and_remove_messages", _summarize_and_remove_messages)
 
 # Define edges.
-workflow.add_edge(START, "agent")
+workflow.add_edge(START, "retrieve_tools")
+workflow.add_edge("retrieve_tools", "agent")
 workflow.add_conditional_edges("agent", _should_continue)
 workflow.add_edge("action", "agent")
 workflow.add_edge("summarize_and_remove_messages", END)

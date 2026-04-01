@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import string
 from typing import TYPE_CHECKING, Any, Literal
@@ -26,6 +28,7 @@ from .agent.tools import (
     add_automation,
     alarm_control,
     confirm_sensitive_action,
+    get_available_tools,
     get_and_analyze_camera_image,
     get_camera_last_events,
     get_entity_history,
@@ -35,6 +38,7 @@ from .agent.tools import (
 )
 from .const import (
     CONF_CRITICAL_ACTION_PIN_ENABLED,
+    CONF_INSTRUCTIONS_CONFIG,
     CONF_PROMPT,
     CONF_SCHEMA_FIRST_YAML,
     CRITICAL_ACTION_PROMPT,
@@ -104,7 +108,7 @@ def _convert_content(
 class MultiLLMAPI:
     """Wrapper to route tool calls across multiple LLM APIs."""
 
-    def __init__(self, apis: list[llm.API]) -> None:
+    def __init__(self, apis: list[llm.APIInstance]) -> None:
         """Initialize the wrapper."""
         self.apis = apis
 
@@ -230,23 +234,28 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             else chat_log.conversation_id
         )
 
-        # HA tools & schema
-        llm_api_ids: list[str] = options.get(CONF_LLM_HASS_API) or []
-        llm_apis: list[llm.API] = []
-        for api_id in llm_api_ids:
-            try:
-                api = await llm.async_get_api(hass, api_id, llm_context)
-                llm_apis.append(api)
-            except HomeAssistantError:
-                _LOGGER.warning("Could not load LLM API %s", api_id)
+        # Fetch Tool Manager Config
+        from .const import SUBENTRY_TYPE_TOOL_MANAGER
+        tool_mgr_subentry = next(
+            (s for s in self.entry.subentries.values() if s.subentry_type == SUBENTRY_TYPE_TOOL_MANAGER),
+            None
+        )
+        tool_mgr_data = tool_mgr_subentry.data if tool_mgr_subentry else {}
+        providers_cfg = tool_mgr_data.get("tool_providers", {})
+        tools_cfg = tool_mgr_data.get("tools", {})
+        instructions_cfg = tool_mgr_data.get(CONF_INSTRUCTIONS_CONFIG, {})
 
-        if llm_api_ids and not llm_apis:
-            msg = "Error getting LLM APIs, check your configuration."
-            _LOGGER.exception(msg)
-            intent_response.async_set_error(intent.IntentResponseErrorCode.UNKNOWN, msg)
-            return conversation.ConversationResult(
-                response=intent_response, conversation_id=conversation_id
-            )
+        # HA tools
+        llm_apis: list[llm.APIInstance] = []
+        for api in llm.async_get_apis(hass):
+            p_cfg = providers_cfg.get(api.id, {})
+            if not p_cfg.get("enabled", True):
+                continue
+            try:
+                inst = await llm.async_get_api(hass, api.id, llm_context)
+                llm_apis.append(inst)
+            except HomeAssistantError:
+                _LOGGER.warning("Could not load LLM API %s", api.id)
 
         if not options.get(CONF_SCHEMA_FIRST_YAML, False) and _is_dashboard_request(
             user_input.text
@@ -262,7 +271,10 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         custom_serializer = llm_apis[0].custom_serializer if llm_apis else None
         tools = []
         for api in llm_apis:
-            tools.extend(_format_tool(tool, custom_serializer) for tool in api.tools)
+            for tool in api.tools:
+                t_cfg = tools_cfg.get(tool.name, {})
+                if t_cfg.get("enabled", True):
+                    tools.append(_format_tool(tool, custom_serializer))
 
         # Add LangChain-native tools (wired in graph via config).
         langchain_tools: dict[str, Any] = {
@@ -274,10 +286,99 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             "alarm_control": alarm_control,
             "resolve_entity_ids": resolve_entity_ids,
             "write_yaml_file": write_yaml_file,
+            "get_available_tools": get_available_tools,
         }
         if not options.get(CONF_SCHEMA_FIRST_YAML, False):
             langchain_tools["add_automation"] = add_automation
-        tools.extend(langchain_tools.values())
+        
+        if providers_cfg.get("langchain_internal", {}).get("enabled", True):
+            for tv in langchain_tools.values():
+                t_cfg = tools_cfg.get(tv.name, {})
+                if t_cfg.get("enabled", True):
+                    tools.append(tv)
+        else:
+            langchain_tools = {}
+
+        # Version hash and PgVector indexing for RAG tool retrieval
+        tools_dict_list = []
+        for t in tools:
+            if isinstance(t, dict):
+                tools_dict_list.append(t)
+            else:
+                tools_dict_list.append({"name": t.name, "description": t.description})
+        
+        tools_json = json.dumps(tools_dict_list, sort_keys=True, default=str)
+        instructions_json = json.dumps(instructions_cfg, sort_keys=True, default=str)
+        # Force re-index by prefixing with version (content field fix)
+        # Include instructions in the hash so they trigger re-index too.
+        tools_hash = hashlib.sha256(f"v3:{tools_json}:{instructions_json}".encode()).hexdigest()
+
+        if runtime_data.tools_version_hash != tools_hash:
+            _LOGGER.debug("Tool definitions changed (or first run). Indexing into vector store.")
+            store = runtime_data.store
+            for i, td in enumerate(tools_dict_list):
+                name = td.get("name") or td.get("function", {}).get("name") or td.get("id")
+                description = td.get("description") or td.get("function", {}).get("description")
+                
+                if not name:
+                    name = f"unnamed_tool_{i}"
+                    _LOGGER.warning(
+                        "Tool at index %d is missing a name (using fallback '%s'). Full tool dict: %s",
+                        i, name, td
+                    )
+
+                # Build the value to be indexed. We MUST use the "content" field
+                # because the store is configured to only embed that field in __init__.py.
+                content = description or ""
+                if not name.startswith("unnamed_tool_"):
+                    # For real tools, include the name in the searchable content too.
+                    content = f"{name}: {content}"
+                
+                t_cfg = tools_cfg.get(name, {})
+                custom_tags = t_cfg.get("tags", "")
+                if custom_tags:
+                    content = f"{content}\nKeywords/Tags: {custom_tags}"
+                
+                index_value = {
+                    "content": content,
+                    "name": name,
+                    "description": description or ""
+                }
+
+                # We do this asynchronously but concurrently to speed it up.
+                hass.async_create_task(
+                    store.aput(
+                        ("system", "tools"),
+                        key=name,
+                        value=index_value
+                    )
+                )
+            
+            # Index active instructions
+            for i_name, i_cfg in instructions_cfg.items():
+                if not i_cfg.get("enabled", True):
+                    continue
+                
+                i_prompt = i_cfg.get("prompt", "")
+                i_tags = i_cfg.get("tags", "")
+                
+                i_content = f"Instruction: {i_name}"
+                if i_tags:
+                    i_content = f"{i_content} (Tags: {i_tags})"
+                
+                hass.async_create_task(
+                    store.aput(
+                        ("system", "instructions"),
+                        key=i_name,
+                        value={
+                            "content": i_content,
+                            "name": i_name,
+                            "prompt": i_prompt
+                        }
+                    )
+                )
+
+            runtime_data.tools_version_hash = tools_hash
 
         # Conversation ID
         _LOGGER.debug("Conversation ID: %s", conversation_id)
@@ -340,9 +441,11 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
 
         # Use the already-configured chat model from __init__.py
         base_llm = runtime_data.chat_model
-        try:
-            chat_model_with_tools = base_llm.bind_tools(tools)
-        except AttributeError:
+        
+        # Tools are no longer bound here. We pass available_tools to the config and bind dynamically via RAG.
+        # But we still need to verify the model supports tools. We assume it does based on __init__ checks,
+        # or we can just bind an empty list to test it if needed.
+        if not hasattr(base_llm, "bind_tools"):
             _LOGGER.exception("Error during conversation processing.")
             intent_response = intent.IntentResponse(language=user_input.language)
             has_provider = any(
@@ -378,7 +481,8 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             "configurable": {
                 "thread_id": conversation_id,
                 "user_id": user_name,
-                "chat_model": chat_model_with_tools,
+                "chat_model": base_llm,
+                "available_tools": tools,
                 "chat_model_options": runtime_data.chat_model_options,
                 "prompt": prompt,
                 "options": options,
@@ -388,6 +492,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 "ha_llm_api": MultiLLMAPI(llm_apis) if llm_apis else None,
                 "hass": hass,
                 "pending_actions": runtime_data.pending_actions,
+                "tool_mgr_data": tool_mgr_data,
             },
             "recursion_limit": 10,
         }
@@ -408,6 +513,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             "summary": "",
             "chat_model_usage_metadata": {},
             "messages_to_remove": [],
+            "selected_tools": [],
         }
 
         # Interact with agent app.

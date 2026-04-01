@@ -13,6 +13,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, cast
 
+from ..const import EMBEDDING_MODEL_PROMPT_TEMPLATE
+
 import aiofiles
 import async_timeout
 import homeassistant.util.dt as dt_util
@@ -1233,3 +1235,34 @@ async def get_camera_last_events(  # noqa: D417
         allow_unicode=True,
         sort_keys=False,
     )
+
+
+@tool(parse_docstring=True)
+async def get_available_tools(
+    query: str,
+    *,
+    config: Annotated[RunnableConfig, InjectedToolArg()],
+    store: Annotated[BaseStore, InjectedStore()],
+) -> dict[str, Any]:
+    """
+    Search for additional tools and capabilities that might be relevant.
+    Use this if you are unsure how to handle a request or if you suspect
+    a specific tool exists but is not currently available to you.
+
+    Args:
+        query: The semantic search query (e.g. 'how to control lights').
+    """
+    # This tool is mostly a marker. The actual retrieval is intercepted in _call_tools.
+    # We provide a basic implementation here just in case, but it's redundant.
+    namespace = ("system", "tools")
+    # Prefix the query just like the retrieve_tools node does.
+    prompt_template = EMBEDDING_MODEL_PROMPT_TEMPLATE
+    formatted_query = prompt_template.format(query=query)
+
+    docs = await store.asearch(namespace, query=formatted_query, limit=10)
+    tool_names = [doc.key for doc in docs]
+
+    return {
+        "tools": tool_names,
+        "result": f"Found these relevant tools: {', '.join(tool_names)}. They have been added to your current session.",
+    }

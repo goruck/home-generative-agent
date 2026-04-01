@@ -21,6 +21,9 @@ from custom_components.home_generative_agent.const import (
     CONF_EXPLAIN_ENABLED,
     CONF_FEATURE_MODEL,
     CONF_FEATURE_MODEL_NAME,
+    CONF_INSTRUCTIONS_CONFIG,
+    CONF_INSTRUCTION_RELEVANCE_THRESHOLD,
+    CONF_INSTRUCTION_RETRIEVAL_LIMIT,
     CONF_NOTIFY_SERVICE,
     CONF_OLLAMA_CHAT_MODEL,
     CONF_OLLAMA_CHAT_URL,
@@ -35,6 +38,8 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT,
     CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
     CONF_SUMMARIZATION_MODEL_PROVIDER,
+    CONF_TOOL_RELEVANCE_THRESHOLD,
+    CONF_TOOL_RETRIEVAL_LIMIT,
     CONF_VLM_PROVIDER,
     CONFIG_ENTRY_VERSION,
     DOMAIN,
@@ -43,6 +48,7 @@ from custom_components.home_generative_agent.const import (
     SUBENTRY_TYPE_MODEL_PROVIDER,
     SUBENTRY_TYPE_SENTINEL,
     SUBENTRY_TYPE_STT_PROVIDER,
+    SUBENTRY_TYPE_TOOL_MANAGER,
 )
 from custom_components.home_generative_agent.core.subentry_resolver import (
     legacy_model_provider_configs,
@@ -127,6 +133,7 @@ def test_supported_subentry_types() -> None:
         SUBENTRY_TYPE_FEATURE,
         SUBENTRY_TYPE_STT_PROVIDER,
         SUBENTRY_TYPE_SENTINEL,
+        SUBENTRY_TYPE_TOOL_MANAGER,
     }
 
 
@@ -884,4 +891,170 @@ async def test_migration_v5_to_v6_already_list_unchanged(
 
     assert await async_migrate_entry(hass, entry)
     assert entry.version == 6
-    assert entry.options.get(CONF_LLM_HASS_API) == ["search_services", "weather_forecast"]
+    assert entry.options.get(CONF_LLM_HASS_API) == [
+        "search_services",
+        "weather_forecast",
+    ]
+
+
+# ---------------------------------------------------------------------------
+# tool_manager subentry tests
+# ---------------------------------------------------------------------------
+
+from custom_components.home_generative_agent.flows.tool_manager_subentry_flow import (
+    ToolManagerSubentryFlow,
+)
+
+@pytest.mark.asyncio
+async def test_tool_manager_subentry_flow_creates_subentry(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tool Manager flow creates a subentry with proper config keys."""
+    entry = DummyEntry()
+    flow = ToolManagerSubentryFlow()
+    flow.hass = hass
+    flow.async_show_form = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "form",
+        "step_id": kwargs["step_id"],
+        "data_schema": kwargs["data_schema"],
+        "description_placeholders": kwargs.get("description_placeholders"),
+    }
+    flow.async_create_entry = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "create_entry",
+        "title": kwargs.get("title"),
+        "data": kwargs.get("data"),
+    }
+    flow._schedule_reload = lambda: None  # type: ignore[assignment]
+    flow._trigger_reindex = lambda: None  # type: ignore[assignment]
+    _patch_entry(flow, entry)
+
+    first = await flow.async_step_user()
+    assert first.get("type") == "form"
+
+    # Go to provider editor
+    second = await flow.async_step_user({
+        "tool_retrieval_limit": 5,
+        "tool_relevance_threshold": 0.5,
+        "instruction_retrieval_limit": 5,
+        "instruction_relevance_threshold": 0.5,
+        "next_action": "edit_provider_langchain_internal"
+    })
+    assert second.get("type") == "form"
+    assert second["description_placeholders"]["provider_name"] == "langchain_internal"
+
+    # Save provider config
+    third = await flow.async_step_provider_editor({
+        "enabled": False,
+        "prompt": "Test Provider Context",
+        "tags": "semantic, tags"
+    })
+    assert third.get("type") == "form" # returns to user step
+
+    # Go to tool editor
+    fourth = await flow.async_step_user({
+        "tool_retrieval_limit": 5,
+        "tool_relevance_threshold": 0.5,
+        "instruction_retrieval_limit": 5,
+        "instruction_relevance_threshold": 0.5,
+        "next_action": "edit_tool_add_automation"
+    })
+    assert fourth.get("type") == "form"
+    assert fourth["description_placeholders"]["tool_name"] == "add_automation"
+
+    # Save tool config
+    fifth = await flow.async_step_tool_editor({
+        "enabled": True,
+        "prompt": "Test Tool Instructions",
+        "tags": "automation tags"
+    })
+    assert fifth.get("type") == "form" # returns to user step
+
+    # Save and exit
+    result = await flow.async_step_user({
+        "tool_retrieval_limit": 10,
+        "tool_relevance_threshold": 0.75,
+        "instruction_retrieval_limit": 10,
+        "instruction_relevance_threshold": 0.75,
+        "next_action": "save"
+    })
+    assert result.get("type") == "create_entry"
+    data = result.get("data")
+    assert data is not None
+    assert data[CONF_TOOL_RETRIEVAL_LIMIT] == 10
+    assert data[CONF_TOOL_RELEVANCE_THRESHOLD] == 0.75
+    assert data[CONF_INSTRUCTION_RETRIEVAL_LIMIT] == 10
+    assert data[CONF_INSTRUCTION_RELEVANCE_THRESHOLD] == 0.75
+
+
+@pytest.mark.asyncio
+async def test_tool_manager_subentry_flow_instructions(
+    hass: HomeAssistant,
+) -> None:
+    """Tool Manager flow supports custom instruction logic ( Tier 1.5 )."""
+    entry = DummyEntry()
+    flow = ToolManagerSubentryFlow()
+    flow.hass = hass
+    flow.async_show_form = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "form",
+        "step_id": kwargs["step_id"],
+        "data_schema": kwargs["data_schema"],
+        "description_placeholders": kwargs.get("description_placeholders"),
+    }
+    flow.async_create_entry = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "create_entry",
+        "title": kwargs.get("title"),
+        "data": kwargs.get("data"),
+    }
+    flow._schedule_reload = lambda: None  # type: ignore[assignment]
+    flow._trigger_reindex = lambda: None  # type: ignore[assignment]
+    _patch_entry(flow, entry)
+
+    await flow.async_step_user()
+    
+    # Start adding instruction
+    step1 = await flow.async_step_user({
+        "tool_retrieval_limit": 5,
+        "tool_relevance_threshold": 0.5,
+        "instruction_retrieval_limit": 5,
+        "instruction_relevance_threshold": 0.5,
+        "next_action": "add_instruction"
+    })
+    assert step1.get("type") == "form"
+    assert step1.get("step_id") == "instruction_name"
+    
+    # Set name
+    step2 = await flow.async_step_instruction_name({"name": "Test Instruction"})
+    assert step2.get("type") == "form"
+    assert step2.get("step_id") == "instruction_editor"
+    assert step2["description_placeholders"]["instruction_name"] == "Test Instruction"
+    
+    # Save content
+    step3 = await flow.async_step_instruction_editor({
+        "enabled": True,
+        "prompt": "Test Instruction Prompt",
+        "tags": "test, tags",
+        "delete_entry": False
+    })
+    assert step3.get("type") == "form" # Returns to user step
+    
+    # Verify it exists in payload
+    assert "Test Instruction" in flow._payload["instructions"]
+    assert flow._payload["instructions"]["Test Instruction"]["prompt"] == "Test Instruction Prompt"
+
+    # Edit it
+    step4 = await flow.async_step_user({
+        "tool_retrieval_limit": 5,
+        "tool_relevance_threshold": 0.5,
+        "instruction_retrieval_limit": 5,
+        "instruction_relevance_threshold": 0.5,
+        "next_action": "edit_instruction_Test Instruction"
+    })
+    assert step4.get("type") == "form"
+    assert step4.get("step_id") == "instruction_editor"
+    
+    # Delete it
+    step5 = await flow.async_step_instruction_editor({
+        "delete_entry": True
+    })
+    assert step5.get("type") == "form"
+    assert "Test Instruction" not in flow._payload["instructions"]
