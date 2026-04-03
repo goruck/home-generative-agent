@@ -488,10 +488,6 @@ def test_camera_entry_unsecured_not_contaminated_by_transitive_bridge() -> None:
     Scenario: camera_entry_unsecured (Front) + unlocked_lock_at_night (Front)
     + open_entry_while_away (Garage).
 
-    Scenario:
-      camera_entry_unsecured (Front) + unlocked_lock_at_night (Front)
-      + open_entry_while_away (Garage)
-
     Without the post-grouping eject pass:
       - camera + lock share area 'Front'  → unioned (Rule 1)
       - lock + open_entry are a complementary pair (no area guard) → unioned

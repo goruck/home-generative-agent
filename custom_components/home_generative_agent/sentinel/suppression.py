@@ -28,7 +28,10 @@ STORE_VERSION = 1
 STORE_KEY = "home_generative_agent_sentinel_suppression"
 
 # Current in-memory schema version.  Increment when new fields are added.
-SUPPRESSION_STATE_VERSION = 3
+SUPPRESSION_STATE_VERSION = 4
+
+# Maximum factor by which learned feedback can extend the base entity cooldown.
+MAX_COOLDOWN_MULTIPLIER = 8
 
 LOGGER = logging.getLogger(__name__)
 
@@ -73,7 +76,7 @@ class SuppressionDecision:
 
 @dataclass
 class SuppressionState:
-    """Persistent suppression state (v2 schema)."""
+    """Persistent suppression state (v4 schema)."""
 
     last_by_type: dict[str, str] = field(default_factory=dict)
     last_by_entity: dict[str, dict[str, str]] = field(default_factory=dict)
@@ -85,6 +88,11 @@ class SuppressionState:
     snoozed_until: dict[str, dict[str, str]] = field(default_factory=dict)
     # Person entity ID → ISO expiry string
     presence_grace_until: dict[str, str] = field(default_factory=dict)
+
+    # v4 additions
+    # Entity ID → learned cooldown multiplier (1 = base, up to MAX_COOLDOWN_MULTIPLIER).
+    # Bumped each time feedback is recorded via record_cooldown_feedback().
+    learned_cooldown_multipliers: dict[str, int] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SuppressionState:
@@ -101,6 +109,10 @@ class SuppressionState:
                 k: dict(v) for k, v in data.get("snoozed_until", {}).items()
             },
             presence_grace_until=dict(data.get("presence_grace_until", {})),
+            learned_cooldown_multipliers={
+                k: int(v)
+                for k, v in data.get("learned_cooldown_multipliers", {}).items()
+            },
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -114,6 +126,7 @@ class SuppressionState:
             "version": self.version,
             "snoozed_until": {k: dict(v) for k, v in self.snoozed_until.items()},
             "presence_grace_until": dict(self.presence_grace_until),
+            "learned_cooldown_multipliers": dict(self.learned_cooldown_multipliers),
         }
 
 
@@ -129,6 +142,7 @@ def _migrate_suppression_state(data: dict[str, Any]) -> dict[str, Any]:
     v1 → v2: add ``snoozed_until``, ``presence_grace_until``, ``version``.
     v2 → v3: drop ``presence_grace_until`` keys that are not ``person.*``
              entity IDs (previously keyed by friendly name).
+    v3 → v4: add ``learned_cooldown_multipliers`` (empty dict).
 
     Returns the same dict object (mutations are in-place).
     """
@@ -159,7 +173,14 @@ def _migrate_suppression_state(data: dict[str, Any]) -> dict[str, Any]:
             )
             del data["presence_grace_until"][key]
         data["version"] = 3
+        stored_version = 3
         LOGGER.info("Suppression state migrated from v2 to v3.")
+
+    # v3 → v4: learned per-entity cooldown multipliers
+    if stored_version < 4:  # noqa: PLR2004
+        data.setdefault("learned_cooldown_multipliers", {})
+        data["version"] = 4
+        LOGGER.info("Suppression state migrated from v3 to v4.")
 
     return data
 
@@ -456,18 +477,25 @@ def should_suppress(  # noqa: PLR0911, PLR0913
             },
         )
 
-    # 6. Entity cooldown
+    # 6. Entity cooldown (scaled by any learned multiplier for the entity)
     for entity_id in finding.triggering_entities:
+        multiplier = min(
+            state.learned_cooldown_multipliers.get(entity_id, 1),
+            MAX_COOLDOWN_MULTIPLIER,
+        )
+        effective_cooldown = cooldown_entity * multiplier
         last_entity = _parse_dt(
             state.last_by_entity.get(entity_id, {}).get(finding.type)
         )
-        if last_entity is not None and now - last_entity < cooldown_entity:
+        if last_entity is not None and now - last_entity < effective_cooldown:
             LOGGER.debug(
-                "Suppressing %s (%s): entity cooldown active for %s (last=%s).",
+                "Suppressing %s (%s): entity cooldown active for %s "
+                "(last=%s, multiplier=%d).",
                 finding.anomaly_id,
                 finding.type,
                 entity_id,
                 state.last_by_entity.get(entity_id, {}).get(finding.type),
+                multiplier,
             )
             return SuppressionDecision(
                 suppress=True,
@@ -478,6 +506,7 @@ def should_suppress(  # noqa: PLR0911, PLR0913
                     "last_seen": state.last_by_entity.get(entity_id, {}).get(
                         finding.type
                     ),
+                    "multiplier": multiplier,
                 },
             )
 
@@ -549,6 +578,29 @@ def register_snooze(
         duration,
         code,
     )
+
+
+def record_cooldown_feedback(state: SuppressionState, entity_id: str) -> int:
+    """
+    Increment the learned cooldown multiplier for *entity_id* by one.
+
+    Call this when a user signals that an entity is generating too many
+    alerts (e.g. via a snooze or explicit feedback action).  The multiplier
+    is capped at ``MAX_COOLDOWN_MULTIPLIER`` and applied to the base entity
+    cooldown in :func:`should_suppress`.
+
+    Returns the new multiplier value.
+    """
+    current = state.learned_cooldown_multipliers.get(entity_id, 1)
+    new_value = min(current + 1, MAX_COOLDOWN_MULTIPLIER)
+    state.learned_cooldown_multipliers[entity_id] = new_value
+    LOGGER.debug(
+        "Learned cooldown multiplier for %s updated: %d → %d.",
+        entity_id,
+        current,
+        new_value,
+    )
+    return new_value
 
 
 def register_presence_grace(

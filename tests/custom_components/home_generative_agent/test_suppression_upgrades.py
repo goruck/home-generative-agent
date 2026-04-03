@@ -396,9 +396,10 @@ def test_migrate_v1_adds_version_and_new_fields() -> None:
     result = _migrate_suppression_state(data)
 
     assert result is data  # in-place
-    assert result["version"] == 3
+    assert result["version"] == 4
     assert "snoozed_until" in result
     assert "presence_grace_until" in result
+    assert result["learned_cooldown_multipliers"] == {}
 
 
 def test_migrate_v1_preserves_existing_data() -> None:
@@ -417,7 +418,8 @@ def test_migrate_is_idempotent() -> None:
     assert data == snapshot
 
 
-def test_migrate_skips_already_v3() -> None:
+def test_migrate_v3_upgrades_to_v4() -> None:
+    """v3 state is upgraded to v4 — learned_cooldown_multipliers added."""
     data: dict = {
         "last_by_type": {},
         "last_by_entity": {},
@@ -425,6 +427,22 @@ def test_migrate_skips_already_v3() -> None:
         "version": 3,
         "snoozed_until": {},
         "presence_grace_until": {},
+    }
+    _migrate_suppression_state(data)
+    assert data["version"] == 4
+    assert data["learned_cooldown_multipliers"] == {}
+
+
+def test_migrate_skips_already_v4() -> None:
+    """v4 state is not mutated by migration."""
+    data: dict = {
+        "last_by_type": {},
+        "last_by_entity": {},
+        "pending_prompts": {},
+        "version": 4,
+        "snoozed_until": {},
+        "presence_grace_until": {},
+        "learned_cooldown_multipliers": {"lock.front": 2},
     }
     original = dict(data)
     _migrate_suppression_state(data)
@@ -438,9 +456,10 @@ def test_from_dict_handles_v1_data() -> None:
     _migrate_suppression_state(data)
     state = SuppressionState.from_dict(data)
 
-    assert state.version == 3
+    assert state.version == 4
     assert state.snoozed_until == {}
     assert state.presence_grace_until == {}
+    assert state.learned_cooldown_multipliers == {}
     assert "open_entry_while_away" in state.last_by_type
 
 
@@ -502,7 +521,7 @@ def test_migrate_v2_drops_friendly_name_presence_grace_keys() -> None:
 
     assert "Alice" not in data["presence_grace_until"]
     assert "person.bob" in data["presence_grace_until"]
-    assert data["version"] == 3
+    assert data["version"] == 4
 
 
 def test_migrate_v2_preserves_valid_entity_id_keys() -> None:
