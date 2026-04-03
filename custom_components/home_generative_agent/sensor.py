@@ -42,6 +42,7 @@ async def async_setup_entry(
                 data.sentinel,
                 entry.entry_id,
                 baseline_updater=data.baseline_updater,
+                discovery_engine=data.discovery_engine,
             )
         ]
     )

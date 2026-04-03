@@ -96,6 +96,70 @@ def _are_related(a: AnomalyFinding, b: AnomalyFinding) -> bool:
     return True
 
 
+def _eject_camera_area_violations(
+    groups: list[list[AnomalyFinding]],
+) -> list[list[AnomalyFinding]]:
+    """
+    Post-grouping pass: eject off-area findings from camera_entry_unsecured groups.
+
+    Without this pass a three-finding scenario such as::
+
+        camera_entry_unsecured (Front) + unlocked_lock_at_night (Front)
+        + open_entry_while_away (Garage)
+
+    would produce a single ``CompoundFinding`` that falsely implies the
+    *Garage* entry event was observed by the *Front* camera.  The bridging
+    lock finding shares an area with the camera (rule 1) **and** is a
+    complementary pair with ``open_entry_while_away`` (rule 3, no area
+    guard on that sub-pair), so the union-find algorithm joins all three.
+
+    Fix: for every group that contains a ``camera_entry_unsecured`` finding
+    whose area is known, eject any other finding whose area is non-empty
+    **and** differs from the camera's area.  Ejected findings are returned
+    as singleton groups.  Findings with no area information are retained
+    (the area guard cannot fire on unknown areas).
+    """
+    result: list[list[AnomalyFinding]] = []
+    for group in groups:
+        camera_findings = [f for f in group if f.type == "camera_entry_unsecured"]
+        if not camera_findings:
+            result.append(group)
+            continue
+
+        camera_areas = {_area_of(f) for f in camera_findings} - {""}
+        if len(camera_areas) > 1:
+            # Multiple cameras with differing areas in the same group — no
+            # single reference area can be determined, so spatial ejection is
+            # skipped for this group to avoid incorrect ejections.
+            result.append(group)
+            continue
+        camera_area = next(iter(camera_areas)) if camera_areas else None
+        if not camera_area:
+            # Camera has no area — spatial constraint cannot be enforced.
+            result.append(group)
+            continue
+
+        retained: list[AnomalyFinding] = []
+        for finding in group:
+            finding_area = _area_of(finding)
+            if finding_area and finding_area != camera_area:
+                # Off-area finding leaked in via transitive bridging — eject.
+                LOGGER.debug(
+                    "Sentinel correlator ejected finding %s (area=%s) from "
+                    "camera group (camera_area=%s) — transitive contamination.",
+                    finding.anomaly_id,
+                    finding_area,
+                    camera_area,
+                )
+                result.append([finding])
+            else:
+                retained.append(finding)
+
+        result.append(retained)
+
+    return result
+
+
 def _build_groups(findings: list[AnomalyFinding]) -> list[list[AnomalyFinding]]:
     """
     Union-find grouping: returns a list of equivalence classes.
@@ -164,6 +228,7 @@ class SentinelCorrelator:
             return []
 
         groups = _build_groups(findings)
+        groups = _eject_camera_area_violations(groups)
         output: list[AnomalyFinding | CompoundFinding] = []
 
         for group in groups:

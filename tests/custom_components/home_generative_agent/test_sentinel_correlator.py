@@ -481,6 +481,60 @@ def test_camera_entry_unsecured_cross_area_not_correlated() -> None:
     assert all(isinstance(r, AnomalyFinding) for r in result)
 
 
+def test_camera_entry_unsecured_not_contaminated_by_transitive_bridge() -> None:
+    """
+    Three findings must NOT all merge when the camera bridges an off-area entry.
+
+    Scenario: camera_entry_unsecured (Front) + unlocked_lock_at_night (Front)
+    + open_entry_while_away (Garage).
+
+    Without the post-grouping eject pass:
+      - camera + lock share area 'Front'  → unioned (Rule 1)
+      - lock + open_entry are a complementary pair (no area guard) → unioned
+      - Result: one compound implying the Front camera saw a Garage entry event
+
+    With the fix:
+      - camera + lock are still grouped (shared area Front)
+      - open_entry_while_away (Garage) is ejected as a singleton
+    """
+    f_camera = _finding(
+        anomaly_id="cam1",
+        rule_type="camera_entry_unsecured",
+        area="Front",
+        triggering_entities=["camera.front"],
+    )
+    f_lock = _finding(
+        anomaly_id="lock1",
+        rule_type="unlocked_lock_at_night",
+        area="Front",
+        triggering_entities=["lock.front_door"],
+    )
+    f_away = _finding(
+        anomaly_id="away1",
+        rule_type="open_entry_while_away",
+        area="Garage",
+        triggering_entities=["binary_sensor.garage_door"],
+    )
+
+    correlator = SentinelCorrelator()
+    result = correlator.correlate([f_camera, f_lock, f_away])
+
+    assert len(result) == 2  # camera+lock compound + Garage singleton
+
+    compound = next((r for r in result if isinstance(r, CompoundFinding)), None)
+    singleton = next((r for r in result if isinstance(r, AnomalyFinding)), None)
+
+    assert compound is not None, "Expected a CompoundFinding for Front area"
+    assert singleton is not None, "Expected a singleton for Garage area"
+
+    compound_ids = {f.anomaly_id for f in compound.constituent_findings}
+    assert "cam1" in compound_ids
+    assert "lock1" in compound_ids
+    assert "away1" not in compound_ids
+
+    assert singleton.anomaly_id == "away1"
+
+
 def test_camera_entry_unsecured_same_area_still_correlated() -> None:
     """
     camera_entry_unsecured and unlocked_lock_at_night in the SAME area still correlate.
@@ -506,3 +560,90 @@ def test_camera_entry_unsecured_same_area_still_correlated() -> None:
 
     assert len(result) == 1
     assert isinstance(result[0], CompoundFinding)
+
+
+def test_camera_entry_unsecured_three_way_same_area_not_split() -> None:
+    """
+    Three findings all in the same area must still group into one CompoundFinding.
+
+    Regression guard: the transitive-contamination eject pass must not split
+    groups where every finding shares the camera's area.
+    """
+    f_camera = _finding(
+        anomaly_id="cam1",
+        rule_type="camera_entry_unsecured",
+        area="Front",
+        triggering_entities=["camera.front"],
+    )
+    f_lock = _finding(
+        anomaly_id="lock1",
+        rule_type="unlocked_lock_at_night",
+        area="Front",
+        triggering_entities=["lock.front_door"],
+    )
+    f_away = _finding(
+        anomaly_id="away1",
+        rule_type="open_entry_while_away",
+        area="Front",
+        triggering_entities=["binary_sensor.front_door"],
+    )
+
+    correlator = SentinelCorrelator()
+    result = correlator.correlate([f_camera, f_lock, f_away])
+
+    assert len(result) == 1
+    compound = result[0]
+    assert isinstance(compound, CompoundFinding)
+    assert len(compound.constituent_findings) == 3
+
+
+def test_camera_entry_unsecured_multi_camera_different_areas_skips_ejection() -> None:
+    """
+    Multi-camera group with different areas skips spatial ejection entirely.
+
+    When two camera_entry_unsecured findings have *different* areas in the same
+    group, _eject_camera_area_violations cannot determine a single reference area
+    and must skip ejection to avoid incorrect splits.
+
+    The group must be returned intact.
+
+    Scenario: two cameras with differing areas (Front, Back) are bridged by a
+    shared triggering entity (e.g. a dual-zone sensor) so they land in the same
+    union-find group.  A third finding with area=Front would normally be ejected
+    if only the Back camera determined the reference area — but since both cameras
+    are present with different areas, ejection is skipped entirely.
+    """
+    shared_sensor = "sensor.dual_zone"
+
+    f_camera_front = _finding(
+        anomaly_id="cam_front",
+        rule_type="camera_entry_unsecured",
+        area="Front",
+        triggering_entities=["camera.front", shared_sensor],
+    )
+    f_camera_back = _finding(
+        anomaly_id="cam_back",
+        rule_type="camera_entry_unsecured",
+        area="Back",
+        triggering_entities=["camera.back", shared_sensor],
+    )
+    # This finding shares an area with the front camera.
+    # It would be incorrectly ejected if the back camera's area were chosen as
+    # the reference, so the multi-camera guard must prevent any ejection.
+    f_front_entry = _finding(
+        anomaly_id="entry_front",
+        rule_type="open_entry_while_away",
+        area="Front",
+        triggering_entities=["binary_sensor.front_door"],
+    )
+
+    correlator = SentinelCorrelator()
+    # f_camera_front and f_camera_back share shared_sensor → same group.
+    # f_front_entry shares area "Front" with f_camera_front → same group.
+    # All three are in one group; ejection must be skipped (len(camera_areas)==2).
+    result = correlator.correlate([f_camera_front, f_camera_back, f_front_entry])
+
+    assert len(result) == 1
+    compound = result[0]
+    assert isinstance(compound, CompoundFinding)
+    assert len(compound.constituent_findings) == 3

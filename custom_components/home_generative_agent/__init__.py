@@ -1743,7 +1743,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         entry_id=entry.entry_id,
         notify_service=options.get(CONF_NOTIFY_SERVICE),
     )
-    notifier = SentinelNotifier(hass, options, suppression, action_handler)
+    notifier = SentinelNotifier(
+        hass, options, suppression, action_handler, audit_store=audit_store
+    )
     notifier.start()
     explainer = None
     if options.get(CONF_EXPLAIN_ENABLED, RECOMMENDED_EXPLAIN_ENABLED):
