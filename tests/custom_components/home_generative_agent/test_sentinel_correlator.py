@@ -595,3 +595,53 @@ def test_camera_entry_unsecured_three_way_same_area_not_split() -> None:
     compound = result[0]
     assert isinstance(compound, CompoundFinding)
     assert len(compound.constituent_findings) == 3
+
+
+def test_camera_entry_unsecured_multi_camera_different_areas_skips_ejection() -> None:
+    """
+    When two camera_entry_unsecured findings have *different* areas in the same
+    group, _eject_camera_area_violations cannot determine a single reference area
+    and must skip ejection to avoid incorrect splits.
+
+    The group must be returned intact.
+
+    Scenario: two cameras with differing areas (Front, Back) are bridged by a
+    shared triggering entity (e.g. a dual-zone sensor) so they land in the same
+    union-find group.  A third finding with area=Front would normally be ejected
+    if only the Back camera determined the reference area — but since both cameras
+    are present with different areas, ejection is skipped entirely.
+    """
+    shared_sensor = "sensor.dual_zone"
+
+    f_camera_front = _finding(
+        anomaly_id="cam_front",
+        rule_type="camera_entry_unsecured",
+        area="Front",
+        triggering_entities=["camera.front", shared_sensor],
+    )
+    f_camera_back = _finding(
+        anomaly_id="cam_back",
+        rule_type="camera_entry_unsecured",
+        area="Back",
+        triggering_entities=["camera.back", shared_sensor],
+    )
+    # This finding shares an area with the front camera.
+    # It would be incorrectly ejected if the back camera's area were chosen as
+    # the reference, so the multi-camera guard must prevent any ejection.
+    f_front_entry = _finding(
+        anomaly_id="entry_front",
+        rule_type="open_entry_while_away",
+        area="Front",
+        triggering_entities=["binary_sensor.front_door"],
+    )
+
+    correlator = SentinelCorrelator()
+    # f_camera_front and f_camera_back share shared_sensor → same group.
+    # f_front_entry shares area "Front" with f_camera_front → same group.
+    # All three are in one group; ejection must be skipped (len(camera_areas)==2).
+    result = correlator.correlate([f_camera_front, f_camera_back, f_front_entry])
+
+    assert len(result) == 1
+    compound = result[0]
+    assert isinstance(compound, CompoundFinding)
+    assert len(compound.constituent_findings) == 3
