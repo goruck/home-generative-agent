@@ -32,19 +32,22 @@ from homeassistant.helpers.event import async_call_later, async_track_time_chang
 from homeassistant.util import dt as dt_util
 
 from custom_components.home_generative_agent.const import (
+    ACT_SNOOZE_24H,
+    ACT_SNOOZE_ALWAYS,
+    ACT_SNOOZE_CANCEL,
+    ACT_SNOOZE_CONFIRM,
+    ACTION_PREFIX,
     CONF_NOTIFY_SERVICE,
     CONF_SENTINEL_AREA_NOTIFY_MAP,
     CONF_SENTINEL_DAILY_DIGEST_ENABLED,
     CONF_SENTINEL_DAILY_DIGEST_TIME,
     RECOMMENDED_SENTINEL_DAILY_DIGEST_ENABLED,
     RECOMMENDED_SENTINEL_DAILY_DIGEST_TIME,
-)
-from custom_components.home_generative_agent.core.utils import extract_final
-from custom_components.home_generative_agent.sentinel.suppression import (
     SNOOZE_24H,
     SNOOZE_PERMANENT,
-    register_snooze,
 )
+from custom_components.home_generative_agent.core.utils import extract_final
+from custom_components.home_generative_agent.sentinel.suppression import register_snooze
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -62,8 +65,6 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
-# Action prefix shared with the existing ActionHandler.
-ACTION_PREFIX = "hga_sentinel_"
 MAX_MOBILE_MESSAGE_CHARS = 220
 
 _SEVERITY_INTERRUPT_LEVEL: dict[str, str] = {
@@ -85,18 +86,12 @@ _BATCH_FLUSH_DELAY_SECS = 30
 # Per-finding cooldown: suppress repeated notifications for the same anomaly.
 _FINDING_COOLDOWN_SECS = 1800  # 30 minutes
 
-# Snooze action verb tokens (without the trailing underscore+anomaly_id).
-_ACT_SNOOZE_24H = "snooze24h"
-_ACT_SNOOZE_ALWAYS = "snoozealways"
-_ACT_SNOOZE_CONFIRM = "snoozeconfirm"
-_ACT_SNOOZE_CANCEL = "snoozecancel"
-
 _SNOOZE_VERBS = frozenset(
     {
-        _ACT_SNOOZE_24H,
-        _ACT_SNOOZE_ALWAYS,
-        _ACT_SNOOZE_CONFIRM,
-        _ACT_SNOOZE_CANCEL,
+        ACT_SNOOZE_24H,
+        ACT_SNOOZE_ALWAYS,
+        ACT_SNOOZE_CONFIRM,
+        ACT_SNOOZE_CANCEL,
     }
 )
 
@@ -346,19 +341,19 @@ class SentinelNotifier:
             anomaly_id
         )
 
-        if verb == _ACT_SNOOZE_24H:
+        if verb == ACT_SNOOZE_24H:
             if finding:
                 register_snooze(self._suppression.state, finding.type, SNOOZE_24H, now)
                 await self._suppression.async_save()
                 LOGGER.info("Snooze 24 h registered for finding type %s.", finding.type)
 
-        elif verb == _ACT_SNOOZE_ALWAYS:
+        elif verb == ACT_SNOOZE_ALWAYS:
             # Guard: send confirmation notification; do NOT write snooze yet.
             if finding:
                 self._pending_always_snooze[anomaly_id] = finding.type
                 await self._send_always_confirmation(finding)
 
-        elif verb == _ACT_SNOOZE_CONFIRM:
+        elif verb == ACT_SNOOZE_CONFIRM:
             # User confirmed — write permanent snooze now.
             finding_type = self._pending_always_snooze.pop(anomaly_id, None)
             if finding_type:
@@ -375,7 +370,7 @@ class SentinelNotifier:
                     anomaly_id,
                 )
 
-        elif verb == _ACT_SNOOZE_CANCEL:
+        elif verb == ACT_SNOOZE_CANCEL:
             self._pending_always_snooze.pop(anomaly_id, None)
             LOGGER.debug("Permanent snooze cancelled for %s.", anomaly_id)
 
@@ -510,8 +505,8 @@ class SentinelNotifier:
             return
 
         friendly = _friendly_type(finding.type)
-        confirm_action = f"{ACTION_PREFIX}{_ACT_SNOOZE_CONFIRM}_{finding.anomaly_id}"
-        cancel_action = f"{ACTION_PREFIX}{_ACT_SNOOZE_CANCEL}_{finding.anomaly_id}"
+        confirm_action = f"{ACTION_PREFIX}{ACT_SNOOZE_CONFIRM}_{finding.anomaly_id}"
+        cancel_action = f"{ACTION_PREFIX}{ACT_SNOOZE_CANCEL}_{finding.anomaly_id}"
         domain, _, service = notify_service.partition(".")
         if not service:
             service = notify_service
@@ -573,11 +568,11 @@ def _build_actions(finding: AnomalyFinding) -> list[dict[str, Any]]:
                 "title": "False Alarm",
             },
             {
-                "action": f"{ACTION_PREFIX}{_ACT_SNOOZE_24H}_{finding.anomaly_id}",
+                "action": f"{ACTION_PREFIX}{ACT_SNOOZE_24H}_{finding.anomaly_id}",
                 "title": "Snooze 24 h",
             },
             {
-                "action": f"{ACTION_PREFIX}{_ACT_SNOOZE_ALWAYS}_{finding.anomaly_id}",
+                "action": f"{ACTION_PREFIX}{ACT_SNOOZE_ALWAYS}_{finding.anomaly_id}",
                 "title": "Snooze Always",
             },
         ]

@@ -12,14 +12,16 @@ from datetime import timedelta
 
 from homeassistant.util import dt as dt_util
 
+from custom_components.home_generative_agent.const import (
+    SNOOZE_7D,
+    SNOOZE_24H,
+    SNOOZE_PERMANENT,
+)
 from custom_components.home_generative_agent.sentinel.models import (
     AnomalyFinding,
     Severity,
 )
 from custom_components.home_generative_agent.sentinel.suppression import (
-    SNOOZE_7D,
-    SNOOZE_24H,
-    SNOOZE_PERMANENT,
     SUPPRESSION_REASON_NOT_SUPPRESSED,
     SUPPRESSION_REASON_PENDING_PROMPT,
     SUPPRESSION_REASON_PRESENCE_GRACE,

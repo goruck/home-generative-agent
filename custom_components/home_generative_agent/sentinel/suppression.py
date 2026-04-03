@@ -11,6 +11,12 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
+from custom_components.home_generative_agent.const import (
+    SNOOZE_7D,
+    SNOOZE_24H,
+    SNOOZE_PERMANENT,
+)
+
 if TYPE_CHECKING:
     from datetime import datetime
 
@@ -40,11 +46,6 @@ SUPPRESSION_REASON_USER_SNOOZE_24H = "user_snooze_24h"
 SUPPRESSION_REASON_USER_SNOOZE_7D = "user_snooze_7d"
 SUPPRESSION_REASON_USER_SNOOZE_PERMANENT = "user_snooze_permanent"
 PENDING_PROMPT_DEFAULT_TTL = timedelta(hours=4)
-
-# Snooze duration tokens
-SNOOZE_24H = "24h"
-SNOOZE_7D = "7d"
-SNOOZE_PERMANENT = "permanent"
 
 # Finding types considered presence-sensitive.  These are suppressed when a
 # person is within their departure/arrival grace window.

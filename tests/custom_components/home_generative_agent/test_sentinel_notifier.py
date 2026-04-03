@@ -10,22 +10,22 @@ import pytest
 
 import custom_components.home_generative_agent.sentinel.notifier as _notifier_mod
 from custom_components.home_generative_agent.const import (
+    ACT_SNOOZE_24H,
+    ACT_SNOOZE_ALWAYS,
+    ACT_SNOOZE_CANCEL,
+    ACT_SNOOZE_CONFIRM,
+    ACTION_PREFIX,
     CONF_NOTIFY_SERVICE,
     CONF_SENTINEL_AREA_NOTIFY_MAP,
+    SNOOZE_PERMANENT,
 )
 from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
 from custom_components.home_generative_agent.sentinel.notifier import (
-    _ACT_SNOOZE_24H,
-    _ACT_SNOOZE_ALWAYS,
-    _ACT_SNOOZE_CANCEL,
-    _ACT_SNOOZE_CONFIRM,
-    ACTION_PREFIX,
     SentinelNotifier,
     _friendly_type,
     _redact_if_sensitive,
 )
 from custom_components.home_generative_agent.sentinel.suppression import (
-    SNOOZE_PERMANENT,
     SuppressionState,
 )
 
@@ -210,7 +210,7 @@ async def test_snooze_always_sends_confirmation_not_snooze() -> None:
     finding = _finding(anomaly_id="abc123")
     action_handler.register_finding(finding)
 
-    await notifier._handle_snooze(_ACT_SNOOZE_ALWAYS, "abc123")
+    await notifier._handle_snooze(ACT_SNOOZE_ALWAYS, "abc123")
 
     # A confirmation notification must have been sent.
     assert len(hass.services.calls) == 1
@@ -236,10 +236,10 @@ async def test_snooze_confirm_writes_permanent_after_always() -> None:
     finding = _finding(anomaly_id="abc123")
     action_handler.register_finding(finding)
 
-    await notifier._handle_snooze(_ACT_SNOOZE_ALWAYS, "abc123")
+    await notifier._handle_snooze(ACT_SNOOZE_ALWAYS, "abc123")
     assert finding.type not in suppression.state.snoozed_until
 
-    await notifier._handle_snooze(_ACT_SNOOZE_CONFIRM, "abc123")
+    await notifier._handle_snooze(ACT_SNOOZE_CONFIRM, "abc123")
 
     assert finding.type in suppression.state.snoozed_until
     entry = suppression.state.snoozed_until[finding.type]
@@ -255,7 +255,7 @@ async def test_snooze_confirm_without_prior_always_is_noop() -> None:
     finding = _finding(anomaly_id="abc123")
     action_handler.register_finding(finding)
 
-    await notifier._handle_snooze(_ACT_SNOOZE_CONFIRM, "abc123")
+    await notifier._handle_snooze(ACT_SNOOZE_CONFIRM, "abc123")
 
     assert finding.type not in suppression.state.snoozed_until
     assert suppression.save_called is False
@@ -274,7 +274,7 @@ async def test_snooze_24h_writes_to_suppression() -> None:
     finding = _finding(anomaly_id="abc123", ftype="open_entry_while_away")
     action_handler.register_finding(finding)
 
-    await notifier._handle_snooze(_ACT_SNOOZE_24H, "abc123")
+    await notifier._handle_snooze(ACT_SNOOZE_24H, "abc123")
 
     assert finding.type in suppression.state.snoozed_until
     entry = suppression.state.snoozed_until[finding.type]
@@ -288,7 +288,7 @@ async def test_snooze_24h_unknown_finding_is_noop() -> None:
     """snooze24h for an unknown anomaly_id must not crash or write state."""
     notifier, _hass, suppression, _action_handler = _make_notifier()
 
-    await notifier._handle_snooze(_ACT_SNOOZE_24H, "nonexistent")
+    await notifier._handle_snooze(ACT_SNOOZE_24H, "nonexistent")
 
     assert suppression.state.snoozed_until == {}
     assert suppression.save_called is False
@@ -552,10 +552,10 @@ async def test_snooze_cancel_clears_pending_always() -> None:
     finding = _finding(anomaly_id="abc123")
     action_handler.register_finding(finding)
 
-    await notifier._handle_snooze(_ACT_SNOOZE_ALWAYS, "abc123")
+    await notifier._handle_snooze(ACT_SNOOZE_ALWAYS, "abc123")
     assert "abc123" in notifier._pending_always_snooze
 
-    await notifier._handle_snooze(_ACT_SNOOZE_CANCEL, "abc123")
+    await notifier._handle_snooze(ACT_SNOOZE_CANCEL, "abc123")
 
     assert "abc123" not in notifier._pending_always_snooze
     assert finding.type not in suppression.state.snoozed_until
@@ -569,7 +569,7 @@ async def test_snooze_cancel_without_prior_always_is_noop() -> None:
     finding = _finding(anomaly_id="abc123")
     action_handler.register_finding(finding)
 
-    await notifier._handle_snooze(_ACT_SNOOZE_CANCEL, "abc123")
+    await notifier._handle_snooze(ACT_SNOOZE_CANCEL, "abc123")
 
     assert "abc123" not in notifier._pending_always_snooze
     assert suppression.state.snoozed_until == {}
@@ -584,13 +584,13 @@ async def test_confirm_after_cancel_is_noop() -> None:
     finding = _finding(anomaly_id="abc123")
     action_handler.register_finding(finding)
 
-    await notifier._handle_snooze(_ACT_SNOOZE_ALWAYS, "abc123")
-    await notifier._handle_snooze(_ACT_SNOOZE_CANCEL, "abc123")
+    await notifier._handle_snooze(ACT_SNOOZE_ALWAYS, "abc123")
+    await notifier._handle_snooze(ACT_SNOOZE_CANCEL, "abc123")
 
     hass.services.calls.clear()
     suppression.save_called = False
 
-    await notifier._handle_snooze(_ACT_SNOOZE_CONFIRM, "abc123")
+    await notifier._handle_snooze(ACT_SNOOZE_CONFIRM, "abc123")
 
     assert finding.type not in suppression.state.snoozed_until
     assert suppression.save_called is False
@@ -610,7 +610,7 @@ async def test_event_driven_snooze_24h_via_handle_action_event() -> None:
     action_handler.register_finding(finding)
     notifier.start()
 
-    action_str = f"{ACTION_PREFIX}{_ACT_SNOOZE_24H}_abc123"
+    action_str = f"{ACTION_PREFIX}{ACT_SNOOZE_24H}_abc123"
     event = DummyEvent({"action": action_str})
     notifier._handle_action_event(event)  # type: ignore[arg-type]
 
@@ -629,7 +629,7 @@ async def test_event_driven_snooze_always_via_handle_action_event() -> None:
     action_handler.register_finding(finding)
     notifier.start()
 
-    action_str = f"{ACTION_PREFIX}{_ACT_SNOOZE_ALWAYS}_abc123"
+    action_str = f"{ACTION_PREFIX}{ACT_SNOOZE_ALWAYS}_abc123"
     event = DummyEvent({"action": action_str})
     notifier._handle_action_event(event)  # type: ignore[arg-type]
 
