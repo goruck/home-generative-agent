@@ -1,4 +1,3 @@
-# ruff: noqa: S101, ANN202, PERF401
 """Tests for ChatLog append helpers (Assist 2026.4+ thinking / tool rows)."""
 
 from __future__ import annotations

@@ -1,4 +1,3 @@
-# ruff: noqa: S101
 """Tests for ProposalStore.cleanup_unsupported_ttl (Bug 3 fix)."""
 
 from __future__ import annotations

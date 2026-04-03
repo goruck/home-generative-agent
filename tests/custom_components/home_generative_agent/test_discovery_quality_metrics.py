@@ -1,4 +1,3 @@
-# ruff: noqa: S101, PLC0415
 """
 Tests for discovery quality metrics (Item 2).
 

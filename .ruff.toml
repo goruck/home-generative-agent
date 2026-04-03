@@ -18,13 +18,32 @@ ignore = [
 [lint.per-file-ignores]
 "tests/**/*.py" = [
     "ANN001", # Allow untyped pytest fixture args
+    "ANN201", # Public fixtures/helpers often omit return types in tests
+    "ANN202", # Private test helpers often omit return annotations
     "ARG002", # Allow unused args in test doubles
+    "FBT001", # Boolean flags in test factories
+    "FBT002",
+    "PERF401", # Test list building clarity over extend micro-optimization
+    "PLR0913", # Parametrized test factories may exceed arg count
+    "PLC0415", # Tests often import inside functions to defer heavy deps / patch targets
+    "E402", # Module imports after pytest hooks / shared fixtures blocks
     "D102",   # Test helper methods do not require docstrings
     "D103",   # Test functions do not require docstrings
     "D107",   # Test helper initializers do not require docstrings
     "E501",   # Allow long assertion/import lines in tests
     "PLR2004", # Magic values in assertions are acceptable in tests
+    "S101",   # pytest uses assert (file-level noqa: S101 then trips RUF100 if also ignored here)
     "SLF001", # Tests can access private members for white-box behavior checks
+]
+"custom_components/home_generative_agent/flows/tool_manager_subentry_flow.py" = [
+    "BLE001", # Broad except when probing optional HA / flow internals
+    "D102",   # Config flow step handlers mirror HA patterns (title via strings.json)
+    "E501",   # Long schema lines
+    "PERF401", # Imperative menu building is clearer than extend chains here
+    "PLR0911", # Flow has multiple valid step exits
+    "PLR0912", # Config flow branching
+    "S110",   # Optional cleanup best-effort
+    "SLF001", # Uses ConfigSubentryFlow protected helpers like upstream flows
 ]
 
 [lint.flake8-pytest-style]

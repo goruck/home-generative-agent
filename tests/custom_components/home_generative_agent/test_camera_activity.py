@@ -1,4 +1,3 @@
-# ruff: noqa: S101
 """Tests for shared camera activity helpers."""
 
 from __future__ import annotations

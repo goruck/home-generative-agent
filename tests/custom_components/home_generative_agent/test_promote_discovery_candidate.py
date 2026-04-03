@@ -1,4 +1,3 @@
-# ruff: noqa: S101
 """Tests for promote_discovery_candidate service."""
 
 from __future__ import annotations

@@ -1,4 +1,3 @@
-# ruff: noqa: S101, PLR0913
 """Tests for sentinel rules."""
 
 from __future__ import annotations

@@ -1,4 +1,3 @@
-# ruff: noqa: S101
 """Tests for proposal template normalization."""
 
 from __future__ import annotations

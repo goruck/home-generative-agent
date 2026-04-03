@@ -1,4 +1,3 @@
-# ruff: noqa: S101
 """Unit tests for core/utils.py — openai_compatible validation helpers."""
 
 from __future__ import annotations

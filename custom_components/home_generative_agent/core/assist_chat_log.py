@@ -219,5 +219,5 @@ async def append_langgraph_turn_to_chat_log(  # noqa: PLR0913
         ha_tool_intent_responses=ha_tool_intent_responses,
     )
 
-    async for _ in chat_log.async_add_delta_content_stream(agent_id, stream):
+    async for _ in chat_log.async_add_delta_content_stream(agent_id, stream):  # type: ignore[arg-type]
         pass

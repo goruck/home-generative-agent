@@ -1,4 +1,3 @@
-# ruff: noqa: S101
 """Tests for SentinelTriageService — sentinel/triage.py (Issue #262)."""
 
 from __future__ import annotations
@@ -36,7 +35,7 @@ class MockLLM:
         self,
         response_json: dict[str, Any] | None = None,
         raise_exc: Exception | None = None,
-        timeout: bool = False,  # noqa: FBT001, FBT002
+        timeout: bool = False,
     ) -> None:
         self.response_json = response_json
         self.raise_exc = raise_exc
@@ -61,7 +60,7 @@ class MockLLM:
 def _finding(
     ftype: str = "open_entry_while_away",
     confidence: float = 0.8,
-    is_sensitive: bool = False,  # noqa: FBT001, FBT002
+    is_sensitive: bool = False,
     evidence: dict[str, Any] | None = None,
 ) -> AnomalyFinding:
     return AnomalyFinding(
@@ -76,7 +75,7 @@ def _finding(
     )
 
 
-def _snapshot(is_night: bool = False, anyone_home: bool = False) -> FullStateSnapshot:  # noqa: FBT001, FBT002
+def _snapshot(is_night: bool = False, anyone_home: bool = False) -> FullStateSnapshot:
     return cast(
         "FullStateSnapshot",
         {

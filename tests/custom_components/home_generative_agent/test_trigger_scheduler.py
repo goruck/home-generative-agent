@@ -1,4 +1,3 @@
-# ruff: noqa: S101
 """Tests for SentinelTriggerScheduler (issue #256)."""
 
 from __future__ import annotations

@@ -1,4 +1,3 @@
-# ruff: noqa: S101
 """Tests for the SentinelCorrelator and CompoundFinding."""
 
 from __future__ import annotations
@@ -22,14 +21,14 @@ from custom_components.home_generative_agent.sentinel.models import (
 # ---------------------------------------------------------------------------
 
 
-def _finding(  # noqa: PLR0913
+def _finding(
     anomaly_id: str = "id1",
     rule_type: str = "unlocked_lock_at_night",
     severity: Severity = "high",
     confidence: float = 0.8,
     triggering_entities: list[str] | None = None,
     area: str | None = "Front",
-    is_sensitive: bool = True,  # noqa: FBT001, FBT002
+    is_sensitive: bool = True,
 ) -> AnomalyFinding:
     """Build a minimal AnomalyFinding for testing."""
     entities = (

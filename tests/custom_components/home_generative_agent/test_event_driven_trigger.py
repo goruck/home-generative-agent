@@ -1,4 +1,3 @@
-# ruff: noqa: S101
 """Tests for event-driven triggering — Issue #257."""
 
 from __future__ import annotations

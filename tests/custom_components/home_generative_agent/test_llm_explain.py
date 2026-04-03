@@ -1,4 +1,3 @@
-# ruff: noqa: S101
 """Tests for compact Sentinel LLM explanation output."""
 
 from __future__ import annotations

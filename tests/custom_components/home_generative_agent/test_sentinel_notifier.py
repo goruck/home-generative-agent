@@ -1,4 +1,3 @@
-# ruff: noqa: S101, PLC0415
 """Tests for SentinelNotifier — sentinel/notifier.py (Issue #261)."""
 
 from __future__ import annotations
@@ -128,7 +127,7 @@ class DummyEvent:
 def _finding(
     anomaly_id: str = "abc123",
     ftype: str = "open_entry_while_away",
-    is_sensitive: bool = False,  # noqa: FBT001, FBT002
+    is_sensitive: bool = False,
     recognized_people: list[str] | None = None,
 ) -> AnomalyFinding:
     evidence: dict[str, Any] = {}

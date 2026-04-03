@@ -1,4 +1,3 @@
-# ruff: noqa: S101
 """Tests for VLM capability routing in camera image analysis."""
 
 from __future__ import annotations

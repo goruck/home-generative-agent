@@ -1,4 +1,3 @@
-# ruff: noqa: S101
 """Tests for snapshot schema validation."""
 
 from __future__ import annotations

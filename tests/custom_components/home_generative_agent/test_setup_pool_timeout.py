@@ -1,4 +1,3 @@
-# ruff: noqa: S101
 """Tests for setup-time pool failure handling."""
 
 from __future__ import annotations

@@ -1,4 +1,3 @@
-# ruff: noqa: S101
 """Tests for SentinelBaselineUpdater — sentinel/baseline.py (Issue #265)."""
 
 from __future__ import annotations
@@ -58,8 +57,8 @@ def _entity(
 
 def _snapshot(
     entities: list[dict[str, Any]] | None = None,
-    is_night: bool = False,  # noqa: FBT001, FBT002
-    anyone_home: bool = True,  # noqa: FBT001, FBT002
+    is_night: bool = False,
+    anyone_home: bool = True,
     now: str = "2025-01-01T10:00:00+00:00",
 ) -> FullStateSnapshot:
     return cast(
@@ -82,7 +81,7 @@ def _snapshot(
     )
 
 
-def _rule(  # noqa: PLR0913
+def _rule(
     rule_id: str = "baseline_deviation",
     template_id: str = "baseline_deviation",
     entity_id: str = "sensor.temperature",

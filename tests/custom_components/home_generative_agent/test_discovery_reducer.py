@@ -1,4 +1,3 @@
-# ruff: noqa: S101
 """Tests for discovery snapshot reducer."""
 
 from __future__ import annotations
@@ -38,7 +37,7 @@ def _make_snapshot(**overrides: Any) -> FullStateSnapshot:
     return validate_snapshot(base)
 
 
-def _make_entity(  # noqa: PLR0913
+def _make_entity(
     entity_id: str,
     domain: str,
     state: str,

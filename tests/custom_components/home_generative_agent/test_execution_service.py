@@ -1,4 +1,3 @@
-# ruff: noqa: S101
 """Tests for SentinelExecutionService guardrails — Issue #259."""
 
 from __future__ import annotations
@@ -39,7 +38,7 @@ from custom_components.home_generative_agent.snapshot.schema import (
 # ---------------------------------------------------------------------------
 
 
-def _make_finding(  # noqa: PLR0913
+def _make_finding(
     *,
     anomaly_id: str = "a1",
     severity: Severity = "medium",

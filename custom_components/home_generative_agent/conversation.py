@@ -79,7 +79,8 @@ def _apply_query_answer_when_no_ha_intent(
     *,
     ha_had_intent_response_from_tool: bool,
 ) -> None:
-    """Align ``response_type`` with HA defaults for pure Q&A turns.
+    """
+    Align ``response_type`` with HA defaults for pure Q&A turns.
 
     When no Home Assistant LLM tool returned ``IntentResponseDict``, core would leave
     the default ``ACTION_DONE``, which mislabels informational answers.

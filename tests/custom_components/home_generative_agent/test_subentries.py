@@ -1,4 +1,3 @@
-# ruff: noqa: S101
 """Tests for configuration subentries and resolution."""
 
 from __future__ import annotations
@@ -6,7 +5,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
-from homeassistant.const import CONF_API_KEY, CONF_HOST, CONF_PASSWORD, CONF_USERNAME
+from homeassistant.const import (
+    CONF_API_KEY,
+    CONF_HOST,
+    CONF_LLM_HASS_API,
+    CONF_PASSWORD,
+    CONF_USERNAME,
+)
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 import custom_components.home_generative_agent as hga_component
@@ -21,7 +26,6 @@ from custom_components.home_generative_agent.const import (
     CONF_EXPLAIN_ENABLED,
     CONF_FEATURE_MODEL,
     CONF_FEATURE_MODEL_NAME,
-    CONF_INSTRUCTIONS_CONFIG,
     CONF_INSTRUCTION_RAG_INTENT_WEIGHT,
     CONF_INSTRUCTION_RELEVANCE_THRESHOLD,
     CONF_INSTRUCTION_RETRIEVAL_LIMIT,
@@ -44,6 +48,7 @@ from custom_components.home_generative_agent.const import (
     CONF_VLM_PROVIDER,
     CONFIG_ENTRY_VERSION,
     DOMAIN,
+    LLM_HASS_API_NONE,
     MODEL_CATEGORY_SPECS,
     SUBENTRY_TYPE_FEATURE,
     SUBENTRY_TYPE_MODEL_PROVIDER,
@@ -70,6 +75,9 @@ from custom_components.home_generative_agent.flows.sentinel_subentry_flow import
 )
 from custom_components.home_generative_agent.flows.stt_provider_subentry_flow import (
     SttProviderSubentryFlow,
+)
+from custom_components.home_generative_agent.flows.tool_manager_subentry_flow import (
+    ToolManagerSubentryFlow,
 )
 
 if TYPE_CHECKING:
@@ -814,8 +822,6 @@ async def test_migration_v5_to_v6_converts_string_to_list(
     hass: HomeAssistant,
 ) -> None:
     """Migration should convert a single string LLM API to a list."""
-    from homeassistant.const import CONF_LLM_HASS_API
-
     entry = MockConfigEntry(
         domain=DOMAIN,
         title="Home Generative Agent",
@@ -837,9 +843,6 @@ async def test_migration_v5_to_v6_none_sentinel_removed(
     hass: HomeAssistant,
 ) -> None:
     """Migration should remove the LLM_HASS_API key if its value is 'none'."""
-    from homeassistant.const import CONF_LLM_HASS_API
-    from custom_components.home_generative_agent.const import LLM_HASS_API_NONE
-
     entry = MockConfigEntry(
         domain=DOMAIN,
         title="Home Generative Agent",
@@ -861,8 +864,6 @@ async def test_migration_v5_to_v6_missing_key_unchanged(
     hass: HomeAssistant,
 ) -> None:
     """Migration should leave an absent LLM_HASS_API key absent."""
-    from homeassistant.const import CONF_LLM_HASS_API
-
     entry = MockConfigEntry(
         domain=DOMAIN,
         title="Home Generative Agent",
@@ -882,8 +883,6 @@ async def test_migration_v5_to_v6_already_list_unchanged(
     hass: HomeAssistant,
 ) -> None:
     """Migration should not modify a value that is already a list."""
-    from homeassistant.const import CONF_LLM_HASS_API
-
     entry = MockConfigEntry(
         domain=DOMAIN,
         title="Home Generative Agent",
@@ -907,14 +906,10 @@ async def test_migration_v5_to_v6_already_list_unchanged(
 # tool_manager subentry tests
 # ---------------------------------------------------------------------------
 
-from custom_components.home_generative_agent.flows.tool_manager_subentry_flow import (
-    ToolManagerSubentryFlow,
-)
-
 
 @pytest.mark.asyncio
 async def test_tool_manager_subentry_flow_creates_subentry(
-    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+    hass: HomeAssistant,
 ) -> None:
     """Tool Manager flow creates a subentry with proper config keys."""
     entry = DummyEntry()
@@ -950,7 +945,8 @@ async def test_tool_manager_subentry_flow_creates_subentry(
         }
     )
     assert second.get("type") == "form"
-    assert second["description_placeholders"]["provider_name"] == "langchain_internal"
+    ph2 = second.get("description_placeholders") or {}
+    assert ph2["provider_name"] == "langchain_internal"
 
     # Save provider config
     third = await flow.async_step_provider_editor(
@@ -970,7 +966,8 @@ async def test_tool_manager_subentry_flow_creates_subentry(
         }
     )
     assert fourth.get("type") == "form"
-    assert fourth["description_placeholders"]["tool_name"] == "add_automation"
+    ph4 = fourth.get("description_placeholders") or {}
+    assert ph4["tool_name"] == "add_automation"
 
     # Save tool config
     fifth = await flow.async_step_tool_editor(
@@ -1042,7 +1039,8 @@ async def test_tool_manager_subentry_flow_instructions(
     step2 = await flow.async_step_instruction_name({"name": "Test Instruction"})
     assert step2.get("type") == "form"
     assert step2.get("step_id") == "instruction_editor"
-    assert step2["description_placeholders"]["instruction_name"] == "Test Instruction"
+    phs2 = step2.get("description_placeholders") or {}
+    assert phs2["instruction_name"] == "Test Instruction"
 
     # Save content
     step3 = await flow.async_step_instruction_editor(

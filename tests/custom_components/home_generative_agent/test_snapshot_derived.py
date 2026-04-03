@@ -1,4 +1,3 @@
-# ruff: noqa: S101
 """Tests for snapshot derived context helpers."""
 
 from __future__ import annotations

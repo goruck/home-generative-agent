@@ -1,4 +1,3 @@
-# ruff: noqa: S101
 """Regression tests for previously fixed issues."""
 
 from __future__ import annotations

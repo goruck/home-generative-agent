@@ -1,4 +1,3 @@
-# ruff: noqa: S101
 """Tests for discovery store behavior."""
 
 from __future__ import annotations

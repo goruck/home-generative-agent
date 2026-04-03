@@ -1,4 +1,3 @@
-# ruff: noqa: S101
 """Tests for deterministic discovery semantic keys."""
 
 from __future__ import annotations

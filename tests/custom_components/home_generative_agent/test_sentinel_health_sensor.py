@@ -1,4 +1,3 @@
-# ruff: noqa: S101
 """Tests for the Sentinel operational health sensor."""
 
 from __future__ import annotations

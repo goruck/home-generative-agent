@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import Mapping, Sequence
 from functools import partial
@@ -2333,12 +2334,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         supports_response=_SERVICE_RESPONSE_ONLY,
     )
 
-    # Pre-warm models to avoid lazy-loading imports in the event loop during the first interaction.
-    async def _pre_warm_model(m):
-        if m and hasattr(m, "bind_tools"):
+    # Pre-warm models: avoid lazy-loading in the event loop on first interaction.
+    async def _pre_warm_model(model: Any) -> None:
+        if model and hasattr(model, "bind_tools"):
             try:
-                await hass.async_add_executor_job(m.bind_tools, [])
-            except Exception:
+                await hass.async_add_executor_job(model.bind_tools, [])
+            except Exception:  # noqa: BLE001 — bind_tools failures vary by provider
                 LOGGER.debug(
                     "Failed to pre-warm model tools, it might not support bind_tools"
                 )
@@ -2362,17 +2363,15 @@ async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool
     if entry.runtime_data.notifier is not None:
         entry.runtime_data.notifier.stop()
 
-    # Explicitly clean up the store's background task if it exists.
-    # Langgraph's AsyncBatchedBaseStore (base of PostgresStore) uses a background _task
-    # that can trigger "Task was destroyed but it is pending!" if not properly awaited during unload.
+    # Clean up LangGraph store background task (AsyncBatchedBaseStore / PostgresStore).
+    # Avoids "Task was destroyed but it is pending!" if unload does not await the task.
     store = entry.runtime_data.store
-    if store and hasattr(store, "_task") and store._task:
+    task = getattr(store, "_task", None)
+    if store and task:
         LOGGER.debug("Stopping langgraph store background task")
-        store._task.cancel()
-        try:
-            await store._task
-        except asyncio.CancelledError:
-            pass
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
     if entry.runtime_data.pool is not None:
         await entry.runtime_data.pool.close()
@@ -2731,7 +2730,7 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
 
         current_version = 5
 
-    if current_version < 6:
+    if current_version < 6:  # noqa: PLR2004 — migration step target schema version
         LOGGER.info(
             "Migrating %s config entry %s -> v6",
             config_entry.domain,

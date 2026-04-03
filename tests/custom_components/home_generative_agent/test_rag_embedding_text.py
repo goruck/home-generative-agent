@@ -1,4 +1,3 @@
-# ruff: noqa: S101
 """Tests for RAG embedding strip and instruction fusion."""
 
 from __future__ import annotations

@@ -1,4 +1,3 @@
-# ruff: noqa: S101
 """Tests for the enroll person HTTP endpoint."""
 
 from __future__ import annotations

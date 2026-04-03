@@ -1,4 +1,3 @@
-# ruff: noqa: S101
 """Tests for Level 2 live auto-execute — Issue #264."""
 
 from __future__ import annotations

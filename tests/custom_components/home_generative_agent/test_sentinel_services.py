@@ -1,4 +1,3 @@
-# ruff: noqa: S101, FBT001, FBT002, PLR0913
 """Tests for Sentinel service handlers."""
 
 from __future__ import annotations

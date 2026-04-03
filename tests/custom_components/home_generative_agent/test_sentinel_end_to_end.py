@@ -1,4 +1,3 @@
-# ruff: noqa: S101
 """End-to-end sentinel test with synthetic snapshot."""
 
 from __future__ import annotations

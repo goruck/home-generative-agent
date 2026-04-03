@@ -1,4 +1,3 @@
-# ruff: noqa: S101
 """Tests for core/video_helpers.py text helpers."""
 
 from __future__ import annotations

@@ -1,4 +1,3 @@
-# ruff: noqa: S101
 """Tests for Assist reasoning trace builder (ChatLog thinking_content source)."""
 
 from __future__ import annotations

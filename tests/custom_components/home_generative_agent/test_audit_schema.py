@@ -1,4 +1,3 @@
-# ruff: noqa: S101
 """Tests for audit record schema (issue #254): versioned fields and migration."""
 
 from __future__ import annotations

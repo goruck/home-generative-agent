@@ -1,4 +1,3 @@
-# ruff: noqa: S101
 """Tests for Sentinel mobile action handling."""
 
 from __future__ import annotations

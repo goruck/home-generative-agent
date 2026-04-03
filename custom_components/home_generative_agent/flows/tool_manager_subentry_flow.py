@@ -26,7 +26,7 @@ from homeassistant.helpers.selector import (
     TextSelector,
 )
 
-from ..const import (
+from ..const import (  # noqa: TID252
     CONF_INSTRUCTION_RAG_INTENT_WEIGHT,
     CONF_INSTRUCTION_RELEVANCE_THRESHOLD,
     CONF_INSTRUCTION_RETRIEVAL_LIMIT,

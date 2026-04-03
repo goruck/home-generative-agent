@@ -1,8 +1,9 @@
 """Tests for MultiLLMAPI wrapper."""
 
+from unittest.mock import AsyncMock
+
 import pytest
 import voluptuous as vol
-from unittest.mock import AsyncMock
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import llm
 

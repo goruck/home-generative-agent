@@ -1,4 +1,3 @@
-# ruff: noqa: S101
 """Tests for sentinel_set_autonomy_level service and engine autonomy-level logic."""
 
 from __future__ import annotations

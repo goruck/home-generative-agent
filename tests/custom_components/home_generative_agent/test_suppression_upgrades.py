@@ -1,4 +1,3 @@
-# ruff: noqa: S101
 """
 Tests for suppression upgrades — Issue #260.
 
@@ -550,9 +549,9 @@ def test_migrate_v2_to_v3_is_idempotent() -> None:
 
 def test_migrate_v2_logs_warning_for_dropped_keys() -> None:
     """v2→v3 migration must emit a warning for each dropped friendly-name key."""
-    from unittest.mock import patch  # noqa: PLC0415
+    from unittest.mock import patch
 
-    import custom_components.home_generative_agent.sentinel.suppression as _mod  # noqa: PLC0415
+    import custom_components.home_generative_agent.sentinel.suppression as _mod
 
     data = _v2_data_with_friendly_name_keys()
     with patch.object(_mod.LOGGER, "warning") as mock_warn:

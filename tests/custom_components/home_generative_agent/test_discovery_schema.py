@@ -1,4 +1,3 @@
-# ruff: noqa: S101
 """Tests for discovery output schema."""
 
 from __future__ import annotations

@@ -1,4 +1,3 @@
-# ruff: noqa: S101
 """Tests for dynamic rules evaluation and registry."""
 
 from __future__ import annotations

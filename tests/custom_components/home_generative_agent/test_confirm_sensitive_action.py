@@ -1,4 +1,3 @@
-# ruff: noqa: S101
 """Unit tests for confirm_sensitive_action."""
 
 from __future__ import annotations

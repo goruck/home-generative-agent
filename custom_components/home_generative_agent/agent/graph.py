@@ -15,6 +15,7 @@ from typing import (
     Annotated,
     Any,
     Literal,
+    cast,
 )
 
 import langchain_core.utils.function_calling  # noqa: F401  # Pre-warm tool conversion logic
@@ -876,8 +877,9 @@ async def _call_model(  # noqa: PLR0912, PLR0915
         )
     LOGGER.debug("AI response: %s", ai_response)
 
-    metadata: dict[str, str] = (
-        raw_response.usage_metadata if hasattr(raw_response, "usage_metadata") else {}
+    metadata: dict[str, Any] = cast(
+        "dict[str, Any]",
+        getattr(raw_response, "usage_metadata", None) or {},
     )
     LOGGER.debug("Token counts from metadata: %s", metadata)
 
