@@ -439,6 +439,11 @@ class SentinelNotifier:
     @callback
     def _async_send_daily_digest(self, _now: Any = None) -> None:
         """Schedule the async daily digest coroutine from the time-change callback."""
+        if self._digest_task is not None and not self._digest_task.done():
+            LOGGER.debug(
+                "Daily digest already in progress; skipping duplicate trigger."
+            )
+            return
         self._digest_task = self._hass.async_create_task(self._async_run_daily_digest())
 
     async def _async_run_daily_digest(self) -> None:

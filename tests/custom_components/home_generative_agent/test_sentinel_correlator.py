@@ -599,6 +599,8 @@ def test_camera_entry_unsecured_three_way_same_area_not_split() -> None:
 
 def test_camera_entry_unsecured_multi_camera_different_areas_skips_ejection() -> None:
     """
+    Multi-camera group with different areas skips spatial ejection entirely.
+
     When two camera_entry_unsecured findings have *different* areas in the same
     group, _eject_camera_area_violations cannot determine a single reference area
     and must skip ejection to avoid incorrect splits.

@@ -312,8 +312,11 @@ class SentinelDiscoveryEngine:
             # 'derived.' have no concrete entity evidence and can never be
             # promoted to a rule.  Gate BEFORE the dedup check so these do not
             # pollute the dedup exclusion set.
-            if candidate.get("evidence_paths") and all(
-                p.startswith("derived.") for p in candidate["evidence_paths"]
+            evidence_paths = candidate.get("evidence_paths")
+            if (
+                evidence_paths is not None
+                and len(evidence_paths) > 0
+                and all(p.startswith("derived.") for p in evidence_paths)
             ):
                 dropped.append(
                     {
