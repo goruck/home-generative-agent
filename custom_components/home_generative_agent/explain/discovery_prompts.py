@@ -30,5 +30,9 @@ USER_PROMPT_TEMPLATE = (
     "Each candidate MUST include no more than 8 evidence_paths.\n"
     "BASELINE HINT: derived.baseline_ready_entities lists entity_ids with enough "
     "historical data for statistical anomaly detection. Prefer baseline-based "
-    "candidates for entities in this list (pattern: deviation from normal)."
+    "candidates for entities in this list (pattern: deviation from normal).\n"
+    "ENTITY REQUIREMENT: if a candidate concerns specific entities, at least one "
+    "evidence_path MUST reference a concrete entity_id "
+    "(e.g. entities[entity_ids contains lock.front_door].state). "
+    "Omit the candidate entirely if no concrete entity_id can be cited."
 )

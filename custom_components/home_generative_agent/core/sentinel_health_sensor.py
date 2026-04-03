@@ -21,6 +21,9 @@ if TYPE_CHECKING:
     from custom_components.home_generative_agent.sentinel.baseline import (
         SentinelBaselineUpdater,
     )
+    from custom_components.home_generative_agent.sentinel.discovery_engine import (
+        SentinelDiscoveryEngine,
+    )
     from custom_components.home_generative_agent.sentinel.engine import SentinelEngine
 
 LOGGER = logging.getLogger(__name__)
@@ -156,6 +159,7 @@ class SentinelHealthSensor(SensorEntity):
         sentinel: SentinelEngine | None,
         entry_id: str,
         baseline_updater: SentinelBaselineUpdater | None = None,
+        discovery_engine: SentinelDiscoveryEngine | None = None,
     ) -> None:
         """Initialize the sentinel health sensor."""
         self.hass = hass
@@ -163,6 +167,7 @@ class SentinelHealthSensor(SensorEntity):
         self._audit_store = audit_store
         self._sentinel = sentinel
         self._baseline_updater = baseline_updater
+        self._discovery_engine = discovery_engine
         self._attr_name = "Sentinel Health"
         self._attr_unique_id = f"sentinel_health::{entry_id}"
         self._attr_native_value = "ok"
@@ -219,6 +224,21 @@ class SentinelHealthSensor(SensorEntity):
         scheduler_stats: dict[str, Any] = run_stats.get("scheduler", {})
         for key, val in scheduler_stats.items():
             self._attrs[key] = val
+
+        # Discovery cycle stats from the most recent discovery run.
+        if self._discovery_engine is not None:
+            disc_stats = self._discovery_engine.discovery_cycle_stats
+            for key, val in disc_stats.items():
+                self._attrs[f"discovery_{key}"] = val
+        else:
+            for key in (
+                "candidates_generated",
+                "candidates_novel",
+                "candidates_deduplicated",
+                "proposals_promoted",
+                "unsupported_ttl_expired",
+            ):
+                self._attrs[f"discovery_{key}"] = None
 
         # Baseline health statistics.
         await self._refresh_baseline_attrs()
