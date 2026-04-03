@@ -481,6 +481,64 @@ def test_camera_entry_unsecured_cross_area_not_correlated() -> None:
     assert all(isinstance(r, AnomalyFinding) for r in result)
 
 
+def test_camera_entry_unsecured_not_contaminated_by_transitive_bridge() -> None:
+    """
+    Three findings must NOT all merge when the camera bridges an off-area entry.
+
+    Scenario: camera_entry_unsecured (Front) + unlocked_lock_at_night (Front)
+    + open_entry_while_away (Garage).
+
+    Scenario:
+      camera_entry_unsecured (Front) + unlocked_lock_at_night (Front)
+      + open_entry_while_away (Garage)
+
+    Without the post-grouping eject pass:
+      - camera + lock share area 'Front'  → unioned (Rule 1)
+      - lock + open_entry are a complementary pair (no area guard) → unioned
+      - Result: one compound implying the Front camera saw a Garage entry event
+
+    With the fix:
+      - camera + lock are still grouped (shared area Front)
+      - open_entry_while_away (Garage) is ejected as a singleton
+    """
+    f_camera = _finding(
+        anomaly_id="cam1",
+        rule_type="camera_entry_unsecured",
+        area="Front",
+        triggering_entities=["camera.front"],
+    )
+    f_lock = _finding(
+        anomaly_id="lock1",
+        rule_type="unlocked_lock_at_night",
+        area="Front",
+        triggering_entities=["lock.front_door"],
+    )
+    f_away = _finding(
+        anomaly_id="away1",
+        rule_type="open_entry_while_away",
+        area="Garage",
+        triggering_entities=["binary_sensor.garage_door"],
+    )
+
+    correlator = SentinelCorrelator()
+    result = correlator.correlate([f_camera, f_lock, f_away])
+
+    assert len(result) == 2  # camera+lock compound + Garage singleton
+
+    compound = next((r for r in result if isinstance(r, CompoundFinding)), None)
+    singleton = next((r for r in result if isinstance(r, AnomalyFinding)), None)
+
+    assert compound is not None, "Expected a CompoundFinding for Front area"
+    assert singleton is not None, "Expected a singleton for Garage area"
+
+    compound_ids = {f.anomaly_id for f in compound.constituent_findings}
+    assert "cam1" in compound_ids
+    assert "lock1" in compound_ids
+    assert "away1" not in compound_ids
+
+    assert singleton.anomaly_id == "away1"
+
+
 def test_camera_entry_unsecured_same_area_still_correlated() -> None:
     """
     camera_entry_unsecured and unlocked_lock_at_night in the SAME area still correlate.
@@ -506,3 +564,38 @@ def test_camera_entry_unsecured_same_area_still_correlated() -> None:
 
     assert len(result) == 1
     assert isinstance(result[0], CompoundFinding)
+
+
+def test_camera_entry_unsecured_three_way_same_area_not_split() -> None:
+    """
+    Three findings all in the same area must still group into one CompoundFinding.
+
+    Regression guard: the transitive-contamination eject pass must not split
+    groups where every finding shares the camera's area.
+    """
+    f_camera = _finding(
+        anomaly_id="cam1",
+        rule_type="camera_entry_unsecured",
+        area="Front",
+        triggering_entities=["camera.front"],
+    )
+    f_lock = _finding(
+        anomaly_id="lock1",
+        rule_type="unlocked_lock_at_night",
+        area="Front",
+        triggering_entities=["lock.front_door"],
+    )
+    f_away = _finding(
+        anomaly_id="away1",
+        rule_type="open_entry_while_away",
+        area="Front",
+        triggering_entities=["binary_sensor.front_door"],
+    )
+
+    correlator = SentinelCorrelator()
+    result = correlator.correlate([f_camera, f_lock, f_away])
+
+    assert len(result) == 1
+    compound = result[0]
+    assert isinstance(compound, CompoundFinding)
+    assert len(compound.constituent_findings) == 3
