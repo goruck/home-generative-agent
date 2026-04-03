@@ -9,13 +9,16 @@ from homeassistant.util import dt as dt_util
 
 from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
 from custom_components.home_generative_agent.sentinel.suppression import (
+    MAX_COOLDOWN_MULTIPLIER,
     PENDING_PROMPT_DEFAULT_TTL,
     SUPPRESSION_REASON_ENTITY_COOLDOWN,
     SUPPRESSION_REASON_NOT_SUPPRESSED,
     SUPPRESSION_REASON_PENDING_PROMPT,
     SUPPRESSION_REASON_TYPE_COOLDOWN,
     SuppressionState,
+    _migrate_suppression_state,
     purge_expired_prompts,
+    record_cooldown_feedback,
     register_finding,
     register_prompt,
     resolve_prompt,
@@ -173,3 +176,105 @@ def test_entity_cooldown_suppresses() -> None:
     assert decision.suppress
     assert decision.reason_code == SUPPRESSION_REASON_ENTITY_COOLDOWN
     assert decision.context["entity_id"] == "lock.front"
+
+
+# ---------------------------------------------------------------------------
+# Learned cooldown multipliers (v4)
+# ---------------------------------------------------------------------------
+
+
+def test_record_cooldown_feedback_increments_multiplier() -> None:
+    state = SuppressionState()
+    new_val = record_cooldown_feedback(state, "lock.front")
+    assert new_val == 2
+    assert state.learned_cooldown_multipliers["lock.front"] == 2
+
+
+def test_record_cooldown_feedback_caps_at_max() -> None:
+    state = SuppressionState(
+        learned_cooldown_multipliers={"lock.front": MAX_COOLDOWN_MULTIPLIER}
+    )
+    new_val = record_cooldown_feedback(state, "lock.front")
+    assert new_val == MAX_COOLDOWN_MULTIPLIER
+    assert state.learned_cooldown_multipliers["lock.front"] == MAX_COOLDOWN_MULTIPLIER
+
+
+def test_entity_cooldown_respects_learned_multiplier() -> None:
+    """Multiplier=2 doubles the effective cooldown window."""
+    now = dt_util.utcnow()
+    state = SuppressionState(
+        last_by_entity={"lock.front": {"rule": dt_util.as_utc(now).isoformat()}},
+        learned_cooldown_multipliers={"lock.front": 2},
+    )
+    finding = _finding()
+    base_cooldown = timedelta(minutes=5)
+
+    # At 1x + 1 min (6 min after last) -> still within 2x window (10 min) -> suppressed.
+    decision = should_suppress(
+        state,
+        finding,
+        now + timedelta(minutes=6),
+        cooldown_type=timedelta(minutes=0),
+        cooldown_entity=base_cooldown,
+    )
+    assert decision.suppress
+    assert decision.reason_code == SUPPRESSION_REASON_ENTITY_COOLDOWN
+    assert decision.context["multiplier"] == 2
+
+    # At 2x + 1 min (11 min after last) -> outside 2x window -> not suppressed.
+    decision2 = should_suppress(
+        state,
+        finding,
+        now + timedelta(minutes=11),
+        cooldown_type=timedelta(minutes=0),
+        cooldown_entity=base_cooldown,
+    )
+    assert not decision2.suppress
+
+
+def test_entity_cooldown_multiplier_context_field() -> None:
+    """SuppressionDecision.context always carries the 'multiplier' key."""
+    now = dt_util.utcnow()
+    state = SuppressionState(
+        last_by_entity={"lock.front": {"rule": dt_util.as_utc(now).isoformat()}}
+    )
+    finding = _finding()
+
+    decision = should_suppress(
+        state,
+        finding,
+        now + timedelta(minutes=1),
+        cooldown_type=timedelta(minutes=0),
+        cooldown_entity=timedelta(minutes=5),
+    )
+    assert decision.suppress
+    assert "multiplier" in decision.context
+    assert decision.context["multiplier"] == 1  # no feedback -> default 1x
+
+
+def test_migration_v3_to_v4_adds_empty_multipliers() -> None:
+    """v3 state gains an empty learned_cooldown_multipliers dict on migration."""
+    v3_data: dict = {
+        "version": 3,
+        "last_by_type": {},
+        "last_by_entity": {},
+        "pending_prompts": {},
+        "snoozed_until": {},
+        "presence_grace": {},
+        "quiet_hours": None,
+    }
+    migrated = _migrate_suppression_state(v3_data)
+    assert migrated["version"] == 4
+    assert migrated["learned_cooldown_multipliers"] == {}
+
+
+def test_from_dict_round_trip_preserves_multipliers() -> None:
+    """as_dict / from_dict round-trip keeps learned_cooldown_multipliers intact."""
+    state = SuppressionState(
+        learned_cooldown_multipliers={"lock.front": 3, "sensor.motion": 1}
+    )
+    restored = SuppressionState.from_dict(state.as_dict())
+    assert restored.learned_cooldown_multipliers == {
+        "lock.front": 3,
+        "sensor.motion": 1,
+    }

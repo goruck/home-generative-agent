@@ -7,8 +7,8 @@ from typing import Any
 
 import pytest
 
+from custom_components.home_generative_agent.const import ACTION_PREFIX
 from custom_components.home_generative_agent.notify.actions import (
-    ACTION_PREFIX,
     EVENT_SENTINEL_ASK_REQUESTED,
     EVENT_SENTINEL_EXECUTE_REQUESTED,
     ActionHandler,

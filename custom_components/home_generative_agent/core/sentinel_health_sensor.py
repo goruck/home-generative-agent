@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 from homeassistant.components.sensor import SensorEntity, SensorEntityDescription
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.util import dt as dt_util
 
 from ..const import (  # noqa: TID252
     CONF_SENTINEL_ENABLED,
@@ -20,6 +21,9 @@ if TYPE_CHECKING:
     from custom_components.home_generative_agent.audit.store import AuditStore
     from custom_components.home_generative_agent.sentinel.baseline import (
         SentinelBaselineUpdater,
+    )
+    from custom_components.home_generative_agent.sentinel.discovery_engine import (
+        SentinelDiscoveryEngine,
     )
     from custom_components.home_generative_agent.sentinel.engine import SentinelEngine
 
@@ -44,6 +48,9 @@ _AUTO_EXEC_TERMINAL: frozenset[str] = frozenset(
 # Both are treated as successful for action_success_rate purposes.
 _USER_EXEC_SUCCESS: frozenset[str] = frozenset({"agent_called", "event_fired"})
 _USER_EXEC_FAILURE: frozenset[str] = frozenset({"blocked", "missing_finding"})
+
+# Known trigger source keys exposed in the 24-hour breakdown attribute.
+_TRIGGER_SOURCE_KEYS: tuple[str, ...] = ("poll", "event", "on_demand")
 
 
 def _compute_kpis(records: list[dict[str, Any]]) -> dict[str, Any]:  # noqa: PLR0912, PLR0915
@@ -105,14 +112,11 @@ def _compute_kpis(records: list[dict[str, Any]]) -> dict[str, Any]:  # noqa: PLR
         if notified:
             notified_at_str = r.get("notification", {}).get("notified_at")
             if notified_at_str:
-                try:
-                    notified_dt = datetime.fromisoformat(notified_at_str)
-                    if notified_dt >= cutoff_14d:
-                        fp_14d_total += 1
-                        if user_response and user_response.get("false_positive"):
-                            fp_14d_count += 1
-                except (ValueError, TypeError):
-                    pass
+                notified_dt = dt_util.parse_datetime(str(notified_at_str))
+                if notified_dt is not None and notified_dt >= cutoff_14d:
+                    fp_14d_total += 1
+                    if user_response and user_response.get("false_positive"):
+                        fp_14d_count += 1
 
     notified_total = sum(
         1 for r in records if r.get("suppression_reason_code") == "not_suppressed"
@@ -141,6 +145,35 @@ def _compute_kpis(records: list[dict[str, Any]]) -> dict[str, Any]:  # noqa: PLR
     }
 
 
+def _compute_trigger_source_breakdown(
+    records: list[dict[str, Any]],
+) -> dict[str, int]:
+    """
+    Return trigger-source counts for findings notified in the last 24 hours.
+
+    Only records whose ``notification.notified_at`` timestamp falls within the
+    rolling 24-hour window are included.  Known trigger sources
+    (``_TRIGGER_SOURCE_KEYS``) are always present (value = 0 when no matching
+    records exist).  Unknown trigger sources are added dynamically, so the
+    returned dict may contain extra keys.
+    """
+    cutoff_24h = datetime.now(UTC) - timedelta(hours=24)
+    counts: dict[str, int] = dict.fromkeys(_TRIGGER_SOURCE_KEYS, 0)
+    for r in records:
+        notified_at_str = r.get("notification", {}).get("notified_at")
+        if not notified_at_str:
+            continue
+        notified_dt = dt_util.parse_datetime(str(notified_at_str))
+        if notified_dt is None:
+            continue
+        if notified_dt < cutoff_24h:
+            continue
+        trigger = r.get("trigger_source")
+        if trigger:
+            counts[trigger] = counts.get(trigger, 0) + 1
+    return counts
+
+
 class SentinelHealthSensor(SensorEntity):
     """Sentinel operational health sensor exposing KPIs as attributes."""
 
@@ -156,6 +189,7 @@ class SentinelHealthSensor(SensorEntity):
         sentinel: SentinelEngine | None,
         entry_id: str,
         baseline_updater: SentinelBaselineUpdater | None = None,
+        discovery_engine: SentinelDiscoveryEngine | None = None,
     ) -> None:
         """Initialize the sentinel health sensor."""
         self.hass = hass
@@ -163,6 +197,7 @@ class SentinelHealthSensor(SensorEntity):
         self._audit_store = audit_store
         self._sentinel = sentinel
         self._baseline_updater = baseline_updater
+        self._discovery_engine = discovery_engine
         self._attr_name = "Sentinel Health"
         self._attr_unique_id = f"sentinel_health::{entry_id}"
         self._attr_native_value = "ok"
@@ -203,6 +238,13 @@ class SentinelHealthSensor(SensorEntity):
         kpis = _compute_kpis(records)
         self._attrs.update(kpis)
 
+        # 24-hour trigger-source breakdown (separate from the all-time stats above).
+        self._attrs["trigger_source_breakdown"] = (
+            _compute_trigger_source_breakdown(records)
+            if self._audit_store is not None
+            else None
+        )
+
         # Merge run-timing telemetry from the engine.
         run_stats: dict[str, Any] = (
             self._sentinel.run_stats if self._sentinel is not None else {}
@@ -219,6 +261,21 @@ class SentinelHealthSensor(SensorEntity):
         scheduler_stats: dict[str, Any] = run_stats.get("scheduler", {})
         for key, val in scheduler_stats.items():
             self._attrs[key] = val
+
+        # Discovery cycle stats from the most recent discovery run.
+        if self._discovery_engine is not None:
+            disc_stats = self._discovery_engine.discovery_cycle_stats
+            for key, val in disc_stats.items():
+                self._attrs[f"discovery_{key}"] = val
+        else:
+            for key in (
+                "candidates_generated",
+                "candidates_novel",
+                "candidates_deduplicated",
+                "proposals_promoted",
+                "unsupported_ttl_expired",
+            ):
+                self._attrs[f"discovery_{key}"] = None
 
         # Baseline health statistics.
         await self._refresh_baseline_attrs()

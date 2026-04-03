@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 
-from custom_components.home_generative_agent.const import DOMAIN
+from custom_components.home_generative_agent.const import ACTION_PREFIX, DOMAIN
 from custom_components.home_generative_agent.core.utils import extract_final
 from custom_components.home_generative_agent.sentinel.suppression import (
     SuppressionManager,
@@ -23,7 +23,6 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
-ACTION_PREFIX = "hga_sentinel_"
 ACTION_ID_PARTS = 2
 EVENT_SENTINEL_EXECUTE_REQUESTED = "hga_sentinel_execute_requested"
 EVENT_SENTINEL_ASK_REQUESTED = "hga_sentinel_ask_requested"

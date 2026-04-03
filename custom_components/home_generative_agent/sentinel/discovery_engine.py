@@ -83,6 +83,7 @@ class SentinelDiscoveryEngine:
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
         self._run_lock = asyncio.Lock()
+        self._discovery_cycle_stats: dict[str, int] = {}
 
     def start(self) -> None:
         """Start the discovery loop."""
@@ -125,7 +126,19 @@ class SentinelDiscoveryEngine:
         async with self._run_lock:
             await self._run_once()
 
+    @property
+    def discovery_cycle_stats(self) -> dict[str, int]:
+        """Return stats from the most recent discovery cycle."""
+        return dict(self._discovery_cycle_stats)
+
     async def _run_once(self) -> None:  # noqa: PLR0911, PLR0912, PLR0915
+        self._discovery_cycle_stats = {
+            "candidates_generated": 0,
+            "candidates_novel": 0,
+            "candidates_deduplicated": 0,
+            "proposals_promoted": 0,
+            "unsupported_ttl_expired": 0,
+        }
         if self._model is None:
             LOGGER.debug("Discovery skipped: no model available.")
             return
@@ -155,6 +168,7 @@ class SentinelDiscoveryEngine:
                         "Discovery TTL cleanup: expired %d unsupported proposal(s).",
                         expired,
                     )
+                    self._discovery_cycle_stats["unsupported_ttl_expired"] += expired
             except Exception:  # noqa: BLE001
                 LOGGER.warning(
                     "Discovery TTL cleanup failed; continuing.", exc_info=True
@@ -202,9 +216,14 @@ class SentinelDiscoveryEngine:
             LOGGER.warning("Discovery output candidates were not a list.")
             return
         candidates = [item for item in raw_candidates if isinstance(item, dict)]
+        self._discovery_cycle_stats["candidates_generated"] = len(candidates)
         filtered, filtered_candidates = self._filter_novel_candidates(
             candidates,
             existing_keys,
+        )
+        self._discovery_cycle_stats["candidates_novel"] = len(filtered)
+        self._discovery_cycle_stats["candidates_deduplicated"] = len(
+            filtered_candidates
         )
         validated["candidates"] = filtered
         validated["filtered_candidates"] = filtered_candidates
@@ -288,6 +307,29 @@ class SentinelDiscoveryEngine:
             # Bug 2 fix: null-key candidates (unknown subject/predicate) fall
             # back to a title+summary hash so they are still deduplicated.
             identity_key = key or _candidate_identity_hash(candidate)
+
+            # Hard filter: candidates whose every evidence_path starts with
+            # 'derived.' have no concrete entity evidence and can never be
+            # promoted to a rule.  Gate BEFORE the dedup check so these do not
+            # pollute the dedup exclusion set.
+            evidence_paths = candidate.get("evidence_paths")
+            if (
+                evidence_paths is not None
+                and len(evidence_paths) > 0
+                and all(p.startswith("derived.") for p in evidence_paths)
+            ):
+                dropped.append(
+                    {
+                        "candidate_id": str(candidate.get("candidate_id", "")),
+                        "dedupe_reason": "derived_only_paths",
+                    }
+                )
+                LOGGER.debug(
+                    "Discovery dropped candidate %s (derived_only_paths).",
+                    candidate.get("candidate_id"),
+                )
+                continue
+
             dedupe_reason: str | None = None
             if identity_key in existing_keys:
                 dedupe_reason = (

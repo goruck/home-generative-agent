@@ -15,6 +15,8 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.util import dt as dt_util
 
 from custom_components.home_generative_agent.const import (
+    ACTION_POLICY_AUTO_EXECUTE,
+    ACTION_POLICY_BLOCKED,
     CONF_EXPLAIN_ENABLED,
     CONF_SENTINEL_AUTO_EXEC_CANARY_MODE,
     CONF_SENTINEL_AUTONOMY_LEVEL,
@@ -47,8 +49,6 @@ from custom_components.home_generative_agent.snapshot.builder import (
 from .correlator import SentinelCorrelator
 from .dynamic_rules import evaluate_dynamic_rules
 from .execution import (
-    ACTION_POLICY_AUTO_EXECUTE,
-    ACTION_POLICY_BLOCKED,
     SentinelExecutionService,
 )
 from .models import AnomalyFinding, CompoundFinding

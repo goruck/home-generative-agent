@@ -226,6 +226,12 @@ RECOMMENDED_SENTINEL_BASELINE_MIN_SAMPLES: int = 20
 RECOMMENDED_SENTINEL_BASELINE_MAX_SAMPLES: int = 500
 RECOMMENDED_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT: float = 30.0
 
+# ---- Sentinel daily digest notification ----
+CONF_SENTINEL_DAILY_DIGEST_ENABLED = "sentinel_daily_digest_enabled"
+CONF_SENTINEL_DAILY_DIGEST_TIME = "sentinel_daily_digest_time"
+RECOMMENDED_SENTINEL_DAILY_DIGEST_ENABLED: bool = False
+RECOMMENDED_SENTINEL_DAILY_DIGEST_TIME: str = "08:00"
+
 # ---- Feature definitions ----
 DEFAULT_FEATURE_TYPES: tuple[str, ...] = (
     "conversation",
@@ -838,3 +844,31 @@ MODEL_CATEGORY_SPECS: dict[str, dict[str, Any]] = {
         },
     },
 }
+
+# ---- Sentinel action codes ----
+# Centralised here so LLM-generated code paths cannot silently hardcode wrong values.
+
+# Notification action prefix used to namespaced HA mobile-app actions.
+ACTION_PREFIX = "hga_sentinel_"
+
+# Snooze verb tokens embedded in HA action identifiers.
+ACT_SNOOZE_24H = "snooze24h"
+ACT_SNOOZE_ALWAYS = "snoozealways"
+ACT_SNOOZE_CONFIRM = "snoozeconfirm"
+ACT_SNOOZE_CANCEL = "snoozecancel"
+
+# Snooze duration tokens written to the suppression store.
+SNOOZE_24H = "24h"
+SNOOZE_7D = "7d"
+SNOOZE_PERMANENT = "permanent"
+
+# Action policy values written to audit records and consumed by the execution service.
+ACTION_POLICY_PROMPT_USER = "prompt_user"
+ACTION_POLICY_HANDOFF = "handoff"
+ACTION_POLICY_AUTO_EXECUTE = "auto_execute"
+ACTION_POLICY_BLOCKED = "blocked"
+
+# Data quality tags written to action audit payloads.
+DATA_QUALITY_FRESH = "fresh"
+DATA_QUALITY_STALE = "stale"
+DATA_QUALITY_UNAVAILABLE = "unavailable"

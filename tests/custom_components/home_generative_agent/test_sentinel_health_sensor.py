@@ -12,6 +12,7 @@ import pytest
 from custom_components.home_generative_agent.core.sentinel_health_sensor import (
     SentinelHealthSensor,
     _compute_kpis,
+    _compute_trigger_source_breakdown,
 )
 
 # ---------------------------------------------------------------------------
@@ -405,3 +406,126 @@ async def test_refresh_requests_all_available_records() -> None:
     cast("MagicMock", sensor._audit_store).async_get_latest.assert_called_once_with(
         1000
     )
+
+
+# ---------------------------------------------------------------------------
+# _compute_trigger_source_breakdown unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_trigger_source_breakdown_empty_records() -> None:
+    """Empty records should return all-zero breakdown with the three standard keys."""
+    result = _compute_trigger_source_breakdown([])
+    assert result == {"poll": 0, "event": 0, "on_demand": 0}
+
+
+def test_trigger_source_breakdown_counts_within_24h() -> None:
+    """Only records notified within the last 24 hours are counted."""
+    now = datetime.now(UTC)
+    recent_str = (now - timedelta(hours=1)).isoformat()
+    old_str = (now - timedelta(hours=25)).isoformat()
+    records = [
+        {"trigger_source": "poll", "notification": {"notified_at": recent_str}},
+        {"trigger_source": "event", "notification": {"notified_at": recent_str}},
+        {"trigger_source": "poll", "notification": {"notified_at": recent_str}},
+        # older than 24h — must be excluded
+        {"trigger_source": "on_demand", "notification": {"notified_at": old_str}},
+    ]
+    result = _compute_trigger_source_breakdown(records)
+    assert result["poll"] == 2
+    assert result["event"] == 1
+    assert result["on_demand"] == 0
+
+
+def test_trigger_source_breakdown_unknown_key_included() -> None:
+    """A trigger_source value not in the known keys is still counted (open-ended)."""
+    now = datetime.now(UTC)
+    recent_str = (now - timedelta(minutes=5)).isoformat()
+    records = [
+        {"trigger_source": "poll", "notification": {"notified_at": recent_str}},
+        {
+            "trigger_source": "unknown_future_type",
+            "notification": {"notified_at": recent_str},
+        },
+    ]
+    result = _compute_trigger_source_breakdown(records)
+    assert result["poll"] == 1
+    assert result["unknown_future_type"] == 1
+
+
+def test_trigger_source_breakdown_missing_notification_skipped() -> None:
+    """Records with no notification.notified_at are silently skipped."""
+    now = datetime.now(UTC)
+    recent_str = (now - timedelta(minutes=5)).isoformat()
+    records = [
+        {"trigger_source": "poll", "notification": {"notified_at": recent_str}},
+        {"trigger_source": "event"},  # no notification key
+        {"trigger_source": "event", "notification": {}},  # notified_at absent
+        {
+            "trigger_source": "event",
+            "notification": {"notified_at": None},
+        },  # None value
+        {
+            "trigger_source": "event",
+            "notification": {"notified_at": "not-a-date"},
+        },  # malformed
+    ]
+    result = _compute_trigger_source_breakdown(records)
+    assert result["poll"] == 1
+    assert result["event"] == 0
+
+
+def test_trigger_source_breakdown_no_trigger_source_skipped() -> None:
+    """Records within 24h but with no trigger_source do not affect counts."""
+    now = datetime.now(UTC)
+    recent_str = (now - timedelta(minutes=5)).isoformat()
+    records = [
+        {"notification": {"notified_at": recent_str}},  # trigger_source absent
+    ]
+    result = _compute_trigger_source_breakdown(records)
+    assert result == {"poll": 0, "event": 0, "on_demand": 0}
+
+
+# ---------------------------------------------------------------------------
+# Sensor integration: trigger_source_breakdown attribute
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_refresh_exposes_trigger_source_breakdown_with_audit_store() -> None:
+    """trigger_source_breakdown attribute is populated from audit records when store present."""
+    now = datetime.now(UTC)
+    recent_str = (now - timedelta(hours=2)).isoformat()
+    records = [
+        {"trigger_source": "poll", "notification": {"notified_at": recent_str}},
+        {"trigger_source": "event", "notification": {"notified_at": recent_str}},
+        {"trigger_source": "poll", "notification": {"notified_at": recent_str}},
+    ]
+    sensor = _make_sensor(records=records)
+    sensor.async_write_ha_state = MagicMock()
+
+    await sensor._async_refresh()
+
+    breakdown = sensor._attrs["trigger_source_breakdown"]
+    assert isinstance(breakdown, dict)
+    assert breakdown["poll"] == 2
+    assert breakdown["event"] == 1
+    assert breakdown["on_demand"] == 0
+
+
+@pytest.mark.asyncio
+async def test_refresh_trigger_source_breakdown_none_when_no_audit_store() -> None:
+    """trigger_source_breakdown is None when audit_store is absent."""
+    hass = MagicMock()
+    sensor = SentinelHealthSensor(
+        hass=hass,
+        options={"sentinel_enabled": True},
+        audit_store=None,
+        sentinel=None,
+        entry_id="test_entry",
+    )
+    sensor.async_write_ha_state = MagicMock()
+
+    await sensor._async_refresh()
+
+    assert sensor._attrs["trigger_source_breakdown"] is None
