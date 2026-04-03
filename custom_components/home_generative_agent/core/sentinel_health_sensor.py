@@ -48,6 +48,9 @@ _AUTO_EXEC_TERMINAL: frozenset[str] = frozenset(
 _USER_EXEC_SUCCESS: frozenset[str] = frozenset({"agent_called", "event_fired"})
 _USER_EXEC_FAILURE: frozenset[str] = frozenset({"blocked", "missing_finding"})
 
+# Known trigger source keys exposed in the 24-hour breakdown attribute.
+_TRIGGER_SOURCE_KEYS: tuple[str, ...] = ("poll", "event", "on_demand")
+
 
 def _compute_kpis(records: list[dict[str, Any]]) -> dict[str, Any]:  # noqa: PLR0912, PLR0915
     """Compute Sentinel KPIs from a list of raw audit record dicts."""
@@ -144,6 +147,34 @@ def _compute_kpis(records: list[dict[str, Any]]) -> dict[str, Any]:  # noqa: PLR
     }
 
 
+def _compute_trigger_source_breakdown(
+    records: list[dict[str, Any]],
+) -> dict[str, int]:
+    """
+    Return trigger-source counts for findings notified in the last 24 hours.
+
+    Only records whose ``notification.notified_at`` timestamp falls within the
+    rolling 24-hour window are included.  Keys are always present (value = 0 when
+    no matching records exist) so callers can rely on a stable schema.
+    """
+    cutoff_24h = datetime.now(UTC) - timedelta(hours=24)
+    counts: dict[str, int] = dict.fromkeys(_TRIGGER_SOURCE_KEYS, 0)
+    for r in records:
+        notified_at_str = r.get("notification", {}).get("notified_at")
+        if not notified_at_str:
+            continue
+        try:
+            notified_dt = datetime.fromisoformat(notified_at_str)
+        except (ValueError, TypeError):
+            continue
+        if notified_dt < cutoff_24h:
+            continue
+        trigger = r.get("trigger_source")
+        if trigger:
+            counts[trigger] = counts.get(trigger, 0) + 1
+    return counts
+
+
 class SentinelHealthSensor(SensorEntity):
     """Sentinel operational health sensor exposing KPIs as attributes."""
 
@@ -207,6 +238,13 @@ class SentinelHealthSensor(SensorEntity):
 
         kpis = _compute_kpis(records)
         self._attrs.update(kpis)
+
+        # 24-hour trigger-source breakdown (separate from the all-time stats above).
+        self._attrs["trigger_source_breakdown"] = (
+            _compute_trigger_source_breakdown(records)
+            if self._audit_store is not None
+            else None
+        )
 
         # Merge run-timing telemetry from the engine.
         run_stats: dict[str, Any] = (
