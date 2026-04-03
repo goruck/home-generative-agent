@@ -70,6 +70,9 @@ LLM_HASS_API_NONE = "none"
 # See https://python.langchain.com/docs/how_to/debugging/
 LANGCHAIN_LOGGING_LEVEL: Literal["disable", "verbose", "debug"] = "disable"
 
+# RunnableConfig["configurable"]: HA tool IntentResponse sidecar (ChatLog / pipeline).
+GRAPH_CFG_HA_TOOL_INTENT_RESPONSES = "ha_tool_intent_responses"
+
 
 # ---- Global Ollama Options ----
 RECOMMENDED_OLLAMA_CONTEXT_SIZE = 32000
@@ -113,6 +116,7 @@ OLLAMA_BOOL_HINT_TAGS = {
 CONF_RECOMMENDED = "recommended"
 CONF_PROMPT = "prompt"
 CONF_SCHEMA_FIRST_YAML = "schema_first_yaml"
+CONF_DEBUG_ASSIST_TRACE = "debug_assist_trace"
 CONF_DISABLED_FEATURES = "disabled_features"
 
 # ---- Audit store ----
@@ -356,6 +360,54 @@ RECOMMENDED_GEMINI_VLM: VLM_GEMINI_SUPPORTED = "gemini-2.5-flash-lite"
 
 CONF_VLM_TEMPERATURE = "vlm_temperature"
 RECOMMENDED_VLM_TEMPERATURE = 0.2
+
+CONF_VLM_CAPABILITY = "vlm_capability"
+VLM_CAPABILITY_BASIC = "basic"
+VLM_CAPABILITY_STANDARD = "standard"
+VLM_CAPABILITY_ADVANCED = "advanced"
+RECOMMENDED_VLM_CAPABILITY: Literal["basic", "standard", "advanced"] = (
+    VLM_CAPABILITY_ADVANCED
+)
+
+# Standard profile: appended to user text when analysis_prompt is used.
+VLM_STANDARD_LENGTH_CONSTRAINT = (
+    "\n\nCRITICAL: Answer the user's prompt in 1 to 2 short, factual sentences. "
+    "Do not elaborate."
+)
+
+# Advanced profile: separate "where to look" from "what to do" for capable VLMs.
+VLM_ADVANCED_OBJECTS_TASK_TEMPLATE = "OBJECTS TO LOCATE: {objects}\nTASK: {task}"
+
+_VLM_CAPABILITY_AGENT_CONTEXT: dict[str, str] = {
+    VLM_CAPABILITY_BASIC: (
+        "<vlm_capability_profile>\n"
+        "VLM profile: Basic. For `get_and_analyze_camera_image`, use only "
+        "`detection_keywords`; `analysis_prompt` is ignored by the vision model.\n"
+        "</vlm_capability_profile>"
+    ),
+    VLM_CAPABILITY_STANDARD: (
+        "<vlm_capability_profile>\n"
+        "VLM profile: Standard. You may pass `analysis_prompt` for focused "
+        "instructions; the vision model is asked for 1-2 short sentences. "
+        "You can combine with `detection_keywords`.\n"
+        "</vlm_capability_profile>"
+    ),
+    VLM_CAPABILITY_ADVANCED: (
+        "<vlm_capability_profile>\n"
+        "VLM profile: Advanced. You may pass a free-form `analysis_prompt` and/or "
+        "`detection_keywords`. When both are set, the vision prompt uses "
+        "OBJECTS TO LOCATE vs TASK formatting.\n"
+        "</vlm_capability_profile>"
+    ),
+}
+
+
+def vlm_capability_agent_context_append(capability: str) -> str:
+    """Append a short hint so the chat model respects the active VLM profile."""
+    return _VLM_CAPABILITY_AGENT_CONTEXT.get(
+        capability, _VLM_CAPABILITY_AGENT_CONTEXT[RECOMMENDED_VLM_CAPABILITY]
+    )
+
 
 # Prompts + input image size
 VLM_SYSTEM_PROMPT = """
@@ -604,6 +656,11 @@ RECOMMENDED_INSTRUCTION_RETRIEVAL_LIMIT = 5
 
 CONF_INSTRUCTION_RELEVANCE_THRESHOLD = "instruction_relevance_threshold"
 RECOMMENDED_INSTRUCTION_RELEVANCE_THRESHOLD = 0.5
+
+CONF_INSTRUCTION_RAG_INTENT_WEIGHT = "instruction_rag_intent_weight"
+RECOMMENDED_INSTRUCTION_RAG_INTENT_WEIGHT = 0.65
+
+RECOMMENDED_INSTRUCTION_RAG_NOISE_FLOOR = 0.25
 
 TOOL_CALL_ERROR_SYSTEM_MESSAGE = """
 

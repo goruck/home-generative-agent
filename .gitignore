@@ -20,3 +20,7 @@ visualize_graph.py
 # Home Assistant configuration
 config/*
 #!config/configuration.yaml
+
+# local reference trees at repo root only — not part of the integration
+/core/
+/.ref/

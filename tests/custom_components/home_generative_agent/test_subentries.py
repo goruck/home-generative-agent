@@ -22,6 +22,7 @@ from custom_components.home_generative_agent.const import (
     CONF_FEATURE_MODEL,
     CONF_FEATURE_MODEL_NAME,
     CONF_INSTRUCTIONS_CONFIG,
+    CONF_INSTRUCTION_RAG_INTENT_WEIGHT,
     CONF_INSTRUCTION_RELEVANCE_THRESHOLD,
     CONF_INSTRUCTION_RETRIEVAL_LIMIT,
     CONF_NOTIFY_SERVICE,
@@ -807,12 +808,14 @@ def test_provider_capabilities_includes_openai_compatible() -> None:
             f"openai_compatible missing from {category} model_keys"
         )
 
+
 @pytest.mark.asyncio
 async def test_migration_v5_to_v6_converts_string_to_list(
     hass: HomeAssistant,
 ) -> None:
     """Migration should convert a single string LLM API to a list."""
     from homeassistant.const import CONF_LLM_HASS_API
+
     entry = MockConfigEntry(
         domain=DOMAIN,
         title="Home Generative Agent",
@@ -836,6 +839,7 @@ async def test_migration_v5_to_v6_none_sentinel_removed(
     """Migration should remove the LLM_HASS_API key if its value is 'none'."""
     from homeassistant.const import CONF_LLM_HASS_API
     from custom_components.home_generative_agent.const import LLM_HASS_API_NONE
+
     entry = MockConfigEntry(
         domain=DOMAIN,
         title="Home Generative Agent",
@@ -858,6 +862,7 @@ async def test_migration_v5_to_v6_missing_key_unchanged(
 ) -> None:
     """Migration should leave an absent LLM_HASS_API key absent."""
     from homeassistant.const import CONF_LLM_HASS_API
+
     entry = MockConfigEntry(
         domain=DOMAIN,
         title="Home Generative Agent",
@@ -878,6 +883,7 @@ async def test_migration_v5_to_v6_already_list_unchanged(
 ) -> None:
     """Migration should not modify a value that is already a list."""
     from homeassistant.const import CONF_LLM_HASS_API
+
     entry = MockConfigEntry(
         domain=DOMAIN,
         title="Home Generative Agent",
@@ -904,6 +910,7 @@ async def test_migration_v5_to_v6_already_list_unchanged(
 from custom_components.home_generative_agent.flows.tool_manager_subentry_flow import (
     ToolManagerSubentryFlow,
 )
+
 
 @pytest.mark.asyncio
 async def test_tool_manager_subentry_flow_creates_subentry(
@@ -932,51 +939,56 @@ async def test_tool_manager_subentry_flow_creates_subentry(
     assert first.get("type") == "form"
 
     # Go to provider editor
-    second = await flow.async_step_user({
-        "tool_retrieval_limit": 5,
-        "tool_relevance_threshold": 0.5,
-        "instruction_retrieval_limit": 5,
-        "instruction_relevance_threshold": 0.5,
-        "next_action": "edit_provider_langchain_internal"
-    })
+    second = await flow.async_step_user(
+        {
+            "tool_retrieval_limit": 5,
+            "tool_relevance_threshold": 0.5,
+            "instruction_retrieval_limit": 5,
+            "instruction_relevance_threshold": 0.5,
+            "instruction_rag_intent_weight": 0.65,
+            "next_action": "edit_provider_langchain_internal",
+        }
+    )
     assert second.get("type") == "form"
     assert second["description_placeholders"]["provider_name"] == "langchain_internal"
 
     # Save provider config
-    third = await flow.async_step_provider_editor({
-        "enabled": False,
-        "prompt": "Test Provider Context",
-        "tags": "semantic, tags"
-    })
-    assert third.get("type") == "form" # returns to user step
+    third = await flow.async_step_provider_editor(
+        {"enabled": False, "prompt": "Test Provider Context", "tags": "semantic, tags"}
+    )
+    assert third.get("type") == "form"  # returns to user step
 
     # Go to tool editor
-    fourth = await flow.async_step_user({
-        "tool_retrieval_limit": 5,
-        "tool_relevance_threshold": 0.5,
-        "instruction_retrieval_limit": 5,
-        "instruction_relevance_threshold": 0.5,
-        "next_action": "edit_tool_add_automation"
-    })
+    fourth = await flow.async_step_user(
+        {
+            "tool_retrieval_limit": 5,
+            "tool_relevance_threshold": 0.5,
+            "instruction_retrieval_limit": 5,
+            "instruction_relevance_threshold": 0.5,
+            "instruction_rag_intent_weight": 0.65,
+            "next_action": "edit_tool_add_automation",
+        }
+    )
     assert fourth.get("type") == "form"
     assert fourth["description_placeholders"]["tool_name"] == "add_automation"
 
     # Save tool config
-    fifth = await flow.async_step_tool_editor({
-        "enabled": True,
-        "prompt": "Test Tool Instructions",
-        "tags": "automation tags"
-    })
-    assert fifth.get("type") == "form" # returns to user step
+    fifth = await flow.async_step_tool_editor(
+        {"enabled": True, "prompt": "Test Tool Instructions", "tags": "automation tags"}
+    )
+    assert fifth.get("type") == "form"  # returns to user step
 
     # Save and exit
-    result = await flow.async_step_user({
-        "tool_retrieval_limit": 10,
-        "tool_relevance_threshold": 0.75,
-        "instruction_retrieval_limit": 10,
-        "instruction_relevance_threshold": 0.75,
-        "next_action": "save"
-    })
+    result = await flow.async_step_user(
+        {
+            "tool_retrieval_limit": 10,
+            "tool_relevance_threshold": 0.75,
+            "instruction_retrieval_limit": 10,
+            "instruction_relevance_threshold": 0.75,
+            "instruction_rag_intent_weight": 0.65,
+            "next_action": "save",
+        }
+    )
     assert result.get("type") == "create_entry"
     data = result.get("data")
     assert data is not None
@@ -984,6 +996,7 @@ async def test_tool_manager_subentry_flow_creates_subentry(
     assert data[CONF_TOOL_RELEVANCE_THRESHOLD] == 0.75
     assert data[CONF_INSTRUCTION_RETRIEVAL_LIMIT] == 10
     assert data[CONF_INSTRUCTION_RELEVANCE_THRESHOLD] == 0.75
+    assert data[CONF_INSTRUCTION_RAG_INTENT_WEIGHT] == 0.65
 
 
 @pytest.mark.asyncio
@@ -1010,51 +1023,60 @@ async def test_tool_manager_subentry_flow_instructions(
     _patch_entry(flow, entry)
 
     await flow.async_step_user()
-    
+
     # Start adding instruction
-    step1 = await flow.async_step_user({
-        "tool_retrieval_limit": 5,
-        "tool_relevance_threshold": 0.5,
-        "instruction_retrieval_limit": 5,
-        "instruction_relevance_threshold": 0.5,
-        "next_action": "add_instruction"
-    })
+    step1 = await flow.async_step_user(
+        {
+            "tool_retrieval_limit": 5,
+            "tool_relevance_threshold": 0.5,
+            "instruction_retrieval_limit": 5,
+            "instruction_relevance_threshold": 0.5,
+            "instruction_rag_intent_weight": 0.65,
+            "next_action": "add_instruction",
+        }
+    )
     assert step1.get("type") == "form"
     assert step1.get("step_id") == "instruction_name"
-    
+
     # Set name
     step2 = await flow.async_step_instruction_name({"name": "Test Instruction"})
     assert step2.get("type") == "form"
     assert step2.get("step_id") == "instruction_editor"
     assert step2["description_placeholders"]["instruction_name"] == "Test Instruction"
-    
+
     # Save content
-    step3 = await flow.async_step_instruction_editor({
-        "enabled": True,
-        "prompt": "Test Instruction Prompt",
-        "tags": "test, tags",
-        "delete_entry": False
-    })
-    assert step3.get("type") == "form" # Returns to user step
-    
+    step3 = await flow.async_step_instruction_editor(
+        {
+            "enabled": True,
+            "prompt": "Test Instruction Prompt",
+            "tags": "test, tags",
+            "delete_entry": False,
+        }
+    )
+    assert step3.get("type") == "form"  # Returns to user step
+
     # Verify it exists in payload
     assert "Test Instruction" in flow._payload["instructions"]
-    assert flow._payload["instructions"]["Test Instruction"]["prompt"] == "Test Instruction Prompt"
+    assert (
+        flow._payload["instructions"]["Test Instruction"]["prompt"]
+        == "Test Instruction Prompt"
+    )
 
     # Edit it
-    step4 = await flow.async_step_user({
-        "tool_retrieval_limit": 5,
-        "tool_relevance_threshold": 0.5,
-        "instruction_retrieval_limit": 5,
-        "instruction_relevance_threshold": 0.5,
-        "next_action": "edit_instruction_Test Instruction"
-    })
+    step4 = await flow.async_step_user(
+        {
+            "tool_retrieval_limit": 5,
+            "tool_relevance_threshold": 0.5,
+            "instruction_retrieval_limit": 5,
+            "instruction_relevance_threshold": 0.5,
+            "instruction_rag_intent_weight": 0.65,
+            "next_action": "edit_instruction_Test Instruction",
+        }
+    )
     assert step4.get("type") == "form"
     assert step4.get("step_id") == "instruction_editor"
-    
+
     # Delete it
-    step5 = await flow.async_step_instruction_editor({
-        "delete_entry": True
-    })
+    step5 = await flow.async_step_instruction_editor({"delete_entry": True})
     assert step5.get("type") == "form"
     assert "Test Instruction" not in flow._payload["instructions"]

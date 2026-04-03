@@ -151,7 +151,13 @@
           "data": {
             "tool_retrieval_limit": "Top N Tool Retrieval Limit",
             "tool_relevance_threshold": "Tool Relevance Threshold (0.0 - 1.0)",
+            "instruction_retrieval_limit": "Top N Instruction Retrieval Limit",
+            "instruction_relevance_threshold": "Instruction Relevance Threshold (0.0 - 1.0)",
+            "instruction_rag_intent_weight": "Instruction retrieval bias (intent vs. content)",
             "next_action": "Next Action"
+          },
+          "data_description": {
+            "instruction_rag_intent_weight": "Lower values favor the text inside the instruction; higher values favor the instruction's name and tags (intent channel)."
           }
         },
         "provider_editor": {
@@ -254,7 +260,11 @@
             "temperature": "Temperature",
             "keepalive_s": "Ollama keepalive (seconds or Never unload (-1))",
             "context_size": "Ollama context size (tokens)",
-            "reasoning": "Ollama reasoning"
+            "reasoning": "Ollama reasoning",
+            "vlm_capability": "VLM capability (camera image analysis)"
+          },
+          "data_description": {
+            "vlm_capability": "Controls how get_and_analyze_camera_image builds prompts for the vision model (Basic / Standard / Advanced)."
           }
         },
         "database": {
@@ -312,11 +322,13 @@
           "max_messages_in_context": "Max messages in chat context",
           "critical_action_pin_enabled": "Require critical action PIN",
           "critical_action_pin": "Critical action PIN (required to unlock/arm/open sensitive devices)",
-          "schema_first_yaml": "Schema-first JSON for YAML requests"
+          "schema_first_yaml": "Schema-first JSON for YAML requests",
+          "debug_assist_trace": "Debug: populate Assist 'Show details' with reasoning trace"
         },
         "data_description": {
           "prompt": "Instruct how the LLM should respond. This can be a template.",
-          "schema_first_yaml": "When enabled, YAML requests are answered with strict JSON that is converted to YAML."
+          "schema_first_yaml": "When enabled, YAML requests are answered with strict JSON that is converted to YAML.",
+          "debug_assist_trace": "Always fill the Assist chat 'Show details' panel with the full reasoning trace, tool calls, and transcript — even when the model does not produce native thinking blocks. Useful for debugging agent behaviour."
         }
       }
     }

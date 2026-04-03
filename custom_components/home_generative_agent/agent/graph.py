@@ -6,15 +6,18 @@ import asyncio
 import copy
 import json
 import logging
+import operator
 import re
 from dataclasses import dataclass
 from functools import partial
 from typing import (
     TYPE_CHECKING,
+    Annotated,
     Any,
     Literal,
 )
 
+import langchain_core.utils.function_calling  # noqa: F401  # Pre-warm tool conversion logic
 import voluptuous as vol
 from homeassistant.exceptions import HomeAssistantError, TemplateError
 from homeassistant.helpers import llm, template
@@ -30,7 +33,6 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langchain_core.messages.utils import trim_messages
-import langchain_core.utils.function_calling  # Pre-warm tool conversion logic
 from langgraph.graph import END, START, MessagesState, StateGraph
 from pydantic import ValidationError
 
@@ -41,28 +43,35 @@ from ..const import (  # noqa: TID252
     CONF_CRITICAL_ACTION_PIN_SALT,
     CONF_CRITICAL_ACTIONS,
     CONF_GEMINI_CHAT_MODEL,
+    CONF_INSTRUCTION_RAG_INTENT_WEIGHT,
+    CONF_INSTRUCTION_RELEVANCE_THRESHOLD,
+    CONF_INSTRUCTION_RETRIEVAL_LIMIT,
     CONF_MANAGE_CONTEXT_WITH_TOKENS,
     CONF_MAX_MESSAGES_IN_CONTEXT,
     CONF_MAX_TOKENS_IN_CONTEXT,
-    CONF_INSTRUCTION_RELEVANCE_THRESHOLD,
-    CONF_INSTRUCTION_RETRIEVAL_LIMIT,
     CONF_OLLAMA_CHAT_MODEL,
     CONF_OPENAI_CHAT_MODEL,
     CONF_OPENAI_COMPATIBLE_CHAT_MODEL,
     CONF_TOOL_RELEVANCE_THRESHOLD,
     CONF_TOOL_RETRIEVAL_LIMIT,
+    CONF_VLM_CAPABILITY,
     EMBEDDING_MODEL_PROMPT_TEMPLATE,
+    GRAPH_CFG_HA_TOOL_INTENT_RESPONSES,
     RECOMMENDED_CRITICAL_ACTIONS,
+    RECOMMENDED_INSTRUCTION_RAG_INTENT_WEIGHT,
+    RECOMMENDED_INSTRUCTION_RAG_NOISE_FLOOR,
     RECOMMENDED_INSTRUCTION_RELEVANCE_THRESHOLD,
     RECOMMENDED_INSTRUCTION_RETRIEVAL_LIMIT,
     RECOMMENDED_TOOL_RELEVANCE_THRESHOLD,
     RECOMMENDED_TOOL_RETRIEVAL_LIMIT,
+    RECOMMENDED_VLM_CAPABILITY,
     SUMMARIZATION_INITIAL_PROMPT,
     SUMMARIZATION_PROMPT_TEMPLATE,
     SUMMARIZATION_SYSTEM_PROMPT,
     TOOL_CALL_ERROR_TEMPLATE,
+    vlm_capability_agent_context_append,
 )
-from ..core.utils import extract_final  # noqa: TID252
+from ..core.utils import extract_final, extract_redacted_thinking  # noqa: TID252
 from .camera_activity import get_recent_camera_activity
 from .helpers import (
     maybe_fill_lock_entity,
@@ -70,6 +79,7 @@ from .helpers import (
     normalize_intent_for_lock,
     sanitize_tool_args,
 )
+from .rag_embedding_text import instruction_keys_fused_from_search_results
 from .token_counter import count_tokens_cross_provider
 
 if TYPE_CHECKING:
@@ -88,6 +98,7 @@ class State(MessagesState):
     messages_to_remove: list[AnyMessage]
     selected_tools: list[str]
     selected_instructions: list[str]
+    redacted_thinking_chunks: Annotated[list[str], operator.add]
 
 
 def _determine_model_name(provider: str, opts: dict[str, Any]) -> str:
@@ -120,14 +131,32 @@ class ToolExecutionContext:
     state: State
 
 
-def _make_tool_error(err: str, name: str, tid: str) -> ToolMessage:
+def _make_tool_error(err: str, name: str, tid: Any) -> ToolMessage:
     """Build a standardized error ToolMessage."""
     return ToolMessage(
         content=TOOL_CALL_ERROR_TEMPLATE.format(error=err),
         name=name,
-        tool_call_id=tid,
+        tool_call_id=str(tid) if tid is not None else "",
         status="error",
     )
+
+
+def _store_ha_tool_intent_for_chat_log(
+    config: Any, tool_call_id: Any, response: Any
+) -> None:
+    """Store HA ``IntentResponse`` for ChatLog rows as ``IntentResponseDict``."""
+    if not isinstance(response, llm.IntentResponseDict):
+        return
+    cfg = config.get("configurable")
+    if not isinstance(cfg, dict):
+        return
+    sidecar = cfg.get(GRAPH_CFG_HA_TOOL_INTENT_RESPONSES)
+    if not isinstance(sidecar, dict):
+        return
+    call_id = str(tool_call_id or "")
+    if not call_id:
+        return
+    sidecar[call_id] = response.original
 
 
 async def _precheck_alarm_open_entries(
@@ -335,6 +364,7 @@ def _critical_action_guard(
         "user": ctx.config.get("configurable", {}).get("user_id"),
         "attempts": 0,
     }
+    pin_tid = tool_call.get("id")
     return ToolMessage(
         content=json.dumps(
             {
@@ -343,7 +373,7 @@ def _critical_action_guard(
                 "reason": "Critical action requires PIN confirmation.",
             }
         ),
-        tool_call_id=tool_call.get("id"),
+        tool_call_id=str(pin_tid) if pin_tid is not None else "",
         name=tool_name,
     )
 
@@ -365,10 +395,13 @@ async def _run_ha_tool(
     except (HomeAssistantError, vol.Invalid) as err:
         return _make_tool_error(repr(err), tool_name, tool_call.get("id") or "")
 
+    _store_ha_tool_intent_for_chat_log(ctx.config, tool_call.get("id"), response)
+
     content_str, status = _parse_tool_response(response, prepared_args)
+    call_id = tool_call.get("id")
     return ToolMessage(
         content=content_str,
-        tool_call_id=tool_call.get("id"),
+        tool_call_id=str(call_id) if call_id is not None else "",
         name=tool_name,
         status=status or "success",
     )
@@ -553,12 +586,21 @@ async def _find_open_entries(
 # ----- Graph nodes and edges -----
 
 
+def _vector_search_result_or_empty(raw: Any, *, label: str) -> list[Any]:
+    """Normalize asyncio.gather results from store.asearch (exceptions -> [])."""
+    if isinstance(raw, BaseException):
+        LOGGER.error("%s RAG search failed: %s", label, raw, exc_info=raw)
+        return []
+    return raw if isinstance(raw, list) else []
+
+
 async def _retrieve_tools(
     state: State, config: RunnableConfig, *, store: BaseStore
 ) -> dict[str, Any]:
     """Retrieve relevant tools based on user's message."""
     if "configurable" not in config:
-        raise HomeAssistantError("Configuration is missing.")
+        msg = "Configuration is missing."
+        raise HomeAssistantError(msg)
 
     # Only retrieve if the last message is from the user
     last_message = state["messages"][-1]
@@ -566,64 +608,85 @@ async def _retrieve_tools(
     if not last_message_from_user:
         return {
             "selected_tools": state.get("selected_tools", []),
-            "selected_instructions": state.get("selected_instructions", [])
+            "selected_instructions": state.get("selected_instructions", []),
         }
 
     tool_mgr_data = config["configurable"].get("tool_mgr_data", {})
-    limit = tool_mgr_data.get(CONF_TOOL_RETRIEVAL_LIMIT, RECOMMENDED_TOOL_RETRIEVAL_LIMIT)
+    limit = tool_mgr_data.get(
+        CONF_TOOL_RETRIEVAL_LIMIT, RECOMMENDED_TOOL_RETRIEVAL_LIMIT
+    )
     threshold = tool_mgr_data.get(
         CONF_TOOL_RELEVANCE_THRESHOLD, RECOMMENDED_TOOL_RELEVANCE_THRESHOLD
     )
 
     query_prompt = EMBEDDING_MODEL_PROMPT_TEMPLATE.format(query=last_message.content)
-    tool_items = await store.asearch(
-        ("system", "tools"), query=query_prompt, limit=limit
+    instruction_limit = tool_mgr_data.get(
+        CONF_INSTRUCTION_RETRIEVAL_LIMIT, RECOMMENDED_INSTRUCTION_RETRIEVAL_LIMIT
+    )
+    instruction_threshold = tool_mgr_data.get(
+        CONF_INSTRUCTION_RELEVANCE_THRESHOLD,
+        RECOMMENDED_INSTRUCTION_RELEVANCE_THRESHOLD,
+    )
+    alpha = tool_mgr_data.get(
+        CONF_INSTRUCTION_RAG_INTENT_WEIGHT, RECOMMENDED_INSTRUCTION_RAG_INTENT_WEIGHT
+    )
+
+    tool_task = store.asearch(("system", "tools"), query=query_prompt, limit=limit)
+    instruction_intent_task = store.asearch(
+        ("system", "instructions"), query=query_prompt, limit=instruction_limit
+    )
+    instruction_body_task = store.asearch(
+        ("system", "instructions_body"), query=query_prompt, limit=instruction_limit
+    )
+
+    raw_tool, raw_intent, raw_body = await asyncio.gather(
+        tool_task,
+        instruction_intent_task,
+        instruction_body_task,
+        return_exceptions=True,
+    )
+
+    tool_items = _vector_search_result_or_empty(raw_tool, label="Tool")
+    instruction_intent_items = _vector_search_result_or_empty(
+        raw_intent, label="Instruction intent"
+    )
+    instruction_body_items = _vector_search_result_or_empty(
+        raw_body, label="Instruction body"
     )
 
     retrieved_names = set()
     for item in tool_items:
-        # Most vector stores return a score (cosine similarity). 
+        # Most vector stores return a score (cosine similarity).
         # For Postgres vector store, higher is more relevant.
-        if hasattr(item, "score") and item.score is not None:
-            if item.score < threshold:
-                LOGGER.debug(
-                    "Skipping tool %s due to low relevance score: %0.4f < %0.4f",
-                    item.key, item.score, threshold
-                )
-                continue
+        if hasattr(item, "score") and item.score is not None and item.score < threshold:
+            LOGGER.debug(
+                "Skipping tool %s due to low relevance score: %0.4f < %0.4f",
+                item.key,
+                item.score,
+                threshold,
+            )
+            continue
         retrieved_names.add(item.key)
 
     # Always include the escape hatch tool
     retrieved_names.add("get_available_tools")
 
-    # Retrieve relevant instructions
-    instruction_limit = tool_mgr_data.get(CONF_INSTRUCTION_RETRIEVAL_LIMIT, RECOMMENDED_INSTRUCTION_RETRIEVAL_LIMIT)
-    instruction_threshold = tool_mgr_data.get(
-        CONF_INSTRUCTION_RELEVANCE_THRESHOLD, RECOMMENDED_INSTRUCTION_RELEVANCE_THRESHOLD
+    retrieved_instructions = instruction_keys_fused_from_search_results(
+        instruction_intent_items,
+        instruction_body_items,
+        instruction_limit=instruction_limit,
+        instruction_threshold=instruction_threshold,
+        alpha=alpha,
+        noise_floor=RECOMMENDED_INSTRUCTION_RAG_NOISE_FLOOR,
     )
-    
-    instruction_items = await store.asearch(
-        ("system", "instructions"), query=query_prompt, limit=instruction_limit
-    )
-    
-    retrieved_instructions = []
-    for item in instruction_items:
-        if hasattr(item, "score") and item.score is not None:
-            if item.score < instruction_threshold:
-                LOGGER.debug(
-                    "Skipping instruction %s due to low relevance score: %0.4f < %0.4f",
-                    item.key, item.score, instruction_threshold
-                )
-                continue
-        retrieved_instructions.append(item.key)
 
     return {
         "selected_tools": list(retrieved_names),
-        "selected_instructions": retrieved_instructions
+        "selected_instructions": retrieved_instructions,
     }
 
 
-async def _call_model(
+async def _call_model(  # noqa: PLR0912, PLR0915
     state: State, config: RunnableConfig, *, store: BaseStore
 ) -> dict[str, Any]:
     """Coroutine to call the chat model."""
@@ -636,20 +699,22 @@ async def _call_model(
     hass = config["configurable"]["hass"]
     opts = config["configurable"]["options"]
     chat_model_options = config["configurable"].get("chat_model_options", {})
-    
+
     available_tools = config["configurable"].get("available_tools", [])
     selected_tool_names = set(state.get("selected_tools", []))
-    
+
     tools_to_bind = [
-        t for t in available_tools 
-        if (t["function"]["name"] if isinstance(t, dict) else getattr(t, "name", "")) in selected_tool_names
+        t
+        for t in available_tools
+        if (t["function"]["name"] if isinstance(t, dict) else getattr(t, "name", ""))
+        in selected_tool_names
     ]
     model = (
         await asyncio.to_thread(model_without_tools.bind_tools, tools_to_bind)
         if tools_to_bind
         else model_without_tools
     )
-    
+
     def _render_prompt(text: str) -> str:
         """Render a Jinja template string."""
         if not text:
@@ -662,21 +727,21 @@ async def _call_model(
                 },
                 parse_result=False,
             )
-        except TemplateError as err:
-            LOGGER.error("Error rendering template prompt: %s", err)
+        except TemplateError:
+            LOGGER.exception("Error rendering template prompt")
             return f"Error rendering template: {text}"
 
     # Extract Tool Manager settings for tiered prompts
     tool_mgr_data = config["configurable"].get("tool_mgr_data", {})
     providers_cfg = tool_mgr_data.get("tool_providers", {})
     tools_cfg = tool_mgr_data.get("tools", {})
-    
+
     provider_prompts = []
     for p_id, p_cfg in providers_cfg.items():
         if p_cfg.get("enabled", True) and p_cfg.get("prompt"):
             rendered_prompt = _render_prompt(p_cfg["prompt"])
             provider_prompts.append(f"Provider `{p_id}` Context: {rendered_prompt}")
-            
+
     instruction_prompts = []
     selected_instruction_names = state.get("selected_instructions", [])
     if selected_instruction_names:
@@ -685,7 +750,9 @@ async def _call_model(
             i_cfg = instructions_cfg.get(i_name, {})
             if i_cfg.get("prompt"):
                 rendered_prompt = _render_prompt(i_cfg["prompt"])
-                instruction_prompts.append(f"Instruction `{i_name}`:\n{rendered_prompt}")
+                instruction_prompts.append(
+                    f"Instruction `{i_name}`:\n{rendered_prompt}"
+                )
 
     tool_prompts = []
     for t_name in selected_tool_names:
@@ -709,10 +776,17 @@ async def _call_model(
 
     # Build system message.
     system_message = config["configurable"]["prompt"]
-    
+    system_message += vlm_capability_agent_context_append(
+        str(opts.get(CONF_VLM_CAPABILITY, RECOMMENDED_VLM_CAPABILITY))
+    )
+
     # Tier 1.5: Custom retrieval-based instructions
     if instruction_prompts:
-        system_message += "\n\n<custom_instructions>\n" + "\n\n".join(instruction_prompts) + "\n</custom_instructions>"
+        system_message += (
+            "\n\n<custom_instructions>\n"
+            + "\n\n".join(instruction_prompts)
+            + "\n</custom_instructions>"
+        )
 
     if mems:
         formatted_mems = "\n".join(f"[{mem.key}]: {mem.value}" for mem in mems)
@@ -727,10 +801,18 @@ async def _call_model(
 
     # 3-Tiered Prompt Assembly: System -> Provider -> Tool
     if provider_prompts:
-        system_message += "\n\n<provider_context>\n" + "\n\n".join(provider_prompts) + "\n</provider_context>"
-        
+        system_message += (
+            "\n\n<provider_context>\n"
+            + "\n\n".join(provider_prompts)
+            + "\n</provider_context>"
+        )
+
     if tool_prompts:
-        system_message += "\n\n<tool_specific_instructions>\n" + "\n\n".join(tool_prompts) + "\n</tool_specific_instructions>"
+        system_message += (
+            "\n\n<tool_specific_instructions>\n"
+            + "\n\n".join(tool_prompts)
+            + "\n</tool_specific_instructions>"
+        )
 
     # Model input = System + current messages.
     messages = [SystemMessage(content=system_message)] + state["messages"]
@@ -775,13 +857,23 @@ async def _call_model(
     raw_response = await model.ainvoke(trimmed_messages)
     LOGGER.debug("Raw chat model response: %s", raw_response)
 
-    response = extract_final(getattr(raw_response, "content", "") or "")
+    raw_content = getattr(raw_response, "content", "") or ""
+    thinking_text = extract_redacted_thinking(raw_content)
+    response = extract_final(raw_content)
 
-    # Create AI message, no need to include tool call metadata if there's none.
-    if hasattr(raw_response, "tool_calls"):
-        ai_response = AIMessage(content=response, tool_calls=raw_response.tool_calls)
+    # Keep tool metadata and ids: use model_copy instead of rebuilding AIMessage.
+    if isinstance(raw_response, AIMessage):
+        ai_response = raw_response.model_copy(update={"content": response})
     else:
-        ai_response = AIMessage(content=response)
+        tc = getattr(raw_response, "tool_calls", None) or []
+        itc = getattr(raw_response, "invalid_tool_calls", None) or []
+        add_kw = getattr(raw_response, "additional_kwargs", None) or {}
+        ai_response = AIMessage(
+            content=response,
+            tool_calls=tc,
+            invalid_tool_calls=itc,
+            additional_kwargs=dict(add_kw),
+        )
     LOGGER.debug("AI response: %s", ai_response)
 
     metadata: dict[str, str] = (
@@ -792,11 +884,14 @@ async def _call_model(
     messages_to_remove = [m for m in state["messages"] if m not in trimmed_messages]
     LOGGER.debug("Messages to remove: %s", messages_to_remove)
 
-    return {
+    out: dict[str, Any] = {
         "messages": ai_response,
         "chat_model_usage_metadata": metadata,
         "messages_to_remove": messages_to_remove,
     }
+    if thinking_text:
+        out["redacted_thinking_chunks"] = [thinking_text]
+    return out
 
 
 async def _summarize_and_remove_messages(
@@ -1028,7 +1123,7 @@ async def _call_tools(
                 if "tools" in parsed:
                     new_selected_tools.update(parsed["tools"])
                     tool_response.content = parsed.get("result", tool_response.content)
-            except Exception:
+            except Exception:  # noqa: BLE001, S110
                 pass
 
     res: dict[str, Any] = {"messages": tool_responses}

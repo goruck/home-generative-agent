@@ -14,9 +14,6 @@ from homeassistant.config_entries import (
     OptionsFlow,
     OptionsFlowWithReload,
 )
-from homeassistant.const import (
-    CONF_LLM_HASS_API,
-)
 from homeassistant.core import callback
 from homeassistant.helpers import llm
 from homeassistant.helpers.selector import (
@@ -38,6 +35,7 @@ from .const import (
     CONF_CRITICAL_ACTION_PIN_ENABLED,
     CONF_CRITICAL_ACTION_PIN_HASH,
     CONF_CRITICAL_ACTION_PIN_SALT,
+    CONF_DEBUG_ASSIST_TRACE,
     CONF_FACE_API_URL,
     CONF_FACE_RECOGNITION,
     CONF_MANAGE_CONTEXT_WITH_TOKENS,
@@ -46,20 +44,15 @@ from .const import (
     CONF_NOTIFY_SERVICE,
     CONF_PROMPT,
     CONF_SCHEMA_FIRST_YAML,
-    CONF_TOOL_RELEVANCE_THRESHOLD,
-    CONF_TOOL_RETRIEVAL_LIMIT,
     CONF_VIDEO_ANALYZER_MODE,
     CONFIG_ENTRY_VERSION,
     CRITICAL_PIN_MAX_LEN,
     CRITICAL_PIN_MIN_LEN,
     DOMAIN,
-    LLM_HASS_API_NONE,
     RECOMMENDED_FACE_RECOGNITION,
     RECOMMENDED_MANAGE_CONTEXT_WITH_TOKENS,
     RECOMMENDED_MAX_MESSAGES_IN_CONTEXT,
     RECOMMENDED_MAX_TOKENS_IN_CONTEXT,
-    RECOMMENDED_TOOL_RELEVANCE_THRESHOLD,
-    RECOMMENDED_TOOL_RETRIEVAL_LIMIT,
     RECOMMENDED_VIDEO_ANALYZER_MODE,
     SUBENTRY_TYPE_FEATURE,
     SUBENTRY_TYPE_MODEL_PROVIDER,
@@ -94,6 +87,7 @@ LOGGER = logging.getLogger(__name__)
 DEFAULT_OPTIONS = {
     CONF_PROMPT: llm.DEFAULT_INSTRUCTIONS_PROMPT,
     CONF_SCHEMA_FIRST_YAML: False,
+    CONF_DEBUG_ASSIST_TRACE: False,
     CONF_CRITICAL_ACTION_PIN_ENABLED: True,
     CONF_VIDEO_ANALYZER_MODE: RECOMMENDED_VIDEO_ANALYZER_MODE,
     CONF_FACE_RECOGNITION: RECOMMENDED_FACE_RECOGNITION,
@@ -180,6 +174,11 @@ async def _schema_for_options(
             CONF_SCHEMA_FIRST_YAML,
             description={"suggested_value": opts.get(CONF_SCHEMA_FIRST_YAML, False)},
             default=opts.get(CONF_SCHEMA_FIRST_YAML, False),
+        ): BooleanSelector(),
+        vol.Optional(
+            CONF_DEBUG_ASSIST_TRACE,
+            description={"suggested_value": opts.get(CONF_DEBUG_ASSIST_TRACE, False)},
+            default=opts.get(CONF_DEBUG_ASSIST_TRACE, False),
         ): BooleanSelector(),
     }
 

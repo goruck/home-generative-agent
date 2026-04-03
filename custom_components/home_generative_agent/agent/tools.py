@@ -13,8 +13,6 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, cast
 
-from ..const import EMBEDDING_MODEL_PROMPT_TEMPLATE
-
 import aiofiles
 import async_timeout
 import homeassistant.util.dt as dt_util
@@ -51,12 +49,20 @@ from ..const import (  # noqa: TID252
     CONF_CRITICAL_ACTION_PIN_HASH,
     CONF_CRITICAL_ACTION_PIN_SALT,
     CONF_NOTIFY_SERVICE,
+    CONF_VLM_CAPABILITY,
     CRITICAL_PIN_MAX_LEN,
     CRITICAL_PIN_MIN_LEN,
+    EMBEDDING_MODEL_PROMPT_TEMPLATE,
     HISTORY_TOOL_CONTEXT_LIMIT,
     HISTORY_TOOL_PURGE_KEEP_DAYS,
+    RECOMMENDED_VLM_CAPABILITY,
+    VLM_ADVANCED_OBJECTS_TASK_TEMPLATE,
+    VLM_CAPABILITY_ADVANCED,
+    VLM_CAPABILITY_BASIC,
+    VLM_CAPABILITY_STANDARD,
     VLM_IMAGE_HEIGHT,
     VLM_IMAGE_WIDTH,
+    VLM_STANDARD_LENGTH_CONSTRAINT,
     VLM_SYSTEM_PROMPT,
     VLM_USER_KW_TEMPLATE,
     VLM_USER_PROMPT,
@@ -365,11 +371,60 @@ def _prompt_func(data: dict[str, Any]) -> list[AnyMessage]:
     return [SystemMessage(content=system), HumanMessage(content=content_parts)]
 
 
-async def analyze_image(
+def build_vlm_user_text(  # noqa: PLR0911
+    *,
+    vlm_capability: str,
+    detection_keywords: list[str] | None,
+    analysis_prompt: str | None,
+) -> str:
+    """Build VLM user text from capability, keywords, and optional prompt."""
+    cap = (
+        vlm_capability
+        if vlm_capability
+        in (VLM_CAPABILITY_BASIC, VLM_CAPABILITY_STANDARD, VLM_CAPABILITY_ADVANCED)
+        else RECOMMENDED_VLM_CAPABILITY
+    )
+    ap = (analysis_prompt or "").strip()
+    has_prompt = bool(ap)
+    kw_list = [k for k in (detection_keywords or []) if str(k).strip()]
+    has_kw = bool(kw_list)
+    joined_kw = " or ".join(kw_list)
+
+    if cap == VLM_CAPABILITY_BASIC:
+        if has_kw:
+            return VLM_USER_KW_TEMPLATE.format(key_words=joined_kw)
+        return VLM_USER_PROMPT
+
+    if cap == VLM_CAPABILITY_STANDARD:
+        if has_prompt and has_kw:
+            return (
+                f"Focus on these elements: {joined_kw}. Instruction: {ap}"
+                f"{VLM_STANDARD_LENGTH_CONSTRAINT}"
+            )
+        if has_prompt:
+            return f"{ap}{VLM_STANDARD_LENGTH_CONSTRAINT}"
+        if has_kw:
+            return VLM_USER_KW_TEMPLATE.format(key_words=joined_kw)
+        return VLM_USER_PROMPT
+
+    # Advanced
+    if has_prompt and has_kw:
+        return VLM_ADVANCED_OBJECTS_TASK_TEMPLATE.format(objects=joined_kw, task=ap)
+    if has_prompt:
+        return ap
+    if has_kw:
+        return VLM_USER_KW_TEMPLATE.format(key_words=joined_kw)
+    return VLM_USER_PROMPT
+
+
+async def analyze_image(  # noqa: PLR0913
     vlm_model: RunnableSerializable[LanguageModelInput, BaseMessage],
     image: bytes,
     detection_keywords: list[str] | None = None,
     prev_text: str | None = None,
+    *,
+    analysis_prompt: str | None = None,
+    vlm_capability: str | None = None,
 ) -> str:
     """Analyze an image with the preconfigured VLM model."""
     await asyncio.sleep(0)  # keep the event loop snappy
@@ -377,10 +432,12 @@ async def analyze_image(
     image_data = base64.b64encode(image).decode("utf-8")
     chain = _prompt_func | vlm_model
 
-    if detection_keywords is not None:
-        prompt = VLM_USER_KW_TEMPLATE.format(key_words=" or ".join(detection_keywords))
-    else:
-        prompt = VLM_USER_PROMPT
+    cap = vlm_capability or RECOMMENDED_VLM_CAPABILITY
+    prompt = build_vlm_user_text(
+        vlm_capability=cap,
+        detection_keywords=detection_keywords,
+        analysis_prompt=analysis_prompt,
+    )
 
     try:
         resp = await chain.ainvoke(
@@ -405,6 +462,7 @@ async def analyze_image(
 async def get_and_analyze_camera_image(  # noqa: D417
     camera_name: str,
     detection_keywords: list[str] | None = None,
+    analysis_prompt: str | None = None,
     *,
     # Hide these arguments from the model.
     config: Annotated[RunnableConfig, InjectedToolArg()],
@@ -412,11 +470,23 @@ async def get_and_analyze_camera_image(  # noqa: D417
     """
     Get a camera image and perform scene analysis on it.
 
+    Integration option VLM capability controls how arguments are interpreted:
+    - Basic: Pass only detection_keywords. analysis_prompt is ignored
+      (do not rely on it).
+    - Standard: You may pass analysis_prompt for focused instructions
+      (1-2 sentence answers). You can combine with detection_keywords.
+    - Advanced: You may pass a free-form analysis_prompt and/or
+      detection_keywords. When both are set, the vision model receives
+      OBJECTS TO LOCATE vs TASK formatting.
+
     Args:
         camera_name: Name of the camera for scene analysis.
         detection_keywords: Specific objects to look for in image, if any.
             For example, If user says "check the front porch camera for
             boxes and dogs", detection_keywords would be ["boxes", "dogs"].
+        analysis_prompt: Optional free-form instruction (e.g. read a display,
+            find an error). Omitted or ignored depending on VLM capability;
+            see above.
 
     """
     if "configurable" not in config:
@@ -424,10 +494,29 @@ async def get_and_analyze_camera_image(  # noqa: D417
 
     hass = config["configurable"]["hass"]
     vlm_model = config["configurable"]["vlm_model"]
+    opts = config["configurable"]["options"]
+    capability = opts.get(CONF_VLM_CAPABILITY, RECOMMENDED_VLM_CAPABILITY)
+    ap_stripped = (analysis_prompt or "").strip()
+
+    if capability == VLM_CAPABILITY_BASIC and ap_stripped:
+        LOGGER.warning(
+            "get_and_analyze_camera_image: analysis_prompt is set but VLM capability "
+            "is Basic; the vision model will ignore analysis_prompt. "
+            "Raise VLM capability to Standard or Advanced if you need free-form "
+            "instructions. Prompt: %s",
+            ap_stripped[:200],
+        )
+
     image = await _get_camera_image(hass, camera_name)
     if image is None:
         return "Error getting image from camera."
-    return await analyze_image(vlm_model, image, detection_keywords)
+    return await analyze_image(
+        vlm_model,
+        image,
+        detection_keywords,
+        analysis_prompt=analysis_prompt,
+        vlm_capability=capability,
+    )
 
 
 @tool(parse_docstring=True)
@@ -1241,16 +1330,20 @@ async def get_camera_last_events(  # noqa: D417
 async def get_available_tools(
     query: str,
     *,
-    config: Annotated[RunnableConfig, InjectedToolArg()],
+    config: Annotated[RunnableConfig, InjectedToolArg()],  # noqa: ARG001
     store: Annotated[BaseStore, InjectedStore()],
 ) -> dict[str, Any]:
     """
     Search for additional tools and capabilities that might be relevant.
+
     Use this if you are unsure how to handle a request or if you suspect
     a specific tool exists but is not currently available to you.
 
     Args:
         query: The semantic search query (e.g. 'how to control lights').
+        config: Injected LangGraph config (reserved for tool runtime).
+        store: LangGraph store for tool metadata search.
+
     """
     # This tool is mostly a marker. The actual retrieval is intercepted in _call_tools.
     # We provide a basic implementation here just in case, but it's redundant.
@@ -1262,7 +1355,9 @@ async def get_available_tools(
     docs = await store.asearch(namespace, query=formatted_query, limit=10)
     tool_names = [doc.key for doc in docs]
 
-    return {
-        "tools": tool_names,
-        "result": f"Found these relevant tools: {', '.join(tool_names)}. They have been added to your current session.",
-    }
+    joined = ", ".join(tool_names)
+    result_msg = (
+        f"Found these relevant tools: {joined}. "
+        "They have been added to your current session."
+    )
+    return {"tools": tool_names, "result": result_msg}

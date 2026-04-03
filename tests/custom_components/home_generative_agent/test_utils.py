@@ -12,6 +12,7 @@ from custom_components.home_generative_agent.core.utils import (
     CannotConnectError,
     InvalidAuthError,
     extract_final,
+    extract_redacted_thinking,
     openai_compatible_healthy,
     validate_openai_compatible_url,
 )
@@ -26,6 +27,21 @@ if TYPE_CHECKING:
 
 def test_extract_final_strips_think_block() -> None:
     assert extract_final("<think>reasoning</think>answer") == "answer"
+
+
+def test_extract_redacted_thinking_short_tags() -> None:
+    raw = "<think>reasoning</think>answer"
+    assert extract_redacted_thinking(raw) == "reasoning"
+
+
+def test_extract_redacted_thinking_long_tags() -> None:
+    raw = "<redacted_thinking>alpha</redacted_thinking>x"
+    assert extract_redacted_thinking(raw) == "alpha"
+
+
+def test_extract_redacted_thinking_unclosed() -> None:
+    raw = "<think>tail without close"
+    assert extract_redacted_thinking(raw) == "tail without close"
 
 
 def test_extract_final_no_max_chars_returns_full() -> None:

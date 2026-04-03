@@ -42,6 +42,7 @@ from ..const import (  # noqa: TID252
     CONF_FEATURE_MODEL_NAME,
     CONF_FEATURE_MODEL_REASONING,
     CONF_FEATURE_MODEL_TEMPERATURE,
+    CONF_VLM_CAPABILITY,
     FEATURE_CATEGORY_MAP,
     FEATURE_DEFS,
     KEEPALIVE_MAX_SECONDS,
@@ -58,9 +59,13 @@ from ..const import (  # noqa: TID252
     RECOMMENDED_OLLAMA_REASONING,
     RECOMMENDED_OLLAMA_SUMMARIZATION_KEEPALIVE,
     RECOMMENDED_OLLAMA_VLM_KEEPALIVE,
+    RECOMMENDED_VLM_CAPABILITY,
     SUBENTRY_TYPE_DATABASE,
     SUBENTRY_TYPE_FEATURE,
     SUBENTRY_TYPE_MODEL_PROVIDER,
+    VLM_CAPABILITY_ADVANCED,
+    VLM_CAPABILITY_BASIC,
+    VLM_CAPABILITY_STANDARD,
 )
 from ..core.db_utils import build_postgres_uri  # noqa: TID252
 from ..core.utils import (  # noqa: TID252
@@ -595,6 +600,36 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
                     )
                 )
 
+        if category == "vlm":
+            vlm_capability_opts: list[SelectOptionDict] = [
+                SelectOptionDict(
+                    label="Basic (Keywords only)", value=VLM_CAPABILITY_BASIC
+                ),
+                SelectOptionDict(
+                    label="Standard (1-2 Sentences)", value=VLM_CAPABILITY_STANDARD
+                ),
+                SelectOptionDict(
+                    label="Advanced (Detailed)", value=VLM_CAPABILITY_ADVANCED
+                ),
+            ]
+            cap_default = entry.options.get(
+                CONF_VLM_CAPABILITY, RECOMMENDED_VLM_CAPABILITY
+            )
+            schema[
+                vol.Optional(
+                    CONF_VLM_CAPABILITY,
+                    description={"suggested_value": cap_default},
+                    default=cap_default,
+                )
+            ] = SelectSelector(
+                SelectSelectorConfig(
+                    options=vlm_capability_opts,
+                    mode=SelectSelectorMode.DROPDOWN,
+                    sort=False,
+                    custom_value=False,
+                )
+            )
+
         if user_input is not None:
             provider_type = _provider_type_for_id(entry, provider_id)
             model_data = dict(defaults)
@@ -617,6 +652,15 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
                 }
             )
             model_data = {k: v for k, v in model_data.items() if v is not None}
+
+            if category == "vlm":
+                cap_val = user_input.get(CONF_VLM_CAPABILITY)
+                if cap_val is not None:
+                    merged_opts = dict(entry.options)
+                    merged_opts[CONF_VLM_CAPABILITY] = cap_val
+                    self.hass.config_entries.async_update_entry(
+                        entry, options=merged_opts
+                    )
 
             payload = self._feature_payload(
                 feature_type, provider_id, model_data, existing_config

@@ -209,7 +209,11 @@
             "temperature": "Temperature",
             "keepalive_s": "Ollama keepalive (seconds or Never unload (-1))",
             "context_size": "Ollama context size (tokens)",
-            "reasoning": "Ollama reasoning"
+            "reasoning": "Ollama reasoning",
+            "vlm_capability": "VLM capability (camera image analysis)"
+          },
+          "data_description": {
+            "vlm_capability": "Controls how get_and_analyze_camera_image builds prompts for the vision model (Basic / Standard / Advanced)."
           }
         },
         "database": {

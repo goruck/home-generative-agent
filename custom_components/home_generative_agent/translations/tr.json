@@ -209,7 +209,11 @@
             "temperature": "Sıcaklık",
             "keepalive_s": "Ollama keepalive (saniye veya Asla boşaltma (-1))",
             "context_size": "Ollama bağlam boyutu (token)",
-            "reasoning": "Ollama akıl yürütme"
+            "reasoning": "Ollama akıl yürütme",
+            "vlm_capability": "VLM yeteneği (kamera görüntü analizi)"
+          },
+          "data_description": {
+            "vlm_capability": "get_and_analyze_camera_image için görüntü modeli istemlerinin nasıl oluşturulacağını denetler (Temel / Standart / Gelişmiş)."
           }
         },
         "database": {

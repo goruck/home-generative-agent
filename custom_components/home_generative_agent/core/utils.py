@@ -42,6 +42,12 @@ LOGGER = logging.getLogger(__name__)
 
 
 _THINK_BLOCK = re.compile(r"<think>.*?(?:</think>|$)", re.IGNORECASE | re.DOTALL)
+# Inner capture supports short `<think>` / `</think>` (tests, _THINK_BLOCK) and long
+# `<redacted_thinking>` / `</redacted_thinking>` (some providers).
+_THINK_INNER = re.compile(
+    r"<(?:think|redacted_thinking)>\s*(.*?)\s*(?:</(?:think|redacted_thinking)>|$)",
+    re.IGNORECASE | re.DOTALL,
+)
 
 # ---------------------------
 # Exceptions
@@ -488,6 +494,37 @@ def reasoning_field(
         return {}
     supported, value = _guess_ollama_reasoning(model)
     return {"reasoning": value} if supported else {}
+
+
+def extract_redacted_thinking(
+    raw: str | list[str | dict[str, Any]] | Any,
+) -> str:
+    """Return thinking text; ``raw`` matches :func:`extract_final` input shapes."""
+    if not raw:
+        return ""
+
+    if isinstance(raw, list):
+        text_parts = []
+        for block in raw:
+            if isinstance(block, str):
+                text_parts.append(block)
+            elif isinstance(block, dict) and block.get("type") == "text":
+                text_parts.append(str(block.get("text", "")))
+        raw_str = "".join(text_parts)
+    elif isinstance(raw, str):
+        raw_str = raw
+    else:
+        raw_str = str(raw)
+
+    if not raw_str:
+        return ""
+
+    chunks = [
+        m.group(1).strip()
+        for m in _THINK_INNER.finditer(raw_str)
+        if m.group(1) and str(m.group(1)).strip()
+    ]
+    return "\n\n---\n\n".join(chunks)
 
 
 def extract_final(

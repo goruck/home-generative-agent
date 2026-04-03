@@ -31,6 +31,10 @@
 > * **Async Provider Init:** Moved Ollama init to the executor to stop it from blocking the event loop.
 > * **Pre-Warmed Models:** Chat, Vision, and Summarization models now pre-warm at startup to kill the lag on the first interaction.
 > * **Langgraph Stability:** Explicitly cleans up background tasks during unload to fix the "Task was destroyed but it is pending!" errors.
+> * **Home Assistant 2026.4 Assist:** I chased parity with the stock HA LLM conversation agent — Assist chat on **2026.4+** gets the same ChatLog / **More info** path, so you see reasoning, tool calls, and HA native tool results instead of a dumb final line of text. Straight Q&A turns also use `QUERY_ANSWER` so core doesn't label a plain answer like you just finished an action.
+> * **Instruction RAG:** Tier 1.5 chunks are scored on *both* an intent channel (name/tags) and a body channel, with a bias slider on the **Tool Manager** subentry, so one garbage similarity doesn't nuke retrieval.
+> * **VLM capability:** Camera analysis has Basic / Standard / Advanced profiles (full table under Configuration); the chat model gets a small matching hint so it doesn't fight your setting.
+> * **Ollama reasoning:** Optional reasoning pass for Ollama models that actually support it, per feature, when you enable it on the model step.
 > 
 > **Note:** Existing installations are automatically migrated on first boot. I will attempt to track upstream changes where possible, but honestly, this is a very novel system at this point.
 
@@ -40,7 +44,7 @@
 
 ![Project Maintenance][maintenance-shield]
 
-This README is the documentation for a [Home Assistant](https://www.home-assistant.io/) (HA) integration called home-generative-agent. This project uses [LangChain](https://www.langchain.com/) and [LangGraph](https://www.langchain.com/langgraph) to create a [generative AI agent](https://arxiv.org/abs/2304.03442#) that interacts with and automates tasks within a HA smart home environment. The agent understands your home's context, learns your preferences, and interacts with you and your home to accomplish activities you find valuable. Key features include creating automations, analyzing images, and managing home states using various LLMs (Large Language Models). The architecture involves both cloud-based and edge-based models for optimal performance and cost-effectiveness. Installation instructions, configuration details, and information on the project's architecture and the different models used are included. The project is open-source and welcomes contributions.
+This README is the documentation for a [Home Assistant](https://www.home-assistant.io/) (HA) integration called home-generative-agent. This project uses [LangChain](https://www.langchain.com/) and [LangGraph](https://www.langchain.com/langgraph) to create a [generative AI agent](https://arxiv.org/abs/2304.03442#) that interacts with and automates tasks within a HA smart home environment. The agent understands your home's context, learns your preferences, and interacts with you and your home to accomplish activities you find valuable. Key features include creating automations, analyzing images, and managing home states using various LLMs (Large Language Models). The architecture involves both cloud-based and edge-based models for optimal performance and cost-effectiveness. Use **Home Assistant 2026.4** or newer if you want Assist chat **More info** and ChatLog behavior to line up with the core LLM integration (older cores may still run; Assist just won't match). Installation instructions, configuration details, and information on the project's architecture and the different models used are included. The project is open-source and welcomes contributions.
 
 These are some of the features currently supported:
 
@@ -50,6 +54,8 @@ These are some of the features currently supported:
 - Full agent control of allowed entities in the home.
 - Short- and long-term memory using semantic search.
 - Automatic summarization of home state to manage LLM context length.
+- Assist chat on **2026.4+**: reasoning, tools, and **More info** aligned with how the built-in HA LLM agent does it.
+- Tier 1.5 instruction RAG with tunable intent-vs-body retrieval (Tool Manager).
 
 This integration will set up the `conversation` platform, allowing users to converse directly with the Home Generative Assistant, and the `image` and `sensor` platforms which create entities to display the latest camera image, the AI-generated summary, and recognized people in HA's UI or they can be used to create automations.
 
@@ -115,6 +121,8 @@ This integration will set up the `conversation` platform, allowing users to conv
 Configuration is done entirely in the Home Assistant UI using subentry flows.
 A "feature" is a discrete capability exposed by the integration (for example Conversation, Camera Image Analysis, or Conversation Summarization). Each feature is enabled separately and has its own model/provider configuration.
 
+For **Assist** — the **More info** button, structured tool rows, and response typing that shipped with **Home Assistant 2026.4** — run core **2026.4** or newer. I'm not promising identical UI on older HA; the integration still works, you just don't get the same chat surface.
+
 1. Add the integration (instruction-only screen).
    - If you previously configured the integration via the legacy flow, your settings are automatically migrated into the new subentry-based UI.
 2. Click **+ Setup** on the integration page.
@@ -133,7 +141,23 @@ Embedding model selection: the integration uses the first model provider that su
 
 If you want separate servers per feature, add multiple Model Provider subentries and assign them in each feature’s settings. For example: create a “Primary Ollama” provider pointing at your chat server and a “Vision Ollama” provider pointing at your camera analysis server, then select the appropriate provider on the feature’s model settings step. You can mix provider types — for example a local vLLM server added as an **OpenAI Compatible** provider alongside an Ollama provider.
 
-Global options (prompt, face recognition URL, context management, critical-action PIN, etc.) live in the integration’s **Options** flow. Sentinel settings are configured in the **Sentinel** subentry.
+Global options (prompt, face recognition URL, context management, critical-action PIN, optional **Debug: populate Assist 'Show details' with reasoning trace**, etc.) live in the integration’s **Options** flow. Sentinel settings are configured in the **Sentinel** subentry.
+
+### Assist chat details (Home Assistant 2026.4+)
+
+The conversation agent streams each turn into HA's **ChatLog** the way core expects (``intent-progress`` / ``chat_log_delta``), so Assist can render thinking text, LangChain tool calls, tool results, and Home Assistant LLM API tool outcomes — same general idea as the stock LLM conversation integration. If the model emits native thinking blocks, those feed through; otherwise you only get a trace in **More info** when there's something to show, *unless* you flip **Debug: populate Assist 'Show details' with reasoning trace** in **Options**, which always fills the panel (verbose; use it when you're debugging the agent).
+
+### VLM capability (camera image analysis)
+
+Configure **VLM capability** on the **Camera Image Analysis** feature screen (with the vision model, temperature, and Ollama options). It controls how the `get_and_analyze_camera_image` tool builds prompts for your vision model:
+
+| Profile | Behavior |
+| -- | -- |
+| **Basic (Keywords only)** | Only `detection_keywords` are sent to the VLM; a free-form `analysis_prompt` from the agent is ignored (a warning is logged if one is passed). |
+| **Standard (1-2 Sentences)** | You may pass `analysis_prompt` for focused instructions; answers are asked to stay in 1–2 short sentences. You can combine with `detection_keywords`. |
+| **Advanced (Detailed)** | Full free-form `analysis_prompt`; when both keywords and a prompt are provided, the user text uses **OBJECTS TO LOCATE** vs **TASK** lines so capable models (e.g. MiniCPM-V) can separate where to look from what to do. |
+
+Default is **Advanced**. The chat model also receives a short system-message hint reflecting the selected profile so tool calling stays aligned with your setting.
 
 ### Speech-to-Text (STT)
 

@@ -9,6 +9,7 @@ import string
 from typing import TYPE_CHECKING, Any, Literal
 
 import homeassistant.util.dt as dt_util
+import voluptuous as vol
 from homeassistant.components import conversation
 from homeassistant.components.conversation import trace
 from homeassistant.components.conversation.models import AbstractConversationAgent
@@ -21,15 +22,15 @@ from langchain_core.caches import InMemoryCache
 from langchain_core.globals import set_debug, set_llm_cache, set_verbose
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
 from voluptuous_openapi import convert
-import voluptuous as vol
 
 from .agent.graph import workflow
+from .agent.rag_embedding_text import strip_for_embedding
 from .agent.tools import (
     add_automation,
     alarm_control,
     confirm_sensitive_action,
-    get_available_tools,
     get_and_analyze_camera_image,
+    get_available_tools,
     get_camera_last_events,
     get_entity_history,
     resolve_entity_ids,
@@ -38,16 +39,20 @@ from .agent.tools import (
 )
 from .const import (
     CONF_CRITICAL_ACTION_PIN_ENABLED,
+    CONF_DEBUG_ASSIST_TRACE,
     CONF_INSTRUCTIONS_CONFIG,
     CONF_PROMPT,
     CONF_SCHEMA_FIRST_YAML,
     CRITICAL_ACTION_PROMPT,
     DOMAIN,
+    GRAPH_CFG_HA_TOOL_INTENT_RESPONSES,
     LANGCHAIN_LOGGING_LEVEL,
     SCHEMA_FIRST_YAML_PROMPT,
     SUBENTRY_TYPE_MODEL_PROVIDER,
     TOOL_CALL_ERROR_SYSTEM_MESSAGE,
 )
+from .core.assist_chat_log import append_langgraph_turn_to_chat_log
+from .core.assist_reasoning_trace import build_assist_reasoning_trace
 from .core.conversation_helpers import (
     _convert_schema_json_to_yaml,
     _fix_entity_ids_in_text,
@@ -67,6 +72,27 @@ if TYPE_CHECKING:
     from .core.runtime import HGAConfigEntry
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _apply_query_answer_when_no_ha_intent(
+    result: conversation.ConversationResult,
+    *,
+    ha_had_intent_response_from_tool: bool,
+) -> None:
+    """Align ``response_type`` with HA defaults for pure Q&A turns.
+
+    When no Home Assistant LLM tool returned ``IntentResponseDict``, core would leave
+    the default ``ACTION_DONE``, which mislabels informational answers.
+
+    Note: the Android companion Assist flow (``AssistViewModelBase``) does not branch
+    on ``response_type`` today; this still corrects ``intent_output`` for the WebSocket
+    API, automations, other clients, and possible future app behavior.
+    """
+    if ha_had_intent_response_from_tool:
+        return
+    if result.response.response_type == intent.IntentResponseType.ERROR:
+        return
+    result.response.response_type = intent.IntentResponseType.QUERY_ANSWER
 
 
 if LANGCHAIN_LOGGING_LEVEL == "verbose":
@@ -133,7 +159,7 @@ class MultiLLMAPI:
 
         if last_err:
             raise last_err
-        
+
         msg = f"No APIs available to handle tool {tool_input.tool_name}"
         raise HomeAssistantError(msg)
 
@@ -192,7 +218,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         """Return a list of supported languages."""
         return MATCH_ALL
 
-    async def _async_handle_message(  # noqa: PLR0912, PLR0915
+    async def _async_handle_message(  # noqa: C901, PLR0912, PLR0915
         self,
         user_input: conversation.ConversationInput,
         chat_log: conversation.ChatLog,
@@ -235,10 +261,15 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         )
 
         # Fetch Tool Manager Config
-        from .const import SUBENTRY_TYPE_TOOL_MANAGER
+        from .const import SUBENTRY_TYPE_TOOL_MANAGER  # noqa: PLC0415
+
         tool_mgr_subentry = next(
-            (s for s in self.entry.subentries.values() if s.subentry_type == SUBENTRY_TYPE_TOOL_MANAGER),
-            None
+            (
+                s
+                for s in self.entry.subentries.values()
+                if s.subentry_type == SUBENTRY_TYPE_TOOL_MANAGER
+            ),
+            None,
         )
         tool_mgr_data = tool_mgr_subentry.data if tool_mgr_subentry else {}
         providers_cfg = tool_mgr_data.get("tool_providers", {})
@@ -290,7 +321,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         }
         if not options.get(CONF_SCHEMA_FIRST_YAML, False):
             langchain_tools["add_automation"] = add_automation
-        
+
         if providers_cfg.get("langchain_internal", {}).get("enabled", True):
             for tv in langchain_tools.values():
                 t_cfg = tools_cfg.get(tv.name, {})
@@ -306,66 +337,75 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 tools_dict_list.append(t)
             else:
                 tools_dict_list.append({"name": t.name, "description": t.description})
-        
+
         tools_json = json.dumps(tools_dict_list, sort_keys=True, default=str)
         instructions_json = json.dumps(instructions_cfg, sort_keys=True, default=str)
         # Force re-index by prefixing with version (content field fix)
         # Include instructions in the hash so they trigger re-index too.
-        tools_hash = hashlib.sha256(f"v3:{tools_json}:{instructions_json}".encode()).hexdigest()
+        tools_hash = hashlib.sha256(
+            f"v4:{tools_json}:{instructions_json}".encode()
+        ).hexdigest()
 
         if runtime_data.tools_version_hash != tools_hash:
-            _LOGGER.debug("Tool definitions changed (or first run). Indexing into vector store.")
+            _LOGGER.debug(
+                "Tool definitions changed (or first run). Indexing into vector store."
+            )
             store = runtime_data.store
             for i, td in enumerate(tools_dict_list):
-                name = td.get("name") or td.get("function", {}).get("name") or td.get("id")
-                description = td.get("description") or td.get("function", {}).get("description")
-                
+                name = (
+                    td.get("name") or td.get("function", {}).get("name") or td.get("id")
+                )
+                description = td.get("description") or td.get("function", {}).get(
+                    "description"
+                )
+
                 if not name:
                     name = f"unnamed_tool_{i}"
                     _LOGGER.warning(
-                        "Tool at index %d is missing a name (using fallback '%s'). Full tool dict: %s",
-                        i, name, td
+                        (
+                            "Tool at index %d is missing a name (using fallback '%s'). "
+                            "Full tool dict: %s"
+                        ),
+                        i,
+                        name,
+                        td,
                     )
 
-                # Build the value to be indexed. We MUST use the "content" field
-                # because the store is configured to only embed that field in __init__.py.
+                # Build the value to be indexed. We MUST use the "content" field because
+                # the store is configured to only embed that field in __init__.py.
                 content = description or ""
                 if not name.startswith("unnamed_tool_"):
                     # For real tools, include the name in the searchable content too.
                     content = f"{name}: {content}"
-                
+
                 t_cfg = tools_cfg.get(name, {})
                 custom_tags = t_cfg.get("tags", "")
                 if custom_tags:
                     content = f"{content}\nKeywords/Tags: {custom_tags}"
-                
+
                 index_value = {
                     "content": content,
                     "name": name,
-                    "description": description or ""
+                    "description": description or "",
                 }
 
                 # We do this asynchronously but concurrently to speed it up.
                 hass.async_create_task(
-                    store.aput(
-                        ("system", "tools"),
-                        key=name,
-                        value=index_value
-                    )
+                    store.aput(("system", "tools"), key=name, value=index_value)
                 )
-            
+
             # Index active instructions
             for i_name, i_cfg in instructions_cfg.items():
                 if not i_cfg.get("enabled", True):
                     continue
-                
+
                 i_prompt = i_cfg.get("prompt", "")
                 i_tags = i_cfg.get("tags", "")
-                
+
                 i_content = f"Instruction: {i_name}"
                 if i_tags:
                     i_content = f"{i_content} (Tags: {i_tags})"
-                
+
                 hass.async_create_task(
                     store.aput(
                         ("system", "instructions"),
@@ -373,8 +413,26 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                         value={
                             "content": i_content,
                             "name": i_name,
-                            "prompt": i_prompt
-                        }
+                            "prompt": i_prompt,
+                        },
+                    )
+                )
+
+                stripped = strip_for_embedding(i_prompt)
+                body_content = (
+                    f"Instruction: {i_name}\n{stripped}"
+                    if stripped
+                    else f"Instruction: {i_name}"
+                )
+                hass.async_create_task(
+                    store.aput(
+                        ("system", "instructions_body"),
+                        key=i_name,
+                        value={
+                            "content": body_content,
+                            "name": i_name,
+                            "prompt": i_prompt,
+                        },
                     )
                 )
 
@@ -441,10 +499,10 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
 
         # Use the already-configured chat model from __init__.py
         base_llm = runtime_data.chat_model
-        
-        # Tools are no longer bound here. We pass available_tools to the config and bind dynamically via RAG.
-        # But we still need to verify the model supports tools. We assume it does based on __init__ checks,
-        # or we can just bind an empty list to test it if needed.
+
+        # Tools are no longer bound here. We pass available_tools to the config and bind
+        # dynamically via RAG. We still verify the model supports tools; see __init__
+        # checks, or bind an empty list to test if needed.
         if not hasattr(base_llm, "bind_tools"):
             _LOGGER.exception("Error during conversation processing.")
             intent_response = intent.IntentResponse(language=user_input.language)
@@ -477,6 +535,8 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         user_name = user_name.translate(str.maketrans("", "", string.punctuation))
         _LOGGER.debug("User name: %s", user_name)
 
+        ha_tool_intent_responses: dict[str, intent.IntentResponse] = {}
+
         app_config: RunnableConfig = {
             "configurable": {
                 "thread_id": conversation_id,
@@ -493,6 +553,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 "hass": hass,
                 "pending_actions": runtime_data.pending_actions,
                 "tool_mgr_data": tool_mgr_data,
+                GRAPH_CFG_HA_TOOL_INTENT_RESPONSES: ha_tool_intent_responses,
             },
             "recursion_limit": 10,
         }
@@ -514,7 +575,10 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             "chat_model_usage_metadata": {},
             "messages_to_remove": [],
             "selected_tools": [],
+            "selected_instructions": [],
+            "redacted_thinking_chunks": [],
         }
+        input_message_count = len(messages)
 
         # Interact with agent app.
         try:
@@ -537,7 +601,6 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
 
         _LOGGER.debug("====== End of run ======")
 
-        intent_response = intent.IntentResponse(language=user_input.language)
         final_content = response["messages"][-1].content
         if isinstance(final_content, str):
             if options.get(CONF_SCHEMA_FIRST_YAML, False):
@@ -548,10 +611,28 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 final_content, options.get(CONF_SCHEMA_FIRST_YAML, False)
             )
             _LOGGER.debug("Final response content: %s", final_content)
-        intent_response.async_set_speech(final_content)
-        return conversation.ConversationResult(
-            response=intent_response, conversation_id=conversation_id
+        reasoning_plain = build_assist_reasoning_trace(response)
+        final_str = (
+            final_content if isinstance(final_content, str) else str(final_content)
         )
+        has_native_thinking = bool(response.get("redacted_thinking_chunks"))
+        await append_langgraph_turn_to_chat_log(
+            chat_log,
+            user_input.agent_id,
+            response["messages"],
+            input_message_count=input_message_count,
+            reasoning_plain=reasoning_plain,
+            has_native_thinking=has_native_thinking,
+            debug_assist_trace=bool(options.get(CONF_DEBUG_ASSIST_TRACE, False)),
+            final_spoken_text=final_str,
+            ha_tool_intent_responses=ha_tool_intent_responses,
+        )
+        conv_result = conversation.async_get_result_from_chat_log(user_input, chat_log)
+        _apply_query_answer_when_no_ha_intent(
+            conv_result,
+            ha_had_intent_response_from_tool=bool(ha_tool_intent_responses),
+        )
+        return conv_result
 
     async def _async_entry_update_listener(
         self, hass: HomeAssistant, entry: ConfigEntry

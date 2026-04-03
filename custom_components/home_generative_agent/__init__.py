@@ -981,10 +981,20 @@ def _ensure_default_sentinel_subentry(hass: HomeAssistant, entry: ConfigEntry) -
     )
     hass.config_entries.async_add_subentry(entry, subentry)
 
-def _ensure_default_tool_manager_subentry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+
+def _ensure_default_tool_manager_subentry(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> None:
     """Ensure a singleton tool manager subentry exists for deterministic settings."""
-    from .const import CONF_TOOL_RELEVANCE_THRESHOLD, CONF_TOOL_RETRIEVAL_LIMIT, RECOMMENDED_TOOL_RELEVANCE_THRESHOLD, RECOMMENDED_TOOL_RETRIEVAL_LIMIT
-    
+    from .const import (  # noqa: PLC0415
+        CONF_INSTRUCTION_RAG_INTENT_WEIGHT,
+        CONF_TOOL_RELEVANCE_THRESHOLD,
+        CONF_TOOL_RETRIEVAL_LIMIT,
+        RECOMMENDED_INSTRUCTION_RAG_INTENT_WEIGHT,
+        RECOMMENDED_TOOL_RELEVANCE_THRESHOLD,
+        RECOMMENDED_TOOL_RETRIEVAL_LIMIT,
+    )
+
     exists = any(
         s.subentry_type == SUBENTRY_TYPE_TOOL_MANAGER for s in entry.subentries.values()
     )
@@ -992,10 +1002,18 @@ def _ensure_default_tool_manager_subentry(hass: HomeAssistant, entry: ConfigEntr
         return
 
     payload = {
-        CONF_TOOL_RETRIEVAL_LIMIT: entry.options.get(CONF_TOOL_RETRIEVAL_LIMIT, RECOMMENDED_TOOL_RETRIEVAL_LIMIT),
-        CONF_TOOL_RELEVANCE_THRESHOLD: entry.options.get(CONF_TOOL_RELEVANCE_THRESHOLD, RECOMMENDED_TOOL_RELEVANCE_THRESHOLD),
+        CONF_TOOL_RETRIEVAL_LIMIT: entry.options.get(
+            CONF_TOOL_RETRIEVAL_LIMIT, RECOMMENDED_TOOL_RETRIEVAL_LIMIT
+        ),
+        CONF_TOOL_RELEVANCE_THRESHOLD: entry.options.get(
+            CONF_TOOL_RELEVANCE_THRESHOLD, RECOMMENDED_TOOL_RELEVANCE_THRESHOLD
+        ),
+        CONF_INSTRUCTION_RAG_INTENT_WEIGHT: entry.options.get(
+            CONF_INSTRUCTION_RAG_INTENT_WEIGHT,
+            RECOMMENDED_INSTRUCTION_RAG_INTENT_WEIGHT,
+        ),
         "tool_providers": {},
-        "tools": {}
+        "tools": {},
     }
     subentry = ConfigSubentry(
         subentry_type=SUBENTRY_TYPE_TOOL_MANAGER,
@@ -1303,8 +1321,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             continue
         try:
             ollama_providers[url] = await hass.async_add_executor_job(
-            _build_ollama_provider, url
-        )
+                _build_ollama_provider, url
+            )
         except Exception:
             LOGGER.exception(
                 "Ollama provider init failed for %s; continuing without it.", url
@@ -2319,7 +2337,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             try:
                 await hass.async_add_executor_job(m.bind_tools, [])
             except Exception:
-                LOGGER.debug("Failed to pre-warm model tools, it might not support bind_tools")
+                LOGGER.debug(
+                    "Failed to pre-warm model tools, it might not support bind_tools"
+                )
 
     await _pre_warm_model(chat_model)
     await _pre_warm_model(vision_model)
