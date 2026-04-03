@@ -126,7 +126,14 @@ def _eject_camera_area_violations(
             result.append(group)
             continue
 
-        camera_area = _area_of(camera_findings[0])
+        camera_areas = {_area_of(f) for f in camera_findings} - {None, ""}
+        if len(camera_areas) > 1:
+            # Multiple cameras with differing areas in the same group — no
+            # single reference area can be determined, so spatial ejection is
+            # skipped for this group to avoid incorrect ejections.
+            result.append(group)
+            continue
+        camera_area = next(iter(camera_areas)) if camera_areas else None
         if not camera_area:
             # Camera has no area — spatial constraint cannot be enforced.
             result.append(group)

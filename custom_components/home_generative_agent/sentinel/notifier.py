@@ -47,9 +47,13 @@ from custom_components.home_generative_agent.const import (
     SNOOZE_PERMANENT,
 )
 from custom_components.home_generative_agent.core.utils import extract_final
-from custom_components.home_generative_agent.sentinel.suppression import register_snooze
+from custom_components.home_generative_agent.sentinel.suppression import (
+    SUPPRESSION_REASON_NOT_SUPPRESSED,
+    register_snooze,
+)
 
 if TYPE_CHECKING:
+    import asyncio
     from collections.abc import Callable
 
     from homeassistant.core import Event, HomeAssistant
@@ -66,6 +70,7 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 MAX_MOBILE_MESSAGE_CHARS = 220
+_AUDIT_FETCH_LIMIT = 1000
 
 _SEVERITY_INTERRUPT_LEVEL: dict[str, str] = {
     "high": "time-sensitive",
@@ -131,6 +136,8 @@ class SentinelNotifier:
         self._cooldown_times: dict[str, datetime] = {}
         # Daily digest time-change unsubscribe handle.
         self._digest_unsub: Callable[[], None] | None = None
+        # Task spawned by the daily digest callback; kept so stop() can cancel it.
+        self._digest_task: asyncio.Task[None] | None = None
 
     # ---------------------------------------------------------------------- #
     # Lifecycle
@@ -151,6 +158,9 @@ class SentinelNotifier:
             )
         )
         if enabled and self._audit_store is not None:
+            if self._digest_unsub is not None:
+                self._digest_unsub()
+                self._digest_unsub = None
             time_str = str(
                 self._options.get(
                     CONF_SENTINEL_DAILY_DIGEST_TIME,
@@ -183,6 +193,9 @@ class SentinelNotifier:
         if self._digest_unsub is not None:
             self._digest_unsub()
             self._digest_unsub = None
+        if self._digest_task is not None:
+            self._digest_task.cancel()
+            self._digest_task = None
 
     # ---------------------------------------------------------------------- #
     # Notification dispatch
@@ -426,7 +439,7 @@ class SentinelNotifier:
     @callback
     def _async_send_daily_digest(self, _now: Any = None) -> None:
         """Schedule the async daily digest coroutine from the time-change callback."""
-        self._hass.async_create_task(self._async_run_daily_digest())
+        self._digest_task = self._hass.async_create_task(self._async_run_daily_digest())
 
     async def _async_run_daily_digest(self) -> None:
         """Fetch the last 24 hours of notified findings and push a summary."""
@@ -435,7 +448,7 @@ class SentinelNotifier:
 
         cutoff = dt_util.utcnow() - timedelta(hours=24)
         try:
-            records = await self._audit_store.async_get_latest(1000)
+            records = await self._audit_store.async_get_latest(_AUDIT_FETCH_LIMIT)
         except Exception:  # noqa: BLE001
             LOGGER.warning(
                 "Daily digest: failed to fetch audit records.", exc_info=True
@@ -445,7 +458,7 @@ class SentinelNotifier:
         notified = [
             r
             for r in records
-            if r.get("suppression_reason_code") == "not_suppressed"
+            if r.get("suppression_reason_code") == SUPPRESSION_REASON_NOT_SUPPRESSED
             and _record_notified_after(r, cutoff)
         ]
         count = len(notified)
@@ -681,12 +694,10 @@ def _record_notified_after(record: dict[str, Any], cutoff: datetime) -> bool:
     notified_at_str = record.get("notification", {}).get("notified_at")
     if not notified_at_str:
         return False
-    try:
-        notified_dt = datetime.fromisoformat(str(notified_at_str))
-    except (ValueError, TypeError):
+    notified_dt = dt_util.parse_datetime(str(notified_at_str))
+    if notified_dt is None:
         return False
-    else:
-        return notified_dt >= cutoff
+    return notified_dt >= cutoff
 
 
 def _friendly_entity(entity_id: str) -> str:

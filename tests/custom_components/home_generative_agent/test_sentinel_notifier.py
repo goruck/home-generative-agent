@@ -1270,6 +1270,20 @@ def test_daily_digest_stop_cancels_unsub() -> None:
     assert notifier._digest_unsub is None
 
 
+def test_daily_digest_stop_cancels_task() -> None:
+    """stop() must cancel a pending digest task and clear _digest_task."""
+    from unittest.mock import MagicMock
+
+    notifier, _hass, _store = _make_digest_notifier()
+    task_mock = MagicMock()
+    notifier._digest_task = task_mock  # inject a fake in-flight task
+
+    notifier.stop()
+
+    task_mock.cancel.assert_called_once()
+    assert notifier._digest_task is None
+
+
 def test_daily_digest_invalid_time_falls_back_to_0800() -> None:
     """A malformed CONF_SENTINEL_DAILY_DIGEST_TIME must fall back to 08:00."""
     from unittest.mock import MagicMock, patch

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 from homeassistant.components.sensor import SensorEntity, SensorEntityDescription
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.util import dt as dt_util
 
 from ..const import (  # noqa: TID252
     CONF_SENTINEL_ENABLED,
@@ -111,14 +112,11 @@ def _compute_kpis(records: list[dict[str, Any]]) -> dict[str, Any]:  # noqa: PLR
         if notified:
             notified_at_str = r.get("notification", {}).get("notified_at")
             if notified_at_str:
-                try:
-                    notified_dt = datetime.fromisoformat(notified_at_str)
-                    if notified_dt >= cutoff_14d:
-                        fp_14d_total += 1
-                        if user_response and user_response.get("false_positive"):
-                            fp_14d_count += 1
-                except (ValueError, TypeError):
-                    pass
+                notified_dt = dt_util.parse_datetime(str(notified_at_str))
+                if notified_dt is not None and notified_dt >= cutoff_14d:
+                    fp_14d_total += 1
+                    if user_response and user_response.get("false_positive"):
+                        fp_14d_count += 1
 
     notified_total = sum(
         1 for r in records if r.get("suppression_reason_code") == "not_suppressed"
@@ -154,8 +152,10 @@ def _compute_trigger_source_breakdown(
     Return trigger-source counts for findings notified in the last 24 hours.
 
     Only records whose ``notification.notified_at`` timestamp falls within the
-    rolling 24-hour window are included.  Keys are always present (value = 0 when
-    no matching records exist) so callers can rely on a stable schema.
+    rolling 24-hour window are included.  Known trigger sources
+    (``_TRIGGER_SOURCE_KEYS``) are always present (value = 0 when no matching
+    records exist).  Unknown trigger sources are added dynamically, so the
+    returned dict may contain extra keys.
     """
     cutoff_24h = datetime.now(UTC) - timedelta(hours=24)
     counts: dict[str, int] = dict.fromkeys(_TRIGGER_SOURCE_KEYS, 0)
@@ -163,9 +163,8 @@ def _compute_trigger_source_breakdown(
         notified_at_str = r.get("notification", {}).get("notified_at")
         if not notified_at_str:
             continue
-        try:
-            notified_dt = datetime.fromisoformat(notified_at_str)
-        except (ValueError, TypeError):
+        notified_dt = dt_util.parse_datetime(str(notified_at_str))
+        if notified_dt is None:
             continue
         if notified_dt < cutoff_24h:
             continue
