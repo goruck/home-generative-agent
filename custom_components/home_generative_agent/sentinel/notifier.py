@@ -28,12 +28,16 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.core import callback
-from homeassistant.helpers.event import async_call_later
+from homeassistant.helpers.event import async_call_later, async_track_time_change
 from homeassistant.util import dt as dt_util
 
 from custom_components.home_generative_agent.const import (
     CONF_NOTIFY_SERVICE,
     CONF_SENTINEL_AREA_NOTIFY_MAP,
+    CONF_SENTINEL_DAILY_DIGEST_ENABLED,
+    CONF_SENTINEL_DAILY_DIGEST_TIME,
+    RECOMMENDED_SENTINEL_DAILY_DIGEST_ENABLED,
+    RECOMMENDED_SENTINEL_DAILY_DIGEST_TIME,
 )
 from custom_components.home_generative_agent.core.utils import extract_final
 from custom_components.home_generative_agent.sentinel.suppression import (
@@ -47,6 +51,7 @@ if TYPE_CHECKING:
 
     from homeassistant.core import Event, HomeAssistant
 
+    from custom_components.home_generative_agent.audit.store import AuditStore
     from custom_components.home_generative_agent.notify.actions import ActionHandler
     from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
     from custom_components.home_generative_agent.snapshot.schema import (
@@ -111,12 +116,14 @@ class SentinelNotifier:
         options: dict[str, Any],
         suppression: SuppressionManager,
         action_handler: ActionHandler,
+        audit_store: AuditStore | None = None,
     ) -> None:
         """Initialise the sentinel notifier."""
         self._hass = hass
         self._options = options
         self._suppression = suppression
         self._action_handler = action_handler
+        self._audit_store = audit_store
         self._unsub: Callable[[], None] | None = None
         # Pending permanent-snooze intents: anomaly_id -> finding_type.
         # Written when the user taps "Snooze Always"; cleared on confirm/cancel.
@@ -127,28 +134,60 @@ class SentinelNotifier:
         self._batch_cancel: Callable[[], None] | None = None
         # Per-finding cooldown: anomaly_id -> time of last dispatch.
         self._cooldown_times: dict[str, datetime] = {}
+        # Daily digest time-change unsubscribe handle.
+        self._digest_unsub: Callable[[], None] | None = None
 
     # ---------------------------------------------------------------------- #
     # Lifecycle
     # ---------------------------------------------------------------------- #
 
     def start(self) -> None:
-        """Subscribe to mobile app action events."""
+        """Subscribe to mobile app action events and start the daily digest timer."""
         if self._unsub is not None:
             return
         self._unsub = self._hass.bus.async_listen(
             "mobile_app_notification_action",
             self._handle_action_event,
         )
+        enabled = bool(
+            self._options.get(
+                CONF_SENTINEL_DAILY_DIGEST_ENABLED,
+                RECOMMENDED_SENTINEL_DAILY_DIGEST_ENABLED,
+            )
+        )
+        if enabled and self._audit_store is not None:
+            time_str = str(
+                self._options.get(
+                    CONF_SENTINEL_DAILY_DIGEST_TIME,
+                    RECOMMENDED_SENTINEL_DAILY_DIGEST_TIME,
+                )
+            )
+            try:
+                hour, minute = (int(p) for p in time_str.split(":", 1))
+            except (ValueError, TypeError):
+                LOGGER.warning(
+                    "Invalid daily digest time %r; defaulting to 08:00.", time_str
+                )
+                hour, minute = 8, 0
+            self._digest_unsub = async_track_time_change(
+                self._hass,
+                self._async_send_daily_digest,
+                hour=hour,
+                minute=minute,
+                second=0,
+            )
 
     def stop(self) -> None:
-        """Unsubscribe from action events."""
+        """Unsubscribe from action events and cancel the daily digest timer."""
         if self._unsub is not None:
             self._unsub()
             self._unsub = None
         if self._batch_cancel is not None:
             self._batch_cancel()
             self._batch_cancel = None
+        if self._digest_unsub is not None:
+            self._digest_unsub()
+            self._digest_unsub = None
 
     # ---------------------------------------------------------------------- #
     # Notification dispatch
@@ -389,6 +428,74 @@ class SentinelNotifier:
                 )
             )
 
+    @callback
+    def _async_send_daily_digest(self, _now: Any = None) -> None:
+        """Schedule the async daily digest coroutine from the time-change callback."""
+        self._hass.async_create_task(self._async_run_daily_digest())
+
+    async def _async_run_daily_digest(self) -> None:
+        """Fetch the last 24 hours of notified findings and push a summary."""
+        if self._audit_store is None:
+            return
+
+        cutoff = dt_util.utcnow() - timedelta(hours=24)
+        try:
+            records = await self._audit_store.async_get_latest(1000)
+        except Exception:  # noqa: BLE001
+            LOGGER.warning(
+                "Daily digest: failed to fetch audit records.", exc_info=True
+            )
+            return
+
+        notified = [
+            r
+            for r in records
+            if r.get("suppression_reason_code") == "not_suppressed"
+            and _record_notified_after(r, cutoff)
+        ]
+        count = len(notified)
+        if count == 0:
+            LOGGER.debug("Daily digest: no notified findings in the last 24 h.")
+            return
+
+        severity_counts: dict[str, int] = {}
+        for r in notified:
+            sev = r.get("finding", {}).get("severity", "unknown")
+            severity_counts[sev] = severity_counts.get(sev, 0) + 1
+        sev_summary = ", ".join(f"{v} {k}" for k, v in sorted(severity_counts.items()))
+        message = (
+            f"Sentinel: {count} alert{'s' if count > 1 else ''} in the last 24 h"
+            f" ({sev_summary})."
+        )
+
+        notify_service = self._options.get(CONF_NOTIFY_SERVICE)
+        if notify_service and isinstance(notify_service, str):
+            domain, _, service = notify_service.partition(".")
+            if not service:
+                service = notify_service
+                domain = "notify"
+            data: dict[str, Any] = {
+                "title": "Sentinel Daily Digest",
+                "message": message,
+                "data": {
+                    "tag": "hga_sentinel_daily_digest",
+                    "push": {"interruption-level": "passive"},
+                },
+            }
+            await self._hass.services.async_call(domain, service, data, blocking=False)
+        else:
+            await self._hass.services.async_call(
+                "persistent_notification",
+                "create",
+                {
+                    "title": "Sentinel Daily Digest",
+                    "message": message,
+                    "notification_id": "hga_sentinel_daily_digest",
+                },
+                blocking=False,
+            )
+        LOGGER.info("Daily digest sent: %s.", message)
+
     async def _send_always_confirmation(self, finding: AnomalyFinding) -> None:
         """
         Send a mobile confirmation notification for permanent snooze.
@@ -572,6 +679,19 @@ def _friendly_type(anomaly_type: str) -> str:
     if len(parts) >= 3 and parts[0] == "rule" and parts[1].isdigit():  # noqa: PLR2004
         display = "_".join(parts[2:])
     return display.replace("_", " ").strip().capitalize()
+
+
+def _record_notified_after(record: dict[str, Any], cutoff: datetime) -> bool:
+    """Return True if *record* has a notification timestamp on or after *cutoff*."""
+    notified_at_str = record.get("notification", {}).get("notified_at")
+    if not notified_at_str:
+        return False
+    try:
+        notified_dt = datetime.fromisoformat(str(notified_at_str))
+    except (ValueError, TypeError):
+        return False
+    else:
+        return notified_dt >= cutoff
 
 
 def _friendly_entity(entity_id: str) -> str:

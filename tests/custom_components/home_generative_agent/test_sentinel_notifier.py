@@ -1,4 +1,4 @@
-# ruff: noqa: S101
+# ruff: noqa: S101, PLC0415
 """Tests for SentinelNotifier — sentinel/notifier.py (Issue #261)."""
 
 from __future__ import annotations
@@ -976,3 +976,345 @@ async def test_async_notify_non_completion_subtitle_uses_friendly_type() -> None
     subtitle = hass.services.calls[0]["data"]["data"]["subtitle"]
     # "candidate_" stripped → "Appliance power spike away"
     assert subtitle == "Appliance power spike away"
+
+
+# ---------------------------------------------------------------------------
+# Daily digest notification (Item 4)
+# ---------------------------------------------------------------------------
+
+
+class _DummyAuditStore:
+    """Minimal AuditStore stub for digest tests."""
+
+    def __init__(self, records: list[dict[str, Any]] | None = None) -> None:
+        self._records = records or []
+
+    async def async_get_latest(self, _limit: int) -> list[dict[str, Any]]:
+        return list(self._records)
+
+
+def _notified_record(notified_at: str, severity: str = "medium") -> dict[str, Any]:
+    """Build a minimal audit record that counts as a notified finding."""
+    return {
+        "suppression_reason_code": "not_suppressed",
+        "finding": {"severity": severity},
+        "notification": {"notified_at": notified_at},
+    }
+
+
+def _suppressed_record(notified_at: str) -> dict[str, Any]:
+    """Build a minimal audit record that is suppressed (should not count)."""
+    return {
+        "suppression_reason_code": "suppressed",
+        "finding": {"severity": "low"},
+        "notification": {"notified_at": notified_at},
+    }
+
+
+def _make_digest_notifier(
+    options: dict[str, Any] | None = None,
+    records: list[dict[str, Any]] | None = None,
+) -> tuple[SentinelNotifier, DummyHass, _DummyAuditStore]:
+    """Create a SentinelNotifier wired with an audit store for digest tests."""
+    from custom_components.home_generative_agent.const import (
+        CONF_SENTINEL_DAILY_DIGEST_ENABLED,
+        CONF_SENTINEL_DAILY_DIGEST_TIME,
+    )
+
+    h = DummyHass()
+    s = DummySuppressionManager()
+    a = DummyActionHandler()
+    store = _DummyAuditStore(records)
+    opts: dict[str, Any] = {
+        CONF_NOTIFY_SERVICE: "notify.mobile_app_phone",
+        CONF_SENTINEL_DAILY_DIGEST_ENABLED: True,
+        CONF_SENTINEL_DAILY_DIGEST_TIME: "08:00",
+    }
+    if options:
+        opts.update(options)
+    notifier = SentinelNotifier(
+        hass=h,  # type: ignore[arg-type]
+        options=opts,
+        suppression=s,  # type: ignore[arg-type]
+        action_handler=a,  # type: ignore[arg-type]
+        audit_store=store,  # type: ignore[arg-type]
+    )
+    return notifier, h, store
+
+
+@pytest.mark.asyncio
+async def test_daily_digest_sends_summary_for_notified_findings() -> None:
+    """_async_run_daily_digest fires a mobile push with correct count and severity."""
+    from homeassistant.util import dt as dt_util
+
+    now_iso = dt_util.utcnow().isoformat()
+    records = [
+        _notified_record(now_iso, severity="high"),
+        _notified_record(now_iso, severity="medium"),
+        _notified_record(now_iso, severity="low"),
+    ]
+    notifier, hass, _store = _make_digest_notifier(records=records)
+
+    await notifier._async_run_daily_digest()
+
+    assert len(hass.services.calls) == 1
+    call = hass.services.calls[0]
+    assert call["domain"] == "notify"
+    assert call["service"] == "mobile_app_phone"
+    msg: str = call["data"]["message"]
+    assert "3 alerts" in msg
+    # All three severities must appear in the summary.
+    assert "high" in msg
+    assert "medium" in msg
+    assert "low" in msg
+    assert call["data"]["title"] == "Sentinel Daily Digest"
+    assert call["data"]["data"]["tag"] == "hga_sentinel_daily_digest"
+    assert call["data"]["data"]["push"]["interruption-level"] == "passive"
+
+
+@pytest.mark.asyncio
+async def test_daily_digest_skips_suppressed_records() -> None:
+    """Suppressed findings must not be included in the digest count."""
+    from homeassistant.util import dt as dt_util
+
+    now_iso = dt_util.utcnow().isoformat()
+    records = [
+        _notified_record(now_iso, severity="high"),
+        _suppressed_record(now_iso),  # must not count
+    ]
+    notifier, hass, _store = _make_digest_notifier(records=records)
+
+    await notifier._async_run_daily_digest()
+
+    assert len(hass.services.calls) == 1
+    msg: str = hass.services.calls[0]["data"]["message"]
+    assert "1 alert" in msg
+    assert "2" not in msg.split()[1]  # count word is "1"
+
+
+@pytest.mark.asyncio
+async def test_daily_digest_skips_old_records() -> None:
+    """Records with notified_at older than 24 h must be excluded."""
+    from datetime import timedelta
+
+    from homeassistant.util import dt as dt_util
+
+    old_iso = (dt_util.utcnow() - timedelta(hours=25)).isoformat()
+    recent_iso = dt_util.utcnow().isoformat()
+    records = [
+        _notified_record(old_iso, severity="high"),  # too old
+        _notified_record(recent_iso, severity="medium"),
+    ]
+    notifier, hass, _store = _make_digest_notifier(records=records)
+
+    await notifier._async_run_daily_digest()
+
+    assert len(hass.services.calls) == 1
+    msg: str = hass.services.calls[0]["data"]["message"]
+    assert "1 alert" in msg
+    assert "high" not in msg
+
+
+@pytest.mark.asyncio
+async def test_daily_digest_no_findings_sends_nothing() -> None:
+    """When there are no notified findings in 24 h, no notification is sent."""
+    notifier, hass, _store = _make_digest_notifier(records=[])
+
+    await notifier._async_run_daily_digest()
+
+    assert len(hass.services.calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_daily_digest_falls_back_to_persistent_notification() -> None:
+    """When CONF_NOTIFY_SERVICE is absent, a persistent_notification is created."""
+    from homeassistant.util import dt as dt_util
+
+    from custom_components.home_generative_agent.const import (
+        CONF_SENTINEL_DAILY_DIGEST_ENABLED,
+        CONF_SENTINEL_DAILY_DIGEST_TIME,
+    )
+
+    now_iso = dt_util.utcnow().isoformat()
+    records = [_notified_record(now_iso)]
+    h = DummyHass()
+    s = DummySuppressionManager()
+    a = DummyActionHandler()
+    store = _DummyAuditStore(records)
+    notifier = SentinelNotifier(
+        hass=h,  # type: ignore[arg-type]
+        options={
+            CONF_SENTINEL_DAILY_DIGEST_ENABLED: True,
+            CONF_SENTINEL_DAILY_DIGEST_TIME: "08:00",
+            # No CONF_NOTIFY_SERVICE
+        },
+        suppression=s,  # type: ignore[arg-type]
+        action_handler=a,  # type: ignore[arg-type]
+        audit_store=store,  # type: ignore[arg-type]
+    )
+
+    await notifier._async_run_daily_digest()
+
+    assert len(h.services.calls) == 1
+    call = h.services.calls[0]
+    assert call["domain"] == "persistent_notification"
+    assert call["service"] == "create"
+    assert call["data"]["notification_id"] == "hga_sentinel_daily_digest"
+
+
+@pytest.mark.asyncio
+async def test_daily_digest_audit_store_none_sends_nothing() -> None:
+    """If audit_store is None, _async_run_daily_digest must exit early."""
+    notifier, hass, _s, _a = _make_notifier(
+        options={CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    )
+    # audit_store defaults to None when not passed to _make_notifier.
+    await notifier._async_run_daily_digest()
+
+    assert len(hass.services.calls) == 0
+
+
+def test_daily_digest_start_registers_time_change_when_enabled() -> None:
+    """start() must register an async_track_time_change listener when digest is enabled."""
+    from unittest.mock import MagicMock, patch
+
+    from custom_components.home_generative_agent.const import (
+        CONF_SENTINEL_DAILY_DIGEST_ENABLED,
+        CONF_SENTINEL_DAILY_DIGEST_TIME,
+    )
+
+    notifier, _hass, _store = _make_digest_notifier(
+        options={
+            CONF_SENTINEL_DAILY_DIGEST_ENABLED: True,
+            CONF_SENTINEL_DAILY_DIGEST_TIME: "07:30",
+        },
+    )
+    unsub_mock = MagicMock()
+    with (
+        patch(
+            "custom_components.home_generative_agent.sentinel.notifier.async_track_time_change",
+            return_value=unsub_mock,
+        ) as track_mock,
+        patch(
+            "custom_components.home_generative_agent.sentinel.notifier.async_call_later",
+            return_value=MagicMock(),
+        ),
+    ):
+        notifier.start()
+
+    track_mock.assert_called_once()
+    _kw = track_mock.call_args.kwargs
+    assert _kw["hour"] == 7
+    assert _kw["minute"] == 30
+    assert _kw["second"] == 0
+    assert notifier._digest_unsub is unsub_mock
+
+
+def test_daily_digest_start_skips_registration_when_disabled() -> None:
+    """start() must NOT register async_track_time_change when digest is disabled."""
+    from unittest.mock import MagicMock, patch
+
+    from custom_components.home_generative_agent.const import (
+        CONF_SENTINEL_DAILY_DIGEST_ENABLED,
+    )
+
+    notifier, _hass, _store = _make_digest_notifier(
+        options={CONF_SENTINEL_DAILY_DIGEST_ENABLED: False},
+    )
+    with (
+        patch(
+            "custom_components.home_generative_agent.sentinel.notifier.async_track_time_change",
+        ) as track_mock,
+        patch(
+            "custom_components.home_generative_agent.sentinel.notifier.async_call_later",
+            return_value=MagicMock(),
+        ),
+    ):
+        notifier.start()
+
+    track_mock.assert_not_called()
+    assert notifier._digest_unsub is None
+
+
+def test_daily_digest_stop_cancels_unsub() -> None:
+    """stop() must call the unsub callable and clear _digest_unsub."""
+    from unittest.mock import MagicMock, patch
+
+    from custom_components.home_generative_agent.const import (
+        CONF_SENTINEL_DAILY_DIGEST_ENABLED,
+        CONF_SENTINEL_DAILY_DIGEST_TIME,
+    )
+
+    notifier, _hass, _store = _make_digest_notifier(
+        options={
+            CONF_SENTINEL_DAILY_DIGEST_ENABLED: True,
+            CONF_SENTINEL_DAILY_DIGEST_TIME: "08:00",
+        },
+    )
+    unsub_mock = MagicMock()
+    with (
+        patch(
+            "custom_components.home_generative_agent.sentinel.notifier.async_track_time_change",
+            return_value=unsub_mock,
+        ),
+        patch(
+            "custom_components.home_generative_agent.sentinel.notifier.async_call_later",
+            return_value=MagicMock(),
+        ),
+    ):
+        notifier.start()
+
+    notifier.stop()
+
+    unsub_mock.assert_called_once()
+    assert notifier._digest_unsub is None
+
+
+def test_daily_digest_invalid_time_falls_back_to_0800() -> None:
+    """A malformed CONF_SENTINEL_DAILY_DIGEST_TIME must fall back to 08:00."""
+    from unittest.mock import MagicMock, patch
+
+    from custom_components.home_generative_agent.const import (
+        CONF_SENTINEL_DAILY_DIGEST_ENABLED,
+        CONF_SENTINEL_DAILY_DIGEST_TIME,
+    )
+
+    notifier, _hass, _store = _make_digest_notifier(
+        options={
+            CONF_SENTINEL_DAILY_DIGEST_ENABLED: True,
+            CONF_SENTINEL_DAILY_DIGEST_TIME: "NOT_A_TIME",
+        },
+    )
+    with (
+        patch(
+            "custom_components.home_generative_agent.sentinel.notifier.async_track_time_change",
+            return_value=MagicMock(),
+        ) as track_mock,
+        patch(
+            "custom_components.home_generative_agent.sentinel.notifier.async_call_later",
+            return_value=MagicMock(),
+        ),
+    ):
+        notifier.start()
+
+    _kw = track_mock.call_args.kwargs
+    assert _kw["hour"] == 8
+    assert _kw["minute"] == 0
+
+
+@pytest.mark.asyncio
+async def test_daily_digest_callback_dispatches_coroutine() -> None:
+    """_async_send_daily_digest (sync callback) must schedule _async_run_daily_digest."""
+    from unittest.mock import AsyncMock, patch
+
+    notifier, hass, _store = _make_digest_notifier(records=[])
+
+    with patch.object(
+        notifier,
+        "_async_run_daily_digest",
+        new_callable=AsyncMock,
+    ) as run_mock:
+        notifier._async_send_daily_digest()
+        await hass.drain_tasks()
+
+    run_mock.assert_awaited_once()

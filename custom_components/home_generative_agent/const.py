@@ -221,6 +221,12 @@ RECOMMENDED_SENTINEL_BASELINE_MIN_SAMPLES: int = 20
 RECOMMENDED_SENTINEL_BASELINE_MAX_SAMPLES: int = 500
 RECOMMENDED_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT: float = 30.0
 
+# ---- Sentinel daily digest notification ----
+CONF_SENTINEL_DAILY_DIGEST_ENABLED = "sentinel_daily_digest_enabled"
+CONF_SENTINEL_DAILY_DIGEST_TIME = "sentinel_daily_digest_time"
+RECOMMENDED_SENTINEL_DAILY_DIGEST_ENABLED: bool = False
+RECOMMENDED_SENTINEL_DAILY_DIGEST_TIME: str = "08:00"
+
 # ---- Feature definitions ----
 DEFAULT_FEATURE_TYPES: tuple[str, ...] = (
     "conversation",
