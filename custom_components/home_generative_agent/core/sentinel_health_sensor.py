@@ -337,7 +337,7 @@ class SentinelHealthSensor(SensorEntity):
             self._attrs["discovery_proposals_approved_24h"] = None
             return
 
-        cutoff_24h = datetime.now(UTC) - timedelta(hours=24)
+        cutoff_24h = dt_util.utcnow() - timedelta(hours=24)
         proposals = await self._proposal_store.async_get_latest(200)
         count = 0
         for record in proposals:

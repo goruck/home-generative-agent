@@ -171,7 +171,7 @@ class SentinelNotifier:
             try:
                 parts = time_str.split(":")
                 hour, minute = int(parts[0]), int(parts[1])
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, IndexError):
                 LOGGER.warning(
                     "Invalid daily digest time %r; defaulting to 08:00.", time_str
                 )
