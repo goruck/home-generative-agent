@@ -29,6 +29,8 @@ from custom_components.home_generative_agent.const import (
     CONF_OLLAMA_VLM_URL,
     CONF_OPENAI_COMPATIBLE_API_KEY,
     CONF_OPENAI_COMPATIBLE_BASE_URL,
+    CONF_SENTINEL_DAILY_DIGEST_ENABLED,
+    CONF_SENTINEL_DAILY_DIGEST_TIME,
     CONF_SENTINEL_ENABLED,
     CONF_SENTINEL_INTERVAL_SECONDS,
     CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH,
@@ -60,6 +62,7 @@ from custom_components.home_generative_agent.flows.model_provider_subentry_flow 
 )
 from custom_components.home_generative_agent.flows.sentinel_subentry_flow import (
     SentinelSubentryFlow,
+    _default_payload,
 )
 from custom_components.home_generative_agent.flows.stt_provider_subentry_flow import (
     SttProviderSubentryFlow,
@@ -799,3 +802,75 @@ def test_provider_capabilities_includes_openai_compatible() -> None:
         assert "openai_compatible" in spec["model_keys"], (
             f"openai_compatible missing from {category} model_keys"
         )
+
+
+# ---------------------------------------------------------------------------
+# Sentinel subentry — daily digest fields (Fix 4)
+# ---------------------------------------------------------------------------
+
+
+def test_sentinel_default_payload_contains_digest_keys() -> None:
+    """_default_payload() includes both daily digest keys with non-empty defaults."""
+    payload = _default_payload()
+    assert CONF_SENTINEL_DAILY_DIGEST_ENABLED in payload
+    assert CONF_SENTINEL_DAILY_DIGEST_TIME in payload
+    # Default time must be a non-empty HH:MM:SS string.
+    assert isinstance(payload[CONF_SENTINEL_DAILY_DIGEST_TIME], str)
+    assert len(payload[CONF_SENTINEL_DAILY_DIGEST_TIME]) > 0
+
+
+def test_sentinel_schema_contains_digest_fields(hass: Any) -> None:
+    """_schema() includes both daily digest selectors."""
+    flow = SentinelSubentryFlow()
+    flow.hass = hass
+    schema = flow._schema(_default_payload())
+    schema_keys = {str(k) for k in schema.schema}
+    assert CONF_SENTINEL_DAILY_DIGEST_ENABLED in schema_keys
+    assert CONF_SENTINEL_DAILY_DIGEST_TIME in schema_keys
+
+
+@pytest.mark.asyncio
+async def test_sentinel_subentry_flow_accepts_digest_fields(hass: Any) -> None:
+    """Sentinel flow stores digest fields when provided in user_input."""
+    entry = DummyEntry()
+    flow = SentinelSubentryFlow()
+    flow.hass = hass
+    flow.async_show_form = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "form",
+        "data_schema": kwargs["data_schema"],
+        "errors": kwargs.get("errors"),
+    }
+    flow.async_create_entry = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "create_entry",
+        "title": kwargs.get("title"),
+        "data": kwargs.get("data"),
+    }
+    flow.async_abort = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "abort",
+        "reason": kwargs.get("reason"),
+    }
+    flow._schedule_reload = lambda: None  # type: ignore[assignment]
+    _patch_entry(flow, entry)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            "sentinel_cooldown_minutes": 30,
+            "sentinel_entity_cooldown_minutes": 15,
+            "sentinel_pending_prompt_ttl_minutes": 240,
+            "sentinel_discovery_enabled": False,
+            "sentinel_discovery_interval_seconds": 3600,
+            "sentinel_discovery_max_records": 200,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            CONF_SENTINEL_DAILY_DIGEST_ENABLED: True,
+            CONF_SENTINEL_DAILY_DIGEST_TIME: "07:30:00",
+        }
+    )
+    assert result.get("type") == "create_entry"
+    data = result.get("data")
+    assert data is not None
+    assert data[CONF_SENTINEL_DAILY_DIGEST_ENABLED] is True
+    assert data[CONF_SENTINEL_DAILY_DIGEST_TIME] == "07:30:00"

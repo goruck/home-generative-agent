@@ -162,6 +162,8 @@
             "sentinel_baseline_freshness_threshold_seconds": "Temel tazelik eşiği (saniye)",
             "explain_enabled": "Sentinel bulguları için LLM açıklamaları",
             "sentinel_require_pin_for_level_increase": "Özerklik düzeyi artışları için PIN iste",
+            "sentinel_daily_digest_enabled": "Günlük özet bildirimini etkinleştir",
+            "sentinel_daily_digest_time": "Günlük özet saati (SS:DD:SN)",
             "critical_action_pin": "Sentinel düzey artırma PIN'i (isteğe bağlı)",
             "notify_service": "Sentinel Bildirim Servisi (isteğe bağlı)"
           }
