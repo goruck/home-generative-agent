@@ -39,7 +39,7 @@ from homeassistant.util import ulid
 from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig  # noqa: TC002
 from langchain_core.tools import InjectedToolArg, tool
-from langgraph.prebuilt import InjectedStore
+from langgraph.prebuilt.tool_node import InjectedStore
 from langgraph.store.base import BaseStore  # noqa: TC002
 from voluptuous import MultipleInvalid
 

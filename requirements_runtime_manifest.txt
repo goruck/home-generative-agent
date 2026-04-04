@@ -4,6 +4,7 @@ langchain-core==1.2.19
 langchain-openai==1.0.3
 langchain-ollama==0.3.10
 langgraph==1.1.2
+langgraph-prebuilt==1.0.8
 langgraph-checkpoint-postgres==3.0.4
 ollama==0.6.1
 psycopg==3.3.3

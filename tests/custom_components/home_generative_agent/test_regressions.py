@@ -192,3 +192,12 @@ async def test_video_analyzer_recognize_faces_without_gallery(
 
     recognized = await analyzer.recognize_faces(b"not-an-image", "camera.test")
     assert recognized == ["Indeterminate"]
+
+
+def test_agent_tools_uses_direct_tool_node_injected_store_import() -> None:
+    """Avoid importing langgraph.prebuilt package during startup."""
+    from pathlib import Path
+
+    source = Path(agent_tools.__file__).read_text(encoding="utf-8")
+    assert "from langgraph.prebuilt.tool_node import InjectedStore" in source
+    assert "from langgraph.prebuilt import InjectedStore" not in source
