@@ -416,3 +416,111 @@ async def test_handoff_calls_agent_without_reply_when_no_notify_service() -> Non
         "entity_id": "conversation.home_generative_agent",
         "reply_sent": False,
     }
+
+
+# ---------------------------------------------------------------------------
+# Dismiss action — cooldown feedback tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dismiss_records_feedback_per_triggering_entity() -> None:
+    """Dismiss with a known finding records cooldown feedback for each entity."""
+    hass = DummyHass()
+    suppression = DummySuppressionManager()
+    audit = DummyAuditStore()
+    # finding has two triggering entities
+    finding = AnomalyFinding(
+        anomaly_id="d-1",
+        type="unlocked_lock_at_night",
+        severity="high",
+        confidence=0.8,
+        triggering_entities=["lock.front_door", "lock.back_door"],
+        evidence={"entity_id": "lock.front_door"},
+        suggested_actions=[],
+        is_sensitive=True,
+    )
+    handler = ActionHandler(
+        hass=hass,  # type: ignore[arg-type]
+        suppression=suppression,  # type: ignore[arg-type]
+        audit_store=audit,  # type: ignore[arg-type]
+    )
+    handler.register_finding(finding)
+
+    await handler.handle_action(f"{ACTION_PREFIX}dismiss_{finding.anomaly_id}", {})
+
+    # Compound key scheme: "{type}:{entity_id}"
+    multipliers = suppression.state.learned_cooldown_multipliers
+    assert multipliers.get("unlocked_lock_at_night:lock.front_door") == 2
+    assert multipliers.get("unlocked_lock_at_night:lock.back_door") == 2
+    assert suppression.save_calls == 1
+    assert audit.updates[0]["outcome"] == {"status": "dismissed"}
+
+
+@pytest.mark.asyncio
+async def test_dismiss_finding_none_no_feedback_no_crash() -> None:
+    """Dismiss for an expired/missing finding does not crash and records no feedback."""
+    hass = DummyHass()
+    suppression = DummySuppressionManager()
+    audit = DummyAuditStore()
+    handler = ActionHandler(
+        hass=hass,  # type: ignore[arg-type]
+        suppression=suppression,  # type: ignore[arg-type]
+        audit_store=audit,  # type: ignore[arg-type]
+    )
+    # Do NOT register a finding — simulates expired finding.
+    await handler.handle_action(f"{ACTION_PREFIX}dismiss_d-missing", {})
+
+    assert suppression.state.learned_cooldown_multipliers == {}
+    assert suppression.save_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_dismiss_empty_triggering_entities_no_feedback() -> None:
+    """Dismiss with an empty triggering_entities list records no feedback."""
+    hass = DummyHass()
+    suppression = DummySuppressionManager()
+    audit = DummyAuditStore()
+    finding = AnomalyFinding(
+        anomaly_id="d-2",
+        type="appliance_power_duration",
+        severity="low",
+        confidence=0.4,
+        triggering_entities=[],
+        evidence={},
+        suggested_actions=[],
+        is_sensitive=False,
+    )
+    handler = ActionHandler(
+        hass=hass,  # type: ignore[arg-type]
+        suppression=suppression,  # type: ignore[arg-type]
+        audit_store=audit,  # type: ignore[arg-type]
+    )
+    handler.register_finding(finding)
+
+    await handler.handle_action(f"{ACTION_PREFIX}dismiss_{finding.anomaly_id}", {})
+
+    assert suppression.state.learned_cooldown_multipliers == {}
+    assert suppression.save_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_single_save_per_action() -> None:
+    """Each action branch triggers exactly one async_save(), not more."""
+    for action in ("execute", "handoff", "dismiss"):
+        hass = DummyHass()
+        suppression = DummySuppressionManager()
+        audit = DummyAuditStore()
+        finding = _finding(anomaly_id="sv-1", is_sensitive=False)
+        handler = ActionHandler(
+            hass=hass,  # type: ignore[arg-type]
+            suppression=suppression,  # type: ignore[arg-type]
+            audit_store=audit,  # type: ignore[arg-type]
+        )
+        handler.register_finding(finding)
+
+        await handler.handle_action(f"{ACTION_PREFIX}{action}_{finding.anomaly_id}", {})
+
+        assert suppression.save_calls == 1, (
+            f"Expected 1 save for '{action}', got {suppression.save_calls}"
+        )

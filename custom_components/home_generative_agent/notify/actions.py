@@ -12,6 +12,7 @@ from custom_components.home_generative_agent.const import ACTION_PREFIX, DOMAIN
 from custom_components.home_generative_agent.core.utils import extract_final
 from custom_components.home_generative_agent.sentinel.suppression import (
     SuppressionManager,
+    record_cooldown_feedback,
     resolve_prompt,
 )
 
@@ -65,7 +66,6 @@ class ActionHandler:
         LOGGER.info("Handling sentinel action %s for %s.", action, anomaly_id)
         finding = self._pending_findings.get(anomaly_id)
         resolve_prompt(self._suppression.state, anomaly_id)
-        await self._suppression.async_save()
 
         response = {
             "action": action,
@@ -79,8 +79,16 @@ class ActionHandler:
             outcome = await self._outcome_for_handoff(finding, payload)
         elif action == "dismiss":
             # User explicitly marked this alert as a false positive.
+            # Record per-entity feedback so future cooldowns are extended.
             response["false_positive"] = True
+            if finding is not None and finding.triggering_entities:
+                for _entity_id in finding.triggering_entities:
+                    record_cooldown_feedback(
+                        self._suppression.state, _entity_id, finding.type
+                    )
             outcome = {"status": "dismissed"}
+
+        await self._suppression.async_save()
 
         if anomaly_id:
             self._pending_findings.pop(anomaly_id, None)
