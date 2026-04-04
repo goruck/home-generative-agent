@@ -127,6 +127,10 @@ class ProposalStore:
                 record["review_notes"] = notes
             if extra:
                 record.update(extra)
+            # Stamp approved_at on first approval only — subsequent re-approvals
+            # must not reset the timestamp or it would re-enter the 24h window.
+            if status == "approved" and "approved_at" not in record:
+                record["approved_at"] = datetime.datetime.now(datetime.UTC).isoformat()
             await self.async_save()
             return True
         return False

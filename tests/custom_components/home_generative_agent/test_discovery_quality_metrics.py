@@ -99,7 +99,6 @@ async def test_stats_reset_each_run() -> None:
         "candidates_generated": 99,
         "candidates_novel": 99,
         "candidates_deduplicated": 99,
-        "proposals_promoted": 99,
         "unsupported_ttl_expired": 99,
     }
     # No model → returns early after reset.
@@ -108,7 +107,7 @@ async def test_stats_reset_each_run() -> None:
     assert stats["candidates_generated"] == 0
     assert stats["candidates_novel"] == 0
     assert stats["candidates_deduplicated"] == 0
-    assert stats["proposals_promoted"] == 0
+    assert "proposals_promoted" not in stats
     assert stats["unsupported_ttl_expired"] == 0
 
 
@@ -304,7 +303,6 @@ async def test_health_sensor_exposes_discovery_stats_when_engine_present() -> No
         "candidates_generated": 4,
         "candidates_novel": 2,
         "candidates_deduplicated": 2,
-        "proposals_promoted": 0,
         "unsupported_ttl_expired": 1,
     }
     sensor = _make_health_sensor(discovery_engine=engine)
@@ -315,8 +313,10 @@ async def test_health_sensor_exposes_discovery_stats_when_engine_present() -> No
     assert attrs["discovery_candidates_generated"] == 4
     assert attrs["discovery_candidates_novel"] == 2
     assert attrs["discovery_candidates_deduplicated"] == 2
-    assert attrs["discovery_proposals_promoted"] == 0
+    assert "discovery_proposals_promoted" not in attrs
     assert attrs["discovery_unsupported_ttl_expired"] == 1
+    # proposals_approved_24h is None when no proposal_store is wired.
+    assert attrs["discovery_proposals_approved_24h"] is None
 
 
 @pytest.mark.asyncio
@@ -330,5 +330,6 @@ async def test_health_sensor_exposes_none_discovery_attrs_when_no_engine() -> No
     assert attrs["discovery_candidates_generated"] is None
     assert attrs["discovery_candidates_novel"] is None
     assert attrs["discovery_candidates_deduplicated"] is None
-    assert attrs["discovery_proposals_promoted"] is None
+    assert "discovery_proposals_promoted" not in attrs
     assert attrs["discovery_unsupported_ttl_expired"] is None
+    assert attrs["discovery_proposals_approved_24h"] is None
