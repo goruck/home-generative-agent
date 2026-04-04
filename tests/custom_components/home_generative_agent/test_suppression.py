@@ -185,26 +185,29 @@ def test_entity_cooldown_suppresses() -> None:
 
 def test_record_cooldown_feedback_increments_multiplier() -> None:
     state = SuppressionState()
-    new_val = record_cooldown_feedback(state, "lock.front")
+    new_val = record_cooldown_feedback(state, "lock.front", "rule")
     assert new_val == 2
-    assert state.learned_cooldown_multipliers["lock.front"] == 2
+    assert state.learned_cooldown_multipliers["rule:lock.front"] == 2
 
 
 def test_record_cooldown_feedback_caps_at_max() -> None:
     state = SuppressionState(
-        learned_cooldown_multipliers={"lock.front": MAX_COOLDOWN_MULTIPLIER}
+        learned_cooldown_multipliers={"rule:lock.front": MAX_COOLDOWN_MULTIPLIER}
     )
-    new_val = record_cooldown_feedback(state, "lock.front")
+    new_val = record_cooldown_feedback(state, "lock.front", "rule")
     assert new_val == MAX_COOLDOWN_MULTIPLIER
-    assert state.learned_cooldown_multipliers["lock.front"] == MAX_COOLDOWN_MULTIPLIER
+    assert (
+        state.learned_cooldown_multipliers["rule:lock.front"] == MAX_COOLDOWN_MULTIPLIER
+    )
 
 
 def test_entity_cooldown_respects_learned_multiplier() -> None:
     """Multiplier=2 doubles the effective cooldown window."""
     now = dt_util.utcnow()
+    # key scheme: "{rule_type}:{entity_id}" — finding type is "rule" (from _finding())
     state = SuppressionState(
         last_by_entity={"lock.front": {"rule": dt_util.as_utc(now).isoformat()}},
-        learned_cooldown_multipliers={"lock.front": 2},
+        learned_cooldown_multipliers={"rule:lock.front": 2},
     )
     finding = _finding()
     base_cooldown = timedelta(minutes=5)
@@ -252,8 +255,8 @@ def test_entity_cooldown_multiplier_context_field() -> None:
     assert decision.context["multiplier"] == 1  # no feedback -> default 1x
 
 
-def test_migration_v3_to_v4_adds_empty_multipliers() -> None:
-    """v3 state gains an empty learned_cooldown_multipliers dict on migration."""
+def test_migration_v3_to_v4_to_v5_adds_empty_multipliers() -> None:
+    """v3 state migrates through v4 and ends at v5 with empty multipliers."""
     v3_data: dict = {
         "version": 3,
         "last_by_type": {},
@@ -264,17 +267,56 @@ def test_migration_v3_to_v4_adds_empty_multipliers() -> None:
         "quiet_hours": None,
     }
     migrated = _migrate_suppression_state(v3_data)
-    assert migrated["version"] == 4
+    assert migrated["version"] == 5
     assert migrated["learned_cooldown_multipliers"] == {}
+
+
+def test_migration_v4_to_v5_discards_bare_entity_id_keys() -> None:
+    """v4→v5 migration discards bare entity_id keys (wrong key scheme)."""
+    v4_data: dict = {
+        "version": 4,
+        "last_by_type": {},
+        "last_by_entity": {},
+        "pending_prompts": {},
+        "snoozed_until": {},
+        "presence_grace_until": {},
+        # Bare entity_id keys (old scheme) — should be discarded.
+        "learned_cooldown_multipliers": {"lock.front": 3, "sensor.motion": 2},
+    }
+    migrated = _migrate_suppression_state(v4_data)
+    assert migrated["version"] == 5
+    # Bare keys without ":" separator must be removed.
+    assert migrated["learned_cooldown_multipliers"] == {}
+
+
+def test_migration_v5_already_skipped() -> None:
+    """State already at v5 is returned unchanged."""
+    v5_data: dict = {
+        "version": 5,
+        "last_by_type": {},
+        "last_by_entity": {},
+        "pending_prompts": {},
+        "snoozed_until": {},
+        "presence_grace_until": {},
+        "learned_cooldown_multipliers": {"unlocked_lock_at_night:lock.front": 2},
+    }
+    migrated = _migrate_suppression_state(v5_data)
+    assert migrated["version"] == 5
+    assert migrated["learned_cooldown_multipliers"] == {
+        "unlocked_lock_at_night:lock.front": 2
+    }
 
 
 def test_from_dict_round_trip_preserves_multipliers() -> None:
     """as_dict / from_dict round-trip keeps learned_cooldown_multipliers intact."""
     state = SuppressionState(
-        learned_cooldown_multipliers={"lock.front": 3, "sensor.motion": 1}
+        learned_cooldown_multipliers={
+            "unlocked_lock_at_night:lock.front": 3,
+            "camera_entry_unsecured:sensor.motion": 1,
+        }
     )
     restored = SuppressionState.from_dict(state.as_dict())
     assert restored.learned_cooldown_multipliers == {
-        "lock.front": 3,
-        "sensor.motion": 1,
+        "unlocked_lock_at_night:lock.front": 3,
+        "camera_entry_unsecured:sensor.motion": 1,
     }

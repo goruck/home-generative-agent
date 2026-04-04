@@ -28,7 +28,7 @@ STORE_VERSION = 1
 STORE_KEY = "home_generative_agent_sentinel_suppression"
 
 # Current in-memory schema version.  Increment when new fields are added.
-SUPPRESSION_STATE_VERSION = 4
+SUPPRESSION_STATE_VERSION = 5
 
 # Maximum factor by which learned feedback can extend the base entity cooldown.
 MAX_COOLDOWN_MULTIPLIER = 8
@@ -76,7 +76,7 @@ class SuppressionDecision:
 
 @dataclass
 class SuppressionState:
-    """Persistent suppression state (v4 schema)."""
+    """Persistent suppression state (v5 schema)."""
 
     last_by_type: dict[str, str] = field(default_factory=dict)
     last_by_entity: dict[str, dict[str, str]] = field(default_factory=dict)
@@ -89,9 +89,9 @@ class SuppressionState:
     # Person entity ID → ISO expiry string
     presence_grace_until: dict[str, str] = field(default_factory=dict)
 
-    # v4 additions
-    # Entity ID → learned cooldown multiplier (1 = base, up to MAX_COOLDOWN_MULTIPLIER).
-    # Bumped each time feedback is recorded via record_cooldown_feedback().
+    # v4 additions; v5 corrects key scheme from bare entity_id to rule_type:entity_id.
+    # "{rule_type}:{entity_id}" maps to an int multiplier (1=base, capped at MAX).
+    # Incremented by record_cooldown_feedback() on each dismiss/snooze.
     learned_cooldown_multipliers: dict[str, int] = field(default_factory=dict)
 
     @classmethod
@@ -143,6 +143,12 @@ def _migrate_suppression_state(data: dict[str, Any]) -> dict[str, Any]:
     v2 → v3: drop ``presence_grace_until`` keys that are not ``person.*``
              entity IDs (previously keyed by friendly name).
     v3 → v4: add ``learned_cooldown_multipliers`` (empty dict).
+    v4 → v5: discard bare ``entity_id`` keys in ``learned_cooldown_multipliers``
+             (wrong key scheme — should be ``{rule_type}:{entity_id}``).
+             In production the dict was always empty since the feedback signal
+             was never wired, but any manually-set or dev-build entries are
+             discarded with a warning rather than silently migrated to an
+             ambiguous compound key.
 
     Returns the same dict object (mutations are in-place).
     """
@@ -180,7 +186,30 @@ def _migrate_suppression_state(data: dict[str, Any]) -> dict[str, Any]:
     if stored_version < 4:  # noqa: PLR2004
         data.setdefault("learned_cooldown_multipliers", {})
         data["version"] = 4
+        stored_version = 4
         LOGGER.info("Suppression state migrated from v3 to v4.")
+
+    # v4 → v5: fix key scheme (entity_id only → {rule_type}:{entity_id})
+    if stored_version < 5:  # noqa: PLR2004
+        stale = {
+            k: v
+            for k, v in data.get("learned_cooldown_multipliers", {}).items()
+            if ":" not in k
+        }
+        if stale:
+            for key in stale:
+                del data["learned_cooldown_multipliers"][key]
+            LOGGER.warning(
+                "Suppression state v4→v5: discarded %d bare entity_id key(s) "
+                "from learned_cooldown_multipliers (wrong key scheme; "
+                "expected '{rule_type}:{entity_id}'). "
+                "Discarded keys: %s",
+                len(stale),
+                sorted(stale),
+            )
+        data["version"] = 5
+        stored_version = 5
+        LOGGER.info("Suppression state migrated from v4 to v5.")
 
     return data
 
@@ -477,10 +506,10 @@ def should_suppress(  # noqa: PLR0911, PLR0913
             },
         )
 
-    # 6. Entity cooldown (scaled by any learned multiplier for the entity)
+    # 6. Entity cooldown (scaled by any learned multiplier for the rule+entity pair)
     for entity_id in finding.triggering_entities:
         multiplier = min(
-            state.learned_cooldown_multipliers.get(entity_id, 1),
+            state.learned_cooldown_multipliers.get(f"{finding.type}:{entity_id}", 1),
             MAX_COOLDOWN_MULTIPLIER,
         )
         effective_cooldown = cooldown_entity * multiplier
@@ -580,23 +609,29 @@ def register_snooze(
     )
 
 
-def record_cooldown_feedback(state: SuppressionState, entity_id: str) -> int:
+def record_cooldown_feedback(
+    state: SuppressionState, entity_id: str, rule_type: str
+) -> int:
     """
-    Increment the learned cooldown multiplier for *entity_id* by one.
+    Increment the learned cooldown multiplier for *rule_type*:*entity_id* by one.
 
-    Call this when a user signals that an entity is generating too many
-    alerts (e.g. via a snooze or explicit feedback action).  The multiplier
-    is capped at ``MAX_COOLDOWN_MULTIPLIER`` and applied to the base entity
-    cooldown in :func:`should_suppress`.
+    Call this when a user signals that a rule+entity combination is generating
+    too many alerts (e.g. via a snooze or dismiss action).  The multiplier is
+    keyed by ``"{rule_type}:{entity_id}"`` so that different rules for the same
+    entity accumulate independent multipliers.
+
+    The multiplier is capped at ``MAX_COOLDOWN_MULTIPLIER`` and applied to the
+    base entity cooldown in :func:`should_suppress`.
 
     Returns the new multiplier value.
     """
-    current = state.learned_cooldown_multipliers.get(entity_id, 1)
+    compound_key = f"{rule_type}:{entity_id}"
+    current = state.learned_cooldown_multipliers.get(compound_key, 1)
     new_value = min(current + 1, MAX_COOLDOWN_MULTIPLIER)
-    state.learned_cooldown_multipliers[entity_id] = new_value
+    state.learned_cooldown_multipliers[compound_key] = new_value
     LOGGER.debug(
         "Learned cooldown multiplier for %s updated: %d → %d.",
-        entity_id,
+        compound_key,
         current,
         new_value,
     )
