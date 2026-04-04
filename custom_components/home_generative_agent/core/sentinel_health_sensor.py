@@ -26,6 +26,9 @@ if TYPE_CHECKING:
         SentinelDiscoveryEngine,
     )
     from custom_components.home_generative_agent.sentinel.engine import SentinelEngine
+    from custom_components.home_generative_agent.sentinel.proposal_store import (
+        ProposalStore,
+    )
 
 LOGGER = logging.getLogger(__name__)
 
@@ -190,6 +193,7 @@ class SentinelHealthSensor(SensorEntity):
         entry_id: str,
         baseline_updater: SentinelBaselineUpdater | None = None,
         discovery_engine: SentinelDiscoveryEngine | None = None,
+        proposal_store: ProposalStore | None = None,
     ) -> None:
         """Initialize the sentinel health sensor."""
         self.hass = hass
@@ -198,6 +202,7 @@ class SentinelHealthSensor(SensorEntity):
         self._sentinel = sentinel
         self._baseline_updater = baseline_updater
         self._discovery_engine = discovery_engine
+        self._proposal_store = proposal_store
         self._attr_name = "Sentinel Health"
         self._attr_unique_id = f"sentinel_health::{entry_id}"
         self._attr_native_value = "ok"
@@ -272,10 +277,12 @@ class SentinelHealthSensor(SensorEntity):
                 "candidates_generated",
                 "candidates_novel",
                 "candidates_deduplicated",
-                "proposals_promoted",
                 "unsupported_ttl_expired",
             ):
                 self._attrs[f"discovery_{key}"] = None
+
+        # Count proposals approved in the last 24 hours from the proposal store.
+        await self._refresh_proposals_approved_24h()
 
         # Baseline health statistics.
         await self._refresh_baseline_attrs()
@@ -323,3 +330,25 @@ class SentinelHealthSensor(SensorEntity):
             if updated_at is not None and hasattr(updated_at, "isoformat")
             else updated_at
         )
+
+    async def _refresh_proposals_approved_24h(self) -> None:
+        """Populate discovery_proposals_approved_24h from the proposal store."""
+        if self._proposal_store is None:
+            self._attrs["discovery_proposals_approved_24h"] = None
+            return
+
+        cutoff_24h = dt_util.utcnow() - timedelta(hours=24)
+        proposals = await self._proposal_store.async_get_latest(200)
+        count = 0
+        for record in proposals:
+            if record.get("status") != "approved":
+                continue
+            approved_at_str = record.get("approved_at")
+            if not approved_at_str:
+                continue
+            approved_at = dt_util.parse_datetime(str(approved_at_str))
+            if approved_at is None:
+                continue
+            if approved_at >= cutoff_24h:
+                count += 1
+        self._attrs["discovery_proposals_approved_24h"] = count

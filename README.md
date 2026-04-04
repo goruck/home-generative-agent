@@ -479,7 +479,7 @@ These optional features are configured in the Sentinel subentry:
 3. Select `+ Sentinel` (or reconfigure the existing Sentinel subentry)
 4. Set options:
    - Discovery: `sentinel_discovery_enabled`, `sentinel_discovery_interval_seconds`, `sentinel_discovery_max_records`
-   - Daily digest: `sentinel_daily_digest_enabled` (default `false`), `sentinel_daily_digest_time` (default `08:00` local time — sends a push summary of the past 24 hours at that time each day)
+   - Daily digest: toggle `sentinel_daily_digest_enabled` and set a delivery time with `sentinel_daily_digest_time` (default `08:00:00` — sends a push summary of the past 24 hours at that time each day). Both fields are now exposed directly in the Sentinel subentry config flow UI.
    - Triage: `sentinel_triage_enabled`, `sentinel_triage_timeout_seconds`
    - Baseline: `sentinel_baseline_enabled`, `sentinel_baseline_update_interval_minutes`, `sentinel_baseline_freshness_threshold_seconds`
    - Autonomy guardrails: `sentinel_require_pin_for_level_increase` and the Sentinel autonomy-level increase PIN
@@ -559,7 +559,7 @@ Attributes:
 | `discovery_candidates_generated` | Total discovery candidates returned by the LLM in the most recent cycle |
 | `discovery_candidates_novel` | Candidates that passed deduplication and were stored |
 | `discovery_candidates_deduplicated` | Candidates dropped as duplicates of existing keys |
-| `discovery_proposals_promoted` | Proposals promoted to draft status in the most recent cycle |
+| `discovery_proposals_approved_24h` | Number of discovery proposals approved by the operator in the past 24 hours |
 | `discovery_unsupported_ttl_expired` | Unsupported proposals whose TTL expired and were cleaned up |
 | `triggers_coalesced` | Cumulative events merged into an existing queued trigger (deduplication) |
 | `triggers_dropped_incoming` | Cumulative triggers dropped on arrival because all queue slots held security-critical triggers |

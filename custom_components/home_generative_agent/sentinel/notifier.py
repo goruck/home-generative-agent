@@ -49,6 +49,7 @@ from custom_components.home_generative_agent.const import (
 from custom_components.home_generative_agent.core.utils import extract_final
 from custom_components.home_generative_agent.sentinel.suppression import (
     SUPPRESSION_REASON_NOT_SUPPRESSED,
+    record_cooldown_feedback,
     register_snooze,
 )
 
@@ -168,8 +169,9 @@ class SentinelNotifier:
                 )
             )
             try:
-                hour, minute = (int(p) for p in time_str.split(":", 1))
-            except (ValueError, TypeError):
+                parts = time_str.split(":")
+                hour, minute = int(parts[0]), int(parts[1])
+            except (ValueError, TypeError, IndexError):
                 LOGGER.warning(
                     "Invalid daily digest time %r; defaulting to 08:00.", time_str
                 )
@@ -357,6 +359,10 @@ class SentinelNotifier:
         if verb == ACT_SNOOZE_24H:
             if finding:
                 register_snooze(self._suppression.state, finding.type, SNOOZE_24H, now)
+                for _entity_id in finding.triggering_entities:
+                    record_cooldown_feedback(
+                        self._suppression.state, _entity_id, finding.type
+                    )
                 await self._suppression.async_save()
                 LOGGER.info("Snooze 24 h registered for finding type %s.", finding.type)
 

@@ -43,6 +43,7 @@ async def async_setup_entry(
                 entry.entry_id,
                 baseline_updater=data.baseline_updater,
                 discovery_engine=data.discovery_engine,
+                proposal_store=data.proposal_store,
             )
         ]
     )

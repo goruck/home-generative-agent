@@ -529,3 +529,102 @@ async def test_refresh_trigger_source_breakdown_none_when_no_audit_store() -> No
     await sensor._async_refresh()
 
     assert sensor._attrs["trigger_source_breakdown"] is None
+
+
+# ---------------------------------------------------------------------------
+# discovery_proposals_approved_24h (Fix 1)
+# ---------------------------------------------------------------------------
+
+
+def _make_proposal_store(records: list[dict]) -> Any:
+    store = MagicMock()
+    store.async_get_latest = AsyncMock(return_value=records)
+    return store
+
+
+@pytest.mark.asyncio
+async def test_proposals_approved_24h_counts_recent_approvals() -> None:
+    """Only approved proposals with approved_at within 24h are counted."""
+    now = datetime.now(UTC)
+    recent = (now - timedelta(hours=2)).isoformat()
+    old = (now - timedelta(hours=25)).isoformat()
+    records = [
+        {"status": "approved", "approved_at": recent},
+        {"status": "approved", "approved_at": recent},
+        {"status": "approved", "approved_at": old},  # outside 24h window
+        {"status": "draft", "approved_at": recent},  # wrong status
+    ]
+    hass = MagicMock()
+    sensor = SentinelHealthSensor(
+        hass=hass,
+        options={"sentinel_enabled": True},
+        audit_store=None,
+        sentinel=None,
+        entry_id="test_entry",
+        proposal_store=_make_proposal_store(records),
+    )
+    sensor.async_write_ha_state = MagicMock()
+
+    await sensor._async_refresh()
+
+    assert sensor._attrs["discovery_proposals_approved_24h"] == 2
+
+
+@pytest.mark.asyncio
+async def test_proposals_approved_24h_zero_when_none_recent() -> None:
+    """Returns 0 when proposal_store is present but no recent approvals."""
+    hass = MagicMock()
+    sensor = SentinelHealthSensor(
+        hass=hass,
+        options={"sentinel_enabled": True},
+        audit_store=None,
+        sentinel=None,
+        entry_id="test_entry",
+        proposal_store=_make_proposal_store([]),
+    )
+    sensor.async_write_ha_state = MagicMock()
+
+    await sensor._async_refresh()
+
+    assert sensor._attrs["discovery_proposals_approved_24h"] == 0
+
+
+@pytest.mark.asyncio
+async def test_proposals_approved_24h_none_when_no_store() -> None:
+    """Returns None when no proposal_store is wired."""
+    hass = MagicMock()
+    sensor = SentinelHealthSensor(
+        hass=hass,
+        options={"sentinel_enabled": True},
+        audit_store=None,
+        sentinel=None,
+        entry_id="test_entry",
+        proposal_store=None,
+    )
+    sensor.async_write_ha_state = MagicMock()
+
+    await sensor._async_refresh()
+
+    assert sensor._attrs["discovery_proposals_approved_24h"] is None
+
+
+@pytest.mark.asyncio
+async def test_proposals_approved_24h_boundary_just_outside_not_counted() -> None:
+    """A proposal approved exactly 24h+1s ago is NOT counted."""
+    now = datetime.now(UTC)
+    just_outside = (now - timedelta(hours=24, seconds=1)).isoformat()
+    records = [{"status": "approved", "approved_at": just_outside}]
+    hass = MagicMock()
+    sensor = SentinelHealthSensor(
+        hass=hass,
+        options={"sentinel_enabled": True},
+        audit_store=None,
+        sentinel=None,
+        entry_id="test_entry",
+        proposal_store=_make_proposal_store(records),
+    )
+    sensor.async_write_ha_state = MagicMock()
+
+    await sensor._async_refresh()
+
+    assert sensor._attrs["discovery_proposals_approved_24h"] == 0

@@ -162,6 +162,8 @@
             "sentinel_baseline_freshness_threshold_seconds": "Baseline freshness threshold (seconds)",
             "explain_enabled": "Enable LLM explanations for sentinel findings",
             "sentinel_require_pin_for_level_increase": "Require PIN for autonomy level increases",
+            "sentinel_daily_digest_enabled": "Enable daily digest notification",
+            "sentinel_daily_digest_time": "Daily digest time (HH:MM:SS)",
             "critical_action_pin": "Sentinel level-increase PIN (optional)",
             "notify_service": "Sentinel Notify Service (optional)"
           }

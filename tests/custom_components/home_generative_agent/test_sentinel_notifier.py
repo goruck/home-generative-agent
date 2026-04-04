@@ -130,6 +130,7 @@ def _finding(
     ftype: str = "open_entry_while_away",
     is_sensitive: bool = False,  # noqa: FBT001, FBT002
     recognized_people: list[str] | None = None,
+    triggering_entities: list[str] | None = None,
 ) -> AnomalyFinding:
     evidence: dict[str, Any] = {}
     if recognized_people is not None:
@@ -139,7 +140,11 @@ def _finding(
         type=ftype,
         severity="medium",
         confidence=0.75,
-        triggering_entities=["binary_sensor.front_door"],
+        triggering_entities=(
+            triggering_entities
+            if triggering_entities is not None
+            else ["binary_sensor.front_door"]
+        ),
         evidence=evidence,
         suggested_actions=["close_entry"],
         is_sensitive=is_sensitive,
@@ -291,6 +296,36 @@ async def test_snooze_24h_unknown_finding_is_noop() -> None:
     await notifier._handle_snooze(ACT_SNOOZE_24H, "nonexistent")
 
     assert suppression.state.snoozed_until == {}
+    assert suppression.save_called is False
+
+
+@pytest.mark.asyncio
+async def test_snooze_24h_records_feedback_for_each_triggering_entity() -> None:
+    """snooze24h increments cooldown multiplier for every triggering entity."""
+    notifier, _hass, suppression, action_handler = _make_notifier()
+    finding = _finding(
+        anomaly_id="abc123",
+        ftype="unlocked_lock_at_night",
+        triggering_entities=["lock.front", "lock.back"],
+    )
+    action_handler.register_finding(finding)
+
+    await notifier._handle_snooze(ACT_SNOOZE_24H, "abc123")
+
+    multipliers = suppression.state.learned_cooldown_multipliers
+    assert multipliers.get("unlocked_lock_at_night:lock.front", 1) == 2
+    assert multipliers.get("unlocked_lock_at_night:lock.back", 1) == 2
+    assert suppression.save_called is True
+
+
+@pytest.mark.asyncio
+async def test_snooze_24h_finding_none_no_feedback() -> None:
+    """snooze24h with an expired finding must not call record_cooldown_feedback."""
+    notifier, _hass, suppression, _action_handler = _make_notifier()
+    # No finding registered — simulates an expired/cleaned-up finding.
+    await notifier._handle_snooze(ACT_SNOOZE_24H, "gone123")
+
+    assert suppression.state.learned_cooldown_multipliers == {}
     assert suppression.save_called is False
 
 
@@ -1208,6 +1243,38 @@ def test_daily_digest_start_registers_time_change_when_enabled() -> None:
     assert _kw["minute"] == 30
     assert _kw["second"] == 0
     assert notifier._digest_unsub is unsub_mock
+
+
+def test_daily_digest_start_hhmmss_format_parsed_correctly() -> None:
+    """start() must parse 'HH:MM:SS' (3-part) digest time without ValueError."""
+    from unittest.mock import MagicMock, patch
+
+    from custom_components.home_generative_agent.const import (
+        CONF_SENTINEL_DAILY_DIGEST_ENABLED,
+        CONF_SENTINEL_DAILY_DIGEST_TIME,
+    )
+
+    notifier, _hass, _store = _make_digest_notifier(
+        options={
+            CONF_SENTINEL_DAILY_DIGEST_ENABLED: True,
+            CONF_SENTINEL_DAILY_DIGEST_TIME: "08:00:00",
+        },
+    )
+    with (
+        patch(
+            "custom_components.home_generative_agent.sentinel.notifier.async_track_time_change",
+            return_value=MagicMock(),
+        ) as track_mock,
+        patch(
+            "custom_components.home_generative_agent.sentinel.notifier.async_call_later",
+            return_value=MagicMock(),
+        ),
+    ):
+        notifier.start()
+
+    _kw = track_mock.call_args.kwargs
+    assert _kw["hour"] == 8
+    assert _kw["minute"] == 0
 
 
 def test_daily_digest_start_skips_registration_when_disabled() -> None:

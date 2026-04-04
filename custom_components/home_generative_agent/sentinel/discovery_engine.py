@@ -136,7 +136,6 @@ class SentinelDiscoveryEngine:
             "candidates_generated": 0,
             "candidates_novel": 0,
             "candidates_deduplicated": 0,
-            "proposals_promoted": 0,
             "unsupported_ttl_expired": 0,
         }
         if self._model is None:

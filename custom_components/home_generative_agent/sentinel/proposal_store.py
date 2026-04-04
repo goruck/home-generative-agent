@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.storage import Store
+from homeassistant.util import dt as dt_util
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -127,6 +128,10 @@ class ProposalStore:
                 record["review_notes"] = notes
             if extra:
                 record.update(extra)
+            # Stamp approved_at on first approval only — subsequent re-approvals
+            # must not reset the timestamp or it would re-enter the 24h window.
+            if status == "approved" and "approved_at" not in record:
+                record["approved_at"] = dt_util.utcnow().isoformat()
             await self.async_save()
             return True
         return False

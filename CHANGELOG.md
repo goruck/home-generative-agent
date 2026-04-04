@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.7.1] - 2026-04-04
+
+### Added
+
+- **Daily digest config flow UI** — The Sentinel subentry options flow now exposes a
+  `Boolean` toggle to enable/disable the daily digest and a `TimeSelector` to set the
+  delivery time, so operators can configure the digest without editing raw options.
+
+- **Proposals approved (24 h) health attribute** — `SentinelHealthSensor` gains a
+  `discovery_proposals_approved_24h` attribute counting how many discovery proposals
+  were approved by the operator in the past 24 hours, giving visibility into how active
+  the rule-learning feedback loop is.
+
+- **Feedback-trained cooldown wired for snooze and dismiss** — `record_cooldown_feedback`
+  is now called from both the snooze action (notifier) and the dismiss action (actions),
+  completing the feedback loop so per-entity cooldown multipliers actually accumulate.
+
+### Fixed
+
+- **Daily digest time parse with `"HH:MM:SS"` format** — `sentinel/notifier.py` used
+  `split(":", 1)` which parsed `"08:00:00"` as `("08", "00:00")`, silently discarding
+  the configured time and always scheduling the digest at 08:00. Fixed to
+  `split(":")` so any user-configured time takes effect.
+
+- **Missing `stored_version = 5` in suppression state migration** — The v4→v5 migration
+  block did not update the `stored_version` sentinel variable, meaning a future v6
+  migration block would have re-applied v5 logic. Fixed.
+
+- **Cooldown multiplier key scheme (`entity_id` → `rule_type:entity_id`)** — Multipliers
+  are now keyed by `"{rule_type}:{entity_id}"` so different rules for the same entity
+  accumulate independent multipliers. Includes a v5 schema migration that discards the
+  old bare-key entries (safe: the feedback signal was never wired in production).
+
 ## [3.7.0] - 2026-04-03
 
 ### Added

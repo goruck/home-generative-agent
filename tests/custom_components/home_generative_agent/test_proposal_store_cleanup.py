@@ -163,3 +163,50 @@ async def test_cleanup_naive_datetime_treated_as_utc() -> None:
     store = _store_with_records([record])
     removed = await store.cleanup_unsupported_ttl()
     assert removed == 1
+
+
+# ---------------------------------------------------------------------------
+# approved_at stamp (Fix 1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_approved_at_stamped_on_first_approval() -> None:
+    """async_update_status stamps approved_at when status=approved for the first time."""
+    record: dict = {"candidate_id": "p1", "status": "draft"}
+    store = _store_with_records([record])
+
+    updated = await store.async_update_status("p1", "approved")
+
+    assert updated is True
+    assert "approved_at" in store._records[0]
+    # Must be a valid ISO-8601 timestamp.
+    parsed = datetime.datetime.fromisoformat(store._records[0]["approved_at"])
+    assert parsed.tzinfo is not None  # timezone-aware
+
+
+@pytest.mark.asyncio
+async def test_approved_at_not_overwritten_on_re_approval() -> None:
+    """Re-approving a proposal does not reset approved_at."""
+    original_ts = "2026-01-01T00:00:00+00:00"
+    record: dict = {
+        "candidate_id": "p2",
+        "status": "approved",
+        "approved_at": original_ts,
+    }
+    store = _store_with_records([record])
+
+    await store.async_update_status("p2", "approved")
+
+    assert store._records[0]["approved_at"] == original_ts
+
+
+@pytest.mark.asyncio
+async def test_non_approved_status_does_not_set_approved_at() -> None:
+    """Setting status to something other than 'approved' must not write approved_at."""
+    record: dict = {"candidate_id": "p3", "status": "draft"}
+    store = _store_with_records([record])
+
+    await store.async_update_status("p3", "unsupported")
+
+    assert "approved_at" not in store._records[0]

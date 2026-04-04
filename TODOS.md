@@ -138,15 +138,14 @@
 
 ### Wire `proposals_promoted` counter in discovery engine
 
-**What:** `_discovery_cycle_stats["proposals_promoted"]` is initialized to 0 in `SentinelDiscoveryEngine._run_once()` and never incremented anywhere in the class. `SentinelHealthSensor` exposes `discovery_proposals_promoted` but it always reports 0.
+**What:** `SentinelHealthSensor` now exposes `discovery_proposals_approved_24h` — the count of proposals with `status="approved"` in the last 24 hours, queried directly from `ProposalStore` (Option B from the original TODO). The bare `proposals_promoted` in-memory counter (which always reported 0) was removed.
 
-**Why:** The counter was added to the health sensor attributes in v3.7.0 but the increment logic was not wired. The `proposals_promoted` value changes when `ProposalStore.async_approve()` is called — but that's in the engine or execution service, not in `_run_once()`. The counter needs to be driven via the `SIGNAL_SENTINEL_RUN_COMPLETE` payload or a separate signal from the approval flow.
-
-**How to apply:** Option A: In `SentinelEngine`, when a discovery candidate is promoted to a rule (via proposal approval), emit an increment signal or include the count in the next `SIGNAL_SENTINEL_RUN_COMPLETE` payload. Option B: In `SentinelHealthSensor.async_update()`, query `ProposalStore` directly for the count of `status="approved"` proposals created in the last 24h and report that as `discovery_proposals_promoted`. Option B is simpler and doesn't require engine changes. Add a test asserting the attribute is non-zero when approved proposals exist.
+**Why:** The counter was added to the health sensor attributes in v3.7.0 but the increment logic was not wired. Option B (direct store query) is simpler and doesn't require engine changes.
 
 **Effort:** S
 **Priority:** P1
 **Depends on:** v3.7.0 (health sensor discovery metrics)
+**Completed:** v3.7.1 (2026-04-04)
 
 ---
 
@@ -154,103 +153,106 @@
 
 ### Feedback-trained per-entity cooldowns — wire feedback signal
 
-**What:** `record_cooldown_feedback()` exists in `sentinel/suppression.py` but is never called from any production code path. The per-entity feedback table (schema v4, shipped in v3.7.0) is populated but the feedback signal — triggered when a user snoozes or dismisses the same entity+rule combination ≥3 times — is never sent.
+**What:** `record_cooldown_feedback(state, entity_id, rule_type)` is now called from both the snooze action (`sentinel/notifier.py`) and the dismiss action (`notify/actions.py`). Each snooze or dismiss of a rule+entity pair increments the compound-key multiplier, which extends future cooldowns for that specific combination.
 
-**Why:** Without the feedback signal, `learned_cooldown_multipliers` remains empty forever and the cooldown multiplier feature is silently inoperative. Operators won't notice because notifications still fire at the base cooldown — the learned multipliers just never kick in.
-
-**How to apply:** In `SentinelEngine._handle_user_action()` (or the execution service that processes mobile action button callbacks), after handling a `snooze` or `dismiss` action, call `suppression_state.record_cooldown_feedback(entity_id, rule_type)`. Add a test that asserts after 3 dismissals the multiplier for that combination is incremented.
+**Why:** Without the feedback signal, `learned_cooldown_multipliers` remained empty forever. Now every snooze/dismiss trains the system.
 
 **Effort:** S
 **Priority:** P1
 **Depends on:** v3.7.0 (suppression schema v4)
+**Completed:** v3.7.1 (2026-04-04)
 
 ---
 
 ### Fix cooldown multiplier key scheme (entity_id → rule_type:entity_id) + schema migration v5
 
-**What:** `learned_cooldown_multipliers` in `SuppressionState` (schema v4) is keyed by `entity_id` only. This means a snooze of `lock.front_door` for `unlocked_lock_at_night` increments the same counter as a snooze for `camera_entry_unsecured`. Different rules for the same entity should have independent multipliers.
+**What:** `learned_cooldown_multipliers` is now keyed by `"{rule_type}:{entity_id}"` (e.g., `"unlocked_lock_at_night:lock.front_door"`). The v4→v5 migration in `_migrate_suppression_state()` discards all bare entity_id keys (safe: `record_cooldown_feedback` was never called in v3.7.0 production, so v4 dicts were always empty). `stored_version = 5` correctly set after migration.
 
-**Why:** A door lock that fires `camera_entry_unsecured` daily (normal security camera activity) and `unlocked_lock_at_night` rarely should suppress the camera rule but not the lock rule. With the current entity-only key, dismissing either rule increments the same multiplier, causing both rules to cool down together. This leads to missed alerts for the more critical rule.
-
-**How to apply:** Change the key format from `entity_id` to `{rule_type}:{entity_id}` (e.g., `"unlocked_lock_at_night:lock.front_door"`). Add a schema v4→v5 migration in `core/migrations.py` that re-keys existing entries (entries with no `:` separator get prefixed with an empty rule type and can be discarded since they were never incremented in production). Update all callsites in `suppression.py` and add a migration test.
+**Why:** The bare entity_id key caused different rules for the same entity to share a single multiplier, causing missed alerts for the more critical rule.
 
 **Effort:** S
 **Priority:** P1
 **Depends on:** Wire feedback signal TODO above
+**Completed:** v3.7.1 (2026-04-04)
 
 ---
 
 ### Daily digest config flow UI
 
-**What:** `CONF_SENTINEL_DAILY_DIGEST_ENABLED` and `CONF_SENTINEL_DAILY_DIGEST_HOUR` are declared in `const.py` and read in `__init__.py` but are not exposed in `sentinel_subentry_flow.py`. Users cannot enable the daily digest without editing raw options JSON.
+**What:** `sentinel_subentry_flow.py` now exposes `BooleanSelector` for `CONF_SENTINEL_DAILY_DIGEST_ENABLED` and `TimeSelector` for `CONF_SENTINEL_DAILY_DIGEST_TIME`. Both appear in `_default_payload()`. `RECOMMENDED_SENTINEL_DAILY_DIGEST_TIME` normalized to `"08:00:00"` in `const.py` to match `TimeSelector` output format. The notifier parse bug (`split(":", 1)` → `split(":")`) was fixed as part of this.
 
-**Why:** The daily digest notification shipped in v3.7.0 with backend support but without a UI control. Any user who discovers the feature via README will find no toggle in the integration options flow.
-
-**How to apply:** In `sentinel_subentry_flow.py`, add a `BooleanSelector` for `CONF_SENTINEL_DAILY_DIGEST_ENABLED` (default: False) and a `TimeSelector` for `CONF_SENTINEL_DAILY_DIGEST_HOUR` (default: `"07:00:00"`). Gate the time selector on the enabled boolean. Add config flow tests asserting both options are accepted.
+**Why:** The daily digest shipped in v3.7.0 with no UI control; users had to edit raw options.
 
 **Effort:** S
 **Priority:** P1
 **Depends on:** v3.7.0 (daily digest backend)
+**Completed:** v3.7.1 (2026-04-04)
 
 ---
 
+### Add `learned_suppressions_active` attribute to health sensor
+
+**What:** Expose a `learned_suppressions_active: int` attribute on `sensor.sentinel_health` — the count of `{rule_type}:{entity_id}` keys in `learned_cooldown_multipliers` where the value is greater than 1 (i.e., at least one doubling has occurred for that rule+entity combination).
+
+**Why:** Without this attribute, there is no external visibility into how much Sentinel has self-tuned. Operators cannot tell whether the feedback-trained cooldown feature is doing anything. After v3.7.0 wires the feedback signal, this count becomes the primary signal that learning is occurring.
+
+**How to apply:** Pass `suppression: SuppressionManager | None = None` to `SentinelHealthSensor.__init__()`. In `_async_refresh()`, read `self._suppression.state.learned_cooldown_multipliers` and count entries where `value > 1`. Set `self._attrs["learned_suppressions_active"] = count` (or `None` if no suppression manager is available). Add a test asserting the count is correct for a pre-seeded state with known multipliers.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** Fix 2+3 (compound key scheme v5, feedback wired in notifier + actions)
+
+---
+
+## Completed
+
 ### iOS notification priority tiers
 
-**What:** All Sentinel mobile push notifications currently use the same `active` interruption level regardless of severity. High-severity findings (security alerts) should use `time-sensitive` (bypasses Focus modes), medium should use `active`, low should use `passive`. Title should reflect severity: "Security Alert" / "Home Alert" / "Home Update".
+**What:** `sentinel/notifier.py` now uses `_SEVERITY_INTERRUPT_LEVEL` (`high` → `time-sensitive`, `medium` → `active`, `low` → `passive`) and `_SEVERITY_TITLE` dicts. `async_notify()` derives severity from the finding, selects the interrupt level and title, and passes `"push": {"interruption-level": level}` in the notification data block.
 
-**Why:** 7 notifications in 18 minutes, all with identical urgency appearance, was the production incident that prompted this sprint. Without priority differentiation, users train themselves to ignore Sentinel notifications — including the ones that matter.
-
-**How to apply:** In `sentinel/notifier.py`, add `_SEVERITY_INTERRUPT_LEVEL` and `_SEVERITY_TITLE` dicts. In `async_notify()`, derive severity from `getattr(finding, "severity", "medium")`, look up the interrupt level and title, and add `"push": {"interruption-level": level}` to the notification `data["data"]` block. Add `"subtitle": _friendly_type(finding.type)`. See plan `steady-petting-haven.md` for full diff. Add tests for all three severity paths.
+**Why:** All notifications previously used the same `active` interruption level, training users to ignore them — including security alerts.
 
 **Effort:** S
 **Priority:** P1
-**Depends on:** None
+**Completed:** v3.6.9 (2026-03-31)
 
 ---
 
 ### Appliance completion detection in baseline deviation
 
-**What:** When `evaluate_baseline_deviation()` fires on a power entity and `current_value < 10% × baseline_value`, the appliance finished its cycle — this is normal behavior, not a failure. The finding should be severity `"low"` with `evidence["is_completion"] = True` instead of the default high-severity "stopped unexpectedly" framing.
+**What:** `sentinel/baseline.py` now detects appliance cycle completion: power-class entities on dedicated appliance circuits (washer, dryer, dishwasher, etc.) with `current_value < COMPLETION_THRESHOLD_PCT × baseline_value` emit `severity="low"` with `evidence["is_completion"] = True`. `sentinel/notifier.py` checks `finding.evidence.get("is_completion")` and uses passive interruption level with completion framing.
 
-**Why:** Washer/dryer finishing a cycle fires `baseline_deviation` because power drops from ~40 kW → 0.5 kW — a large deviation. The LLM explanation then phrases it as a failure ("appliance stopped unexpectedly") causing false-positive alerts. See `COMPLETION_THRESHOLD_PCT = 0.10`.
-
-**How to apply:** In `sentinel/baseline.py`, after the evidence dict is built, detect completion: check `device_class == "power"` or `unit in {"W", "kW"}`, then if `current_value < 0.10 * baseline_value`, set `evidence["is_completion"] = True` and override `severity = "low"`. Update `explain/prompts.py` to add grounding: "If evidence contains is_completion=true, the appliance finished its cycle normally — say 'finished' not 'stopped unexpectedly'." See plan `steady-petting-haven.md` for full diff. Add tests for power vs non-power entities.
+**Why:** Washer/dryer finishing a cycle triggered `baseline_deviation` with high-severity framing ("stopped unexpectedly"), causing false-positive security alerts.
 
 **Effort:** S
 **Priority:** P1
-**Depends on:** None
+**Completed:** v3.6.9 (2026-03-31)
 
 ---
 
 ### Presence-aware lock severity for `unlocked_lock_at_night`
 
-**What:** `unlocked_lock_at_night` fires `severity="high"` and `is_sensitive=True` even when `snapshot["derived"]["anyone_home"]` is True. A lock left unlocked while you're home is low urgency — it should be `severity="low"`, `is_sensitive=False`.
+**What:** `sentinel/rules/unlocked_lock_at_night.py` now reads `anyone_home` from `snapshot["derived"]` and emits `severity="low"` when home is occupied, `severity="high"` when away. Evidence dict includes `"anyone_home": anyone_home`.
 
-**Why:** High-severity alert with iOS `time-sensitive` interruption level for an unlocked door while you're sitting in the living room is noise. Operators will start ignoring it. The presence signal already exists in the snapshot; it's not being used.
-
-**How to apply:** In `sentinel/rules/unlocked_lock_at_night.py`, read `anyone_home = bool(snapshot["derived"].get("anyone_home", False))` before the loop. Add `"anyone_home": anyone_home` to the evidence dict. Set `severity="low" if anyone_home else "high"` and `is_sensitive=not anyone_home` in the `AnomalyFinding` constructor. Update `explain/prompts.py` grounding: "If evidence contains anyone_home=true for an unlocked lock, the household is occupied — frame it as a reminder, not an alert." See plan `steady-petting-haven.md` for full diff. Add tests for both presence states.
+**Why:** High-severity `time-sensitive` iOS alert for an unlocked door while occupants are home is noise that trains operators to ignore real alerts.
 
 **Effort:** S
 **Priority:** P1
-**Depends on:** None
+**Completed:** v3.6.9 (2026-03-31)
 
 ---
 
 ### Notification batching for medium/low severity bursts
 
-**What:** When more than 3 medium/low mobile push notifications are sent within a rolling 60-second window, buffer subsequent notifications and flush as a single summary push ("N additional home alerts: type1, type2, …") after 30 seconds. High-severity findings always bypass batching.
+**What:** `SentinelNotifier` now tracks `_notification_times`, `_held_batch`, and `_batch_cancel`. When more than `_BATCH_RATE_LIMIT` medium/low pushes are sent within `_BATCH_WINDOW_SECONDS`, subsequent notifications are buffered and flushed as a single passive-priority summary after `_BATCH_FLUSH_DELAY_SECONDS`. High-severity findings always bypass batching.
 
-**Why:** Burst of 7 notifications in 18 minutes (the production incident) clutter the lock screen and train users to dismiss without reading. High-severity findings must still arrive immediately; medium/low bursts should batch.
-
-**How to apply:** In `SentinelNotifier.__init__()`, add `_notification_times: list[datetime]`, `_held_batch: list[...]`, `_batch_cancel`. In `async_notify()`, check rate window before dispatching; if over limit and severity != "high", hold in batch and arm `async_call_later` timer. Add `_async_flush_batch()` callback that sends a passive-priority summary with no action buttons. Cancel timer in `stop()`. See plan `steady-petting-haven.md` for full implementation. Add 6 test cases covering batching, bypass, and flush.
+**Why:** Burst of 7 notifications in 18 minutes cluttered the lock screen and trained users to dismiss without reading.
 
 **Effort:** M
 **Priority:** P1
-**Depends on:** iOS notification priority tiers TODO above (shares `async_notify()` changes)
+**Completed:** v3.6.9 (2026-03-31)
 
 ---
-
-## Completed
 
 ### Centralize action code vocabulary in `const.py`
 
