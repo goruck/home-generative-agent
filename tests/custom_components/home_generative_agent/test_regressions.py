@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -20,8 +21,6 @@ from custom_components.home_generative_agent.core.recognized_sensor import (
 from custom_components.home_generative_agent.core.video_analyzer import VideoAnalyzer
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from homeassistant.core import HomeAssistant
 
 
@@ -196,8 +195,6 @@ async def test_video_analyzer_recognize_faces_without_gallery(
 
 def test_agent_tools_uses_direct_tool_node_injected_store_import() -> None:
     """Avoid importing langgraph.prebuilt package during startup."""
-    from pathlib import Path
-
     source = Path(agent_tools.__file__).read_text(encoding="utf-8")
     assert "from langgraph.prebuilt.tool_node import InjectedStore" in source
     assert "from langgraph.prebuilt import InjectedStore" not in source
