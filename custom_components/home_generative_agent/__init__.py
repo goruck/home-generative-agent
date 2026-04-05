@@ -21,6 +21,7 @@ from homeassistant.config_entries import ConfigEntry, ConfigSubentry
 from homeassistant.const import (
     CONF_API_KEY,
     CONF_HOST,
+    CONF_LLM_HASS_API,
     CONF_PASSWORD,
     CONF_PORT,
     CONF_USERNAME,
@@ -2653,6 +2654,18 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
             CONF_EXPLAIN_ENABLED,
         ):
             new_options.pop(key, None)
+
+        current_version = 5
+
+        if current_version < 6:  # noqa: PLR2004
+            # v5 -> v6: normalize CONF_LLM_HASS_API from a string to a list.
+            # "none" sentinel and absent key both become [] (no APIs).
+            api_val = new_options.get(CONF_LLM_HASS_API)
+            if isinstance(api_val, str):
+                new_options[CONF_LLM_HASS_API] = [] if api_val == "none" else [api_val]
+            elif api_val is None:
+                new_options[CONF_LLM_HASS_API] = []
+            current_version = 6
 
         try:
             hass.config_entries.async_update_entry(

@@ -8,7 +8,7 @@ DOMAIN = "home_generative_agent"
 HGA_CARD_STATIC_PATH = "/hga-card"
 HGA_CARD_STATIC_PATH_LEGACY = "/hga-enroll-card"
 
-CONFIG_ENTRY_VERSION = 5
+CONFIG_ENTRY_VERSION = 6
 
 SUBENTRY_TYPE_DATABASE = "database"
 SUBENTRY_TYPE_MODEL_PROVIDER = "model_provider"
@@ -63,7 +63,6 @@ CONF_VECTORS_BOOTSTRAPPED = "vectors_bootstrapped"
 
 # ---- Notify service (for mobile push notifications) ----
 CONF_NOTIFY_SERVICE = "notify_service"
-LLM_HASS_API_NONE = "none"
 
 # ---- LangChain logging ----
 # See https://python.langchain.com/docs/how_to/debugging/
