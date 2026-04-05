@@ -6,7 +6,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
-from homeassistant.const import CONF_API_KEY, CONF_HOST, CONF_PASSWORD, CONF_USERNAME
+from homeassistant.const import (
+    CONF_API_KEY,
+    CONF_HOST,
+    CONF_LLM_HASS_API,
+    CONF_PASSWORD,
+    CONF_USERNAME,
+)
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 import custom_components.home_generative_agent as hga_component
@@ -874,3 +880,48 @@ async def test_sentinel_subentry_flow_accepts_digest_fields(hass: Any) -> None:
     assert data is not None
     assert data[CONF_SENTINEL_DAILY_DIGEST_ENABLED] is True
     assert data[CONF_SENTINEL_DAILY_DIGEST_TIME] == "07:30:00"
+
+
+# ---------------------------------------------------------------------------
+# v5 -> v6 migration: CONF_LLM_HASS_API normalisation
+# ---------------------------------------------------------------------------
+
+
+def _make_v5_entry(hass: Any, options: dict[str, Any]) -> Any:
+    """Return a v5 MockConfigEntry with the given options, added to hass."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Home Generative Agent",
+        version=5,
+        data={},
+        options=options,
+    )
+    entry.add_to_hass(hass)
+    return entry
+
+
+@pytest.mark.asyncio
+async def test_migration_v5_to_v6_string_api_id(hass: HomeAssistant) -> None:
+    """v5 string API id is wrapped in a list."""
+    entry = _make_v5_entry(hass, {CONF_LLM_HASS_API: "assist"})
+    assert await async_migrate_entry(hass, entry)
+    assert entry.options[CONF_LLM_HASS_API] == ["assist"]
+    assert entry.version == CONFIG_ENTRY_VERSION
+
+
+@pytest.mark.asyncio
+async def test_migration_v5_to_v6_none_sentinel(hass: HomeAssistant) -> None:
+    """v5 'none' sentinel is converted to an empty list (no APIs)."""
+    entry = _make_v5_entry(hass, {CONF_LLM_HASS_API: "none"})
+    assert await async_migrate_entry(hass, entry)
+    assert entry.options.get(CONF_LLM_HASS_API) == []
+    assert entry.version == CONFIG_ENTRY_VERSION
+
+
+@pytest.mark.asyncio
+async def test_migration_v5_to_v6_absent_key(hass: HomeAssistant) -> None:
+    """v5 absent CONF_LLM_HASS_API key is converted to empty list."""
+    entry = _make_v5_entry(hass, {})
+    assert await async_migrate_entry(hass, entry)
+    assert entry.options.get(CONF_LLM_HASS_API) == []
+    assert entry.version == CONFIG_ENTRY_VERSION

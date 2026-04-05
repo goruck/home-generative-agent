@@ -197,19 +197,23 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         )
 
         # HA tools & schema
-        try:
-            llm_api = await llm.async_get_api(
-                hass,
-                options[CONF_LLM_HASS_API],
-                llm_context,
-            )
-        except HomeAssistantError:
-            msg = "Error getting LLM API, check your configuration."
-            _LOGGER.exception(msg)
-            intent_response.async_set_error(intent.IntentResponseErrorCode.UNKNOWN, msg)
-            return conversation.ConversationResult(
-                response=intent_response, conversation_id=conversation_id
-            )
+        llm_api = None
+        if options.get(CONF_LLM_HASS_API):
+            try:
+                llm_api = await llm.async_get_api(
+                    hass,
+                    options[CONF_LLM_HASS_API],
+                    llm_context,
+                )
+            except HomeAssistantError:
+                msg = "Error getting LLM API, check your configuration."
+                _LOGGER.exception(msg)
+                intent_response.async_set_error(
+                    intent.IntentResponseErrorCode.UNKNOWN, msg
+                )
+                return conversation.ConversationResult(
+                    response=intent_response, conversation_id=conversation_id
+                )
 
         if not options.get(CONF_SCHEMA_FIRST_YAML, False) and _is_dashboard_request(
             user_input.text
@@ -222,9 +226,11 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 response=intent_response, conversation_id=conversation_id
             )
 
-        tools = [
-            _format_tool(tool, llm_api.custom_serializer) for tool in llm_api.tools
-        ]
+        tools = (
+            [_format_tool(tool, llm_api.custom_serializer) for tool in llm_api.tools]
+            if llm_api
+            else []
+        )
 
         # Add LangChain-native tools (wired in graph via config).
         langchain_tools: dict[str, Any] = {
