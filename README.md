@@ -101,6 +101,23 @@ If you want separate servers per feature, add multiple Model Provider subentries
 
 Global options (prompt, face recognition URL, context management, critical-action PIN, etc.) live in the integration’s **Options** flow. Sentinel settings are configured in the **Sentinel** subentry.
 
+### Control Home Assistant (LLM API selection)
+
+The **Control Home Assistant** option in the Options flow is a multi-select that controls which Home Assistant LLM APIs the agent can use. Selecting an API grants the agent the tools registered by that API.
+
+- **Assist** (`assist`) — the built-in HA Assist API. Gives the agent access to entity-control intents and the full entity list. Select this for standard voice-assistant style control.
+- **MCP server integrations** — any [Model Context Protocol](https://www.home-assistant.io/integrations/mcp_server/) integration you have configured registers its own LLM API (for example `mcp-<entry_id>`). Those entries appear in the list once added.
+
+You can select any combination. Selecting both Assist and one or more MCP APIs merges all their tools into a single combined API for the agent. Deselecting everything runs the agent with only its built-in LangChain tools (no HA entity control, no MCP tools).
+
+**Adding an MCP server:**
+
+1. Go to Settings → Devices & Services → Add Integration → search **Model Context Protocol**.
+2. Enter the server URL and complete setup.
+3. The MCP integration registers an LLM API automatically.
+4. Open Settings → Devices & Services → Home Generative Agent → **Configure**.
+5. Select the new entry in the **Control Home Assistant** multi-select and save.
+
 ### Speech-to-Text (STT)
 
 HGA can provide a built-in STT engine using the OpenAI Whisper API so you can use voice without a separate STT integration.
