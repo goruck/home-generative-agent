@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.7.2] - 2026-04-05
+
+### Changed
+
+- **Multi-select LLM API support** — The "Control Home Assistant" option in the options
+  flow is now a multi-select, allowing multiple LLM APIs to be active simultaneously (e.g.
+  combining the built-in Assist API with one or more MCP server integrations). Existing
+  single-API configurations migrate automatically; the behaviour is identical when only one
+  API is selected.
+
+### Fixed
+
+- **Crash when no APIs configured** — `_async_handle_message` no longer raises `KeyError`
+  when `CONF_LLM_HASS_API` is absent from options (i.e. the user deselected all APIs).
+  The agent now runs cleanly with only its built-in LangChain tools in that state.
+
+- **Migration respects "no control" intent** — The v5→v6 config-entry migration converts
+  the legacy `"none"` sentinel and absent key to an empty list rather than silently
+  enabling the Assist API, preserving the operator's prior choice.
+
 ## [3.7.1] - 2026-04-04
 
 ### Added
