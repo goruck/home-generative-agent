@@ -35,6 +35,7 @@ from custom_components.home_generative_agent.const import (
     CONF_OLLAMA_VLM_URL,
     CONF_OPENAI_COMPATIBLE_API_KEY,
     CONF_OPENAI_COMPATIBLE_BASE_URL,
+    CONF_SENTINEL_CAMERA_ENTRY_LINKS,
     CONF_SENTINEL_DAILY_DIGEST_ENABLED,
     CONF_SENTINEL_DAILY_DIGEST_TIME,
     CONF_SENTINEL_ENABLED,
@@ -880,6 +881,138 @@ async def test_sentinel_subentry_flow_accepts_digest_fields(hass: Any) -> None:
     assert data is not None
     assert data[CONF_SENTINEL_DAILY_DIGEST_ENABLED] is True
     assert data[CONF_SENTINEL_DAILY_DIGEST_TIME] == "07:30:00"
+
+
+def test_sentinel_default_payload_contains_camera_entry_links() -> None:
+    """_default_payload() includes sentinel_camera_entry_links as an empty dict."""
+    payload = _default_payload()
+    assert CONF_SENTINEL_CAMERA_ENTRY_LINKS in payload
+    assert payload[CONF_SENTINEL_CAMERA_ENTRY_LINKS] == {}
+
+
+def test_sentinel_schema_contains_camera_entry_links(hass: Any) -> None:
+    """_schema() includes the sentinel_camera_entry_links text selector."""
+    flow = SentinelSubentryFlow()
+    flow.hass = hass
+    schema = flow._schema(_default_payload())
+    schema_keys = {str(k) for k in schema.schema}
+    assert CONF_SENTINEL_CAMERA_ENTRY_LINKS in schema_keys
+
+
+@pytest.mark.asyncio
+async def test_sentinel_flow_camera_entry_links_valid_json(hass: Any) -> None:
+    """Flow parses a valid JSON string into a dict for sentinel_camera_entry_links."""
+    entry = DummyEntry()
+    flow = SentinelSubentryFlow()
+    flow.hass = hass
+    flow.async_show_form = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "form",
+        "data_schema": kwargs["data_schema"],
+        "errors": kwargs.get("errors"),
+    }
+    flow.async_create_entry = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "create_entry",
+        "title": kwargs.get("title"),
+        "data": kwargs.get("data"),
+    }
+    flow.async_abort = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "abort",
+        "reason": kwargs.get("reason"),
+    }
+    flow._schedule_reload = lambda: None  # type: ignore[assignment]
+    _patch_entry(flow, entry)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            CONF_SENTINEL_CAMERA_ENTRY_LINKS: '{"camera.driveway": ["lock.front_door"]}',
+        }
+    )
+    assert result.get("type") == "create_entry"
+    data = result.get("data")
+    assert data is not None
+    assert data[CONF_SENTINEL_CAMERA_ENTRY_LINKS] == {
+        "camera.driveway": ["lock.front_door"]
+    }
+
+
+@pytest.mark.asyncio
+async def test_sentinel_flow_camera_entry_links_invalid_json(hass: Any) -> None:
+    """Flow returns an error for malformed sentinel_camera_entry_links JSON."""
+    entry = DummyEntry()
+    flow = SentinelSubentryFlow()
+    flow.hass = hass
+    flow.async_show_form = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "form",
+        "data_schema": kwargs["data_schema"],
+        "errors": kwargs.get("errors"),
+    }
+    flow.async_create_entry = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "create_entry",
+        "title": kwargs.get("title"),
+        "data": kwargs.get("data"),
+    }
+    flow.async_abort = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "abort",
+        "reason": kwargs.get("reason"),
+    }
+    flow._schedule_reload = lambda: None  # type: ignore[assignment]
+    _patch_entry(flow, entry)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            CONF_SENTINEL_CAMERA_ENTRY_LINKS: "not valid json {{",
+        }
+    )
+    assert result.get("type") == "form"
+    assert result.get("errors", {}).get("base") == "invalid_camera_entry_links"
+
+
+@pytest.mark.asyncio
+async def test_sentinel_flow_camera_entry_links_wrong_structure(hass: Any) -> None:
+    """Flow returns an error when sentinel_camera_entry_links is not dict[str, list[str]]."""
+    entry = DummyEntry()
+    flow = SentinelSubentryFlow()
+    flow.hass = hass
+    flow.async_show_form = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "form",
+        "data_schema": kwargs["data_schema"],
+        "errors": kwargs.get("errors"),
+    }
+    flow.async_create_entry = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "create_entry",
+        "title": kwargs.get("title"),
+        "data": kwargs.get("data"),
+    }
+    flow.async_abort = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "abort",
+        "reason": kwargs.get("reason"),
+    }
+    flow._schedule_reload = lambda: None  # type: ignore[assignment]
+    _patch_entry(flow, entry)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            # Value is a string, not a list — wrong structure.
+            CONF_SENTINEL_CAMERA_ENTRY_LINKS: '{"camera.driveway": "lock.front_door"}',
+        }
+    )
+    assert result.get("type") == "form"
+    assert result.get("errors", {}).get("base") == "invalid_camera_entry_links"
 
 
 # ---------------------------------------------------------------------------

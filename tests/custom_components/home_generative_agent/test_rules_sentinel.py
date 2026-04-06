@@ -406,6 +406,276 @@ def test_camera_entry_unsecured_interior_area_no_fallback() -> None:
     assert len(findings) == 0
 
 
+def test_camera_entry_links_adjacent_area_fires() -> None:
+    """Camera with a cross-area entry link fires when the linked entry is unsecured."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["now"] = "2025-01-01T00:05:00+00:00"
+    # Front door is in "Front" area — different from the camera's "Driveway" area.
+    snapshot["entities"] = [
+        {
+            "entity_id": "lock.front_door",
+            "domain": "lock",
+            "state": "unlocked",
+            "friendly_name": "Front Door",
+            "area": "Front",
+            "attributes": {},
+            "last_changed": "2025-01-01T00:00:00+00:00",
+            "last_updated": "2025-01-01T00:00:00+00:00",
+        }
+    ]
+    snapshot["camera_activity"] = [
+        {
+            "camera_entity_id": "camera.driveway",
+            "area": "Driveway",
+            "last_activity": "2025-01-01T00:04:00+00:00",
+            "motion_entities": [],
+            "vmd_entities": [],
+            "snapshot_summary": None,
+            "recognized_people": [],
+            "latest_path": None,
+        }
+    ]
+
+    rule = CameraEntryUnsecuredRule(
+        camera_entry_links={"camera.driveway": ["lock.front_door"]}
+    )
+    findings = rule.evaluate(snapshot)
+    assert len(findings) == 1
+    assert "lock.front_door" in findings[0].evidence["unsecured_entities"]
+    # Cross-area entity should have its area in the evidence map.
+    assert findings[0].evidence["unsecured_entity_areas"]["lock.front_door"] == "Front"
+
+
+def test_camera_entry_links_no_links_regression() -> None:
+    """Rule without links fires only on same-area unsecured entries (regression)."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["now"] = "2025-01-01T00:05:00+00:00"
+    snapshot["entities"] = [
+        {
+            "entity_id": "lock.front_door",
+            "domain": "lock",
+            "state": "unlocked",
+            "friendly_name": "Front Door",
+            "area": "Front",
+            "attributes": {},
+            "last_changed": "2025-01-01T00:00:00+00:00",
+            "last_updated": "2025-01-01T00:00:00+00:00",
+        }
+    ]
+    snapshot["camera_activity"] = [
+        {
+            "camera_entity_id": "camera.front",
+            "area": "Front",
+            "last_activity": "2025-01-01T00:04:00+00:00",
+            "motion_entities": [],
+            "vmd_entities": [],
+            "snapshot_summary": None,
+            "recognized_people": [],
+            "latest_path": None,
+        }
+    ]
+
+    findings = CameraEntryUnsecuredRule().evaluate(snapshot)
+    assert len(findings) == 1
+    assert findings[0].evidence["unsecured_entities"] == ["lock.front_door"]
+
+
+def test_camera_entry_links_entity_not_in_snapshot() -> None:
+    """Linked entity absent from snapshot is silently skipped; no finding if nothing else unsecured."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["now"] = "2025-01-01T00:05:00+00:00"
+    snapshot["entities"] = []  # empty — linked entity won't be found
+    snapshot["camera_activity"] = [
+        {
+            "camera_entity_id": "camera.driveway",
+            "area": "Driveway",
+            "last_activity": "2025-01-01T00:04:00+00:00",
+            "motion_entities": [],
+            "vmd_entities": [],
+            "snapshot_summary": None,
+            "recognized_people": [],
+            "latest_path": None,
+        }
+    ]
+
+    rule = CameraEntryUnsecuredRule(
+        camera_entry_links={"camera.driveway": ["lock.missing_entity"]}
+    )
+    findings = rule.evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_camera_entry_links_locked_does_not_fire() -> None:
+    """Linked entry that is locked produces no finding."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["now"] = "2025-01-01T00:05:00+00:00"
+    snapshot["entities"] = [
+        {
+            "entity_id": "lock.front_door",
+            "domain": "lock",
+            "state": "locked",
+            "friendly_name": "Front Door",
+            "area": "Front",
+            "attributes": {},
+            "last_changed": "2025-01-01T00:00:00+00:00",
+            "last_updated": "2025-01-01T00:00:00+00:00",
+        }
+    ]
+    snapshot["camera_activity"] = [
+        {
+            "camera_entity_id": "camera.driveway",
+            "area": "Driveway",
+            "last_activity": "2025-01-01T00:04:00+00:00",
+            "motion_entities": [],
+            "vmd_entities": [],
+            "snapshot_summary": None,
+            "recognized_people": [],
+            "latest_path": None,
+        }
+    ]
+
+    rule = CameraEntryUnsecuredRule(
+        camera_entry_links={"camera.driveway": ["lock.front_door"]}
+    )
+    findings = rule.evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_camera_entry_links_binary_sensor_fires() -> None:
+    """Linked binary_sensor entry in ENTRY_CLASSES that is 'on' triggers a finding."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["now"] = "2025-01-01T00:05:00+00:00"
+    snapshot["entities"] = [
+        {
+            "entity_id": "binary_sensor.side_gate",
+            "domain": "binary_sensor",
+            "state": "on",
+            "friendly_name": "Side Gate",
+            "area": "Garden",
+            "attributes": {"device_class": "door"},
+            "last_changed": "2025-01-01T00:00:00+00:00",
+            "last_updated": "2025-01-01T00:00:00+00:00",
+        }
+    ]
+    snapshot["camera_activity"] = [
+        {
+            "camera_entity_id": "camera.driveway",
+            "area": "Driveway",
+            "last_activity": "2025-01-01T00:04:00+00:00",
+            "motion_entities": [],
+            "vmd_entities": [],
+            "snapshot_summary": None,
+            "recognized_people": [],
+            "latest_path": None,
+        }
+    ]
+
+    rule = CameraEntryUnsecuredRule(
+        camera_entry_links={"camera.driveway": ["binary_sensor.side_gate"]}
+    )
+    findings = rule.evaluate(snapshot)
+    assert len(findings) == 1
+    assert "binary_sensor.side_gate" in findings[0].evidence["unsecured_entities"]
+
+
+def test_camera_entry_links_dedup_same_entity() -> None:
+    """Entity that appears in both same-area and linked sets is listed only once."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["now"] = "2025-01-01T00:05:00+00:00"
+    # Lock is in the same area as the camera AND explicitly linked.
+    snapshot["entities"] = [
+        {
+            "entity_id": "lock.front_door",
+            "domain": "lock",
+            "state": "unlocked",
+            "friendly_name": "Front Door",
+            "area": "Front",
+            "attributes": {},
+            "last_changed": "2025-01-01T00:00:00+00:00",
+            "last_updated": "2025-01-01T00:00:00+00:00",
+        }
+    ]
+    snapshot["camera_activity"] = [
+        {
+            "camera_entity_id": "camera.front",
+            "area": "Front",
+            "last_activity": "2025-01-01T00:04:00+00:00",
+            "motion_entities": [],
+            "vmd_entities": [],
+            "snapshot_summary": None,
+            "recognized_people": [],
+            "latest_path": None,
+        }
+    ]
+
+    rule = CameraEntryUnsecuredRule(
+        camera_entry_links={"camera.front": ["lock.front_door"]}
+    )
+    findings = rule.evaluate(snapshot)
+    assert len(findings) == 1
+    # Entity should appear exactly once despite being in both lookup paths.
+    assert findings[0].evidence["unsecured_entities"].count("lock.front_door") == 1
+
+
+def test_camera_entry_links_binary_sensor_wrong_device_class_does_not_fire() -> None:
+    """Linked binary_sensor with device_class NOT in ENTRY_CLASSES does not fire."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["now"] = "2025-01-01T00:05:00+00:00"
+    snapshot["entities"] = [
+        {
+            "entity_id": "binary_sensor.driveway_motion",
+            "domain": "binary_sensor",
+            "state": "on",
+            "friendly_name": "Driveway Motion",
+            "area": "Driveway",
+            "attributes": {"device_class": "motion"},  # not in ENTRY_CLASSES
+            "last_changed": "2025-01-01T00:00:00+00:00",
+            "last_updated": "2025-01-01T00:00:00+00:00",
+        }
+    ]
+    snapshot["camera_activity"] = [
+        {
+            "camera_entity_id": "camera.driveway",
+            "area": "Driveway",
+            "last_activity": "2025-01-01T00:04:00+00:00",
+            "motion_entities": [],
+            "vmd_entities": [],
+            "snapshot_summary": None,
+            "recognized_people": [],
+            "latest_path": None,
+        }
+    ]
+
+    rule = CameraEntryUnsecuredRule(
+        camera_entry_links={"camera.driveway": ["binary_sensor.driveway_motion"]}
+    )
+    findings = rule.evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_camera_entry_links_empty_list_does_not_fire() -> None:
+    """Camera with an empty links list produces no finding from the linked path."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["now"] = "2025-01-01T00:05:00+00:00"
+    snapshot["entities"] = []
+    snapshot["camera_activity"] = [
+        {
+            "camera_entity_id": "camera.driveway",
+            "area": "Driveway",
+            "last_activity": "2025-01-01T00:04:00+00:00",
+            "motion_entities": [],
+            "vmd_entities": [],
+            "snapshot_summary": None,
+            "recognized_people": [],
+            "latest_path": None,
+        }
+    ]
+
+    rule = CameraEntryUnsecuredRule(camera_entry_links={"camera.driveway": []})
+    findings = rule.evaluate(snapshot)
+    assert len(findings) == 0
+
+
 def test_unknown_person_camera_no_home_triggers() -> None:
     """Unknown person on camera should trigger when no one is home."""
     snapshot = _base_snapshot()
