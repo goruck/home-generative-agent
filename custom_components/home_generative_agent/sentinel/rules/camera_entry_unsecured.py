@@ -18,6 +18,7 @@ LOGGER = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from custom_components.home_generative_agent.snapshot.schema import (
         FullStateSnapshot,
+        SnapshotEntity,
     )
 
 ENTRY_CLASSES = {"door", "window", "opening"}
@@ -67,7 +68,7 @@ class CameraEntryUnsecuredRule:
         }
 
         # Index entities by id for linked-entity unsecured lookup.
-        entity_by_id: dict[str, dict] = {
+        entity_by_id: dict[str, SnapshotEntity] = {
             e["entity_id"]: e for e in snapshot["entities"]
         }
 

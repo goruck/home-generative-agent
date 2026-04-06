@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 import logging
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from homeassistant.const import EVENT_STATE_CHANGED
 from homeassistant.core import callback
@@ -173,8 +173,9 @@ class SentinelEngine:
             OpenEntryWhileAwayRule(),
             AppliancePowerDurationRule(),
             CameraEntryUnsecuredRule(
-                camera_entry_links=dict(
-                    options.get(CONF_SENTINEL_CAMERA_ENTRY_LINKS) or {}
+                camera_entry_links=cast(
+                    "dict[str, list[str]]",
+                    options.get(CONF_SENTINEL_CAMERA_ENTRY_LINKS) or {},
                 ),
             ),
             UnknownPersonCameraNoHomeRule(),

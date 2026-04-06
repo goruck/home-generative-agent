@@ -973,8 +973,9 @@ async def test_sentinel_flow_camera_entry_links_invalid_json(hass: Any) -> None:
             CONF_SENTINEL_CAMERA_ENTRY_LINKS: "not valid json {{",
         }
     )
+    assert result is not None
     assert result.get("type") == "form"
-    assert result.get("errors", {}).get("base") == "invalid_camera_entry_links"
+    assert (result.get("errors") or {}).get("base") == "invalid_camera_entry_links"
 
 
 @pytest.mark.asyncio
@@ -1011,8 +1012,9 @@ async def test_sentinel_flow_camera_entry_links_wrong_structure(hass: Any) -> No
             CONF_SENTINEL_CAMERA_ENTRY_LINKS: '{"camera.driveway": "lock.front_door"}',
         }
     )
+    assert result is not None
     assert result.get("type") == "form"
-    assert result.get("errors", {}).get("base") == "invalid_camera_entry_links"
+    assert (result.get("errors") or {}).get("base") == "invalid_camera_entry_links"
 
 
 # ---------------------------------------------------------------------------
