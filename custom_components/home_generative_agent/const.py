@@ -196,6 +196,13 @@ RECOMMENDED_SENTINEL_PRESENCE_GRACE_MINUTES: int = 10
 # Maps area name -> notify service, e.g. {"bedroom": "notify.mobile_app_alice"}
 CONF_SENTINEL_AREA_NOTIFY_MAP = "sentinel_area_notify_map"
 
+# ---- Sentinel camera-entry rule configuration ----
+# Maps camera entity_id -> list of entry/lock entity_ids in adjacent areas.
+# Use when a camera covers an entry that is not in the same HA area.
+# e.g. {"camera.driveway": ["lock.front_door", "binary_sensor.front_door"]}
+CONF_SENTINEL_CAMERA_ENTRY_LINKS: str = "sentinel_camera_entry_links"
+RECOMMENDED_SENTINEL_CAMERA_ENTRY_LINKS: dict[str, list[str]] = {}
+
 # ---- Sentinel LLM triage (Issue #262) ----
 CONF_SENTINEL_TRIAGE_ENABLED = "sentinel_triage_enabled"
 CONF_SENTINEL_TRIAGE_TIMEOUT_SECONDS = "sentinel_triage_timeout_seconds"

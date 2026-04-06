@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.8.0] - 2026-04-05
+
+### Added
+
+- **Cross-area camera entry links** — Sentinel's camera-entry-unsecured rule can now
+  detect activity on cameras that physically overlook entry points in a different Home
+  Assistant area (e.g. a driveway camera watching the front door). Configure the mapping
+  via `sentinel_camera_entry_links` in the Sentinel subentry: a JSON object of camera
+  entity IDs to lists of entry/lock entity IDs. Same-area unsecured entries are still
+  detected automatically; cross-area links are purely additive. When both same-area and
+  linked entries are unsecured, all are reported in a single finding (deduplicated).
+  The anomaly suppression ID hashes only same-area entities, so changing link config
+  does not invalidate existing suppression state.
+
 ## [3.7.2] - 2026-04-05
 
 ### Changed

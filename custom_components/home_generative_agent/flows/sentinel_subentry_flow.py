@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import voluptuous as vol
@@ -33,6 +34,7 @@ from ..const import (  # noqa: TID252
     CONF_SENTINEL_BASELINE_ENABLED,
     CONF_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS,
     CONF_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES,
+    CONF_SENTINEL_CAMERA_ENTRY_LINKS,
     CONF_SENTINEL_COOLDOWN_MINUTES,
     CONF_SENTINEL_DAILY_DIGEST_ENABLED,
     CONF_SENTINEL_DAILY_DIGEST_TIME,
@@ -52,6 +54,7 @@ from ..const import (  # noqa: TID252
     RECOMMENDED_SENTINEL_BASELINE_ENABLED,
     RECOMMENDED_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS,
     RECOMMENDED_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES,
+    RECOMMENDED_SENTINEL_CAMERA_ENTRY_LINKS,
     RECOMMENDED_SENTINEL_COOLDOWN_MINUTES,
     RECOMMENDED_SENTINEL_DAILY_DIGEST_ENABLED,
     RECOMMENDED_SENTINEL_DAILY_DIGEST_TIME,
@@ -66,6 +69,16 @@ from ..const import (  # noqa: TID252
     SUBENTRY_TYPE_SENTINEL,
 )
 from ..core.utils import hash_pin, list_mobile_notify_services  # noqa: TID252
+
+
+def _camera_entry_links_json(payload: dict[str, Any]) -> str:
+    """Serialize sentinel_camera_entry_links from payload to a JSON string."""
+    value = payload.get(
+        CONF_SENTINEL_CAMERA_ENTRY_LINKS, RECOMMENDED_SENTINEL_CAMERA_ENTRY_LINKS
+    )
+    if not isinstance(value, dict):
+        value = {}
+    return json.dumps(value)
 
 
 def _current_subentry(flow: ConfigSubentryFlow) -> ConfigSubentry | None:
@@ -117,6 +130,7 @@ def _default_payload() -> dict[str, Any]:
         ),
         CONF_SENTINEL_DAILY_DIGEST_ENABLED: RECOMMENDED_SENTINEL_DAILY_DIGEST_ENABLED,
         CONF_SENTINEL_DAILY_DIGEST_TIME: RECOMMENDED_SENTINEL_DAILY_DIGEST_TIME,
+        CONF_SENTINEL_CAMERA_ENTRY_LINKS: RECOMMENDED_SENTINEL_CAMERA_ENTRY_LINKS,
     }
 
 
@@ -262,6 +276,13 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                 ),
             ): TimeSelector(),
             vol.Optional(
+                CONF_SENTINEL_CAMERA_ENTRY_LINKS,
+                description={
+                    "suggested_value": _camera_entry_links_json(payload),
+                },
+                default=_camera_entry_links_json(payload),
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+            vol.Optional(
                 CONF_CRITICAL_ACTION_PIN,
                 description={
                     "suggested_value": "",
@@ -308,7 +329,7 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
         """Entry point for Sentinel setup/reconfigure."""
         return await self.async_step_settings(user_input)
 
-    async def async_step_settings(  # noqa: PLR0912
+    async def async_step_settings(  # noqa: PLR0912, PLR0915
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
         """Create or edit Sentinel configuration."""
@@ -357,10 +378,36 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                     CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT
                 ]
 
+        raw_links = str(data.get(CONF_SENTINEL_CAMERA_ENTRY_LINKS, "") or "").strip()
+        if raw_links and raw_links != "{}":
+            try:
+                parsed_links = json.loads(raw_links)
+                if not isinstance(parsed_links, dict) or not all(
+                    isinstance(k, str)
+                    and isinstance(v, list)
+                    and all(isinstance(i, str) for i in v)
+                    for k, v in parsed_links.items()
+                ):
+                    errors["base"] = "invalid_camera_entry_links"
+                else:
+                    data[CONF_SENTINEL_CAMERA_ENTRY_LINKS] = parsed_links
+            except (json.JSONDecodeError, ValueError):
+                errors["base"] = "invalid_camera_entry_links"
+        else:
+            data[CONF_SENTINEL_CAMERA_ENTRY_LINKS] = {}
+
         if errors:
+            # Strip any raw (non-dict) value for camera_entry_links so the schema
+            # helper receives a dict and json.dumps() produces valid JSON for the
+            # form pre-fill rather than a Python repr string.
+            error_payload = {**payload, **data}
+            if not isinstance(
+                error_payload.get(CONF_SENTINEL_CAMERA_ENTRY_LINKS), dict
+            ):
+                error_payload.pop(CONF_SENTINEL_CAMERA_ENTRY_LINKS, None)
             return self.async_show_form(
                 step_id="settings",
-                data_schema=self._schema({**payload, **data}),
+                data_schema=self._schema(error_payload),
                 errors=errors,
             )
 
