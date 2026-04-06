@@ -171,7 +171,7 @@
         }
       },
       "error": {
-        "invalid_camera_entry_links": "Must be a JSON object mapping camera entity IDs to lists of entry entity IDs, e.g. {\"camera.driveway\": [\"lock.front_door\"]}."
+        "invalid_camera_entry_links": "Must be a JSON object mapping camera entity IDs to lists of entry entity IDs, e.g. {{\"camera.driveway\": [\"lock.front_door\"]}}."
       }
     },
     "feature": {
