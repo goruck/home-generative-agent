@@ -14,12 +14,16 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT,
     CONF_SENTINEL_BASELINE_MAX_SAMPLES,
     CONF_SENTINEL_BASELINE_MIN_SAMPLES,
+    CONF_SENTINEL_BASELINE_WEEKLY_PATTERNS,
     RECOMMENDED_SENTINEL_BASELINE_MIN_SAMPLES,
 )
 from custom_components.home_generative_agent.sentinel.baseline import (
+    _DOW_METRIC_PARTS,
     BASELINE_FRESH,
     BASELINE_STALE,
     BASELINE_UNAVAILABLE,
+    METRIC_DOW_AVG_PREFIX,
+    METRIC_DOW_STD_PREFIX,
     METRIC_HOURLY_PREFIX,
     METRIC_ROLLING_AVG,
     SentinelBaselineUpdater,
@@ -1397,3 +1401,577 @@ def test_baseline_deviation_non_power_entity_no_completion() -> None:
 
     assert len(findings) == 1
     assert "is_completion" not in findings[0].evidence
+
+
+# ---------------------------------------------------------------------------
+# DOW (day-of-week) baseline tests — Sprint 3 PR2
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Welford's algorithm — _update_dow_welford
+# ---------------------------------------------------------------------------
+
+
+def test_dow_welford_single_observation() -> None:
+    """After one observation, mean equals the value and stddev is 0."""
+    mock_hass = MagicMock()
+    mock_pool = MagicMock()
+    updater = SentinelBaselineUpdater(mock_hass, mock_pool, {})
+
+    mean, stddev = updater._update_dow_welford(
+        "sensor.temp", dow=0, hour=14, new_value=20.0
+    )
+
+    assert mean == pytest.approx(20.0)
+    assert stddev == pytest.approx(0.0)
+    assert updater._dow_state["sensor.temp:0:14"] == pytest.approx((20.0, 0.0, 1))
+
+
+def test_dow_welford_multiple_observations_converge() -> None:
+    """After N observations, running mean and stddev converge correctly."""
+    mock_hass = MagicMock()
+    mock_pool = MagicMock()
+    updater = SentinelBaselineUpdater(mock_hass, mock_pool, {})
+
+    values = [10.0, 20.0, 30.0, 40.0]
+    final_mean = 0.0
+    final_stddev = 0.0
+    for v in values:
+        final_mean, final_stddev = updater._update_dow_welford(
+            "sensor.temp", dow=5, hour=8, new_value=v
+        )
+
+    # Population mean = 25; sample stddev = sqrt(((10-25)^2+(20-25)^2+(30-25)^2+(40-25)^2)/3)
+    # = sqrt((225+25+25+225)/3) = sqrt(500/3) ≈ 12.91
+    assert final_mean == pytest.approx(25.0)
+    assert final_stddev == pytest.approx((500.0 / 3) ** 0.5, rel=1e-4)
+    _, _, count = updater._dow_state["sensor.temp:5:8"]
+    assert count == 4
+
+
+def test_dow_welford_separate_slots_are_independent() -> None:
+    """DOW slots for different entities/hours don't interfere."""
+    mock_hass = MagicMock()
+    mock_pool = MagicMock()
+    updater = SentinelBaselineUpdater(mock_hass, mock_pool, {})
+
+    updater._update_dow_welford("sensor.a", dow=0, hour=0, new_value=100.0)
+    updater._update_dow_welford("sensor.b", dow=0, hour=0, new_value=5.0)
+
+    mean_a, _, count_a = updater._dow_state["sensor.a:0:0"]
+    mean_b, _, count_b = updater._dow_state["sensor.b:0:0"]
+
+    assert mean_a == pytest.approx(100.0)
+    assert mean_b == pytest.approx(5.0)
+    assert count_a == 1
+    assert count_b == 1
+
+
+# ---------------------------------------------------------------------------
+# evaluate_time_of_day_anomaly — DOW blending
+# ---------------------------------------------------------------------------
+
+
+def _dow_rule(entity_id: str = "sensor.temp") -> dict[str, Any]:
+    return {
+        "rule_id": "time_of_day_anomaly",
+        "template_id": "time_of_day_anomaly",
+        "params": {"entity_id": entity_id},
+        "severity": "low",
+        "confidence": 0.7,
+        "is_sensitive": False,
+        "suggested_actions": [],
+    }
+
+
+def _dow_snapshot(entity_id: str, state: str, hour: int, dow: int) -> Any:
+    """Snapshot with a single entity and a specific local datetime."""
+    # Create an ISO string matching the given DOW and hour.
+    # We use a fixed base date (2026-01-05 = Monday) and offset by dow days.
+    base_monday = datetime(2026, 1, 5, 0, 0, 0, tzinfo=UTC)
+    dt = base_monday.replace(hour=hour) + timedelta(days=dow)
+    now_str = dt.isoformat()
+    return cast(
+        "FullStateSnapshot",
+        {
+            "schema_version": 1,
+            "generated_at": now_str,
+            "entities": [
+                {
+                    "entity_id": entity_id,
+                    "state": state,
+                    "domain": entity_id.split(".", maxsplit=1)[0],
+                    "area": "Living Room",
+                    "attributes": {},
+                    "last_changed": now_str,
+                    "last_updated": now_str,
+                }
+            ],
+            "camera_activity": [],
+            "derived": {
+                "now": now_str,
+                "timezone": "UTC",
+                "is_night": False,
+                "anyone_home": True,
+                "people_home": [],
+                "people_away": [],
+                "last_motion_by_area": {},
+            },
+        },
+    )
+
+
+def test_dow_blend_at_zero_samples_uses_global_mean() -> None:
+    """With count=0 (no DOW data), falls back fully to global hourly mean."""
+    # No DOW data — dow_data is empty — should fall back to global hourly detection.
+    snapshot = _dow_snapshot("sensor.temp", "200", hour=14, dow=0)
+    # Global hourly mean of 20 at hour 14; current=200 → 900% deviation
+    baselines = {"sensor.temp": {f"{METRIC_HOURLY_PREFIX}14": 20.0}}
+    rule = _dow_rule()
+
+    # With no DOW data at all, evaluates as pure global
+    findings = evaluate_time_of_day_anomaly(
+        snapshot, rule, baselines, dow_data={}, dow_min_samples=4
+    )
+
+    assert len(findings) == 1
+
+
+def test_dow_blend_at_full_samples_uses_dow_mean() -> None:
+    """With count >= dow_min_samples, expected is entirely the DOW mean."""
+    dow_min_samples = 4
+    entity_id = "sensor.temp"
+    dow, hour = 0, 14  # Monday 14:00
+
+    snapshot = _dow_snapshot(entity_id, "25", hour=hour, dow=dow)
+    # DOW mean=20, global mean=50 (very different to confirm DOW is used)
+    dow_mean_key = f"{METRIC_DOW_AVG_PREFIX}{dow}_{hour}"
+    dow_std_key = f"{METRIC_DOW_STD_PREFIX}{dow}_{hour}"
+    global_key = f"{METRIC_HOURLY_PREFIX}{hour}"
+    baselines = {entity_id: {global_key: 50.0}}
+    dow_data = {
+        entity_id: {
+            dow_mean_key: (20.0, dow_min_samples),  # (value, count) — fully warm
+            dow_std_key: (1.0, dow_min_samples),  # tight stddev
+        }
+    }
+
+    findings = evaluate_time_of_day_anomaly(
+        snapshot,
+        rule=_dow_rule(entity_id),
+        baselines=baselines,
+        dow_data=dow_data,
+        dow_min_samples=dow_min_samples,
+    )
+
+    # expected = 20.0 (DOW), deviation = |25-20| = 5, threshold = max(1*2, 20*0.3)=6 → no fire
+    assert findings == []
+
+
+def test_dow_blend_fires_for_genuine_outlier_vs_dow_mean() -> None:
+    """A genuine outlier relative to the DOW mean fires even if near the global mean."""
+    dow_min_samples = 4
+    entity_id = "sensor.temp"
+    dow, hour = 5, 20  # Saturday 20:00
+
+    snapshot = _dow_snapshot(entity_id, "100", hour=hour, dow=dow)
+    dow_mean_key = f"{METRIC_DOW_AVG_PREFIX}{dow}_{hour}"
+    dow_std_key = f"{METRIC_DOW_STD_PREFIX}{dow}_{hour}"
+    global_key = f"{METRIC_HOURLY_PREFIX}{hour}"
+    # DOW mean=20, stddev=2; global=90 (close to current); current=100
+    baselines = {entity_id: {global_key: 90.0}}
+    dow_data = {
+        entity_id: {
+            dow_mean_key: (20.0, dow_min_samples),
+            dow_std_key: (2.0, dow_min_samples),
+        }
+    }
+
+    findings = evaluate_time_of_day_anomaly(
+        snapshot,
+        rule=_dow_rule(entity_id),
+        baselines=baselines,
+        dow_data=dow_data,
+        dow_min_samples=dow_min_samples,
+    )
+
+    # expected=20 (fully DOW), threshold=max(2*2,20*0.3)=6, deviation=|100-20|=80 → fires
+    assert len(findings) == 1
+    ev = findings[0].evidence
+    assert ev["dow_mean"] == pytest.approx(20.0)
+    assert ev["blend_weight"] == pytest.approx(1.0)
+    assert ev["deviation_direction"] == "above"
+
+
+def test_dow_blend_no_fire_for_in_range_value() -> None:
+    """A value within DOW mean ± 2*stddev does NOT fire."""
+    dow_min_samples = 4
+    entity_id = "sensor.temp"
+    dow, hour = 6, 9  # Sunday 09:00
+
+    snapshot = _dow_snapshot(entity_id, "22", hour=hour, dow=dow)
+    dow_mean_key = f"{METRIC_DOW_AVG_PREFIX}{dow}_{hour}"
+    dow_std_key = f"{METRIC_DOW_STD_PREFIX}{dow}_{hour}"
+    global_key = f"{METRIC_HOURLY_PREFIX}{hour}"
+    baselines = {entity_id: {global_key: 20.0}}
+    dow_data = {
+        entity_id: {
+            dow_mean_key: (20.0, dow_min_samples),
+            dow_std_key: (3.0, dow_min_samples),  # threshold = max(6, 20*0.3) = 6
+        }
+    }
+
+    findings = evaluate_time_of_day_anomaly(
+        snapshot,
+        rule=_dow_rule(entity_id),
+        baselines=baselines,
+        dow_data=dow_data,
+        dow_min_samples=dow_min_samples,
+    )
+
+    # deviation=2, threshold=6 → no fire
+    assert findings == []
+
+
+def test_dow_partial_blend_midpoint() -> None:
+    """At count = dow_min_samples/2, blend weight is 0.5."""
+    dow_min_samples = 4
+    entity_id = "sensor.temp"
+    dow, hour = 1, 7  # Tuesday 07:00
+    half_count = dow_min_samples // 2  # 2
+
+    snapshot = _dow_snapshot(entity_id, "200", hour=hour, dow=dow)
+    dow_mean_key = f"{METRIC_DOW_AVG_PREFIX}{dow}_{hour}"
+    global_key = f"{METRIC_HOURLY_PREFIX}{hour}"
+    # DOW mean=10, global mean=10; both at 10; current=200 → fires regardless of blend
+    baselines = {entity_id: {global_key: 10.0}}
+    dow_data = {
+        entity_id: {
+            dow_mean_key: (10.0, half_count),  # w=0.5
+        }
+    }
+
+    findings = evaluate_time_of_day_anomaly(
+        snapshot,
+        rule=_dow_rule(entity_id),
+        baselines=baselines,
+        dow_data=dow_data,
+        dow_min_samples=dow_min_samples,
+    )
+
+    # expected=0.5*10 + 0.5*10 = 10; deviation=190 → fires
+    assert len(findings) == 1
+    assert findings[0].evidence["blend_weight"] == pytest.approx(0.5)
+
+
+def test_dow_fallback_to_global_when_no_dow_data() -> None:
+    """When dow_data=None, falls back to global hourly comparison."""
+    entity_id = "sensor.temp"
+    dow, hour = 0, 10  # Monday 10:00
+
+    snapshot = _dow_snapshot(entity_id, "100", hour=hour, dow=dow)
+    global_key = f"{METRIC_HOURLY_PREFIX}{hour}"
+    baselines = {entity_id: {global_key: 20.0}}
+
+    findings = evaluate_time_of_day_anomaly(
+        snapshot,
+        rule=_dow_rule(entity_id),
+        baselines=baselines,
+        dow_data=None,
+    )
+
+    # Global: deviation = 80/20 = 400% > 30% → fires
+    assert len(findings) == 1
+
+
+# ---------------------------------------------------------------------------
+# DOW migration index — idempotency via CREATE INDEX IF NOT EXISTS
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_async_initialize_dow_index_idempotent() -> None:
+    """async_initialize() must succeed when called twice (index DDL is IF NOT EXISTS)."""
+    executed: list[str] = []
+    mock_cursor = MagicMock()
+
+    async def _exec(sql: str, *_args: Any) -> None:
+        executed.append(sql.strip().split("\n")[0])
+
+    mock_cursor.execute = _exec
+    mock_cursor.fetchall = AsyncMock(return_value=[])
+    mock_cursor.fetchone = AsyncMock(return_value=None)
+
+    mock_conn = MagicMock()
+    mock_conn.commit = AsyncMock()
+    mock_conn.cursor = MagicMock(
+        return_value=MagicMock(
+            __aenter__=AsyncMock(return_value=mock_cursor),
+            __aexit__=AsyncMock(return_value=False),
+        )
+    )
+    mock_pool = MagicMock()
+    mock_pool.connection = MagicMock(
+        return_value=MagicMock(
+            __aenter__=AsyncMock(return_value=mock_conn),
+            __aexit__=AsyncMock(return_value=False),
+        )
+    )
+
+    mock_hass = MagicMock()
+    updater = SentinelBaselineUpdater(mock_hass, mock_pool, {})
+
+    # First init
+    await updater.async_initialize()
+    # Second init — must not raise (idempotent DDL)
+    await updater.async_initialize()
+
+    # The index DDL should have been executed twice (once per init call).
+    index_calls = [s for s in executed if "idx_sentinel_baselines" in s]
+    assert len(index_calls) == 2
+
+
+# ---------------------------------------------------------------------------
+# DOW upserts written when weekly_patterns=True
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_update_baselines_writes_dow_rows_when_enabled() -> None:
+    """When weekly_patterns=True, _update_baselines writes DOW mean+stddev rows."""
+    written_metrics: list[str] = []
+
+    mock_cursor = MagicMock()
+
+    async def _exec(_sql: str, params: Any = None) -> None:
+        if params and len(params) >= 2:
+            written_metrics.append(str(params[1]))
+
+    mock_cursor.execute = _exec
+    mock_cursor.fetchone = AsyncMock(return_value={"sample_count": 5})
+    mock_cursor.fetchall = AsyncMock(return_value=[])
+
+    mock_conn = MagicMock()
+    mock_conn.commit = AsyncMock()
+    mock_conn.cursor = MagicMock(
+        return_value=MagicMock(
+            __aenter__=AsyncMock(return_value=mock_cursor),
+            __aexit__=AsyncMock(return_value=False),
+        )
+    )
+    mock_pool = MagicMock()
+    mock_pool.connection = MagicMock(
+        return_value=MagicMock(
+            __aenter__=AsyncMock(return_value=mock_conn),
+            __aexit__=AsyncMock(return_value=False),
+        )
+    )
+    mock_hass = MagicMock()
+    updater = SentinelBaselineUpdater(
+        mock_hass,
+        mock_pool,
+        {CONF_SENTINEL_BASELINE_WEEKLY_PATTERNS: True},
+    )
+
+    snapshot = cast(
+        "FullStateSnapshot",
+        {
+            "schema_version": 1,
+            "generated_at": "2026-01-05T14:00:00+00:00",
+            "entities": [
+                {
+                    "entity_id": "sensor.temp",
+                    "state": "22.0",
+                    "domain": "sensor",
+                    "area": "Living Room",
+                    "attributes": {},
+                    "last_changed": "2026-01-05T14:00:00+00:00",
+                    "last_updated": "2026-01-05T14:00:00+00:00",
+                }
+            ],
+            "camera_activity": [],
+            "derived": {
+                "now": "2026-01-05T14:00:00+00:00",
+                "timezone": "UTC",
+                "is_night": False,
+                "anyone_home": True,
+                "people_home": [],
+                "people_away": [],
+                "last_motion_by_area": {},
+            },
+        },
+    )
+
+    await updater._update_baselines(snapshot)
+
+    # Should write rolling_avg, hourly_avg_<H>, hourly_avg_<DOW>_<H>, hourly_stddev_<DOW>_<H>
+    dow_mean_written = any(
+        METRIC_DOW_AVG_PREFIX in m and m.count("_") >= _DOW_METRIC_PARTS + 1
+        for m in written_metrics
+    )
+    dow_std_written = any(METRIC_DOW_STD_PREFIX in m for m in written_metrics)
+
+    assert dow_mean_written, f"No DOW mean metric written; got: {written_metrics}"
+    assert dow_std_written, f"No DOW stddev metric written; got: {written_metrics}"
+
+
+@pytest.mark.asyncio
+async def test_update_baselines_skips_dow_rows_when_disabled() -> None:
+    """When weekly_patterns=False (default), no DOW rows are written."""
+    written_metrics: list[str] = []
+
+    mock_cursor = MagicMock()
+
+    async def _exec(_sql: str, params: Any = None) -> None:
+        if params and len(params) >= 2:
+            written_metrics.append(str(params[1]))
+
+    mock_cursor.execute = _exec
+    mock_cursor.fetchone = AsyncMock(return_value={"sample_count": 5})
+    mock_cursor.fetchall = AsyncMock(return_value=[])
+
+    mock_conn = MagicMock()
+    mock_conn.commit = AsyncMock()
+    mock_conn.cursor = MagicMock(
+        return_value=MagicMock(
+            __aenter__=AsyncMock(return_value=mock_cursor),
+            __aexit__=AsyncMock(return_value=False),
+        )
+    )
+    mock_pool = MagicMock()
+    mock_pool.connection = MagicMock(
+        return_value=MagicMock(
+            __aenter__=AsyncMock(return_value=mock_conn),
+            __aexit__=AsyncMock(return_value=False),
+        )
+    )
+    mock_hass = MagicMock()
+    # weekly_patterns NOT set (defaults to False)
+    updater = SentinelBaselineUpdater(mock_hass, mock_pool, {})
+
+    snapshot = cast(
+        "FullStateSnapshot",
+        {
+            "schema_version": 1,
+            "generated_at": "2026-01-05T14:00:00+00:00",
+            "entities": [
+                {
+                    "entity_id": "sensor.temp",
+                    "state": "22.0",
+                    "domain": "sensor",
+                    "area": "Living Room",
+                    "attributes": {},
+                    "last_changed": "2026-01-05T14:00:00+00:00",
+                    "last_updated": "2026-01-05T14:00:00+00:00",
+                }
+            ],
+            "camera_activity": [],
+            "derived": {
+                "now": "2026-01-05T14:00:00+00:00",
+                "timezone": "UTC",
+                "is_night": False,
+                "anyone_home": True,
+                "people_home": [],
+                "people_away": [],
+                "last_motion_by_area": {},
+            },
+        },
+    )
+
+    await updater._update_baselines(snapshot)
+
+    dow_std_written = any(METRIC_DOW_STD_PREFIX in m for m in written_metrics)
+    assert not dow_std_written, (
+        f"DOW stddev should not be written; got: {written_metrics}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# DOW warm-restart — _dow_state reconstructed from DB rows in async_initialize
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_async_initialize_reconstructs_dow_state_from_db() -> None:
+    """
+    async_initialize() must reconstruct _dow_state from existing DB rows.
+
+    Simulates a restart: DB contains a mean row and a stddev row for entity
+    sensor.power at DOW=0 (Monday), hour=9. Verifies that _dow_state is
+    populated with the correct (mean, m2, count) tuple where
+    m2 = stddev**2 * (count - 1).
+    """
+    # Pre-existing DB rows: mean=100.0 (count=5) and stddev=10.0 for Mon 09:00.
+    dow, hour = 0, 9
+    mean_metric = f"{METRIC_DOW_AVG_PREFIX}{dow}_{hour}"
+    std_metric = f"{METRIC_DOW_STD_PREFIX}{dow}_{hour}"
+    db_rows = [
+        {
+            "entity_id": "sensor.power",
+            "metric": mean_metric,
+            "value": 100.0,
+            "sample_count": 5,
+        },
+        {
+            "entity_id": "sensor.power",
+            "metric": std_metric,
+            "value": 10.0,
+            "sample_count": 5,
+        },
+    ]
+
+    call_count = 0
+
+    mock_cursor = MagicMock()
+
+    async def _exec(_sql: str, *_args: Any) -> None:
+        pass
+
+    async def _fetchall() -> list[Any]:
+        nonlocal call_count
+        call_count += 1
+        # First fetchall: established-set query (returns empty).
+        # Second fetchall: DOW warm-restart query (returns pre-populated rows).
+        if call_count == 1:
+            return []
+        return db_rows
+
+    mock_cursor.execute = _exec
+    mock_cursor.fetchall = _fetchall
+    mock_cursor.fetchone = AsyncMock(return_value=None)
+
+    mock_conn = MagicMock()
+    mock_conn.commit = AsyncMock()
+    mock_conn.cursor = MagicMock(
+        return_value=MagicMock(
+            __aenter__=AsyncMock(return_value=mock_cursor),
+            __aexit__=AsyncMock(return_value=False),
+        )
+    )
+    mock_pool = MagicMock()
+    mock_pool.connection = MagicMock(
+        return_value=MagicMock(
+            __aenter__=AsyncMock(return_value=mock_conn),
+            __aexit__=AsyncMock(return_value=False),
+        )
+    )
+
+    mock_hass = MagicMock()
+    updater = SentinelBaselineUpdater(mock_hass, mock_pool, {})
+
+    assert updater._dow_state == {}, "State must be empty before init"
+
+    await updater.async_initialize()
+
+    key = f"sensor.power:{dow}:{hour}"
+    assert key in updater._dow_state, f"Expected key {key!r} in _dow_state"
+
+    reconstructed_mean, reconstructed_m2, reconstructed_count = updater._dow_state[key]
+
+    # mean should equal the DB value exactly.
+    assert reconstructed_mean == pytest.approx(100.0)
+    # count should equal the DB sample_count.
+    assert reconstructed_count == 5
+    # m2 = stddev**2 * (count - 1) = 10**2 * 4 = 400.
+    expected_m2 = 10.0**2 * (5 - 1)
+    assert reconstructed_m2 == pytest.approx(expected_m2)

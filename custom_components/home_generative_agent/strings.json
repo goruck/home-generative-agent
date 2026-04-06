@@ -163,6 +163,8 @@
             "sentinel_baseline_enabled": "Enable baseline collection (requires anomaly alerting)",
             "sentinel_baseline_update_interval_minutes": "Baseline update interval (minutes)",
             "sentinel_baseline_freshness_threshold_seconds": "Baseline freshness threshold (seconds)",
+            "sentinel_baseline_weekly_patterns": "Enable day-of-week baselines (reduces weekend false positives)",
+            "sentinel_baseline_dow_min_samples": "DOW baseline minimum samples (weeks of data per slot)",
             "explain_enabled": "Enable LLM explanations for sentinel findings",
             "sentinel_require_pin_for_level_increase": "Require PIN for autonomy level increases",
             "sentinel_daily_digest_enabled": "Enable daily digest notification",

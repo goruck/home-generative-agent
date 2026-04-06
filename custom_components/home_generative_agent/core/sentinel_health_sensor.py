@@ -287,6 +287,13 @@ class SentinelHealthSensor(SensorEntity):
         # Baseline health statistics.
         await self._refresh_baseline_attrs()
 
+        # Learned suppression feedback count (from suppression state).
+        self._attrs["learned_suppressions_active"] = (
+            self._sentinel.learned_suppressions_count
+            if self._sentinel is not None
+            else None
+        )
+
         self._attr_native_value = "ok"
         self.async_write_ha_state()
 

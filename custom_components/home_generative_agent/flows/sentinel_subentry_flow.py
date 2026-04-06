@@ -31,9 +31,11 @@ from ..const import (  # noqa: TID252
     CONF_CRITICAL_ACTION_PIN,
     CONF_EXPLAIN_ENABLED,
     CONF_NOTIFY_SERVICE,
+    CONF_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
     CONF_SENTINEL_BASELINE_ENABLED,
     CONF_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS,
     CONF_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES,
+    CONF_SENTINEL_BASELINE_WEEKLY_PATTERNS,
     CONF_SENTINEL_CAMERA_ENTRY_LINKS,
     CONF_SENTINEL_COOLDOWN_MINUTES,
     CONF_SENTINEL_DAILY_DIGEST_ENABLED,
@@ -51,9 +53,11 @@ from ..const import (  # noqa: TID252
     CRITICAL_PIN_MAX_LEN,
     CRITICAL_PIN_MIN_LEN,
     RECOMMENDED_EXPLAIN_ENABLED,
+    RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
     RECOMMENDED_SENTINEL_BASELINE_ENABLED,
     RECOMMENDED_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS,
     RECOMMENDED_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES,
+    RECOMMENDED_SENTINEL_BASELINE_WEEKLY_PATTERNS,
     RECOMMENDED_SENTINEL_CAMERA_ENTRY_LINKS,
     RECOMMENDED_SENTINEL_COOLDOWN_MINUTES,
     RECOMMENDED_SENTINEL_DAILY_DIGEST_ENABLED,
@@ -242,6 +246,24 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                     )
                 ),
             ): NumberSelector(NumberSelectorConfig(min=60, max=86400, step=60)),
+            vol.Required(
+                CONF_SENTINEL_BASELINE_WEEKLY_PATTERNS,
+                default=bool(
+                    payload.get(
+                        CONF_SENTINEL_BASELINE_WEEKLY_PATTERNS,
+                        RECOMMENDED_SENTINEL_BASELINE_WEEKLY_PATTERNS,
+                    )
+                ),
+            ): BooleanSelector(),
+            vol.Required(
+                CONF_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
+                default=int(
+                    payload.get(
+                        CONF_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
+                        RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
+                    )
+                ),
+            ): NumberSelector(NumberSelectorConfig(min=1, max=52, step=1)),
             vol.Required(
                 CONF_EXPLAIN_ENABLED,
                 default=bool(

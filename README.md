@@ -256,7 +256,7 @@ When `sentinel_baseline_enabled` is `true` **and** `sentinel_enabled` is `true`,
 On each detection cycle the engine calls `async_fetch_baselines()` to read current baseline values from PostgreSQL and passes them to the dynamic-rule evaluators. Two temporal templates are always registered:
 
 - `baseline_deviation` — fires when a numeric entity state deviates from its rolling average by more than `threshold_pct` percent (default `50.0`).
-- `time_of_day_anomaly` — fires when a numeric entity state differs from the expected hour-of-day rolling average by more than `threshold_pct` percent (default `50.0`).
+- `time_of_day_anomaly` — fires when a numeric entity state differs from the expected hour-of-day rolling average by more than `threshold_pct` percent (default `50.0`). When day-of-week baselines are enabled (`sentinel_baseline_weekly_patterns`), this template uses a weighted blend of the DOW-hour mean and the global hourly mean, transitioning smoothly from global to DOW baselines as data accumulates per slot.
 
 `threshold_pct`, `entity_id`, and `metric` are per-rule `params` stored in the rule registry — they are set when a rule is created via discovery or the `hga_sentinel_add_rule` service, not in the subentry. Both templates produce no findings while the table is empty (baselines accumulate over time).
 
@@ -271,9 +271,11 @@ Configuration options (in the Sentinel subentry):
 - `sentinel_baseline_enabled` — enable baseline collection (default: `false`); has no effect unless `sentinel_enabled` is also `true`
 - `sentinel_baseline_update_interval_minutes` — how often baselines are recalculated (default: `15`)
 - `sentinel_baseline_freshness_threshold_seconds` — age after which a baseline is considered stale (default: `3600`)
-- `sentinel_baseline_min_samples` — minimum number of samples before a baseline is considered usable (default: `10`)
-- `sentinel_baseline_max_samples` — rolling window size; older samples are discarded when this is reached (default: `288`)
-- `sentinel_baseline_drift_threshold_pct` — default percent deviation that triggers a `baseline_deviation` or `time_of_day_anomaly` finding (default: `50.0`)
+- `sentinel_baseline_min_samples` — minimum number of samples before a global baseline is usable (default: `20`)
+- `sentinel_baseline_max_samples` — rolling window size; older samples are discarded when this is reached (default: `500`)
+- `sentinel_baseline_drift_threshold_pct` — default percent deviation that triggers a `baseline_deviation` or `time_of_day_anomaly` finding (default: `30.0`)
+- `sentinel_baseline_weekly_patterns` — enable per-(day-of-week, hour) baselines for `time_of_day_anomaly` (default: `false`); requires `sentinel_baseline_enabled`
+- `sentinel_baseline_dow_min_samples` — observations per DOW-hour slot before blend weight reaches 1.0 (default: `4` weeks); separate from the global `sentinel_baseline_min_samples` because DOW slots update at most once per week
 
 ### Sentinel Action Flows
 
@@ -595,6 +597,7 @@ Attributes:
 | `baseline_stale_count` | Number of entities whose baseline exists but is older than the freshness threshold |
 | `baseline_rules_waiting` | Number of active baseline rules whose entity has not yet reached `sentinel_baseline_min_samples` |
 | `baseline_last_update` | UTC ISO 8601 timestamp of the most recent baseline write (null if no baselines yet) |
+| `learned_suppressions_active` | Number of distinct `{rule_type}:{entity_id}` pairs with learned cooldown multipliers (from dismiss/snooze feedback) |
 
 Example Lovelace Markdown card:
 

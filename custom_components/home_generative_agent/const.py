@@ -226,6 +226,13 @@ RECOMMENDED_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS: int = 3600
 RECOMMENDED_SENTINEL_BASELINE_MIN_SAMPLES: int = 20
 RECOMMENDED_SENTINEL_BASELINE_MAX_SAMPLES: int = 500
 RECOMMENDED_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT: float = 30.0
+# DOW (day-of-week) baseline extensions — Sprint 3 PR2
+CONF_SENTINEL_BASELINE_WEEKLY_PATTERNS = "sentinel_baseline_weekly_patterns"
+CONF_SENTINEL_BASELINE_DOW_MIN_SAMPLES = "sentinel_baseline_dow_min_samples"
+RECOMMENDED_SENTINEL_BASELINE_WEEKLY_PATTERNS: bool = False
+# DOW slots update once/week; 4 weeks separates weekend/weekday patterns.
+# Lower than RECOMMENDED_SENTINEL_BASELINE_MIN_SAMPLES (20) for global EMA.
+RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES: int = 4
 
 # ---- Sentinel daily digest notification ----
 CONF_SENTINEL_DAILY_DIGEST_ENABLED = "sentinel_daily_digest_enabled"
