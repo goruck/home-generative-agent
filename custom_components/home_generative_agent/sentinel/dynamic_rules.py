@@ -8,6 +8,11 @@ from typing import TYPE_CHECKING, Any, cast
 
 from homeassistant.util import dt as dt_util
 
+from custom_components.home_generative_agent.const import (
+    RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
+    RECOMMENDED_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT,
+)
+
 from .baseline import evaluate_baseline_deviation, evaluate_time_of_day_anomaly
 from .models import AnomalyFinding, Severity, build_anomaly_id
 from .proposal_templates import SUPPORTED_TEMPLATES
@@ -31,8 +36,8 @@ def evaluate_dynamic_rules(  # noqa: PLR0913
     rules: Iterable[dict[str, Any]],
     baselines: dict[str, dict[str, float]] | None = None,
     dow_data: dict[str, dict[str, tuple[float, int]]] | None = None,
-    dow_min_samples: int = 4,
-    global_drift_pct: float = 30.0,
+    dow_min_samples: int = RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
+    global_drift_pct: float = RECOMMENDED_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT,
 ) -> list[AnomalyFinding]:
     """
     Evaluate generated rules deterministically.

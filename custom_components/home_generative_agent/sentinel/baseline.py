@@ -261,16 +261,8 @@ ON CONFLICT (entity_id, metric, period) DO UPDATE SET
 
 # Fetch all DOW rows (both mean and stddev) — no min-samples filter because
 # the blend weight formula handles sparse slots gracefully (w → 0 as count → 0).
+# Also used for warm-restart reconstruction of Welford state on HA restart.
 _FETCH_DOW_SQL = """
-SELECT entity_id, metric, value, sample_count
-FROM sentinel_baselines
-WHERE period = 'dow'
-"""
-
-# Warm-restart query: fetch existing DOW mean + stddev rows on startup so
-# Welford's _dow_state (mean, m2, count) can be reconstructed without full
-# retraining.
-_FETCH_DOW_WARMUP_SQL = """
 SELECT entity_id, metric, value, sample_count
 FROM sentinel_baselines
 WHERE period = 'dow'
@@ -350,7 +342,7 @@ class SentinelBaselineUpdater:
                         self._established.add(str(eid))
                 # Warm-restart Welford _dow_state from existing DB rows so that
                 # historical variance is preserved across HA restarts.
-                await cur.execute(_FETCH_DOW_WARMUP_SQL)
+                await cur.execute(_FETCH_DOW_SQL)
                 dow_rows = await cur.fetchall()
                 mean_rows: dict[str, dict[str, tuple[float, int]]] = {}
                 std_rows: dict[str, dict[str, float]] = {}
@@ -369,9 +361,7 @@ class SentinelBaselineUpdater:
                         )
                     if not eid or not metric or val is None:
                         continue
-                    if metric.startswith(
-                        METRIC_DOW_STD_PREFIX
-                    ) and not metric.startswith(METRIC_DOW_AVG_PREFIX):
+                    if metric.startswith(METRIC_DOW_STD_PREFIX):
                         std_rows.setdefault(eid, {})[metric] = float(val)
                     elif metric.startswith(METRIC_DOW_AVG_PREFIX):
                         # hourly_avg_{dow}_{hour} rows have two numeric suffixes
@@ -1260,16 +1250,22 @@ def evaluate_time_of_day_anomaly(  # noqa: PLR0913
         now_dt = datetime.fromisoformat(now_str)
         if now_dt.tzinfo is None:
             now_dt = now_dt.replace(tzinfo=UTC)
+        # snapshot["derived"]["now"] is always UTC (see snapshot/derived.py).
+        # Global hourly baselines are also written in UTC, so hour_str stays UTC.
         hour_str = str(now_dt.hour)
-        dow = now_dt.weekday()  # 0=Monday, 6=Sunday
+        # DOW baselines are written in local time (dt_util.now() in
+        # _update_baselines), so DOW key lookups must also use local time.
+        local_dt = dt_util.as_local(now_dt)
+        dow = local_dt.weekday()  # 0=Monday, 6=Sunday, local time
+        local_hour = local_dt.hour
     except (TypeError, ValueError):
         return []
 
     # --- DOW-blended path ---
     if dow_data is not None:
         entity_dow = dow_data.get(entity_id, {})
-        dow_mean_key = f"{METRIC_DOW_AVG_PREFIX}{dow}_{now_dt.hour}"
-        dow_std_key = f"{METRIC_DOW_STD_PREFIX}{dow}_{now_dt.hour}"
+        dow_mean_key = f"{METRIC_DOW_AVG_PREFIX}{dow}_{local_hour}"
+        dow_std_key = f"{METRIC_DOW_STD_PREFIX}{dow}_{local_hour}"
 
         dow_mean_entry = entity_dow.get(dow_mean_key)
         dow_std_entry = entity_dow.get(dow_std_key)
@@ -1282,7 +1278,7 @@ def evaluate_time_of_day_anomaly(  # noqa: PLR0913
                 entity_id=entity_id,
                 hour_str=hour_str,
                 dow=dow,
-                local_hour=now_dt.hour,
+                local_hour=local_hour,
                 dow_mean=dow_mean_entry[0],
                 dow_count=dow_mean_entry[1],
                 dow_std=dow_std_entry[0] if dow_std_entry is not None else None,

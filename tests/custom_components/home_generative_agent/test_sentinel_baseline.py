@@ -1884,3 +1884,94 @@ async def test_update_baselines_skips_dow_rows_when_disabled() -> None:
     assert not dow_std_written, (
         f"DOW stddev should not be written; got: {written_metrics}"
     )
+
+
+# ---------------------------------------------------------------------------
+# DOW warm-restart — _dow_state reconstructed from DB rows in async_initialize
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_async_initialize_reconstructs_dow_state_from_db() -> None:
+    """
+    async_initialize() must reconstruct _dow_state from existing DB rows.
+
+    Simulates a restart: DB contains a mean row and a stddev row for entity
+    sensor.power at DOW=0 (Monday), hour=9. Verifies that _dow_state is
+    populated with the correct (mean, m2, count) tuple where
+    m2 = stddev**2 * (count - 1).
+    """
+    # Pre-existing DB rows: mean=100.0 (count=5) and stddev=10.0 for Mon 09:00.
+    dow, hour = 0, 9
+    mean_metric = f"{METRIC_DOW_AVG_PREFIX}{dow}_{hour}"
+    std_metric = f"{METRIC_DOW_STD_PREFIX}{dow}_{hour}"
+    db_rows = [
+        {
+            "entity_id": "sensor.power",
+            "metric": mean_metric,
+            "value": 100.0,
+            "sample_count": 5,
+        },
+        {
+            "entity_id": "sensor.power",
+            "metric": std_metric,
+            "value": 10.0,
+            "sample_count": 5,
+        },
+    ]
+
+    call_count = 0
+
+    mock_cursor = MagicMock()
+
+    async def _exec(_sql: str, *_args: Any) -> None:
+        pass
+
+    async def _fetchall() -> list[Any]:
+        nonlocal call_count
+        call_count += 1
+        # First fetchall: established-set query (returns empty).
+        # Second fetchall: DOW warm-restart query (returns pre-populated rows).
+        if call_count == 1:
+            return []
+        return db_rows
+
+    mock_cursor.execute = _exec
+    mock_cursor.fetchall = _fetchall
+    mock_cursor.fetchone = AsyncMock(return_value=None)
+
+    mock_conn = MagicMock()
+    mock_conn.commit = AsyncMock()
+    mock_conn.cursor = MagicMock(
+        return_value=MagicMock(
+            __aenter__=AsyncMock(return_value=mock_cursor),
+            __aexit__=AsyncMock(return_value=False),
+        )
+    )
+    mock_pool = MagicMock()
+    mock_pool.connection = MagicMock(
+        return_value=MagicMock(
+            __aenter__=AsyncMock(return_value=mock_conn),
+            __aexit__=AsyncMock(return_value=False),
+        )
+    )
+
+    mock_hass = MagicMock()
+    updater = SentinelBaselineUpdater(mock_hass, mock_pool, {})
+
+    assert updater._dow_state == {}, "State must be empty before init"
+
+    await updater.async_initialize()
+
+    key = f"sensor.power:{dow}:{hour}"
+    assert key in updater._dow_state, f"Expected key {key!r} in _dow_state"
+
+    reconstructed_mean, reconstructed_m2, reconstructed_count = updater._dow_state[key]
+
+    # mean should equal the DB value exactly.
+    assert reconstructed_mean == pytest.approx(100.0)
+    # count should equal the DB sample_count.
+    assert reconstructed_count == 5
+    # m2 = stddev**2 * (count - 1) = 10**2 * 4 = 400.
+    expected_m2 = 10.0**2 * (5 - 1)
+    assert reconstructed_m2 == pytest.approx(expected_m2)
