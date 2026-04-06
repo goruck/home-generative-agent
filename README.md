@@ -194,7 +194,7 @@ Security / presence:
 
 - `unlocked_lock_at_night` — exterior lock unlocked while it is night
 - `open_entry_while_away` — door or window open while everyone is away
-- `camera_entry_unsecured` — camera activity detected in the same area as an unsecured entry point (door, window, or lock)
+- `camera_entry_unsecured` — camera activity detected near an unsecured entry point (door, window, or lock). Same-area entries are detected automatically; cameras that physically overlook entry points in a different HA area can be linked via `sentinel_camera_entry_links` in the Sentinel subentry config.
 - `unknown_person_camera_no_home` — unrecognized person on any camera while no one is home
 - `unknown_person_camera_night_home` — unrecognized person on any camera at night while someone is home
 - `alarm_disarmed_during_external_threat` — security alarm disarmed while an unrecognized person is detected on an outdoor camera
@@ -501,6 +501,7 @@ These optional features are configured in the Sentinel subentry:
    - Baseline: `sentinel_baseline_enabled`, `sentinel_baseline_update_interval_minutes`, `sentinel_baseline_freshness_threshold_seconds`
    - Autonomy guardrails: `sentinel_require_pin_for_level_increase` and the Sentinel autonomy-level increase PIN
    - Per-area notifications: `sentinel_area_notify_map` (area name → notify service, e.g. `{"Garage": "notify.mobile_app_garage_tablet"}`)
+   - Cross-area camera entry links: `sentinel_camera_entry_links` (camera entity ID → list of entry/lock entity IDs in other areas, e.g. `{"camera.driveway": ["lock.front_door"]}`) — used by the `camera_entry_unsecured` rule to fire when a camera sees activity but the linked entry is in a different HA area
    - Audit store size: `audit_hot_max_records` (default 500) — maximum records kept in the local hot store. Records with `suppression_reason_code == "not_suppressed"` (user-visible findings) are always preserved in preference to suppressed records when the store is at capacity.
 
 Discovery and baseline both require `sentinel_enabled` to be `true` — they will not start if anomaly alerting is disabled. Discovery and triage also require a configured chat model; if no model is available, those loops are skipped.
