@@ -20,6 +20,7 @@ from custom_components.home_generative_agent.const import (
     CONF_EXPLAIN_ENABLED,
     CONF_SENTINEL_AUTO_EXEC_CANARY_MODE,
     CONF_SENTINEL_AUTONOMY_LEVEL,
+    CONF_SENTINEL_CAMERA_ENTRY_LINKS,
     CONF_SENTINEL_COOLDOWN_MINUTES,
     CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES,
     CONF_SENTINEL_INTERVAL_SECONDS,
@@ -171,7 +172,11 @@ class SentinelEngine:
             UnlockedLockAtNightRule(),
             OpenEntryWhileAwayRule(),
             AppliancePowerDurationRule(),
-            CameraEntryUnsecuredRule(),
+            CameraEntryUnsecuredRule(
+                camera_entry_links=dict(
+                    options.get(CONF_SENTINEL_CAMERA_ENTRY_LINKS) or {}
+                ),
+            ),
             UnknownPersonCameraNoHomeRule(),
             UnknownPersonAtNightWhileHomeRule(),
             VehicleDetectedNearCameraRule(),

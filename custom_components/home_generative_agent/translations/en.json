@@ -164,10 +164,14 @@
             "sentinel_require_pin_for_level_increase": "Require PIN for autonomy level increases",
             "sentinel_daily_digest_enabled": "Enable daily digest notification",
             "sentinel_daily_digest_time": "Daily digest time (HH:MM:SS)",
+            "sentinel_camera_entry_links": "Camera entry links (JSON, optional)",
             "critical_action_pin": "Sentinel level-increase PIN (optional)",
             "notify_service": "Sentinel Notify Service (optional)"
           }
         }
+      },
+      "error": {
+        "invalid_camera_entry_links": "Must be a JSON object mapping camera entity IDs to lists of entry entity IDs, e.g. {\"camera.driveway\": [\"lock.front_door\"]}."
       }
     },
     "feature": {
