@@ -26,10 +26,13 @@ LOGGER = logging.getLogger(__name__)
 _SEVERITIES = {"low", "medium", "high"}
 
 
-def evaluate_dynamic_rules(
+def evaluate_dynamic_rules(  # noqa: PLR0913
     snapshot: FullStateSnapshot,
     rules: Iterable[dict[str, Any]],
     baselines: dict[str, dict[str, float]] | None = None,
+    dow_data: dict[str, dict[str, tuple[float, int]]] | None = None,
+    dow_min_samples: int = 4,
+    global_drift_pct: float = 30.0,
 ) -> list[AnomalyFinding]:
     """
     Evaluate generated rules deterministically.
@@ -38,6 +41,10 @@ def evaluate_dynamic_rules(
     populated by ``SentinelBaselineUpdater``.  When ``None``, baseline-driven
     templates (``baseline_deviation``, ``time_of_day_anomaly``) return empty
     lists silently.
+
+    *dow_data* is an optional mapping ``{entity_id: {metric_key: (value, count)}}``
+    for DOW (day-of-week) per-slot baselines.  When provided, ``time_of_day_anomaly``
+    rules use a weighted blend of the DOW mean and the global hourly mean.
     """
     _baselines: dict[str, dict[str, float]] = baselines or {}
     entity_map = {entity["entity_id"]: entity for entity in snapshot["entities"]}
@@ -126,7 +133,14 @@ def evaluate_dynamic_rules(
             lambda rule: evaluate_baseline_deviation(snapshot, rule, _baselines)
         ),
         "time_of_day_anomaly": (
-            lambda rule: evaluate_time_of_day_anomaly(snapshot, rule, _baselines)
+            lambda rule: evaluate_time_of_day_anomaly(
+                snapshot,
+                rule,
+                _baselines,
+                dow_data=dow_data,
+                dow_min_samples=dow_min_samples,
+                global_drift_pct=global_drift_pct,
+            )
         ),
         # Flexible templates
         "unlocked_lock_while_away": lambda rule: _eval_unlocked_lock_while_away(

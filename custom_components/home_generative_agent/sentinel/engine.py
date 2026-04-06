@@ -20,6 +20,9 @@ from custom_components.home_generative_agent.const import (
     CONF_EXPLAIN_ENABLED,
     CONF_SENTINEL_AUTO_EXEC_CANARY_MODE,
     CONF_SENTINEL_AUTONOMY_LEVEL,
+    CONF_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
+    CONF_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT,
+    CONF_SENTINEL_BASELINE_WEEKLY_PATTERNS,
     CONF_SENTINEL_CAMERA_ENTRY_LINKS,
     CONF_SENTINEL_COOLDOWN_MINUTES,
     CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES,
@@ -35,6 +38,9 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
     RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE,
     RECOMMENDED_SENTINEL_AUTONOMY_LEVEL,
+    RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
+    RECOMMENDED_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT,
+    RECOMMENDED_SENTINEL_BASELINE_WEEKLY_PATTERNS,
     RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
     RECOMMENDED_SENTINEL_PRESENCE_GRACE_MINUTES,
     RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES,
@@ -192,6 +198,17 @@ class SentinelEngine:
         self._last_people_home: set[str] = set()
         # Run telemetry exposed to SentinelHealthSensor.
         self.run_stats: dict[str, Any] = {}
+
+    @property
+    def learned_suppressions_count(self) -> int:
+        """
+        Count of distinct ``{rule_type}:{entity_id}`` pairs with learned multipliers.
+
+        Each entry represents a finding type+entity that was snoozed or dismissed,
+        extending its cooldown.  Exposed on the health sensor as
+        ``learned_suppressions_active``.
+        """
+        return len(self._suppression.state.learned_cooldown_multipliers)
 
     # ---------------------------------------------------------------------- #
     # Autonomy level management
@@ -395,7 +412,7 @@ class SentinelEngine:
             self.run_stats["scheduler"] = self._trigger_scheduler.stats
             async_dispatcher_send(self._hass, SIGNAL_SENTINEL_RUN_COMPLETE)
 
-    async def _run_once(self, trigger_source: str = "poll") -> None:
+    async def _run_once(self, trigger_source: str = "poll") -> None:  # noqa: PLR0912
         try:
             snapshot = await async_build_full_state_snapshot(self._hass)
         except (ValueError, TypeError, KeyError):
@@ -470,6 +487,7 @@ class SentinelEngine:
             )
             if dynamic_rules:
                 baselines: dict[str, dict[str, float]] = {}
+                dow_data: dict[str, dict[str, tuple[float, int]]] | None = None
                 if self._baseline_updater is not None:
                     baselines = await self._baseline_updater.async_fetch_baselines()
                     # Inject baseline_ready_entities into derived so the discovery
@@ -478,8 +496,30 @@ class SentinelEngine:
                         await self._baseline_updater.async_fetch_ready_entity_ids()
                     )
                     snapshot["derived"]["baseline_ready_entities"] = ready_ids
+                    # Fetch DOW data when weekly_patterns is enabled.
+                    weekly_patterns = bool(
+                        self._options.get(
+                            CONF_SENTINEL_BASELINE_WEEKLY_PATTERNS,
+                            RECOMMENDED_SENTINEL_BASELINE_WEEKLY_PATTERNS,
+                        )
+                    )
+                    if weekly_patterns:
+                        dow_data = await self._baseline_updater.async_fetch_dow_data()
+                dow_min_samples = _coerce_int(
+                    self._options.get(CONF_SENTINEL_BASELINE_DOW_MIN_SAMPLES),
+                    RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
+                )
+                global_drift_pct = _coerce_float(
+                    self._options.get(CONF_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT),
+                    RECOMMENDED_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT,
+                )
                 dynamic_findings = evaluate_dynamic_rules(
-                    snapshot, dynamic_rules, baselines=baselines
+                    snapshot,
+                    dynamic_rules,
+                    baselines=baselines,
+                    dow_data=dow_data,
+                    dow_min_samples=dow_min_samples,
+                    global_drift_pct=global_drift_pct,
                 )
                 LOGGER.debug(
                     "Sentinel evaluated %s dynamic rule(s), produced %s finding(s).",
@@ -991,6 +1031,18 @@ def _coerce_int(value: object | None, default: int) -> int:
     if isinstance(value, str):
         try:
             return int(value)
+        except ValueError:
+            return default
+    return default
+
+
+def _coerce_float(value: object | None, default: float) -> float:
+    """Coerce option values to float with a deterministic fallback."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
         except ValueError:
             return default
     return default

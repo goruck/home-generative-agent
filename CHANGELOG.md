@@ -2,6 +2,36 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.9.0] - 2026-04-06
+
+### Added
+
+- **Day-of-week (DOW) baselines** — Sentinel's time-of-day anomaly detector now
+  supports per-(DOW, hour) baselines in addition to the existing global hourly
+  averages. Enable via `sentinel_baseline_weekly_patterns` in the Sentinel subentry.
+  Uses Welford's online algorithm for exact running mean + variance per slot without
+  storing all past values. Detection uses a weighted blend that transitions smoothly
+  from global to DOW baselines as data accumulates (`w = min(count / dow_min_samples,
+  1.0)`), so there is no hard cliff when switching. Entity-specific stddev thresholds
+  prevent washer/dryer power sensors from triggering on the same absolute deviation
+  that would flag a door sensor. DOW buckets use local time so weekend/weekday
+  schedules align with the user's actual timezone.
+
+- **DOW min-samples config** — New `sentinel_baseline_dow_min_samples` option
+  (default 4 weeks) controls how many observations per DOW-hour slot are required
+  before the blend weight reaches 1.0. Configurable via a NumberSelector in the
+  Sentinel subentry UI. Intentionally lower than the global `sentinel_baseline_min_samples`
+  (20) because DOW slots update at most once per week per entity.
+
+- **`learned_suppressions_active` health sensor attribute** — Exposes the count of
+  distinct `{rule_type}:{entity_id}` pairs that have accumulated learned cooldown
+  multipliers via snooze/dismiss feedback. Makes the feedback-learning loop
+  observable in the health dashboard.
+
+- **DB performance index** — `CREATE INDEX IF NOT EXISTS idx_sentinel_baselines_entity_metric`
+  added to `async_initialize()` for fast per-entity/metric lookups. Idempotent;
+  safe on existing installations.
+
 ## [3.8.0] - 2026-04-05
 
 ### Added

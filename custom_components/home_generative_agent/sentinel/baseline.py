@@ -40,11 +40,14 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_BASELINE_MAX_SAMPLES,
     CONF_SENTINEL_BASELINE_MIN_SAMPLES,
     CONF_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES,
+    CONF_SENTINEL_BASELINE_WEEKLY_PATTERNS,
+    RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
     RECOMMENDED_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT,
     RECOMMENDED_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS,
     RECOMMENDED_SENTINEL_BASELINE_MAX_SAMPLES,
     RECOMMENDED_SENTINEL_BASELINE_MIN_SAMPLES,
     RECOMMENDED_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES,
+    RECOMMENDED_SENTINEL_BASELINE_WEEKLY_PATTERNS,
 )
 
 from .models import AnomalyFinding, Severity, build_anomaly_id
@@ -108,8 +111,19 @@ BASELINE_UNAVAILABLE = "unavailable"
 
 # Rolling metric name written for the global time-window average.
 METRIC_ROLLING_AVG = "rolling_avg"
-# Rolling metric name keyed by hour-of-day (e.g. "hourly_avg_14").
+# Global hourly metric keyed by hour-of-day (e.g. "hourly_avg_14").
 METRIC_HOURLY_PREFIX = "hourly_avg_"
+# DOW (day-of-week) metric prefixes — per (DOW, hour) slot.
+# Examples: "hourly_avg_5_14" = Friday 14:00 mean, "hourly_stddev_5_14" = stddev.
+# DOW follows Python weekday(): 0=Monday, 6=Sunday.
+# DST note: buckets use local time via dt_util.now(). The ambiguous fall-back
+# hour during DST transitions double-counts one slot once per year — acceptable;
+# do not "fix" by converting to UTC (would break weekly pattern separation).
+METRIC_DOW_AVG_PREFIX = "hourly_avg_"  # same prefix, but with two numeric suffixes
+METRIC_DOW_STD_PREFIX = "hourly_stddev_"
+# Number of numeric parts in a DOW metric name (e.g. "5_14" = DOW 5, hour 14).
+# Global hourly metrics have one part ("14"); DOW metrics have two ("5_14").
+_DOW_METRIC_PARTS = 2
 
 # DDL for the baseline table.
 _CREATE_TABLE_SQL = """
@@ -224,6 +238,44 @@ _DELETE_ALL_SQL = """
 DELETE FROM sentinel_baselines
 """
 
+# DOW index for fast per-(entity, metric) lookups added in async_initialize().
+_CREATE_DOW_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_sentinel_baselines_entity_metric
+ON sentinel_baselines (entity_id, metric)
+"""
+
+# Direct upsert for DOW slots — bypasses EMA because DOW slots are sparse
+# (each updated at most once per week per entity).  EMA on sparse slots
+# produces interpolation artefacts; Welford's algorithm gives exact running
+# mean + variance without requiring continuous data.
+_DOW_UPSERT_SQL = """
+INSERT INTO sentinel_baselines
+    (entity_id, metric, period, value, sample_count, updated_at)
+VALUES
+    (%s, %s, 'dow', %s, %s, %s)
+ON CONFLICT (entity_id, metric, period) DO UPDATE SET
+    value        = EXCLUDED.value,
+    sample_count = EXCLUDED.sample_count,
+    updated_at   = EXCLUDED.updated_at
+"""
+
+# Fetch all DOW rows (both mean and stddev) — no min-samples filter because
+# the blend weight formula handles sparse slots gracefully (w → 0 as count → 0).
+_FETCH_DOW_SQL = """
+SELECT entity_id, metric, value, sample_count
+FROM sentinel_baselines
+WHERE period = 'dow'
+"""
+
+# Warm-restart query: fetch existing DOW mean + stddev rows on startup so
+# Welford's _dow_state (mean, m2, count) can be reconstructed without full
+# retraining.
+_FETCH_DOW_WARMUP_SQL = """
+SELECT entity_id, metric, value, sample_count
+FROM sentinel_baselines
+WHERE period = 'dow'
+"""
+
 # Aggregate stats query for health sensor — avoids full table scan.
 # Params: (metric, freshness_threshold_seconds, min_samples).
 _FETCH_STATS_SQL = """
@@ -262,12 +314,17 @@ class SentinelBaselineUpdater:
         self._stop_event = asyncio.Event()
         # entity_ids that crossed MIN_SAMPLES (no re-notification on restart).
         self._established: set[str] = set()
+        # In-memory Welford state for DOW slots: key = "entity_id:dow:hour",
+        # value = (mean, m2, count).  m2 is the sum of squared deviations
+        # (Welford's accumulator for variance).  Populated on async_initialize()
+        # from DB values and updated on every _update_baselines() call.
+        self._dow_state: dict[str, tuple[float, float, int]] = {}
 
     # ---------------------------------------------------------------------- #
     # Lifecycle
     # ---------------------------------------------------------------------- #
 
-    async def async_initialize(self) -> None:
+    async def async_initialize(self) -> None:  # noqa: PLR0912
         """Create/migrate the ``sentinel_baselines`` table and seed state."""
         try:
             async with self._pool.connection() as conn, conn.cursor() as cur:
@@ -275,6 +332,8 @@ class SentinelBaselineUpdater:
                 # Idempotent migrations for columns added after initial release.
                 await cur.execute(_MIGRATE_REFERENCE_VALUE_SQL)
                 await cur.execute(_MIGRATE_REFERENCE_AT_SQL)
+                # DOW index — fast per-(entity, metric) lookups.
+                await cur.execute(_CREATE_DOW_INDEX_SQL)
                 await conn.commit()
                 # Seed the established set so restarts don't re-fire notifications.
                 min_samples = _coerce_int(
@@ -289,9 +348,58 @@ class SentinelBaselineUpdater:
                     eid = row.get("entity_id") if isinstance(row, dict) else row[0]
                     if eid:
                         self._established.add(str(eid))
+                # Warm-restart Welford _dow_state from existing DB rows so that
+                # historical variance is preserved across HA restarts.
+                await cur.execute(_FETCH_DOW_WARMUP_SQL)
+                dow_rows = await cur.fetchall()
+                mean_rows: dict[str, dict[str, tuple[float, int]]] = {}
+                std_rows: dict[str, dict[str, float]] = {}
+                for row in dow_rows:
+                    if isinstance(row, dict):
+                        eid = str(row.get("entity_id", "") or "")
+                        metric = str(row.get("metric", "") or "")
+                        val = row.get("value")
+                        cnt = row.get("sample_count", 0)
+                    else:
+                        eid, metric, val, cnt = (
+                            str(row[0] or ""),
+                            str(row[1] or ""),
+                            row[2],
+                            row[3],
+                        )
+                    if not eid or not metric or val is None:
+                        continue
+                    if metric.startswith(
+                        METRIC_DOW_STD_PREFIX
+                    ) and not metric.startswith(METRIC_DOW_AVG_PREFIX):
+                        std_rows.setdefault(eid, {})[metric] = float(val)
+                    elif metric.startswith(METRIC_DOW_AVG_PREFIX):
+                        # hourly_avg_{dow}_{hour} rows have two numeric suffixes
+                        parts = metric[len(METRIC_DOW_AVG_PREFIX) :].split("_")
+                        if (
+                            len(parts) == _DOW_METRIC_PARTS
+                        ):  # DOW (not global hourly_avg_{H})
+                            mean_rows.setdefault(eid, {})[metric] = (
+                                float(val),
+                                int(cnt or 0),
+                            )
+                # Reconstruct _dow_state: key = "entity_id:dow:hour"
+                for eid, metrics in mean_rows.items():
+                    for metric, (mean_val, count) in metrics.items():
+                        parts = metric[len(METRIC_DOW_AVG_PREFIX) :].split("_")
+                        if len(parts) != _DOW_METRIC_PARTS:
+                            continue
+                        dow_str, hour_str = parts
+                        std_metric = f"{METRIC_DOW_STD_PREFIX}{dow_str}_{hour_str}"
+                        stddev = (std_rows.get(eid) or {}).get(std_metric, 0.0)
+                        m2 = stddev**2 * max(count - 1, 0)
+                        key = f"{eid}:{dow_str}:{hour_str}"
+                        self._dow_state[key] = (mean_val, m2, count)
             LOGGER.debug(
-                "sentinel_baselines table ready; %d baselines already established.",
+                "sentinel_baselines table ready; %d baselines established; "
+                "%d DOW slots warmed.",
                 len(self._established),
+                len(self._dow_state),
             )
         except Exception:
             LOGGER.exception(
@@ -357,6 +465,10 @@ class SentinelBaselineUpdater:
     async def _update_baselines(self, snapshot: FullStateSnapshot) -> None:  # noqa: PLR0912, PLR0915
         """Upsert rolling stats for all numeric entities in *snapshot*."""
         now = dt_util.utcnow()
+        # Use local time for DOW bucket assignment so that weekday patterns align with
+        # the user's actual schedule.  UTC-based bucketing would produce cross-timezone
+        # artefacts (e.g. Saturday night classified as Sunday morning).
+        local_now = dt_util.now()
         hour_str = str(now.hour)
 
         min_samples = _coerce_int(
@@ -373,6 +485,12 @@ class SentinelBaselineUpdater:
         drift_threshold_pct = _coerce_float(
             self._options.get(CONF_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT),
             default=RECOMMENDED_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT,
+        )
+        weekly_patterns = bool(
+            self._options.get(
+                CONF_SENTINEL_BASELINE_WEEKLY_PATTERNS,
+                RECOMMENDED_SENTINEL_BASELINE_WEEKLY_PATTERNS,
+            )
         )
 
         # Collect numeric entities and their current values.
@@ -477,6 +595,27 @@ class SentinelBaselineUpdater:
                     )
                     # Discard hourly RETURNING row (not used for establishment).
                     await cur.fetchone()
+
+                    # --- DOW (day-of-week) Welford upsert (when enabled) ---
+                    if weekly_patterns:
+                        dow = local_now.weekday()  # 0=Monday, 6=Sunday
+                        local_hour = local_now.hour
+                        dow_mean, dow_stddev = self._update_dow_welford(
+                            entity_id, dow, local_hour, value
+                        )
+                        dow_mean_metric = f"{METRIC_DOW_AVG_PREFIX}{dow}_{local_hour}"
+                        dow_std_metric = f"{METRIC_DOW_STD_PREFIX}{dow}_{local_hour}"
+                        _, _, dow_count = self._dow_state[
+                            f"{entity_id}:{dow}:{local_hour}"
+                        ]
+                        await cur.execute(
+                            _DOW_UPSERT_SQL,
+                            (entity_id, dow_mean_metric, dow_mean, dow_count, now),
+                        )
+                        await cur.execute(
+                            _DOW_UPSERT_SQL,
+                            (entity_id, dow_std_metric, dow_stddev, dow_count, now),
+                        )
 
                 await conn.commit()
 
@@ -584,6 +723,81 @@ class SentinelBaselineUpdater:
             )
         except Exception:  # noqa: BLE001
             LOGGER.debug("Could not fire drift notification for %s.", entity_id)
+
+    # ---------------------------------------------------------------------- #
+    # DOW Welford helpers
+    # ---------------------------------------------------------------------- #
+
+    def _update_dow_welford(
+        self,
+        entity_id: str,
+        dow: int,
+        hour: int,
+        new_value: float,
+    ) -> tuple[float, float]:
+        """
+        Update Welford's online mean/variance for the given (entity, DOW, hour) slot.
+
+        Returns ``(mean, stddev)`` after incorporating *new_value*.
+
+        Welford's algorithm accumulates mean and M2 (sum of squared deviations)
+        without storing all past values.  This is correct for sparse slots that
+        update at most once per week; EMA would produce interpolation artefacts.
+
+        The in-memory state ``_dow_state`` is the only source of M2; DB stores
+        only mean, stddev, and count.  On restart, M2 is reconstructed from
+        ``stddev**2 * (count - 1)`` in ``async_initialize()``.
+        """
+        key = f"{entity_id}:{dow}:{hour}"
+        mean, m2, count = self._dow_state.get(key, (0.0, 0.0, 0))
+        count += 1
+        delta = new_value - mean
+        mean = mean + delta / count
+        delta2 = new_value - mean
+        m2 = m2 + delta * delta2
+        stddev = (m2 / (count - 1)) ** 0.5 if count > 1 else 0.0
+        self._dow_state[key] = (mean, m2, count)
+        return mean, stddev
+
+    async def async_fetch_dow_data(
+        self,
+    ) -> dict[str, dict[str, tuple[float, int]]]:
+        """
+        Return DOW mean/stddev values and sample counts for all entities.
+
+        Returns ``{entity_id: {metric_key: (value, count)}}``.
+        No min-samples filter — the blend-weight formula handles sparse slots
+        (``w = min(count / dow_min_samples, 1.0)``; w=0 ⟹ pure global mean).
+        Returns an empty dict on any DB error.
+        """
+        try:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(_FETCH_DOW_SQL)
+                rows = await cur.fetchall()
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("DOW baseline fetch failed; returning empty dict.")
+            return {}
+
+        result: dict[str, dict[str, tuple[float, int]]] = {}
+        for row in rows:
+            if isinstance(row, dict):
+                entity_id = str(row.get("entity_id", "") or "")
+                metric = str(row.get("metric", "") or "")
+                value = row.get("value")
+                count = row.get("sample_count", 0)
+            else:
+                entity_id, metric, value, count = (
+                    str(row[0] or ""),
+                    str(row[1] or ""),
+                    row[2],
+                    row[3],
+                )
+            if not entity_id or not metric or value is None:
+                continue
+            result.setdefault(entity_id, {})[metric] = (float(value), int(count or 0))
+
+        LOGGER.debug("Fetched DOW baseline data for %d entities.", len(result))
+        return result
 
     # ---------------------------------------------------------------------- #
     # Freshness query
@@ -1006,16 +1220,32 @@ def evaluate_baseline_deviation(  # noqa: PLR0911, PLR0912, PLR0915
     ]
 
 
-def evaluate_time_of_day_anomaly(
+def evaluate_time_of_day_anomaly(  # noqa: PLR0913
     snapshot: FullStateSnapshot,
     rule: dict[str, Any],
     baselines: dict[str, dict[str, float]],
+    dow_data: dict[str, dict[str, tuple[float, int]]] | None = None,
+    dow_min_samples: int = RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
+    global_drift_pct: float = RECOMMENDED_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT,
 ) -> list[AnomalyFinding]:
     """
     Detect when an entity's state differs from the expected hour-of-day average.
 
-    Rule params are identical to ``evaluate_baseline_deviation`` but the
-    metric compared is the hour-of-day rolling average for the current hour.
+    When *dow_data* is provided and the entity has DOW baseline data, the
+    expected value is a weighted blend of the DOW-hour mean and the global
+    hourly mean:
+
+        w = min(count / dow_min_samples, 1.0)
+        expected = w * dow_mean + (1 - w) * global_mean
+
+    At ``count = 0``: pure global.  At ``count >= dow_min_samples``: pure DOW.
+
+    The anomaly threshold is entity-specific when a DOW stddev is available:
+
+        threshold = max(dow_std * 2.0, abs(expected) * drift_pct / 100)
+
+    Without DOW data the function falls back to the existing global-hourly
+    behaviour (delegates to ``evaluate_baseline_deviation``).
     """
     params: dict[str, Any] = rule.get("params") or {}
     entity_id = params.get("entity_id")
@@ -1031,9 +1261,36 @@ def evaluate_time_of_day_anomaly(
         if now_dt.tzinfo is None:
             now_dt = now_dt.replace(tzinfo=UTC)
         hour_str = str(now_dt.hour)
+        dow = now_dt.weekday()  # 0=Monday, 6=Sunday
     except (TypeError, ValueError):
         return []
 
+    # --- DOW-blended path ---
+    if dow_data is not None:
+        entity_dow = dow_data.get(entity_id, {})
+        dow_mean_key = f"{METRIC_DOW_AVG_PREFIX}{dow}_{now_dt.hour}"
+        dow_std_key = f"{METRIC_DOW_STD_PREFIX}{dow}_{now_dt.hour}"
+
+        dow_mean_entry = entity_dow.get(dow_mean_key)
+        dow_std_entry = entity_dow.get(dow_std_key)
+
+        if dow_mean_entry is not None:
+            return _evaluate_dow_anomaly(
+                snapshot=snapshot,
+                rule=rule,
+                baselines=baselines,
+                entity_id=entity_id,
+                hour_str=hour_str,
+                dow=dow,
+                local_hour=now_dt.hour,
+                dow_mean=dow_mean_entry[0],
+                dow_count=dow_mean_entry[1],
+                dow_std=dow_std_entry[0] if dow_std_entry is not None else None,
+                dow_min_samples=dow_min_samples,
+                global_drift_pct=global_drift_pct,
+            )
+
+    # --- Global-hourly fallback (no DOW data) ---
     hourly_rule = dict(rule)
     hourly_params = dict(params)
     hourly_params["metric"] = f"{METRIC_HOURLY_PREFIX}{hour_str}"
@@ -1044,6 +1301,107 @@ def evaluate_time_of_day_anomaly(
         hourly_rule["template_id"] = "time_of_day_anomaly"
 
     return evaluate_baseline_deviation(snapshot, hourly_rule, baselines)
+
+
+def _evaluate_dow_anomaly(  # noqa: PLR0913
+    snapshot: FullStateSnapshot,
+    rule: dict[str, Any],
+    baselines: dict[str, dict[str, float]],
+    entity_id: str,
+    hour_str: str,
+    dow: int,
+    local_hour: int,
+    dow_mean: float,
+    dow_count: int,
+    dow_std: float | None,
+    dow_min_samples: int,
+    global_drift_pct: float,
+) -> list[AnomalyFinding]:
+    """
+    Compute a DOW-blended time-of-day anomaly finding.
+
+    Called only when a DOW mean row exists for the given entity/DOW/hour.
+    The blend weight is proportional to DOW observation count, so the model
+    transitions smoothly from global-hourly to DOW-specific baselines as data
+    accumulates.  No hard cliff at dow_min_samples.
+    """
+    entity_map = {e["entity_id"]: e for e in snapshot.get("entities", [])}
+    entity = entity_map.get(entity_id)
+    if entity is None:
+        return []
+
+    try:
+        current_value = float(str(entity.get("state", "")))
+    except (TypeError, ValueError):
+        return []
+
+    # Global hourly mean for this hour (the fallback anchor).
+    global_mean = (baselines.get(entity_id) or {}).get(
+        f"{METRIC_HOURLY_PREFIX}{hour_str}"
+    )
+    if global_mean is None:
+        global_mean = dow_mean  # no global baseline yet — use DOW mean as anchor
+
+    # Weighted blend: w=0 ⟹ pure global; w=1 ⟹ pure DOW.
+    w = min(dow_count / dow_min_samples, 1.0) if dow_min_samples > 0 else 1.0
+    expected = w * dow_mean + (1.0 - w) * global_mean
+
+    # Entity-specific threshold: use DOW stddev when the slot is warm enough.
+    if dow_std is not None and dow_count >= dow_min_samples and dow_std > 0.0:
+        threshold = max(dow_std * 2.0, abs(expected) * (global_drift_pct / 100.0))
+    else:
+        threshold = abs(expected) * (global_drift_pct / 100.0)
+
+    deviation = abs(current_value - expected)
+    if deviation <= threshold:
+        return []
+
+    rule_id = str(rule.get("rule_id") or "time_of_day_anomaly")
+    deviation_pct = deviation / abs(expected) * 100.0 if expected != 0.0 else 100.0
+    evidence = {
+        "rule_id": rule_id,
+        "template_id": rule.get("template_id", "time_of_day_anomaly"),
+        "entity_id": entity_id,
+        "friendly_name": entity.get("friendly_name") or "",
+        "current_value": current_value,
+        "expected_value": round(expected, 4),
+        "dow_mean": dow_mean,
+        "global_mean": global_mean,
+        "blend_weight": round(w, 4),
+        "dow_count": dow_count,
+        "dow_stddev": round(dow_std, 4) if dow_std is not None else None,
+        "deviation": round(deviation, 4),
+        "deviation_pct": round(deviation_pct, 2),
+        "deviation_direction": "above" if current_value > expected else "below",
+        "threshold": round(threshold, 4),
+        "dow": dow,
+        "hour": local_hour,
+        "last_changed": entity.get("last_changed"),
+    }
+
+    severity_raw = str(rule.get("severity") or "low")
+    severity: Severity = (  # type: ignore[assignment]
+        severity_raw if severity_raw in {"low", "medium", "high"} else "low"
+    )
+    confidence = _coerce_float(rule.get("confidence"), default=0.7)
+    _hash_evidence = {k: v for k, v in evidence.items() if k != "friendly_name"}
+    anomaly_id = build_anomaly_id(rule_id, [entity_id], _hash_evidence)
+    suggested_actions = rule.get("suggested_actions") or []
+
+    return [
+        AnomalyFinding(
+            anomaly_id=anomaly_id,
+            type=rule_id,
+            severity=severity,
+            confidence=confidence,
+            triggering_entities=[entity_id],
+            evidence=evidence,
+            suggested_actions=(
+                list(suggested_actions) if isinstance(suggested_actions, list) else []
+            ),
+            is_sensitive=bool(rule.get("is_sensitive", False)),
+        )
+    ]
 
 
 # ---------------------------------------------------------------------------
