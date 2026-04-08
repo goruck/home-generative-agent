@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import string
 from typing import TYPE_CHECKING, Any, Literal
 
 import homeassistant.util.dt as dt_util
+import voluptuous as vol
 from homeassistant.components import conversation
 from homeassistant.components.conversation import trace
 from homeassistant.components.conversation.models import AbstractConversationAgent
@@ -21,6 +24,10 @@ from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
 from voluptuous_openapi import convert
 
 from .agent.graph import workflow
+from .agent.rag_embedding_text import (
+    strip_for_embedding,
+    truncate_for_embedding_index,
+)
 from .agent.tools import (
     add_automation,
     alarm_control,
@@ -49,6 +56,7 @@ from .core.conversation_helpers import (
     _is_dashboard_request,
     _maybe_fix_dashboard_entities,
 )
+from .core.utils import gather_store_puts_in_chunks
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -59,7 +67,7 @@ if TYPE_CHECKING:
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
     from langchain_core.runnables import RunnableConfig
 
-    from .core.runtime import HGAConfigEntry
+    from .core.runtime import HGAConfigEntry, HGAData
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -98,6 +106,67 @@ def _convert_content(
     if isinstance(content, conversation.UserContent):
         return HumanMessage(content=content.content)
     return AIMessage(content=content.content)
+
+
+class MultiLLMAPI:
+    """Wrapper to route tool calls across multiple LLM APIs."""
+
+    def __init__(
+        self, apis: dict[str, llm.APIInstance], routing_map: dict[str, str]
+    ) -> None:
+        """Initialize the wrapper."""
+        self.apis = apis
+        self.routing_map = routing_map
+
+    @property
+    def api_prompt(self) -> str:
+        """Return the concatenated API prompts."""
+        return "\n".join(api.api_prompt for api in self.apis.values() if api.api_prompt)
+
+    @property
+    def custom_serializer(self) -> Callable[[Any], Any] | None:
+        """Return the custom serializer from the first available API."""
+        for api in self.apis.values():
+            if api.custom_serializer:
+                return api.custom_serializer
+        return None
+
+    async def async_call_tool(self, tool_input: llm.ToolInput) -> Any:
+        """Route the tool call to the specific provider using the routing map."""
+        api_id = self.routing_map.get(tool_input.tool_name)
+        if not api_id:
+            # Fallback for unexpected calls
+            for api in self.apis.values():
+                try:
+                    return await api.async_call_tool(tool_input)
+                except (HomeAssistantError, vol.Invalid):
+                    continue
+            msg = f"No routing target for {tool_input.tool_name}"
+            raise HomeAssistantError(msg)
+
+        api = self.apis.get(api_id)
+        if not api:
+            msg = f"API {api_id} not available for {tool_input.tool_name}"
+            raise HomeAssistantError(msg)
+
+        return await api.async_call_tool(tool_input)
+
+
+async def _run_tool_index_background(
+    *,
+    index_tasks: list[Any],
+    tool_hashes: dict[str, str],
+    rd: HGAData,
+) -> None:
+    """Batch tool indexing into the store and update hashes on success."""
+    try:
+        if index_tasks:
+            await gather_store_puts_in_chunks(index_tasks)
+        rd.tool_content_hashes.update(tool_hashes)
+    except Exception:
+        _LOGGER.exception("Global tool index background task failed")
+    finally:
+        rd.tool_index_ready = True
 
 
 async def async_setup_entry(
@@ -197,23 +266,146 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         )
 
         # HA tools & schema
-        llm_api = None
-        if options.get(CONF_LLM_HASS_API):
+        # Gather ALL selected APIs
+        active_api_ids = options.get(CONF_LLM_HASS_API, [llm.LLM_API_ASSIST])
+        if isinstance(active_api_ids, str):
+            active_api_ids = [active_api_ids]
+
+        active_apis: dict[str, llm.APIInstance] = {}
+        for api_id in active_api_ids:
             try:
-                llm_api = await llm.async_get_api(
-                    hass,
-                    options[CONF_LLM_HASS_API],
-                    llm_context,
-                )
+                api = await llm.async_get_api(hass, api_id, llm_context)
+                active_apis[api_id] = api
             except HomeAssistantError:
-                msg = "Error getting LLM API, check your configuration."
-                _LOGGER.exception(msg)
-                intent_response.async_set_error(
-                    intent.IntentResponseErrorCode.UNKNOWN, msg
+                _LOGGER.warning("Could not load LLM API: %s", api_id)
+
+        # Multi-API initialization
+        llm_api = MultiLLMAPI(active_apis, {})
+
+        # --- Global Tool Indexing (Background) ---
+        if not runtime_data.tool_index_ready:
+            all_available_api_ids = [api.id for api in llm.async_get_apis(hass)]
+            index_tasks = []
+            new_hashes = {}
+
+            # 1. Index Providers
+            for api_id in all_available_api_ids:
+                try:
+                    # Isolate each provider discovery
+                    api_instance = await llm.async_get_api(hass, api_id, llm_context)
+                    for tool in api_instance.tools:
+                        # Composite hash: api_id + name + description + schema
+                        schema_json = json.dumps(
+                            convert(
+                                tool.parameters,
+                                custom_serializer=api_instance.custom_serializer,
+                            ),
+                            sort_keys=True,
+                        )
+                        raw_content = (
+                            f"provider:{api_id}\nname:{tool.name}\n"
+                            f"description:{tool.description}\nparameters:{schema_json}"
+                        )
+                        content_hash = hashlib.sha256(raw_content.encode()).hexdigest()
+
+                        tool_key = f"{api_id}::{tool.name}"
+                        if (
+                            runtime_data.tool_content_hashes.get(tool_key)
+                            != content_hash
+                        ):
+                            # Prep for embedding
+                            embedding_text = strip_for_embedding(
+                                f"{tool.name}: {tool.description}"
+                            )
+                            index_tasks.append(
+                                runtime_data.store.aput(
+                                    ("system", "tools"),
+                                    key=tool_key,
+                                    value={
+                                        "content": truncate_for_embedding_index(
+                                            embedding_text
+                                        ),
+                                        "name": tool.name,
+                                        "api_id": api_id,
+                                        "description": tool.description,
+                                        "parameters": schema_json,
+                                    },
+                                )
+                            )
+                            new_hashes[tool_key] = content_hash
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.warning("Failed to index tool provider %s: %s", api_id, err)
+
+            # 2. Index Local LangChain Tools (provider: hga_local)
+            local_tools = {
+                "get_and_analyze_camera_image": get_and_analyze_camera_image,
+                "get_camera_last_events": get_camera_last_events,
+                "upsert_memory": upsert_memory,
+                "get_entity_history": get_entity_history,
+                "confirm_sensitive_action": confirm_sensitive_action,
+                "alarm_control": alarm_control,
+                "resolve_entity_ids": resolve_entity_ids,
+                "write_yaml_file": write_yaml_file,
+                "add_automation": add_automation,
+            }
+            for t_name, t_func in local_tools.items():
+                try:
+                    # LangChain tools have .name, .description,
+                    # and .args_schema (or similar)
+                    # We'll use a simplified schema extraction for indexing
+                    raw_content = (
+                        f"provider:hga_local\nname:{t_name}\n"
+                        f"description:{t_func.description}"
+                    )
+                    content_hash = hashlib.sha256(raw_content.encode()).hexdigest()
+                    tool_key = f"hga_local::{t_name}"
+                    if (
+                        tool_key not in new_hashes
+                        or new_hashes.get(tool_key) != content_hash
+                    ):
+                        embedding_text = strip_for_embedding(
+                            f"{t_name}: {t_func.description}"
+                        )
+                        # We need the JSON schema for actual binding.
+                        # For local tools, we'll store a placeholder.
+                        # Actually, selected_tools in graph.py expects parameters.
+                        # We extract it from t_func.args_schema.schema()
+                        # if it exists.
+                        params = "{}"
+                        if hasattr(t_func, "args_schema") and t_func.args_schema:
+                            params = json.dumps(
+                                t_func.args_schema.schema(), sort_keys=True
+                            )
+
+                        index_tasks.append(
+                            runtime_data.store.aput(
+                                ("system", "tools"),
+                                key=tool_key,
+                                value={
+                                    "content": truncate_for_embedding_index(
+                                        embedding_text
+                                    ),
+                                    "name": t_name,
+                                    "api_id": "hga_local",
+                                    "description": t_func.description,
+                                    "parameters": params,
+                                },
+                            )
+                        )
+                        new_hashes[tool_key] = content_hash
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.warning("Failed to index local tool %s: %s", t_name, err)
+
+            if index_tasks:
+                hass.async_create_task(
+                    _run_tool_index_background(
+                        index_tasks=index_tasks,
+                        tool_hashes=new_hashes,
+                        rd=runtime_data,
+                    )
                 )
-                return conversation.ConversationResult(
-                    response=intent_response, conversation_id=conversation_id
-                )
+            else:
+                runtime_data.tool_index_ready = True
 
         if not options.get(CONF_SCHEMA_FIRST_YAML, False) and _is_dashboard_request(
             user_input.text
@@ -227,8 +419,12 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             )
 
         tools = (
-            [_format_tool(tool, llm_api.custom_serializer) for tool in llm_api.tools]
-            if llm_api
+            [
+                _format_tool(tool, api.custom_serializer)
+                for api in active_apis.values()
+                for tool in api.tools
+            ]
+            if active_apis
             else []
         )
 
@@ -308,7 +504,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         # Use the already-configured chat model from __init__.py
         base_llm = runtime_data.chat_model
         try:
-            chat_model_with_tools = base_llm.bind_tools(tools)
+            base_llm.bind_tools(tools)
         except AttributeError:
             _LOGGER.exception("Error during conversation processing.")
             intent_response = intent.IntentResponse(language=user_input.language)
@@ -345,7 +541,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             "configurable": {
                 "thread_id": conversation_id,
                 "user_id": user_name,
-                "chat_model": chat_model_with_tools,
+                "chat_model": base_llm,
                 "chat_model_options": runtime_data.chat_model_options,
                 "prompt": prompt,
                 "options": options,

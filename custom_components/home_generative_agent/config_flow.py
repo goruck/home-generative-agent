@@ -46,6 +46,8 @@ from .const import (
     CONF_NOTIFY_SERVICE,
     CONF_PROMPT,
     CONF_SCHEMA_FIRST_YAML,
+    CONF_TOOL_RELEVANCE_THRESHOLD,
+    CONF_TOOL_RETRIEVAL_LIMIT,
     CONF_VIDEO_ANALYZER_MODE,
     CONFIG_ENTRY_VERSION,
     CRITICAL_PIN_MAX_LEN,
@@ -55,6 +57,8 @@ from .const import (
     RECOMMENDED_MANAGE_CONTEXT_WITH_TOKENS,
     RECOMMENDED_MAX_MESSAGES_IN_CONTEXT,
     RECOMMENDED_MAX_TOKENS_IN_CONTEXT,
+    RECOMMENDED_TOOL_RELEVANCE_THRESHOLD,
+    RECOMMENDED_TOOL_RETRIEVAL_LIMIT,
     RECOMMENDED_VIDEO_ANALYZER_MODE,
     SUBENTRY_TYPE_FEATURE,
     SUBENTRY_TYPE_MODEL_PROVIDER,
@@ -94,6 +98,8 @@ DEFAULT_OPTIONS = {
     CONF_MANAGE_CONTEXT_WITH_TOKENS: RECOMMENDED_MANAGE_CONTEXT_WITH_TOKENS,
     CONF_MAX_TOKENS_IN_CONTEXT: RECOMMENDED_MAX_TOKENS_IN_CONTEXT,
     CONF_MAX_MESSAGES_IN_CONTEXT: RECOMMENDED_MAX_MESSAGES_IN_CONTEXT,
+    CONF_TOOL_RETRIEVAL_LIMIT: RECOMMENDED_TOOL_RETRIEVAL_LIMIT,
+    CONF_TOOL_RELEVANCE_THRESHOLD: RECOMMENDED_TOOL_RELEVANCE_THRESHOLD,
 }
 
 # ---------------------------
@@ -141,6 +147,18 @@ async def _schema_for_options(
             description={"suggested_value": opts.get(CONF_LLM_HASS_API, [])},
             default=[],
         ): SelectSelector(SelectSelectorConfig(options=hass_apis, multiple=True)),
+        vol.Required(
+            CONF_TOOL_RETRIEVAL_LIMIT,
+            default=opts.get(
+                CONF_TOOL_RETRIEVAL_LIMIT, RECOMMENDED_TOOL_RETRIEVAL_LIMIT
+            ),
+        ): NumberSelector(NumberSelectorConfig(min=1, max=20, step=1)),
+        vol.Required(
+            CONF_TOOL_RELEVANCE_THRESHOLD,
+            default=opts.get(
+                CONF_TOOL_RELEVANCE_THRESHOLD, RECOMMENDED_TOOL_RELEVANCE_THRESHOLD
+            ),
+        ): NumberSelector(NumberSelectorConfig(min=0.0, max=1.0, step=0.01)),
         vol.Optional(
             CONF_VIDEO_ANALYZER_MODE,
             description={"suggested_value": opts.get(CONF_VIDEO_ANALYZER_MODE)},

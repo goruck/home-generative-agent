@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -68,6 +68,8 @@ class HGAData:
     proposal_store: ProposalStore | None
     rule_registry: RuleRegistry | None
     baseline_updater: SentinelBaselineUpdater | None = None
+    tool_content_hashes: dict[str, str] = field(default_factory=dict)
+    tool_index_ready: bool = False
 
 
 type HGAConfigEntry = ConfigEntry[HGAData]

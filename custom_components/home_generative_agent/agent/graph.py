@@ -15,6 +15,9 @@ from typing import (
 )
 
 import voluptuous as vol
+from homeassistant.const import (
+    CONF_LLM_HASS_API,
+)
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import llm
 from homeassistant.util import dt as dt_util
@@ -33,6 +36,9 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 from pydantic import ValidationError
 
 from ..const import (  # noqa: TID252
+    ACTUATION_KEYWORDS_REGEX,
+    ACTUATION_LANGCHAIN_TOOLS,
+    ACTUATION_TOOL_PREFIXES,
     CONF_CHAT_MODEL_PROVIDER,
     CONF_CRITICAL_ACTION_PIN_ENABLED,
     CONF_CRITICAL_ACTION_PIN_HASH,
@@ -45,6 +51,8 @@ from ..const import (  # noqa: TID252
     CONF_OLLAMA_CHAT_MODEL,
     CONF_OPENAI_CHAT_MODEL,
     CONF_OPENAI_COMPATIBLE_CHAT_MODEL,
+    CONF_TOOL_RELEVANCE_THRESHOLD,
+    CONF_TOOL_RETRIEVAL_LIMIT,
     EMBEDDING_MODEL_PROMPT_TEMPLATE,
     RECOMMENDED_CRITICAL_ACTIONS,
     SUMMARIZATION_INITIAL_PROMPT,
@@ -76,6 +84,8 @@ class State(MessagesState):
     summary: str
     chat_model_usage_metadata: dict[str, Any]
     messages_to_remove: list[AnyMessage]
+    selected_tools: list[dict[str, Any]]
+    tool_routing_map: dict[str, str]
 
 
 def _determine_model_name(provider: str, opts: dict[str, Any]) -> str:
@@ -541,50 +551,105 @@ async def _find_open_entries(
 # ----- Graph nodes and edges -----
 
 
-async def _call_model(
-    state: State, config: RunnableConfig, *, store: BaseStore
+async def _retrieve_tools(
+    state: State,
+    config: RunnableConfig,
+    *,
+    store: BaseStore,
 ) -> dict[str, Any]:
-    """Coroutine to call the chat model."""
-    if "configurable" not in config:
-        msg = "Configuration for the model is missing."
-        raise HomeAssistantError(msg)
+    """Retrieve relevant tools from the vector store and merge with essentials."""
+    opts = config.get("configurable", {})
+    query = state["messages"][-1].content if state["messages"] else ""
+    if not isinstance(query, str):
+        query = ""
 
-    model = config["configurable"]["chat_model"]
-    user_id = config["configurable"]["user_id"]
-    hass = config["configurable"]["hass"]
-    opts = config["configurable"]["options"]
-    chat_model_options = config["configurable"].get("chat_model_options", {})
+    # Current config
+    limit = opts.get(CONF_TOOL_RETRIEVAL_LIMIT, 5)
+    threshold = opts.get(CONF_TOOL_RELEVANCE_THRESHOLD, 0.15)
+    active_api_ids = opts.get(CONF_LLM_HASS_API, [llm.LLM_API_ASSIST])
+    if isinstance(active_api_ids, str):
+        active_api_ids = [active_api_ids]
 
-    # Retrieve memories (semantic if last message is from user).
-    last_message = state["messages"][-1]
-    last_message_from_user = isinstance(last_message, HumanMessage)
-    query_prompt = (
-        EMBEDDING_MODEL_PROMPT_TEMPLATE.format(query=last_message.content)
-        if last_message_from_user
-        else None
-    )
-    mems = await store.asearch((user_id, "memories"), query=query_prompt, limit=10)
+    # 1. Search across ALL tools (buffering for filtering)
+    results = await store.asearch(("system", "tools"), query=query, limit=limit * 4)
 
-    # Recent camera activity.
-    camera_activity = await get_recent_camera_activity(hass, store)
+    # 2. 'Gatekeeper' Filtering (filter by active provider BEFORE truncation)
+    active_results = []
+    for item in results:
+        api_id = item.value.get("api_id")
+        # Note: score is (1 - distance) for pgvector cosine
+        score = getattr(item, "score", 0.0)
+        if api_id in active_api_ids and score >= threshold:
+            active_results.append(item)
 
-    # Build system message.
-    system_message = config["configurable"]["prompt"]
-    if mems:
-        formatted_mems = "\n".join(f"[{mem.key}]: {mem.value}" for mem in mems)
-        system_message += f"\n<memories>\n{formatted_mems}\n</memories>"
-    if camera_activity:
-        ca = "\n".join(str(a) for a in camera_activity)
-        system_message += f"\n<recent_camera_activity>\n{ca}\n</recent_camera_activity>"
-    if summary := state.get("summary", ""):
-        system_message += (
-            f"\n<past_conversation_summary>\n{summary}\n</past_conversation_summary>"
+    # 3. Truncate to Top-N
+    top_results = active_results[:limit]
+
+    # 4. Routing Map & Safety Net
+    routing_map: dict[str, str] = {}
+    selected_tools: list[dict[str, Any]] = []
+
+    def add_to_binding(
+        tool_name: str, api_id: str, description: str, parameters: str
+    ) -> None:
+        # Conflict resolution for routing: prioritize 'assist' for safety net
+        if tool_name in routing_map and routing_map[tool_name] == llm.LLM_API_ASSIST:
+            return
+        routing_map[tool_name] = api_id
+        selected_tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": tool_name,
+                    "description": description,
+                    "parameters": json.loads(parameters),
+                },
+            }
         )
 
-    # Model input = System + current messages.
-    messages = [SystemMessage(content=system_message)] + state["messages"]
+    for item in top_results:
+        add_to_binding(
+            item.value["name"],
+            item.value["api_id"],
+            item.value["description"],
+            item.value["parameters"],
+        )
 
-    # Trim messages to manage context window length.
+    # 5. Actuation Safety Net
+    suggests_actuation = bool(re.search(ACTUATION_KEYWORDS_REGEX, query))
+    if suggests_actuation:
+        # Fetch all available tools from the store to find matches
+        # (Alternatively, we could have indexed these with a specific tag)
+        all_tools = await store.asearch(("system", "tools"), query=query, limit=100)
+        for item in all_tools:
+            name = item.value["name"]
+            api_id = item.value["api_id"]
+            if api_id in active_api_ids:
+                is_actuation = (
+                    any(name.startswith(p) for p in ACTUATION_TOOL_PREFIXES)
+                    or name in ACTUATION_LANGCHAIN_TOOLS
+                )
+                if is_actuation:
+                    add_to_binding(
+                        name,
+                        api_id,
+                        item.value["description"],
+                        item.value["parameters"],
+                    )
+
+    return {
+        "selected_tools": selected_tools,
+        "tool_routing_map": routing_map,
+    }
+
+
+async def _trim_messages_for_model(
+    messages: list[AnyMessage],
+    opts: dict[str, Any],
+    chat_model_options: dict[str, Any],
+    hass: HomeAssistant,
+) -> list[AnyMessage]:
+    """Trim messages to manage context window length."""
     provider = opts.get(CONF_CHAT_MODEL_PROVIDER)
     model_name = _determine_model_name(provider, opts)
     manage_context_with_tokens: bool = (
@@ -606,7 +671,7 @@ async def _call_model(
         max_tokens = context_max_messages
         token_counter = len
 
-    trimmed_messages = await hass.async_add_executor_job(
+    return await hass.async_add_executor_job(
         partial(
             trim_messages,
             messages=messages,
@@ -618,10 +683,71 @@ async def _call_model(
         )
     )
 
-    LOGGER.debug("Model call messages: %s", trimmed_messages)
-    LOGGER.debug("Model call messages length: %s", len(trimmed_messages))
 
-    raw_response = await model.ainvoke(trimmed_messages)
+async def _call_model(
+    state: State, config: RunnableConfig, *, store: BaseStore
+) -> dict[str, Any]:
+    """Coroutine to call the chat model."""
+    if "configurable" not in config:
+        msg = "Configuration for the model is missing."
+        raise HomeAssistantError(msg)
+
+    conf = config["configurable"]
+    model = conf["chat_model"]
+    user_id = conf["user_id"]
+    hass = conf["hass"]
+    opts = conf["options"]
+    chat_model_options = conf.get("chat_model_options", {})
+
+    # Retrieve memories (semantic if last message is from user).
+    last_message = state["messages"][-1]
+    last_message_from_user = isinstance(last_message, HumanMessage)
+    query_prompt = None
+    if last_message_from_user:
+        query_prompt = EMBEDDING_MODEL_PROMPT_TEMPLATE.format(
+            query=last_message.content
+        )
+
+    mems = await store.asearch((user_id, "memories"), query=query_prompt, limit=10)
+
+    # Recent camera activity.
+    camera_activity = await get_recent_camera_activity(hass, store)
+
+    # Build system message.
+    system_message = conf["prompt"]
+    if mems:
+        formatted_mems = "\n".join(f"[{mem.key}]: {mem.value}" for mem in mems)
+        system_message += f"\n<memories>\n{formatted_mems}\n</memories>"
+    if camera_activity:
+        ca = "\n".join(str(a) for a in camera_activity)
+        system_message += f"\n<recent_camera_activity>\n{ca}\n</recent_camera_activity>"
+    if summary := state.get("summary", ""):
+        system_message += (
+            f"\n<past_conversation_summary>\n{summary}\n</past_conversation_summary>"
+        )
+
+    # Model input = System + current messages.
+    messages = [SystemMessage(content=system_message)] + state["messages"]
+
+    trimmed_messages = await _trim_messages_for_model(
+        messages, opts, chat_model_options, hass
+    )
+
+    LOGGER.debug("Model call messages: %s", trimmed_messages)
+
+    # Bind retrieved tools
+    selected_tools = state.get("selected_tools", [])
+    if selected_tools:
+        model = model.bind_tools(selected_tools)
+
+    # Pass routing map to MultiLLMAPI
+    routing_map = state.get("tool_routing_map", {})
+    configurable = config.get("configurable", {})
+    llm_api = configurable.get("ha_llm_api")
+    if llm_api and hasattr(llm_api, "routing_map"):
+        llm_api.routing_map = routing_map
+
+    raw_response = await model.ainvoke(trimmed_messages, config)
     LOGGER.debug("Raw chat model response: %s", raw_response)
 
     response = extract_final(getattr(raw_response, "content", "") or "")
@@ -886,12 +1012,14 @@ def _should_continue(
 workflow = StateGraph(State)
 
 # Define nodes.
+workflow.add_node("retrieve_tools", _retrieve_tools)
 workflow.add_node("agent", _call_model)
 workflow.add_node("action", _call_tools)
 workflow.add_node("summarize_and_remove_messages", _summarize_and_remove_messages)
 
 # Define edges.
-workflow.add_edge(START, "agent")
+workflow.add_edge(START, "retrieve_tools")
+workflow.add_edge("retrieve_tools", "agent")
 workflow.add_conditional_edges("agent", _should_continue)
 workflow.add_edge("action", "agent")
 workflow.add_edge("summarize_and_remove_messages", END)

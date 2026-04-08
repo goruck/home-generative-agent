@@ -812,3 +812,36 @@ ACTION_POLICY_BLOCKED = "blocked"
 DATA_QUALITY_FRESH = "fresh"
 DATA_QUALITY_STALE = "stale"
 DATA_QUALITY_UNAVAILABLE = "unavailable"
+
+# ---------------- RAG Tool Selection ----------------
+CONF_TOOL_RETRIEVAL_LIMIT = "tool_retrieval_limit"
+RECOMMENDED_TOOL_RETRIEVAL_LIMIT = 5
+
+CONF_TOOL_RELEVANCE_THRESHOLD = "tool_relevance_threshold"
+RECOMMENDED_TOOL_RELEVANCE_THRESHOLD = 0.15
+
+# Actuation Safety Net: Keywords that trigger force-attachment of control tools
+ACTUATION_KEYWORDS_REGEX = (
+    r"(?i)\b(turn|switch|lock|unlock|open|close|set|activate|deactivate|arm|"
+    r"disarm|start|stop|dim|brighten|play|pause|mute|run|trigger|enable|"
+    r"disable|toggle|lock.*)\b"
+)
+
+# Tool prefixes/names for actuation safety net
+ACTUATION_TOOL_PREFIXES = (
+    "HassTurn",
+    "HassLight",
+    "HassLock",
+    "HassCover",
+    "HassClimate",
+    "HassVacuum",
+    "HassMedia",
+    "HassValve",
+    "HassFan",
+    "HassWaterHeater",
+)
+
+ACTUATION_LANGCHAIN_TOOLS = (
+    "alarm_control",
+    "confirm_sensitive_action",
+)

@@ -508,3 +508,18 @@ def extract_final(raw: str, max_chars: int | None = None) -> str:
     if last_space > 0:
         return segment[:last_space].rstrip(" ,;")
     return segment.rstrip(" ,;")
+
+
+async def gather_store_puts_in_chunks(
+    tasks: list[Any],
+    *,
+    chunk_size: int = 4,
+    sleep_s: float = 0.01,
+) -> None:
+    """Await store.aput coroutines in sequential chunks (embedding provider limits)."""
+    if not tasks:
+        return
+    n = len(tasks)
+    for i in range(0, n, chunk_size):
+        await asyncio.gather(*tasks[i : i + chunk_size])
+        await asyncio.sleep(sleep_s)
