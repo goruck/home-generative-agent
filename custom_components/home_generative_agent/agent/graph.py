@@ -12,6 +12,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Literal,
+    TypedDict,
 )
 
 import voluptuous as vol
@@ -63,6 +64,8 @@ from ..const import (  # noqa: TID252
 from ..core.utils import extract_final  # noqa: TID252
 from .camera_activity import get_recent_camera_activity
 from .helpers import (
+    format_tool,
+    is_actuation_tool,
     maybe_fill_lock_entity,
     normalize_intent_for_alarm,
     normalize_intent_for_lock,
@@ -548,6 +551,182 @@ async def _find_open_entries(
     return open_entries
 
 
+class RawTool(TypedDict):
+    """Represent a tool before formatting for the LLM."""
+
+    name: str
+    api_id: str
+    description: str
+    parameters: str
+    is_actuation: bool
+
+
+def _get_allowed_api_ids(config: RunnableConfig) -> set[str]:
+    """Determine which API IDs are allowed based on configuration."""
+    opts = config.get("configurable", {}).get("options", {})
+    active_api_ids = opts.get(CONF_LLM_HASS_API, [llm.LLM_API_ASSIST])
+    if isinstance(active_api_ids, str):
+        active_api_ids = [active_api_ids]
+    return set(active_api_ids) | {"hga_local"}
+
+
+async def _get_rag_retrieved_tools(
+    store: BaseStore,
+    config: RunnableConfig,
+    query: str,
+    allowed_api_ids: set[str],
+) -> list[RawTool]:
+    """Search for tools in the vector store and filter by score/API."""
+    tool_index_ready = config.get("configurable", {}).get("tool_index_ready", True)
+    if not tool_index_ready:
+        return []
+
+    opts = config.get("configurable", {}).get("options", {})
+    limit = opts.get(CONF_TOOL_RETRIEVAL_LIMIT, 5)
+    threshold = opts.get(CONF_TOOL_RELEVANCE_THRESHOLD, 0.15)
+
+    try:
+        results = await store.asearch(("system", "tools"), query=query, limit=limit * 4)
+    except Exception:
+        LOGGER.exception("RAG tool retrieval search failed; falling back")
+        return []
+
+    raw_tools: list[RawTool] = []
+    for item in results:
+        api_id = item.value.get("api_id")
+        # Note: score is (1 - distance) for pgvector cosine
+        score = getattr(item, "score", 0.0)
+        if api_id in allowed_api_ids and score >= threshold:
+            raw_tools.append(
+                RawTool(
+                    name=item.value["name"],
+                    api_id=item.value["api_id"],
+                    description=item.value["description"],
+                    parameters=item.value["parameters"],
+                    is_actuation=item.value.get("is_actuation", False),
+                )
+            )
+
+    return raw_tools[:limit]
+
+
+async def _get_actuation_safety_tools(
+    store: BaseStore,
+    config: RunnableConfig,
+    query: str,
+    allowed_api_ids: set[str],
+) -> list[RawTool]:
+    """Find essential actuation tools if the query suggests actuation."""
+    tool_index_ready = config.get("configurable", {}).get("tool_index_ready", True)
+    if not tool_index_ready or not re.search(ACTUATION_KEYWORDS_REGEX, query):
+        return []
+
+    try:
+        # Optimization: use store.alist with a filter to find actuation tools.
+        # Fall back to in-memory filtering if store doesn't handle the filter.
+        results = await store.alist(
+            ("system", "tools"), filter={"is_actuation": True}
+        )
+    except Exception:
+        LOGGER.warning("Deterministic tool filter failed; falling back to full list")
+        try:
+            results = await store.alist(("system", "tools"))
+        except Exception:
+            LOGGER.exception("Actuation safety net tool list failed; falling back")
+            return []
+
+    safety_tools: list[RawTool] = []
+    for item in results:
+        val = item.value
+        name = val["name"]
+        is_actuation = val.get("is_actuation", False)
+
+        # Fallback check if the store's filter was ignored or is_actuation is missing.
+        if not is_actuation:
+            is_actuation = is_actuation_tool(name)
+
+        if is_actuation and val.get("api_id") in allowed_api_ids:
+            safety_tools.append(
+                RawTool(
+                    name=name,
+                    api_id=val["api_id"],
+                    description=val["description"],
+                    parameters=val["parameters"],
+                    is_actuation=True,
+                )
+            )
+    return safety_tools
+
+
+def _get_fallback_tools(
+    config: RunnableConfig,
+    allowed_api_ids: set[str],
+) -> list[RawTool]:
+    """Gather all available tools as a fallback when none are selected."""
+    fallback_tools: list[RawTool] = []
+
+    ha_llm_api = config.get("configurable", {}).get("ha_llm_api")
+    if ha_llm_api and hasattr(ha_llm_api, "apis"):
+        for api_id, api in ha_llm_api.apis.items():
+            if api_id in allowed_api_ids:
+                for tool in api.tools:
+                    formatted = format_tool(tool, api.custom_serializer)
+                    f_func = formatted["function"]
+                    name = tool.name
+                    fallback_tools.append(
+                        RawTool(
+                            name=name,
+                            api_id=api_id,
+                            description=f_func.get("description", ""),
+                            parameters=json.dumps(f_func["parameters"]),
+                            is_actuation=is_actuation_tool(name),
+                        )
+                    )
+
+    langchain_tools = config.get("configurable", {}).get("langchain_tools", {})
+    for name, lc_tool in langchain_tools.items():
+        params = "{}"
+        if hasattr(lc_tool, "args_schema") and lc_tool.args_schema:
+            params = json.dumps(lc_tool.args_schema.schema())
+        fallback_tools.append(
+            RawTool(
+                name=name,
+                api_id="hga_local",
+                description=lc_tool.description,
+                parameters=params,
+                is_actuation=is_actuation_tool(name),
+            )
+        )
+    return fallback_tools
+
+
+def _format_and_dedupe_tools(
+    raw_tools: list[RawTool],
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    """Convert raw tools to output format and deduplicate (first-seen wins)."""
+    selected_tools: list[dict[str, Any]] = []
+    routing_map: dict[str, str] = {}
+
+    for tool in raw_tools:
+        name = tool["name"]
+        if name in routing_map:
+            continue
+
+        routing_map[name] = tool["api_id"]
+        selected_tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": tool["description"],
+                    "parameters": json.loads(tool["parameters"]),
+                },
+            }
+        )
+
+    return selected_tools, routing_map
+
+
 # ----- Graph nodes and edges -----
 
 
@@ -558,84 +737,27 @@ async def _retrieve_tools(
     store: BaseStore,
 ) -> dict[str, Any]:
     """Retrieve relevant tools from the vector store and merge with essentials."""
-    opts = config.get("configurable", {})
     query = state["messages"][-1].content if state["messages"] else ""
     if not isinstance(query, str):
         query = ""
 
-    # Current config
-    limit = opts.get(CONF_TOOL_RETRIEVAL_LIMIT, 5)
-    threshold = opts.get(CONF_TOOL_RELEVANCE_THRESHOLD, 0.15)
-    active_api_ids = opts.get(CONF_LLM_HASS_API, [llm.LLM_API_ASSIST])
-    if isinstance(active_api_ids, str):
-        active_api_ids = [active_api_ids]
+    allowed_api_ids = _get_allowed_api_ids(config)
 
-    # 1. Search across ALL tools (buffering for filtering)
-    results = await store.asearch(("system", "tools"), query=query, limit=limit * 4)
+    # 1. Gather candidates
+    rag_tools = await _get_rag_retrieved_tools(store, config, query, allowed_api_ids)
+    safety_tools = await _get_actuation_safety_tools(
+        store, config, query, allowed_api_ids
+    )
 
-    # 2. 'Gatekeeper' Filtering (filter by active provider BEFORE truncation)
-    active_results = []
-    for item in results:
-        api_id = item.value.get("api_id")
-        # Note: score is (1 - distance) for pgvector cosine
-        score = getattr(item, "score", 0.0)
-        if api_id in active_api_ids and score >= threshold:
-            active_results.append(item)
+    # 2. Merge (RAG has priority)
+    all_candidates = rag_tools + safety_tools
 
-    # 3. Truncate to Top-N
-    top_results = active_results[:limit]
+    # 3. Fallback
+    if not all_candidates:
+        all_candidates = _get_fallback_tools(config, allowed_api_ids)
 
-    # 4. Routing Map & Safety Net
-    routing_map: dict[str, str] = {}
-    selected_tools: list[dict[str, Any]] = []
-
-    def add_to_binding(
-        tool_name: str, api_id: str, description: str, parameters: str
-    ) -> None:
-        # Conflict resolution for routing: prioritize 'assist' for safety net
-        if tool_name in routing_map and routing_map[tool_name] == llm.LLM_API_ASSIST:
-            return
-        routing_map[tool_name] = api_id
-        selected_tools.append(
-            {
-                "type": "function",
-                "function": {
-                    "name": tool_name,
-                    "description": description,
-                    "parameters": json.loads(parameters),
-                },
-            }
-        )
-
-    for item in top_results:
-        add_to_binding(
-            item.value["name"],
-            item.value["api_id"],
-            item.value["description"],
-            item.value["parameters"],
-        )
-
-    # 5. Actuation Safety Net
-    suggests_actuation = bool(re.search(ACTUATION_KEYWORDS_REGEX, query))
-    if suggests_actuation:
-        # Fetch all available tools from the store to find matches
-        # (Alternatively, we could have indexed these with a specific tag)
-        all_tools = await store.asearch(("system", "tools"), query=query, limit=100)
-        for item in all_tools:
-            name = item.value["name"]
-            api_id = item.value["api_id"]
-            if api_id in active_api_ids:
-                is_actuation = (
-                    any(name.startswith(p) for p in ACTUATION_TOOL_PREFIXES)
-                    or name in ACTUATION_LANGCHAIN_TOOLS
-                )
-                if is_actuation:
-                    add_to_binding(
-                        name,
-                        api_id,
-                        item.value["description"],
-                        item.value["parameters"],
-                    )
+    # 4. Format and deduplicate
+    selected_tools, routing_map = _format_and_dedupe_tools(all_candidates)
 
     return {
         "selected_tools": selected_tools,

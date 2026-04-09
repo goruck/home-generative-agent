@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING, Final
 from urllib.parse import urljoin
 
 import aiofiles
-import async_timeout
 import homeassistant.util.dt as dt_util
 import httpx
 from homeassistant.components.camera.const import DOMAIN as CAMERA_DOMAIN
@@ -296,7 +295,7 @@ class VideoAnalyzer:
         if not frame_descriptions:
             return None
         try:
-            async with async_timeout.timeout(_SUMMARY_TIMEOUT_SEC):
+            async with asyncio.timeout(_SUMMARY_TIMEOUT_SEC):
                 msg: str = await self._generate_summary(frame_descriptions)
         except TimeoutError as exc:
             LOGGER.warning("[%s] Summary timed out: %s", camera_id, exc)
@@ -448,7 +447,7 @@ class VideoAnalyzer:
         raise ValueError(msg)
 
     async def _is_anomaly(self, camera_name: str, msg: str, first_path: str) -> bool:
-        async with async_timeout.timeout(10):
+        async with asyncio.timeout(10):
             search_results = await self.entry.runtime_data.store.asearch(
                 ("video_analysis", camera_name), query=msg, limit=10
             )
@@ -643,7 +642,7 @@ class VideoAnalyzer:
 
             # Face recognition: short timeout
             try:
-                async with async_timeout.timeout(_FACE_TIMEOUT_SEC):
+                async with asyncio.timeout(_FACE_TIMEOUT_SEC):
                     faces_in_frame = await self.recognize_faces(data, camera_id)
             except TimeoutError:
                 LOGGER.warning(
@@ -655,7 +654,7 @@ class VideoAnalyzer:
             try:
                 async with (
                     _global_vision_sem,
-                    async_timeout.timeout(_VISION_TIMEOUT_SEC),
+                    asyncio.timeout(_VISION_TIMEOUT_SEC),
                 ):
                     frame_description = await analyze_image(
                         self.entry.runtime_data.vision_model,
@@ -752,7 +751,7 @@ class VideoAnalyzer:
     async def _store_results(self, camera_id: str, batch: list[Path], msg: str) -> None:
         """Store the analysis results in the vector DB."""
         camera_name = camera_id.rsplit(".", maxsplit=1)[-1]
-        async with async_timeout.timeout(10):
+        async with asyncio.timeout(10):
             await self.entry.runtime_data.store.aput(
                 namespace=("video_analysis", camera_name),
                 key=batch[0].name,

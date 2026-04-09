@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, cast
 
 import aiofiles
-import async_timeout
 import homeassistant.util.dt as dt_util
 import voluptuous as vol
 import yaml
@@ -289,7 +288,7 @@ async def _get_camera_image(hass: HomeAssistant, camera_name: str) -> bytes | No
             await asyncio.sleep(backoff_base * (attempt - 1))
 
         try:
-            async with async_timeout.timeout(timeout_sec):
+            async with asyncio.timeout(timeout_sec):
                 image = await camera.async_get_image(
                     hass=hass,
                     entity_id=camera_entity_id,

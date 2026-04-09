@@ -12,7 +12,6 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urljoin, urlparse
 
-import async_timeout
 import httpx
 import psycopg
 from homeassistant.core import HomeAssistant
@@ -261,7 +260,7 @@ async def validate_ollama_url(
     base_url = ensure_http_url(base_url)
     client = get_async_client(hass)
     try:
-        async with async_timeout.timeout(timeout_s):
+        async with asyncio.timeout(timeout_s):
             resp = await client.get(urljoin(base_url.rstrip("/") + "/", "api/tags"))
     except (TimeoutError, httpx.RequestError) as err:
         LOGGER.debug("Ollama connectivity exception: %s", err)
@@ -280,7 +279,7 @@ async def list_ollama_models(  # noqa: PLR0911
     base_url = ensure_http_url(base_url)
     client = get_async_client(hass)
     try:
-        async with async_timeout.timeout(timeout_s):
+        async with asyncio.timeout(timeout_s):
             resp = await client.get(urljoin(base_url.rstrip("/") + "/", "api/tags"))
     except (TimeoutError, httpx.RequestError):
         return []
@@ -313,7 +312,7 @@ async def validate_openai_key(
         return
     client = get_async_client(hass)
     try:
-        async with async_timeout.timeout(timeout_s):
+        async with asyncio.timeout(timeout_s):
             resp = await client.get(
                 "https://api.openai.com/v1/models",
                 headers={"Authorization": f"Bearer {api_key}"},
@@ -343,7 +342,7 @@ async def validate_openai_compatible_url(
         headers["Authorization"] = f"Bearer {api_key}"
     client = get_async_client(hass)
     try:
-        async with async_timeout.timeout(timeout_s):
+        async with asyncio.timeout(timeout_s):
             resp = await client.get(url, headers=headers)
     except (TimeoutError, httpx.RequestError) as err:
         LOGGER.debug("OpenAI-compatible connectivity exception: %s", err)
@@ -382,7 +381,7 @@ async def validate_gemini_key(
         return
     client = get_async_client(hass)
     try:
-        async with async_timeout.timeout(timeout_s):
+        async with asyncio.timeout(timeout_s):
             resp = await client.get(
                 f"https://generativelanguage.googleapis.com/v1/models?key={api_key}"
             )
@@ -405,7 +404,7 @@ async def validate_face_api_url(
     base_url = ensure_http_url(base_url)
     client = get_async_client(hass)
     try:
-        async with async_timeout.timeout(timeout_s):
+        async with asyncio.timeout(timeout_s):
             resp = await client.get(urljoin(base_url.rstrip("/") + "/", "status"))
     except (TimeoutError, httpx.RequestError) as err:
         LOGGER.debug("Face API connectivity exception: %s", err)

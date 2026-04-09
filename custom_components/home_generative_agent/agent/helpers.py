@@ -5,10 +5,17 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Any, TypedDict
 
+from voluptuous_openapi import convert
+from ..const import (
+    ACTUATION_LANGCHAIN_TOOLS,
+    ACTUATION_TOOL_PREFIXES,
+)
+
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
     from homeassistant.core import HomeAssistant
+    from homeassistant.helpers import llm
 
 
 class ConfigurableData(TypedDict, total=False):
@@ -141,3 +148,26 @@ def normalize_intent_for_lock(
     else:
         normalized.setdefault("service", "lock")
     return normalized
+
+
+def format_tool(
+    tool: llm.Tool, custom_serializer: Callable[[Any], Any] | None
+) -> dict[str, Any]:
+    """Format Home Assistant LLM tools to be compatible with OpenAI format."""
+    tool_spec = {
+        "name": tool.name,
+        "parameters": convert(tool.parameters, custom_serializer=custom_serializer),
+    }
+    if tool.description:
+        tool_spec["description"] = tool.description
+    return {"type": "function", "function": tool_spec}
+def is_actuation_tool(name: str) -> bool:
+    """Check if a tool name indicates an actuation tool."""
+    name_lower = name.lower()
+    # Check exact matches first (greedy check for specific tools)
+    if name_lower in {t.lower() for t in ACTUATION_LANGCHAIN_TOOLS}:
+        return True
+    # Check prefix matches for provider tools
+    if any(name_lower.startswith(p.lower()) for p in ACTUATION_TOOL_PREFIXES):
+        return True
+    return False

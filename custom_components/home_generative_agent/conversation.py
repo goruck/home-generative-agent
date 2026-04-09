@@ -24,6 +24,7 @@ from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
 from voluptuous_openapi import convert
 
 from .agent.graph import workflow
+from .agent.helpers import format_tool, is_actuation_tool
 from .agent.rag_embedding_text import (
     strip_for_embedding,
     truncate_for_embedding_index,
@@ -61,12 +62,12 @@ from .core.utils import gather_store_puts_in_chunks
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from agent.graph import State
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
     from langchain_core.runnables import RunnableConfig
 
+    from .agent.graph import State
     from .core.runtime import HGAConfigEntry, HGAData
 
 _LOGGER = logging.getLogger(__name__)
@@ -81,19 +82,6 @@ elif LANGCHAIN_LOGGING_LEVEL == "debug":
 else:
     set_verbose(False)
     set_debug(False)
-
-
-def _format_tool(
-    tool: llm.Tool, custom_serializer: Callable[[Any], Any] | None
-) -> dict[str, Any]:
-    """Format Home Assistant LLM tools to be compatible with OpenAI format."""
-    tool_spec = {
-        "name": tool.name,
-        "parameters": convert(tool.parameters, custom_serializer=custom_serializer),
-    }
-    if tool.description:
-        tool_spec["description"] = tool.description
-    return {"type": "function", "function": tool_spec}
 
 
 def _convert_content(
@@ -163,10 +151,9 @@ async def _run_tool_index_background(
         if index_tasks:
             await gather_store_puts_in_chunks(index_tasks)
         rd.tool_content_hashes.update(tool_hashes)
+        rd.tool_index_ready = True
     except Exception:
         _LOGGER.exception("Global tool index background task failed")
-    finally:
-        rd.tool_index_ready = True
 
 
 async def async_setup_entry(
@@ -302,9 +289,11 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                             ),
                             sort_keys=True,
                         )
+                        is_actuation = is_actuation_tool(tool.name)
                         raw_content = (
                             f"provider:{api_id}\nname:{tool.name}\n"
-                            f"description:{tool.description}\nparameters:{schema_json}"
+                            f"description:{tool.description}\nparameters:{schema_json}\n"
+                            f"actuation:{is_actuation}"
                         )
                         content_hash = hashlib.sha256(raw_content.encode()).hexdigest()
 
@@ -329,6 +318,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                                         "api_id": api_id,
                                         "description": tool.description,
                                         "parameters": schema_json,
+                                        "is_actuation": is_actuation,
                                     },
                                 )
                             )
@@ -350,12 +340,21 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             }
             for t_name, t_func in local_tools.items():
                 try:
+                    # Extract the JSON schema for local tools
+                    params = "{}"
+                    if hasattr(t_func, "args_schema") and t_func.args_schema:
+                        params = json.dumps(
+                            t_func.args_schema.schema(), sort_keys=True
+                        )
+
+                    is_actuation = is_actuation_tool(t_name)
                     # LangChain tools have .name, .description,
                     # and .args_schema (or similar)
                     # We'll use a simplified schema extraction for indexing
                     raw_content = (
                         f"provider:hga_local\nname:{t_name}\n"
-                        f"description:{t_func.description}"
+                        f"description:{t_func.description}\nparameters:{params}\n"
+                        f"actuation:{is_actuation}"
                     )
                     content_hash = hashlib.sha256(raw_content.encode()).hexdigest()
                     tool_key = f"hga_local::{t_name}"
@@ -366,16 +365,6 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                         embedding_text = strip_for_embedding(
                             f"{t_name}: {t_func.description}"
                         )
-                        # We need the JSON schema for actual binding.
-                        # For local tools, we'll store a placeholder.
-                        # Actually, selected_tools in graph.py expects parameters.
-                        # We extract it from t_func.args_schema.schema()
-                        # if it exists.
-                        params = "{}"
-                        if hasattr(t_func, "args_schema") and t_func.args_schema:
-                            params = json.dumps(
-                                t_func.args_schema.schema(), sort_keys=True
-                            )
 
                         index_tasks.append(
                             runtime_data.store.aput(
@@ -389,6 +378,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                                     "api_id": "hga_local",
                                     "description": t_func.description,
                                     "parameters": params,
+                                    "is_actuation": is_actuation,
                                 },
                             )
                         )
@@ -420,7 +410,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
 
         tools = (
             [
-                _format_tool(tool, api.custom_serializer)
+                format_tool(tool, api.custom_serializer)
                 for api in active_apis.values()
                 for tool in api.tools
             ]
@@ -551,6 +541,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 "ha_llm_api": llm_api or None,
                 "hass": hass,
                 "pending_actions": runtime_data.pending_actions,
+                "tool_index_ready": runtime_data.tool_index_ready,
             },
             "recursion_limit": 10,
         }
