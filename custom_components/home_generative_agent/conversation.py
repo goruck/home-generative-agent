@@ -259,143 +259,31 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             active_api_ids = [active_api_ids]
 
         active_apis: dict[str, llm.APIInstance] = {}
+        failed_apis: list[str] = []
         for api_id in active_api_ids:
             try:
                 api = await llm.async_get_api(hass, api_id, llm_context)
                 active_apis[api_id] = api
             except HomeAssistantError:
                 _LOGGER.warning("Could not load LLM API: %s", api_id)
+                failed_apis.append(api_id)
+
+        if not active_apis:
+            intent_response.async_set_error(
+                intent.IntentResponseErrorCode.UNKNOWN,
+                "No LLM APIs could be loaded. "
+                f"Failed: {', '.join(failed_apis)}. "
+                f"Configured: {', '.join(active_api_ids)}",
+            )
+            return conversation.ConversationResult(
+                response=intent_response, conversation_id=conversation_id
+            )
 
         # Multi-API initialization
         llm_api = MultiLLMAPI(active_apis, {})
 
         # --- Global Tool Indexing (Background) ---
-        if not runtime_data.tool_index_ready:
-            all_available_api_ids = [api.id for api in llm.async_get_apis(hass)]
-            index_tasks = []
-            new_hashes = {}
-
-            # 1. Index Providers
-            for api_id in all_available_api_ids:
-                try:
-                    # Isolate each provider discovery
-                    api_instance = await llm.async_get_api(hass, api_id, llm_context)
-                    for tool in api_instance.tools:
-                        # Composite hash: api_id + name + description + schema
-                        schema_json = json.dumps(
-                            convert(
-                                tool.parameters,
-                                custom_serializer=api_instance.custom_serializer,
-                            ),
-                            sort_keys=True,
-                        )
-                        is_actuation = is_actuation_tool(tool.name)
-                        raw_content = (
-                            f"provider:{api_id}\nname:{tool.name}\n"
-                            f"description:{tool.description}\nparameters:{schema_json}\n"
-                            f"actuation:{is_actuation}"
-                        )
-                        content_hash = hashlib.sha256(raw_content.encode()).hexdigest()
-
-                        tool_key = f"{api_id}::{tool.name}"
-                        if (
-                            runtime_data.tool_content_hashes.get(tool_key)
-                            != content_hash
-                        ):
-                            # Prep for embedding
-                            embedding_text = strip_for_embedding(
-                                f"{tool.name}: {tool.description}"
-                            )
-                            index_tasks.append(
-                                runtime_data.store.aput(
-                                    ("system", "tools"),
-                                    key=tool_key,
-                                    value={
-                                        "content": truncate_for_embedding_index(
-                                            embedding_text
-                                        ),
-                                        "name": tool.name,
-                                        "api_id": api_id,
-                                        "description": tool.description,
-                                        "parameters": schema_json,
-                                        "is_actuation": is_actuation,
-                                    },
-                                )
-                            )
-                            new_hashes[tool_key] = content_hash
-                except Exception as err:  # noqa: BLE001
-                    _LOGGER.warning("Failed to index tool provider %s: %s", api_id, err)
-
-            # 2. Index Local LangChain Tools (provider: hga_local)
-            local_tools = {
-                "get_and_analyze_camera_image": get_and_analyze_camera_image,
-                "get_camera_last_events": get_camera_last_events,
-                "upsert_memory": upsert_memory,
-                "get_entity_history": get_entity_history,
-                "confirm_sensitive_action": confirm_sensitive_action,
-                "alarm_control": alarm_control,
-                "resolve_entity_ids": resolve_entity_ids,
-                "write_yaml_file": write_yaml_file,
-                "add_automation": add_automation,
-            }
-            for t_name, t_func in local_tools.items():
-                try:
-                    # Extract the JSON schema for local tools
-                    params = "{}"
-                    if hasattr(t_func, "args_schema") and t_func.args_schema:
-                        params = json.dumps(
-                            t_func.args_schema.schema(), sort_keys=True
-                        )
-
-                    is_actuation = is_actuation_tool(t_name)
-                    # LangChain tools have .name, .description,
-                    # and .args_schema (or similar)
-                    # We'll use a simplified schema extraction for indexing
-                    raw_content = (
-                        f"provider:hga_local\nname:{t_name}\n"
-                        f"description:{t_func.description}\nparameters:{params}\n"
-                        f"actuation:{is_actuation}"
-                    )
-                    content_hash = hashlib.sha256(raw_content.encode()).hexdigest()
-                    tool_key = f"hga_local::{t_name}"
-                    if (
-                        tool_key not in new_hashes
-                        or new_hashes.get(tool_key) != content_hash
-                    ):
-                        embedding_text = strip_for_embedding(
-                            f"{t_name}: {t_func.description}"
-                        )
-
-                        index_tasks.append(
-                            runtime_data.store.aput(
-                                ("system", "tools"),
-                                key=tool_key,
-                                value={
-                                    "content": truncate_for_embedding_index(
-                                        embedding_text
-                                    ),
-                                    "name": t_name,
-                                    "api_id": "hga_local",
-                                    "description": t_func.description,
-                                    "parameters": params,
-                                    "is_actuation": is_actuation,
-                                },
-                            )
-                        )
-                        new_hashes[tool_key] = content_hash
-                except Exception as err:  # noqa: BLE001
-                    _LOGGER.warning("Failed to index local tool %s: %s", t_name, err)
-
-            if index_tasks:
-                hass.async_create_task(
-                    _run_tool_index_background(
-                        index_tasks=index_tasks,
-                        tool_hashes=new_hashes,
-                        rd=runtime_data,
-                    )
-                )
-            else:
-                runtime_data.tool_index_ready = True
+        await self._async_index_tools(llm_context, runtime_data)
 
         if not options.get(CONF_SCHEMA_FIRST_YAML, False) and _is_dashboard_request(
             user_input.text
@@ -562,6 +450,8 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             "summary": "",
             "chat_model_usage_metadata": {},
             "messages_to_remove": [],
+            "selected_tools": [],
+            "tool_routing_map": {},
         }
 
         # Interact with agent app.
@@ -600,6 +490,162 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         return conversation.ConversationResult(
             response=intent_response, conversation_id=conversation_id
         )
+
+    async def _async_discover_provider_tools(
+        self,
+        llm_context: llm.LLMContext,
+        runtime_data: HGAData,
+        all_available_api_ids: list[str],
+        index_tasks: list[Any],
+        new_hashes: dict[str, str],
+    ) -> None:
+        """Discover and prepare provider tools for indexing."""
+        for api_id in all_available_api_ids:
+            try:
+                # Isolate each provider discovery
+                api_instance = await llm.async_get_api(self.hass, api_id, llm_context)
+                for tool in api_instance.tools:
+                    # Composite hash: api_id + name + description + schema
+                    schema_json = json.dumps(
+                        convert(
+                            tool.parameters,
+                            custom_serializer=api_instance.custom_serializer,
+                        ),
+                        sort_keys=True,
+                    )
+                    is_actuation = is_actuation_tool(tool.name)
+                    raw_content = (
+                        f"provider:{api_id}\nname:{tool.name}\n"
+                        f"description:{tool.description}\nparameters:{schema_json}\n"
+                        f"actuation:{is_actuation}"
+                    )
+                    content_hash = hashlib.sha256(raw_content.encode()).hexdigest()
+
+                    tool_key = f"{api_id}::{tool.name}"
+                    if runtime_data.tool_content_hashes.get(tool_key) != content_hash:
+                        # Prep for embedding
+                        embedding_text = strip_for_embedding(
+                            f"{tool.name}: {tool.description}"
+                        )
+                        index_tasks.append(
+                            runtime_data.store.aput(
+                                ("system", "tools"),
+                                key=tool_key,
+                                value={
+                                    "content": truncate_for_embedding_index(
+                                        embedding_text
+                                    ),
+                                    "name": tool.name,
+                                    "api_id": api_id,
+                                    "description": tool.description,
+                                    "parameters": schema_json,
+                                    "is_actuation": is_actuation,
+                                },
+                            )
+                        )
+                        new_hashes[tool_key] = content_hash
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.warning("Failed to index tool provider %s: %s", api_id, err)
+
+    async def _async_discover_local_tools(
+        self,
+        runtime_data: HGAData,
+        index_tasks: list[Any],
+        new_hashes: dict[str, str],
+    ) -> None:
+        """Discover and prepare local tools for indexing."""
+        local_tools = {
+            "get_and_analyze_camera_image": get_and_analyze_camera_image,
+            "get_camera_last_events": get_camera_last_events,
+            "upsert_memory": upsert_memory,
+            "get_entity_history": get_entity_history,
+            "confirm_sensitive_action": confirm_sensitive_action,
+            "alarm_control": alarm_control,
+            "resolve_entity_ids": resolve_entity_ids,
+            "write_yaml_file": write_yaml_file,
+            "add_automation": add_automation,
+        }
+        for t_name, t_func in local_tools.items():
+            try:
+                # Extract the JSON schema for local tools
+                params = "{}"
+                args_schema = getattr(t_func, "args_schema", None)
+                if args_schema is not None:
+                    try:
+                        # Use getattr to avoid pyright errors
+                        # on potential dict types
+                        schema_func = getattr(args_schema, "schema", None)
+                        if callable(schema_func):
+                            params = json.dumps(schema_func(), sort_keys=True)
+                    except (AttributeError, TypeError, ValueError):
+                        params = "{}"
+
+                is_actuation = is_actuation_tool(t_name)
+                # LangChain tools have .name, .description,
+                # and .args_schema (or similar)
+                # We'll use a simplified schema extraction for indexing
+                raw_content = (
+                    f"provider:hga_local\nname:{t_name}\n"
+                    f"description:{t_func.description}\nparameters:{params}\n"
+                    f"actuation:{is_actuation}"
+                )
+                content_hash = hashlib.sha256(raw_content.encode()).hexdigest()
+                tool_key = f"hga_local::{t_name}"
+                if (
+                    tool_key not in new_hashes
+                    or new_hashes.get(tool_key) != content_hash
+                ):
+                    embedding_text = strip_for_embedding(
+                        f"{t_name}: {t_func.description}"
+                    )
+
+                    index_tasks.append(
+                        runtime_data.store.aput(
+                            ("system", "tools"),
+                            key=tool_key,
+                            value={
+                                "content": truncate_for_embedding_index(embedding_text),
+                                "name": t_name,
+                                "api_id": "hga_local",
+                                "description": t_func.description,
+                                "parameters": params,
+                                "is_actuation": is_actuation,
+                            },
+                        )
+                    )
+                    new_hashes[tool_key] = content_hash
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.warning("Failed to index local tool %s: %s", t_name, err)
+
+    async def _async_index_tools(
+        self, llm_context: llm.LLMContext, runtime_data: HGAData
+    ) -> None:
+        """Discover and index tools in the background vector store."""
+        if runtime_data.tool_index_ready:
+            return
+
+        all_available_api_ids = [api.id for api in llm.async_get_apis(self.hass)]
+        index_tasks: list[Any] = []
+        new_hashes: dict[str, str] = {}
+
+        # 1. Index Providers
+        await self._async_discover_provider_tools(
+            llm_context, runtime_data, all_available_api_ids, index_tasks, new_hashes
+        )
+
+        # 2. Index Local LangChain Tools (provider: hga_local)
+        await self._async_discover_local_tools(runtime_data, index_tasks, new_hashes)
+
+        if index_tasks:
+            self.hass.async_create_task(
+                _run_tool_index_background(
+                    index_tasks=index_tasks,
+                    tool_hashes=new_hashes,
+                    rd=runtime_data,
+                )
+            )
+        else:
+            runtime_data.tool_index_ready = True
 
     async def _async_entry_update_listener(
         self, hass: HomeAssistant, entry: ConfigEntry

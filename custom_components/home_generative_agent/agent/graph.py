@@ -13,6 +13,7 @@ from typing import (
     Any,
     Literal,
     TypedDict,
+    cast,
 )
 
 import voluptuous as vol
@@ -36,10 +37,8 @@ from langchain_core.messages.utils import trim_messages
 from langgraph.graph import END, START, MessagesState, StateGraph
 from pydantic import ValidationError
 
-from ..const import (  # noqa: TID252
+from custom_components.home_generative_agent.const import (
     ACTUATION_KEYWORDS_REGEX,
-    ACTUATION_LANGCHAIN_TOOLS,
-    ACTUATION_TOOL_PREFIXES,
     CONF_CHAT_MODEL_PROVIDER,
     CONF_CRITICAL_ACTION_PIN_ENABLED,
     CONF_CRITICAL_ACTION_PIN_HASH,
@@ -61,6 +60,7 @@ from ..const import (  # noqa: TID252
     SUMMARIZATION_SYSTEM_PROMPT,
     TOOL_CALL_ERROR_TEMPLATE,
 )
+
 from ..core.utils import extract_final  # noqa: TID252
 from .camera_activity import get_recent_camera_activity
 from .helpers import (
@@ -74,6 +74,8 @@ from .helpers import (
 from .token_counter import count_tokens_cross_provider
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from homeassistant.core import HomeAssistant
     from langchain_core.runnables import RunnableConfig
     from langgraph.store.base import BaseStore
@@ -622,15 +624,14 @@ async def _get_actuation_safety_tools(
         return []
 
     try:
-        # Optimization: use store.alist with a filter to find actuation tools.
-        # Fall back to in-memory filtering if store doesn't handle the filter.
-        results = await store.alist(
+        # Optimization: use store.asearch with a filter to find actuation tools.
+        results = await store.asearch(
             ("system", "tools"), filter={"is_actuation": True}
         )
-    except Exception:
+    except Exception:  # noqa: BLE001
         LOGGER.warning("Deterministic tool filter failed; falling back to full list")
         try:
-            results = await store.alist(("system", "tools"))
+            results = await store.asearch(("system", "tools"))
         except Exception:
             LOGGER.exception("Actuation safety net tool list failed; falling back")
             return []
@@ -772,20 +773,21 @@ async def _trim_messages_for_model(
     hass: HomeAssistant,
 ) -> list[AnyMessage]:
     """Trim messages to manage context window length."""
-    provider = opts.get(CONF_CHAT_MODEL_PROVIDER)
+    provider_raw = opts.get(CONF_CHAT_MODEL_PROVIDER)
+    provider = str(provider_raw) if provider_raw else "openai"
     model_name = _determine_model_name(provider, opts)
     manage_context_with_tokens: bool = (
-        opts.get(CONF_MANAGE_CONTEXT_WITH_TOKENS) == "true"
+        str(opts.get(CONF_MANAGE_CONTEXT_WITH_TOKENS)).lower() == "true"
     )
-    context_max_messages: int = opts.get(CONF_MAX_MESSAGES_IN_CONTEXT)
-    context_max_tokens: int = opts.get(CONF_MAX_TOKENS_IN_CONTEXT)
+    context_max_messages: int = int(opts.get(CONF_MAX_MESSAGES_IN_CONTEXT) or 100)
+    context_max_tokens: int = int(opts.get(CONF_MAX_TOKENS_IN_CONTEXT) or 4096)
 
     if manage_context_with_tokens:
         max_tokens = context_max_tokens
         token_counter = partial(
             count_tokens_cross_provider,
             model=model_name,
-            provider=provider,
+            provider=cast("Any", provider),
             options=opts,
             chat_model_options=chat_model_options,
         )
@@ -794,14 +796,17 @@ async def _trim_messages_for_model(
         token_counter = len
 
     return await hass.async_add_executor_job(
-        partial(
-            trim_messages,
-            messages=messages,
-            token_counter=token_counter,
-            max_tokens=max_tokens,
-            strategy="last",
-            start_on="human",
-            include_system=True,
+        cast(
+            "Callable[..., list[AnyMessage]]",
+            partial(
+                trim_messages,
+                messages=messages,
+                token_counter=token_counter,
+                max_tokens=max_tokens,
+                strategy="last",
+                start_on="human",
+                include_system=True,
+            ),
         )
     )
 

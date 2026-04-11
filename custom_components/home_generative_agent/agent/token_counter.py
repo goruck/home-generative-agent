@@ -24,7 +24,7 @@ OPENAI_PREFIXES: tuple[str, ...] = ("gpt",)
 LOGGER = logging.getLogger(__name__)
 
 # ---- Providers ----
-Provider = Literal["openai", "gemini", "ollama"]
+Provider = Literal["openai", "openai_compatible", "gemini", "ollama"]
 
 # ---- Message shapes ----
 MessageLike = BaseMessage | str | tuple[str, str] | list[str] | Mapping[str, Any]

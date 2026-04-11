@@ -6,7 +6,8 @@ import re
 from typing import TYPE_CHECKING, Any, TypedDict
 
 from voluptuous_openapi import convert
-from ..const import (
+
+from custom_components.home_generative_agent.const import (
     ACTUATION_LANGCHAIN_TOOLS,
     ACTUATION_TOOL_PREFIXES,
 )
@@ -161,6 +162,8 @@ def format_tool(
     if tool.description:
         tool_spec["description"] = tool.description
     return {"type": "function", "function": tool_spec}
+
+
 def is_actuation_tool(name: str) -> bool:
     """Check if a tool name indicates an actuation tool."""
     name_lower = name.lower()
@@ -168,6 +171,4 @@ def is_actuation_tool(name: str) -> bool:
     if name_lower in {t.lower() for t in ACTUATION_LANGCHAIN_TOOLS}:
         return True
     # Check prefix matches for provider tools
-    if any(name_lower.startswith(p.lower()) for p in ACTUATION_TOOL_PREFIXES):
-        return True
-    return False
+    return any(name_lower.startswith(p.lower()) for p in ACTUATION_TOOL_PREFIXES)

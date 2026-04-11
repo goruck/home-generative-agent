@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from homeassistant.helpers import llm
 
-from custom_components.home_generative_agent.agent.graph import _retrieve_tools
+from custom_components.home_generative_agent.agent.graph import State, _retrieve_tools
 
 if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
@@ -18,7 +18,14 @@ if TYPE_CHECKING:
 @pytest.mark.asyncio
 async def test_retrieve_tools_fallback_on_empty_store() -> None:
     """Test that _retrieve_tools falls back to all tools if store search returns nothing."""
-    state = {"messages": [MagicMock(content="turn on the lights")]}
+    state: State = {
+        "messages": [MagicMock(content="turn on the lights")],
+        "summary": "",
+        "chat_model_usage_metadata": {},
+        "messages_to_remove": [],
+        "selected_tools": [],
+        "tool_routing_map": {},
+    }
     store = MagicMock()
     # Store returns empty results
     store.asearch = AsyncMock(return_value=[])
@@ -62,7 +69,14 @@ async def test_retrieve_tools_fallback_on_empty_store() -> None:
 @pytest.mark.asyncio
 async def test_retrieve_tools_fallback_on_store_error() -> None:
     """Test that _retrieve_tools falls back to all tools if store search raises an error."""
-    state = {"messages": [MagicMock(content="turn on the lights")]}
+    state: State = {
+        "messages": [MagicMock(content="turn on the lights")],
+        "summary": "",
+        "chat_model_usage_metadata": {},
+        "messages_to_remove": [],
+        "selected_tools": [],
+        "tool_routing_map": {},
+    }
     store = MagicMock()
     # Store raises connection error
     store.asearch = AsyncMock(side_effect=Exception("Connection refused"))
@@ -97,7 +111,14 @@ async def test_retrieve_tools_fallback_on_store_error() -> None:
 @pytest.mark.asyncio
 async def test_retrieve_tools_fallback_on_index_not_ready() -> None:
     """Test that _retrieve_tools falls back to all tools if index is not ready."""
-    state = {"messages": [MagicMock(content="turn on the lights")]}
+    state: State = {
+        "messages": [MagicMock(content="turn on the lights")],
+        "summary": "",
+        "chat_model_usage_metadata": {},
+        "messages_to_remove": [],
+        "selected_tools": [],
+        "tool_routing_map": {},
+    }
     store = MagicMock()
     # Store.asearch should not even be called if tool_index_ready is False
     store.asearch = AsyncMock()
