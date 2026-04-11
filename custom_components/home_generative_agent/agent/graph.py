@@ -16,6 +16,7 @@ from typing import (
     cast,
 )
 
+import psycopg
 import voluptuous as vol
 from homeassistant.const import (
     CONF_LLM_HASS_API,
@@ -35,6 +36,7 @@ from langchain_core.messages import (
 )
 from langchain_core.messages.utils import trim_messages
 from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.store.base import InvalidNamespaceError
 from pydantic import ValidationError
 
 from custom_components.home_generative_agent.const import (
@@ -579,6 +581,10 @@ async def _get_rag_retrieved_tools(
     allowed_api_ids: set[str],
 ) -> list[RawTool]:
     """Search for tools in the vector store and filter by score/API."""
+    if store is None:
+        LOGGER.warning("Store is None; skipping RAG tool retrieval")
+        return []
+
     tool_index_ready = config.get("configurable", {}).get("tool_index_ready", True)
     if not tool_index_ready:
         return []
@@ -589,8 +595,16 @@ async def _get_rag_retrieved_tools(
 
     try:
         results = await store.asearch(("system", "tools"), query=query, limit=limit * 4)
+    except (
+        InvalidNamespaceError,
+        psycopg.OperationalError,
+        psycopg.ProgrammingError,
+        ValueError,
+    ) as err:
+        LOGGER.warning("RAG tool retrieval search failed (known error): %s", err)
+        return []
     except Exception:
-        LOGGER.exception("RAG tool retrieval search failed; falling back")
+        LOGGER.exception("Unexpected RAG tool retrieval search failure")
         return []
 
     raw_tools: list[RawTool] = []
@@ -619,6 +633,10 @@ async def _get_actuation_safety_tools(
     allowed_api_ids: set[str],
 ) -> list[RawTool]:
     """Find essential actuation tools if the query suggests actuation."""
+    if store is None:
+        LOGGER.warning("Store is None; skipping actuation safety tools")
+        return []
+
     tool_index_ready = config.get("configurable", {}).get("tool_index_ready", True)
     if not tool_index_ready or not re.search(ACTUATION_KEYWORDS_REGEX, query):
         return []
@@ -628,13 +646,31 @@ async def _get_actuation_safety_tools(
         results = await store.asearch(
             ("system", "tools"), filter={"is_actuation": True}
         )
-    except Exception:  # noqa: BLE001
-        LOGGER.warning("Deterministic tool filter failed; falling back to full list")
+    except (
+        InvalidNamespaceError,
+        psycopg.OperationalError,
+        psycopg.ProgrammingError,
+        ValueError,
+    ) as err:
+        LOGGER.warning("Deterministic safety tool filter failed (known error): %s", err)
         try:
             results = await store.asearch(("system", "tools"))
-        except Exception:
-            LOGGER.exception("Actuation safety net tool list failed; falling back")
+        except (
+            InvalidNamespaceError,
+            psycopg.OperationalError,
+            psycopg.ProgrammingError,
+            ValueError,
+        ) as err2:
+            LOGGER.warning(
+                "Actuation safety fallback list failed (known error): %s", err2
+            )
             return []
+        except Exception:
+            LOGGER.exception("Unexpected actuation safety fallback failure")
+            return []
+    except Exception:
+        LOGGER.exception("Unexpected deterministic safety tool filter failure")
+        return []
 
     safety_tools: list[RawTool] = []
     for item in results:

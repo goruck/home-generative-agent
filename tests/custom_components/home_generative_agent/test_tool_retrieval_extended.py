@@ -7,11 +7,14 @@ import re
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
+import psycopg
 import pytest
 
 from custom_components.home_generative_agent.agent.graph import (
     State,
+    _get_actuation_safety_tools,
     _get_allowed_api_ids,
+    _get_rag_retrieved_tools,
     _retrieve_tools,
 )
 from custom_components.home_generative_agent.const import ACTUATION_KEYWORDS_REGEX
@@ -198,3 +201,60 @@ async def test_retrieve_tools_deduplication_first_seen_wins() -> None:
     assert result["tool_routing_map"]["HassTurnOn"] == "hga_local"
     assert len(result["selected_tools"]) == 1
     assert result["selected_tools"][0]["function"]["description"] == "Custom Turn On"
+
+
+@pytest.mark.asyncio
+async def test_retrieve_tools_store_is_none(caplog: pytest.LogCaptureFixture) -> None:
+    """Verify that retrieval functions handle store=None gracefully."""
+    config: RunnableConfig = {"configurable": {"tool_index_ready": True}}
+    allowed = {"assist"}
+
+    # Test RAG retrieval
+    rag_tools = await _get_rag_retrieved_tools(None, config, "query", allowed)
+    assert rag_tools == []
+    assert "Store is None; skipping RAG tool retrieval" in caplog.text
+
+    # Test Safety Net retrieval
+    safety_tools = await _get_actuation_safety_tools(
+        None, config, "turn on lights", allowed
+    )
+    assert safety_tools == []
+    assert "Store is None; skipping actuation safety tools" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_retrieve_tools_specific_exceptions(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Verify that retrieval functions handle specific exceptions (psycopg, ValueError)."""
+    store = MagicMock()
+    config: RunnableConfig = {
+        "configurable": {
+            "tool_index_ready": True,
+            "options": {"tool_retrieval_limit": 5},
+        }
+    }
+    allowed = {"assist"}
+
+    # 1. Test psycopg.OperationalError
+    store.asearch = AsyncMock(side_effect=psycopg.OperationalError("Conn lost"))
+    rag_tools = await _get_rag_retrieved_tools(store, config, "query", allowed)
+    assert rag_tools == []
+    assert "RAG tool retrieval search failed (known error): Conn lost" in caplog.text
+
+    # 2. Test ValueError
+    store.asearch = AsyncMock(side_effect=ValueError("Invalid filter"))
+    safety_tools = await _get_actuation_safety_tools(
+        store, config, "turn on lights", allowed
+    )
+    assert safety_tools == []
+    assert (
+        "Deterministic safety tool filter failed (known error): Invalid filter"
+        in caplog.text
+    )
+
+    # 3. Test unexpected Exception (last resort)
+    store.asearch = AsyncMock(side_effect=RuntimeError("Boom"))
+    rag_tools = await _get_rag_retrieved_tools(store, config, "query", allowed)
+    assert rag_tools == []
+    assert "Unexpected RAG tool retrieval search failure" in caplog.text
