@@ -1,5 +1,5 @@
 # ruff: noqa: S101
-"""Extended unit tests for tool retrieval logic (RAG, safety net, dedupe)."""
+"""Unit tests for tool retrieval logic (RAG, safety net, fallbacks)."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import psycopg
 import pytest
+from homeassistant.helpers import llm
 
 from custom_components.home_generative_agent.agent.graph import (
     State,
@@ -201,6 +202,98 @@ async def test_retrieve_tools_deduplication_first_seen_wins() -> None:
     assert result["tool_routing_map"]["HassTurnOn"] == "hga_local"
     assert len(result["selected_tools"]) == 1
     assert result["selected_tools"][0]["function"]["description"] == "Custom Turn On"
+
+
+@pytest.mark.asyncio
+async def test_retrieve_tools_fallback_on_empty_store() -> None:
+    """Test that _retrieve_tools falls back to all tools if store search returns nothing."""
+    state: State = {
+        "messages": [MagicMock(content="turn on the lights")],
+        "summary": "",
+        "chat_model_usage_metadata": {},
+        "messages_to_remove": [],
+        "selected_tools": [],
+        "tool_routing_map": {},
+    }
+    store = MagicMock()
+    # Store returns empty results
+    store.asearch = AsyncMock(return_value=[])
+
+    # Mock tools
+    ha_tool = MagicMock(spec=llm.Tool)
+    ha_tool.name = "HassTurnOn"
+    ha_tool.description = "Turn on something"
+    ha_tool.parameters = {"type": "object", "properties": {}}
+
+    api = MagicMock()
+    api.tools = [ha_tool]
+    api.custom_serializer = None
+
+    ha_llm_api = MagicMock()
+    ha_llm_api.apis = {"assist": api}
+
+    lc_tool = MagicMock()
+    lc_tool.description = "Local tool"
+    lc_tool.args_schema = None
+
+    config: RunnableConfig = {
+        "configurable": {
+            "options": {"llm_hass_api": ["assist"]},
+            "tool_index_ready": True,
+            "langchain_tools": {"local_tool": lc_tool},
+            "ha_llm_api": ha_llm_api,
+        }
+    }
+
+    result = await _retrieve_tools(state, config, store=store)
+
+    # Should have all tools
+    assert "HassTurnOn" in result["tool_routing_map"]
+    assert "local_tool" in result["tool_routing_map"]
+    assert len(result["selected_tools"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_retrieve_tools_fallback_on_index_not_ready() -> None:
+    """Test that _retrieve_tools falls back to all tools if index is not ready."""
+    state: State = {
+        "messages": [MagicMock(content="turn on the lights")],
+        "summary": "",
+        "chat_model_usage_metadata": {},
+        "messages_to_remove": [],
+        "selected_tools": [],
+        "tool_routing_map": {},
+    }
+    store = MagicMock()
+    # Store.asearch should not even be called if tool_index_ready is False
+    store.asearch = AsyncMock()
+
+    ha_tool = MagicMock(spec=llm.Tool)
+    ha_tool.name = "HassTurnOn"
+    ha_tool.description = "Turn on something"
+    ha_tool.parameters = {"type": "object", "properties": {}}
+
+    api = MagicMock()
+    api.tools = [ha_tool]
+    api.custom_serializer = None
+
+    ha_llm_api = MagicMock()
+    ha_llm_api.apis = {"assist": api}
+
+    config: RunnableConfig = {
+        "configurable": {
+            "options": {"llm_hass_api": ["assist"]},
+            "tool_index_ready": False,
+            "langchain_tools": {},
+            "ha_llm_api": ha_llm_api,
+        }
+    }
+
+    result = await _retrieve_tools(state, config, store=store)
+
+    store.asearch.assert_not_called()
+    assert "HassTurnOn" in result["tool_routing_map"]
+    assert len(result["selected_tools"]) == 1
 
 
 @pytest.mark.asyncio
