@@ -624,9 +624,13 @@ async def confirm_sensitive_action(  # noqa: D417, PLR0911
     """
     Confirm and execute a pending sensitive action that requires a PIN.
 
+    Only call this tool after receiving a tool response with status "requires_pin".
+    That response contains the action_id to pass here. Do not call this tool
+    speculatively or before the action tool has returned a "requires_pin" status.
+
     Args:
-        action_id: The action to confirm (provided by agent when it asked for a PIN).
-        pin: The user-provided PIN.
+        action_id: The action ID from the "requires_pin" tool response.
+        pin: The PIN provided by the user.
 
     """
     if "configurable" not in config:

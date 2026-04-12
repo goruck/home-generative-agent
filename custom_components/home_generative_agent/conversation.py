@@ -336,7 +336,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
 
         # Build system prompt
         try:
-            pin_enabled = options.get(CONF_CRITICAL_ACTION_PIN_ENABLED, True)
+            pin_enabled = options.get(CONF_CRITICAL_ACTION_PIN_ENABLED, False)
             critical_prompt = CRITICAL_ACTION_PROMPT if pin_enabled else ""
             schema_prompt = (
                 SCHEMA_FIRST_YAML_PROMPT

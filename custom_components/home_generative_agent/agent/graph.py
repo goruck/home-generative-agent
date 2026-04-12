@@ -323,14 +323,13 @@ def _critical_action_guard(
     if not _is_critical_action(tool_args, ctx.critical_actions, tool_name):
         return None
     if not ctx.pin_hash or not ctx.pin_salt:
-        return _make_tool_error(
-            (
-                "Critical action requires a configured PIN. "
-                "No action was queued. Set a PIN in the integration options and retry."
-            ),
+        LOGGER.warning(
+            "Critical action PIN is enabled but no PIN is configured. "
+            "Allowing '%s' without PIN verification. "
+            "Set a PIN in the integration options to enforce confirmation.",
             tool_name,
-            tool_call.get("id") or "",
         )
+        return None
 
     action_id = ulid.ulid_now()
     ctx.pending_actions[action_id] = {
@@ -1120,7 +1119,7 @@ async def _call_tools(
     pin_configured = bool(pin_hash and pin_salt)
     # Always respect a configured PIN, even if the toggle somehow reads False.
     pin_enabled = bool(
-        options.get(CONF_CRITICAL_ACTION_PIN_ENABLED, True) or pin_configured
+        options.get(CONF_CRITICAL_ACTION_PIN_ENABLED, False) or pin_configured
     )
     pending_actions = config["configurable"].get("pending_actions", {})
 

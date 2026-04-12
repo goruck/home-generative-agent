@@ -92,7 +92,7 @@ DEFAULT_OPTIONS = {
     CONF_LLM_HASS_API: [llm.LLM_API_ASSIST],
     CONF_PROMPT: llm.DEFAULT_INSTRUCTIONS_PROMPT,
     CONF_SCHEMA_FIRST_YAML: False,
-    CONF_CRITICAL_ACTION_PIN_ENABLED: True,
+    CONF_CRITICAL_ACTION_PIN_ENABLED: False,
     CONF_VIDEO_ANALYZER_MODE: RECOMMENDED_VIDEO_ANALYZER_MODE,
     CONF_FACE_RECOGNITION: RECOMMENDED_FACE_RECOGNITION,
     CONF_MANAGE_CONTEXT_WITH_TOKENS: RECOMMENDED_MANAGE_CONTEXT_WITH_TOKENS,
@@ -195,9 +195,9 @@ async def _schema_for_options(
         vol.Optional(
             CONF_CRITICAL_ACTION_PIN_ENABLED,
             description={
-                "suggested_value": opts.get(CONF_CRITICAL_ACTION_PIN_ENABLED, True)
+                "suggested_value": opts.get(CONF_CRITICAL_ACTION_PIN_ENABLED, False)
             },
-            default=opts.get(CONF_CRITICAL_ACTION_PIN_ENABLED, True),
+            default=opts.get(CONF_CRITICAL_ACTION_PIN_ENABLED, False),
         ): BooleanSelector(),
         vol.Optional(
             CONF_SCHEMA_FIRST_YAML,
@@ -206,7 +206,7 @@ async def _schema_for_options(
         ): BooleanSelector(),
     }
 
-    if opts.get(CONF_CRITICAL_ACTION_PIN_ENABLED, True):
+    if opts.get(CONF_CRITICAL_ACTION_PIN_ENABLED, False):
         schema[
             vol.Optional(
                 CONF_CRITICAL_ACTION_PIN,
@@ -346,7 +346,7 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
 
         pin_enabled = user_input.get(
             CONF_CRITICAL_ACTION_PIN_ENABLED,
-            options.get(CONF_CRITICAL_ACTION_PIN_ENABLED, True),
+            options.get(CONF_CRITICAL_ACTION_PIN_ENABLED, False),
         )
         options[CONF_CRITICAL_ACTION_PIN_ENABLED] = pin_enabled
 
