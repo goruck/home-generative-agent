@@ -154,6 +154,8 @@ async def _run_tool_index_background(
         rd.tool_index_ready = True
     except Exception:
         _LOGGER.exception("Global tool index background task failed")
+    finally:
+        rd.tool_indexing_in_progress = False
 
 
 async def async_setup_entry(
@@ -379,11 +381,10 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
 
         prompt = "\n".join(prompt_parts)
 
-        # Use the already-configured chat model from __init__.py
+        # Use the already-configured chat model from __init__.py.
+        # Tool binding happens dynamically per-turn inside _call_model via RAG.
         base_llm = runtime_data.chat_model
-        try:
-            base_llm.bind_tools(tools)
-        except AttributeError:
+        if not hasattr(base_llm, "bind_tools"):
             _LOGGER.exception("Error during conversation processing.")
             intent_response = intent.IntentResponse(language=user_input.language)
             has_provider = any(
@@ -563,8 +564,11 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             "alarm_control": alarm_control,
             "resolve_entity_ids": resolve_entity_ids,
             "write_yaml_file": write_yaml_file,
-            "add_automation": add_automation,
         }
+        # Mirror the dispatch-time guard: add_automation is excluded when
+        # schema_first_yaml=True so the index and langchain_tools stay in sync.
+        if not self.entry.options.get(CONF_SCHEMA_FIRST_YAML, False):
+            local_tools["add_automation"] = add_automation
         for t_name, t_func in local_tools.items():
             try:
                 # Extract the JSON schema for local tools
@@ -596,10 +600,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 )
                 content_hash = hashlib.sha256(raw_content.encode()).hexdigest()
                 tool_key = f"hga_local::{t_name}"
-                if (
-                    tool_key not in new_hashes
-                    or new_hashes.get(tool_key) != content_hash
-                ):
+                if runtime_data.tool_content_hashes.get(tool_key) != content_hash:
                     embedding_text = strip_for_embedding(
                         f"{t_name}: {t_func.description}"
                     )
@@ -626,8 +627,9 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         self, llm_context: llm.LLMContext, runtime_data: HGAData
     ) -> None:
         """Discover and index tools in the background vector store."""
-        if runtime_data.tool_index_ready:
+        if runtime_data.tool_index_ready or runtime_data.tool_indexing_in_progress:
             return
+        runtime_data.tool_indexing_in_progress = True
 
         all_available_api_ids = [api.id for api in llm.async_get_apis(self.hass)]
         index_tasks: list[Any] = []

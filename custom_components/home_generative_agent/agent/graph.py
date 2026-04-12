@@ -784,7 +784,10 @@ async def _retrieve_tools(
     """Retrieve relevant tools from the vector store and merge with essentials."""
     query = state["messages"][-1].content if state["messages"] else ""
     if not isinstance(query, str):
-        query = ""
+        # Multimodal content is a list of parts; extract text segments.
+        query = " ".join(
+            p["text"] for p in query if isinstance(p, dict) and p.get("type") == "text"
+        )
 
     allowed_api_ids = _get_allowed_api_ids(config)
 
@@ -817,8 +820,14 @@ async def _trim_messages_for_model(
     hass: HomeAssistant,
 ) -> list[AnyMessage]:
     """Trim messages to manage context window length."""
+    _known_providers = {"openai", "openai_compatible", "gemini", "ollama"}
     provider_raw = opts.get(CONF_CHAT_MODEL_PROVIDER)
     provider = str(provider_raw) if provider_raw else "openai"
+    if provider not in _known_providers:
+        LOGGER.warning(
+            "Unknown model provider %r, defaulting token counter to 'openai'", provider
+        )
+        provider = "openai"
     model_name = _determine_model_name(provider, opts)
     manage_context_with_tokens: bool = (
         str(opts.get(CONF_MANAGE_CONTEXT_WITH_TOKENS)).lower() == "true"

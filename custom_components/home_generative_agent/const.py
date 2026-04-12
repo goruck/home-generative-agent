@@ -824,7 +824,7 @@ RECOMMENDED_TOOL_RELEVANCE_THRESHOLD = 0.15
 ACTUATION_KEYWORDS_REGEX = (
     r"(?i)\b(turn|switch|lock|unlock|open|close|set|activate|deactivate|arm|"
     r"disarm|start|stop|dim|brighten|play|pause|mute|run|trigger|enable|"
-    r"disable|toggle|lock.*)\b"
+    r"disable|toggle)\b"
 )
 
 # Tool prefixes/names for actuation safety net
