@@ -37,7 +37,7 @@ from langchain_core.messages import (
 from langchain_core.messages.utils import trim_messages
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.store.base import InvalidNamespaceError
-from pydantic import ValidationError
+from pydantic import PydanticInvalidForJsonSchema, ValidationError
 
 from custom_components.home_generative_agent.const import (
     ACTUATION_KEYWORDS_REGEX,
@@ -575,7 +575,7 @@ def _get_allowed_api_ids(config: RunnableConfig) -> set[str]:
 
 
 async def _get_rag_retrieved_tools(
-    store: BaseStore,
+    store: BaseStore | None,
     config: RunnableConfig,
     query: str,
     allowed_api_ids: set[str],
@@ -590,8 +590,8 @@ async def _get_rag_retrieved_tools(
         return []
 
     opts = config.get("configurable", {}).get("options", {})
-    limit = opts.get(CONF_TOOL_RETRIEVAL_LIMIT, 5)
-    threshold = opts.get(CONF_TOOL_RELEVANCE_THRESHOLD, 0.15)
+    limit = int(opts.get(CONF_TOOL_RETRIEVAL_LIMIT, 5))
+    threshold = float(opts.get(CONF_TOOL_RELEVANCE_THRESHOLD, 0.15))
 
     try:
         results = await store.asearch(("system", "tools"), query=query, limit=limit * 4)
@@ -627,7 +627,7 @@ async def _get_rag_retrieved_tools(
 
 
 async def _get_actuation_safety_tools(
-    store: BaseStore,
+    store: BaseStore | None,
     config: RunnableConfig,
     query: str,
     allowed_api_ids: set[str],
@@ -724,7 +724,15 @@ def _get_fallback_tools(
     for name, lc_tool in langchain_tools.items():
         params = "{}"
         if hasattr(lc_tool, "args_schema") and lc_tool.args_schema:
-            params = json.dumps(lc_tool.args_schema.schema())
+            try:
+                params = json.dumps(lc_tool.args_schema.schema())
+            except (
+                AttributeError,
+                TypeError,
+                ValueError,
+                PydanticInvalidForJsonSchema,
+            ):
+                params = "{}"
         fallback_tools.append(
             RawTool(
                 name=name,

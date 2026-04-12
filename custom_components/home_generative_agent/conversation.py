@@ -21,10 +21,10 @@ from homeassistant.util import ulid
 from langchain_core.caches import InMemoryCache
 from langchain_core.globals import set_debug, set_llm_cache, set_verbose
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
-from voluptuous_openapi import convert
+from pydantic import PydanticInvalidForJsonSchema
 
 from .agent.graph import workflow
-from .agent.helpers import format_tool, is_actuation_tool
+from .agent.helpers import format_tool, is_actuation_tool, safe_convert
 from .agent.rag_embedding_text import (
     strip_for_embedding,
     truncate_for_embedding_index,
@@ -507,7 +507,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 for tool in api_instance.tools:
                     # Composite hash: api_id + name + description + schema
                     schema_json = json.dumps(
-                        convert(
+                        safe_convert(
                             tool.parameters,
                             custom_serializer=api_instance.custom_serializer,
                         ),
@@ -577,7 +577,12 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                         schema_func = getattr(args_schema, "schema", None)
                         if callable(schema_func):
                             params = json.dumps(schema_func(), sort_keys=True)
-                    except (AttributeError, TypeError, ValueError):
+                    except (
+                        AttributeError,
+                        TypeError,
+                        ValueError,
+                        PydanticInvalidForJsonSchema,
+                    ):
                         params = "{}"
 
                 is_actuation = is_actuation_tool(t_name)
