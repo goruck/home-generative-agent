@@ -145,8 +145,8 @@ async def test_retrieve_tools_actuation_safety_net() -> None:
 
 
 @pytest.mark.asyncio
-async def test_retrieve_tools_deduplication_first_seen_wins() -> None:
-    """Test that the first tool encountered (RAG) wins during deduplication."""
+async def test_retrieve_tools_deduplication_safety_wins() -> None:
+    """Test that safety tools take priority over RAG when both return the same tool."""
     state: State = {
         "messages": [MagicMock(content="turn on lights")],
         "summary": "",
@@ -168,7 +168,7 @@ async def test_retrieve_tools_deduplication_first_seen_wins() -> None:
     }
     rag_item.score = 0.9
 
-    # Safety Net returns HassTurnOn from assist (default version)
+    # Safety Net also returns HassTurnOn from assist (default version)
     safety_item = MagicMock()
     safety_item.value = {
         "name": "HassTurnOn",
@@ -198,10 +198,10 @@ async def test_retrieve_tools_deduplication_first_seen_wins() -> None:
 
     # HassTurnOn should be present
     assert "HassTurnOn" in result["tool_routing_map"]
-    # RAG version (hga_local) should win because it was first in the candidates list
-    assert result["tool_routing_map"]["HassTurnOn"] == "hga_local"
+    # Safety tool (assist) wins because safety tools take priority over RAG.
+    assert result["tool_routing_map"]["HassTurnOn"] == "assist"
     assert len(result["selected_tools"]) == 1
-    assert result["selected_tools"][0]["function"]["description"] == "Custom Turn On"
+    assert result["selected_tools"][0]["function"]["description"] == "Standard Turn On"
 
 
 @pytest.mark.asyncio

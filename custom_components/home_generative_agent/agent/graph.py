@@ -789,6 +789,8 @@ async def _retrieve_tools(
         )
 
     allowed_api_ids = _get_allowed_api_ids(config)
+    opts = config.get("configurable", {}).get("options", {})
+    limit = int(opts.get(CONF_TOOL_RETRIEVAL_LIMIT, 5))
 
     # 1. Gather candidates
     rag_tools = await _get_rag_retrieved_tools(store, config, query, allowed_api_ids)
@@ -796,8 +798,12 @@ async def _retrieve_tools(
         store, config, query, allowed_api_ids
     )
 
-    # 2. Merge (RAG has priority)
-    all_candidates = rag_tools + safety_tools
+    # 2. Merge: safety tools take priority; RAG fills remaining slots.
+    # Deduplicate RAG against safety, then cap total at limit so the
+    # setting is a hard bound on the number of tools given to the model.
+    safety_names = {t["name"] for t in safety_tools}
+    rag_only = [t for t in rag_tools if t["name"] not in safety_names]
+    all_candidates = (safety_tools + rag_only)[:limit]
 
     # 3. Fallback
     if not all_candidates:
