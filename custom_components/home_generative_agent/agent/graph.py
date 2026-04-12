@@ -805,9 +805,23 @@ async def _retrieve_tools(
     rag_only = [t for t in rag_tools if t["name"] not in safety_names]
     all_candidates = (safety_tools + rag_only)[:limit]
 
-    # 3. Fallback
+    # 3. Fallback: vector store unavailable or index not yet ready.
+    # Still apply the limit so the user-configured cap is always respected.
+    # Prioritize actuation tools for actuation queries; otherwise use
+    # declaration order (HA tools first, then LangChain tools).
     if not all_candidates:
-        all_candidates = _get_fallback_tools(config, allowed_api_ids)
+        fallback = _get_fallback_tools(config, allowed_api_ids)
+        LOGGER.warning(
+            "Tool index not ready or returned no results; "
+            "applying keyword-filtered fallback (limit=%d, total=%d).",
+            limit,
+            len(fallback),
+        )
+        if re.search(ACTUATION_KEYWORDS_REGEX, query):
+            actuation = [t for t in fallback if t["is_actuation"]]
+            rest = [t for t in fallback if not t["is_actuation"]]
+            fallback = actuation + rest
+        all_candidates = fallback[:limit]
 
     # 4. Format and deduplicate
     selected_tools, routing_map = _format_and_dedupe_tools(all_candidates)
