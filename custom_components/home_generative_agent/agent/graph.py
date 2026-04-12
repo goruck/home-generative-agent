@@ -812,6 +812,15 @@ async def _retrieve_tools(
     # 4. Format and deduplicate
     selected_tools, routing_map = _format_and_dedupe_tools(all_candidates)
 
+    LOGGER.debug(
+        "Tool retrieval: limit=%d rag=%d safety=%d merged=%d selected=%s",
+        limit,
+        len(rag_tools),
+        len(safety_tools),
+        len(all_candidates),
+        [t["function"]["name"] for t in selected_tools],
+    )
+
     return {
         "selected_tools": selected_tools,
         "tool_routing_map": routing_map,
@@ -1140,10 +1149,33 @@ async def _call_tools(
     )
     tool_responses: list[ToolMessage] = []
 
+    tool_routing_map: dict[str, str] = state.get("tool_routing_map", {})
+
     for tool_call in tool_calls:
         tool_name = tool_call.get("name", "")
         tool_args = tool_call.get("args", {}) or {}
         LOGGER.debug("Tool call: %s(%s)", tool_name, tool_args)
+
+        # Enforce the retrieved tool set: reject calls for tools that were not
+        # selected by _retrieve_tools this turn. This prevents the model from
+        # executing tools it learned from conversation history but that were not
+        # retrieved for the current query (e.g. when retrieval limit is low).
+        if tool_routing_map and tool_name not in tool_routing_map:
+            LOGGER.warning(
+                "Model called tool '%s' which was not retrieved for this turn "
+                "(routing_map=%s). Rejecting.",
+                tool_name,
+                list(tool_routing_map),
+            )
+            tool_responses.append(
+                _make_tool_error(
+                    f"Tool '{tool_name}' is not available for this request. "
+                    "Only use the tools listed in your schema.",
+                    tool_name,
+                    tool_call.get("id") or "",
+                )
+            )
+            continue
 
         ctx = ToolExecutionContext(
             hass=hass,
