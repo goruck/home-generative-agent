@@ -152,6 +152,10 @@ async def _run_tool_index_background(
             await gather_store_puts_in_chunks(index_tasks)
         rd.tool_content_hashes.update(tool_hashes)
         rd.tool_index_ready = True
+        _LOGGER.info(
+            "Tool index ready: %d tool(s) indexed/updated.",
+            len(tool_hashes),
+        )
     except Exception:
         _LOGGER.exception("Global tool index background task failed")
     finally:
