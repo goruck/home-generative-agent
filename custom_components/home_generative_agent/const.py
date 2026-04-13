@@ -844,5 +844,4 @@ ACTUATION_TOOL_PREFIXES = (
 
 ACTUATION_LANGCHAIN_TOOLS = (
     "alarm_control",
-    "confirm_sensitive_action",
 )
