@@ -637,7 +637,15 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
     async def _async_index_tools(
         self, llm_context: llm.LLMContext, runtime_data: HGAData
     ) -> None:
-        """Discover and index tools in the background vector store."""
+        """
+        Discover and index tools in the background vector store.
+
+        TODO: Move indexing to integration startup (async_added_to_hass or
+        async_setup_entry) so the index is ready before the first user query.
+        Currently indexing is triggered on the first conversation turn, which
+        means that turn always hits the fallback tool selection path.
+        Requires constructing an LLMContext without a live ConversationInput.
+        """
         if runtime_data.tool_index_ready or runtime_data.tool_indexing_in_progress:
             return
         runtime_data.tool_indexing_in_progress = True
