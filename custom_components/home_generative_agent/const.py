@@ -598,6 +598,7 @@ VIDEO_ANALYZER_LATEST_SUBFOLDER = "_latest"
 SIGNAL_HGA_NEW_LATEST = "hga_new_latest"
 SIGNAL_HGA_RECOGNIZED = "hga_recognized_people"
 SIGNAL_SENTINEL_RUN_COMPLETE = "hga_sentinel_run_complete"
+SIGNAL_TOOL_INDEX_UPDATED = "hga_tool_index_updated"
 
 # ---------------- Face recognition ----------------
 CONF_FACE_RECOGNITION = "face_recognition"

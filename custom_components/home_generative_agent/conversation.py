@@ -17,6 +17,7 @@ from homeassistant.const import CONF_LLM_HASS_API, MATCH_ALL
 from homeassistant.exceptions import HomeAssistantError, TemplateError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import intent, llm, template
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.util import ulid
 from langchain_core.caches import InMemoryCache
 from langchain_core.globals import set_debug, set_llm_cache, set_verbose
@@ -48,6 +49,7 @@ from .const import (
     DOMAIN,
     LANGCHAIN_LOGGING_LEVEL,
     SCHEMA_FIRST_YAML_PROMPT,
+    SIGNAL_TOOL_INDEX_UPDATED,
     SUBENTRY_TYPE_MODEL_PROVIDER,
     TOOL_CALL_ERROR_SYSTEM_MESSAGE,
 )
@@ -145,6 +147,7 @@ async def _run_tool_index_background(
     index_tasks: list[Any],
     tool_hashes: dict[str, str],
     rd: HGAData,
+    hass: HomeAssistant,
 ) -> None:
     """Batch tool indexing into the store and update hashes on success."""
     try:
@@ -156,8 +159,12 @@ async def _run_tool_index_background(
             "Tool index ready: %d tool(s) indexed/updated.",
             len(tool_hashes),
         )
+        async_dispatcher_send(
+            hass, SIGNAL_TOOL_INDEX_UPDATED, "ready", len(tool_hashes)
+        )
     except Exception:
         _LOGGER.exception("Global tool index background task failed")
+        async_dispatcher_send(hass, SIGNAL_TOOL_INDEX_UPDATED, "failed", 0)
     finally:
         rd.tool_indexing_in_progress = False
 
@@ -634,6 +641,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         if runtime_data.tool_index_ready or runtime_data.tool_indexing_in_progress:
             return
         runtime_data.tool_indexing_in_progress = True
+        async_dispatcher_send(self.hass, SIGNAL_TOOL_INDEX_UPDATED, "indexing", 0)
 
         all_available_api_ids = [api.id for api in llm.async_get_apis(self.hass)]
         index_tasks: list[Any] = []
@@ -653,10 +661,14 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                     index_tasks=index_tasks,
                     tool_hashes=new_hashes,
                     rd=runtime_data,
+                    hass=self.hass,
                 )
             )
         else:
             runtime_data.tool_index_ready = True
+            async_dispatcher_send(
+                self.hass, SIGNAL_TOOL_INDEX_UPDATED, "ready", len(new_hashes)
+            )
 
     async def _async_entry_update_listener(
         self, hass: HomeAssistant, entry: ConfigEntry
