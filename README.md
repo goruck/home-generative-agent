@@ -100,6 +100,8 @@ Embedding model selection: the integration uses the first model provider that su
 
 ### Tool Retrieval (RAG)
 
+**Big thanks to [1Jamie](https://github.com/1Jamie) for this feature!**
+
 On startup the integration indexes all available tools as vector embeddings in PostgreSQL. Each turn, only the most relevant tools for the user’s message are loaded into the agent’s prompt — keeping context short and tool selection accurate.
 
 Two options in the **Options** flow control this:
