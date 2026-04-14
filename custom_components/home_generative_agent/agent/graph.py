@@ -1085,10 +1085,11 @@ async def _summarize_and_remove_messages(
     )
 
     # Build messages for the already-configured summarization model.
-    messages = (
+    messages = cast(
+        "list[AnyMessage]",
         [SystemMessage(content=SUMMARIZATION_SYSTEM_PROMPT)]
         + [m for m in msgs_to_remove if isinstance(m, (HumanMessage, AIMessage))]
-        + [HumanMessage(content=summary_message)]
+        + [HumanMessage(content=summary_message)],
     )
 
     model = config["configurable"]["summarization_model"]
