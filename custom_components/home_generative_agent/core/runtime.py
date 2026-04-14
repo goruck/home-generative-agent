@@ -71,6 +71,7 @@ class HGAData:
     tool_content_hashes: dict[str, str] = field(default_factory=dict)
     tool_index_ready: bool = False
     tool_indexing_in_progress: bool = False
+    tool_index_failed: bool = False
 
 
 type HGAConfigEntry = ConfigEntry[HGAData]

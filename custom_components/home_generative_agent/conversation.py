@@ -164,6 +164,7 @@ async def _run_tool_index_background(
         )
     except Exception:
         _LOGGER.exception("Global tool index background task failed")
+        rd.tool_index_failed = True
         async_dispatcher_send(hass, SIGNAL_TOOL_INDEX_UPDATED, "failed", 0)
     finally:
         rd.tool_indexing_in_progress = False
@@ -212,6 +213,17 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         """When entity is added to Home Assistant."""
         await super().async_added_to_hass()
         conversation.async_set_agent(self.hass, self.entry, self)
+        # Kick off tool indexing at startup so the index is ready before the first
+        # user query. Construct a minimal LLMContext — no live ConversationInput needed
+        # because async_get_apis / tool discovery only uses platform/assistant.
+        startup_llm_context = llm.LLMContext(
+            platform=DOMAIN,
+            context=None,
+            language=self.hass.config.language,
+            assistant=conversation.DOMAIN,
+            device_id=None,
+        )
+        await self._async_index_tools(startup_llm_context, self.entry.runtime_data)
 
     async def async_will_remove_from_hass(self) -> None:
         """When entity will be removed from Home Assistant."""
@@ -640,13 +652,14 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         """
         Discover and index tools in the background vector store.
 
-        TODO: Move indexing to integration startup (async_added_to_hass or
-        async_setup_entry) so the index is ready before the first user query.
-        Currently indexing is triggered on the first conversation turn, which
-        means that turn always hits the fallback tool selection path.
-        Requires constructing an LLMContext without a live ConversationInput.
+        Called at startup (async_added_to_hass) so the index is ready before the
+        first user query. Also called per-turn as a no-op guard once ready.
         """
-        if runtime_data.tool_index_ready or runtime_data.tool_indexing_in_progress:
+        if (
+            runtime_data.tool_index_ready
+            or runtime_data.tool_indexing_in_progress
+            or runtime_data.tool_index_failed
+        ):
             return
         runtime_data.tool_indexing_in_progress = True
         async_dispatcher_send(self.hass, SIGNAL_TOOL_INDEX_UPDATED, "indexing", 0)

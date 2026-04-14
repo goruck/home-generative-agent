@@ -842,6 +842,4 @@ ACTUATION_TOOL_PREFIXES = (
     "HassWaterHeater",
 )
 
-ACTUATION_LANGCHAIN_TOOLS = (
-    "alarm_control",
-)
+ACTUATION_LANGCHAIN_TOOLS = ("alarm_control",)

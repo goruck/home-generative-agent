@@ -573,13 +573,41 @@ def _get_allowed_api_ids(config: RunnableConfig) -> set[str]:
     return set(active_api_ids) | {"hga_local"}
 
 
+_INTENT_SPLIT_RE = re.compile(
+    r"(?<=[.!?])\s+|,\s*|\band\b\s+|\bthen\b\s+|\balso\b\s+",
+    re.IGNORECASE,
+)
+_MIN_SUBQUERY_LEN = 8  # ignore trivially short fragments
+
+
+def _split_query_intents(query: str) -> list[str]:
+    """
+    Split a multi-intent query into sub-queries for per-intent RAG search.
+
+    Always includes the original full query so the caller never loses the
+    whole-sentence embedding signal.
+    """
+    parts = [p.strip() for p in _INTENT_SPLIT_RE.split(query)]
+    sub_queries = [p for p in parts if len(p) >= _MIN_SUBQUERY_LEN]
+    if len(sub_queries) <= 1:
+        return [query]
+    return [query, *sub_queries]
+
+
 async def _get_rag_retrieved_tools(
     store: BaseStore | None,
     config: RunnableConfig,
     query: str,
     allowed_api_ids: set[str],
 ) -> list[RawTool]:
-    """Search for tools in the vector store and filter by score/API."""
+    """
+    Search for tools in the vector store and filter by score/API.
+
+    For multi-intent queries, splits the query into per-intent sub-queries and
+    runs a separate vector search for each.  Each tool's score is the maximum
+    across all sub-query passes so that a tool highly relevant to *one* intent
+    is not diluted by the blended embedding of the full query.
+    """
     if store is None:
         LOGGER.warning("Store is None; skipping RAG tool retrieval")
         return []
@@ -592,37 +620,54 @@ async def _get_rag_retrieved_tools(
     limit = int(opts.get(CONF_TOOL_RETRIEVAL_LIMIT, 5))
     threshold = float(opts.get(CONF_TOOL_RELEVANCE_THRESHOLD, 0.15))
 
-    try:
-        results = await store.asearch(("system", "tools"), query=query, limit=limit * 4)
-    except (
-        InvalidNamespaceError,
-        psycopg.OperationalError,
-        psycopg.ProgrammingError,
-        ValueError,
-    ) as err:
-        LOGGER.warning("RAG tool retrieval search failed (known error): %s", err)
-        return []
-    except Exception:
-        LOGGER.exception("Unexpected RAG tool retrieval search failure")
-        return []
+    sub_queries = _split_query_intents(query)
 
-    raw_tools: list[RawTool] = []
-    for item in results:
-        api_id = item.value.get("api_id")
-        # Note: score is (1 - distance) for pgvector cosine
-        score = getattr(item, "score", 0.0)
-        if api_id in allowed_api_ids and score >= threshold:
-            raw_tools.append(
-                RawTool(
-                    name=item.value["name"],
-                    api_id=item.value["api_id"],
-                    description=item.value["description"],
-                    parameters=item.value["parameters"],
-                    is_actuation=item.value.get("is_actuation", False),
-                )
+    # best_score[tool_key] -> (score, SearchItem)
+    best: dict[str, tuple[float, Any]] = {}
+
+    for sub_query in sub_queries:
+        try:
+            results = await store.asearch(
+                ("system", "tools"), query=sub_query, limit=limit * 4
             )
+        except (
+            InvalidNamespaceError,
+            psycopg.OperationalError,
+            psycopg.ProgrammingError,
+            ValueError,
+        ) as err:
+            LOGGER.warning("RAG tool retrieval search failed (known error): %s", err)
+            continue
+        except Exception:
+            LOGGER.exception("Unexpected RAG tool retrieval search failure")
+            continue
 
-    return raw_tools[:limit]
+        for item in results:
+            name = item.value.get("name", "")
+            api_id = item.value.get("api_id")
+            if api_id not in allowed_api_ids:
+                continue
+            # score is (1 - distance) for pgvector cosine
+            score = getattr(item, "score", 0.0)
+            if score >= threshold and (name not in best or score > best[name][0]):
+                best[name] = (score, item)
+
+    # Sort by best score descending and return top `limit`
+    sorted_items = sorted(best.values(), key=lambda t: t[0], reverse=True)
+    raw_tools: list[RawTool] = []
+    for score, item in sorted_items[:limit]:
+        LOGGER.debug("RAG tool candidate: %s score=%.3f", item.value["name"], score)
+        raw_tools.append(
+            RawTool(
+                name=item.value["name"],
+                api_id=item.value["api_id"],
+                description=item.value["description"],
+                parameters=item.value["parameters"],
+                is_actuation=item.value.get("is_actuation", False),
+            )
+        )
+
+    return raw_tools
 
 
 async def _get_actuation_safety_tools(
@@ -641,9 +686,14 @@ async def _get_actuation_safety_tools(
         return []
 
     try:
-        # Optimization: use store.asearch with a filter to find actuation tools.
+        # Score actuation tools against the query so the most relevant ones are
+        # ranked first.  This lets the merge drop low-relevance actuation tools
+        # (e.g. alarm_control for a "turn on light" query) and free those slots
+        # for non-actuation RAG tools (e.g. camera analysis).
         results = await store.asearch(
-            ("system", "tools"), filter={"is_actuation": True}
+            ("system", "tools"),
+            query=query,
+            filter={"is_actuation": True},
         )
     except (
         InvalidNamespaceError,
@@ -671,8 +721,12 @@ async def _get_actuation_safety_tools(
         LOGGER.exception("Unexpected deterministic safety tool filter failure")
         return []
 
+    # Sort by relevance score descending so the merge can cap to the top-N.
+    sorted_results = sorted(
+        results, key=lambda i: getattr(i, "score", 0.0), reverse=True
+    )
     safety_tools: list[RawTool] = []
-    for item in results:
+    for item in sorted_results:
         val = item.value
         name = val["name"]
         is_actuation = val.get("is_actuation", False)
@@ -799,11 +853,21 @@ async def _retrieve_tools(
     )
 
     # 2. Merge: safety tools take priority; RAG fills remaining slots.
-    # Deduplicate RAG against safety, then cap total at limit so the
-    # setting is a hard bound on the number of tools given to the model.
-    safety_names = {t["name"] for t in safety_tools}
+    #
+    # Safety tools are now score-sorted by relevance (see _get_actuation_safety_tools).
+    # Cap them at ¾ of the configured limit so low-relevance actuation tools
+    # (e.g. alarm_control for "turn on light") don't crowd out non-actuation RAG
+    # tools needed for other intents (e.g. camera analysis).
+    #
+    # effective_limit expands just enough to fit all rag_only tools that survived
+    # the per-sub-query RAG budget, but is capped at safety_cap + limit to avoid
+    # unbounded growth.
+    safety_cap = min(len(safety_tools), max(1, limit * 3 // 4))
+    safety_capped = safety_tools[:safety_cap]
+    safety_names = {t["name"] for t in safety_capped}
     rag_only = [t for t in rag_tools if t["name"] not in safety_names]
-    all_candidates = (safety_tools + rag_only)[:limit]
+    effective_limit = min(safety_cap + len(rag_only), safety_cap + limit)
+    all_candidates = (safety_capped + rag_only)[:effective_limit]
 
     # 3. Fallback: vector store unavailable or index not yet ready.
     # Still apply the limit so the user-configured cap is always respected.
@@ -827,9 +891,11 @@ async def _retrieve_tools(
     selected_tools, routing_map = _format_and_dedupe_tools(all_candidates)
 
     LOGGER.debug(
-        "Tool retrieval: limit=%d rag=%d safety=%d merged=%d selected=%s",
+        "Tool retrieval: limit=%d eff=%d rag=%d safety=%d/%d merged=%d tools=%s",
         limit,
+        effective_limit,
         len(rag_tools),
+        safety_cap,
         len(safety_tools),
         len(all_candidates),
         [t["function"]["name"] for t in selected_tools],
@@ -892,6 +958,19 @@ async def _trim_messages_for_model(
     )
 
 
+async def _invoke_model(
+    model: Any, messages: list[AnyMessage], config: RunnableConfig
+) -> Any:
+    """Invoke a chat model, wrapping non-HA exceptions as HomeAssistantError."""
+    try:
+        return await model.ainvoke(messages, config)
+    except HomeAssistantError:
+        raise
+    except Exception as err:
+        msg = f"Model invocation failed: {err}"
+        raise HomeAssistantError(msg) from err
+
+
 async def _call_model(
     state: State, config: RunnableConfig, *, store: BaseStore
 ) -> dict[str, Any]:
@@ -946,16 +1025,20 @@ async def _call_model(
     # Bind retrieved tools
     selected_tools = state.get("selected_tools", [])
     if selected_tools:
+        # Disable reasoning/thinking before binding tools: Qwen3's <think> tokens
+        # interleave with tool call JSON output and break Ollama's qwen3.go parser
+        # (ResponseError: "invalid character 'g' looking for beginning of value").
+        if chat_model_options.get("reasoning"):
+            model = model.with_config(config={"configurable": {"reasoning": False}})
         model = model.bind_tools(selected_tools)
 
     # Pass routing map to MultiLLMAPI
     routing_map = state.get("tool_routing_map", {})
-    configurable = config.get("configurable", {})
-    llm_api = configurable.get("ha_llm_api")
+    llm_api = conf.get("ha_llm_api")
     if llm_api and hasattr(llm_api, "routing_map"):
         llm_api.routing_map = routing_map
 
-    raw_response = await model.ainvoke(trimmed_messages, config)
+    raw_response = await _invoke_model(model, trimmed_messages, config)
     LOGGER.debug("Raw chat model response: %s", raw_response)
 
     response = extract_final(getattr(raw_response, "content", "") or "")
@@ -1010,7 +1093,7 @@ async def _summarize_and_remove_messages(
 
     model = config["configurable"]["summarization_model"]
     LOGGER.debug("Summary messages: %s", messages)
-    raw_response = await model.ainvoke(messages)
+    raw_response = await _invoke_model(model, messages, {})
     LOGGER.debug("Raw summary response: %s", raw_response)
 
     response = extract_final(getattr(raw_response, "content", "") or "")

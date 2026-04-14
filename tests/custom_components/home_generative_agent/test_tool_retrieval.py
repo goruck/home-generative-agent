@@ -17,6 +17,7 @@ from custom_components.home_generative_agent.agent.graph import (
     _get_allowed_api_ids,
     _get_rag_retrieved_tools,
     _retrieve_tools,
+    _split_query_intents,
 )
 from custom_components.home_generative_agent.const import ACTUATION_KEYWORDS_REGEX
 
@@ -351,3 +352,104 @@ async def test_retrieve_tools_specific_exceptions(
     rag_tools = await _get_rag_retrieved_tools(store, config, "query", allowed)
     assert rag_tools == []
     assert "Unexpected RAG tool retrieval search failure" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# _split_query_intents
+# ---------------------------------------------------------------------------
+
+
+def test_split_query_intents_single_intent() -> None:
+    """Single-intent queries are returned unchanged (as a 1-element list)."""
+    query = "what is the temperature in the living room"
+    assert _split_query_intents(query) == [query]
+
+
+def test_split_query_intents_multi_intent_and() -> None:
+    """Multi-intent queries include the original plus per-intent sub-queries."""
+    query = "turn on the kitchen light and check the back yard camera"
+    result = _split_query_intents(query)
+    assert result[0] == query  # original always first
+    assert len(result) > 1
+    assert any("turn on" in part for part in result[1:])
+    assert any("camera" in part for part in result[1:])
+
+
+def test_split_query_intents_comma_split() -> None:
+    """Comma-separated intents are split into sub-queries."""
+    query = "tell me the time in London, turn on the garage light"
+    result = _split_query_intents(query)
+    assert result[0] == query
+    assert any("time" in part for part in result[1:])
+    assert any("garage" in part for part in result[1:])
+
+
+def test_split_query_intents_short_fragment_filtered() -> None:
+    """Fragments shorter than _MIN_SUBQUERY_LEN are dropped."""
+    # "UK" is 2 chars — well below the 8-char minimum
+    query = "tell me the time in London, UK, and turn on the lights"
+    result = _split_query_intents(query)
+    assert result[0] == query
+    assert "UK" not in result[1:]
+
+
+def test_split_query_intents_empty_string() -> None:
+    """Empty string returns a list containing just the empty string."""
+    assert _split_query_intents("") == [""]
+
+
+# ---------------------------------------------------------------------------
+# _retrieve_tools: fallback when all candidates are filtered by api_id
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_retrieve_tools_fallback_when_candidates_filtered_by_api() -> None:
+    """Fallback fires when RAG/safety return items with a disallowed api_id."""
+    state: State = {
+        "messages": [MagicMock(content="find my keys")],
+        "summary": "",
+        "chat_model_usage_metadata": {},
+        "messages_to_remove": [],
+        "selected_tools": [],
+        "tool_routing_map": {},
+    }
+    store = MagicMock()
+
+    # All store results carry an api_id that is not in allowed_api_ids
+    bad_item = MagicMock()
+    bad_item.value = {
+        "name": "find_keys",
+        "api_id": "unknown_provider",
+        "description": "Find keys",
+        "parameters": "{}",
+        "is_actuation": False,
+    }
+    bad_item.score = 0.95
+    store.asearch = AsyncMock(return_value=[bad_item])
+
+    ha_tool = MagicMock(spec=llm.Tool)
+    ha_tool.name = "HassSearch"
+    ha_tool.description = "Search HA"
+    ha_tool.parameters = {"type": "object", "properties": {}}
+
+    api = MagicMock()
+    api.tools = [ha_tool]
+    api.custom_serializer = None
+    ha_llm_api = MagicMock()
+    ha_llm_api.apis = {"assist": api}
+
+    config: RunnableConfig = {
+        "configurable": {
+            "options": {"llm_hass_api": ["assist"]},
+            "tool_index_ready": True,
+            "langchain_tools": {},
+            "ha_llm_api": ha_llm_api,
+        }
+    }
+
+    result = await _retrieve_tools(state, config, store=store)
+
+    # Disallowed-api item filtered; fallback provides the HA tool
+    assert "find_keys" not in result["tool_routing_map"]
+    assert "HassSearch" in result["tool_routing_map"]
