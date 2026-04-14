@@ -29,6 +29,7 @@
 **Effort:** M
 **Priority:** P2
 **Depends on:** None
+**Completed:** v3.8.0 (2026-04-05)
 
 ---
 
@@ -117,6 +118,7 @@
 **Effort:** M
 **Priority:** P2
 **Depends on:** Baseline enhancement PR
+**Completed:** v3.9.0 (2026-04-06)
 
 ---
 
