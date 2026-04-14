@@ -1,14 +1,75 @@
-"""Shared agent helpers for argument normalization and resolution."""
+"""Helper utilities for Home Generative Agent tool conversion and normalization."""
 
 from __future__ import annotations
 
 import re
 from typing import TYPE_CHECKING, Any, TypedDict
 
+import voluptuous as vol
+from voluptuous_openapi import UNSUPPORTED, convert
+
+from custom_components.home_generative_agent.const import (
+    ACTUATION_LANGCHAIN_TOOLS,
+    ACTUATION_TOOL_PREFIXES,
+)
+
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
     from homeassistant.core import HomeAssistant
+    from homeassistant.helpers import llm
+
+
+def safe_convert(
+    schema: Any, custom_serializer: Callable[[Any], Any] | None = None
+) -> Any:
+    """Safely convert a voluptuous schema to OpenAPI, handling unhashable Selectors."""
+
+    def robust_serializer(obj: Any) -> Any:
+        """Robustly handle HA types that might be unhashable or need mapping."""
+        # 0. Skip basic types that voluptuous_openapi handles natively.
+        # vol.Schema, dict, and list are unhashable but handled by the library.
+        if isinstance(obj, (vol.Schema, dict, list)):
+            return UNSUPPORTED
+
+        # 1. First, call the original custom serializer if it exists
+        if custom_serializer:
+            try:
+                res = custom_serializer(obj)
+                # If external serializer returns non-None/UNSUPPORTED, use it.
+                # Some HA serializers might return None for unhandled types.
+                if res is not None and res is not UNSUPPORTED:
+                    return res
+            except Exception:  # noqa: BLE001, S110
+                # Fallback to the robust serializer if custom_serializer fails.
+                pass
+
+        # 2. Check for Home Assistant Selectors by looking for 'config'
+        # These are often unhashable and require specific extraction.
+        config = getattr(obj, "config", obj if isinstance(obj, dict) else {})
+        if isinstance(config, dict) and "options" in config:
+            # Extract options into an Enum for SelectSelector
+            raw_options = config.get("options")
+            if isinstance(raw_options, list):
+                options = [
+                    opt.get("value", opt) if isinstance(opt, dict) else opt
+                    for opt in raw_options
+                ]
+                return {"type": "string", "enum": options}
+
+        # 3. Handle other selectors that have a config but aren't SelectSelector
+        if hasattr(obj, "config") or (isinstance(obj, dict) and "selector" in obj):
+            return {"type": "string"}
+
+        # 4. General unhashable safety net to prevent voluptuous_openapi crash
+        try:
+            hash(obj)
+        except TypeError:
+            return {"type": "string"}
+
+        return UNSUPPORTED
+
+    return convert(schema, custom_serializer=robust_serializer)
 
 
 class ConfigurableData(TypedDict, total=False):
@@ -141,3 +202,28 @@ def normalize_intent_for_lock(
     else:
         normalized.setdefault("service", "lock")
     return normalized
+
+
+def format_tool(
+    tool: llm.Tool, custom_serializer: Callable[[Any], Any] | None
+) -> dict[str, Any]:
+    """Format Home Assistant LLM tools to be compatible with OpenAI format."""
+    tool_spec = {
+        "name": tool.name,
+        "parameters": safe_convert(
+            tool.parameters, custom_serializer=custom_serializer
+        ),
+    }
+    if tool.description:
+        tool_spec["description"] = tool.description
+    return {"type": "function", "function": tool_spec}
+
+
+def is_actuation_tool(name: str) -> bool:
+    """Check if a tool name indicates an actuation tool."""
+    name_lower = name.lower()
+    # Check exact matches first (greedy check for specific tools)
+    if name_lower in {t.lower() for t in ACTUATION_LANGCHAIN_TOOLS}:
+        return True
+    # Check prefix matches for provider tools
+    return any(name_lower.startswith(p.lower()) for p in ACTUATION_TOOL_PREFIXES)

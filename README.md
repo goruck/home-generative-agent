@@ -16,6 +16,7 @@ These are some of the features currently supported:
 - Full agent control of allowed entities in the home.
 - Short- and long-term memory using semantic search.
 - Automatic summarization of home state to manage LLM context length.
+- Semantic tool retrieval (RAG): tools are embedded at startup and retrieved per-turn by cosine similarity, keeping prompts lean and tool selection accurate.
 
 This integration will set up the `conversation` platform, allowing users to converse directly with the Home Generative Assistant, and the `image` and `sensor` platforms which create entities to display the latest camera image, the AI-generated summary, and recognized people in HA's UI or they can be used to create automations.
 
@@ -96,6 +97,17 @@ A "feature" is a discrete capability exposed by the integration (for example Con
    - This is where Sentinel runtime, cooldowns, discovery, explanation, optional notify service, and autonomy level guardrails are configured.
 
 Embedding model selection: the integration uses the first model provider that supports embeddings (or the feature’s provider when it advertises embedding capability). If you want a different embedding model, add a provider that supports embeddings and select the desired embedding model name in that provider’s defaults, then re-run Setup or reload the integration.
+
+### Tool Retrieval (RAG)
+
+On startup the integration indexes all available tools as vector embeddings in PostgreSQL. Each turn, only the most relevant tools for the user’s message are loaded into the agent’s prompt — keeping context short and tool selection accurate.
+
+Two options in the **Options** flow control this:
+
+- **Retrieval Limit** (`tool_retrieval_limit`, default `5`) — maximum number of tools made available to the agent per turn. Raise this if the agent misses tools on complex multi-step requests; lower it to reduce prompt size.
+- **Relevance Threshold** (`tool_relevance_threshold`, default `0.15`) — cosine similarity cutoff. Results below this score are excluded. Lower the threshold if the agent is missing tools it should pick up; raise it to tighten selectivity.
+
+A **Tool Index Status** diagnostic sensor (`sensor.tool_index_status`) exposes the current state of the index: `indexing` (first-run embedding in progress), `ready` (index available), or `failed` (embedding provider unreachable — agent falls back to all tools for that session). Subsequent restarts skip unchanged tools using SHA-256 content hashing, so re-indexing is fast.
 
 If you want separate servers per feature, add multiple Model Provider subentries and assign them in each feature’s settings. For example: create a “Primary Ollama” provider pointing at your chat server and a “Vision Ollama” provider pointing at your camera analysis server, then select the appropriate provider on the feature’s model settings step. You can mix provider types — for example a local vLLM server added as an **OpenAI Compatible** provider alongside an Ollama provider.
 
@@ -717,6 +729,21 @@ Normalization fallbacks for common LLM-generated patterns:
 
 This section shows how to display the latest camera image, the AI-generated summary, and recognized people in Home Assistant or use in automations via the image and sensor platforms.
 
+### Diagnostic Sensors
+
+The integration registers a **Tool Index Status** sensor (`sensor.tool_index_status`, entity category: diagnostic) that shows the current state of the RAG tool index:
+
+| State | Meaning |
+|---|---|
+| `indexing` | First-run embedding in progress (only during initial startup) |
+| `ready` | Index is built and available; tools are retrieved per-turn by semantic search |
+| `failed` | Embedding provider unreachable; agent falls back to all tools for the session |
+| `unknown` | Index state not yet reported (integration just started) |
+
+You can include this in a Lovelace diagnostic card or use it in automations to alert when the embedding provider goes down.
+
+### Camera Entities
+
 ### Overview
  
    * Image entities (1 per camera): `image.<camera_slug>_last_event`. Shows the most recent snapshot published by the analyzer/service.
@@ -966,9 +993,9 @@ LangGraph powers the conversation agent, enabling you to create stateful, multi-
 
 ![Alt text](./assets/graph.png)
 
-The agent workflow has three nodes, each Python module modifying the agent's state, a shared data structure. The edges between the nodes represent the allowed transitions between them, with solid lines unconditional and dashed lines conditional. Nodes do the work, and edges tell what to do next.
+The agent workflow has four nodes, each Python module modifying the agent's state, a shared data structure. The edges between the nodes represent the allowed transitions between them, with solid lines unconditional and dashed lines conditional. Nodes do the work, and edges tell what to do next.
 
-The ```__start__``` and ```__end__``` nodes inform the graph where to start and stop. The ```agent``` node runs the primary LLM, and if it decides to use a tool, the ```action``` node runs the tool and then returns control to the ```agent```. When the agent does not call a tool, control passes to ```summarize_and_remove_messages```, which summarizes only when trimming is required to manage the LLM context.
+The ```__start__``` and ```__end__``` nodes inform the graph where to start and stop. The ```retrieve_tools``` node runs first: it queries the vector index to select the tools most relevant to the current message (see [Tool Retrieval](#tool-retrieval-rag) above). The ```agent``` node then runs the primary LLM with only those tools bound to its context, and if it decides to use a tool, the ```action``` node runs the tool and returns control to ```agent```. When the agent does not call a tool, control passes to ```summarize_and_remove_messages```, which summarizes only when trimming is required to manage the LLM context.
 
 ### LLM Context Management
 You need to carefully manage the context length of LLMs to balance cost, accuracy, and latency and avoid triggering rate limits such as OpenAI's Tokens per Minute restriction. The system controls the context length of the primary model by trimming the messages in the context if they exceed a max parameter which can be expressed in either tokens or messages, and the trimmed messages are replaced by a shorter summary inserted into the system message. These parameters are configurable in the UI, with defaults defined in `const.py`; their description is below.

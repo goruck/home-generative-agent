@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, cast
 
 import aiofiles
-import async_timeout
 import homeassistant.util.dt as dt_util
 import voluptuous as vol
 import yaml
@@ -289,7 +288,7 @@ async def _get_camera_image(hass: HomeAssistant, camera_name: str) -> bytes | No
             await asyncio.sleep(backoff_base * (attempt - 1))
 
         try:
-            async with async_timeout.timeout(timeout_sec):
+            async with asyncio.timeout(timeout_sec):
                 image = await camera.async_get_image(
                     hass=hass,
                     entity_id=camera_entity_id,
@@ -625,9 +624,13 @@ async def confirm_sensitive_action(  # noqa: D417, PLR0911
     """
     Confirm and execute a pending sensitive action that requires a PIN.
 
+    Only call this tool after receiving a tool response with status "requires_pin".
+    That response contains the action_id to pass here. Do not call this tool
+    speculatively or before the action tool has returned a "requires_pin" status.
+
     Args:
-        action_id: The action to confirm (provided by agent when it asked for a PIN).
-        pin: The user-provided PIN.
+        action_id: The action ID from the "requires_pin" tool response.
+        pin: The PIN provided by the user.
 
     """
     if "configurable" not in config:

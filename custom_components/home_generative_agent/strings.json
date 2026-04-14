@@ -275,11 +275,15 @@
           "max_messages_in_context": "Max messages in chat context",
           "critical_action_pin_enabled": "Require critical action PIN",
           "critical_action_pin": "Critical action PIN (required to unlock/arm/open sensitive devices)",
-          "schema_first_yaml": "Schema-first JSON for YAML requests"
+          "schema_first_yaml": "Schema-first JSON for YAML requests",
+          "tool_retrieval_limit": "Tool retrieval limit",
+          "tool_relevance_threshold": "Tool relevance threshold"
         },
         "data_description": {
           "prompt": "Instruct how the LLM should respond. This can be a template.",
-          "schema_first_yaml": "When enabled, YAML requests are answered with strict JSON that is converted to YAML."
+          "schema_first_yaml": "When enabled, YAML requests are answered with strict JSON that is converted to YAML.",
+          "tool_retrieval_limit": "The maximum number of tools to retrieve based on semantic similarity to the user's query.",
+          "tool_relevance_threshold": "The minimum semantic similarity score (0.0 to 1.0) required for a tool to be retrieved."
         }
       }
     }

@@ -12,9 +12,15 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Literal,
+    TypedDict,
+    cast,
 )
 
+import psycopg
 import voluptuous as vol
+from homeassistant.const import (
+    CONF_LLM_HASS_API,
+)
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import llm
 from homeassistant.util import dt as dt_util
@@ -30,9 +36,11 @@ from langchain_core.messages import (
 )
 from langchain_core.messages.utils import trim_messages
 from langgraph.graph import END, START, MessagesState, StateGraph
-from pydantic import ValidationError
+from langgraph.store.base import InvalidNamespaceError
+from pydantic import PydanticInvalidForJsonSchema, ValidationError
 
-from ..const import (  # noqa: TID252
+from custom_components.home_generative_agent.const import (
+    ACTUATION_KEYWORDS_REGEX,
     CONF_CHAT_MODEL_PROVIDER,
     CONF_CRITICAL_ACTION_PIN_ENABLED,
     CONF_CRITICAL_ACTION_PIN_HASH,
@@ -45,6 +53,8 @@ from ..const import (  # noqa: TID252
     CONF_OLLAMA_CHAT_MODEL,
     CONF_OPENAI_CHAT_MODEL,
     CONF_OPENAI_COMPATIBLE_CHAT_MODEL,
+    CONF_TOOL_RELEVANCE_THRESHOLD,
+    CONF_TOOL_RETRIEVAL_LIMIT,
     EMBEDDING_MODEL_PROMPT_TEMPLATE,
     RECOMMENDED_CRITICAL_ACTIONS,
     SUMMARIZATION_INITIAL_PROMPT,
@@ -52,9 +62,12 @@ from ..const import (  # noqa: TID252
     SUMMARIZATION_SYSTEM_PROMPT,
     TOOL_CALL_ERROR_TEMPLATE,
 )
+
 from ..core.utils import extract_final  # noqa: TID252
 from .camera_activity import get_recent_camera_activity
 from .helpers import (
+    format_tool,
+    is_actuation_tool,
     maybe_fill_lock_entity,
     normalize_intent_for_alarm,
     normalize_intent_for_lock,
@@ -63,6 +76,8 @@ from .helpers import (
 from .token_counter import count_tokens_cross_provider
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from homeassistant.core import HomeAssistant
     from langchain_core.runnables import RunnableConfig
     from langgraph.store.base import BaseStore
@@ -76,6 +91,8 @@ class State(MessagesState):
     summary: str
     chat_model_usage_metadata: dict[str, Any]
     messages_to_remove: list[AnyMessage]
+    selected_tools: list[dict[str, Any]]
+    tool_routing_map: dict[str, str]
 
 
 def _determine_model_name(provider: str, opts: dict[str, Any]) -> str:
@@ -306,14 +323,13 @@ def _critical_action_guard(
     if not _is_critical_action(tool_args, ctx.critical_actions, tool_name):
         return None
     if not ctx.pin_hash or not ctx.pin_salt:
-        return _make_tool_error(
-            (
-                "Critical action requires a configured PIN. "
-                "No action was queued. Set a PIN in the integration options and retry."
-            ),
+        LOGGER.warning(
+            "Critical action PIN is enabled but no PIN is configured. "
+            "Allowing '%s' without PIN verification. "
+            "Set a PIN in the integration options to enforce confirmation.",
             tool_name,
-            tool_call.get("id") or "",
         )
+        return None
 
     action_id = ulid.ulid_now()
     ctx.pending_actions[action_id] = {
@@ -538,7 +554,421 @@ async def _find_open_entries(
     return open_entries
 
 
+class RawTool(TypedDict):
+    """Represent a tool before formatting for the LLM."""
+
+    name: str
+    api_id: str
+    description: str
+    parameters: str
+    is_actuation: bool
+
+
+def _get_allowed_api_ids(config: RunnableConfig) -> set[str]:
+    """Determine which API IDs are allowed based on configuration."""
+    opts = config.get("configurable", {}).get("options", {})
+    active_api_ids = opts.get(CONF_LLM_HASS_API, [llm.LLM_API_ASSIST])
+    if isinstance(active_api_ids, str):
+        active_api_ids = [active_api_ids]
+    return set(active_api_ids) | {"hga_local"}
+
+
+_INTENT_SPLIT_RE = re.compile(
+    r"(?<=[.!?])\s+|,\s*|\band\b\s+|\bthen\b\s+|\balso\b\s+",
+    re.IGNORECASE,
+)
+_MIN_SUBQUERY_LEN = 8  # ignore trivially short fragments
+
+
+def _split_query_intents(query: str) -> list[str]:
+    """
+    Split a multi-intent query into sub-queries for per-intent RAG search.
+
+    Always includes the original full query so the caller never loses the
+    whole-sentence embedding signal.
+    """
+    parts = [p.strip() for p in _INTENT_SPLIT_RE.split(query)]
+    sub_queries = [p for p in parts if len(p) >= _MIN_SUBQUERY_LEN]
+    if len(sub_queries) <= 1:
+        return [query]
+    return [query, *sub_queries]
+
+
+async def _get_rag_retrieved_tools(
+    store: BaseStore | None,
+    config: RunnableConfig,
+    query: str,
+    allowed_api_ids: set[str],
+) -> list[RawTool]:
+    """
+    Search for tools in the vector store and filter by score/API.
+
+    For multi-intent queries, splits the query into per-intent sub-queries and
+    runs a separate vector search for each.  Each tool's score is the maximum
+    across all sub-query passes so that a tool highly relevant to *one* intent
+    is not diluted by the blended embedding of the full query.
+    """
+    if store is None:
+        LOGGER.warning("Store is None; skipping RAG tool retrieval")
+        return []
+
+    tool_index_ready = config.get("configurable", {}).get("tool_index_ready", True)
+    if not tool_index_ready:
+        return []
+
+    opts = config.get("configurable", {}).get("options", {})
+    limit = int(opts.get(CONF_TOOL_RETRIEVAL_LIMIT, 5))
+    threshold = float(opts.get(CONF_TOOL_RELEVANCE_THRESHOLD, 0.15))
+
+    sub_queries = _split_query_intents(query)
+
+    # best_score[tool_key] -> (score, SearchItem)
+    best: dict[str, tuple[float, Any]] = {}
+
+    for sub_query in sub_queries:
+        try:
+            results = await store.asearch(
+                ("system", "tools"), query=sub_query, limit=limit * 4
+            )
+        except (
+            InvalidNamespaceError,
+            psycopg.OperationalError,
+            psycopg.ProgrammingError,
+            ValueError,
+        ) as err:
+            LOGGER.warning("RAG tool retrieval search failed (known error): %s", err)
+            continue
+        except Exception:
+            LOGGER.exception("Unexpected RAG tool retrieval search failure")
+            continue
+
+        for item in results:
+            name = item.value.get("name", "")
+            api_id = item.value.get("api_id")
+            if api_id not in allowed_api_ids:
+                continue
+            # score is (1 - distance) for pgvector cosine
+            score = getattr(item, "score", 0.0)
+            if score >= threshold and (name not in best or score > best[name][0]):
+                best[name] = (score, item)
+
+    # Sort by best score descending and return top `limit`
+    sorted_items = sorted(best.values(), key=lambda t: t[0], reverse=True)
+    raw_tools: list[RawTool] = []
+    for score, item in sorted_items[:limit]:
+        LOGGER.debug("RAG tool candidate: %s score=%.3f", item.value["name"], score)
+        raw_tools.append(
+            RawTool(
+                name=item.value["name"],
+                api_id=item.value["api_id"],
+                description=item.value["description"],
+                parameters=item.value["parameters"],
+                is_actuation=item.value.get("is_actuation", False),
+            )
+        )
+
+    return raw_tools
+
+
+async def _get_actuation_safety_tools(
+    store: BaseStore | None,
+    config: RunnableConfig,
+    query: str,
+    allowed_api_ids: set[str],
+) -> list[RawTool]:
+    """Find essential actuation tools if the query suggests actuation."""
+    if store is None:
+        LOGGER.warning("Store is None; skipping actuation safety tools")
+        return []
+
+    tool_index_ready = config.get("configurable", {}).get("tool_index_ready", True)
+    if not tool_index_ready or not re.search(ACTUATION_KEYWORDS_REGEX, query):
+        return []
+
+    try:
+        # Score actuation tools against the query so the most relevant ones are
+        # ranked first.  This lets the merge drop low-relevance actuation tools
+        # (e.g. alarm_control for a "turn on light" query) and free those slots
+        # for non-actuation RAG tools (e.g. camera analysis).
+        results = await store.asearch(
+            ("system", "tools"),
+            query=query,
+            filter={"is_actuation": True},
+        )
+    except (
+        InvalidNamespaceError,
+        psycopg.OperationalError,
+        psycopg.ProgrammingError,
+        ValueError,
+    ) as err:
+        LOGGER.warning("Deterministic safety tool filter failed (known error): %s", err)
+        try:
+            results = await store.asearch(("system", "tools"))
+        except (
+            InvalidNamespaceError,
+            psycopg.OperationalError,
+            psycopg.ProgrammingError,
+            ValueError,
+        ) as err2:
+            LOGGER.warning(
+                "Actuation safety fallback list failed (known error): %s", err2
+            )
+            return []
+        except Exception:
+            LOGGER.exception("Unexpected actuation safety fallback failure")
+            return []
+    except Exception:
+        LOGGER.exception("Unexpected deterministic safety tool filter failure")
+        return []
+
+    # Sort by relevance score descending so the merge can cap to the top-N.
+    sorted_results = sorted(
+        results, key=lambda i: getattr(i, "score", 0.0), reverse=True
+    )
+    safety_tools: list[RawTool] = []
+    for item in sorted_results:
+        val = item.value
+        name = val["name"]
+        is_actuation = val.get("is_actuation", False)
+
+        # Fallback check if the store's filter was ignored or is_actuation is missing.
+        if not is_actuation:
+            is_actuation = is_actuation_tool(name)
+
+        if is_actuation and val.get("api_id") in allowed_api_ids:
+            safety_tools.append(
+                RawTool(
+                    name=name,
+                    api_id=val["api_id"],
+                    description=val["description"],
+                    parameters=val["parameters"],
+                    is_actuation=True,
+                )
+            )
+    return safety_tools
+
+
+def _get_fallback_tools(
+    config: RunnableConfig,
+    allowed_api_ids: set[str],
+) -> list[RawTool]:
+    """Gather all available tools as a fallback when none are selected."""
+    fallback_tools: list[RawTool] = []
+
+    ha_llm_api = config.get("configurable", {}).get("ha_llm_api")
+    if ha_llm_api and hasattr(ha_llm_api, "apis"):
+        for api_id, api in ha_llm_api.apis.items():
+            if api_id in allowed_api_ids:
+                for tool in api.tools:
+                    formatted = format_tool(tool, api.custom_serializer)
+                    f_func = formatted["function"]
+                    name = tool.name
+                    fallback_tools.append(
+                        RawTool(
+                            name=name,
+                            api_id=api_id,
+                            description=f_func.get("description", ""),
+                            parameters=json.dumps(f_func["parameters"]),
+                            is_actuation=is_actuation_tool(name),
+                        )
+                    )
+
+    langchain_tools = config.get("configurable", {}).get("langchain_tools", {})
+    for name, lc_tool in langchain_tools.items():
+        params = "{}"
+        if hasattr(lc_tool, "args_schema") and lc_tool.args_schema:
+            try:
+                params = json.dumps(lc_tool.args_schema.schema())
+            except (
+                AttributeError,
+                TypeError,
+                ValueError,
+                PydanticInvalidForJsonSchema,
+            ):
+                params = "{}"
+        fallback_tools.append(
+            RawTool(
+                name=name,
+                api_id="hga_local",
+                description=lc_tool.description,
+                parameters=params,
+                is_actuation=is_actuation_tool(name),
+            )
+        )
+    return fallback_tools
+
+
+def _format_and_dedupe_tools(
+    raw_tools: list[RawTool],
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    """Convert raw tools to output format and deduplicate (first-seen wins)."""
+    selected_tools: list[dict[str, Any]] = []
+    routing_map: dict[str, str] = {}
+
+    for tool in raw_tools:
+        name = tool["name"]
+        if name in routing_map:
+            continue
+
+        routing_map[name] = tool["api_id"]
+        selected_tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": tool["description"],
+                    "parameters": json.loads(tool["parameters"]),
+                },
+            }
+        )
+
+    return selected_tools, routing_map
+
+
 # ----- Graph nodes and edges -----
+
+
+async def _retrieve_tools(
+    state: State,
+    config: RunnableConfig,
+    *,
+    store: BaseStore,
+) -> dict[str, Any]:
+    """Retrieve relevant tools from the vector store and merge with essentials."""
+    query = state["messages"][-1].content if state["messages"] else ""
+    if not isinstance(query, str):
+        # Multimodal content is a list of parts; extract text segments.
+        query = " ".join(
+            p["text"] for p in query if isinstance(p, dict) and p.get("type") == "text"
+        )
+
+    allowed_api_ids = _get_allowed_api_ids(config)
+    opts = config.get("configurable", {}).get("options", {})
+    limit = int(opts.get(CONF_TOOL_RETRIEVAL_LIMIT, 5))
+
+    # 1. Gather candidates
+    rag_tools = await _get_rag_retrieved_tools(store, config, query, allowed_api_ids)
+    safety_tools = await _get_actuation_safety_tools(
+        store, config, query, allowed_api_ids
+    )
+
+    # 2. Merge: safety tools take priority; RAG fills remaining slots.
+    #
+    # Safety tools are now score-sorted by relevance (see _get_actuation_safety_tools).
+    # Cap them at ¾ of the configured limit so low-relevance actuation tools
+    # (e.g. alarm_control for "turn on light") don't crowd out non-actuation RAG
+    # tools needed for other intents (e.g. camera analysis).
+    #
+    # effective_limit expands just enough to fit all rag_only tools that survived
+    # the per-sub-query RAG budget, but is capped at safety_cap + limit to avoid
+    # unbounded growth.
+    safety_cap = min(len(safety_tools), max(1, limit * 3 // 4))
+    safety_capped = safety_tools[:safety_cap]
+    safety_names = {t["name"] for t in safety_capped}
+    rag_only = [t for t in rag_tools if t["name"] not in safety_names]
+    effective_limit = min(safety_cap + len(rag_only), safety_cap + limit)
+    all_candidates = (safety_capped + rag_only)[:effective_limit]
+
+    # 3. Fallback: vector store unavailable or index not yet ready.
+    # Still apply the limit so the user-configured cap is always respected.
+    # Prioritize actuation tools for actuation queries; otherwise use
+    # declaration order (HA tools first, then LangChain tools).
+    if not all_candidates:
+        fallback = _get_fallback_tools(config, allowed_api_ids)
+        LOGGER.warning(
+            "Tool index not ready or returned no results; "
+            "applying keyword-filtered fallback (limit=%d, total=%d).",
+            limit,
+            len(fallback),
+        )
+        if re.search(ACTUATION_KEYWORDS_REGEX, query):
+            actuation = [t for t in fallback if t["is_actuation"]]
+            rest = [t for t in fallback if not t["is_actuation"]]
+            fallback = actuation + rest
+        all_candidates = fallback[:limit]
+
+    # 4. Format and deduplicate
+    selected_tools, routing_map = _format_and_dedupe_tools(all_candidates)
+
+    LOGGER.debug(
+        "Tool retrieval: limit=%d eff=%d rag=%d safety=%d/%d merged=%d tools=%s",
+        limit,
+        effective_limit,
+        len(rag_tools),
+        safety_cap,
+        len(safety_tools),
+        len(all_candidates),
+        [t["function"]["name"] for t in selected_tools],
+    )
+
+    return {
+        "selected_tools": selected_tools,
+        "tool_routing_map": routing_map,
+    }
+
+
+async def _trim_messages_for_model(
+    messages: list[AnyMessage],
+    opts: dict[str, Any],
+    chat_model_options: dict[str, Any],
+    hass: HomeAssistant,
+) -> list[AnyMessage]:
+    """Trim messages to manage context window length."""
+    _known_providers = {"openai", "openai_compatible", "gemini", "ollama"}
+    provider_raw = opts.get(CONF_CHAT_MODEL_PROVIDER)
+    provider = str(provider_raw) if provider_raw else "openai"
+    if provider not in _known_providers:
+        LOGGER.warning(
+            "Unknown model provider %r, defaulting token counter to 'openai'", provider
+        )
+        provider = "openai"
+    model_name = _determine_model_name(provider, opts)
+    manage_context_with_tokens: bool = (
+        str(opts.get(CONF_MANAGE_CONTEXT_WITH_TOKENS)).lower() == "true"
+    )
+    context_max_messages: int = int(opts.get(CONF_MAX_MESSAGES_IN_CONTEXT) or 100)
+    context_max_tokens: int = int(opts.get(CONF_MAX_TOKENS_IN_CONTEXT) or 4096)
+
+    if manage_context_with_tokens:
+        max_tokens = context_max_tokens
+        token_counter = partial(
+            count_tokens_cross_provider,
+            model=model_name,
+            provider=cast("Any", provider),
+            options=opts,
+            chat_model_options=chat_model_options,
+        )
+    else:
+        max_tokens = context_max_messages
+        token_counter = len
+
+    return await hass.async_add_executor_job(
+        cast(
+            "Callable[..., list[AnyMessage]]",
+            partial(
+                trim_messages,
+                messages=messages,
+                token_counter=token_counter,
+                max_tokens=max_tokens,
+                strategy="last",
+                start_on="human",
+                include_system=True,
+            ),
+        )
+    )
+
+
+async def _invoke_model(
+    model: Any, messages: list[AnyMessage], config: RunnableConfig
+) -> Any:
+    """Invoke a chat model, wrapping non-HA exceptions as HomeAssistantError."""
+    try:
+        return await model.ainvoke(messages, config)
+    except HomeAssistantError:
+        raise
+    except Exception as err:
+        msg = f"Model invocation failed: {err}"
+        raise HomeAssistantError(msg) from err
 
 
 async def _call_model(
@@ -549,27 +979,29 @@ async def _call_model(
         msg = "Configuration for the model is missing."
         raise HomeAssistantError(msg)
 
-    model = config["configurable"]["chat_model"]
-    user_id = config["configurable"]["user_id"]
-    hass = config["configurable"]["hass"]
-    opts = config["configurable"]["options"]
-    chat_model_options = config["configurable"].get("chat_model_options", {})
+    conf = config["configurable"]
+    model = conf["chat_model"]
+    user_id = conf["user_id"]
+    hass = conf["hass"]
+    opts = conf["options"]
+    chat_model_options = conf.get("chat_model_options", {})
 
     # Retrieve memories (semantic if last message is from user).
     last_message = state["messages"][-1]
     last_message_from_user = isinstance(last_message, HumanMessage)
-    query_prompt = (
-        EMBEDDING_MODEL_PROMPT_TEMPLATE.format(query=last_message.content)
-        if last_message_from_user
-        else None
-    )
+    query_prompt = None
+    if last_message_from_user:
+        query_prompt = EMBEDDING_MODEL_PROMPT_TEMPLATE.format(
+            query=last_message.content
+        )
+
     mems = await store.asearch((user_id, "memories"), query=query_prompt, limit=10)
 
     # Recent camera activity.
     camera_activity = await get_recent_camera_activity(hass, store)
 
     # Build system message.
-    system_message = config["configurable"]["prompt"]
+    system_message = conf["prompt"]
     if mems:
         formatted_mems = "\n".join(f"[{mem.key}]: {mem.value}" for mem in mems)
         system_message += f"\n<memories>\n{formatted_mems}\n</memories>"
@@ -584,44 +1016,29 @@ async def _call_model(
     # Model input = System + current messages.
     messages = [SystemMessage(content=system_message)] + state["messages"]
 
-    # Trim messages to manage context window length.
-    provider = opts.get(CONF_CHAT_MODEL_PROVIDER)
-    model_name = _determine_model_name(provider, opts)
-    manage_context_with_tokens: bool = (
-        opts.get(CONF_MANAGE_CONTEXT_WITH_TOKENS) == "true"
-    )
-    context_max_messages: int = opts.get(CONF_MAX_MESSAGES_IN_CONTEXT)
-    context_max_tokens: int = opts.get(CONF_MAX_TOKENS_IN_CONTEXT)
-
-    if manage_context_with_tokens:
-        max_tokens = context_max_tokens
-        token_counter = partial(
-            count_tokens_cross_provider,
-            model=model_name,
-            provider=provider,
-            options=opts,
-            chat_model_options=chat_model_options,
-        )
-    else:
-        max_tokens = context_max_messages
-        token_counter = len
-
-    trimmed_messages = await hass.async_add_executor_job(
-        partial(
-            trim_messages,
-            messages=messages,
-            token_counter=token_counter,
-            max_tokens=max_tokens,
-            strategy="last",
-            start_on="human",
-            include_system=True,
-        )
+    trimmed_messages = await _trim_messages_for_model(
+        messages, opts, chat_model_options, hass
     )
 
     LOGGER.debug("Model call messages: %s", trimmed_messages)
-    LOGGER.debug("Model call messages length: %s", len(trimmed_messages))
 
-    raw_response = await model.ainvoke(trimmed_messages)
+    # Bind retrieved tools
+    selected_tools = state.get("selected_tools", [])
+    if selected_tools:
+        # Disable reasoning/thinking before binding tools: Qwen3's <think> tokens
+        # interleave with tool call JSON output and break Ollama's qwen3.go parser
+        # (ResponseError: "invalid character 'g' looking for beginning of value").
+        if chat_model_options.get("reasoning"):
+            model = model.with_config(config={"configurable": {"reasoning": False}})
+        model = model.bind_tools(selected_tools)
+
+    # Pass routing map to MultiLLMAPI
+    routing_map = state.get("tool_routing_map", {})
+    llm_api = conf.get("ha_llm_api")
+    if llm_api and hasattr(llm_api, "routing_map"):
+        llm_api.routing_map = routing_map
+
+    raw_response = await _invoke_model(model, trimmed_messages, config)
     LOGGER.debug("Raw chat model response: %s", raw_response)
 
     response = extract_final(getattr(raw_response, "content", "") or "")
@@ -668,15 +1085,16 @@ async def _summarize_and_remove_messages(
     )
 
     # Build messages for the already-configured summarization model.
-    messages = (
+    messages = cast(
+        "list[AnyMessage]",
         [SystemMessage(content=SUMMARIZATION_SYSTEM_PROMPT)]
         + [m for m in msgs_to_remove if isinstance(m, (HumanMessage, AIMessage))]
-        + [HumanMessage(content=summary_message)]
+        + [HumanMessage(content=summary_message)],
     )
 
     model = config["configurable"]["summarization_model"]
     LOGGER.debug("Summary messages: %s", messages)
-    raw_response = await model.ainvoke(messages)
+    raw_response = await _invoke_model(model, messages, {})
     LOGGER.debug("Raw summary response: %s", raw_response)
 
     response = extract_final(getattr(raw_response, "content", "") or "")
@@ -814,7 +1232,7 @@ async def _call_tools(
     pin_configured = bool(pin_hash and pin_salt)
     # Always respect a configured PIN, even if the toggle somehow reads False.
     pin_enabled = bool(
-        options.get(CONF_CRITICAL_ACTION_PIN_ENABLED, True) or pin_configured
+        options.get(CONF_CRITICAL_ACTION_PIN_ENABLED, False) or pin_configured
     )
     pending_actions = config["configurable"].get("pending_actions", {})
 
@@ -829,10 +1247,33 @@ async def _call_tools(
     )
     tool_responses: list[ToolMessage] = []
 
+    tool_routing_map: dict[str, str] = state.get("tool_routing_map", {})
+
     for tool_call in tool_calls:
         tool_name = tool_call.get("name", "")
         tool_args = tool_call.get("args", {}) or {}
         LOGGER.debug("Tool call: %s(%s)", tool_name, tool_args)
+
+        # Enforce the retrieved tool set: reject calls for tools that were not
+        # selected by _retrieve_tools this turn. This prevents the model from
+        # executing tools it learned from conversation history but that were not
+        # retrieved for the current query (e.g. when retrieval limit is low).
+        if tool_routing_map and tool_name not in tool_routing_map:
+            LOGGER.warning(
+                "Model called tool '%s' which was not retrieved for this turn "
+                "(routing_map=%s). Rejecting.",
+                tool_name,
+                list(tool_routing_map),
+            )
+            tool_responses.append(
+                _make_tool_error(
+                    f"Tool '{tool_name}' is not available for this request. "
+                    "Only use the tools listed in your schema.",
+                    tool_name,
+                    tool_call.get("id") or "",
+                )
+            )
+            continue
 
         ctx = ToolExecutionContext(
             hass=hass,
@@ -886,12 +1327,14 @@ def _should_continue(
 workflow = StateGraph(State)
 
 # Define nodes.
+workflow.add_node("retrieve_tools", _retrieve_tools)
 workflow.add_node("agent", _call_model)
 workflow.add_node("action", _call_tools)
 workflow.add_node("summarize_and_remove_messages", _summarize_and_remove_messages)
 
 # Define edges.
-workflow.add_edge(START, "agent")
+workflow.add_edge(START, "retrieve_tools")
+workflow.add_edge("retrieve_tools", "agent")
 workflow.add_conditional_edges("agent", _should_continue)
 workflow.add_edge("action", "agent")
 workflow.add_edge("summarize_and_remove_messages", END)

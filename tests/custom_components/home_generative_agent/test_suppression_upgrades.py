@@ -9,6 +9,7 @@ for all suppression paths, v1→v2 migration, and read-only compatibility mode.
 from __future__ import annotations
 
 from datetime import timedelta
+from typing import Any
 
 from homeassistant.util import dt as dt_util
 
@@ -382,7 +383,7 @@ def test_suppression_state_serialization_includes_new_fields() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _v1_data() -> dict:
+def _v1_data() -> dict[str, Any]:
     return {
         "last_by_type": {"open_entry_while_away": "2025-01-01T00:00:00+00:00"},
         "last_by_entity": {},
@@ -519,7 +520,7 @@ def test_snooze_takes_priority_over_presence_grace() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _v2_data_with_friendly_name_keys() -> dict:
+def _v2_data_with_friendly_name_keys() -> dict[str, Any]:
     """Return a v2 suppression record with a mix of entity-ID and friendly-name keys."""
     return {
         "last_by_type": {},

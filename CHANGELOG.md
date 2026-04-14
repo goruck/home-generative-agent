@@ -2,6 +2,48 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.10.0] - 2026-04-13
+
+### Added
+
+- **RAG-based tool indexing and retrieval** — tools are embedded into pgvector at startup
+  and retrieved per-turn by cosine similarity. Only the tools most relevant to the user's
+  message are loaded into the agent's prompt, reducing prompt size and improving
+  tool selection accuracy. On subsequent restarts, unchanged tools skip re-embedding
+  via SHA-256 content hashing.
+
+- **Tool Index Status diagnostic sensor** (`sensor.tool_index_status`) — exposes the
+  current state of the tool index: `indexing`, `ready`, `failed`, or `unknown`. Use
+  it in dashboards or automations to monitor embedding provider health.
+
+- **Multi-intent query decomposition** — compound requests like "turn on the lights and
+  check the back yard camera" are split into sub-queries and searched independently.
+  Scores are aggregated by maximum per tool, so each intent gets the best-matched tools.
+
+- **Actuation safety net** — when a message contains action keywords (turn on, lock, etc.),
+  physical control tools are force-bound even if they fall below the relevance threshold.
+  Capped at three-quarters of the retrieval limit so safety tools cannot crowd out
+  RAG-retrieved results.
+
+- **`tool_retrieval_limit` and `tool_relevance_threshold` options** — configurable in the
+  Options flow. Retrieval limit (default `5`) sets the maximum tools per turn; relevance
+  threshold (default `0.15`) sets the cosine similarity cutoff.
+
+### Fixed
+
+- **`tool_index_failed` guard** — a persistent embedding provider failure previously
+  re-spawned a background index task on every conversation turn. The integration now
+  sets `tool_index_failed` and skips further attempts until the next restart.
+
+- **Reasoning mode crash on Qwen3/Ollama** — reasoning mode is now disabled before
+  `bind_tools` to prevent a crash when using Qwen3 or other providers that do not
+  support reasoning during tool binding.
+
+- **`safe_convert` for unhashable selectors** — `voluptuous_openapi.convert` could crash
+  on `SelectSelector` and other unhashable HA selector types. A `safe_convert` wrapper
+  now handles these gracefully, extracting enum options where possible and defaulting
+  to string type otherwise.
+
 ## [3.9.0] - 2026-04-06
 
 ### Added

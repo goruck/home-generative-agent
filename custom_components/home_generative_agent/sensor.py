@@ -8,6 +8,7 @@ from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 
 from .core.recognized_sensor import RecognizedPeopleSensor
 from .core.sentinel_health_sensor import SentinelHealthSensor
+from .core.tool_index_sensor import ToolIndexSensor
 
 if TYPE_CHECKING:
     from homeassistant.core import Event, HomeAssistant
@@ -26,12 +27,12 @@ async def async_setup_entry(
     async_add_entities: Any,
 ) -> None:
     """
-    Set up the sentinel health sensor and one recognized-people sensor per camera.
+    Set up sensors for this config entry.
 
-    If no cameras exist yet, wait for Home Assistant to finish starting,
-    then try discovery again.
+    Registers the Sentinel health sensor, the tool index diagnostic sensor,
+    and one recognized-people sensor per camera.
+    If no cameras exist yet, waits for HA startup before registering them.
     """
-    # Sentinel health sensor is always registered; it handles "disabled" internally.
     data = entry.runtime_data
     async_add_entities(
         [
@@ -44,7 +45,8 @@ async def async_setup_entry(
                 baseline_updater=data.baseline_updater,
                 discovery_engine=data.discovery_engine,
                 proposal_store=data.proposal_store,
-            )
+            ),
+            ToolIndexSensor(hass, entry.entry_id),
         ]
     )
 
