@@ -2123,3 +2123,35 @@ def test_gate_dot_split_entity_id() -> None:
 
     result = SentinelEngine._apply_sustained_gate(engine, [finding], now, 20)
     assert result == [], "sensor.refrigerator_power should be gated (dot-split match)"
+
+
+def test_gate_non_gated_template_passes_through() -> None:
+    """Findings with unrecognised template_id are not gated, even for cyclical entities."""
+    engine = _make_gate_engine()
+    # Use a cyclical entity but a template that is NOT in _GATED_TEMPLATE_IDS.
+    finding = _make_deviation_finding(
+        "sensor.fridge_power",
+        "Fridge",
+        template_id="appliance_power_duration",
+    )
+    now = _gate_now()
+
+    result = SentinelEngine._apply_sustained_gate(engine, [finding], now, 20)
+    assert len(result) == 1, (
+        "Non-gated template_id must pass through even for cyclical entity"
+    )
+    assert result[0] is finding
+    assert engine._cyclical_deviation_above_since == {}
+
+
+def test_gate_friendly_name_match() -> None:
+    """Gate activates when entity_id has no hint token but friendly_name does."""
+    engine = _make_gate_engine()
+    # entity_id is a generic plug — no cyclical hint.
+    # friendly_name contains "fridge" — should match.
+    finding = _make_deviation_finding("sensor.smart_plug_1_power", "Fridge Power")
+    now = _gate_now()
+
+    result = SentinelEngine._apply_sustained_gate(engine, [finding], now, 20)
+    assert result == [], "friendly_name match should trigger the gate"
+    assert "sensor.smart_plug_1_power" in engine._cyclical_deviation_above_since
