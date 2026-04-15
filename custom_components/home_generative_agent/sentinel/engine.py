@@ -605,6 +605,12 @@ class SentinelEngine:
     # Cyclical load sustained deviation gate
     # ---------------------------------------------------------------------- #
 
+    # Template IDs subject to the cyclical load gate.  Any new dynamic rule
+    # template that represents a deviation-style alert (not a point-in-time
+    # anomaly) should be added here so cyclical entities are gated correctly.
+    # Template IDs are defined in sentinel/dynamic_rules.py (TEMPLATE_ID
+    # constants) and sentinel/baseline.py (evaluate_baseline_deviation /
+    # evaluate_time_of_day_anomaly).
     _GATED_TEMPLATE_IDS: frozenset[str] = frozenset(
         {"baseline_deviation", "time_of_day_anomaly"}
     )
@@ -670,12 +676,18 @@ class SentinelEngine:
 
             # Determine the entity_id for gate tracking.  Use the first entry
             # in triggering_entities (baseline rules always produce a single-
-            # entity finding).
-            entity_id = (
-                finding.triggering_entities[0]
-                if finding.triggering_entities
-                else finding.anomaly_id
-            )
+            # entity finding).  If the list is empty, pass the finding through
+            # unchanged — tokenising the anomaly_id would be unreliable and
+            # could produce false positive or false negative gate matches.
+            if not finding.triggering_entities:
+                LOGGER.warning(
+                    "Cyclical gate: finding %s has no triggering_entities; "
+                    "skipping gate for this finding.",
+                    finding.anomaly_id,
+                )
+                passed.append(finding)
+                continue
+            entity_id = finding.triggering_entities[0]
             friendly_name = finding.evidence.get("friendly_name", "")
 
             if not _is_cyclical(entity_id, str(friendly_name)):

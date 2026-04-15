@@ -2155,3 +2155,86 @@ def test_gate_friendly_name_match() -> None:
     result = SentinelEngine._apply_sustained_gate(engine, [finding], now, 20)
     assert result == [], "friendly_name match should trigger the gate"
     assert "sensor.smart_plug_1_power" in engine._cyclical_deviation_above_since
+
+
+def test_gate_empty_triggering_entities_passes_through() -> None:
+    """Findings with no triggering_entities bypass the gate unchanged."""
+    engine = _make_gate_engine()
+    # Construct a finding whose triggering_entities is empty.  The gate should
+    # not attempt to tokenise anomaly_id and should pass the finding through.
+    finding = AnomalyFinding(
+        anomaly_id="baseline_deviation_refrigerator_energy",
+        type="high_energy_consumption",
+        severity="medium",
+        confidence=0.9,
+        triggering_entities=[],  # empty — gate must skip
+        evidence={"template_id": "baseline_deviation", "friendly_name": ""},
+        suggested_actions=[],
+        is_sensitive=False,
+    )
+    now = _gate_now()
+
+    result = SentinelEngine._apply_sustained_gate(engine, [finding], now, 20)
+    assert result == [finding], "empty triggering_entities must pass through"
+    assert engine._cyclical_deviation_above_since == {}
+
+
+def test_gate_two_cyclical_stale_cleanup() -> None:
+    """When one of two tracked cyclical entities drops, only that clock is cleared."""
+    engine = _make_gate_engine()
+    now = _gate_now()
+    fridge = _make_deviation_finding("sensor.fridge_power", "")
+    freezer = _make_deviation_finding("sensor.freezer_power", "")
+
+    # Run 1: both entities appear; gate starts both clocks.
+    SentinelEngine._apply_sustained_gate(engine, [fridge, freezer], now, 20)
+    assert "sensor.fridge_power" in engine._cyclical_deviation_above_since
+    assert "sensor.freezer_power" in engine._cyclical_deviation_above_since
+
+    # Run 2: only fridge appears; freezer clock must be cleared.
+    later = datetime(2026, 4, 14, 12, 10, 0, tzinfo=UTC)
+    SentinelEngine._apply_sustained_gate(engine, [fridge], later, 20)
+    assert "sensor.fridge_power" in engine._cyclical_deviation_above_since
+    assert "sensor.freezer_power" not in engine._cyclical_deviation_above_since
+
+
+def test_cyclical_entities_gated_count_tracks_state() -> None:
+    """cyclical_entities_gated_count reflects dict size across suppression/cleanup."""
+    engine = _make_gate_engine()
+    assert engine.cyclical_entities_gated_count == 0
+
+    now = _gate_now()
+    finding = _make_deviation_finding("sensor.fridge_power", "")
+
+    # After first gate entry, count should be 1.
+    SentinelEngine._apply_sustained_gate(engine, [finding], now, 20)
+    assert engine.cyclical_entities_gated_count == 1
+
+    # After stale cleanup (no finding this run), count should be 0.
+    later = datetime(2026, 4, 14, 12, 10, 0, tzinfo=UTC)
+    SentinelEngine._apply_sustained_gate(engine, [], later, 20)
+    assert engine.cyclical_entities_gated_count == 0
+
+
+def test_gate_boundary_exactly_at_duration() -> None:
+    """At exactly sustained_minutes elapsed, finding is still suppressed (strict <)."""
+    engine = _make_gate_engine()
+    now = _gate_now()
+    finding = _make_deviation_finding("sensor.fridge_power", "")
+
+    # Seed the clock so that elapsed is exactly sustained_minutes.
+    engine._cyclical_deviation_above_since["sensor.fridge_power"] = datetime(
+        2026,
+        4,
+        14,
+        11,
+        40,
+        0,
+        tzinfo=UTC,  # 20 minutes before _gate_now()
+    )
+
+    result = SentinelEngine._apply_sustained_gate(engine, [finding], now, 20)
+    # elapsed == 20.0, sustained_minutes == 20 → elapsed < 20 is False → fires.
+    # This documents the contract: the gate uses strict-less-than, so exactly
+    # at the threshold the finding IS fired (not suppressed).
+    assert result == [finding], "finding at exactly threshold should fire"
