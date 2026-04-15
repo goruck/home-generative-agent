@@ -294,6 +294,13 @@ class SentinelHealthSensor(SensorEntity):
             else None
         )
 
+        # Cyclical load sustained deviation gate count.
+        self._attrs["cyclical_entities_gated"] = (
+            self._sentinel.cyclical_entities_gated_count
+            if self._sentinel is not None
+            else None
+        )
+
         self._attr_native_value = "ok"
         self.async_write_ha_state()
 

@@ -83,6 +83,25 @@ COMPLETION_RECENCY_SECS = 900
 # regardless of the configured threshold_pct.
 MINIMUM_POWER_DEVIATION_WATTS = 50.0
 
+# Entities that exhibit normal high-power cycling and should be gated by the
+# sustained deviation gate before firing baseline_deviation or time_of_day_anomaly
+# notifications.  Distinct from _APPLIANCE_HINTS (cycle-completion detection).
+#
+# v1 scope: unambiguous cyclers only.  HVAC/heat/AC/water-heater hints are
+# deferred because they can also indicate genuine away-energy anomalies.
+#
+# Matching uses dot-and-word-boundary-aware tokenisation in _is_cyclical():
+# re.split(r"[._\s]+", entity_id) so sensor.refrigerator_power correctly
+# produces the token "refrigerator".
+CYCLICAL_LOAD_HINTS: frozenset[str] = frozenset(
+    {
+        "fridge",
+        "refrigerator",
+        "freezer",
+        "compressor",
+    }
+)
+
 # Entity-name keywords that identify dedicated appliance circuits.  Only these
 # entities qualify for completion detection; generic power sensors (UPS, fridge,
 # whole-home, server rack) are intentionally excluded.

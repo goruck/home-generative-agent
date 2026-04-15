@@ -81,15 +81,47 @@
 
 ### Config flow UI for CONF_SENTINEL_BASELINE_MIN_SAMPLES
 
-**What:** Add a `NumberSelector` to the Sentinel subentry options flow for `sentinel_baseline_min_samples` (min: 1, max: 500, step: 1, default: 20). Update `sentinel_subentry_flow.py` and `const.py`.
+**Completed:** v3.11.0 (2026-04-14)
 
-**Why:** Without a UI control, users can't tune how many samples are required before baseline rules fire. The feature is invisible to anyone who doesn't read the source code. A user who enables baseline collection and sees no rule firings needs a way to discover and adjust this threshold.
+`NumberSelector` added to `sentinel_subentry_flow.py` (min: 1, max: 500, step: 1, default: 20). Also added `sentinel_baseline_sustained_minutes` selector in the same PR.
 
-**How to apply:** Add `CONF_SENTINEL_BASELINE_MIN_SAMPLES` to `const.py` (if not already added by the baseline enhancement PR). In `sentinel_subentry_flow.py`, add a `NumberSelector` in the baseline section alongside the existing update interval and freshness threshold controls.
+---
+
+### Incident lifecycle control for repeated deviation notifications
+
+**What:** Replace per-entity-run notification tracking with a stable incident abstraction: key per `entity_id + template_id`, hold incident open until entity returns below threshold, notify once per incident. Suppresses repeated alerts for any entity, not just named cyclers. Clear incident when the entity is absent from findings for one full run.
+
+**Why:** The v3.11.0 cyclical load gate (fridge/freezer/compressor) fixes the immediate fridge spam problem, but the root cause is deeper: Sentinel lacks any concept of "same condition still active." Every run where an entity is above threshold produces a new finding, and only the cooldown prevents repeated notification. The incident abstraction fixes this for all entities without requiring appliance name classification.
+
+**How to apply:** Add `_open_incidents: dict[str, IncidentState]` to `SentinelEngine.__init__`. `IncidentState` holds `opened_at`, `last_seen_at`, `notified: bool`. In a new `_apply_incident_control()` method, gate all findings: suppress if `notified=True` and entity still in `_open_incidents`; fire if not yet notified; clear if entity absent this run.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** Cyclical load gate (v3.11.0)
+
+---
+
+### Cyclical load gate: notification body with duration
+
+**What:** When the sustained gate fires, include elapsed time in the notification body ("Fridge compressor has been running for 22 minutes — possible problem?"). Reads `_cyclical_deviation_above_since[entity_id]` and formats elapsed time.
 
 **Effort:** S
-**Priority:** P2
-**Depends on:** Baseline enhancement PR (sentinel-baseline-enhancement)
+**Priority:** P3
+**Depends on:** Cyclical load gate (v3.11.0)
+
+---
+
+### Expand CYCLICAL_LOAD_HINTS to include HVAC/heat/AC/water heater
+
+**What:** Add `hvac`, `heat`, `heatpump`, `aircon`, `airconditioner`, `waterheater`, `tankless` to `CYCLICAL_LOAD_HINTS` in `sentinel/baseline.py`.
+
+**Why:** These appliances cycle normally (HVAC compressor, water heater element) and can generate the same notification spam as fridges. Deferred from v3.11.0 because an HVAC running at 3am away-mode IS an anomaly worth surfacing — the suppression tradeoff is non-trivial and needs evaluation before gating.
+
+**How to apply:** Before expanding hints, evaluate false-negative rate by checking whether any real HVAC away-mode anomalies have been observed in production. Add hint only if HVAC cycling during normal occupancy is reliably distinguishable from anomalous HVAC usage.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** Cyclical load gate (v3.11.0), field observation data
 
 ---
 
@@ -126,15 +158,9 @@
 
 ### Tighten discovery prompt to require entity-backed evidence paths
 
-**What:** Add an instruction to `USER_PROMPT_TEMPLATE` in `explain/discovery_prompts.py` requiring that each candidate cite at least one `entities[entity_ids contains <entity_id>].state` path referencing a concrete entity from the snapshot. Candidates that concern a specific entity but can only cite `derived.*` paths (e.g. `derived.anyone_home`) should be omitted rather than submitted with abstract evidence.
+**Completed:** v3.9.0 (2026-04-06)
 
-**Why:** The LLM currently generates candidates like "Stale Person Tracking While Away" with `evidence_paths` containing only `derived.*` entries and no concrete entity IDs. The normalization engine (`proposal_templates.py:explain_normalize_candidate`) requires at least one extractable entity ID to map a candidate to a supported rule template. Without it, approval always fails with `unsupported_pattern`, leaving a stuck proposal in the card that can only be dismissed by rejection and eventually expires via the 30-day TTL. The prompt is the only enforcement point — the schema validates structure but not content.
-
-**How to apply:** In `USER_PROMPT_TEMPLATE`, add after the current `evidence_paths` instruction: *"If a candidate concerns specific entities, at least one evidence_path MUST reference a concrete entity_id using the format `entities[entity_ids contains domain.object_id].state`. Omit the candidate entirely if no such entity can be cited from the snapshot."* Add a corresponding test in `tests/` that verifies a candidate with only `derived.*` paths and no concrete entity references is not generated (or is filtered pre-store).
-
-**Effort:** S
-**Priority:** P2
-**Depends on:** Discovery deduplication fix PR (fix/discovery-dedup-noise)
+Entity-backed evidence path instruction added to `USER_PROMPT_TEMPLATE` in `explain/discovery_prompts.py`. `_filter_novel_candidates()` in `explain/discovery_engine.py` now guards against derived-only paths. Tests added for the filter.
 
 ---
 
@@ -194,15 +220,9 @@
 
 ### Add `learned_suppressions_active` attribute to health sensor
 
-**What:** Expose a `learned_suppressions_active: int` attribute on `sensor.sentinel_health` — the count of `{rule_type}:{entity_id}` keys in `learned_cooldown_multipliers` where the value is greater than 1 (i.e., at least one doubling has occurred for that rule+entity combination).
+**Completed:** v3.9.0 (2026-04-06)
 
-**Why:** Without this attribute, there is no external visibility into how much Sentinel has self-tuned. Operators cannot tell whether the feedback-trained cooldown feature is doing anything. After v3.7.0 wires the feedback signal, this count becomes the primary signal that learning is occurring.
-
-**How to apply:** Pass `suppression: SuppressionManager | None = None` to `SentinelHealthSensor.__init__()`. In `_async_refresh()`, read `self._suppression.state.learned_cooldown_multipliers` and count entries where `value > 1`. Set `self._attrs["learned_suppressions_active"] = count` (or `None` if no suppression manager is available). Add a test asserting the count is correct for a pre-seeded state with known multipliers.
-
-**Effort:** S
-**Priority:** P2
-**Depends on:** Fix 2+3 (compound key scheme v5, feedback wired in notifier + actions)
+`learned_suppressions_active` attribute exposed on `sensor.sentinel_health`. Count reads `learned_cooldown_multipliers` from suppression state via `engine.learned_suppressions_count` property.
 
 ---
 
