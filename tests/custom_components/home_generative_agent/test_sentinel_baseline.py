@@ -2238,3 +2238,26 @@ def test_gate_boundary_exactly_at_duration() -> None:
     # This documents the contract: the gate uses strict-less-than, so exactly
     # at the threshold the finding IS fired (not suppressed).
     assert result == [finding], "finding at exactly threshold should fire"
+
+
+def test_gate_clock_skew_resets_clock() -> None:
+    """Negative elapsed (clock went backward) resets the gate clock; finding suppressed."""
+    engine = _make_gate_engine()
+    now = _gate_now()
+    finding = _make_deviation_finding("sensor.fridge_power", "")
+
+    # Seed the clock AFTER now (clock went backward since last run).
+    engine._cyclical_deviation_above_since["sensor.fridge_power"] = datetime(
+        2026,
+        4,
+        14,
+        13,
+        0,
+        0,
+        tzinfo=UTC,  # 1 hour in the future relative to now
+    )
+
+    result = SentinelEngine._apply_sustained_gate(engine, [finding], now, 20)
+    assert result == [], "clock skew must suppress (not fire) and reset the clock"
+    # Clock should be reset to now, not left at the future timestamp.
+    assert engine._cyclical_deviation_above_since["sensor.fridge_power"] == now

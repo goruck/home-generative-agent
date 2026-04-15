@@ -708,6 +708,17 @@ class SentinelEngine:
                 continue
 
             elapsed = (now - first_seen).total_seconds() / 60.0
+            if elapsed < 0:
+                # Clock went backward (NTP correction, VM migration).  Reset
+                # the gate clock to avoid permanent suppression.
+                LOGGER.warning(
+                    "Cyclical gate: clock skew detected for %s "
+                    "(elapsed=%.1f min); resetting gate clock.",
+                    entity_id,
+                    elapsed,
+                )
+                self._cyclical_deviation_above_since[entity_id] = now
+                continue
             if elapsed < sustained_minutes:
                 # Still within the gate window — suppress.
                 LOGGER.debug(
