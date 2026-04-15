@@ -165,6 +165,8 @@
             "sentinel_baseline_freshness_threshold_seconds": "Baseline freshness threshold (seconds)",
             "sentinel_baseline_weekly_patterns": "Enable day-of-week baselines (reduces weekend false positives)",
             "sentinel_baseline_dow_min_samples": "DOW baseline minimum samples (weeks of data per slot)",
+            "sentinel_baseline_min_samples": "Baseline minimum samples before deviation alerts fire",
+            "sentinel_baseline_sustained_minutes": "Cyclical load gate: minutes above threshold before alerting (0 = disabled)",
             "explain_enabled": "Enable LLM explanations for sentinel findings",
             "sentinel_require_pin_for_level_increase": "Require PIN for autonomy level increases",
             "sentinel_daily_digest_enabled": "Enable daily digest notification",

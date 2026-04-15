@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
@@ -22,6 +23,7 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_AUTONOMY_LEVEL,
     CONF_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
     CONF_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT,
+    CONF_SENTINEL_BASELINE_SUSTAINED_MINUTES,
     CONF_SENTINEL_BASELINE_WEEKLY_PATTERNS,
     CONF_SENTINEL_CAMERA_ENTRY_LINKS,
     CONF_SENTINEL_COOLDOWN_MINUTES,
@@ -40,6 +42,7 @@ from custom_components.home_generative_agent.const import (
     RECOMMENDED_SENTINEL_AUTONOMY_LEVEL,
     RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
     RECOMMENDED_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT,
+    RECOMMENDED_SENTINEL_BASELINE_SUSTAINED_MINUTES,
     RECOMMENDED_SENTINEL_BASELINE_WEEKLY_PATTERNS,
     RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
     RECOMMENDED_SENTINEL_PRESENCE_GRACE_MINUTES,
@@ -53,6 +56,7 @@ from custom_components.home_generative_agent.snapshot.builder import (
     async_build_full_state_snapshot,
 )
 
+from .baseline import CYCLICAL_LOAD_HINTS
 from .correlator import SentinelCorrelator
 from .dynamic_rules import evaluate_dynamic_rules
 from .execution import (
@@ -141,6 +145,25 @@ def _anomaly_type_for_state(entity_id: str, new_state: State) -> str | None:
     return None
 
 
+def _is_cyclical(entity_id: str, friendly_name: str) -> bool:
+    """
+    Return True if this entity is a known normal high-power cycler.
+
+    Splits on dots, underscores, and spaces so that entity IDs like
+    ``sensor.refrigerator_power`` correctly tokenise to ``{"sensor",
+    "refrigerator", "power"}``.  Matching is token-exact (no substring),
+    which prevents short hints from matching unrelated tokens.
+
+    Entities matching CYCLICAL_LOAD_HINTS undergo the sustained deviation gate
+    before firing baseline_deviation or time_of_day_anomaly findings.
+    """
+    tokens = set(
+        re.split(r"[._\s]+", entity_id.lower())
+        + re.split(r"[._\s]+", friendly_name.lower())
+    )
+    return bool(tokens & CYCLICAL_LOAD_HINTS)
+
+
 class SentinelEngine:
     """Periodic sentinel evaluation loop."""
 
@@ -196,6 +219,12 @@ class SentinelEngine:
         # Presence tracking for grace-window registration.
         # Stores the set of person entity IDs known to be home from the last run.
         self._last_people_home: set[str] = set()
+        # Cyclical load sustained deviation gate (Sprint 4).
+        # Maps entity_id -> datetime when entity first exceeded the deviation
+        # threshold in the current sustained episode.  Reset on engine stop.
+        # Note: HA restart clears this dict; the first compressor-on cycle after
+        # restart waits the full sustained_minutes before notifying (acceptable).
+        self._cyclical_deviation_above_since: dict[str, datetime] = {}
         # Run telemetry exposed to SentinelHealthSensor.
         self.run_stats: dict[str, Any] = {}
 
@@ -209,6 +238,17 @@ class SentinelEngine:
         ``learned_suppressions_active``.
         """
         return len(self._suppression.state.learned_cooldown_multipliers)
+
+    @property
+    def cyclical_entities_gated_count(self) -> int:
+        """
+        Count of cyclical entities currently held by the sustained deviation gate.
+
+        Each entry is an entity_id whose deviation finding is being suppressed
+        while waiting for the sustained_minutes threshold to elapse.  Exposed on
+        the health sensor as ``cyclical_entities_gated``.
+        """
+        return len(self._cyclical_deviation_above_since)
 
     # ---------------------------------------------------------------------- #
     # Autonomy level management
@@ -412,7 +452,7 @@ class SentinelEngine:
             self.run_stats["scheduler"] = self._trigger_scheduler.stats
             async_dispatcher_send(self._hass, SIGNAL_SENTINEL_RUN_COMPLETE)
 
-    async def _run_once(self, trigger_source: str = "poll") -> None:  # noqa: PLR0912
+    async def _run_once(self, trigger_source: str = "poll") -> None:  # noqa: PLR0912, PLR0915
         try:
             snapshot = await async_build_full_state_snapshot(self._hass)
         except (ValueError, TypeError, KeyError):
@@ -526,6 +566,14 @@ class SentinelEngine:
                     len(dynamic_rules),
                     len(dynamic_findings),
                 )
+                sustained_minutes = _coerce_int(
+                    self._options.get(CONF_SENTINEL_BASELINE_SUSTAINED_MINUTES),
+                    RECOMMENDED_SENTINEL_BASELINE_SUSTAINED_MINUTES,
+                )
+                if sustained_minutes > 0:
+                    dynamic_findings = self._apply_sustained_gate(
+                        dynamic_findings, now, sustained_minutes
+                    )
                 if dynamic_findings:
                     LOGGER.info(
                         "Sentinel dynamic rules produced %s finding(s).",
@@ -552,6 +600,154 @@ class SentinelEngine:
                 trigger_source=trigger_source,
             )
         LOGGER.debug("Sentinel cycle completed with %s finding(s).", len(all_findings))
+
+    # ---------------------------------------------------------------------- #
+    # Cyclical load sustained deviation gate
+    # ---------------------------------------------------------------------- #
+
+    # Template IDs subject to the cyclical load gate.  Any new dynamic rule
+    # template that represents a deviation-style alert (not a point-in-time
+    # anomaly) should be added here so cyclical entities are gated correctly.
+    # Template IDs are defined in sentinel/dynamic_rules.py (TEMPLATE_ID
+    # constants) and sentinel/baseline.py (evaluate_baseline_deviation /
+    # evaluate_time_of_day_anomaly).
+    _GATED_TEMPLATE_IDS: frozenset[str] = frozenset(
+        {"baseline_deviation", "time_of_day_anomaly"}
+    )
+
+    def _apply_sustained_gate(
+        self,
+        findings: list[AnomalyFinding],
+        now: datetime,
+        sustained_minutes: int,
+    ) -> list[AnomalyFinding]:
+        """
+        Apply a sustained-presence gate to cyclical-entity deviation findings.
+
+        For each finding whose ``template_id`` is ``baseline_deviation`` or
+        ``time_of_day_anomaly`` and whose entity matches
+        :data:`CYCLICAL_LOAD_HINTS`:
+
+        * First appearance: record ``now`` in
+          ``_cyclical_deviation_above_since`` and **suppress** the finding
+          (start the clock).
+        * Subsequent appearances while elapsed < ``sustained_minutes``:
+          **suppress** (keep suppressing).
+        * After ``sustained_minutes`` have elapsed: **fire** the finding,
+          reset the clock to ``now`` (so re-fire requires another full
+          duration).
+
+        All other findings pass through unchanged.
+
+        Clock cleanup: after iterating findings, any entity_id that was in
+        ``_cyclical_deviation_above_since`` but did **not** appear in any
+        finding this run is removed (the entity dropped back below threshold).
+        Cleanup runs after gate processing so an entity that rises and falls
+        within a single run is tracked from first rise and cleared at end of
+        that same run.
+
+        Note on semantics: "sustained" means the entity was present in
+        findings on consecutive engine runs, not that it was continuously
+        above threshold for N wall-clock minutes.  At the default 5-minute
+        run cadence the approximation is close enough; document this rather
+        than adding wall-clock gap tracking.
+
+        Note on static rules: this gate is applied only to ``dynamic_findings``
+        from ``evaluate_dynamic_rules()``.  If static baseline rules are ever
+        added, apply the gate to their output as well.
+
+        Note on HA restart: ``_cyclical_deviation_above_since`` is in-memory
+        only and is cleared on restart.  The first compressor-on cycle after
+        restart waits the full ``sustained_minutes`` before notifying.
+        """
+        if sustained_minutes <= 0:
+            return findings
+
+        passed: list[AnomalyFinding] = []
+        # Track which entity_ids appeared in this run's cyclical findings so we
+        # can clear stale entries at the end.
+        seen_cyclical: set[str] = set()
+
+        for finding in findings:
+            template_id = finding.evidence.get("template_id", "")
+            if template_id not in self._GATED_TEMPLATE_IDS:
+                passed.append(finding)
+                continue
+
+            # Determine the entity_id for gate tracking.  Use the first entry
+            # in triggering_entities (baseline rules always produce a single-
+            # entity finding).  If the list is empty, pass the finding through
+            # unchanged — tokenising the anomaly_id would be unreliable and
+            # could produce false positive or false negative gate matches.
+            if not finding.triggering_entities:
+                LOGGER.warning(
+                    "Cyclical gate: finding %s has no triggering_entities; "
+                    "skipping gate for this finding.",
+                    finding.anomaly_id,
+                )
+                passed.append(finding)
+                continue
+            entity_id = finding.triggering_entities[0]
+            friendly_name = finding.evidence.get("friendly_name", "")
+
+            if not _is_cyclical(entity_id, str(friendly_name)):
+                passed.append(finding)
+                continue
+
+            seen_cyclical.add(entity_id)
+
+            first_seen = self._cyclical_deviation_above_since.get(entity_id)
+            if first_seen is None:
+                # First time above threshold — start the clock, suppress.
+                self._cyclical_deviation_above_since[entity_id] = now
+                LOGGER.debug(
+                    "Cyclical gate started for %s (sustained_minutes=%d).",
+                    entity_id,
+                    sustained_minutes,
+                )
+                continue
+
+            elapsed = (now - first_seen).total_seconds() / 60.0
+            if elapsed < 0:
+                # Clock went backward (NTP correction, VM migration).  Reset
+                # the gate clock to avoid permanent suppression.
+                LOGGER.warning(
+                    "Cyclical gate: clock skew detected for %s "
+                    "(elapsed=%.1f min); resetting gate clock.",
+                    entity_id,
+                    elapsed,
+                )
+                self._cyclical_deviation_above_since[entity_id] = now
+                continue
+            if elapsed < sustained_minutes:
+                # Still within the gate window — suppress.
+                LOGGER.debug(
+                    "Cyclical gate suppressing %s (%.1f / %d min elapsed).",
+                    entity_id,
+                    elapsed,
+                    sustained_minutes,
+                )
+                continue
+
+            # Gate exceeded — fire and reset clock.
+            LOGGER.info(
+                "Cyclical gate exceeded for %s (%.1f min); firing finding.",
+                entity_id,
+                elapsed,
+            )
+            self._cyclical_deviation_above_since[entity_id] = now
+            passed.append(finding)
+
+        # Remove entries for entities that dropped below threshold this run.
+        # (Not in seen_cyclical means no cyclical finding appeared for them.)
+        stale = set(self._cyclical_deviation_above_since) - seen_cyclical
+        for entity_id in stale:
+            LOGGER.debug(
+                "Cyclical gate cleared for %s (no finding this run).", entity_id
+            )
+            del self._cyclical_deviation_above_since[entity_id]
+
+        return passed
 
     # ---------------------------------------------------------------------- #
     # Presence grace window maintenance

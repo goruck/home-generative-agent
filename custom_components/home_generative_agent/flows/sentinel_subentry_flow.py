@@ -34,6 +34,8 @@ from ..const import (  # noqa: TID252
     CONF_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
     CONF_SENTINEL_BASELINE_ENABLED,
     CONF_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS,
+    CONF_SENTINEL_BASELINE_MIN_SAMPLES,
+    CONF_SENTINEL_BASELINE_SUSTAINED_MINUTES,
     CONF_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES,
     CONF_SENTINEL_BASELINE_WEEKLY_PATTERNS,
     CONF_SENTINEL_CAMERA_ENTRY_LINKS,
@@ -56,6 +58,8 @@ from ..const import (  # noqa: TID252
     RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
     RECOMMENDED_SENTINEL_BASELINE_ENABLED,
     RECOMMENDED_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS,
+    RECOMMENDED_SENTINEL_BASELINE_MIN_SAMPLES,
+    RECOMMENDED_SENTINEL_BASELINE_SUSTAINED_MINUTES,
     RECOMMENDED_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES,
     RECOMMENDED_SENTINEL_BASELINE_WEEKLY_PATTERNS,
     RECOMMENDED_SENTINEL_CAMERA_ENTRY_LINKS,
@@ -127,6 +131,10 @@ def _default_payload() -> dict[str, Any]:
         ),
         CONF_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS: (
             RECOMMENDED_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS
+        ),
+        CONF_SENTINEL_BASELINE_MIN_SAMPLES: RECOMMENDED_SENTINEL_BASELINE_MIN_SAMPLES,
+        CONF_SENTINEL_BASELINE_SUSTAINED_MINUTES: (
+            RECOMMENDED_SENTINEL_BASELINE_SUSTAINED_MINUTES
         ),
         CONF_EXPLAIN_ENABLED: RECOMMENDED_EXPLAIN_ENABLED,
         CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: (
@@ -264,6 +272,24 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                     )
                 ),
             ): NumberSelector(NumberSelectorConfig(min=1, max=52, step=1)),
+            vol.Required(
+                CONF_SENTINEL_BASELINE_MIN_SAMPLES,
+                default=int(
+                    payload.get(
+                        CONF_SENTINEL_BASELINE_MIN_SAMPLES,
+                        RECOMMENDED_SENTINEL_BASELINE_MIN_SAMPLES,
+                    )
+                ),
+            ): NumberSelector(NumberSelectorConfig(min=1, max=500, step=1)),
+            vol.Required(
+                CONF_SENTINEL_BASELINE_SUSTAINED_MINUTES,
+                default=int(
+                    payload.get(
+                        CONF_SENTINEL_BASELINE_SUSTAINED_MINUTES,
+                        RECOMMENDED_SENTINEL_BASELINE_SUSTAINED_MINUTES,
+                    )
+                ),
+            ): NumberSelector(NumberSelectorConfig(min=0, max=120, step=5)),
             vol.Required(
                 CONF_EXPLAIN_ENABLED,
                 default=bool(

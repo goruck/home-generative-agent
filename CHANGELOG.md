@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.11.0] - 2026-04-14
+
+### Added
+
+- **Cyclical load sustained deviation gate** — refrigerators, freezers, and
+  compressors now require sustained anomalous power draw before Sentinel fires
+  a notification. Normal compressor cycling (e.g. ~944 W on/off every 30
+  minutes) no longer triggers repeated "High energy consumption away" alerts.
+  The gate duration is configurable in Sentinel settings (default 20 minutes,
+  range 0–120 in 5-minute steps; set to 0 to disable).
+
+- **Baseline minimum samples UI** — the "Baseline minimum samples before
+  deviation alerts fire" setting is now exposed in the Sentinel configuration
+  flow (range 1–500, default 20). Previously this required editing config
+  entries directly.
+
+- **Health sensor `cyclical_entities_gated` attribute** — the Sentinel health
+  sensor now reports how many cyclical entities are currently held by the
+  sustained deviation gate, useful for dashboards and debugging.
+
 ## [3.10.0] - 2026-04-13
 
 ### Added
