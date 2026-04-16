@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.11.1] - 2026-04-16
+
+### Added
+
+- **HA 2026.4.0 chatlog transparency (Show Details)** — HGA now populates the
+  HA conversation chatlog after each agent turn, enabling HA's "Show Details"
+  panel to display the full tool call / result chain. Each intermediate tool
+  call (with arguments) and its result are visible as typed chatlog entries.
+  Requires HA 2026.4.0 or later. Closes #369.
+
 ## [3.11.0] - 2026-04-14
 
 ### Added
