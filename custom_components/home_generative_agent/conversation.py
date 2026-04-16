@@ -163,7 +163,7 @@ def _populate_chat_log_from_response(
                     llm.ToolInput(
                         tool_name=tc["name"],
                         tool_args=tc["args"],
-                        id=tc["id"],
+                        id=tc["id"] or ulid.ulid_now(),
                         external=True,
                     )
                     for tc in msg.tool_calls
