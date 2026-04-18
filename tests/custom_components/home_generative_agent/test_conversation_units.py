@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import sys
 import types
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -45,18 +46,20 @@ def _stub_ha_conversation() -> None:
         pass
 
     # conversation module
-    conv_mod = types.ModuleType("homeassistant.components.conversation")
-    conv_mod.ConversationEntity = _ConversationEntity  # type: ignore[attr-defined]
-    conv_mod.AbstractConversationAgent = _AbstractConversationAgent  # type: ignore[attr-defined]
-    conv_mod.ConversationResult = _ConversationResult  # type: ignore[attr-defined]
-    conv_mod.UserContent = _UserContent  # type: ignore[attr-defined]
-    conv_mod.AssistantContent = _AssistantContent  # type: ignore[attr-defined]
-    conv_mod.DOMAIN = "conversation"  # type: ignore[attr-defined]
-    conv_mod.async_set_agent = MagicMock()  # type: ignore[attr-defined]
-    conv_mod.trace = MagicMock()  # type: ignore[attr-defined]
+    conv_mod: Any = types.ModuleType("homeassistant.components.conversation")
+    conv_mod.ConversationEntity = _ConversationEntity
+    conv_mod.AbstractConversationAgent = _AbstractConversationAgent
+    conv_mod.ConversationResult = _ConversationResult
+    conv_mod.UserContent = _UserContent
+    conv_mod.AssistantContent = _AssistantContent
+    conv_mod.AssistantContentDeltaDict = dict
+    conv_mod.ToolResultContentDeltaDict = dict
+    conv_mod.DOMAIN = "conversation"
+    conv_mod.async_set_agent = MagicMock()
+    conv_mod.trace = MagicMock()
 
     # conversation.models submodule
-    models_mod = types.ModuleType("homeassistant.components.conversation.models")
+    models_mod: Any = types.ModuleType("homeassistant.components.conversation.models")
     models_mod.AbstractConversationAgent = _AbstractConversationAgent  # type: ignore[attr-defined]
     conv_mod.models = models_mod  # type: ignore[attr-defined]
 

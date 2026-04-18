@@ -2,26 +2,40 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import hashlib
 import json
 import logging
 import string
-from typing import TYPE_CHECKING, Any, Literal
+from collections.abc import AsyncGenerator, AsyncIterable
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import homeassistant.util.dt as dt_util
 import voluptuous as vol
 from homeassistant.components import conversation
-from homeassistant.components.conversation import trace
+from homeassistant.components.conversation import (
+    AssistantContentDeltaDict,
+    ToolResultContentDeltaDict,
+    trace,
+)
 from homeassistant.components.conversation.models import AbstractConversationAgent
 from homeassistant.const import CONF_LLM_HASS_API, MATCH_ALL
-from homeassistant.exceptions import HomeAssistantError, TemplateError
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import intent, llm, template
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.util import ulid
 from langchain_core.caches import InMemoryCache
 from langchain_core.globals import set_debug, set_llm_cache, set_verbose
-from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    AnyMessage,
+    HumanMessage,
+    ToolCall,
+    ToolMessage,
+)
 from pydantic import PydanticInvalidForJsonSchema
 
 from .agent.graph import workflow
@@ -62,7 +76,7 @@ from .core.conversation_helpers import (
 from .core.utils import gather_store_puts_in_chunks
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import AsyncGenerator, AsyncIterable, Callable, Mapping
 
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
@@ -119,20 +133,22 @@ def _normalize_ai_content(content: str | list) -> str | None:
     return "\n".join(parts) or None
 
 
-def _normalize_tool_result(content: str | list) -> JsonObjectType:
+def _normalize_tool_result(content: Any) -> JsonObjectType:
     """
     Normalize ToolMessage.content to JsonObjectType for HA ToolResultContent.
 
     ToolMessage.content is str for plain string results, or list[dict] (content blocks)
-    from some providers. HA ToolResultContent.tool_result requires JsonObjectType.
+    from some providers (e.g. Anthropic).
     """
     if isinstance(content, str):
         return {"result": content}
-    parts = [
-        block.get("text", "") if isinstance(block, dict) else str(block)
-        for block in content
-    ]
-    return {"result": "\n".join(parts)}
+    if isinstance(content, list):
+        parts = [
+            block.get("text", "") if isinstance(block, dict) else str(block)
+            for block in content
+        ]
+        return {"result": "\n".join(parts)}
+    return {"result": str(content)}
 
 
 def _populate_chat_log_from_response(
@@ -191,6 +207,110 @@ def _populate_chat_log_from_response(
                     tool_result=_normalize_tool_result(msg.content),
                 )
             )
+
+
+# ruff: noqa: PLR0912
+async def _stream_langgraph_to_ha(
+    event_stream: AsyncIterable[Mapping[str, Any]],
+    _agent_id: str,
+) -> AsyncGenerator[AssistantContentDeltaDict | ToolResultContentDeltaDict]:
+    """
+    Transform LangGraph astream_events into HA ChatLog deltas.
+
+    Filters for events from the 'agent' node for tokens/tool-calls and the
+    'action' node for tool results.
+    """
+    pending_tool_map: dict[str, ToolCall] = {}
+
+    try:
+        async for event in event_stream:
+            ev = cast("dict[str, Any]", event)
+            metadata = cast("dict[str, Any]", ev.get("metadata", {}))
+            node = metadata.get("langgraph_node")
+            event_type = ev.get("event")
+            data = cast("dict[str, Any]", ev.get("data", {}))
+
+            # 1. Start of a model turn: open an AssistantContent block.
+            # HA flushes any previous AssistantContent when it receives a
+            # role="assistant" delta. We yield this at every agent start to ensure
+            # HA state sync in recursive loops (Agent -> Action -> Agent).
+            if node == "agent" and event_type == "on_chat_model_start":
+                yield AssistantContentDeltaDict(role="assistant")
+
+            # 2. Incremental text tokens.
+            elif node == "agent" and event_type == "on_chat_model_stream":
+                chunk = data.get("chunk")
+                if not isinstance(chunk, AIMessageChunk) or chunk.tool_call_chunks:
+                    continue
+
+                chunk_text = _normalize_ai_content(chunk.content)
+                if chunk_text:
+                    yield AssistantContentDeltaDict(content=chunk_text)
+
+            # 3. End of a model turn: record pending tool calls.
+            elif node == "agent" and event_type == "on_chat_model_end":
+                msg = data.get("output")
+                if not isinstance(msg, AIMessage):
+                    continue
+
+                if msg.tool_calls:
+                    # Update mapping for result correlation.
+                    call_id_map = []
+                    for tc in msg.tool_calls:
+                        call_id = tc.get("id") or ulid.ulid_now()
+                        pending_tool_map[call_id] = tc
+                        call_id_map.append(call_id)
+
+                    yield AssistantContentDeltaDict(
+                        tool_calls=[
+                            llm.ToolInput(
+                                tool_name=str(tc["name"]),
+                                tool_args=cast("dict[str, Any]", tc["args"]),
+                                id=call_id_map[i],
+                                external=True,
+                            )
+                            for i, tc in enumerate(msg.tool_calls)
+                        ]
+                    )
+
+            # 4. Tool results from the action node.
+            elif node == "action" and event_type == "on_chain_end":
+                output = cast("Mapping[str, Any]", data.get("output", {}))
+                messages = cast("list[Any]", output.get("messages", []))
+                tool_messages = [m for m in messages if isinstance(m, ToolMessage)]
+
+                # 1. Yield successful results and remove from pending map.
+                for msg in tool_messages:
+                    pending_tool_map.pop(msg.tool_call_id, None)
+
+                    yield ToolResultContentDeltaDict(
+                        role="tool_result",
+                        tool_call_id=str(msg.tool_call_id),
+                        tool_name=str(msg.name or ""),
+                        tool_result=_normalize_tool_result(msg.content),
+                    )
+
+                # 2. Yield synthetic rejections for any calls that didn't return a
+                # result. This ensures HA doesn't hang if a tool fails silently or
+                # is rejected.
+                for call_id, tc in pending_tool_map.items():
+                    yield ToolResultContentDeltaDict(
+                        role="tool_result",
+                        tool_call_id=call_id,
+                        tool_name=tc.get("name") or "tool",
+                        tool_result={
+                            "error": "Tool execution rejected by routing policy."
+                        },
+                    )
+                pending_tool_map.clear()
+    except (GeneratorExit, asyncio.CancelledError):
+        # Stop iteration on cancellation or closure.
+        raise
+    except Exception:
+        _LOGGER.exception("Error in LangGraph streaming transformation generator.")
+        raise
+    finally:
+        pending_tool_map.clear()
 
 
 class MultiLLMAPI:
@@ -280,6 +400,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
 
     _attr_has_entity_name = True
     _attr_name = None
+    _attr_supports_streaming = True
 
     def __init__(self, entry: ConfigEntry) -> None:
         """Initialize the agent."""
@@ -330,26 +451,10 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         """Return a list of supported languages."""
         return MATCH_ALL
 
-    async def _async_handle_message(  # noqa: PLR0911, PLR0912, PLR0915
-        self,
-        user_input: conversation.ConversationInput,
-        chat_log: conversation.ChatLog,
-    ) -> conversation.ConversationResult:
-        """Process the user input."""
-        hass = self.hass
-        options = self.entry.runtime_data.options
-        runtime_data = self.entry.runtime_data
-        intent_response = intent.IntentResponse(language=user_input.language)
-        tools: list[dict[str, Any]] | None = None
-        user_name: str | None = None
-        llm_context = llm.LLMContext(
-            platform=DOMAIN,
-            context=user_input.context,
-            language=user_input.language,
-            assistant=conversation.DOMAIN,
-            device_id=user_input.device_id,
-        )
-
+    def _async_get_message_history(
+        self, chat_log: conversation.ChatLog
+    ) -> list[HumanMessage | AIMessage]:
+        """Extract and slice the relevant chat log history."""
         # Include only HA User/Assistant messages not already seen by this entity.
         # Exclude AssistantContent with tool_calls: those are intermediate LangGraph
         # turns already persisted in the PostgreSQL checkpointer. Including them would
@@ -363,21 +468,21 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         # The last chat log entry will be the current user request—add it later.
         message_history = message_history[:-1]
 
-        if (mhlen := len(message_history)) <= self.message_history_len:
+        mhlen = len(message_history)
+        if mhlen <= self.message_history_len:
             message_history = []
         else:
             diff = mhlen - self.message_history_len
             message_history = message_history[-diff:]
             self.message_history_len = mhlen
 
-        conversation_id = (
-            ulid.ulid_now()
-            if chat_log.conversation_id is None
-            else chat_log.conversation_id
-        )
+        return message_history
 
-        # HA tools & schema
-        # Gather ALL selected APIs
+    async def _async_init_llm_apis(self, llm_context: llm.LLMContext) -> MultiLLMAPI:
+        """Load and validate configured LLM APIs, returning a MultiLLMAPI instance."""
+        hass = self.hass
+        options = self.entry.runtime_data.options
+
         active_api_ids = options.get(CONF_LLM_HASS_API, [llm.LLM_API_ASSIST])
         if isinstance(active_api_ids, str):
             active_api_ids = [active_api_ids]
@@ -393,32 +498,20 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 failed_apis.append(api_id)
 
         if not active_apis:
-            intent_response.async_set_error(
-                intent.IntentResponseErrorCode.UNKNOWN,
+            msg = (
                 "No LLM APIs could be loaded. "
                 f"Failed: {', '.join(failed_apis)}. "
-                f"Configured: {', '.join(active_api_ids)}",
+                f"Configured: {', '.join(active_api_ids)}"
             )
-            return conversation.ConversationResult(
-                response=intent_response, conversation_id=conversation_id
-            )
+            raise HomeAssistantError(msg)
 
-        # Multi-API initialization
-        llm_api = MultiLLMAPI(active_apis, {})
+        return MultiLLMAPI(active_apis, {})
 
-        # --- Global Tool Indexing (Background) ---
-        await self._async_index_tools(llm_context, runtime_data)
-
-        if not options.get(CONF_SCHEMA_FIRST_YAML, False) and _is_dashboard_request(
-            user_input.text
-        ):
-            intent_response.async_set_speech(
-                """Please enable 'Schema-first JSON for YAML requests' in
-                HGA's configuration and try again"""
-            )
-            return conversation.ConversationResult(
-                response=intent_response, conversation_id=conversation_id
-            )
+    def _async_get_all_tools(
+        self, active_apis: dict[str, llm.APIInstance]
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Aggregate HA tools and LangChain-native tools."""
+        options = self.entry.runtime_data.options
 
         tools = (
             [
@@ -445,10 +538,248 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             langchain_tools["add_automation"] = add_automation
         tools.extend(langchain_tools.values())
 
-        # Conversation ID
-        _LOGGER.debug("Conversation ID: %s", conversation_id)
+        return tools, langchain_tools
+
+    def _async_render_system_prompt(
+        self,
+        llm_context: llm.LLMContext,
+        user_name: str | None,
+        llm_api: MultiLLMAPI,
+        *,
+        has_tools: bool,
+    ) -> str:
+        """Render the full system instructions."""
+        options = self.entry.runtime_data.options
+
+        pin_enabled = options.get(CONF_CRITICAL_ACTION_PIN_ENABLED, False)
+        critical_prompt = CRITICAL_ACTION_PROMPT if pin_enabled else ""
+        schema_prompt = (
+            SCHEMA_FIRST_YAML_PROMPT
+            if options.get(CONF_SCHEMA_FIRST_YAML, False)
+            else ""
+        )
+        prompt_parts = [
+            template.Template(
+                (
+                    llm.DATE_TIME_PROMPT
+                    + options.get(CONF_PROMPT, llm.DEFAULT_INSTRUCTIONS_PROMPT)
+                    + f"\nYou are in the {self.tz} timezone."
+                    + critical_prompt
+                    + schema_prompt
+                    + TOOL_CALL_ERROR_SYSTEM_MESSAGE
+                    if has_tools
+                    else ""
+                ),
+                self.hass,
+            ).async_render(
+                {
+                    "ha_name": self.hass.config.location_name,
+                    "user_name": user_name,
+                    "llm_context": llm_context,
+                },
+                parse_result=False,
+            )
+        ]
+
+        if llm_api:
+            prompt_parts.append(llm_api.api_prompt)
+
+        return "\n".join(prompt_parts)
+
+    async def _async_run_ainvoke(
+        self,
+        app: Any,
+        input_data: State,
+        config: RunnableConfig,
+        chat_log: conversation.ChatLog,
+        tools: list[dict[str, Any]] | None,
+    ) -> None:
+        """Handle the non-streaming ainvoke path."""
+        options = self.entry.runtime_data.options
+        hass = self.hass
+
+        try:
+            response = await app.ainvoke(input=input_data, config=config)
+        except HomeAssistantError as err:
+            _LOGGER.exception("LangGraph error during conversation processing.")
+            msg = f"Something went wrong: {err}"
+            raise HomeAssistantError(msg) from err
+
+        trace.async_conversation_trace_append(
+            trace.ConversationTraceEventType.AGENT_DETAIL,
+            {"messages": response["messages"], "tools": tools or None},
+        )
+
+        _LOGGER.debug("====== End of run (ainvoke) ======")
+
+        # Post-process the final LLM text (entity ID resolution, YAML conversion).
+        final_content = response["messages"][-1].content
+        if isinstance(final_content, str):
+            if options.get(CONF_SCHEMA_FIRST_YAML, False):
+                final_content = _maybe_fix_dashboard_entities(final_content, hass)
+                final_content = _convert_schema_json_to_yaml(
+                    final_content, enabled=True
+                )
+            else:
+                final_content = _fix_entity_ids_in_text(final_content, hass)
+            _LOGGER.debug("Final response content: %s", final_content)
+
+        # Backfill chat_log with the messages produced this turn so HA's
+        # "Show Details" panel renders the full tool call / result chain.
+        # Slice off history + current HumanMessage — only net-new messages.
+        new_messages = response["messages"][len(input_data["messages"]) :]
+
+        # Guard: async_get_result_from_chat_log requires last entry to be
+        # AssistantContent, which means the last new message must be an
+        # AIMessage.
+        if not new_messages or not isinstance(new_messages[-1], AIMessage):
+            _LOGGER.error(
+                "LangGraph response did not end with AIMessage (got %s). "
+                "Falling back to manual ConversationResult.",
+                type(new_messages[-1]) if new_messages else "empty",
+            )
+            chat_log.async_add_assistant_content_without_tools(
+                conversation.AssistantContent(
+                    agent_id=self.entity_id,
+                    content=final_content if isinstance(final_content, str) else "",
+                )
+            )
+            return
+
+        # Replace the final AIMessage content with the post-processed text so
+        # Show Details reflects the same text the user hears.
+        if isinstance(final_content, str):
+            processed_messages: list[AnyMessage] = [
+                *new_messages[:-1],
+                AIMessage(
+                    content=final_content,
+                    tool_calls=new_messages[-1].tool_calls,
+                ),
+            ]
+        else:
+            processed_messages = list(new_messages)
+
+        _populate_chat_log_from_response(chat_log, self.entity_id, processed_messages)
+
+    async def _async_run_astream(
+        self,
+        app: Any,
+        input_data: State,
+        config: RunnableConfig,
+        chat_log: conversation.ChatLog,
+        tools: list[dict[str, Any]] | None,
+    ) -> None:
+        """Handle the streaming astream_events path."""
+        hass = self.hass
+
+        async def _run_streaming_task() -> None:
+            """Coroutine to drive the delta stream and ensure cancellation."""
+            event_stream = app.astream_events(
+                input=input_data, config=config, version="v2"
+            )
+            async for _ in chat_log.async_add_delta_content_stream(
+                self.entity_id,
+                _stream_langgraph_to_ha(event_stream, self.entity_id),
+            ):
+                pass
+
+        # Create a task for the streaming process to enable explicit cancellation
+        # if the client disconnects or the conversation turn is aborted.
+        stream_task = hass.async_create_task(_run_streaming_task())
+        try:
+            await stream_task
+        except HomeAssistantError:
+            # Partial content already committed — cannot roll back.
+            # Log and return whatever was committed.
+            _LOGGER.exception(
+                "HomeAssistantError mid-stream; partial content committed."
+            )
+        except asyncio.CancelledError:
+            # Hard kill: cancel the background graph run if the consumer has left.
+            stream_task.cancel()
+            raise
+        finally:
+            if not stream_task.done():
+                stream_task.cancel()
+                # Non-blocking wait to allow generators to close.
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await stream_task
+
+        # Fire trace after stream completes using final graph state.
+        # astream_events handles exhaustion only after graph termination.
+        _LOGGER.debug("====== End of run (streaming) ======")
+        try:
+            final_state = await app.aget_state(config)
+            trace.async_conversation_trace_append(
+                trace.ConversationTraceEventType.AGENT_DETAIL,
+                {
+                    "messages": final_state.values.get("messages", []),
+                    "tools": tools or None,
+                },
+            )
+        except ValueError:
+            # Expected when no checkpointer is configured (e.g. tests)
+            _LOGGER.debug("aget_state unavailable; skipping trace for streaming turn.")
+        except Exception:
+            _LOGGER.exception("Failed to retrieve final state for tracing.")
+
+    async def _async_handle_message(
+        self,
+        user_input: conversation.ConversationInput,
+        chat_log: conversation.ChatLog,
+    ) -> conversation.ConversationResult:
+        """Process the user input."""
+        hass = self.hass
+        options = self.entry.runtime_data.options
+        runtime_data = self.entry.runtime_data
+        intent_response = intent.IntentResponse(language=user_input.language)
+
+        llm_context = llm.LLMContext(
+            platform=DOMAIN,
+            context=user_input.context,
+            language=user_input.language,
+            assistant=conversation.DOMAIN,
+            device_id=user_input.device_id,
+        )
+
+        message_history = self._async_get_message_history(chat_log)
+
+        conversation_id = (
+            ulid.ulid_now()
+            if chat_log.conversation_id is None
+            else chat_log.conversation_id
+        )
+
+        # Multi-API initialization
+        try:
+            llm_api = await self._async_init_llm_apis(llm_context)
+        except HomeAssistantError as err:
+            intent_response.async_set_error(
+                intent.IntentResponseErrorCode.UNKNOWN,
+                str(err),
+            )
+            return conversation.ConversationResult(
+                response=intent_response, conversation_id=conversation_id
+            )
+
+        # --- Global Tool Indexing (Background) ---
+        await self._async_index_tools(llm_context, runtime_data)
+
+        if not options.get(CONF_SCHEMA_FIRST_YAML, False) and _is_dashboard_request(
+            user_input.text
+        ):
+            intent_response.async_set_speech(
+                "Please enable 'Schema-first JSON for YAML requests' in "
+                "HGA's configuration and try again"
+            )
+            return conversation.ConversationResult(
+                response=intent_response, conversation_id=conversation_id
+            )
+
+        tools, langchain_tools = self._async_get_all_tools(llm_api.apis)
 
         # Resolve user name (None means automation)
+        user_name = None
         if (
             user_input.context
             and user_input.context.user_id
@@ -456,55 +787,11 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         ):
             user_name = user.name
 
-        # Build system prompt
-        try:
-            pin_enabled = options.get(CONF_CRITICAL_ACTION_PIN_ENABLED, False)
-            critical_prompt = CRITICAL_ACTION_PROMPT if pin_enabled else ""
-            schema_prompt = (
-                SCHEMA_FIRST_YAML_PROMPT
-                if options.get(CONF_SCHEMA_FIRST_YAML, False)
-                else ""
-            )
-            prompt_parts = [
-                template.Template(
-                    (
-                        llm.DATE_TIME_PROMPT
-                        + options.get(CONF_PROMPT, llm.DEFAULT_INSTRUCTIONS_PROMPT)
-                        + f"\nYou are in the {self.tz} timezone."
-                        + critical_prompt
-                        + schema_prompt
-                        + TOOL_CALL_ERROR_SYSTEM_MESSAGE
-                        if tools
-                        else ""
-                    ),
-                    self.hass,
-                ).async_render(
-                    {
-                        "ha_name": self.hass.config.location_name,
-                        "user_name": user_name,
-                        "llm_context": llm_context,
-                    },
-                    parse_result=False,
-                )
-            ]
-        except TemplateError as err:
-            _LOGGER.exception("Error rendering prompt.")
-            intent_response = intent.IntentResponse(language=user_input.language)
-            intent_response.async_set_error(
-                intent.IntentResponseErrorCode.UNKNOWN,
-                f"Sorry, I had a problem with my template: {err}",
-            )
-            return conversation.ConversationResult(
-                response=intent_response, conversation_id=conversation_id
-            )
-
-        if llm_api:
-            prompt_parts.append(llm_api.api_prompt)
-
-        prompt = "\n".join(prompt_parts)
+        prompt = self._async_render_system_prompt(
+            llm_context, user_name, llm_api, has_tools=bool(tools)
+        )
 
         # Use the already-configured chat model from __init__.py.
-        # Tool binding happens dynamically per-turn inside _call_model via RAG.
         base_llm = runtime_data.chat_model
         if not hasattr(base_llm, "bind_tools"):
             _LOGGER.exception("Error during conversation processing.")
@@ -533,15 +820,16 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             )
 
         # A user name of None indicates an automation is being run.
-        user_name = "robot" if user_name is None else user_name
+        clean_user_name = "robot" if user_name is None else user_name
         # Remove special characters since memory namespace labels cannot contain them.
-        user_name = user_name.translate(str.maketrans("", "", string.punctuation))
-        _LOGGER.debug("User name: %s", user_name)
+        clean_user_name = clean_user_name.translate(
+            str.maketrans("", "", string.punctuation)
+        )
 
         app_config: RunnableConfig = {
             "configurable": {
                 "thread_id": conversation_id,
-                "user_id": user_name,
+                "user_id": clean_user_name,
                 "chat_model": base_llm,
                 "chat_model_options": runtime_data.chat_model_options,
                 "prompt": prompt,
@@ -565,9 +853,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         )
 
         # Agent input: message history + current user request.
-        messages: list[AnyMessage] = []
-        messages.extend(message_history)
-        messages.append(HumanMessage(content=user_input.text))
+        messages = [*message_history, HumanMessage(content=user_input.text)]
         app_input: State = {
             "messages": messages,
             "summary": "",
@@ -578,73 +864,21 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         }
 
         # Interact with agent app.
-        try:
-            response = await app.ainvoke(input=app_input, config=app_config)
-        except HomeAssistantError as err:
-            _LOGGER.exception("LangGraph error during conversation processing.")
-            intent_response = intent.IntentResponse(language=user_input.language)
-            intent_response.async_set_error(
-                intent.IntentResponseErrorCode.UNKNOWN,
-                f"Something went wrong: {err}",
-            )
-            return conversation.ConversationResult(
-                response=intent_response, conversation_id=conversation_id
-            )
-
-        trace.async_conversation_trace_append(
-            trace.ConversationTraceEventType.AGENT_DETAIL,
-            {"messages": response["messages"], "tools": tools or None},
-        )
-
-        _LOGGER.debug("====== End of run ======")
-
-        # Post-process the final LLM text (entity ID resolution, YAML conversion).
-        final_content = response["messages"][-1].content
-        if isinstance(final_content, str):
-            if options.get(CONF_SCHEMA_FIRST_YAML, False):
-                final_content = _maybe_fix_dashboard_entities(final_content, hass)
-            else:
-                final_content = _fix_entity_ids_in_text(final_content, hass)
-            final_content = _convert_schema_json_to_yaml(
-                final_content, options.get(CONF_SCHEMA_FIRST_YAML, False)
-            )
-            _LOGGER.debug("Final response content: %s", final_content)
-
-        # Backfill chat_log with the messages produced this turn so HA's
-        # "Show Details" panel renders the full tool call / result chain.
-        # Slice off history + current HumanMessage — only net-new messages.
-        new_messages = response["messages"][len(app_input["messages"]) :]
-
-        # Guard: async_get_result_from_chat_log requires last entry is AssistantContent,
-        # which means the last new message must be an AIMessage.
-        if not new_messages or not isinstance(new_messages[-1], AIMessage):
-            _LOGGER.error(
-                "LangGraph response did not end with AIMessage (got %s). "
-                "Falling back to manual ConversationResult.",
-                type(new_messages[-1]) if new_messages else "empty",
-            )
-            intent_response = intent.IntentResponse(language=user_input.language)
-            intent_response.async_set_speech(
-                final_content if isinstance(final_content, str) else ""
-            )
-            return conversation.ConversationResult(
-                response=intent_response, conversation_id=conversation_id
-            )
-
-        # Replace the final AIMessage content with the post-processed text so
-        # Show Details reflects the same text the user hears.
-        if isinstance(final_content, str):
-            processed_messages: list[AnyMessage] = [
-                *new_messages[:-1],
-                AIMessage(
-                    content=final_content,
-                    tool_calls=new_messages[-1].tool_calls,
-                ),
-            ]
+        if options.get(CONF_SCHEMA_FIRST_YAML, False):
+            try:
+                await self._async_run_ainvoke(
+                    app, app_input, app_config, chat_log, tools
+                )
+            except HomeAssistantError as err:
+                intent_response.async_set_error(
+                    intent.IntentResponseErrorCode.UNKNOWN,
+                    str(err),
+                )
+                return conversation.ConversationResult(
+                    response=intent_response, conversation_id=conversation_id
+                )
         else:
-            processed_messages = list(new_messages)
-
-        _populate_chat_log_from_response(chat_log, self.entity_id, processed_messages)
+            await self._async_run_astream(app, app_input, app_config, chat_log, tools)
 
         return conversation.async_get_result_from_chat_log(user_input, chat_log)
 
