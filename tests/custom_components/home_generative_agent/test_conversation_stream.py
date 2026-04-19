@@ -380,8 +380,12 @@ def test_normalize_tool_result_plain_string() -> None:
 
 
 def test_normalize_tool_result_json_string_parsed_to_dict() -> None:
-    """JSON-encoded dicts (produced by _parse_tool_response's json.dumps) are
-    deserialized so Show Details shows clean key/value pairs, not escaped JSON."""
+    """
+    JSON-encoded dicts are deserialized.
+
+    _parse_tool_response produces json.dumps output; Show Details must show
+    clean key/value pairs, not escaped JSON.
+    """
     content = '{"timezone": "Europe/London", "datetime": "2026-04-17T12:00:00"}'
     result = _normalize_tool_result(content)
     assert result == {"timezone": "Europe/London", "datetime": "2026-04-17T12:00:00"}
@@ -417,8 +421,12 @@ def test_normalize_tool_result_non_dict_json_stays_wrapped() -> None:
 
 @pytest.mark.asyncio
 async def test_stream_ignores_state_chain_end() -> None:
-    """LangGraph emits a second on_chain_end for 'action' whose output is the full
-    messages list (not a dict). The generator must skip it without error."""
+    """
+    LangGraph emits a second on_chain_end for 'action' with a list output.
+
+    The output is the full messages list (not a dict). The generator must skip
+    it without error.
+    """
 
     async def event_stream() -> AsyncGenerator[dict[str, Any]]:
         yield {"event": "on_chat_model_start", "metadata": {"langgraph_node": "agent"}}
@@ -439,7 +447,9 @@ async def test_stream_ignores_state_chain_end() -> None:
             "data": {
                 "output": {
                     "messages": [
-                        ToolMessage(content="done", tool_call_id="call_1", name="turn_on")
+                        ToolMessage(
+                            content="done", tool_call_id="call_1", name="turn_on"
+                        )
                     ]
                 }
             },
@@ -458,6 +468,8 @@ async def test_stream_ignores_state_chain_end() -> None:
     deltas = [d async for d in _stream_langgraph_to_ha(event_stream(), "agent_1")]
 
     # Exactly one tool result — the state event must not add a duplicate.
-    tool_results = [d for d in deltas if isinstance(d, dict) and d.get("role") == "tool_result"]
+    tool_results = [
+        d for d in deltas if isinstance(d, dict) and d.get("role") == "tool_result"
+    ]
     assert len(tool_results) == 1
     assert tool_results[0]["tool_call_id"] == "call_1"

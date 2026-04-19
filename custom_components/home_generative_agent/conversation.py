@@ -729,6 +729,21 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         # Fire trace after stream completes using final graph state.
         # astream_events handles exhaustion only after graph termination.
         _LOGGER.debug("====== End of run (streaming) ======")
+
+        # Re-fire CONTENT_ADDED for the final AssistantContent so the HA
+        # frontend's streaming UI shows it in the main chat area.
+        # async_add_delta_content_stream flushes via async_add_assistant_content,
+        # which does NOT fire CONTENT_ADDED for AssistantContent. Re-committing
+        # via async_add_assistant_content_without_tools does fire it.
+        if (
+            chat_log.content
+            and isinstance(chat_log.content[-1], conversation.AssistantContent)
+            and not chat_log.content[-1].tool_calls
+            and chat_log.content[-1].content
+        ):
+            final_content = chat_log.content.pop()
+            chat_log.async_add_assistant_content_without_tools(final_content)
+
         try:
             final_state = await app.aget_state(config)
             trace.async_conversation_trace_append(
