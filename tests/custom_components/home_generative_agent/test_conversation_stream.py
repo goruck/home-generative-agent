@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import types
 from typing import TYPE_CHECKING, Any, cast
@@ -50,6 +51,7 @@ _stub_ha_conversation()
 
 from custom_components.home_generative_agent.conversation import (
     _normalize_tool_result,
+    _sanitize_tool_result_dict,
     _stream_langgraph_to_ha,
 )
 
@@ -473,3 +475,64 @@ async def test_stream_ignores_state_chain_end() -> None:
     ]
     assert len(tool_results) == 1
     assert tool_results[0]["tool_call_id"] == "call_1"
+
+
+# ---------------------------------------------------------------------------
+# _sanitize_tool_result_dict unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_sanitize_passthrough_plain_dict() -> None:
+    """Dicts without response_type are returned unchanged."""
+    d = {"timezone": "Europe/London", "datetime": "2026-04-17T12:00:00"}
+    assert _sanitize_tool_result_dict(d) == d
+
+
+def test_sanitize_ha_action_done_with_speech() -> None:
+    """HassTurnOn-style response is flattened; speech text becomes 'result'."""
+    d = {
+        "response_type": "action_done",
+        "speech": {"plain": {"speech": "Turned on Garage Light", "extra_data": None}},
+        "data": {
+            "success": [{"name": "Garage Light", "type": "domain"}],
+            "failed": [],
+        },
+    }
+    result = _sanitize_tool_result_dict(d)
+    assert result["result"] == "Turned on Garage Light"
+    assert result["success"] == [{"name": "Garage Light", "type": "domain"}]
+    assert result["failed"] == []
+    assert "response_type" not in result
+    assert "speech" not in result
+
+
+def test_sanitize_ha_action_done_empty_speech_falls_back_to_response_type() -> None:
+    """When speech text is absent the response_type string is used as result."""
+    d = {
+        "response_type": "action_done",
+        "speech": {},
+        "data": {"success": [], "failed": []},
+    }
+    result = _sanitize_tool_result_dict(d)
+    assert result["result"] == "action_done"
+    assert "response_type" not in result
+
+
+def test_normalize_tool_result_ha_intent_string() -> None:
+    """JSON-encoded HA intent responses are sanitized by _normalize_tool_result."""
+    content = json.dumps(
+        {
+            "response_type": "action_done",
+            "speech": {
+                "plain": {"speech": "Turned on Garage Light", "extra_data": None}
+            },
+            "data": {
+                "success": [{"name": "Garage Light", "type": "domain"}],
+                "failed": [],
+            },
+        }
+    )
+    result = _normalize_tool_result(content)
+    assert result["result"] == "Turned on Garage Light"
+    assert "response_type" not in result
+    assert "speech" not in result

@@ -140,6 +140,12 @@ def _normalize_tool_result(content: Any) -> JsonObjectType:
     ToolMessage.content is str for plain string results (HA tools serialize their
     response via json.dumps, so the content is a JSON-encoded string), or list[dict]
     (content blocks) from some providers (e.g. Anthropic).
+
+    HA intent tools (e.g. HassTurnOn) return a JSON string whose decoded form
+    contains a ``response_type`` key (e.g. ``"action_done"``).  If the raw dict
+    is stored in ToolResultContent the HA frontend mistakes it for the final
+    conversation response and renders an empty speech bubble.  We detect that
+    shape and re-encode it so only the meaningful payload is kept.
     """
     if isinstance(content, str):
         # HA tools produce json.dumps(response) as content, so try to deserialize
@@ -147,7 +153,7 @@ def _normalize_tool_result(content: Any) -> JsonObjectType:
         try:
             parsed = json.loads(content)
             if isinstance(parsed, dict):
-                return parsed
+                return _sanitize_tool_result_dict(parsed)
         except (json.JSONDecodeError, ValueError):
             pass
         return {"result": content}
@@ -158,6 +164,38 @@ def _normalize_tool_result(content: Any) -> JsonObjectType:
         ]
         return {"result": "\n".join(parts)}
     return {"result": str(content)}
+
+
+def _sanitize_tool_result_dict(d: dict[str, Any]) -> JsonObjectType:
+    """
+    Reformat HA intent-response dicts to avoid frontend misinterpretation.
+
+    HA intent tools (e.g. HassTurnOn) return a dict with ``response_type`` and
+    ``speech`` keys that mirror the top-level ConversationResult shape.  When
+    stored verbatim in ToolResultContent the HA frontend mistakes it for the
+    final conversation response and renders an empty speech bubble.  We flatten
+    the meaningful payload instead.
+    """
+    if "response_type" not in d:
+        return d
+
+    out: dict[str, Any] = {"result": d["response_type"]}
+
+    # Lift the plain-speech text when present (non-empty string).
+    speech = d.get("speech")
+    if isinstance(speech, dict):
+        plain = speech.get("plain")
+        if isinstance(plain, dict):
+            text = plain.get("speech")
+            if text:
+                out["result"] = text
+
+    # Preserve the data payload (success/failed entity lists, etc.).
+    data = d.get("data")
+    if isinstance(data, dict):
+        out.update(data)
+
+    return out
 
 
 def _populate_chat_log_from_response(
