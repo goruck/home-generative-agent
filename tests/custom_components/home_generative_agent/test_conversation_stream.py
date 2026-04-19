@@ -49,6 +49,7 @@ def _stub_ha_conversation() -> None:
 _stub_ha_conversation()
 
 from custom_components.home_generative_agent.conversation import (
+    _normalize_tool_result,
     _stream_langgraph_to_ha,
 )
 
@@ -365,3 +366,98 @@ async def test_stream_cancellation() -> None:
     # Next iteration should raise CancelledError
     with pytest.raises(asyncio.CancelledError):
         await anext(gen)
+
+
+# ---------------------------------------------------------------------------
+# _normalize_tool_result unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_tool_result_plain_string() -> None:
+    """Plain (non-JSON) strings are wrapped under 'result'."""
+    result = _normalize_tool_result("light turned on")
+    assert result == {"result": "light turned on"}
+
+
+def test_normalize_tool_result_json_string_parsed_to_dict() -> None:
+    """JSON-encoded dicts (produced by _parse_tool_response's json.dumps) are
+    deserialized so Show Details shows clean key/value pairs, not escaped JSON."""
+    content = '{"timezone": "Europe/London", "datetime": "2026-04-17T12:00:00"}'
+    result = _normalize_tool_result(content)
+    assert result == {"timezone": "Europe/London", "datetime": "2026-04-17T12:00:00"}
+
+
+def test_normalize_tool_result_nested_content_blocks() -> None:
+    """HA tools that return Anthropic-style content blocks are also deserialized."""
+    content = '{"content": [{"type": "text", "text": "The time is noon."}]}'
+    result = _normalize_tool_result(content)
+    assert result == {"content": [{"type": "text", "text": "The time is noon."}]}
+
+
+def test_normalize_tool_result_list_of_blocks() -> None:
+    """List content (Anthropic content blocks) is joined into a single string."""
+    content = [
+        {"type": "text", "text": "Part one."},
+        {"type": "text", "text": "Part two."},
+    ]
+    result = _normalize_tool_result(content)
+    assert result == {"result": "Part one.\nPart two."}
+
+
+def test_normalize_tool_result_non_dict_json_stays_wrapped() -> None:
+    """JSON arrays and scalars are NOT returned as-is; they stay wrapped."""
+    result = _normalize_tool_result("[1, 2, 3]")
+    assert result == {"result": "[1, 2, 3]"}
+
+
+# ---------------------------------------------------------------------------
+# on_chain_end state-event guard test
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stream_ignores_state_chain_end() -> None:
+    """LangGraph emits a second on_chain_end for 'action' whose output is the full
+    messages list (not a dict). The generator must skip it without error."""
+
+    async def event_stream() -> AsyncGenerator[dict[str, Any]]:
+        yield {"event": "on_chat_model_start", "metadata": {"langgraph_node": "agent"}}
+        yield {
+            "event": "on_chat_model_end",
+            "metadata": {"langgraph_node": "agent"},
+            "data": {
+                "output": AIMessage(
+                    content="",
+                    tool_calls=[{"name": "turn_on", "args": {}, "id": "call_1"}],
+                )
+            },
+        }
+        # (a) node function event — dict output
+        yield {
+            "event": "on_chain_end",
+            "metadata": {"langgraph_node": "action"},
+            "data": {
+                "output": {
+                    "messages": [
+                        ToolMessage(content="done", tool_call_id="call_1", name="turn_on")
+                    ]
+                }
+            },
+        }
+        # (b) graph-level state event — list output (must be ignored)
+        yield {
+            "event": "on_chain_end",
+            "metadata": {"langgraph_node": "action"},
+            "data": {
+                "output": [
+                    ToolMessage(content="done", tool_call_id="call_1", name="turn_on")
+                ]
+            },
+        }
+
+    deltas = [d async for d in _stream_langgraph_to_ha(event_stream(), "agent_1")]
+
+    # Exactly one tool result — the state event must not add a duplicate.
+    tool_results = [d for d in deltas if isinstance(d, dict) and d.get("role") == "tool_result"]
+    assert len(tool_results) == 1
+    assert tool_results[0]["tool_call_id"] == "call_1"

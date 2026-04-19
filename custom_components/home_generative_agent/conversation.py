@@ -137,10 +137,19 @@ def _normalize_tool_result(content: Any) -> JsonObjectType:
     """
     Normalize ToolMessage.content to JsonObjectType for HA ToolResultContent.
 
-    ToolMessage.content is str for plain string results, or list[dict] (content blocks)
-    from some providers (e.g. Anthropic).
+    ToolMessage.content is str for plain string results (HA tools serialize their
+    response via json.dumps, so the content is a JSON-encoded string), or list[dict]
+    (content blocks) from some providers (e.g. Anthropic).
     """
     if isinstance(content, str):
+        # HA tools produce json.dumps(response) as content, so try to deserialize
+        # back to a dict to avoid double-escaping in Show Details.
+        try:
+            parsed = json.loads(content)
+            if isinstance(parsed, dict):
+                return parsed
+        except (json.JSONDecodeError, ValueError):
+            pass
         return {"result": content}
     if isinstance(content, list):
         parts = [
@@ -276,9 +285,9 @@ async def _stream_langgraph_to_ha(
             # 4. Tool results from the action node.
             elif node == "action" and event_type == "on_chain_end":
                 output = data.get("output")
-                # LangGraph emits two on_chain_end events tagged langgraph_node="action":
-                # (a) the node function's own event: output = {"messages": [ToolMessage, ...]}
-                # (b) a graph-level state event: output = the full updated messages list
+                # LangGraph emits two on_chain_end events for "action":
+                # (a) node function event: output = {"messages": [ToolMessage, ...]}
+                # (b) graph-level state event: output = full updated messages list
                 # We only want (a). Skip anything that is not a dict.
                 if not isinstance(output, dict):
                     continue
@@ -704,6 +713,12 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             # Hard kill: cancel the background graph run if the consumer has left.
             stream_task.cancel()
             raise
+        except Exception:
+            # Any other exception (e.g. GraphRecursionError, tool failure) leaves
+            # the chat_log in a partial state. Log and fall through to recovery.
+            _LOGGER.exception(
+                "Unexpected error in streaming task; attempting state recovery."
+            )
         finally:
             if not stream_task.done():
                 stream_task.cancel()
@@ -723,6 +738,27 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                     "tools": tools or None,
                 },
             )
+
+            # If streaming ended without committing a final AssistantContent
+            # (e.g. the generator raised before the last LLM turn), recover the
+            # final AIMessage from the graph state so the caller can return it.
+            if not isinstance(
+                chat_log.content[-1] if chat_log.content else None,
+                conversation.AssistantContent,
+            ):
+                messages = final_state.values.get("messages", [])
+                if messages and isinstance(messages[-1], AIMessage):
+                    final_msg = messages[-1]
+                    chat_log.async_add_assistant_content_without_tools(
+                        conversation.AssistantContent(
+                            agent_id=self.entity_id,
+                            content=_normalize_ai_content(final_msg.content),
+                        )
+                    )
+                    _LOGGER.debug(
+                        "Recovered final AssistantContent from graph state after "
+                        "streaming failure."
+                    )
         except ValueError:
             # Expected when no checkpointer is configured (e.g. tests)
             _LOGGER.debug("aget_state unavailable; skipping trace for streaming turn.")
