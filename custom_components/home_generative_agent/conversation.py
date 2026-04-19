@@ -275,7 +275,13 @@ async def _stream_langgraph_to_ha(
 
             # 4. Tool results from the action node.
             elif node == "action" and event_type == "on_chain_end":
-                output = cast("Mapping[str, Any]", data.get("output", {}))
+                output = data.get("output")
+                # LangGraph emits two on_chain_end events tagged langgraph_node="action":
+                # (a) the node function's own event: output = {"messages": [ToolMessage, ...]}
+                # (b) a graph-level state event: output = the full updated messages list
+                # We only want (a). Skip anything that is not a dict.
+                if not isinstance(output, dict):
+                    continue
                 messages = cast("list[Any]", output.get("messages", []))
                 tool_messages = [m for m in messages if isinstance(m, ToolMessage)]
 
