@@ -142,6 +142,16 @@ async def test_stream_recursive_loops() -> None:
             "metadata": {"langgraph_node": "agent"},
             "data": {"chunk": AIMessageChunk(content="Thinking...")},
         }
+        yield {
+            "event": "on_chat_model_end",
+            "metadata": {"langgraph_node": "agent"},
+            "data": {
+                "output": AIMessage(
+                    content="Thinking...",
+                    tool_calls=[{"name": "tool", "args": {}, "id": "call_1"}],
+                )
+            },
+        }
         # Simulate Action node finishing
         yield {
             "event": "on_chain_end",
@@ -170,7 +180,11 @@ async def test_stream_recursive_loops() -> None:
     roles = [d for d in deltas if d.get("role") == "assistant"]
     assert len(roles) == 2
     assert deltas[0] == {"role": "assistant"}
-    assert deltas[3] == {"role": "assistant"}
+    # deltas[1] is content="Thinking..."
+    # deltas[2] is tool_calls
+    # deltas[3] is role="tool_result"
+    # deltas[4] is role="assistant" (the second start)
+    assert deltas[4] == {"role": "assistant"}
 
 
 @pytest.mark.asyncio
@@ -569,8 +583,8 @@ async def test_stream_graph_error_persistence_guard() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stream_tool_result_id_none_stringification() -> None:
-    """Test that tool_call_id=None becomes '' instead of 'None'."""
+async def test_stream_drops_orphaned_tool_results() -> None:
+    """Test that tool results without a preceding tool call are safely dropped."""
 
     async def event_stream() -> AsyncGenerator[dict[str, Any]]:
         yield {"event": "on_chat_model_start", "metadata": {"langgraph_node": "agent"}}
@@ -587,10 +601,58 @@ async def test_stream_tool_result_id_none_stringification() -> None:
         }
 
     deltas = [d async for d in _stream_langgraph_to_ha(event_stream(), "agent_1")]
-    # Result for an unknown ID-less call (since we didn't provide a tool_call event)
-    # tool_call_id should be "" (not "None")
-    result_delta = cast("ToolResultContentDeltaDict", deltas[1])
-    assert result_delta.get("tool_call_id") == ""
+    # Result for an unknown call should be dropped, leaving only the agent start.
+    assert len(deltas) == 1
+    assert deltas[0]["role"] == "assistant"
+
+
+@pytest.mark.asyncio
+async def test_stream_mixed_text_and_tools() -> None:
+    """Test that text is not swallowed when mixed with tool call chunks."""
+
+    async def event_stream() -> AsyncGenerator[dict[str, Any]]:
+        yield {"event": "on_chat_model_start", "metadata": {"langgraph_node": "agent"}}
+        yield {
+            "event": "on_chat_model_stream",
+            "metadata": {"langgraph_node": "agent"},
+            "data": {
+                # Mixed chunk: has both content and tool_call_chunks
+                "chunk": AIMessageChunk(
+                    content="Thinking... ",
+                    tool_call_chunks=[{"name": "tool", "args": "{}", "id": "call_1"}],
+                )
+            },
+        }
+
+    deltas = [d async for d in _stream_langgraph_to_ha(event_stream(), "agent_1")]
+
+    # Should have yielded the text despite the presence of tool_call_chunks
+    assert len(deltas) == 2
+    assert deltas[0] == {"role": "assistant"}
+    assert deltas[1] == {"content": "Thinking... "}
+
+
+@pytest.mark.asyncio
+async def test_stream_role_tracking() -> None:
+    """Test that redundant role deltas are suppressed."""
+
+    async def event_stream() -> AsyncGenerator[dict[str, Any]]:
+        yield {"event": "on_chat_model_start", "metadata": {"langgraph_node": "agent"}}
+        # Simulate a second start (e.g. from a loop without an intervening role change)
+        yield {"event": "on_chat_model_start", "metadata": {"langgraph_node": "agent"}}
+        yield {
+            "event": "on_chat_model_stream",
+            "metadata": {"langgraph_node": "agent"},
+            "data": {"chunk": AIMessageChunk(content="Hi")},
+        }
+
+    deltas = [d async for d in _stream_langgraph_to_ha(event_stream(), "agent_1")]
+
+    # Should only have ONE role="assistant" delta
+    roles = [d for d in deltas if d.get("role") == "assistant"]
+    assert len(roles) == 1
+    assert deltas[0] == {"role": "assistant"}
+    assert deltas[1] == {"content": "Hi"}
 
 
 # ---------------------------------------------------------------------------

@@ -333,18 +333,20 @@ def _handle_on_chain_end(
         tool_call_id = msg.tool_call_id
         # Fallback correlation for models without tool IDs.
         if (not tool_call_id or tool_call_id == "None") and unidentified_call_ids:
-            tool_call_id = unidentified_call_ids.popleft()
+            # Peek first; only pop if it matches a pending call
+            if unidentified_call_ids[0] in pending_tool_map:
+                tool_call_id = unidentified_call_ids.popleft()
 
-        pending_tool_map.pop(tool_call_id, None)
-
-        deltas.append(
-            ToolResultContentDeltaDict(
-                role="tool_result",
-                tool_call_id=str(tool_call_id or ""),
-                tool_name=str(msg.name or ""),
-                tool_result=_normalize_tool_result(msg.content),
+        if tool_call_id in pending_tool_map:
+            pending_tool_map.pop(tool_call_id)
+            deltas.append(
+                ToolResultContentDeltaDict(
+                    role="tool_result",
+                    tool_call_id=str(tool_call_id),
+                    tool_name=str(msg.name or ""),
+                    tool_result=_normalize_tool_result(msg.content),
+                )
             )
-        )
 
     # 2. Yield synthetic rejections for any calls that didn't return a result.
     deltas.extend(
@@ -383,11 +385,11 @@ def _handle_on_chat_model_stream(
     """
     Process on_chat_model_stream events to yield text tokens.
 
-    Filters out tool-call chunks and empty content, yielding only valid
-    AssistantContentDeltaDict tokens.
+    Yields text content even if the chunk also contains tool call chunks,
+    ensuring that mid-message tool calls do not swallow preceding text.
     """
     chunk = data.get("chunk")
-    if not isinstance(chunk, AIMessageChunk) or chunk.tool_call_chunks:
+    if not isinstance(chunk, AIMessageChunk):
         return None
 
     if chunk_text := _normalize_ai_content(chunk.content):
@@ -408,7 +410,7 @@ def _process_stream_event(
     token streaming and tool call/result lifecycle.
     """
     metadata = cast("dict[str, Any]", event.get("metadata", {}))
-    node = metadata.get("langgraph_node")
+    node = metadata.get("langgraph_node") or event.get("name")
     event_type = event.get("event")
     data = cast("dict[str, Any]", event.get("data", {}))
 
@@ -428,10 +430,10 @@ def _process_stream_event(
         ):
             yield delta
     elif node == "action" and event_type == "on_chain_end":
-        for delta in _handle_on_chain_end(
+        for res_delta in _handle_on_chain_end(
             data, pending_tool_map, unidentified_call_ids
         ):
-            yield delta
+            yield res_delta
 
 
 async def _stream_langgraph_to_ha(
@@ -456,11 +458,20 @@ async def _stream_langgraph_to_ha(
     # (e.g. local models) drops the ID.
     unidentified_call_ids: deque[str] = deque()
 
+    # track the current role to avoid yielding redundant 'role' deltas that
+    # might cause the HA frontend to reset the message content during loops.
+    active_role: str | None = None
+
     try:
         async for event in event_stream:
             for delta in _process_stream_event(
                 event, pending_tool_map, unidentified_call_ids
             ):
+                new_role = delta.get("role")
+                if new_role == "assistant" and active_role == "assistant":
+                    continue
+                if new_role:
+                    active_role = new_role
                 yield delta
     except (GeneratorExit, asyncio.CancelledError):
         # Stop iteration on cancellation or closure.
