@@ -8,8 +8,12 @@ import hashlib
 import json
 import logging
 import string
-from collections.abc import AsyncGenerator, AsyncIterable
+from collections import deque
+from collections.abc import AsyncIterable, AsyncIterator
 from typing import TYPE_CHECKING, Any, Literal, cast
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 import homeassistant.util.dt as dt_util
 import voluptuous as vol
@@ -21,7 +25,7 @@ from homeassistant.components.conversation import (
 )
 from homeassistant.components.conversation.models import AbstractConversationAgent
 from homeassistant.const import CONF_LLM_HASS_API, MATCH_ALL
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import HomeAssistantError, TemplateError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import intent, llm, template
 from homeassistant.helpers.dispatcher import async_dispatcher_send
@@ -76,7 +80,12 @@ from .core.conversation_helpers import (
 from .core.utils import gather_store_puts_in_chunks
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterable, Callable, Mapping
+    from collections.abc import (
+        AsyncIterable,
+        AsyncIterator,
+        Callable,
+        Mapping,
+    )
 
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
@@ -256,114 +265,218 @@ def _populate_chat_log_from_response(
             )
 
 
-# ruff: noqa: PLR0912
+def _handle_on_chat_model_end(
+    data: dict[str, Any],
+    pending_tool_map: dict[str, ToolCall],
+    unidentified_call_ids: deque[str],
+) -> AssistantContentDeltaDict | None:
+    """
+    Process on_chat_model_end events to record tool calls.
+
+    Updates pending_tool_map with new tool calls and handles ULID generation
+    for calls without native IDs, tracking them in unidentified_call_ids for
+    later correlation.
+    """
+    msg = data.get("output")
+    if not isinstance(msg, AIMessage) or not msg.tool_calls:
+        return None
+
+    call_id_map = []
+    for tc in msg.tool_calls:
+        orig_id = tc.get("id")
+        call_id = orig_id or ulid.ulid_now()
+        if not orig_id:
+            unidentified_call_ids.append(call_id)
+        pending_tool_map[call_id] = tc
+        call_id_map.append(call_id)
+
+    return AssistantContentDeltaDict(
+        tool_calls=[
+            llm.ToolInput(
+                tool_name=str(tc["name"]),
+                tool_args=cast("dict[str, Any]", tc["args"]),
+                id=call_id_map[i],
+                external=True,
+            )
+            for i, tc in enumerate(msg.tool_calls)
+        ]
+    )
+
+
+def _handle_on_chain_end(
+    data: dict[str, Any],
+    pending_tool_map: dict[str, ToolCall],
+    unidentified_call_ids: deque[str],
+) -> list[ToolResultContentDeltaDict]:
+    """
+    Process on_chain_end events for the action node to yield tool results.
+
+    Correlates results back to pending tool calls (handling ID-less correlation
+    via unidentified_call_ids) and yields ToolResultContentDeltaDicts. Any
+    tools that did not return a result are yielded as synthetic rejections.
+    """
+    output = data.get("output")
+    # LangGraph emits two on_chain_end events for "action":
+    # (a) node function event: output = {"messages": [ToolMessage, ...]}
+    # (b) graph-level state event: output = full updated messages list
+    # We only want (a). Skip anything that is not a dict (e.g. the list in (b)).
+    if not isinstance(output, dict):
+        return []
+
+    messages = cast("list[Any]", output.get("messages", []))
+    tool_messages = [m for m in messages if isinstance(m, ToolMessage)]
+
+    deltas: list[ToolResultContentDeltaDict] = []
+
+    # 1. Yield successful results and remove from pending map.
+    for msg in tool_messages:
+        tool_call_id = msg.tool_call_id
+        # Fallback correlation for models without tool IDs.
+        if (not tool_call_id or tool_call_id == "None") and unidentified_call_ids:
+            tool_call_id = unidentified_call_ids.popleft()
+
+        pending_tool_map.pop(tool_call_id, None)
+
+        deltas.append(
+            ToolResultContentDeltaDict(
+                role="tool_result",
+                tool_call_id=str(tool_call_id or ""),
+                tool_name=str(msg.name or ""),
+                tool_result=_normalize_tool_result(msg.content),
+            )
+        )
+
+    # 2. Yield synthetic rejections for any calls that didn't return a result.
+    deltas.extend(
+        _get_synthetic_rejections(
+            pending_tool_map, "Tool execution rejected by routing policy."
+        )
+    )
+    pending_tool_map.clear()
+    unidentified_call_ids.clear()
+    return deltas
+
+
+def _get_synthetic_rejections(
+    pending_tool_map: dict[str, ToolCall], error_msg: str
+) -> list[ToolResultContentDeltaDict]:
+    """
+    Generate synthetic tool result rejections for pending calls.
+
+    Used when a tool execution is rejected by policy or fails mid-stream,
+    ensuring Home Assistant receives a final state for all initiated calls.
+    """
+    return [
+        ToolResultContentDeltaDict(
+            role="tool_result",
+            tool_call_id=call_id,
+            tool_name=tc.get("name") or "tool",
+            tool_result={"error": error_msg},
+        )
+        for call_id, tc in pending_tool_map.items()
+    ]
+
+
+def _handle_on_chat_model_stream(
+    data: dict[str, Any],
+) -> AssistantContentDeltaDict | None:
+    """
+    Process on_chat_model_stream events to yield text tokens.
+
+    Filters out tool-call chunks and empty content, yielding only valid
+    AssistantContentDeltaDict tokens.
+    """
+    chunk = data.get("chunk")
+    if not isinstance(chunk, AIMessageChunk) or chunk.tool_call_chunks:
+        return None
+
+    if chunk_text := _normalize_ai_content(chunk.content):
+        return AssistantContentDeltaDict(content=chunk_text)
+    return None
+
+
+def _process_stream_event(
+    event: Mapping[str, Any],
+    pending_tool_map: dict[str, ToolCall],
+    unidentified_call_ids: deque[str],
+) -> Iterator[AssistantContentDeltaDict | ToolResultContentDeltaDict]:
+    """
+    Process a single LangGraph event and yield HA ChatLog deltas.
+
+    Dispatches LangGraph astream_events (start, stream, end) to the appropriate
+    handler based on the node and event type. Manages the orchestration of
+    token streaming and tool call/result lifecycle.
+    """
+    metadata = cast("dict[str, Any]", event.get("metadata", {}))
+    node = metadata.get("langgraph_node")
+    event_type = event.get("event")
+    data = cast("dict[str, Any]", event.get("data", {}))
+
+    if node == "agent":
+        if event_type == "on_chat_model_start":
+            yield AssistantContentDeltaDict(role="assistant")
+        elif (
+            event_type == "on_chat_model_stream"
+            and (delta := _handle_on_chat_model_stream(data))
+        ) or (
+            event_type == "on_chat_model_end"
+            and (
+                delta := _handle_on_chat_model_end(
+                    data, pending_tool_map, unidentified_call_ids
+                )
+            )
+        ):
+            yield delta
+    elif node == "action" and event_type == "on_chain_end":
+        for delta in _handle_on_chain_end(
+            data, pending_tool_map, unidentified_call_ids
+        ):
+            yield delta
+
+
 async def _stream_langgraph_to_ha(
     event_stream: AsyncIterable[Mapping[str, Any]],
     _agent_id: str,
-) -> AsyncGenerator[AssistantContentDeltaDict | ToolResultContentDeltaDict]:
+) -> AsyncIterator[AssistantContentDeltaDict | ToolResultContentDeltaDict]:
     """
     Transform LangGraph astream_events into HA ChatLog deltas.
 
     Filters for events from the 'agent' node for tokens/tool-calls and the
     'action' node for tool results.
     """
+    # pending_tool_map survives across multiple model turns (iterations) within
+    # this generator to handle partial-result cases where some tools return results
+    # and others don't. It is cleared only after synthetic rejections are yielded
+    # at the end of an 'action' node chain.
     pending_tool_map: dict[str, ToolCall] = {}
+
+    # unidentified_call_ids tracks ULIDs generated for tool calls that lacked
+    # native IDs. This ensures we can correlate ToolMessages from the 'action'
+    # node back to the correct HA ToolInput entry even when the LLM provider
+    # (e.g. local models) drops the ID.
+    unidentified_call_ids: deque[str] = deque()
 
     try:
         async for event in event_stream:
-            ev = cast("dict[str, Any]", event)
-            metadata = cast("dict[str, Any]", ev.get("metadata", {}))
-            node = metadata.get("langgraph_node")
-            event_type = ev.get("event")
-            data = cast("dict[str, Any]", ev.get("data", {}))
-
-            # 1. Start of a model turn: open an AssistantContent block.
-            # HA flushes any previous AssistantContent when it receives a
-            # role="assistant" delta. We yield this at every agent start to ensure
-            # HA state sync in recursive loops (Agent -> Action -> Agent).
-            if node == "agent" and event_type == "on_chat_model_start":
-                yield AssistantContentDeltaDict(role="assistant")
-
-            # 2. Incremental text tokens.
-            elif node == "agent" and event_type == "on_chat_model_stream":
-                chunk = data.get("chunk")
-                if not isinstance(chunk, AIMessageChunk) or chunk.tool_call_chunks:
-                    continue
-
-                chunk_text = _normalize_ai_content(chunk.content)
-                if chunk_text:
-                    yield AssistantContentDeltaDict(content=chunk_text)
-
-            # 3. End of a model turn: record pending tool calls.
-            elif node == "agent" and event_type == "on_chat_model_end":
-                msg = data.get("output")
-                if not isinstance(msg, AIMessage):
-                    continue
-
-                if msg.tool_calls:
-                    # Update mapping for result correlation.
-                    call_id_map = []
-                    for tc in msg.tool_calls:
-                        call_id = tc.get("id") or ulid.ulid_now()
-                        pending_tool_map[call_id] = tc
-                        call_id_map.append(call_id)
-
-                    yield AssistantContentDeltaDict(
-                        tool_calls=[
-                            llm.ToolInput(
-                                tool_name=str(tc["name"]),
-                                tool_args=cast("dict[str, Any]", tc["args"]),
-                                id=call_id_map[i],
-                                external=True,
-                            )
-                            for i, tc in enumerate(msg.tool_calls)
-                        ]
-                    )
-
-            # 4. Tool results from the action node.
-            elif node == "action" and event_type == "on_chain_end":
-                output = data.get("output")
-                # LangGraph emits two on_chain_end events for "action":
-                # (a) node function event: output = {"messages": [ToolMessage, ...]}
-                # (b) graph-level state event: output = full updated messages list
-                # We only want (a). Skip anything that is not a dict.
-                if not isinstance(output, dict):
-                    continue
-                messages = cast("list[Any]", output.get("messages", []))
-                tool_messages = [m for m in messages if isinstance(m, ToolMessage)]
-
-                # 1. Yield successful results and remove from pending map.
-                for msg in tool_messages:
-                    pending_tool_map.pop(msg.tool_call_id, None)
-
-                    yield ToolResultContentDeltaDict(
-                        role="tool_result",
-                        tool_call_id=str(msg.tool_call_id),
-                        tool_name=str(msg.name or ""),
-                        tool_result=_normalize_tool_result(msg.content),
-                    )
-
-                # 2. Yield synthetic rejections for any calls that didn't return a
-                # result. This ensures HA doesn't hang if a tool fails silently or
-                # is rejected.
-                for call_id, tc in pending_tool_map.items():
-                    yield ToolResultContentDeltaDict(
-                        role="tool_result",
-                        tool_call_id=call_id,
-                        tool_name=tc.get("name") or "tool",
-                        tool_result={
-                            "error": "Tool execution rejected by routing policy."
-                        },
-                    )
-                pending_tool_map.clear()
+            for delta in _process_stream_event(
+                event, pending_tool_map, unidentified_call_ids
+            ):
+                yield delta
     except (GeneratorExit, asyncio.CancelledError):
         # Stop iteration on cancellation or closure.
         raise
     except Exception:
         _LOGGER.exception("Error in LangGraph streaming transformation generator.")
+        # Persistence guard: flush pending tools as synthetic rejections so HA
+        # doesn't hang waiting for results that will never arrive due to the error.
+        for delta in _get_synthetic_rejections(
+            pending_tool_map, "Tool execution failed mid-stream."
+        ):
+            yield delta
         raise
     finally:
         pending_tool_map.clear()
+        unidentified_call_ids.clear()
 
 
 class MultiLLMAPI:
@@ -611,28 +724,33 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             if options.get(CONF_SCHEMA_FIRST_YAML, False)
             else ""
         )
-        prompt_parts = [
-            template.Template(
-                (
-                    llm.DATE_TIME_PROMPT
-                    + options.get(CONF_PROMPT, llm.DEFAULT_INSTRUCTIONS_PROMPT)
-                    + f"\nYou are in the {self.tz} timezone."
-                    + critical_prompt
-                    + schema_prompt
-                    + TOOL_CALL_ERROR_SYSTEM_MESSAGE
-                    if has_tools
-                    else ""
-                ),
-                self.hass,
-            ).async_render(
-                {
-                    "ha_name": self.hass.config.location_name,
-                    "user_name": user_name,
-                    "llm_context": llm_context,
-                },
-                parse_result=False,
-            )
-        ]
+        try:
+            prompt_parts = [
+                template.Template(
+                    (
+                        llm.DATE_TIME_PROMPT
+                        + options.get(CONF_PROMPT, llm.DEFAULT_INSTRUCTIONS_PROMPT)
+                        + f"\nYou are in the {self.tz} timezone."
+                        + critical_prompt
+                        + schema_prompt
+                        + TOOL_CALL_ERROR_SYSTEM_MESSAGE
+                        if has_tools
+                        else ""
+                    ),
+                    self.hass,
+                ).async_render(
+                    {
+                        "ha_name": self.hass.config.location_name,
+                        "user_name": user_name,
+                        "llm_context": llm_context,
+                    },
+                    parse_result=False,
+                )
+            ]
+        except TemplateError as err:
+            _LOGGER.exception("Error rendering prompt")
+            msg = f"Error rendering prompt: {err}"
+            raise HomeAssistantError(msg) from err
 
         if llm_api:
             prompt_parts.append(llm_api.api_prompt)

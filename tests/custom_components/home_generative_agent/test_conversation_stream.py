@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import sys
 import types
@@ -15,6 +16,11 @@ from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
+
+    from homeassistant.components.conversation import (
+        AssistantContentDeltaDict,
+        ToolResultContentDeltaDict,
+    )
 
 
 def _stub_ha_conversation() -> None:
@@ -118,6 +124,8 @@ async def test_stream_filters_thinking() -> None:
 
     deltas = [d async for d in _stream_langgraph_to_ha(event_stream(), "agent_1")]
 
+    # Thinking blocks are intentionally filtered in the MVP streaming path.
+    # Piping thinking_content through AssistantContentDeltaDict is a deferred feature.
     assert len(deltas) == 2
     assert deltas[0] == {"role": "assistant"}
     assert deltas[1] == {"content": "The answer is 42."}
@@ -475,6 +483,114 @@ async def test_stream_ignores_state_chain_end() -> None:
     ]
     assert len(tool_results) == 1
     assert tool_results[0]["tool_call_id"] == "call_1"
+
+
+@pytest.mark.asyncio
+async def test_stream_idless_tool_calls() -> None:
+    """Test correlation for models that emit tool calls without IDs (e.g. Ollama)."""
+
+    async def event_stream() -> AsyncGenerator[dict[str, Any]]:
+        yield {"event": "on_chat_model_start", "metadata": {"langgraph_node": "agent"}}
+        yield {
+            "event": "on_chat_model_end",
+            "metadata": {"langgraph_node": "agent"},
+            "data": {
+                "output": AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"name": "test_tool", "args": {}, "id": None},  # ID is None
+                    ],
+                )
+            },
+        }
+        yield {
+            "event": "on_chain_end",
+            "metadata": {"langgraph_node": "action"},
+            "data": {
+                "output": {
+                    "messages": [
+                        ToolMessage(
+                            content="Success", tool_call_id="", name="test_tool"
+                        )
+                    ]
+                }
+            },
+        }
+
+    deltas = [d async for d in _stream_langgraph_to_ha(event_stream(), "agent_1")]
+
+    # 1. role="assistant"
+    # 2. AssistantContentDeltaDict with generated ULID
+    # 3. ToolResultContentDeltaDict with matching ULID
+    assert len(deltas) == 3
+    assistant_delta = cast("AssistantContentDeltaDict", deltas[1])
+    tool_calls = assistant_delta.get("tool_calls")
+    assert tool_calls is not None
+    generated_id = tool_calls[0].id
+    assert generated_id.startswith("01")  # Valid ULID start
+
+    result_delta = cast("ToolResultContentDeltaDict", deltas[2])
+    assert result_delta.get("tool_call_id") == generated_id
+    assert result_delta.get("tool_result") == {"result": "Success"}
+
+
+@pytest.mark.asyncio
+async def test_stream_graph_error_persistence_guard() -> None:
+    """Test that orphaned tool calls are flushed if the graph crashes."""
+
+    async def event_stream() -> AsyncGenerator[dict[str, Any]]:
+        yield {"event": "on_chat_model_start", "metadata": {"langgraph_node": "agent"}}
+        yield {
+            "event": "on_chat_model_end",
+            "metadata": {"langgraph_node": "agent"},
+            "data": {
+                "output": AIMessage(
+                    content="",
+                    tool_calls=[{"name": "tool_1", "args": {}, "id": "call_1"}],
+                )
+            },
+        }
+        # Simulate a crash before the action node completes
+        msg = "Graph exploded"
+        raise ValueError(msg)
+
+    deltas = []
+    with contextlib.suppress(ValueError):
+        async for delta in _stream_langgraph_to_ha(event_stream(), "agent_1"):
+            deltas.append(delta)  # noqa: PERF401
+
+    # Should have yielded the synthetic rejection in the except block
+    assert len(deltas) == 3
+    assert deltas[2]["role"] == "tool_result"
+    result_delta = cast("ToolResultContentDeltaDict", deltas[2])
+    assert result_delta.get("tool_call_id") == "call_1"
+    tool_result = cast("dict[str, Any]", result_delta.get("tool_result"))
+    assert "failed mid-stream" in tool_result["error"]
+
+
+@pytest.mark.asyncio
+async def test_stream_tool_result_id_none_stringification() -> None:
+    """Test that tool_call_id=None becomes '' instead of 'None'."""
+
+    async def event_stream() -> AsyncGenerator[dict[str, Any]]:
+        yield {"event": "on_chat_model_start", "metadata": {"langgraph_node": "agent"}}
+        yield {
+            "event": "on_chain_end",
+            "metadata": {"langgraph_node": "action"},
+            "data": {
+                "output": {
+                    "messages": [
+                        ToolMessage(content="ok", tool_call_id="", name="tool")
+                    ]
+                }
+            },
+        }
+
+    deltas = [d async for d in _stream_langgraph_to_ha(event_stream(), "agent_1")]
+    # Result for an unknown ID-less call (since we didn't provide a tool_call event)
+    # tool_call_id should be "" (not "None")
+    result_delta = cast("ToolResultContentDeltaDict", deltas[1])
+    assert result_delta.get("tool_call_id") == ""
 
 
 # ---------------------------------------------------------------------------
