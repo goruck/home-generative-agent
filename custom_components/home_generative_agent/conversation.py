@@ -332,10 +332,12 @@ def _handle_on_chain_end(
     for msg in tool_messages:
         tool_call_id = msg.tool_call_id
         # Fallback correlation for models without tool IDs.
-        if (not tool_call_id or tool_call_id == "None") and unidentified_call_ids:
-            # Peek first; only pop if it matches a pending call
-            if unidentified_call_ids[0] in pending_tool_map:
-                tool_call_id = unidentified_call_ids.popleft()
+        if (
+            (not tool_call_id or tool_call_id == "None")
+            and unidentified_call_ids
+            and unidentified_call_ids[0] in pending_tool_map
+        ):
+            tool_call_id = unidentified_call_ids.popleft()
 
         if tool_call_id in pending_tool_map:
             pending_tool_map.pop(tool_call_id)
@@ -430,10 +432,7 @@ def _process_stream_event(
         ):
             yield delta
     elif node == "action" and event_type == "on_chain_end":
-        for res_delta in _handle_on_chain_end(
-            data, pending_tool_map, unidentified_call_ids
-        ):
-            yield res_delta
+        yield from _handle_on_chain_end(data, pending_tool_map, unidentified_call_ids)
 
 
 async def _stream_langgraph_to_ha(
@@ -908,7 +907,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             and not chat_log.content[-1].tool_calls
             and chat_log.content[-1].content
         ):
-            final_content = chat_log.content.pop()
+            final_content = cast(conversation.AssistantContent, chat_log.content.pop())
             chat_log.async_add_assistant_content_without_tools(final_content)
 
         try:

@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import MagicMock
 
 import pytest
-from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, ToolCallChunk, ToolMessage
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -180,10 +180,6 @@ async def test_stream_recursive_loops() -> None:
     roles = [d for d in deltas if d.get("role") == "assistant"]
     assert len(roles) == 2
     assert deltas[0] == {"role": "assistant"}
-    # deltas[1] is content="Thinking..."
-    # deltas[2] is tool_calls
-    # deltas[3] is role="tool_result"
-    # deltas[4] is role="assistant" (the second start)
     assert deltas[4] == {"role": "assistant"}
 
 
@@ -492,11 +488,12 @@ async def test_stream_ignores_state_chain_end() -> None:
     deltas = [d async for d in _stream_langgraph_to_ha(event_stream(), "agent_1")]
 
     # Exactly one tool result — the state event must not add a duplicate.
-    tool_results = [
-        d for d in deltas if isinstance(d, dict) and d.get("role") == "tool_result"
-    ]
+    tool_results = cast(
+        "list[ToolResultContentDeltaDict]",
+        [d for d in deltas if isinstance(d, dict) and d.get("role") == "tool_result"],
+    )
     assert len(tool_results) == 1
-    assert tool_results[0]["tool_call_id"] == "call_1"
+    assert cast(Any, tool_results[0])["tool_call_id"] == "call_1"
 
 
 @pytest.mark.asyncio
@@ -603,7 +600,7 @@ async def test_stream_drops_orphaned_tool_results() -> None:
     deltas = [d async for d in _stream_langgraph_to_ha(event_stream(), "agent_1")]
     # Result for an unknown call should be dropped, leaving only the agent start.
     assert len(deltas) == 1
-    assert deltas[0]["role"] == "assistant"
+    assert deltas[0].get("role") == "assistant"
 
 
 @pytest.mark.asyncio
@@ -619,7 +616,11 @@ async def test_stream_mixed_text_and_tools() -> None:
                 # Mixed chunk: has both content and tool_call_chunks
                 "chunk": AIMessageChunk(
                     content="Thinking... ",
-                    tool_call_chunks=[{"name": "tool", "args": "{}", "id": "call_1"}],
+                    tool_call_chunks=[
+                        ToolCallChunk(
+                            name="tool", args="{}", id="call_1", index=0
+                        )
+                    ],
                 )
             },
         }

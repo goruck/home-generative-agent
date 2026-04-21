@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import logging
@@ -83,6 +84,15 @@ if TYPE_CHECKING:
     from langgraph.store.base import BaseStore
 
 LOGGER = logging.getLogger(__name__)
+
+# Maximum seconds to wait for a single LangChain tool (e.g. camera VLM).
+# With asyncio.gather a hung tool blocks all parallel tools in the batch,
+# so this converts an infinite hang into a bounded error. Keep below the
+# outer HA conversation timeout.
+_LC_TOOL_TIMEOUT_S: float = 30.0
+
+_PIN_LOOKBACK = 20  # messages to scan for an unresolved requires_pin
+_ROUTING_REJECTION_MARKER = "is not available for this request"
 
 
 class State(MessagesState):
@@ -231,7 +241,9 @@ async def _run_langchain_tool(
             return str(val)
 
     try:
-        lc_result = await lc_tool.ainvoke(tool_call_copy)
+        lc_result = await asyncio.wait_for(
+            lc_tool.ainvoke(tool_call_copy), timeout=_LC_TOOL_TIMEOUT_S
+        )
         if isinstance(lc_result, ToolMessage):
             status = lc_result.status
             result_str = _stringify(lc_result.content)
@@ -266,6 +278,12 @@ async def _run_langchain_tool(
             name=tool_name,
             tool_call_id=tool_call.get("id") or "",
             status=status,
+        )
+    except TimeoutError:
+        return _make_tool_error(
+            f"Tool timed out after {_LC_TOOL_TIMEOUT_S}s.",
+            tool_name,
+            tool_call.get("id") or "",
         )
     except (HomeAssistantError, ValidationError) as err:
         status_msg = (
@@ -828,6 +846,113 @@ def _format_and_dedupe_tools(
 # ----- Graph nodes and edges -----
 
 
+def _last_requires_pin_idx(recent: list[AnyMessage]) -> int | None:
+    """Return the index of the most recent unresolved requires_pin ToolMessage."""
+    idx: int | None = None
+    for i, msg in enumerate(recent):
+        if not isinstance(msg, ToolMessage):
+            continue
+        content = msg.content
+        if not isinstance(content, str):
+            continue
+        try:
+            data = json.loads(content)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(data, dict) and data.get("status") == "requires_pin":
+            idx = i
+    return idx
+
+
+def _last_routing_rejection_idx(recent: list[AnyMessage]) -> int | None:
+    """Return index of the last unresolved routing-rejected actuation ToolMessage."""
+    idx: int | None = None
+    for i, msg in enumerate(recent):
+        if not isinstance(msg, ToolMessage):
+            continue
+        if not is_actuation_tool(msg.name or ""):
+            continue
+        content = msg.content if isinstance(msg.content, str) else ""
+        if msg.status == "error" and _ROUTING_REJECTION_MARKER in content:
+            idx = i
+        else:
+            idx = None  # tool ran (success or other error) — rejection resolved
+    return idx
+
+
+def _has_pending_pin_confirmation(messages: list[AnyMessage]) -> bool:
+    """
+    Return True if a PIN confirmation is pending in recent message history.
+
+    Detects two cases:
+
+    Case 1 (normal flow): A ``requires_pin`` ToolMessage exists without a
+    subsequent ``confirm_sensitive_action`` call.
+
+    Case 2 (degraded flow): An actuation tool was routing-rejected and the model
+    subsequently asked for a PIN in an AI message.  Injecting
+    ``confirm_sensitive_action`` lets the model recover on the next turn.
+    """
+    recent = messages[-_PIN_LOOKBACK:] if len(messages) > _PIN_LOOKBACK else messages
+
+    pin_idx = _last_requires_pin_idx(recent)
+    if pin_idx is not None:
+        for msg in recent[pin_idx + 1 :]:
+            if isinstance(msg, ToolMessage) and msg.name == "confirm_sensitive_action":
+                return False
+        return True
+
+    rejection_idx = _last_routing_rejection_idx(recent)
+    if rejection_idx is None:
+        return False
+
+    # AI asked for PIN after routing rejection but before a successful actuation call.
+    for msg in recent[rejection_idx + 1 :]:
+        if isinstance(msg, AIMessage) and not msg.tool_calls:
+            content = msg.content if isinstance(msg.content, str) else ""
+            if "pin" in content.lower():
+                return True
+
+    return False
+
+
+async def _get_pending_pin_tools(
+    messages: list[AnyMessage],
+    store: BaseStore | None,
+) -> list[RawTool]:
+    """Return [confirm_sensitive_action] when a PIN confirmation is pending."""
+    if not _has_pending_pin_confirmation(messages):
+        return []
+
+    if store is None:
+        return []
+
+    try:
+        item = await store.aget(
+            ("system", "tools"), key="hga_local::confirm_sensitive_action"
+        )
+    except Exception:  # noqa: BLE001
+        LOGGER.debug(
+            "Could not fetch confirm_sensitive_action from store for PIN injection"
+        )
+        return []
+
+    if item is None:
+        return []
+
+    val = item.value
+    LOGGER.debug("PIN flow active: force-injecting confirm_sensitive_action")
+    return [
+        RawTool(
+            name=val["name"],
+            api_id=val["api_id"],
+            description=val["description"],
+            parameters=val["parameters"],
+            is_actuation=val.get("is_actuation", False),
+        )
+    ]
+
+
 async def _retrieve_tools(
     state: State,
     config: RunnableConfig,
@@ -847,9 +972,10 @@ async def _retrieve_tools(
     limit = int(opts.get(CONF_TOOL_RETRIEVAL_LIMIT, 5))
 
     # 1. Gather candidates
-    rag_tools = await _get_rag_retrieved_tools(store, config, query, allowed_api_ids)
-    safety_tools = await _get_actuation_safety_tools(
-        store, config, query, allowed_api_ids
+    rag_tools, safety_tools, pin_tools = await asyncio.gather(
+        _get_rag_retrieved_tools(store, config, query, allowed_api_ids),
+        _get_actuation_safety_tools(store, config, query, allowed_api_ids),
+        _get_pending_pin_tools(state["messages"], store),
     )
 
     # 2. Merge: safety tools take priority; RAG fills remaining slots.
@@ -862,12 +988,20 @@ async def _retrieve_tools(
     # effective_limit expands just enough to fit all rag_only tools that survived
     # the per-sub-query RAG budget, but is capped at safety_cap + limit to avoid
     # unbounded growth.
+    #
+    # pin_tools are force-injected outside the limit — they must always be present
+    # when a PIN confirmation is pending, regardless of RAG scores.
+    pin_names = {t["name"] for t in pin_tools}
     safety_cap = min(len(safety_tools), max(1, limit * 3 // 4))
-    safety_capped = safety_tools[:safety_cap]
+    safety_capped = [t for t in safety_tools[:safety_cap] if t["name"] not in pin_names]
     safety_names = {t["name"] for t in safety_capped}
-    rag_only = [t for t in rag_tools if t["name"] not in safety_names]
+    rag_only = [
+        t
+        for t in rag_tools
+        if t["name"] not in safety_names and t["name"] not in pin_names
+    ]
     effective_limit = min(safety_cap + len(rag_only), safety_cap + limit)
-    all_candidates = (safety_capped + rag_only)[:effective_limit]
+    all_candidates = pin_tools + (safety_capped + rag_only)[:effective_limit]
 
     # 3. Fallback: vector store unavailable or index not yet ready.
     # Still apply the limit so the user-configured cap is always respected.
@@ -891,12 +1025,13 @@ async def _retrieve_tools(
     selected_tools, routing_map = _format_and_dedupe_tools(all_candidates)
 
     LOGGER.debug(
-        "Tool retrieval: limit=%d eff=%d rag=%d safety=%d/%d merged=%d tools=%s",
+        "Tool retrieval: limit=%d eff=%d rag=%d safety=%d/%d pin=%d merged=%d tools=%s",
         limit,
         effective_limit,
         len(rag_tools),
         safety_cap,
         len(safety_tools),
+        len(pin_tools),
         len(all_candidates),
         [t["function"]["name"] for t in selected_tools],
     )
@@ -1249,15 +1384,18 @@ async def _call_tools(
 
     tool_routing_map: dict[str, str] = state.get("tool_routing_map", {})
 
-    for tool_call in tool_calls:
+    # Execute all tool calls concurrently.
+    # asyncio.gather preserves submission order: results[i] matches tool_calls[i].
+    # Concurrent HA tool calls may interleave (e.g. turn_on + get_state in same
+    # batch). If strict sequencing is needed, issue separate model turns.
+    async def _invoke_one(tool_call: dict[str, Any]) -> ToolMessage:
+        """Execute a single tool call and return its ToolMessage."""
         tool_name = tool_call.get("name", "")
         tool_args = tool_call.get("args", {}) or {}
         LOGGER.debug("Tool call: %s(%s)", tool_name, tool_args)
 
         # Enforce the retrieved tool set: reject calls for tools that were not
-        # selected by _retrieve_tools this turn. This prevents the model from
-        # executing tools it learned from conversation history but that were not
-        # retrieved for the current query (e.g. when retrieval limit is low).
+        # selected by _retrieve_tools this turn.
         if tool_routing_map and tool_name not in tool_routing_map:
             LOGGER.warning(
                 "Model called tool '%s' which was not retrieved for this turn "
@@ -1265,15 +1403,12 @@ async def _call_tools(
                 tool_name,
                 list(tool_routing_map),
             )
-            tool_responses.append(
-                _make_tool_error(
-                    f"Tool '{tool_name}' is not available for this request. "
-                    "Only use the tools listed in your schema.",
-                    tool_name,
-                    tool_call.get("id") or "",
-                )
+            return _make_tool_error(
+                f"Tool '{tool_name}' is not available for this request. "
+                "Only use the tools listed in your schema.",
+                tool_name,
+                tool_call.get("id") or "",
             )
-            continue
 
         ctx = ToolExecutionContext(
             hass=hass,
@@ -1292,8 +1427,7 @@ async def _call_tools(
             tool_name=tool_name, tool_args=tool_args, ctx=ctx, tool_call=tool_call
         )
         if precheck:
-            tool_responses.append(precheck)
-            continue
+            return precheck
 
         lc_key = tool_name.lower()
         if lc_key in langchain_tools:
@@ -1308,7 +1442,28 @@ async def _call_tools(
                 tool_call=tool_call,
             )
         LOGGER.debug("Tool response: %s", tool_response)
-        tool_responses.append(tool_response)
+        return tool_response
+
+    results = await asyncio.gather(
+        *[_invoke_one(tc) for tc in tool_calls],
+        return_exceptions=True,
+    )
+    tool_responses: list[ToolMessage] = []
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            # Log the full exception; surface a sanitized message to avoid
+            # leaking tokens, URLs, or internal details to the model.
+            tc = tool_calls[i]
+            LOGGER.error("Tool %s raised during gather: %r", tc.get("name", ""), result)
+            tool_responses.append(
+                _make_tool_error(
+                    f"Tool execution failed: {type(result).__name__}",
+                    tc.get("name", ""),
+                    tc.get("id") or "",
+                )
+            )
+        else:
+            tool_responses.append(result)  # type: ignore[arg-type]
 
     return {"messages": tool_responses}
 
