@@ -1,5 +1,35 @@
 # TODOS
 
+## Agent
+
+### asyncio.gather concurrency policy for state-mutating tools
+
+**What:** Add per-tool annotation or global policy for whether a tool is safe to run concurrently. State-mutating HA tools (`turn_on`, `turn_off`, lock, unlock, `alarm_control`) called in the same model batch could interleave under `asyncio.gather`.
+
+**Why:** With `asyncio.gather` (introduced in feat/streaming-chatlog), a model turn that includes both `turn_on` and `get_state` may now run concurrently. `get_state` might return stale state if it completes before `turn_on` finishes. Previously sequential. Flagged during eng review Codex outside voice.
+
+**How to apply:** In `graph.py`, add a `_SEQUENTIAL_TOOLS` set or per-tool `safe_to_parallelize` annotation. In `_call_tools`, run sequential tools before the gather batch, or use `asyncio.gather` only for tools not in the set. Alternatively, add a note in the integration docs that sequential ordering of state-changing + read-back calls requires separate model turns.
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** feat/streaming-chatlog
+
+---
+
+### Integration smoke test: on_tool_end propagation during action node
+
+**What:** After feat/streaming-chatlog lands, run a real multi-tool conversation (`get_current_time` + `get_and_analyze_camera_image`) and verify that `on_tool_end` for `get_current_time` fires BEFORE the camera tool completes.
+
+**Why:** The streaming win depends on LangGraph propagating child `on_tool_end` events from `lc_tool.ainvoke()` to the outer `astream_events` DURING node execution. Verified against LangGraph 1.1.2 source during planning, but not confirmed via integration test. If LangGraph buffers nested events until node completion, the streaming gain disappears.
+
+**How to verify:** Add a timing log in the `on_tool_end` handler (DEBUG level). Time delta between `on_tool_end` for the time tool and the camera tool should be ~3980ms apart, not ~0ms.
+
+**Effort:** S
+**Priority:** P2 (post-ship validation)
+**Depends on:** feat/streaming-chatlog
+
+---
+
 ## Explain / Prompts
 
 ### Sanitize area/entity strings before injecting into LLM prompts
