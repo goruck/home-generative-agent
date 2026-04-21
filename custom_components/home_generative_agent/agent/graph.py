@@ -899,6 +899,10 @@ def _has_pending_pin_confirmation(messages: list[AnyMessage]) -> bool:
     if pin_idx is not None:
         for msg in recent[pin_idx + 1 :]:
             if isinstance(msg, ToolMessage) and msg.name == "confirm_sensitive_action":
+                content = msg.content if isinstance(msg.content, str) else ""
+                if "Incorrect PIN" in content:
+                    # Wrong PIN entered — action is still pending, keep scanning.
+                    continue
                 return False
         return True
 
