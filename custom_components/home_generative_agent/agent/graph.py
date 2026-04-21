@@ -77,7 +77,7 @@ from .helpers import (
 from .token_counter import count_tokens_cross_provider
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from homeassistant.core import HomeAssistant
     from langchain_core.runnables import RunnableConfig
@@ -846,7 +846,7 @@ def _format_and_dedupe_tools(
 # ----- Graph nodes and edges -----
 
 
-def _last_requires_pin_idx(recent: list[AnyMessage]) -> int | None:
+def _last_requires_pin_idx(recent: Sequence[AnyMessage]) -> int | None:
     """Return the index of the most recent unresolved requires_pin ToolMessage."""
     idx: int | None = None
     for i, msg in enumerate(recent):
@@ -864,7 +864,7 @@ def _last_requires_pin_idx(recent: list[AnyMessage]) -> int | None:
     return idx
 
 
-def _last_routing_rejection_idx(recent: list[AnyMessage]) -> int | None:
+def _last_routing_rejection_idx(recent: Sequence[AnyMessage]) -> int | None:
     """Return index of the last unresolved routing-rejected actuation ToolMessage."""
     idx: int | None = None
     for i, msg in enumerate(recent):
@@ -880,7 +880,7 @@ def _last_routing_rejection_idx(recent: list[AnyMessage]) -> int | None:
     return idx
 
 
-def _has_pending_pin_confirmation(messages: list[AnyMessage]) -> bool:
+def _has_pending_pin_confirmation(messages: Sequence[AnyMessage]) -> bool:
     """
     Return True if a PIN confirmation is pending in recent message history.
 
