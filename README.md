@@ -17,6 +17,7 @@ These are some of the features currently supported:
 - Short- and long-term memory using semantic search.
 - Automatic summarization of home state to manage LLM context length.
 - Semantic tool retrieval (RAG): tools are embedded at startup and retrieved per-turn by cosine similarity, keeping prompts lean and tool selection accurate.
+- Native LLM streaming: assistant tokens appear in the HA frontend word-by-word via `astream_events` + HA ChatLog delta API (requires HA 2026.4.0 or later).
 
 This integration will set up the `conversation` platform, allowing users to converse directly with the Home Generative Assistant, and the `image` and `sensor` platforms which create entities to display the latest camera image, the AI-generated summary, and recognized people in HA's UI or they can be used to create automations.
 
@@ -969,6 +970,8 @@ Below is a high-level view of the architecture.
 
 The general integration architecture follows the best practices as described in [Home Assistant Core](https://developers.home-assistant.io/docs/development_index/) and is compliant with [Home Assistant Community Store](https://www.hacs.xyz/) (HACS) publishing requirements.
 
+For a deep-dive on the streaming implementation, see [docs/streaming-design.md](docs/streaming-design.md).
+
 The agent is built using LangGraph and uses the HA `conversation` component to interact with the user. The agent uses the Home Assistant LLM API to fetch the state of the home and understand the HA native tools it has at its disposal. I implemented all other tools available to the agent using LangChain. The agent employs several LLMs, a large and very accurate primary model for high-level reasoning, smaller specialized helper models for camera image analysis, primary model context summarization, and embedding generation for long-term semantic search. The models can be either cloud (best accuracy, highest cost) or edge-based (good accuracy, lowest cost). Edge models run under the [Ollama](https://ollama.com/) framework or any OpenAI-compatible server (vLLM, llama.cpp, LiteLLM, etc.) on a computer located in the home. Recommended defaults and supported models are configurable in the integration UI, with defaults defined in `const.py`.
 
 Category | Provider | Default model | Purpose
@@ -997,7 +1000,7 @@ LangGraph powers the conversation agent, enabling you to create stateful, multi-
 
 The agent workflow has four nodes, each Python module modifying the agent's state, a shared data structure. The edges between the nodes represent the allowed transitions between them, with solid lines unconditional and dashed lines conditional. Nodes do the work, and edges tell what to do next.
 
-The ```__start__``` and ```__end__``` nodes inform the graph where to start and stop. The ```retrieve_tools``` node runs first: it queries the vector index to select the tools most relevant to the current message (see [Tool Retrieval](#tool-retrieval-rag) above). The ```agent``` node then runs the primary LLM with only those tools bound to its context, and if it decides to use a tool, the ```action``` node runs the tool and returns control to ```agent```. When the agent does not call a tool, control passes to ```summarize_and_remove_messages```, which summarizes only when trimming is required to manage the LLM context.
+The ```__start__``` and ```__end__``` nodes inform the graph where to start and stop. The ```retrieve_tools``` node runs first: it queries the vector index to select the tools most relevant to the current message (see [Tool Retrieval](#tool-retrieval-rag) above). The ```agent``` node then runs the primary LLM with only those tools bound to its context, and if it decides to use a tool, the ```action``` node runs the tool and returns control to ```agent```. Multiple tool calls within a single model turn execute concurrently via `asyncio.gather`, with a 30-second per-tool timeout to prevent hung calls from blocking the conversation. When the agent does not call a tool, control passes to ```summarize_and_remove_messages```, which summarizes only when trimming is required to manage the LLM context.
 
 ### LLM Context Management
 You need to carefully manage the context length of LLMs to balance cost, accuracy, and latency and avoid triggering rate limits such as OpenAI's Tokens per Minute restriction. The system controls the context length of the primary model by trimming the messages in the context if they exceed a max parameter which can be expressed in either tokens or messages, and the trimmed messages are replaced by a shorter summary inserted into the system message. These parameters are configurable in the UI, with defaults defined in `const.py`; their description is below.
@@ -1011,11 +1014,13 @@ Parameter | Description | Default
 ### Latency
 The latency between user requests or the agent taking timely action on the user's behalf is critical for you to consider in the design. I used several techniques to reduce latency, including using specialized, smaller helper LLMs running on the edge and facilitating primary model prompt caching by structuring the prompts to put static content, such as instructions and examples, upfront and variable content, such as user-specific information at the end. These techniques also reduce primary model usage costs considerably.
 
+Native LLM streaming (v3.12.0+) means the first tokens appear in the HA conversation UI within milliseconds of the model starting its response — total response time is unchanged, but perceived latency drops significantly. Multi-tool turns also benefit from parallel tool execution: tools in the same model turn run concurrently rather than serially.
+
 You can see the typical latency performance in the table below.
 
 Action | Latency (s) | Remark
 -- | -- | -- |
-HA intents | < 1 | e.g., turn on a light
+HA intents | < 1 | e.g., turn on a light; first token streams immediately
 Analyze camera image | < 3 | initial request
 Add automation | < 1 |
 Memory operations | < 1 |

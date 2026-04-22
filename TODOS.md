@@ -1,5 +1,63 @@
 # TODOS
 
+## Agent
+
+### asyncio.gather concurrency policy for state-mutating tools
+
+**What:** Add per-tool annotation or global policy for whether a tool is safe to run concurrently. State-mutating HA tools (`turn_on`, `turn_off`, lock, unlock, `alarm_control`) called in the same model batch could interleave under `asyncio.gather`.
+
+**Why:** With `asyncio.gather` (introduced in feat/streaming-chatlog), a model turn that includes both `turn_on` and `get_state` may now run concurrently. `get_state` might return stale state if it completes before `turn_on` finishes. Previously sequential. Flagged during eng review Codex outside voice.
+
+**How to apply:** In `graph.py`, add a `_SEQUENTIAL_TOOLS` set or per-tool `safe_to_parallelize` annotation. In `_call_tools`, run sequential tools before the gather batch, or use `asyncio.gather` only for tools not in the set. Alternatively, add a note in the integration docs that sequential ordering of state-changing + read-back calls requires separate model turns.
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** feat/streaming-chatlog
+
+---
+
+### Rename sync methods with `_async_` prefix in conversation.py
+
+**What:** Three synchronous methods in `HGAConversationEntity` have the `_async_` prefix, which conventionally means "coroutine" in HA code: `_async_get_message_history` (line 629), `_async_get_all_tools` (line 685), `_async_render_system_prompt` (line 718). None use `await`.
+
+**Why:** Misleading naming. Future maintainers may incorrectly assume these are coroutines.
+
+**How to apply:** Rename each to drop `_async_` prefix and update all callers within `conversation.py`.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** feat/streaming-chatlog
+
+---
+
+### Integration tests for streaming conversation path (HA fixture level)
+
+**What:** Add four HA-fixture-level integration tests using a real (mocked) LangGraph + HA conversation entity: (1) single-turn text-only streaming, (2) multi-turn with tool calls, (3) PIN flow multi-turn with confirmation, (4) `schema_first_yaml=True` fallback fires `ainvoke` path correctly.
+
+**Why:** Current test coverage (58%) is dominated by pure-function unit tests. The `HGAConversationEntity` integration methods (`_async_run_astream`, `_async_handle_message`, `_async_render_system_prompt`, `_async_init_llm_apis`) have zero unit test coverage. These tests were listed as required in the streaming design plan but deferred at ship time. Accepted risk per user override.
+
+**How to apply:** Use the existing `test_conversation.py` integration test harness as a model. Create `tests/custom_components/home_generative_agent/test_conversation_stream_integration.py`. Mock `app.astream_events` to return a controlled sequence of events, verify delta sequence delivered to HA ChatLog.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** feat/streaming-chatlog
+
+---
+
+### Integration smoke test: on_tool_end propagation during action node
+
+**What:** After feat/streaming-chatlog lands, run a real multi-tool conversation (`get_current_time` + `get_and_analyze_camera_image`) and verify that `on_tool_end` for `get_current_time` fires BEFORE the camera tool completes.
+
+**Why:** The streaming win depends on LangGraph propagating child `on_tool_end` events from `lc_tool.ainvoke()` to the outer `astream_events` DURING node execution. Verified against LangGraph 1.1.2 source during planning, but not confirmed via integration test. If LangGraph buffers nested events until node completion, the streaming gain disappears.
+
+**How to verify:** Add a timing log in the `on_tool_end` handler (DEBUG level). Time delta between `on_tool_end` for the time tool and the camera tool should be ~3980ms apart, not ~0ms.
+
+**Effort:** S
+**Priority:** P2 (post-ship validation)
+**Depends on:** feat/streaming-chatlog
+
+---
+
 ## Explain / Prompts
 
 ### Sanitize area/entity strings before injecting into LLM prompts

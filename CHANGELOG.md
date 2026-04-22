@@ -2,6 +2,47 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.12.0] - 2026-04-21
+
+### Added
+
+- **Native LLM streaming** — HGA now streams assistant tokens to the HA frontend
+  in real time via `astream_events` + HA ChatLog delta API. Responses appear
+  word-by-word instead of waiting for the full LLM response. Closes #370.
+  Requires HA 2026.4.0 or later.
+
+- **Parallel tool execution** — multiple tool calls within a single model turn
+  now run concurrently via `asyncio.gather`, reducing multi-tool turn latency
+  (e.g. `get_current_time` + `get_and_analyze_camera_image` in parallel).
+
+- **LangChain tool timeout** — each tool call is bounded by a 30-second timeout
+  via `asyncio.wait_for`. Stuck tool calls now produce a descriptive error
+  instead of hanging the conversation indefinitely.
+
+### Changed
+
+- **Protected-action PIN flow hardened** — wrong-PIN entries no longer mark the
+  pending action as resolved. Routing errors on `confirm_sensitive_action` are
+  also treated as unresolved, preventing a bypass when the confirm tool is
+  unavailable. Type annotations for PIN helper functions updated to
+  `Sequence[AnyMessage]` for broader compatibility.
+
+- **Streaming robustness** — LangGraph stream delta synchronization hardened:
+  tool call IDs are correlated across `on_chat_model_end` and `on_chain_end`
+  events; orphaned tool calls are flushed as synthetic rejections on generator
+  exit; partial content is committed and recoverable on stream failure;
+  CONTENT_ADDED is re-fired for the final AssistantContent so the HA frontend
+  streaming UI shows the complete response. Empty chat logs on mid-stream error
+  now produce a safe fallback instead of crashing the turn.
+
+### Fixed
+
+- HA intent-tool results containing `response_type` dict structures no longer
+  produce an empty chat bubble in multi-tool turns.
+
+- JSON tool results are correctly parsed; streaming failures fall back to graph
+  state recovery to avoid empty responses.
+
 ## [3.11.1] - 2026-04-16
 
 ### Added

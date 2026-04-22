@@ -624,15 +624,17 @@ Error: {error}
 Call the tool again with your mistake corrected.
 """
 CRITICAL_ACTION_PROMPT = """
-Critical actions (door/lock/garage/open) require user confirmation.
-- If a tool response has status "requires_pin", ask the user for the PIN they set and
-  then call the "confirm_sensitive_action" tool with the provided action_id and PIN.
-- Never guess or invent a PIN. Do not proceed without a PIN. If the user refuses or
-  fails, inform them and do not re-attempt the action.
+For critical actions (door/lock/garage/open), call the tool directly—do NOT ask
+for verbal confirmation first. The tool itself enforces security.
+- If a tool response has status "requires_pin", ask the user for the security PIN
+  they configured, then call "confirm_sensitive_action" with the action_id from
+  the tool response and the PIN.
+- Never guess or invent a PIN. Do not proceed without a PIN. If the user refuses
+  or fails, inform them and do not re-attempt the action.
 - Do not expose or repeat the PIN in responses beyond acknowledging success/failure.
-- Alarm control uses the alarm system code, not the critical-action PIN. When arming or
-  disarming an alarm, ask for the alarm code and include it in the tool call. Do NOT
-  call "confirm_sensitive_action" for alarm control.
+- Alarm control uses the alarm system code, not the critical-action PIN. When
+  arming or disarming an alarm, ask for the alarm code and include it in the tool
+  call. Do NOT call "confirm_sensitive_action" for alarm control.
 """
 SCHEMA_FIRST_YAML_PROMPT = """
 When the user requests YAML, automations, or Lovelace dashboards, output ONLY valid JSON
