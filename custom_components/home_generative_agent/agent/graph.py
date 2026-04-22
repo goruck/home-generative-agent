@@ -903,6 +903,10 @@ def _has_pending_pin_confirmation(messages: Sequence[AnyMessage]) -> bool:
                 if "Incorrect PIN" in content:
                     # Wrong PIN entered — action is still pending, keep scanning.
                     continue
+                if getattr(msg, "status", None) == "error":
+                    # Routing or tool error on confirm_sensitive_action itself —
+                    # the PIN was never checked. Keep the action pending.
+                    continue
                 return False
         return True
 

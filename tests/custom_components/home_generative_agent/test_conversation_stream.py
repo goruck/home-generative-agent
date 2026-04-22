@@ -12,7 +12,12 @@ from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import MagicMock
 
 import pytest
-from langchain_core.messages import AIMessage, AIMessageChunk, ToolCallChunk, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    ToolCallChunk,
+    ToolMessage,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -493,7 +498,7 @@ async def test_stream_ignores_state_chain_end() -> None:
         [d for d in deltas if isinstance(d, dict) and d.get("role") == "tool_result"],
     )
     assert len(tool_results) == 1
-    assert cast(Any, tool_results[0])["tool_call_id"] == "call_1"
+    assert cast("Any", tool_results[0])["tool_call_id"] == "call_1"
 
 
 @pytest.mark.asyncio
@@ -617,9 +622,7 @@ async def test_stream_mixed_text_and_tools() -> None:
                 "chunk": AIMessageChunk(
                     content="Thinking... ",
                     tool_call_chunks=[
-                        ToolCallChunk(
-                            name="tool", args="{}", id="call_1", index=0
-                        )
+                        ToolCallChunk(name="tool", args="{}", id="call_1", index=0)
                     ],
                 )
             },

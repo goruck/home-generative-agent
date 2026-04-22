@@ -60,8 +60,8 @@ def _stub_ha_conversation() -> None:
 
     # conversation.models submodule
     models_mod: Any = types.ModuleType("homeassistant.components.conversation.models")
-    models_mod.AbstractConversationAgent = _AbstractConversationAgent  # type: ignore[attr-defined]
-    conv_mod.models = models_mod  # type: ignore[attr-defined]
+    models_mod.AbstractConversationAgent = _AbstractConversationAgent
+    conv_mod.models = models_mod
 
     sys.modules["homeassistant.components.conversation"] = conv_mod
     sys.modules["homeassistant.components.conversation.models"] = models_mod

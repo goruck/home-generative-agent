@@ -9,7 +9,6 @@ import json
 import logging
 import string
 from collections import deque
-from collections.abc import AsyncIterable, AsyncIterator
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 if TYPE_CHECKING:
@@ -891,24 +890,23 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 # Non-blocking wait to allow generators to close.
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await stream_task
-
-        # Fire trace after stream completes using final graph state.
-        # astream_events handles exhaustion only after graph termination.
-        _LOGGER.debug("====== End of run (streaming) ======")
-
-        # Re-fire CONTENT_ADDED for the final AssistantContent so the HA
-        # frontend's streaming UI shows it in the main chat area.
-        # async_add_delta_content_stream flushes via async_add_assistant_content,
-        # which does NOT fire CONTENT_ADDED for AssistantContent. Re-committing
-        # via async_add_assistant_content_without_tools does fire it.
-        if (
-            chat_log.content
-            and isinstance(chat_log.content[-1], conversation.AssistantContent)
-            and not chat_log.content[-1].tool_calls
-            and chat_log.content[-1].content
-        ):
-            final_content = cast(conversation.AssistantContent, chat_log.content.pop())
-            chat_log.async_add_assistant_content_without_tools(final_content)
+            # Re-fire CONTENT_ADDED for the final AssistantContent so the HA
+            # frontend's streaming UI shows it in the main chat area.
+            # async_add_delta_content_stream flushes via async_add_assistant_content,
+            # which does NOT fire CONTENT_ADDED for AssistantContent. Re-committing
+            # via async_add_assistant_content_without_tools does fire it.
+            # Runs even on cancellation so the UI is consistent if HA reads
+            # partial chat_log state after a cancelled turn.
+            if (
+                chat_log.content
+                and isinstance(chat_log.content[-1], conversation.AssistantContent)
+                and not chat_log.content[-1].tool_calls
+                and chat_log.content[-1].content
+            ):
+                _final_content = cast(
+                    "conversation.AssistantContent", chat_log.content.pop()
+                )
+                chat_log.async_add_assistant_content_without_tools(_final_content)
 
         try:
             final_state = await app.aget_state(config)
@@ -1102,6 +1100,19 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 )
         else:
             await self._async_run_astream(app, app_input, app_config, chat_log, tools)
+
+        # Guard against an empty chat log (e.g. HomeAssistantError swallowed mid-stream
+        # before any AssistantContent was committed).
+        # async_get_result_from_chat_log raises if no AssistantContent is present.
+        if not any(
+            isinstance(msg, conversation.AssistantContent) for msg in chat_log.content
+        ):
+            chat_log.async_add_assistant_content_without_tools(
+                conversation.AssistantContent(
+                    agent_id=self.entity_id,
+                    content="",
+                )
+            )
 
         return conversation.async_get_result_from_chat_log(user_input, chat_log)
 
