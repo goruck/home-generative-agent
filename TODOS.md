@@ -55,6 +55,7 @@
 **Effort:** S
 **Priority:** P2 (post-ship validation)
 **Depends on:** feat/streaming-chatlog
+**Completed:** v3.12.0 (2026-04-21)
 
 ---
 
