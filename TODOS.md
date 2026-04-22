@@ -16,6 +16,34 @@
 
 ---
 
+### Rename sync methods with `_async_` prefix in conversation.py
+
+**What:** Three synchronous methods in `HGAConversationEntity` have the `_async_` prefix, which conventionally means "coroutine" in HA code: `_async_get_message_history` (line 629), `_async_get_all_tools` (line 685), `_async_render_system_prompt` (line 718). None use `await`.
+
+**Why:** Misleading naming. Future maintainers may incorrectly assume these are coroutines.
+
+**How to apply:** Rename each to drop `_async_` prefix and update all callers within `conversation.py`.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** feat/streaming-chatlog
+
+---
+
+### Integration tests for streaming conversation path (HA fixture level)
+
+**What:** Add four HA-fixture-level integration tests using a real (mocked) LangGraph + HA conversation entity: (1) single-turn text-only streaming, (2) multi-turn with tool calls, (3) PIN flow multi-turn with confirmation, (4) `schema_first_yaml=True` fallback fires `ainvoke` path correctly.
+
+**Why:** Current test coverage (58%) is dominated by pure-function unit tests. The `HGAConversationEntity` integration methods (`_async_run_astream`, `_async_handle_message`, `_async_render_system_prompt`, `_async_init_llm_apis`) have zero unit test coverage. These tests were listed as required in the streaming design plan but deferred at ship time. Accepted risk per user override.
+
+**How to apply:** Use the existing `test_conversation.py` integration test harness as a model. Create `tests/custom_components/home_generative_agent/test_conversation_stream_integration.py`. Mock `app.astream_events` to return a controlled sequence of events, verify delta sequence delivered to HA ChatLog.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** feat/streaming-chatlog
+
+---
+
 ### Integration smoke test: on_tool_end propagation during action node
 
 **What:** After feat/streaming-chatlog lands, run a real multi-tool conversation (`get_current_time` + `get_and_analyze_camera_image`) and verify that `on_tool_end` for `get_current_time` fires BEFORE the camera tool completes.
