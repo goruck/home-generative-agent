@@ -15,6 +15,8 @@ from homeassistant.config_entries import (
 )
 from homeassistant.const import CONF_API_KEY
 from homeassistant.helpers.selector import (
+    NumberSelector,
+    NumberSelectorConfig,
     SelectOptionDict,
     SelectSelector,
     SelectSelectorConfig,
@@ -26,7 +28,9 @@ from homeassistant.helpers.selector import (
 
 from ..const import (  # noqa: TID252
     CONF_GEMINI_API_KEY,
+    CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
     MODEL_CATEGORY_SPECS,
+    RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
     SUBENTRY_TYPE_MODEL_PROVIDER,
 )
 from ..core.utils import (  # noqa: TID252
@@ -234,6 +238,13 @@ class ModelProviderSubentryFlow(ConfigSubentryFlow):
                     settings["base_url"] = ensure_http_url(str(base_url))
                     api_key = user_input.get(CONF_API_KEY) or "none"
                     settings["api_key"] = api_key
+                    embedding_dims = user_input.get(
+                        CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS
+                    )
+                    if embedding_dims is not None:
+                        settings[CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS] = int(
+                            embedding_dims
+                        )
                     try:
                         await validate_openai_compatible_url(
                             self.hass, settings["base_url"], api_key
@@ -337,6 +348,19 @@ class ModelProviderSubentryFlow(ConfigSubentryFlow):
                         },
                         default=current_settings.get("api_key") or "",
                     ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
+                    vol.Optional(
+                        CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
+                        description={
+                            "suggested_value": current_settings.get(
+                                CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
+                                RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
+                            )
+                        },
+                        default=current_settings.get(
+                            CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
+                            RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
+                        ),
+                    ): NumberSelector(NumberSelectorConfig(min=64, max=4096, step=1)),
                 }
             )
         elif provider_type == "openai":

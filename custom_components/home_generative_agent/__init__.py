@@ -99,6 +99,7 @@ from .const import (
     CONF_OPENAI_COMPATIBLE_API_KEY,
     CONF_OPENAI_COMPATIBLE_BASE_URL,
     CONF_OPENAI_COMPATIBLE_CHAT_MODEL,
+    CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
     CONF_OPENAI_COMPATIBLE_EMBEDDING_MODEL,
     CONF_OPENAI_COMPATIBLE_SUMMARIZATION_MODEL,
     CONF_OPENAI_COMPATIBLE_VLM,
@@ -161,6 +162,7 @@ from .const import (
     RECOMMENDED_OLLAMA_VLM_KEEPALIVE,
     RECOMMENDED_OPENAI_CHAT_MODEL,
     RECOMMENDED_OPENAI_COMPATIBLE_CHAT_MODEL,
+    RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
     RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_MODEL,
     RECOMMENDED_OPENAI_COMPATIBLE_SUMMARIZATION_MODEL,
     RECOMMENDED_OPENAI_COMPATIBLE_VLM,
@@ -1369,7 +1371,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     CONF_OPENAI_COMPATIBLE_EMBEDDING_MODEL,
                     RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_MODEL,
                 ),
-                dimensions=EMBEDDING_MODEL_DIMS,
+                check_embedding_ctx_length=False,
                 http_client=openai_http_client,
                 http_async_client=http_async_client,
             )
@@ -1400,9 +1402,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             "No embeddings provider available; vector store will be limited.",
         )
     else:
+        embedding_dims = (
+            options.get(
+                CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
+                RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
+            )
+            if embedding_provider == "openai_compatible"
+            else EMBEDDING_MODEL_DIMS
+        )
         index_config = PostgresIndexConfig(
             embed=partial(generate_embeddings, embedding_model),
-            dims=EMBEDDING_MODEL_DIMS,
+            dims=embedding_dims,
             fields=["content"],
         )
 
