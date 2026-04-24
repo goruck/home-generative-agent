@@ -51,6 +51,7 @@ from ..const import (  # noqa: TID252
     CONF_OPENAI_CHAT_MODEL,
     CONF_OPENAI_COMPATIBLE_API_KEY,
     CONF_OPENAI_COMPATIBLE_BASE_URL,
+    CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
     CONF_OPENAI_EMBEDDING_MODEL,
     CONF_OPENAI_SUMMARIZATION_MODEL,
     CONF_OPENAI_VLM,
@@ -682,6 +683,12 @@ def _apply_provider_to_category(
         if base_url := settings.get("base_url"):
             options[CONF_OPENAI_COMPATIBLE_BASE_URL] = base_url
         options[CONF_OPENAI_COMPATIBLE_API_KEY] = settings.get("api_key", "none")
+        if (
+            category == "embedding"
+            and (dims := settings.get(CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS))
+            is not None
+        ):
+            options[CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS] = dims
 
     if provider.provider_type == "gemini" and (api_key := settings.get("api_key")):
         options[CONF_GEMINI_API_KEY] = api_key

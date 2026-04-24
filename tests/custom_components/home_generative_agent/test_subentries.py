@@ -24,6 +24,7 @@ from custom_components.home_generative_agent.const import (
     CONF_CRITICAL_ACTION_PIN,
     CONF_DB_NAME,
     CONF_DB_PARAMS,
+    CONF_EMBEDDING_MODEL_PROVIDER,
     CONF_EXPLAIN_ENABLED,
     CONF_FEATURE_MODEL,
     CONF_FEATURE_MODEL_NAME,
@@ -35,6 +36,7 @@ from custom_components.home_generative_agent.const import (
     CONF_OLLAMA_VLM_URL,
     CONF_OPENAI_COMPATIBLE_API_KEY,
     CONF_OPENAI_COMPATIBLE_BASE_URL,
+    CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
     CONF_SENTINEL_CAMERA_ENTRY_LINKS,
     CONF_SENTINEL_DAILY_DIGEST_ENABLED,
     CONF_SENTINEL_DAILY_DIGEST_TIME,
@@ -48,6 +50,7 @@ from custom_components.home_generative_agent.const import (
     CONFIG_ENTRY_VERSION,
     DOMAIN,
     MODEL_CATEGORY_SPECS,
+    RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
     SUBENTRY_TYPE_FEATURE,
     SUBENTRY_TYPE_MODEL_PROVIDER,
     SUBENTRY_TYPE_SENTINEL,
@@ -1060,3 +1063,59 @@ async def test_migration_v5_to_v6_absent_key(hass: HomeAssistant) -> None:
     assert await async_migrate_entry(hass, entry)
     assert entry.options.get(CONF_LLM_HASS_API) == []
     assert entry.version == CONFIG_ENTRY_VERSION
+
+
+# ---------------------------------------------------------------------------
+# LM Studio / openai_compatible embedding dims (fix #375)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_runtime_options_openai_compatible_embedding_dims() -> None:
+    """Configured embedding dims in provider settings propagate to runtime options."""
+    provider = DummySubentry(
+        "compat1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Edge-LLM",
+        {
+            "provider_type": "openai_compatible",
+            "capabilities": ["embedding"],
+            "settings": {
+                "base_url": "http://lmstudio:1234",
+                "api_key": "none",
+                CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS: 768,
+            },
+        },
+    )
+    entry = DummyEntry()
+    entry.subentries = {provider.subentry_id: provider}
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_EMBEDDING_MODEL_PROVIDER] == "openai_compatible"
+    assert options[CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS] == 768
+
+
+def test_resolve_runtime_options_openai_compatible_embedding_dims_none() -> None:
+    """When dims is absent from provider settings, key is not written to options."""
+    provider = DummySubentry(
+        "compat1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Edge-LLM",
+        {
+            "provider_type": "openai_compatible",
+            "capabilities": ["embedding"],
+            "settings": {
+                "base_url": "http://lmstudio:1234",
+                "api_key": "none",
+            },
+        },
+    )
+    entry = DummyEntry()
+    entry.subentries = {provider.subentry_id: provider}
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS not in options
+
+
+def test_recommended_openai_compatible_embedding_dims_value() -> None:
+    """Default dims constant is 768 — matches nomic-embed-text native output size."""
+    assert RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_DIMS == 768
