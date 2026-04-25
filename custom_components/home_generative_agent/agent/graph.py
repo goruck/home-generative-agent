@@ -91,6 +91,14 @@ LOGGER = logging.getLogger(__name__)
 # outer HA conversation timeout.
 _LC_TOOL_TIMEOUT_S: float = 30.0
 
+# Maximum seconds to wait for the chat LLM to respond.
+# Under heavy VLM load the Ollama GPU is fully saturated; the chat model
+# queues behind concurrent vision requests and can block indefinitely inside
+# astream_events, stalling the streaming pipeline. This guard converts an
+# infinite hang into a bounded HomeAssistantError so the recovery path can
+# return a response to the user.
+_LLM_INVOKE_TIMEOUT_S: float = 90.0
+
 _PIN_LOOKBACK = 20  # messages to scan for an unresolved requires_pin
 _ROUTING_REJECTION_MARKER = "is not available for this request"
 
@@ -1106,7 +1114,12 @@ async def _invoke_model(
 ) -> Any:
     """Invoke a chat model, wrapping non-HA exceptions as HomeAssistantError."""
     try:
-        return await model.ainvoke(messages, config)
+        return await asyncio.wait_for(
+            model.ainvoke(messages, config), timeout=_LLM_INVOKE_TIMEOUT_S
+        )
+    except TimeoutError:
+        msg = f"Model invocation timed out after {_LLM_INVOKE_TIMEOUT_S}s."
+        raise HomeAssistantError(msg) from None
     except HomeAssistantError:
         raise
     except Exception as err:

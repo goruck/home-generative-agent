@@ -3,14 +3,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import MagicMock
 
 import pytest
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
+import custom_components.home_generative_agent.agent.graph as agent_graph
 from custom_components.home_generative_agent.agent import tools as agent_tools
 from custom_components.home_generative_agent.const import SIGNAL_HGA_RECOGNIZED
 from custom_components.home_generative_agent.core.image_entity import LastEventImage
@@ -198,3 +202,43 @@ def test_agent_tools_uses_direct_tool_node_injected_store_import() -> None:
     source = Path(agent_tools.__file__).read_text(encoding="utf-8")
     assert "from langgraph.prebuilt.tool_node import InjectedStore" in source
     assert "from langgraph.prebuilt import InjectedStore" not in source
+
+
+@pytest.mark.asyncio
+async def test_invoke_model_raises_on_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    _invoke_model raises HomeAssistantError when the LLM hangs under load.
+
+    Regression: without asyncio.wait_for the model.ainvoke() call blocked
+    indefinitely when the Ollama GPU was saturated by background VLM work,
+    stalling astream_events and showing 'no response' in the chat UI.
+    """
+    monkeypatch.setattr(agent_graph, "_LLM_INVOKE_TIMEOUT_S", 0.05)
+
+    async def _slow_ainvoke(*_args: object, **_kwargs: object) -> None:
+        await asyncio.sleep(10)
+
+    mock_model = MagicMock()
+    mock_model.ainvoke = _slow_ainvoke
+
+    with pytest.raises(HomeAssistantError, match="timed out"):
+        await agent_graph._invoke_model(mock_model, [], {})
+
+
+@pytest.mark.asyncio
+async def test_invoke_model_returns_result_within_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_invoke_model returns the model result when the LLM responds in time."""
+    monkeypatch.setattr(agent_graph, "_LLM_INVOKE_TIMEOUT_S", 5.0)
+
+    expected = MagicMock()
+
+    async def _fast_ainvoke(*_args: object, **_kwargs: object) -> MagicMock:
+        return expected
+
+    mock_model = MagicMock()
+    mock_model.ainvoke = _fast_ainvoke
+
+    result = await agent_graph._invoke_model(mock_model, [], {})
+    assert result is expected
