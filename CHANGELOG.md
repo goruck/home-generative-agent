@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.12.2] - 2026-04-24
+
+### Fixed
+
+- **Chat streaming no longer hangs under heavy VLM load** — `_invoke_model` now
+  wraps `model.ainvoke()` in `asyncio.wait_for(_LLM_INVOKE_TIMEOUT_S=90s)`. When
+  the Ollama GPU is saturated by concurrent camera analysis, the chat LLM was
+  queuing indefinitely inside `astream_events`, stalling the streaming pipeline
+  and showing "no response" in the HA chat UI. The timeout converts an infinite
+  hang into a bounded `HomeAssistantError`. Closes #378.
+
+- **Blank chat bubble after timeout replaced with user-visible error message** —
+  The timeout `HomeAssistantError` now propagates cleanly through
+  `_stream_langgraph_to_ha` (bypassing the misleading "generator error" log path)
+  to the recovery handler, which emits "I'm sorry, I was unable to respond in time.
+  Please try again." instead of an empty bubble.
+
+- **Empty-content fallback in `_async_handle_message` now shows an error message**
+  — the `content=""` guard (hit when streaming fails with no recoverable graph
+  state) now emits "I'm sorry, I was unable to respond. Please try again." so the
+  chat UI always shows something actionable.
+
 ## [3.12.1] - 2026-04-24
 
 ### Fixed

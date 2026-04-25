@@ -474,6 +474,10 @@ async def _stream_langgraph_to_ha(
     except (GeneratorExit, asyncio.CancelledError):
         # Stop iteration on cancellation or closure.
         raise
+    except HomeAssistantError:
+        # Application-level failure (e.g. model timeout) — not a generator bug.
+        # Re-raise so _async_run_astream can handle recovery and user messaging.
+        raise
     except Exception:
         _LOGGER.exception("Error in LangGraph streaming transformation generator.")
         # Persistence guard: flush pending tools as synthetic rejections so HA
@@ -938,6 +942,23 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                         "Recovered final AssistantContent from graph state after "
                         "streaming failure."
                     )
+                else:
+                    # Graph state has no usable AI response (e.g. model timed out
+                    # before generating a reply). Emit a user-visible error message
+                    # so the chat UI shows something instead of a blank bubble.
+                    chat_log.async_add_assistant_content_without_tools(
+                        conversation.AssistantContent(
+                            agent_id=self.entity_id,
+                            content=(
+                                "I'm sorry, I was unable to respond in time. "
+                                "Please try again."
+                            ),
+                        )
+                    )
+                    _LOGGER.debug(
+                        "Added fallback AssistantContent after streaming failure "
+                        "with no recoverable graph state."
+                    )
         except ValueError:
             # Expected when no checkpointer is configured (e.g. tests)
             _LOGGER.debug("aget_state unavailable; skipping trace for streaming turn.")
@@ -1110,7 +1131,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             chat_log.async_add_assistant_content_without_tools(
                 conversation.AssistantContent(
                     agent_id=self.entity_id,
-                    content="",
+                    content="I'm sorry, I was unable to respond. Please try again.",
                 )
             )
 
