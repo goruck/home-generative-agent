@@ -19,6 +19,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.httpx_client import get_async_client
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_ollama import OllamaEmbeddings
 
 from ..const import (  # noqa: TID252
     CONF_OLLAMA_URL,
@@ -35,7 +36,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping, Sequence
 
     from homeassistant.core import HomeAssistant
-    from langchain_ollama import OllamaEmbeddings
     from langchain_openai import OpenAIEmbeddings
 
 LOGGER = logging.getLogger(__name__)
@@ -183,17 +183,22 @@ async def chat_priority_context() -> AsyncIterator[None]:
     global _chat_active_count  # noqa: PLW0603
     _chat_active_count += 1
     _chat_idle.clear()
-    # Acquire locks in fixed order (vlm → llm) to wait for any in-flight
+    # The outer try/finally guarantees cleanup even if this task is cancelled
+    # while waiting to acquire a lock (e.g., HA config-entry reload mid-chat).
+    # Without it, _chat_idle would stay cleared permanently and all background
+    # workers would hang until the next HA restart.
+    #
+    # Locks are acquired in fixed order (vlm → llm) to wait for any in-flight
     # background Ollama call before submitting the chat request.  Background
     # workers hold at most one lock at a time, so there is no circular
     # dependency and deadlock is impossible.
-    async with _bg_vlm_lock, _bg_llm_lock:
-        try:
+    try:
+        async with _bg_vlm_lock, _bg_llm_lock:
             yield
-        finally:
-            _chat_active_count -= 1
-            if _chat_active_count == 0:
-                _chat_idle.set()
+    finally:
+        _chat_active_count -= 1
+        if _chat_active_count == 0:
+            _chat_idle.set()
 
 
 async def generate_embeddings(
@@ -201,26 +206,31 @@ async def generate_embeddings(
     texts: Sequence[str],
 ) -> list[list[float]]:
     """
-    Generate embeddings, waiting for the chat-priority gate first.
+    Generate embeddings, applying the chat-priority GPU gate for Ollama only.
 
-    Uses the same TOCTOU-safe loop as Sentinel triage/discovery: wait on
+    OllamaEmbeddings uses the same local GPUs as the chat model, so it must
+    wait using the same TOCTOU-safe loop as Sentinel triage/discovery: wait on
     _chat_idle, acquire _bg_llm_lock, re-check _chat_idle, then embed.
-    This prevents Ollama-backed embedding calls from competing with the chat
-    model on shared GPUs.
+
+    OpenAI and Google embeddings call cloud APIs and do not contend for local
+    GPUs, so they bypass the gate entirely.
     """
     texts_list = [t for t in texts if t]  # drop empties defensively
     if not texts_list:
         return []
-    while True:
-        await _chat_idle.wait()
-        async with _bg_llm_lock:
-            if not _chat_idle.is_set():
-                continue  # chat grabbed priority; retry
-            if isinstance(emb, GoogleGenerativeAIEmbeddings):
-                return await emb.aembed_documents(
-                    texts_list, output_dimensionality=EMBEDDING_MODEL_DIMS
-                )
-            return await emb.aembed_documents(texts_list)
+    if isinstance(emb, OllamaEmbeddings):
+        while True:
+            await _chat_idle.wait()
+            async with _bg_llm_lock:
+                if not _chat_idle.is_set():
+                    continue  # chat grabbed priority; retry
+                return await emb.aembed_documents(texts_list)
+    # Non-Ollama providers: no local GPU contention — call directly.
+    if isinstance(emb, GoogleGenerativeAIEmbeddings):
+        return await emb.aembed_documents(
+            texts_list, output_dimensionality=EMBEDDING_MODEL_DIMS
+        )
+    return await emb.aembed_documents(texts_list)
 
 
 def discover_mobile_notify_service(hass: HomeAssistant) -> str | None:

@@ -8,8 +8,10 @@ Covers:
 - Concurrent chat contexts: _chat_idle only re-sets when the last chat exits
 - Background workers cannot acquire _bg_vlm_lock or _bg_llm_lock while
   chat_priority_context holds them
-- generate_embeddings waits on _chat_idle AND holds _bg_llm_lock during the
-  embed call, so chat_priority_context blocks it just like Sentinel LLM calls
+- generate_embeddings (Ollama) waits on _chat_idle AND holds _bg_llm_lock
+  during the embed call, so chat_priority_context blocks it
+- generate_embeddings (non-Ollama) bypasses the gate entirely
+- chat_priority_context cleans up _chat_idle on cancellation before lock
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from langchain_ollama import OllamaEmbeddings
 
 import custom_components.home_generative_agent.core.utils as utils_mod
 
@@ -165,7 +168,7 @@ async def test_bg_locks_released_after_chat_context() -> None:
 
 @pytest.mark.asyncio
 async def test_generate_embeddings_waits_while_chat_active() -> None:
-    """generate_embeddings must not proceed until _chat_idle is set."""
+    """Ollama generate_embeddings must not proceed until _chat_idle is set."""
     _idle().clear()  # simulate active chat
 
     embed_started = asyncio.Event()
@@ -173,7 +176,7 @@ async def test_generate_embeddings_waits_while_chat_active() -> None:
 
     mock_emb = MagicMock()
     mock_emb.aembed_documents = AsyncMock(return_value=[[0.1, 0.2]])
-    mock_emb.__class__ = MagicMock  # type: ignore[assignment]
+    mock_emb.__class__ = OllamaEmbeddings  # type: ignore[assignment]
 
     async def _run_embed() -> None:
         embed_started.set()
@@ -192,10 +195,10 @@ async def test_generate_embeddings_waits_while_chat_active() -> None:
 
 @pytest.mark.asyncio
 async def test_generate_embeddings_proceeds_when_idle() -> None:
-    """generate_embeddings completes immediately when no chat is active."""
+    """Ollama generate_embeddings completes immediately when no chat is active."""
     mock_emb = MagicMock()
     mock_emb.aembed_documents = AsyncMock(return_value=[[0.1, 0.2]])
-    mock_emb.__class__ = MagicMock  # type: ignore[assignment]
+    mock_emb.__class__ = OllamaEmbeddings  # type: ignore[assignment]
 
     result = await utils_mod.generate_embeddings(mock_emb, ["hello"])
     assert result == [[0.1, 0.2]]
@@ -203,7 +206,7 @@ async def test_generate_embeddings_proceeds_when_idle() -> None:
 
 @pytest.mark.asyncio
 async def test_generate_embeddings_holds_bg_llm_lock_during_call() -> None:
-    """generate_embeddings must hold _bg_llm_lock while calling aembed_documents."""
+    """Ollama generate_embeddings must hold _bg_llm_lock while calling aembed_documents."""
     lock_held_during_call = False
 
     async def _check_lock(_texts: list[str], **_: object) -> list[list[float]]:
@@ -213,7 +216,7 @@ async def test_generate_embeddings_holds_bg_llm_lock_during_call() -> None:
 
     mock_emb = MagicMock()
     mock_emb.aembed_documents = _check_lock
-    mock_emb.__class__ = MagicMock  # type: ignore[assignment]
+    mock_emb.__class__ = OllamaEmbeddings  # type: ignore[assignment]
 
     await utils_mod.generate_embeddings(mock_emb, ["hello"])
     assert lock_held_during_call, "_bg_llm_lock must be held during aembed_documents"
@@ -221,7 +224,7 @@ async def test_generate_embeddings_holds_bg_llm_lock_during_call() -> None:
 
 @pytest.mark.asyncio
 async def test_chat_blocks_embeddings_via_bg_llm_lock() -> None:
-    """chat_priority_context must block generate_embeddings via _bg_llm_lock."""
+    """chat_priority_context must block Ollama generate_embeddings via _bg_llm_lock."""
     embed_acquired_lock: list[bool] = []
 
     async def _check_lock(_texts: list[str], **_: object) -> list[list[float]]:
@@ -230,7 +233,7 @@ async def test_chat_blocks_embeddings_via_bg_llm_lock() -> None:
 
     mock_emb = MagicMock()
     mock_emb.aembed_documents = _check_lock
-    mock_emb.__class__ = MagicMock  # type: ignore[assignment]
+    mock_emb.__class__ = OllamaEmbeddings  # type: ignore[assignment]
 
     async with utils_mod.chat_priority_context():
         embed_task = asyncio.create_task(
@@ -254,3 +257,64 @@ async def test_generate_embeddings_empty_texts_returns_empty() -> None:
     result = await utils_mod.generate_embeddings(mock_emb, [])
     mock_emb.aembed_documents.assert_not_called()
     assert result == []
+
+
+# ---------------------------------------------------------------------------
+# generate_embeddings: non-Ollama providers bypass the GPU gate
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_generate_embeddings_non_ollama_bypasses_gate() -> None:
+    """Non-Ollama providers must not wait on _chat_idle or acquire _bg_llm_lock."""
+    _idle().clear()  # simulate active chat
+
+    embed_result: list[object] = []
+
+    mock_emb = MagicMock()
+    mock_emb.aembed_documents = AsyncMock(return_value=[[0.5, 0.6]])
+    # Leave __class__ as MagicMock — not OllamaEmbeddings, so gate is bypassed.
+
+    async def _run_embed() -> None:
+        result = await utils_mod.generate_embeddings(mock_emb, ["hello"])
+        embed_result.append(result)
+
+    task = asyncio.create_task(_run_embed())
+    await asyncio.sleep(0.01)
+    # Should have completed immediately despite chat being "active".
+    assert embed_result, "non-Ollama embeddings must not block on _chat_idle"
+    assert not _llm_lock().locked(), (
+        "_bg_llm_lock must not be held after non-Ollama call"
+    )
+    await task
+
+
+# ---------------------------------------------------------------------------
+# chat_priority_context: cancellation safety
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_chat_priority_context_cleanup_on_cancellation_before_lock() -> None:
+    """_chat_idle and _chat_active_count must be reset if cancelled waiting for a lock."""
+    # Hold _bg_vlm_lock so chat_priority_context blocks waiting to acquire it.
+    async with _vlm_lock():
+        ctx_task = asyncio.create_task(_enter_chat_context())
+        # Give the task time to increment the count and block on the lock.
+        await asyncio.sleep(0.01)
+        assert not _idle().is_set(), "_chat_idle should be cleared"
+        assert utils_mod._chat_active_count == 1  # type: ignore[attr-defined]
+
+        ctx_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await ctx_task
+
+    # After cancellation _chat_idle must be restored and the count reset.
+    assert _idle().is_set(), "_chat_idle must be set after cancellation"
+    assert utils_mod._chat_active_count == 0  # type: ignore[attr-defined]
+
+
+async def _enter_chat_context() -> None:
+    """Enter chat_priority_context and hold until cancelled."""
+    async with utils_mod.chat_priority_context():
+        await asyncio.sleep(9999)

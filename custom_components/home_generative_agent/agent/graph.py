@@ -1124,19 +1124,22 @@ async def _invoke_model(
     model: Any, messages: list[AnyMessage], config: RunnableConfig
 ) -> Any:
     """Invoke a chat model, wrapping non-HA exceptions as HomeAssistantError."""
-    async with chat_priority_context():
-        try:
-            return await asyncio.wait_for(
-                model.ainvoke(messages, config), timeout=_LLM_INVOKE_TIMEOUT_S
-            )
-        except TimeoutError:
-            msg = f"Model invocation timed out after {_LLM_INVOKE_TIMEOUT_S}s."
-            raise HomeAssistantError(msg) from None
-        except HomeAssistantError:
-            raise
-        except Exception as err:
-            msg = f"Model invocation failed: {err}"
-            raise HomeAssistantError(msg) from err
+    # asyncio.timeout wraps the full block — including lock acquisition inside
+    # chat_priority_context — so the total wait (queue time + inference time)
+    # is bounded.  Previously wait_for started only after both locks were held,
+    # leaving lock-wait time unbounded if a background job was slow to finish.
+    try:
+        async with asyncio.timeout(_LLM_INVOKE_TIMEOUT_S):
+            async with chat_priority_context():
+                return await model.ainvoke(messages, config)
+    except TimeoutError:
+        msg = f"Model invocation timed out after {_LLM_INVOKE_TIMEOUT_S}s."
+        raise HomeAssistantError(msg) from None
+    except HomeAssistantError:
+        raise
+    except Exception as err:
+        msg = f"Model invocation failed: {err}"
+        raise HomeAssistantError(msg) from err
 
 
 async def _call_model(
