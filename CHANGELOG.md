@@ -2,6 +2,43 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.12.3] - 2026-04-26
+
+### Fixed
+
+- **Chat no longer competes with in-flight background AI jobs for the GPU** — a
+  new chat-priority gate (`chat_priority_context`) clears a shared `_chat_idle`
+  event and acquires two serialisation locks (`_bg_vlm_lock`, `_bg_llm_lock`)
+  before submitting the chat request to Ollama. Camera snapshot analysis (VLM)
+  and Sentinel triage/discovery (LLM) wait on `_chat_idle` and hold those same
+  locks during inference, so any in-flight background job completes before the
+  chat model starts. This eliminates the GPU compute contention that caused
+  3-minute delays and 180 s timeouts when a camera VLM was mid-inference.
+
+- **Chat LLM timeout raised from 90 s to 180 s** — the previous 90 s budget
+  did not account for the time the chat-priority gate may spend waiting for a
+  background job to finish. The higher limit covers gate-wait + prefill +
+  generation for typical conversation history lengths.
+
+- **Sentinel discovery capped at 45 s per LLM call** — discovery prompts can
+  be large enough to consume 180 s+ of GPU time. A hard `asyncio.wait_for`
+  timeout skips the cycle cleanly rather than monopolising the GPU.
+
+- **TOCTOU-safe background LLM loops** — triage, discovery, and the VLM
+  analyser all use a re-check loop (`wait → lock → re-verify _chat_idle →
+  invoke`) so the priority gate cannot be bypassed by a task that races past
+  the event wait but arrives at the lock after chat has already claimed it.
+
+- **Tool timeout sends a non-retryable error to the LLM** — `_run_langchain_tool`
+  now returns a `TOOL_CALL_TRANSIENT_ERROR_TEMPLATE` message on `TimeoutError`
+  instead of the generic retry-prompting error template. This stops the model
+  from re-calling a tool that timed out due to a temporary resource constraint.
+
+- **Tests added for the chat-priority gate** — 15 new tests cover
+  `chat_priority_context` entry/exit semantics, concurrent-chat reference
+  counting, lock exclusion, `generate_embeddings` gate behaviour, discovery LLM
+  timeout, and the transient tool-error helper.
+
 ## [3.12.2] - 2026-04-24
 
 ### Fixed
