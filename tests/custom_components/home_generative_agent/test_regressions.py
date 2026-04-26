@@ -242,3 +242,29 @@ async def test_invoke_model_returns_result_within_timeout(
 
     result = await agent_graph._invoke_model(mock_model, [], {})
     assert result is expected
+
+
+# ---------------------------------------------------------------------------
+# _make_transient_tool_error — non-retryable tool timeout message
+# ---------------------------------------------------------------------------
+
+
+def test_make_transient_tool_error_status_and_content() -> None:
+    """_make_transient_tool_error must produce a ToolMessage with status='error'."""
+    from langchain_core.messages import ToolMessage
+
+    msg = agent_graph._make_transient_tool_error("boom", "my_tool", "call-123")
+
+    assert isinstance(msg, ToolMessage)
+    assert msg.name == "my_tool"
+    assert msg.tool_call_id == "call-123"
+    assert msg.status == "error"
+    # The content must contain the error description.
+    assert "boom" in msg.content
+
+
+def test_make_transient_tool_error_content_instructs_no_retry() -> None:
+    """Transient error message must tell the LLM not to retry the tool."""
+    msg = agent_graph._make_transient_tool_error("timeout", "some_tool", "id-1")
+    # The template instructs the model not to retry.
+    assert "Do not retry" in msg.content or "transient" in msg.content.lower()
