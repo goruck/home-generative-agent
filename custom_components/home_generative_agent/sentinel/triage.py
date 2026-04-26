@@ -33,6 +33,11 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from custom_components.home_generative_agent.core.utils import (
+    _bg_llm_lock,
+    _chat_idle,
+)
+
 if TYPE_CHECKING:
     from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
     from custom_components.home_generative_agent.snapshot.schema import (
@@ -154,10 +159,17 @@ class SentinelTriageService:
                 SystemMessage(content=_SYSTEM_PROMPT),
                 HumanMessage(content=prompt),
             ]
-            result = await asyncio.wait_for(
-                self._model.ainvoke(messages),
-                timeout=self._timeout_seconds,
-            )
+            # TOCTOU-safe: loop until we hold _bg_llm_lock AND chat is idle.
+            while True:
+                await _chat_idle.wait()
+                async with _bg_llm_lock:
+                    if not _chat_idle.is_set():
+                        continue  # chat grabbed priority; retry
+                    result = await asyncio.wait_for(
+                        self._model.ainvoke(messages),
+                        timeout=self._timeout_seconds,
+                    )
+                    break
         except TimeoutError:
             elapsed_ms = int((time.monotonic() - start) * 1000)
             LOGGER.warning(

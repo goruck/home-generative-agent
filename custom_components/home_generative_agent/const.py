@@ -625,6 +625,13 @@ Error: {error}
 
 Call the tool again with your mistake corrected.
 """
+TOOL_CALL_TRANSIENT_ERROR_TEMPLATE = """
+Error: {error}
+
+This is a transient resource error, not a mistake in your arguments.
+Do not retry this tool. Inform the user that the operation could not
+be completed due to a temporary system constraint.
+"""
 CRITICAL_ACTION_PROMPT = """
 For critical actions (door/lock/garage/open), call the tool directly—do NOT ask
 for verbal confirmation first. The tool itself enforces security.

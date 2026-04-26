@@ -16,6 +16,10 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS,
 )
+from custom_components.home_generative_agent.core.utils import (
+    _bg_llm_lock,
+    _chat_idle,
+)
 from custom_components.home_generative_agent.explain.discovery_prompts import (
     SYSTEM_PROMPT,
     USER_PROMPT_TEMPLATE,
@@ -39,6 +43,10 @@ if TYPE_CHECKING:
     from .rule_registry import RuleRegistry
 
 LOGGER = logging.getLogger(__name__)
+
+# Hard cap on discovery LLM calls: prevents the chat model from being
+# monopolised when the snapshot is large (observed 180s+ without a cap).
+_DISCOVERY_LLM_TIMEOUT_S: float = 45.0
 
 # Rule IDs for static built-in rules (deterministic, always active).
 # Included in active_rule_ids so the LLM knows these topics are already covered
@@ -183,8 +191,26 @@ class SentinelDiscoveryEngine:
         )
         messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
 
+        # Discovery LLM calls can run for 60-180 s with a large snapshot.
+        # Use a hard cap so the GPU is not monopolised indefinitely, and a
+        # TOCTOU-safe loop so we don't race with chat_priority_context.
         try:
-            result = await self._model.ainvoke(messages)
+            while True:
+                await _chat_idle.wait()
+                async with _bg_llm_lock:
+                    if not _chat_idle.is_set():
+                        continue  # chat grabbed priority; retry
+                    result = await asyncio.wait_for(
+                        self._model.ainvoke(messages),
+                        timeout=_DISCOVERY_LLM_TIMEOUT_S,
+                    )
+                    break
+        except TimeoutError:
+            LOGGER.warning(
+                "Discovery LLM call timed out after %.0fs; skipping cycle.",
+                _DISCOVERY_LLM_TIMEOUT_S,
+            )
+            return
         except (ValueError, TypeError, RuntimeError) as err:
             LOGGER.warning("Discovery LLM call failed: %s", err)
             return

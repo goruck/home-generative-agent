@@ -45,6 +45,8 @@ from ..const import (  # noqa: TID252
     VIDEO_ANALYZER_TRIGGER_ON_MOTION,
 )
 from .utils import (
+    _bg_vlm_lock,
+    _chat_idle,
     discover_mobile_notify_service,
     dispatch_on_loop,
     extract_final,
@@ -84,8 +86,6 @@ _FRAME_DEADLINE_SEC: Final[int] = 600  # skip frames older than this
 _SUMMARY_TIMEOUT_SEC: Final[int] = 60  # was 35
 _FACE_TIMEOUT_SEC: Final[int] = 10  # was 10 (keep)
 _VISION_TIMEOUT_SEC: Final[int] = 90  # was 30
-_GLOBAL_VISION_CONCURRENCY: Final[int] = 3  # tune per hardware
-
 # --- Uniqueness gate tuning ---
 _UNIQUENESS_ENABLED: Final[bool] = False
 _UNIQUENESS_HAMMING_MAX: Final[int] = 4  # <= this => "too similar" (tune 4-10)
@@ -95,8 +95,6 @@ _UNIQUENESS_HEARTBEAT_SEC: Final[int] = 10  # always allow a frame at least this
 # --- Metrics reporting ---
 _METRICS_REPORT_INTERVAL_SEC: Final[int] = 3600  # once per hour
 _METRICS_LAT_HISTORY: Final[int] = 512  # keep up to 512 lat samples per camera
-
-_global_vision_sem = asyncio.Semaphore(_GLOBAL_VISION_CONCURRENCY)
 
 
 @dataclass
@@ -650,18 +648,31 @@ class VideoAnalyzer:
                 )
                 faces_in_frame = []
 
-            # Vision: global concurrency + short timeout
+            # Vision: global concurrency + chat-priority gate.
+            # Re-check _chat_idle inside the semaphore to close the TOCTOU race:
+            # a VLM job may pass the outer wait() before chat clears the event,
+            # then block on _bg_vlm_lock.  When the lock is released we
+            # re-verify; if chat is now active we release and loop back to wait.
+            # chat_priority_context also acquires _bg_vlm_lock so it will wait
+            # for any in-flight camera inference to finish before submitting the
+            # chat request, preventing GPU compute contention on shared devices.
             try:
-                async with (
-                    _global_vision_sem,
-                    asyncio.timeout(_VISION_TIMEOUT_SEC),
-                ):
-                    frame_description = await analyze_image(
-                        self.entry.runtime_data.vision_model,
-                        data,
-                        None,
-                        prev_text=prev_text,
-                    )
+                vlm_done = False
+                frame_description = ""
+                while not vlm_done:
+                    await _chat_idle.wait()
+                    async with _bg_vlm_lock:
+                        if not _chat_idle.is_set():
+                            # Chat became active while we waited for the lock.
+                            continue
+                        async with asyncio.timeout(_VISION_TIMEOUT_SEC):
+                            frame_description = await analyze_image(
+                                self.entry.runtime_data.vision_model,
+                                data,
+                                None,
+                                prev_text=prev_text,
+                            )
+                        vlm_done = True
             except TimeoutError as exc:
                 self._m_inc(camera_id, "timeouts")
                 self._log_snapshot_error(camera_id, path, exc)

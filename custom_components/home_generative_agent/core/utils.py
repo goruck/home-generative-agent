@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import hmac
 import logging
@@ -31,7 +32,7 @@ from ..const import (  # noqa: TID252
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import AsyncIterator, Mapping, Sequence
 
     from homeassistant.core import HomeAssistant
     from langchain_ollama import OllamaEmbeddings
@@ -134,18 +135,76 @@ def configured_ollama_urls(
     return deduped
 
 
+# ---------------------------------------------------------------------------
+# Chat-priority gate
+# ---------------------------------------------------------------------------
+# The chat model may need exclusive access to all available GPUs.
+# Background tasks (camera snapshot analysis, embedding generation,
+# Sentinel triage/discovery) monopolise individual GPUs and can prevent
+# the chat model from loading or slow it significantly.
+#
+# Two primitives work together:
+#   _chat_idle     — Event; cleared while a chat invocation is active.
+#                    Background workers wait on this before touching the GPU.
+#   _bg_llm_lock   — Lock; held while a background LLM call (Sentinel) runs.
+#                    chat_priority_context acquires it so chat waits for any
+#                    in-flight Sentinel call before submitting to Ollama.
+#
+# Background callers use a TOCTOU-safe loop: wait on _chat_idle, acquire
+# _bg_llm_lock, re-check _chat_idle, then invoke the model — retrying if
+# chat grabbed priority between the wait and the lock acquisition.
+#
+# The gate lives in utils.py (not video_analyzer.py) because
+# generate_embeddings is the single chokepoint for all embed traffic —
+# gating it here covers Sentinel, the vector store, and any other caller.
+# video_analyzer.py imports the same primitives for VLM gating.
+# ---------------------------------------------------------------------------
+
+_chat_idle = asyncio.Event()
+_chat_idle.set()  # "no chat active" by default
+_chat_active_count: int = 0
+
+# Serialises background LLM (Sentinel triage/discovery) calls and lets
+# chat_priority_context wait for any in-flight background call to finish.
+_bg_llm_lock = asyncio.Lock()
+
+# Serialises background camera snapshot analysis calls so that
+# chat_priority_context can wait for any in-flight camera model inference
+# before submitting the chat request to Ollama.  The background video analyser
+# holds this lock for the duration of each Ollama /api/chat request.  Running
+# the camera model concurrently with the chat model on a shared GPU causes
+# compute contention that can dramatically slow or time out the chat response.
+_bg_vlm_lock = asyncio.Lock()
+
+
+@contextlib.asynccontextmanager
+async def chat_priority_context() -> AsyncIterator[None]:
+    """Gate background VLM/embed/LLM jobs while a chat LLM invocation is active."""
+    global _chat_active_count  # noqa: PLW0603
+    _chat_active_count += 1
+    _chat_idle.clear()
+    # Acquire locks in fixed order (vlm → llm) to wait for any in-flight
+    # background Ollama call before submitting the chat request.  Background
+    # workers hold at most one lock at a time, so there is no circular
+    # dependency and deadlock is impossible.
+    async with _bg_vlm_lock, _bg_llm_lock:
+        try:
+            yield
+        finally:
+            _chat_active_count -= 1
+            if _chat_active_count == 0:
+                _chat_idle.set()
+
+
 async def generate_embeddings(
     emb: OpenAIEmbeddings | OllamaEmbeddings | GoogleGenerativeAIEmbeddings,
     texts: Sequence[str],
 ) -> list[list[float]]:
-    """
-    Generate embeddings from a list of text.
-
-    If Gemini: force output_dimensionality to match index size.
-    """
+    """Generate embeddings, waiting for the chat-priority gate first."""
     texts_list = [t for t in texts if t]  # drop empties defensively
     if not texts_list:
         return []
+    await _chat_idle.wait()
     if isinstance(emb, GoogleGenerativeAIEmbeddings):
         return await emb.aembed_documents(
             texts_list, output_dimensionality=EMBEDDING_MODEL_DIMS

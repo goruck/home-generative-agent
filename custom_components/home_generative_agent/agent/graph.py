@@ -62,9 +62,10 @@ from custom_components.home_generative_agent.const import (
     SUMMARIZATION_PROMPT_TEMPLATE,
     SUMMARIZATION_SYSTEM_PROMPT,
     TOOL_CALL_ERROR_TEMPLATE,
+    TOOL_CALL_TRANSIENT_ERROR_TEMPLATE,
 )
 
-from ..core.utils import extract_final  # noqa: TID252
+from ..core.utils import chat_priority_context, extract_final  # noqa: TID252
 from .camera_activity import get_recent_camera_activity
 from .helpers import (
     format_tool,
@@ -92,12 +93,12 @@ LOGGER = logging.getLogger(__name__)
 _LC_TOOL_TIMEOUT_S: float = 30.0
 
 # Maximum seconds to wait for the chat LLM to respond.
-# Under heavy VLM load the Ollama GPU is fully saturated; the chat model
-# queues behind concurrent vision requests and can block indefinitely inside
-# astream_events, stalling the streaming pipeline. This guard converts an
-# infinite hang into a bounded HomeAssistantError so the recovery path can
-# return a response to the user.
-_LLM_INVOKE_TIMEOUT_S: float = 90.0
+# The chat model may need exclusive GPU access and can be delayed while the
+# chat-priority gate waits for in-flight background jobs (camera analysis,
+# embedding, Sentinel LLM) to finish.  With a large prompt, prefill alone
+# can take tens of seconds.  Set high enough to cover gate wait + prefill +
+# generation for typical conversation history lengths.
+_LLM_INVOKE_TIMEOUT_S: float = 180.0
 
 _PIN_LOOKBACK = 20  # messages to scan for an unresolved requires_pin
 _ROUTING_REJECTION_MARKER = "is not available for this request"
@@ -147,6 +148,16 @@ def _make_tool_error(err: str, name: str, tid: str) -> ToolMessage:
     """Build a standardized error ToolMessage."""
     return ToolMessage(
         content=TOOL_CALL_ERROR_TEMPLATE.format(error=err),
+        name=name,
+        tool_call_id=tid,
+        status="error",
+    )
+
+
+def _make_transient_tool_error(err: str, name: str, tid: str) -> ToolMessage:
+    """Build a ToolMessage for transient/resource errors that must not be retried."""
+    return ToolMessage(
+        content=TOOL_CALL_TRANSIENT_ERROR_TEMPLATE.format(error=err),
         name=name,
         tool_call_id=tid,
         status="error",
@@ -288,7 +299,7 @@ async def _run_langchain_tool(
             status=status,
         )
     except TimeoutError:
-        return _make_tool_error(
+        return _make_transient_tool_error(
             f"Tool timed out after {_LC_TOOL_TIMEOUT_S}s.",
             tool_name,
             tool_call.get("id") or "",
@@ -1113,18 +1124,19 @@ async def _invoke_model(
     model: Any, messages: list[AnyMessage], config: RunnableConfig
 ) -> Any:
     """Invoke a chat model, wrapping non-HA exceptions as HomeAssistantError."""
-    try:
-        return await asyncio.wait_for(
-            model.ainvoke(messages, config), timeout=_LLM_INVOKE_TIMEOUT_S
-        )
-    except TimeoutError:
-        msg = f"Model invocation timed out after {_LLM_INVOKE_TIMEOUT_S}s."
-        raise HomeAssistantError(msg) from None
-    except HomeAssistantError:
-        raise
-    except Exception as err:
-        msg = f"Model invocation failed: {err}"
-        raise HomeAssistantError(msg) from err
+    async with chat_priority_context():
+        try:
+            return await asyncio.wait_for(
+                model.ainvoke(messages, config), timeout=_LLM_INVOKE_TIMEOUT_S
+            )
+        except TimeoutError:
+            msg = f"Model invocation timed out after {_LLM_INVOKE_TIMEOUT_S}s."
+            raise HomeAssistantError(msg) from None
+        except HomeAssistantError:
+            raise
+        except Exception as err:
+            msg = f"Model invocation failed: {err}"
+            raise HomeAssistantError(msg) from err
 
 
 async def _call_model(
