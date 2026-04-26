@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 import pytest
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.dispatcher import async_dispatcher_send
+from langchain_core.messages import ToolMessage
 
 import custom_components.home_generative_agent.agent.graph as agent_graph
 from custom_components.home_generative_agent.agent import tools as agent_tools
@@ -251,8 +252,6 @@ async def test_invoke_model_returns_result_within_timeout(
 
 def test_make_transient_tool_error_status_and_content() -> None:
     """_make_transient_tool_error must produce a ToolMessage with status='error'."""
-    from langchain_core.messages import ToolMessage
-
     msg = agent_graph._make_transient_tool_error("boom", "my_tool", "call-123")
 
     assert isinstance(msg, ToolMessage)

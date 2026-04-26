@@ -200,16 +200,27 @@ async def generate_embeddings(
     emb: OpenAIEmbeddings | OllamaEmbeddings | GoogleGenerativeAIEmbeddings,
     texts: Sequence[str],
 ) -> list[list[float]]:
-    """Generate embeddings, waiting for the chat-priority gate first."""
+    """
+    Generate embeddings, waiting for the chat-priority gate first.
+
+    Uses the same TOCTOU-safe loop as Sentinel triage/discovery: wait on
+    _chat_idle, acquire _bg_llm_lock, re-check _chat_idle, then embed.
+    This prevents Ollama-backed embedding calls from competing with the chat
+    model on shared GPUs.
+    """
     texts_list = [t for t in texts if t]  # drop empties defensively
     if not texts_list:
         return []
-    await _chat_idle.wait()
-    if isinstance(emb, GoogleGenerativeAIEmbeddings):
-        return await emb.aembed_documents(
-            texts_list, output_dimensionality=EMBEDDING_MODEL_DIMS
-        )
-    return await emb.aembed_documents(texts_list)
+    while True:
+        await _chat_idle.wait()
+        async with _bg_llm_lock:
+            if not _chat_idle.is_set():
+                continue  # chat grabbed priority; retry
+            if isinstance(emb, GoogleGenerativeAIEmbeddings):
+                return await emb.aembed_documents(
+                    texts_list, output_dimensionality=EMBEDDING_MODEL_DIMS
+                )
+            return await emb.aembed_documents(texts_list)
 
 
 def discover_mobile_notify_service(hass: HomeAssistant) -> str | None:
