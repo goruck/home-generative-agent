@@ -180,6 +180,7 @@ class SentinelEngine:
         entry_id: str | None = None,
         triage_service: SentinelTriageService | None = None,
         baseline_updater: SentinelBaselineUpdater | None = None,
+        run_stats: dict[str, Any] | None = None,
     ) -> None:
         """Initialize sentinel dependencies and runtime state."""
         self._hass = hass
@@ -226,7 +227,7 @@ class SentinelEngine:
         # restart waits the full sustained_minutes before notifying (acceptable).
         self._cyclical_deviation_above_since: dict[str, datetime] = {}
         # Run telemetry exposed to SentinelHealthSensor.
-        self.run_stats: dict[str, Any] = {}
+        self.run_stats: dict[str, Any] = run_stats if run_stats is not None else {}
 
     @property
     def learned_suppressions_count(self) -> int:

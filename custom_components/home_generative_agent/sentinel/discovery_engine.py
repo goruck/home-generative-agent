@@ -17,8 +17,9 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS,
 )
 from custom_components.home_generative_agent.core.utils import (
-    _bg_llm_lock,
-    _chat_idle,
+    SENTINEL_ADMISSION_TIMEOUT_S,
+    SentinelLLMDeferredError,
+    run_sentinel_llm_call,
 )
 from custom_components.home_generative_agent.explain.discovery_prompts import (
     SYSTEM_PROMPT,
@@ -79,6 +80,8 @@ class SentinelDiscoveryEngine:
         rule_registry: RuleRegistry | None = None,
         proposal_store: ProposalStore | None = None,
         baseline_updater: SentinelBaselineUpdater | None = None,
+        deployment: str = "edge",
+        health_stats: dict[str, Any] | None = None,
     ) -> None:
         """Initialize advisory discovery dependencies and runtime state."""
         self._hass = hass
@@ -88,6 +91,8 @@ class SentinelDiscoveryEngine:
         self._rule_registry = rule_registry
         self._proposal_store = proposal_store
         self._baseline_updater = baseline_updater
+        self._deployment = deployment
+        self._health_stats = health_stats
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
         self._run_lock = asyncio.Lock()
@@ -191,20 +196,18 @@ class SentinelDiscoveryEngine:
         )
         messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
 
-        # Discovery LLM calls can run for 60-180 s with a large snapshot.
-        # Use a hard cap so the GPU is not monopolised indefinitely, and a
-        # TOCTOU-safe loop so we don't race with chat_priority_context.
         try:
-            while True:
-                await _chat_idle.wait()
-                async with _bg_llm_lock:
-                    if not _chat_idle.is_set():
-                        continue  # chat grabbed priority; retry
-                    result = await asyncio.wait_for(
-                        self._model.ainvoke(messages),
-                        timeout=_DISCOVERY_LLM_TIMEOUT_S,
-                    )
-                    break
+            result = await run_sentinel_llm_call(
+                lambda: self._model.ainvoke(messages),
+                deployment=self._deployment,
+                category="discovery",
+                admission_timeout_s=SENTINEL_ADMISSION_TIMEOUT_S,
+                call_timeout_s=_DISCOVERY_LLM_TIMEOUT_S,
+                health_stats=self._health_stats,
+            )
+        except SentinelLLMDeferredError as err:
+            LOGGER.debug("Discovery LLM call deferred: %s", err)
+            return
         except TimeoutError:
             LOGGER.warning(
                 "Discovery LLM call timed out after %.0fs; skipping cycle.",

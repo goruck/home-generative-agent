@@ -259,6 +259,10 @@ class SentinelHealthSensor(SensorEntity):
             "last_run_end",
             "run_duration_ms",
             "active_rule_count",
+            "sentinel_admission_degraded",
+            "sentinel_admission_degraded_category",
+            "sentinel_admission_consecutive_deferrals",
+            "sentinel_admission_starved_for_s",
         ):
             self._attrs[key] = run_stats.get(key)
 
@@ -301,7 +305,9 @@ class SentinelHealthSensor(SensorEntity):
             else None
         )
 
-        self._attr_native_value = "ok"
+        self._attr_native_value = (
+            "degraded" if run_stats.get("sentinel_admission_degraded") else "ok"
+        )
         self.async_write_ha_state()
 
     async def _refresh_baseline_attrs(self) -> None:

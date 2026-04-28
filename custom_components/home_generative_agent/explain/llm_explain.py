@@ -5,11 +5,16 @@ from __future__ import annotations
 import logging
 import re
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from custom_components.home_generative_agent.core.utils import extract_final
+from custom_components.home_generative_agent.core.utils import (
+    SENTINEL_ADMISSION_TIMEOUT_S,
+    SentinelLLMDeferredError,
+    extract_final,
+    run_sentinel_llm_call,
+)
 
 from .prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
 
@@ -18,16 +23,25 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 MAX_EXPLANATION_CHARS = 220
+_EXPLAIN_LLM_TIMEOUT_S: Final[float] = 20.0
 
 
 class LLMExplainer:
     """Generate non-authoritative explanation text for findings."""
 
-    def __init__(self, model: Any) -> None:
+    def __init__(
+        self,
+        model: Any,
+        *,
+        deployment: str = "edge",
+        health_stats: dict[str, Any] | None = None,
+    ) -> None:
         """Initialize the explainer with an optional LLM model."""
         self._model = model
+        self._deployment = deployment
+        self._health_stats = health_stats
 
-    async def async_explain(self, finding: AnomalyFinding) -> str | None:
+    async def async_explain(self, finding: AnomalyFinding) -> str | None:  # noqa: PLR0911
         """Return explanation text or None on failure."""
         if self._model is None:
             return None
@@ -41,8 +55,18 @@ class LLMExplainer:
         messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
 
         try:
-            result = await self._model.ainvoke(messages)
-        except (ValueError, TypeError, RuntimeError) as err:
+            result = await run_sentinel_llm_call(
+                lambda: self._model.ainvoke(messages),
+                deployment=self._deployment,
+                category="explain",
+                admission_timeout_s=SENTINEL_ADMISSION_TIMEOUT_S,
+                call_timeout_s=_EXPLAIN_LLM_TIMEOUT_S,
+                health_stats=self._health_stats,
+            )
+        except SentinelLLMDeferredError as err:
+            LOGGER.debug("LLM explanation deferred: %s", err)
+            return None
+        except (TimeoutError, ValueError, TypeError, RuntimeError) as err:
             LOGGER.warning("LLM explanation failed: %s", err)
             return None
 

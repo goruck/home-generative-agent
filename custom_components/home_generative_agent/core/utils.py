@@ -9,6 +9,7 @@ import hmac
 import logging
 import re
 import secrets
+import time
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urljoin, urlparse
@@ -19,7 +20,6 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.httpx_client import get_async_client
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
-from langchain_ollama import OllamaEmbeddings
 
 from ..const import (  # noqa: TID252
     CONF_OLLAMA_URL,
@@ -33,10 +33,19 @@ from ..const import (  # noqa: TID252
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping, Sequence
+    from collections.abc import (
+        AsyncIterator,
+        Awaitable,
+        Callable,
+        Mapping,
+        MutableMapping,
+        Sequence,
+    )
 
     from homeassistant.core import HomeAssistant
+    from langchain_ollama import OllamaEmbeddings
     from langchain_openai import OpenAIEmbeddings
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -136,69 +145,208 @@ def configured_ollama_urls(
 
 
 # ---------------------------------------------------------------------------
-# Chat-priority gate
+# Deployment-aware admission control
 # ---------------------------------------------------------------------------
-# The chat model may need exclusive access to all available GPUs.
-# Background tasks (camera snapshot analysis, embedding generation,
-# Sentinel triage/discovery) monopolise individual GPUs and can prevent
-# the chat model from loading or slow it significantly.
-#
-# Two primitives work together:
-#   _chat_idle     — Event; cleared while a chat invocation is active.
-#                    Background workers wait on this before touching the GPU.
-#   _bg_llm_lock   — Lock; held while a background LLM call (Sentinel) runs.
-#                    chat_priority_context acquires it so chat waits for any
-#                    in-flight Sentinel call before submitting to Ollama.
-#
-# Background callers use a TOCTOU-safe loop: wait on _chat_idle, acquire
-# _bg_llm_lock, re-check _chat_idle, then invoke the model — retrying if
-# chat grabbed priority between the wait and the lock acquisition.
-#
-# The gate lives in utils.py (not video_analyzer.py) because
-# generate_embeddings is the single chokepoint for all embed traffic —
-# gating it here covers Sentinel, the vector store, and any other caller.
-# video_analyzer.py imports the same primitives for VLM gating.
+# Policy:
+#   Chat (edge)      — marks the full turn active via local_chat_session so
+#                      Sentinel can observe chat activity and defer.
+#   Sentinel (edge)  — calls sentinel_admission before every LLM invocation;
+#                      defers (skips) if chat is active.
+#   Video / embeds   — no chat gate; video tuning constants are the surface
+#                      for managing GPU contention on weak hardware.
+#   Cloud providers  — bypass all local gates.
 # ---------------------------------------------------------------------------
 
 _chat_idle = asyncio.Event()
 _chat_idle.set()  # "no chat active" by default
 _chat_active_count: int = 0
 
-# Serialises background LLM (Sentinel triage/discovery) calls and lets
-# chat_priority_context wait for any in-flight background call to finish.
-_bg_llm_lock = asyncio.Lock()
+_sentinel_last_run: float = 0.0  # monotonic timestamp of last admitted run
+_sentinel_first_defer: float = 0.0
+_sentinel_defer_count: int = 0
+_SENTINEL_STARVATION_WARN_S: float = 300.0
+_SENTINEL_CANCEL_WAIT_S: float = 2.0
+_sentinel_llm_tasks: set[asyncio.Future[Any]] = set()
 
-# Serialises background camera snapshot analysis calls so that
-# chat_priority_context can wait for any in-flight camera model inference
-# before submitting the chat request to Ollama.  The background video analyser
-# holds this lock for the duration of each Ollama /api/chat request.  Running
-# the camera model concurrently with the chat model on a shared GPU causes
-# compute contention that can dramatically slow or time out the chat response.
-_bg_vlm_lock = asyncio.Lock()
+# Public constant: maximum seconds a Sentinel LLM call waits for chat to become
+# idle before deferring.  All callers (triage, discovery, explain) use the same
+# value so policy changes need only one edit.
+SENTINEL_ADMISSION_TIMEOUT_S: float = 2.0
+
+
+class SentinelLLMDeferredError(Exception):
+    """Raised when a background Sentinel LLM call is deferred or interrupted."""
+
+    def __init__(self, category: str, reason: str) -> None:
+        """Initialize with the Sentinel LLM category and deferral reason."""
+        super().__init__(f"Sentinel {category} {reason}.")
+
+
+def is_edge_deployment(deployment: str | None) -> bool:
+    """Return True for edge (local) deployments subject to resource gating."""
+    return deployment == "edge"
 
 
 @contextlib.asynccontextmanager
-async def chat_priority_context() -> AsyncIterator[None]:
-    """Gate background VLM/embed/LLM jobs while a chat LLM invocation is active."""
+async def local_chat_session(
+    deployment: str, *, category: str = "chat"
+) -> AsyncIterator[None]:
+    """
+    Mark a local chat turn active for its full duration.
+
+    Clears _chat_idle for the entire turn so Sentinel LLM invocations can
+    check for active chat and defer.  No-op for cloud deployments.
+    The try/finally guarantees the counter resets on cancellation or exception.
+    """
+    if not is_edge_deployment(deployment):
+        yield
+        return
     global _chat_active_count  # noqa: PLW0603
     _chat_active_count += 1
     _chat_idle.clear()
-    # The outer try/finally guarantees cleanup even if this task is cancelled
-    # while waiting to acquire a lock (e.g., HA config-entry reload mid-chat).
-    # Without it, _chat_idle would stay cleared permanently and all background
-    # workers would hang until the next HA restart.
-    #
-    # Locks are acquired in fixed order (vlm → llm) to wait for any in-flight
-    # background Ollama call before submitting the chat request.  Background
-    # workers hold at most one lock at a time, so there is no circular
-    # dependency and deadlock is impossible.
     try:
-        async with _bg_vlm_lock, _bg_llm_lock:
-            yield
+        await _cancel_active_sentinel_llm_tasks(category)
+        LOGGER.debug(
+            "Chat session active (deployment=%s, category=%s).", deployment, category
+        )
+        yield
     finally:
         _chat_active_count -= 1
         if _chat_active_count == 0:
             _chat_idle.set()
+        LOGGER.debug(
+            "Chat session ended (deployment=%s, category=%s).", deployment, category
+        )
+
+
+async def _cancel_active_sentinel_llm_tasks(category: str) -> None:
+    """Cancel in-flight Sentinel LLM HTTP calls before foreground chat proceeds."""
+    tasks = [task for task in _sentinel_llm_tasks if not task.done()]
+    if not tasks:
+        return
+    LOGGER.warning(
+        "Cancelling %d active Sentinel LLM call(s) for foreground %s.",
+        len(tasks),
+        category,
+    )
+    for task in tasks:
+        task.cancel()
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*tasks, return_exceptions=True),
+            timeout=_SENTINEL_CANCEL_WAIT_S,
+        )
+    except TimeoutError:
+        LOGGER.warning(
+            "Sentinel LLM task(s) did not cancel within %.1fs; "
+            "GPU contention may persist briefly.",
+            _SENTINEL_CANCEL_WAIT_S,
+        )
+
+
+async def sentinel_admission(
+    deployment: str,
+    *,
+    category: str,
+    timeout_s: float,
+    health_stats: MutableMapping[str, Any] | None = None,
+) -> bool:
+    """
+    Return True if a Sentinel LLM call may proceed.
+
+    Edge: waits up to timeout_s for chat to become idle; returns False if still
+    active so the caller can defer the pass.
+    Cloud: always admitted.
+    Tracks last-admitted timestamp and consecutive deferral count for health
+    monitoring; logs a WARNING when Sentinel has been starved beyond the
+    starvation threshold.
+    """
+    global _sentinel_first_defer, _sentinel_last_run, _sentinel_defer_count  # noqa: PLW0603
+    if not is_edge_deployment(deployment):
+        _sentinel_last_run = time.monotonic()
+        _sentinel_first_defer = 0.0
+        _sentinel_defer_count = 0
+        if health_stats is not None:
+            health_stats["sentinel_admission_degraded"] = False
+            health_stats["sentinel_admission_degraded_category"] = None
+            health_stats["sentinel_admission_consecutive_deferrals"] = 0
+            health_stats["sentinel_admission_starved_for_s"] = 0
+        return True
+    try:
+        async with asyncio.timeout(timeout_s):
+            await _chat_idle.wait()
+    except TimeoutError:
+        _sentinel_defer_count += 1
+        now = time.monotonic()
+        if _sentinel_first_defer <= 0:
+            _sentinel_first_defer = now
+        last_activity = _sentinel_last_run or _sentinel_first_defer
+        starved_for_s = now - last_activity
+        degraded = starved_for_s > _SENTINEL_STARVATION_WARN_S
+        if health_stats is not None:
+            health_stats["sentinel_admission_degraded"] = degraded
+            health_stats["sentinel_admission_degraded_category"] = (
+                category if degraded else None
+            )
+            health_stats["sentinel_admission_consecutive_deferrals"] = (
+                _sentinel_defer_count
+            )
+            health_stats["sentinel_admission_starved_for_s"] = int(starved_for_s)
+        if degraded:
+            LOGGER.warning(
+                "Sentinel %s deferred %d consecutive time(s); "
+                "last successful run or first deferral %.0fs ago. "
+                "Consider reducing chat load or tuning sentinel intervals.",
+                category,
+                _sentinel_defer_count,
+                starved_for_s,
+            )
+        else:
+            LOGGER.debug(
+                "Sentinel %s deferred (chat active); consecutive deferrals=%d.",
+                category,
+                _sentinel_defer_count,
+            )
+        return False
+    _sentinel_last_run = time.monotonic()
+    _sentinel_first_defer = 0.0
+    _sentinel_defer_count = 0
+    if health_stats is not None:
+        health_stats["sentinel_admission_degraded"] = False
+        health_stats["sentinel_admission_degraded_category"] = None
+        health_stats["sentinel_admission_consecutive_deferrals"] = 0
+        health_stats["sentinel_admission_starved_for_s"] = 0
+    return True
+
+
+async def run_sentinel_llm_call(  # noqa: PLR0913
+    call_factory: Callable[[], Awaitable[Any]],
+    *,
+    deployment: str,
+    category: str,
+    admission_timeout_s: float,
+    call_timeout_s: float,
+    health_stats: MutableMapping[str, Any] | None = None,
+) -> Any:
+    """Run a Sentinel LLM call with chat-priority admission and interruption."""
+    if not await sentinel_admission(
+        deployment,
+        category=category,
+        timeout_s=admission_timeout_s,
+        health_stats=health_stats,
+    ):
+        raise SentinelLLMDeferredError(category, "deferred; chat is active")
+
+    task = asyncio.create_task(call_factory())
+    _sentinel_llm_tasks.add(task)
+    try:
+        return await asyncio.wait_for(task, timeout=call_timeout_s)
+    except asyncio.CancelledError as err:
+        raise SentinelLLMDeferredError(
+            category, "interrupted by foreground chat"
+        ) from err
+    finally:
+        _sentinel_llm_tasks.discard(task)
 
 
 async def generate_embeddings(
@@ -206,26 +354,16 @@ async def generate_embeddings(
     texts: Sequence[str],
 ) -> list[list[float]]:
     """
-    Generate embeddings, applying the chat-priority GPU gate for Ollama only.
+    Generate embeddings for the given texts.
 
-    OllamaEmbeddings uses the same local GPUs as the chat model, so it must
-    wait using the same TOCTOU-safe loop as Sentinel triage/discovery: wait on
-    _chat_idle, acquire _bg_llm_lock, re-check _chat_idle, then embed.
-
-    OpenAI and Google embeddings call cloud APIs and do not contend for local
-    GPUs, so they bypass the gate entirely.
+    Embedding models are expected to be small enough to run concurrently with
+    LLM work, so no chat-priority gate is applied regardless of provider.
+    For Gemini embeddings, output_dimensionality is forced to EMBEDDING_MODEL_DIMS
+    to match the pgvector index.
     """
-    texts_list = [t for t in texts if t]  # drop empties defensively
+    texts_list = [t for t in texts if t]
     if not texts_list:
         return []
-    if isinstance(emb, OllamaEmbeddings):
-        while True:
-            await _chat_idle.wait()
-            async with _bg_llm_lock:
-                if not _chat_idle.is_set():
-                    continue  # chat grabbed priority; retry
-                return await emb.aembed_documents(texts_list)
-    # Non-Ollama providers: no local GPU contention — call directly.
     if isinstance(emb, GoogleGenerativeAIEmbeddings):
         return await emb.aembed_documents(
             texts_list, output_dimensionality=EMBEDDING_MODEL_DIMS

@@ -76,7 +76,7 @@ from .core.conversation_helpers import (
     _is_dashboard_request,
     _maybe_fix_dashboard_entities,
 )
-from .core.utils import gather_store_puts_in_chunks
+from .core.utils import gather_store_puts_in_chunks, local_chat_session
 
 if TYPE_CHECKING:
     from collections.abc import (
@@ -971,8 +971,6 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         chat_log: conversation.ChatLog,
     ) -> conversation.ConversationResult:
         """Process the user input."""
-        hass = self.hass
-        options = self.entry.runtime_data.options
         runtime_data = self.entry.runtime_data
         intent_response = intent.IntentResponse(language=user_input.language)
 
@@ -991,6 +989,31 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             if chat_log.conversation_id is None
             else chat_log.conversation_id
         )
+
+        deployment = runtime_data.model_deployments.get("chat", "edge")
+        async with local_chat_session(deployment, category="chat"):
+            return await self._async_handle_message_active(
+                user_input,
+                chat_log,
+                intent_response,
+                llm_context,
+                message_history,
+                conversation_id,
+            )
+
+    async def _async_handle_message_active(  # noqa: PLR0913
+        self,
+        user_input: conversation.ConversationInput,
+        chat_log: conversation.ChatLog,
+        intent_response: intent.IntentResponse,
+        llm_context: llm.LLMContext,
+        message_history: list[Any],
+        conversation_id: str,
+    ) -> conversation.ConversationResult:
+        """Process user input while local chat activity is already marked."""
+        hass = self.hass
+        runtime_data = self.entry.runtime_data
+        options = runtime_data.options
 
         # Multi-API initialization
         try:
