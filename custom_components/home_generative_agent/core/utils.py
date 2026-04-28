@@ -35,8 +35,8 @@ from ..const import (  # noqa: TID252
 if TYPE_CHECKING:
     from collections.abc import (
         AsyncIterator,
-        Awaitable,
         Callable,
+        Coroutine,
         Mapping,
         MutableMapping,
         Sequence,
@@ -320,7 +320,7 @@ async def sentinel_admission(
 
 
 async def run_sentinel_llm_call(  # noqa: PLR0913
-    call_factory: Callable[[], Awaitable[Any]],
+    call_factory: Callable[[], Coroutine[Any, Any, Any]],
     *,
     deployment: str,
     category: str,
