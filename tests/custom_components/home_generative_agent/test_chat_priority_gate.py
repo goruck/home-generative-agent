@@ -1,22 +1,21 @@
 # ruff: noqa: S101
 """
-Tests for the chat-priority GPU gate primitives in core/utils.py.
+Tests for deployment-aware admission control in core/utils.py.
 
 Covers:
-- _chat_idle initial state (set = idle by default)
-- chat_priority_context clears _chat_idle on entry, restores it on exit
-- Concurrent chat contexts: _chat_idle only re-sets when the last chat exits
-- Background workers cannot acquire _bg_vlm_lock or _bg_llm_lock while
-  chat_priority_context holds them
-- generate_embeddings (Ollama) waits on _chat_idle AND holds _bg_llm_lock
-  during the embed call, so chat_priority_context blocks it
-- generate_embeddings (non-Ollama) bypasses the gate entirely
-- chat_priority_context cleans up _chat_idle on cancellation before lock
+- is_edge_deployment: edge/cloud/None classification
+- local_chat_session: edge clears _chat_idle, cloud is a no-op,
+  reference counting, exception/cancellation safety
+- sentinel_admission: cloud always admitted, edge defers when chat active,
+  edge admitted when idle, starvation tracking and WARNING threshold
+- generate_embeddings: runs freely during active chat (no gate)
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -25,14 +24,27 @@ from langchain_ollama import OllamaEmbeddings
 import custom_components.home_generative_agent.core.utils as utils_mod
 
 # ---------------------------------------------------------------------------
-# Fixture: create fresh asyncio primitives per test.
-#
-# Module-level asyncio.Event / asyncio.Lock objects bind to the first event
-# loop that touches them.  pytest-asyncio gives each async test its own loop,
-# so re-using the module globals across tests causes
-# "bound to a different event loop" errors.  We replace the module attributes
-# with brand-new primitives created inside the test's own loop, then restore
-# them afterwards via monkeypatch.
+# Override pytest-homeassistant-custom-component autouse fixtures.
+# These tests use pytest-asyncio's function-scoped asyncio.Runner (no `hass`).
+# Shadowing the plugin fixtures avoids "Event loop is closed" errors in teardown.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def enable_event_loop_debug() -> None:
+    """No-op override: pure-asyncio tests don't need HA's debug-mode hook."""
+
+
+@pytest.fixture(autouse=True)
+def verify_cleanup() -> None:
+    """No-op override: all tasks are explicitly awaited; no HA resources to clean up."""
+
+
+# ---------------------------------------------------------------------------
+# Fixture: fresh gate primitives per test.
+# Module-level asyncio.Event objects bind to the first event loop that touches
+# them.  pytest-asyncio gives each async test its own loop, so we replace the
+# module attributes with brand-new objects via monkeypatch.
 # ---------------------------------------------------------------------------
 
 
@@ -42,159 +54,303 @@ async def _fresh_gate_primitives(
 ) -> None:
     """Replace module-level gate primitives with fresh instances for each test."""
     new_idle = asyncio.Event()
-    new_idle.set()  # "no chat active" by default
-    new_llm_lock = asyncio.Lock()
-    new_vlm_lock = asyncio.Lock()
+    new_idle.set()
 
     monkeypatch.setattr(utils_mod, "_chat_idle", new_idle)
-    monkeypatch.setattr(utils_mod, "_bg_llm_lock", new_llm_lock)
-    monkeypatch.setattr(utils_mod, "_bg_vlm_lock", new_vlm_lock)
     monkeypatch.setattr(utils_mod, "_chat_active_count", 0)
-
-
-# ---------------------------------------------------------------------------
-# Helpers: read current primitives through the module to pick up monkeypatched
-# values (direct imports would cache the original objects).
-# ---------------------------------------------------------------------------
+    monkeypatch.setattr(utils_mod, "_sentinel_last_run", 0.0)
+    monkeypatch.setattr(utils_mod, "_sentinel_first_defer", 0.0)
+    monkeypatch.setattr(utils_mod, "_sentinel_defer_count", 0)
+    monkeypatch.setattr(utils_mod, "_sentinel_llm_tasks", set())
 
 
 def _idle() -> asyncio.Event:
     return utils_mod._chat_idle  # type: ignore[attr-defined]
 
 
-def _llm_lock() -> asyncio.Lock:
-    return utils_mod._bg_llm_lock  # type: ignore[attr-defined]
+# ---------------------------------------------------------------------------
+# is_edge_deployment
+# ---------------------------------------------------------------------------
 
 
-def _vlm_lock() -> asyncio.Lock:
-    return utils_mod._bg_vlm_lock  # type: ignore[attr-defined]
+def test_is_edge_deployment_edge() -> None:
+    assert utils_mod.is_edge_deployment("edge") is True
+
+
+def test_is_edge_deployment_cloud() -> None:
+    assert utils_mod.is_edge_deployment("cloud") is False
+
+
+def test_is_edge_deployment_none() -> None:
+    assert utils_mod.is_edge_deployment(None) is False
+
+
+def test_is_edge_deployment_unknown_string() -> None:
+    assert utils_mod.is_edge_deployment("other") is False
 
 
 # ---------------------------------------------------------------------------
-# _chat_idle initial state
+# local_chat_session: edge deployment
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_chat_idle_is_set_initially() -> None:
-    """_chat_idle must be set (idle) after fixture reset."""
+async def test_local_chat_session_edge_clears_idle() -> None:
+    """Edge chat session must clear _chat_idle on entry."""
     assert _idle().is_set()
-
-
-# ---------------------------------------------------------------------------
-# chat_priority_context: entry / exit semantics
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_chat_priority_context_clears_idle_on_entry() -> None:
-    """_chat_idle must be cleared while inside chat_priority_context."""
-    assert _idle().is_set()
-    async with utils_mod.chat_priority_context():
+    async with utils_mod.local_chat_session("edge"):
         assert not _idle().is_set()
-
-
-@pytest.mark.asyncio
-async def test_chat_priority_context_restores_idle_on_exit() -> None:
-    """_chat_idle must be set again after chat_priority_context exits."""
-    async with utils_mod.chat_priority_context():
-        pass
     assert _idle().is_set()
 
 
 @pytest.mark.asyncio
-async def test_chat_priority_context_restores_idle_on_exception() -> None:
+async def test_local_chat_session_edge_restores_on_exception() -> None:
     """_chat_idle must be restored even when the body raises."""
     err_msg = "boom"
-    with pytest.raises(RuntimeError):
-        async with utils_mod.chat_priority_context():
+    with pytest.raises(RuntimeError, match=err_msg):
+        async with utils_mod.local_chat_session("edge"):
             raise RuntimeError(err_msg)
     assert _idle().is_set()
-
-
-# ---------------------------------------------------------------------------
-# chat_priority_context: concurrent-chat reference counting
-# ---------------------------------------------------------------------------
+    assert utils_mod._chat_active_count == 0  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
-async def test_concurrent_chat_contexts_keep_idle_cleared() -> None:
-    """Two overlapping chat_priority_context calls: idle stays cleared until both exit."""
+async def test_local_chat_session_edge_restores_on_cancellation() -> None:
+    """_chat_idle and counter must reset when the session task is cancelled."""
+
+    async def _run() -> None:
+        async with utils_mod.local_chat_session("edge"):
+            await asyncio.sleep(9999)
+
+    task = asyncio.create_task(_run())
+    await asyncio.sleep(0)
+    assert not _idle().is_set()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert _idle().is_set()
+    assert utils_mod._chat_active_count == 0  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_edge_sessions_keep_idle_cleared() -> None:
+    """Ref count: _chat_idle stays cleared until the last session exits."""
     results: list[bool] = []
 
-    async def _enter_and_sample() -> None:
-        async with utils_mod.chat_priority_context():
+    async def _session() -> None:
+        async with utils_mod.local_chat_session("edge"):
             results.append(_idle().is_set())
             await asyncio.sleep(0)
             results.append(_idle().is_set())
 
-    await asyncio.gather(_enter_and_sample(), _enter_and_sample())
+    await asyncio.gather(_session(), _session())
     assert all(r is False for r in results)
     assert _idle().is_set()
 
 
 # ---------------------------------------------------------------------------
-# chat_priority_context: lock exclusion of background workers
+# local_chat_session: cloud deployment (no-op)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_bg_vlm_lock_held_inside_chat_context() -> None:
-    """_bg_vlm_lock must be locked while inside chat_priority_context."""
-    async with utils_mod.chat_priority_context():
-        assert _vlm_lock().locked()
-
-
-@pytest.mark.asyncio
-async def test_bg_llm_lock_held_inside_chat_context() -> None:
-    """_bg_llm_lock must be locked while inside chat_priority_context."""
-    async with utils_mod.chat_priority_context():
-        assert _llm_lock().locked()
-
-
-@pytest.mark.asyncio
-async def test_bg_locks_released_after_chat_context() -> None:
-    """Both background locks must be released after chat_priority_context exits."""
-    async with utils_mod.chat_priority_context():
-        pass
-    assert not _vlm_lock().locked()
-    assert not _llm_lock().locked()
+async def test_local_chat_session_cloud_is_noop() -> None:
+    """Cloud deployment must not touch _chat_idle."""
+    assert _idle().is_set()
+    async with utils_mod.local_chat_session("cloud"):
+        assert _idle().is_set()
+    assert _idle().is_set()
+    assert utils_mod._chat_active_count == 0  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------
-# generate_embeddings: TOCTOU-safe gate (waits + holds _bg_llm_lock)
+# sentinel_admission: cloud always admitted
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_generate_embeddings_waits_while_chat_active() -> None:
-    """Ollama generate_embeddings must not proceed until _chat_idle is set."""
-    _idle().clear()  # simulate active chat
+async def test_sentinel_admission_cloud_always_admitted() -> None:
+    """Cloud deployment is always admitted regardless of chat state."""
+    _idle().clear()  # simulate active edge chat
+    result = await utils_mod.sentinel_admission(
+        "cloud", category="triage", timeout_s=0.1
+    )
+    assert result is True
 
-    embed_started = asyncio.Event()
-    embed_result: list[object] = []
 
+@pytest.mark.asyncio
+async def test_sentinel_admission_cloud_resets_defer_count() -> None:
+    """Cloud admission resets starvation counters."""
+    utils_mod._sentinel_defer_count = 5  # type: ignore[attr-defined]
+    await utils_mod.sentinel_admission("cloud", category="triage", timeout_s=1.0)
+    assert utils_mod._sentinel_defer_count == 0  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# sentinel_admission: edge — idle case
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sentinel_admission_edge_admitted_when_idle() -> None:
+    """Edge Sentinel is admitted immediately when no chat is active."""
+    result = await utils_mod.sentinel_admission(
+        "edge", category="triage", timeout_s=1.0
+    )
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_sentinel_admission_edge_updates_last_run_on_success() -> None:
+    """Successful admission updates _sentinel_last_run."""
+    before = time.monotonic()
+    await utils_mod.sentinel_admission("edge", category="triage", timeout_s=1.0)
+    assert utils_mod._sentinel_last_run >= before  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_sentinel_admission_edge_resets_defer_count_on_success() -> None:
+    """Successful admission resets the deferral counter."""
+    utils_mod._sentinel_defer_count = 3  # type: ignore[attr-defined]
+    await utils_mod.sentinel_admission("edge", category="triage", timeout_s=1.0)
+    assert utils_mod._sentinel_defer_count == 0  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# sentinel_admission: edge — deferred (chat active, timeout)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sentinel_admission_edge_deferred_when_chat_active() -> None:
+    """Edge Sentinel must be denied when chat is active and timeout elapses."""
+    _idle().clear()
+    result = await utils_mod.sentinel_admission(
+        "edge", category="triage", timeout_s=0.05
+    )
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_sentinel_admission_edge_increments_defer_count() -> None:
+    """Deferral must increment _sentinel_defer_count."""
+    _idle().clear()
+    await utils_mod.sentinel_admission("edge", category="discovery", timeout_s=0.05)
+    assert utils_mod._sentinel_defer_count == 1  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_sentinel_admission_edge_starvation_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A WARNING is emitted when the starvation threshold is exceeded."""
+    _idle().clear()
+    # Last run was far in the past.
+    utils_mod._sentinel_last_run = time.monotonic() - 400.0  # type: ignore[attr-defined]
+    with caplog.at_level(
+        logging.WARNING, logger="custom_components.home_generative_agent.core.utils"
+    ):
+        await utils_mod.sentinel_admission("edge", category="triage", timeout_s=0.05)
+    assert any("deferred" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_sentinel_admission_edge_marks_health_degraded_without_prior_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sustained deferrals degrade health even if no Sentinel LLM run succeeded yet."""
+    _idle().clear()
+    health_stats: dict[str, object] = {}
+    now = time.monotonic()
+    monkeypatch.setattr(utils_mod, "_sentinel_first_defer", now - 400.0)
+
+    result = await utils_mod.sentinel_admission(
+        "edge", category="triage", timeout_s=0.05, health_stats=health_stats
+    )
+
+    assert result is False
+    assert health_stats["sentinel_admission_degraded"] is True
+    assert health_stats["sentinel_admission_degraded_category"] == "triage"
+    assert health_stats["sentinel_admission_consecutive_deferrals"] == 1
+
+
+@pytest.mark.asyncio
+async def test_sentinel_admission_edge_admitted_after_chat_ends() -> None:
+    """Edge Sentinel must be admitted once chat becomes idle."""
+    _idle().clear()
+    admitted: list[bool] = []
+
+    async def _admit() -> None:
+        result = await utils_mod.sentinel_admission(
+            "edge", category="triage", timeout_s=2.0
+        )
+        admitted.append(result)
+
+    task = asyncio.create_task(_admit())
+    await asyncio.sleep(0.01)
+    assert not admitted
+
+    _idle().set()
+    await asyncio.wait_for(task, timeout=2.0)
+    assert admitted == [True]
+
+
+@pytest.mark.asyncio
+async def test_local_chat_session_cancels_inflight_sentinel_llm() -> None:
+    """Foreground edge chat must interrupt an already-running Sentinel LLM call."""
+    sentinel_started = asyncio.Event()
+    sentinel_deferred: list[bool] = []
+
+    async def _slow_llm() -> str:
+        sentinel_started.set()
+        await asyncio.sleep(9999)
+        return "done"
+
+    async def _run_sentinel() -> None:
+        try:
+            await utils_mod.run_sentinel_llm_call(
+                _slow_llm,
+                deployment="edge",
+                category="triage",
+                admission_timeout_s=0.1,
+                call_timeout_s=60.0,
+            )
+        except utils_mod.SentinelLLMDeferredError:
+            sentinel_deferred.append(True)
+
+    sentinel_task = asyncio.create_task(_run_sentinel())
+    await sentinel_started.wait()
+
+    async with utils_mod.local_chat_session("edge"):
+        # Wait for the outer task to fully handle SentinelLLMDeferredError before
+        # asserting. _cancel_active_sentinel_llm_tasks awaits the inner future but
+        # the outer coroutine needs one more event-loop turn to run its except branch.
+        await asyncio.wait_for(sentinel_task, timeout=1.0)
+        assert sentinel_deferred == [True]
+
+
+# ---------------------------------------------------------------------------
+# generate_embeddings: no gate — runs freely even during active chat
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_generate_embeddings_runs_during_active_chat() -> None:
+    """Embeddings must complete immediately even while edge chat is active."""
     mock_emb = MagicMock()
     mock_emb.aembed_documents = AsyncMock(return_value=[[0.1, 0.2]])
     mock_emb.__class__ = OllamaEmbeddings  # type: ignore[assignment]
 
-    async def _run_embed() -> None:
-        embed_started.set()
-        result = await utils_mod.generate_embeddings(mock_emb, ["hello"])
-        embed_result.append(result)
-
-    task = asyncio.create_task(_run_embed())
-    await embed_started.wait()
-    await asyncio.sleep(0.01)
-    assert not embed_result, "generate_embeddings should block while chat is active"
-
-    _idle().set()
-    await asyncio.wait_for(task, timeout=2.0)
-    assert embed_result, "generate_embeddings should complete after chat gate released"
+    async with utils_mod.local_chat_session("edge"):
+        result = await asyncio.wait_for(
+            utils_mod.generate_embeddings(mock_emb, ["hello"]),
+            timeout=1.0,
+        )
+    assert result == [[0.1, 0.2]]
 
 
 @pytest.mark.asyncio
-async def test_generate_embeddings_proceeds_when_idle() -> None:
+async def test_generate_embeddings_ollama_proceeds_when_idle() -> None:
     """Ollama generate_embeddings completes immediately when no chat is active."""
     mock_emb = MagicMock()
     mock_emb.aembed_documents = AsyncMock(return_value=[[0.1, 0.2]])
@@ -202,50 +358,6 @@ async def test_generate_embeddings_proceeds_when_idle() -> None:
 
     result = await utils_mod.generate_embeddings(mock_emb, ["hello"])
     assert result == [[0.1, 0.2]]
-
-
-@pytest.mark.asyncio
-async def test_generate_embeddings_holds_bg_llm_lock_during_call() -> None:
-    """Ollama generate_embeddings must hold _bg_llm_lock while calling aembed_documents."""
-    lock_held_during_call = False
-
-    async def _check_lock(_texts: list[str], **_: object) -> list[list[float]]:
-        nonlocal lock_held_during_call
-        lock_held_during_call = _llm_lock().locked()
-        return [[0.1]]
-
-    mock_emb = MagicMock()
-    mock_emb.aembed_documents = _check_lock
-    mock_emb.__class__ = OllamaEmbeddings  # type: ignore[assignment]
-
-    await utils_mod.generate_embeddings(mock_emb, ["hello"])
-    assert lock_held_during_call, "_bg_llm_lock must be held during aembed_documents"
-
-
-@pytest.mark.asyncio
-async def test_chat_blocks_embeddings_via_bg_llm_lock() -> None:
-    """chat_priority_context must block Ollama generate_embeddings via _bg_llm_lock."""
-    embed_acquired_lock: list[bool] = []
-
-    async def _check_lock(_texts: list[str], **_: object) -> list[list[float]]:
-        embed_acquired_lock.append(True)
-        return [[0.1]]
-
-    mock_emb = MagicMock()
-    mock_emb.aembed_documents = _check_lock
-    mock_emb.__class__ = OllamaEmbeddings  # type: ignore[assignment]
-
-    async with utils_mod.chat_priority_context():
-        embed_task = asyncio.create_task(
-            utils_mod.generate_embeddings(mock_emb, ["hello"])
-        )
-        await asyncio.sleep(0.01)
-        assert not embed_acquired_lock, (
-            "generate_embeddings should not start while chat holds _bg_llm_lock"
-        )
-
-    await asyncio.wait_for(embed_task, timeout=2.0)
-    assert embed_acquired_lock
 
 
 @pytest.mark.asyncio
@@ -260,61 +372,23 @@ async def test_generate_embeddings_empty_texts_returns_empty() -> None:
 
 
 # ---------------------------------------------------------------------------
-# generate_embeddings: non-Ollama providers bypass the GPU gate
+# run_sentinel_llm_call: call_timeout_s exceeded
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_generate_embeddings_non_ollama_bypasses_gate() -> None:
-    """Non-Ollama providers must not wait on _chat_idle or acquire _bg_llm_lock."""
-    _idle().clear()  # simulate active chat
+async def test_run_sentinel_llm_call_timeout_raises_timeout_error() -> None:
+    """call_factory that exceeds call_timeout_s must raise TimeoutError."""
 
-    embed_result: list[object] = []
-
-    mock_emb = MagicMock()
-    mock_emb.aembed_documents = AsyncMock(return_value=[[0.5, 0.6]])
-    # Leave __class__ as MagicMock — not OllamaEmbeddings, so gate is bypassed.
-
-    async def _run_embed() -> None:
-        result = await utils_mod.generate_embeddings(mock_emb, ["hello"])
-        embed_result.append(result)
-
-    task = asyncio.create_task(_run_embed())
-    await asyncio.sleep(0.01)
-    # Should have completed immediately despite chat being "active".
-    assert embed_result, "non-Ollama embeddings must not block on _chat_idle"
-    assert not _llm_lock().locked(), (
-        "_bg_llm_lock must not be held after non-Ollama call"
-    )
-    await task
-
-
-# ---------------------------------------------------------------------------
-# chat_priority_context: cancellation safety
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_chat_priority_context_cleanup_on_cancellation_before_lock() -> None:
-    """_chat_idle and _chat_active_count must be reset if cancelled waiting for a lock."""
-    # Hold _bg_vlm_lock so chat_priority_context blocks waiting to acquire it.
-    async with _vlm_lock():
-        ctx_task = asyncio.create_task(_enter_chat_context())
-        # Give the task time to increment the count and block on the lock.
-        await asyncio.sleep(0.01)
-        assert not _idle().is_set(), "_chat_idle should be cleared"
-        assert utils_mod._chat_active_count == 1  # type: ignore[attr-defined]
-
-        ctx_task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await ctx_task
-
-    # After cancellation _chat_idle must be restored and the count reset.
-    assert _idle().is_set(), "_chat_idle must be set after cancellation"
-    assert utils_mod._chat_active_count == 0  # type: ignore[attr-defined]
-
-
-async def _enter_chat_context() -> None:
-    """Enter chat_priority_context and hold until cancelled."""
-    async with utils_mod.chat_priority_context():
+    async def _slow() -> str:
         await asyncio.sleep(9999)
+        return "done"
+
+    with pytest.raises(TimeoutError):
+        await utils_mod.run_sentinel_llm_call(
+            _slow,
+            deployment="cloud",  # always admitted — bypasses the chat gate
+            category="triage",
+            admission_timeout_s=0.1,
+            call_timeout_s=0.05,
+        )

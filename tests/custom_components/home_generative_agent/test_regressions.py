@@ -8,12 +8,12 @@ import logging
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.dispatcher import async_dispatcher_send
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 import custom_components.home_generative_agent.agent.graph as agent_graph
 from custom_components.home_generative_agent.agent import tools as agent_tools
@@ -266,4 +266,86 @@ def test_make_transient_tool_error_content_instructs_no_retry() -> None:
     """Transient error message must tell the LLM not to retry the tool."""
     msg = agent_graph._make_transient_tool_error("timeout", "some_tool", "id-1")
     # The template instructs the model not to retry.
-    assert "Do not retry" in msg.content or "transient" in msg.content.lower()
+    content = str(msg.content)
+    assert "Do not retry" in content or "transient" in content.lower()
+
+
+# ---------------------------------------------------------------------------
+# _call_model — fallback "Done." when Qwen3 thinking strips all content
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_call_model_injects_done_fallback_after_empty_tool_response(
+    hass: HomeAssistant,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    _call_model must emit 'Done.' when the model returns empty content after a tool.
+
+    Regression: Qwen3 extended-thinking strips <think> tokens so content becomes
+    '' (eval_count: 9).  Without the fallback the user receives no reply at all.
+    """
+    empty_ai = AIMessage(content="", tool_calls=[])
+
+    async def _fake_invoke_model(*_args: object, **_kwargs: object) -> AIMessage:
+        return empty_ai
+
+    async def _fake_camera(*_args: object, **_kwargs: object) -> list[object]:
+        return []
+
+    async def _fake_trim(
+        messages: list[object], *_args: object, **_kwargs: object
+    ) -> list[object]:
+        return messages
+
+    mock_store = MagicMock()
+    mock_store.asearch = AsyncMock(return_value=[])
+
+    monkeypatch.setattr(agent_graph, "_invoke_model", _fake_invoke_model)
+    monkeypatch.setattr(agent_graph, "get_recent_camera_activity", _fake_camera)
+    monkeypatch.setattr(agent_graph, "_trim_messages_for_model", _fake_trim)
+
+    state: dict[str, object] = {
+        "messages": [
+            HumanMessage(content="turn it off"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "HassTurnOff",
+                        "args": {},
+                        "id": "call-1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            ToolMessage(content="action_done", tool_call_id="call-1"),
+        ],
+        "selected_tools": [],
+        "summary": "",
+        "tool_routing_map": {},
+        "messages_to_remove": [],
+        "chat_model_usage_metadata": {},
+    }
+
+    config: dict[str, object] = {
+        "configurable": {
+            "chat_model": MagicMock(),
+            "user_id": "user-test",
+            "hass": hass,
+            "options": {},
+            "chat_model_options": {},
+            "prompt": "You are a helpful assistant.",
+            "langchain_tools": {},
+            "ha_llm_api": None,
+            "pending_actions": {},
+        }
+    }
+
+    result = await agent_graph._call_model(state, config, store=mock_store)  # type: ignore[arg-type]
+
+    ai_msg = result["messages"]
+    assert isinstance(ai_msg, AIMessage)
+    assert ai_msg.content == "Done.", f"expected 'Done.' but got {ai_msg.content!r}"
+    assert not ai_msg.tool_calls

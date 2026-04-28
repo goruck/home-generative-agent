@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
+from custom_components.home_generative_agent.core.utils import SentinelLLMDeferredError
 from custom_components.home_generative_agent.explain.llm_explain import (
     LLMExplainer,
     _iso_to_relative,
@@ -185,3 +186,15 @@ async def test_async_explain_does_not_pass_raw_timestamps() -> None:
     prompt_text = captured_messages[1].content
     assert "2025-01-15T20:09:00" not in prompt_text
     assert "ago" in prompt_text
+
+
+@pytest.mark.asyncio
+async def test_async_explain_returns_none_when_deferred() -> None:
+    """async_explain must return None when run_sentinel_llm_call raises SentinelLLMDeferredError."""
+    explainer = LLMExplainer(DummyModel("some content"))
+    with patch(
+        "custom_components.home_generative_agent.explain.llm_explain.run_sentinel_llm_call",
+        side_effect=SentinelLLMDeferredError("explain", "chat is active"),
+    ):
+        result = await explainer.async_explain(_finding())
+    assert result is None
