@@ -28,6 +28,7 @@ class ModelProviderConfig:
     provider_type: ProviderType
     capabilities: set[str]
     data: dict
+    deployment: str = "edge"
 
 
 @dataclass

@@ -16,6 +16,11 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS,
 )
+from custom_components.home_generative_agent.core.utils import (
+    SENTINEL_ADMISSION_TIMEOUT_S,
+    SentinelLLMDeferredError,
+    run_sentinel_llm_call,
+)
 from custom_components.home_generative_agent.explain.discovery_prompts import (
     SYSTEM_PROMPT,
     USER_PROMPT_TEMPLATE,
@@ -39,6 +44,10 @@ if TYPE_CHECKING:
     from .rule_registry import RuleRegistry
 
 LOGGER = logging.getLogger(__name__)
+
+# Hard cap on discovery LLM calls: prevents the chat model from being
+# monopolised when the snapshot is large (observed 180s+ without a cap).
+_DISCOVERY_LLM_TIMEOUT_S: float = 45.0
 
 # Rule IDs for static built-in rules (deterministic, always active).
 # Included in active_rule_ids so the LLM knows these topics are already covered
@@ -71,6 +80,8 @@ class SentinelDiscoveryEngine:
         rule_registry: RuleRegistry | None = None,
         proposal_store: ProposalStore | None = None,
         baseline_updater: SentinelBaselineUpdater | None = None,
+        deployment: str = "edge",
+        health_stats: dict[str, Any] | None = None,
     ) -> None:
         """Initialize advisory discovery dependencies and runtime state."""
         self._hass = hass
@@ -80,6 +91,8 @@ class SentinelDiscoveryEngine:
         self._rule_registry = rule_registry
         self._proposal_store = proposal_store
         self._baseline_updater = baseline_updater
+        self._deployment = deployment
+        self._health_stats = health_stats
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
         self._run_lock = asyncio.Lock()
@@ -184,7 +197,23 @@ class SentinelDiscoveryEngine:
         messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
 
         try:
-            result = await self._model.ainvoke(messages)
+            result = await run_sentinel_llm_call(
+                lambda: self._model.ainvoke(messages),
+                deployment=self._deployment,
+                category="discovery",
+                admission_timeout_s=SENTINEL_ADMISSION_TIMEOUT_S,
+                call_timeout_s=_DISCOVERY_LLM_TIMEOUT_S,
+                health_stats=self._health_stats,
+            )
+        except SentinelLLMDeferredError as err:
+            LOGGER.debug("Discovery LLM call deferred: %s", err)
+            return
+        except TimeoutError:
+            LOGGER.warning(
+                "Discovery LLM call timed out after %.0fs; skipping cycle.",
+                _DISCOVERY_LLM_TIMEOUT_S,
+            )
+            return
         except (ValueError, TypeError, RuntimeError) as err:
             LOGGER.warning("Discovery LLM call failed: %s", err)
             return

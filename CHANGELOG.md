@@ -2,6 +2,78 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.12.4] - 2026-04-28
+
+### Fixed
+
+- **`SENTINEL_ADMISSION_TIMEOUT_S` public constant** — admission timeout was a
+  magic `2.0` literal scattered across triage, discovery, and explain call sites.
+  Extracted to a named constant in `core/utils.py` and imported at each site.
+
+- **`asyncio.create_task()` replaces deprecated `asyncio.ensure_future()`** —
+  `run_sentinel_llm_call` now wraps the call factory in a proper `Task`, which is
+  cancellable and tracked in `_sentinel_llm_tasks`.
+
+- **HA reload cancels in-flight Sentinel LLM tasks** — the previous reload path
+  replaced `_sentinel_llm_tasks` with a fresh `set()` while old tasks continued
+  running. The teardown in `__init__.py` now cancels each task before replacing
+  the set.
+
+- **Warning log when Sentinel LLM cancel times out** — `contextlib.suppress`
+  silently swallowed any `TimeoutError` from the cancel wait. Replaced with an
+  explicit `except TimeoutError` that emits a `WARNING` log.
+
+- **Tests** — deferred-path coverage for `SentinelTriageService`,
+  `LLMExplainer`, and `run_sentinel_llm_call` (timeout path); three tests for
+  `build_model_deployments` (ollama→edge, openai→cloud, empty providers).
+
+## [3.12.3] - 2026-04-26
+
+### Fixed
+
+- **Deployment-aware admission control replaces lock-based GPU gate** — the
+  previous `chat_priority_context` / `_bg_vlm_lock` / `_bg_llm_lock` approach
+  made chat wait for background work to finish. The new design inverts this:
+  `local_chat_session(deployment)` marks the full chat turn active by clearing a
+  shared `_chat_idle` event; Sentinel triage and discovery call
+  `sentinel_admission(deployment, timeout_s=2.0)` before each LLM invocation and
+  defer if chat is active. Video analysis no longer participates in any
+  admission gate — its existing tuning constants (`_VISION_TIMEOUT_SEC`,
+  `_SUMMARY_TIMEOUT_SEC`, per-camera queues) remain the intended concurrency
+  surface. Embedding generation is ungated and runs concurrently with chat.
+
+- **Provider deployment metadata flows through runtime** — `ModelProviderConfig`
+  gains a `deployment: str` field ("edge"/"cloud"). `build_model_deployments()`
+  builds a `{category: deployment}` map from provider subentries at setup time;
+  the map lives on `HGAData.model_deployments`. Cloud providers bypass all local
+  admission gates automatically, with no code changes required per provider.
+
+- **Sentinel starvation surfaced in the health sensor** — `sentinel_admission`
+  tracks consecutive deferrals and wall-clock gap since last success. When the
+  gap exceeds 300 s a WARNING is logged and the `SentinelHealthSensor` transitions
+  to `"degraded"`, exposing the condition to HA automations and dashboards.
+
+- **Chat LLM timeout raised from 90 s to 180 s** — the higher limit covers
+  prefill + generation for typical conversation history lengths without the
+  gate-wait overhead of the old approach.
+
+- **Sentinel discovery capped at 45 s per LLM call** — discovery prompts can
+  be large enough to consume 180 s+ of GPU time. A hard `asyncio.wait_for`
+  timeout skips the cycle cleanly rather than monopolising the GPU.
+
+- **Tool timeout sends a non-retryable error to the LLM** — `_run_langchain_tool`
+  now returns a `TOOL_CALL_TRANSIENT_ERROR_TEMPLATE` message on `TimeoutError`
+  instead of the generic retry-prompting error template. This stops the model
+  from re-calling a tool that timed out due to a temporary resource constraint.
+
+- **Qwen3 extended-thinking fallback** — when Ollama strips `<think>` tokens
+  and returns empty content after a tool call, `_call_model` injects `"Done."`
+  so the conversation does not go silent.
+
+- **Tests** — 26 tests for the new admission-control primitives, plus coverage
+  for the triage/discovery deferral paths, the transient tool-error helper, and
+  the Qwen3 fallback.
+
 ## [3.12.2] - 2026-04-24
 
 ### Fixed

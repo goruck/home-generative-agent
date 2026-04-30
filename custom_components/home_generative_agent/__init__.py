@@ -206,6 +206,7 @@ from .core.person_gallery import PersonGalleryDAO
 from .core.runtime import HGAConfigEntry, HGAData
 from .core.subentry_resolver import (
     build_database_uri_from_entry,
+    build_model_deployments,
     legacy_feature_configs,
     legacy_model_provider_configs,
     resolve_model_provider_configs,
@@ -1166,6 +1167,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     """Set up Home Generative Agent from a config entry."""
     hass.data.setdefault(DOMAIN, {})
 
+    # Reset admission-control globals in case a prior entry unload left them
+    # dirty (e.g. mid-chat reload where the task was not cleanly cancelled).
+    import custom_components.home_generative_agent.core.utils as _utils_mod  # noqa: PLC0415
+
+    _utils_mod._chat_active_count = 0  # noqa: SLF001
+    _utils_mod._chat_idle.set()  # noqa: SLF001
+    _utils_mod._sentinel_last_run = 0.0  # noqa: SLF001
+    _utils_mod._sentinel_first_defer = 0.0  # noqa: SLF001
+    _utils_mod._sentinel_defer_count = 0  # noqa: SLF001
+    for _t in _utils_mod._sentinel_llm_tasks:  # noqa: SLF001
+        _t.cancel()
+    _utils_mod._sentinel_llm_tasks = set()  # noqa: SLF001
+
     _register_services(hass, entry)
     _ensure_default_feature_subentries(hass, entry)
     _ensure_default_sentinel_subentry(hass, entry)
@@ -1175,6 +1189,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     options = resolve_runtime_options(entry)
     conf = dict(options)
     providers = resolve_model_provider_configs(entry, options)
+    model_deployments = build_model_deployments(entry, providers, options)
     api_key = conf.get(CONF_API_KEY) or _provider_api_key(providers, "openai")
     openai_secret = SecretStr(api_key) if api_key else None
     gemini_key = conf.get(CONF_GEMINI_API_KEY) or _provider_api_key(providers, "gemini")
@@ -1758,9 +1773,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         hass, options, suppression, action_handler, audit_store=audit_store
     )
     notifier.start()
+    sentinel_run_stats: dict[str, Any] = {
+        "sentinel_admission_degraded": False,
+        "sentinel_admission_degraded_category": None,
+        "sentinel_admission_consecutive_deferrals": 0,
+        "sentinel_admission_starved_for_s": 0,
+    }
+    chat_deployment = model_deployments.get("chat", "edge")
     explainer = None
     if options.get(CONF_EXPLAIN_ENABLED, RECOMMENDED_EXPLAIN_ENABLED):
-        explainer = LLMExplainer(chat_model)
+        explainer = LLMExplainer(
+            chat_model,
+            deployment=chat_deployment,
+            health_stats=sentinel_run_stats,
+        )
+
     # Issue #262: optional LLM triage service.
     triage_service: SentinelTriageService | None = None
     if options.get(CONF_SENTINEL_TRIAGE_ENABLED, RECOMMENDED_SENTINEL_TRIAGE_ENABLED):
@@ -1771,7 +1798,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             )
         )
         triage_service = SentinelTriageService(
-            chat_model, timeout_seconds=triage_timeout
+            chat_model,
+            timeout_seconds=triage_timeout,
+            deployment=chat_deployment,
+            health_stats=sentinel_run_stats,
         )
         LOGGER.info("Sentinel LLM triage enabled (timeout=%ds).", triage_timeout)
     # Issue #265: optional baseline updater (requires PostgreSQL pool).
@@ -1798,6 +1828,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         entry_id=entry.entry_id,
         triage_service=triage_service,
         baseline_updater=baseline_updater,
+        run_stats=sentinel_run_stats,
     )
     discovery_engine = SentinelDiscoveryEngine(
         hass=hass,
@@ -1807,6 +1838,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         rule_registry=rule_registry,
         proposal_store=proposal_store,
         baseline_updater=baseline_updater,
+        deployment=chat_deployment,
+        health_stats=sentinel_run_stats,
     )
 
     face_recognition = options.get(CONF_FACE_RECOGNITION, RECOMMENDED_FACE_RECOGNITION)
@@ -1824,6 +1857,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         chat_model_options=ollama_chat_model_options,
         vision_model=vision_model,
         summarization_model=summarization_model,
+        model_deployments=model_deployments,
         store=store,
         video_analyzer=video_analyzer,
         checkpointer=checkpointer,

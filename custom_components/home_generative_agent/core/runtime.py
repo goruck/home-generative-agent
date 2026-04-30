@@ -68,6 +68,7 @@ class HGAData:
     proposal_store: ProposalStore | None
     rule_registry: RuleRegistry | None
     baseline_updater: SentinelBaselineUpdater | None = None
+    model_deployments: dict[str, str] = field(default_factory=dict)
     tool_content_hashes: dict[str, str] = field(default_factory=dict)
     tool_index_ready: bool = False
     tool_indexing_in_progress: bool = False

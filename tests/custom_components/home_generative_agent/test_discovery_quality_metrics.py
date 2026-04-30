@@ -13,6 +13,7 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -333,3 +334,46 @@ async def test_health_sensor_exposes_none_discovery_attrs_when_no_engine() -> No
     assert "discovery_proposals_promoted" not in attrs
     assert attrs["discovery_unsupported_ttl_expired"] is None
     assert attrs["discovery_proposals_approved_24h"] is None
+
+
+# ---------------------------------------------------------------------------
+# Discovery LLM timeout path (_DISCOVERY_LLM_TIMEOUT_S cap)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_discovery_llm_timeout_skips_cycle() -> None:
+    """Discovery run must skip the cycle (not raise) when the LLM times out."""
+
+    async def _slow_ainvoke(*_a: object, **_kw: object) -> None:
+        await asyncio.sleep(9999)
+
+    model = MagicMock()
+    model.ainvoke = _slow_ainvoke
+    engine = _make_engine(model=model)
+
+    # Patch the timeout to an immediate value so the test completes quickly.
+    with (
+        patch(
+            "custom_components.home_generative_agent.sentinel.discovery_engine"
+            "._DISCOVERY_LLM_TIMEOUT_S",
+            new=0.0,
+        ),
+        _SNAPSHOT_PATCH,
+        _REDUCER_PATCH,
+    ):
+        await engine._run_once()
+
+    # The cycle was skipped cleanly — no candidates stored, no exception raised.
+    assert engine.discovery_cycle_stats["candidates_generated"] == 0
+
+
+@pytest.mark.asyncio
+async def test_discovery_llm_timeout_constant_is_positive() -> None:
+    """_DISCOVERY_LLM_TIMEOUT_S must be a positive float."""
+    from custom_components.home_generative_agent.sentinel.discovery_engine import (
+        _DISCOVERY_LLM_TIMEOUT_S,
+    )
+
+    assert isinstance(_DISCOVERY_LLM_TIMEOUT_S, float)
+    assert _DISCOVERY_LLM_TIMEOUT_S > 0

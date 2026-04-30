@@ -57,8 +57,12 @@ from custom_components.home_generative_agent.const import (
     SUBENTRY_TYPE_STT_PROVIDER,
 )
 from custom_components.home_generative_agent.core.subentry_resolver import (
+    build_model_deployments,
     legacy_model_provider_configs,
     resolve_runtime_options,
+)
+from custom_components.home_generative_agent.core.subentry_types import (
+    ModelProviderConfig,
 )
 from custom_components.home_generative_agent.core.utils import (
     CannotConnectError,
@@ -1119,3 +1123,45 @@ def test_resolve_runtime_options_openai_compatible_embedding_dims_none() -> None
 def test_recommended_openai_compatible_embedding_dims_value() -> None:
     """Default dims constant is 768 — matches nomic-embed-text native output size."""
     assert RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_DIMS == 768
+
+
+# ---------------------------------------------------------------------------
+# build_model_deployments
+# ---------------------------------------------------------------------------
+
+
+def test_build_model_deployments_ollama_returns_edge() -> None:
+    """Ollama provider must map its capabilities to 'edge' deployment."""
+    provider = ModelProviderConfig(
+        entry_id="p_ollama",
+        name="Ollama Local",
+        provider_type="ollama",
+        capabilities={"chat", "vlm", "summarization"},
+        data={},
+        deployment="edge",
+    )
+    entry = DummyEntry()
+    result = build_model_deployments(entry, {"p_ollama": provider}, {})  # type: ignore[arg-type]
+    assert result.get("chat") == "edge"
+
+
+def test_build_model_deployments_openai_returns_cloud() -> None:
+    """OpenAI provider must map its capabilities to 'cloud' deployment."""
+    provider = ModelProviderConfig(
+        entry_id="p_openai",
+        name="OpenAI Cloud",
+        provider_type="openai",
+        capabilities={"chat"},
+        data={"settings": {}},
+        deployment="cloud",
+    )
+    entry = DummyEntry()
+    result = build_model_deployments(entry, {"p_openai": provider}, {})  # type: ignore[arg-type]
+    assert result.get("chat") == "cloud"
+
+
+def test_build_model_deployments_empty_providers_returns_empty() -> None:
+    """No providers must yield an empty deployment map."""
+    entry = DummyEntry()
+    result = build_model_deployments(entry, {}, {})  # type: ignore[arg-type]
+    assert result == {}

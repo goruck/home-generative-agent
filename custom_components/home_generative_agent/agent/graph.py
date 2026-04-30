@@ -62,6 +62,7 @@ from custom_components.home_generative_agent.const import (
     SUMMARIZATION_PROMPT_TEMPLATE,
     SUMMARIZATION_SYSTEM_PROMPT,
     TOOL_CALL_ERROR_TEMPLATE,
+    TOOL_CALL_TRANSIENT_ERROR_TEMPLATE,
 )
 
 from ..core.utils import extract_final  # noqa: TID252
@@ -92,12 +93,12 @@ LOGGER = logging.getLogger(__name__)
 _LC_TOOL_TIMEOUT_S: float = 30.0
 
 # Maximum seconds to wait for the chat LLM to respond.
-# Under heavy VLM load the Ollama GPU is fully saturated; the chat model
-# queues behind concurrent vision requests and can block indefinitely inside
-# astream_events, stalling the streaming pipeline. This guard converts an
-# infinite hang into a bounded HomeAssistantError so the recovery path can
-# return a response to the user.
-_LLM_INVOKE_TIMEOUT_S: float = 90.0
+# The chat model may need exclusive GPU access and can be delayed while the
+# chat-priority gate waits for in-flight background jobs (camera analysis,
+# embedding, Sentinel LLM) to finish.  With a large prompt, prefill alone
+# can take tens of seconds.  Set high enough to cover gate wait + prefill +
+# generation for typical conversation history lengths.
+_LLM_INVOKE_TIMEOUT_S: float = 180.0
 
 _PIN_LOOKBACK = 20  # messages to scan for an unresolved requires_pin
 _ROUTING_REJECTION_MARKER = "is not available for this request"
@@ -147,6 +148,16 @@ def _make_tool_error(err: str, name: str, tid: str) -> ToolMessage:
     """Build a standardized error ToolMessage."""
     return ToolMessage(
         content=TOOL_CALL_ERROR_TEMPLATE.format(error=err),
+        name=name,
+        tool_call_id=tid,
+        status="error",
+    )
+
+
+def _make_transient_tool_error(err: str, name: str, tid: str) -> ToolMessage:
+    """Build a ToolMessage for transient/resource errors that must not be retried."""
+    return ToolMessage(
+        content=TOOL_CALL_TRANSIENT_ERROR_TEMPLATE.format(error=err),
         name=name,
         tool_call_id=tid,
         status="error",
@@ -288,7 +299,7 @@ async def _run_langchain_tool(
             status=status,
         )
     except TimeoutError:
-        return _make_tool_error(
+        return _make_transient_tool_error(
             f"Tool timed out after {_LC_TOOL_TIMEOUT_S}s.",
             tool_name,
             tool_call.get("id") or "",
@@ -1109,14 +1120,34 @@ async def _trim_messages_for_model(
     )
 
 
+def _build_system_message(
+    base_prompt: str,
+    mems: list[Any],
+    camera_activity: list[Any],
+    summary: str,
+) -> str:
+    """Compose the system message from the base prompt and retrieved context."""
+    system_message = base_prompt
+    if mems:
+        formatted_mems = "\n".join(f"[{mem.key}]: {mem.value}" for mem in mems)
+        system_message += f"\n<memories>\n{formatted_mems}\n</memories>"
+    if camera_activity:
+        ca = "\n".join(str(a) for a in camera_activity)
+        system_message += f"\n<recent_camera_activity>\n{ca}\n</recent_camera_activity>"
+    if summary:
+        system_message += (
+            f"\n<past_conversation_summary>\n{summary}\n</past_conversation_summary>"
+        )
+    return system_message
+
+
 async def _invoke_model(
     model: Any, messages: list[AnyMessage], config: RunnableConfig
 ) -> Any:
     """Invoke a chat model, wrapping non-HA exceptions as HomeAssistantError."""
     try:
-        return await asyncio.wait_for(
-            model.ainvoke(messages, config), timeout=_LLM_INVOKE_TIMEOUT_S
-        )
+        async with asyncio.timeout(_LLM_INVOKE_TIMEOUT_S):
+            return await model.ainvoke(messages, config)
     except TimeoutError:
         msg = f"Model invocation timed out after {_LLM_INVOKE_TIMEOUT_S}s."
         raise HomeAssistantError(msg) from None
@@ -1157,17 +1188,9 @@ async def _call_model(
     camera_activity = await get_recent_camera_activity(hass, store)
 
     # Build system message.
-    system_message = conf["prompt"]
-    if mems:
-        formatted_mems = "\n".join(f"[{mem.key}]: {mem.value}" for mem in mems)
-        system_message += f"\n<memories>\n{formatted_mems}\n</memories>"
-    if camera_activity:
-        ca = "\n".join(str(a) for a in camera_activity)
-        system_message += f"\n<recent_camera_activity>\n{ca}\n</recent_camera_activity>"
-    if summary := state.get("summary", ""):
-        system_message += (
-            f"\n<past_conversation_summary>\n{summary}\n</past_conversation_summary>"
-        )
+    system_message = _build_system_message(
+        conf["prompt"], mems, camera_activity, state.get("summary", "")
+    )
 
     # Model input = System + current messages.
     messages = [SystemMessage(content=system_message)] + state["messages"]
@@ -1199,9 +1222,23 @@ async def _call_model(
 
     response = extract_final(getattr(raw_response, "content", "") or "")
 
+    tool_calls = getattr(raw_response, "tool_calls", []) or []
+
+    # Qwen3 extended-thinking: Ollama strips <think>…</think> tokens from content,
+    # leaving content='' when all output was reasoning.  On a post-tool turn with no
+    # follow-up tool call the user would receive no reply at all.  Inject a minimal
+    # acknowledgement so the conversation doesn't go silent.
+    if (
+        not response
+        and not tool_calls
+        and isinstance(state["messages"][-1], ToolMessage)
+    ):
+        LOGGER.debug("Empty model response after tool execution; injecting fallback.")
+        response = "Done."
+
     # Create AI message, no need to include tool call metadata if there's none.
-    if hasattr(raw_response, "tool_calls"):
-        ai_response = AIMessage(content=response, tool_calls=raw_response.tool_calls)
+    if tool_calls:
+        ai_response = AIMessage(content=response, tool_calls=tool_calls)
     else:
         ai_response = AIMessage(content=response)
     LOGGER.debug("AI response: %s", ai_response)

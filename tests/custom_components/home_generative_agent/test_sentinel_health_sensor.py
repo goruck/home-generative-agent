@@ -341,9 +341,34 @@ async def test_refresh_run_stats_keys_present_when_no_engine() -> None:
         "last_run_end",
         "run_duration_ms",
         "active_rule_count",
+        "sentinel_admission_degraded",
+        "sentinel_admission_degraded_category",
+        "sentinel_admission_consecutive_deferrals",
+        "sentinel_admission_starved_for_s",
     ):
         assert key in sensor._attrs
         assert sensor._attrs[key] is None
+
+
+@pytest.mark.asyncio
+async def test_refresh_marks_degraded_for_sentinel_admission_starvation() -> None:
+    """Admission starvation in run_stats should set the health sensor to degraded."""
+    sensor = _make_sensor(
+        run_stats={
+            "sentinel_admission_degraded": True,
+            "sentinel_admission_degraded_category": "triage",
+            "sentinel_admission_consecutive_deferrals": 4,
+            "sentinel_admission_starved_for_s": 360,
+        }
+    )
+    sensor.async_write_ha_state = MagicMock()
+
+    await sensor._async_refresh()
+
+    assert sensor._attr_native_value == "degraded"
+    assert sensor._attrs["sentinel_admission_degraded"] is True
+    assert sensor._attrs["sentinel_admission_degraded_category"] == "triage"
+    assert sensor._attrs["sentinel_admission_consecutive_deferrals"] == 4
 
 
 def test_unique_id_uses_entry_id() -> None:

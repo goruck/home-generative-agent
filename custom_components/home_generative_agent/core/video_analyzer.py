@@ -84,8 +84,6 @@ _FRAME_DEADLINE_SEC: Final[int] = 600  # skip frames older than this
 _SUMMARY_TIMEOUT_SEC: Final[int] = 60  # was 35
 _FACE_TIMEOUT_SEC: Final[int] = 10  # was 10 (keep)
 _VISION_TIMEOUT_SEC: Final[int] = 90  # was 30
-_GLOBAL_VISION_CONCURRENCY: Final[int] = 3  # tune per hardware
-
 # --- Uniqueness gate tuning ---
 _UNIQUENESS_ENABLED: Final[bool] = False
 _UNIQUENESS_HAMMING_MAX: Final[int] = 4  # <= this => "too similar" (tune 4-10)
@@ -95,8 +93,6 @@ _UNIQUENESS_HEARTBEAT_SEC: Final[int] = 10  # always allow a frame at least this
 # --- Metrics reporting ---
 _METRICS_REPORT_INTERVAL_SEC: Final[int] = 3600  # once per hour
 _METRICS_LAT_HISTORY: Final[int] = 512  # keep up to 512 lat samples per camera
-
-_global_vision_sem = asyncio.Semaphore(_GLOBAL_VISION_CONCURRENCY)
 
 
 @dataclass
@@ -436,7 +432,8 @@ class VideoAnalyzer:
             HumanMessage(content=prompt),
         ]
         model = self.entry.runtime_data.summarization_model
-        summary = await model.ainvoke(messages)
+        async with asyncio.timeout(_SUMMARY_TIMEOUT_SEC):
+            summary = await model.ainvoke(messages)
         LOGGER.debug("Raw video analyzer summary: %s", summary)
 
         text = extract_final(getattr(summary, "content", "") or "", max_chars=150)
@@ -447,10 +444,17 @@ class VideoAnalyzer:
         raise ValueError(msg)
 
     async def _is_anomaly(self, camera_name: str, msg: str, first_path: str) -> bool:
-        async with asyncio.timeout(10):
-            search_results = await self.entry.runtime_data.store.asearch(
-                ("video_analysis", camera_name), query=msg, limit=10
+        try:
+            async with asyncio.timeout(10):
+                search_results = await self.entry.runtime_data.store.asearch(
+                    ("video_analysis", camera_name), query=msg, limit=10
+                )
+        except TimeoutError:
+            LOGGER.warning(
+                "[%s] store.asearch timed out in _is_anomaly; treating as novel.",
+                camera_name,
             )
+            return True
 
         # Calculate a "no newer than" time threshold from first snapshot time
         # by delaying it by the time offset.
@@ -650,14 +654,11 @@ class VideoAnalyzer:
                 )
                 faces_in_frame = []
 
-            # Vision: global concurrency + short timeout
             try:
-                async with (
-                    _global_vision_sem,
-                    asyncio.timeout(_VISION_TIMEOUT_SEC),
-                ):
+                vision_model = self.entry.runtime_data.vision_model
+                async with asyncio.timeout(_VISION_TIMEOUT_SEC):
                     frame_description = await analyze_image(
-                        self.entry.runtime_data.vision_model,
+                        vision_model,
                         data,
                         None,
                         prev_text=prev_text,

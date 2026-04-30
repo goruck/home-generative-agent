@@ -201,6 +201,8 @@ Sentinel is a singleton service per Home Generative Agent config entry. Configur
 
 Important: The LLM never executes actions or directly decides runtime safety behavior. Detection and actuation remain deterministic. Triage can suppress low-value notifications but cannot alter any finding field or gate execution.
 
+**Admission control:** On edge deployments (Ollama, local OpenAI-compatible servers), Sentinel LLM calls (triage, discovery, explain) defer when a chat turn is active, so the GPU is not competed for during a live conversation. Sentinel resumes immediately once the chat turn completes. Cloud providers (OpenAI, Gemini, Anthropic) are always admitted — they use remote inference and are unaffected by local GPU load. When deferrals persist for more than 300 s, the `sentinel_health` sensor transitions to `degraded` and a WARNING is logged.
+
 ### Built-in Static Rules
 
 These rules run on every detection cycle without any configuration or approval. They cover the most common security and safety patterns out of the box:
@@ -580,7 +582,7 @@ Notable service behavior:
 
 ### Sentinel Health Sensor
 
-Sentinel registers a `sensor.sentinel_health` entity that is updated after every detection run. Its state is `ok` when Sentinel is enabled and `disabled` otherwise.
+Sentinel registers a `sensor.sentinel_health` entity that is updated after every detection run. Its state is `ok` when Sentinel is enabled and running normally, `degraded` when Sentinel LLM calls have been consecutively deferred for more than 300 s (edge deployment under sustained chat load), and `disabled` when Sentinel is not configured.
 
 Attributes:
 
@@ -590,6 +592,10 @@ Attributes:
 | `last_run_end` | UTC ISO 8601 timestamp when the last run ended |
 | `run_duration_ms` | Last run duration in milliseconds |
 | `active_rule_count` | Number of active rules evaluated |
+| `sentinel_admission_degraded` | `true` when Sentinel LLM calls have been deferred for more than 300 s without a successful run |
+| `sentinel_admission_degraded_category` | The Sentinel category (`triage`, `discovery`, `explain`) that last triggered the degraded flag, or `null` |
+| `sentinel_admission_consecutive_deferrals` | Number of consecutive times Sentinel LLM admission was denied due to active chat |
+| `sentinel_admission_starved_for_s` | Seconds since the last successful Sentinel LLM run (or since the first deferral if no run has ever succeeded) |
 | `trigger_source_breakdown` | Rolling 24-hour trigger counts broken down by source: `{poll: N, event: N, on_demand: N}` |
 | `discovery_candidates_generated` | Total discovery candidates returned by the LLM in the most recent cycle |
 | `discovery_candidates_novel` | Candidates that passed deduplication and were stored |

@@ -6,13 +6,16 @@ from __future__ import annotations
 import asyncio
 import json
 from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import patch
 
 import pytest
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from custom_components.home_generative_agent.core.utils import SentinelLLMDeferredError
 from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
 from custom_components.home_generative_agent.sentinel.triage import (
     TRIAGE_NOTIFY,
+    TRIAGE_REASON_DEFERRED,
     TRIAGE_SUPPRESS,
     SentinelTriageService,
     TriageDecision,
@@ -576,3 +579,26 @@ async def test_llm_receives_system_and_human_messages() -> None:
 
     # The human message must contain the finding type so the LLM has context.
     assert "open_entry_while_away" in llm.last_messages[1].content
+
+
+# ---------------------------------------------------------------------------
+# 10. Deferred triage when chat is active
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_triage_deferred_when_chat_active() -> None:
+    """SentinelLLMDeferredError from run_sentinel_llm_call must produce decision=notify, reason_code=triage_deferred."""
+    finding = _finding()
+    snapshot = _snapshot()
+
+    svc = SentinelTriageService(MockLLM())
+    with patch(
+        "custom_components.home_generative_agent.sentinel.triage.run_sentinel_llm_call",
+        side_effect=SentinelLLMDeferredError("triage", "chat is active"),
+    ):
+        result = await svc.triage(finding, snapshot)
+
+    assert result.decision == TRIAGE_NOTIFY
+    assert result.reason_code == TRIAGE_REASON_DEFERRED
+    assert result.triage_confidence is None
