@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections import defaultdict
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -22,8 +23,18 @@ _ALLOWED_DOMAINS = {
 _ALLOWED_SENSOR_DEVICE_CLASSES = {"power", "energy", "battery"}
 _ALLOWED_BINARY_CLASSES = {"door", "window", "opening", "motion", "occupancy"}
 _MAX_ENTITIES = 100
-_MAX_CAMERA_ACTIVITY = 50
-_MAX_SUMMARY_CHARS = 150
+_MAX_CAMERA_ACTIVITY = 20
+_MAX_SUMMARY_CHARS = 80
+# Cap how many baseline-ready entity IDs appear in derived context.
+_MAX_BASELINE_ENTITIES = 30
+# Character budget for the serialised snapshot JSON (≈5 k tokens at 4 chars/token).
+# A second-pass strip is applied when this threshold is exceeded.
+_TOKEN_BUDGET_CHARS = 20_000
+# Camera summary length used in the emergency second-pass trim.
+_SECOND_PASS_SUMMARY_CHARS = 40
+# Cap per-camera recognized_people list so facial-recognition deployments
+# do not exceed the token budget after summaries are dropped.
+_MAX_RECOGNIZED_PEOPLE = 5
 
 # States considered "interesting" for anomaly detection — scored higher.
 _ANOMALOUS_STATES = {"on", "open", "unlocked", "triggered", "disarmed"}
@@ -176,6 +187,77 @@ def _reduce_cameras(snapshot: FullStateSnapshot) -> list[dict[str, Any]]:
     return reduced
 
 
+def _reduce_derived(
+    snapshot: FullStateSnapshot, entity_id_set: frozenset[str]
+) -> dict[str, Any]:
+    """Compress derived context for LLM discovery prompts."""
+    derived: dict[str, Any] = dict(snapshot["derived"])
+
+    # Truncate timestamps to minute precision.
+    motion_by_area = derived.get("last_motion_by_area")
+    if isinstance(motion_by_area, dict):
+        derived["last_motion_by_area"] = {
+            area: _truncate_iso(str(ts)) for area, ts in motion_by_area.items()
+        }
+    now_val = derived.get("now")
+    if isinstance(now_val, str):
+        derived["now"] = _truncate_iso(now_val)
+
+    # timezone is redundant for anomaly detection — is_night already encodes it.
+    derived.pop("timezone", None)
+
+    # Restrict baseline_ready_entities to entities present in the reduced snapshot,
+    # then cap to bound token cost.
+    baseline_ready = derived.get("baseline_ready_entities")
+    if isinstance(baseline_ready, list):
+        trimmed = [eid for eid in baseline_ready if eid in entity_id_set]
+        derived["baseline_ready_entities"] = trimmed[:_MAX_BASELINE_ENTITIES]
+
+    return derived
+
+
+def _char_count(result: dict[str, Any]) -> int:
+    """Return the compact JSON serialisation length of *result*."""
+    return len(json.dumps(result, default=str, separators=(",", ":")))
+
+
+def _apply_budget_trim(result: dict[str, Any]) -> dict[str, Any]:
+    """Strip fields progressively until the snapshot fits the token budget."""
+    if _char_count(result) <= _TOKEN_BUDGET_CHARS:
+        return result
+
+    # Strip last_changed from every entity group (~14 chars saved per group).
+    for group in result["entities"]:
+        group.pop("last_changed", None)
+
+    if _char_count(result) <= _TOKEN_BUDGET_CHARS:
+        return result
+
+    # Truncate camera summaries to _SECOND_PASS_SUMMARY_CHARS.
+    for cam in result["camera_activity"]:
+        summary = cam.get("snapshot_summary")
+        if summary and len(summary) > _SECOND_PASS_SUMMARY_CHARS:
+            cam["snapshot_summary"] = summary[:_SECOND_PASS_SUMMARY_CHARS] + "..."
+
+    if _char_count(result) <= _TOKEN_BUDGET_CHARS:
+        return result
+
+    # Drop all camera summaries.
+    for cam in result["camera_activity"]:
+        cam.pop("snapshot_summary", None)
+
+    if _char_count(result) <= _TOKEN_BUDGET_CHARS:
+        return result
+
+    # Cap recognized_people per camera — unbounded in facial-recognition deployments.
+    for cam in result["camera_activity"]:
+        people = cam.get("recognized_people")
+        if isinstance(people, list) and len(people) > _MAX_RECOGNIZED_PEOPLE:
+            cam["recognized_people"] = people[:_MAX_RECOGNIZED_PEOPLE]
+
+    return result
+
+
 def reduce_snapshot_for_discovery(snapshot: FullStateSnapshot) -> dict[str, Any]:
     """Return a compressed snapshot for LLM discovery prompts."""
     generated_at = snapshot.get("generated_at", "")
@@ -196,19 +278,15 @@ def reduce_snapshot_for_discovery(snapshot: FullStateSnapshot) -> dict[str, Any]
     # Phase 4: Reduce camera activity
     reduced_camera_activity = _reduce_cameras(snapshot)
 
-    # Phase 5: Trim derived context timestamps
-    derived: dict[str, Any] = dict(snapshot["derived"])
-    motion_by_area = derived.get("last_motion_by_area")
-    if isinstance(motion_by_area, dict):
-        derived["last_motion_by_area"] = {
-            area: _truncate_iso(str(ts)) for area, ts in motion_by_area.items()
-        }
-    now_val = derived.get("now")
-    if isinstance(now_val, str):
-        derived["now"] = _truncate_iso(now_val)
+    # Phase 5: Compress derived context
+    entity_id_set = frozenset(e["entity_id"] for e in filtered)
+    derived = _reduce_derived(snapshot, entity_id_set)
 
-    return {
+    result: dict[str, Any] = {
         "entities": grouped_entities,
         "camera_activity": reduced_camera_activity,
         "derived": derived,
     }
+
+    # Phase 6: Second-pass trim if character budget exceeded
+    return _apply_budget_trim(result)
