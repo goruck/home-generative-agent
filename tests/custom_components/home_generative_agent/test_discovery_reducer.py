@@ -3,11 +3,17 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from custom_components.home_generative_agent.snapshot.discovery_reducer import (
+    _MAX_BASELINE_ENTITIES,
     _MAX_ENTITIES,
+    _MAX_RECOGNIZED_PEOPLE,
     _MAX_SUMMARY_CHARS,
+    _SECOND_PASS_SUMMARY_CHARS,
+    _TOKEN_BUDGET_CHARS,
+    _apply_budget_trim,
     _truncate_iso,
     reduce_snapshot_for_discovery,
 )
@@ -374,3 +380,236 @@ def test_domain_not_in_grouped_output() -> None:
     reduced = reduce_snapshot_for_discovery(snapshot)
     group = reduced["entities"][0]
     assert "domain" not in group
+
+
+# --- timezone dropped from derived ---
+
+
+def test_timezone_absent_from_derived() -> None:
+    snapshot = _make_snapshot()
+    reduced = reduce_snapshot_for_discovery(snapshot)
+    assert "timezone" not in reduced["derived"]
+
+
+# --- baseline_ready_entities trimming ---
+
+
+def test_baseline_ready_entities_intersected_with_filtered() -> None:
+    """Only entity IDs that survived domain filtering appear in baseline list."""
+    snapshot = _make_snapshot(
+        entities=[
+            _make_entity("lock.front_door", "lock", "locked", area="Front"),
+            _make_entity("light.kitchen", "light", "on", area="Kitchen"),
+        ],
+    )
+    # baseline_ready_entities is injected after schema validation in production.
+    snapshot["derived"]["baseline_ready_entities"] = [  # type: ignore[typeddict-unknown-key]
+        "lock.front_door",
+        "light.kitchen",
+    ]
+    reduced = reduce_snapshot_for_discovery(snapshot)
+    assert reduced["derived"]["baseline_ready_entities"] == ["lock.front_door"]
+
+
+def test_baseline_ready_entities_capped() -> None:
+    """baseline_ready_entities is capped at _MAX_BASELINE_ENTITIES."""
+    lock_entities = [
+        _make_entity(f"lock.door_{i}", "lock", "locked") for i in range(60)
+    ]
+    snapshot = _make_snapshot(entities=lock_entities)
+    # Inject baseline list that covers all 60 locks (all survive domain filter).
+    snapshot["derived"]["baseline_ready_entities"] = [  # type: ignore[typeddict-unknown-key]
+        f"lock.door_{i}" for i in range(60)
+    ]
+    reduced = reduce_snapshot_for_discovery(snapshot)
+    assert len(reduced["derived"]["baseline_ready_entities"]) <= _MAX_BASELINE_ENTITIES
+
+
+# --- Camera activity cap ---
+
+
+def test_camera_activity_capped_at_max() -> None:
+    cameras = [_make_camera(f"camera.cam_{i}") for i in range(30)]
+    snapshot = _make_snapshot(camera_activity=cameras)
+    reduced = reduce_snapshot_for_discovery(snapshot)
+    assert len(reduced["camera_activity"]) <= 20
+
+
+def test_camera_activity_cap_keeps_most_recent_camera() -> None:
+    cameras = [
+        _make_camera(
+            f"camera.cam_{i:02d}",
+            last_activity="2025-01-01T00:00:00+00:00",
+        )
+        for i in range(25)
+    ]
+    cameras.append(
+        _make_camera(
+            "camera.zz_recent",
+            last_activity="2025-01-01T01:00:00+00:00",
+        )
+    )
+    snapshot = _make_snapshot(camera_activity=cameras)
+
+    reduced = reduce_snapshot_for_discovery(snapshot)
+    retained_ids = {cam["camera_entity_id"] for cam in reduced["camera_activity"]}
+
+    assert "camera.zz_recent" in retained_ids
+    assert len(retained_ids) <= 20
+
+
+# --- Token budget / second-pass trim ---
+
+
+def _make_large_snapshot() -> Any:
+    """Build a synthetic large snapshot that exercises the budget gate."""
+    entities = [
+        _make_entity(
+            f"binary_sensor.window_{i}",
+            "binary_sensor",
+            "off",
+            area=f"Room{i % 10}",
+            device_class="window",
+            last_changed="2025-01-01T00:00:00+00:00",
+        )
+        for i in range(_MAX_ENTITIES)
+    ]
+    cameras = [
+        _make_camera(
+            f"camera.cam_{i}",
+            area=f"Room{i}",
+            summary="X" * _MAX_SUMMARY_CHARS,
+        )
+        for i in range(20)
+    ]
+    snapshot = _make_snapshot(entities=entities, camera_activity=cameras)
+    # Inject fields added post-validation in production.
+    snapshot["derived"]["baseline_ready_entities"] = [  # type: ignore[typeddict-unknown-key]
+        f"binary_sensor.window_{i}" for i in range(_MAX_ENTITIES)
+    ]
+    snapshot["derived"]["last_motion_by_area"] = {  # type: ignore[typeddict-item]
+        f"Room{i}": "2025-01-01T00:00:00" for i in range(20)
+    }
+    return snapshot
+
+
+def test_reduced_snapshot_stays_within_token_budget() -> None:
+    """The serialised reduced snapshot never exceeds _TOKEN_BUDGET_CHARS."""
+    snapshot = _make_large_snapshot()
+    reduced = reduce_snapshot_for_discovery(snapshot)
+    char_count = len(json.dumps(reduced, default=str, separators=(",", ":")))
+    assert char_count <= _TOKEN_BUDGET_CHARS, (
+        f"Snapshot too large: {char_count} chars (budget {_TOKEN_BUDGET_CHARS})"
+    )
+
+
+def test_second_pass_trims_last_changed_when_over_budget() -> None:
+    """_apply_budget_trim strips last_changed from groups when over budget."""
+    # Build a result dict that is guaranteed to exceed _TOKEN_BUDGET_CHARS.
+    big_groups = [
+        {
+            "entity_ids": [f"binary_sensor.window_{i}"],
+            "state": "off",
+            "area": f"Room{i}",
+            "device_class": "window",
+            "last_changed": "2025-01-01T00:00",
+        }
+        for i in range(500)
+    ]
+    oversized: dict[str, Any] = {
+        "entities": big_groups,
+        "camera_activity": [],
+        "derived": {
+            "now": "2025-01-01T00:00",
+            "is_night": False,
+            "anyone_home": True,
+            "people_home": [],
+            "people_away": [],
+            "last_motion_by_area": {},
+        },
+    }
+    assert len(json.dumps(oversized, separators=(",", ":"))) > _TOKEN_BUDGET_CHARS
+
+    trimmed = _apply_budget_trim(oversized)
+    for group in trimmed["entities"]:
+        assert "last_changed" not in group
+    # The trim may or may not reach budget depending on data volume; the key
+    # invariant is that last_changed was removed (pass 1 fired).
+
+
+def test_third_pass_truncates_camera_summaries_to_second_pass_chars() -> None:
+    """_apply_budget_trim truncates summaries to _SECOND_PASS_SUMMARY_CHARS in pass 2."""
+    # Build a dict that is over budget after pass 1 (no last_changed) but fits
+    # under budget once camera summaries are shortened to _SECOND_PASS_SUMMARY_CHARS.
+    # Use few entities (no last_changed to strip) and many cameras with long summaries.
+    cameras = [
+        {"camera_entity_id": f"camera.cam_{i}", "snapshot_summary": "X" * 300}
+        for i in range(100)
+    ]
+    over_after_pass1: dict[str, Any] = {
+        "entities": [],
+        "camera_activity": cameras,
+        "derived": {"now": "2025-01-01T00:00"},
+    }
+    assert (
+        len(json.dumps(over_after_pass1, separators=(",", ":"))) > _TOKEN_BUDGET_CHARS
+    )
+
+    trimmed = _apply_budget_trim(over_after_pass1)
+    for cam in trimmed["camera_activity"]:
+        summary = cam.get("snapshot_summary", "")
+        if summary:
+            assert len(summary) <= _SECOND_PASS_SUMMARY_CHARS + 3  # +3 for "..."
+
+
+def test_fourth_pass_drops_camera_summaries_when_still_over_budget() -> None:
+    """_apply_budget_trim drops all summaries if still over budget after passes 1 and 2."""
+    # Force over budget even after truncating summaries to _SECOND_PASS_SUMMARY_CHARS:
+    # use many cameras so the total camera payload stays large even with short summaries.
+    cameras = [
+        {
+            "camera_entity_id": f"camera.cam_{i:04d}",
+            "area": f"VeryLongAreaNameThatTakesUpSpace_{i:04d}",
+            "snapshot_summary": "Y" * 300,
+            "recognized_people": [f"Person{j:04d}" for j in range(20)],
+        }
+        for i in range(200)
+    ]
+    still_over: dict[str, Any] = {
+        "entities": [],
+        "camera_activity": cameras,
+        "derived": {"now": "2025-01-01T00:00"},
+    }
+    assert len(json.dumps(still_over, separators=(",", ":"))) > _TOKEN_BUDGET_CHARS
+
+    trimmed = _apply_budget_trim(still_over)
+    for cam in trimmed["camera_activity"]:
+        assert "snapshot_summary" not in cam
+
+
+def test_fourth_pass_caps_recognized_people_when_still_over_budget() -> None:
+    """_apply_budget_trim caps recognized_people per camera in pass 4."""
+    # Construct a payload that is over budget even after dropping all summaries:
+    # many cameras with large recognized_people lists and no summaries.
+    cameras = [
+        {
+            "camera_entity_id": f"camera.cam_{i:04d}",
+            "area": f"VeryLongAreaNameThatTakesUpSpace_{i:04d}",
+            "recognized_people": [f"PersonWithLongName{j:04d}" for j in range(50)],
+        }
+        for i in range(200)
+    ]
+    over_without_summaries: dict[str, Any] = {
+        "entities": [],
+        "camera_activity": cameras,
+        "derived": {"now": "2025-01-01T00:00"},
+    }
+    assert (
+        len(json.dumps(over_without_summaries, separators=(",", ":")))
+        > _TOKEN_BUDGET_CHARS
+    )
+
+    trimmed = _apply_budget_trim(over_without_summaries)
+    for cam in trimmed["camera_activity"]:
+        people = cam.get("recognized_people", [])
+        assert len(people) <= _MAX_RECOGNIZED_PEOPLE

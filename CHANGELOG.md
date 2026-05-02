@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.12.5] - 2026-04-29
+
+### Fixed
+
+- **Sentinel discovery snapshot stays within 20 k-char (~5 k token) budget** —
+  `reduce_snapshot_for_discovery()` previously produced snapshots up to ~32 k
+  tokens, routinely exceeding the 45 s discovery LLM timeout. Four changes tighten
+  the output:
+  - `_MAX_CAMERA_ACTIVITY` reduced 50 → 20; `_MAX_SUMMARY_CHARS` 150 → 80.
+  - Derived context compressed: `timezone` dropped (redundant with `is_night`),
+    `now` and motion timestamps truncated to minute precision,
+    `baseline_ready_entities` intersected with the filtered entity set and capped
+    at 30 IDs.
+  - Character-budget gate (`_TOKEN_BUDGET_CHARS = 20_000`) with four progressive
+    trim passes: (1) strip `last_changed` from entity groups, (2) truncate camera
+    summaries to 40 chars, (3) drop all camera summaries, (4) cap
+    `recognized_people` per camera at 5 entries — the fourth pass prevents
+    facial-recognition deployments from exceeding the budget after summaries are
+    dropped.
+  - Nine new tests cover timezone removal, `baseline_ready_entities` filtering
+    and cap, camera-count cap, budget compliance, and each of the four trim passes.
+
 ## [3.12.4] - 2026-04-28
 
 ### Fixed
