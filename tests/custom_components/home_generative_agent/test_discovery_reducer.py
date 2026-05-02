@@ -435,6 +435,29 @@ def test_camera_activity_capped_at_max() -> None:
     assert len(reduced["camera_activity"]) <= 20
 
 
+def test_camera_activity_cap_keeps_most_recent_camera() -> None:
+    cameras = [
+        _make_camera(
+            f"camera.cam_{i:02d}",
+            last_activity="2025-01-01T00:00:00+00:00",
+        )
+        for i in range(25)
+    ]
+    cameras.append(
+        _make_camera(
+            "camera.zz_recent",
+            last_activity="2025-01-01T01:00:00+00:00",
+        )
+    )
+    snapshot = _make_snapshot(camera_activity=cameras)
+
+    reduced = reduce_snapshot_for_discovery(snapshot)
+    retained_ids = {cam["camera_entity_id"] for cam in reduced["camera_activity"]}
+
+    assert "camera.zz_recent" in retained_ids
+    assert len(retained_ids) <= 20
+
+
 # --- Token budget / second-pass trim ---
 
 

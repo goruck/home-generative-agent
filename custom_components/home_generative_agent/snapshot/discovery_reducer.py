@@ -181,9 +181,17 @@ def _reduce_cameras(snapshot: FullStateSnapshot) -> list[dict[str, Any]]:
             entry["recognized_people"] = people
         reduced.append(entry)
 
-    reduced.sort(key=lambda item: item["camera_entity_id"])
+    reduced.sort(
+        key=lambda item: (
+            item.get("last_activity") is not None,
+            item.get("last_activity") or "",
+            item["camera_entity_id"],
+        ),
+        reverse=True,
+    )
     if len(reduced) > _MAX_CAMERA_ACTIVITY:
         reduced = reduced[:_MAX_CAMERA_ACTIVITY]
+    reduced.sort(key=lambda item: item["camera_entity_id"])
     return reduced
 
 
