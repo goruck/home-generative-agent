@@ -1043,7 +1043,7 @@ class NullChat:
         """Return self, as tool binding is a no-op for the fallback model."""
         return self
 
-    def with_config(self, **_cfg: Any) -> NullChat:
+    def with_config(self, _config: Any = None, **_cfg: Any) -> NullChat:
         """Return self, as this is a no-op."""
         return self
 
@@ -1163,6 +1163,66 @@ def _register_services(hass: HomeAssistant, entry: HGAConfigEntry) -> None:
     )
 
 
+async def _log_ollama_server_info(
+    hass: HomeAssistant,
+    urls_by_category: dict[str, str],
+) -> None:
+    """Query Ollama /api/ps at startup and log loaded models and swap-risk notes."""
+    client = get_async_client(hass)
+
+    # Log which categories share each URL so operators can spot contention.
+    url_to_cats: dict[str, list[str]] = {}
+    for cat, url in urls_by_category.items():
+        url_to_cats.setdefault(url, []).append(cat)
+    for url, cats in url_to_cats.items():
+        LOGGER.info(
+            "subsystem=model_server url=%s categories=%s",
+            url,
+            ",".join(sorted(cats)),
+        )
+
+    # Query /api/ps on each unique URL and log loaded models.
+    for url, cats in url_to_cats.items():
+        try:
+            async with asyncio.timeout(5.0):
+                resp = await client.get(f"{url.rstrip('/')}/api/ps")
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as err:  # noqa: BLE001
+            LOGGER.warning(
+                "subsystem=model_server url=%s probe_failed reason=%s",
+                url,
+                err,
+            )
+            continue
+
+        models = data.get("models", [])
+        if not models:
+            LOGGER.info("subsystem=model_server url=%s loaded_models=none", url)
+            continue
+
+        for m in models:
+            name = m.get("name", "unknown")
+            size_mb = int(m.get("size", 0)) // (1024 * 1024)
+            vram_mb = int(m.get("size_vram", 0)) // (1024 * 1024)
+            LOGGER.info(
+                "subsystem=model_server url=%s model=%s size_mb=%d vram_mb=%d",
+                url,
+                name,
+                size_mb,
+                vram_mb,
+            )
+
+        if len(cats) > 1:
+            LOGGER.info(
+                "subsystem=model_server url=%s shared_by=%d categories=%s "
+                "note=model_swapping_may_add_latency",
+                url,
+                len(cats),
+                ",".join(sorted(cats)),
+            )
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:  # noqa: C901, PLR0912, PLR0915
     """Set up Home Generative Agent from a config entry."""
     hass.data.setdefault(DOMAIN, {})
@@ -1173,6 +1233,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
     _utils_mod._chat_active_count = 0  # noqa: SLF001
     _utils_mod._chat_idle.set()  # noqa: SLF001
+    _utils_mod._video_active_count = 0  # noqa: SLF001
+    _utils_mod._video_idle.set()  # noqa: SLF001
     _utils_mod._sentinel_last_run = 0.0  # noqa: SLF001
     _utils_mod._sentinel_first_defer = 0.0  # noqa: SLF001
     _utils_mod._sentinel_defer_count = 0  # noqa: SLF001
@@ -1902,6 +1964,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         hass.data[DOMAIN]["http_registered"] = True
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    if ollama_any_ok:
+        ollama_probe_urls: dict[str, str] = {
+            "chat": ollama_chat_url,
+            "vlm": ollama_vlm_url,
+            "summarization": ollama_sum_url,
+        }
+        if embedding_provider not in {"openai", "openai_compatible", "gemini"}:
+            ollama_probe_urls["embeddings"] = base_ollama_url
+        hass.async_create_task(_log_ollama_server_info(hass, ollama_probe_urls))
 
     if options.get(CONF_VIDEO_ANALYZER_MODE) != "disable":
         video_analyzer.start()

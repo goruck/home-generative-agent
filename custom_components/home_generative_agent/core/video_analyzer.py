@@ -27,8 +27,11 @@ from PIL import Image
 
 from ..agent.tools import analyze_image  # noqa: TID252
 from ..const import (  # noqa: TID252
+    CONF_MODEL_PROVIDER_UNCONTENDED,
     CONF_NOTIFY_SERVICE,
     CONF_VIDEO_ANALYZER_MODE,
+    CONF_VIDEO_MODEL_SEMAPHORE,
+    RECOMMENDED_VIDEO_MODEL_SEMAPHORE,
     SIGNAL_HGA_NEW_LATEST,
     SIGNAL_HGA_RECOGNIZED,
     VIDEO_ANALYZER_FACE_CROP,
@@ -43,11 +46,16 @@ from ..const import (  # noqa: TID252
     VIDEO_ANALYZER_SYSTEM_MESSAGE,
     VIDEO_ANALYZER_TIME_OFFSET,
     VIDEO_ANALYZER_TRIGGER_ON_MOTION,
+    VIDEO_SUMMARY_NUM_PREDICT,
+    VIDEO_VLM_NUM_PREDICT,
 )
 from .utils import (
     discover_mobile_notify_service,
     dispatch_on_loop,
     extract_final,
+    is_edge_deployment,
+    local_video_session,
+    wait_for_chat_idle,
 )
 from .video_helpers import (
     apply_name_substitution,
@@ -84,6 +92,12 @@ _FRAME_DEADLINE_SEC: Final[int] = 600  # skip frames older than this
 _SUMMARY_TIMEOUT_SEC: Final[int] = 60  # was 35
 _FACE_TIMEOUT_SEC: Final[int] = 10  # was 10 (keep)
 _VISION_TIMEOUT_SEC: Final[int] = 90  # was 30
+_VIDEO_MODEL_SEMAPHORE_WAIT_SEC: Final[int] = (
+    30  # max wait for semaphore before dropping
+)
+_VIDEO_QUEUE_BACKLOG_THRESHOLD: Final[int] = (
+    2  # drop stale frames when queue exceeds this
+)
 # --- Uniqueness gate tuning ---
 _UNIQUENESS_ENABLED: Final[bool] = False
 _UNIQUENESS_HAMMING_MAX: Final[int] = 4  # <= this => "too similar" (tune 4-10)
@@ -96,13 +110,21 @@ _METRICS_LAT_HISTORY: Final[int] = 512  # keep up to 512 lat samples per camera
 
 
 @dataclass
+class _SnapshotItem:
+    path: Path
+    enqueued: float  # monotonic() at enqueue time
+
+
+@dataclass
 class _Metrics:
     captured: int = 0
     enqueued: int = 0
     skipped_duplicate: int = 0
     dropped_stale: int = 0
+    dropped_backlog: int = 0
     analyzed: int = 0
     timeouts: int = 0
+    semaphore_timeouts: int = 0
     # PEP 585: deque is subscriptable; keep in a field to avoid shared default
     lat_ms: deque[float] = field(
         default_factory=lambda: deque(maxlen=_METRICS_LAT_HISTORY)
@@ -116,7 +138,7 @@ class VideoAnalyzer:
         """Initialize the video analyzer."""
         self.hass = hass
         self.entry = entry
-        self._snapshot_queues: dict[str, asyncio.Queue[Path]] = {}
+        self._snapshot_queues: dict[str, asyncio.Queue[_SnapshotItem]] = {}
         self._retention_deques: dict[str, deque[Path]] = {}
         self._active_queue_tasks: dict[str, asyncio.Task] = {}
         self._initialized_dirs: set[str] = set()
@@ -136,6 +158,8 @@ class VideoAnalyzer:
         self._metrics_job_cancel: Callable[[], None] | None = (
             None  # hourly report handle
         )
+        # Initialized in start() once runtime_data.options is available.
+        self._video_model_sem: asyncio.Semaphore | None = None
 
     def _pctl(self, values: Iterable[float], q: float) -> float:
         """Nearest-rank percentile for a finite iterable."""
@@ -160,10 +184,14 @@ class VideoAnalyzer:
             m.skipped_duplicate += n
         elif key == "dropped_stale":
             m.dropped_stale += n
+        elif key == "dropped_backlog":
+            m.dropped_backlog += n
         elif key == "analyzed":
             m.analyzed += n
         elif key == "timeouts":
             m.timeouts += n
+        elif key == "semaphore_timeout":
+            m.semaphore_timeouts += n
         else:
             # ignore unknown keys silently to avoid noisy logs in prod
             return
@@ -182,7 +210,8 @@ class VideoAnalyzer:
             msg = (
                 "[%s] Metrics (last interval): "
                 "captured=%d enqueued=%d skipped_duplicate=%d "
-                "dropped_stale=%d analyzed=%d timeouts=%d "
+                "dropped_stale=%d dropped_backlog=%d analyzed=%d "
+                "timeouts=%d semaphore_timeouts=%d "
                 "avg_latency_ms=%.1f p95_latency_ms=%.1f"
             )
             LOGGER.info(
@@ -192,8 +221,10 @@ class VideoAnalyzer:
                 m.enqueued,
                 m.skipped_duplicate,
                 m.dropped_stale,
+                m.dropped_backlog,
                 m.analyzed,
                 m.timeouts,
+                m.semaphore_timeouts,
                 avg_ms,
                 p95_ms,
             )
@@ -203,8 +234,10 @@ class VideoAnalyzer:
             m.enqueued = 0
             m.skipped_duplicate = 0
             m.dropped_stale = 0
+            m.dropped_backlog = 0
             m.analyzed = 0
             m.timeouts = 0
+            m.semaphore_timeouts = 0
             m.lat_ms.clear()
 
     def protect_notify_image(self, p: Path, ttl_sec: int = 1800) -> None:
@@ -220,9 +253,9 @@ class VideoAnalyzer:
             self._notify_protected.pop(k, None)
         return self._notify_protected.get(p, 0) > now
 
-    def _get_snapshot_queue(self, camera_id: str) -> asyncio.Queue[Path]:
+    def _get_snapshot_queue(self, camera_id: str) -> asyncio.Queue[_SnapshotItem]:
         if camera_id not in self._snapshot_queues:
-            queue: asyncio.Queue[Path] = asyncio.Queue(maxsize=_QUEUE_MAXSIZE)
+            queue: asyncio.Queue[_SnapshotItem] = asyncio.Queue(maxsize=_QUEUE_MAXSIZE)
             self._snapshot_queues[camera_id] = queue
             task = self.hass.async_create_task(self._snapshot_worker(camera_id))
             self._active_queue_tasks[camera_id] = task
@@ -230,17 +263,34 @@ class VideoAnalyzer:
 
     async def _get_batch(
         self,
-        queue: asyncio.Queue[Path],
+        queue: asyncio.Queue[_SnapshotItem],
         camera_id: str,
         *,
         max_batch: int = _MAX_BATCH,
     ) -> list[Path]:
-        first: Path = await queue.get()
-        batch: list[Path] = [first]
+        first: _SnapshotItem = await queue.get()
 
-        n: int = max(max_batch - 1, 0)
-        with contextlib.suppress(asyncio.QueueEmpty):
-            batch.extend(queue.get_nowait() for _ in range(n))
+        # Backlog policy: when the queue is deep, keep only the newest frame.
+        if queue.qsize() > _VIDEO_QUEUE_BACKLOG_THRESHOLD:
+            pending: list[_SnapshotItem] = [first]
+            with contextlib.suppress(asyncio.QueueEmpty):
+                while True:
+                    pending.append(queue.get_nowait())
+            kept = max(pending, key=lambda it: it.enqueued)
+            dropped = len(pending) - 1
+            self._m_inc(camera_id, "dropped_backlog", dropped)
+            LOGGER.debug(
+                "video_backlog camera=%s dropped=%d kept=1",
+                camera_id,
+                dropped,
+            )
+            batch: list[Path] = [kept.path]
+        else:
+            batch = [first.path]
+            n: int = max(max_batch - 1, 0)
+            with contextlib.suppress(asyncio.QueueEmpty):
+                for _ in range(n):
+                    batch.append(queue.get_nowait().path)
 
         LOGGER.debug(
             "[%s] Start t=%s batch=%d qsize=%d",
@@ -285,20 +335,77 @@ class VideoAnalyzer:
         )
         return frame_descriptions, recognized
 
-    async def _summarize(
+    async def _summarize(  # noqa: PLR0911
         self, camera_id: str, frame_descriptions: list[dict[str, list[str]]]
     ) -> str | None:
         if not frame_descriptions:
             return None
-        try:
-            async with asyncio.timeout(_SUMMARY_TIMEOUT_SEC):
-                msg: str = await self._generate_summary(frame_descriptions)
-        except TimeoutError as exc:
-            LOGGER.warning("[%s] Summary timed out: %s", camera_id, exc)
-            return None
+
+        sum_deployment = self.entry.runtime_data.model_deployments.get(
+            "summarization", "edge"
+        )
+        uncontended = self.entry.runtime_data.options.get(
+            CONF_MODEL_PROVIDER_UNCONTENDED, False
+        )
+        use_gate = is_edge_deployment(sum_deployment) and not uncontended
+
+        if use_gate:
+            sem = self._video_model_sem
+            if sem is None:
+                msg = "Video model semaphore not initialized."
+                raise RuntimeError(msg)
+            async with local_video_session(sum_deployment):
+                # Sentinel defers from here; chat must clear before the model call.
+                if not await wait_for_chat_idle(_VIDEO_MODEL_SEMAPHORE_WAIT_SEC):
+                    LOGGER.debug("video_chat_wait summary result=timeout")
+                    return None
+                t_sem = monotonic()
+                try:
+                    async with asyncio.timeout(_VIDEO_MODEL_SEMAPHORE_WAIT_SEC):
+                        await sem.acquire()
+                except TimeoutError:
+                    LOGGER.debug(
+                        "video_semaphore summary wait=%ds result=timeout",
+                        _VIDEO_MODEL_SEMAPHORE_WAIT_SEC,
+                    )
+                    self._m_inc(camera_id, "semaphore_timeout")
+                    return None
+                LOGGER.debug(
+                    "video_semaphore summary wait=%.1fs result=acquired",
+                    monotonic() - t_sem,
+                )
+                t_model = monotonic()
+                try:
+                    try:
+                        async with asyncio.timeout(_SUMMARY_TIMEOUT_SEC):
+                            summary_text: str = await self._generate_summary(
+                                frame_descriptions
+                            )
+                    except TimeoutError as exc:
+                        LOGGER.warning("[%s] Summary timed out: %s", camera_id, exc)
+                        return None
+                    except ValueError as exc:
+                        LOGGER.warning("[%s] Summary failed: %s", camera_id, exc)
+                        return None
+                finally:
+                    sem.release()
+                LOGGER.debug(
+                    "video_model op=summary elapsed=%.1fs result=ok",
+                    monotonic() - t_model,
+                )
         else:
-            LOGGER.debug("[%s] Video analysis: %s", camera_id, msg)
-            return msg
+            try:
+                async with asyncio.timeout(_SUMMARY_TIMEOUT_SEC):
+                    summary_text = await self._generate_summary(frame_descriptions)
+            except TimeoutError as exc:
+                LOGGER.warning("[%s] Summary timed out: %s", camera_id, exc)
+                return None
+            except ValueError as exc:
+                LOGGER.warning("[%s] Summary failed: %s", camera_id, exc)
+                return None
+
+        LOGGER.debug("[%s] Video analysis: %s", camera_id, summary_text)
+        return summary_text
 
     async def _finalize(self, camera_id: str, batch: list[Path], msg: str) -> None:
         await self._handle_notification(camera_id, msg, batch)
@@ -431,9 +538,16 @@ class VideoAnalyzer:
             SystemMessage(content=VIDEO_ANALYZER_SYSTEM_MESSAGE),
             HumanMessage(content=prompt),
         ]
-        model = self.entry.runtime_data.summarization_model
-        async with asyncio.timeout(_SUMMARY_TIMEOUT_SEC):
-            summary = await model.ainvoke(messages)
+        sum_deployment = self.entry.runtime_data.model_deployments.get(
+            "summarization", "edge"
+        )
+        base_sum = self.entry.runtime_data.summarization_model
+        sum_cfg = dict(getattr(base_sum, "config", {}).get("configurable", {}))
+        sum_cfg["num_predict"] = VIDEO_SUMMARY_NUM_PREDICT
+        if is_edge_deployment(sum_deployment):
+            sum_cfg["reasoning"] = False
+        model = base_sum.with_config(config={"configurable": sum_cfg})
+        summary = await model.ainvoke(messages)
         LOGGER.debug("Raw video analyzer summary: %s", summary)
 
         text = extract_final(getattr(summary, "content", "") or "", max_chars=150)
@@ -612,17 +726,17 @@ class VideoAnalyzer:
         else:
             LOGGER.exception("[%s] Unexpected error analyzing %s.", camera_id, path)
 
-    def _drain_queue(self, queue: asyncio.Queue[Path]) -> list[Path]:
+    def _drain_queue(self, queue: asyncio.Queue[_SnapshotItem]) -> list[Path]:
         """Drain all items from the asyncio queue into a list."""
         batch: list[Path] = []
         try:
             while True:
-                batch.append(queue.get_nowait())
+                batch.append(queue.get_nowait().path)
         except asyncio.QueueEmpty:
             pass
         return batch
 
-    async def _process_snapshot(
+    async def _process_snapshot(  # noqa: PLR0911, PLR0912, PLR0915
         self, path: Path, camera_id: str, prev_text: str | None = None
     ) -> dict[str, list[str]]:
         """Process a single snapshot: recognize faces and describe the frame."""
@@ -655,14 +769,67 @@ class VideoAnalyzer:
                 faces_in_frame = []
 
             try:
-                vision_model = self.entry.runtime_data.vision_model
-                async with asyncio.timeout(_VISION_TIMEOUT_SEC):
-                    frame_description = await analyze_image(
-                        vision_model,
-                        data,
-                        None,
-                        prev_text=prev_text,
-                    )
+                vlm_deployment = self.entry.runtime_data.model_deployments.get(
+                    "vlm", "edge"
+                )
+                uncontended = self.entry.runtime_data.options.get(
+                    CONF_MODEL_PROVIDER_UNCONTENDED, False
+                )
+                use_gate = is_edge_deployment(vlm_deployment) and not uncontended
+                base_vlm = self.entry.runtime_data.vision_model
+                vlm_cfg = dict(getattr(base_vlm, "config", {}).get("configurable", {}))
+                vlm_cfg["num_predict"] = VIDEO_VLM_NUM_PREDICT
+                if is_edge_deployment(vlm_deployment):
+                    vlm_cfg["reasoning"] = False
+                vision_model = base_vlm.with_config(config={"configurable": vlm_cfg})
+                if use_gate:
+                    sem = self._video_model_sem
+                    if sem is None:
+                        return {}
+                    async with local_video_session(vlm_deployment):
+                        # Sentinel defers; chat must clear before model call.
+                        if not await wait_for_chat_idle(
+                            _VIDEO_MODEL_SEMAPHORE_WAIT_SEC
+                        ):
+                            LOGGER.debug(
+                                "video_chat_wait camera=%s result=timeout", camera_id
+                            )
+                            return {}
+                        t_sem = monotonic()
+                        try:
+                            async with asyncio.timeout(_VIDEO_MODEL_SEMAPHORE_WAIT_SEC):
+                                await sem.acquire()
+                        except TimeoutError:
+                            LOGGER.debug(
+                                "video_semaphore camera=%s wait=%ds result=timeout",
+                                camera_id,
+                                _VIDEO_MODEL_SEMAPHORE_WAIT_SEC,
+                            )
+                            self._m_inc(camera_id, "semaphore_timeout")
+                            return {}
+                        LOGGER.debug(
+                            "video_semaphore camera=%s wait=%.1fs result=acquired",
+                            camera_id,
+                            monotonic() - t_sem,
+                        )
+                        t_model = monotonic()
+                        try:
+                            async with asyncio.timeout(_VISION_TIMEOUT_SEC):
+                                frame_description = await analyze_image(
+                                    vision_model, data, None, prev_text=prev_text
+                                )
+                        finally:
+                            sem.release()
+                        LOGGER.debug(
+                            "video_model camera=%s op=frame elapsed=%.1fs result=ok",
+                            camera_id,
+                            monotonic() - t_model,
+                        )
+                else:
+                    async with asyncio.timeout(_VISION_TIMEOUT_SEC):
+                        frame_description = await analyze_image(
+                            vision_model, data, None, prev_text=prev_text
+                        )
             except TimeoutError as exc:
                 self._m_inc(camera_id, "timeouts")
                 self._log_snapshot_error(camera_id, path, exc)
@@ -761,7 +928,9 @@ class VideoAnalyzer:
 
     async def _process_snapshot_queue(self, camera_id: str) -> None:
         """Flush any queued snapshots for a camera as one ordered batch."""
-        queue: asyncio.Queue[Path] | None = self._snapshot_queues.get(camera_id)
+        queue: asyncio.Queue[_SnapshotItem] | None = self._snapshot_queues.get(
+            camera_id
+        )
         if not queue:
             return
 
@@ -912,7 +1081,9 @@ class VideoAnalyzer:
                 )
                 return None
 
-            await put_with_backpressure(queue, path)
+            await put_with_backpressure(
+                queue, _SnapshotItem(path=path, enqueued=monotonic())
+            )
             self._m_inc(camera_id, "enqueued")
             LOGGER.debug(
                 "[%s] Enqueue t=%s %s", camera_id, dt_util.utcnow().isoformat(), path
@@ -1001,6 +1172,22 @@ class VideoAnalyzer:
             LOGGER.warning("VideoAnalyzer already started.")
             return
 
+        # Build the video model semaphore now that runtime_data.options is set.
+        sem_size = max(
+            1,
+            int(
+                self.entry.runtime_data.options.get(
+                    CONF_VIDEO_MODEL_SEMAPHORE, RECOMMENDED_VIDEO_MODEL_SEMAPHORE
+                )
+            ),
+        )
+        self._video_model_sem = asyncio.Semaphore(sem_size)
+        LOGGER.info(
+            "subsystem=video_analyzer video_model_semaphore=%d uncontended=%s",
+            sem_size,
+            self.entry.runtime_data.options.get(CONF_MODEL_PROVIDER_UNCONTENDED, False),
+        )
+
         # Create a reusable httpx client for face API
         if self._httpx_client is None:
             self._httpx_client = httpx.AsyncClient(timeout=_FACE_TIMEOUT_SEC)
@@ -1046,6 +1233,10 @@ class VideoAnalyzer:
             task.cancel()
             tasks_to_await.append(task)
         self._active_queue_tasks.clear()
+
+        # Orphan the semaphore reference; tasks already cancelled above will
+        # absorb CancelledError and exit — not released by this None assignment.
+        self._video_model_sem = None
 
         try:
             self._cancel_track()
