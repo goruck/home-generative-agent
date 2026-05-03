@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.12.6] - 2026-05-03
+
+### Fixed
+
+- **Sentinel LLM timeouts on Qwen3-family models** — Qwen3.5:35b defaults to
+  thinking mode (generating `<think>…</think>` chains) when `ChatOllama.reasoning`
+  is `None`. `reasoning_field()` now passes `{"reasoning": False}` instead of `{}`
+  when reasoning is disabled, explicitly suppressing the default. This was the root
+  cause of repeated 20–60 s timeouts on Sentinel explain and discovery calls.
+- **Discovery prompt token bloat** — `_existing_semantic_context()` could return up
+  to 400 semantic keys (200 proposals + 200 discovery records), adding ~16 K chars
+  of exclusion context on top of the 20 K snapshot budget. Keys sent to the LLM are
+  now capped at 60 (`_MAX_SEMANTIC_KEYS_IN_PROMPT`). The post-hoc
+  `_filter_novel_candidates()` filter catches any duplicates that slip through.
+- **Sentinel explain timeout too tight** — `_EXPLAIN_LLM_TIMEOUT_S` raised 20 → 30 s
+  to give the model headroom over the observed ~20 s inference time.
+- **Discovery timeout too tight** — `_DISCOVERY_LLM_TIMEOUT_S` raised 45 → 60 s.
+- **Opaque timeout log** — `async_explain` now logs
+  `"LLM explanation timed out after 30s; skipping."` instead of the empty-string
+  warning produced when `TimeoutError` was bundled with other exceptions.
+- **Discovery prompt observability** — a new `DEBUG` log line reports prompt char
+  counts (`snapshot=N, keys=M/total`) each discovery cycle.
+
 ## [3.12.5] - 2026-04-29
 
 ### Fixed
