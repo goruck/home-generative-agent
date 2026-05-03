@@ -364,7 +364,12 @@ RECOMMENDED_OLLAMA_VLM: VLM_OLLAMA_SUPPORTED = "qwen3-vl:8b"
 CONF_OLLAMA_VLM_KEEPALIVE = "ollama_vlm_keepalive"
 RECOMMENDED_OLLAMA_VLM_KEEPALIVE: KeepAliveSeconds = 300
 CONF_OLLAMA_VLM_CONTEXT_SIZE = "ollama_vlm_context_size"
-VLM_NUM_PREDICT = -2  # Ollama only, -2 = fill context
+VLM_NUM_PREDICT = (
+    -2
+)  # Ollama only, -2 = fill context; do not change — governs ad-hoc agent image analysis
+VIDEO_VLM_NUM_PREDICT: int = (
+    256  # video-role token limit (see video-sentinel-priority-plan.md)
+)
 VLM_REPEAT_PENALTY = 1.05  # Ollama only
 VLM_MIRO_STAT = 0  # Ollama only
 
@@ -455,7 +460,12 @@ RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL: SUMMARIZATION_MODEL_OLLAMA_SUPPORTED = (
 CONF_OLLAMA_SUMMARIZATION_KEEPALIVE = "ollama_summarization_keepalive"
 RECOMMENDED_OLLAMA_SUMMARIZATION_KEEPALIVE: KeepAliveSeconds = 300
 CONF_OLLAMA_SUMMARIZATION_CONTEXT_SIZE = "ollama_summarization_context_size"
-SUMMARIZATION_MODEL_PREDICT = -2  # Ollama only, -2 = fill context
+SUMMARIZATION_MODEL_PREDICT = (
+    -2
+)  # Ollama only, -2 = fill context; do not change — governs conversation summarization
+VIDEO_SUMMARY_NUM_PREDICT: int = (
+    128  # video-role token limit (see video-sentinel-priority-plan.md)
+)
 SUMMARIZATION_MODEL_REPEAT_PENALTY = 1.05  # Ollama only
 SUMMARIZATION_MIRO_STAT = 0  # Ollama only
 
@@ -523,6 +533,20 @@ EMBEDDING_MODEL_CTX = 512
 EMBEDDING_MODEL_PROMPT_TEMPLATE = """
 Represent this sentence for searching relevant passages: {query}
 """
+
+# ---------------- Model provider contention gate ----------------
+# When True, the integration bypasses the video semaphore, video foreground
+# context, and Sentinel deferral.  Set True for dedicated high-capacity servers
+# that do not need local resource protection.
+# Currently read from global entry options (not per-provider subentry).
+CONF_MODEL_PROVIDER_UNCONTENDED = "model_provider_uncontended"
+RECOMMENDED_MODEL_PROVIDER_UNCONTENDED: bool = False
+
+# ---------------- Video model concurrency ----------------
+# Semaphore size for concurrent video model calls (VLM + summary) per entry.
+# Read from the video feature config subentry; this is the fallback default.
+CONF_VIDEO_MODEL_SEMAPHORE = "video_model_semaphore"
+RECOMMENDED_VIDEO_MODEL_SEMAPHORE: int = 1
 
 # ---------------- OpenAI-compatible endpoint (edge) ----------------
 CONF_OPENAI_COMPATIBLE_BASE_URL = "openai_compatible_base_url"

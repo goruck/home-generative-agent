@@ -147,30 +147,39 @@ def configured_ollama_urls(
 # ---------------------------------------------------------------------------
 # Deployment-aware admission control
 # ---------------------------------------------------------------------------
-# Policy:
-#   Chat (edge)      — marks the full turn active via local_chat_session so
-#                      Sentinel can observe chat activity and defer.
-#   Sentinel (edge)  — calls sentinel_admission before every LLM invocation;
-#                      defers (skips) if chat is active.
-#   Video / embeds   — no chat gate; video tuning constants are the surface
-#                      for managing GPU contention on weak hardware.
-#   Cloud providers  — bypass all local gates.
+# Priority order (highest to lowest):
+#   1. Chat (edge)      — marks the full turn active via local_chat_session.
+#                         Cancels in-flight Sentinel LLM tasks on entry.
+#   2. Video (edge)     — marks video model calls active via local_video_session.
+#                         Defers Sentinel LLM tasks for the entire duration:
+#                         chat-wait + semaphore-wait + model-call.  This is
+#                         intentional — video reserves its slot from entry so
+#                         Sentinel cannot interleave with a pending video turn.
+#   3. Sentinel (edge)  — calls sentinel_admission before every LLM invocation;
+#                         defers if chat OR video is active.
+#   Cloud providers     — bypass all local gates.
 # ---------------------------------------------------------------------------
 
 _chat_idle = asyncio.Event()
 _chat_idle.set()  # "no chat active" by default
 _chat_active_count: int = 0
 
+_video_idle = asyncio.Event()
+_video_idle.set()  # "no video active" by default
+_video_active_count: int = 0
+
 _sentinel_last_run: float = 0.0  # monotonic timestamp of last admitted run
 _sentinel_first_defer: float = 0.0
 _sentinel_defer_count: int = 0
+_sentinel_admissions_deferred_chat: int = 0
+_sentinel_admissions_deferred_video: int = 0
 _SENTINEL_STARVATION_WARN_S: float = 300.0
 _SENTINEL_CANCEL_WAIT_S: float = 2.0
 _sentinel_llm_tasks: set[asyncio.Future[Any]] = set()
 
-# Public constant: maximum seconds a Sentinel LLM call waits for chat to become
-# idle before deferring.  All callers (triage, discovery, explain) use the same
-# value so policy changes need only one edit.
+# Public constant: maximum seconds a Sentinel LLM call waits for chat or video
+# to become idle before deferring.  All callers (triage, discovery, explain)
+# use the same value so policy changes need only one edit.
 SENTINEL_ADMISSION_TIMEOUT_S: float = 2.0
 
 
@@ -219,6 +228,51 @@ async def local_chat_session(
         )
 
 
+@contextlib.asynccontextmanager
+async def local_video_session(deployment: str) -> AsyncIterator[None]:
+    """
+    Mark a local video model call active for its duration.
+
+    Clears _video_idle so Sentinel admission can detect and defer.
+    Reference-counted: deferral lifts only when the last concurrent video
+    context exits.  No-op when CONF_MODEL_PROVIDER_UNCONTENDED is True
+    (caller is responsible for checking) or for cloud deployments.
+    The try/finally guarantees the flag resets on cancellation or exception.
+    """
+    if not is_edge_deployment(deployment):
+        yield
+        return
+    global _video_active_count  # noqa: PLW0603
+    _video_active_count += 1
+    _video_idle.clear()
+    try:
+        LOGGER.debug("Video session active (deployment=%s).", deployment)
+        yield
+    finally:
+        _video_active_count -= 1
+        if _video_active_count == 0:
+            _video_idle.set()
+        LOGGER.debug("Video session ended (deployment=%s).", deployment)
+
+
+def video_is_active() -> bool:
+    """Return True if any video model call is currently in progress."""
+    return not _video_idle.is_set()
+
+
+async def wait_for_chat_idle(timeout_s: float) -> bool:
+    """Wait for chat to become idle. Returns True when idle, False on timeout."""
+    if _chat_idle.is_set():
+        return True
+    try:
+        async with asyncio.timeout(timeout_s):
+            await _chat_idle.wait()
+    except TimeoutError:
+        return False
+    else:
+        return True
+
+
 async def _cancel_active_sentinel_llm_tasks(category: str) -> None:
     """Cancel in-flight Sentinel LLM HTTP calls before foreground chat proceeds."""
     tasks = [task for task in _sentinel_llm_tasks if not task.done()]
@@ -254,14 +308,15 @@ async def sentinel_admission(
     """
     Return True if a Sentinel LLM call may proceed.
 
-    Edge: waits up to timeout_s for chat to become idle; returns False if still
-    active so the caller can defer the pass.
+    Edge: waits up to timeout_s for both chat and video to become idle; returns
+    False if either is still active so the caller can defer the pass.
     Cloud: always admitted.
     Tracks last-admitted timestamp and consecutive deferral count for health
     monitoring; logs a WARNING when Sentinel has been starved beyond the
     starvation threshold.
     """
     global _sentinel_first_defer, _sentinel_last_run, _sentinel_defer_count  # noqa: PLW0603
+    global _sentinel_admissions_deferred_chat, _sentinel_admissions_deferred_video  # noqa: PLW0603
     if not is_edge_deployment(deployment):
         _sentinel_last_run = time.monotonic()
         _sentinel_first_defer = 0.0
@@ -272,11 +327,25 @@ async def sentinel_admission(
             health_stats["sentinel_admission_consecutive_deferrals"] = 0
             health_stats["sentinel_admission_starved_for_s"] = 0
         return True
+
     try:
         async with asyncio.timeout(timeout_s):
-            await _chat_idle.wait()
+            # Both events must be set (idle) before Sentinel may proceed.
+            await asyncio.gather(_chat_idle.wait(), _video_idle.wait())
     except TimeoutError:
+        # Re-evaluate after timeout: both could still be blocking.
+        chat_blocking = not _chat_idle.is_set()
+        video_blocking = not _video_idle.is_set()
+        defer_reason = (
+            "chat_and_video_active"
+            if chat_blocking and video_blocking
+            else ("chat_active" if chat_blocking else "video_active")
+        )
         _sentinel_defer_count += 1
+        if chat_blocking:
+            _sentinel_admissions_deferred_chat += 1
+        if video_blocking:
+            _sentinel_admissions_deferred_video += 1
         now = time.monotonic()
         if _sentinel_first_defer <= 0:
             _sentinel_first_defer = now
@@ -303,8 +372,10 @@ async def sentinel_admission(
             )
         else:
             LOGGER.debug(
-                "Sentinel %s deferred (chat active); consecutive deferrals=%d.",
+                "sentinel_admission category=%s decision=deferred reason=%s "
+                "consecutive_deferrals=%d",
                 category,
+                defer_reason,
                 _sentinel_defer_count,
             )
         return False
@@ -316,7 +387,20 @@ async def sentinel_admission(
         health_stats["sentinel_admission_degraded_category"] = None
         health_stats["sentinel_admission_consecutive_deferrals"] = 0
         health_stats["sentinel_admission_starved_for_s"] = 0
+    LOGGER.debug("sentinel_admission category=%s decision=admitted", category)
     return True
+
+
+def sentinel_admission_counters() -> dict[str, int]:
+    """Return and reset Sentinel admission deferral counters since last call."""
+    global _sentinel_admissions_deferred_chat, _sentinel_admissions_deferred_video  # noqa: PLW0603
+    result = {
+        "deferred_chat": _sentinel_admissions_deferred_chat,
+        "deferred_video": _sentinel_admissions_deferred_video,
+    }
+    _sentinel_admissions_deferred_chat = 0
+    _sentinel_admissions_deferred_video = 0
+    return result
 
 
 async def run_sentinel_llm_call(  # noqa: PLR0913

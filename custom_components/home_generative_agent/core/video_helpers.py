@@ -169,14 +169,14 @@ def order_batch(batch: list[Path]) -> list[tuple[Path, int]]:
     return sorted(((p, epoch_from_path(p)) for p in batch), key=lambda x: x[1])
 
 
-async def put_with_backpressure(q: asyncio.Queue[Path], p: Path) -> None:
+async def put_with_backpressure[T](q: asyncio.Queue[T], item: T) -> None:
     """Put item into queue, dropping oldest if full."""
     if q.full():
         with contextlib.suppress(asyncio.QueueEmpty):
             _ = q.get_nowait()
             q.task_done()
-        _LOGGER.debug("Queue full; dropped oldest to enqueue %s", p)
-    await q.put(p)
+        _LOGGER.debug("Queue full; dropped oldest item.")
+    await q.put(item)
 
 
 def _camera_fs_dir(root: Path, camera_id: str) -> Path:
