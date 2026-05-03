@@ -201,7 +201,9 @@ Sentinel is a singleton service per Home Generative Agent config entry. Configur
 
 Important: The LLM never executes actions or directly decides runtime safety behavior. Detection and actuation remain deterministic. Triage can suppress low-value notifications but cannot alter any finding field or gate execution.
 
-**Admission control:** On edge deployments (Ollama, local OpenAI-compatible servers), Sentinel LLM calls (triage, discovery, explain) defer when a chat turn is active, so the GPU is not competed for during a live conversation. Sentinel resumes immediately once the chat turn completes. Cloud providers (OpenAI, Gemini, Anthropic) are always admitted — they use remote inference and are unaffected by local GPU load. When deferrals persist for more than 300 s, the `sentinel_health` sensor transitions to `degraded` and a WARNING is logged.
+**Admission control:** On edge deployments (Ollama, local OpenAI-compatible servers), Sentinel LLM calls (triage, discovery, explain) defer when a chat turn or a video model call is active, so the GPU is not competed for during live interactions. Priority order is: chat (highest) > video > Sentinel. Chat cancels in-flight Sentinel tasks on entry; video defers queued Sentinel tasks for its entire window (chat-wait + semaphore-wait + model call). Sentinel resumes immediately once both foreground activities are idle. Cloud providers (OpenAI, Gemini, Anthropic) are always admitted — they use remote inference and are unaffected by local GPU load. When deferrals persist for more than 300 s, the `sentinel_health` sensor transitions to `degraded` and a WARNING is logged.
+
+Set `model_provider_uncontended: true` in the Options flow to bypass all local gates (chat-session, video-session, Sentinel deferral) when the server has dedicated capacity that doesn't need protection.
 
 ### Built-in Static Rules
 
@@ -1137,6 +1139,12 @@ The agent uses a tool that in turn uses the HA Blueprint `hga_scene_analysis.yam
 ### Proactive Camera Video Analysis.
 
 You can enable proactive video scene analysis from cameras visible to Home Assistant. When enabled, motion detection will trigger the analysis which will be stored in a database for use by the agent, and optionally, notifications of the analysis will be sent to the mobile app. You can also enable anomaly detection which will only send notifications based on semantic search of the current analysis vis-a-vis the database. These options are set in the integration's config UI.
+
+**Resource management on edge deployments:** The video pipeline enforces a per-entry semaphore that limits how many VLM and summary model calls run concurrently. The default limit is 1 (sequential). Frames that cannot acquire the semaphore within 30 s are dropped so stale results never accumulate. If a chat turn starts while the video pipeline is waiting for the model, it waits briefly for the chat turn to complete before dropping the frame — avoiding GPU contention. The video token budget is intentionally capped (256 tokens for VLM scene descriptions, 128 tokens for summaries) so video frames do not monopolize the model's context window at the expense of other callers.
+
+Two advanced options are available in the Camera Image Analysis feature subentry:
+- `video_model_semaphore` — concurrent video model call limit (default: `1`). Increase only if your server has dedicated GPU headroom for parallel video inference.
+- `model_provider_uncontended` (global Options) — bypass all local gates when the model server has dedicated capacity that does not need protecting.
 
 The image below is an example of a notification sent to the mobile app.
 
