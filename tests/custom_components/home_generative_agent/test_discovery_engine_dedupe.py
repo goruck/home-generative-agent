@@ -289,3 +289,94 @@ async def test_existing_context_static_ids_present_alongside_dynamic() -> None:
     active_rule_ids, _ = await engine._existing_semantic_context()
     assert "my_dynamic_rule" in active_rule_ids
     assert _STATIC_RULE_IDS.issubset(active_rule_ids)
+
+
+# ---------------------------------------------------------------------------
+# Semantic key prompt cap tests
+# ---------------------------------------------------------------------------
+
+
+def test_max_semantic_keys_in_prompt_constant() -> None:
+    """_MAX_SEMANTIC_KEYS_IN_PROMPT must be defined and positive."""
+    from custom_components.home_generative_agent.sentinel.discovery_engine import (
+        _MAX_SEMANTIC_KEYS_IN_PROMPT,
+    )
+
+    assert isinstance(_MAX_SEMANTIC_KEYS_IN_PROMPT, int)
+    assert _MAX_SEMANTIC_KEYS_IN_PROMPT > 0
+
+
+@pytest.mark.asyncio
+async def test_discovery_prompt_caps_semantic_keys(hass: HomeAssistant) -> None:
+    """When existing_semantic_keys exceeds the cap, only cap entries reach the prompt."""
+    import json
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+
+    from custom_components.home_generative_agent.sentinel.discovery_engine import (
+        _MAX_SEMANTIC_KEYS_IN_PROMPT,
+        SentinelDiscoveryEngine,
+    )
+
+    oversized_keys = {f"key_{i}" for i in range(_MAX_SEMANTIC_KEYS_IN_PROMPT + 20)}
+    captured_prompts: list[str] = []
+
+    class _CapturingModel:
+        async def ainvoke(self, messages: list[Any]) -> Any:
+            for msg in messages:
+                if hasattr(msg, "content"):
+                    captured_prompts.append(str(msg.content))
+            return SimpleNamespace(
+                content=json.dumps(
+                    {"schema_version": 1, "generated_at": "2026-01-01T00:00:00Z",
+                     "model": "test", "candidates": []}
+                )
+            )
+
+    class _FullDummyStore:
+        async def async_get_latest(self, _limit: int) -> list[dict[str, Any]]:
+            return []
+
+        async def async_append(self, _payload: Any) -> None:
+            pass
+
+    engine = SentinelDiscoveryEngine(
+        hass=hass,
+        options={},
+        model=_CapturingModel(),
+        store=_FullDummyStore(),  # type: ignore[arg-type]
+    )
+
+    async def _fake_run(call_factory: Any, **_kw: Any) -> Any:
+        return await call_factory()
+
+    with (
+        patch.object(
+            engine,
+            "_existing_semantic_context",
+            new_callable=AsyncMock,
+            return_value=(set(), oversized_keys),
+        ),
+        patch(
+            "custom_components.home_generative_agent.sentinel.discovery_engine.async_build_full_state_snapshot",
+            new_callable=AsyncMock,
+            return_value={
+                "entities": [],
+                "camera_activity": [],
+                "derived": {"is_night": False, "now": "2026-01-01T00:00:00Z"},
+                "generated_at": "2026-01-01T00:00:00Z",
+            },
+        ),
+        patch(
+            "custom_components.home_generative_agent.sentinel.discovery_engine.run_sentinel_llm_call",
+            side_effect=_fake_run,
+        ),
+    ):
+        await engine._run_once()
+
+    assert captured_prompts, "Model was never invoked"
+    prompt_text = " ".join(captured_prompts)
+    key_count_in_prompt = sum(
+        1 for i in range(_MAX_SEMANTIC_KEYS_IN_PROMPT + 20) if f"key_{i}" in prompt_text
+    )
+    assert key_count_in_prompt <= _MAX_SEMANTIC_KEYS_IN_PROMPT

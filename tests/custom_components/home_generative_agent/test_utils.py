@@ -13,6 +13,7 @@ from custom_components.home_generative_agent.core.utils import (
     InvalidAuthError,
     extract_final,
     openai_compatible_healthy,
+    reasoning_field,
     validate_openai_compatible_url,
 )
 
@@ -263,3 +264,42 @@ async def test_openai_compatible_healthy_returns_false_on_auth_error(
 
     result = await openai_compatible_healthy(hass, "http://localhost:8000", "bad-key")
     assert result is False
+
+
+# ---------------------------------------------------------------------------
+# reasoning_field tests
+# ---------------------------------------------------------------------------
+
+
+def test_reasoning_field_unsupported_model_returns_empty() -> None:
+    """Non-thinking models always return {} regardless of enabled flag."""
+    assert reasoning_field(model="llama3:8b", enabled=True) == {}
+    assert reasoning_field(model="llama3:8b", enabled=False) == {}
+
+
+def test_reasoning_field_qwen3_enabled_returns_true() -> None:
+    """Qwen3-family models return {'reasoning': True} when enabled."""
+    result = reasoning_field(model="qwen3:32b", enabled=True)
+    assert result == {"reasoning": True}
+
+
+def test_reasoning_field_qwen3_disabled_returns_false() -> None:
+    """Qwen3-family models return {'reasoning': False} when disabled.
+
+    Previously returned {}, which caused ChatOllama to default to thinking-on
+    for Qwen3 models. Explicit False is required to suppress the default.
+    """
+    result = reasoning_field(model="qwen3.5:35b", enabled=False)
+    assert result == {"reasoning": False}
+
+
+def test_reasoning_field_gpt_oss_disabled_returns_false() -> None:
+    """gpt-oss models return {'reasoning': False} when disabled."""
+    result = reasoning_field(model="gpt-oss", enabled=False)
+    assert result == {"reasoning": False}
+
+
+def test_reasoning_field_qwen3_disabled_returns_false_registry_url() -> None:
+    """Registry-prefixed model names are stripped before matching."""
+    result = reasoning_field(model="registry.ollama.ai/library/qwen3.5:35b", enabled=False)
+    assert result == {"reasoning": False}
