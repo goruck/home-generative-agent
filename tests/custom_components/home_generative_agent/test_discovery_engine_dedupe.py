@@ -3,11 +3,15 @@
 
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from custom_components.home_generative_agent.sentinel.discovery_engine import (
+    _MAX_SEMANTIC_KEYS_IN_PROMPT,
     _STATIC_RULE_IDS,
     SentinelDiscoveryEngine,
     _candidate_identity_hash,
@@ -298,10 +302,6 @@ async def test_existing_context_static_ids_present_alongside_dynamic() -> None:
 
 def test_max_semantic_keys_in_prompt_constant() -> None:
     """_MAX_SEMANTIC_KEYS_IN_PROMPT must be defined and positive."""
-    from custom_components.home_generative_agent.sentinel.discovery_engine import (
-        _MAX_SEMANTIC_KEYS_IN_PROMPT,
-    )
-
     assert isinstance(_MAX_SEMANTIC_KEYS_IN_PROMPT, int)
     assert _MAX_SEMANTIC_KEYS_IN_PROMPT > 0
 
@@ -309,27 +309,22 @@ def test_max_semantic_keys_in_prompt_constant() -> None:
 @pytest.mark.asyncio
 async def test_discovery_prompt_caps_semantic_keys(hass: HomeAssistant) -> None:
     """When existing_semantic_keys exceeds the cap, only cap entries reach the prompt."""
-    import json
-    from types import SimpleNamespace
-    from unittest.mock import AsyncMock, patch
-
-    from custom_components.home_generative_agent.sentinel.discovery_engine import (
-        _MAX_SEMANTIC_KEYS_IN_PROMPT,
-        SentinelDiscoveryEngine,
-    )
-
     oversized_keys = {f"key_{i}" for i in range(_MAX_SEMANTIC_KEYS_IN_PROMPT + 20)}
     captured_prompts: list[str] = []
 
     class _CapturingModel:
         async def ainvoke(self, messages: list[Any]) -> Any:
-            for msg in messages:
-                if hasattr(msg, "content"):
-                    captured_prompts.append(str(msg.content))
+            captured_prompts.extend(
+                str(msg.content) for msg in messages if hasattr(msg, "content")
+            )
             return SimpleNamespace(
                 content=json.dumps(
-                    {"schema_version": 1, "generated_at": "2026-01-01T00:00:00Z",
-                     "model": "test", "candidates": []}
+                    {
+                        "schema_version": 1,
+                        "generated_at": "2026-01-01T00:00:00Z",
+                        "model": "test",
+                        "candidates": [],
+                    }
                 )
             )
 
@@ -375,8 +370,11 @@ async def test_discovery_prompt_caps_semantic_keys(hass: HomeAssistant) -> None:
         await engine._run_once()
 
     assert captured_prompts, "Model was never invoked"
-    prompt_text = " ".join(captured_prompts)
-    key_count_in_prompt = sum(
-        1 for i in range(_MAX_SEMANTIC_KEYS_IN_PROMPT + 20) if f"key_{i}" in prompt_text
-    )
-    assert key_count_in_prompt <= _MAX_SEMANTIC_KEYS_IN_PROMPT
+    # Parse the JSON array from the human message to get an exact key count.
+    human_content = captured_prompts[-1]
+    keys_start = human_content.find("Existing semantic keys (do not duplicate): [")
+    assert keys_start != -1, "Prompt missing existing_semantic_keys section"
+    array_start = human_content.index("[", keys_start)
+    array_end = human_content.index("]", array_start) + 1
+    keys_in_prompt: list[str] = json.loads(human_content[array_start:array_end])
+    assert len(keys_in_prompt) <= _MAX_SEMANTIC_KEYS_IN_PROMPT

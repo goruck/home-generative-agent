@@ -284,11 +284,7 @@ def test_reasoning_field_qwen3_enabled_returns_true() -> None:
 
 
 def test_reasoning_field_qwen3_disabled_returns_false() -> None:
-    """Qwen3-family models return {'reasoning': False} when disabled.
-
-    Previously returned {}, which caused ChatOllama to default to thinking-on
-    for Qwen3 models. Explicit False is required to suppress the default.
-    """
+    """Qwen3-family models return {'reasoning': False} when disabled."""
     result = reasoning_field(model="qwen3.5:35b", enabled=False)
     assert result == {"reasoning": False}
 
@@ -301,5 +297,7 @@ def test_reasoning_field_gpt_oss_disabled_returns_false() -> None:
 
 def test_reasoning_field_qwen3_disabled_returns_false_registry_url() -> None:
     """Registry-prefixed model names are stripped before matching."""
-    result = reasoning_field(model="registry.ollama.ai/library/qwen3.5:35b", enabled=False)
+    result = reasoning_field(
+        model="registry.ollama.ai/library/qwen3.5:35b", enabled=False
+    )
     assert result == {"reasoning": False}
