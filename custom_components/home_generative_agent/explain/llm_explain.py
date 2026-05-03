@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 MAX_EXPLANATION_CHARS = 220
-_EXPLAIN_LLM_TIMEOUT_S: Final[float] = 20.0
+_EXPLAIN_LLM_TIMEOUT_S: Final[float] = 30.0
 
 
 class LLMExplainer:
@@ -66,7 +66,13 @@ class LLMExplainer:
         except SentinelLLMDeferredError as err:
             LOGGER.debug("LLM explanation deferred: %s", err)
             return None
-        except (TimeoutError, ValueError, TypeError, RuntimeError) as err:
+        except TimeoutError:
+            LOGGER.warning(
+                "LLM explanation timed out after %.0fs; skipping.",
+                _EXPLAIN_LLM_TIMEOUT_S,
+            )
+            return None
+        except (ValueError, TypeError, RuntimeError) as err:
             LOGGER.warning("LLM explanation failed: %s", err)
             return None
 

@@ -47,7 +47,10 @@ LOGGER = logging.getLogger(__name__)
 
 # Hard cap on discovery LLM calls: prevents the chat model from being
 # monopolised when the snapshot is large (observed 180s+ without a cap).
-_DISCOVERY_LLM_TIMEOUT_S: float = 45.0
+_DISCOVERY_LLM_TIMEOUT_S: float = 60.0
+# Max semantic keys sent in the discovery prompt. The post-hoc filter catches
+# any duplicates that slip through, so a generous cap is safe.
+_MAX_SEMANTIC_KEYS_IN_PROMPT: int = 60
 
 # Rule IDs for static built-in rules (deterministic, always active).
 # Included in active_rule_ids so the LLM knows these topics are already covered
@@ -186,13 +189,21 @@ class SentinelDiscoveryEngine:
                     "Discovery TTL cleanup failed; continuing.", exc_info=True
                 )
         active_rule_ids, existing_keys = await self._existing_semantic_context()
+        # Cap keys sent to the LLM to bound prompt token cost. Post-hoc filter
+        # handles duplicates that slip through.
+        capped_keys = sorted(existing_keys)[:_MAX_SEMANTIC_KEYS_IN_PROMPT]
         now = dt_util.utcnow().isoformat()
         prompt = USER_PROMPT_TEMPLATE.format(
             snapshot=compact_snapshot,
             active_rule_ids=json.dumps(sorted(active_rule_ids), separators=(",", ":")),
-            existing_semantic_keys=json.dumps(
-                sorted(existing_keys), separators=(",", ":")
-            ),
+            existing_semantic_keys=json.dumps(capped_keys, separators=(",", ":")),
+        )
+        LOGGER.debug(
+            "Discovery prompt: %d chars (snapshot=%d, keys=%d/%d).",
+            len(prompt),
+            len(compact_snapshot),
+            len(capped_keys),
+            len(existing_keys),
         )
         messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
 

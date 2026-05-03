@@ -784,11 +784,16 @@ def reasoning_field(
     model: str,
     enabled: bool,
 ) -> dict[str, ReasoningValue]:
-    """Return {'reasoning': value} if enabled and model likely supports it."""
-    if not enabled:
-        return {}
+    """
+    Return {'reasoning': value} for models that support thinking.
+
+    Explicitly passes False when disabled so ChatOllama does not fall back to
+    the model's default (which for Qwen3-family is thinking-on).
+    """
     supported, value = _guess_ollama_reasoning(model)
-    return {"reasoning": value} if supported else {}
+    if not supported:
+        return {}
+    return {"reasoning": value if enabled else False}
 
 
 def extract_final(raw: str, max_chars: int | None = None) -> str:
