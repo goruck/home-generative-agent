@@ -697,6 +697,48 @@ async def validate_gemini_key(
             raise CannotConnectError
 
 
+async def validate_anthropic_key(
+    hass: HomeAssistant, api_key: str, timeout_s: float = 10.0
+) -> None:
+    """Validate that an Anthropic API key is authorized and reachable."""
+    if not api_key:
+        return
+    client = get_async_client(hass)
+    try:
+        async with asyncio.timeout(timeout_s):
+            resp = await client.get(
+                "https://api.anthropic.com/v1/models",
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                },
+            )
+    except (TimeoutError, httpx.RequestError) as err:
+        LOGGER.debug("Anthropic connectivity exception: %s", err)
+        raise CannotConnectError from err
+    else:
+        if resp.status_code == HTTP_STATUS_UNAUTHORIZED:
+            raise InvalidAuthError
+        if resp.status_code >= HTTP_STATUS_BAD_REQUEST:
+            raise CannotConnectError
+
+
+async def anthropic_healthy(
+    hass: HomeAssistant, api_key: str | None, timeout_s: float = 2.0
+) -> bool:
+    """Return True if Anthropic API is reachable, False otherwise."""
+    if not api_key:
+        LOGGER.debug("Anthropic health check skipped: not configured.")
+        return False
+    try:
+        await validate_anthropic_key(hass, api_key, timeout_s)
+    except (CannotConnectError, InvalidAuthError) as err:
+        LOGGER.warning("Anthropic health check failed: %s", err)
+        return False
+    else:
+        return True
+
+
 async def validate_face_api_url(
     hass: HomeAssistant, base_url: str, timeout_s: float = 10.0
 ) -> None:
@@ -796,10 +838,16 @@ def reasoning_field(
     return {"reasoning": value if enabled else False}
 
 
-def extract_final(raw: str, max_chars: int | None = None) -> str:
+def extract_final(raw: str | list[Any], max_chars: int | None = None) -> str:
     """Return plain text with <think> blocks removed."""
     if not raw:
         return ""
+    if isinstance(raw, list):
+        raw = " ".join(
+            part["text"]
+            for part in raw
+            if isinstance(part, dict) and isinstance(part.get("text"), str)
+        )
     # Remove any leaked reasoning
     s = _THINK_BLOCK.sub("", raw)
     # Collapse whitespace

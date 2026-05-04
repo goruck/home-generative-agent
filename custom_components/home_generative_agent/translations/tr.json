@@ -75,7 +75,8 @@
           "data": {
             "base_url": "Temel URL",
             "api_key": "API anahtarı",
-            "gemini_api_key": "Gemini API anahtarı"
+            "gemini_api_key": "Gemini API anahtarı",
+            "anthropic_api_key": "Anthropic API anahtarı"
           },
           "data_description": {
             "api_key": "OpenAI için zorunludur. OpenAI Uyumlu sağlayıcılarda, uç nokta kimlik doğrulaması gerektirmiyorsa boş bırakın veya 'none' girin."

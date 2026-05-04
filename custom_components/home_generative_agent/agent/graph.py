@@ -42,6 +42,7 @@ from pydantic import PydanticInvalidForJsonSchema, ValidationError
 
 from custom_components.home_generative_agent.const import (
     ACTUATION_KEYWORDS_REGEX,
+    CONF_ANTHROPIC_CHAT_MODEL,
     CONF_CHAT_MODEL_PROVIDER,
     CONF_CRITICAL_ACTION_PIN_ENABLED,
     CONF_CRITICAL_ACTION_PIN_HASH,
@@ -122,6 +123,8 @@ def _determine_model_name(provider: str, opts: dict[str, Any]) -> str:
         return opts.get(CONF_OPENAI_COMPATIBLE_CHAT_MODEL, "")
     if provider == "gemini":
         return opts.get(CONF_GEMINI_CHAT_MODEL, "")
+    if provider == "anthropic":
+        return opts.get(CONF_ANTHROPIC_CHAT_MODEL, "")
     return opts.get(CONF_OLLAMA_CHAT_MODEL, "")
 
 
@@ -1076,7 +1079,7 @@ async def _trim_messages_for_model(
     hass: HomeAssistant,
 ) -> list[AnyMessage]:
     """Trim messages to manage context window length."""
-    _known_providers = {"openai", "openai_compatible", "gemini", "ollama"}
+    _known_providers = {"openai", "openai_compatible", "gemini", "ollama", "anthropic"}
     provider_raw = opts.get(CONF_CHAT_MODEL_PROVIDER)
     provider = str(provider_raw) if provider_raw else "openai"
     if provider not in _known_providers:

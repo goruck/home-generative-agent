@@ -15,6 +15,7 @@ from homeassistant.const import (
 )
 
 from ..const import (  # noqa: TID252
+    CONF_ANTHROPIC_API_KEY,
     CONF_CHAT_MODEL_PROVIDER,
     CONF_DB_NAME,
     CONF_DB_PARAMS,
@@ -718,6 +719,9 @@ def _apply_provider_to_category(
 
     if provider.provider_type == "gemini" and (api_key := settings.get("api_key")):
         options[CONF_GEMINI_API_KEY] = api_key
+
+    if provider.provider_type == "anthropic" and (api_key := settings.get("api_key")):
+        options[CONF_ANTHROPIC_API_KEY] = api_key
 
     if category == "embedding":
         options[CONF_EMBEDDING_MODEL_PROVIDER] = provider.provider_type
