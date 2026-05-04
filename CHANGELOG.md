@@ -2,6 +2,45 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.13.0] - 2026-05-03
+
+### Added
+
+- **Anthropic Claude provider** — You can now select Anthropic Claude models
+  (claude-opus-4-5, claude-sonnet-4-5, claude-haiku-4-5, and their successors)
+  as the chat, vision (VLM), and summarization provider. Configure by adding an
+  Anthropic model-provider subentry and entering your API key. Prompt caching is
+  enabled automatically via `cache_control: ephemeral`, reducing latency and cost
+  on repeated conversation turns.
+- **Anthropic API key validation** — The config flow validates the API key against
+  `https://api.anthropic.com/v1/models` before saving, with distinct errors for
+  authentication failures and connectivity issues.
+- **`extract_final` list-content support** — `extract_final()` now accepts
+  Anthropic's multi-block content format (`list[{"type":"text","text":"..."}]`) in
+  addition to plain strings. This fixes triage, discovery, and explain responses
+  when Anthropic returns structured content blocks.
+
+### Fixed
+
+- **Sentinel triage with Anthropic provider** — `_parse_response` used `str(content)`
+  which produced a Python dict repr when Anthropic returned multi-block content,
+  causing every alert to bypass triage (fail-open to notify). Fixed to use
+  `extract_final(content)`.
+- **LLM explain with Anthropic provider** — `extract_final(str(content))` → 
+  `extract_final(content)` so list-format Anthropic responses are rendered
+  correctly in push notifications instead of showing raw dict repr.
+- **Discovery engine with Anthropic provider** — `json.loads(content)` raised
+  `TypeError` (not caught by the bare `json.JSONDecodeError` handler) when
+  Anthropic returned a list. Fixed to use `extract_final(content)` before parsing
+  and added `TypeError` to the handler.
+- **Config flow `else` branch hardened** — The Anthropic API-key schema builder
+  used a bare `else:` that would silently present the Anthropic form for any
+  future unknown provider. Changed to explicit `elif provider_type == "anthropic":`
+  with a fallback empty schema.
+- **Config flow: API key stored on validation failure** — `settings["api_key"]`
+  was assigned even when `validate_anthropic_key` raised an exception. Moved
+  inside the success path.
+
 ## [3.12.6] - 2026-05-03
 
 ### Fixed
