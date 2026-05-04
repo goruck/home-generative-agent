@@ -79,7 +79,7 @@ class LLMExplainer:
         content = getattr(result, "content", None)
         if not content:
             return None
-        text = extract_final(str(content)).replace("**", "").replace("`", "")
+        text = extract_final(content).replace("**", "").replace("`", "")
         if not text:
             return _compact_fallback(finding)
         if len(text) > MAX_EXPLANATION_CHARS:
