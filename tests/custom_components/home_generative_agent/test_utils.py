@@ -53,7 +53,10 @@ def test_extract_final_max_chars_no_space_falls_back_to_hard_cut() -> None:
 
 
 def test_extract_final_list_of_text_blocks_joins_text() -> None:
-    blocks: list[Any] = [{"type": "text", "text": "hello"}, {"type": "text", "text": "world"}]
+    blocks: list[Any] = [
+        {"type": "text", "text": "hello"},
+        {"type": "text", "text": "world"},
+    ]
     assert extract_final(blocks) == "hello world"
 
 
