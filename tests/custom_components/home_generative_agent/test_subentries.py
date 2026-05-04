@@ -20,6 +20,7 @@ from custom_components.home_generative_agent.config_flow import (
     HomeGenerativeAgentConfigFlow,
 )
 from custom_components.home_generative_agent.const import (
+    CONF_ANTHROPIC_API_KEY,
     CONF_CHAT_MODEL_PROVIDER,
     CONF_CRITICAL_ACTION_PIN,
     CONF_DB_NAME,
@@ -1165,3 +1166,94 @@ def test_build_model_deployments_empty_providers_returns_empty() -> None:
     entry = DummyEntry()
     result = build_model_deployments(entry, {}, {})  # type: ignore[arg-type]
     assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# Anthropic provider tests
+# ---------------------------------------------------------------------------
+
+
+def test_model_provider_flow_anthropic_only_in_cloud() -> None:
+    """Anthropic must appear in cloud options but NOT in edge options."""
+    flow = ModelProviderSubentryFlow()
+
+    flow._deployment = "cloud"
+    cloud_values = [opt["value"] for opt in flow._provider_options()]
+    assert "anthropic" in cloud_values
+
+    flow._deployment = "edge"
+    edge_values = [opt["value"] for opt in flow._provider_options()]
+    assert "anthropic" not in edge_values
+
+
+def test_provider_capabilities_includes_anthropic_for_chat_vlm_summarization() -> None:
+    """MODEL_CATEGORY_SPECS includes anthropic in chat, vlm, and summarization."""
+    for category in ("chat", "vlm", "summarization"):
+        spec = MODEL_CATEGORY_SPECS[category]
+        assert "anthropic" in spec["providers"], (
+            f"anthropic missing from {category} providers"
+        )
+        assert "anthropic" in spec["recommended_models"], (
+            f"anthropic missing from {category} recommended_models"
+        )
+        assert "anthropic" in spec["model_keys"], (
+            f"anthropic missing from {category} model_keys"
+        )
+
+
+def test_provider_capabilities_anthropic_absent_from_embedding() -> None:
+    """Anthropic must NOT appear in the embedding category."""
+    spec = MODEL_CATEGORY_SPECS["embedding"]
+    assert "anthropic" not in spec.get("providers", {})
+
+
+def test_resolve_runtime_options_anthropic_propagates_api_key() -> None:
+    """Anthropic subentry propagates api_key into CONF_ANTHROPIC_API_KEY."""
+    provider = DummySubentry(
+        "anthro1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Cloud-LLM Anthropic",
+        {
+            "provider_type": "anthropic",
+            "deployment": "cloud",
+            "capabilities": ["chat", "vlm", "summarization"],
+            "settings": {"api_key": "sk-ant-test"},
+        },
+    )
+    feature = DummySubentry(
+        "feature1",
+        SUBENTRY_TYPE_FEATURE,
+        "Conversation",
+        {
+            "feature_type": "conversation",
+            "model_provider_id": "anthro1",
+            "name": "Conversation",
+            CONF_FEATURE_MODEL: {CONF_FEATURE_MODEL_NAME: "claude-sonnet-4-6"},
+        },
+    )
+    entry = DummyEntry()
+    entry.subentries = {
+        provider.subentry_id: provider,
+        feature.subentry_id: feature,
+    }
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_CHAT_MODEL_PROVIDER] == "anthropic"
+    assert options[CONF_ANTHROPIC_API_KEY] == "sk-ant-test"
+
+
+def test_build_model_deployments_anthropic_returns_cloud() -> None:
+    """Anthropic provider must map its capabilities to 'cloud' deployment."""
+    provider = ModelProviderConfig(
+        entry_id="p_anthropic",
+        name="Cloud-LLM Anthropic",
+        provider_type="anthropic",
+        capabilities={"chat", "vlm", "summarization"},
+        data={"settings": {}},
+        deployment="cloud",
+    )
+    entry = DummyEntry()
+    result = build_model_deployments(entry, {"p_anthropic": provider}, {})  # type: ignore[arg-type]
+    assert result.get("chat") == "cloud"
+    assert result.get("vlm") == "cloud"
+    assert result.get("summarization") == "cloud"
