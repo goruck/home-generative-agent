@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.13.1] - 2026-05-05
+
+### Fixed
+
+- **Home Assistant blocking I/O during model setup** — Ollama chat and embeddings
+  clients now use Home Assistant's SSL context helper, and tool binding is moved
+  into the executor path. This avoids blocking `httpx` client setup work on the
+  event loop during integration setup and model calls.
+- **Video analyzer face API client ownership** — The video analyzer now uses Home
+  Assistant's shared async `httpx` client for face API calls and passes the face
+  timeout per request, avoiding direct async client construction and shutdown in
+  the integration.
+- **Sentinel log noise** — Repeated Sentinel operational failures are now rate
+  limited with recovery messages, and routine cycle/debug logs were removed from
+  the hot path. Discovery, triage, suppression, execution, and trigger handling
+  should be quieter while still surfacing first failures and repeated issues.
+- **Sentinel LLM calls off the event loop** — Sentinel model calls now prefer the
+  synchronous `invoke` path in a worker thread when available, preserving
+  admission/defer semantics while reducing event-loop pressure.
+- **Video analyzer priority typecheck coverage** — Tests were tightened around
+  `NullChat`, Ollama server logging, and nested mock accessors so priority-path
+  coverage remains compatible with Pyright.
+
 ## [3.13.0] - 2026-05-03
 
 ### Added
