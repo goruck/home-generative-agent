@@ -1161,6 +1161,15 @@ async def _invoke_model(
         raise HomeAssistantError(msg) from err
 
 
+def _bind_model_tools(
+    model: Any, selected_tools: list[Any], *, disable_reasoning: bool
+) -> Any:
+    """Bind tools to a model in a worker thread."""
+    if disable_reasoning:
+        model = model.with_config(config={"configurable": {"reasoning": False}})
+    return model.bind_tools(selected_tools)
+
+
 async def _call_model(
     state: State, config: RunnableConfig, *, store: BaseStore
 ) -> dict[str, Any]:
@@ -1210,9 +1219,14 @@ async def _call_model(
         # Disable reasoning/thinking before binding tools: Qwen3's <think> tokens
         # interleave with tool call JSON output and break Ollama's qwen3.go parser
         # (ResponseError: "invalid character 'g' looking for beginning of value").
-        if chat_model_options.get("reasoning"):
-            model = model.with_config(config={"configurable": {"reasoning": False}})
-        model = model.bind_tools(selected_tools)
+        model = await hass.async_add_executor_job(
+            partial(
+                _bind_model_tools,
+                model,
+                selected_tools,
+                disable_reasoning=bool(chat_model_options.get("reasoning")),
+            )
+        )
 
     # Pass routing map to MultiLLMAPI
     routing_map = state.get("tool_routing_map", {})

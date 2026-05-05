@@ -578,6 +578,10 @@ def test_start_logs_semaphore_size(
             "custom_components.home_generative_agent.core.video_analyzer.async_track_time_interval",
             return_value=MagicMock(),
         ),
+        patch(
+            "custom_components.home_generative_agent.core.video_analyzer.get_async_client",
+            return_value=MagicMock(),
+        ),
         caplog.at_level(
             logging.INFO,
             logger="custom_components.home_generative_agent.core.video_analyzer",
@@ -596,15 +600,41 @@ def test_start_builds_semaphore_from_config(va: VideoAnalyzer) -> None:
     """start() reads CONF_VIDEO_MODEL_SEMAPHORE from options to size the semaphore."""
     va.entry.runtime_data.options = {"video_model_semaphore": 3}
 
-    with patch(
-        "custom_components.home_generative_agent.core.video_analyzer.async_track_time_interval",
-        return_value=MagicMock(),
+    with (
+        patch(
+            "custom_components.home_generative_agent.core.video_analyzer.async_track_time_interval",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "custom_components.home_generative_agent.core.video_analyzer.get_async_client",
+            return_value=MagicMock(),
+        ),
     ):
         va.start()
 
     assert va._video_model_sem is not None  # type: ignore[attr-defined]
     # Semaphore with 3 permits: internal counter should equal the configured size
     assert va._video_model_sem._value == 3  # type: ignore[attr-defined]
+
+
+def test_start_uses_home_assistant_shared_httpx_client(va: VideoAnalyzer) -> None:
+    """start() must not create a private httpx client in the event loop."""
+    client = MagicMock()
+
+    with (
+        patch(
+            "custom_components.home_generative_agent.core.video_analyzer.async_track_time_interval",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "custom_components.home_generative_agent.core.video_analyzer.get_async_client",
+            return_value=client,
+        ) as get_client,
+    ):
+        va.start()
+
+    get_client.assert_called_once_with(va.hass)
+    assert va._httpx_client is client  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------

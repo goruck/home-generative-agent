@@ -39,6 +39,7 @@ from homeassistant.helpers.target import (
     async_extract_referenced_entity_ids,
 )
 from homeassistant.util import dt as dt_util
+from homeassistant.util.ssl import SSL_ALPN_HTTP11, client_context
 from langchain_anthropic import ChatAnthropic
 from langchain_core.runnables import ConfigurableField
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
@@ -1069,6 +1070,11 @@ class NullStore:
         return
 
 
+def _ollama_httpx_client_kwargs() -> dict[str, Any]:
+    """Return httpx kwargs that avoid creating SSL contexts in the event loop."""
+    return {"verify": client_context(alpn_protocols=SSL_ALPN_HTTP11)}
+
+
 def _register_services(hass: HomeAssistant, entry: HGAConfigEntry) -> None:
     """Register integration services."""
 
@@ -1345,9 +1351,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     def _build_ollama_provider(
         url: str,
     ) -> RunnableSerializable[LanguageModelInput, BaseMessage]:
+        httpx_kwargs = _ollama_httpx_client_kwargs()
         return ChatOllama(
             model=RECOMMENDED_OLLAMA_CHAT_MODEL,
             base_url=url,
+            sync_client_kwargs=httpx_kwargs,
+            async_client_kwargs=httpx_kwargs,
         ).configurable_fields(
             model=ConfigurableField(id="model"),
             format=ConfigurableField(id="format"),
@@ -1452,6 +1461,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 ),
                 base_url=base_ollama_url,
                 num_ctx=EMBEDDING_MODEL_CTX,
+                sync_client_kwargs=_ollama_httpx_client_kwargs(),
+                async_client_kwargs=_ollama_httpx_client_kwargs(),
             )
         except Exception:
             LOGGER.exception("Ollama embeddings init failed; continuing without them.")
