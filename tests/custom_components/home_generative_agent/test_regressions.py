@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import ssl
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -15,6 +16,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+import custom_components.home_generative_agent as hga_component
 import custom_components.home_generative_agent.agent.graph as agent_graph
 from custom_components.home_generative_agent.agent import tools as agent_tools
 from custom_components.home_generative_agent.const import SIGNAL_HGA_RECOGNIZED
@@ -270,6 +272,13 @@ def test_make_transient_tool_error_content_instructs_no_retry() -> None:
     assert "Do not retry" in content or "transient" in content.lower()
 
 
+def test_ollama_httpx_client_kwargs_use_prebuilt_ssl_context() -> None:
+    """Ollama chat and embedding clients must not build SSL contexts on-loop."""
+    kwargs = cast("Any", hga_component)._ollama_httpx_client_kwargs()
+
+    assert isinstance(kwargs["verify"], ssl.SSLContext)
+
+
 # ---------------------------------------------------------------------------
 # _call_model — fallback "Done." when Qwen3 thinking strips all content
 # ---------------------------------------------------------------------------
@@ -349,3 +358,79 @@ async def test_call_model_injects_done_fallback_after_empty_tool_response(
     assert isinstance(ai_msg, AIMessage)
     assert ai_msg.content == "Done.", f"expected 'Done.' but got {ai_msg.content!r}"
     assert not ai_msg.tool_calls
+
+
+@pytest.mark.asyncio
+async def test_call_model_binds_tools_in_executor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tool binding can lazily import LangChain modules, so keep it off-loop."""
+
+    async def _fake_invoke_model(*_args: object, **_kwargs: object) -> AIMessage:
+        return AIMessage(content="ok")
+
+    async def _fake_camera(*_args: object, **_kwargs: object) -> list[object]:
+        return []
+
+    async def _fake_trim(
+        messages: list[object], *_args: object, **_kwargs: object
+    ) -> list[object]:
+        return messages
+
+    class FakeHass:
+        executor_calls = 0
+
+        async def async_add_executor_job(self, target: Any) -> Any:
+            self.executor_calls += 1
+            return target()
+
+    class FakeModel:
+        bound_tools: list[object] | None = None
+        config: dict[str, object] | None = None
+
+        def with_config(self, *, config: dict[str, object]) -> FakeModel:
+            self.config = config
+            return self
+
+        def bind_tools(self, tools: list[object]) -> FakeModel:
+            self.bound_tools = tools
+            return self
+
+    fake_hass = FakeHass()
+    model = FakeModel()
+    selected_tools: list[object] = [object()]
+    mock_store = MagicMock()
+    mock_store.asearch = AsyncMock(return_value=[])
+
+    monkeypatch.setattr(agent_graph, "_invoke_model", _fake_invoke_model)
+    monkeypatch.setattr(agent_graph, "get_recent_camera_activity", _fake_camera)
+    monkeypatch.setattr(agent_graph, "_trim_messages_for_model", _fake_trim)
+
+    state: dict[str, object] = {
+        "messages": [HumanMessage(content="turn on the lamp")],
+        "selected_tools": selected_tools,
+        "summary": "",
+        "tool_routing_map": {},
+        "messages_to_remove": [],
+        "chat_model_usage_metadata": {},
+    }
+    config: dict[str, object] = {
+        "configurable": {
+            "chat_model": model,
+            "user_id": "user-test",
+            "hass": fake_hass,
+            "options": {},
+            "chat_model_options": {"reasoning": True},
+            "prompt": "You are a helpful assistant.",
+            "langchain_tools": {},
+            "ha_llm_api": None,
+            "pending_actions": {},
+        }
+    }
+
+    result = await agent_graph._call_model(state, config, store=mock_store)  # type: ignore[arg-type]
+
+    assert fake_hass.executor_calls == 1
+    assert model.config == {"configurable": {"reasoning": False}}
+    assert model.bound_tools == selected_tools
+    assert result["messages"].content == "ok"

@@ -22,6 +22,7 @@ from homeassistant.components.camera.const import DOMAIN as CAMERA_DOMAIN
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.httpx_client import get_async_client
 from langchain_core.messages import HumanMessage, SystemMessage
 from PIL import Image
 
@@ -625,13 +626,14 @@ class VideoAnalyzer:
         client = self._httpx_client
         if client is None:
             # fallback if start() wasn't called yet
-            client = httpx.AsyncClient(timeout=_FACE_TIMEOUT_SEC)
+            client = get_async_client(self.hass)
 
         # Call face API with timeout & specific exception handling
         try:
             resp = await client.post(
                 urljoin(base_url.rstrip("/") + "/", "analyze"),
                 files={"file": ("snapshot.jpg", data, "image/jpeg")},
+                timeout=_FACE_TIMEOUT_SEC,
             )
             resp.raise_for_status()
             face_res = resp.json()
@@ -1190,7 +1192,7 @@ class VideoAnalyzer:
 
         # Create a reusable httpx client for face API
         if self._httpx_client is None:
-            self._httpx_client = httpx.AsyncClient(timeout=_FACE_TIMEOUT_SEC)
+            self._httpx_client = get_async_client(self.hass)
 
         self._cancel_track = async_track_time_interval(
             self.hass,
@@ -1216,7 +1218,7 @@ class VideoAnalyzer:
 
         LOGGER.info("Video analyzer started.")
 
-    async def stop(self) -> None:  # noqa: PLR0912
+    async def stop(self) -> None:
         """Stop the video analyzer."""
         if not hasattr(self, "_cancel_track"):
             LOGGER.warning("VideoAnalyzer not started.")
@@ -1263,12 +1265,8 @@ class VideoAnalyzer:
             for task in pending:
                 LOGGER.warning("Task did not cancel in time: %s", task)
 
-        # close reusable httpx client
-        if self._httpx_client is not None:
-            try:
-                await self._httpx_client.aclose()
-            finally:
-                self._httpx_client = None
+        # Shared Home Assistant httpx client is closed by Home Assistant.
+        self._httpx_client = None
 
         # cancel hourly metrics reporting
         if self._metrics_job_cancel is not None:
