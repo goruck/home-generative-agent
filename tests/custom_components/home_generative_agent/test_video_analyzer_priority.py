@@ -25,14 +25,14 @@ import contextlib
 import logging
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import custom_components.home_generative_agent as hga_mod
 import custom_components.home_generative_agent.core.utils as utils_mod
 import custom_components.home_generative_agent.core.video_analyzer as va_mod
-from custom_components.home_generative_agent import NullChat, _log_ollama_server_info
 from custom_components.home_generative_agent.const import (
     VIDEO_SUMMARY_NUM_PREDICT,
     VIDEO_VLM_NUM_PREDICT,
@@ -45,6 +45,27 @@ from custom_components.home_generative_agent.core.video_analyzer import (
 from custom_components.home_generative_agent.core.video_helpers import (
     put_with_backpressure,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Mapping
+
+hga_symbols = cast("Mapping[str, Any]", vars(hga_mod))
+NullChat = cast("type[Any]", hga_symbols["NullChat"])
+_log_ollama_server_info = cast(
+    "Callable[[Any, dict[str, str]], Awaitable[None]]",
+    hga_symbols["_log_ollama_server_info"],
+)
+
+
+def _model_deployment_get(va: VideoAnalyzer) -> MagicMock:
+    """Return the MagicMock backing runtime_data.model_deployments.get."""
+    return cast("MagicMock", va.entry.runtime_data.model_deployments.get)
+
+
+def _entry_model_deployment_get(entry: MagicMock) -> MagicMock:
+    """Return the MagicMock backing an entry fixture's model deployment getter."""
+    return cast("MagicMock", entry.runtime_data.model_deployments.get)
+
 
 # ---------------------------------------------------------------------------
 # Override autouse fixtures from pytest-homeassistant-custom-component
@@ -259,7 +280,7 @@ async def test_stale_frame_skips_semaphore(va: VideoAnalyzer) -> None:
     mock_sem = MagicMock()
     mock_sem.acquire = AsyncMock()
     va._video_model_sem = mock_sem  # type: ignore[attr-defined]
-    va.entry.runtime_data.model_deployments.get.return_value = "edge"
+    _model_deployment_get(va).return_value = "edge"
 
     # Invalid path name → epoch_from_path raises ValueError → epoch=0 → stale
     result = await va._process_snapshot(Path("not_a_snapshot.jpg"), "camera.test")  # type: ignore[attr-defined]
@@ -272,7 +293,7 @@ async def test_stale_frame_skips_semaphore(va: VideoAnalyzer) -> None:
 @pytest.mark.asyncio
 async def test_stale_frame_does_not_open_file(va: VideoAnalyzer) -> None:
     """Stale-frame path returns before trying to open the snapshot file."""
-    va.entry.runtime_data.model_deployments.get.return_value = "edge"
+    _model_deployment_get(va).return_value = "edge"
 
     with patch("aiofiles.open", return_value=_FakeImageFile()) as mock_open:
         await va._process_snapshot(Path("not_a_snapshot.jpg"), "camera.test")  # type: ignore[attr-defined]
@@ -293,7 +314,7 @@ async def test_semaphore_timeout_causes_frame_drop(
     """Semaphore acquisition timeout causes _process_snapshot to return {}."""
     # 0-permit semaphore → any acquire blocks
     va._video_model_sem = asyncio.Semaphore(0)  # type: ignore[attr-defined]
-    va.entry.runtime_data.model_deployments.get.return_value = "edge"
+    _model_deployment_get(va).return_value = "edge"
     monkeypatch.setattr(va_mod, "_VIDEO_MODEL_SEMAPHORE_WAIT_SEC", 0.05)
 
     with (
@@ -317,7 +338,7 @@ async def test_semaphore_timeout_increments_counter(
 ) -> None:
     """Semaphore timeout increments semaphore_timeouts metric."""
     va._video_model_sem = asyncio.Semaphore(0)  # type: ignore[attr-defined]
-    va.entry.runtime_data.model_deployments.get.return_value = "edge"
+    _model_deployment_get(va).return_value = "edge"
     monkeypatch.setattr(va_mod, "_VIDEO_MODEL_SEMAPHORE_WAIT_SEC", 0.05)
 
     with (
@@ -343,7 +364,7 @@ async def test_semaphore_timeout_increments_counter(
 async def test_vlm_call_uses_video_vlm_num_predict(va: VideoAnalyzer) -> None:
     """VLM frame analysis is configured with VIDEO_VLM_NUM_PREDICT."""
     # Cloud deployment bypasses the semaphore gate
-    va.entry.runtime_data.model_deployments.get.return_value = "cloud"
+    _model_deployment_get(va).return_value = "cloud"
 
     with (
         patch(
@@ -368,7 +389,7 @@ async def test_vlm_call_uses_video_vlm_num_predict(va: VideoAnalyzer) -> None:
 @pytest.mark.asyncio
 async def test_vlm_call_disables_reasoning(va: VideoAnalyzer) -> None:
     """Edge VLM frame analysis binds reasoning=False to suppress Ollama thinking."""
-    va.entry.runtime_data.model_deployments.get.return_value = "edge"
+    _model_deployment_get(va).return_value = "edge"
 
     with (
         patch(
@@ -398,7 +419,7 @@ async def test_vlm_call_disables_reasoning(va: VideoAnalyzer) -> None:
 @pytest.mark.asyncio
 async def test_summary_uses_video_summary_num_predict(va: VideoAnalyzer) -> None:
     """Multi-frame summary is configured with VIDEO_SUMMARY_NUM_PREDICT."""
-    va.entry.runtime_data.model_deployments.get.return_value = "cloud"
+    _model_deployment_get(va).return_value = "cloud"
 
     frame_descs = [
         {"A person is at the gate. t+0s.": []},
@@ -418,7 +439,7 @@ async def test_summary_uses_video_summary_num_predict(va: VideoAnalyzer) -> None
 @pytest.mark.asyncio
 async def test_summary_disables_reasoning(va: VideoAnalyzer) -> None:
     """Edge summarization passes reasoning=False directly to ainvoke."""
-    va.entry.runtime_data.model_deployments.get.return_value = "edge"
+    _model_deployment_get(va).return_value = "edge"
 
     frame_descs = [
         {"Scene A.": []},
@@ -447,7 +468,7 @@ async def test_vlm_null_chat_with_config_does_not_raise(
 ) -> None:
     """NullChat.with_config accepts a positional config arg without TypeError."""
     entry.runtime_data.vision_model = NullChat()
-    entry.runtime_data.model_deployments.get.return_value = "cloud"
+    _entry_model_deployment_get(entry).return_value = "cloud"
     va = VideoAnalyzer(hass, entry)
     va._video_model_sem = asyncio.Semaphore(1)  # type: ignore[attr-defined]
 
@@ -475,7 +496,7 @@ async def test_summary_null_chat_with_config_does_not_raise(
 ) -> None:
     """NullChat.with_config accepts a positional config arg without TypeError."""
     entry.runtime_data.summarization_model = NullChat()
-    entry.runtime_data.model_deployments.get.return_value = "cloud"
+    _entry_model_deployment_get(entry).return_value = "cloud"
     va = VideoAnalyzer(hass, entry)
 
     frame_descs = [{"Scene A.": []}, {"Scene B.": []}]
@@ -497,7 +518,7 @@ async def test_semaphore_limits_concurrent_vlm_calls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Multiple camera workers share one semaphore; max one VLM call at a time."""
-    va.entry.runtime_data.model_deployments.get.return_value = "edge"
+    _model_deployment_get(va).return_value = "edge"
     va._video_model_sem = asyncio.Semaphore(1)  # type: ignore[attr-defined]
 
     concurrent = 0
@@ -568,7 +589,7 @@ def test_start_logs_semaphore_size(
     assert any("video_model_semaphore=2" in m for m in messages)
     assert any("uncontended=True" in m for m in messages)
 
-    va.hass.bus.async_listen.assert_called()
+    cast("MagicMock", va.hass.bus.async_listen).assert_called()
 
 
 def test_start_builds_semaphore_from_config(va: VideoAnalyzer) -> None:
