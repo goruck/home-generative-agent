@@ -24,7 +24,7 @@ OPENAI_PREFIXES: tuple[str, ...] = ("gpt",)
 LOGGER = logging.getLogger(__name__)
 
 # ---- Providers ----
-Provider = Literal["openai", "openai_compatible", "gemini", "ollama"]
+Provider = Literal["openai", "openai_compatible", "gemini", "ollama", "anthropic"]
 
 # ---- Message shapes ----
 MessageLike = BaseMessage | str | tuple[str, str] | list[str] | Mapping[str, Any]
@@ -284,6 +284,10 @@ def count_tokens_cross_provider(
     """
     if provider in ("openai", "openai_compatible"):
         return _count_tokens_tiktoken(messages, model=model)
+
+    if provider == "anthropic":
+        # Anthropic's token-count API is a network call; use tiktoken as fallback.
+        return _count_tokens_tiktoken(messages, model="gpt-4o")
 
     if provider == "gemini":
         gemini_api_key_any = options.get(CONF_GEMINI_API_KEY)

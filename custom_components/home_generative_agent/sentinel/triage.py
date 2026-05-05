@@ -37,6 +37,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from custom_components.home_generative_agent.core.utils import (
     SENTINEL_ADMISSION_TIMEOUT_S,
     SentinelLLMDeferredError,
+    extract_final,
     run_sentinel_llm_call,
 )
 
@@ -271,9 +272,7 @@ def _parse_response(result: Any, elapsed_ms: int) -> TriageDecision:  # noqa: AR
 
     Fails-open to ``notify`` on any parse error.
     """
-    content = getattr(result, "content", None) or ""
-    if not isinstance(content, str):
-        content = str(content)
+    content = extract_final(getattr(result, "content", None) or "")
 
     # Strip think blocks, then markdown fences if the model wrapped the JSON.
     content = _THINK_BLOCK.sub("", content).strip()

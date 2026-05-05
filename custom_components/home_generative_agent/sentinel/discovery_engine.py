@@ -19,6 +19,7 @@ from custom_components.home_generative_agent.const import (
 from custom_components.home_generative_agent.core.utils import (
     SENTINEL_ADMISSION_TIMEOUT_S,
     SentinelLLMDeferredError,
+    extract_final,
     run_sentinel_llm_call,
 )
 from custom_components.home_generative_agent.explain.discovery_prompts import (
@@ -229,14 +230,14 @@ class SentinelDiscoveryEngine:
             LOGGER.warning("Discovery LLM call failed: %s", err)
             return
 
-        content = getattr(result, "content", None)
+        content = extract_final(getattr(result, "content", None) or "")
         if not content:
             LOGGER.debug("Discovery LLM returned empty content.")
             return
 
         try:
             payload = json.loads(content)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, TypeError):
             LOGGER.warning("Discovery output was not valid JSON.")
             return
 

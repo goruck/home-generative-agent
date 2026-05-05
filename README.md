@@ -1004,14 +1004,17 @@ Category | Provider | Default model | Purpose
 Chat | OpenAI | gpt-5 | High-level reasoning and planning
 Chat | Ollama | gpt-oss | High-level reasoning and planning
 Chat | Gemini | gemini-2.5-flash-lite | High-level reasoning and planning
+Chat | Anthropic | claude-sonnet-4-6 | High-level reasoning and planning
 Chat | OpenAI Compatible | gpt-4o | High-level reasoning and planning
 VLM | Ollama | qwen3-vl:8b | Image scene analysis
 VLM | OpenAI | gpt-5-nano | Image scene analysis
 VLM | Gemini | gemini-2.5-flash-lite | Image scene analysis
+VLM | Anthropic | claude-sonnet-4-6 | Image scene analysis
 VLM | OpenAI Compatible | gpt-4o | Image scene analysis
 Summarization | Ollama | qwen3:1.7b | Primary model context summarization
 Summarization | OpenAI | gpt-5-nano | Primary model context summarization
 Summarization | Gemini | gemini-2.5-flash-lite | Primary model context summarization
+Summarization | Anthropic | claude-haiku-4-5-20251001 | Primary model context summarization
 Summarization | OpenAI Compatible | gpt-4o | Primary model context summarization
 Embeddings | Ollama | mxbai-embed-large | Embedding generation for semantic search
 Embeddings | OpenAI | text-embedding-3-small | Embedding generation for semantic search

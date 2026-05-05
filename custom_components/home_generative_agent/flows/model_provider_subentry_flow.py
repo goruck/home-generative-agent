@@ -27,6 +27,7 @@ from homeassistant.helpers.selector import (
 )
 
 from ..const import (  # noqa: TID252
+    CONF_ANTHROPIC_API_KEY,
     CONF_GEMINI_API_KEY,
     CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
     MODEL_CATEGORY_SPECS,
@@ -37,6 +38,7 @@ from ..core.utils import (  # noqa: TID252
     CannotConnectError,
     InvalidAuthError,
     ensure_http_url,
+    validate_anthropic_key,
     validate_gemini_key,
     validate_ollama_url,
     validate_openai_compatible_url,
@@ -50,6 +52,7 @@ ProviderNames = {
     "openai_compatible": "Edge-LLM OpenAI Compatible",
     "openai": "Cloud-LLM OpenAI",
     "gemini": "Cloud-LLM Gemini",
+    "anthropic": "Cloud-LLM Anthropic",
 }
 
 _PROVIDER_CAPABILITIES_CACHE: dict[str, set[str]] | None = None
@@ -117,6 +120,7 @@ class ModelProviderSubentryFlow(ConfigSubentryFlow):
                 [
                     SelectOptionDict(label="OpenAI", value="openai"),
                     SelectOptionDict(label="Gemini", value="gemini"),
+                    SelectOptionDict(label="Anthropic", value="anthropic"),
                 ]
             )
         if not opts:
@@ -288,6 +292,23 @@ class ModelProviderSubentryFlow(ConfigSubentryFlow):
                         LOGGER.exception("Unexpected exception validating Gemini key")
                         errors["base"] = "unknown"
                     settings["api_key"] = api_key
+            elif provider_type == "anthropic":
+                api_key = user_input.get(CONF_ANTHROPIC_API_KEY)
+                if not api_key:
+                    errors["base"] = "invalid_auth"
+                else:
+                    try:
+                        await validate_anthropic_key(self.hass, api_key)
+                        settings["api_key"] = api_key
+                    except InvalidAuthError:
+                        errors["base"] = "invalid_auth"
+                    except CannotConnectError:
+                        errors["base"] = "cannot_connect"
+                    except Exception:
+                        LOGGER.exception(
+                            "Unexpected exception validating Anthropic key"
+                        )
+                        errors["base"] = "unknown"
 
             if not errors:
                 caps = _provider_capabilities().get(provider_type, {"chat"})
@@ -375,7 +396,7 @@ class ModelProviderSubentryFlow(ConfigSubentryFlow):
                     ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
                 }
             )
-        else:
+        elif provider_type == "gemini":
             schema = vol.Schema(
                 {
                     vol.Required(
@@ -387,6 +408,20 @@ class ModelProviderSubentryFlow(ConfigSubentryFlow):
                     ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
                 }
             )
+        elif provider_type == "anthropic":
+            schema = vol.Schema(
+                {
+                    vol.Required(
+                        CONF_ANTHROPIC_API_KEY,
+                        description={
+                            "suggested_value": current_settings.get("api_key")
+                        },
+                        default=current_settings.get("api_key") or "",
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
+                }
+            )
+        else:
+            schema = vol.Schema({})
 
         return self.async_show_form(
             step_id="settings", data_schema=schema, errors=errors
