@@ -261,7 +261,7 @@ class SentinelExecutionService:
         # All guardrails passed — approve auto-execute.
         self._recent_action_times.append(now)
         self._idempotency_seen.add(execution_id)
-        LOGGER.info(
+        LOGGER.debug(
             "Auto-execute approved for finding %s (execution_id=%s).",
             finding.anomaly_id,
             execution_id,
@@ -417,11 +417,6 @@ class SentinelExecutionService:
             )
 
         # All guardrails pass — hypothetical auto-execute (no state mutation).
-        LOGGER.debug(
-            "Canary: would auto-execute finding %s (execution_id=%s).",
-            finding.anomaly_id,
-            execution_id,
-        )
         return ActionPolicyResult(
             action_policy_path=ACTION_POLICY_AUTO_EXECUTE,
             data_quality=dq,

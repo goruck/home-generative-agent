@@ -342,8 +342,8 @@ async def test_discovery_prompt_caps_semantic_keys(hass: HomeAssistant) -> None:
         store=_FullDummyStore(),  # type: ignore[arg-type]
     )
 
-    async def _fake_run(call_factory: Any, **_kw: Any) -> Any:
-        return await call_factory()
+    async def _fake_run(model: Any, messages: Any, **_kw: Any) -> Any:
+        return await model.ainvoke(messages)
 
     with (
         patch.object(
@@ -363,7 +363,7 @@ async def test_discovery_prompt_caps_semantic_keys(hass: HomeAssistant) -> None:
             },
         ),
         patch(
-            "custom_components.home_generative_agent.sentinel.discovery_engine.run_sentinel_llm_call",
+            "custom_components.home_generative_agent.sentinel.discovery_engine.run_sentinel_model_call",
             side_effect=_fake_run,
         ),
     ):

@@ -77,11 +77,19 @@ class CameraEntryUnsecuredRule:
             e["entity_id"]: e["last_changed"] for e in snapshot["entities"]
         }
 
+        skip_counts = {
+            "no_area": 0,
+            "no_activity": 0,
+            "parse_error": 0,
+            "outside_window": 0,
+            "missing_linked_entry": 0,
+        }
+        fallback_sensor_candidates = 0
         for activity in snapshot["camera_activity"]:
             cam = activity["camera_entity_id"]
             area = activity.get("area")
             if not area:
-                LOGGER.debug("%s: skipped — no area assigned in snapshot.", cam)
+                skip_counts["no_area"] += 1
                 continue
             last_activity = activity.get("last_activity")
             if not last_activity:
@@ -107,31 +115,17 @@ class CameraEntryUnsecuredRule:
                         for e in snapshot["entities"]
                         if e.get("area") == area and e["domain"] == "binary_sensor"
                     ]
-                    LOGGER.debug(
-                        "%s: area=%s area_binary_sensor_candidates=%s",
-                        cam,
-                        area,
-                        candidates,
-                    )
+                    fallback_sensor_candidates += len(candidates)
                 last_activity = max(candidates) if candidates else None
             if not last_activity:
-                LOGGER.debug("%s: skipped — no activity timestamp resolved.", cam)
+                skip_counts["no_activity"] += 1
                 continue
             last_dt = dt_util.parse_datetime(last_activity)
             if last_dt is None:
-                LOGGER.debug(
-                    "%s: skipped — could not parse last_activity=%s.",
-                    cam,
-                    last_activity,
-                )
+                skip_counts["parse_error"] += 1
                 continue
             if now - last_dt > window:
-                LOGGER.debug(
-                    "%s: skipped — last_activity=%s is outside %d-min window.",
-                    cam,
-                    last_activity,
-                    ACTIVITY_WINDOW_MIN,
-                )
+                skip_counts["outside_window"] += 1
                 continue
             # Same-area unsecured entries (primary spatial relationship).
             unsecured_same_area: list[str] = list(unsecured_by_area.get(area) or [])
@@ -144,11 +138,7 @@ class CameraEntryUnsecuredRule:
             for linked_eid in self._camera_entry_links.get(cam, []):
                 entity = entity_by_id.get(linked_eid)
                 if entity is None:
-                    LOGGER.debug(
-                        "%s: linked entry entity %s not in snapshot, skipping.",
-                        cam,
-                        linked_eid,
-                    )
+                    skip_counts["missing_linked_entry"] += 1
                     continue
                 domain = entity["domain"]
                 state = entity["state"]
@@ -204,5 +194,16 @@ class CameraEntryUnsecuredRule:
                     suggested_actions=["check_entry"],
                     is_sensitive=True,
                 ),
+            )
+        if LOGGER.isEnabledFor(logging.DEBUG) and (
+            findings or any(skip_counts.values())
+        ):
+            LOGGER.debug(
+                "Camera-entry rule evaluated %d camera(s): findings=%d "
+                "skips=%s fallback_sensor_candidates=%d.",
+                len(snapshot["camera_activity"]),
+                len(findings),
+                skip_counts,
+                fallback_sensor_candidates,
             )
         return findings

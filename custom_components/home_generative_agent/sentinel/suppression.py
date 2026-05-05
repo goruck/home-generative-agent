@@ -153,6 +153,7 @@ def _migrate_suppression_state(data: dict[str, Any]) -> dict[str, Any]:
     Returns the same dict object (mutations are in-place).
     """
     stored_version = int(data.get("version", 1))
+    original_version = stored_version
     if stored_version >= SUPPRESSION_STATE_VERSION:
         return data
 
@@ -162,7 +163,6 @@ def _migrate_suppression_state(data: dict[str, Any]) -> dict[str, Any]:
         data.setdefault("presence_grace_until", {})
         data["version"] = 2
         stored_version = 2
-        LOGGER.info("Suppression state migrated from v1 to v2.")
 
     # v2 → v3: presence_grace_until keys must be person entity IDs
     if stored_version < 3:  # noqa: PLR2004
@@ -180,14 +180,12 @@ def _migrate_suppression_state(data: dict[str, Any]) -> dict[str, Any]:
             del data["presence_grace_until"][key]
         data["version"] = 3
         stored_version = 3
-        LOGGER.info("Suppression state migrated from v2 to v3.")
 
     # v3 → v4: learned per-entity cooldown multipliers
     if stored_version < 4:  # noqa: PLR2004
         data.setdefault("learned_cooldown_multipliers", {})
         data["version"] = 4
         stored_version = 4
-        LOGGER.info("Suppression state migrated from v3 to v4.")
 
     # v4 → v5: fix key scheme (entity_id only → {rule_type}:{entity_id})
     if stored_version < 5:  # noqa: PLR2004
@@ -202,14 +200,18 @@ def _migrate_suppression_state(data: dict[str, Any]) -> dict[str, Any]:
             LOGGER.warning(
                 "Suppression state v4→v5: discarded %d bare entity_id key(s) "
                 "from learned_cooldown_multipliers (wrong key scheme; "
-                "expected '{rule_type}:{entity_id}'). "
-                "Discarded keys: %s",
+                "expected '{rule_type}:{entity_id}').",
                 len(stale),
-                sorted(stale),
             )
+            LOGGER.debug("Discarded learned cooldown keys: %s", sorted(stale))
         data["version"] = 5
         stored_version = 5
-        LOGGER.info("Suppression state migrated from v4 to v5.")
+
+    LOGGER.info(
+        "Suppression state migrated from v%d to v%d.",
+        original_version,
+        stored_version,
+    )
 
     return data
 
@@ -265,11 +267,6 @@ def _check_pending_prompt(
         del state.pending_prompts[finding.anomaly_id]
         return None
 
-    LOGGER.debug(
-        "Suppressing %s (%s): pending prompt exists.",
-        finding.anomaly_id,
-        finding.type,
-    )
     return SuppressionDecision(
         suppress=True,
         reason_code=SUPPRESSION_REASON_PENDING_PROMPT,
@@ -442,12 +439,6 @@ def should_suppress(  # noqa: PLR0911, PLR0913
     # 2. Snooze
     snooze_code = _check_snooze(state, finding, now)
     if snooze_code is not None:
-        LOGGER.debug(
-            "Suppressing %s (%s): snooze active (%s).",
-            finding.anomaly_id,
-            finding.type,
-            snooze_code,
-        )
         return SuppressionDecision(
             suppress=True,
             reason_code=snooze_code,
@@ -456,11 +447,6 @@ def should_suppress(  # noqa: PLR0911, PLR0913
 
     # 3. Presence grace
     if _check_presence_grace(state, finding, now):
-        LOGGER.debug(
-            "Suppressing %s (%s): presence grace window active.",
-            finding.anomaly_id,
-            finding.type,
-        )
         return SuppressionDecision(
             suppress=True,
             reason_code=SUPPRESSION_REASON_PRESENCE_GRACE,
@@ -476,12 +462,6 @@ def should_suppress(  # noqa: PLR0911, PLR0913
         severity=finding.severity,
         quiet_severities=quiet_hours_severities or [],
     ):
-        LOGGER.debug(
-            "Suppressing %s (%s): quiet hours active for severity=%s.",
-            finding.anomaly_id,
-            finding.type,
-            finding.severity,
-        )
         return SuppressionDecision(
             suppress=True,
             reason_code=SUPPRESSION_REASON_QUIET_HOURS,
@@ -491,12 +471,6 @@ def should_suppress(  # noqa: PLR0911, PLR0913
     # 5. Type cooldown
     last_type = _parse_dt(state.last_by_type.get(finding.type))
     if last_type is not None and now - last_type < cooldown_type:
-        LOGGER.debug(
-            "Suppressing %s (%s): type cooldown active (last=%s).",
-            finding.anomaly_id,
-            finding.type,
-            state.last_by_type.get(finding.type),
-        )
         return SuppressionDecision(
             suppress=True,
             reason_code=SUPPRESSION_REASON_TYPE_COOLDOWN,
@@ -517,15 +491,6 @@ def should_suppress(  # noqa: PLR0911, PLR0913
             state.last_by_entity.get(entity_id, {}).get(finding.type)
         )
         if last_entity is not None and now - last_entity < effective_cooldown:
-            LOGGER.debug(
-                "Suppressing %s (%s): entity cooldown active for %s "
-                "(last=%s, multiplier=%d).",
-                finding.anomaly_id,
-                finding.type,
-                entity_id,
-                state.last_by_entity.get(entity_id, {}).get(finding.type),
-                multiplier,
-            )
             return SuppressionDecision(
                 suppress=True,
                 reason_code=SUPPRESSION_REASON_ENTITY_COOLDOWN,
@@ -653,11 +618,6 @@ def register_presence_grace(
     """
     expiry = dt_util.as_utc(now + timedelta(minutes=grace_minutes)).isoformat()
     state.presence_grace_until[person_entity_id] = expiry
-    LOGGER.debug(
-        "Presence grace opened for %s (expires %s).",
-        person_entity_id,
-        expiry,
-    )
 
 
 # ---------------------------------------------------------------------------

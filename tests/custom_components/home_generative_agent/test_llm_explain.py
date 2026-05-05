@@ -190,10 +190,10 @@ async def test_async_explain_does_not_pass_raw_timestamps() -> None:
 
 @pytest.mark.asyncio
 async def test_async_explain_returns_none_when_deferred() -> None:
-    """async_explain must return None when run_sentinel_llm_call raises SentinelLLMDeferredError."""
+    """async_explain must return None when the model call is deferred."""
     explainer = LLMExplainer(DummyModel("some content"))
     with patch(
-        "custom_components.home_generative_agent.explain.llm_explain.run_sentinel_llm_call",
+        "custom_components.home_generative_agent.explain.llm_explain.run_sentinel_model_call",
         side_effect=SentinelLLMDeferredError("explain", "chat is active"),
     ):
         result = await explainer.async_explain(_finding())
@@ -205,7 +205,7 @@ async def test_async_explain_returns_none_on_timeout() -> None:
     """async_explain must return None when the LLM call times out."""
     explainer = LLMExplainer(DummyModel("irrelevant"))
     with patch(
-        "custom_components.home_generative_agent.explain.llm_explain.run_sentinel_llm_call",
+        "custom_components.home_generative_agent.explain.llm_explain.run_sentinel_model_call",
         side_effect=TimeoutError(),
     ):
         result = await explainer.async_explain(_finding())
@@ -217,7 +217,7 @@ async def test_async_explain_returns_none_on_value_error() -> None:
     """async_explain must return None on unexpected LLM errors."""
     explainer = LLMExplainer(DummyModel("irrelevant"))
     with patch(
-        "custom_components.home_generative_agent.explain.llm_explain.run_sentinel_llm_call",
+        "custom_components.home_generative_agent.explain.llm_explain.run_sentinel_model_call",
         side_effect=ValueError("bad response"),
     ):
         result = await explainer.async_explain(_finding())

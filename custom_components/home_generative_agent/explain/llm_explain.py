@@ -13,7 +13,7 @@ from custom_components.home_generative_agent.core.utils import (
     SENTINEL_ADMISSION_TIMEOUT_S,
     SentinelLLMDeferredError,
     extract_final,
-    run_sentinel_llm_call,
+    run_sentinel_model_call,
 )
 
 from .prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
@@ -55,8 +55,9 @@ class LLMExplainer:
         messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
 
         try:
-            result = await run_sentinel_llm_call(
-                lambda: self._model.ainvoke(messages),
+            result = await run_sentinel_model_call(
+                self._model,
+                messages,
                 deployment=self._deployment,
                 category="explain",
                 admission_timeout_s=SENTINEL_ADMISSION_TIMEOUT_S,

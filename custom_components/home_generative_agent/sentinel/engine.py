@@ -62,6 +62,7 @@ from .dynamic_rules import evaluate_dynamic_rules
 from .execution import (
     SentinelExecutionService,
 )
+from .logging_utils import RepeatingLogLimiter
 from .models import AnomalyFinding, CompoundFinding
 from .rules.alarm_disarmed_external_threat import AlarmDisarmedDuringExternalThreatRule
 from .rules.appliance_power_duration import AppliancePowerDurationRule
@@ -198,6 +199,7 @@ class SentinelEngine:
         self._correlator = SentinelCorrelator()
         self._trigger_scheduler = SentinelTriggerScheduler()
         self._execution_service = SentinelExecutionService(dict(options))
+        self._log_limiter = RepeatingLogLimiter(LOGGER)
         self._rules = [
             UnlockedLockAtNightRule(),
             OpenEntryWhileAwayRule(),
@@ -343,8 +345,6 @@ class SentinelEngine:
         if self._baseline_updater is not None:
             self._baseline_updater.start()
 
-        LOGGER.debug("Sentinel engine started (event-driven triggering active).")
-
     async def stop(self) -> None:
         """Stop the sentinel loop and unsubscribe from HA events."""
         if self._task is None:
@@ -386,11 +386,6 @@ class SentinelEngine:
         if anomaly_type is None:
             return
 
-        LOGGER.debug(
-            "State change on %s → anomaly type %s; enqueueing trigger.",
-            entity_id,
-            anomaly_type,
-        )
         self._trigger_scheduler.enqueue(TriggerRecord(anomaly_type=anomaly_type))
 
     # ---------------------------------------------------------------------- #
@@ -401,7 +396,6 @@ class SentinelEngine:
         interval = _coerce_int(
             self._options.get(CONF_SENTINEL_INTERVAL_SECONDS), default=300
         )
-        LOGGER.info("Sentinel loop started (interval=%ss).", interval)
         while not self._stop_event.is_set():
             # Check the trigger scheduler first.  If a queued trigger is ready
             # the single-flight lock inside the scheduler wraps _run_once().
@@ -453,21 +447,34 @@ class SentinelEngine:
             self.run_stats["scheduler"] = self._trigger_scheduler.stats
             async_dispatcher_send(self._hass, SIGNAL_SENTINEL_RUN_COMPLETE)
 
-    async def _run_once(self, trigger_source: str = "poll") -> None:  # noqa: PLR0912, PLR0915
+    async def _run_once(self, trigger_source: str = "poll") -> None:  # noqa: PLR0912
         try:
             snapshot = await async_build_full_state_snapshot(self._hass)
         except (ValueError, TypeError, KeyError):
-            LOGGER.warning("Failed to build snapshot for sentinel.")
+            self._log_limiter.warning(
+                "snapshot_build",
+                "Failed to build snapshot for sentinel.",
+            )
             return
+        self._log_limiter.recovered(
+            "snapshot_build",
+            "Sentinel snapshot build recovered after %d failed cycle(s).",
+        )
 
         # Force Level 0 when suppression state is in read-only mode (version
         # mismatch after a downgrade).
         if self._suppression.is_read_only:
-            LOGGER.warning(
+            self._log_limiter.warning(
+                "suppression_read_only",
                 "Suppression state is read-only (schema version mismatch); "
-                "sentinel forced to Level 0 (notify-only)."
+                "sentinel forced to Level 0 (notify-only).",
             )
             # Continue but will not dispatch (autonomy level effectively 0).
+        else:
+            self._log_limiter.recovered(
+                "suppression_read_only",
+                "Suppression state left read-only mode after %d cycle(s).",
+            )
 
         now = dt_util.utcnow()
         cooldown_type = timedelta(
@@ -510,22 +517,21 @@ class SentinelEngine:
             try:
                 findings = rule.evaluate(snapshot)
             except (KeyError, ValueError, TypeError):
-                LOGGER.warning("Sentinel rule %s failed to evaluate.", rule.rule_id)
-                continue
-            if findings:
-                LOGGER.info(
-                    "Sentinel rule %s produced %s finding(s).",
+                self._log_limiter.warning(
+                    f"rule_eval:{rule.rule_id}",
+                    "Sentinel rule %s failed to evaluate.",
                     rule.rule_id,
-                    len(findings),
                 )
+                continue
+            self._log_limiter.recovered(
+                f"rule_eval:{rule.rule_id}",
+                "Sentinel rule %s recovered after %d failed evaluation(s).",
+                rule.rule_id,
+            )
             all_findings.extend(findings)
 
         if self._rule_registry is not None:
             dynamic_rules = self._rule_registry.list_rules()
-            LOGGER.debug(
-                "Sentinel dynamic registry has %s rule(s).",
-                len(dynamic_rules),
-            )
             if dynamic_rules:
                 baselines: dict[str, dict[str, float]] = {}
                 dow_data: dict[str, dict[str, tuple[float, int]]] | None = None
@@ -562,11 +568,6 @@ class SentinelEngine:
                     dow_min_samples=dow_min_samples,
                     global_drift_pct=global_drift_pct,
                 )
-                LOGGER.debug(
-                    "Sentinel evaluated %s dynamic rule(s), produced %s finding(s).",
-                    len(dynamic_rules),
-                    len(dynamic_findings),
-                )
                 sustained_minutes = _coerce_int(
                     self._options.get(CONF_SENTINEL_BASELINE_SUSTAINED_MINUTES),
                     RECOMMENDED_SENTINEL_BASELINE_SUSTAINED_MINUTES,
@@ -575,15 +576,9 @@ class SentinelEngine:
                     dynamic_findings = self._apply_sustained_gate(
                         dynamic_findings, now, sustained_minutes
                     )
-                if dynamic_findings:
-                    LOGGER.info(
-                        "Sentinel dynamic rules produced %s finding(s).",
-                        len(dynamic_findings),
-                    )
                 all_findings.extend(dynamic_findings)
 
         if not all_findings:
-            LOGGER.debug("Sentinel cycle completed with no findings.")
             return
 
         # Correlation pass: group related findings from this single cycle.
@@ -600,7 +595,6 @@ class SentinelEngine:
                 explain_enabled,
                 trigger_source=trigger_source,
             )
-        LOGGER.debug("Sentinel cycle completed with %s finding(s).", len(all_findings))
 
     # ---------------------------------------------------------------------- #
     # Cyclical load sustained deviation gate
@@ -681,7 +675,8 @@ class SentinelEngine:
             # unchanged — tokenising the anomaly_id would be unreliable and
             # could produce false positive or false negative gate matches.
             if not finding.triggering_entities:
-                LOGGER.warning(
+                self._log_limiter.warning(
+                    "cyclical_gate_missing_entities",
                     "Cyclical gate: finding %s has no triggering_entities; "
                     "skipping gate for this finding.",
                     finding.anomaly_id,
@@ -701,11 +696,6 @@ class SentinelEngine:
             if first_seen is None:
                 # First time above threshold — start the clock, suppress.
                 self._cyclical_deviation_above_since[entity_id] = now
-                LOGGER.debug(
-                    "Cyclical gate started for %s (sustained_minutes=%d).",
-                    entity_id,
-                    sustained_minutes,
-                )
                 continue
 
             elapsed = (now - first_seen).total_seconds() / 60.0
@@ -722,20 +712,9 @@ class SentinelEngine:
                 continue
             if elapsed < sustained_minutes:
                 # Still within the gate window — suppress.
-                LOGGER.debug(
-                    "Cyclical gate suppressing %s (%.1f / %d min elapsed).",
-                    entity_id,
-                    elapsed,
-                    sustained_minutes,
-                )
                 continue
 
             # Gate exceeded — fire and reset clock.
-            LOGGER.info(
-                "Cyclical gate exceeded for %s (%.1f min); firing finding.",
-                entity_id,
-                elapsed,
-            )
             self._cyclical_deviation_above_since[entity_id] = now
             passed.append(finding)
 
@@ -743,9 +722,6 @@ class SentinelEngine:
         # (Not in seen_cyclical means no cyclical finding appeared for them.)
         stale = set(self._cyclical_deviation_above_since) - seen_cyclical
         for entity_id in stale:
-            LOGGER.debug(
-                "Cyclical gate cleared for %s (no finding this run).", entity_id
-            )
             del self._cyclical_deviation_above_since[entity_id]
 
         return passed
@@ -830,12 +806,6 @@ class SentinelEngine:
             **suppress_kwargs,
         )
         if suppression_decision.suppress:
-            LOGGER.debug(
-                "Suppressed finding %s for %s (%s).",
-                finding.anomaly_id,
-                finding.type,
-                suppression_decision.reason_code,
-            )
             await _append_finding_audit(
                 self._audit_store,
                 snapshot,
@@ -865,12 +835,6 @@ class SentinelEngine:
             triage_reason_code_value = triage_result.reason_code
             triage_confidence_value = triage_result.triage_confidence
             if triage_result.decision == TRIAGE_SUPPRESS:
-                LOGGER.info(
-                    "Triage suppressed finding %s (%s): reason=%s.",
-                    finding.anomaly_id,
-                    finding.type,
-                    triage_result.reason_code,
-                )
                 await _append_finding_audit(
                     self._audit_store,
                     snapshot,
@@ -904,12 +868,6 @@ class SentinelEngine:
             canary_would_execute = (
                 exec_result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
             )
-            if canary_would_execute:
-                LOGGER.info(
-                    "Canary: would auto-execute finding %s (execution_id=%s).",
-                    finding.anomaly_id,
-                    exec_result.execution_id,
-                )
 
         # Live auto-execute: call HA services when policy approves and canary is off.
         action_outcome: dict[str, Any] | None = None
@@ -934,10 +892,6 @@ class SentinelEngine:
         # BLOCKED findings: audit and skip notification — no pending user action.
         if exec_result.action_policy_path == ACTION_POLICY_BLOCKED:
             await self._suppression.async_save()
-            LOGGER.debug(
-                "Finding %s blocked by execution policy; no notification dispatched.",
-                finding.anomaly_id,
-            )
             await _append_finding_audit(
                 self._audit_store,
                 snapshot,
@@ -956,12 +910,6 @@ class SentinelEngine:
 
         register_prompt(self._suppression.state, finding, now)
         await self._suppression.async_save()
-        LOGGER.info(
-            "Dispatching finding %s (%s) → policy=%s.",
-            finding.anomaly_id,
-            finding.type,
-            exec_result.action_policy_path,
-        )
 
         explanation = None
         if explain_enabled and self._explainer is not None:
@@ -1028,11 +976,6 @@ class SentinelEngine:
                 passing.append((constituent, decision.reason_code))
 
         if not passing:
-            LOGGER.debug(
-                "Suppressed compound finding %s (all %d constituents suppressed).",
-                compound.compound_id,
-                len(compound.constituent_findings),
-            )
             await _append_finding_audit(
                 self._audit_store,
                 snapshot,
@@ -1064,11 +1007,6 @@ class SentinelEngine:
         # BLOCKED findings: audit and skip notification — no pending user action.
         if exec_result.action_policy_path == ACTION_POLICY_BLOCKED:
             await self._suppression.async_save()
-            LOGGER.debug(
-                "Compound finding %s blocked by execution policy; "
-                "no notification dispatched.",
-                compound.compound_id,
-            )
             await _append_finding_audit(
                 self._audit_store,
                 snapshot,
@@ -1085,13 +1023,6 @@ class SentinelEngine:
         for constituent, _reason in passing:
             register_prompt(self._suppression.state, constituent, now)
         await self._suppression.async_save()
-
-        LOGGER.info(
-            "Dispatching compound finding %s (%d constituents, %d passed suppression).",
-            compound.compound_id,
-            len(compound.constituent_findings),
-            len(passing),
-        )
 
         canary_would_execute: bool | None = None
         if canary_mode:

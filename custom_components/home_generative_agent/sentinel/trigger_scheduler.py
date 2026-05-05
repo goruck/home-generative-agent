@@ -178,11 +178,6 @@ class SentinelTriggerScheduler:
                 pending.anomaly_type == record.anomaly_type
                 and pending.age(now) < COALESCE_WINDOW_SECONDS
             ):
-                LOGGER.debug(
-                    "Trigger coalesced: type=%s age=%.1fs",
-                    record.anomaly_type,
-                    pending.age(now),
-                )
                 self._stats["triggers_coalesced"] += 1
                 return
 
@@ -211,11 +206,6 @@ class SentinelTriggerScheduler:
         # --- 3. Enqueue ---
         self._queue.append(record)
         self._trigger_available.set()
-        LOGGER.debug(
-            "Trigger enqueued: type=%s queue_depth=%d",
-            record.anomaly_type,
-            len(self._queue),
-        )
 
     async def run_once_if_triggered(
         self,
@@ -242,19 +232,11 @@ class SentinelTriggerScheduler:
             return False
 
         if self._lock.locked():
-            LOGGER.debug(
-                "Single-flight lock held; skipping trigger-driven run for type=%s.",
-                record.anomaly_type,
-            )
             # Re-queue so the trigger is not lost permanently.
             self._queue.insert(0, record)
             return False
 
         async with self._lock:
-            LOGGER.debug(
-                "Executing trigger-driven _run_once for type=%s.",
-                record.anomaly_type,
-            )
             await run_once()
 
         return True
@@ -265,10 +247,8 @@ class SentinelTriggerScheduler:
     ) -> bool:
         """Execute *run_once* immediately under the single-flight lock."""
         if self._lock.locked():
-            LOGGER.debug("Single-flight lock held; skipping immediate run request.")
             return False
         async with self._lock:
-            LOGGER.debug("Executing immediate _run_once request.")
             await run_once()
         return True
 
@@ -296,7 +276,6 @@ class SentinelTriggerScheduler:
         execute concurrently.
         """
         async with self._lock:
-            LOGGER.debug("Executing polling-driven _run_once.")
             await run_once()
 
     @property
@@ -324,11 +303,6 @@ class SentinelTriggerScheduler:
         while self._queue:
             candidate = self._queue.pop(0)
             if candidate.is_expired(now):
-                LOGGER.debug(
-                    "Trigger TTL expired; discarding type=%s age=%.1fs.",
-                    candidate.anomaly_type,
-                    candidate.age(now),
-                )
                 self._stats["triggers_ttl_expired"] += 1
                 continue
             return candidate

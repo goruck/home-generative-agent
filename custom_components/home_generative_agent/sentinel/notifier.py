@@ -306,10 +306,10 @@ class SentinelNotifier:
                     "push": {"interruption-level": interrupt_level},
                 },
             }
-            LOGGER.info("Sending sentinel notification via %s.", target_service)
+            LOGGER.debug("Sending sentinel notification via %s.", target_service)
             await self._hass.services.async_call(domain, service, data, blocking=False)
         else:
-            LOGGER.info("Sending sentinel notification via persistent_notification.")
+            LOGGER.debug("Sending sentinel notification via persistent_notification.")
             await self._hass.services.async_call(
                 "persistent_notification",
                 "create",
@@ -364,7 +364,9 @@ class SentinelNotifier:
                         self._suppression.state, _entity_id, finding.type
                     )
                 await self._suppression.async_save()
-                LOGGER.info("Snooze 24 h registered for finding type %s.", finding.type)
+                LOGGER.debug(
+                    "Snooze 24 h registered for finding type %s.", finding.type
+                )
 
         elif verb == ACT_SNOOZE_ALWAYS:
             # Guard: send confirmation notification; do NOT write snooze yet.
@@ -380,7 +382,7 @@ class SentinelNotifier:
                     self._suppression.state, finding_type, SNOOZE_PERMANENT, now
                 )
                 await self._suppression.async_save()
-                LOGGER.info(
+                LOGGER.debug(
                     "Permanent snooze confirmed for finding type %s.", finding_type
                 )
             else:
@@ -513,7 +515,7 @@ class SentinelNotifier:
                 },
                 blocking=False,
             )
-        LOGGER.info("Daily digest sent: %s.", message)
+        LOGGER.debug("Daily digest sent: %s.", message)
 
     async def _send_always_confirmation(self, finding: AnomalyFinding) -> None:
         """

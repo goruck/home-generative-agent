@@ -588,13 +588,13 @@ async def test_llm_receives_system_and_human_messages() -> None:
 
 @pytest.mark.asyncio
 async def test_triage_deferred_when_chat_active() -> None:
-    """SentinelLLMDeferredError from run_sentinel_llm_call must produce decision=notify, reason_code=triage_deferred."""
+    """SentinelLLMDeferredError from the model call must produce a deferred decision."""
     finding = _finding()
     snapshot = _snapshot()
 
     svc = SentinelTriageService(MockLLM())
     with patch(
-        "custom_components.home_generative_agent.sentinel.triage.run_sentinel_llm_call",
+        "custom_components.home_generative_agent.sentinel.triage.run_sentinel_model_call",
         side_effect=SentinelLLMDeferredError("triage", "chat is active"),
     ):
         result = await svc.triage(finding, snapshot)

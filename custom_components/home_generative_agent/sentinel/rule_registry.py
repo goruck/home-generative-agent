@@ -64,7 +64,7 @@ class RuleRegistry:
             LOGGER.debug("Skipping rule registry add: missing rule_id.")
             return False
         if self.find_rule(str(rule_id)):
-            LOGGER.info("Rule registry ignored duplicate rule %s.", rule_id)
+            LOGGER.debug("Rule registry ignored duplicate rule %s.", rule_id)
             return False
         stored_rule = dict(rule)
         stored_rule.setdefault("enabled", True)

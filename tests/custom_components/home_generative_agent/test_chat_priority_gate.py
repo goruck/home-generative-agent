@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from unittest.mock import AsyncMock, MagicMock
 
@@ -392,3 +393,38 @@ async def test_run_sentinel_llm_call_timeout_raises_timeout_error() -> None:
             admission_timeout_s=0.1,
             call_timeout_s=0.05,
         )
+
+
+@pytest.mark.asyncio
+async def test_run_sentinel_model_call_uses_sync_invoke_off_event_loop() -> None:
+    """Models with sync invoke should run in an executor, not on the event loop."""
+    loop_thread_id = threading.get_ident()
+
+    class SyncModel:
+        def __init__(self) -> None:
+            self.invoke_thread_id: int | None = None
+            self.ainvoke_called = False
+
+        def invoke(self, _messages: list[str]) -> str:
+            self.invoke_thread_id = threading.get_ident()
+            return "ok"
+
+        async def ainvoke(self, _messages: list[str]) -> str:
+            self.ainvoke_called = True
+            return "async"
+
+    model = SyncModel()
+
+    result = await utils_mod.run_sentinel_model_call(
+        model,
+        ["message"],
+        deployment="cloud",
+        category="triage",
+        admission_timeout_s=0.1,
+        call_timeout_s=1.0,
+    )
+
+    assert result == "ok"
+    assert model.invoke_thread_id is not None
+    assert model.invoke_thread_id != loop_thread_id
+    assert model.ainvoke_called is False

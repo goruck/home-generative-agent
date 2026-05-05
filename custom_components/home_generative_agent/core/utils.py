@@ -336,11 +336,6 @@ async def sentinel_admission(
         # Re-evaluate after timeout: both could still be blocking.
         chat_blocking = not _chat_idle.is_set()
         video_blocking = not _video_idle.is_set()
-        defer_reason = (
-            "chat_and_video_active"
-            if chat_blocking and video_blocking
-            else ("chat_active" if chat_blocking else "video_active")
-        )
         _sentinel_defer_count += 1
         if chat_blocking:
             _sentinel_admissions_deferred_chat += 1
@@ -370,14 +365,6 @@ async def sentinel_admission(
                 _sentinel_defer_count,
                 starved_for_s,
             )
-        else:
-            LOGGER.debug(
-                "sentinel_admission category=%s decision=deferred reason=%s "
-                "consecutive_deferrals=%d",
-                category,
-                defer_reason,
-                _sentinel_defer_count,
-            )
         return False
     _sentinel_last_run = time.monotonic()
     _sentinel_first_defer = 0.0
@@ -387,7 +374,6 @@ async def sentinel_admission(
         health_stats["sentinel_admission_degraded_category"] = None
         health_stats["sentinel_admission_consecutive_deferrals"] = 0
         health_stats["sentinel_admission_starved_for_s"] = 0
-    LOGGER.debug("sentinel_admission category=%s decision=admitted", category)
     return True
 
 
@@ -431,6 +417,67 @@ async def run_sentinel_llm_call(  # noqa: PLR0913
         ) from err
     finally:
         _sentinel_llm_tasks.discard(task)
+
+
+async def run_sentinel_llm_call_in_executor(  # noqa: PLR0913
+    call_factory: Callable[[], Any],
+    *,
+    deployment: str,
+    category: str,
+    admission_timeout_s: float,
+    call_timeout_s: float,
+    health_stats: MutableMapping[str, Any] | None = None,
+) -> Any:
+    """Run a blocking Sentinel LLM call off the event loop."""
+    if not await sentinel_admission(
+        deployment,
+        category=category,
+        timeout_s=admission_timeout_s,
+        health_stats=health_stats,
+    ):
+        raise SentinelLLMDeferredError(category, "deferred; chat is active")
+
+    task = asyncio.create_task(asyncio.to_thread(call_factory))
+    _sentinel_llm_tasks.add(task)
+    try:
+        return await asyncio.wait_for(task, timeout=call_timeout_s)
+    except asyncio.CancelledError as err:
+        raise SentinelLLMDeferredError(
+            category, "interrupted by foreground chat"
+        ) from err
+    finally:
+        _sentinel_llm_tasks.discard(task)
+
+
+async def run_sentinel_model_call(  # noqa: PLR0913
+    model: Any,
+    messages: Any,
+    *,
+    deployment: str,
+    category: str,
+    admission_timeout_s: float,
+    call_timeout_s: float,
+    health_stats: MutableMapping[str, Any] | None = None,
+) -> Any:
+    """Run a Sentinel model call, preferring sync ``invoke`` off the event loop."""
+    invoke = getattr(model, "invoke", None)
+    if callable(invoke):
+        return await run_sentinel_llm_call_in_executor(
+            lambda: invoke(messages),
+            deployment=deployment,
+            category=category,
+            admission_timeout_s=admission_timeout_s,
+            call_timeout_s=call_timeout_s,
+            health_stats=health_stats,
+        )
+    return await run_sentinel_llm_call(
+        lambda: model.ainvoke(messages),
+        deployment=deployment,
+        category=category,
+        admission_timeout_s=admission_timeout_s,
+        call_timeout_s=call_timeout_s,
+        health_stats=health_stats,
+    )
 
 
 async def generate_embeddings(

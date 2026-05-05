@@ -422,7 +422,6 @@ class SentinelBaselineUpdater:
             return
         self._stop_event.clear()
         self._task = self._hass.async_create_task(self._run_loop())
-        LOGGER.debug("SentinelBaselineUpdater started.")
 
     async def stop(self) -> None:
         """Stop the background update loop."""
@@ -433,7 +432,6 @@ class SentinelBaselineUpdater:
         with contextlib.suppress(asyncio.CancelledError):
             await self._task
         self._task = None
-        LOGGER.debug("SentinelBaselineUpdater stopped.")
 
     # ---------------------------------------------------------------------- #
     # Run loop
@@ -445,7 +443,6 @@ class SentinelBaselineUpdater:
             default=RECOMMENDED_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES,
         )
         interval_seconds = interval_minutes * 60
-        LOGGER.info("Baseline update loop started (interval=%d min).", interval_minutes)
         while not self._stop_event.is_set():
             try:
                 from custom_components.home_generative_agent.snapshot.builder import (  # noqa: PLC0415
@@ -637,11 +634,6 @@ class SentinelBaselineUpdater:
                         await self._fire_establishment_notification(
                             entity_id, entity_values[entity_id], snapshot
                         )
-
-            LOGGER.debug(
-                "Baseline upsert completed for %d entities.", len(entity_values)
-            )
-
             # Fire drift notifications after commit (outside the conn context).
             # Only fire for established entities — skip entities still in build-up.
             for entity_id, value in entity_values.items():
@@ -678,7 +670,7 @@ class SentinelBaselineUpdater:
         message = (
             f"Baseline established for {friendly_name}: normal \u2248 {value:.2f}."
         )
-        LOGGER.info("Baseline established for %s (value=%.2f).", entity_id, value)
+        LOGGER.debug("Baseline established for %s (value=%.2f).", entity_id, value)
         try:
             await self._hass.services.async_call(
                 "persistent_notification",
@@ -712,7 +704,7 @@ class SentinelBaselineUpdater:
             f"was {reference_value:.2f}, now {current_value:.2f} "
             f"({drift_pct:.1f}% change). Reference updated."
         )
-        LOGGER.info(
+        LOGGER.debug(
             "Baseline drift for %s: %.2f -> %.2f (%.1f%%).",
             entity_id,
             reference_value,
@@ -897,11 +889,6 @@ class SentinelBaselineUpdater:
                 continue
             result.setdefault(entity_id, {})[metric] = float(value)
 
-        LOGGER.debug(
-            "Fetched baselines for %d entities (min_samples=%d).",
-            len(result),
-            min_samples,
-        )
         return result
 
     async def async_fetch_full_baselines(self) -> dict[str, dict[str, Any]] | None:

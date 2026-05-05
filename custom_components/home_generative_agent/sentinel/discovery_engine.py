@@ -20,7 +20,7 @@ from custom_components.home_generative_agent.core.utils import (
     SENTINEL_ADMISSION_TIMEOUT_S,
     SentinelLLMDeferredError,
     extract_final,
-    run_sentinel_llm_call,
+    run_sentinel_model_call,
 )
 from custom_components.home_generative_agent.explain.discovery_prompts import (
     SYSTEM_PROMPT,
@@ -35,6 +35,7 @@ from custom_components.home_generative_agent.snapshot.discovery_reducer import (
 
 from .discovery_schema import DISCOVERY_OUTPUT_SCHEMA, DISCOVERY_SCHEMA_VERSION
 from .discovery_semantic import candidate_semantic_key, rule_semantic_key
+from .logging_utils import RepeatingLogLimiter
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -101,6 +102,7 @@ class SentinelDiscoveryEngine:
         self._stop_event = asyncio.Event()
         self._run_lock = asyncio.Lock()
         self._discovery_cycle_stats: dict[str, int] = {}
+        self._log_limiter = RepeatingLogLimiter(LOGGER)
 
     def start(self) -> None:
         """Start the discovery loop."""
@@ -123,7 +125,6 @@ class SentinelDiscoveryEngine:
         interval = _coerce_int(
             self._options.get(CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS), default=3600
         )
-        LOGGER.info("Sentinel discovery loop started (interval=%ss).", interval)
         while not self._stop_event.is_set():
             await self._run_once_guarded()
             try:
@@ -162,8 +163,15 @@ class SentinelDiscoveryEngine:
         try:
             snapshot = await async_build_full_state_snapshot(self._hass)
         except (ValueError, TypeError, KeyError):
-            LOGGER.warning("Failed to build snapshot for discovery.")
+            self._log_limiter.warning(
+                "snapshot_build",
+                "Failed to build snapshot for discovery.",
+            )
             return
+        self._log_limiter.recovered(
+            "snapshot_build",
+            "Discovery snapshot build recovered after %d failed cycle(s).",
+        )
 
         if self._baseline_updater is not None:
             ready_ids = await self._baseline_updater.async_fetch_ready_entity_ids()
@@ -180,14 +188,16 @@ class SentinelDiscoveryEngine:
             try:
                 expired = await self._proposal_store.cleanup_unsupported_ttl()
                 if expired:
-                    LOGGER.info(
+                    LOGGER.debug(
                         "Discovery TTL cleanup: expired %d unsupported proposal(s).",
                         expired,
                     )
                     self._discovery_cycle_stats["unsupported_ttl_expired"] += expired
             except Exception:  # noqa: BLE001
-                LOGGER.warning(
-                    "Discovery TTL cleanup failed; continuing.", exc_info=True
+                self._log_limiter.warning(
+                    "ttl_cleanup",
+                    "Discovery TTL cleanup failed; continuing.",
+                    exc_info=True,
                 )
         active_rule_ids, existing_keys = await self._existing_semantic_context()
         # Cap keys sent to the LLM to bound prompt token cost. Post-hoc filter
@@ -199,18 +209,12 @@ class SentinelDiscoveryEngine:
             active_rule_ids=json.dumps(sorted(active_rule_ids), separators=(",", ":")),
             existing_semantic_keys=json.dumps(capped_keys, separators=(",", ":")),
         )
-        LOGGER.debug(
-            "Discovery prompt: %d chars (snapshot=%d, keys=%d/%d).",
-            len(prompt),
-            len(compact_snapshot),
-            len(capped_keys),
-            len(existing_keys),
-        )
         messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
 
         try:
-            result = await run_sentinel_llm_call(
-                lambda: self._model.ainvoke(messages),
+            result = await run_sentinel_model_call(
+                self._model,
+                messages,
                 deployment=self._deployment,
                 category="discovery",
                 admission_timeout_s=SENTINEL_ADMISSION_TIMEOUT_S,
@@ -221,14 +225,23 @@ class SentinelDiscoveryEngine:
             LOGGER.debug("Discovery LLM call deferred: %s", err)
             return
         except TimeoutError:
-            LOGGER.warning(
+            self._log_limiter.warning(
+                "llm_call",
                 "Discovery LLM call timed out after %.0fs; skipping cycle.",
                 _DISCOVERY_LLM_TIMEOUT_S,
             )
             return
         except (ValueError, TypeError, RuntimeError) as err:
-            LOGGER.warning("Discovery LLM call failed: %s", err)
+            self._log_limiter.warning(
+                "llm_call",
+                "Discovery LLM call failed: %s",
+                err,
+            )
             return
+        self._log_limiter.recovered(
+            "llm_call",
+            "Discovery LLM call recovered after %d failed cycle(s).",
+        )
 
         content = extract_final(getattr(result, "content", None) or "")
         if not content:
@@ -238,7 +251,10 @@ class SentinelDiscoveryEngine:
         try:
             payload = json.loads(content)
         except (json.JSONDecodeError, TypeError):
-            LOGGER.warning("Discovery output was not valid JSON.")
+            self._log_limiter.warning(
+                "invalid_output",
+                "Discovery output was not valid JSON.",
+            )
             return
 
         payload.setdefault("schema_version", DISCOVERY_SCHEMA_VERSION)
@@ -248,13 +264,27 @@ class SentinelDiscoveryEngine:
         try:
             validated = cast("dict[str, Any]", DISCOVERY_OUTPUT_SCHEMA(payload))
         except vol.Invalid:
-            LOGGER.warning("Discovery output failed schema validation.")
+            self._log_limiter.warning(
+                "invalid_output",
+                "Discovery output failed schema validation.",
+            )
             return
+        self._log_limiter.recovered(
+            "invalid_output",
+            "Discovery output recovered after %d invalid response(s).",
+        )
 
         raw_candidates = validated.get("candidates", [])
         if not isinstance(raw_candidates, list):
-            LOGGER.warning("Discovery output candidates were not a list.")
+            self._log_limiter.warning(
+                "invalid_candidates",
+                "Discovery output candidates were not a list.",
+            )
             return
+        self._log_limiter.recovered(
+            "invalid_candidates",
+            "Discovery candidates recovered after %d invalid response(s).",
+        )
         candidates = [item for item in raw_candidates if isinstance(item, dict)]
         self._discovery_cycle_stats["candidates_generated"] = len(candidates)
         filtered, filtered_candidates = self._filter_novel_candidates(
@@ -267,22 +297,7 @@ class SentinelDiscoveryEngine:
         )
         validated["candidates"] = filtered
         validated["filtered_candidates"] = filtered_candidates
-        if not filtered:
-            LOGGER.info(
-                "Discovery produced no novel candidates after dedupe (filtered=%s).",
-                len(filtered_candidates),
-            )
-        else:
-            LOGGER.debug(
-                "Discovery kept %s novel candidate(s) and filtered %s candidate(s).",
-                len(filtered),
-                len(filtered_candidates),
-            )
-
         await self._store.async_append(validated)
-        LOGGER.info(
-            "Discovery stored %s candidate(s).", len(validated.get("candidates", []))
-        )
 
     async def _existing_semantic_context(  # noqa: PLR0912
         self,
@@ -364,10 +379,6 @@ class SentinelDiscoveryEngine:
                         "dedupe_reason": "derived_only_paths",
                     }
                 )
-                LOGGER.debug(
-                    "Discovery dropped candidate %s (derived_only_paths).",
-                    candidate.get("candidate_id"),
-                )
                 continue
 
             dedupe_reason: str | None = None
@@ -378,12 +389,6 @@ class SentinelDiscoveryEngine:
             elif identity_key in seen_batch:
                 dedupe_reason = "batch_duplicate"
             if dedupe_reason is not None:
-                LOGGER.debug(
-                    "Discovery dropped candidate %s with key %s (%s).",
-                    candidate.get("candidate_id"),
-                    identity_key,
-                    dedupe_reason,
-                )
                 dropped_entry: dict[str, str] = {
                     "candidate_id": str(candidate.get("candidate_id", "")),
                     "dedupe_reason": dedupe_reason,

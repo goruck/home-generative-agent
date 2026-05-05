@@ -236,13 +236,6 @@ class SentinelCorrelator:
                 output.append(group[0])
             else:
                 compound = CompoundFinding.from_findings(group)
-                LOGGER.info(
-                    "Sentinel correlator grouped %d findings into compound %s "
-                    "(types=%s).",
-                    len(group),
-                    compound.compound_id,
-                    [f.type for f in group],
-                )
                 output.append(compound)
 
         return output
