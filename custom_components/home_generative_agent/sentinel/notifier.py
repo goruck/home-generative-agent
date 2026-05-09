@@ -579,6 +579,13 @@ def _build_actions(finding: AnomalyFinding) -> list[dict[str, Any]]:
                     "title": "Ask Agent",
                 }
             )
+        elif "arm_alarm" in finding.suggested_actions:
+            actions.append(
+                {
+                    "action": f"{ACTION_PREFIX}execute_{finding.anomaly_id}",
+                    "title": "Arm Alarm",
+                }
+            )
         else:
             actions.append(
                 {
@@ -687,6 +694,9 @@ def _friendly_type(anomaly_type: str) -> str:
         "open_any_window_at_night_while_away": "Window open at night",
         "unlocked_lock_at_night": "Door lock left unlocked",
         "camera_entry_unsecured": "Activity near unsecured entry",
+        "alarm_disarmed_during_external_threat": (
+            "Outdoor activity while alarm disarmed"
+        ),
     }
     if anomaly_type in known:
         return known[anomaly_type]
@@ -752,7 +762,46 @@ def _fallback_message(finding: AnomalyFinding) -> str:
     return f"{summary}: {entity}. {_severity_action_hint(finding.severity)}"
 
 
+def _alarm_disarmed_mobile_message(finding: AnomalyFinding) -> str:
+    """Deterministic mobile copy for alarm_disarmed_during_external_threat."""
+    ev = finding.evidence
+
+    cam_name: str = (ev.get("camera_friendly_name") or "").strip()[:30]
+    if not cam_name:
+        cam_id = str(ev.get("camera_entity_id", ""))
+        if cam_id:
+            cam_name = cam_id.partition(".")[2].replace("_", " ").title()[:30]
+        else:
+            cam_name = ""
+    if not cam_name:
+        cam_name = "A camera"
+
+    age = ev.get("camera_activity_age_minutes")
+    if age is not None:
+        age_mins = max(1, round(float(age)))
+        activity_phrase = (
+            f"{cam_name} detected unrecognized outdoor activity {age_mins} min ago."
+        )
+    else:
+        activity_phrase = f"{cam_name} reported unrecognized outdoor activity."
+
+    last_changed = ev.get("alarm_last_changed")
+    alarm_phrase = ""
+    if last_changed:
+        parsed = dt_util.parse_datetime(str(last_changed))
+        if parsed is not None:
+            time_str = dt_util.as_local(parsed).strftime("%-I:%M %p")
+            alarm_phrase = f" The alarm has been disarmed since {time_str}."
+    if not alarm_phrase:
+        alarm_phrase = " The alarm is currently disarmed."
+
+    cta = " Arm the alarm or view the camera."
+    return (activity_phrase + alarm_phrase + cta)[:MAX_MOBILE_MESSAGE_CHARS].rstrip()
+
+
 def _mobile_message(explanation: str | None, finding: AnomalyFinding) -> str:
+    if finding.type == "alarm_disarmed_during_external_threat":
+        return _alarm_disarmed_mobile_message(finding)
     if explanation:
         text = _normalize_text(explanation)
         if text and len(text) <= MAX_MOBILE_MESSAGE_CHARS:

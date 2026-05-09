@@ -158,6 +158,10 @@ RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: bool = False
 CONF_SENTINEL_STALENESS_THRESHOLD_SECONDS = "sentinel_staleness_threshold_seconds"
 RECOMMENDED_SENTINEL_STALENESS_THRESHOLD_SECONDS: int = 1800
 
+# Camera activity staleness gate for the alarm_disarmed_during_external_threat rule.
+# Only fire the rule when camera activity is within this many minutes of the snapshot.
+SENTINEL_CAMERA_ACTIVITY_STALENESS_MINUTES: int = 10
+
 # ---- Sentinel auto-execution (Level 2+) ----
 CONF_SENTINEL_AUTO_EXECUTION_ENABLED = "sentinel_auto_execution_enabled"
 RECOMMENDED_SENTINEL_AUTO_EXECUTION_ENABLED: bool = False

@@ -1749,6 +1749,168 @@ def test_alarm_disarmed_zero_alarm_panels_no_findings() -> None:
     assert len(findings) == 0
 
 
+def test_alarm_disarmed_stale_activity_no_trigger() -> None:
+    """Camera activity older than staleness threshold should not fire the rule."""
+    snapshot = _base_snapshot()
+    snapshot["generated_at"] = "2025-01-01T00:20:00+00:00"
+    snapshot["entities"] = [_alarm_entity("disarmed")]
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.backyard",
+            # 16 minutes before generated_at — beyond the 10-minute threshold.
+            last_activity="2025-01-01T00:04:00+00:00",
+            snapshot_summary="Unknown person in backyard.",
+        )
+    ]
+    findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_alarm_disarmed_fresh_activity_triggers_with_age() -> None:
+    """Camera activity within the staleness window fires and includes computed age."""
+    snapshot = _base_snapshot()
+    snapshot["generated_at"] = "2025-01-01T00:08:00+00:00"
+    snapshot["entities"] = [_alarm_entity("disarmed")]
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.backyard",
+            # 4 minutes before generated_at — within the 10-minute threshold.
+            last_activity="2025-01-01T00:04:00+00:00",
+            snapshot_summary="Unknown person in backyard.",
+        )
+    ]
+    findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
+    assert len(findings) == 1
+    age = findings[0].evidence["camera_activity_age_minutes"]
+    assert age is not None
+    assert 3.9 < age < 4.1
+
+
+def test_alarm_disarmed_unparseable_timestamp_no_other_evidence_no_trigger() -> None:
+    """Unparseable last_activity with no other evidence must not fire the rule."""
+    snapshot = _base_snapshot()
+    snapshot["entities"] = [_alarm_entity("disarmed")]
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.backyard",
+            last_activity="not-a-valid-timestamp",
+            motion_entities=[],
+            vmd_entities=[],
+            snapshot_summary=None,
+        )
+    ]
+    findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_alarm_disarmed_unparseable_timestamp_with_other_evidence_triggers() -> None:
+    """Unparseable last_activity is allowed when snapshot_summary is present."""
+    snapshot = _base_snapshot()
+    snapshot["entities"] = [_alarm_entity("disarmed")]
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.backyard",
+            last_activity="not-a-valid-timestamp",
+            snapshot_summary="Unknown person detected.",
+        )
+    ]
+    findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
+    assert len(findings) == 1
+    assert findings[0].evidence["camera_activity_age_minutes"] is None
+
+
+def test_alarm_disarmed_no_timestamp_but_motion_triggers_with_no_age() -> None:
+    """Missing last_activity but present motion_entities allows finding without an age."""
+    snapshot = _base_snapshot()
+    snapshot["entities"] = [_alarm_entity("disarmed")]
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.backyard",
+            last_activity=None,
+            motion_entities=["binary_sensor.backyard_motion"],
+            snapshot_summary=None,
+        )
+    ]
+    findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
+    assert len(findings) == 1
+    assert findings[0].evidence["camera_activity_age_minutes"] is None
+
+
+def test_alarm_disarmed_anomaly_id_stable_across_cycles() -> None:
+    """Anomaly ID must not change when only camera_activity_age_minutes advances."""
+    base = _base_snapshot()
+    base["entities"] = [_alarm_entity("disarmed")]
+    base["camera_activity"] = [
+        _camera_activity(
+            "camera.backyard",
+            last_activity="2025-01-01T00:04:00+00:00",
+            snapshot_summary="Unknown person.",
+        )
+    ]
+
+    # Cycle 1: generated_at 5 minutes after last_activity.
+    snap1 = {**base, "generated_at": "2025-01-01T00:09:00+00:00"}
+    findings1 = AlarmDisarmedDuringExternalThreatRule().evaluate(snap1)  # type: ignore[arg-type]
+    assert len(findings1) == 1
+
+    # Cycle 2: generated_at 6 minutes after last_activity — age advances by 1 min.
+    snap2 = {**base, "generated_at": "2025-01-01T00:10:00+00:00"}
+    findings2 = AlarmDisarmedDuringExternalThreatRule().evaluate(snap2)  # type: ignore[arg-type]
+    assert len(findings2) == 1
+
+    assert findings1[0].anomaly_id == findings2[0].anomaly_id, (
+        "anomaly_id must be stable across cycles for the same underlying event"
+    )
+
+
+def test_alarm_disarmed_indoor_occupancy_signal_is_null() -> None:
+    """indoor_occupancy_signal must always be null — never inferred from home presence."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["entities"] = [_alarm_entity("disarmed")]
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.backyard",
+            snapshot_summary="Unknown person.",
+        )
+    ]
+    findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
+    assert len(findings) == 1
+    assert findings[0].evidence["indoor_occupancy_signal"] is None
+
+
+def test_alarm_disarmed_evidence_includes_computed_durations() -> None:
+    """Evidence should include disarm_duration_minutes and camera_activity_age_minutes."""
+    snapshot = _base_snapshot()
+    snapshot["generated_at"] = "2025-01-01T00:10:00+00:00"
+    snapshot["entities"] = [
+        SnapshotEntity(
+            entity_id="alarm_control_panel.home_alarm",
+            domain="alarm_control_panel",
+            state="disarmed",
+            friendly_name="Home Alarm",
+            area=None,
+            attributes={},
+            last_changed="2025-01-01T00:00:00+00:00",  # disarmed 10 min ago
+            last_updated="2025-01-01T00:00:00+00:00",
+        )
+    ]
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.backyard",
+            last_activity="2025-01-01T00:05:00+00:00",  # 5 min ago
+            snapshot_summary="Unknown person.",
+        )
+    ]
+    findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
+    assert len(findings) == 1
+    ev = findings[0].evidence
+    assert ev["disarm_duration_minutes"] is not None
+    assert 9.9 < ev["disarm_duration_minutes"] < 10.1
+    assert ev["camera_activity_age_minutes"] is not None
+    assert 4.9 < ev["camera_activity_age_minutes"] < 5.1
+
+
 # ---------------------------------------------------------------------------
 # PhoneBatteryLowAtNightRule
 # ---------------------------------------------------------------------------
