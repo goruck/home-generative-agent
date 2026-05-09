@@ -97,6 +97,9 @@ def _friendly_type(anomaly_type: str) -> str:
         "open_any_window_at_night_while_away": "Window open at night",
         "unlocked_lock_at_night": "Door lock left unlocked",
         "camera_entry_unsecured": "Activity near unsecured entry",
+        "alarm_disarmed_during_external_threat": (
+            "Outdoor activity while alarm disarmed"
+        ),
     }
     if anomaly_type in known:
         return known[anomaly_type]
