@@ -236,6 +236,51 @@ Entity-backed evidence path instruction added to `USER_PROMPT_TEMPLATE` in `expl
 
 ---
 
+## Video Analyzer
+
+### Caption novelty: per-analysis notification-status metadata
+
+**What:** Store whether each video analysis triggered a notification alongside the
+caption in the vector store. Add `notified`, `decision_reason`, and `matched_key`
+fields to the stored value written by `_store_results`. Update `_is_caption_novel`
+to optionally filter `store.asearch` results to notification-worthy records only,
+so suppressed artifact captions do not inflate the similarity baseline.
+
+**Why:** `_store_results` is called unconditionally, meaning suppressed captions
+(e.g. repeated nighttime blur) are stored and can later cause a genuinely new
+artifact caption to be suppressed against a non-notified prior. Filtering by
+`notified=True` in the search would improve precision but requires a metadata
+field and a query-time filter that the store API must support.
+
+**How to apply:** Add `notified: bool`, `decision_reason: str`, and
+`matched_caption_key: str | None` fields to the dict written in `_store_results`.
+Pass `decision.notify` and `decision.reason` from `_handle_notification` into
+`_store_results`. Update `store.asearch` call to include a metadata filter when
+the store API supports it. Until the filter lands, the current behavior (compare
+against all stored analyses) is acceptable.
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** v3.14.0 (CaptionNoveltyDecision)
+
+---
+
+### Caption novelty: tune threshold and artifact terms from real logs
+
+**What:** Review accumulated debug logs from `_is_caption_novel` decisions to
+check whether `VIDEO_ANALYZER_SIMILARITY_THRESHOLD = 0.89` and the `_ARTIFACT_RE`
+vocabulary produce the right suppress/notify balance in production.
+
+**Why:** The threshold and terms were set conservatively. Real logs can reveal
+common false-positives (suppressing events that should notify) or false-negatives
+(notifying on repeated low-value artifacts). Adjust as data accumulates.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** v3.14.0 (decision logging)
+
+---
+
 ## Notifier / Observability
 
 ### Feedback-trained per-entity cooldowns — wire feedback signal

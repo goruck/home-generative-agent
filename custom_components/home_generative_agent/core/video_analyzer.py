@@ -705,8 +705,13 @@ class VideoAnalyzer:
         matched_caption = (
             best_result.value.get("content") if best_result.value else None
         )
-        matched_age_seconds = int(
-            (dt_util.now() - dt_util.as_local(best_result.created_at)).total_seconds()
+        matched_age_seconds = max(
+            0,
+            int(
+                (
+                    dt_util.now() - dt_util.as_local(best_result.created_at)
+                ).total_seconds()
+            ),
         )
         norm_current = _normalize_caption(msg)
 
