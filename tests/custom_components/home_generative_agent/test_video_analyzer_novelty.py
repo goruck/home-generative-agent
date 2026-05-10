@@ -20,6 +20,10 @@ from unittest.mock import AsyncMock, MagicMock
 import homeassistant.util.dt as dt_util
 import pytest
 
+from custom_components.home_generative_agent.const import (
+    VIDEO_ANALYZER_CAPTION_DEDUPE_WINDOW_SEC,
+    VIDEO_ANALYZER_SIMILARITY_THRESHOLD,
+)
 from custom_components.home_generative_agent.core.video_analyzer import (
     CaptionNoveltyDecision,
     VideoAnalyzer,
@@ -360,6 +364,35 @@ async def test_one_high_score_among_low_scores_suppresses(va: VideoAnalyzer) -> 
     assert decision.best_score == pytest.approx(0.92)
 
 
+@pytest.mark.asyncio
+async def test_score_at_exact_threshold_suppresses(va: VideoAnalyzer) -> None:
+    """Score == threshold uses >=, so it must suppress (not notify)."""
+    results = [
+        _make_search_result(
+            "bright blur across the walkway", score=VIDEO_ANALYZER_SIMILARITY_THRESHOLD
+        )
+    ]
+    va.entry.runtime_data.store.asearch = AsyncMock(return_value=results)
+    decision = await va._is_caption_novel(  # type: ignore[attr-defined]
+        "frontgate", "bright blur streaks", _fresh_snapshot_name(), []
+    )
+    assert decision.notify is False
+    assert decision.reason == "score_above_threshold"
+
+
+@pytest.mark.asyncio
+async def test_score_just_below_threshold_notifies(va: VideoAnalyzer) -> None:
+    """Score just below threshold must notify."""
+    score = VIDEO_ANALYZER_SIMILARITY_THRESHOLD - 0.001
+    results = [_make_search_result("quiet empty walkway", score=score)]
+    va.entry.runtime_data.store.asearch = AsyncMock(return_value=results)
+    decision = await va._is_caption_novel(  # type: ignore[attr-defined]
+        "frontgate", "package left on step", _fresh_snapshot_name(), []
+    )
+    assert decision.notify is True
+    assert decision.reason == "score_below_threshold"
+
+
 # ---------------------------------------------------------------------------
 # _is_caption_novel: score_below_threshold notifies
 # ---------------------------------------------------------------------------
@@ -482,6 +515,50 @@ async def test_artifact_bucket_stale_match_notifies(va: VideoAnalyzer) -> None:
     decision = await va._is_caption_novel(  # type: ignore[attr-defined]
         "frontgate",
         "bright blur across the walkway",
+        _fresh_snapshot_name(),
+        [],
+    )
+    assert decision.notify is True
+    assert decision.reason == "stale_match"
+
+
+@pytest.mark.asyncio
+async def test_artifact_bucket_at_exact_window_suppresses(va: VideoAnalyzer) -> None:
+    """Age == window uses <=, so it must suppress (not notify as stale_match)."""
+    results = [
+        _make_search_result(
+            "no people visible in the black and white scene",
+            score=0.75,
+            age_seconds=VIDEO_ANALYZER_CAPTION_DEDUPE_WINDOW_SEC,
+        )
+    ]
+    va.entry.runtime_data.store.asearch = AsyncMock(return_value=results)
+    decision = await va._is_caption_novel(  # type: ignore[attr-defined]
+        "frontgate",
+        "a bright horizontal blur streaks across the walkway",
+        _fresh_snapshot_name(),
+        [],
+    )
+    assert decision.notify is False
+    assert decision.reason == "artifact_bucket"
+
+
+@pytest.mark.asyncio
+async def test_artifact_bucket_one_second_over_window_notifies(
+    va: VideoAnalyzer,
+) -> None:
+    """One second past the window boundary must fire stale_match."""
+    results = [
+        _make_search_result(
+            "no people visible in the black and white scene",
+            score=0.75,
+            age_seconds=VIDEO_ANALYZER_CAPTION_DEDUPE_WINDOW_SEC + 1,
+        )
+    ]
+    va.entry.runtime_data.store.asearch = AsyncMock(return_value=results)
+    decision = await va._is_caption_novel(  # type: ignore[attr-defined]
+        "frontgate",
+        "a bright horizontal blur streaks across the walkway",
         _fresh_snapshot_name(),
         [],
     )
@@ -761,3 +838,116 @@ async def test_decision_carries_matched_caption_and_score(va: VideoAnalyzer) -> 
     assert decision.matched_caption == "prior caption text"
     assert decision.matched_age_seconds is not None
     assert decision.matched_age_seconds >= 90
+
+
+# ---------------------------------------------------------------------------
+# _handle_notification: novelty decision drives notify vs suppress
+# ---------------------------------------------------------------------------
+
+
+from pathlib import Path  # noqa: E402
+from unittest.mock import patch  # noqa: E402
+
+
+def _make_batch() -> list[Path]:
+    """Minimal batch: one snapshot path with 3+ parts so chosen.parts[-3:] works."""
+    snap_name = _fresh_snapshot_name()
+    return [Path("/media/local/camera_frontporch") / snap_name]
+
+
+@pytest.mark.asyncio
+async def test_handle_notification_notifies_when_decision_is_notify(
+    va: VideoAnalyzer,
+) -> None:
+    """notify=True decision must call protect_notify_image and _send_notification."""
+    va.entry.runtime_data.options = {"video_analyzer_mode": "notify_on_anomaly"}
+    va._is_caption_novel = AsyncMock(  # type: ignore[method-assign]
+        return_value=CaptionNoveltyDecision(notify=True, reason="score_below_threshold")
+    )
+    va.protect_notify_image = MagicMock()  # type: ignore[method-assign]
+    va._send_notification = AsyncMock()  # type: ignore[method-assign]
+
+    with (
+        patch(
+            "custom_components.home_generative_agent.core.video_analyzer.latest_target",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "custom_components.home_generative_agent.core.video_analyzer.publish_latest_atomic",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "custom_components.home_generative_agent.core.video_analyzer.dispatch_on_loop"
+        ),
+    ):
+        await va._handle_notification(  # type: ignore[attr-defined]
+            "camera.frontporch", "a person walks up the path", _make_batch()
+        )
+
+    va.protect_notify_image.assert_called_once()
+    va._send_notification.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_handle_notification_suppresses_when_decision_is_no_notify(
+    va: VideoAnalyzer,
+) -> None:
+    """notify=False decision must not call protect_notify_image or _send_notification."""
+    va.entry.runtime_data.options = {"video_analyzer_mode": "notify_on_anomaly"}
+    va._is_caption_novel = AsyncMock(  # type: ignore[method-assign]
+        return_value=CaptionNoveltyDecision(
+            notify=False, reason="score_above_threshold"
+        )
+    )
+    va.protect_notify_image = MagicMock()  # type: ignore[method-assign]
+    va._send_notification = AsyncMock()  # type: ignore[method-assign]
+
+    with (
+        patch(
+            "custom_components.home_generative_agent.core.video_analyzer.latest_target",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "custom_components.home_generative_agent.core.video_analyzer.publish_latest_atomic",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "custom_components.home_generative_agent.core.video_analyzer.dispatch_on_loop"
+        ),
+    ):
+        await va._handle_notification(  # type: ignore[attr-defined]
+            "camera.frontporch", "empty porch scene", _make_batch()
+        )
+
+    va.protect_notify_image.assert_not_called()
+    va._send_notification.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_handle_notification_always_notifies_outside_anomaly_mode(
+    va: VideoAnalyzer,
+) -> None:
+    """Mode != 'notify_on_anomaly' must always notify regardless of caption novelty."""
+    va.entry.runtime_data.options = {"video_analyzer_mode": "always_notify"}
+    va.protect_notify_image = MagicMock()  # type: ignore[method-assign]
+    va._send_notification = AsyncMock()  # type: ignore[method-assign]
+
+    with (
+        patch(
+            "custom_components.home_generative_agent.core.video_analyzer.latest_target",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "custom_components.home_generative_agent.core.video_analyzer.publish_latest_atomic",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "custom_components.home_generative_agent.core.video_analyzer.dispatch_on_loop"
+        ),
+    ):
+        await va._handle_notification(  # type: ignore[attr-defined]
+            "camera.frontporch", "empty porch scene", _make_batch()
+        )
+
+    va.protect_notify_image.assert_called_once()
+    va._send_notification.assert_awaited_once()

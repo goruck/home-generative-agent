@@ -113,7 +113,7 @@ _METRICS_LAT_HISTORY: Final[int] = 512  # keep up to 512 lat samples per camera
 # --- Caption novelty: lexical fast-path terms ---
 _ARTIFACT_RE: Final = re.compile(
     r"bright light|light streak|glare|\bblur|monochrome|black and white|"
-    r"night scene|no (?:people|person|one|body) (?:\w+ )?visible"
+    r"night scene|no(?:body| (?:people|persons?|one|body|humans?)) (?:\w+ )?visible"
 )
 _SUBJECT_RE: Final = re.compile(
     r"\b(?:person|people|man|woman|child|children|boy|girl|"
@@ -137,12 +137,12 @@ _ACTION_RE: Final = re.compile(
     r"cross|crosses|crossing|crossed|"
     r"appear|appears|appearing|appeared|"
     r"disappear|disappears|disappearing|disappeared|"
-    r"arriv|arrives|arriving|arrived|"
-    r"leav|leaves|leaving|left|"
-    r"driv|drives|driving|drove|"
+    r"arrive|arrives|arriving|arrived|"
+    r"leave|leaves|leaving|left|"
+    r"drive|drives|driving|drove|"
     r"pull|pulls|pulling|pulled|"
     r"step|steps|stepping|stepped|"
-    r"mov|moves|moving|moved|"
+    r"move|moves|moving|moved|"
     r"stand|stands|standing|stood|"
     r"sit|sits|sitting|sat|"
     r"wait|waits|waiting|waited|"
@@ -671,6 +671,9 @@ class VideoAnalyzer:
         first_path: str,
         recognized_names: list[str],
     ) -> CaptionNoveltyDecision:
+        # Decision tree: one early-return per CaptionNoveltyDecision reason code.
+        # PLR0911 (too many return statements) suppressed intentionally — each
+        # return maps to a named reason that callers and tests can assert on.
         # Snapshot names are in the form "snapshot_20250426_002804.jpg".
         first_str = first_path.replace("snapshot_", "").replace(".jpg", "")
         first_dt = dt_util.as_local(datetime.strptime(first_str, "%Y%m%d_%H%M%S"))  # noqa: DTZ007
@@ -692,14 +695,13 @@ class VideoAnalyzer:
         if not search_results:
             return CaptionNoveltyDecision(notify=True, reason="no_match")
 
-        scores = [r.score for r in search_results if r.score is not None]
-        if not scores:
+        if not any(r.score is not None for r in search_results):
             return CaptionNoveltyDecision(notify=True, reason="score_none")
 
         best_result = max(
             search_results, key=lambda r: r.score if r.score is not None else -1.0
         )
-        best_score = best_result.score  # guaranteed non-None since scores is non-empty
+        best_score = best_result.score  # guaranteed non-None by the any() check above
         matched_caption = (
             best_result.value.get("content") if best_result.value else None
         )
@@ -707,7 +709,6 @@ class VideoAnalyzer:
             (dt_util.now() - dt_util.as_local(best_result.created_at)).total_seconds()
         )
         norm_current = _normalize_caption(msg)
-        norm_matched = _normalize_caption(matched_caption or "")
 
         if best_score >= VIDEO_ANALYZER_SIMILARITY_THRESHOLD:
             # For captions with a real subject (person, vehicle, package) only suppress
@@ -743,6 +744,7 @@ class VideoAnalyzer:
         # Vector score is below threshold. Check the lexical artifact fast path:
         # suppress if both captions describe a low-value artifact with no real subject
         # and the matched caption is recent enough.
+        norm_matched = _normalize_caption(matched_caption or "")
         if (
             _in_artifact_bucket(norm_current)
             and _in_artifact_bucket(norm_matched)
