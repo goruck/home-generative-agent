@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.0] - 2026-05-10
+
+### Added
+
+- **Video analyzer caption deduplication** — The video analyzer now suppresses
+  repeated low-value camera notifications within a configurable window
+  (`VIDEO_ANALYZER_CAPTION_DEDUPE_WINDOW_SEC`, default 30 minutes). A new
+  `CaptionNoveltyDecision` result type carries the suppression reason and match
+  details, enabling structured debug logging and future metadata storage.
+
+### Fixed
+
+- **Caption novelty used weakest vector match** — `_is_anomaly` treated any
+  single below-threshold result as novel, even when the best matching caption was
+  highly similar. Replaced with a best-score check so only the closest stored
+  caption governs the suppress/notify decision. Renamed to `_is_caption_novel`
+  to match the new semantics.
+- **Generic "animal" subject not recognized** — Captions describing "a dark
+  animal stands on the path" were incorrectly suppressed against days-old matches
+  because `animal` was absent from the subject-term list. Added `animal` to
+  `_SUBJECT_RE` so generic animal descriptions trigger the stale-match re-notify
+  path alongside `cat`, `dog`, `deer`, and other named species.
+- **Dead regex stems in action detector** — Partial stems `arriv`, `leav`,
+  `driv`, and `mov` in `_ACTION_RE` could never match at a word boundary.
+  Replaced with the correct infinitive forms: `arrive`, `leave`, `drive`, `move`.
+
 ## [3.13.1] - 2026-05-05
 
 ### Fixed

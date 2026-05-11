@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from time import monotonic
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Literal
 from urllib.parse import urljoin
 
 import aiofiles
@@ -35,6 +35,7 @@ from ..const import (  # noqa: TID252
     RECOMMENDED_VIDEO_MODEL_SEMAPHORE,
     SIGNAL_HGA_NEW_LATEST,
     SIGNAL_HGA_RECOGNIZED,
+    VIDEO_ANALYZER_CAPTION_DEDUPE_WINDOW_SEC,
     VIDEO_ANALYZER_FACE_CROP,
     VIDEO_ANALYZER_LATEST_NAME,
     VIDEO_ANALYZER_LATEST_SUBFOLDER,
@@ -108,6 +109,111 @@ _UNIQUENESS_HEARTBEAT_SEC: Final[int] = 10  # always allow a frame at least this
 # --- Metrics reporting ---
 _METRICS_REPORT_INTERVAL_SEC: Final[int] = 3600  # once per hour
 _METRICS_LAT_HISTORY: Final[int] = 512  # keep up to 512 lat samples per camera
+
+# --- Caption novelty: lexical fast-path terms ---
+_ARTIFACT_RE: Final = re.compile(
+    r"bright light|light streak|glare|\bblur|monochrome|black and white|"
+    r"night scene|no(?:body| (?:people|persons?|one|body|humans?)) (?:\w+ )?visible"
+)
+_SUBJECT_RE: Final = re.compile(
+    r"\b(?:person|people|man|woman|child|children|boy|girl|"
+    r"package|box|delivery|"
+    r"car|truck|vehicle|suv|van|bus|motorcycle|pickup|minivan|"
+    r"cat|dog|bird|deer|raccoon|fox|coyote|squirrel|animal)\b"
+)
+# Matches negated human presence so "no people visible" does not count as a subject.
+_NEGATED_HUMAN_RE: Final = re.compile(
+    r"\bno\s+(?:people|persons?|one|body|humans?)\b.{0,20}\bvisible\b"
+)
+# Action/presence verbs indicating a subject is doing something or is actively there.
+# stale_match only fires when an action verb is present — a parked car or a static
+# house description does not count as an event worth re-notifying.
+_ACTION_RE: Final = re.compile(
+    r"\b(?:walk|walks|walking|walked|"
+    r"run|runs|running|ran|"
+    r"approach|approaches|approaching|approached|"
+    r"enter|enters|entering|entered|"
+    r"exit|exits|exiting|exited|"
+    r"cross|crosses|crossing|crossed|"
+    r"appear|appears|appearing|appeared|"
+    r"disappear|disappears|disappearing|disappeared|"
+    r"arrive|arrives|arriving|arrived|"
+    r"leave|leaves|leaving|left|"
+    r"drive|drives|driving|drove|"
+    r"pull|pulls|pulling|pulled|"
+    r"step|steps|stepping|stepped|"
+    r"move|moves|moving|moved|"
+    r"stand|stands|standing|stood|"
+    r"sit|sits|sitting|sat|"
+    r"wait|waits|waiting|waited|"
+    r"watch|watches|watching|watched)\b"
+)
+# Phrases where an action verb describes an inanimate object, not a person.
+# Scrubbed from the caption before _ACTION_RE is applied.
+_STATIC_CONTEXT_RE: Final = re.compile(
+    # "SUV sits parked" / "car sits there" — vehicle static position
+    r"\b(?:suv|car|truck|vehicle|van|bus|sedan|pickup|minivan)\s+sits?\b"
+    # "path/walkway/fence runs along" — a feature extending through the scene
+    r"|\b(?:path|walkway|road|driveway|fence|lane)\s+runs?\b"
+    # "stepping stones" — "stepping" modifies "stones", not a person
+    r"|\bstepping\s+stones?\b"
+)
+
+
+def _normalize_caption(caption: str) -> str:
+    """Lowercase, collapse punctuation/whitespace, canonicalize compound terms."""
+    text = caption.lower()
+    text = text.replace("black-and-white", "black and white")
+    text = re.sub(r"[^\w\s]", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _in_artifact_bucket(normalized: str) -> bool:
+    """Return True if the caption describes a low-value visual artifact."""
+    return bool(_ARTIFACT_RE.search(normalized))
+
+
+def _has_action(normalized: str) -> bool:
+    """
+    Return True if the caption contains an action/presence verb from an animate subject.
+
+    Inanimate patterns ('SUV sits parked', 'path runs alongside') are scrubbed
+    before the check so they do not produce false positives.
+    """
+    scrubbed = _STATIC_CONTEXT_RE.sub(" ", normalized)
+    return bool(_ACTION_RE.search(scrubbed))
+
+
+def _has_real_subject(normalized: str, recognized_names: list[str]) -> bool:
+    """Return True if the caption mentions a subject that should prevent suppression."""
+    # Remove negated human spans before scanning for subject terms so that
+    # "no people visible" does not look like a human presence.
+    scrubbed = _NEGATED_HUMAN_RE.sub(" ", normalized)
+    if _SUBJECT_RE.search(scrubbed):
+        return True
+    # "Indeterminate" means face recognition ran but found no identifiable face.
+    # Only "Unknown Person" (seen but unrecognized) or a known name counts.
+    return any(n and n != "Indeterminate" for n in recognized_names)
+
+
+@dataclass(frozen=True)
+class CaptionNoveltyDecision:
+    """Result of _is_caption_novel."""
+
+    notify: bool
+    reason: Literal[
+        "stale_snapshot",
+        "no_match",
+        "score_none",
+        "score_below_threshold",
+        "score_above_threshold",
+        "artifact_bucket",
+        "stale_match",
+        "store_timeout",
+    ]
+    best_score: float | None = None
+    matched_caption: str | None = None
+    matched_age_seconds: int | None = None
 
 
 @dataclass
@@ -558,7 +664,22 @@ class VideoAnalyzer:
         msg = "Empty model content after parsing."
         raise ValueError(msg)
 
-    async def _is_anomaly(self, camera_name: str, msg: str, first_path: str) -> bool:
+    async def _is_caption_novel(  # noqa: PLR0911, PLR0912
+        self,
+        camera_name: str,
+        msg: str,
+        first_path: str,
+        recognized_names: list[str],
+    ) -> CaptionNoveltyDecision:
+        # Decision tree: one early-return per CaptionNoveltyDecision reason code.
+        # PLR0911 (too many return statements) suppressed intentionally — each
+        # return maps to a named reason that callers and tests can assert on.
+        # Snapshot names are in the form "snapshot_20250426_002804.jpg".
+        first_str = first_path.replace("snapshot_", "").replace(".jpg", "")
+        first_dt = dt_util.as_local(datetime.strptime(first_str, "%Y%m%d_%H%M%S"))  # noqa: DTZ007
+        if first_dt < dt_util.now() - timedelta(minutes=VIDEO_ANALYZER_TIME_OFFSET):
+            return CaptionNoveltyDecision(notify=True, reason="stale_snapshot")
+
         try:
             async with asyncio.timeout(10):
                 search_results = await self.entry.runtime_data.store.asearch(
@@ -566,27 +687,118 @@ class VideoAnalyzer:
                 )
         except TimeoutError:
             LOGGER.warning(
-                "[%s] store.asearch timed out in _is_anomaly; treating as novel.",
+                "[%s] store.asearch timed out in _is_caption_novel; treating as novel.",
                 camera_name,
             )
-            return True
+            return CaptionNoveltyDecision(notify=True, reason="store_timeout")
 
-        # Calculate a "no newer than" time threshold from first snapshot time
-        # by delaying it by the time offset.
-        # Snapshot names are in the form "snapshot_20250426_002804.jpg".
-        first_str = first_path.replace("snapshot_", "").replace(".jpg", "")
-        first_dt = dt_util.as_local(datetime.strptime(first_str, "%Y%m%d_%H%M%S"))  # noqa: DTZ007
+        if not search_results:
+            return CaptionNoveltyDecision(notify=True, reason="no_match")
 
-        # Simple anomaly detection.
-        # If the first snapshot is older then the time threshold or if any search
-        # result has a lower score then the similarity threshold, declare the current
-        # video analysis as an anomaly.
-        return first_dt < dt_util.now() - timedelta(
-            minutes=VIDEO_ANALYZER_TIME_OFFSET
-        ) or any(
-            r.score < VIDEO_ANALYZER_SIMILARITY_THRESHOLD
-            for r in search_results
-            if r.score is not None
+        if not any(r.score is not None for r in search_results):
+            return CaptionNoveltyDecision(notify=True, reason="score_none")
+
+        best_result = max(
+            search_results, key=lambda r: r.score if r.score is not None else -1.0
+        )
+        best_score = best_result.score  # guaranteed non-None by the any() check above
+        matched_caption = (
+            best_result.value.get("content") if best_result.value else None
+        )
+        matched_age_seconds = max(
+            0,
+            int(
+                (
+                    dt_util.now() - dt_util.as_local(best_result.created_at)
+                ).total_seconds()
+            ),
+        )
+        norm_current = _normalize_caption(msg)
+
+        if best_score >= VIDEO_ANALYZER_SIMILARITY_THRESHOLD:
+            # For captions with a real subject (person, vehicle, package) only suppress
+            # within the dedupe window so that a days-old match does not silence a new
+            # person or vehicle event.  Static/artifact captions continue to suppress
+            # regardless of match age to avoid empty-scene notification spam.
+            # Re-notify when the caption describes active presence/movement of a real
+            # subject and the match is outside the dedupe window.  The score=1.0 guard
+            # was removed: _has_action already filters parked cars, static houses, and
+            # passive scenes ("features", "remains", "is parked").  An exact caption
+            # recurring after the dedupe window (e.g. "unknown person on porch") is a
+            # genuine repeat event and should notify.
+            if (
+                matched_age_seconds > VIDEO_ANALYZER_CAPTION_DEDUPE_WINDOW_SEC
+                and _has_real_subject(norm_current, recognized_names)
+                and _has_action(norm_current)
+            ):
+                return CaptionNoveltyDecision(
+                    notify=True,
+                    reason="stale_match",
+                    best_score=best_score,
+                    matched_caption=matched_caption,
+                    matched_age_seconds=matched_age_seconds,
+                )
+            return CaptionNoveltyDecision(
+                notify=False,
+                reason="score_above_threshold",
+                best_score=best_score,
+                matched_caption=matched_caption,
+                matched_age_seconds=matched_age_seconds,
+            )
+
+        # Vector score is below threshold. Check the lexical artifact fast path.
+        # Scan ALL returned candidates for any artifact-bucket match with no real
+        # subject, then use the most recent one for the window check.  Using only
+        # best_result would miss a recent artifact match when a higher-scoring but
+        # older artifact result happens to rank first.
+        if _in_artifact_bucket(norm_current) and not _has_real_subject(
+            norm_current, recognized_names
+        ):
+            artifact_cap: str | None = None
+            artifact_age: int | None = None
+            for r in search_results:
+                if r.score is None:
+                    continue
+                cap = (r.value or {}).get("content")
+                norm_cap = _normalize_caption(cap or "")
+                if _in_artifact_bucket(norm_cap) and not _has_real_subject(
+                    norm_cap, recognized_names
+                ):
+                    age = max(
+                        0,
+                        int(
+                            (
+                                dt_util.now() - dt_util.as_local(r.created_at)
+                            ).total_seconds()
+                        ),
+                    )
+                    if artifact_age is None or age < artifact_age:
+                        artifact_age = age
+                        artifact_cap = cap
+
+            if artifact_age is not None:
+                if artifact_age <= VIDEO_ANALYZER_CAPTION_DEDUPE_WINDOW_SEC:
+                    return CaptionNoveltyDecision(
+                        notify=False,
+                        reason="artifact_bucket",
+                        best_score=best_score,
+                        matched_caption=artifact_cap,
+                        matched_age_seconds=artifact_age,
+                    )
+                return CaptionNoveltyDecision(
+                    notify=True,
+                    reason="stale_match",
+                    best_score=best_score,
+                    matched_caption=artifact_cap,
+                    matched_age_seconds=artifact_age,
+                )
+
+        return CaptionNoveltyDecision(
+            notify=True,
+            reason="score_below_threshold",
+            best_score=best_score,
+            matched_caption=matched_caption,
+            matched_age_seconds=matched_age_seconds,
         )
 
     async def _prune_old_snapshots(self, camera_id: str, batch: list[Path]) -> None:
@@ -908,9 +1120,26 @@ class VideoAnalyzer:
         mode = self.entry.runtime_data.options.get(CONF_VIDEO_ANALYZER_MODE)
         if mode == "notify_on_anomaly":
             first_snapshot = batch[0].parts[-1]
-            LOGGER.debug("[%s] First snapshot: %s", camera_id, first_snapshot)
-            if await self._is_anomaly(camera_name, msg, first_snapshot):
-                LOGGER.debug("[%s] Video is an anomaly!", camera_id)
+            decision = await self._is_caption_novel(
+                camera_name,
+                msg,
+                first_snapshot,
+                recognized_names=list(self._last_recognized.get(camera_id, [])),
+            )
+            LOGGER.debug(
+                "[%s] novelty decision: notify=%s reason=%s best_score=%s "
+                "matched_age_s=%s caption=%r matched=%r",
+                camera_id,
+                decision.notify,
+                decision.reason,
+                f"{decision.best_score:.3f}"
+                if decision.best_score is not None
+                else "none",
+                decision.matched_age_seconds,
+                msg[:80],
+                (decision.matched_caption or "")[:80],
+            )
+            if decision.notify:
                 # Protect the chosen file from pruning for 30 minutes
                 self.protect_notify_image(chosen, ttl_sec=1800)
                 await self._send_notification(msg, camera_name, notify_img)
