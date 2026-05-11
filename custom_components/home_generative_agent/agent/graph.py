@@ -851,13 +851,18 @@ def _format_and_dedupe_tools(
             continue
 
         routing_map[name] = tool["api_id"]
+        parameters = json.loads(tool["parameters"])
+        if not isinstance(parameters, dict):
+            parameters = {"type": "object"}
+        elif not parameters.get("type"):
+            parameters["type"] = "object"
         selected_tools.append(
             {
                 "type": "function",
                 "function": {
                     "name": name,
                     "description": tool["description"],
-                    "parameters": json.loads(tool["parameters"]),
+                    "parameters": parameters,
                 },
             }
         )

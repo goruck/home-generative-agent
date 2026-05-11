@@ -135,8 +135,8 @@ def test_discovery_cycle_stats_property_returns_copy() -> None:
 async def test_unsupported_ttl_expired_incremented() -> None:
     """unsupported_ttl_expired accumulates the value returned by cleanup."""
     proposal_store = _DummyProposalStore(ttl_expired=5)
-    model = AsyncMock()
-    model.ainvoke = AsyncMock(return_value=MagicMock(content=""))
+    model = MagicMock()
+    model.invoke = MagicMock(return_value=MagicMock(content=""))
     engine = _make_engine(model=model, proposal_store=proposal_store)
     with _SNAPSHOT_PATCH, _REDUCER_PATCH:
         await engine._run_once()
@@ -147,8 +147,8 @@ async def test_unsupported_ttl_expired_incremented() -> None:
 async def test_unsupported_ttl_expired_zero_when_no_cleanup() -> None:
     """unsupported_ttl_expired stays 0 when cleanup returns 0."""
     proposal_store = _DummyProposalStore(ttl_expired=0)
-    model = AsyncMock()
-    model.ainvoke = AsyncMock(return_value=MagicMock(content=""))
+    model = MagicMock()
+    model.invoke = MagicMock(return_value=MagicMock(content=""))
     engine = _make_engine(model=model, proposal_store=proposal_store)
     with _SNAPSHOT_PATCH, _REDUCER_PATCH:
         await engine._run_once()
@@ -187,8 +187,8 @@ async def test_candidates_generated_counts_all_returned() -> None:
         }
         for i in range(3)
     ]
-    model = AsyncMock()
-    model.ainvoke = AsyncMock(return_value=_valid_llm_response(candidates))
+    model = MagicMock()
+    model.invoke = MagicMock(return_value=_valid_llm_response(candidates))
     engine = _make_engine(model=model)
     with _SNAPSHOT_PATCH, _REDUCER_PATCH:
         await engine._run_once()
@@ -218,8 +218,8 @@ async def test_candidates_novel_vs_deduplicated_counts() -> None:
             "evidence_paths": ["entities[entity_ids contains lock.front_door].state"],
         },
     ]
-    model = AsyncMock()
-    model.ainvoke = AsyncMock(return_value=_valid_llm_response(raw))
+    model = MagicMock()
+    model.invoke = MagicMock(return_value=_valid_llm_response(raw))
     engine = _make_engine(model=model)
     with _SNAPSHOT_PATCH, _REDUCER_PATCH:
         await engine._run_once()
@@ -256,8 +256,8 @@ async def test_derived_only_paths_candidate_is_dropped() -> None:
             "evidence_paths": ["entities[entity_ids contains lock.front_door].state"],
         },
     ]
-    model = AsyncMock()
-    model.ainvoke = AsyncMock(return_value=_valid_llm_response(raw))
+    model = MagicMock()
+    model.invoke = MagicMock(return_value=_valid_llm_response(raw))
     engine = _make_engine(model=model)
     with _SNAPSHOT_PATCH, _REDUCER_PATCH:
         await engine._run_once()

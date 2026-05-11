@@ -1991,6 +1991,7 @@ def _make_gate_engine() -> SentinelEngine:
     """Return a minimal SentinelEngine with only gate-relevant state populated."""
     engine = object.__new__(SentinelEngine)
     engine._cyclical_deviation_above_since = {}
+    engine._log_limiter = MagicMock()
     return engine
 
 
