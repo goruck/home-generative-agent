@@ -664,7 +664,7 @@ class VideoAnalyzer:
         msg = "Empty model content after parsing."
         raise ValueError(msg)
 
-    async def _is_caption_novel(  # noqa: PLR0911
+    async def _is_caption_novel(  # noqa: PLR0911, PLR0912
         self,
         camera_name: str,
         msg: str,
@@ -746,31 +746,52 @@ class VideoAnalyzer:
                 matched_age_seconds=matched_age_seconds,
             )
 
-        # Vector score is below threshold. Check the lexical artifact fast path:
-        # suppress if both captions describe a low-value artifact with no real subject
-        # and the matched caption is recent enough.
-        norm_matched = _normalize_caption(matched_caption or "")
-        if (
-            _in_artifact_bucket(norm_current)
-            and _in_artifact_bucket(norm_matched)
-            and not _has_real_subject(norm_current, recognized_names)
-            and not _has_real_subject(norm_matched, recognized_names)
+        # Vector score is below threshold. Check the lexical artifact fast path.
+        # Scan ALL returned candidates for any artifact-bucket match with no real
+        # subject, then use the most recent one for the window check.  Using only
+        # best_result would miss a recent artifact match when a higher-scoring but
+        # older artifact result happens to rank first.
+        if _in_artifact_bucket(norm_current) and not _has_real_subject(
+            norm_current, recognized_names
         ):
-            if matched_age_seconds <= VIDEO_ANALYZER_CAPTION_DEDUPE_WINDOW_SEC:
+            artifact_cap: str | None = None
+            artifact_age: int | None = None
+            for r in search_results:
+                if r.score is None:
+                    continue
+                cap = (r.value or {}).get("content")
+                norm_cap = _normalize_caption(cap or "")
+                if _in_artifact_bucket(norm_cap) and not _has_real_subject(
+                    norm_cap, recognized_names
+                ):
+                    age = max(
+                        0,
+                        int(
+                            (
+                                dt_util.now() - dt_util.as_local(r.created_at)
+                            ).total_seconds()
+                        ),
+                    )
+                    if artifact_age is None or age < artifact_age:
+                        artifact_age = age
+                        artifact_cap = cap
+
+            if artifact_age is not None:
+                if artifact_age <= VIDEO_ANALYZER_CAPTION_DEDUPE_WINDOW_SEC:
+                    return CaptionNoveltyDecision(
+                        notify=False,
+                        reason="artifact_bucket",
+                        best_score=best_score,
+                        matched_caption=artifact_cap,
+                        matched_age_seconds=artifact_age,
+                    )
                 return CaptionNoveltyDecision(
-                    notify=False,
-                    reason="artifact_bucket",
+                    notify=True,
+                    reason="stale_match",
                     best_score=best_score,
-                    matched_caption=matched_caption,
-                    matched_age_seconds=matched_age_seconds,
+                    matched_caption=artifact_cap,
+                    matched_age_seconds=artifact_age,
                 )
-            return CaptionNoveltyDecision(
-                notify=True,
-                reason="stale_match",
-                best_score=best_score,
-                matched_caption=matched_caption,
-                matched_age_seconds=matched_age_seconds,
-            )
 
         return CaptionNoveltyDecision(
             notify=True,

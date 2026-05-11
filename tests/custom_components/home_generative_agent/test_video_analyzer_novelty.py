@@ -567,6 +567,75 @@ async def test_artifact_bucket_one_second_over_window_notifies(
 
 
 # ---------------------------------------------------------------------------
+# _is_caption_novel: artifact fast-path scans all candidates, not just best
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_artifact_bucket_recent_lower_score_suppresses(
+    va: VideoAnalyzer,
+) -> None:
+    """
+    Recent artifact match at lower score suppresses even if best result is old.
+
+    best_result (score=0.85) is an artifact from 2 hours ago — stale.
+    A second result (score=0.70) is a recent artifact from 5 minutes ago.
+    The fast path must scan all candidates and suppress based on the recent one.
+    """
+    results = [
+        _make_search_result(
+            "a bright horizontal blur streaks across the walkway",
+            score=0.85,
+            age_seconds=7200,  # 2 hours — outside window
+        ),
+        _make_search_result(
+            "glare and blur visible near the fence",
+            score=0.70,
+            age_seconds=300,  # 5 minutes — inside window
+        ),
+    ]
+    va.entry.runtime_data.store.asearch = AsyncMock(return_value=results)
+    decision = await va._is_caption_novel(  # type: ignore[attr-defined]
+        "frontgate",
+        "a bright light streaks across the walkway at night",
+        _fresh_snapshot_name(),
+        [],
+    )
+    assert decision.notify is False
+    assert decision.reason == "artifact_bucket"
+    assert decision.matched_age_seconds == 300
+
+
+@pytest.mark.asyncio
+async def test_artifact_bucket_all_old_notifies_stale_match(
+    va: VideoAnalyzer,
+) -> None:
+    """When every artifact candidate is outside the window, stale_match fires."""
+    results = [
+        _make_search_result(
+            "a bright horizontal blur streaks across the walkway",
+            score=0.85,
+            age_seconds=3600,  # 1 hour
+        ),
+        _make_search_result(
+            "glare and blur visible near the fence",
+            score=0.70,
+            age_seconds=2400,  # 40 minutes
+        ),
+    ]
+    va.entry.runtime_data.store.asearch = AsyncMock(return_value=results)
+    decision = await va._is_caption_novel(  # type: ignore[attr-defined]
+        "frontgate",
+        "a bright light streaks across the walkway at night",
+        _fresh_snapshot_name(),
+        [],
+    )
+    assert decision.notify is True
+    assert decision.reason == "stale_match"
+    assert decision.matched_age_seconds == 2400  # most recent artifact match
+
+
+# ---------------------------------------------------------------------------
 # _is_caption_novel: person appears after no-people caption notifies
 # ---------------------------------------------------------------------------
 
