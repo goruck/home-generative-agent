@@ -28,7 +28,7 @@ def test_format_and_dedupe_tools_injects_type_object_when_missing() -> None:
 
 
 def test_format_and_dedupe_tools_handles_non_dict_parameters() -> None:
-    """Non-dict parameters (null, array) are replaced with {type: object}."""
+    """Non-dict or empty parameters are normalized to a valid OpenAI object schema."""
     for bad_params in ["null", "[]", '"string"']:
         raw: list = [
             {
@@ -41,7 +41,28 @@ def test_format_and_dedupe_tools_handles_non_dict_parameters() -> None:
         ]
         selected, _ = _format_and_dedupe_tools(raw)
         params = selected[0]["function"]["parameters"]
-        assert params == {"type": "object"}, f"bad params {bad_params!r} not normalized"
+        # OpenAI requires 'properties' on type:object schemas.
+        assert params == {"type": "object", "properties": {}}, (
+            f"bad params {bad_params!r} not normalized"
+        )
+
+
+def test_format_and_dedupe_tools_adds_empty_properties_for_openai() -> None:
+    """type:object schemas without properties get properties:{} for OpenAI compat."""
+    raw: list = [
+        {
+            "name": "no_props_tool",
+            "api_id": "test",
+            "description": "Schema with type but no properties",
+            "parameters": '{"type": "object"}',
+            "is_actuation": False,
+        }
+    ]
+    selected, _ = _format_and_dedupe_tools(raw)
+    params = selected[0]["function"]["parameters"]
+    assert params.get("type") == "object"
+    assert "properties" in params, "OpenAI requires properties on type:object schemas"
+    assert params["properties"] == {}
 
 
 def test_format_and_dedupe_tools_preserves_existing_type() -> None:

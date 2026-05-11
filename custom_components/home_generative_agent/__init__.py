@@ -42,6 +42,21 @@ from homeassistant.util import dt as dt_util
 from homeassistant.util.ssl import SSL_ALPN_HTTP11, client_context
 from langchain_anthropic import ChatAnthropic
 from langchain_core.runnables import ConfigurableField
+
+# langchain_anthropic caches the sync httpx client with @lru_cache but omits it
+# for the async path, causing a repeated blocking SSL context creation inside the
+# HA event loop. Patch parity: cache the async function the same way.
+try:
+    import langchain_anthropic.chat_models as _lc_anthropic_chat
+
+    if not hasattr(_lc_anthropic_chat._get_default_async_httpx_client, "cache_info"):  # noqa: SLF001  # type: ignore[reportPrivateImportUsage]
+        from functools import lru_cache as _lru_cache
+
+        _lc_anthropic_chat._get_default_async_httpx_client = _lru_cache(  # noqa: SLF001  # type: ignore[reportPrivateImportUsage]
+            _lc_anthropic_chat._get_default_async_httpx_client  # noqa: SLF001  # type: ignore[reportPrivateImportUsage]
+        )
+except Exception:  # noqa: BLE001, S110
+    pass
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
@@ -1411,6 +1426,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 model=ConfigurableField(id="model"),
                 temperature=ConfigurableField(id="temperature"),
             )
+            # Pre-warm the now-cached async httpx client in a thread so the first
+            # API call doesn't trigger a blocking SSL context load in the event loop.
+            _warm_fn = getattr(
+                globals().get("_lc_anthropic_chat"),
+                "_get_default_async_httpx_client",
+                None,
+            )
+            if callable(_warm_fn):
+                await hass.async_add_executor_job(
+                    partial(
+                        _warm_fn, base_url="https://api.anthropic.com", timeout=None
+                    )
+                )
         except Exception:
             LOGGER.exception("Anthropic provider init failed; continuing without it.")
 

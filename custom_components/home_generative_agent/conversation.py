@@ -130,13 +130,17 @@ def _normalize_ai_content(content: str | list) -> str | None:
     AIMessage.content is str for most providers, or list[dict] (content blocks) for
     providers that return structured output (e.g. Anthropic). Extracts text blocks
     only; returns None if the result is empty.
+
+    Handles both 'text' (final AIMessage) and 'text_delta' (Anthropic streaming
+    chunks) block types so the function works for both streaming and non-streaming
+    invocation paths.
     """
     if isinstance(content, str):
         return content or None
     parts = [
         block.get("text", "")
         for block in content
-        if isinstance(block, dict) and block.get("type") == "text"
+        if isinstance(block, dict) and block.get("type") in ("text", "text_delta")
     ]
     return "\n".join(parts) or None
 
@@ -434,6 +438,23 @@ def _process_stream_event(
         yield from _handle_on_chain_end(data, pending_tool_map, unidentified_call_ids)
 
 
+def _nonstreaming_text(event: Mapping[str, Any]) -> str | None:
+    """
+    Return text from on_chat_model_end for providers that don't stream.
+
+    Returns None when the message has tool calls or no usable text content.
+    """
+    data = cast("dict[str, Any]", event.get("data", {}))
+    end_msg = data.get("output")
+    if (
+        isinstance(end_msg, AIMessage)
+        and not end_msg.tool_calls
+        and (text := _normalize_ai_content(end_msg.content))
+    ):
+        return text
+    return None
+
+
 async def _stream_langgraph_to_ha(
     event_stream: AsyncIterable[Mapping[str, Any]],
     _agent_id: str,
@@ -460,8 +481,22 @@ async def _stream_langgraph_to_ha(
     # might cause the HA frontend to reset the message content during loops.
     active_role: str | None = None
 
+    # Tracks whether any text was delivered via on_chat_model_stream in the
+    # current model turn. Providers with streaming=False (e.g. Anthropic, OpenAI
+    # by default) never emit on_chat_model_stream events, so text must be
+    # extracted from on_chat_model_end instead.
+    text_streamed_in_turn: bool = False
+
     try:
         async for event in event_stream:
+            metadata = cast("dict[str, Any]", event.get("metadata", {}))
+            node = metadata.get("langgraph_node") or event.get("name")
+            event_type = event.get("event")
+
+            # Reset the per-turn flag at the start of each model call.
+            if node == "agent" and event_type == "on_chat_model_start":
+                text_streamed_in_turn = False
+
             for delta in _process_stream_event(
                 event, pending_tool_map, unidentified_call_ids
             ):
@@ -470,7 +505,22 @@ async def _stream_langgraph_to_ha(
                     continue
                 if new_role:
                     active_role = new_role
+                if delta.get("content"):
+                    text_streamed_in_turn = True
                 yield delta
+
+            # Non-streaming fallback: providers with streaming=False only emit
+            # on_chat_model_start and on_chat_model_end — no on_chat_model_stream
+            # events fire, so no text was streamed. For text-only responses, yield
+            # the full content from the end event so the chat_log is populated.
+            if (
+                node == "agent"
+                and event_type == "on_chat_model_end"
+                and not text_streamed_in_turn
+                and (text := _nonstreaming_text(event))
+            ):
+                text_streamed_in_turn = True
+                yield AssistantContentDeltaDict(content=text)
     except (GeneratorExit, asyncio.CancelledError):
         # Stop iteration on cancellation or closure.
         raise
@@ -1239,16 +1289,17 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             local_tools["add_automation"] = add_automation
         for t_name, t_func in local_tools.items():
             try:
-                # Extract the JSON schema for local tools
+                # Extract the JSON schema for local tools.
+                # Prefer tool_call_schema.model_json_schema() — it excludes
+                # InjectedToolArg / InjectedStore fields that cannot be serialized.
+                # Fall back to args_schema.schema() for non-standard tools.
                 params = "{}"
-                args_schema = getattr(t_func, "args_schema", None)
-                if args_schema is not None:
+                tool_call_schema = getattr(t_func, "tool_call_schema", None)
+                if tool_call_schema is not None:
                     try:
-                        # Use getattr to avoid pyright errors
-                        # on potential dict types
-                        schema_func = getattr(args_schema, "schema", None)
-                        if callable(schema_func):
-                            params = json.dumps(schema_func(), sort_keys=True)
+                        params = json.dumps(
+                            tool_call_schema.model_json_schema(), sort_keys=True
+                        )
                     except (
                         AttributeError,
                         TypeError,
@@ -1256,6 +1307,20 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                         PydanticInvalidForJsonSchema,
                     ):
                         params = "{}"
+                if params == "{}":
+                    args_schema = getattr(t_func, "args_schema", None)
+                    if args_schema is not None:
+                        try:
+                            schema_func = getattr(args_schema, "schema", None)
+                            if callable(schema_func):
+                                params = json.dumps(schema_func(), sort_keys=True)
+                        except (
+                            AttributeError,
+                            TypeError,
+                            ValueError,
+                            PydanticInvalidForJsonSchema,
+                        ):
+                            params = "{}"
 
                 is_actuation = is_actuation_tool(t_name)
                 # LangChain tools have .name, .description,

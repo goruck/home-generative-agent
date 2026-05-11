@@ -2,6 +2,38 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.2] - 2026-05-11
+
+### Fixed
+
+- **Streaming silent for Anthropic and OpenAI** — Both providers default to
+  `streaming=False` in LangChain, so no `on_chat_model_stream` events fire and
+  the chat window stayed blank until the full response arrived. A new
+  `on_chat_model_end` fallback in `_stream_langgraph_to_ha` yields the complete
+  text for text-only responses when no streaming chunks were delivered in a turn.
+  Anthropic streaming chunks (type `text_delta`) are now also recognised by
+  `_normalize_ai_content`, so Anthropic works correctly in both streaming and
+  non-streaming modes.
+- **OpenAI 400 "object schema missing properties" on `confirm_sensitive_action`**
+  — Tool schema extraction was calling `args_schema.schema()`, which fails on
+  `InjectedStore` annotations and produced a bare `{"type": "object"}` without the
+  `properties` field that OpenAI requires. Schema extraction now uses
+  `tool_call_schema.model_json_schema()` (which correctly excludes injected
+  arguments) as the primary path, with a `properties: {}` safety net added to
+  `_format_and_dedupe_tools` for any schema that declares `type: object` but omits
+  `properties`.
+- **`get_entity_history` not retrieved for history questions** — The tool's RAG
+  embedding description was too terse to match natural-language queries like "how
+  many times was the front door opened". The description was rewritten to enumerate
+  concrete use-cases (open/close counts, on-durations, motion trigger times, run
+  frequency) so cosine similarity retrieval picks it up reliably.
+- **Blocking `ssl.load_verify_locations` in the HA event loop** — `langchain_anthropic`
+  lazily constructs an async `httpx` client (and triggers SSL context loading) on
+  every call to `_get_default_async_httpx_client`. The function is now patched at
+  import time with `lru_cache` so the client is created once; the first call is
+  pre-warmed in a thread-pool executor after provider initialisation so SSL I/O
+  never blocks the HA event loop.
+
 ## [3.14.1] - 2026-05-10
 
 ### Fixed
