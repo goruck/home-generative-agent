@@ -146,7 +146,9 @@ async def test_stream_nonstreaming_tool_then_text() -> None:
             "data": {
                 "output": {
                     "messages": [
-                        ToolMessage(content="on", tool_call_id="call_1", name="get_state")
+                        ToolMessage(
+                            content="on", tool_call_id="call_1", name="get_state"
+                        )
                     ]
                 }
             },
