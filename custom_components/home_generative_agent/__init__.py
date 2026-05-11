@@ -47,17 +47,15 @@ from langchain_core.runnables import ConfigurableField
 # for the async path, causing a repeated blocking SSL context creation inside the
 # HA event loop. Patch parity: cache the async function the same way.
 try:
-    import langchain_anthropic.chat_models as _lc_anthropic_chat  # noqa: PLC0415
+    import langchain_anthropic.chat_models as _lc_anthropic_chat
 
-    if not hasattr(
-        _lc_anthropic_chat._get_default_async_httpx_client, "cache_info"
-    ):
-        from functools import lru_cache as _lru_cache  # noqa: PLC0415
+    if not hasattr(_lc_anthropic_chat._get_default_async_httpx_client, "cache_info"):  # noqa: SLF001  # type: ignore[reportPrivateImportUsage]
+        from functools import lru_cache as _lru_cache
 
-        _lc_anthropic_chat._get_default_async_httpx_client = _lru_cache(
-            _lc_anthropic_chat._get_default_async_httpx_client
+        _lc_anthropic_chat._get_default_async_httpx_client = _lru_cache(  # noqa: SLF001  # type: ignore[reportPrivateImportUsage]
+            _lc_anthropic_chat._get_default_async_httpx_client  # noqa: SLF001  # type: ignore[reportPrivateImportUsage]
         )
-except Exception:  # noqa: BLE001
+except Exception:  # noqa: BLE001, S110
     pass
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_ollama import ChatOllama, OllamaEmbeddings
@@ -1437,7 +1435,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             )
             if callable(_warm_fn):
                 await hass.async_add_executor_job(
-                    partial(_warm_fn, base_url="https://api.anthropic.com", timeout=None)
+                    partial(
+                        _warm_fn, base_url="https://api.anthropic.com", timeout=None
+                    )
                 )
         except Exception:
             LOGGER.exception("Anthropic provider init failed; continuing without it.")

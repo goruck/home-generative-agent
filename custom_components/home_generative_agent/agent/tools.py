@@ -1049,6 +1049,7 @@ async def get_entity_history(  # noqa: D417
 ) -> dict[str, dict[str, list[dict[str, str]]]]:
     """
     Retrieve historical state changes for Home Assistant entities over a time range.
+
     Use this to answer questions like: how many times was a door opened or closed,
     how long was a light on, when did a motion sensor last trigger, how often did an
     appliance run, or any other question about past device states or activity.

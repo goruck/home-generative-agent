@@ -438,6 +438,23 @@ def _process_stream_event(
         yield from _handle_on_chain_end(data, pending_tool_map, unidentified_call_ids)
 
 
+def _nonstreaming_text(event: Mapping[str, Any]) -> str | None:
+    """
+    Return text from on_chat_model_end for providers that don't stream.
+
+    Returns None when the message has tool calls or no usable text content.
+    """
+    data = cast("dict[str, Any]", event.get("data", {}))
+    end_msg = data.get("output")
+    if (
+        isinstance(end_msg, AIMessage)
+        and not end_msg.tool_calls
+        and (text := _normalize_ai_content(end_msg.content))
+    ):
+        return text
+    return None
+
+
 async def _stream_langgraph_to_ha(
     event_stream: AsyncIterable[Mapping[str, Any]],
     _agent_id: str,
@@ -500,13 +517,10 @@ async def _stream_langgraph_to_ha(
                 node == "agent"
                 and event_type == "on_chat_model_end"
                 and not text_streamed_in_turn
+                and (text := _nonstreaming_text(event))
             ):
-                data = cast("dict[str, Any]", event.get("data", {}))
-                end_msg = data.get("output")
-                if isinstance(end_msg, AIMessage) and not end_msg.tool_calls:
-                    if text := _normalize_ai_content(end_msg.content):
-                        text_streamed_in_turn = True
-                        yield AssistantContentDeltaDict(content=text)
+                text_streamed_in_turn = True
+                yield AssistantContentDeltaDict(content=text)
     except (GeneratorExit, asyncio.CancelledError):
         # Stop iteration on cancellation or closure.
         raise
