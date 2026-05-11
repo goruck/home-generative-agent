@@ -853,9 +853,12 @@ def _format_and_dedupe_tools(
         routing_map[name] = tool["api_id"]
         parameters = json.loads(tool["parameters"])
         if not isinstance(parameters, dict):
-            parameters = {"type": "object"}
+            parameters = {"type": "object", "properties": {}}
         elif not parameters.get("type"):
             parameters["type"] = "object"
+        # OpenAI requires 'properties' on all type:object schemas.
+        if parameters.get("type") == "object" and "properties" not in parameters:
+            parameters["properties"] = {}
         selected_tools.append(
             {
                 "type": "function",

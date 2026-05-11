@@ -101,6 +101,117 @@ async def test_stream_text_only() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stream_nonstreaming_text_only() -> None:
+    """Non-streaming providers (Anthropic/OpenAI streaming=False) yield text from on_chat_model_end."""
+
+    async def event_stream() -> AsyncGenerator[dict[str, Any]]:
+        yield {
+            "event": "on_chat_model_start",
+            "metadata": {"langgraph_node": "agent"},
+        }
+        # No on_chat_model_stream events (non-streaming model)
+        yield {
+            "event": "on_chat_model_end",
+            "metadata": {"langgraph_node": "agent"},
+            "data": {"output": AIMessage(content="Here is the answer.")},
+        }
+
+    deltas = [d async for d in _stream_langgraph_to_ha(event_stream(), "agent_1")]
+
+    assert len(deltas) == 2
+    assert deltas[0] == {"role": "assistant"}
+    assert deltas[1] == {"content": "Here is the answer."}
+
+
+@pytest.mark.asyncio
+async def test_stream_nonstreaming_tool_then_text() -> None:
+    """Non-streaming multi-turn: tool call followed by text-only response."""
+
+    async def event_stream() -> AsyncGenerator[dict[str, Any]]:
+        # Turn 1: tool call
+        yield {"event": "on_chat_model_start", "metadata": {"langgraph_node": "agent"}}
+        yield {
+            "event": "on_chat_model_end",
+            "metadata": {"langgraph_node": "agent"},
+            "data": {
+                "output": AIMessage(
+                    content="",
+                    tool_calls=[{"name": "get_state", "args": {}, "id": "call_1"}],
+                )
+            },
+        }
+        yield {
+            "event": "on_chain_end",
+            "metadata": {"langgraph_node": "action"},
+            "data": {
+                "output": {
+                    "messages": [
+                        ToolMessage(content="on", tool_call_id="call_1", name="get_state")
+                    ]
+                }
+            },
+        }
+        # Turn 2: text-only response (non-streaming)
+        yield {"event": "on_chat_model_start", "metadata": {"langgraph_node": "agent"}}
+        yield {
+            "event": "on_chat_model_end",
+            "metadata": {"langgraph_node": "agent"},
+            "data": {"output": AIMessage(content="The light is on.")},
+        }
+
+    deltas = [d async for d in _stream_langgraph_to_ha(event_stream(), "agent_1")]
+
+    # role, tool_calls, tool_result, role, content
+    assert len(deltas) == 5
+    assert deltas[0] == {"role": "assistant"}
+    assert "tool_calls" in deltas[1]
+    assert deltas[2].get("role") == "tool_result"
+    assert deltas[3] == {"role": "assistant"}
+    assert deltas[4] == {"content": "The light is on."}
+
+
+@pytest.mark.asyncio
+async def test_stream_anthropic_text_delta_chunks() -> None:
+    """Anthropic streaming chunks with type='text_delta' yield text correctly."""
+
+    async def event_stream() -> AsyncGenerator[dict[str, Any]]:
+        yield {
+            "event": "on_chat_model_start",
+            "metadata": {"langgraph_node": "agent"},
+        }
+        yield {
+            "event": "on_chat_model_stream",
+            "metadata": {"langgraph_node": "agent"},
+            "data": {
+                "chunk": AIMessageChunk(
+                    content=[{"type": "text_delta", "text": "Hello"}]
+                )
+            },
+        }
+        yield {
+            "event": "on_chat_model_stream",
+            "metadata": {"langgraph_node": "agent"},
+            "data": {
+                "chunk": AIMessageChunk(
+                    content=[{"type": "text_delta", "text": " world"}]
+                )
+            },
+        }
+        yield {
+            "event": "on_chat_model_end",
+            "metadata": {"langgraph_node": "agent"},
+            "data": {"output": AIMessage(content="Hello world")},
+        }
+
+    deltas = [d async for d in _stream_langgraph_to_ha(event_stream(), "agent_1")]
+
+    assert len(deltas) == 3
+    assert deltas[0] == {"role": "assistant"}
+    assert deltas[1] == {"content": "Hello"}
+    assert deltas[2] == {"content": " world"}
+
+
+@pytest.mark.asyncio
 async def test_stream_filters_thinking() -> None:
     """Test that Claude 'thinking' blocks are filtered out."""
 
