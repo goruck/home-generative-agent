@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.1] - 2026-05-10
+
+### Fixed
+
+- **Anthropic API rejects tools with missing `input_schema.type`** — Tools whose
+  parameters schema had no top-level `type` field (e.g. tools with no parameters,
+  returning `{}`) caused a `400 invalid_request_error` from the Anthropic API on
+  every chat query. `_format_and_dedupe_tools` now injects `"type": "object"` when
+  the field is absent, and replaces non-dict parameter values (null, array) with
+  `{"type": "object"}` to prevent a downstream `AttributeError`.
+
 ## [3.14.0] - 2026-05-10
 
 ### Added
