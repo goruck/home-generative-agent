@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.3] - 2026-05-11
+
+### Fixed
+
+- **Appliance duration alerts now name the actual appliance** — Notifications for
+  `appliance_power_duration` findings previously fell back to the generic phrase
+  "An appliance" because the LLM explanation lacked a display name. The rule now
+  includes `friendly_name` in finding evidence, and a new deterministic message
+  builder formats the mobile copy directly — e.g. `Washer drew about 296 W for
+  633 min, above the 60 min threshold. Check it.` — bypassing the LLM path
+  entirely for this finding type. Power-sensor suffixes (`Power`, `Energy`, etc.)
+  are stripped case-insensitively so user-set names like `EV Charger Power` render
+  as `EV Charger`. When no friendly name is present the entity ID is used as
+  fallback. The same formatter is reused for persistent notifications. Closes
+  [#391](https://github.com/goruck/home-generative-agent/issues/391).
+
 ## [3.14.2] - 2026-05-11
 
 ### Fixed

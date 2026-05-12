@@ -150,7 +150,7 @@ def test_open_entry_while_away_triggers() -> None:
 
 
 def test_appliance_power_duration_triggers() -> None:
-    """High power draw over duration should trigger."""
+    """High power draw over duration should trigger and expose friendly_name."""
     snapshot = _base_snapshot()
     snapshot["derived"]["now"] = "2025-01-01T02:00:00+00:00"
     snapshot["entities"] = [
@@ -168,6 +168,42 @@ def test_appliance_power_duration_triggers() -> None:
 
     findings = AppliancePowerDurationRule(duration_min=30).evaluate(snapshot)
     assert len(findings) == 1
+    assert findings[0].evidence["friendly_name"] == "Washer Power"
+
+
+def test_appliance_power_duration_friendly_name_excluded_from_anomaly_id() -> None:
+    """Changing friendly_name must not change the anomaly_id hash."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["now"] = "2025-01-01T02:00:00+00:00"
+    snapshot["entities"] = [
+        {
+            "entity_id": "sensor.washer_power",
+            "domain": "sensor",
+            "state": "250",
+            "friendly_name": "Washer Power",
+            "area": "Laundry",
+            "attributes": {"device_class": "power", "unit_of_measurement": "W"},
+            "last_changed": "2025-01-01T00:00:00+00:00",
+            "last_updated": "2025-01-01T00:00:00+00:00",
+        }
+    ]
+    findings_a = AppliancePowerDurationRule(duration_min=30).evaluate(snapshot)
+
+    snapshot["entities"] = [
+        {
+            "entity_id": "sensor.washer_power",
+            "domain": "sensor",
+            "state": "250",
+            "friendly_name": "My Washing Machine Power",
+            "area": "Laundry",
+            "attributes": {"device_class": "power", "unit_of_measurement": "W"},
+            "last_changed": "2025-01-01T00:00:00+00:00",
+            "last_updated": "2025-01-01T00:00:00+00:00",
+        }
+    ]
+    findings_b = AppliancePowerDurationRule(duration_min=30).evaluate(snapshot)
+
+    assert findings_a[0].anomaly_id == findings_b[0].anomaly_id
 
 
 def test_camera_entry_unsecured_triggers() -> None:
