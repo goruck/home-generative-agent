@@ -1207,7 +1207,7 @@ def test_appliance_power_duration_fallback_to_entity_id() -> None:
             "friendly_name": name_val,
         }
         msg = _appliance_power_duration_mobile_message(_appliance_finding(evidence=ev))
-        assert "Washer" in msg
+        assert msg.startswith("Washer drew ")
         assert len(msg) <= MAX_MOBILE_MESSAGE_CHARS
 
 

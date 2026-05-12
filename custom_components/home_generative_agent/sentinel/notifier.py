@@ -764,7 +764,7 @@ def _appliance_power_duration_mobile_message(finding: AnomalyFinding) -> str:
             ev.get("entity_id")
             or (finding.triggering_entities[0] if finding.triggering_entities else "")
         )
-        appliance = _friendly_entity(entity_id)
+        appliance = _strip_power_suffix(_friendly_entity(entity_id))
 
     power_w = ev.get("power_w")
     duration_min = ev.get("duration_min")
