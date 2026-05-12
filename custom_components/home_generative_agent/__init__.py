@@ -1354,6 +1354,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 timeout=120,
                 http_client=openai_http_client,
                 http_async_client=http_async_client,
+                streaming=True,
+                stream_usage=True,
             ).configurable_fields(
                 model_name=ConfigurableField(id="model_name"),
                 temperature=ConfigurableField(id="temperature"),
@@ -1422,6 +1424,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 anthropic_api_key=anthropic_secret,  # type: ignore[call-arg]
                 model=RECOMMENDED_ANTHROPIC_CHAT_MODEL,  # type: ignore[call-arg]
                 model_kwargs={"cache_control": {"type": "ephemeral"}},
+                streaming=True,
             ).configurable_fields(
                 model=ConfigurableField(id="model"),
                 temperature=ConfigurableField(id="temperature"),
