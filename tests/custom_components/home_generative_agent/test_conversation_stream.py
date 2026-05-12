@@ -102,7 +102,7 @@ async def test_stream_text_only() -> None:
 
 @pytest.mark.asyncio
 async def test_stream_nonstreaming_text_only() -> None:
-    """Non-streaming providers (Anthropic/OpenAI streaming=False) yield text from on_chat_model_end."""
+    """Providers that don't emit on_chat_model_stream yield text from on_chat_model_end."""
 
     async def event_stream() -> AsyncGenerator[dict[str, Any]]:
         yield {
