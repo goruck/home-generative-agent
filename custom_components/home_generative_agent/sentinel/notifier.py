@@ -746,10 +746,45 @@ _POWER_SUFFIXES: tuple[str, ...] = (
 
 def _strip_power_suffix(name: str) -> str:
     """Remove trailing power-sensor label words from an appliance display name."""
+    name_lower = name.lower()
     for suffix in _POWER_SUFFIXES:
-        if name.endswith(suffix):
+        if name_lower.endswith(suffix.lower()):
             return name[: -len(suffix)].strip()
     return name
+
+
+def _appliance_power_duration_mobile_message(finding: AnomalyFinding) -> str:
+    """Deterministic mobile copy for appliance_power_duration."""
+    ev = finding.evidence
+    raw_name = (ev.get("friendly_name") or "").strip()
+    if raw_name:
+        appliance = _strip_power_suffix(raw_name)
+    else:
+        entity_id = str(
+            ev.get("entity_id")
+            or (finding.triggering_entities[0] if finding.triggering_entities else "")
+        )
+        appliance = _friendly_entity(entity_id)
+
+    power_w = ev.get("power_w")
+    duration_min = ev.get("duration_min")
+    threshold_min = ev.get("threshold_min")
+
+    power_str = (
+        f"about {round(float(power_w))} W" if power_w is not None else "high power"
+    )
+    dur_str = (
+        f"{int(duration_min)} min" if duration_min is not None else "an extended period"
+    )
+    thr_str = (
+        f"{int(threshold_min)} min" if threshold_min is not None else "the configured"
+    )
+
+    msg = (
+        f"{appliance} drew {power_str} for {dur_str},"
+        f" above the {thr_str} threshold. Check it."
+    )
+    return msg[:MAX_MOBILE_MESSAGE_CHARS].rstrip()
 
 
 def _fallback_message(finding: AnomalyFinding) -> str:
@@ -802,6 +837,8 @@ def _alarm_disarmed_mobile_message(finding: AnomalyFinding) -> str:
 def _mobile_message(explanation: str | None, finding: AnomalyFinding) -> str:
     if finding.type == "alarm_disarmed_during_external_threat":
         return _alarm_disarmed_mobile_message(finding)
+    if finding.type == "appliance_power_duration":
+        return _appliance_power_duration_mobile_message(finding)
     if explanation:
         text = _normalize_text(explanation)
         if text and len(text) <= MAX_MOBILE_MESSAGE_CHARS:
@@ -814,6 +851,9 @@ def _persistent_message(explanation: str | None, finding: AnomalyFinding) -> str
         text = _normalize_text(explanation)
         if text:
             return text
+
+    if finding.type == "appliance_power_duration":
+        return _appliance_power_duration_mobile_message(finding)
 
     entities = ", ".join(
         _friendly_entity(entity) for entity in finding.triggering_entities

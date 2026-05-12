@@ -24,6 +24,7 @@ from custom_components.home_generative_agent.sentinel.notifier import (
     MAX_MOBILE_MESSAGE_CHARS,
     SentinelNotifier,
     _alarm_disarmed_mobile_message,
+    _appliance_power_duration_mobile_message,
     _build_actions,
     _friendly_type,
     _mobile_message,
@@ -1123,6 +1124,103 @@ async def test_async_notify_non_completion_subtitle_uses_friendly_type() -> None
     subtitle = hass.services.calls[0]["data"]["data"]["subtitle"]
     # "candidate_" stripped → "Appliance power spike away"
     assert subtitle == "Appliance power spike away"
+
+
+# ---------------------------------------------------------------------------
+# 15. Appliance power duration deterministic message
+# ---------------------------------------------------------------------------
+
+
+def _appliance_finding(
+    anomaly_id: str = "apd1",
+    evidence: dict[str, Any] | None = None,
+) -> AnomalyFinding:
+    return AnomalyFinding(
+        anomaly_id=anomaly_id,
+        type="appliance_power_duration",
+        severity="medium",
+        confidence=0.6,
+        triggering_entities=["sensor.washer_power"],
+        evidence=evidence
+        or {
+            "entity_id": "sensor.washer_power",
+            "area": "Laundry",
+            "power_w": 296.0,
+            "duration_min": 633,
+            "threshold_min": 60,
+            "friendly_name": "Washer Power",
+        },
+        suggested_actions=["check_appliance"],
+        is_sensitive=False,
+    )
+
+
+def test_appliance_power_duration_strips_power_suffix() -> None:
+    """'Washer Power' friendly_name should render as 'Washer' in the message."""
+    msg = _appliance_power_duration_mobile_message(_appliance_finding())
+    assert msg.startswith("Washer ")
+    assert "Power" not in msg.split()[0]
+    assert "296" in msg
+    assert "633 min" in msg
+    assert "60 min" in msg
+    assert len(msg) <= MAX_MOBILE_MESSAGE_CHARS
+
+
+def test_appliance_power_duration_preserves_casing() -> None:
+    """User-authored casing (e.g. 'EV Charger') must not be title-cased away."""
+    ev: dict[str, Any] = {
+        "entity_id": "sensor.ev_charger_power",
+        "area": "Garage",
+        "power_w": 7200.0,
+        "duration_min": 120,
+        "threshold_min": 60,
+        "friendly_name": "EV Charger Power",
+    }
+    msg = _appliance_power_duration_mobile_message(_appliance_finding(evidence=ev))
+    assert msg.startswith("EV Charger ")
+
+
+def test_appliance_power_duration_lowercase_friendly_name() -> None:
+    """Lowercase friendly_name suffix should still be stripped correctly."""
+    ev: dict[str, Any] = {
+        "entity_id": "sensor.washer_power",
+        "area": "Laundry",
+        "power_w": 250.0,
+        "duration_min": 90,
+        "threshold_min": 60,
+        "friendly_name": "washer power",
+    }
+    msg = _appliance_power_duration_mobile_message(_appliance_finding(evidence=ev))
+    assert msg.startswith("washer ")
+    assert "power" not in msg.split()[0].lower() or msg.startswith("washer ")
+
+
+def test_appliance_power_duration_fallback_to_entity_id() -> None:
+    """None and empty-string friendly_name both fall back to the entity ID display name."""
+    for name_val in (None, ""):
+        ev: dict[str, Any] = {
+            "entity_id": "sensor.washer_power",
+            "area": "Laundry",
+            "power_w": 250.0,
+            "duration_min": 90,
+            "threshold_min": 60,
+            "friendly_name": name_val,
+        }
+        msg = _appliance_power_duration_mobile_message(_appliance_finding(evidence=ev))
+        assert "Washer" in msg
+        assert len(msg) <= MAX_MOBILE_MESSAGE_CHARS
+
+
+def test_appliance_power_duration_mobile_message_wins_over_llm() -> None:
+    """Deterministic copy is used even when the LLM explanation mentions 'An appliance'."""
+    finding = _appliance_finding()
+    llm_explanation = (
+        "An appliance in Laundry recently drew about 296 W for 633 minutes,"
+        " exceeding the 60-minute threshold. Check the appliance."
+    )
+    msg = _mobile_message(llm_explanation, finding)
+    assert msg.startswith("Washer ")
+    assert "An appliance" not in msg
 
 
 # ---------------------------------------------------------------------------
