@@ -175,21 +175,31 @@ def test_appliance_power_duration_friendly_name_excluded_from_anomaly_id() -> No
     """Changing friendly_name must not change the anomaly_id hash."""
     snapshot = _base_snapshot()
     snapshot["derived"]["now"] = "2025-01-01T02:00:00+00:00"
-    base_entity: dict[str, Any] = {
-        "entity_id": "sensor.washer_power",
-        "domain": "sensor",
-        "state": "250",
-        "area": "Laundry",
-        "attributes": {"device_class": "power", "unit_of_measurement": "W"},
-        "last_changed": "2025-01-01T00:00:00+00:00",
-        "last_updated": "2025-01-01T00:00:00+00:00",
-    }
-
-    snapshot["entities"] = [{**base_entity, "friendly_name": "Washer Power"}]
+    snapshot["entities"] = [
+        {
+            "entity_id": "sensor.washer_power",
+            "domain": "sensor",
+            "state": "250",
+            "friendly_name": "Washer Power",
+            "area": "Laundry",
+            "attributes": {"device_class": "power", "unit_of_measurement": "W"},
+            "last_changed": "2025-01-01T00:00:00+00:00",
+            "last_updated": "2025-01-01T00:00:00+00:00",
+        }
+    ]
     findings_a = AppliancePowerDurationRule(duration_min=30).evaluate(snapshot)
 
     snapshot["entities"] = [
-        {**base_entity, "friendly_name": "My Washing Machine Power"}
+        {
+            "entity_id": "sensor.washer_power",
+            "domain": "sensor",
+            "state": "250",
+            "friendly_name": "My Washing Machine Power",
+            "area": "Laundry",
+            "attributes": {"device_class": "power", "unit_of_measurement": "W"},
+            "last_changed": "2025-01-01T00:00:00+00:00",
+            "last_updated": "2025-01-01T00:00:00+00:00",
+        }
     ]
     findings_b = AppliancePowerDurationRule(duration_min=30).evaluate(snapshot)
 
