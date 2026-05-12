@@ -482,9 +482,9 @@ async def _stream_langgraph_to_ha(
     active_role: str | None = None
 
     # Tracks whether any text was delivered via on_chat_model_stream in the
-    # current model turn. Providers with streaming=False (e.g. Anthropic, OpenAI
-    # by default) never emit on_chat_model_stream events, so text must be
-    # extracted from on_chat_model_end instead.
+    # current model turn. Providers that don't emit on_chat_model_stream (e.g.
+    # Ollama, Gemini, or any provider with streaming disabled) never fire these
+    # events, so text must be extracted from on_chat_model_end instead.
     text_streamed_in_turn: bool = False
 
     try:
@@ -509,10 +509,10 @@ async def _stream_langgraph_to_ha(
                     text_streamed_in_turn = True
                 yield delta
 
-            # Non-streaming fallback: providers with streaming=False only emit
-            # on_chat_model_start and on_chat_model_end — no on_chat_model_stream
-            # events fire, so no text was streamed. For text-only responses, yield
-            # the full content from the end event so the chat_log is populated.
+            # Non-streaming fallback: providers that don't emit on_chat_model_stream
+            # only produce on_chat_model_start and on_chat_model_end — no chunks
+            # fire, so no text was streamed. For text-only responses, yield the
+            # full content from the end event so the chat_log is populated.
             if (
                 node == "agent"
                 and event_type == "on_chat_model_end"

@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.4] - 2026-05-12
+
+### Changed
+
+- **OpenAI and Anthropic providers now stream tokens natively** — Both providers are
+  constructed with `streaming=True`, so visible words appear in the chat window as
+  they are generated rather than arriving all at once at the end. OpenAI additionally
+  sets `stream_usage=True` so token-count telemetry is preserved in streamed responses
+  (without this flag the usage metadata would be empty). The existing non-streaming
+  fallback path remains active for Ollama, Gemini, and any provider that does not emit
+  token chunks. The `schema_first_yaml=True` dashboard-generation path is unaffected —
+  it invokes the model directly via `ainvoke` and was already independent of the
+  streaming flag.
+
 ## [3.14.3] - 2026-05-11
 
 ### Fixed
