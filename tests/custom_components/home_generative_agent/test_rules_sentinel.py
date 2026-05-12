@@ -188,7 +188,9 @@ def test_appliance_power_duration_friendly_name_excluded_from_anomaly_id() -> No
     snapshot["entities"] = [{**base_entity, "friendly_name": "Washer Power"}]
     findings_a = AppliancePowerDurationRule(duration_min=30).evaluate(snapshot)
 
-    snapshot["entities"] = [{**base_entity, "friendly_name": "My Washing Machine Power"}]
+    snapshot["entities"] = [
+        {**base_entity, "friendly_name": "My Washing Machine Power"}
+    ]
     findings_b = AppliancePowerDurationRule(duration_min=30).evaluate(snapshot)
 
     assert findings_a[0].anomaly_id == findings_b[0].anomaly_id

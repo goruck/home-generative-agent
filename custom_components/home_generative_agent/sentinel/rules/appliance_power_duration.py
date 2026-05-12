@@ -70,9 +70,7 @@ class AppliancePowerDurationRule:
                 "threshold_min": self._duration_min,
                 "friendly_name": entity["friendly_name"] or None,
             }
-            hash_evidence = {
-                k: v for k, v in evidence.items() if k != "friendly_name"
-            }
+            hash_evidence = {k: v for k, v in evidence.items() if k != "friendly_name"}
             anomaly_id = build_anomaly_id(
                 self.rule_id, [entity["entity_id"]], hash_evidence
             )
