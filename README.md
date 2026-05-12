@@ -1043,7 +1043,7 @@ Parameter | Description | Default
 ### Latency
 The latency between user requests or the agent taking timely action on the user's behalf is critical for you to consider in the design. I used several techniques to reduce latency, including using specialized, smaller helper LLMs running on the edge and facilitating primary model prompt caching by structuring the prompts to put static content, such as instructions and examples, upfront and variable content, such as user-specific information at the end. These techniques also reduce primary model usage costs considerably.
 
-Native LLM streaming (v3.12.0+) means the first tokens appear in the HA conversation UI within milliseconds of the model starting its response — total response time is unchanged, but perceived latency drops significantly. Multi-tool turns also benefit from parallel tool execution: tools in the same model turn run concurrently rather than serially.
+Native LLM streaming (v3.12.0+) means the first tokens appear in the HA conversation UI within milliseconds of the model starting its response — total response time is unchanged, but perceived latency drops significantly. Multi-tool turns also benefit from parallel tool execution: tools in the same model turn run concurrently rather than serially. As of v3.14.4, OpenAI and Anthropic providers are constructed with `streaming=True` so they emit token chunks directly, while other providers continue to use their existing streaming or fallback behavior.
 
 You can see the typical latency performance in the table below.
 
