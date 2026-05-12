@@ -237,7 +237,7 @@ Security / presence:
 
 Appliances / sensors:
 
-- `appliance_power_duration` — appliance drawing power beyond a configurable duration threshold
+- `appliance_power_duration` — appliance drawing power beyond a configurable duration threshold; notification names the actual appliance (e.g. `Washer drew about 296 W for 633 min, above the 60 min threshold. Check it.`)
 
 Cameras:
 
@@ -256,7 +256,8 @@ When Sentinel notifications are enabled:
 
 - Mobile push explanation text is compact and plain-language (targeted for small screens).
 - Explanation text is normalized before send (markdown/backticks removed, whitespace collapsed).
-- If explanation text is missing or too long, Sentinel uses a deterministic fallback message.
+- Some finding types use a dedicated deterministic message builder regardless of LLM explanation availability — `appliance_power_duration` and `alarm_disarmed_during_external_threat` always produce deterministic mobile copy that names the relevant entity.
+- For all other finding types, if explanation text is missing or too long, Sentinel uses a deterministic fallback message.
 - Fallback urgency wording depends on severity:
   - `high`: `Urgent: check and secure it now.`
   - `medium`: `Check soon and secure it if unexpected.`
