@@ -521,5 +521,7 @@ async def test_actuation_safety_none_score_does_not_crash() -> None:
     }
 
     # Must not raise; tool is still returned (actuation safety is not score-gated)
-    result = await _get_actuation_safety_tools(store, config, "turn on the lights", {"assist"})
+    result = await _get_actuation_safety_tools(
+        store, config, "turn on the lights", {"assist"}
+    )
     assert any(t["name"] == "HassTurnOn" for t in result)

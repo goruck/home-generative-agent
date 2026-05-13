@@ -487,9 +487,7 @@ async def test_search_memories_falls_back_to_recency_on_attribute_error(
 
 
 @pytest.mark.asyncio
-async def test_search_memories_returns_empty_when_both_searches_fail(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+async def test_search_memories_returns_empty_when_both_searches_fail() -> None:
     """Both semantic and recency search failures return [] without propagating."""
     store = MagicMock()
     store.asearch = AsyncMock(
@@ -505,9 +503,7 @@ async def test_search_memories_returns_empty_when_both_searches_fail(
 
 
 @pytest.mark.asyncio
-async def test_search_memories_returns_empty_on_unexpected_error(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+async def test_search_memories_returns_empty_on_unexpected_error() -> None:
     """Unexpected exceptions are swallowed and return [] so the agent can still respond."""
     store = MagicMock()
     store.asearch = AsyncMock(side_effect=RuntimeError("unexpected failure"))
