@@ -753,6 +753,7 @@ Normalization fallbacks for common LLM-generated patterns:
   - `Rule registry ignored duplicate rule ...`
   - `... covered_by_existing_rule ...`
 - Existing stored proposal drafts are not auto-migrated; statuses update when proposals are re-processed.
+- **llama-server embedding incompatibility** — If you use llama-server as an OpenAI-compatible provider and see `Memory semantic search failed — embedding endpoint returned an incompatible response` in the logs, the agent has automatically fallen back to recency-based memory retrieval. This happens because llama-server's `/v1/embeddings` response format does not match the OpenAI SDK's expected structure. Semantic search (memory and RAG tool retrieval) will degrade silently. For reliable semantic embeddings, use a dedicated embedding model via Ollama (`mxbai-embed-large` is recommended) and set its provider as the **Embedding** provider in the integration settings. Chat and embedding providers can be different — e.g. llama-server for chat, Ollama for embeddings.
 
 ## Image and Sensor Entities
 
