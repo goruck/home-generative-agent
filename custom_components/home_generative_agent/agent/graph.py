@@ -687,8 +687,8 @@ async def _get_rag_retrieved_tools(
             api_id = item.value.get("api_id")
             if api_id not in allowed_api_ids:
                 continue
-            # score is (1 - distance) for pgvector cosine
-            score = getattr(item, "score", 0.0)
+            # score is (1 - distance) for pgvector cosine; None when no embedding
+            score = getattr(item, "score", None) or 0.0
             if score >= threshold and (name not in best or score > best[name][0]):
                 best[name] = (score, item)
 
@@ -763,7 +763,7 @@ async def _get_actuation_safety_tools(
 
     # Sort by relevance score descending so the merge can cap to the top-N.
     sorted_results = sorted(
-        results, key=lambda i: getattr(i, "score", 0.0), reverse=True
+        results, key=lambda i: getattr(i, "score", None) or 0.0, reverse=True
     )
     safety_tools: list[RawTool] = []
     for item in sorted_results:
@@ -1178,6 +1178,30 @@ def _bind_model_tools(
     return model.bind_tools(selected_tools)
 
 
+async def _search_memories(store: BaseStore, user_id: str, query: str | None) -> list:
+    """Search the memory store, falling back gracefully on embedding errors."""
+    try:
+        return await store.asearch((user_id, "memories"), query=query, limit=10)
+    except AttributeError:
+        # Some OpenAI-compatible servers (e.g. llama-server) return a raw JSON
+        # list from /v1/embeddings instead of {"data": [...]}, which causes the
+        # OpenAI SDK parser to raise AttributeError.  Fall back to recency search.
+        LOGGER.warning(
+            "Memory semantic search failed — embedding endpoint returned an "
+            "incompatible response (not OpenAI-standard). Falling back to "
+            "recency-based memory retrieval. Check the /v1/embeddings response "
+            "format of your OpenAI-compatible server."
+        )
+        try:
+            return await store.asearch((user_id, "memories"), limit=10)
+        except Exception:
+            LOGGER.exception("Memory recency search also failed; no memories injected")
+            return []
+    except Exception:
+        LOGGER.exception("Unexpected memory store search failure; no memories injected")
+        return []
+
+
 async def _call_model(
     state: State, config: RunnableConfig, *, store: BaseStore
 ) -> dict[str, Any]:
@@ -1202,7 +1226,7 @@ async def _call_model(
             query=last_message.content
         )
 
-    mems = await store.asearch((user_id, "memories"), query=query_prompt, limit=10)
+    mems = await _search_memories(store, user_id, query_prompt)
 
     # Recent camera activity.
     camera_activity = await get_recent_camera_activity(hass, store)
