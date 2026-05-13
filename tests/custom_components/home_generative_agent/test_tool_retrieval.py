@@ -453,3 +453,75 @@ async def test_retrieve_tools_fallback_when_candidates_filtered_by_api() -> None
     # Disallowed-api item filtered; fallback provides the HA tool
     assert "find_keys" not in result["tool_routing_map"]
     assert "HassSearch" in result["tool_routing_map"]
+
+
+# ---------------------------------------------------------------------------
+# score=None guard — issue #394
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_rag_retrieval_none_score_is_treated_as_zero() -> None:
+    """
+    item.score=None must not raise TypeError (issue #394).
+
+    getattr(item, 'score', 0.0) returns None when the attribute exists but is
+    None; the fix normalises it to 0.0 so the threshold comparison is safe.
+    """
+    store = MagicMock()
+    item = MagicMock()
+    item.value = {
+        "name": "some_tool",
+        "api_id": "hga_local",
+        "description": "A tool",
+        "parameters": "{}",
+        "is_actuation": False,
+    }
+    item.score = None
+
+    store.asearch = AsyncMock(return_value=[item])
+
+    config: RunnableConfig = {
+        "configurable": {
+            "options": {"tool_relevance_threshold": 0.15},
+            "tool_index_ready": True,
+        }
+    }
+
+    # Must not raise; None score < threshold so tool is filtered out
+    result = await _get_rag_retrieved_tools(store, config, "query", {"hga_local"})
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_actuation_safety_none_score_does_not_crash() -> None:
+    """
+    item.score=None in actuation safety sort must not raise TypeError (issue #394).
+
+    The lambda key used in sorted() had the same getattr default bug.
+    """
+    store = MagicMock()
+    item = MagicMock()
+    item.value = {
+        "name": "HassTurnOn",
+        "api_id": "assist",
+        "description": "Turn on",
+        "parameters": "{}",
+        "is_actuation": True,
+    }
+    item.score = None
+
+    store.asearch = AsyncMock(return_value=[item])
+
+    config: RunnableConfig = {
+        "configurable": {
+            "options": {},
+            "tool_index_ready": True,
+        }
+    }
+
+    # Must not raise; tool is still returned (actuation safety is not score-gated)
+    result = await _get_actuation_safety_tools(
+        store, config, "turn on the lights", {"assist"}
+    )
+    assert any(t["name"] == "HassTurnOn" for t in result)

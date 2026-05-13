@@ -19,6 +19,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 import custom_components.home_generative_agent as hga_component
 import custom_components.home_generative_agent.agent.graph as agent_graph
 from custom_components.home_generative_agent.agent import tools as agent_tools
+from custom_components.home_generative_agent.agent.graph import _search_memories
 from custom_components.home_generative_agent.const import SIGNAL_HGA_RECOGNIZED
 from custom_components.home_generative_agent.core.image_entity import LastEventImage
 from custom_components.home_generative_agent.core.person_gallery import PersonGalleryDAO
@@ -434,3 +435,79 @@ async def test_call_model_binds_tools_in_executor(
     assert model.config == {"configurable": {"reasoning": False}}
     assert model.bound_tools == selected_tools
     assert result["messages"].content == "ok"
+
+
+# ---------------------------------------------------------------------------
+# _search_memories — issue #394: llama-server embedding incompatibility
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_search_memories_returns_semantic_results() -> None:
+    """Happy path: semantic search returns store results unchanged."""
+    store = MagicMock()
+    expected = [MagicMock()]
+    store.asearch = AsyncMock(return_value=expected)
+
+    result = await _search_memories(store, "user-1", "what is the temperature?")
+
+    store.asearch.assert_awaited_once_with(
+        ("user-1", "memories"), query="what is the temperature?", limit=10
+    )
+    assert result is expected
+
+
+@pytest.mark.asyncio
+async def test_search_memories_falls_back_to_recency_on_attribute_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """
+    AttributeError from embedding endpoint falls back to recency search (issue #394).
+
+    llama-server returns a bare JSON list instead of {"data": [...]}, which causes
+    the OpenAI SDK parser to raise AttributeError inside store.asearch.
+    """
+    store = MagicMock()
+    fallback = [MagicMock()]
+    store.asearch = AsyncMock(
+        side_effect=[
+            AttributeError("'list' object has no attribute 'data'"),
+            fallback,
+        ]
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = await _search_memories(store, "user-1", "some query")
+
+    assert result is fallback
+    assert "incompatible response" in caplog.text
+    # Second call must omit query= (recency-only)
+    _, recency_kwargs = store.asearch.call_args_list[1]
+    assert "query" not in recency_kwargs
+
+
+@pytest.mark.asyncio
+async def test_search_memories_returns_empty_when_both_searches_fail() -> None:
+    """Both semantic and recency search failures return [] without propagating."""
+    store = MagicMock()
+    store.asearch = AsyncMock(
+        side_effect=[
+            AttributeError("bad embedding format"),
+            RuntimeError("DB gone"),
+        ]
+    )
+
+    result = await _search_memories(store, "user-1", "query")
+
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_search_memories_returns_empty_on_unexpected_error() -> None:
+    """Unexpected exceptions are swallowed and return [] so the agent can still respond."""
+    store = MagicMock()
+    store.asearch = AsyncMock(side_effect=RuntimeError("unexpected failure"))
+
+    result = await _search_memories(store, "user-1", "query")
+
+    assert result == []
