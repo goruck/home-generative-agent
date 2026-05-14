@@ -11,6 +11,7 @@ from homeassistant.util import dt as dt_util
 from custom_components.home_generative_agent.const import (
     RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
     RECOMMENDED_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT,
+    SENTINEL_OCCUPANCY_ARMED_STATES,
 )
 
 from .baseline import evaluate_baseline_deviation, evaluate_time_of_day_anomaly
@@ -741,6 +742,10 @@ def _eval_alarm_state_mismatch(
     alarm_state = params.get("alarm_state")
     expected_presence = params.get("expected_presence")
     if not alarm_id or not alarm_state or not expected_presence:
+        return []
+    # armed_home / armed_night are designed for occupancy — never anomalous when
+    # expected_presence is "home", since that is their intended operating condition.
+    if alarm_state in SENTINEL_OCCUPANCY_ARMED_STATES and expected_presence == "home":
         return []
     anyone_home = snapshot["derived"]["anyone_home"]
     if expected_presence == "away" and anyone_home:

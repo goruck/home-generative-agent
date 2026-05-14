@@ -6,6 +6,10 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from custom_components.home_generative_agent.const import (
+    SENTINEL_OCCUPANCY_ARMED_STATES,
+)
+
 SUPPORTED_TEMPLATES = {
     "alarm_disarmed_open_entry",
     "low_battery_sensors",
@@ -301,6 +305,20 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
     ):
         detected_state = _extract_alarm_state(text) or "armed_home"
         effective_presence = presence if presence != "any" else "home"
+        # armed_home / armed_night are designed for use while occupants are present —
+        # they are never a mismatch when presence is "home".
+        if (
+            detected_state in SENTINEL_OCCUPANCY_ARMED_STATES
+            and effective_presence == "home"
+        ):
+            return NormalizationResult(
+                normalized=None,
+                reason_code="unsupported_pattern",
+                details={
+                    "reason": f"{detected_state} with home presence is not a mismatch",
+                    **summary,
+                },
+            )
         alarm_slug = alarm_id.replace(".", "_")
         default_rule_id = (
             f"alarm_state_mismatch_{detected_state}_{effective_presence}_{alarm_slug}"

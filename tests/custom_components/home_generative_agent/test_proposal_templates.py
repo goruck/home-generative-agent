@@ -615,6 +615,81 @@ def test_normalize_candidate_alarm_armed_home_while_away() -> None:
     assert normalized.params["expected_presence"] == "away"
 
 
+def test_normalize_candidate_alarm_armed_home_home_presence_rejected() -> None:
+    """armed_home + home presence is not a mismatch — normalization must reject it."""
+    candidate = {
+        "candidate_id": "alarm_mode_occupancy_mismatch",
+        "title": "Alarm mode occupancy mismatch",
+        "summary": "The home alarm is armed_home while people are home.",
+        "pattern": "alarm_state == armed_home AND anyone_home == true",
+        "suggested_type": "security",
+        "confidence_hint": 0.85,
+        "evidence_paths": [
+            "entities[entity_id=alarm_control_panel.home_alarm].state",
+            "derived.anyone_home",
+        ],
+    }
+    result = explain_normalize_candidate(candidate)
+    assert result.normalized is None
+    assert result.reason_code == "unsupported_pattern"
+    assert normalize_candidate(candidate) is None
+
+
+def test_normalize_candidate_alarm_armed_night_home_presence_rejected() -> None:
+    """armed_night + home presence is not a mismatch — normalization must reject it."""
+    candidate = {
+        "candidate_id": "armed_night_while_home",
+        "title": "Alarm Armed Night While Home",
+        "summary": "Security alarm is in armed_night mode while occupants are home.",
+        "pattern": "alarm_state == armed_night AND anyone_home == true",
+        "suggested_type": "security",
+        "confidence_hint": 0.8,
+        "evidence_paths": [
+            "entities[entity_id=alarm_control_panel.home_alarm].state",
+            "derived.anyone_home",
+        ],
+    }
+    result = explain_normalize_candidate(candidate)
+    assert result.normalized is None
+    assert result.reason_code == "unsupported_pattern"
+
+
+def test_normalize_candidate_alarm_armed_home_no_presence_signal_rejected() -> None:
+    """armed_home with no explicit presence signal defaults to home — still rejected."""
+    candidate = {
+        "candidate_id": "armed_home_no_presence",
+        "title": "Alarm Armed Home Mode Active",
+        "summary": "The home alarm is in armed_home mode.",
+        "pattern": "alarm_state == armed_home",
+        "suggested_type": "security",
+        "confidence_hint": 0.7,
+        "evidence_paths": [
+            "entities[entity_id=alarm_control_panel.home_alarm].state",
+        ],
+    }
+    result = explain_normalize_candidate(candidate)
+    assert result.normalized is None
+    assert result.reason_code == "unsupported_pattern"
+
+
+def test_normalize_candidate_alarm_armed_night_no_presence_signal_rejected() -> None:
+    """armed_night with no explicit presence signal defaults to home — still rejected."""
+    candidate = {
+        "candidate_id": "armed_night_no_presence",
+        "title": "Alarm Armed Night Mode Active",
+        "summary": "The home alarm is in armed_night mode.",
+        "pattern": "alarm_state == armed_night",
+        "suggested_type": "security",
+        "confidence_hint": 0.7,
+        "evidence_paths": [
+            "entities[entity_id=alarm_control_panel.home_alarm].state",
+        ],
+    }
+    result = explain_normalize_candidate(candidate)
+    assert result.normalized is None
+    assert result.reason_code == "unsupported_pattern"
+
+
 # ---------------------------------------------------------------------------
 # entity_state_duration - lock variant
 # ---------------------------------------------------------------------------
