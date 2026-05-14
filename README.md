@@ -480,7 +480,7 @@ Security / presence:
 - `unlocked_lock_when_home` — lock unlocked while someone is home
 - `unlocked_lock_while_away` — lock unlocked while no one is home
 - `alarm_disarmed_open_entry` — alarm disarmed with an entry sensor open
-- `alarm_state_mismatch` — alarm in a specific state (armed or disarmed) that contradicts current or expected occupancy
+- `alarm_state_mismatch` — alarm in a specific state (armed or disarmed) that contradicts current or expected occupancy. `armed_home` and `armed_night` with `expected_presence=home` are never treated as a mismatch — these modes are designed for use while occupants are present.
 - `open_entry_when_home` — entry open while someone is home
 - `open_entry_while_away` — entry open while away
 - `open_entry_at_night_when_home` — entry open at night while home
@@ -735,6 +735,7 @@ Normalization fallbacks for common LLM-generated patterns:
 - **Power/energy sensor without numeric threshold** (e.g. `high_energy_consumption_night`): when no explicit value like "above 500W" appears in the candidate text, normalization falls back to `baseline_deviation` so the rule fires when the sensor deviates from its rolling average rather than a fixed threshold.
 - **Lock battery low** (e.g. `playroom_lock_battery_low`): when a lock entity appears in evidence paths alongside "battery low/below" text, normalization routes to `low_battery_sensors` rather than `unlocked_lock_when_home`.
 - **Alarm disarmed with no occupancy signal** (e.g. `alarm_disarmed_during_external_threat`): `alarm_state_mismatch` also matches candidates whose text contains "disarmed" without an armed-state keyword, and defaults `expected_presence` to `"home"` when no home/away signal is present.
+- **Occupancy-safe alarm modes** (`armed_home` / `armed_night` with home presence): normalization rejects any LLM-proposed rule whose detected alarm state is `armed_home` or `armed_night` and whose effective presence resolves to `"home"` — these states are designed for occupancy and are never a mismatch. The deterministic evaluator also suppresses runtime findings for this combination.
 - **Window/entry open duration without entity IDs in evidence** (e.g. `window_open_duration_exceeded`): when evidence paths contain no window entity references, normalization falls back to `open_any_window_at_night_while_away` using a selector-based approach that checks all window sensors.
 
 `unavailable_sensors` is also supported for candidates without explicit occupancy context (for example `backyard_sensors_unavailable`). It triggers only when all listed sensors are `unavailable`; if any required sensor is missing or not unavailable, no finding is produced.
