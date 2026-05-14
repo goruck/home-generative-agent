@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.6] - 2026-05-13
+
+### Fixed
+
+- **Sentinel no longer fires a false "disarm the alarm" notification when armed_home or
+  armed_night is active with occupants present** — `armed_home` and `armed_night` are
+  HA alarm modes designed for use while people are home. A three-layer guard now
+  prevents this combination from ever becoming an anomaly: the deterministic evaluator
+  suppresses it at runtime, the normalization layer rejects any future LLM-proposed
+  rule with this pattern, and the LLM explanation prompt is conditioned to never
+  describe the state as a problem when occupants are present. The constant defining
+  these occupancy-safe modes (`SENTINEL_OCCUPANCY_ARMED_STATES`) is now centralized
+  in `const.py` and shared across both sentinel modules. Five new regression tests
+  (plus three coverage tests) guard all paths.
+
 ## [3.14.4] - 2026-05-12
 
 ### Changed
