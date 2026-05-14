@@ -40,6 +40,14 @@ SUPPORTED_TEMPLATES = {
     "multiple_entries_open_count",
 }
 
+# Matches anyone_home == false / anyone_home = 0 / anyone_home=False etc.
+# Must be checked before _HOME_TERMS to avoid "home" substring false-positive.
+_ANYONE_HOME_FALSE_PATTERN = re.compile(
+    r"anyone_home\s*(?:==?)\s*(?:false|0)\b", re.IGNORECASE
+)
+_ANYONE_HOME_TRUE_PATTERN = re.compile(
+    r"anyone_home\s*(?:==?)\s*(?:true|1)\b", re.IGNORECASE
+)
 _PERCENT_THRESHOLD_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*%")
 _DOT_NOTATION_ENTITY_PATTERN = re.compile(r"^([a-z_]+\.[a-z0-9_]+)(?:[.\[]|$)")
 _HA_ENTITY_DOMAINS = frozenset(
@@ -971,6 +979,13 @@ def _has_night_signal(evidence_paths: list[str], text: str) -> bool:
 
 
 def _presence_signal(evidence_paths: list[str], text: str) -> str:
+    # Explicit boolean expressions take priority — they are unambiguous and must
+    # be resolved before term matching, which can misfire on substrings like
+    # "home" inside "armed_home" or "anyone_home".
+    if _ANYONE_HOME_FALSE_PATTERN.search(text):
+        return "away"
+    if _ANYONE_HOME_TRUE_PATTERN.search(text):
+        return "home"
     if _contains_any(text, _AWAY_TERMS):
         return "away"
     if _contains_any(text, _HOME_TERMS):
