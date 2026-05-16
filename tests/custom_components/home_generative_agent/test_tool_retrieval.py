@@ -16,6 +16,7 @@ from custom_components.home_generative_agent.agent.graph import (
     _get_actuation_safety_tools,
     _get_allowed_api_ids,
     _get_rag_retrieved_tools,
+    _query_needs_actuation_safety,
     _retrieve_tools,
     _split_query_intents,
 )
@@ -525,3 +526,152 @@ async def test_actuation_safety_none_score_does_not_crash() -> None:
         store, config, "turn on the lights", {"assist"}
     )
     assert any(t["name"] == "HassTurnOn" for t in result)
+
+
+# ---------------------------------------------------------------------------
+# _query_needs_actuation_safety — issue #394 follow-up
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "list all open windows",
+        "which doors are open",
+        "show open entry sensors",
+        "are the gates open",
+        "is the garage vent open",
+        "show me which windows are open",
+        "what windows are open right now",
+        "where are the open doors",
+    ],
+)
+def test_query_needs_actuation_safety_suppressed_for_read_only_open(query: str) -> None:
+    """Read-only open-state queries must not trigger actuation safety injection."""
+    assert not _query_needs_actuation_safety(query)
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "open the garage door",
+        "open the gates",
+        "close the family room blinds",
+        "turn on the kitchen light",
+        "lock the front door",
+        "show me which windows are open and then close them",
+        "show me which windows are open and then open the garage door",
+    ],
+)
+def test_query_needs_actuation_safety_enabled_for_actuation(query: str) -> None:
+    """True actuation commands and compound queries must still trigger safety injection."""
+    assert _query_needs_actuation_safety(query)
+
+
+def test_query_needs_actuation_safety_no_actuation_keyword() -> None:
+    """Queries with no actuation keyword need no actuation safety."""
+    assert not _query_needs_actuation_safety(
+        "what is the temperature in the living room"
+    )
+
+
+def test_query_needs_actuation_safety_comma_compound_known_gap() -> None:
+    """Known gap: comma-separated 'open' command is not detected; actuation suppressed."""
+    query = "show me open windows, open the garage door"
+    # The comma form is NOT detected — actuation is incorrectly suppressed.
+    assert not _query_needs_actuation_safety(query)
+
+
+@pytest.mark.asyncio
+async def test_retrieve_tools_no_actuation_safety_for_read_only_open() -> None:
+    """_retrieve_tools must not force-inject actuation tools for 'list all open windows'."""
+    query = "list all open windows"
+    state: State = {
+        "messages": [MagicMock(content=query)],
+        "summary": "",
+        "chat_model_usage_metadata": {},
+        "messages_to_remove": [],
+        "selected_tools": [],
+        "tool_routing_map": {},
+        "action_rounds": 0,
+    }
+    store = MagicMock()
+
+    live_ctx_item = MagicMock()
+    live_ctx_item.value = {
+        "name": "GetLiveContext",
+        "api_id": "hga_local",
+        "description": "Get live home state",
+        "parameters": "{}",
+        "is_actuation": False,
+    }
+    live_ctx_item.score = 0.85
+
+    actuation_item = MagicMock()
+    actuation_item.value = {
+        "name": "HassTurnOn",
+        "api_id": "assist",
+        "description": "Turn on",
+        "parameters": "{}",
+        "is_actuation": True,
+    }
+    actuation_item.score = 0.0
+
+    # RAG returns GetLiveContext; safety search should be skipped entirely.
+    store.asearch = AsyncMock(return_value=[live_ctx_item])
+
+    config: RunnableConfig = {
+        "configurable": {
+            "options": {"llm_hass_api": ["assist"], "tool_relevance_threshold": 0.15},
+            "tool_index_ready": True,
+            "langchain_tools": {},
+            "ha_llm_api": MagicMock(apis={}),
+        }
+    }
+
+    result = await _retrieve_tools(state, config, store=store)
+
+    assert "GetLiveContext" in result["tool_routing_map"]
+    assert "HassTurnOn" not in result["tool_routing_map"]
+    # Counter must be reset to 0 at the start of each turn.
+    assert result["action_rounds"] == 0
+
+
+@pytest.mark.asyncio
+async def test_retrieve_tools_action_rounds_reset() -> None:
+    """action_rounds is reset to 0 by _retrieve_tools regardless of prior state."""
+    query = "list all open windows"
+    state: State = {
+        "messages": [MagicMock(content=query)],
+        "summary": "",
+        "chat_model_usage_metadata": {},
+        "messages_to_remove": [],
+        "selected_tools": [],
+        "tool_routing_map": {},
+        "action_rounds": 3,  # simulate a prior turn that hit the limit
+    }
+    store = MagicMock()
+    store.asearch = AsyncMock(return_value=[])
+
+    ha_tool = MagicMock(spec=llm.Tool)
+    ha_tool.name = "GetLiveContext"
+    ha_tool.description = "Get live home state"
+    ha_tool.parameters = {"type": "object", "properties": {}}
+
+    api = MagicMock()
+    api.tools = [ha_tool]
+    api.custom_serializer = None
+    ha_llm_api = MagicMock()
+    ha_llm_api.apis = {"assist": api}
+
+    config: RunnableConfig = {
+        "configurable": {
+            "options": {"llm_hass_api": ["assist"]},
+            "tool_index_ready": True,
+            "langchain_tools": {},
+            "ha_llm_api": ha_llm_api,
+        }
+    }
+
+    result = await _retrieve_tools(state, config, store=store)
+    assert result["action_rounds"] == 0

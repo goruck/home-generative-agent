@@ -1157,7 +1157,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 "pending_actions": runtime_data.pending_actions,
                 "tool_index_ready": runtime_data.tool_index_ready,
             },
-            "recursion_limit": 10,
+            "recursion_limit": 20,
         }
 
         # Compile graph into a LangChain Runnable.
