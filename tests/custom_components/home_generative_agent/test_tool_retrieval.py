@@ -635,6 +635,11 @@ async def test_retrieve_tools_no_actuation_safety_for_read_only_open() -> None:
     assert "HassTurnOn" not in result["tool_routing_map"]
     # Counter must be reset to 0 at the start of each turn.
     assert result["action_rounds"] == 0
+    # GetLiveContext must be first in the ordered tool list (issue #394).
+    assert result["selected_tools"][0]["function"]["name"] == "GetLiveContext"
+    # No actuation tool should appear anywhere in the selection.
+    selected_names = [t["function"]["name"] for t in result["selected_tools"]]
+    assert "HassTurnOn" not in selected_names
 
 
 @pytest.mark.asyncio

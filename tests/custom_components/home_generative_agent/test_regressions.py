@@ -19,7 +19,13 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 import custom_components.home_generative_agent as hga_component
 import custom_components.home_generative_agent.agent.graph as agent_graph
 from custom_components.home_generative_agent.agent import tools as agent_tools
-from custom_components.home_generative_agent.agent.graph import _search_memories
+from custom_components.home_generative_agent.agent.graph import (
+    _MAX_ACTION_ROUNDS,
+    State,
+    _search_memories,
+    _should_continue,
+    _tool_loop_guard,
+)
 from custom_components.home_generative_agent.const import SIGNAL_HGA_RECOGNIZED
 from custom_components.home_generative_agent.core.image_entity import LastEventImage
 from custom_components.home_generative_agent.core.person_gallery import PersonGalleryDAO
@@ -511,3 +517,28 @@ async def test_search_memories_returns_empty_on_unexpected_error() -> None:
     result = await _search_memories(store, "user-1", "query")
 
     assert result == []
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_repeated_tool_calls_hit_loop_guard() -> None:
+    """Loop guard routes to tool_loop_guard and emits a friendly message (issue #394)."""
+    state: State = {
+        "messages": [
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "SomeTool", "args": {}, "id": "call_1"}],
+            )
+        ],
+        "summary": "",
+        "chat_model_usage_metadata": {},
+        "messages_to_remove": [],
+        "selected_tools": [],
+        "tool_routing_map": {},
+        "action_rounds": _MAX_ACTION_ROUNDS,
+    }
+
+    assert _should_continue(state) == "tool_loop_guard"
+
+    guard_result = await _tool_loop_guard(state)
+    response_text = guard_result["messages"][0].content
+    assert "wasn't able to complete" in response_text
