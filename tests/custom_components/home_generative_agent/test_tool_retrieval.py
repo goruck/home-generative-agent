@@ -570,7 +570,9 @@ def test_query_needs_actuation_safety_enabled_for_actuation(query: str) -> None:
 
 def test_query_needs_actuation_safety_no_actuation_keyword() -> None:
     """Queries with no actuation keyword need no actuation safety."""
-    assert not _query_needs_actuation_safety("what is the temperature in the living room")
+    assert not _query_needs_actuation_safety(
+        "what is the temperature in the living room"
+    )
 
 
 def test_query_needs_actuation_safety_comma_compound_known_gap() -> None:
