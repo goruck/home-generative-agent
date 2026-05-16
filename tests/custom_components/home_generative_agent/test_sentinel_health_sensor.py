@@ -271,24 +271,31 @@ def _make_sensor(
     return sensor
 
 
+def _mock_async_write_ha_state(sensor: SentinelHealthSensor) -> MagicMock:
+    """Replace HA's state write hook with a mock for direct refresh tests."""
+    mock_write = MagicMock()
+    object.__setattr__(sensor, "async_write_ha_state", mock_write)
+    return mock_write
+
+
 @pytest.mark.asyncio
 async def test_refresh_disabled_sentinel() -> None:
     """When sentinel is disabled the state should be 'disabled' and attrs empty."""
     sensor = _make_sensor(sentinel_enabled=False)
-    sensor.async_write_ha_state = MagicMock()  # suppress HA machinery
+    mock_write = _mock_async_write_ha_state(sensor)
 
     await sensor._async_refresh()
 
     assert sensor._attr_native_value == "disabled"
     assert sensor._attrs == {}
-    sensor.async_write_ha_state.assert_called_once()
+    mock_write.assert_called_once()
 
 
 @pytest.mark.asyncio
 async def test_refresh_enabled_empty_records() -> None:
     """With no audit records the sensor state should be 'ok' with zero KPIs."""
     sensor = _make_sensor(sentinel_enabled=True, records=[])
-    sensor.async_write_ha_state = MagicMock()
+    mock_write = _mock_async_write_ha_state(sensor)
 
     await sensor._async_refresh()
 
@@ -299,7 +306,7 @@ async def test_refresh_enabled_empty_records() -> None:
         "medium": 0,
         "high": 0,
     }
-    sensor.async_write_ha_state.assert_called_once()
+    mock_write.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -312,7 +319,7 @@ async def test_refresh_merges_run_stats() -> None:
         "active_rule_count": 12,
     }
     sensor = _make_sensor(run_stats=run_stats)
-    sensor.async_write_ha_state = MagicMock()
+    _mock_async_write_ha_state(sensor)
 
     await sensor._async_refresh()
 
@@ -332,7 +339,7 @@ async def test_refresh_run_stats_keys_present_when_no_engine() -> None:
         sentinel=None,
         entry_id="test_entry",
     )
-    sensor.async_write_ha_state = MagicMock()
+    _mock_async_write_ha_state(sensor)
 
     await sensor._async_refresh()
 
@@ -361,7 +368,7 @@ async def test_refresh_marks_degraded_for_sentinel_admission_starvation() -> Non
             "sentinel_admission_starved_for_s": 360,
         }
     )
-    sensor.async_write_ha_state = MagicMock()
+    _mock_async_write_ha_state(sensor)
 
     await sensor._async_refresh()
 
@@ -390,7 +397,7 @@ async def test_refresh_includes_scheduler_stats_from_run_stats() -> None:
         },
     }
     sensor = _make_sensor(run_stats=run_stats)
-    sensor.async_write_ha_state = MagicMock()
+    _mock_async_write_ha_state(sensor)
 
     await sensor._async_refresh()
 
@@ -411,7 +418,7 @@ async def test_refresh_scheduler_stats_absent_when_no_engine() -> None:
         sentinel=None,
         entry_id="test_entry",
     )
-    sensor.async_write_ha_state = MagicMock()
+    _mock_async_write_ha_state(sensor)
 
     await sensor._async_refresh()
 
@@ -424,7 +431,7 @@ async def test_refresh_scheduler_stats_absent_when_no_engine() -> None:
 async def test_refresh_requests_all_available_records() -> None:
     """_async_refresh requests 1000 records so all available data contributes to KPIs."""
     sensor = _make_sensor(records=[])
-    sensor.async_write_ha_state = MagicMock()
+    _mock_async_write_ha_state(sensor)
 
     await sensor._async_refresh()
 
@@ -527,7 +534,7 @@ async def test_refresh_exposes_trigger_source_breakdown_with_audit_store() -> No
         {"trigger_source": "poll", "notification": {"notified_at": recent_str}},
     ]
     sensor = _make_sensor(records=records)
-    sensor.async_write_ha_state = MagicMock()
+    _mock_async_write_ha_state(sensor)
 
     await sensor._async_refresh()
 
@@ -549,7 +556,7 @@ async def test_refresh_trigger_source_breakdown_none_when_no_audit_store() -> No
         sentinel=None,
         entry_id="test_entry",
     )
-    sensor.async_write_ha_state = MagicMock()
+    _mock_async_write_ha_state(sensor)
 
     await sensor._async_refresh()
 
@@ -588,7 +595,7 @@ async def test_proposals_approved_24h_counts_recent_approvals() -> None:
         entry_id="test_entry",
         proposal_store=_make_proposal_store(records),
     )
-    sensor.async_write_ha_state = MagicMock()
+    _mock_async_write_ha_state(sensor)
 
     await sensor._async_refresh()
 
@@ -607,7 +614,7 @@ async def test_proposals_approved_24h_zero_when_none_recent() -> None:
         entry_id="test_entry",
         proposal_store=_make_proposal_store([]),
     )
-    sensor.async_write_ha_state = MagicMock()
+    _mock_async_write_ha_state(sensor)
 
     await sensor._async_refresh()
 
@@ -626,7 +633,7 @@ async def test_proposals_approved_24h_none_when_no_store() -> None:
         entry_id="test_entry",
         proposal_store=None,
     )
-    sensor.async_write_ha_state = MagicMock()
+    _mock_async_write_ha_state(sensor)
 
     await sensor._async_refresh()
 
@@ -648,7 +655,7 @@ async def test_proposals_approved_24h_boundary_just_outside_not_counted() -> Non
         entry_id="test_entry",
         proposal_store=_make_proposal_store(records),
     )
-    sensor.async_write_ha_state = MagicMock()
+    _mock_async_write_ha_state(sensor)
 
     await sensor._async_refresh()
 
