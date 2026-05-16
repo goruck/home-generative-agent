@@ -1056,11 +1056,13 @@ async def _bootstrap_vectors_once(
 class NullChat:
     """Non-throwing fallback implementing common chat model methods."""
 
-    async def ainvoke(self, _input: Any, **_kw: Any) -> str:
+    async def ainvoke(self, _input: Any, _config: Any = None, **_kw: Any) -> str:
         """Return a placeholder response."""
         return "LLM unavailable."
 
-    async def astream(self, _input: Any, **_kw: Any) -> AsyncGenerator[str, Any]:
+    async def astream(
+        self, _input: Any, _config: Any = None, **_kw: Any
+    ) -> AsyncGenerator[str, Any]:
         """Return a placeholder response."""
         yield "LLM unavailable."
 

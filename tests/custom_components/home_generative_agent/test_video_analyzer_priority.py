@@ -507,6 +507,20 @@ async def test_summary_null_chat_with_config_does_not_raise(
         await va._generate_summary(frame_descs)  # type: ignore[attr-defined]
 
 
+@pytest.mark.asyncio
+async def test_null_chat_ainvoke_accepts_positional_config() -> None:
+    """NullChat.ainvoke accepts config as a positional arg (LangChain convention)."""
+    result = await NullChat().ainvoke([], {"configurable": {}})
+    assert result == "LLM unavailable."
+
+
+@pytest.mark.asyncio
+async def test_null_chat_astream_accepts_positional_config() -> None:
+    """NullChat.astream accepts config as a positional arg (LangChain convention)."""
+    chunks = [chunk async for chunk in NullChat().astream([], {"configurable": {}})]
+    assert chunks == ["LLM unavailable."]
+
+
 # ---------------------------------------------------------------------------
 # Shared semaphore: VLM and summary share the same concurrency limit
 # ---------------------------------------------------------------------------
