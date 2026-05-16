@@ -106,9 +106,17 @@ as an actuation keyword. Add the two new regex constants to `const.py` as well,
 for consistency:
 
 ```python
-# Read-only state query signals
+# Read-only state query signals.
+# Covers imperative phrasings ("check", "find", "give", "tell") as well as
+# interrogative ones ("which", "are", "how many") so that queries like
+# "check if windows are open" or "find all open sensors" are recognized
+# without requiring a noun allowlist. Do not include "any" as a standalone
+# signal: phrases like "open any garage door" are true commands and must keep
+# actuation safety enabled. The AND with OPEN_AS_STATE_REGEX still prevents false
+# suppression on pure actuation commands.
 READ_ONLY_STATE_QUERY_REGEX = (
-    r"(?i)\b(list|show|which|what|where|are|is|status|state)\b"
+    r"(?i)\b(list|show|which|what|where|are|is|status|state"
+    r"|check|find|count|give|tell|report)\b"
 )
 
 # "open" used as a state description (not a command), without a noun restriction.
@@ -220,10 +228,38 @@ Add separate tests proving pure read-only queries stay suppressed:
 
 - `show me which windows are open`
 
-Add a test for the accepted comma-separated gap (actuation tools suppressed —
-expected failure, documents the known limitation):
+Add a test for the accepted comma-separated gap decorated with
+`@pytest.mark.xfail(strict=True, reason="comma-separated compound not detected")`.
+Using `strict=True` means the suite will fail if the behavior accidentally
+becomes correct, catching any future fix automatically:
 
 - `show me open windows, open the garage door`
+
+Prefer extracting the actuation keywords into shared tuple constants and deriving
+both regexes from those constants instead of manually keeping two regex strings in
+sync. For example:
+
+```python
+ACTUATION_KEYWORDS = (
+    "turn",
+    "switch",
+    "lock",
+    "unlock",
+    "open",
+    "close",
+    ...
+)
+NON_OPEN_ACTUATION_KEYWORDS = tuple(
+    kw for kw in ACTUATION_KEYWORDS if kw not in {"open", "opened"}
+)
+ACTUATION_KEYWORDS_REGEX = _keyword_regex(ACTUATION_KEYWORDS)
+NON_OPEN_ACTUATION_KEYWORDS_REGEX = _keyword_regex(NON_OPEN_ACTUATION_KEYWORDS)
+```
+
+Add a sync-guard test against the tuple constants, not by parsing regex strings:
+strip `open`/`opened` from `ACTUATION_KEYWORDS` and assert the result equals
+`NON_OPEN_ACTUATION_KEYWORDS`. This makes drift between the two sets an immediate
+test failure without coupling the test to regex formatting.
 
 ### 4. Add a graph loop guard
 
@@ -252,7 +288,11 @@ that fires well before LangGraph's `recursion_limit=10` (set in
    `_retrieve_tools` runs exactly once per user turn before any tool calls, so
    this is the correct reset point. It is self-contained and works regardless of
    how the graph is invoked, with no requirement for call sites to remember to
-   pass a reset value.
+   pass a reset value. **Verify this invariant in the graph topology before
+   implementation** — if a future refactor adds a re-planning path that re-enters
+   `_retrieve_tools` mid-turn, the reset would clear the counter mid-loop and the
+   guard would never fire. Add a one-line comment at the reset site explaining why
+   `_retrieve_tools` is the correct (and only correct) place to zero this field.
 
 2. Increment `action_rounds` in `_call_tools` (the `action` node) by returning
    the updated state key:
@@ -285,8 +325,22 @@ def _should_continue(
 
 
 async def _tool_loop_guard(state: State) -> dict[str, Any]:
+    # Many OpenAI-compatible providers (the primary target of this fix) require
+    # a ToolMessage response for every tool_call_id in the preceding AIMessage.
+    # Injecting a bare AIMessage without first closing the open tool calls
+    # corrupts conversation history and can cause downstream summarization to
+    # fail. Emit a cancellation ToolMessage for each pending call first.
+    last = state["messages"][-1]
+    cancellations = [
+        _make_tool_error(
+            "Tool call cancelled: too many retries.",
+            str(tc.get("name") or ""),
+            str(tc.get("id") or ""),
+        )
+        for tc in (last.tool_calls if isinstance(last, AIMessage) else [])
+    ]
     return {
-        "messages": [
+        "messages": cancellations + [
             AIMessage(
                 content=(
                     "I wasn't able to complete this request after several "
@@ -306,7 +360,12 @@ workflow.add_edge("tool_loop_guard", "summarize_and_remove_messages")
 ```
 
 This ensures the final graph state ends with a normal assistant message instead
-of an unresolved tool-call AI message. The user-facing fallback should be:
+of an unresolved tool-call AI message, and the conversation history remains
+well-formed for all OpenAI-compatible providers. Use `tool_call.get("id") or ""`
+instead of direct indexing so malformed local-provider tool calls do not turn the
+guard itself into another exception. Reuse `_make_tool_error(...)` so cancellation
+messages include the same `name`, `tool_call_id`, and `status="error"` shape as
+normal tool failures. The user-facing fallback should be:
 
 ```text
 I wasn't able to complete this request after several tool-use attempts.
@@ -370,6 +429,12 @@ friendly fallback before LangGraph raises `GraphRecursionError`.
 Also add a regression test proving `action_rounds` starts at `0` for a new user
 turn in the same conversation/checkpointer thread. A prior multi-tool turn
 should not cause the next user request to hit the loop guard early.
+
+Add a backward-compatibility test that deserializes a `State`-shaped dict
+without the `action_rounds` key (simulating a pre-existing PostgreSQL checkpoint)
+and asserts that `_should_continue` and `_call_tools` both handle it correctly
+via the `.get("action_rounds", 0)` default. Checkpoint corruption is silent in
+production, so this must be an explicit test rather than a code review assumption.
 
 Then run the conversation stream and full test suite:
 
