@@ -13,6 +13,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Literal,
+    NotRequired,
     TypedDict,
     cast,
 )
@@ -58,6 +59,10 @@ from custom_components.home_generative_agent.const import (
     CONF_TOOL_RELEVANCE_THRESHOLD,
     CONF_TOOL_RETRIEVAL_LIMIT,
     EMBEDDING_MODEL_PROMPT_TEMPLATE,
+    NON_OPEN_ACTUATION_KEYWORDS_REGEX,
+    OPEN_AS_STATE_REGEX,
+    OPEN_COMMAND_CLAUSE_REGEX,
+    READ_ONLY_STATE_QUERY_REGEX,
     RECOMMENDED_CRITICAL_ACTIONS,
     SUMMARIZATION_INITIAL_PROMPT,
     SUMMARIZATION_PROMPT_TEMPLATE,
@@ -113,6 +118,7 @@ class State(MessagesState):
     messages_to_remove: list[AnyMessage]
     selected_tools: list[dict[str, Any]]
     tool_routing_map: dict[str, str]
+    action_rounds: NotRequired[int]
 
 
 def _determine_model_name(provider: str, opts: dict[str, Any]) -> str:
@@ -710,6 +716,21 @@ async def _get_rag_retrieved_tools(
     return raw_tools
 
 
+_MAX_ACTION_ROUNDS = 3
+
+
+def _query_needs_actuation_safety(query: str) -> bool:
+    """Return True when the query warrants force-injection of actuation tools."""
+    if not re.search(ACTUATION_KEYWORDS_REGEX, query):
+        return False
+    return not (
+        re.search(READ_ONLY_STATE_QUERY_REGEX, query)
+        and re.search(OPEN_AS_STATE_REGEX, query)
+        and not re.search(NON_OPEN_ACTUATION_KEYWORDS_REGEX, query)
+        and not re.search(OPEN_COMMAND_CLAUSE_REGEX, query)
+    )
+
+
 async def _get_actuation_safety_tools(
     store: BaseStore | None,
     config: RunnableConfig,
@@ -722,7 +743,7 @@ async def _get_actuation_safety_tools(
         return []
 
     tool_index_ready = config.get("configurable", {}).get("tool_index_ready", True)
-    if not tool_index_ready or not re.search(ACTUATION_KEYWORDS_REGEX, query):
+    if not tool_index_ready or not _query_needs_actuation_safety(query):
         return []
 
     try:
@@ -1043,8 +1064,8 @@ async def _retrieve_tools(
 
     # 3. Fallback: vector store unavailable or index not yet ready.
     # Still apply the limit so the user-configured cap is always respected.
-    # Prioritize actuation tools for actuation queries; otherwise use
-    # declaration order (HA tools first, then LangChain tools).
+    # Prioritize actuation tools for actuation queries; for read-only open-state
+    # queries promote GetLiveContext to the front; otherwise use declaration order.
     if not all_candidates:
         fallback = _get_fallback_tools(config, allowed_api_ids)
         LOGGER.warning(
@@ -1053,11 +1074,28 @@ async def _retrieve_tools(
             limit,
             len(fallback),
         )
-        if re.search(ACTUATION_KEYWORDS_REGEX, query):
+        if _query_needs_actuation_safety(query):
             actuation = [t for t in fallback if t["is_actuation"]]
             rest = [t for t in fallback if not t["is_actuation"]]
             fallback = actuation + rest
+        else:
+            live_context = [t for t in fallback if t["name"] == "GetLiveContext"]
+            non_actuation = [
+                t
+                for t in fallback
+                if not t["is_actuation"] and t["name"] != "GetLiveContext"
+            ]
+            actuation = [t for t in fallback if t["is_actuation"]]
+            fallback = live_context + non_actuation + actuation
         all_candidates = fallback[:limit]
+
+    # 3b. For read-only open-state queries, promote GetLiveContext to the front
+    # of the normal-path candidate list so it is not displaced by other RAG tools
+    # that may score nearby despite being less relevant.
+    if not _query_needs_actuation_safety(query):
+        live_ctx = [t for t in all_candidates if t["name"] == "GetLiveContext"]
+        rest = [t for t in all_candidates if t["name"] != "GetLiveContext"]
+        all_candidates = live_ctx + rest
 
     # 4. Format and deduplicate
     selected_tools, routing_map = _format_and_dedupe_tools(all_candidates)
@@ -1077,6 +1115,7 @@ async def _retrieve_tools(
     return {
         "selected_tools": selected_tools,
         "tool_routing_map": routing_map,
+        "action_rounds": 0,
     }
 
 
@@ -1456,7 +1495,7 @@ def _minimal_payload_for_domain(tool_args: dict[str, Any]) -> dict[str, Any]:
 
 async def _call_tools(
     state: State, config: RunnableConfig, *, store: BaseStore
-) -> dict[str, list[ToolMessage]]:
+) -> dict[str, Any]:
     """Call Home Assistant or LangChain tools requested by the model."""
     if "configurable" not in config:
         msg = "Configuration is missing."
@@ -1572,17 +1611,38 @@ async def _call_tools(
         else:
             tool_responses.append(result)  # type: ignore[arg-type]
 
-    return {"messages": tool_responses}
+    return {
+        "messages": tool_responses,
+        "action_rounds": state.get("action_rounds", 0) + 1,
+    }
 
 
 def _should_continue(
     state: State,
-) -> Literal["action", "summarize_and_remove_messages"]:
+) -> Literal["action", "tool_loop_guard", "summarize_and_remove_messages"]:
     """Return the next node in graph to execute."""
     messages = state["messages"]
-    if isinstance(messages[-1], AIMessage) and messages[-1].tool_calls:
+    has_tool_calls = isinstance(messages[-1], AIMessage) and messages[-1].tool_calls
+    if has_tool_calls and state.get("action_rounds", 0) < _MAX_ACTION_ROUNDS:
         return "action"
+    if has_tool_calls:
+        return "tool_loop_guard"
     return "summarize_and_remove_messages"
+
+
+async def _tool_loop_guard(state: State) -> dict[str, Any]:  # noqa: ARG001
+    """Emit a friendly message when the action-round limit is reached."""
+    return {
+        "messages": [
+            AIMessage(
+                content=(
+                    "I wasn't able to complete this request after several "
+                    "tool-use attempts. Please try rephrasing your query or "
+                    "breaking it into smaller steps."
+                )
+            )
+        ]
+    }
 
 
 # Define a new graph
@@ -1592,6 +1652,7 @@ workflow = StateGraph(State)
 workflow.add_node("retrieve_tools", _retrieve_tools)
 workflow.add_node("agent", _call_model)
 workflow.add_node("action", _call_tools)
+workflow.add_node("tool_loop_guard", _tool_loop_guard)
 workflow.add_node("summarize_and_remove_messages", _summarize_and_remove_messages)
 
 # Define edges.
@@ -1599,4 +1660,5 @@ workflow.add_edge(START, "retrieve_tools")
 workflow.add_edge("retrieve_tools", "agent")
 workflow.add_conditional_edges("agent", _should_continue)
 workflow.add_edge("action", "agent")
+workflow.add_edge("tool_loop_guard", "summarize_and_remove_messages")
 workflow.add_edge("summarize_and_remove_messages", END)
