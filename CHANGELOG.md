@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.7] - 2026-05-15
+
+### Fixed
+
+- **Read-only state queries like "list all open windows" no longer trigger
+  actuation tools** — The word "open" in phrases like "which windows are open"
+  or "show me all open doors" was matching the actuation-safety keyword list,
+  causing the agent to inject control tools (`HassTurnOn`, `HassTurnOff`, etc.)
+  into its context for what is really a read-only query. A four-regex heuristic
+  now distinguishes read-only use of "open" (as a state descriptor combined with
+  `list`, `show`, `which`, `what`, `are`, `is`, `status`, or `state`) from
+  command use of "open" (as an actuation verb). The `GetLiveContext` tool is
+  also promoted to the front of the candidate list for these queries so the
+  agent picks up the correct read tool first. Closes
+  [#394](https://github.com/goruck/home-generative-agent/issues/394).
+
+- **Tool-loop guard prevents `GraphRecursionError` on stuck tool cycles** — When
+  a weaker model or an ambiguous query caused the agent to request tool calls
+  indefinitely, LangGraph eventually threw a `GraphRecursionError` visible as an
+  error in the HA conversation UI. A new `tool_loop_guard` graph node caps
+  tool-use at 3 rounds per conversation turn and returns a friendly message
+  instead of crashing: "I wasn't able to complete this request after several
+  tool-use attempts. Please try rephrasing your query or breaking it into smaller
+  steps." The LangGraph `recursion_limit` is also raised from 10 to 20 so the
+  application-level guard fires well before the LangGraph backstop.
+
 ## [3.14.6] - 2026-05-13
 
 ### Fixed
