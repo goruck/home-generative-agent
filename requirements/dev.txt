@@ -5,5 +5,5 @@
 #   Ubuntu: add GitHub apt repo then: sudo apt install gh
 ruff==0.15.13
 colorlog==6.10.1
-pre-commit>=4.0.0
+pre-commit>=4.6.0
 pyright==1.1.*
