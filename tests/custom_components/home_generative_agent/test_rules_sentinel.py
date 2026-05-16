@@ -946,6 +946,110 @@ def test_dynamic_alarm_state_mismatch_no_trigger_when_state_differs() -> None:
     assert len(findings) == 0
 
 
+def test_dynamic_alarm_state_mismatch_armed_home_plus_home_never_triggers() -> None:
+    """armed_home + expected_presence=home is never anomalous — designed for occupancy."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["entities"] = [
+        _entity("alarm_control_panel.home_alarm", "armed_home", "alarm_control_panel")
+    ]
+    rule = _dyn_rule(
+        "alarm_state_mismatch",
+        "alarm_mode_occupancy_mismatch",
+        {
+            "alarm_entity_id": "alarm_control_panel.home_alarm",
+            "alarm_state": "armed_home",
+            "expected_presence": "home",
+        },
+    )
+    findings = evaluate_dynamic_rule(snapshot, rule)
+    assert len(findings) == 0
+
+
+def test_dynamic_alarm_state_mismatch_armed_home_plus_home_suppressed_regardless_of_live_presence() -> (
+    None
+):
+    """Guard fires before the anyone_home check — suppresses even when anyone_home=False."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["anyone_home"] = False
+    snapshot["entities"] = [
+        _entity("alarm_control_panel.home_alarm", "armed_home", "alarm_control_panel")
+    ]
+    rule = _dyn_rule(
+        "alarm_state_mismatch",
+        "alarm_mode_occupancy_mismatch",
+        {
+            "alarm_entity_id": "alarm_control_panel.home_alarm",
+            "alarm_state": "armed_home",
+            "expected_presence": "home",
+        },
+    )
+    findings = evaluate_dynamic_rule(snapshot, rule)
+    assert len(findings) == 0
+
+
+def test_dynamic_alarm_state_mismatch_armed_night_plus_home_never_triggers() -> None:
+    """armed_night + expected_presence=home is never anomalous — designed for occupancy."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["entities"] = [
+        _entity("alarm_control_panel.home_alarm", "armed_night", "alarm_control_panel")
+    ]
+    rule = _dyn_rule(
+        "alarm_state_mismatch",
+        "test_night_rule",
+        {
+            "alarm_entity_id": "alarm_control_panel.home_alarm",
+            "alarm_state": "armed_night",
+            "expected_presence": "home",
+        },
+    )
+    findings = evaluate_dynamic_rule(snapshot, rule)
+    assert len(findings) == 0
+
+
+def test_dynamic_alarm_state_mismatch_armed_away_plus_home_still_triggers() -> None:
+    """armed_away + someone home remains anomalous (alarm will trigger motion sensors)."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["entities"] = [
+        _entity("alarm_control_panel.home_alarm", "armed_away", "alarm_control_panel")
+    ]
+    rule = _dyn_rule(
+        "alarm_state_mismatch",
+        "armed_away_while_home",
+        {
+            "alarm_entity_id": "alarm_control_panel.home_alarm",
+            "alarm_state": "armed_away",
+            "expected_presence": "home",
+        },
+    )
+    findings = evaluate_dynamic_rule(snapshot, rule)
+    assert len(findings) == 1
+    assert findings[0].evidence["alarm_state"] == "armed_away"
+
+
+def test_dynamic_alarm_state_mismatch_armed_night_plus_away_still_triggers() -> None:
+    """armed_night + expected_presence=away is still anomalous (guard doesn't over-suppress)."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["anyone_home"] = False
+    snapshot["entities"] = [
+        _entity("alarm_control_panel.home_alarm", "armed_night", "alarm_control_panel")
+    ]
+    rule = _dyn_rule(
+        "alarm_state_mismatch",
+        "armed_night_while_away",
+        {
+            "alarm_entity_id": "alarm_control_panel.home_alarm",
+            "alarm_state": "armed_night",
+            "expected_presence": "away",
+        },
+    )
+    findings = evaluate_dynamic_rule(snapshot, rule)
+    assert len(findings) == 1
+    assert findings[0].evidence["alarm_state"] == "armed_night"
+
+
 # ---------------------------------------------------------------------------
 # entity_state_duration evaluator
 # ---------------------------------------------------------------------------
@@ -2110,6 +2214,22 @@ def test_system_prompt_camera_entry_cooccurrence_grounding() -> None:
     assert "camera_entry_unsecured" in SYSTEM_PROMPT
     assert "co-occurrence" in SYSTEM_PROMPT
     assert "camera area proximity does not imply" in SYSTEM_PROMPT.lower()
+
+
+def test_system_prompt_armed_home_night_occupancy_grounding() -> None:
+    """
+    SYSTEM_PROMPT instructs the LLM never to tell users to disarm armed_home/armed_night.
+
+    Regression guard: ensures this clause is never accidentally removed.
+    """
+    assert "armed_home" in SYSTEM_PROMPT
+    assert "armed_night" in SYSTEM_PROMPT
+    assert "designed for use while occupants are present" in SYSTEM_PROMPT
+    assert "never tell the user to disarm it" in SYSTEM_PROMPT
+    assert (
+        "expected_presence='home'" in SYSTEM_PROMPT
+        or "anyone_home=True" in SYSTEM_PROMPT
+    )
 
 
 # ---------------------------------------------------------------------------

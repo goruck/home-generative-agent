@@ -162,6 +162,12 @@ RECOMMENDED_SENTINEL_STALENESS_THRESHOLD_SECONDS: int = 1800
 # Only fire the rule when camera activity is within this many minutes of the snapshot.
 SENTINEL_CAMERA_ACTIVITY_STALENESS_MINUTES: int = 10
 
+# HA alarm modes that allow motion detection while occupants are present. These states
+# are the intended operating condition when expected_presence="home" — never anomalous.
+SENTINEL_OCCUPANCY_ARMED_STATES: frozenset[str] = frozenset(
+    {"armed_home", "armed_night"}
+)
+
 # ---- Sentinel auto-execution (Level 2+) ----
 CONF_SENTINEL_AUTO_EXECUTION_ENABLED = "sentinel_auto_execution_enabled"
 RECOMMENDED_SENTINEL_AUTO_EXECUTION_ENABLED: bool = False

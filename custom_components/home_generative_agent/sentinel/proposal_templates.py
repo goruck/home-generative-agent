@@ -6,6 +6,10 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from custom_components.home_generative_agent.const import (
+    SENTINEL_OCCUPANCY_ARMED_STATES,
+)
+
 SUPPORTED_TEMPLATES = {
     "alarm_disarmed_open_entry",
     "low_battery_sensors",
@@ -36,6 +40,14 @@ SUPPORTED_TEMPLATES = {
     "multiple_entries_open_count",
 }
 
+# Matches anyone_home == false / anyone_home = 0 / anyone_home=False etc.
+# Must be checked before _HOME_TERMS to avoid "home" substring false-positive.
+_ANYONE_HOME_FALSE_PATTERN = re.compile(
+    r"anyone_home\s*(?:==?)\s*(?:false|0)\b", re.IGNORECASE
+)
+_ANYONE_HOME_TRUE_PATTERN = re.compile(
+    r"anyone_home\s*(?:==?)\s*(?:true|1)\b", re.IGNORECASE
+)
 _PERCENT_THRESHOLD_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*%")
 _DOT_NOTATION_ENTITY_PATTERN = re.compile(r"^([a-z_]+\.[a-z0-9_]+)(?:[.\[]|$)")
 _HA_ENTITY_DOMAINS = frozenset(
@@ -301,6 +313,20 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
     ):
         detected_state = _extract_alarm_state(text) or "armed_home"
         effective_presence = presence if presence != "any" else "home"
+        # armed_home / armed_night are designed for use while occupants are present —
+        # they are never a mismatch when presence is "home".
+        if (
+            detected_state in SENTINEL_OCCUPANCY_ARMED_STATES
+            and effective_presence == "home"
+        ):
+            return NormalizationResult(
+                normalized=None,
+                reason_code="unsupported_pattern",
+                details={
+                    "reason": f"{detected_state} with home presence is not a mismatch",
+                    **summary,
+                },
+            )
         alarm_slug = alarm_id.replace(".", "_")
         default_rule_id = (
             f"alarm_state_mismatch_{detected_state}_{effective_presence}_{alarm_slug}"
@@ -953,6 +979,13 @@ def _has_night_signal(evidence_paths: list[str], text: str) -> bool:
 
 
 def _presence_signal(evidence_paths: list[str], text: str) -> str:
+    # Explicit boolean expressions take priority — they are unambiguous and must
+    # be resolved before term matching, which can misfire on substrings like
+    # "home" inside "armed_home" or "anyone_home".
+    if _ANYONE_HOME_FALSE_PATTERN.search(text):
+        return "away"
+    if _ANYONE_HOME_TRUE_PATTERN.search(text):
+        return "home"
     if _contains_any(text, _AWAY_TERMS):
         return "away"
     if _contains_any(text, _HOME_TERMS):
