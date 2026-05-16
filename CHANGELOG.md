@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.8] - 2026-05-16
+
+### Fixed
+
+- **`NullChat` fallback no longer crashes with `TypeError` when a provider is
+  unavailable at startup** — `NullChat.ainvoke` and `NullChat.astream` now
+  accept `config` as an explicit second positional parameter, matching the
+  standard LangChain `BaseChatModel` calling convention
+  (`ainvoke(input, config=None, **kwargs)`). Previously, the fallback model
+  used when a provider health check failed at HA startup (e.g., Ollama not yet
+  responsive) would raise `TypeError: NullChat.ainvoke() takes 2 positional
+  arguments but 3 were given` instead of returning the intended graceful
+  `"LLM unavailable."` response. Two regression tests added. Closes
+  [#410](https://github.com/goruck/home-generative-agent/issues/410).
+
 ## [3.14.7] - 2026-05-15
 
 ### Fixed
