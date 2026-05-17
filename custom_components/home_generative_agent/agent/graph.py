@@ -575,6 +575,89 @@ def _parse_open_entries_from_live_context(raw: str) -> list[str]:
     return open_entries
 
 
+def _open_state_name_matches_query(name: str, query: str) -> bool:
+    """Return whether an open entry name is in scope for the user's query."""
+    name_lc = name.lower()
+    query_lc = query.lower()
+    if "window" in query_lc:
+        return "window" in name_lc
+    if "door" in query_lc:
+        return "door" in name_lc
+    if "gate" in query_lc:
+        return "gate" in name_lc
+    return True
+
+
+def _open_state_empty_result(query: str) -> str:
+    """Return a scoped empty live-context result for the user's query."""
+    query_lc = query.lower()
+    if "window" in query_lc:
+        return "Live Context: No open windows were found."
+    if "door" in query_lc:
+        return "Live Context: No open doors were found."
+    if "gate" in query_lc:
+        return "Live Context: No open gates were found."
+    return "Live Context: No open entries were found."
+
+
+def _filter_open_state_live_context_content(content: str, query: str) -> str:
+    """Filter broad live context down to the open entries requested by the user."""
+    if not _query_is_read_only_open_state(query):
+        return content
+
+    parsed: dict[str, Any] | None = None
+    try:
+        maybe_parsed = json.loads(content)
+    except json.JSONDecodeError:
+        maybe_parsed = None
+    if isinstance(maybe_parsed, dict):
+        parsed = maybe_parsed
+        raw_result = str(parsed.get("result") or parsed.get("response") or "")
+    else:
+        raw_result = content
+
+    open_entries = [
+        name
+        for name in _parse_open_entries_from_live_context(raw_result)
+        if _open_state_name_matches_query(name, query)
+    ]
+    if open_entries:
+        result = "Live Context: Open entries matching the request:\n" + "\n".join(
+            f"- names: {name}\n  state: 'on'\n  attributes:\n    device_class: opening"
+            for name in open_entries
+        )
+    else:
+        result = _open_state_empty_result(query)
+
+    if parsed is None:
+        return result
+
+    filtered = dict(parsed)
+    filtered["result"] = result
+    return json.dumps(filtered)
+
+
+def _maybe_filter_open_state_tool_response(
+    tool_response: ToolMessage,
+    tool_call: dict[str, Any],
+    first_open_state_live_context_call: dict[str, Any] | None,
+    tool_name: str,
+    query: str,
+) -> ToolMessage:
+    """Filter broad live context before returning it to the model."""
+    if (
+        tool_call is not first_open_state_live_context_call
+        or tool_name != "GetLiveContext"
+        or not isinstance(tool_response.content, str)
+    ):
+        return tool_response
+
+    tool_response.content = _filter_open_state_live_context_content(
+        tool_response.content, query
+    )
+    return tool_response
+
+
 async def _find_open_entries(
     hass: HomeAssistant, messages: list[AnyMessage]
 ) -> list[str]:
@@ -719,16 +802,76 @@ async def _get_rag_retrieved_tools(
 _MAX_ACTION_ROUNDS = 3
 
 
-def _query_needs_actuation_safety(query: str) -> bool:
-    """Return True when the query warrants force-injection of actuation tools."""
-    if not re.search(ACTUATION_KEYWORDS_REGEX, query):
-        return False
-    return not (
-        re.search(READ_ONLY_STATE_QUERY_REGEX, query)
+def _query_is_read_only_open_state(query: str) -> bool:
+    """Return True when open/opened describes state instead of an action."""
+    return bool(
+        re.search(ACTUATION_KEYWORDS_REGEX, query)
+        and re.search(READ_ONLY_STATE_QUERY_REGEX, query)
         and re.search(OPEN_AS_STATE_REGEX, query)
         and not re.search(NON_OPEN_ACTUATION_KEYWORDS_REGEX, query)
         and not re.search(OPEN_COMMAND_CLAUSE_REGEX, query)
     )
+
+
+def _latest_open_state_query(messages: Sequence[BaseMessage]) -> str:
+    """Return the active read-only open-state query, including short retries."""
+    latest_human = ""
+    for msg in reversed(messages):
+        if isinstance(msg, HumanMessage):
+            latest_human = str(msg.content)
+            break
+
+    if _query_is_read_only_open_state(latest_human):
+        return latest_human
+
+    if latest_human.strip().lower() not in {"yes", "y", "try again", "again"}:
+        return ""
+
+    for msg in reversed(messages):
+        if not isinstance(msg, HumanMessage):
+            continue
+        query = str(msg.content)
+        if _query_is_read_only_open_state(query):
+            return query
+    return ""
+
+
+def _normalize_live_context_args_for_open_state(
+    tool_name: str,
+    tool_args: dict[str, Any],
+    query: str,
+    *,
+    force_broad: bool = True,
+) -> dict[str, Any]:
+    """Normalize brittle GetLiveContext calls for read-only open-state queries."""
+    if (
+        not force_broad
+        or tool_name != "GetLiveContext"
+        or not _query_is_read_only_open_state(query)
+    ):
+        return tool_args
+    return {"domain": "binary_sensor"}
+
+
+def _open_state_live_context_normalization_context(
+    messages: Sequence[BaseMessage], tool_calls: list[dict[str, Any]]
+) -> tuple[str, dict[str, Any] | None]:
+    """Return the open-state query and first live-context call to widen."""
+    query = _latest_open_state_query(messages)
+    if not query:
+        return "", None
+    first_call = next(
+        (tc for tc in tool_calls if tc.get("name", "") == "GetLiveContext"),
+        None,
+    )
+    return query, first_call
+
+
+def _query_needs_actuation_safety(query: str) -> bool:
+    """Return True when the query warrants force-injection of actuation tools."""
+    if not re.search(ACTUATION_KEYWORDS_REGEX, query):
+        return False
+    return not _query_is_read_only_open_state(query)
 
 
 async def _get_actuation_safety_tools(
@@ -1012,6 +1155,50 @@ async def _get_pending_pin_tools(
     ]
 
 
+async def _get_tool_by_name(
+    store: BaseStore,
+    config: RunnableConfig,
+    name: str,
+    allowed_api_ids: set[str],
+) -> RawTool | None:
+    """Fetch a specific tool by name from the index, falling back to config tools."""
+    for api_id in sorted(allowed_api_ids):
+        try:
+            item = await store.aget(("system", "tools"), key=f"{api_id}::{name}")
+        except (
+            InvalidNamespaceError,
+            psycopg.OperationalError,
+            psycopg.ProgrammingError,
+            ValueError,
+        ) as err:
+            LOGGER.debug("Could not fetch %s from tool index: %s", name, err)
+            break
+        except Exception:
+            LOGGER.exception("Unexpected failure fetching %s from tool index", name)
+            break
+
+        if item is None:
+            continue
+
+        val = item.value
+        if val.get("name") != name or val.get("api_id") not in allowed_api_ids:
+            continue
+
+        return RawTool(
+            name=val["name"],
+            api_id=val["api_id"],
+            description=val["description"],
+            parameters=val["parameters"],
+            is_actuation=val.get("is_actuation", False),
+        )
+
+    for tool in _get_fallback_tools(config, allowed_api_ids):
+        if tool["name"] == name and tool["api_id"] in allowed_api_ids:
+            return tool
+
+    return None
+
+
 async def _retrieve_tools(
     state: State,
     config: RunnableConfig,
@@ -1089,10 +1276,21 @@ async def _retrieve_tools(
             fallback = live_context + non_actuation + actuation
         all_candidates = fallback[:limit]
 
-    # 3b. For read-only open-state queries, promote GetLiveContext to the front
-    # of the normal-path candidate list so it is not displaced by other RAG tools
-    # that may score nearby despite being less relevant.
-    if not _query_needs_actuation_safety(query):
+    # 3b. For read-only open-state queries, force-bind GetLiveContext and promote
+    # it to the front. RAG can otherwise miss it, leaving the prompt to require a
+    # tool that was not actually included in the model schema.
+    if _query_is_read_only_open_state(query):
+        all_candidates = [
+            t
+            for t in all_candidates
+            if not t["is_actuation"] or t["name"] == "GetLiveContext"
+        ]
+        if not any(t["name"] == "GetLiveContext" for t in all_candidates):
+            live_context = await _get_tool_by_name(
+                store, config, "GetLiveContext", allowed_api_ids
+            )
+            if live_context is not None:
+                all_candidates = [live_context, *all_candidates]
         live_ctx = [t for t in all_candidates if t["name"] == "GetLiveContext"]
         rest = [t for t in all_candidates if t["name"] != "GetLiveContext"]
         all_candidates = live_ctx + rest
@@ -1526,9 +1724,11 @@ async def _call_tools(
     tool_calls: list[dict[str, Any]] = (
         raw_tool_calls if isinstance(raw_tool_calls, list) else []
     )
-    tool_responses: list[ToolMessage] = []
 
     tool_routing_map: dict[str, str] = state.get("tool_routing_map", {})
+    open_state_query, first_open_state_live_context_call = (
+        _open_state_live_context_normalization_context(state["messages"], tool_calls)
+    )
 
     # Execute all tool calls concurrently.
     # asyncio.gather preserves submission order: results[i] matches tool_calls[i].
@@ -1538,6 +1738,20 @@ async def _call_tools(
         """Execute a single tool call and return its ToolMessage."""
         tool_name = tool_call.get("name", "")
         tool_args = tool_call.get("args", {}) or {}
+        normalized_args = _normalize_live_context_args_for_open_state(
+            tool_name,
+            tool_args,
+            open_state_query,
+            force_broad=tool_call is first_open_state_live_context_call,
+        )
+        if normalized_args != tool_args:
+            LOGGER.debug(
+                "Normalized GetLiveContext args for read-only open-state query: "
+                "%s -> %s",
+                tool_args,
+                normalized_args,
+            )
+            tool_args = normalized_args
         LOGGER.debug("Tool call: %s(%s)", tool_name, tool_args)
 
         # Enforce the retrieved tool set: reject calls for tools that were not
@@ -1587,6 +1801,13 @@ async def _call_tools(
                 ctx=ctx,
                 tool_call=tool_call,
             )
+        tool_response = _maybe_filter_open_state_tool_response(
+            tool_response,
+            tool_call,
+            first_open_state_live_context_call,
+            tool_name,
+            open_state_query,
+        )
         LOGGER.debug("Tool response: %s", tool_response)
         return tool_response
 

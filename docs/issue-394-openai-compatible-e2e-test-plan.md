@@ -30,6 +30,9 @@ All three bugs are already fixed in the codebase. This plan is about
 | `AttributeError` on bare embedding list | `_search_memories()` in `agent/graph.py` catches `AttributeError` and falls back to recency search |
 | `score=None` TypeError | `_get_rag_retrieved_tools()` and `_get_actuation_safety_tools()` both guard with `getattr(item, "score", None) or 0.0` |
 | Tool-selection loop | `_tool_loop_guard()` fires after `_MAX_ACTION_ROUNDS = 3` rounds via the `action_rounds` state counter |
+| Read-only open-state tool selection | `_retrieve_tools()` force-binds and promotes `GetLiveContext` for read-only open-state queries, even when RAG misses it |
+| Brittle local-model `GetLiveContext` args | `_call_tools()` normalizes the first read-only open-state `GetLiveContext` call to broad `{"domain": "binary_sensor"}` |
+| Broad open-state result pollution | `_filter_open_state_live_context_content()` filters broad binary-sensor results back to the requested type, such as doors or windows |
 
 Existing coverage should be preserved and extended only where a real assertion
 gap remains:
@@ -38,7 +41,11 @@ gap remains:
 |----------|---------------|-----|
 | llama-server embedding `AttributeError` fallback | `test_search_memories_falls_back_to_recency_on_attribute_error` in `test_regressions.py` | None — verified |
 | `score=None` retrieval guard | `test_rag_retrieval_none_score_is_treated_as_zero` and `test_actuation_safety_none_score_does_not_crash` in `test_tool_retrieval.py` | None — verified |
-| Read-only `open` query avoids actuation injection | `test_retrieve_tools_no_actuation_safety_for_read_only_open` in `test_tool_retrieval.py` | Asserts `tool_routing_map` presence only; does not assert `GetLiveContext` is first in `selected_tools` |
+| Read-only `open` query avoids actuation injection and promotes `GetLiveContext` | `test_retrieve_tools_no_actuation_safety_for_read_only_open` in `test_tool_retrieval.py` | None — verified |
+| Read-only open-door query force-binds `GetLiveContext` when RAG misses it | `test_retrieve_tools_force_injects_live_context_for_open_doors` in `test_tool_retrieval.py` | None — verified |
+| Open commands keep actuation behavior | `test_retrieve_tools_open_command_does_not_force_live_context` in `test_tool_retrieval.py` | None — verified |
+| Local-model live-context args are widened only for the first read-only open-state call | `test_normalize_live_context_args_for_read_only_open_state`, `test_normalize_live_context_args_does_not_touch_open_command`, and `test_normalize_live_context_args_can_leave_subsequent_calls_alone` in `test_tool_retrieval.py` | None — verified |
+| Broad live-context results are scoped to the requested open entity type | `test_filter_open_state_live_context_scopes_door_query` and `test_filter_open_state_live_context_keeps_requested_open_windows` in `test_tool_retrieval.py` | None — verified |
 | `action_rounds` reset at turn start | `test_retrieve_tools_action_rounds_reset` in `test_tool_retrieval.py` | None — verified |
 | Repeated unproductive tool calls return a friendly message | Not covered | Add direct `_should_continue()` / `_tool_loop_guard()` regression test |
 
@@ -57,9 +64,15 @@ The manual smoke-test checklist in Section 4 covers real llama-server validation
 The important assertions are:
 
 - HGA survives llama-server's incompatible embedding response shape.
-- Read-only open-state queries favor `GetLiveContext` over actuation safety tools.
+- Read-only open-state queries force-bind and favor `GetLiveContext` over
+  actuation safety tools.
 - Actuation safety tools are not force-injected solely because the query contains
   `open`.
+- The first read-only open-state `GetLiveContext` call is widened to
+  `{"domain": "binary_sensor"}` so local models can ask for current state without
+  brittle partial-name filters.
+- Broad live-context output is filtered before the model sees it so a door query
+  does not report open windows, and a window query does not report open doors.
 - Repeated unproductive tool calls return HGA's friendly loop-guard message
   instead of surfacing `GraphRecursionError`.
 
@@ -78,23 +91,34 @@ No fake HTTP server needed — the exception is what matters, not the transport.
 Do not add another embedding-shape test unless this existing assertion is
 removed or materially weakened.
 
-### 2. Read-only open-window tool selection (extend in `test_tool_retrieval.py`)
+### 2. Read-only open-window tool selection (covered in `test_tool_retrieval.py`)
 
-`test_retrieve_tools_no_actuation_safety_for_read_only_open` currently asserts
-that `GetLiveContext` is present in `result["tool_routing_map"]` and that
-`HassTurnOn` is absent. It does not assert anything about `result["selected_tools"]`
-or ordering.
+`test_retrieve_tools_no_actuation_safety_for_read_only_open` asserts that
+`GetLiveContext` is present, first in `selected_tools`, and that `HassTurnOn` is
+absent for read-only open-window queries.
 
-Extend this test with two additional assertions:
+`test_retrieve_tools_force_injects_live_context_for_open_doors` covers the
+weaker-model path where RAG retrieves nearby non-state tools but misses
+`GetLiveContext`; the retrieval layer now fetches and prepends `GetLiveContext`
+deterministically.
 
-- `result["selected_tools"][0]` is `"GetLiveContext"` (first in the ordered list).
-- No actuation safety tool name appears anywhere in `result["selected_tools"]`.
+`test_retrieve_tools_open_command_does_not_force_live_context` preserves true
+actuation behavior for commands such as `open the garage door`.
 
-The existing mock setup (`store.asearch` returning a single `GetLiveContext` item
-with `score=0.85`) is sufficient — no new fixtures needed.
+### 2a. Read-only open-state tool-call normalization (covered in `test_tool_retrieval.py`)
 
-Do not add a new open-window retrieval test unless the existing test is split for
-clarity.
+Some local tool-calling models emit brittle filters for these queries, such as
+`{"domain": ["binary_sensor"], "name": "Window"}` or list-valued names. The
+first `GetLiveContext` call in a read-only open-state turn is widened to
+`{"domain": "binary_sensor"}`. Focused tests cover normalization, preservation
+of true open commands, and leaving subsequent more-specific calls alone.
+
+### 2b. Scoped broad live-context results (covered in `test_tool_retrieval.py`)
+
+Because the first call is intentionally broad, HGA filters the tool result before
+returning it to the model. Door queries receive only open door entries or the
+scoped empty result `Live Context: No open doors were found.` Window queries keep
+only open window entries. Regression tests cover both cases.
 
 ### 3. Loop-guard regression (add to `test_regressions.py`)
 
@@ -136,7 +160,9 @@ Query: list all open windows
 Expected:
 - Tool retrieval shows GetLiveContext first or near the front.
 - safety=0/0 for the read-only open-state query.
-- The final answer lists open binary_sensor entities.
+- The first GetLiveContext call is broad binary_sensor live context.
+- The filtered tool result contains only the requested open entry type.
+- The final answer lists the requested open binary_sensor entities.
 - No GraphRecursionError reaches the user.
 - No AttributeError: 'list' object has no attribute 'data' escapes to HA logs.
 ```
@@ -145,6 +171,8 @@ Useful log evidence:
 
 ```text
 Tool retrieval: ... safety=0/0 ... tools=['GetLiveContext', ...]
+Normalized GetLiveContext args for read-only open-state query: ... -> {'domain': 'binary_sensor'}
+Live Context: Open entries matching the request:
 ```
 
 This checklist can be used by issue reporters, release testers, GitHub Actions,
