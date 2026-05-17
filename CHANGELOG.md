@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.10] - 2026-05-17
+
+### Fixed
+
+- **Open-state queries now work for users whose sensors use `device_class: window`
+  or `device_class: door`** — the parser that identifies open entry sensors from
+  a live-context response only accepted `device_class: opening`. Real Home
+  Assistant window and door contact sensors (registered by most Zigbee and Z-Wave
+  coordinators) use `device_class: window` and `device_class: door` respectively.
+  The same gap existed in the HA-state fallback path used when no prior live
+  context is available. Both paths now accept all four open-state device classes
+  (`door`, `garage_door`, `opening`, `window`). Four regression tests are added
+  that use the correct device classes (the prior test fixtures all used
+  `device_class: opening`, which matched the developer's own sensors but masked
+  the failure for anyone else).
+
 ## [3.14.9] - 2026-05-17
 
 ### Fixed
