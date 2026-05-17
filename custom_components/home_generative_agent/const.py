@@ -934,9 +934,13 @@ NON_OPEN_ACTUATION_KEYWORDS_REGEX = (
 
 # Compound state-then-command forms where "open" is used as a command verb
 # despite the query also containing read-only state language.
-# Covers: "show me open windows and then open the garage door".
+# Covers: "show me open windows and then open the garage door",
+#         "list open windows and open the garage door" (via article anchor).
 # Known gap: comma- or period-separated compound forms are not detected.
-OPEN_COMMAND_CLAUSE_REGEX = r"(?i)\b(?:then|and then|after that)\s+open\b"
+OPEN_COMMAND_CLAUSE_REGEX = (
+    r"(?i)\b(?:then|and then|after that)\s+open\b"
+    r"|\band\s+open\s+(?:the|a|an)\b"
+)
 
 # Tool prefixes/names for actuation safety net
 ACTUATION_TOOL_PREFIXES = (

@@ -108,6 +108,9 @@ _LLM_INVOKE_TIMEOUT_S: float = 180.0
 
 _PIN_LOOKBACK = 20  # messages to scan for an unresolved requires_pin
 _ROUTING_REJECTION_MARKER = "is not available for this request"
+_OPEN_STATE_RETRY_PHRASES: frozenset[str] = frozenset(
+    {"yes", "y", "try again", "again"}
+)
 
 
 class State(MessagesState):
@@ -191,7 +194,7 @@ async def _precheck_alarm_open_entries(
     if is_disarm:
         return None
 
-    open_entries = await _find_open_entries(ctx.hass, ctx.state["messages"])
+    open_entries = await _find_open_entries(ctx.hass, [])
     if not open_entries:
         return None
 
@@ -575,29 +578,29 @@ def _parse_open_entries_from_live_context(raw: str) -> list[str]:
     return open_entries
 
 
+_OPEN_ENTITY_KEYWORDS: tuple[str, ...] = ("window", "door", "gate")
+
+
 def _open_state_name_matches_query(name: str, query: str) -> bool:
     """Return whether an open entry name is in scope for the user's query."""
     name_lc = name.lower()
     query_lc = query.lower()
-    if "window" in query_lc:
-        return "window" in name_lc
-    if "door" in query_lc:
-        return "door" in name_lc
-    if "gate" in query_lc:
-        return "gate" in name_lc
-    return True
+    present = [kw for kw in _OPEN_ENTITY_KEYWORDS if kw in query_lc]
+    if not present:
+        return True
+    return any(kw in name_lc for kw in present)
 
 
 def _open_state_empty_result(query: str) -> str:
     """Return a scoped empty live-context result for the user's query."""
     query_lc = query.lower()
-    if "window" in query_lc:
-        return "Live Context: No open windows were found."
-    if "door" in query_lc:
-        return "Live Context: No open doors were found."
-    if "gate" in query_lc:
-        return "Live Context: No open gates were found."
-    return "Live Context: No open entries were found."
+    present = [kw for kw in _OPEN_ENTITY_KEYWORDS if kw in query_lc]
+    if not present:
+        return "Live Context: No open entries were found."
+    if len(present) == 1:
+        return f"Live Context: No open {present[0]}s were found."
+    entity_list = ", ".join(f"{kw}s" for kw in present[:-1]) + f" or {present[-1]}s"
+    return f"Live Context: No open {entity_list} were found."
 
 
 def _filter_open_state_live_context_content(content: str, query: str) -> str:
@@ -612,12 +615,14 @@ def _filter_open_state_live_context_content(content: str, query: str) -> str:
         maybe_parsed = None
     if isinstance(maybe_parsed, dict):
         parsed = maybe_parsed
+        if parsed.get("success") is False or parsed.get("error"):
+            return content
         raw_result = str(parsed.get("result") or parsed.get("response") or "")
     else:
         raw_result = content
 
     open_entries = [
-        name
+        name.replace("\n", " ").replace("\r", " ")[:128]
         for name in _parse_open_entries_from_live_context(raw_result)
         if _open_state_name_matches_query(name, query)
     ]
@@ -824,15 +829,16 @@ def _latest_open_state_query(messages: Sequence[BaseMessage]) -> str:
     if _query_is_read_only_open_state(latest_human):
         return latest_human
 
-    if latest_human.strip().lower() not in {"yes", "y", "try again", "again"}:
+    if latest_human.strip().lower() not in _OPEN_STATE_RETRY_PHRASES:
         return ""
 
     for msg in reversed(messages):
         if not isinstance(msg, HumanMessage):
             continue
         query = str(msg.content)
-        if _query_is_read_only_open_state(query):
-            return query
+        if query.strip().lower() in _OPEN_STATE_RETRY_PHRASES:
+            continue
+        return query if _query_is_read_only_open_state(query) else ""
     return ""
 
 
@@ -1187,8 +1193,8 @@ async def _get_tool_by_name(
         return RawTool(
             name=val["name"],
             api_id=val["api_id"],
-            description=val["description"],
-            parameters=val["parameters"],
+            description=val.get("description", ""),
+            parameters=val.get("parameters", "{}"),
             is_actuation=val.get("is_actuation", False),
         )
 
@@ -1286,14 +1292,14 @@ async def _retrieve_tools(
             if not t["is_actuation"] or t["name"] == "GetLiveContext"
         ]
         if not any(t["name"] == "GetLiveContext" for t in all_candidates):
-            live_context = await _get_tool_by_name(
+            fetched_live_ctx = await _get_tool_by_name(
                 store, config, "GetLiveContext", allowed_api_ids
             )
-            if live_context is not None:
-                all_candidates = [live_context, *all_candidates]
+            if fetched_live_ctx is not None:
+                all_candidates = [fetched_live_ctx, *all_candidates]
         live_ctx = [t for t in all_candidates if t["name"] == "GetLiveContext"]
         rest = [t for t in all_candidates if t["name"] != "GetLiveContext"]
-        all_candidates = live_ctx + rest
+        all_candidates = (live_ctx + rest)[: limit + 1]
 
     # 4. Format and deduplicate
     selected_tools, routing_map = _format_and_dedupe_tools(all_candidates)
