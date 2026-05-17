@@ -712,6 +712,118 @@ def test_filter_open_state_live_context_keeps_requested_open_windows() -> None:
     assert "Family Room Sliding Door" not in filtered["result"]
 
 
+def test_filter_open_state_live_context_real_ha_device_class_garage_door() -> None:
+    """Entities with device_class: garage_door must be recognised as open-state sensors."""
+    payload = {
+        "success": True,
+        "result": (
+            "Live Context:\n"
+            "- names: Garage Door\n"
+            "  domain: binary_sensor\n"
+            "  state: 'on'\n"
+            "  attributes:\n"
+            "    device_class: garage_door\n"
+        ),
+    }
+
+    filtered = json.loads(
+        _filter_open_state_live_context_content(
+            json.dumps(payload), "list all open doors in my home"
+        )
+    )
+
+    assert "Garage Door" in filtered["result"]
+
+
+def test_filter_open_state_live_context_real_ha_device_class_window() -> None:
+    """Entities with device_class: window must be recognised as open-state sensors."""
+    payload = {
+        "success": True,
+        "result": (
+            "Live Context:\n"
+            "- names: Window - kitchen\n"
+            "  domain: binary_sensor\n"
+            "  state: 'on'\n"
+            "  areas: kitchen\n"
+            "  attributes:\n"
+            "    device_class: window\n"
+            "- names: Window - bedroom\n"
+            "  domain: binary_sensor\n"
+            "  state: 'off'\n"
+            "  areas: bedroom\n"
+            "  attributes:\n"
+            "    device_class: window\n"
+        ),
+    }
+
+    filtered = json.loads(
+        _filter_open_state_live_context_content(
+            json.dumps(payload), "list all open windows in my home"
+        )
+    )
+
+    assert "Window - kitchen" in filtered["result"]
+    assert "Window - bedroom" not in filtered["result"]
+
+
+def test_filter_open_state_live_context_real_ha_device_class_door() -> None:
+    """Entities with device_class: door must be recognised as open-state sensors."""
+    payload = {
+        "success": True,
+        "result": (
+            "Live Context:\n"
+            "- names: Front Door\n"
+            "  domain: binary_sensor\n"
+            "  state: 'on'\n"
+            "  attributes:\n"
+            "    device_class: door\n"
+            "- names: Back Door\n"
+            "  domain: binary_sensor\n"
+            "  state: 'off'\n"
+            "  attributes:\n"
+            "    device_class: door\n"
+        ),
+    }
+
+    filtered = json.loads(
+        _filter_open_state_live_context_content(
+            json.dumps(payload), "list all open doors in my home"
+        )
+    )
+
+    assert "Front Door" in filtered["result"]
+    assert "Back Door" not in filtered["result"]
+
+
+def test_filter_open_state_live_context_window_query_excludes_doors() -> None:
+    """Window query with mixed device classes must keep only open windows."""
+    payload = {
+        "success": True,
+        "result": (
+            "Live Context:\n"
+            "- names: Window - kitchen\n"
+            "  domain: binary_sensor\n"
+            "  state: 'on'\n"
+            "  attributes:\n"
+            "    device_class: window\n"
+            "- names: Front Door\n"
+            "  domain: binary_sensor\n"
+            "  state: 'on'\n"
+            "  attributes:\n"
+            "    device_class: door\n"
+        ),
+    }
+
+    filtered = json.loads(
+        _filter_open_state_live_context_content(
+            json.dumps(payload), "list all open windows in my home"
+        )
+    )
+
+    assert "Window - kitchen" in filtered["result"]
+    assert "Front Door" not in filtered["result"]
+
+
 def test_query_needs_actuation_safety_comma_compound_known_gap() -> None:
     """Known gap: comma-separated 'open' command is not detected; actuation suppressed."""
     query = "show me open windows, open the garage door"

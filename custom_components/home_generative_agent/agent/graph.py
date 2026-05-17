@@ -569,14 +569,20 @@ def _parse_open_entries_from_live_context(raw: str) -> list[str]:
             if re.search(r"['\"]?on['\"]?", stripped, re.IGNORECASE):
                 is_on = True
             continue
-        if "device_class" in stripped and "opening" in stripped:
-            is_opening = True
+        if "device_class" in stripped:
+            dc = stripped.split(":", maxsplit=1)[-1].strip().strip("'\"")
+            if dc in _OPEN_STATE_DEVICE_CLASSES:
+                is_opening = True
             continue
 
     if current_name and is_on and is_opening:
         open_entries.append(current_name)
     return open_entries
 
+
+_OPEN_STATE_DEVICE_CLASSES: frozenset[str] = frozenset(
+    {"door", "garage_door", "opening", "window"}
+)
 
 _OPEN_ENTITY_KEYWORDS: tuple[str, ...] = ("window", "door", "gate")
 
@@ -679,7 +685,7 @@ async def _find_open_entries(
         state_obj = hass.states.get(entity_id)
         if not state_obj:
             continue
-        if state_obj.attributes.get("device_class") != "opening":
+        if state_obj.attributes.get("device_class") not in _OPEN_STATE_DEVICE_CLASSES:
             continue
         if str(state_obj.state).lower() not in {"on", "open", "opening"}:
             continue
