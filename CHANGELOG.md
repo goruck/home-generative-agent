@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.9] - 2026-05-17
+
+### Fixed
+
+- **Read-only open-state queries are more reliable across local tool-calling
+  models** — HGA now force-binds and promotes `GetLiveContext` for read-only
+  queries such as "list all open windows" and "list the open doors in my house",
+  even when semantic tool retrieval misses it or ranks less relevant tools
+  higher. The first `GetLiveContext` call for these queries is normalized to a
+  broad `binary_sensor` live-context request so local models that emit brittle
+  filters like `name: "Window"` or list-valued domains still get the needed
+  state. Broad live-context results are then filtered back to the requested
+  entity type, preventing door queries from volunteering open windows. Focused
+  regression tests cover retrieval, argument normalization, retry handling, and
+  scoped result filtering.
+
 ## [3.14.8] - 2026-05-16
 
 ### Fixed

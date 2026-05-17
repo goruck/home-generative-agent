@@ -3,19 +3,24 @@
 
 from __future__ import annotations
 
+import json
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
 
 import psycopg
 import pytest
 from homeassistant.helpers import llm
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
 from custom_components.home_generative_agent.agent.graph import (
     State,
+    _filter_open_state_live_context_content,
     _get_actuation_safety_tools,
     _get_allowed_api_ids,
     _get_rag_retrieved_tools,
+    _latest_open_state_query,
+    _normalize_live_context_args_for_open_state,
     _query_needs_actuation_safety,
     _retrieve_tools,
     _split_query_intents,
@@ -575,6 +580,138 @@ def test_query_needs_actuation_safety_no_actuation_keyword() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("tool_args", "query"),
+    [
+        ({"domain": ["binary_sensor"], "name": "Window"}, "list all open windows"),
+        (
+            {"domain": ["binary_sensor"], "name": "Door"},
+            "list the open doors in my house",
+        ),
+        (
+            {"domain": ["binary_sensor"], "name": ["Sliding Door", "Door Lock"]},
+            "list the open doors in my house",
+        ),
+    ],
+)
+def test_normalize_live_context_args_for_read_only_open_state(
+    tool_args: dict[str, Any], query: str
+) -> None:
+    """Brittle model-generated live-context filters are widened for open-state checks."""
+    assert _normalize_live_context_args_for_open_state(
+        "GetLiveContext", tool_args, query
+    ) == {"domain": "binary_sensor"}
+
+
+def test_normalize_live_context_args_does_not_touch_open_command() -> None:
+    """Actual open commands must not be converted to read-only live context."""
+    tool_args: dict[str, Any] = {"domain": ["cover"], "name": "Garage Door"}
+
+    assert (
+        _normalize_live_context_args_for_open_state(
+            "GetLiveContext", tool_args, "open the garage door"
+        )
+        == tool_args
+    )
+
+
+def test_normalize_live_context_args_can_leave_subsequent_calls_alone() -> None:
+    """Only the first live-context call is widened to avoid duplicate broad payloads."""
+    tool_args: dict[str, Any] = {
+        "domain": "binary_sensor",
+        "name": "Breakfast Nook Left Window",
+    }
+
+    assert (
+        _normalize_live_context_args_for_open_state(
+            "GetLiveContext",
+            tool_args,
+            "list all open windows",
+            force_broad=False,
+        )
+        == tool_args
+    )
+
+
+def test_latest_open_state_query_uses_previous_query_for_retry() -> None:
+    """Short retries should keep the prior read-only open-state query active."""
+    messages: list[BaseMessage] = [
+        HumanMessage(content="list all open windows"),
+        AIMessage(content="Would you like me to try once more?"),
+        HumanMessage(content="yes"),
+    ]
+
+    assert _latest_open_state_query(messages) == "list all open windows"
+
+
+def test_filter_open_state_live_context_scopes_door_query() -> None:
+    """Door queries must not expose open windows from the broad binary sensor context."""
+    payload = {
+        "success": True,
+        "result": (
+            "Live Context:\n"
+            "- names: Front Door\n"
+            "  domain: binary_sensor\n"
+            "  state: 'off'\n"
+            "  attributes:\n"
+            "    device_class: opening\n"
+            "- names: Family Room Right Window\n"
+            "  domain: binary_sensor\n"
+            "  state: 'on'\n"
+            "  attributes:\n"
+            "    device_class: opening\n"
+            "- names: Garage and Play Room Doors\n"
+            "  domain: binary_sensor\n"
+            "  state: 'off'\n"
+            "  attributes:\n"
+            "    device_class: opening\n"
+        ),
+    }
+
+    filtered = json.loads(
+        _filter_open_state_live_context_content(
+            json.dumps(payload), "list the open doors in my house"
+        )
+    )
+
+    assert filtered["result"] == "Live Context: No open doors were found."
+
+
+def test_filter_open_state_live_context_keeps_requested_open_windows() -> None:
+    """Window queries keep only matching open windows from the broad context."""
+    payload = {
+        "success": True,
+        "result": (
+            "Live Context:\n"
+            "- names: Breakfast Nook Side Right Window\n"
+            "  domain: binary_sensor\n"
+            "  state: 'on'\n"
+            "  attributes:\n"
+            "    device_class: opening\n"
+            "- names: Family Room Sliding Door\n"
+            "  domain: binary_sensor\n"
+            "  state: 'on'\n"
+            "  attributes:\n"
+            "    device_class: opening\n"
+            "- names: Landing Windows\n"
+            "  domain: binary_sensor\n"
+            "  state: 'on'\n"
+            "  attributes:\n"
+            "    device_class: opening\n"
+        ),
+    }
+
+    filtered = json.loads(
+        _filter_open_state_live_context_content(
+            json.dumps(payload), "list all open windows"
+        )
+    )
+
+    assert "Breakfast Nook Side Right Window" in filtered["result"]
+    assert "Landing Windows" in filtered["result"]
+    assert "Family Room Sliding Door" not in filtered["result"]
+
+
 def test_query_needs_actuation_safety_comma_compound_known_gap() -> None:
     """Known gap: comma-separated 'open' command is not detected; actuation suppressed."""
     query = "show me open windows, open the garage door"
@@ -640,6 +777,117 @@ async def test_retrieve_tools_no_actuation_safety_for_read_only_open() -> None:
     # No actuation tool should appear anywhere in the selection.
     selected_names = [t["function"]["name"] for t in result["selected_tools"]]
     assert "HassTurnOn" not in selected_names
+
+
+@pytest.mark.asyncio
+async def test_retrieve_tools_force_injects_live_context_for_open_doors() -> None:
+    """Read-only open-door queries must bind GetLiveContext even when RAG misses it."""
+    query = "list the open doors in my house"
+    state: State = {
+        "messages": [MagicMock(content=query)],
+        "summary": "",
+        "chat_model_usage_metadata": {},
+        "messages_to_remove": [],
+        "selected_tools": [],
+        "tool_routing_map": {},
+        "action_rounds": 0,
+    }
+    store = MagicMock()
+
+    rag_items = []
+    for name, is_actuation in (
+        ("get_entity_history", False),
+        ("HassBroadcast", True),
+        ("HassTurnOn", True),
+        ("resolve_entity_ids", False),
+        ("alarm_control", True),
+    ):
+        item = MagicMock()
+        item.value = {
+            "name": name,
+            "api_id": "assist",
+            "description": name,
+            "parameters": "{}",
+            "is_actuation": is_actuation,
+        }
+        item.score = 0.9
+        rag_items.append(item)
+
+    live_ctx_item = MagicMock()
+    live_ctx_item.value = {
+        "name": "GetLiveContext",
+        "api_id": "assist",
+        "description": "Get live home state",
+        "parameters": "{}",
+        "is_actuation": False,
+    }
+
+    store.asearch = AsyncMock(return_value=rag_items)
+    store.aget = AsyncMock(return_value=live_ctx_item)
+
+    config: RunnableConfig = {
+        "configurable": {
+            "options": {"llm_hass_api": ["assist"], "tool_relevance_threshold": 0.15},
+            "tool_index_ready": True,
+            "langchain_tools": {},
+            "ha_llm_api": MagicMock(apis={}),
+        }
+    }
+
+    result = await _retrieve_tools(state, config, store=store)
+    selected_names = [t["function"]["name"] for t in result["selected_tools"]]
+
+    assert selected_names[0] == "GetLiveContext"
+    assert "GetLiveContext" in result["tool_routing_map"]
+    assert "get_entity_history" in result["tool_routing_map"]
+    assert "resolve_entity_ids" in result["tool_routing_map"]
+    assert "HassTurnOn" not in result["tool_routing_map"]
+    assert "HassBroadcast" not in result["tool_routing_map"]
+    assert "alarm_control" not in result["tool_routing_map"]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_tools_open_command_does_not_force_live_context() -> None:
+    """Open commands must keep actuation safety behavior."""
+    query = "open the garage door"
+    state: State = {
+        "messages": [MagicMock(content=query)],
+        "summary": "",
+        "chat_model_usage_metadata": {},
+        "messages_to_remove": [],
+        "selected_tools": [],
+        "tool_routing_map": {},
+        "action_rounds": 0,
+    }
+    store = MagicMock()
+
+    safety_item = MagicMock()
+    safety_item.value = {
+        "name": "HassTurnOn",
+        "api_id": "assist",
+        "description": "Turn on",
+        "parameters": "{}",
+        "is_actuation": True,
+    }
+    safety_item.score = 0.9
+
+    store.asearch = AsyncMock(return_value=[safety_item])
+    store.aget = AsyncMock()
+
+    config: RunnableConfig = {
+        "configurable": {
+            "options": {"llm_hass_api": ["assist"], "tool_relevance_threshold": 0.15},
+            "tool_index_ready": True,
+            "langchain_tools": {},
+            "ha_llm_api": MagicMock(apis={}),
+        }
+    }
+
+    result = await _retrieve_tools(state, config, store=store)
+
+    assert "HassTurnOn" in result["tool_routing_map"]
+    assert "GetLiveContext" not in result["tool_routing_map"]
+    store.aget.assert_not_called()
 
 
 @pytest.mark.asyncio
