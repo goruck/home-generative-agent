@@ -39,8 +39,7 @@ The autonomy level controls how much Sentinel is allowed to do on your behalf:
 |---|---|---|
 | `0` — Passive | Detection runs but no notifications or actions are taken | Full silence; useful for testing rules without alert fatigue |
 | `1` — Notify only *(default)* | Mobile push and persistent HA notifications on findings | Triage (if enabled) may suppress low-value alerts; all actions are user-initiated |
-| `2` — Auto-exec enabled | Notifications plus autonomous execution of allowed services when `sentinel_auto_execution_enabled = true` | Constrained by `min_confidence`, `max_actions_per_hour`, and an explicit `allowed_services` allowlist; canary mode available for dry-run validation before going live |
-| `3` — Autonomous (elevated) | Same auto-execution as level 2, with fewer restrictions on which findings qualify | All level 2 safeguards still apply; PIN protection for level increase available via `sentinel_require_pin_for_level_increase` |
+| `2` / `3` — Auto-exec enabled | Notifications plus autonomous execution of allowed services when `sentinel_auto_execution_enabled = true`. Levels 2 and 3 apply identical execution gates in the current code. | Constrained by `min_confidence`, `max_actions_per_hour`, an explicit `allowed_services` allowlist, and idempotency window; canary mode available for dry-run validation. PIN protection for level increase via `sentinel_require_pin_for_level_increase`. |
 
 Runtime overrides are TTL-bounded (`sentinel_runtime_override_ttl_minutes`, default 60 min) and revert to the configured level automatically.
 

@@ -1,6 +1,6 @@
 # Constants Reference
 
-This document covers all named constants that affect integration behaviour, organized by subsystem. The authoritative source for UI-configurable settings is `custom_components/home_generative_agent/const.py`. Module-level tuning constants that live elsewhere are documented in the [Module Tuning Constants](#module-tuning-constants) section.
+This document covers the named constants that affect integration behaviour, organized by subsystem. It tracks all `RECOMMENDED_*` defaults from `custom_components/home_generative_agent/const.py` and the most relevant module-level tuning knobs; see the source file directly for the authoritative list. Module-level tuning constants that live outside `const.py` are documented in the [Module Tuning Constants](#module-tuning-constants) section.
 
 **Two tiers:**
 - **UI-configurable** — exposed in the HA config/options flow; `const.py` defines the default (`RECOMMENDED_*`). Change these in the UI without touching code.
@@ -171,7 +171,10 @@ This document covers all named constants that affect integration behaviour, orga
 
 | Constant | Value | Purpose |
 |---|---|---|
-| `RECOMMENDED_OLLAMA_URL` | `http://localhost:11434` | Default Ollama server URL (UI-configurable) |
+| `RECOMMENDED_OLLAMA_URL` | `http://localhost:11434` | Default Ollama server URL (UI-configurable); also the initial value for the three per-category URL overrides below |
+| `RECOMMENDED_OLLAMA_CHAT_URL` | `http://localhost:11434` | Ollama server URL for the chat model (UI-configurable; overrides `RECOMMENDED_OLLAMA_URL` for chat only) |
+| `RECOMMENDED_OLLAMA_VLM_URL` | `http://localhost:11434` | Ollama server URL for the VLM (UI-configurable; lets VLM traffic target a separate server) |
+| `RECOMMENDED_OLLAMA_SUMMARIZATION_URL` | `http://localhost:11434` | Ollama server URL for the summarization model (UI-configurable; lets summarization traffic target a separate server) |
 | `RECOMMENDED_OLLAMA_CONTEXT_SIZE` | `32000` | Context window size passed to Ollama models |
 | `KEEPALIVE_MIN_SECONDS` | `0` | Minimum allowable keepalive (0 = unload immediately) |
 | `KEEPALIVE_MAX_SECONDS` | `900` | Maximum allowable keepalive (15 minutes) |
@@ -260,6 +263,7 @@ This document covers all named constants that affect integration behaviour, orga
 | `RECOMMENDED_EXPLAIN_ENABLED` | `explain_enabled` | `False` | Generate LLM explanations for findings before notification |
 | `RECOMMENDED_SENTINEL_STALENESS_THRESHOLD_SECONDS` | `sentinel_staleness_threshold_seconds` | `1800` (s) | Snapshot entity data older than this is considered stale and may reduce finding confidence |
 | `RECOMMENDED_AUDIT_HOT_MAX_RECORDS` | `audit_hot_max_records` | `500` | Maximum records kept in the in-memory audit hot store. User-visible findings are preserved in preference to suppressed records when at capacity. |
+| `RECOMMENDED_SENTINEL_CAMERA_ENTRY_LINKS` | `sentinel_camera_entry_links` | `{}` | Maps camera `entity_id` → list of entry/lock `entity_id`s in other HA areas. Used by the `camera_entry_unsecured` rule for cameras that physically overlook entries not in the same HA area (e.g. `{"camera.driveway": ["lock.front_door"]}`). |
 
 **Code-only:**
 
@@ -398,6 +402,16 @@ The `RECOMMENDED_CRITICAL_ACTIONS` list defines which HA service calls require P
 |---|---|---|---|
 | `RECOMMENDED_FACE_RECOGNITION` | `face_recognition` | `False` | Enable face recognition in camera analysis |
 | `RECOMMENDED_FACE_API_URL` | `face_api_url` | `http://face-recog-server.local:8000` | Base URL of the [face-service](https://github.com/goruck/face-service) instance |
+
+---
+
+## Speech-to-Text (STT)
+
+**File:** `const.py` | **UI-configurable**
+
+| Constant | Config key | Default | Purpose |
+|---|---|---|---|
+| `RECOMMENDED_OPENAI_STT_MODEL` | `model_name` | `gpt-4o-mini-transcribe` | Default OpenAI Whisper model for the STT provider. Supported values: `whisper-1`, `gpt-4o-transcribe`, `gpt-4o-mini-transcribe`. |
 
 ---
 
