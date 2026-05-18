@@ -6,14 +6,12 @@
 
 ![Project Maintenance][maintenance-shield]
 
-A [Home Assistant](https://www.home-assistant.io/) integration that brings a generative AI agent into your smart home. Talk to your home, create automations in plain English, analyze camera footage, and get proactive alerts — all powered by your choice of cloud or local LLMs.
-
-HGA is a single integration that gives you conversational control over every HA entity, camera understanding with face recognition, long-term semantic memory, and the Sentinel anomaly engine — all running on cloud models or fully on-premises with Ollama.
+A [Home Assistant](https://www.home-assistant.io/) integration that brings a generative AI agent into your smart home. Talk to your home, create automations in plain English, analyze camera footage, and get proactive alerts — all powered by your choice of cloud or local LLMs. HGA is a single integration that gives you conversational control over every HA entity, camera understanding with face recognition, long-term semantic memory, and the Sentinel anomaly engine.
 
 ## Features
 
 | Feature | What it does |
-|---|---|
+| --- | --- |
 | **Conversational control** | Talk to your home in natural language. Turn things on, check status, ask questions. |
 | **Automation creation** | Describe what you want in chat and the agent writes and registers the HA automation. |
 | **Camera & image analysis** | Ask the agent what it sees in any camera. Proactive motion-triggered analysis with anomaly detection. |
@@ -44,13 +42,13 @@ HGA is a single integration that gives you conversational control over every HA 
 ## Requirements
 
 | Requirement | Notes |
-|---|---|
+| --- | --- |
 | Home Assistant | 2025.5.0 minimum; 2026.4.0+ for streaming responses |
 | HACS | Required for the recommended install path; manual install is also supported |
 | PostgreSQL with pgvector | Provided as a bundled HA add-on (step 1 below) |
 | Model provider | At least one of: OpenAI, Gemini, Anthropic, Ollama, or any OpenAI-compatible server |
 | Edge GPU server *(optional)* | Ollama, vLLM, llama.cpp, or LiteLLM for local model serving |
-| face-service *(optional)* | Required only for face recognition in camera analysis |
+| face-service *(optional)* | An add-on required only for face recognition in camera analysis |
 
 ## Quick Start
 
@@ -79,7 +77,7 @@ You can now open the HA Assist panel and start talking to your home.
 ## Documentation
 
 | Guide | Contents |
-|---|---|
+| --- | --- |
 | [Installation](docs/installation.md) | HACS install, manual install, optional add-ons (Ollama, face recognition) |
 | [Configuration](docs/configuration.md) | Model providers, features, Tool Retrieval (RAG), LLM API, STT, YAML mode, Critical Action PIN |
 | [Sentinel](docs/sentinel.md) | Anomaly detection pipeline, built-in rules, triage, baseline, blueprints, services API, health sensor |
@@ -90,33 +88,37 @@ You can now open the HA Assist panel and start talking to your home.
 ## More Examples
 
 ### Automation that runs on a schedule
+
 *User asked: "Remind me every 30 minutes if the litter box waste drawer is over 90% full." Agent wrote and registered the automation.*
 ![Periodic automation](./assets/cat_automation.png)
 
 ### Query entity history
-*User asked: "When did the hallway light turn on today?" Agent queried the HA history database and summarized the results.*
+
+*User asked: "When did the front porch light turn on today?" Agent queried the HA history database and summarized the results.*
 ![Check light history](./assets/history1.png)
 
 ### Energy consumption report
+
 *User asked: "How much energy did the fridge use today?" Agent pulled sensor history and gave a plain-English summary.*
 ![Fridge energy report](./assets/fridge_energy_1.png)
 
 ### Semantic memory across conversations
-*User asked in a later conversation: "What automations did we create last week?" Agent retrieved the relevant context from long-term memory and then built the automation.*
-![Semantic memory 2](./assets/semantic2.png)
-![Semantic memory 3](./assets/semantic3.png)
+
+*User asked in a later conversation: "always prepare the home for my arrival at night" Agent retrieved the relevant context from long-term memory and then built the automation, remembering that the user arrives home around 7:30 PM.*
+
+![Semantic memory 2](./assets/semantic2.png) ![Semantic memory 3](./assets/semantic3.png)
 
 ### Check a camera for packages
+
 *User asked: "Are there any packages at the front gate?" Agent analyzed the live camera and confirmed two boxes visible.*
 ![Check for packages](./assets/check-for-boxes.png)
 
-## Contributions are welcome!
+## Contributions are welcome
 
 If you want to contribute to this, please read the [Contribution guidelines](CONTRIBUTING.md).
 
 ***
 
-[home_generative_agent]: https://github.com/goruck/home-generative-agent
 [commits-shield]: https://img.shields.io/github/commit-activity/y/goruck/home-generative-agent.svg?style=for-the-badge
 [commits]: https://github.com/goruck/home-generative-agent/commits/main
 [license-shield]: https://img.shields.io/github/license/goruck/home-generative-agent.svg?style=for-the-badge
