@@ -1,0 +1,183 @@
+# Configuration
+
+Configuration is done entirely in the Home Assistant UI using subentry flows. A *subentry* is a discrete, independently configured capability — for example a Model Provider, a Feature set, or Sentinel. Each subentry has its own settings and can be added, reconfigured, or removed without affecting others.
+
+- [Basic Setup](#basic-setup)
+- [Model Providers](#model-providers)
+- [Features](#features)
+- [Tool Retrieval (RAG)](#tool-retrieval-rag)
+- [Control Home Assistant (LLM API)](#control-home-assistant-llm-api)
+- [Speech-to-Text (STT)](#speech-to-text-stt)
+- [Schema-first YAML Mode](#schema-first-yaml-mode)
+- [Critical Action PIN](#critical-action-pin)
+- [Global Options](#global-options)
+
+---
+
+## Basic Setup
+
+1. Open **Settings → Devices & Services → Home Generative Agent**.
+2. Click **+ Setup** to enable features and configure the database.
+   - Default features: Conversation, Camera Image Analysis, Conversation Summary.
+   - Each feature can be individually enabled and assigned its own model.
+3. Click **+ Model Provider** to add a provider (Cloud or Edge → provider type → credentials → model defaults).
+   - The first provider added is automatically assigned to all features.
+4. Use the **gear icon** on any feature to adjust its model settings later.
+5. Click **+ Sentinel** to configure proactive anomaly detection (see [Sentinel guide](sentinel.md)).
+
+---
+
+## Model Providers
+
+Supported providers and their default models:
+
+| Category | Provider | Default model | Purpose |
+|---|---|---|---|
+| Chat | OpenAI | gpt-5 | Reasoning and planning |
+| Chat | Ollama | gpt-oss | Reasoning and planning |
+| Chat | Gemini | gemini-2.5-flash-lite | Reasoning and planning |
+| Chat | Anthropic | claude-sonnet-4-6 | Reasoning and planning |
+| Chat | OpenAI Compatible | gpt-4o | Reasoning and planning |
+| VLM | Ollama | qwen3-vl:8b | Image scene analysis |
+| VLM | OpenAI | gpt-5-nano | Image scene analysis |
+| VLM | Gemini | gemini-2.5-flash-lite | Image scene analysis |
+| VLM | Anthropic | claude-sonnet-4-6 | Image scene analysis |
+| VLM | OpenAI Compatible | gpt-4o | Image scene analysis |
+| Summarization | Ollama | qwen3:8b | Context summarization |
+| Summarization | OpenAI | gpt-5-nano | Context summarization |
+| Summarization | Gemini | gemini-2.5-flash-lite | Context summarization |
+| Summarization | Anthropic | claude-haiku-4-5-20251001 | Context summarization |
+| Summarization | OpenAI Compatible | gpt-4o | Context summarization |
+| Embeddings | Ollama | mxbai-embed-large | Semantic search |
+| Embeddings | OpenAI | text-embedding-3-small | Semantic search |
+| Embeddings | Gemini | gemini-embedding-001 | Semantic search |
+| Embeddings | OpenAI Compatible | text-embedding-3-small | Semantic search |
+
+**Embedding model selection:** The integration uses the first provider that supports embeddings (or the feature's own provider when it advertises embedding capability). To use a specific embedding model, add a provider that supports embeddings and select the desired model name in that provider's defaults, then reload the integration.
+
+**Multiple providers:** You can add multiple Model Provider subentries and assign them per-feature. For example: a "Primary Ollama" provider for chat and a "Vision Ollama" provider for camera analysis. You can also mix types — a local vLLM server as **OpenAI Compatible** alongside an Ollama provider.
+
+---
+
+## Features
+
+Each feature is enabled separately under **+ Setup** and has its own model/provider assignment:
+
+- **Conversation** — the main conversational agent
+- **Camera Image Analysis** — on-demand and proactive vision analysis
+- **Conversation Summary** — automatic context window management
+
+Global options such as system prompt, face recognition URL, context management parameters, and the critical-action PIN live in the integration's **Options** flow (gear icon on the integration page).
+
+---
+
+## Tool Retrieval (RAG)
+
+> **Thanks to [1Jamie](https://github.com/1Jamie) for this feature!**
+
+On startup the integration indexes all available tools as vector embeddings in PostgreSQL. Each turn, only the most relevant tools for the user's message are loaded into the agent's prompt — keeping context short and tool selection accurate.
+
+Two options in the **Options** flow control this:
+
+- **Retrieval Limit** (`tool_retrieval_limit`, default `5`) — maximum tools made available per turn. Raise if the agent misses tools on complex multi-step requests; lower to reduce prompt size.
+- **Relevance Threshold** (`tool_relevance_threshold`, default `0.15`) — cosine similarity cutoff. Lower if the agent misses tools it should pick up; raise to tighten selectivity.
+
+A **Tool Index Status** diagnostic sensor (`sensor.tool_index_status`) shows the current index state:
+
+| State | Meaning |
+|---|---|
+| `indexing` | First-run embedding in progress |
+| `ready` | Index available; tools retrieved per-turn by semantic search |
+| `failed` | Embedding provider unreachable; agent falls back to all tools |
+| `unknown` | Index state not yet reported |
+
+Subsequent restarts skip unchanged tools using SHA-256 content hashing, so re-indexing is fast.
+
+---
+
+## Control Home Assistant (LLM API)
+
+The **Control Home Assistant** option in the Options flow is a multi-select that controls which HA LLM APIs the agent can use.
+
+- **Assist** (`assist`) — the built-in HA Assist API. Grants entity-control intents and the full entity list. Select this for standard voice-assistant control.
+- **MCP server integrations** — any [Model Context Protocol](https://www.home-assistant.io/integrations/mcp_server/) integration you have configured registers its own LLM API (e.g. `mcp-<entry_id>`). Those entries appear in the list once added.
+
+You can select any combination. Selecting both Assist and one or more MCP APIs merges all their tools into a single combined API. Deselecting everything runs the agent with only its built-in LangChain tools (no HA entity control, no MCP tools).
+
+**Adding an MCP server:**
+
+1. Go to **Settings → Devices & Services → Add Integration** → search **Model Context Protocol**.
+2. Enter the server URL and complete setup.
+3. The MCP integration registers an LLM API automatically.
+4. Open **Settings → Devices & Services → Home Generative Agent → Configure**.
+5. Select the new entry in **Control Home Assistant** and save.
+
+---
+
+## Speech-to-Text (STT)
+
+HGA provides a built-in STT engine using the OpenAI Whisper API — no separate STT integration required.
+
+1. Open **Settings → Devices & Services → Home Generative Agent**.
+2. Click **+ STT Provider**.
+3. Choose **OpenAI** and give it a name.
+4. On the **Credentials** step, either reuse an existing OpenAI Model Provider subentry or select **Use a separate key** and enter a dedicated API key.
+5. On **Model & advanced options**, pick a model (recommended: `gpt-4o-mini-transcribe`) and set optional fields:
+   - `language` (optional): e.g. `en` or `en-US`
+   - `prompt` (optional): hints for domain-specific vocabulary
+   - `temperature` (optional): 0–1
+   - `translate`: only supported by `whisper-1`; other models fall back to transcription
+6. Go to **Settings → Voice assistants → Assist pipelines** and select **STT - OpenAI** (or your chosen name) for Speech-to-text.
+
+---
+
+## Schema-first YAML Mode
+
+**Schema-first JSON for YAML requests** controls how the agent handles YAML-style requests (automations, dashboards, or "show me YAML").
+
+| Setting | Behavior |
+|---|---|
+| **ON** | Agent returns strict JSON converted to YAML for display. Automations are not auto-registered — YAML is shown in chat. To save a file, ask the agent to **save the YAML**; it writes under `/config/www/` and returns a `/local/...` URL. |
+| **OFF** | Dashboard generation is disabled. Automations are auto-registered; YAML is not shown in chat. Other YAML requests follow standard prompt behavior. |
+
+> Note: YAML rendered in the chat window may not preserve indentation due to UI rendering — use the saved file if you need valid YAML to copy.
+
+Example: *"Save this YAML to a file called garage-light."*
+
+---
+
+## Critical Action PIN
+
+Protects sensitive actions (unlocking doors, opening covers) behind a second verification step.
+
+**Setup:** Go to **Settings → Devices & Services → Home Generative Agent → Configure** and toggle **Require critical action PIN**. Enter a 4–10 digit PIN. The value is stored as a salted hash. Leaving the field blank while the toggle is on clears the stored PIN; turning the toggle off removes the guard entirely.
+
+> In the conversation agent settings for HGA, disable **Prefer handling commands locally** for the PIN protection to work correctly.
+
+**Protected actions:**
+- Unlocking or opening locks
+- Opening covers whose `entity_id` includes `door`, `gate`, or `garage`
+- Using HA intent tools on locks
+
+Alarm control panels use their own alarm code, which is separate from the critical-action PIN.
+
+**Flow:** When you request a protected action, the agent queues the request and asks for the PIN. Reply with the digits to complete the action. After five bad attempts or 10 minutes, the queued action expires and you must ask again. If the guard is enabled but no PIN is configured, the agent rejects requests until you set one in Options.
+
+---
+
+## Global Options
+
+The **Options** flow (gear icon on the integration page) exposes:
+
+- System prompt override
+- Face recognition service URL
+- Context management parameters (`max_messages_in_context`, `max_tokens_in_context`, `manage_context_with_tokens`)
+- Critical action PIN toggle and value
+- Tool retrieval limit and relevance threshold
+- `model_provider_uncontended` — bypass all local GPU gates when the server has dedicated capacity
+
+See [Architecture](architecture.md#llm-context-management) for detail on context management parameters.
+
+---
+
+> **Developer reference:** For a complete listing of every named constant — including code-only tuning knobs and module-level internals — see the [Constants Reference](constants.md).
