@@ -176,6 +176,8 @@ async def test_execute_fires_event_when_no_conversation_entity() -> None:
     assert event_data["suggested_actions"] == ["check_appliance"]
     assert event_data["mobile_action_payload"] == {"action_data": "from_test"}
     assert "requested_at" in event_data
+    assert "detected_at" in event_data
+    assert event_data["detected_at"].endswith("+00:00")
 
     assert suppression.save_calls == 1
     assert "finding-1" not in suppression.state.pending_prompts
@@ -311,6 +313,8 @@ async def test_handoff_fires_ask_event_when_no_conversation_entity() -> None:
     assert event_data["is_sensitive"] is True
     assert "suggested_prompt" in event_data
     assert "Front Door Lock" in event_data["suggested_prompt"]
+    assert "detected_at" in event_data
+    assert event_data["detected_at"].endswith("+00:00")
 
     # Suppression prompt resolved — user responded.
     assert "sens-1" not in suppression.state.pending_prompts

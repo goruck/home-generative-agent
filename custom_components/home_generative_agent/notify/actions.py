@@ -357,5 +357,6 @@ def _build_execute_event_data(
         "suggested_actions": list(finding.suggested_actions),
         "is_sensitive": finding.is_sensitive,
         "evidence": finding.evidence,
+        "detected_at": dt_util.as_utc(finding.detected_at).isoformat(),
         "mobile_action_payload": dict(payload),
     }
