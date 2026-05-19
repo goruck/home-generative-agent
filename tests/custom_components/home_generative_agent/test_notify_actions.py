@@ -12,6 +12,9 @@ from custom_components.home_generative_agent.notify.actions import (
     EVENT_SENTINEL_ASK_REQUESTED,
     EVENT_SENTINEL_EXECUTE_REQUESTED,
     ActionHandler,
+    _build_ask_prompt,
+    _build_execute_prompt,
+    _format_evidence_summary,
 )
 from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
 from custom_components.home_generative_agent.sentinel.suppression import (
@@ -524,3 +527,136 @@ async def test_single_save_per_action() -> None:
         assert suppression.save_calls == 1, (
             f"Expected 1 save for '{action}', got {suppression.save_calls}"
         )
+
+
+# ---------------------------------------------------------------------------
+# _format_evidence_summary unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_format_evidence_summary_happy_path() -> None:
+    """Returns key=value pairs for all non-skipped, non-None evidence."""
+    evidence = {"power_w": 170.0, "duration_min": 45}
+    result = _format_evidence_summary(evidence)
+    assert "power_w=170.0" in result
+    assert "duration_min=45" in result
+
+
+def test_format_evidence_summary_skips_entity_id_friendly_name_area() -> None:
+    """entity_id, friendly_name, and area are excluded from the summary."""
+    evidence = {
+        "entity_id": "sensor.fridge",
+        "friendly_name": "Fridge",
+        "area": "kitchen",
+        "power_w": 200.0,
+    }
+    result = _format_evidence_summary(evidence)
+    assert "entity_id" not in result
+    assert "friendly_name" not in result
+    assert "area" not in result
+    assert "power_w=200.0" in result
+
+
+def test_format_evidence_summary_excludes_none_values() -> None:
+    """None values are excluded from the summary."""
+    evidence = {"state": "on", "voltage": None, "current": 1.5}
+    result = _format_evidence_summary(evidence)
+    assert "voltage" not in result
+    assert "state=on" in result
+    assert "current=1.5" in result
+
+
+def test_format_evidence_summary_caps_at_six_items() -> None:
+    """Only the first 6 items are included even if more are present."""
+    evidence = {f"k{i}": i for i in range(10)}
+    result = _format_evidence_summary(evidence)
+    pairs = [p for p in result.split(", ") if p]
+    assert len(pairs) == 6
+
+
+def test_format_evidence_summary_empty_returns_see_entity() -> None:
+    """Empty or all-skipped evidence falls back to 'see entity'."""
+    assert _format_evidence_summary({}) == "see entity"
+    assert _format_evidence_summary({"entity_id": "x", "friendly_name": "y"}) == "see entity"
+
+
+# ---------------------------------------------------------------------------
+# _build_execute_prompt / _build_ask_prompt new-content tests
+# ---------------------------------------------------------------------------
+
+
+def _make_finding_with_evidence() -> AnomalyFinding:
+    return AnomalyFinding(
+        anomaly_id="test-1",
+        type="appliance_power_duration",
+        severity="medium",
+        confidence=0.75,
+        triggering_entities=["sensor.fridge_power"],
+        evidence={"entity_id": "sensor.fridge_power", "power_w": 170.0},
+        suggested_actions=["check_appliance"],
+        is_sensitive=False,
+    )
+
+
+def test_build_execute_prompt_contains_detected_at() -> None:
+    """Execute prompt includes the detection timestamp."""
+    finding = _make_finding_with_evidence()
+    prompt = _build_execute_prompt(finding)
+    assert "detected at" in prompt
+    assert "UTC" in prompt
+
+
+def test_build_execute_prompt_contains_evidence_summary() -> None:
+    """Execute prompt includes alert-time evidence."""
+    finding = _make_finding_with_evidence()
+    prompt = _build_execute_prompt(finding)
+    assert "Alert-time evidence:" in prompt
+    assert "power_w=170.0" in prompt
+
+
+def test_build_execute_prompt_contains_resolved_acknowledgement() -> None:
+    """Execute prompt instructs agent to acknowledge if condition already resolved."""
+    finding = _make_finding_with_evidence()
+    prompt = _build_execute_prompt(finding)
+    assert "has resolved" in prompt
+    assert "still active" in prompt
+
+
+def test_build_ask_prompt_contains_detected_at() -> None:
+    """Handoff prompt includes the detection timestamp."""
+    finding = _make_finding_with_evidence()
+    prompt = _build_ask_prompt(finding)
+    assert "detected at" in prompt
+    assert "UTC" in prompt
+
+
+def test_build_ask_prompt_contains_evidence_summary() -> None:
+    """Handoff prompt includes alert-time evidence."""
+    finding = _make_finding_with_evidence()
+    prompt = _build_ask_prompt(finding)
+    assert "Alert-time evidence:" in prompt
+    assert "power_w=170.0" in prompt
+
+
+def test_build_ask_prompt_contains_resolved_acknowledgement() -> None:
+    """Handoff prompt instructs agent to acknowledge if condition already resolved."""
+    finding = _make_finding_with_evidence()
+    prompt = _build_ask_prompt(finding)
+    assert "has resolved" in prompt
+    assert "still active" in prompt
+
+
+# ---------------------------------------------------------------------------
+# AnomalyFinding.detected_at serialization
+# ---------------------------------------------------------------------------
+
+
+def test_anomaly_finding_as_dict_includes_detected_at() -> None:
+    """as_dict() serializes detected_at as an ISO-format UTC string."""
+    finding = _make_finding_with_evidence()
+    d = finding.as_dict()
+    assert "detected_at" in d
+    detected_at_str = d["detected_at"]
+    assert isinstance(detected_at_str, str)
+    assert "T" in detected_at_str  # ISO 8601 format
+    assert "+00:00" in detected_at_str or "Z" in detected_at_str or "UTC" not in detected_at_str
