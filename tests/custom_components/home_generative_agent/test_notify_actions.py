@@ -577,7 +577,10 @@ def test_format_evidence_summary_caps_at_six_items() -> None:
 def test_format_evidence_summary_empty_returns_see_entity() -> None:
     """Empty or all-skipped evidence falls back to 'see entity'."""
     assert _format_evidence_summary({}) == "see entity"
-    assert _format_evidence_summary({"entity_id": "x", "friendly_name": "y"}) == "see entity"
+    assert (
+        _format_evidence_summary({"entity_id": "x", "friendly_name": "y"})
+        == "see entity"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -659,4 +662,8 @@ def test_anomaly_finding_as_dict_includes_detected_at() -> None:
     detected_at_str = d["detected_at"]
     assert isinstance(detected_at_str, str)
     assert "T" in detected_at_str  # ISO 8601 format
-    assert "+00:00" in detected_at_str or "Z" in detected_at_str or "UTC" not in detected_at_str
+    assert (
+        "+00:00" in detected_at_str
+        or "Z" in detected_at_str
+        or "UTC" not in detected_at_str
+    )

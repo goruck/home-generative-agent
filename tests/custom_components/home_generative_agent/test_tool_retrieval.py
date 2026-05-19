@@ -1012,7 +1012,9 @@ async def test_retrieve_tools_open_command_includes_live_context() -> None:
 
 
 @pytest.mark.asyncio
-async def test_retrieve_tools_live_context_not_injected_when_store_returns_none() -> None:
+async def test_retrieve_tools_live_context_not_injected_when_store_returns_none() -> (
+    None
+):
     """When store.aget returns None for GetLiveContext, it is silently skipped."""
     query = "open the garage door"
     state: State = {
