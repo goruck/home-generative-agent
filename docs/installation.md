@@ -2,7 +2,7 @@
 
 - [HACS (Recommended)](#hacs-recommended)
   - [Required Steps](#required-steps)
-  - [Optional Add-ons](#optional-add-ons)
+  - [Optional Apps](#optional-apps)
 - [Manual Install](#manual-install)
 
 ---
@@ -11,15 +11,15 @@
 
 ### Required Steps
 
-**1. Install the [PostgreSQL with pgvector](https://github.com/goruck/addon-postgres-pgvector/tree/main/postgres_pgvector) add-on.**
+**1. Install the [PostgreSQL with pgvector](https://github.com/goruck/addon-postgres-pgvector/tree/main/postgres_pgvector) app.**
 
-> **Requires Home Assistant OS or Supervised** (add-ons are not available on HA Container or Core).
+> **Requires Home Assistant OS or Supervised** (apps are not available on HA Container or Core). Apps were called add-ons prior to HA 2026.2 — the terms are equivalent.
 
-Click the button below and configure it according to the [add-on documentation](https://github.com/goruck/addon-postgres-pgvector/blob/main/postgres_pgvector/DOCS.md). This provides persistent conversation memory and vector similarity search.
+Click the button below and configure it according to the [app documentation](https://github.com/goruck/addon-postgres-pgvector/blob/main/postgres_pgvector/DOCS.md). This provides persistent conversation memory and vector similarity search.
 
 [![Add add-on repository](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fgoruck%2Faddon-postgres-pgvector)
 
-> If the button doesn't work, add the repository manually: **Settings → Add-ons → Add-on Store → ⋮ → Repositories**, enter `https://github.com/goruck/addon-postgres-pgvector`, then search for and install `postgres_pgvector`.
+> If the button doesn't work, add the repository manually: **Settings → Apps → App Store → ⋮ → Repositories**, enter `https://github.com/goruck/addon-postgres-pgvector`, then search for and install `postgres_pgvector`.
 
 **2. Install Home Generative Agent from HACS.**
 
@@ -56,7 +56,7 @@ Click **+ Model Provider** on the integration page and configure at least one pr
 
 ---
 
-### Optional Add-ons
+### Optional Apps
 
 **Edge model server (Ollama or OpenAI-compatible)**
 
@@ -66,10 +66,12 @@ Run models locally for lower cost and latency.
 - Pull the recommended Ollama models:
 
   ```bash
-  ollama pull gpt-oss
-  ollama pull qwen3:8b
-  ollama pull qwen3-vl:8b
-  ollama pull mxbai-embed-large
+  ollama pull gpt-oss            # chat
+  ollama pull qwen3:8b           # chat (larger)
+  ollama pull qwen3:1.7b         # summarization (lighter)
+  ollama pull qwen3-vl:8b        # vision (VLM)
+  ollama pull qwen2.5vl:7b       # vision alternative
+  ollama pull mxbai-embed-large  # embeddings
   ```
 
 **Automation blueprints**

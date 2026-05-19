@@ -247,7 +247,7 @@ Internal dispatcher signals (most users will not need these directly — platfor
 
 ## Face Recognition
 
-Face recognition requires the optional [face-service](https://github.com/goruck/face-service) add-on. See [Installation — Optional Add-ons](installation.md#optional-add-ons) for setup.
+Face recognition requires the optional [face-service](https://github.com/goruck/face-service) external service. See [Installation — Optional Apps](installation.md#optional-apps) for setup.
 
 ### Enroll via Service
 
@@ -264,7 +264,7 @@ The file must be inside Home Assistant's `/media` folder so it is accessible to 
 
 ### Enroll via Dashboard Card
 
-After registering the `hga-enroll-card.js` resource (see [Installation](installation.md#optional-add-ons)), add the card to any dashboard:
+After registering the `hga-enroll-card.js` resource (see [Installation](installation.md#optional-apps)), add the card to any dashboard:
 
 ```yaml
 type: custom:hga-enroll-card
