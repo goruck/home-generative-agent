@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
 
@@ -55,6 +55,7 @@ class AnomalyFinding:
     evidence: dict[str, Any]
     suggested_actions: list[str]
     is_sensitive: bool
+    detected_at: datetime = field(default_factory=dt_util.utcnow)
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize the finding for storage/notifications."""
@@ -67,6 +68,7 @@ class AnomalyFinding:
             "evidence": _jsonify(self.evidence),
             "suggested_actions": list(self.suggested_actions),
             "is_sensitive": self.is_sensitive,
+            "detected_at": _as_iso(self.detected_at),
         }
 
 

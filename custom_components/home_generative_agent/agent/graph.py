@@ -72,7 +72,6 @@ from custom_components.home_generative_agent.const import (
 )
 
 from ..core.utils import extract_final  # noqa: TID252
-from .camera_activity import get_recent_camera_activity
 from .helpers import (
     format_tool,
     is_actuation_tool,
@@ -1288,9 +1287,8 @@ async def _retrieve_tools(
             fallback = live_context + non_actuation + actuation
         all_candidates = fallback[:limit]
 
-    # 3b. For read-only open-state queries, force-bind GetLiveContext and promote
-    # it to the front. RAG can otherwise miss it, leaving the prompt to require a
-    # tool that was not actually included in the model schema.
+    # 3b. For read-only open-state queries, force-bind GetLiveContext, promote
+    # it to the front, and drop actuation tools (they are not needed).
     if _query_is_read_only_open_state(query):
         all_candidates = [
             t
@@ -1306,6 +1304,17 @@ async def _retrieve_tools(
         live_ctx = [t for t in all_candidates if t["name"] == "GetLiveContext"]
         rest = [t for t in all_candidates if t["name"] != "GetLiveContext"]
         all_candidates = (live_ctx + rest)[: limit + 1]
+
+    # 3c. Always inject GetLiveContext if not already present. This ensures the
+    # model can evaluate any conditional clause, verify state before acting, and
+    # respond accurately regardless of phrasing. Step 3b already injects it for
+    # read-only open-state queries, so the deduplication check prevents doubling.
+    if not any(t["name"] == "GetLiveContext" for t in all_candidates):
+        fetched_live_ctx = await _get_tool_by_name(
+            store, config, "GetLiveContext", allowed_api_ids
+        )
+        if fetched_live_ctx is not None:
+            all_candidates = [*all_candidates, fetched_live_ctx]
 
     # 4. Format and deduplicate
     selected_tools, routing_map = _format_and_dedupe_tools(all_candidates)
@@ -1383,7 +1392,6 @@ async def _trim_messages_for_model(
 def _build_system_message(
     base_prompt: str,
     mems: list[Any],
-    camera_activity: list[Any],
     summary: str,
 ) -> str:
     """Compose the system message from the base prompt and retrieved context."""
@@ -1391,9 +1399,6 @@ def _build_system_message(
     if mems:
         formatted_mems = "\n".join(f"[{mem.key}]: {mem.value}" for mem in mems)
         system_message += f"\n<memories>\n{formatted_mems}\n</memories>"
-    if camera_activity:
-        ca = "\n".join(str(a) for a in camera_activity)
-        system_message += f"\n<recent_camera_activity>\n{ca}\n</recent_camera_activity>"
     if summary:
         system_message += (
             f"\n<past_conversation_summary>\n{summary}\n</past_conversation_summary>"
@@ -1477,12 +1482,9 @@ async def _call_model(
 
     mems = await _search_memories(store, user_id, query_prompt)
 
-    # Recent camera activity.
-    camera_activity = await get_recent_camera_activity(hass, store)
-
     # Build system message.
     system_message = _build_system_message(
-        conf["prompt"], mems, camera_activity, state.get("summary", "")
+        conf["prompt"], mems, state.get("summary", "")
     )
 
     # Model input = System + current messages.
