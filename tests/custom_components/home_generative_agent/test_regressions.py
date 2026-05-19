@@ -307,9 +307,6 @@ async def test_call_model_injects_done_fallback_after_empty_tool_response(
     async def _fake_invoke_model(*_args: object, **_kwargs: object) -> AIMessage:
         return empty_ai
 
-    async def _fake_camera(*_args: object, **_kwargs: object) -> list[object]:
-        return []
-
     async def _fake_trim(
         messages: list[object], *_args: object, **_kwargs: object
     ) -> list[object]:
@@ -319,7 +316,6 @@ async def test_call_model_injects_done_fallback_after_empty_tool_response(
     mock_store.asearch = AsyncMock(return_value=[])
 
     monkeypatch.setattr(agent_graph, "_invoke_model", _fake_invoke_model)
-    monkeypatch.setattr(agent_graph, "get_recent_camera_activity", _fake_camera)
     monkeypatch.setattr(agent_graph, "_trim_messages_for_model", _fake_trim)
 
     state: dict[str, object] = {
@@ -376,9 +372,6 @@ async def test_call_model_binds_tools_in_executor(
     async def _fake_invoke_model(*_args: object, **_kwargs: object) -> AIMessage:
         return AIMessage(content="ok")
 
-    async def _fake_camera(*_args: object, **_kwargs: object) -> list[object]:
-        return []
-
     async def _fake_trim(
         messages: list[object], *_args: object, **_kwargs: object
     ) -> list[object]:
@@ -410,7 +403,6 @@ async def test_call_model_binds_tools_in_executor(
     mock_store.asearch = AsyncMock(return_value=[])
 
     monkeypatch.setattr(agent_graph, "_invoke_model", _fake_invoke_model)
-    monkeypatch.setattr(agent_graph, "get_recent_camera_activity", _fake_camera)
     monkeypatch.setattr(agent_graph, "_trim_messages_for_model", _fake_trim)
 
     state: dict[str, object] = {

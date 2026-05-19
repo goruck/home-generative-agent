@@ -2,6 +2,43 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.11] - 2026-05-19
+
+### Changed
+
+- **GetLiveContext is now always injected into the tool candidate list** — the
+  previous approach used a regex to detect conditional clauses ("if", "when",
+  etc.) and only injected GetLiveContext when a match was found. This was brittle
+  and missed constructs like "while", "whenever", "assuming", and compound
+  queries. GetLiveContext is now added unconditionally whenever it is absent from
+  the candidate set; step 3b's deduplication prevents double-injection for
+  read-only open-state queries.
+
+- **Camera activity removed from the system prompt** — the agent was fetching
+  recent camera activity on every turn and injecting it into the system message
+  as a `<recent_camera_activity>` block. This caused the model to answer presence
+  queries from stale camera snapshots instead of calling `GetLiveContext` with
+  `domain=person` for authoritative state. The model now fetches camera data via
+  tool call only when it needs it.
+
+- **Sentinel action prompts include detection timestamp and alert-time evidence**
+  — both execute and handoff prompts now include the exact time the anomaly was
+  detected and a compact evidence summary, so the agent can explicitly acknowledge
+  whether the alert condition is still active or has already resolved. This
+  prevents the model from silently substituting current state for the original
+  alert context.
+
+- **`AnomalyFinding` now records its detection timestamp** — a `detected_at`
+  field (`datetime`, defaulting to `utcnow()`) is added to the dataclass and
+  serialized in `as_dict()`. Downstream consumers (audit trail, action prompts)
+  can now reference the precise detection time.
+
+### Fixed
+
+- **Removed global LangChain in-memory LLM cache** — `set_llm_cache(InMemoryCache())`
+  was called unconditionally at conversation entity setup. This has been removed;
+  caching is now left to LangChain's default behaviour (no global cache).
+
 ## [3.14.10] - 2026-05-17
 
 ### Fixed

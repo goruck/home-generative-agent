@@ -399,10 +399,15 @@ async def test_preview_rule_proposal_returns_current_trigger_state(hass) -> None
         },
     )
 
+    def _drop_timestamps(findings: list) -> list:
+        return [{k: v for k, v in f.items() if k != "detected_at"} for f in findings]
+
     assert response["status"] == "ok"
     assert response["would_trigger"] is True
     assert response["matching_entity_ids"] == ["lock.garage_door_lock"]
-    assert response["findings"] == [finding.as_dict() for finding in expected_findings]
+    assert _drop_timestamps(response["findings"]) == _drop_timestamps(
+        [finding.as_dict() for finding in expected_findings]
+    )
     assert registry.added_rules == []
 
 
