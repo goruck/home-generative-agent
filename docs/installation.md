@@ -11,11 +11,15 @@
 
 ### Required Steps
 
-**1. Install the PostgreSQL with pgvector add-on.**
+**1. Install the [PostgreSQL with pgvector](https://github.com/goruck/addon-postgres-pgvector/tree/main/postgres_pgvector) add-on.**
+
+> **Requires Home Assistant OS or Supervised** (add-ons are not available on HA Container or Core).
 
 Click the button below and configure it according to the [add-on documentation](https://github.com/goruck/addon-postgres-pgvector/blob/main/postgres_pgvector/DOCS.md). This provides persistent conversation memory and vector similarity search.
 
 [![Add add-on repository](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fgoruck%2Faddon-postgres-pgvector)
+
+> If the button doesn't work, add the repository manually: **Settings → Add-ons → Add-on Store → ⋮ → Repositories**, enter `https://github.com/goruck/addon-postgres-pgvector`, then search for and install `postgres_pgvector`.
 
 **2. Install Home Generative Agent from HACS.**
 
