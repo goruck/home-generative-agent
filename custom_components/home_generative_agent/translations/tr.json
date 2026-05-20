@@ -274,11 +274,15 @@
           "max_messages_in_context": "Sohbet bağlamındaki maksimum mesaj sayısı",
           "critical_action_pin_enabled": "Kritik eylemler için PIN zorunlu",
           "critical_action_pin": "Kritik eylem PIN’i (kilit açma/kurma/açma için gerekli)",
-          "schema_first_yaml": "YAML istekleri için şema-öncelikli JSON"
+          "schema_first_yaml": "YAML istekleri için şema-öncelikli JSON",
+          "stt_hallucination_patterns": "STT hayali desenler (içerir)",
+          "stt_hallucination_exact_patterns": "STT hayali desenler (tam eşleşme)"
         },
         "data_description": {
           "prompt": "LLM'in nasıl yanıt vermesi gerektiğini belirtin. Bu bir şablon olabilir.",
-          "schema_first_yaml": "Etkinleştirildiğinde, YAML istekleri YAML’ye çevrilecek sıkı JSON ile yanıtlanır."
+          "schema_first_yaml": "Etkinleştirildiğinde, YAML istekleri YAML'ye çevrilecek sıkı JSON ile yanıtlanır.",
+          "stt_hallucination_patterns": "Sessizce yok sayılacak alt dizeleri ekleyin (büyük/küçük harf duyarsız kısmi eşleşme). Yeni bir değer yazın ve eklemek için Enter'a basın. Kaldırmak için bir çipe tıklayın. Filtreyi devre dışı bırakmak için boş bırakın.",
+          "stt_hallucination_exact_patterns": "Sessizce yok sayılacak tam ifadeleri ekleyin (büyük/küçük harf duyarsız tam eşleşme). Tüm STT metni bu ifadeye eşit olmalıdır. Devre dışı bırakmak için boş bırakın."
         }
       }
     }

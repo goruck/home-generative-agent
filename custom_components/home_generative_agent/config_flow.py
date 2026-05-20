@@ -46,6 +46,8 @@ from .const import (
     CONF_NOTIFY_SERVICE,
     CONF_PROMPT,
     CONF_SCHEMA_FIRST_YAML,
+    CONF_STT_HALLUCINATION_EXACT_PATTERNS,
+    CONF_STT_HALLUCINATION_PATTERNS,
     CONF_TOOL_RELEVANCE_THRESHOLD,
     CONF_TOOL_RETRIEVAL_LIMIT,
     CONF_VIDEO_ANALYZER_MODE,
@@ -204,6 +206,28 @@ async def _schema_for_options(
             description={"suggested_value": opts.get(CONF_SCHEMA_FIRST_YAML, False)},
             default=opts.get(CONF_SCHEMA_FIRST_YAML, False),
         ): BooleanSelector(),
+        vol.Optional(
+            CONF_STT_HALLUCINATION_PATTERNS,
+            default=opts.get(CONF_STT_HALLUCINATION_PATTERNS, []),
+        ): SelectSelector(
+            SelectSelectorConfig(
+                options=[],
+                multiple=True,
+                custom_value=True,
+                mode=SelectSelectorMode.LIST,
+            )
+        ),
+        vol.Optional(
+            CONF_STT_HALLUCINATION_EXACT_PATTERNS,
+            default=opts.get(CONF_STT_HALLUCINATION_EXACT_PATTERNS, []),
+        ): SelectSelector(
+            SelectSelectorConfig(
+                options=[],
+                multiple=True,
+                custom_value=True,
+                mode=SelectSelectorMode.LIST,
+            )
+        ),
     }
 
     if opts.get(CONF_CRITICAL_ACTION_PIN_ENABLED, False):

@@ -62,7 +62,11 @@ from .const import (
     CONF_CRITICAL_ACTION_PIN_ENABLED,
     CONF_PROMPT,
     CONF_SCHEMA_FIRST_YAML,
+    CONF_STT_HALLUCINATION_EXACT_PATTERNS,
+    CONF_STT_HALLUCINATION_PATTERNS,
     CRITICAL_ACTION_PROMPT,
+    DEFAULT_STT_HALLUCINATION_EXACT_PATTERNS,
+    DEFAULT_STT_HALLUCINATION_PATTERNS,
     DOMAIN,
     LANGCHAIN_LOGGING_LEVEL,
     SCHEMA_FIRST_YAML_PROMPT,
@@ -453,6 +457,50 @@ def _nonstreaming_text(event: Mapping[str, Any]) -> str | None:
     ):
         return text
     return None
+
+
+def _get_stt_hallucination_patterns(options: dict[str, Any]) -> tuple[str, ...]:
+    """Parse STT substring-match patterns from options (list or legacy string)."""
+    raw = options.get(CONF_STT_HALLUCINATION_PATTERNS, DEFAULT_STT_HALLUCINATION_PATTERNS)
+    if isinstance(raw, list):
+        return tuple(p.strip().lower() for p in raw if isinstance(p, str) and p.strip())
+    if isinstance(raw, str):
+        if not raw:
+            return tuple()
+        # Normalise newlines to commas so users can type one pattern per line
+        raw = raw.replace("\n", ",")
+        return tuple(p.strip().lower() for p in raw.split(",") if p.strip())
+    return tuple()
+
+
+def _get_stt_hallucination_exact_patterns(options: dict[str, Any]) -> tuple[str, ...]:
+    """Parse STT exact-match patterns from options (list or legacy string)."""
+    raw = options.get(CONF_STT_HALLUCINATION_EXACT_PATTERNS, DEFAULT_STT_HALLUCINATION_EXACT_PATTERNS)
+    if isinstance(raw, list):
+        return tuple(p.strip().lower() for p in raw if isinstance(p, str) and p.strip())
+    if isinstance(raw, str):
+        if not raw:
+            return tuple()
+        raw = raw.replace("\n", ",")
+        return tuple(p.strip().lower() for p in raw.split(",") if p.strip())
+    return tuple()
+
+
+def _is_stt_hallucination(text: str | None, substring_patterns: tuple[str, ...], exact_patterns: tuple[str, ...]) -> bool:
+    """Return True if the text is a phantom STT transcription of noise.
+
+    Matches case-insensitive:
+      - substring_patterns: partial match ('sub' matches 'Subtitles')
+      - exact_patterns: full text must equal pattern (after lower-casing)
+    """
+    if not text:
+        return False
+    lowered = text.lower()
+    if any(pat in lowered for pat in substring_patterns):
+        return True
+    if any(lowered == pat for pat in exact_patterns):
+        return True
+    return False
 
 
 async def _stream_langgraph_to_ha(
@@ -1087,6 +1135,15 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 "Please enable 'Schema-first JSON for YAML requests' in "
                 "HGA's configuration and try again"
             )
+            return conversation.ConversationResult(
+                response=intent_response, conversation_id=conversation_id
+            )
+
+        # Silently drop phantom STT transcriptions of silence/background noise.
+        noise_patterns = _get_stt_hallucination_patterns(options)
+        exact_noise_patterns = _get_stt_hallucination_exact_patterns(options)
+        if _is_stt_hallucination(user_input.text, noise_patterns, exact_noise_patterns):
+            _LOGGER.debug("Ignoring hallucinated STT input: %s", user_input.text)
             return conversation.ConversationResult(
                 response=intent_response, conversation_id=conversation_id
             )

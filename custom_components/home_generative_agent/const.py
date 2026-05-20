@@ -113,6 +113,12 @@ CONF_PROMPT = "prompt"
 CONF_SCHEMA_FIRST_YAML = "schema_first_yaml"
 CONF_DISABLED_FEATURES = "disabled_features"
 
+# ---- STT hallucination filter (phantom transcriptions of silence/noise) ----
+CONF_STT_HALLUCINATION_PATTERNS = "stt_hallucination_patterns"
+CONF_STT_HALLUCINATION_EXACT_PATTERNS = "stt_hallucination_exact_patterns"
+DEFAULT_STT_HALLUCINATION_PATTERNS: list[str] = []
+DEFAULT_STT_HALLUCINATION_EXACT_PATTERNS: list[str] = []
+
 # ---- Audit store ----
 CONF_AUDIT_HOT_MAX_RECORDS = "audit_hot_max_records"
 CONF_AUDIT_ARCHIVAL_BACKLOG_MAX = "audit_archival_backlog_max"

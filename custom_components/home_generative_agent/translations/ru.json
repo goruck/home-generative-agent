@@ -141,9 +141,6 @@
       "abort": {
         "reconfigure_successful": "Sentinel configuration updated."
       },
-      "error": {
-        "invalid_camera_entry_links": "Must be a JSON object mapping camera entity IDs to lists of entry entity IDs, e.g. {{\"camera.driveway\": [\"lock.front_door\"]}}."
-      },
       "initiate_flow": {
         "reconfigure": "Reconfigure Sentinel",
         "user": "Configure Sentinel"
@@ -177,6 +174,9 @@
             "notify_service": "Sentinel Notify Service (optional)"
           }
         }
+      },
+      "error": {
+        "invalid_camera_entry_links": "Must be a JSON object mapping camera entity IDs to lists of entry entity IDs, e.g. {{\"camera.driveway\": [\"lock.front_door\"]}}."
       }
     },
     "feature": {
@@ -264,33 +264,33 @@
   "options": {
     "step": {
       "init": {
-        "title": "Home Generative Agent Options",
-        "description": "Configure global behavior and prompts.",
+        "title": "Настройки Home Generative Agent",
+        "description": "Настройка глобального поведения и подсказок.",
         "data": {
-          "face_api_url": "Face recognition API URL (optional)",
-          "prompt": "Instructions",
-          "llm_hass_api": "Control Home Assistant",
-          "video_analyzer_mode": "Video analyzer mode",
-          "notify_service": "Video Analyzer Notify Service (optional)",
-          "face_recognition": "Enable face recognition",
-          "manage_context_with_tokens": "Context management method",
-          "max_tokens_in_context": "Max tokens in chat context",
-          "max_messages_in_context": "Max messages in chat context",
-          "critical_action_pin_enabled": "Require critical action PIN",
-          "critical_action_pin": "Critical action PIN (required to unlock/arm/open sensitive devices)",
-          "schema_first_yaml": "Schema-first JSON for YAML requests",
-          "stt_hallucination_patterns": "STT hallucination patterns (contains)",
-          "stt_hallucination_exact_patterns": "STT hallucination patterns (exact match)",
-          "tool_retrieval_limit": "Tool retrieval limit",
-          "tool_relevance_threshold": "Tool relevance threshold"
+          "face_api_url": "URL API распознавания лиц (необязательно)",
+          "prompt": "Инструкции",
+          "llm_hass_api": "Управление Home Assistant",
+          "video_analyzer_mode": "Режим видеоанализатора",
+          "notify_service": "Служба уведомлений видеоанализатора (необязательно)",
+          "face_recognition": "Включить распознавание лиц",
+          "manage_context_with_tokens": "Метод управления контекстом",
+          "max_tokens_in_context": "Макс. токенов в контексте чата",
+          "max_messages_in_context": "Макс. сообщений в контексте чата",
+          "critical_action_pin_enabled": "Требовать PIN для критических действий",
+          "critical_action_pin": "PIN для критических действий (требуется для разблокировки/армирования/открытия)",
+          "schema_first_yaml": "Схема-First JSON для YAML-запросов",
+          "stt_hallucination_patterns": "STT паттерны-галлюцинации (вхождение)",
+          "stt_hallucination_exact_patterns": "STT паттерны-галлюцинации (точное совпадение)",
+          "tool_retrieval_limit": "Лимит извлечения инструментов",
+          "tool_relevance_threshold": "Порог релевантности инструментов"
         },
         "data_description": {
-          "prompt": "Instruct how the LLM should respond. This can be a template.",
-          "schema_first_yaml": "When enabled, YAML requests are answered with strict JSON that is converted to YAML.",
-          "stt_hallucination_patterns": "Add substrings to silently ignore (case-insensitive partial match). Type a new value and press Enter to add it. Click a chip to remove it. Leave empty to disable the filter.",
-          "stt_hallucination_exact_patterns": "Add full phrases to silently ignore (case-insensitive exact match). The entire STT text must equal this phrase. Leave empty to disable.",
-          "tool_retrieval_limit": "The maximum number of tools to retrieve based on semantic similarity to the user's query.",
-          "tool_relevance_threshold": "The minimum semantic similarity score (0.0 to 1.0) required for a tool to be retrieved."
+          "prompt": "Укажите, как LLM должен отвечать. Это может быть шаблон.",
+          "schema_first_yaml": "При включении YAML-запросы отвечаются строгим JSON, который преобразуется в YAML.",
+          "stt_hallucination_patterns": "Добавьте подстроки для автоматического игнорирования (регистронезависимое частичное совпадение). Введите значение и нажмите Enter, чтобы добавить. Нажмите на chip, чтобы удалить. Оставьте пустым, чтобы отключить фильтр.",
+          "stt_hallucination_exact_patterns": "Добавьте полные фразы для автоматического игнорирования (регистронезависимое точное совпадение). Весь STT-текст должен совпадать с фразой. Оставьте пустым, чтобы отключить.",
+          "tool_retrieval_limit": "Максимальное количество инструментов для извлечения на основе семантической близости к запросу пользователя.",
+          "tool_relevance_threshold": "Минимальный семантический коэффициент сходства (0,0 до 1,0) для извлечения инструмента."
         }
       }
     }
