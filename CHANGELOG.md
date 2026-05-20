@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.12] - 2026-05-19
+
+### Fixed
+
+- **Ambiguous entity name no longer loops the agent** — when multiple entities
+  share a friendly name (e.g. `binary_sensor.haustur` and `binary_sensor.haustur_2`
+  after a device is re-added), `get_entity_history` now silently picks the
+  canonical entity (no numeric `_N` suffix). If ambiguity cannot be resolved
+  this way, the tool returns `{"error": "..."}` so the LLM can report the
+  problem to the user instead of looping on an empty `{}` response (issue #414).
+
 ## [3.14.11] - 2026-05-19
 
 ### Changed
