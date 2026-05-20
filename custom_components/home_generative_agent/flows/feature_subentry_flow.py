@@ -36,6 +36,7 @@ from ..const import (  # noqa: TID252
     CONF_DB_NAME,
     CONF_DB_PARAMS,
     CONF_DISABLED_FEATURES,
+    CONF_FEATURE_FALLBACK_PROVIDER_IDS,
     CONF_FEATURE_MODEL,
     CONF_FEATURE_MODEL_CONTEXT_SIZE,
     CONF_FEATURE_MODEL_KEEPALIVE,
@@ -134,6 +135,28 @@ def _provider_type_for_id(entry: ConfigEntry, provider_id: str | None) -> str | 
     return subentry.data.get("provider_type")
 
 
+def _fallback_provider_options(
+    entry: ConfigEntry, category: str, primary_id: str | None
+) -> list[SelectOptionDict]:
+    """Return provider options excluding the primary."""
+    options: list[SelectOptionDict] = []
+    for subentry in entry.subentries.values():
+        if subentry.subentry_type != SUBENTRY_TYPE_MODEL_PROVIDER:
+            continue
+        if primary_id and subentry.subentry_id == primary_id:
+            continue
+        caps = set(subentry.data.get("capabilities") or [])
+        if caps and category not in caps:
+            continue
+        options.append(
+            SelectOptionDict(
+                label=subentry.title or subentry.subentry_id,
+                value=subentry.subentry_id,
+            )
+        )
+    return options
+
+
 def _default_model_data(category: str, provider_type: str | None) -> dict[str, Any]:
     spec = MODEL_CATEGORY_SPECS.get(category, {})
     defaults: dict[str, Any] = {}
@@ -210,14 +233,18 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
         provider_id: str | None,
         model_data: dict[str, Any],
         config_data: dict[str, Any],
+        fallback_provider_ids: list[str] | None = None,
     ) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "feature_type": feature_type,
             "name": FEATURE_DEFS[feature_type]["name"],
             "model_provider_id": provider_id,
             CONF_FEATURE_MODEL: model_data,
             "config": config_data,
         }
+        if fallback_provider_ids:
+            payload[CONF_FEATURE_FALLBACK_PROVIDER_IDS] = fallback_provider_ids
+        return payload
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -451,6 +478,9 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
         existing_model = dict(subentry.data.get(CONF_FEATURE_MODEL, {}))
         existing_config = dict(subentry.data.get("config", {}))
         existing_provider_id = subentry.data.get("model_provider_id")
+        existing_fallback_ids = list(
+            subentry.data.get(CONF_FEATURE_FALLBACK_PROVIDER_IDS) or []
+        )
 
         provider_notice = ""
         if not provider_opts:
@@ -491,6 +521,7 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
             and self._pending_provider_id != existing_provider_id
         ):
             existing_model = {}
+            existing_fallback_ids = []
         provider_type = _provider_type_for_id(entry, provider_id)
         defaults = _default_model_data(category or "", provider_type)
 
@@ -514,6 +545,12 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
                     self._ollama_model_cache[ollama_url] = cached
                 if cached:
                     model_options = cached
+        fallback_opts = _fallback_provider_options(entry, category or "", provider_id)
+        fallback_defaults = [
+            fid
+            for fid in existing_fallback_ids
+            if any(opt["value"] == fid for opt in fallback_opts)
+        ]
         schema: dict[Any, Any] = {
             vol.Required(
                 CONF_FEATURE_MODEL_NAME,
@@ -528,6 +565,21 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
                 )
             ),
         }
+        if fallback_opts:
+            schema[
+                vol.Optional(
+                    CONF_FEATURE_FALLBACK_PROVIDER_IDS,
+                    default=fallback_defaults,
+                )
+            ] = SelectSelector(
+                SelectSelectorConfig(
+                    options=fallback_opts,
+                    mode=SelectSelectorMode.LIST,
+                    sort=False,
+                    custom_value=False,
+                    multiple=True,
+                )
+            )
 
         temp_default = existing_model.get(
             CONF_FEATURE_MODEL_TEMPERATURE
@@ -617,9 +669,21 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
                 }
             )
             model_data = {k: v for k, v in model_data.items() if v is not None}
+            fallback_ids = user_input.get(CONF_FEATURE_FALLBACK_PROVIDER_IDS) or []
+            if fallback_ids and not isinstance(fallback_ids, list):
+                fallback_ids = [str(fallback_ids)]
+            fallback_ids = [
+                fid
+                for fid in fallback_ids
+                if any(opt["value"] == fid for opt in fallback_opts)
+            ]
 
             payload = self._feature_payload(
-                feature_type, provider_id, model_data, existing_config
+                feature_type,
+                provider_id,
+                model_data,
+                existing_config,
+                fallback_provider_ids=fallback_ids,
             )
             self.hass.config_entries.async_update_subentry(  # type: ignore[attr-defined]
                 entry, subentry, data=payload, title=FEATURE_DEFS[feature_type]["name"]
