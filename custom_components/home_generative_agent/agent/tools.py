@@ -372,22 +372,23 @@ async def analyze_image(
     await asyncio.sleep(0)  # keep the event loop snappy
 
     image_data = base64.b64encode(image).decode("utf-8")
-    chain = _prompt_func | vlm_model
 
     if detection_keywords is not None:
         prompt = VLM_USER_KW_TEMPLATE.format(key_words=" or ".join(detection_keywords))
     else:
         prompt = VLM_USER_PROMPT
 
+    messages = _prompt_func(
+        {
+            "system": VLM_SYSTEM_PROMPT,
+            "text": prompt,
+            "image": image_data,
+            "prev_text": prev_text,
+        }
+    )
+
     try:
-        resp = await chain.ainvoke(
-            {
-                "system": VLM_SYSTEM_PROMPT,
-                "text": prompt,
-                "image": image_data,
-                "prev_text": prev_text,
-            }
-        )
+        resp = await vlm_model.ainvoke(messages)
     except HomeAssistantError:
         msg = "Error analyzing image with VLM model."
         LOGGER.exception(msg)

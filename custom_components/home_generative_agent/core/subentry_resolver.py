@@ -22,6 +22,7 @@ from ..const import (  # noqa: TID252
     CONF_DB_URI,
     CONF_EMBEDDING_MODEL_PROVIDER,
     CONF_EXPLAIN_ENABLED,
+    CONF_FEATURE_FALLBACK_PROVIDER_IDS,
     CONF_FEATURE_MODEL,
     CONF_FEATURE_MODEL_CONTEXT_SIZE,
     CONF_FEATURE_MODEL_KEEPALIVE,
@@ -556,6 +557,12 @@ def resolve_model_provider_configs(
 def _feature_from_subentry(subentry: ConfigSubentry) -> FeatureConfig:
     """Convert a stored feature subentry to a dataclass."""
     data = dict(subentry.data)
+    fallback_ids = data.get(CONF_FEATURE_FALLBACK_PROVIDER_IDS)
+    if fallback_ids and isinstance(fallback_ids, list):
+        fallback_provider_ids = [str(fid) for fid in fallback_ids]
+    else:
+        fallback_provider_ids = None
+
     return FeatureConfig(
         entry_id=subentry.subentry_id,
         name=data.get("name") or subentry.title,
@@ -563,6 +570,7 @@ def _feature_from_subentry(subentry: ConfigSubentry) -> FeatureConfig:
         model_provider_id=data.get("model_provider_id"),
         model=dict(data.get(CONF_FEATURE_MODEL, {})),
         config=dict(data.get("config", {})),
+        fallback_provider_ids=fallback_provider_ids,
     )
 
 
@@ -858,3 +866,50 @@ def resolve_runtime_options(entry: ConfigEntry) -> dict[str, Any]:
             )
 
     return options
+
+
+def resolve_fallback_chains(
+    entry: ConfigEntry,
+    providers: Mapping[str, ModelProviderConfig],
+    options: Mapping[str, Any],
+) -> dict[str, list[ModelProviderConfig]]:
+    """
+    Return {category: [primary, fallback1, ...]} for each model category.
+
+    Uses explicit fallback_provider_ids from feature subentries when available,
+    otherwise builds an automatic chain from remaining capable providers.
+    """
+    features = resolve_feature_configs(entry, providers, options)
+    providers_by_id = dict(providers)
+
+    chains: dict[str, list[ModelProviderConfig]] = {}
+
+    for feature in features.values():
+        cat = FEATURE_CATEGORY_MAP.get(feature.feature_type)
+        if not cat:
+            continue
+        primary = providers_by_id.get(feature.model_provider_id or "")
+        if not primary:
+            continue
+        chain = [primary]
+        for fb_id in (feature.fallback_provider_ids or []):
+            fb = providers_by_id.get(fb_id)
+            if fb and fb.entry_id != primary.entry_id and cat in fb.capabilities:
+                chain.append(fb)
+        chains[cat] = chain
+
+    # Auto-build for legacy configs or categories without explicit fallbacks
+    for cat in ("chat", "vlm", "summarization", "embedding"):
+        if cat in chains:
+            continue
+        primary: ModelProviderConfig | None = None
+        for provider in providers_by_id.values():
+            if cat in provider.capabilities:
+                if primary is None:
+                    primary = provider
+                elif provider.entry_id != primary.entry_id:
+                    chains.setdefault(cat, [primary]).append(provider)
+        if cat not in chains and primary is not None:
+            chains[cat] = [primary]
+
+    return chains

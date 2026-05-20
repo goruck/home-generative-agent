@@ -43,8 +43,6 @@ if TYPE_CHECKING:
     )
 
     from homeassistant.core import HomeAssistant
-    from langchain_ollama import OllamaEmbeddings
-    from langchain_openai import OpenAIEmbeddings
 
 
 LOGGER = logging.getLogger(__name__)
@@ -481,7 +479,7 @@ async def run_sentinel_model_call(  # noqa: PLR0913
 
 
 async def generate_embeddings(
-    emb: OpenAIEmbeddings | OllamaEmbeddings | GoogleGenerativeAIEmbeddings,
+    emb: Any,
     texts: Sequence[str],
 ) -> list[list[float]]:
     """

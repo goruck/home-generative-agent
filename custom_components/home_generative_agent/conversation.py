@@ -459,35 +459,53 @@ def _nonstreaming_text(event: Mapping[str, Any]) -> str | None:
     return None
 
 
-def _get_stt_hallucination_patterns(options: dict[str, Any]) -> tuple[str, ...]:
+def _get_stt_hallucination_patterns(
+    options: dict[str, Any],
+) -> tuple[str, ...]:
     """Parse STT substring-match patterns from options (list or legacy string)."""
-    raw = options.get(CONF_STT_HALLUCINATION_PATTERNS, DEFAULT_STT_HALLUCINATION_PATTERNS)
+    raw = options.get(
+        CONF_STT_HALLUCINATION_PATTERNS, DEFAULT_STT_HALLUCINATION_PATTERNS
+    )
     if isinstance(raw, list):
-        return tuple(p.strip().lower() for p in raw if isinstance(p, str) and p.strip())
+        return tuple(
+            p.strip().lower() for p in raw if isinstance(p, str) and p.strip()
+        )
     if isinstance(raw, str):
         if not raw:
-            return tuple()
+            return ()
         # Normalise newlines to commas so users can type one pattern per line
         raw = raw.replace("\n", ",")
         return tuple(p.strip().lower() for p in raw.split(",") if p.strip())
-    return tuple()
+    return ()
 
 
-def _get_stt_hallucination_exact_patterns(options: dict[str, Any]) -> tuple[str, ...]:
+def _get_stt_hallucination_exact_patterns(
+    options: dict[str, Any],
+) -> tuple[str, ...]:
     """Parse STT exact-match patterns from options (list or legacy string)."""
-    raw = options.get(CONF_STT_HALLUCINATION_EXACT_PATTERNS, DEFAULT_STT_HALLUCINATION_EXACT_PATTERNS)
+    raw = options.get(
+        CONF_STT_HALLUCINATION_EXACT_PATTERNS,
+        DEFAULT_STT_HALLUCINATION_EXACT_PATTERNS,
+    )
     if isinstance(raw, list):
-        return tuple(p.strip().lower() for p in raw if isinstance(p, str) and p.strip())
+        return tuple(
+            p.strip().lower() for p in raw if isinstance(p, str) and p.strip()
+        )
     if isinstance(raw, str):
         if not raw:
-            return tuple()
+            return ()
         raw = raw.replace("\n", ",")
         return tuple(p.strip().lower() for p in raw.split(",") if p.strip())
-    return tuple()
+    return ()
 
 
-def _is_stt_hallucination(text: str | None, substring_patterns: tuple[str, ...], exact_patterns: tuple[str, ...]) -> bool:
-    """Return True if the text is a phantom STT transcription of noise.
+def _is_stt_hallucination(
+    text: str | None,
+    substring_patterns: tuple[str, ...],
+    exact_patterns: tuple[str, ...],
+) -> bool:
+    """
+    Determine whether the text is a phantom STT transcription of noise.
 
     Matches case-insensitive:
       - substring_patterns: partial match ('sub' matches 'Subtitles')
@@ -496,11 +514,9 @@ def _is_stt_hallucination(text: str | None, substring_patterns: tuple[str, ...],
     if not text:
         return False
     lowered = text.lower()
-    if any(pat in lowered for pat in substring_patterns):
-        return True
-    if any(lowered == pat for pat in exact_patterns):
-        return True
-    return False
+    return any(pat in lowered for pat in substring_patterns) or any(
+        lowered == pat for pat in exact_patterns
+    )
 
 
 async def _stream_langgraph_to_ha(
@@ -1023,40 +1039,68 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             # If streaming ended without committing a final AssistantContent
             # (e.g. the generator raised before the last LLM turn), recover the
             # final AIMessage from the graph state so the caller can return it.
-            if not isinstance(
-                chat_log.content[-1] if chat_log.content else None,
-                conversation.AssistantContent,
+            # Also replace partial streaming content when a model fallback
+            # produced a different final response (mid-stream fallback).
+            messages = final_state.values.get("messages", [])
+            recovered_content = (
+                _normalize_ai_content(messages[-1].content)
+                if messages and isinstance(messages[-1], AIMessage)
+                else None
+            )
+            last_chat_content = (
+                chat_log.content[-1] if chat_log.content else None
+            )
+            replace_partial = (
+                isinstance(last_chat_content, conversation.AssistantContent)
+                and recovered_content is not None
+                and last_chat_content.content != recovered_content
+            )
+            add_recovered = (
+                not isinstance(last_chat_content, conversation.AssistantContent)
+                and recovered_content is not None
+            )
+            if replace_partial:
+                chat_log.content.pop()
+                chat_log.async_add_assistant_content_without_tools(
+                    conversation.AssistantContent(
+                        agent_id=self.entity_id,
+                        content=recovered_content,
+                    )
+                )
+                _LOGGER.debug(
+                    "Replaced partial streaming content with fallback "
+                    "response from graph state."
+                )
+            elif add_recovered:
+                chat_log.async_add_assistant_content_without_tools(
+                    conversation.AssistantContent(
+                        agent_id=self.entity_id,
+                        content=recovered_content,
+                    )
+                )
+                _LOGGER.debug(
+                    "Recovered final AssistantContent from graph state after "
+                    "streaming failure."
+                )
+            elif not isinstance(
+                last_chat_content, conversation.AssistantContent
             ):
-                messages = final_state.values.get("messages", [])
-                if messages and isinstance(messages[-1], AIMessage):
-                    final_msg = messages[-1]
-                    chat_log.async_add_assistant_content_without_tools(
-                        conversation.AssistantContent(
-                            agent_id=self.entity_id,
-                            content=_normalize_ai_content(final_msg.content),
-                        )
+                # Graph state has no usable AI response (e.g. model timed out
+                # before generating a reply). Emit a user-visible error message
+                # so the chat UI shows something instead of a blank bubble.
+                chat_log.async_add_assistant_content_without_tools(
+                    conversation.AssistantContent(
+                        agent_id=self.entity_id,
+                        content=(
+                            "I'm sorry, I was unable to respond in time. "
+                            "Please try again."
+                        ),
                     )
-                    _LOGGER.debug(
-                        "Recovered final AssistantContent from graph state after "
-                        "streaming failure."
-                    )
-                else:
-                    # Graph state has no usable AI response (e.g. model timed out
-                    # before generating a reply). Emit a user-visible error message
-                    # so the chat UI shows something instead of a blank bubble.
-                    chat_log.async_add_assistant_content_without_tools(
-                        conversation.AssistantContent(
-                            agent_id=self.entity_id,
-                            content=(
-                                "I'm sorry, I was unable to respond in time. "
-                                "Please try again."
-                            ),
-                        )
-                    )
-                    _LOGGER.debug(
-                        "Added fallback AssistantContent after streaming failure "
-                        "with no recoverable graph state."
-                    )
+                )
+                _LOGGER.debug(
+                    "Added fallback AssistantContent after streaming failure "
+                    "with no recoverable graph state."
+                )
         except ValueError:
             # Expected when no checkpointer is configured (e.g. tests)
             _LOGGER.debug("aget_state unavailable; skipping trace for streaming turn.")

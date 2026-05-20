@@ -149,6 +149,9 @@ from .const import (
     DOMAIN,
     EMBEDDING_MODEL_CTX,
     EMBEDDING_MODEL_DIMS,
+    FALLBACK_CIRCUIT_BREAKER_COOLDOWN_SECONDS,
+    FALLBACK_CIRCUIT_BREAKER_THRESHOLD,
+    FALLBACK_CIRCUIT_BREAKER_WINDOW_SECONDS,
     FEATURE_CATEGORY_MAP,
     FEATURE_NAMES,
     HGA_CARD_STATIC_PATH,
@@ -225,6 +228,12 @@ from .const import (
     VLM_TOP_P,
 )
 from .core.db_utils import parse_postgres_uri
+from .core.fallback import (
+    CircuitBreaker,
+    FallbackChatModel,
+    FallbackEmbeddings,
+    FallbackVLM,
+)
 from .core.migrations import migrate_person_gallery
 from .core.person_gallery import PersonGalleryDAO
 from .core.runtime import HGAConfigEntry, HGAData
@@ -233,6 +242,7 @@ from .core.subentry_resolver import (
     build_model_deployments,
     legacy_feature_configs,
     legacy_model_provider_configs,
+    resolve_fallback_chains,
     resolve_model_provider_configs,
     resolve_runtime_options,
 )
@@ -1284,6 +1294,36 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     conf = dict(options)
     providers = resolve_model_provider_configs(entry, options)
     model_deployments = build_model_deployments(entry, providers, options)
+    fallback_chains = resolve_fallback_chains(entry, providers, options)
+
+    _fallback_cb = CircuitBreaker(
+        threshold=FALLBACK_CIRCUIT_BREAKER_THRESHOLD,
+        window_seconds=FALLBACK_CIRCUIT_BREAKER_WINDOW_SECONDS,
+        cooldown_seconds=FALLBACK_CIRCUIT_BREAKER_COOLDOWN_SECONDS,
+    )
+
+    def _model_instance_for_provider(provider: Any) -> Any:
+        """Map a ModelProviderConfig to the initialized LangChain instance."""
+        pt = provider.provider_type
+        if pt == "openai":
+            return openai_provider
+        if pt == "openai_compatible":
+            return openai_compatible_provider
+        if pt == "gemini":
+            return gemini_provider
+        if pt == "anthropic":
+            return anthropic_provider
+        if pt == "ollama":
+            settings = provider.data.get("settings", {})
+            url = (
+                settings.get("base_url")
+                or settings.get("chat_url")
+                or settings.get("vlm_url")
+                or settings.get("summarization_url")
+                or RECOMMENDED_OLLAMA_URL
+            )
+            return ollama_providers.get(url)
+        return None
     api_key = conf.get(CONF_API_KEY) or _provider_api_key(providers, "openai")
     openai_secret = SecretStr(api_key) if api_key else None
     gemini_key = conf.get(CONF_GEMINI_API_KEY) or _provider_api_key(providers, "gemini")
@@ -1531,10 +1571,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 "OpenAI-compatible embeddings init failed; continuing without them."
             )
 
-    # Choose active embedding provider
-    embedding_model: (
-        OpenAIEmbeddings | OllamaEmbeddings | GoogleGenerativeAIEmbeddings | None
-    ) = None
+    # Choose active embedding provider and build fallback chain
+    embedding_model: Any = None
     embedding_provider = options.get(
         CONF_EMBEDDING_MODEL_PROVIDER, RECOMMENDED_EMBEDDING_MODEL_PROVIDER
     )
@@ -1547,6 +1585,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         embedding_model = gemini_embeddings
     else:
         embedding_model = ollama_embeddings
+
+    # Wrap embedding model with fallback if multiple providers available
+    _emb_chain = [
+        (m, p.deployment, p.entry_id)
+        for p in fallback_chains.get("embedding", [])
+        if (m := _model_instance_for_provider(p)) is not None
+    ]
+    if len(_emb_chain) > 1:
+        embedding_model = FallbackEmbeddings(_emb_chain, circuit_breaker=_fallback_cb)
+    elif _emb_chain:
+        embedding_model = _emb_chain[0][0]
+    else:
+        embedding_model = None
 
     if embedding_model is None:
         LOGGER.warning(
@@ -1909,6 +1960,45 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 }
             }
         )
+
+    # ----- Wrap chat / VLM / summarization with fallback chains -----
+    _chat_chain = [
+        (m, p.deployment, p.entry_id)
+        for p in fallback_chains.get("chat", [])
+        if (m := _model_instance_for_provider(p)) is not None
+    ]
+    if len(_chat_chain) > 1:
+        chat_model = FallbackChatModel(_chat_chain, circuit_breaker=_fallback_cb)
+    elif _chat_chain:
+        chat_model = _chat_chain[0][0]
+    else:
+        chat_model = NullChat()
+
+    _vlm_chain = [
+        (m, p.deployment, p.entry_id)
+        for p in fallback_chains.get("vlm", [])
+        if (m := _model_instance_for_provider(p)) is not None
+    ]
+    if len(_vlm_chain) > 1:
+        vision_model = FallbackVLM(_vlm_chain, circuit_breaker=_fallback_cb)
+    elif _vlm_chain:
+        vision_model = _vlm_chain[0][0]
+    else:
+        vision_model = NullChat()
+
+    _sum_chain = [
+        (m, p.deployment, p.entry_id)
+        for p in fallback_chains.get("summarization", [])
+        if (m := _model_instance_for_provider(p)) is not None
+    ]
+    if len(_sum_chain) > 1:
+        summarization_model = FallbackChatModel(
+            _sum_chain, circuit_breaker=_fallback_cb
+        )
+    elif _sum_chain:
+        summarization_model = _sum_chain[0][0]
+    else:
+        summarization_model = NullChat()
 
     video_analyzer = VideoAnalyzer(hass, entry)
     suppression = SuppressionManager(hass)

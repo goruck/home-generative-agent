@@ -292,6 +292,16 @@ CONF_FEATURE_MODEL_REASONING = "reasoning"
 CONF_FEATURE_MODEL_KEEPALIVE = "keepalive_s"
 CONF_FEATURE_MODEL_CONTEXT_SIZE = "context_size"
 
+# ---- Fallback configuration ----
+CONF_FEATURE_FALLBACK_PROVIDER_IDS = "fallback_provider_ids"
+CONF_FALLBACK_ALERT_ENABLED = "fallback_alert_enabled"
+RECOMMENDED_FALLBACK_ALERT_ENABLED: bool = False
+
+# Circuit breaker defaults
+FALLBACK_CIRCUIT_BREAKER_THRESHOLD: int = 3
+FALLBACK_CIRCUIT_BREAKER_WINDOW_SECONDS: float = 60.0
+FALLBACK_CIRCUIT_BREAKER_COOLDOWN_SECONDS: float = 120.0
+
 # --- Gemini API key (used in config_flow/__init__.py) ---
 CONF_GEMINI_API_KEY = "gemini_api_key"
 
