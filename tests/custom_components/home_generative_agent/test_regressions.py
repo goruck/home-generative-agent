@@ -44,6 +44,50 @@ history_tool = cast(
 )
 
 
+# ---------------------------------------------------------------------------
+# _get_existing_entity_id — issue #414: ambiguous friendly name disambiguation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_existing_entity_id_prefers_canonical_over_numbered_duplicate(
+    hass: HomeAssistant,
+) -> None:
+    """_get_existing_entity_id picks the un-suffixed entity when a _N duplicate exists (issue #414)."""
+    hass.states.async_set("binary_sensor.haustur", "off", {"friendly_name": "Haustür"})
+    hass.states.async_set(
+        "binary_sensor.haustur_2", "off", {"friendly_name": "Haustür"}
+    )
+
+    result = await agent_tools._get_existing_entity_id("Haustür", hass, "binary_sensor")
+    assert result == "binary_sensor.haustur"
+
+
+@pytest.mark.asyncio
+async def test_get_entity_history_returns_error_dict_on_genuinely_ambiguous_entity(
+    hass: HomeAssistant,
+) -> None:
+    """get_entity_history returns {"error": ...} when the entity name is genuinely ambiguous (issue #414)."""
+    hass.states.async_set(
+        "binary_sensor.front_door_a", "off", {"friendly_name": "Front Door"}
+    )
+    hass.states.async_set(
+        "binary_sensor.front_door_b", "off", {"friendly_name": "Front Door"}
+    )
+
+    config = {"configurable": {"hass": hass}}
+    result = await history_tool(
+        ["Front Door"],
+        ["binary_sensor"],
+        "2025-01-01T00:00:00+0000",
+        "2025-01-02T00:00:00+0000",
+        config=config,
+    )
+
+    assert "error" in result
+    assert "Front Door" in result["error"]
+
+
 @pytest.mark.asyncio
 async def test_get_entity_history_pairs_zip_warns(
     hass: HomeAssistant,
