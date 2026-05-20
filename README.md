@@ -39,6 +39,14 @@ A [Home Assistant](https://www.home-assistant.io/) integration that brings a gen
 
 ![Proactive notification](./assets/proactive-notification.png)
 
+### Real-time camera alert mobile device notifications
+
+![camera alert notification](./assets/camera-alert-example-lindo-cat.png)
+
+### Anomaly detection notification
+
+![fridge power notification](./assets/sentinel-fridge-power-notification.png)
+
 ## Requirements
 
 | Requirement | Notes |
