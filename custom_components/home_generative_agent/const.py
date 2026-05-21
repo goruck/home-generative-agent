@@ -294,8 +294,6 @@ CONF_FEATURE_MODEL_CONTEXT_SIZE = "context_size"
 
 # ---- Fallback configuration ----
 CONF_FEATURE_FALLBACK_PROVIDER_IDS = "fallback_provider_ids"
-CONF_FALLBACK_ALERT_ENABLED = "fallback_alert_enabled"
-RECOMMENDED_FALLBACK_ALERT_ENABLED: bool = False
 
 # Circuit breaker defaults
 FALLBACK_CIRCUIT_BREAKER_THRESHOLD: int = 3

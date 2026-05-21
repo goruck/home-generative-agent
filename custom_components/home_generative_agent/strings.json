@@ -217,11 +217,14 @@
           "description": "Configure model settings for this feature. {provider_notice}",
           "data": {
             "model_name": "Model",
-            "fallback_provider_ids": "Fallback providers (ordered)",
+            "fallback_provider_ids": "Fallback providers",
             "temperature": "Temperature",
             "keepalive_s": "Ollama keepalive (seconds or Never unload (-1))",
             "context_size": "Ollama context size (tokens)",
             "reasoning": "Ollama reasoning"
+          },
+          "data_description": {
+            "fallback_provider_ids": "Ordered list of fallback providers. The first available provider is used if the primary fails."
           }
         },
         "database": {

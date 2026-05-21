@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from time import monotonic
 from typing import TYPE_CHECKING, Any
@@ -54,6 +53,11 @@ def _is_retryable(err: Exception) -> bool:
     )
 
 
+def _safe_err_summary(err: Exception) -> str:
+    """Return a truncated, safe error string for logging."""
+    return f"{type(err).__name__}: {str(err)[:200]}"
+
+
 class CircuitBreaker:
     """Simple in-memory circuit breaker for model providers."""
 
@@ -103,18 +107,19 @@ def _default_alert(
     provider_id: str, err: Exception, *, fallback_to: str | None = None
 ) -> None:
     """Default alert callback that logs a warning."""
+    summary = _safe_err_summary(err)
     if fallback_to:
         LOGGER.warning(
             "Fallback activated: provider %s failed (%s), switching to %s",
             provider_id,
-            err,
+            summary,
             fallback_to,
         )
     else:
         LOGGER.error(
             "All providers failed. Last provider %s error: %s",
             provider_id,
-            err,
+            summary,
         )
 
 
@@ -210,7 +215,7 @@ class FallbackChatModel:
                     provider_id,
                     i + 1,
                     len(self.chain),
-                    err,
+                    _safe_err_summary(err),
                 )
                 if self.circuit_breaker:
                     self.circuit_breaker.record_failure(provider_id)
@@ -227,7 +232,7 @@ class FallbackChatModel:
                     self.circuit_breaker.record_success(provider_id)
                 return result
 
-        msg = f"All LLM providers failed. Last error: {last_err}"
+        msg = f"All LLM providers failed. Last error: {_safe_err_summary(last_err)}"
         raise HomeAssistantError(msg) from last_err
 
     async def astream(
@@ -255,7 +260,7 @@ class FallbackChatModel:
                     provider_id,
                     i + 1,
                     len(self.chain),
-                    err,
+                    _safe_err_summary(err),
                 )
                 if self.circuit_breaker:
                     self.circuit_breaker.record_failure(provider_id)
@@ -270,7 +275,7 @@ class FallbackChatModel:
             else:
                 return
 
-        msg = f"All LLM providers failed. Last error: {last_err}"
+        msg = f"All LLM providers failed. Last error: {_safe_err_summary(last_err)}"
         raise HomeAssistantError(msg) from last_err
 
 
@@ -310,13 +315,13 @@ class FallbackVLM:
                     provider_id,
                     i + 1,
                     len(self.chain),
-                    err,
+                    _safe_err_summary(err),
                 )
                 if self.circuit_breaker:
                     self.circuit_breaker.record_failure(provider_id)
                 continue
 
-        msg = f"All VLM providers failed. Last error: {last_err}"
+        msg = f"All VLM providers failed. Last error: {_safe_err_summary(last_err)}"
         raise HomeAssistantError(msg) from last_err
 
 
@@ -351,13 +356,16 @@ class FallbackEmbeddings:
                     provider_id,
                     i + 1,
                     len(self.chain),
-                    err,
+                    _safe_err_summary(err),
                 )
                 if self.circuit_breaker:
                     self.circuit_breaker.record_failure(provider_id)
                 continue
 
-        msg = f"All embedding providers failed. Last error: {last_err}"
+        msg = (
+            f"All embedding providers failed. Last error: "
+            f"{_safe_err_summary(last_err)}"
+        )
         raise HomeAssistantError(msg) from last_err
 
     async def aembed_query(self, text: str) -> list[float]:
@@ -379,19 +387,24 @@ class FallbackEmbeddings:
                     provider_id,
                     i + 1,
                     len(self.chain),
-                    err,
+                    _safe_err_summary(err),
                 )
                 if self.circuit_breaker:
                     self.circuit_breaker.record_failure(provider_id)
                 continue
 
-        msg = f"All embedding providers failed. Last error: {last_err}"
+        msg = (
+            f"All embedding providers failed. Last error: "
+            f"{_safe_err_summary(last_err)}"
+        )
         raise HomeAssistantError(msg) from last_err
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        """Run synchronous document embedding via the async fallback chain."""
-        return asyncio.run(self.aembed_documents(texts))
+        """Raise: synchronous embedding is not supported in async HA context."""
+        msg = "Use aembed_documents in async context"
+        raise NotImplementedError(msg)
 
     def embed_query(self, text: str) -> list[float]:
-        """Run synchronous query embedding via the async fallback chain."""
-        return asyncio.run(self.aembed_query(text))
+        """Raise: synchronous embedding is not supported in async HA context."""
+        msg = "Use aembed_query in async context"
+        raise NotImplementedError(msg)
