@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -194,7 +195,9 @@ async def test_fallback_embeddings_primary_succeeds() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fallback_embeddings_primary_fails() -> None:
+async def test_fallback_embeddings_primary_fails(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Embedding fallback used when primary fails."""
     primary = AsyncMock()
     primary.aembed_documents.side_effect = ConnectionError("emb down")
@@ -202,8 +205,13 @@ async def test_fallback_embeddings_primary_fails() -> None:
     fallback.aembed_documents.return_value = [[0.3, 0.4]]
 
     emb = FallbackEmbeddings(chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")])
+    caplog.set_level(logging.WARNING)
     result = await emb.aembed_documents(["hello"])
     assert result == [[0.3, 0.4]]
+    assert (
+        "Embedding fallback activated: provider p2 succeeded after failed "
+        "provider(s): p1"
+    ) in caplog.text
 
 
 @pytest.mark.asyncio
@@ -258,6 +266,25 @@ async def test_fallback_chat_circuit_breaker_skips_broken() -> None:
     result = await model.ainvoke(["hello"])
     assert result.content == "fallback"
     primary.ainvoke.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fallback_chat_all_circuit_broken_reports_no_provider() -> None:
+    """All-skipped providers should raise a clean HomeAssistantError."""
+    primary = AsyncMock()
+    fallback = AsyncMock()
+    cb = CircuitBreaker(threshold=1, window_seconds=10, cooldown_seconds=60)
+    cb.record_failure("p1")
+    cb.record_failure("p2")
+
+    model = FallbackChatModel(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")],
+        circuit_breaker=cb,
+    )
+    with pytest.raises(HomeAssistantError, match="No provider was available"):
+        await model.ainvoke(["hello"])
+    primary.ainvoke.assert_not_awaited()
+    fallback.ainvoke.assert_not_awaited()
 
 
 @pytest.mark.asyncio

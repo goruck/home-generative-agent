@@ -53,8 +53,10 @@ def _is_retryable(err: Exception) -> bool:
     )
 
 
-def _safe_err_summary(err: Exception) -> str:
+def _safe_err_summary(err: Exception | None) -> str:
     """Return a truncated, safe error string for logging."""
+    if err is None:
+        return "No provider was available"
     return f"{type(err).__name__}: {str(err)[:200]}"
 
 
@@ -79,9 +81,7 @@ class CircuitBreaker:
         now = monotonic()
         self._failures.setdefault(provider_id, []).append(now)
         self._failures[provider_id] = [
-            t
-            for t in self._failures[provider_id]
-            if now - t <= self.window_seconds
+            t for t in self._failures[provider_id] if now - t <= self.window_seconds
         ]
         if len(self._failures[provider_id]) >= self.threshold:
             self._disabled_until[provider_id] = now + self.cooldown_seconds
@@ -340,17 +340,19 @@ class FallbackEmbeddings:
     async def aembed_documents(self, texts: list[str]) -> list[list[float]]:
         """Embed documents through the fallback chain."""
         last_err: Exception | None = None
+        failed_providers: list[str] = []
         for i, (model, _deployment, provider_id) in enumerate(self.chain):
             if self.circuit_breaker and not self.circuit_breaker.is_available(
                 provider_id
             ):
                 continue
             try:
-                return await model.aembed_documents(texts)
+                result = await model.aembed_documents(texts)
             except Exception as err:
                 last_err = err
                 if not _is_retryable(err):
                     raise
+                failed_providers.append(provider_id)
                 LOGGER.warning(
                     "Embedding call failed for provider %s (attempt %d/%d): %s",
                     provider_id,
@@ -361,27 +363,39 @@ class FallbackEmbeddings:
                 if self.circuit_breaker:
                     self.circuit_breaker.record_failure(provider_id)
                 continue
+            else:
+                if failed_providers:
+                    LOGGER.warning(
+                        "Embedding fallback activated: provider %s succeeded "
+                        "after failed provider(s): %s",
+                        provider_id,
+                        ", ".join(failed_providers),
+                    )
+                if self.circuit_breaker:
+                    self.circuit_breaker.record_success(provider_id)
+                return result
 
         msg = (
-            f"All embedding providers failed. Last error: "
-            f"{_safe_err_summary(last_err)}"
+            f"All embedding providers failed. Last error: {_safe_err_summary(last_err)}"
         )
         raise HomeAssistantError(msg) from last_err
 
     async def aembed_query(self, text: str) -> list[float]:
         """Embed a query through the fallback chain."""
         last_err: Exception | None = None
+        failed_providers: list[str] = []
         for i, (model, _deployment, provider_id) in enumerate(self.chain):
             if self.circuit_breaker and not self.circuit_breaker.is_available(
                 provider_id
             ):
                 continue
             try:
-                return await model.aembed_query(text)
+                result = await model.aembed_query(text)
             except Exception as err:
                 last_err = err
                 if not _is_retryable(err):
                     raise
+                failed_providers.append(provider_id)
                 LOGGER.warning(
                     "Embedding query failed for provider %s (attempt %d/%d): %s",
                     provider_id,
@@ -392,10 +406,20 @@ class FallbackEmbeddings:
                 if self.circuit_breaker:
                     self.circuit_breaker.record_failure(provider_id)
                 continue
+            else:
+                if failed_providers:
+                    LOGGER.warning(
+                        "Embedding fallback activated: provider %s succeeded "
+                        "after failed provider(s): %s",
+                        provider_id,
+                        ", ".join(failed_providers),
+                    )
+                if self.circuit_breaker:
+                    self.circuit_breaker.record_success(provider_id)
+                return result
 
         msg = (
-            f"All embedding providers failed. Last error: "
-            f"{_safe_err_summary(last_err)}"
+            f"All embedding providers failed. Last error: {_safe_err_summary(last_err)}"
         )
         raise HomeAssistantError(msg) from last_err
 

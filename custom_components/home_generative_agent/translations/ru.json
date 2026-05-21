@@ -217,10 +217,14 @@
           "description": "Configure model settings for this feature. {provider_notice}",
           "data": {
             "model_name": "Model",
+            "fallback_provider_ids": "Fallback providers",
             "temperature": "Temperature",
             "keepalive_s": "Ollama keepalive (seconds or Never unload (-1))",
             "context_size": "Ollama context size (tokens)",
             "reasoning": "Ollama reasoning"
+          },
+          "data_description": {
+            "fallback_provider_ids": "Ordered list of fallback providers. The first available provider is used if the primary fails."
           }
         },
         "database": {
@@ -279,16 +283,17 @@
           "critical_action_pin_enabled": "Требовать PIN для критических действий",
           "critical_action_pin": "PIN для критических действий (требуется для разблокировки/армирования/открытия)",
           "schema_first_yaml": "Схема-First JSON для YAML-запросов",
-          "stt_hallucination_patterns": "Фильтр STT-подсказок",
-          "stt_hallucination_exact_patterns": "Фильтр точных STT-подсказок",
+          "stt_filters_section": "Фильтры речевого ввода",
+          "stt_hallucination_patterns": "Игнорируемые подстроки STT",
+          "stt_hallucination_exact_patterns": "Игнорируемые точные фразы STT",
           "tool_retrieval_limit": "Лимит извлечения инструментов",
           "tool_relevance_threshold": "Порог релевантности инструментов"
         },
         "data_description": {
           "prompt": "Укажите, как LLM должен отвечать. Это может быть шаблон.",
           "schema_first_yaml": "При включении YAML-запросы отвечаются строгим JSON, который преобразуется в YAML.",
-          "stt_hallucination_patterns": "Добавьте подстроки для автоматического игнорирования (регистронезависимое частичное совпадение). Введите значение и нажмите Enter, чтобы добавить. Нажмите на chip, чтобы удалить. Оставьте пустым, чтобы отключить фильтр.",
-          "stt_hallucination_exact_patterns": "Добавьте полные фразы для автоматического игнорирования (регистронезависимое точное совпадение). Весь STT-текст должен совпадать с фразой. Оставьте пустым, чтобы отключить.",
+          "stt_hallucination_patterns": "Одна подстрока на строку. Если STT-текст содержит любую запись, он игнорируется до запуска LLM. Регистр не учитывается.",
+          "stt_hallucination_exact_patterns": "Одна фраза на строку. Если весь STT-текст равен любой записи, он игнорируется до запуска LLM. Регистр не учитывается.",
           "tool_retrieval_limit": "Максимальное количество инструментов для извлечения на основе семантической близости к запросу пользователя.",
           "tool_relevance_threshold": "Минимальный семантический коэффициент сходства (0,0 до 1,0) для извлечения инструмента."
         }

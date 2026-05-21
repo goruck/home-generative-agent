@@ -21,6 +21,8 @@ from homeassistant.core import callback
 from homeassistant.helpers import llm
 from homeassistant.helpers.selector import (
     BooleanSelector,
+    ConstantSelector,
+    ConstantSelectorConfig,
     NumberSelector,
     NumberSelectorConfig,
     SelectOptionDict,
@@ -90,6 +92,8 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
+_CONF_STT_FILTERS_SECTION = "stt_filters_section"
+
 DEFAULT_OPTIONS = {
     CONF_LLM_HASS_API: [llm.LLM_API_ASSIST],
     CONF_PROMPT: llm.DEFAULT_INSTRUCTIONS_PROMPT,
@@ -112,6 +116,15 @@ DEFAULT_OPTIONS = {
 def _get_str(src: Mapping[str, Any], key: str) -> str:
     """Get a trimmed string from a mapping (missing -> '')."""
     return str(src.get(key, "") or "").strip()
+
+
+def _patterns_as_text(raw: Any) -> str:
+    """Render list/string pattern options as one pattern per line."""
+    if isinstance(raw, list):
+        return "\n".join(str(item).strip() for item in raw if str(item).strip())
+    if isinstance(raw, str):
+        return raw
+    return ""
 
 
 async def _schema_for_options(
@@ -201,33 +214,6 @@ async def _schema_for_options(
             },
             default=opts.get(CONF_CRITICAL_ACTION_PIN_ENABLED, False),
         ): BooleanSelector(),
-        vol.Optional(
-            CONF_SCHEMA_FIRST_YAML,
-            description={"suggested_value": opts.get(CONF_SCHEMA_FIRST_YAML, False)},
-            default=opts.get(CONF_SCHEMA_FIRST_YAML, False),
-        ): BooleanSelector(),
-        vol.Optional(
-            CONF_STT_HALLUCINATION_PATTERNS,
-            default=opts.get(CONF_STT_HALLUCINATION_PATTERNS, []),
-        ): SelectSelector(
-            SelectSelectorConfig(
-                options=[],
-                multiple=True,
-                custom_value=True,
-                mode=SelectSelectorMode.LIST,
-            )
-        ),
-        vol.Optional(
-            CONF_STT_HALLUCINATION_EXACT_PATTERNS,
-            default=opts.get(CONF_STT_HALLUCINATION_EXACT_PATTERNS, []),
-        ): SelectSelector(
-            SelectSelectorConfig(
-                options=[],
-                multiple=True,
-                custom_value=True,
-                mode=SelectSelectorMode.LIST,
-            )
-        ),
     }
 
     if opts.get(CONF_CRITICAL_ACTION_PIN_ENABLED, False):
@@ -240,6 +226,14 @@ async def _schema_for_options(
                 },
             )
         ] = TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
+
+    schema[
+        vol.Optional(
+            CONF_SCHEMA_FIRST_YAML,
+            description={"suggested_value": opts.get(CONF_SCHEMA_FIRST_YAML, False)},
+            default=opts.get(CONF_SCHEMA_FIRST_YAML, False),
+        )
+    ] = BooleanSelector()
 
     video_analyzer_mode = opts.get(
         CONF_VIDEO_ANALYZER_MODE, RECOMMENDED_VIDEO_ANALYZER_MODE
@@ -273,6 +267,36 @@ async def _schema_for_options(
                     custom_value=False,
                 )
             )
+
+    schema.update(
+        {
+            vol.Optional(
+                _CONF_STT_FILTERS_SECTION,
+                default="speech_input_filters",
+            ): ConstantSelector(
+                ConstantSelectorConfig(
+                    label="Speech input filters",
+                    value="speech_input_filters",
+                )
+            ),
+            vol.Optional(
+                CONF_STT_HALLUCINATION_PATTERNS,
+                default=_patterns_as_text(
+                    opts.get(CONF_STT_HALLUCINATION_PATTERNS, [])
+                ),
+            ): TextSelector(
+                TextSelectorConfig(type=TextSelectorType.TEXT, multiline=True)
+            ),
+            vol.Optional(
+                CONF_STT_HALLUCINATION_EXACT_PATTERNS,
+                default=_patterns_as_text(
+                    opts.get(CONF_STT_HALLUCINATION_EXACT_PATTERNS, [])
+                ),
+            ): TextSelector(
+                TextSelectorConfig(type=TextSelectorType.TEXT, multiline=True)
+            ),
+        }
+    )
 
     return schema
 
@@ -415,6 +439,10 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         if not options.get(CONF_LLM_HASS_API):
             options.pop(CONF_LLM_HASS_API, None)
 
+    def _cleanup_ui_only_options(self, options: dict[str, Any]) -> None:
+        """Remove schema-only fields before storing options."""
+        options.pop(_CONF_STT_FILTERS_SECTION, None)
+
     # ---- main step ----
 
     async def async_step_init(
@@ -450,5 +478,6 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
             )
 
         self._cleanup_none_llm_api(options)
+        self._cleanup_ui_only_options(options)
         self._drop_empty_fields(options)
         return self.async_create_entry(title="", data=options)

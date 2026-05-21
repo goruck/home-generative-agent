@@ -1339,6 +1339,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             )
             return ollama_providers.get(url)
         return None
+
     api_key = conf.get(CONF_API_KEY) or _provider_api_key(providers, "openai")
     openai_secret = SecretStr(api_key) if api_key else None
     gemini_key = conf.get(CONF_GEMINI_API_KEY) or _provider_api_key(providers, "gemini")
@@ -1586,6 +1587,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 "OpenAI-compatible embeddings init failed; continuing without them."
             )
 
+    def _embedding_instance_for_provider(provider: ModelProviderConfig) -> Any:
+        """Map a ModelProviderConfig to the initialized embedding instance."""
+        if provider.provider_type == "openai":
+            return openai_embeddings
+        if provider.provider_type == "openai_compatible":
+            return openai_compatible_embeddings
+        if provider.provider_type == "gemini":
+            return gemini_embeddings
+        if provider.provider_type == "ollama":
+            settings = provider.data.get("settings", {})
+            url = (
+                settings.get("base_url")
+                or settings.get("chat_url")
+                or RECOMMENDED_OLLAMA_URL
+            )
+            if url != base_ollama_url:
+                return None
+            return ollama_embeddings
+        return None
+
     # Choose active embedding provider and build fallback chain
     embedding_model: Any = None
     embedding_provider = options.get(
@@ -1604,11 +1625,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     # Wrap embedding model with fallback if multiple providers available
     _emb_fb = fallback_chains.get("embedding", [])
     if _emb_fb:
-        _emb_chain = [
-            (embedding_model, _emb_fb[0].deployment, _emb_fb[0].entry_id)
-        ]
+        _emb_chain = []
+        if embedding_model is not None:
+            _emb_chain.append(
+                (embedding_model, _emb_fb[0].deployment, _emb_fb[0].entry_id)
+            )
         for p in _emb_fb[1:]:
-            m = _model_instance_for_provider(p)
+            m = _embedding_instance_for_provider(p)
             if m is not None:
                 _emb_chain.append((m, p.deployment, p.entry_id))
         if len(_emb_chain) > 1:
@@ -1980,16 +2003,151 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             }
         )
 
+    def _fallback_model_name(provider: ModelProviderConfig, category: str) -> Any:
+        """Return the model name to use for a fallback provider/category."""
+        settings = provider.data.get("settings", {})
+        spec = MODEL_CATEGORY_SPECS.get(category, {})
+        return settings.get(f"{category}_model") or spec.get(
+            "recommended_models", {}
+        ).get(provider.provider_type)
+
+    def _category_top_p(category: str) -> float | None:
+        """Return the top-p value for chat-like categories."""
+        if category == "chat":
+            return CHAT_MODEL_TOP_P
+        if category == "vlm":
+            return VLM_TOP_P
+        if category == "summarization":
+            return SUMMARIZATION_MODEL_TOP_P
+        return None
+
+    def _configured_cloud_model(
+        model: Any,
+        provider: ModelProviderConfig,
+        category: str,
+        model_name: Any,
+        temperature: Any,
+    ) -> Any:
+        """Configure a cloud fallback model for its provider/category."""
+        model_key = (
+            "model_name"
+            if provider.provider_type in ("openai", "openai_compatible")
+            else "model"
+        )
+        config = {model_key: model_name, "temperature": temperature}
+        if (top_p := _category_top_p(category)) is not None:
+            config["top_p"] = top_p
+        return model.with_config(config={"configurable": config})
+
+    def _configured_ollama_model(
+        model: Any,
+        provider: ModelProviderConfig,
+        category: str,
+        model_name: Any,
+        temperature: Any,
+    ) -> Any:
+        """Configure an Ollama fallback model for its category."""
+        settings = provider.data.get("settings", {})
+        reasoning_enabled = settings.get("reasoning", ollama_reasoning)
+        rf_fallback = reasoning_field(model=str(model_name), enabled=reasoning_enabled)
+        config = {
+            "model": model_name,
+            "temperature": temperature,
+            **rf_fallback,
+        }
+        if category == "chat":
+            config.update(
+                {
+                    "top_p": CHAT_MODEL_TOP_P,
+                    "num_predict": CHAT_MODEL_MAX_TOKENS,
+                    "num_ctx": settings.get(
+                        "chat_context", RECOMMENDED_OLLAMA_CONTEXT_SIZE
+                    ),
+                    "repeat_penalty": CHAT_MODEL_REPEAT_PENALTY,
+                    "keep_alive": settings.get(
+                        "chat_keepalive", RECOMMENDED_OLLAMA_CHAT_KEEPALIVE
+                    ),
+                }
+            )
+        elif category == "vlm":
+            config.update(
+                {
+                    "top_p": VLM_TOP_P,
+                    "num_predict": VLM_NUM_PREDICT,
+                    "num_ctx": settings.get(
+                        "vlm_context", RECOMMENDED_OLLAMA_CONTEXT_SIZE
+                    ),
+                    "repeat_penalty": VLM_REPEAT_PENALTY,
+                    "mirostat": VLM_MIRO_STAT,
+                    "keep_alive": settings.get(
+                        "vlm_keepalive", RECOMMENDED_OLLAMA_VLM_KEEPALIVE
+                    ),
+                }
+            )
+        elif category == "summarization":
+            config.update(
+                {
+                    "top_p": SUMMARIZATION_MODEL_TOP_P,
+                    "num_predict": SUMMARIZATION_MODEL_PREDICT,
+                    "num_ctx": settings.get(
+                        "summarization_context", RECOMMENDED_OLLAMA_CONTEXT_SIZE
+                    ),
+                    "repeat_penalty": SUMMARIZATION_MODEL_REPEAT_PENALTY,
+                    "mirostat": SUMMARIZATION_MIRO_STAT,
+                    "keep_alive": settings.get(
+                        "summarization_keepalive",
+                        RECOMMENDED_OLLAMA_SUMMARIZATION_KEEPALIVE,
+                    ),
+                }
+            )
+        return model.with_config(config={"configurable": config})
+
+    def _configured_model_for_provider(
+        provider: ModelProviderConfig, category: str
+    ) -> Any:
+        """Return a category-configured model instance for a fallback provider."""
+        model = _model_instance_for_provider(provider)
+        if model is None:
+            return None
+
+        model_name = _fallback_model_name(provider, category)
+        spec = MODEL_CATEGORY_SPECS.get(category, {})
+        temp_key = spec.get("temperature_key")
+        temperature = options.get(temp_key) if temp_key else None
+        if temperature is None:
+            temperature = spec.get("recommended_temperature")
+
+        if provider.provider_type in (
+            "openai",
+            "openai_compatible",
+            "gemini",
+        ):
+            return _configured_cloud_model(
+                model, provider, category, model_name, temperature
+            )
+        if provider.provider_type == "anthropic":
+            return model.with_config(
+                config={
+                    "configurable": {
+                        "model": model_name,
+                        "temperature": temperature,
+                    }
+                }
+            )
+        if provider.provider_type == "ollama":
+            return _configured_ollama_model(
+                model, provider, category, model_name, temperature
+            )
+        return model
+
     # ----- Wrap chat / VLM / summarization with fallback chains -----
     # Primary model already carries per-feature config (model_name, temp, etc.).
-    # Fallbacks are raw provider instances.
+    # Fallbacks are configured per provider/category before entering the chain.
     _chat_fb = fallback_chains.get("chat", [])
     if _chat_fb:
-        _chat_chain = [
-            (chat_model, _chat_fb[0].deployment, _chat_fb[0].entry_id)
-        ]
+        _chat_chain = [(chat_model, _chat_fb[0].deployment, _chat_fb[0].entry_id)]
         for p in _chat_fb[1:]:
-            m = _model_instance_for_provider(p)
+            m = _configured_model_for_provider(p, "chat")
             if m is not None:
                 _chat_chain.append((m, p.deployment, p.entry_id))
         if len(_chat_chain) > 1:
@@ -1997,11 +2155,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
     _vlm_fb = fallback_chains.get("vlm", [])
     if _vlm_fb:
-        _vlm_chain = [
-            (vision_model, _vlm_fb[0].deployment, _vlm_fb[0].entry_id)
-        ]
+        _vlm_chain = [(vision_model, _vlm_fb[0].deployment, _vlm_fb[0].entry_id)]
         for p in _vlm_fb[1:]:
-            m = _model_instance_for_provider(p)
+            m = _configured_model_for_provider(p, "vlm")
             if m is not None:
                 _vlm_chain.append((m, p.deployment, p.entry_id))
         if len(_vlm_chain) > 1:
@@ -2009,17 +2165,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
     _sum_fb = fallback_chains.get("summarization", [])
     if _sum_fb:
-        _sum_chain = [
-            (summarization_model, _sum_fb[0].deployment, _sum_fb[0].entry_id)
-        ]
+        _sum_chain = [(summarization_model, _sum_fb[0].deployment, _sum_fb[0].entry_id)]
         for p in _sum_fb[1:]:
-            m = _model_instance_for_provider(p)
+            m = _configured_model_for_provider(p, "summarization")
             if m is not None:
                 _sum_chain.append((m, p.deployment, p.entry_id))
         if len(_sum_chain) > 1:
-            summarization_model = FallbackChatModel(
-                _sum_chain, circuit_breaker=_sum_cb
-            )
+            summarization_model = FallbackChatModel(_sum_chain, circuit_breaker=_sum_cb)
 
     video_analyzer = VideoAnalyzer(hass, entry)
     suppression = SuppressionManager(hass)
