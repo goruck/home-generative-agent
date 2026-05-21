@@ -21,6 +21,8 @@ from homeassistant.core import callback
 from homeassistant.helpers import llm
 from homeassistant.helpers.selector import (
     BooleanSelector,
+    ConstantSelector,
+    ConstantSelectorConfig,
     NumberSelector,
     NumberSelectorConfig,
     SelectOptionDict,
@@ -207,6 +209,15 @@ async def _schema_for_options(
             default=opts.get(CONF_SCHEMA_FIRST_YAML, False),
         ): BooleanSelector(),
         vol.Optional(
+            "stt_filter_heading",
+            default="",
+        ): ConstantSelector(
+            ConstantSelectorConfig(
+                label="Filter STT prompts",
+                value="",
+            )
+        ),
+        vol.Optional(
             CONF_STT_HALLUCINATION_PATTERNS,
             default=opts.get(CONF_STT_HALLUCINATION_PATTERNS, []),
         ): SelectSelector(
@@ -214,7 +225,7 @@ async def _schema_for_options(
                 options=[],
                 multiple=True,
                 custom_value=True,
-                mode=SelectSelectorMode.DROPDOWN,
+                mode=SelectSelectorMode.LIST,
             )
         ),
         vol.Optional(
@@ -225,7 +236,7 @@ async def _schema_for_options(
                 options=[],
                 multiple=True,
                 custom_value=True,
-                mode=SelectSelectorMode.DROPDOWN,
+                mode=SelectSelectorMode.LIST,
             )
         ),
     }
