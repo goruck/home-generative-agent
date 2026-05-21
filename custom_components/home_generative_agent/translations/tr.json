@@ -275,9 +275,8 @@
           "critical_action_pin_enabled": "Kritik eylemler için PIN zorunlu",
           "critical_action_pin": "Kritik eylem PIN’i (kilit açma/kurma/açma için gerekli)",
           "schema_first_yaml": "YAML istekleri için şema-öncelikli JSON",
-          "stt_filter_heading": "STT ipuçlarını filtrele",
-          "stt_hallucination_patterns": "İçerir",
-          "stt_hallucination_exact_patterns": "Tam eşleşme"
+          "stt_hallucination_patterns": "STT ipuçlarını filtrele",
+          "stt_hallucination_exact_patterns": "Tam STT ipuçlarını filtrele"
         },
         "data_description": {
           "prompt": "LLM'in nasıl yanıt vermesi gerektiğini belirtin. Bu bir şablon olabilir.",

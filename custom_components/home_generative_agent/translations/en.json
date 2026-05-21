@@ -279,9 +279,8 @@
           "critical_action_pin_enabled": "Require critical action PIN",
           "critical_action_pin": "Critical action PIN (required to unlock/arm/open sensitive devices)",
           "schema_first_yaml": "Schema-first JSON for YAML requests",
-          "stt_filter_heading": "Filter STT prompts",
-          "stt_hallucination_patterns": "Contains",
-          "stt_hallucination_exact_patterns": "Exact match",
+          "stt_hallucination_patterns": "Filter STT prompts",
+          "stt_hallucination_exact_patterns": "Filter STT exact prompts",
           "tool_retrieval_limit": "Tool retrieval limit",
           "tool_relevance_threshold": "Tool relevance threshold"
         },

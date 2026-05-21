@@ -279,9 +279,8 @@
           "critical_action_pin_enabled": "Требовать PIN для критических действий",
           "critical_action_pin": "PIN для критических действий (требуется для разблокировки/армирования/открытия)",
           "schema_first_yaml": "Схема-First JSON для YAML-запросов",
-          "stt_filter_heading": "Фильтр STT-подсказок",
-          "stt_hallucination_patterns": "Содержит",
-          "stt_hallucination_exact_patterns": "Точное совпадение",
+          "stt_hallucination_patterns": "Фильтр STT-подсказок",
+          "stt_hallucination_exact_patterns": "Фильтр точных STT-подсказок",
           "tool_retrieval_limit": "Лимит извлечения инструментов",
           "tool_relevance_threshold": "Порог релевантности инструментов"
         },
