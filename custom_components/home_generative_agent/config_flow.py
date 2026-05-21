@@ -214,7 +214,7 @@ async def _schema_for_options(
                 options=[],
                 multiple=True,
                 custom_value=True,
-                mode=SelectSelectorMode.LIST,
+                mode=SelectSelectorMode.DROPDOWN,
             )
         ),
         vol.Optional(
@@ -225,7 +225,7 @@ async def _schema_for_options(
                 options=[],
                 multiple=True,
                 custom_value=True,
-                mode=SelectSelectorMode.LIST,
+                mode=SelectSelectorMode.DROPDOWN,
             )
         ),
     }
