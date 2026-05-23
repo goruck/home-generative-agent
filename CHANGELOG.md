@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.13] - 2026-05-23
+
+### Added
+
+- **Deploy script** — `scripts/deploy` syncs the integration to a running Home Assistant instance via rsync over SSH. Only changed files are transferred (checksum-based), `__pycache__` and `.pyc` files are excluded, and the script calls `ha core restart` after a successful sync. See [Contributing](docs/contributing.md) for setup instructions.
+
 ## [3.14.12] - 2026-05-19
 
 ### Fixed
