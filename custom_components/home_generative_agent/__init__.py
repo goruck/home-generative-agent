@@ -2178,7 +2178,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             if len(configured_providers) <= 1:
                 LOGGER.debug(
                     "No configured fallback for %s; primary provider %s is "
-                    "unavailable and will remain the placeholder model.",
+                    "unavailable and will remain the placeholder model until "
+                    "the integration is reloaded.",
                     category,
                     primary_provider.entry_id,
                 )
@@ -2199,7 +2200,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         if active_provider_id != primary_provider.entry_id:
             LOGGER.warning(
                 "Fallback selected at setup for %s: primary provider %s was "
-                "unavailable; using provider %s (deployment=%s).",
+                "unavailable; using provider %s (deployment=%s). This selection "
+                "remains active until the integration is reloaded or Home "
+                "Assistant restarts.",
                 category,
                 primary_provider.entry_id,
                 active_provider_id,

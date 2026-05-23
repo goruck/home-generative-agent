@@ -57,6 +57,18 @@ Supported providers and their default models:
 
 **Multiple providers:** You can add multiple Model Provider subentries and assign them per-feature. For example: a "Primary Ollama" provider for chat and a "Vision Ollama" provider for camera analysis. You can also mix types — a local vLLM server as **OpenAI Compatible** alongside an Ollama provider.
 
+### Provider Fallbacks
+
+Feature setup can include an ordered list of fallback providers. A fallback applies only to that feature category, so a chat fallback does not automatically cover VLM, summarization, or embeddings.
+
+Fallbacks are evaluated at setup/reload time and at runtime:
+
+- If the primary provider is unavailable when the integration starts or reloads, HGA selects the first usable configured fallback and logs `Fallback selected at setup ...`. That selected provider remains active until the integration is reloaded or Home Assistant restarts. If the primary provider comes back online later, HGA does not automatically switch back during the same runtime.
+- If the active provider fails during a model call with a retryable error, HGA tries the next configured fallback provider for that call and logs the runtime fallback activation.
+- If no fallback is configured for a category and the primary provider is unavailable at setup, HGA keeps a placeholder model for that category and logs this at debug level. Configure a fallback for each category that should degrade to another provider.
+
+To switch back to a recovered primary provider, reload the Home Generative Agent integration or restart Home Assistant.
+
 > **llama-server embedding incompatibility** — If you use llama-server as an OpenAI-compatible provider and see `Memory semantic search failed — embedding endpoint returned an incompatible response` in the logs, the agent has fallen back to recency-based memory retrieval. llama-server's `/v1/embeddings` response format does not match the OpenAI SDK's expected structure, causing semantic search (memory and RAG tool retrieval) to degrade silently. For reliable semantic embeddings, use a dedicated Ollama provider with `mxbai-embed-large`. Chat and embedding providers can be different — e.g. llama-server for chat, Ollama for embeddings.
 
 ---
