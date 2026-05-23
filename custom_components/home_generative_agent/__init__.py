@@ -2164,18 +2164,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     def _finalize_model_chain(
         category: str,
         chain: list[tuple[Any, str, str]],
-        primary_provider: ModelProviderConfig,
+        configured_providers: list[ModelProviderConfig],
         unavailable_model: Any,
         wrapper_factory: Any,
     ) -> Any:
         """Finalize fallback chain and update effective deployment metadata."""
+        primary_provider = configured_providers[0]
         if not chain:
-            LOGGER.warning(
-                "No available %s model providers; keeping unavailable primary "
-                "provider %s.",
-                category,
-                primary_provider.entry_id,
-            )
+            configured = [
+                f"{provider.entry_id}:{provider.deployment}"
+                for provider in configured_providers
+            ]
+            if len(configured_providers) <= 1:
+                LOGGER.debug(
+                    "No configured fallback for %s; primary provider %s is "
+                    "unavailable and will remain the placeholder model.",
+                    category,
+                    primary_provider.entry_id,
+                )
+            else:
+                LOGGER.warning(
+                    "No available %s model providers in resolved fallback chain %s; "
+                    "keeping unavailable primary provider %s. Check fallback "
+                    "provider health and %s capability.",
+                    category,
+                    configured,
+                    primary_provider.entry_id,
+                    category,
+                )
             return unavailable_model
 
         active_model, active_deployment, active_provider_id = chain[0]
@@ -2216,7 +2232,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         chat_model = _finalize_model_chain(
             "chat",
             _chat_chain,
-            _chat_fb[0],
+            _chat_fb,
             chat_model,
             lambda chain: FallbackChatModel(chain, circuit_breaker=_chat_cb),
         )
@@ -2238,7 +2254,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         vision_model = _finalize_model_chain(
             "vlm",
             _vlm_chain,
-            _vlm_fb[0],
+            _vlm_fb,
             vision_model,
             lambda chain: FallbackVLM(chain, circuit_breaker=_vlm_cb),
         )
@@ -2262,7 +2278,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         summarization_model = _finalize_model_chain(
             "summarization",
             _sum_chain,
-            _sum_fb[0],
+            _sum_fb,
             summarization_model,
             lambda chain: FallbackChatModel(chain, circuit_breaker=_sum_cb),
         )
