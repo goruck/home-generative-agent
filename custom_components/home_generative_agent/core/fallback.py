@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from time import monotonic
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from homeassistant.exceptions import HomeAssistantError
 
@@ -58,6 +58,33 @@ def _safe_err_summary(err: Exception | None) -> str:
     if err is None:
         return "No provider was available"
     return f"{type(err).__name__}: {str(err)[:200]}"
+
+
+def _retryable_empty_response(result: Any) -> HomeAssistantError | None:
+    """Return retryable error when a model hit length limit with empty content."""
+    content = getattr(result, "content", None)
+    if content:
+        return None
+    if getattr(result, "tool_calls", None):
+        return None
+
+    metadata_raw: Any = getattr(result, "response_metadata", {}) or {}
+    if not isinstance(metadata_raw, dict):
+        return None
+    metadata = cast("dict[str, Any]", metadata_raw)
+    finish_reason = metadata.get("finish_reason") or metadata.get("done_reason")
+    if str(finish_reason).lower() not in {"length", "max_tokens"}:
+        return None
+
+    model_name = metadata.get("model_name") or metadata.get("model")
+    msg = f"Empty model content after length-limited response from {model_name}"
+    return HomeAssistantError(msg)
+
+
+def _raise_for_retryable_empty_response(result: Any) -> None:
+    """Raise when a result should be retried through fallback."""
+    if retry_err := _retryable_empty_response(result):
+        raise retry_err
 
 
 class CircuitBreaker:
@@ -206,6 +233,7 @@ class FallbackChatModel:
                 continue
             try:
                 result = await model.ainvoke(input_data, config, **kwargs)
+                _raise_for_retryable_empty_response(result)
             except Exception as err:
                 last_err = err
                 if not _is_retryable(err):

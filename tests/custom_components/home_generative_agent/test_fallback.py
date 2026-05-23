@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -25,8 +25,16 @@ from custom_components.home_generative_agent.core.fallback import (
 class FakeAIMessage:
     """Minimal fake AIMessage for testing."""
 
-    def __init__(self, content: str) -> None:
+    def __init__(
+        self,
+        content: str,
+        *,
+        response_metadata: dict[str, Any] | None = None,
+        tool_calls: list[Any] | None = None,
+    ) -> None:
         self.content = content
+        self.response_metadata = response_metadata or {}
+        self.tool_calls = tool_calls or []
 
 
 def test_is_retryable_home_assistant_error() -> None:
@@ -80,6 +88,49 @@ async def test_fallback_chat_primary_fails() -> None:
     assert result.content == "fallback"
     assert primary.ainvoke.await_count == 1
     assert fallback.ainvoke.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_fallback_chat_primary_empty_length_response() -> None:
+    """Empty length-limited responses should trigger fallback."""
+    primary = AsyncMock()
+    primary.ainvoke.return_value = FakeAIMessage(
+        "",
+        response_metadata={"done_reason": "length", "model_name": "gpt-oss"},
+    )
+    fallback = AsyncMock()
+    fallback.ainvoke.return_value = FakeAIMessage("fallback")
+
+    model = FallbackChatModel(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")]
+    )
+
+    result = await model.ainvoke(["hello"])
+
+    assert result.content == "fallback"
+    assert primary.ainvoke.await_count == 1
+    assert fallback.ainvoke.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_fallback_chat_empty_tool_call_response_does_not_fallback() -> None:
+    """Empty tool-call responses are valid and should not trigger fallback."""
+    primary = AsyncMock()
+    primary.ainvoke.return_value = FakeAIMessage(
+        "",
+        response_metadata={"finish_reason": "tool_calls"},
+        tool_calls=[{"name": "tool"}],
+    )
+    fallback = AsyncMock()
+
+    model = FallbackChatModel(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")]
+    )
+
+    result = await model.ainvoke(["hello"])
+
+    assert cast("FakeAIMessage", result).tool_calls == [{"name": "tool"}]
+    fallback.ainvoke.assert_not_awaited()
 
 
 @pytest.mark.asyncio
