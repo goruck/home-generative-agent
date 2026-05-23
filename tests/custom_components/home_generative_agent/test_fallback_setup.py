@@ -153,6 +153,7 @@ class FallbackSetupData:
     fallback_chains: dict[str, list[ModelProviderConfig]]
     deployments: dict[str, str]
     captured_embedding_chain: dict[str, list[tuple[Any, str, str]]]
+    openai_available: bool = True
     openai_embeddings_available: bool = True
 
 
@@ -237,6 +238,9 @@ def _patch_setup_dependencies(
     async def _healthy(*_args: Any, **_kwargs: Any) -> bool:
         return True
 
+    async def _openai_healthy(*_args: Any, **_kwargs: Any) -> bool:
+        return data.openai_available
+
     async def _unhealthy(*_args: Any, **_kwargs: Any) -> bool:
         return False
 
@@ -276,7 +280,7 @@ def _patch_setup_dependencies(
         "configured_ollama_urls",
         lambda *_args, **_kwargs: ["http://ollama"],
     )
-    monkeypatch.setattr(hga_component, "openai_healthy", _healthy)
+    monkeypatch.setattr(hga_component, "openai_healthy", _openai_healthy)
     monkeypatch.setattr(hga_component, "ollama_healthy", _healthy)
     monkeypatch.setattr(hga_component, "gemini_healthy", _unhealthy)
     monkeypatch.setattr(hga_component, "openai_compatible_healthy", _unhealthy)
@@ -404,3 +408,35 @@ async def test_setup_embedding_chain_skips_unavailable_primary(
         "ollama1",
         "ollama2",
     ]
+
+
+@pytest.mark.asyncio
+async def test_setup_model_fallback_skips_unavailable_primary(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unavailable primary chat-like models must not short-circuit fallback."""
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _fallback_setup_data()
+    data.openai_available = False
+    _patch_setup_dependencies(hass, monkeypatch, data)
+
+    result = await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    assert result is True
+    chat_model = cast("FakeConfiguredModel", entry.runtime_data.chat_model)
+    assert chat_model.base.name == "ollama"
+    assert chat_model.config["configurable"]["model"] == "qwen-chat-fallback"
+
+    vision_model = cast("FakeConfiguredModel", entry.runtime_data.vision_model)
+    assert vision_model.base.name == "ollama"
+    assert vision_model.config["configurable"]["model"] == "llava-fallback"
+
+    summarization_model = cast(
+        "FakeConfiguredModel", entry.runtime_data.summarization_model
+    )
+    assert summarization_model.base.name == "ollama"
+    assert (
+        summarization_model.config["configurable"]["model"] == "qwen-summary-fallback"
+    )

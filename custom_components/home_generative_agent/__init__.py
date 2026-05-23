@@ -2140,38 +2140,90 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             )
         return model
 
+    def _is_unavailable_model(model: Any) -> bool:
+        """Return True for placeholder models that should not block fallback."""
+        return isinstance(model, NullChat)
+
+    def _append_available_model(
+        chain: list[tuple[Any, str, str]],
+        model: Any,
+        deployment: str,
+        provider_id: str,
+        category: str,
+    ) -> None:
+        """Append a model to a fallback chain if it is usable."""
+        if _is_unavailable_model(model):
+            LOGGER.debug(
+                "Skipping unavailable %s model for fallback provider %s.",
+                category,
+                provider_id,
+            )
+            return
+        chain.append((model, deployment, provider_id))
+
     # ----- Wrap chat / VLM / summarization with fallback chains -----
     # Primary model already carries per-feature config (model_name, temp, etc.).
     # Fallbacks are configured per provider/category before entering the chain.
     _chat_fb = fallback_chains.get("chat", [])
     if _chat_fb:
-        _chat_chain = [(chat_model, _chat_fb[0].deployment, _chat_fb[0].entry_id)]
+        _chat_chain = []
+        _append_available_model(
+            _chat_chain,
+            chat_model,
+            _chat_fb[0].deployment,
+            _chat_fb[0].entry_id,
+            "chat",
+        )
         for p in _chat_fb[1:]:
             m = _configured_model_for_provider(p, "chat")
             if m is not None:
-                _chat_chain.append((m, p.deployment, p.entry_id))
+                _append_available_model(
+                    _chat_chain, m, p.deployment, p.entry_id, "chat"
+                )
         if len(_chat_chain) > 1:
             chat_model = FallbackChatModel(_chat_chain, circuit_breaker=_chat_cb)
+        elif _chat_chain:
+            chat_model = _chat_chain[0][0]
 
     _vlm_fb = fallback_chains.get("vlm", [])
     if _vlm_fb:
-        _vlm_chain = [(vision_model, _vlm_fb[0].deployment, _vlm_fb[0].entry_id)]
+        _vlm_chain = []
+        _append_available_model(
+            _vlm_chain,
+            vision_model,
+            _vlm_fb[0].deployment,
+            _vlm_fb[0].entry_id,
+            "vlm",
+        )
         for p in _vlm_fb[1:]:
             m = _configured_model_for_provider(p, "vlm")
             if m is not None:
-                _vlm_chain.append((m, p.deployment, p.entry_id))
+                _append_available_model(_vlm_chain, m, p.deployment, p.entry_id, "vlm")
         if len(_vlm_chain) > 1:
             vision_model = FallbackVLM(_vlm_chain, circuit_breaker=_vlm_cb)
+        elif _vlm_chain:
+            vision_model = _vlm_chain[0][0]
 
     _sum_fb = fallback_chains.get("summarization", [])
     if _sum_fb:
-        _sum_chain = [(summarization_model, _sum_fb[0].deployment, _sum_fb[0].entry_id)]
+        _sum_chain = []
+        _append_available_model(
+            _sum_chain,
+            summarization_model,
+            _sum_fb[0].deployment,
+            _sum_fb[0].entry_id,
+            "summarization",
+        )
         for p in _sum_fb[1:]:
             m = _configured_model_for_provider(p, "summarization")
             if m is not None:
-                _sum_chain.append((m, p.deployment, p.entry_id))
+                _append_available_model(
+                    _sum_chain, m, p.deployment, p.entry_id, "summarization"
+                )
         if len(_sum_chain) > 1:
             summarization_model = FallbackChatModel(_sum_chain, circuit_breaker=_sum_cb)
+        elif _sum_chain:
+            summarization_model = _sum_chain[0][0]
 
     video_analyzer = VideoAnalyzer(hass, entry)
     suppression = SuppressionManager(hass)
