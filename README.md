@@ -39,24 +39,38 @@ A [Home Assistant](https://www.home-assistant.io/) integration that brings a gen
 
 ![Proactive notification](./assets/proactive-notification.png)
 
+### Real-time camera alert mobile device notifications
+
+![camera alert notification](./assets/camera-alert-example-lindo-cat.png)
+
+### Anomaly detection notification
+
+![fridge power notification](./assets/sentinel-fridge-power-notification.png)
+
 ## Requirements
 
 | Requirement | Notes |
 | --- | --- |
 | Home Assistant | 2025.5.0 minimum; 2026.4.0+ for streaming responses |
 | HACS | Required for the recommended install path; manual install is also supported |
-| PostgreSQL with pgvector | Provided as a bundled HA add-on (step 1 below) |
+| PostgreSQL with pgvector | Provided as a bundled HA app (step 1 below) |
 | Model provider | At least one of: OpenAI, Gemini, Anthropic, Ollama, or any OpenAI-compatible server |
 | Edge GPU server *(optional)* | Ollama, vLLM, llama.cpp, or LiteLLM for local model serving |
-| face-service *(optional)* | An add-on required only for face recognition in camera analysis |
+| face-service *(optional)* | An external service required only for face recognition in camera analysis |
 
 ## Quick Start
 
-Get the basic conversational agent running in seven steps. See the [full installation guide](docs/installation.md) for optional add-ons (edge models, face recognition).
+Get the basic conversational agent running in seven steps. See the [full installation guide](docs/installation.md) for optional apps (edge models, face recognition).
 
-**1. Install the PostgreSQL with pgvector add-on.**
+**1. Install the [PostgreSQL with pgvector](https://github.com/goruck/addon-postgres-pgvector/tree/main/postgres_pgvector) app.**
+
+> **Requires Home Assistant OS or Supervised** (apps are not available on HA Container or Core).
+
+Click the button below to add the repository, then install and configure the app per its [documentation](https://github.com/goruck/addon-postgres-pgvector/blob/main/postgres_pgvector/DOCS.md).
 
 [![Add add-on repository](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fgoruck%2Faddon-postgres-pgvector)
+
+> If the button doesn't work, add the repository manually: **Settings → Apps → App Store → ⋮ → Repositories**, enter `https://github.com/goruck/addon-postgres-pgvector`, then search for and install `postgres_pgvector`.
 
 **2. Install Home Generative Agent from HACS.**
 
@@ -78,7 +92,7 @@ You can now open the HA Assist panel and start talking to your home.
 
 | Guide | Contents |
 | --- | --- |
-| [Installation](docs/installation.md) | HACS install, manual install, optional add-ons (Ollama, face recognition) |
+| [Installation](docs/installation.md) | HACS install, manual install, optional apps (Ollama, face recognition) |
 | [Configuration](docs/configuration.md) | Model providers, features, Tool Retrieval (RAG), LLM API, STT, YAML mode, Critical Action PIN |
 | [Sentinel](docs/sentinel.md) | Anomaly detection pipeline, built-in rules, triage, baseline, blueprints, services API, health sensor |
 | [Camera Entities](docs/camera-entities.md) | Image and sensor entities, dashboards, automations, proactive video analysis, face recognition |
@@ -90,6 +104,22 @@ You can now open the HA Assist panel and start talking to your home.
 ### Automation that runs on a schedule
 
 *User asked: "Remind me every 30 minutes if the litter box waste drawer is over 90% full." Agent wrote and registered the automation.*
+
+```yaml
+alias: Check Litter Box Waste Drawer
+triggers:
+  - minutes: /30
+    trigger: time_pattern
+conditions:
+  - condition: numeric_state
+    entity_id: sensor.litter_robot_4_waste_drawer
+    above: 90
+actions:
+  - data:
+      message: The Litter Box waste drawer is more than 90% full!
+    action: notify.notify
+```
+
 ![Periodic automation](./assets/cat_automation.png)
 
 ### Query entity history

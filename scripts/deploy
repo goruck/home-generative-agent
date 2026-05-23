@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# Push custom_components/home_generative_agent to a remote HA instance via rsync over SSH.
+#
+# Usage:
+#   scripts/deploy [user@]host [remote-config-path]
+#
+# Defaults:
+#   user        root (HA OS SSH add-on default)
+#   host        required (first arg, or HA_HOST env var)
+#   remote path /homeassistant   (or HA_CONFIG_PATH env var)
+#
+# Examples:
+#   scripts/deploy homeassistant.local
+#   scripts/deploy pi@192.168.1.50 /home/pi/.homeassistant
+#   HA_HOST=homeassistant.local scripts/deploy
+#
+# After a successful sync the script restarts the integration via HA's CLI
+# (ha core restart) if SSH access allows it. Pass --no-restart to skip.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+COMPONENT="home_generative_agent"
+SRC="${REPO_ROOT}/custom_components/${COMPONENT}/"
+
+# ── argument parsing ──────────────────────────────────────────────────────────
+RESTART=true
+POSITIONAL=()
+for arg in "$@"; do
+  case "$arg" in
+    --no-restart) RESTART=false ;;
+    *) POSITIONAL+=("$arg") ;;
+  esac
+done
+
+HOST="${POSITIONAL[0]:-${HA_HOST:-}}"
+REMOTE_CONFIG="${POSITIONAL[1]:-${HA_CONFIG_PATH:-/homeassistant}}"
+
+if [[ -z "$HOST" ]]; then
+  echo "ERROR: no host specified." >&2
+  echo "Usage: scripts/deploy [user@]host [remote-config-path]" >&2
+  exit 1
+fi
+
+# Default SSH user to 'root' if not embedded in HOST (HA OS SSH add-on uses root)
+if [[ "$HOST" != *@* ]]; then
+  HOST="root@${HOST}"
+fi
+
+REMOTE_DEST="${HOST}:${REMOTE_CONFIG}/custom_components/${COMPONENT}/"
+
+# ── sync ──────────────────────────────────────────────────────────────────────
+echo "Syncing ${SRC}"
+echo "     -> ${REMOTE_DEST}"
+echo
+
+rsync \
+  --archive \
+  --checksum \
+  --compress \
+  --delete \
+  --exclude='__pycache__' \
+  --exclude='*.pyc' \
+  --exclude='*.egg-info' \
+  --human-readable \
+  --progress \
+  "${SRC}" \
+  "${REMOTE_DEST}"
+
+echo
+echo "Sync complete."
+
+# ── optional restart ──────────────────────────────────────────────────────────
+if [[ "$RESTART" == true ]]; then
+  echo "Restarting Home Assistant integration..."
+  # 'ha core restart' works on HA OS / Supervised installs.
+  # On a plain venv/container install, adjust or pass --no-restart.
+  if ssh "${HOST%%:*}" "command -v ha" &>/dev/null; then
+    ssh "${HOST%%:*}" "ha core restart"
+    echo "Restart triggered."
+  else
+    echo "NOTICE: 'ha' CLI not found on remote — skipping restart."
+    echo "  Restart manually or pass --no-restart to silence this."
+  fi
+fi

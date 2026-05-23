@@ -57,6 +57,8 @@ Supported providers and their default models:
 
 **Multiple providers:** You can add multiple Model Provider subentries and assign them per-feature. For example: a "Primary Ollama" provider for chat and a "Vision Ollama" provider for camera analysis. You can also mix types — a local vLLM server as **OpenAI Compatible** alongside an Ollama provider.
 
+> **llama-server embedding incompatibility** — If you use llama-server as an OpenAI-compatible provider and see `Memory semantic search failed — embedding endpoint returned an incompatible response` in the logs, the agent has fallen back to recency-based memory retrieval. llama-server's `/v1/embeddings` response format does not match the OpenAI SDK's expected structure, causing semantic search (memory and RAG tool retrieval) to degrade silently. For reliable semantic embeddings, use a dedicated Ollama provider with `mxbai-embed-large`. Chat and embedding providers can be different — e.g. llama-server for chat, Ollama for embeddings.
+
 ---
 
 ## Features

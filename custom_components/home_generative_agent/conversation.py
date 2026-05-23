@@ -29,8 +29,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import intent, llm, template
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.util import ulid
-from langchain_core.caches import InMemoryCache
-from langchain_core.globals import set_debug, set_llm_cache, set_verbose
+from langchain_core.globals import set_debug, set_verbose
 from langchain_core.messages import (
     AIMessage,
     AIMessageChunk,
@@ -712,9 +711,6 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             self._attr_supported_features = (
                 conversation.ConversationEntityFeature.CONTROL
             )
-
-        # Use in-memory caching for langgraph calls to LLMs.
-        set_llm_cache(InMemoryCache())
 
         self.tz = dt_util.get_default_time_zone()
 

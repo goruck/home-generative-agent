@@ -959,8 +959,63 @@ async def test_retrieve_tools_force_injects_live_context_for_open_doors() -> Non
 
 
 @pytest.mark.asyncio
-async def test_retrieve_tools_open_command_does_not_force_live_context() -> None:
-    """Open commands must keep actuation safety behavior."""
+async def test_retrieve_tools_open_command_includes_live_context() -> None:
+    """Open commands keep actuation safety behavior and now always include GetLiveContext."""
+    query = "open the garage door"
+    state: State = {
+        "messages": [MagicMock(content=query)],
+        "summary": "",
+        "chat_model_usage_metadata": {},
+        "messages_to_remove": [],
+        "selected_tools": [],
+        "tool_routing_map": {},
+        "action_rounds": 0,
+    }
+    store = MagicMock()
+
+    safety_item = MagicMock()
+    safety_item.value = {
+        "name": "HassTurnOn",
+        "api_id": "assist",
+        "description": "Turn on",
+        "parameters": "{}",
+        "is_actuation": True,
+    }
+    safety_item.score = 0.9
+
+    live_ctx_item = MagicMock()
+    live_ctx_item.value = {
+        "name": "GetLiveContext",
+        "api_id": "assist",
+        "description": "Get live home state",
+        "parameters": "{}",
+        "is_actuation": False,
+    }
+
+    store.asearch = AsyncMock(return_value=[safety_item])
+    store.aget = AsyncMock(return_value=live_ctx_item)
+
+    config: RunnableConfig = {
+        "configurable": {
+            "options": {"llm_hass_api": ["assist"], "tool_relevance_threshold": 0.15},
+            "tool_index_ready": True,
+            "langchain_tools": {},
+            "ha_llm_api": MagicMock(apis={}),
+        }
+    }
+
+    result = await _retrieve_tools(state, config, store=store)
+
+    assert "HassTurnOn" in result["tool_routing_map"]
+    assert "GetLiveContext" in result["tool_routing_map"]
+    store.aget.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_retrieve_tools_live_context_not_injected_when_store_returns_none() -> (
+    None
+):
+    """When store.aget returns None for GetLiveContext, it is silently skipped."""
     query = "open the garage door"
     state: State = {
         "messages": [MagicMock(content=query)],
@@ -984,7 +1039,8 @@ async def test_retrieve_tools_open_command_does_not_force_live_context() -> None
     safety_item.score = 0.9
 
     store.asearch = AsyncMock(return_value=[safety_item])
-    store.aget = AsyncMock()
+    # aget returns None — GetLiveContext not in the tool index.
+    store.aget = AsyncMock(return_value=None)
 
     config: RunnableConfig = {
         "configurable": {
@@ -997,9 +1053,9 @@ async def test_retrieve_tools_open_command_does_not_force_live_context() -> None
 
     result = await _retrieve_tools(state, config, store=store)
 
+    # HassTurnOn still added; GetLiveContext silently absent.
     assert "HassTurnOn" in result["tool_routing_map"]
     assert "GetLiveContext" not in result["tool_routing_map"]
-    store.aget.assert_not_called()
 
 
 @pytest.mark.asyncio

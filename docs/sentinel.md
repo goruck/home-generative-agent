@@ -190,13 +190,13 @@ When a user taps an action button, Sentinel uses a two-tier dispatch strategy: i
 
 ### Execute (non-sensitive findings)
 
-1. **Agent available** — calls the conversation agent with a natural-language prompt describing the finding and suggested actions. The agent checks live context, takes action, and its reply is pushed back as a mobile notification (when `notify_service` is configured).
+1. **Agent available** — calls the conversation agent with a prompt that includes the detection timestamp, alert-time evidence snapshot, and suggested actions. The agent calls `GetLiveContext` to check whether the alert condition is still active (state may have changed since detection). If still active it executes the suggested action; if the condition has since resolved it explicitly acknowledges the original alert and confirms resolution. Its reply is pushed back as a mobile notification (when `notify_service` is configured).
 2. **Agent unavailable** — fires `hga_sentinel_execute_requested` so a blueprint or automation can handle it.
 3. **Sensitive finding** — blocked with status `blocked`.
 
 ### Ask Agent / Handoff (sensitive findings)
 
-1. **Agent available** — calls the conversation agent with a security-focused prompt. The agent can verify a PIN or alarm code before executing. Its reply is pushed back as a mobile notification.
+1. **Agent available** — calls the conversation agent with a security-focused prompt that includes the detection timestamp and alert-time evidence. The agent calls `GetLiveContext` to check whether the condition is still active before acting. It can verify a PIN or alarm code before executing. Its reply is pushed back as a mobile notification.
 2. **Agent unavailable** — fires `hga_sentinel_ask_requested` (includes a `suggested_prompt` field) so a blueprint can route it to the agent.
 
 ### Event payloads
@@ -205,6 +205,7 @@ Both `hga_sentinel_execute_requested` and `hga_sentinel_ask_requested` include:
 
 - `requested_at`, `anomaly_id`, `type`, `severity`, `confidence`
 - `triggering_entities`, `suggested_actions`, `is_sensitive`, `evidence`
+- `detected_at` — UTC ISO 8601 timestamp when the finding was first detected
 - `mobile_action_payload`
 
 `hga_sentinel_ask_requested` additionally includes `suggested_prompt` — a ready-to-use natural-language prompt for the conversation agent.
