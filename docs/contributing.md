@@ -4,6 +4,7 @@ Contributions are welcome! Please read the [Contribution guidelines](../CONTRIBU
 
 - [Development Setup](#development-setup)
 - [Makefile Reference](#makefile-reference)
+- [Deploying to Home Assistant](#deploying-to-home-assistant)
 - [Dependency Workflow](#dependency-workflow)
 
 ---
@@ -53,6 +54,30 @@ make clean       # Remove the venv
 ```
 
 > `make lint` fails if `requirements_runtime_manifest.txt` is out of date with `manifest.json`. Run `make runtimedeps` to regenerate it.
+
+---
+
+## Deploying to Home Assistant
+
+`scripts/deploy` syncs the integration to a running HA instance via rsync over SSH.
+
+```bash
+# Basic usage (defaults to root@ and /homeassistant config path)
+scripts/deploy 192.168.1.240
+
+# Explicit user and config path
+scripts/deploy root@192.168.1.240 /homeassistant
+
+# Skip the automatic HA restart
+scripts/deploy 192.168.1.240 --no-restart
+
+# Via environment variable
+HA_HOST=192.168.1.240 scripts/deploy
+```
+
+Only files that differ (by checksum) are transferred; `__pycache__` and `.pyc` files are excluded. After a successful sync the script calls `ha core restart` over SSH to reload the integration.
+
+**SSH key setup (one-time):** Add your public key (`~/.ssh/id_rsa.pub` or `~/.ssh/id_ed25519.pub`) to the HA SSH add-on under **Settings → Add-ons → SSH & Web Terminal → Configuration → authorized_keys**, then restart the add-on.
 
 ---
 
