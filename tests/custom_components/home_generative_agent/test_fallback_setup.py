@@ -412,7 +412,7 @@ async def test_setup_embedding_chain_skips_unavailable_primary(
 
 @pytest.mark.asyncio
 async def test_setup_model_fallback_skips_unavailable_primary(
-    hass: Any, monkeypatch: pytest.MonkeyPatch
+    hass: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Unavailable primary chat-like models must not short-circuit fallback."""
     entry = MockConfigEntry(domain=DOMAIN, data={})
@@ -440,3 +440,8 @@ async def test_setup_model_fallback_skips_unavailable_primary(
     assert (
         summarization_model.config["configurable"]["model"] == "qwen-summary-fallback"
     )
+    assert entry.runtime_data.model_deployments["chat"] == "edge"
+    assert entry.runtime_data.model_deployments["vlm"] == "edge"
+    assert entry.runtime_data.model_deployments["summarization"] == "edge"
+    assert "Fallback selected at setup for chat" in caplog.text
+    assert "using provider ollama1 (deployment=edge)" in caplog.text

@@ -2161,6 +2161,39 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             return
         chain.append((model, deployment, provider_id))
 
+    def _finalize_model_chain(
+        category: str,
+        chain: list[tuple[Any, str, str]],
+        primary_provider: ModelProviderConfig,
+        unavailable_model: Any,
+        wrapper_factory: Any,
+    ) -> Any:
+        """Finalize fallback chain and update effective deployment metadata."""
+        if not chain:
+            LOGGER.warning(
+                "No available %s model providers; keeping unavailable primary "
+                "provider %s.",
+                category,
+                primary_provider.entry_id,
+            )
+            return unavailable_model
+
+        active_model, active_deployment, active_provider_id = chain[0]
+        model_deployments[category] = active_deployment
+        if active_provider_id != primary_provider.entry_id:
+            LOGGER.warning(
+                "Fallback selected at setup for %s: primary provider %s was "
+                "unavailable; using provider %s (deployment=%s).",
+                category,
+                primary_provider.entry_id,
+                active_provider_id,
+                active_deployment,
+            )
+
+        if len(chain) > 1:
+            return wrapper_factory(chain)
+        return active_model
+
     # ----- Wrap chat / VLM / summarization with fallback chains -----
     # Primary model already carries per-feature config (model_name, temp, etc.).
     # Fallbacks are configured per provider/category before entering the chain.
@@ -2180,10 +2213,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 _append_available_model(
                     _chat_chain, m, p.deployment, p.entry_id, "chat"
                 )
-        if len(_chat_chain) > 1:
-            chat_model = FallbackChatModel(_chat_chain, circuit_breaker=_chat_cb)
-        elif _chat_chain:
-            chat_model = _chat_chain[0][0]
+        chat_model = _finalize_model_chain(
+            "chat",
+            _chat_chain,
+            _chat_fb[0],
+            chat_model,
+            lambda chain: FallbackChatModel(chain, circuit_breaker=_chat_cb),
+        )
 
     _vlm_fb = fallback_chains.get("vlm", [])
     if _vlm_fb:
@@ -2199,10 +2235,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             m = _configured_model_for_provider(p, "vlm")
             if m is not None:
                 _append_available_model(_vlm_chain, m, p.deployment, p.entry_id, "vlm")
-        if len(_vlm_chain) > 1:
-            vision_model = FallbackVLM(_vlm_chain, circuit_breaker=_vlm_cb)
-        elif _vlm_chain:
-            vision_model = _vlm_chain[0][0]
+        vision_model = _finalize_model_chain(
+            "vlm",
+            _vlm_chain,
+            _vlm_fb[0],
+            vision_model,
+            lambda chain: FallbackVLM(chain, circuit_breaker=_vlm_cb),
+        )
 
     _sum_fb = fallback_chains.get("summarization", [])
     if _sum_fb:
@@ -2220,10 +2259,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 _append_available_model(
                     _sum_chain, m, p.deployment, p.entry_id, "summarization"
                 )
-        if len(_sum_chain) > 1:
-            summarization_model = FallbackChatModel(_sum_chain, circuit_breaker=_sum_cb)
-        elif _sum_chain:
-            summarization_model = _sum_chain[0][0]
+        summarization_model = _finalize_model_chain(
+            "summarization",
+            _sum_chain,
+            _sum_fb[0],
+            summarization_model,
+            lambda chain: FallbackChatModel(chain, circuit_breaker=_sum_cb),
+        )
 
     video_analyzer = VideoAnalyzer(hass, entry)
     suppression = SuppressionManager(hass)
