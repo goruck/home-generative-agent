@@ -1253,6 +1253,8 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 "hass": hass,
                 "pending_actions": runtime_data.pending_actions,
                 "tool_index_ready": runtime_data.tool_index_ready,
+                "tool_indexing_in_progress": runtime_data.tool_indexing_in_progress,
+                "tool_index_failed": runtime_data.tool_index_failed,
             },
             "recursion_limit": 20,
         }
@@ -1467,6 +1469,14 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             or runtime_data.tool_indexing_in_progress
             or runtime_data.tool_index_failed
         ):
+            _LOGGER.debug(
+                "Tool index guard skipped indexing: ready=%s indexing=%s "
+                "failed=%s cached_hashes=%d.",
+                runtime_data.tool_index_ready,
+                runtime_data.tool_indexing_in_progress,
+                runtime_data.tool_index_failed,
+                len(runtime_data.tool_content_hashes),
+            )
             return
         runtime_data.tool_indexing_in_progress = True
         async_dispatcher_send(self.hass, SIGNAL_TOOL_INDEX_UPDATED, "indexing", 0)
@@ -1484,6 +1494,10 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         await self._async_discover_local_tools(runtime_data, index_tasks, new_hashes)
 
         if index_tasks:
+            _LOGGER.info(
+                "Tool index starting: %d tool(s) queued for indexing/update.",
+                len(new_hashes),
+            )
             self.hass.async_create_task(
                 _run_tool_index_background(
                     index_tasks=index_tasks,
@@ -1494,6 +1508,10 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             )
         else:
             runtime_data.tool_index_ready = True
+            _LOGGER.info(
+                "Tool index ready: no tool changes detected (%d cached hash(es)).",
+                len(runtime_data.tool_content_hashes),
+            )
             async_dispatcher_send(
                 self.hass, SIGNAL_TOOL_INDEX_UPDATED, "ready", len(new_hashes)
             )

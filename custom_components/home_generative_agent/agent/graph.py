@@ -753,6 +753,7 @@ async def _get_rag_retrieved_tools(
 
     tool_index_ready = config.get("configurable", {}).get("tool_index_ready", True)
     if not tool_index_ready:
+        LOGGER.debug("Skipping RAG tool retrieval: tool index is not ready")
         return []
 
     opts = config.get("configurable", {}).get("options", {})
@@ -763,6 +764,10 @@ async def _get_rag_retrieved_tools(
 
     # best_score[tool_key] -> (score, SearchItem)
     best: dict[str, tuple[float, Any]] = {}
+    total_results = 0
+    allowed_results = 0
+    below_threshold = 0
+    top_seen: list[tuple[str, float]] = []
 
     for sub_query in sub_queries:
         try:
@@ -781,15 +786,35 @@ async def _get_rag_retrieved_tools(
             LOGGER.exception("Unexpected RAG tool retrieval search failure")
             continue
 
+        total_results += len(results)
         for item in results:
             name = item.value.get("name", "")
             api_id = item.value.get("api_id")
             if api_id not in allowed_api_ids:
                 continue
+            allowed_results += 1
             # score is (1 - distance) for pgvector cosine; None when no embedding
             score = getattr(item, "score", None) or 0.0
+            top_seen.append((name, score))
             if score >= threshold and (name not in best or score > best[name][0]):
                 best[name] = (score, item)
+            else:
+                below_threshold += 1
+
+    if not best:
+        top_seen.sort(key=lambda item: item[1], reverse=True)
+        LOGGER.debug(
+            "RAG tool retrieval produced no candidates: sub_queries=%d "
+            "raw_results=%d allowed_results=%d below_threshold=%d "
+            "threshold=%.3f allowed_api_ids=%s top_scores=%s",
+            len(sub_queries),
+            total_results,
+            allowed_results,
+            below_threshold,
+            threshold,
+            sorted(allowed_api_ids),
+            top_seen[:5],
+        )
 
     # Sort by best score descending and return top `limit`
     sorted_items = sorted(best.values(), key=lambda t: t[0], reverse=True)
@@ -898,6 +923,8 @@ async def _get_actuation_safety_tools(
 
     tool_index_ready = config.get("configurable", {}).get("tool_index_ready", True)
     if not tool_index_ready or not _query_needs_actuation_safety(query):
+        if not tool_index_ready and _query_needs_actuation_safety(query):
+            LOGGER.debug("Skipping actuation safety tools: tool index is not ready")
         return []
 
     try:
@@ -1011,6 +1038,31 @@ def _get_fallback_tools(
             )
         )
     return fallback_tools
+
+
+def _tool_retrieval_fallback_reason(
+    *,
+    store: BaseStore | None,
+    config: RunnableConfig,
+) -> tuple[str, bool, bool, bool]:
+    """Return a concise reason for falling back to keyword-filtered tools."""
+    configurable = config.get("configurable", {})
+    tool_index_ready = configurable.get("tool_index_ready", True)
+    tool_indexing_in_progress = configurable.get("tool_indexing_in_progress", False)
+    tool_index_failed = configurable.get("tool_index_failed", False)
+    if store is None:
+        reason = "store unavailable"
+    elif tool_index_failed:
+        reason = "tool index failed"
+    elif not tool_index_ready:
+        reason = (
+            "tool index still building"
+            if tool_indexing_in_progress
+            else "tool index not ready"
+        )
+    else:
+        reason = "vector search returned no usable tool candidates"
+    return reason, tool_index_ready, tool_indexing_in_progress, tool_index_failed
 
 
 def _format_and_dedupe_tools(
@@ -1266,11 +1318,21 @@ async def _retrieve_tools(
     # queries promote GetLiveContext to the front; otherwise use declaration order.
     if not all_candidates:
         fallback = _get_fallback_tools(config, allowed_api_ids)
+        (
+            fallback_reason,
+            tool_index_ready,
+            tool_indexing_in_progress,
+            tool_index_failed,
+        ) = _tool_retrieval_fallback_reason(store=store, config=config)
         LOGGER.warning(
-            "Tool index not ready or returned no results; "
-            "applying keyword-filtered fallback (limit=%d, total=%d).",
+            "Tool retrieval using keyword-filtered fallback: %s "
+            "(limit=%d, total=%d, ready=%s, indexing=%s, failed=%s).",
+            fallback_reason,
             limit,
             len(fallback),
+            tool_index_ready,
+            tool_indexing_in_progress,
+            tool_index_failed,
         )
         if _query_needs_actuation_safety(query):
             actuation = [t for t in fallback if t["is_actuation"]]
