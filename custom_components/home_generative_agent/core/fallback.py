@@ -286,10 +286,34 @@ class FallbackVLM:
         self,
         chain: list[tuple[Any, str, str]],
         circuit_breaker: CircuitBreaker | None = None,
+        config: dict[str, Any] | None = None,
     ) -> None:
         """Initialize fallback VLM wrapper."""
         self.chain = chain
         self.circuit_breaker = circuit_breaker
+        self._config = config or {}
+
+    @property
+    def config(self) -> dict[str, Any]:
+        """Return internal config dict."""
+        return self._config
+
+    def with_config(
+        self, config: dict[str, Any] | None = None, **kwargs: Any
+    ) -> FallbackVLM:
+        """Return a new FallbackVLM with config applied to each model."""
+        merged: dict[str, Any] = dict(self._config)
+        if config:
+            merged.update(config)
+        wrapped_chain: list[tuple[Any, str, str]] = []
+        for model, deployment, provider_id in self.chain:
+            if hasattr(model, "with_config"):
+                wrapped_chain.append(
+                    (model.with_config(config, **kwargs), deployment, provider_id)
+                )
+            else:
+                wrapped_chain.append((model, deployment, provider_id))
+        return FallbackVLM(wrapped_chain, self.circuit_breaker, merged)
 
     async def ainvoke(
         self,

@@ -326,6 +326,28 @@ async def test_fallback_chat_with_config() -> None:
     assert "top_p" in wrapped.config.get("configurable", {})
 
 
+@pytest.mark.asyncio
+async def test_fallback_vlm_with_config() -> None:
+    """with_config should propagate to VLM models and store config."""
+    primary = MagicMock()
+    primary.with_config.return_value = AsyncMock()
+    fallback = MagicMock()
+    fallback.with_config.return_value = AsyncMock()
+
+    model = FallbackVLM(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")],
+        config={"configurable": {"temperature": 0.5}},
+    )
+
+    wrapped = model.with_config(config={"configurable": {"num_predict": 128}})
+
+    assert isinstance(wrapped, FallbackVLM)
+    assert len(wrapped.chain) == 2
+    primary.with_config.assert_called_once()
+    fallback.with_config.assert_called_once()
+    assert "num_predict" in wrapped.config.get("configurable", {})
+
+
 def _fake_astream(
     *items: FakeAIMessage,
 ) -> Any:
