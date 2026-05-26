@@ -423,6 +423,30 @@ async def test_retrieve_tools_specific_exceptions(
     assert "Unexpected RAG tool retrieval search failure" in caplog.text
 
 
+@pytest.mark.asyncio
+async def test_retrieve_tools_vector_dimension_mismatch_is_known_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Vector dimension mismatches are expected during embedding provider changes."""
+    store = MagicMock()
+    store.asearch = AsyncMock(
+        side_effect=psycopg.DataError("different vector dimensions 1024 and 3072")
+    )
+    config: RunnableConfig = {
+        "configurable": {
+            "tool_index_ready": True,
+            "options": {"tool_retrieval_limit": 5},
+        }
+    }
+
+    rag_tools = await _get_rag_retrieved_tools(store, config, "query", {"assist"})
+
+    assert rag_tools == []
+    assert "RAG tool retrieval search failed (known error)" in caplog.text
+    assert "different vector dimensions" in caplog.text
+    assert "Unexpected RAG tool retrieval search failure" not in caplog.text
+
+
 # ---------------------------------------------------------------------------
 # _split_query_intents
 # ---------------------------------------------------------------------------

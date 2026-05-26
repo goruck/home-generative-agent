@@ -780,6 +780,7 @@ async def _get_rag_retrieved_tools(
             InvalidNamespaceError,
             psycopg.OperationalError,
             psycopg.ProgrammingError,
+            psycopg.DataError,
             ValueError,
         ) as err:
             LOGGER.warning("RAG tool retrieval search failed (known error): %s", err)
@@ -972,6 +973,7 @@ async def _get_actuation_safety_tools(
         InvalidNamespaceError,
         psycopg.OperationalError,
         psycopg.ProgrammingError,
+        psycopg.DataError,
         ValueError,
     ) as err:
         LOGGER.warning("Deterministic safety tool filter failed (known error): %s", err)
@@ -981,6 +983,7 @@ async def _get_actuation_safety_tools(
             InvalidNamespaceError,
             psycopg.OperationalError,
             psycopg.ProgrammingError,
+            psycopg.DataError,
             ValueError,
         ) as err2:
             LOGGER.warning(
@@ -1537,6 +1540,17 @@ async def _search_memories(store: BaseStore, user_id: str, query: str | None) ->
             "incompatible response (not OpenAI-standard). Falling back to "
             "recency-based memory retrieval. Check the /v1/embeddings response "
             "format of your OpenAI-compatible server."
+        )
+        try:
+            return await store.asearch((user_id, "memories"), limit=10)
+        except Exception:
+            LOGGER.exception("Memory recency search also failed; no memories injected")
+            return []
+    except psycopg.DataError as err:
+        LOGGER.warning(
+            "Memory semantic search failed due to vector store data mismatch: %s. "
+            "Falling back to recency-based memory retrieval.",
+            err,
         )
         try:
             return await store.asearch((user_id, "memories"), limit=10)

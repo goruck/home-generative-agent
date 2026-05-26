@@ -13,6 +13,7 @@ from homeassistant.exceptions import HomeAssistantError
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+from custom_components.home_generative_agent.const import EMBEDDING_MODEL_DIMS
 from custom_components.home_generative_agent.core.fallback import (
     CircuitBreaker,
     FallbackChatModel,
@@ -294,14 +295,27 @@ async def test_fallback_embeddings_query() -> None:
 @pytest.mark.asyncio
 async def test_fallback_embeddings_switch_callback_and_sticky_provider(
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Embedding fallback switches provider and uses it first afterward."""
+
+    class FakeGeminiEmbeddings:
+        """Fake Gemini embeddings model for dimensionality-normalization coverage."""
+
+        def __init__(self) -> None:
+            """Initialize fake model."""
+            self.aembed_documents = AsyncMock(return_value=[[0.3, 0.4]])
+
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.fallback."
+        "GoogleGenerativeAIEmbeddings",
+        FakeGeminiEmbeddings,
+    )
+
     primary = AsyncMock()
     primary.aembed_documents.side_effect = ConnectionError("emb down")
     primary.aembed_query.return_value = [0.1, 0.2]
-    fallback = AsyncMock()
-    fallback.aembed_documents.return_value = [[0.3, 0.4]]
-    fallback.aembed_query.return_value = [0.5, 0.6]
+    fallback = FakeGeminiEmbeddings()
     switch_callback = MagicMock()
 
     emb = FallbackEmbeddings(
@@ -310,11 +324,19 @@ async def test_fallback_embeddings_switch_callback_and_sticky_provider(
     )
 
     assert await emb.aembed_documents(["hello"]) == [[0.3, 0.4]]
+    fallback.aembed_documents.assert_awaited_once_with(
+        ["hello"], output_dimensionality=EMBEDDING_MODEL_DIMS
+    )
     switch_callback.assert_called_once_with("p1", "p2")
+
+    fallback.aembed_documents.reset_mock()
+    fallback.aembed_documents.return_value = [[0.5, 0.6]]
 
     assert await emb.aembed_query("hello") == [0.5, 0.6]
     primary.aembed_query.assert_not_awaited()
-    assert fallback.aembed_query.await_count == 1
+    fallback.aembed_documents.assert_awaited_once_with(
+        ["hello"], output_dimensionality=EMBEDDING_MODEL_DIMS
+    )
     assert "Using sticky embedding provider p2 first" in caplog.text
     assert "configured primary provider p1 will not be retried" in caplog.text
 

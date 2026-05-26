@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
+import psycopg
 import pytest
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.dispatcher import async_dispatcher_send
@@ -542,6 +543,30 @@ async def test_search_memories_returns_empty_when_both_searches_fail() -> None:
     result = await _search_memories(store, "user-1", "query")
 
     assert result == []
+
+
+@pytest.mark.asyncio
+async def test_search_memories_falls_back_to_recency_on_vector_dimension_mismatch(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Vector dimension mismatches fall back to recency without a traceback."""
+    store = MagicMock()
+    fallback = [MagicMock()]
+    store.asearch = AsyncMock(
+        side_effect=[
+            psycopg.DataError("different vector dimensions 1024 and 3072"),
+            fallback,
+        ]
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = await _search_memories(store, "user-1", "some query")
+
+    assert result is fallback
+    assert "vector store data mismatch" in caplog.text
+    assert "Unexpected memory store search failure" not in caplog.text
+    _, recency_kwargs = store.asearch.call_args_list[1]
+    assert "query" not in recency_kwargs
 
 
 @pytest.mark.asyncio

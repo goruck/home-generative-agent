@@ -7,6 +7,9 @@ from time import monotonic
 from typing import TYPE_CHECKING, Any, cast
 
 from homeassistant.exceptions import HomeAssistantError
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+
+from custom_components.home_generative_agent.const import EMBEDDING_MODEL_DIMS
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -421,6 +424,22 @@ class FallbackEmbeddings:
             if self.switch_callback:
                 self.switch_callback(previous_provider_id, provider_id)
 
+    async def _aembed_documents(
+        self, model: Any, texts: list[str]
+    ) -> list[list[float]]:
+        """Embed documents with provider-specific dimensionality normalization."""
+        if isinstance(model, GoogleGenerativeAIEmbeddings):
+            return await model.aembed_documents(
+                texts, output_dimensionality=EMBEDDING_MODEL_DIMS
+            )
+        return await model.aembed_documents(texts)
+
+    async def _aembed_query(self, model: Any, text: str) -> list[float]:
+        """Embed a query with provider-specific dimensionality normalization."""
+        if isinstance(model, GoogleGenerativeAIEmbeddings):
+            return (await self._aembed_documents(model, [text]))[0]
+        return await model.aembed_query(text)
+
     async def aembed_documents(self, texts: list[str]) -> list[list[float]]:
         """Embed documents through the fallback chain."""
         last_err: Exception | None = None
@@ -432,7 +451,7 @@ class FallbackEmbeddings:
             ):
                 continue
             try:
-                result = await model.aembed_documents(texts)
+                result = await self._aembed_documents(model, texts)
             except Exception as err:
                 last_err = err
                 if not _is_retryable(err):
@@ -477,7 +496,7 @@ class FallbackEmbeddings:
             ):
                 continue
             try:
-                result = await model.aembed_query(text)
+                result = await self._aembed_query(model, text)
             except Exception as err:
                 last_err = err
                 if not _is_retryable(err):
