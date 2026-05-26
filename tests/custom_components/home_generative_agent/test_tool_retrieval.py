@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import re
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -301,6 +302,68 @@ async def test_retrieve_tools_fallback_on_index_not_ready() -> None:
     store.asearch.assert_not_called()
     assert "HassTurnOn" in result["tool_routing_map"]
     assert len(result["selected_tools"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_retrieve_tools_fallback_when_live_index_becomes_stale(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Live runtime state wins when vector search marks the index stale."""
+    state: State = {
+        "messages": [MagicMock(content="what can you do?")],
+        "summary": "",
+        "chat_model_usage_metadata": {},
+        "messages_to_remove": [],
+        "selected_tools": [],
+        "tool_routing_map": {},
+    }
+    runtime_data = SimpleNamespace(
+        tool_index_ready=True,
+        tool_indexing_in_progress=False,
+        tool_index_failed=False,
+    )
+    store = MagicMock()
+
+    item = MagicMock()
+    item.value = {
+        "name": "stale_vector_tool",
+        "api_id": "assist",
+        "description": "Stale vector tool",
+        "parameters": "{}",
+        "is_actuation": False,
+    }
+    item.score = 0.99
+
+    async def _stale_search(*_args: Any, **_kwargs: Any) -> list[Any]:
+        runtime_data.tool_index_ready = False
+        return [item]
+
+    store.asearch = AsyncMock(side_effect=_stale_search)
+
+    ha_tool = MagicMock(spec=llm.Tool)
+    ha_tool.name = "GetLiveContext"
+    ha_tool.description = "Get live context"
+    ha_tool.parameters = {"type": "object", "properties": {}}
+
+    api = MagicMock()
+    api.tools = [ha_tool]
+    api.custom_serializer = None
+
+    config: RunnableConfig = {
+        "configurable": {
+            "options": {"llm_hass_api": ["assist"]},
+            "hga_runtime_data": runtime_data,
+            "tool_index_ready": True,
+            "langchain_tools": {},
+            "ha_llm_api": MagicMock(apis={"assist": api}),
+        }
+    }
+
+    result = await _retrieve_tools(state, config, store=store)
+
+    assert "stale_vector_tool" not in result["tool_routing_map"]
+    assert result["tool_routing_map"] == {"GetLiveContext": "assist"}
+    assert "tool index not ready" in caplog.text
 
 
 @pytest.mark.asyncio

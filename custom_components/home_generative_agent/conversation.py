@@ -466,9 +466,7 @@ def _get_stt_hallucination_patterns(
         CONF_STT_HALLUCINATION_PATTERNS, DEFAULT_STT_HALLUCINATION_PATTERNS
     )
     if isinstance(raw, list):
-        return tuple(
-            p.strip().lower() for p in raw if isinstance(p, str) and p.strip()
-        )
+        return tuple(p.strip().lower() for p in raw if isinstance(p, str) and p.strip())
     if isinstance(raw, str):
         if not raw:
             return ()
@@ -487,9 +485,7 @@ def _get_stt_hallucination_exact_patterns(
         DEFAULT_STT_HALLUCINATION_EXACT_PATTERNS,
     )
     if isinstance(raw, list):
-        return tuple(
-            p.strip().lower() for p in raw if isinstance(p, str) and p.strip()
-        )
+        return tuple(p.strip().lower() for p in raw if isinstance(p, str) and p.strip())
     if isinstance(raw, str):
         if not raw:
             return ()
@@ -1043,9 +1039,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 if messages and isinstance(messages[-1], AIMessage)
                 else None
             )
-            last_chat_content = (
-                chat_log.content[-1] if chat_log.content else None
-            )
+            last_chat_content = chat_log.content[-1] if chat_log.content else None
             replace_partial = (
                 isinstance(last_chat_content, conversation.AssistantContent)
                 and recovered_content is not None
@@ -1078,9 +1072,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                     "Recovered final AssistantContent from graph state after "
                     "streaming failure."
                 )
-            elif not isinstance(
-                last_chat_content, conversation.AssistantContent
-            ):
+            elif not isinstance(last_chat_content, conversation.AssistantContent):
                 # Graph state has no usable AI response (e.g. model timed out
                 # before generating a reply). Emit a user-visible error message
                 # so the chat UI shows something instead of a blank bubble.
@@ -1252,6 +1244,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 "ha_llm_api": llm_api or None,
                 "hass": hass,
                 "pending_actions": runtime_data.pending_actions,
+                "hga_runtime_data": runtime_data,
                 "tool_index_ready": runtime_data.tool_index_ready,
                 "tool_indexing_in_progress": runtime_data.tool_indexing_in_progress,
                 "tool_index_failed": runtime_data.tool_index_failed,

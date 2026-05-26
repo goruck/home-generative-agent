@@ -751,7 +751,9 @@ async def _get_rag_retrieved_tools(
         LOGGER.warning("Store is None; skipping RAG tool retrieval")
         return []
 
-    tool_index_ready = config.get("configurable", {}).get("tool_index_ready", True)
+    tool_index_ready, _tool_indexing_in_progress, _tool_index_failed = (
+        _tool_index_state(config)
+    )
     if not tool_index_ready:
         LOGGER.debug("Skipping RAG tool retrieval: tool index is not ready")
         return []
@@ -785,6 +787,16 @@ async def _get_rag_retrieved_tools(
         except Exception:
             LOGGER.exception("Unexpected RAG tool retrieval search failure")
             continue
+
+        tool_index_ready, _tool_indexing_in_progress, _tool_index_failed = (
+            _tool_index_state(config)
+        )
+        if not tool_index_ready:
+            LOGGER.debug(
+                "Discarding RAG tool retrieval results because the tool index "
+                "became stale during vector search"
+            )
+            return []
 
         total_results += len(results)
         for item in results:
@@ -910,6 +922,23 @@ def _query_needs_actuation_safety(query: str) -> bool:
     return not _query_is_read_only_open_state(query)
 
 
+def _tool_index_state(config: RunnableConfig) -> tuple[bool, bool, bool]:
+    """Return current tool-index state, preferring live runtime data if present."""
+    configurable = config.get("configurable", {})
+    runtime_data = configurable.get("hga_runtime_data")
+    if runtime_data is not None:
+        return (
+            bool(getattr(runtime_data, "tool_index_ready", True)),
+            bool(getattr(runtime_data, "tool_indexing_in_progress", False)),
+            bool(getattr(runtime_data, "tool_index_failed", False)),
+        )
+    return (
+        bool(configurable.get("tool_index_ready", True)),
+        bool(configurable.get("tool_indexing_in_progress", False)),
+        bool(configurable.get("tool_index_failed", False)),
+    )
+
+
 async def _get_actuation_safety_tools(
     store: BaseStore | None,
     config: RunnableConfig,
@@ -921,7 +950,9 @@ async def _get_actuation_safety_tools(
         LOGGER.warning("Store is None; skipping actuation safety tools")
         return []
 
-    tool_index_ready = config.get("configurable", {}).get("tool_index_ready", True)
+    tool_index_ready, _tool_indexing_in_progress, _tool_index_failed = (
+        _tool_index_state(config)
+    )
     if not tool_index_ready or not _query_needs_actuation_safety(query):
         if not tool_index_ready and _query_needs_actuation_safety(query):
             LOGGER.debug("Skipping actuation safety tools: tool index is not ready")
@@ -1046,10 +1077,9 @@ def _tool_retrieval_fallback_reason(
     config: RunnableConfig,
 ) -> tuple[str, bool, bool, bool]:
     """Return a concise reason for falling back to keyword-filtered tools."""
-    configurable = config.get("configurable", {})
-    tool_index_ready = configurable.get("tool_index_ready", True)
-    tool_indexing_in_progress = configurable.get("tool_indexing_in_progress", False)
-    tool_index_failed = configurable.get("tool_index_failed", False)
+    tool_index_ready, tool_indexing_in_progress, tool_index_failed = _tool_index_state(
+        config
+    )
     if store is None:
         reason = "store unavailable"
     elif tool_index_failed:
