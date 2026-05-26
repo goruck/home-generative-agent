@@ -74,7 +74,9 @@ async def test_fallback_chat_primary_succeeds() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fallback_chat_primary_fails() -> None:
+async def test_fallback_chat_primary_fails(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """When primary fails with retryable error, fallback is used."""
     primary = AsyncMock()
     primary.ainvoke.side_effect = HomeAssistantError("primary down")
@@ -88,6 +90,8 @@ async def test_fallback_chat_primary_fails() -> None:
     assert result.content == "fallback"
     assert primary.ainvoke.await_count == 1
     assert fallback.ainvoke.await_count == 1
+    assert "Model call failed for provider p1 (provider 1/2)" in caplog.text
+    assert "(attempt 1/2)" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -181,7 +185,9 @@ async def test_fallback_chat_stream_primary_succeeds() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fallback_chat_stream_primary_fails() -> None:
+async def test_fallback_chat_stream_primary_fails(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Streaming: when primary fails mid-stream, fallback stream is used."""
     _err = HomeAssistantError("primary down")
 
@@ -204,6 +210,8 @@ async def test_fallback_chat_stream_primary_fails() -> None:
     chunks = [c async for c in model.astream(["hello"])]
     assert len(chunks) == 1
     assert chunks[0].content == "fb_chunk"
+    assert "Model stream failed for provider p1 (provider 1/2)" in caplog.text
+    assert "(attempt 1/2)" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -220,7 +228,9 @@ async def test_fallback_vlm_primary_succeeds() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fallback_vlm_primary_fails() -> None:
+async def test_fallback_vlm_primary_fails(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """VLM fallback used when primary fails."""
     primary = AsyncMock()
     primary.ainvoke.side_effect = HomeAssistantError("vlm down")
@@ -230,6 +240,8 @@ async def test_fallback_vlm_primary_fails() -> None:
     model = FallbackVLM(chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")])
     result = await model.ainvoke(["image"])
     assert result.content == "vlm fallback"
+    assert "VLM call failed for provider p1 (provider 1/2)" in caplog.text
+    assert "(attempt 1/2)" not in caplog.text
 
 
 @pytest.mark.asyncio

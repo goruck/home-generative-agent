@@ -239,7 +239,7 @@ class FallbackChatModel:
                 if not _is_retryable(err):
                     raise
                 LOGGER.warning(
-                    "Model call failed for provider %s (attempt %d/%d): %s",
+                    "Model call failed for provider %s (provider %d/%d): %s",
                     provider_id,
                     i + 1,
                     len(self.chain),
@@ -284,7 +284,7 @@ class FallbackChatModel:
                 if not _is_retryable(err):
                     raise
                 LOGGER.warning(
-                    "Model stream failed for provider %s (attempt %d/%d): %s",
+                    "Model stream failed for provider %s (provider %d/%d): %s",
                     provider_id,
                     i + 1,
                     len(self.chain),
@@ -363,7 +363,7 @@ class FallbackVLM:
                 if not _is_retryable(err):
                     raise
                 LOGGER.warning(
-                    "VLM call failed for provider %s (attempt %d/%d): %s",
+                    "VLM call failed for provider %s (provider %d/%d): %s",
                     provider_id,
                     i + 1,
                     len(self.chain),
