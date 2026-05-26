@@ -263,6 +263,7 @@ async def test_fallback_embeddings_primary_fails(
         "Embedding fallback activated: provider p2 succeeded after failed "
         "provider(s): p1"
     ) in caplog.text
+    assert "Embedding provider switched from p1 to p2" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -276,6 +277,30 @@ async def test_fallback_embeddings_query() -> None:
     emb = FallbackEmbeddings(chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")])
     result = await emb.aembed_query("hello")
     assert result == [0.5, 0.6]
+
+
+@pytest.mark.asyncio
+async def test_fallback_embeddings_switch_callback_and_sticky_provider() -> None:
+    """Embedding fallback switches provider and uses it first afterward."""
+    primary = AsyncMock()
+    primary.aembed_documents.side_effect = ConnectionError("emb down")
+    primary.aembed_query.return_value = [0.1, 0.2]
+    fallback = AsyncMock()
+    fallback.aembed_documents.return_value = [[0.3, 0.4]]
+    fallback.aembed_query.return_value = [0.5, 0.6]
+    switch_callback = MagicMock()
+
+    emb = FallbackEmbeddings(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")],
+        switch_callback=switch_callback,
+    )
+
+    assert await emb.aembed_documents(["hello"]) == [[0.3, 0.4]]
+    switch_callback.assert_called_once_with("p1", "p2")
+
+    assert await emb.aembed_query("hello") == [0.5, 0.6]
+    primary.aembed_query.assert_not_awaited()
+    assert fallback.aembed_query.await_count == 1
 
 
 def test_circuit_breaker_opens_after_threshold() -> None:

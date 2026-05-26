@@ -32,6 +32,7 @@ from homeassistant.const import (
 from homeassistant.core import HomeAssistant, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.httpx_client import get_async_client
 from homeassistant.helpers.network import get_url
 from homeassistant.helpers.target import (
@@ -213,6 +214,7 @@ from .const import (
     RECOMMENDED_VLM_TEMPERATURE,
     SIGNAL_HGA_NEW_LATEST,
     SIGNAL_HGA_RECOGNIZED,
+    SIGNAL_TOOL_INDEX_UPDATED,
     SUBENTRY_TYPE_DATABASE,
     SUBENTRY_TYPE_FEATURE,
     SUBENTRY_TYPE_MODEL_PROVIDER,
@@ -1635,7 +1637,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             if m is not None:
                 _emb_chain.append((m, p.deployment, p.entry_id))
         if len(_emb_chain) > 1:
-            embedding_model = FallbackEmbeddings(_emb_chain, circuit_breaker=_emb_cb)
+
+            def _mark_tool_index_stale(
+                previous_provider_id: str, provider_id: str
+            ) -> None:
+                """Mark tool vectors stale after an embedding provider switch."""
+                runtime_data = getattr(entry, "runtime_data", None)
+                if runtime_data is None:
+                    return
+                runtime_data.tool_content_hashes.clear()
+                runtime_data.tool_index_ready = False
+                runtime_data.tool_index_failed = False
+                LOGGER.warning(
+                    "Tool index marked stale after embedding provider switch "
+                    "from %s to %s; it will be rebuilt on the next indexing pass.",
+                    previous_provider_id,
+                    provider_id,
+                )
+                async_dispatcher_send(hass, SIGNAL_TOOL_INDEX_UPDATED, "stale", 0)
+
+            embedding_model = FallbackEmbeddings(
+                _emb_chain,
+                circuit_breaker=_emb_cb,
+                switch_callback=_mark_tool_index_stale,
+            )
         elif _emb_chain:
             embedding_model = _emb_chain[0][0]
         else:

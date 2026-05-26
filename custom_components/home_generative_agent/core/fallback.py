@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, cast
 from homeassistant.exceptions import HomeAssistantError
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
 
     from langchain_core.language_models import LanguageModelInput
     from langchain_core.messages import BaseMessage
@@ -384,16 +384,42 @@ class FallbackEmbeddings:
         self,
         chain: list[tuple[Any, str, str]],
         circuit_breaker: CircuitBreaker | None = None,
+        switch_callback: Callable[[str, str], None] | None = None,
     ) -> None:
         """Initialize fallback embeddings wrapper."""
         self.chain = chain
         self.circuit_breaker = circuit_breaker
+        self.switch_callback = switch_callback
+        self._active_provider_id = chain[0][2] if chain else None
+
+    def _ordered_chain(self) -> list[tuple[Any, str, str]]:
+        """Return chain with the active provider first."""
+        if self._active_provider_id is None:
+            return self.chain
+        active = [item for item in self.chain if item[2] == self._active_provider_id]
+        inactive = [item for item in self.chain if item[2] != self._active_provider_id]
+        return [*active, *inactive]
+
+    def _record_success(self, provider_id: str) -> None:
+        """Record the provider used successfully for future embedding calls."""
+        previous_provider_id = self._active_provider_id
+        self._active_provider_id = provider_id
+        if previous_provider_id and previous_provider_id != provider_id:
+            LOGGER.warning(
+                "Embedding provider switched from %s to %s. Existing vector "
+                "indexes may be stale and should be rebuilt.",
+                previous_provider_id,
+                provider_id,
+            )
+            if self.switch_callback:
+                self.switch_callback(previous_provider_id, provider_id)
 
     async def aembed_documents(self, texts: list[str]) -> list[list[float]]:
         """Embed documents through the fallback chain."""
         last_err: Exception | None = None
         failed_providers: list[str] = []
-        for i, (model, _deployment, provider_id) in enumerate(self.chain):
+        chain = self._ordered_chain()
+        for i, (model, _deployment, provider_id) in enumerate(chain):
             if self.circuit_breaker and not self.circuit_breaker.is_available(
                 provider_id
             ):
@@ -406,10 +432,10 @@ class FallbackEmbeddings:
                     raise
                 failed_providers.append(provider_id)
                 LOGGER.warning(
-                    "Embedding call failed for provider %s (attempt %d/%d): %s",
+                    "Embedding call failed for provider %s (provider %d/%d): %s",
                     provider_id,
                     i + 1,
-                    len(self.chain),
+                    len(chain),
                     _safe_err_summary(err),
                 )
                 if self.circuit_breaker:
@@ -425,6 +451,7 @@ class FallbackEmbeddings:
                     )
                 if self.circuit_breaker:
                     self.circuit_breaker.record_success(provider_id)
+                self._record_success(provider_id)
                 return result
 
         msg = (
@@ -436,7 +463,8 @@ class FallbackEmbeddings:
         """Embed a query through the fallback chain."""
         last_err: Exception | None = None
         failed_providers: list[str] = []
-        for i, (model, _deployment, provider_id) in enumerate(self.chain):
+        chain = self._ordered_chain()
+        for i, (model, _deployment, provider_id) in enumerate(chain):
             if self.circuit_breaker and not self.circuit_breaker.is_available(
                 provider_id
             ):
@@ -449,10 +477,10 @@ class FallbackEmbeddings:
                     raise
                 failed_providers.append(provider_id)
                 LOGGER.warning(
-                    "Embedding query failed for provider %s (attempt %d/%d): %s",
+                    "Embedding query failed for provider %s (provider %d/%d): %s",
                     provider_id,
                     i + 1,
-                    len(self.chain),
+                    len(chain),
                     _safe_err_summary(err),
                 )
                 if self.circuit_breaker:
@@ -468,6 +496,7 @@ class FallbackEmbeddings:
                     )
                 if self.circuit_breaker:
                     self.circuit_breaker.record_success(provider_id)
+                self._record_success(provider_id)
                 return result
 
         msg = (
