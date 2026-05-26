@@ -292,7 +292,9 @@ async def test_fallback_embeddings_query() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fallback_embeddings_switch_callback_and_sticky_provider() -> None:
+async def test_fallback_embeddings_switch_callback_and_sticky_provider(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Embedding fallback switches provider and uses it first afterward."""
     primary = AsyncMock()
     primary.aembed_documents.side_effect = ConnectionError("emb down")
@@ -313,6 +315,8 @@ async def test_fallback_embeddings_switch_callback_and_sticky_provider() -> None
     assert await emb.aembed_query("hello") == [0.5, 0.6]
     primary.aembed_query.assert_not_awaited()
     assert fallback.aembed_query.await_count == 1
+    assert "Using sticky embedding provider p2 first" in caplog.text
+    assert "configured primary provider p1 will not be retried" in caplog.text
 
 
 def test_circuit_breaker_opens_after_threshold() -> None:

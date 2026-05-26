@@ -398,6 +398,13 @@ class FallbackEmbeddings:
             return self.chain
         active = [item for item in self.chain if item[2] == self._active_provider_id]
         inactive = [item for item in self.chain if item[2] != self._active_provider_id]
+        if inactive and active and active[0][2] != self.chain[0][2]:
+            LOGGER.debug(
+                "Using sticky embedding provider %s first; configured primary "
+                "provider %s will not be retried until the integration is reloaded.",
+                active[0][2],
+                self.chain[0][2],
+            )
         return [*active, *inactive]
 
     def _record_success(self, provider_id: str) -> None:
