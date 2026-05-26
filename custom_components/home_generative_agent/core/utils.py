@@ -214,7 +214,9 @@ async def local_chat_session(
     try:
         await _cancel_active_sentinel_llm_tasks(category)
         LOGGER.debug(
-            "Chat session active (deployment=%s, category=%s).", deployment, category
+            "Local chat resource gate active (configured_deployment=%s, category=%s).",
+            deployment,
+            category,
         )
         yield
     finally:
@@ -222,7 +224,9 @@ async def local_chat_session(
         if _chat_active_count == 0:
             _chat_idle.set()
         LOGGER.debug(
-            "Chat session ended (deployment=%s, category=%s).", deployment, category
+            "Local chat resource gate ended (configured_deployment=%s, category=%s).",
+            deployment,
+            category,
         )
 
 
