@@ -138,6 +138,34 @@ async def test_fallback_chat_empty_tool_call_response_does_not_fallback() -> Non
     fallback.ainvoke.assert_not_awaited()
 
 
+def test_fallback_chat_with_config_preserves_bound_model_config() -> None:
+    """Per-call fallback config preserves the configured provider model."""
+    primary = MagicMock()
+    primary.config = {
+        "configurable": {
+            "model": "qwen-summary",
+            "temperature": 0.2,
+            "num_ctx": 32000,
+        }
+    }
+    primary.with_config.return_value = MagicMock()
+
+    model = FallbackChatModel(chain=[(primary, "edge", "p1")])
+    configured = model.with_config(
+        config={"configurable": {"num_predict": 128, "reasoning": False}}
+    )
+
+    assert isinstance(configured, FallbackChatModel)
+    call_config = primary.with_config.call_args.args[0]
+    assert call_config["configurable"] == {
+        "model": "qwen-summary",
+        "temperature": 0.2,
+        "num_ctx": 32000,
+        "num_predict": 128,
+        "reasoning": False,
+    }
+
+
 @pytest.mark.asyncio
 async def test_fallback_chat_all_fail() -> None:
     """When all providers fail, HomeAssistantError is raised."""
@@ -243,6 +271,34 @@ async def test_fallback_vlm_primary_fails(
     assert result.content == "vlm fallback"
     assert "VLM call failed for provider p1 (provider 1/2)" in caplog.text
     assert "(attempt 1/2)" not in caplog.text
+
+
+def test_fallback_vlm_with_config_preserves_bound_model_config() -> None:
+    """Video per-call VLM config preserves the configured provider model."""
+    primary = MagicMock()
+    primary.config = {
+        "configurable": {
+            "model": "qwen-vlm",
+            "temperature": 0.1,
+            "num_ctx": 32000,
+        }
+    }
+    primary.with_config.return_value = MagicMock()
+
+    model = FallbackVLM(chain=[(primary, "edge", "p1")])
+    configured = model.with_config(
+        config={"configurable": {"num_predict": 256, "reasoning": False}}
+    )
+
+    assert isinstance(configured, FallbackVLM)
+    call_config = primary.with_config.call_args.args[0]
+    assert call_config["configurable"] == {
+        "model": "qwen-vlm",
+        "temperature": 0.1,
+        "num_ctx": 32000,
+        "num_predict": 256,
+        "reasoning": False,
+    }
 
 
 @pytest.mark.asyncio

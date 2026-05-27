@@ -63,6 +63,32 @@ def _safe_err_summary(err: Exception | None) -> str:
     return f"{type(err).__name__}: {str(err)[:200]}"
 
 
+def _merge_config(
+    base: dict[str, Any] | None, override: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Merge Runnable config dicts while preserving existing configurable values."""
+    merged = dict(base or {})
+    if not override:
+        return merged
+
+    for key, value in override.items():
+        if key == "configurable" and isinstance(value, dict):
+            existing = merged.get("configurable")
+            merged["configurable"] = {
+                **(existing if isinstance(existing, dict) else {}),
+                **value,
+            }
+        else:
+            merged[key] = value
+    return merged
+
+
+def _merge_model_config(model: Any, config: dict[str, Any] | None) -> dict[str, Any]:
+    """Merge new config with any config already bound to a model."""
+    existing = getattr(model, "config", None)
+    return _merge_config(existing if isinstance(existing, dict) else None, config)
+
+
 def _retryable_empty_response(result: Any) -> HomeAssistantError | None:
     """Return retryable error when a model hit length limit with empty content."""
     content = getattr(result, "content", None)
@@ -202,14 +228,16 @@ class FallbackChatModel:
         self, config: dict[str, Any] | None = None, **kwargs: Any
     ) -> FallbackChatModel:
         """Return a new FallbackChatModel with merged config."""
-        merged: dict[str, Any] = dict(self._config)
-        if config:
-            merged.update(config)
+        merged = _merge_config(self._config, config)
         wrapped_chain: list[tuple[Any, str, str]] = []
         for model, deployment, provider_id in self.chain:
             if hasattr(model, "with_config"):
                 wrapped_chain.append(
-                    (model.with_config(config, **kwargs), deployment, provider_id)
+                    (
+                        model.with_config(_merge_model_config(model, config), **kwargs),
+                        deployment,
+                        provider_id,
+                    )
                 )
             else:
                 wrapped_chain.append((model, deployment, provider_id))
@@ -333,14 +361,16 @@ class FallbackVLM:
         self, config: dict[str, Any] | None = None, **kwargs: Any
     ) -> FallbackVLM:
         """Return a new FallbackVLM with config applied to each model."""
-        merged: dict[str, Any] = dict(self._config)
-        if config:
-            merged.update(config)
+        merged = _merge_config(self._config, config)
         wrapped_chain: list[tuple[Any, str, str]] = []
         for model, deployment, provider_id in self.chain:
             if hasattr(model, "with_config"):
                 wrapped_chain.append(
-                    (model.with_config(config, **kwargs), deployment, provider_id)
+                    (
+                        model.with_config(_merge_model_config(model, config), **kwargs),
+                        deployment,
+                        provider_id,
+                    )
                 )
             else:
                 wrapped_chain.append((model, deployment, provider_id))
