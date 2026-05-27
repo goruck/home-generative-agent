@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from homeassistant.const import CONF_API_KEY
+from homeassistant.exceptions import HomeAssistantError
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 import custom_components.home_generative_agent as hga_component
@@ -142,6 +143,26 @@ class NoopHttpClient:
 
     def close(self) -> None:
         """Close no resources."""
+
+
+def _register_capture_service(
+    hass: Any,
+    domain: str,
+    service: str,
+    calls: list[dict[str, Any]],
+) -> None:
+    """Register a fake service and capture all calls."""
+
+    async def _handler(call: Any) -> None:
+        calls.append(
+            {
+                "domain": domain,
+                "service": service,
+                "data": dict(call.data),
+            }
+        )
+
+    hass.services.async_register(domain, service, _handler)
 
 
 @dataclass
@@ -445,3 +466,79 @@ async def test_setup_model_fallback_skips_unavailable_primary(
     assert entry.runtime_data.model_deployments["summarization"] == "edge"
     assert "Fallback selected at setup for chat" in caplog.text
     assert "using provider ollama1 (deployment=edge)" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_setup_model_fallback_sends_persistent_notification(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Setup-selected fallbacks notify even when no mobile notify service exists."""
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    calls: list[dict[str, Any]] = []
+    _register_capture_service(hass, "persistent_notification", "create", calls)
+    data = _fallback_setup_data()
+    data.openai_available = False
+    _patch_setup_dependencies(hass, monkeypatch, data)
+
+    result = await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    assert result is True
+    assert calls
+    chat_call = next(
+        call for call in calls if "fallback for chat" in call["data"]["message"]
+    )
+    payload = chat_call["data"]
+    assert chat_call["domain"] == "persistent_notification"
+    assert chat_call["service"] == "create"
+    assert payload["title"] == "HGA model fallback active"
+    assert "fallback for chat" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_cloud_model_fallback_sends_mobile_notification_once(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Runtime cloud fallbacks notify once and include the cost warning."""
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    calls: list[dict[str, Any]] = []
+    _register_capture_service(hass, "notify", "mobile_app_phone", calls)
+    data = _fallback_setup_data()
+    data.options[CONF_CHAT_MODEL_PROVIDER] = "ollama"
+    data.options[CONF_NOTIFY_SERVICE] = "notify.mobile_app_phone"
+    data.fallback_chains["chat"] = [
+        data.providers["ollama1"],
+        data.providers["openai1"],
+    ]
+    data.deployments["chat"] = "edge"
+    _patch_setup_dependencies(hass, monkeypatch, data)
+
+    result = await cast("Any", hga_component).async_setup_entry(hass, entry)
+    assert result is True
+    calls.clear()
+
+    chat_model = entry.runtime_data.chat_model
+    assert isinstance(chat_model, FallbackChatModel)
+    primary = cast("Any", chat_model.chain[0][0])
+    fallback = cast("Any", chat_model.chain[1][0])
+    primary.ainvoke = AsyncMock(side_effect=HomeAssistantError("edge down"))
+    fallback.ainvoke = AsyncMock(return_value=type("Msg", (), {"content": "ok"})())
+
+    assert (await chat_model.ainvoke(["hello"])).content == "ok"
+    assert (await chat_model.ainvoke(["hello"])).content == "ok"
+    await hass.async_block_till_done()
+
+    assert len(calls) == 1
+    payload = calls[0]["data"]
+    assert calls[0]["domain"] == "notify"
+    assert calls[0]["service"] == "mobile_app_phone"
+    assert payload["title"] == "HGA model fallback active"
+    assert (
+        "cloud fallback" in payload["message"]
+        or "fallback for chat" in payload["message"]
+    )
+    assert "Cloud model usage may incur provider costs." in payload["message"]
+    assert payload["data"]["tag"].startswith("hga_model_fallback_chat_")

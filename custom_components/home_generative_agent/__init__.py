@@ -1297,6 +1297,139 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     providers = resolve_model_provider_configs(entry, options)
     model_deployments = build_model_deployments(entry, providers, options)
     fallback_chains = resolve_fallback_chains(entry, providers, options)
+    notified_model_fallbacks: set[tuple[str, str]] = set()
+    setup_model_fallbacks: list[tuple[str, str, str, str]] = []
+
+    def _provider_name(provider_id: str | None) -> str:
+        """Return a readable provider name for fallback notices."""
+        if not provider_id:
+            return "unknown provider"
+        provider = providers.get(provider_id)
+        return provider.name if provider else provider_id
+
+    async def _async_notify_model_fallback(
+        category: str,
+        primary_provider_id: str | None,
+        fallback_provider_id: str | None,
+        fallback_deployment: str | None,
+        *,
+        setup_selected: bool = False,
+    ) -> None:
+        """Notify the user once when model fallback is active."""
+        if not fallback_provider_id:
+            return
+        dedupe_key = (category, fallback_provider_id)
+        if dedupe_key in notified_model_fallbacks:
+            return
+        notified_model_fallbacks.add(dedupe_key)
+
+        category_label = category.replace("_", " ")
+        primary_name = _provider_name(primary_provider_id)
+        fallback_name = _provider_name(fallback_provider_id)
+        cloud_note = (
+            " Cloud model usage may incur provider costs."
+            if fallback_deployment == "cloud"
+            else ""
+        )
+        if setup_selected:
+            message = (
+                f"Home Generative Agent is using fallback for {category_label}: "
+                f"{fallback_name}. Primary provider {primary_name} was unavailable "
+                f"at startup.{cloud_note}"
+            )
+        else:
+            message = (
+                f"Home Generative Agent used fallback for {category_label}: "
+                f"{fallback_name}. Primary provider {primary_name} failed."
+                f"{cloud_note}"
+            )
+
+        notify_service = options.get(CONF_NOTIFY_SERVICE)
+        tag = f"hga_model_fallback_{category}_{fallback_provider_id[:16]}"
+        if notify_service and isinstance(notify_service, str):
+            domain, _, service = notify_service.partition(".")
+            if not service:
+                service = notify_service
+                domain = "notify"
+            try:
+                await hass.services.async_call(
+                    domain,
+                    service,
+                    {
+                        "title": "HGA model fallback active",
+                        "message": message,
+                        "data": {"tag": tag},
+                    },
+                    blocking=False,
+                )
+            except HomeAssistantError as err:
+                LOGGER.warning(
+                    "Could not send model fallback notification via %s: %s",
+                    notify_service,
+                    err,
+                )
+            return
+
+        try:
+            await hass.services.async_call(
+                "persistent_notification",
+                "create",
+                {
+                    "title": "HGA model fallback active",
+                    "message": message,
+                    "notification_id": tag,
+                },
+                blocking=False,
+            )
+        except HomeAssistantError as err:
+            LOGGER.warning("Could not send model fallback notification: %s", err)
+
+    def _schedule_model_fallback_notification(
+        category: str,
+        primary_provider_id: str,
+        fallback_provider_id: str | None,
+        fallback_deployment: str | None,
+    ) -> None:
+        """Schedule a runtime fallback notification without blocking model calls."""
+        if not fallback_provider_id:
+            return
+        hass.async_create_task(
+            _async_notify_model_fallback(
+                category,
+                primary_provider_id,
+                fallback_provider_id,
+                fallback_deployment,
+            )
+        )
+
+    def _model_fallback_alert(category: str) -> Any:
+        """Return a runtime fallback alert callback for model wrappers."""
+
+        def _alert(
+            provider_id: str,
+            err: Exception,
+            *,
+            fallback_to: str | None = None,
+            fallback_deployment: str | None = None,
+        ) -> None:
+            if fallback_to:
+                LOGGER.warning(
+                    "Fallback activated: provider %s failed (%s), switching to %s",
+                    provider_id,
+                    err,
+                    fallback_to,
+                )
+            else:
+                LOGGER.error(
+                    "All providers failed. Last provider %s error: %s",
+                    provider_id,
+                    err,
+                )
+            _schedule_model_fallback_notification(
+                category, provider_id, fallback_to, fallback_deployment
+            )
+
+        return _alert
 
     _chat_cb = CircuitBreaker(
         threshold=FALLBACK_CIRCUIT_BREAKER_THRESHOLD,
@@ -1637,6 +1770,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             if m is not None:
                 _emb_chain.append((m, p.deployment, p.entry_id))
         if len(_emb_chain) > 1:
+            active_provider_id = _emb_chain[0][2]
+            if active_provider_id != _emb_fb[0].entry_id:
+                provider = providers.get(active_provider_id)
+                model_deployments["embedding"] = (
+                    provider.deployment if provider else _emb_chain[0][1]
+                )
+                await _async_notify_model_fallback(
+                    "embedding",
+                    _emb_fb[0].entry_id,
+                    active_provider_id,
+                    provider.deployment if provider else _emb_chain[0][1],
+                    setup_selected=True,
+                )
 
             def _mark_tool_index_stale(
                 previous_provider_id: str, provider_id: str
@@ -1655,6 +1801,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     provider_id,
                 )
                 async_dispatcher_send(hass, SIGNAL_TOOL_INDEX_UPDATED, "stale", 0)
+                provider = providers.get(provider_id)
+                _schedule_model_fallback_notification(
+                    "embedding",
+                    previous_provider_id,
+                    provider_id,
+                    provider.deployment if provider else None,
+                )
 
             embedding_model = FallbackEmbeddings(
                 _emb_chain,
@@ -1662,6 +1815,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 switch_callback=_mark_tool_index_stale,
             )
         elif _emb_chain:
+            active_provider_id = _emb_chain[0][2]
+            if active_provider_id != _emb_fb[0].entry_id:
+                provider = providers.get(active_provider_id)
+                model_deployments["embedding"] = (
+                    provider.deployment if provider else _emb_chain[0][1]
+                )
+                await _async_notify_model_fallback(
+                    "embedding",
+                    _emb_fb[0].entry_id,
+                    active_provider_id,
+                    provider.deployment if provider else _emb_chain[0][1],
+                    setup_selected=True,
+                )
             embedding_model = _emb_chain[0][0]
         else:
             embedding_model = None
@@ -2233,6 +2399,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 active_provider_id,
                 active_deployment,
             )
+            setup_model_fallbacks.append(
+                (
+                    category,
+                    primary_provider.entry_id,
+                    active_provider_id,
+                    active_deployment,
+                )
+            )
 
         if len(chain) > 1:
             return wrapper_factory(chain)
@@ -2262,7 +2436,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             _chat_chain,
             _chat_fb,
             chat_model,
-            lambda chain: FallbackChatModel(chain, circuit_breaker=_chat_cb),
+            lambda chain: FallbackChatModel(
+                chain,
+                circuit_breaker=_chat_cb,
+                alert_callback=_model_fallback_alert("chat"),
+            ),
         )
 
     _vlm_fb = fallback_chains.get("vlm", [])
@@ -2284,7 +2462,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             _vlm_chain,
             _vlm_fb,
             vision_model,
-            lambda chain: FallbackVLM(chain, circuit_breaker=_vlm_cb),
+            lambda chain: FallbackVLM(
+                chain,
+                circuit_breaker=_vlm_cb,
+                alert_callback=_model_fallback_alert("vlm"),
+            ),
         )
 
     _sum_fb = fallback_chains.get("summarization", [])
@@ -2308,7 +2490,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             _sum_chain,
             _sum_fb,
             summarization_model,
-            lambda chain: FallbackChatModel(chain, circuit_breaker=_sum_cb),
+            lambda chain: FallbackChatModel(
+                chain,
+                circuit_breaker=_sum_cb,
+                alert_callback=_model_fallback_alert("summarization"),
+            ),
+        )
+
+    for category, primary_id, fallback_id, fallback_deployment in setup_model_fallbacks:
+        await _async_notify_model_fallback(
+            category,
+            primary_id,
+            fallback_id,
+            fallback_deployment,
+            setup_selected=True,
         )
 
     video_analyzer = VideoAnalyzer(hass, entry)

@@ -273,6 +273,29 @@ async def test_fallback_vlm_primary_fails(
     assert "(attempt 1/2)" not in caplog.text
 
 
+@pytest.mark.asyncio
+async def test_fallback_vlm_alert_callback_includes_fallback_deployment() -> None:
+    """VLM fallback alert callback receives provider and deployment details."""
+    primary = AsyncMock()
+    primary.ainvoke.side_effect = HomeAssistantError("vlm down")
+    fallback = AsyncMock()
+    fallback.ainvoke.return_value = FakeAIMessage("vlm fallback")
+    alert_callback = MagicMock()
+
+    model = FallbackVLM(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")],
+        alert_callback=alert_callback,
+    )
+
+    assert (await model.ainvoke(["image"])).content == "vlm fallback"
+    alert_callback.assert_called_once()
+    assert alert_callback.call_args.args[:2] == ("p1", primary.ainvoke.side_effect)
+    assert alert_callback.call_args.kwargs == {
+        "fallback_to": "p2",
+        "fallback_deployment": "cloud",
+    }
+
+
 def test_fallback_vlm_with_config_preserves_bound_model_config() -> None:
     """Video per-call VLM config preserves the configured provider model."""
     primary = MagicMock()

@@ -160,9 +160,14 @@ class CircuitBreaker:
 
 
 def _default_alert(
-    provider_id: str, err: Exception, *, fallback_to: str | None = None
+    provider_id: str,
+    err: Exception,
+    *,
+    fallback_to: str | None = None,
+    fallback_deployment: str | None = None,
 ) -> None:
     """Default alert callback that logs a warning."""
+    del fallback_deployment
     summary = _safe_err_summary(err)
     if fallback_to:
         LOGGER.warning(
@@ -278,12 +283,12 @@ class FallbackChatModel:
                 )
                 if self.circuit_breaker:
                     self.circuit_breaker.record_failure(provider_id)
+                next_provider = self.chain[i + 1] if i + 1 < len(self.chain) else None
                 self.alert_callback(
                     provider_id,
                     err,
-                    fallback_to=(
-                        self.chain[i + 1][2] if i + 1 < len(self.chain) else None
-                    ),
+                    fallback_to=next_provider[2] if next_provider else None,
+                    fallback_deployment=next_provider[1] if next_provider else None,
                 )
                 continue
             else:
@@ -323,12 +328,12 @@ class FallbackChatModel:
                 )
                 if self.circuit_breaker:
                     self.circuit_breaker.record_failure(provider_id)
+                next_provider = self.chain[i + 1] if i + 1 < len(self.chain) else None
                 self.alert_callback(
                     provider_id,
                     err,
-                    fallback_to=(
-                        self.chain[i + 1][2] if i + 1 < len(self.chain) else None
-                    ),
+                    fallback_to=next_provider[2] if next_provider else None,
+                    fallback_deployment=next_provider[1] if next_provider else None,
                 )
                 continue
             else:
@@ -345,11 +350,13 @@ class FallbackVLM:
         self,
         chain: list[tuple[Any, str, str]],
         circuit_breaker: CircuitBreaker | None = None,
+        alert_callback: Any | None = None,
         config: dict[str, Any] | None = None,
     ) -> None:
         """Initialize fallback VLM wrapper."""
         self.chain = chain
         self.circuit_breaker = circuit_breaker
+        self.alert_callback = alert_callback or _default_alert
         self._config = config or {}
 
     @property
@@ -374,7 +381,12 @@ class FallbackVLM:
                 )
             else:
                 wrapped_chain.append((model, deployment, provider_id))
-        return FallbackVLM(wrapped_chain, self.circuit_breaker, merged)
+        return FallbackVLM(
+            wrapped_chain,
+            self.circuit_breaker,
+            self.alert_callback,
+            merged,
+        )
 
     async def ainvoke(
         self,
@@ -404,6 +416,13 @@ class FallbackVLM:
                 )
                 if self.circuit_breaker:
                     self.circuit_breaker.record_failure(provider_id)
+                next_provider = self.chain[i + 1] if i + 1 < len(self.chain) else None
+                self.alert_callback(
+                    provider_id,
+                    err,
+                    fallback_to=next_provider[2] if next_provider else None,
+                    fallback_deployment=next_provider[1] if next_provider else None,
+                )
                 continue
 
         msg = f"All VLM providers failed. Last error: {_safe_err_summary(last_err)}"
