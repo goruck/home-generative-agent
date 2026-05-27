@@ -1305,7 +1305,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         if not provider_id:
             return "unknown provider"
         provider = providers.get(provider_id)
-        return provider.name if provider else provider_id
+        name = provider.name if provider else provider_id
+        for prefix in ("Primary ", "Fallback "):
+            if name.startswith(prefix):
+                return name.removeprefix(prefix)
+        return name
 
     async def _async_notify_model_fallback(
         category: str,
@@ -1333,15 +1337,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         )
         if setup_selected:
             message = (
-                f"Home Generative Agent is using fallback for {category_label}: "
-                f"{fallback_name}. Primary provider {primary_name} was unavailable "
-                f"at startup.{cloud_note}"
+                f"Using {fallback_name} for {category_label}; {primary_name} "
+                f"was unavailable at startup.{cloud_note}"
             )
         else:
             message = (
-                f"Home Generative Agent used fallback for {category_label}: "
-                f"{fallback_name}. Primary provider {primary_name} failed."
-                f"{cloud_note}"
+                f"Using {fallback_name} for {category_label}; {primary_name} "
+                f"failed.{cloud_note}"
             )
 
         notify_service = options.get(CONF_NOTIFY_SERVICE)

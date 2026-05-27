@@ -486,14 +486,14 @@ async def test_setup_model_fallback_sends_persistent_notification(
 
     assert result is True
     assert calls
-    chat_call = next(
-        call for call in calls if "fallback for chat" in call["data"]["message"]
-    )
+    chat_call = next(call for call in calls if "for chat" in call["data"]["message"])
     payload = chat_call["data"]
     assert chat_call["domain"] == "persistent_notification"
     assert chat_call["service"] == "create"
     assert payload["title"] == "HGA model fallback active"
-    assert "fallback for chat" in payload["message"]
+    assert payload["message"] == (
+        "Using Ollama for chat; OpenAI was unavailable at startup."
+    )
 
 
 @pytest.mark.asyncio
@@ -536,9 +536,62 @@ async def test_runtime_cloud_model_fallback_sends_mobile_notification_once(
     assert calls[0]["domain"] == "notify"
     assert calls[0]["service"] == "mobile_app_phone"
     assert payload["title"] == "HGA model fallback active"
-    assert (
-        "cloud fallback" in payload["message"]
-        or "fallback for chat" in payload["message"]
-    )
+    assert "Using OpenAI for chat; Ollama failed." in payload["message"]
     assert "Cloud model usage may incur provider costs." in payload["message"]
     assert payload["data"]["tag"].startswith("hga_model_fallback_chat_")
+
+
+@pytest.mark.asyncio
+async def test_model_fallback_notification_strips_role_prefixes(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Provider role prefixes should not be repeated in fallback notifications."""
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    calls: list[dict[str, Any]] = []
+    _register_capture_service(hass, "notify", "mobile_app_phone", calls)
+    data = _fallback_setup_data()
+    data.providers["ollama1"] = ModelProviderConfig(
+        entry_id="ollama1",
+        name="Primary Ollama",
+        provider_type="ollama",
+        capabilities={"chat", "embedding"},
+        data=data.providers["ollama1"].data,
+        deployment="edge",
+    )
+    data.providers["openai1"] = ModelProviderConfig(
+        entry_id="openai1",
+        name="Primary OpenAI",
+        provider_type="openai",
+        capabilities={"chat", "embedding"},
+        data=data.providers["openai1"].data,
+        deployment="cloud",
+    )
+    data.options[CONF_CHAT_MODEL_PROVIDER] = "ollama"
+    data.options[CONF_NOTIFY_SERVICE] = "notify.mobile_app_phone"
+    data.fallback_chains["chat"] = [
+        data.providers["ollama1"],
+        data.providers["openai1"],
+    ]
+    data.deployments["chat"] = "edge"
+    _patch_setup_dependencies(hass, monkeypatch, data)
+
+    result = await cast("Any", hga_component).async_setup_entry(hass, entry)
+    assert result is True
+    calls.clear()
+
+    chat_model = entry.runtime_data.chat_model
+    assert isinstance(chat_model, FallbackChatModel)
+    primary = cast("Any", chat_model.chain[0][0])
+    fallback = cast("Any", chat_model.chain[1][0])
+    primary.ainvoke = AsyncMock(side_effect=HomeAssistantError("edge down"))
+    fallback.ainvoke = AsyncMock(return_value=type("Msg", (), {"content": "ok"})())
+
+    assert (await chat_model.ainvoke(["hello"])).content == "ok"
+    await hass.async_block_till_done()
+
+    message = calls[0]["data"]["message"]
+    assert "Primary OpenAI" not in message
+    assert "Primary provider Primary Ollama" not in message
+    assert message.startswith("Using OpenAI for chat; Ollama failed.")
