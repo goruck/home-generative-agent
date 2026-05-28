@@ -235,6 +235,7 @@ from .core.fallback import (
     FallbackChatModel,
     FallbackEmbeddings,
     FallbackVLM,
+    _safe_err_summary,
 )
 from .core.migrations import migrate_person_gallery
 from .core.person_gallery import PersonGalleryDAO
@@ -1418,14 +1419,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 LOGGER.warning(
                     "Fallback activated: provider %s failed (%s), switching to %s",
                     provider_id,
-                    err,
+                    _safe_err_summary(err),
                     fallback_to,
                 )
             else:
                 LOGGER.error(
                     "All providers failed. Last provider %s error: %s",
                     provider_id,
-                    err,
+                    _safe_err_summary(err),
                 )
             _schedule_model_fallback_notification(
                 category, provider_id, fallback_to, fallback_deployment

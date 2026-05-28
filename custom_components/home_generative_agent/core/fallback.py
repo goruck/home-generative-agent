@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, cast
 from homeassistant.exceptions import HomeAssistantError
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
-from custom_components.home_generative_agent.const import EMBEDDING_MODEL_DIMS
+from ..const import EMBEDDING_MODEL_DIMS  # noqa: TID252
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -33,6 +33,13 @@ try:
 except ImportError:
     pass
 
+try:
+    import httpx
+
+    FALLBACK_RETRYABLE_EXCEPTIONS += (httpx.TransportError,)
+except ImportError:
+    pass
+
 
 def _is_retryable(err: Exception) -> bool:
     """Return True if the exception should trigger a fallback attempt."""
@@ -47,8 +54,6 @@ def _is_retryable(err: Exception) -> bool:
             "ratelimit",
             "too many requests",
             "timeout",
-            "connection",
-            "unavailable",
             "internal server error",
             "bad gateway",
             "service unavailable",
@@ -301,46 +306,14 @@ class FallbackChatModel:
 
     async def astream(
         self,
-        input_data: LanguageModelInput,
-        config: dict[str, Any] | None = None,
-        **kwargs: Any,
+        _input_data: LanguageModelInput,
+        _config: dict[str, Any] | None = None,
+        **_kwargs: Any,
     ) -> AsyncIterator[BaseMessage]:
-        """Stream from the first available model in the chain."""
-        last_err: Exception | None = None
-        for i, (model, _deployment, provider_id) in enumerate(self.chain):
-            if self.circuit_breaker and not self.circuit_breaker.is_available(
-                provider_id
-            ):
-                continue
-            try:
-                async for chunk in model.astream(input_data, config, **kwargs):
-                    yield chunk
-            except Exception as err:
-                last_err = err
-                if not _is_retryable(err):
-                    raise
-                LOGGER.warning(
-                    "Model stream failed for provider %s (provider %d/%d): %s",
-                    provider_id,
-                    i + 1,
-                    len(self.chain),
-                    _safe_err_summary(err),
-                )
-                if self.circuit_breaker:
-                    self.circuit_breaker.record_failure(provider_id)
-                next_provider = self.chain[i + 1] if i + 1 < len(self.chain) else None
-                self.alert_callback(
-                    provider_id,
-                    err,
-                    fallback_to=next_provider[2] if next_provider else None,
-                    fallback_deployment=next_provider[1] if next_provider else None,
-                )
-                continue
-            else:
-                return
-
-        msg = f"All LLM providers failed. Last error: {_safe_err_summary(last_err)}"
-        raise HomeAssistantError(msg) from last_err
+        """Raise: astream cannot safely retry mid-stream — use ainvoke."""
+        msg = "Use ainvoke; astream is not safe with fallback chains"
+        raise NotImplementedError(msg)
+        yield  # type: ignore[unreachable]
 
 
 class FallbackVLM:

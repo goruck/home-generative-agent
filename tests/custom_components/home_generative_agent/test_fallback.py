@@ -4,14 +4,12 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock, MagicMock
+from typing import Any, cast
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from homeassistant.exceptions import HomeAssistantError
-
-if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
 
 from custom_components.home_generative_agent.const import EMBEDDING_MODEL_DIMS
 from custom_components.home_generative_agent.core.fallback import (
@@ -56,6 +54,11 @@ def test_is_retryable_rate_limit() -> None:
 def test_is_retryable_non_retryable() -> None:
     """Generic ValueError should NOT be retryable."""
     assert _is_retryable(ValueError("bad input")) is False
+
+
+def test_is_retryable_httpx_connect_error() -> None:
+    """httpx.ConnectError (Ollama network failure) should be retryable."""
+    assert _is_retryable(httpx.ConnectError("All connection attempts failed")) is True
 
 
 @pytest.mark.asyncio
@@ -197,50 +200,13 @@ async def test_fallback_chat_non_retryable_raises_immediately() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fallback_chat_stream_primary_succeeds() -> None:
-    """Streaming: when primary succeeds, fallback is never tried."""
+async def test_fallback_chat_astream_raises_not_implemented() -> None:
+    """Astream is disabled; callers must use ainvoke."""
     primary = AsyncMock()
-    primary.ainvoke.return_value = FakeAIMessage("primary")
-    primary.astream = _fake_astream(FakeAIMessage("chunk1"))
-    fallback = AsyncMock()
-
-    model = FallbackChatModel(
-        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")]
-    )
-    chunks = [c async for c in model.astream(["hello"])]
-    assert len(chunks) == 1
-    assert chunks[0].content == "chunk1"
-    fallback.astream.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_fallback_chat_stream_primary_fails(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Streaming: when primary fails mid-stream, fallback stream is used."""
-    _err = HomeAssistantError("primary down")
-
-    async def _failing_astream(
-        *_args: Any, **_kwargs: Any
-    ) -> AsyncIterator[FakeAIMessage]:
-        raise _err
-        yield  # type: ignore[unreachable]
-
-    primary = AsyncMock()
-    primary.ainvoke.side_effect = HomeAssistantError("primary down")
-    primary.astream = _failing_astream
-    fallback = AsyncMock()
-    fallback.ainvoke.return_value = FakeAIMessage("fallback")
-    fallback.astream = _fake_astream(FakeAIMessage("fb_chunk"))
-
-    model = FallbackChatModel(
-        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")]
-    )
-    chunks = [c async for c in model.astream(["hello"])]
-    assert len(chunks) == 1
-    assert chunks[0].content == "fb_chunk"
-    assert "Model stream failed for provider p1 (provider 1/2)" in caplog.text
-    assert "(attempt 1/2)" not in caplog.text
+    model = FallbackChatModel(chain=[(primary, "edge", "p1")])
+    with pytest.raises(NotImplementedError, match="Use ainvoke"):
+        async for _ in model.astream(["hello"]):
+            pass
 
 
 @pytest.mark.asyncio
@@ -541,18 +507,6 @@ async def test_fallback_vlm_with_config() -> None:
     assert "num_predict" in wrapped.config.get("configurable", {})
 
 
-def _fake_astream(
-    *items: FakeAIMessage,
-) -> Any:
-    """Return an async generator function that yields the given items."""
-
-    async def _gen(*_args: Any, **_kwargs: Any) -> AsyncIterator[FakeAIMessage]:
-        for item in items:
-            yield item
-
-    return _gen
-
-
 def test_fallback_embeddings_sync_raises() -> None:
     """Synchronous embedding methods must raise NotImplementedError."""
     primary = AsyncMock()
@@ -561,3 +515,58 @@ def test_fallback_embeddings_sync_raises() -> None:
         emb.embed_documents(["hello"])
     with pytest.raises(NotImplementedError, match="Use aembed_query"):
         emb.embed_query("hello")
+
+
+@pytest.mark.asyncio
+async def test_fallback_vlm_all_providers_fail() -> None:
+    """When all VLM providers fail, HomeAssistantError is raised."""
+    primary = AsyncMock()
+    primary.ainvoke.side_effect = HomeAssistantError("vlm primary down")
+    fallback = AsyncMock()
+    fallback.ainvoke.side_effect = HomeAssistantError("vlm fallback down")
+
+    model = FallbackVLM(chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")])
+    with pytest.raises(HomeAssistantError, match="All VLM providers failed"):
+        await model.ainvoke(["image"])
+
+
+@pytest.mark.asyncio
+async def test_fallback_embeddings_aembed_documents_all_fail() -> None:
+    """When all embedding providers fail on documents, HomeAssistantError is raised."""
+    primary = AsyncMock()
+    primary.aembed_documents.side_effect = HomeAssistantError("emb primary down")
+    fallback = AsyncMock()
+    fallback.aembed_documents.side_effect = HomeAssistantError("emb fallback down")
+
+    emb = FallbackEmbeddings(chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")])
+    with pytest.raises(HomeAssistantError, match="All embedding providers failed"):
+        await emb.aembed_documents(["hello"])
+
+
+@pytest.mark.asyncio
+async def test_fallback_embeddings_aembed_query_all_fail() -> None:
+    """When all embedding providers fail on query, HomeAssistantError is raised."""
+    primary = AsyncMock()
+    primary.aembed_query.side_effect = HomeAssistantError("emb primary down")
+    fallback = AsyncMock()
+    fallback.aembed_query.side_effect = HomeAssistantError("emb fallback down")
+
+    emb = FallbackEmbeddings(chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")])
+    with pytest.raises(HomeAssistantError, match="All embedding providers failed"):
+        await emb.aembed_query("hello")
+
+
+def test_circuit_breaker_window_expiry() -> None:
+    """Failures outside the window are not counted toward the threshold."""
+    cb = CircuitBreaker(threshold=2, window_seconds=10.0, cooldown_seconds=60.0)
+
+    with patch(
+        "custom_components.home_generative_agent.core.fallback.monotonic"
+    ) as mock_time:
+        mock_time.return_value = 0.0
+        cb.record_failure("p1")
+
+        mock_time.return_value = 15.0
+        cb.record_failure("p1")
+
+        assert cb.is_available("p1") is True
