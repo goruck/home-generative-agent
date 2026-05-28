@@ -64,12 +64,14 @@ Feature setup can include an ordered list of fallback providers. A fallback appl
 Fallbacks are evaluated at setup/reload time and at runtime:
 
 - If the primary provider is unavailable when the integration starts or reloads, HGA selects the first usable configured fallback and logs `Fallback selected at setup ...`. That selected provider remains active until the integration is reloaded or Home Assistant restarts. If the primary provider comes back online later, HGA does not automatically switch back during the same runtime.
-- If the active provider fails during a model call with a retryable error, HGA tries the next configured fallback provider for that call and logs the runtime fallback activation.
+- If the active provider fails during a model call with a retryable error, HGA tries the next configured fallback provider for that call and logs the runtime fallback activation. Retryable failures include local transport/connectivity errors, timeouts, rate limits, and transient provider/server errors.
 - If no fallback is configured for a category and the primary provider is unavailable at setup, HGA keeps a placeholder model for that category and logs this at debug level. Configure a fallback for each category that should degrade to another provider.
 
 When a fallback becomes active, HGA also notifies the user once per category/provider for the current runtime. If `notify_service` is configured, the notification is sent to that mobile notify service. If no notify service is configured, HGA creates a Home Assistant persistent notification instead. Runtime fallback notifications are deduplicated, so repeated video-analysis, summarization, chat, or embedding retries do not spam the user. When the active fallback is a cloud provider, the notification includes a cost warning: `Cloud model usage may incur provider costs.`
 
 Fallback model settings come from the fallback provider itself. For chat, VLM, and summarization, HGA first uses the fallback provider subentry's category-specific model setting (`chat_model`, `vlm_model`, or `summarization_model`). If that provider does not define a category-specific model, HGA uses the recommended model for that provider/category from `const.py` (`MODEL_CATEGORY_SPECS`). Category temperature defaults also come from `const.py` when not otherwise set. Ollama fallbacks additionally use the category defaults for context, keepalive, top-p, repeat penalty, and related tuning values unless the provider settings override them.
+
+Chat fallback chains are invoked as complete model calls rather than direct token streams. The Home Assistant chat UI can still stream LangGraph conversation events, but HGA does not switch providers after partial provider text has already been emitted. This avoids mixed responses where a failed primary provider starts a reply and a fallback provider finishes with different content.
 
 To switch back to a recovered primary provider, reload the Home Generative Agent integration or restart Home Assistant.
 
