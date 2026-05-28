@@ -892,7 +892,7 @@ def resolve_fallback_chains(
         if not primary:
             continue
         chain = [primary]
-        for fb_id in (feature.fallback_provider_ids or []):
+        for fb_id in feature.fallback_provider_ids or []:
             fb = providers_by_id.get(fb_id)
             if fb and fb.entry_id != primary.entry_id and cat in fb.capabilities:
                 chain.append(fb)

@@ -248,7 +248,10 @@ def test_get_stt_hallucination_patterns_extra_whitespace() -> None:
 def test_get_stt_hallucination_exact_patterns_empty() -> None:
     """Empty exact option returns an empty tuple."""
     assert _get_stt_hallucination_exact_patterns({}) == ()
-    assert _get_stt_hallucination_exact_patterns({"stt_hallucination_exact_patterns": []}) == ()
+    assert (
+        _get_stt_hallucination_exact_patterns({"stt_hallucination_exact_patterns": []})
+        == ()
+    )
 
 
 def test_get_stt_hallucination_exact_patterns_list() -> None:
@@ -284,7 +287,9 @@ def test_is_stt_hallucination_exact_match() -> None:
     assert _is_stt_hallucination("To Be Continued", (), exact_patterns) is True
     assert _is_stt_hallucination("The End", (), exact_patterns) is True
     assert _is_stt_hallucination("the end.", (), exact_patterns) is False  # not exact
-    assert _is_stt_hallucination("To be continued now", (), exact_patterns) is False  # not exact
+    assert (
+        _is_stt_hallucination("To be continued now", (), exact_patterns) is False
+    )  # not exact
 
 
 def test_is_stt_hallucination_combined() -> None:
@@ -299,4 +304,6 @@ def test_is_stt_hallucination_combined() -> None:
 def test_is_stt_hallucination_no_match() -> None:
     """Non-matching text returns False."""
     assert _is_stt_hallucination("turn on the light", ("subtitles",), ()) is False
-    assert _is_stt_hallucination("subtitle", ("subtitles",), ()) is False  # partial, not full
+    assert (
+        _is_stt_hallucination("subtitle", ("subtitles",), ()) is False
+    )  # partial, not full
