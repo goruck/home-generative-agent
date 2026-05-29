@@ -26,7 +26,7 @@
       "step": {
         "set_options": {
           "title": "Database setup",
-          "description": "Enter the necessary parameters for the databse",
+          "description": "Enter the necessary parameters for the database",
           "data": {
             "username": "Database username",
             "password": "Database password",
@@ -268,34 +268,34 @@
   "options": {
     "step": {
       "init": {
-        "title": "Home Generative Agent Options",
-        "description": "Configure global behavior and prompts.",
+        "title": "Настройки Home Generative Agent",
+        "description": "Настройка глобального поведения и подсказок.",
         "data": {
-          "face_api_url": "Face recognition API URL (optional)",
-          "prompt": "Instructions",
-          "llm_hass_api": "Control Home Assistant",
-          "video_analyzer_mode": "Video analyzer mode",
-          "notify_service": "Video Analyzer Notify Service (optional)",
-          "face_recognition": "Enable face recognition",
-          "manage_context_with_tokens": "Context management method",
-          "max_tokens_in_context": "Max tokens in chat context",
-          "max_messages_in_context": "Max messages in chat context",
-          "critical_action_pin_enabled": "Require critical action PIN",
-          "critical_action_pin": "Critical action PIN (required to unlock/arm/open sensitive devices)",
-          "schema_first_yaml": "Schema-first JSON for YAML requests",
-          "stt_filters_section": "Speech input filters",
-          "stt_hallucination_patterns": "Ignored STT substrings",
-          "stt_hallucination_exact_patterns": "Ignored exact STT phrases",
-          "tool_retrieval_limit": "Tool retrieval limit",
-          "tool_relevance_threshold": "Tool relevance threshold"
+          "face_api_url": "URL API распознавания лиц (необязательно)",
+          "prompt": "Инструкции",
+          "llm_hass_api": "Управление Home Assistant",
+          "video_analyzer_mode": "Режим видеоанализатора",
+          "notify_service": "Служба уведомлений видеоанализатора (необязательно)",
+          "face_recognition": "Включить распознавание лиц",
+          "manage_context_with_tokens": "Метод управления контекстом",
+          "max_tokens_in_context": "Макс. токенов в контексте чата",
+          "max_messages_in_context": "Макс. сообщений в контексте чата",
+          "critical_action_pin_enabled": "Требовать PIN для критических действий",
+          "critical_action_pin": "PIN для критических действий (требуется для разблокировки/армирования/открытия)",
+          "schema_first_yaml": "Схема-First JSON для YAML-запросов",
+          "stt_filters_section": "Фильтры речевого ввода",
+          "stt_hallucination_patterns": "Игнорируемые подстроки STT",
+          "stt_hallucination_exact_patterns": "Игнорируемые точные фразы STT",
+          "tool_retrieval_limit": "Лимит извлечения инструментов",
+          "tool_relevance_threshold": "Порог релевантности инструментов"
         },
         "data_description": {
-          "prompt": "Instruct how the LLM should respond. This can be a template.",
-          "schema_first_yaml": "When enabled, YAML requests are answered with strict JSON that is converted to YAML.",
-          "stt_hallucination_patterns": "One substring per line. If an STT transcript contains any entry, it is ignored before the LLM runs. Matching is case-insensitive.",
-          "stt_hallucination_exact_patterns": "One phrase per line. If the entire STT transcript equals any entry, it is ignored before the LLM runs. Matching is case-insensitive.",
-          "tool_retrieval_limit": "The maximum number of tools to retrieve based on semantic similarity to the user's query.",
-          "tool_relevance_threshold": "The minimum semantic similarity score (0.0 to 1.0) required for a tool to be retrieved."
+          "prompt": "Укажите, как LLM должен отвечать. Это может быть шаблон.",
+          "schema_first_yaml": "При включении YAML-запросы отвечаются строгим JSON, который преобразуется в YAML.",
+          "stt_hallucination_patterns": "Одна подстрока на строку. Если STT-текст содержит любую запись, он игнорируется до запуска LLM. Регистр не учитывается.",
+          "stt_hallucination_exact_patterns": "Одна фраза на строку. Если весь STT-текст равен любой записи, он игнорируется до запуска LLM. Регистр не учитывается.",
+          "tool_retrieval_limit": "Максимальное количество инструментов для извлечения на основе семантической близости к запросу пользователя.",
+          "tool_relevance_threshold": "Минимальный семантический коэффициент сходства (0,0 до 1,0) для извлечения инструмента."
         }
       }
     }

@@ -61,7 +61,11 @@ from .const import (
     CONF_CRITICAL_ACTION_PIN_ENABLED,
     CONF_PROMPT,
     CONF_SCHEMA_FIRST_YAML,
+    CONF_STT_HALLUCINATION_EXACT_PATTERNS,
+    CONF_STT_HALLUCINATION_PATTERNS,
     CRITICAL_ACTION_PROMPT,
+    DEFAULT_STT_HALLUCINATION_EXACT_PATTERNS,
+    DEFAULT_STT_HALLUCINATION_PATTERNS,
     DOMAIN,
     LANGCHAIN_LOGGING_LEVEL,
     SCHEMA_FIRST_YAML_PROMPT,
@@ -452,6 +456,62 @@ def _nonstreaming_text(event: Mapping[str, Any]) -> str | None:
     ):
         return text
     return None
+
+
+def _get_stt_hallucination_patterns(
+    options: dict[str, Any],
+) -> tuple[str, ...]:
+    """Parse STT substring-match patterns from options (list or legacy string)."""
+    raw = options.get(
+        CONF_STT_HALLUCINATION_PATTERNS, DEFAULT_STT_HALLUCINATION_PATTERNS
+    )
+    if isinstance(raw, list):
+        return tuple(p.strip().lower() for p in raw if isinstance(p, str) and p.strip())
+    if isinstance(raw, str):
+        if not raw:
+            return ()
+        # Normalise newlines to commas so users can type one pattern per line
+        raw = raw.replace("\n", ",")
+        return tuple(p.strip().lower() for p in raw.split(",") if p.strip())
+    return ()
+
+
+def _get_stt_hallucination_exact_patterns(
+    options: dict[str, Any],
+) -> tuple[str, ...]:
+    """Parse STT exact-match patterns from options (list or legacy string)."""
+    raw = options.get(
+        CONF_STT_HALLUCINATION_EXACT_PATTERNS,
+        DEFAULT_STT_HALLUCINATION_EXACT_PATTERNS,
+    )
+    if isinstance(raw, list):
+        return tuple(p.strip().lower() for p in raw if isinstance(p, str) and p.strip())
+    if isinstance(raw, str):
+        if not raw:
+            return ()
+        raw = raw.replace("\n", ",")
+        return tuple(p.strip().lower() for p in raw.split(",") if p.strip())
+    return ()
+
+
+def _is_stt_hallucination(
+    text: str | None,
+    substring_patterns: tuple[str, ...],
+    exact_patterns: tuple[str, ...],
+) -> bool:
+    """
+    Determine whether the text is a phantom STT transcription of noise.
+
+    Matches case-insensitive:
+      - substring_patterns: partial match ('sub' matches 'Subtitles')
+      - exact_patterns: full text must equal pattern (after lower-casing)
+    """
+    if not text:
+        return False
+    lowered = text.lower()
+    return any(pat in lowered for pat in substring_patterns) or any(
+        lowered == pat for pat in exact_patterns
+    )
 
 
 async def _stream_langgraph_to_ha(
@@ -971,40 +1031,64 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             # If streaming ended without committing a final AssistantContent
             # (e.g. the generator raised before the last LLM turn), recover the
             # final AIMessage from the graph state so the caller can return it.
-            if not isinstance(
-                chat_log.content[-1] if chat_log.content else None,
-                conversation.AssistantContent,
-            ):
-                messages = final_state.values.get("messages", [])
-                if messages and isinstance(messages[-1], AIMessage):
-                    final_msg = messages[-1]
-                    chat_log.async_add_assistant_content_without_tools(
-                        conversation.AssistantContent(
-                            agent_id=self.entity_id,
-                            content=_normalize_ai_content(final_msg.content),
-                        )
+            # Also replace partial streaming content when a model fallback
+            # produced a different final response (mid-stream fallback).
+            messages = final_state.values.get("messages", [])
+            recovered_content = (
+                _normalize_ai_content(messages[-1].content)
+                if messages and isinstance(messages[-1], AIMessage)
+                else None
+            )
+            last_chat_content = chat_log.content[-1] if chat_log.content else None
+            replace_partial = (
+                isinstance(last_chat_content, conversation.AssistantContent)
+                and recovered_content is not None
+                and last_chat_content.content != recovered_content
+            )
+            add_recovered = (
+                not isinstance(last_chat_content, conversation.AssistantContent)
+                and recovered_content is not None
+            )
+            if replace_partial:
+                chat_log.content.pop()
+                chat_log.async_add_assistant_content_without_tools(
+                    conversation.AssistantContent(
+                        agent_id=self.entity_id,
+                        content=recovered_content,
                     )
-                    _LOGGER.debug(
-                        "Recovered final AssistantContent from graph state after "
-                        "streaming failure."
+                )
+                _LOGGER.debug(
+                    "Replaced partial streaming content with fallback "
+                    "response from graph state."
+                )
+            elif add_recovered:
+                chat_log.async_add_assistant_content_without_tools(
+                    conversation.AssistantContent(
+                        agent_id=self.entity_id,
+                        content=recovered_content,
                     )
-                else:
-                    # Graph state has no usable AI response (e.g. model timed out
-                    # before generating a reply). Emit a user-visible error message
-                    # so the chat UI shows something instead of a blank bubble.
-                    chat_log.async_add_assistant_content_without_tools(
-                        conversation.AssistantContent(
-                            agent_id=self.entity_id,
-                            content=(
-                                "I'm sorry, I was unable to respond in time. "
-                                "Please try again."
-                            ),
-                        )
+                )
+                _LOGGER.debug(
+                    "Recovered final AssistantContent from graph state after "
+                    "streaming failure."
+                )
+            elif not isinstance(last_chat_content, conversation.AssistantContent):
+                # Graph state has no usable AI response (e.g. model timed out
+                # before generating a reply). Emit a user-visible error message
+                # so the chat UI shows something instead of a blank bubble.
+                chat_log.async_add_assistant_content_without_tools(
+                    conversation.AssistantContent(
+                        agent_id=self.entity_id,
+                        content=(
+                            "I'm sorry, I was unable to respond in time. "
+                            "Please try again."
+                        ),
                     )
-                    _LOGGER.debug(
-                        "Added fallback AssistantContent after streaming failure "
-                        "with no recoverable graph state."
-                    )
+                )
+                _LOGGER.debug(
+                    "Added fallback AssistantContent after streaming failure "
+                    "with no recoverable graph state."
+                )
         except ValueError:
             # Expected when no checkpointer is configured (e.g. tests)
             _LOGGER.debug("aget_state unavailable; skipping trace for streaming turn.")
@@ -1087,6 +1171,15 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 response=intent_response, conversation_id=conversation_id
             )
 
+        # Silently drop phantom STT transcriptions of silence/background noise.
+        noise_patterns = _get_stt_hallucination_patterns(options)
+        exact_noise_patterns = _get_stt_hallucination_exact_patterns(options)
+        if _is_stt_hallucination(user_input.text, noise_patterns, exact_noise_patterns):
+            _LOGGER.debug("Ignoring hallucinated STT input: %s", user_input.text)
+            return conversation.ConversationResult(
+                response=intent_response, conversation_id=conversation_id
+            )
+
         tools, langchain_tools = self._async_get_all_tools(llm_api.apis)
 
         # Resolve user name (None means automation)
@@ -1151,7 +1244,10 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 "ha_llm_api": llm_api or None,
                 "hass": hass,
                 "pending_actions": runtime_data.pending_actions,
+                "hga_runtime_data": runtime_data,
                 "tool_index_ready": runtime_data.tool_index_ready,
+                "tool_indexing_in_progress": runtime_data.tool_indexing_in_progress,
+                "tool_index_failed": runtime_data.tool_index_failed,
             },
             "recursion_limit": 20,
         }
@@ -1366,6 +1462,14 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             or runtime_data.tool_indexing_in_progress
             or runtime_data.tool_index_failed
         ):
+            _LOGGER.debug(
+                "Tool index guard skipped indexing: ready=%s indexing=%s "
+                "failed=%s cached_hashes=%d.",
+                runtime_data.tool_index_ready,
+                runtime_data.tool_indexing_in_progress,
+                runtime_data.tool_index_failed,
+                len(runtime_data.tool_content_hashes),
+            )
             return
         runtime_data.tool_indexing_in_progress = True
         async_dispatcher_send(self.hass, SIGNAL_TOOL_INDEX_UPDATED, "indexing", 0)
@@ -1383,6 +1487,10 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         await self._async_discover_local_tools(runtime_data, index_tasks, new_hashes)
 
         if index_tasks:
+            _LOGGER.info(
+                "Tool index starting: %d tool(s) queued for indexing/update.",
+                len(new_hashes),
+            )
             self.hass.async_create_task(
                 _run_tool_index_background(
                     index_tasks=index_tasks,
@@ -1393,6 +1501,10 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             )
         else:
             runtime_data.tool_index_ready = True
+            _LOGGER.info(
+                "Tool index ready: no tool changes detected (%d cached hash(es)).",
+                len(runtime_data.tool_content_hashes),
+            )
             async_dispatcher_send(
                 self.hass, SIGNAL_TOOL_INDEX_UPDATED, "ready", len(new_hashes)
             )

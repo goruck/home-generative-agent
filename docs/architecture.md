@@ -88,7 +88,9 @@ These are configurable in the integration's **Options** flow.
 
 Native LLM streaming (v3.12.0+) means the first tokens appear in the HA conversation UI within milliseconds of the model starting its response — total response time is unchanged, but perceived latency drops significantly.
 
-OpenAI and Anthropic providers are constructed with `streaming=True` so they emit token chunks directly. Other providers use their existing streaming or fallback behavior. The implementation uses `astream_events` + HA ChatLog delta API (requires HA 2026.4.0 or later).
+OpenAI and Anthropic providers are constructed with `streaming=True` so they emit token chunks directly. Other providers use their existing streaming or final-message behavior. The implementation uses LangGraph `astream_events` + the HA ChatLog delta API (requires HA 2026.4.0 or later).
+
+When a chat feature has provider fallbacks configured, HGA keeps fallback retry at the model-call boundary. The LangGraph node invokes the selected chat chain with `ainvoke`, and the conversation layer streams graph events to Home Assistant. HGA intentionally does not expose provider-level `astream` on fallback chat chains, because switching providers after partial token output can produce mixed, misleading responses.
 
 For a deep-dive on the streaming implementation, see [docs/streaming-design.md](streaming-design.md).
 

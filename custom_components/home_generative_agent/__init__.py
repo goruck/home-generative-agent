@@ -32,6 +32,7 @@ from homeassistant.const import (
 from homeassistant.core import HomeAssistant, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.httpx_client import get_async_client
 from homeassistant.helpers.network import get_url
 from homeassistant.helpers.target import (
@@ -149,6 +150,9 @@ from .const import (
     DOMAIN,
     EMBEDDING_MODEL_CTX,
     EMBEDDING_MODEL_DIMS,
+    FALLBACK_CIRCUIT_BREAKER_COOLDOWN_SECONDS,
+    FALLBACK_CIRCUIT_BREAKER_THRESHOLD,
+    FALLBACK_CIRCUIT_BREAKER_WINDOW_SECONDS,
     FEATURE_CATEGORY_MAP,
     FEATURE_NAMES,
     HGA_CARD_STATIC_PATH,
@@ -210,6 +214,7 @@ from .const import (
     RECOMMENDED_VLM_TEMPERATURE,
     SIGNAL_HGA_NEW_LATEST,
     SIGNAL_HGA_RECOGNIZED,
+    SIGNAL_TOOL_INDEX_UPDATED,
     SUBENTRY_TYPE_DATABASE,
     SUBENTRY_TYPE_FEATURE,
     SUBENTRY_TYPE_MODEL_PROVIDER,
@@ -225,6 +230,13 @@ from .const import (
     VLM_TOP_P,
 )
 from .core.db_utils import parse_postgres_uri
+from .core.fallback import (
+    CircuitBreaker,
+    FallbackChatModel,
+    FallbackEmbeddings,
+    FallbackVLM,
+    _safe_err_summary,
+)
 from .core.migrations import migrate_person_gallery
 from .core.person_gallery import PersonGalleryDAO
 from .core.runtime import HGAConfigEntry, HGAData
@@ -233,6 +245,7 @@ from .core.subentry_resolver import (
     build_model_deployments,
     legacy_feature_configs,
     legacy_model_provider_configs,
+    resolve_fallback_chains,
     resolve_model_provider_configs,
     resolve_runtime_options,
 )
@@ -1284,6 +1297,187 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     conf = dict(options)
     providers = resolve_model_provider_configs(entry, options)
     model_deployments = build_model_deployments(entry, providers, options)
+    fallback_chains = resolve_fallback_chains(entry, providers, options)
+    notified_model_fallbacks: set[tuple[str, str]] = set()
+    setup_model_fallbacks: list[tuple[str, str, str, str]] = []
+
+    def _provider_name(provider_id: str | None) -> str:
+        """Return a readable provider name for fallback notices."""
+        if not provider_id:
+            return "unknown provider"
+        provider = providers.get(provider_id)
+        name = provider.name if provider else provider_id
+        for prefix in ("Primary ", "Fallback "):
+            if name.startswith(prefix):
+                return name.removeprefix(prefix)
+        return name
+
+    async def _async_notify_model_fallback(
+        category: str,
+        primary_provider_id: str | None,
+        fallback_provider_id: str | None,
+        fallback_deployment: str | None,
+        *,
+        setup_selected: bool = False,
+    ) -> None:
+        """Notify the user once when model fallback is active."""
+        if not fallback_provider_id:
+            return
+        dedupe_key = (category, fallback_provider_id)
+        if dedupe_key in notified_model_fallbacks:
+            return
+        notified_model_fallbacks.add(dedupe_key)
+
+        category_label = category.replace("_", " ")
+        primary_name = _provider_name(primary_provider_id)
+        fallback_name = _provider_name(fallback_provider_id)
+        cloud_note = (
+            " Cloud model usage may incur provider costs."
+            if fallback_deployment == "cloud"
+            else ""
+        )
+        if setup_selected:
+            message = (
+                f"Using {fallback_name} for {category_label}; {primary_name} "
+                f"was unavailable at startup.{cloud_note}"
+            )
+        else:
+            message = (
+                f"Using {fallback_name} for {category_label}; {primary_name} "
+                f"failed.{cloud_note}"
+            )
+
+        notify_service = options.get(CONF_NOTIFY_SERVICE)
+        tag = f"hga_model_fallback_{category}_{fallback_provider_id[:16]}"
+        if notify_service and isinstance(notify_service, str):
+            domain, _, service = notify_service.partition(".")
+            if not service:
+                service = notify_service
+                domain = "notify"
+            try:
+                await hass.services.async_call(
+                    domain,
+                    service,
+                    {
+                        "title": "HGA model fallback active",
+                        "message": message,
+                        "data": {"tag": tag},
+                    },
+                    blocking=False,
+                )
+            except HomeAssistantError as err:
+                LOGGER.warning(
+                    "Could not send model fallback notification via %s: %s",
+                    notify_service,
+                    err,
+                )
+            return
+
+        try:
+            await hass.services.async_call(
+                "persistent_notification",
+                "create",
+                {
+                    "title": "HGA model fallback active",
+                    "message": message,
+                    "notification_id": tag,
+                },
+                blocking=False,
+            )
+        except HomeAssistantError as err:
+            LOGGER.warning("Could not send model fallback notification: %s", err)
+
+    def _schedule_model_fallback_notification(
+        category: str,
+        primary_provider_id: str,
+        fallback_provider_id: str | None,
+        fallback_deployment: str | None,
+    ) -> None:
+        """Schedule a runtime fallback notification without blocking model calls."""
+        if not fallback_provider_id:
+            return
+        hass.async_create_task(
+            _async_notify_model_fallback(
+                category,
+                primary_provider_id,
+                fallback_provider_id,
+                fallback_deployment,
+            )
+        )
+
+    def _model_fallback_alert(category: str) -> Any:
+        """Return a runtime fallback alert callback for model wrappers."""
+
+        def _alert(
+            provider_id: str,
+            err: Exception,
+            *,
+            fallback_to: str | None = None,
+            fallback_deployment: str | None = None,
+        ) -> None:
+            if fallback_to:
+                LOGGER.warning(
+                    "Fallback activated: provider %s failed (%s), switching to %s",
+                    provider_id,
+                    _safe_err_summary(err),
+                    fallback_to,
+                )
+            else:
+                LOGGER.error(
+                    "All providers failed. Last provider %s error: %s",
+                    provider_id,
+                    _safe_err_summary(err),
+                )
+            _schedule_model_fallback_notification(
+                category, provider_id, fallback_to, fallback_deployment
+            )
+
+        return _alert
+
+    _chat_cb = CircuitBreaker(
+        threshold=FALLBACK_CIRCUIT_BREAKER_THRESHOLD,
+        window_seconds=FALLBACK_CIRCUIT_BREAKER_WINDOW_SECONDS,
+        cooldown_seconds=FALLBACK_CIRCUIT_BREAKER_COOLDOWN_SECONDS,
+    )
+    _vlm_cb = CircuitBreaker(
+        threshold=FALLBACK_CIRCUIT_BREAKER_THRESHOLD,
+        window_seconds=FALLBACK_CIRCUIT_BREAKER_WINDOW_SECONDS,
+        cooldown_seconds=FALLBACK_CIRCUIT_BREAKER_COOLDOWN_SECONDS,
+    )
+    _sum_cb = CircuitBreaker(
+        threshold=FALLBACK_CIRCUIT_BREAKER_THRESHOLD,
+        window_seconds=FALLBACK_CIRCUIT_BREAKER_WINDOW_SECONDS,
+        cooldown_seconds=FALLBACK_CIRCUIT_BREAKER_COOLDOWN_SECONDS,
+    )
+    _emb_cb = CircuitBreaker(
+        threshold=FALLBACK_CIRCUIT_BREAKER_THRESHOLD,
+        window_seconds=FALLBACK_CIRCUIT_BREAKER_WINDOW_SECONDS,
+        cooldown_seconds=FALLBACK_CIRCUIT_BREAKER_COOLDOWN_SECONDS,
+    )
+
+    def _model_instance_for_provider(provider: Any) -> Any:
+        """Map a ModelProviderConfig to the initialized LangChain instance."""
+        pt = provider.provider_type
+        if pt == "openai":
+            return openai_provider
+        if pt == "openai_compatible":
+            return openai_compatible_provider
+        if pt == "gemini":
+            return gemini_provider
+        if pt == "anthropic":
+            return anthropic_provider
+        if pt == "ollama":
+            settings = provider.data.get("settings", {})
+            url = (
+                settings.get("base_url")
+                or settings.get("chat_url")
+                or settings.get("vlm_url")
+                or settings.get("summarization_url")
+                or RECOMMENDED_OLLAMA_URL
+            )
+            return ollama_providers.get(url)
+        return None
+
     api_key = conf.get(CONF_API_KEY) or _provider_api_key(providers, "openai")
     openai_secret = SecretStr(api_key) if api_key else None
     gemini_key = conf.get(CONF_GEMINI_API_KEY) or _provider_api_key(providers, "gemini")
@@ -1531,10 +1725,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 "OpenAI-compatible embeddings init failed; continuing without them."
             )
 
-    # Choose active embedding provider
-    embedding_model: (
-        OpenAIEmbeddings | OllamaEmbeddings | GoogleGenerativeAIEmbeddings | None
-    ) = None
+    def _embedding_instance_for_provider(provider: ModelProviderConfig) -> Any:
+        """Map a ModelProviderConfig to the initialized embedding instance."""
+        if provider.provider_type == "openai":
+            return openai_embeddings
+        if provider.provider_type == "openai_compatible":
+            return openai_compatible_embeddings
+        if provider.provider_type == "gemini":
+            return gemini_embeddings
+        if provider.provider_type == "ollama":
+            settings = provider.data.get("settings", {})
+            url = (
+                settings.get("base_url")
+                or settings.get("chat_url")
+                or RECOMMENDED_OLLAMA_URL
+            )
+            if url != base_ollama_url:
+                return None
+            return ollama_embeddings
+        return None
+
+    # Choose active embedding provider and build fallback chain
+    embedding_model: Any = None
     embedding_provider = options.get(
         CONF_EMBEDDING_MODEL_PROVIDER, RECOMMENDED_EMBEDDING_MODEL_PROVIDER
     )
@@ -1547,6 +1759,81 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         embedding_model = gemini_embeddings
     else:
         embedding_model = ollama_embeddings
+
+    # Wrap embedding model with fallback if multiple providers available
+    _emb_fb = fallback_chains.get("embedding", [])
+    if _emb_fb:
+        _emb_chain = []
+        if embedding_model is not None:
+            _emb_chain.append(
+                (embedding_model, _emb_fb[0].deployment, _emb_fb[0].entry_id)
+            )
+        for p in _emb_fb[1:]:
+            m = _embedding_instance_for_provider(p)
+            if m is not None:
+                _emb_chain.append((m, p.deployment, p.entry_id))
+        if len(_emb_chain) > 1:
+            active_provider_id = _emb_chain[0][2]
+            if active_provider_id != _emb_fb[0].entry_id:
+                provider = providers.get(active_provider_id)
+                model_deployments["embedding"] = (
+                    provider.deployment if provider else _emb_chain[0][1]
+                )
+                await _async_notify_model_fallback(
+                    "embedding",
+                    _emb_fb[0].entry_id,
+                    active_provider_id,
+                    provider.deployment if provider else _emb_chain[0][1],
+                    setup_selected=True,
+                )
+
+            def _mark_tool_index_stale(
+                previous_provider_id: str, provider_id: str
+            ) -> None:
+                """Mark tool vectors stale after an embedding provider switch."""
+                runtime_data = getattr(entry, "runtime_data", None)
+                if runtime_data is None:
+                    return
+                runtime_data.tool_content_hashes.clear()
+                runtime_data.tool_index_ready = False
+                runtime_data.tool_index_failed = False
+                LOGGER.warning(
+                    "Tool index marked stale after embedding provider switch "
+                    "from %s to %s; it will be rebuilt on the next indexing pass.",
+                    previous_provider_id,
+                    provider_id,
+                )
+                async_dispatcher_send(hass, SIGNAL_TOOL_INDEX_UPDATED, "stale", 0)
+                provider = providers.get(provider_id)
+                _schedule_model_fallback_notification(
+                    "embedding",
+                    previous_provider_id,
+                    provider_id,
+                    provider.deployment if provider else None,
+                )
+
+            embedding_model = FallbackEmbeddings(
+                _emb_chain,
+                circuit_breaker=_emb_cb,
+                switch_callback=_mark_tool_index_stale,
+            )
+        elif _emb_chain:
+            active_provider_id = _emb_chain[0][2]
+            if active_provider_id != _emb_fb[0].entry_id:
+                provider = providers.get(active_provider_id)
+                model_deployments["embedding"] = (
+                    provider.deployment if provider else _emb_chain[0][1]
+                )
+                await _async_notify_model_fallback(
+                    "embedding",
+                    _emb_fb[0].entry_id,
+                    active_provider_id,
+                    provider.deployment if provider else _emb_chain[0][1],
+                    setup_selected=True,
+                )
+            embedding_model = _emb_chain[0][0]
+        else:
+            embedding_model = None
 
     if embedding_model is None:
         LOGGER.warning(
@@ -1908,6 +2195,318 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     **rf_summarization,
                 }
             }
+        )
+
+    def _fallback_model_name(provider: ModelProviderConfig, category: str) -> Any:
+        """Return the model name to use for a fallback provider/category."""
+        settings = provider.data.get("settings", {})
+        spec = MODEL_CATEGORY_SPECS.get(category, {})
+        return settings.get(f"{category}_model") or spec.get(
+            "recommended_models", {}
+        ).get(provider.provider_type)
+
+    def _category_top_p(category: str) -> float | None:
+        """Return the top-p value for chat-like categories."""
+        if category == "chat":
+            return CHAT_MODEL_TOP_P
+        if category == "vlm":
+            return VLM_TOP_P
+        if category == "summarization":
+            return SUMMARIZATION_MODEL_TOP_P
+        return None
+
+    def _configured_cloud_model(
+        model: Any,
+        provider: ModelProviderConfig,
+        category: str,
+        model_name: Any,
+        temperature: Any,
+    ) -> Any:
+        """Configure a cloud fallback model for its provider/category."""
+        model_key = (
+            "model_name"
+            if provider.provider_type in ("openai", "openai_compatible")
+            else "model"
+        )
+        config = {model_key: model_name, "temperature": temperature}
+        if (top_p := _category_top_p(category)) is not None:
+            config["top_p"] = top_p
+        return model.with_config(config={"configurable": config})
+
+    def _configured_ollama_model(
+        model: Any,
+        provider: ModelProviderConfig,
+        category: str,
+        model_name: Any,
+        temperature: Any,
+    ) -> Any:
+        """Configure an Ollama fallback model for its category."""
+        settings = provider.data.get("settings", {})
+        reasoning_enabled = settings.get("reasoning", ollama_reasoning)
+        rf_fallback = reasoning_field(model=str(model_name), enabled=reasoning_enabled)
+        config = {
+            "model": model_name,
+            "temperature": temperature,
+            **rf_fallback,
+        }
+        if category == "chat":
+            config.update(
+                {
+                    "top_p": CHAT_MODEL_TOP_P,
+                    "num_predict": CHAT_MODEL_MAX_TOKENS,
+                    "num_ctx": settings.get(
+                        "chat_context", RECOMMENDED_OLLAMA_CONTEXT_SIZE
+                    ),
+                    "repeat_penalty": CHAT_MODEL_REPEAT_PENALTY,
+                    "keep_alive": settings.get(
+                        "chat_keepalive", RECOMMENDED_OLLAMA_CHAT_KEEPALIVE
+                    ),
+                }
+            )
+        elif category == "vlm":
+            config.update(
+                {
+                    "top_p": VLM_TOP_P,
+                    "num_predict": VLM_NUM_PREDICT,
+                    "num_ctx": settings.get(
+                        "vlm_context", RECOMMENDED_OLLAMA_CONTEXT_SIZE
+                    ),
+                    "repeat_penalty": VLM_REPEAT_PENALTY,
+                    "mirostat": VLM_MIRO_STAT,
+                    "keep_alive": settings.get(
+                        "vlm_keepalive", RECOMMENDED_OLLAMA_VLM_KEEPALIVE
+                    ),
+                }
+            )
+        elif category == "summarization":
+            config.update(
+                {
+                    "top_p": SUMMARIZATION_MODEL_TOP_P,
+                    "num_predict": SUMMARIZATION_MODEL_PREDICT,
+                    "num_ctx": settings.get(
+                        "summarization_context", RECOMMENDED_OLLAMA_CONTEXT_SIZE
+                    ),
+                    "repeat_penalty": SUMMARIZATION_MODEL_REPEAT_PENALTY,
+                    "mirostat": SUMMARIZATION_MIRO_STAT,
+                    "keep_alive": settings.get(
+                        "summarization_keepalive",
+                        RECOMMENDED_OLLAMA_SUMMARIZATION_KEEPALIVE,
+                    ),
+                }
+            )
+        return model.with_config(config={"configurable": config})
+
+    def _configured_model_for_provider(
+        provider: ModelProviderConfig, category: str
+    ) -> Any:
+        """Return a category-configured model instance for a fallback provider."""
+        model = _model_instance_for_provider(provider)
+        if model is None:
+            return None
+
+        model_name = _fallback_model_name(provider, category)
+        spec = MODEL_CATEGORY_SPECS.get(category, {})
+        temp_key = spec.get("temperature_key")
+        temperature = options.get(temp_key) if temp_key else None
+        if temperature is None:
+            temperature = spec.get("recommended_temperature")
+
+        if provider.provider_type in (
+            "openai",
+            "openai_compatible",
+            "gemini",
+        ):
+            return _configured_cloud_model(
+                model, provider, category, model_name, temperature
+            )
+        if provider.provider_type == "anthropic":
+            return model.with_config(
+                config={
+                    "configurable": {
+                        "model": model_name,
+                        "temperature": temperature,
+                    }
+                }
+            )
+        if provider.provider_type == "ollama":
+            return _configured_ollama_model(
+                model, provider, category, model_name, temperature
+            )
+        return model
+
+    def _is_unavailable_model(model: Any) -> bool:
+        """Return True for placeholder models that should not block fallback."""
+        return isinstance(model, NullChat)
+
+    def _append_available_model(
+        chain: list[tuple[Any, str, str]],
+        model: Any,
+        deployment: str,
+        provider_id: str,
+        category: str,
+    ) -> None:
+        """Append a model to a fallback chain if it is usable."""
+        if _is_unavailable_model(model):
+            LOGGER.debug(
+                "Skipping unavailable %s model for fallback provider %s.",
+                category,
+                provider_id,
+            )
+            return
+        chain.append((model, deployment, provider_id))
+
+    def _finalize_model_chain(
+        category: str,
+        chain: list[tuple[Any, str, str]],
+        configured_providers: list[ModelProviderConfig],
+        unavailable_model: Any,
+        wrapper_factory: Any,
+    ) -> Any:
+        """Finalize fallback chain and update effective deployment metadata."""
+        primary_provider = configured_providers[0]
+        if not chain:
+            configured = [
+                f"{provider.entry_id}:{provider.deployment}"
+                for provider in configured_providers
+            ]
+            if len(configured_providers) <= 1:
+                LOGGER.debug(
+                    "No configured fallback for %s; primary provider %s is "
+                    "unavailable and will remain the placeholder model until "
+                    "the integration is reloaded.",
+                    category,
+                    primary_provider.entry_id,
+                )
+            else:
+                LOGGER.warning(
+                    "No available %s model providers in resolved fallback chain %s; "
+                    "keeping unavailable primary provider %s. Check fallback "
+                    "provider health and %s capability.",
+                    category,
+                    configured,
+                    primary_provider.entry_id,
+                    category,
+                )
+            return unavailable_model
+
+        active_model, active_deployment, active_provider_id = chain[0]
+        model_deployments[category] = active_deployment
+        if active_provider_id != primary_provider.entry_id:
+            LOGGER.warning(
+                "Fallback selected at setup for %s: primary provider %s was "
+                "unavailable; using provider %s (deployment=%s). This selection "
+                "remains active until the integration is reloaded or Home "
+                "Assistant restarts.",
+                category,
+                primary_provider.entry_id,
+                active_provider_id,
+                active_deployment,
+            )
+            setup_model_fallbacks.append(
+                (
+                    category,
+                    primary_provider.entry_id,
+                    active_provider_id,
+                    active_deployment,
+                )
+            )
+
+        if len(chain) > 1:
+            return wrapper_factory(chain)
+        return active_model
+
+    # ----- Wrap chat / VLM / summarization with fallback chains -----
+    # Primary model already carries per-feature config (model_name, temp, etc.).
+    # Fallbacks are configured per provider/category before entering the chain.
+    _chat_fb = fallback_chains.get("chat", [])
+    if _chat_fb:
+        _chat_chain = []
+        _append_available_model(
+            _chat_chain,
+            chat_model,
+            _chat_fb[0].deployment,
+            _chat_fb[0].entry_id,
+            "chat",
+        )
+        for p in _chat_fb[1:]:
+            m = _configured_model_for_provider(p, "chat")
+            if m is not None:
+                _append_available_model(
+                    _chat_chain, m, p.deployment, p.entry_id, "chat"
+                )
+        chat_model = _finalize_model_chain(
+            "chat",
+            _chat_chain,
+            _chat_fb,
+            chat_model,
+            lambda chain: FallbackChatModel(
+                chain,
+                circuit_breaker=_chat_cb,
+                alert_callback=_model_fallback_alert("chat"),
+            ),
+        )
+
+    _vlm_fb = fallback_chains.get("vlm", [])
+    if _vlm_fb:
+        _vlm_chain = []
+        _append_available_model(
+            _vlm_chain,
+            vision_model,
+            _vlm_fb[0].deployment,
+            _vlm_fb[0].entry_id,
+            "vlm",
+        )
+        for p in _vlm_fb[1:]:
+            m = _configured_model_for_provider(p, "vlm")
+            if m is not None:
+                _append_available_model(_vlm_chain, m, p.deployment, p.entry_id, "vlm")
+        vision_model = _finalize_model_chain(
+            "vlm",
+            _vlm_chain,
+            _vlm_fb,
+            vision_model,
+            lambda chain: FallbackVLM(
+                chain,
+                circuit_breaker=_vlm_cb,
+                alert_callback=_model_fallback_alert("vlm"),
+            ),
+        )
+
+    _sum_fb = fallback_chains.get("summarization", [])
+    if _sum_fb:
+        _sum_chain = []
+        _append_available_model(
+            _sum_chain,
+            summarization_model,
+            _sum_fb[0].deployment,
+            _sum_fb[0].entry_id,
+            "summarization",
+        )
+        for p in _sum_fb[1:]:
+            m = _configured_model_for_provider(p, "summarization")
+            if m is not None:
+                _append_available_model(
+                    _sum_chain, m, p.deployment, p.entry_id, "summarization"
+                )
+        summarization_model = _finalize_model_chain(
+            "summarization",
+            _sum_chain,
+            _sum_fb,
+            summarization_model,
+            lambda chain: FallbackChatModel(
+                chain,
+                circuit_breaker=_sum_cb,
+                alert_callback=_model_fallback_alert("summarization"),
+            ),
+        )
+
+    for category, primary_id, fallback_id, fallback_deployment in setup_model_fallbacks:
+        await _async_notify_model_fallback(
+            category,
+            primary_id,
+            fallback_id,
+            fallback_deployment,
+            setup_selected=True,
         )
 
     video_analyzer = VideoAnalyzer(hass, entry)

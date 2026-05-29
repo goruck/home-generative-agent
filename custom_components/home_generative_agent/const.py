@@ -113,6 +113,12 @@ CONF_PROMPT = "prompt"
 CONF_SCHEMA_FIRST_YAML = "schema_first_yaml"
 CONF_DISABLED_FEATURES = "disabled_features"
 
+# ---- STT hallucination filter (phantom transcriptions of silence/noise) ----
+CONF_STT_HALLUCINATION_PATTERNS = "stt_hallucination_patterns"
+CONF_STT_HALLUCINATION_EXACT_PATTERNS = "stt_hallucination_exact_patterns"
+DEFAULT_STT_HALLUCINATION_PATTERNS: list[str] = []
+DEFAULT_STT_HALLUCINATION_EXACT_PATTERNS: list[str] = []
+
 # ---- Audit store ----
 CONF_AUDIT_HOT_MAX_RECORDS = "audit_hot_max_records"
 CONF_AUDIT_ARCHIVAL_BACKLOG_MAX = "audit_archival_backlog_max"
@@ -285,6 +291,14 @@ CONF_FEATURE_MODEL_TEMPERATURE = "temperature"
 CONF_FEATURE_MODEL_REASONING = "reasoning"
 CONF_FEATURE_MODEL_KEEPALIVE = "keepalive_s"
 CONF_FEATURE_MODEL_CONTEXT_SIZE = "context_size"
+
+# ---- Fallback configuration ----
+CONF_FEATURE_FALLBACK_PROVIDER_IDS = "fallback_provider_ids"
+
+# Circuit breaker defaults
+FALLBACK_CIRCUIT_BREAKER_THRESHOLD: int = 3
+FALLBACK_CIRCUIT_BREAKER_WINDOW_SECONDS: float = 60.0
+FALLBACK_CIRCUIT_BREAKER_COOLDOWN_SECONDS: float = 120.0
 
 # --- Gemini API key (used in config_flow/__init__.py) ---
 CONF_GEMINI_API_KEY = "gemini_api_key"

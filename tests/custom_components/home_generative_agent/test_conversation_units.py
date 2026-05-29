@@ -72,6 +72,9 @@ _stub_ha_conversation()
 # These imports must come AFTER the stub so conversation.py loads cleanly.
 from custom_components.home_generative_agent.conversation import (  # noqa: E402
     MultiLLMAPI,
+    _get_stt_hallucination_exact_patterns,
+    _get_stt_hallucination_patterns,
+    _is_stt_hallucination,
     _run_tool_index_background,
 )
 
@@ -196,3 +199,111 @@ async def test_run_tool_index_background_success_clears_flags() -> None:
     assert rd.tool_index_failed is False
     assert rd.tool_indexing_in_progress is False
     assert rd.tool_content_hashes == {"key": "hash"}
+
+
+# ---------------------------------------------------------------------------
+# STT hallucination filter helpers
+# ---------------------------------------------------------------------------
+
+
+def test_get_stt_hallucination_patterns_empty() -> None:
+    """Empty option returns an empty tuple."""
+    assert _get_stt_hallucination_patterns({}) == ()
+    assert _get_stt_hallucination_patterns({"stt_hallucination_patterns": []}) == ()
+    assert _get_stt_hallucination_patterns({"stt_hallucination_patterns": ""}) == ()
+
+
+def test_get_stt_hallucination_patterns_list() -> None:
+    """List input is normalised to lower-case tuple."""
+    patterns = _get_stt_hallucination_patterns(
+        {"stt_hallucination_patterns": ["Foo", " BAR ", "baz"]}
+    )
+    assert patterns == ("foo", "bar", "baz")
+
+
+def test_get_stt_hallucination_patterns_legacy_string() -> None:
+    """Legacy comma-separated string still works."""
+    patterns = _get_stt_hallucination_patterns(
+        {"stt_hallucination_patterns": "Foo, BAR,  baz "}
+    )
+    assert patterns == ("foo", "bar", "baz")
+
+
+def test_get_stt_hallucination_patterns_multiline_string() -> None:
+    """Legacy newline-separated string also works."""
+    patterns = _get_stt_hallucination_patterns(
+        {"stt_hallucination_patterns": "Foo\nBAR\nbaz"}
+    )
+    assert patterns == ("foo", "bar", "baz")
+
+
+def test_get_stt_hallucination_patterns_extra_whitespace() -> None:
+    """Extra whitespace around commas and empty segments are ignored."""
+    patterns = _get_stt_hallucination_patterns(
+        {"stt_hallucination_patterns": " a , , b ,c"}
+    )
+    assert patterns == ("a", "b", "c")
+
+
+def test_get_stt_hallucination_exact_patterns_empty() -> None:
+    """Empty exact option returns an empty tuple."""
+    assert _get_stt_hallucination_exact_patterns({}) == ()
+    assert (
+        _get_stt_hallucination_exact_patterns({"stt_hallucination_exact_patterns": []})
+        == ()
+    )
+
+
+def test_get_stt_hallucination_exact_patterns_list() -> None:
+    """List input is normalised to lower-case tuple."""
+    patterns = _get_stt_hallucination_exact_patterns(
+        {"stt_hallucination_exact_patterns": ["Foo", " BAR ", "baz"]}
+    )
+    assert patterns == ("foo", "bar", "baz")
+
+
+def test_is_stt_hallucination_empty() -> None:
+    """None/empty text never matches, even with non-empty patterns."""
+    assert _is_stt_hallucination(None, ("foo",), ()) is False
+    assert _is_stt_hallucination("", ("foo",), ()) is False
+
+
+def test_is_stt_hallucination_no_patterns() -> None:
+    """With empty patterns nothing ever matches."""
+    assert _is_stt_hallucination("foo", (), ()) is False
+    assert _is_stt_hallucination("subtitles", (), ()) is False
+
+
+def test_is_stt_hallucination_substring_match() -> None:
+    """Matching substring returns True (case-insensitive)."""
+    sub_patterns = ("subtitles", "dimatorzok")
+    assert _is_stt_hallucination("Subtitles by", sub_patterns, ()) is True
+    assert _is_stt_hallucination("some dimatorzok noise", sub_patterns, ()) is True
+
+
+def test_is_stt_hallucination_exact_match() -> None:
+    """Exact match returns True only for full text equality (case-insensitive)."""
+    exact_patterns = ("to be continued", "the end")
+    assert _is_stt_hallucination("To Be Continued", (), exact_patterns) is True
+    assert _is_stt_hallucination("The End", (), exact_patterns) is True
+    assert _is_stt_hallucination("the end.", (), exact_patterns) is False  # not exact
+    assert (
+        _is_stt_hallucination("To be continued now", (), exact_patterns) is False
+    )  # not exact
+
+
+def test_is_stt_hallucination_combined() -> None:
+    """Both substring and exact patterns work together."""
+    sub_patterns = ("sub",)
+    exact_patterns = ("the end",)
+    assert _is_stt_hallucination("subtitles", sub_patterns, exact_patterns) is True
+    assert _is_stt_hallucination("The End", sub_patterns, exact_patterns) is True
+    assert _is_stt_hallucination("nothing", sub_patterns, exact_patterns) is False
+
+
+def test_is_stt_hallucination_no_match() -> None:
+    """Non-matching text returns False."""
+    assert _is_stt_hallucination("turn on the light", ("subtitles",), ()) is False
+    assert (
+        _is_stt_hallucination("subtitle", ("subtitles",), ()) is False
+    )  # partial, not full

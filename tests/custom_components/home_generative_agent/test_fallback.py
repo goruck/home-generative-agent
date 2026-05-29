@@ -1,0 +1,572 @@
+# ruff: noqa: S101
+"""Tests for core fallback wrappers."""
+
+from __future__ import annotations
+
+import logging
+from typing import Any, cast
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import httpx
+import pytest
+from homeassistant.exceptions import HomeAssistantError
+
+from custom_components.home_generative_agent.const import EMBEDDING_MODEL_DIMS
+from custom_components.home_generative_agent.core.fallback import (
+    CircuitBreaker,
+    FallbackChatModel,
+    FallbackEmbeddings,
+    FallbackVLM,
+    _is_retryable,
+)
+
+
+class FakeAIMessage:
+    """Minimal fake AIMessage for testing."""
+
+    def __init__(
+        self,
+        content: str,
+        *,
+        response_metadata: dict[str, Any] | None = None,
+        tool_calls: list[Any] | None = None,
+    ) -> None:
+        self.content = content
+        self.response_metadata = response_metadata or {}
+        self.tool_calls = tool_calls or []
+
+
+def test_is_retryable_home_assistant_error() -> None:
+    """HomeAssistantError should be retryable."""
+    assert _is_retryable(HomeAssistantError("oops")) is True
+
+
+def test_is_retryable_timeout() -> None:
+    """TimeoutError should be retryable."""
+    assert _is_retryable(TimeoutError("timed out")) is True
+
+
+def test_is_retryable_rate_limit() -> None:
+    """Rate limit string should be retryable."""
+    assert _is_retryable(RuntimeError("Rate limit exceeded")) is True
+
+
+def test_is_retryable_non_retryable() -> None:
+    """Generic ValueError should NOT be retryable."""
+    assert _is_retryable(ValueError("bad input")) is False
+
+
+def test_is_retryable_httpx_connect_error() -> None:
+    """httpx.ConnectError (Ollama network failure) should be retryable."""
+    assert _is_retryable(httpx.ConnectError("All connection attempts failed")) is True
+
+
+@pytest.mark.asyncio
+async def test_fallback_chat_primary_succeeds() -> None:
+    """When primary succeeds, fallback is never tried."""
+    primary = AsyncMock()
+    primary.ainvoke.return_value = FakeAIMessage("primary")
+    fallback = AsyncMock()
+
+    model = FallbackChatModel(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")]
+    )
+    result = await model.ainvoke(["hello"])
+    assert result.content == "primary"
+    primary.ainvoke.assert_awaited_once()
+    fallback.ainvoke.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fallback_chat_primary_fails(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When primary fails with retryable error, fallback is used."""
+    primary = AsyncMock()
+    primary.ainvoke.side_effect = HomeAssistantError("primary down")
+    fallback = AsyncMock()
+    fallback.ainvoke.return_value = FakeAIMessage("fallback")
+
+    model = FallbackChatModel(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")]
+    )
+    result = await model.ainvoke(["hello"])
+    assert result.content == "fallback"
+    assert primary.ainvoke.await_count == 1
+    assert fallback.ainvoke.await_count == 1
+    assert "Model call failed for provider p1 (provider 1/2)" in caplog.text
+    assert "(attempt 1/2)" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_fallback_chat_primary_empty_length_response() -> None:
+    """Empty length-limited responses should trigger fallback."""
+    primary = AsyncMock()
+    primary.ainvoke.return_value = FakeAIMessage(
+        "",
+        response_metadata={"done_reason": "length", "model_name": "gpt-oss"},
+    )
+    fallback = AsyncMock()
+    fallback.ainvoke.return_value = FakeAIMessage("fallback")
+
+    model = FallbackChatModel(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")]
+    )
+
+    result = await model.ainvoke(["hello"])
+
+    assert result.content == "fallback"
+    assert primary.ainvoke.await_count == 1
+    assert fallback.ainvoke.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_fallback_chat_empty_tool_call_response_does_not_fallback() -> None:
+    """Empty tool-call responses are valid and should not trigger fallback."""
+    primary = AsyncMock()
+    primary.ainvoke.return_value = FakeAIMessage(
+        "",
+        response_metadata={"finish_reason": "tool_calls"},
+        tool_calls=[{"name": "tool"}],
+    )
+    fallback = AsyncMock()
+
+    model = FallbackChatModel(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")]
+    )
+
+    result = await model.ainvoke(["hello"])
+
+    assert cast("FakeAIMessage", result).tool_calls == [{"name": "tool"}]
+    fallback.ainvoke.assert_not_awaited()
+
+
+def test_fallback_chat_with_config_preserves_bound_model_config() -> None:
+    """Per-call fallback config preserves the configured provider model."""
+    primary = MagicMock()
+    primary.config = {
+        "configurable": {
+            "model": "qwen-summary",
+            "temperature": 0.2,
+            "num_ctx": 32000,
+        }
+    }
+    primary.with_config.return_value = MagicMock()
+
+    model = FallbackChatModel(chain=[(primary, "edge", "p1")])
+    configured = model.with_config(
+        config={"configurable": {"num_predict": 128, "reasoning": False}}
+    )
+
+    assert isinstance(configured, FallbackChatModel)
+    call_config = primary.with_config.call_args.args[0]
+    assert call_config["configurable"] == {
+        "model": "qwen-summary",
+        "temperature": 0.2,
+        "num_ctx": 32000,
+        "num_predict": 128,
+        "reasoning": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_fallback_chat_all_fail() -> None:
+    """When all providers fail, HomeAssistantError is raised."""
+    primary = AsyncMock()
+    primary.ainvoke.side_effect = HomeAssistantError("primary down")
+    fallback = AsyncMock()
+    fallback.ainvoke.side_effect = HomeAssistantError("fallback down")
+
+    model = FallbackChatModel(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")]
+    )
+    with pytest.raises(HomeAssistantError, match="All LLM providers failed"):
+        await model.ainvoke(["hello"])
+
+
+@pytest.mark.asyncio
+async def test_fallback_chat_non_retryable_raises_immediately() -> None:
+    """Non-retryable exceptions should not trigger fallback."""
+    primary = AsyncMock()
+    primary.ainvoke.side_effect = ValueError("bad input")
+    fallback = AsyncMock()
+
+    model = FallbackChatModel(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")]
+    )
+    with pytest.raises(ValueError, match="bad input"):
+        await model.ainvoke(["hello"])
+    fallback.ainvoke.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fallback_chat_astream_raises_not_implemented() -> None:
+    """Astream is disabled; callers must use ainvoke."""
+    primary = AsyncMock()
+    model = FallbackChatModel(chain=[(primary, "edge", "p1")])
+    with pytest.raises(NotImplementedError, match="Use ainvoke"):
+        async for _ in model.astream(["hello"]):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_fallback_vlm_primary_succeeds() -> None:
+    """VLM fallback not used when primary succeeds."""
+    primary = AsyncMock()
+    primary.ainvoke.return_value = FakeAIMessage("vlm primary")
+    fallback = AsyncMock()
+
+    model = FallbackVLM(chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")])
+    result = await model.ainvoke(["image"])
+    assert result.content == "vlm primary"
+    fallback.ainvoke.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fallback_vlm_primary_fails(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """VLM fallback used when primary fails."""
+    primary = AsyncMock()
+    primary.ainvoke.side_effect = HomeAssistantError("vlm down")
+    fallback = AsyncMock()
+    fallback.ainvoke.return_value = FakeAIMessage("vlm fallback")
+
+    model = FallbackVLM(chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")])
+    result = await model.ainvoke(["image"])
+    assert result.content == "vlm fallback"
+    assert "VLM call failed for provider p1 (provider 1/2)" in caplog.text
+    assert "(attempt 1/2)" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_fallback_vlm_alert_callback_includes_fallback_deployment() -> None:
+    """VLM fallback alert callback receives provider and deployment details."""
+    primary = AsyncMock()
+    primary.ainvoke.side_effect = HomeAssistantError("vlm down")
+    fallback = AsyncMock()
+    fallback.ainvoke.return_value = FakeAIMessage("vlm fallback")
+    alert_callback = MagicMock()
+
+    model = FallbackVLM(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")],
+        alert_callback=alert_callback,
+    )
+
+    assert (await model.ainvoke(["image"])).content == "vlm fallback"
+    alert_callback.assert_called_once()
+    assert alert_callback.call_args.args[:2] == ("p1", primary.ainvoke.side_effect)
+    assert alert_callback.call_args.kwargs == {
+        "fallback_to": "p2",
+        "fallback_deployment": "cloud",
+    }
+
+
+def test_fallback_vlm_with_config_preserves_bound_model_config() -> None:
+    """Video per-call VLM config preserves the configured provider model."""
+    primary = MagicMock()
+    primary.config = {
+        "configurable": {
+            "model": "qwen-vlm",
+            "temperature": 0.1,
+            "num_ctx": 32000,
+        }
+    }
+    primary.with_config.return_value = MagicMock()
+
+    model = FallbackVLM(chain=[(primary, "edge", "p1")])
+    configured = model.with_config(
+        config={"configurable": {"num_predict": 256, "reasoning": False}}
+    )
+
+    assert isinstance(configured, FallbackVLM)
+    call_config = primary.with_config.call_args.args[0]
+    assert call_config["configurable"] == {
+        "model": "qwen-vlm",
+        "temperature": 0.1,
+        "num_ctx": 32000,
+        "num_predict": 256,
+        "reasoning": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_fallback_embeddings_primary_succeeds() -> None:
+    """Embedding fallback not used when primary succeeds."""
+    primary = AsyncMock()
+    primary.aembed_documents.return_value = [[0.1, 0.2]]
+    fallback = AsyncMock()
+
+    emb = FallbackEmbeddings(chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")])
+    result = await emb.aembed_documents(["hello"])
+    assert result == [[0.1, 0.2]]
+    fallback.aembed_documents.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fallback_embeddings_primary_fails(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Embedding fallback used when primary fails."""
+    primary = AsyncMock()
+    primary.aembed_documents.side_effect = ConnectionError("emb down")
+    fallback = AsyncMock()
+    fallback.aembed_documents.return_value = [[0.3, 0.4]]
+
+    emb = FallbackEmbeddings(chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")])
+    caplog.set_level(logging.WARNING)
+    result = await emb.aembed_documents(["hello"])
+    assert result == [[0.3, 0.4]]
+    assert (
+        "Embedding fallback activated: provider p2 succeeded after failed "
+        "provider(s): p1"
+    ) in caplog.text
+    assert "Embedding provider switched from p1 to p2" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_fallback_embeddings_query() -> None:
+    """Embedding query fallback works."""
+    primary = AsyncMock()
+    primary.aembed_query.side_effect = ConnectionError("emb down")
+    fallback = AsyncMock()
+    fallback.aembed_query.return_value = [0.5, 0.6]
+
+    emb = FallbackEmbeddings(chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")])
+    result = await emb.aembed_query("hello")
+    assert result == [0.5, 0.6]
+
+
+@pytest.mark.asyncio
+async def test_fallback_embeddings_switch_callback_and_sticky_provider(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Embedding fallback switches provider and uses it first afterward."""
+
+    class FakeGeminiEmbeddings:
+        """Fake Gemini embeddings model for dimensionality-normalization coverage."""
+
+        def __init__(self) -> None:
+            """Initialize fake model."""
+            self.aembed_documents = AsyncMock(return_value=[[0.3, 0.4]])
+
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.fallback."
+        "GoogleGenerativeAIEmbeddings",
+        FakeGeminiEmbeddings,
+    )
+
+    primary = AsyncMock()
+    primary.aembed_documents.side_effect = ConnectionError("emb down")
+    primary.aembed_query.return_value = [0.1, 0.2]
+    fallback = FakeGeminiEmbeddings()
+    switch_callback = MagicMock()
+
+    emb = FallbackEmbeddings(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")],
+        switch_callback=switch_callback,
+    )
+
+    assert await emb.aembed_documents(["hello"]) == [[0.3, 0.4]]
+    fallback.aembed_documents.assert_awaited_once_with(
+        ["hello"], output_dimensionality=EMBEDDING_MODEL_DIMS
+    )
+    switch_callback.assert_called_once_with("p1", "p2")
+
+    fallback.aembed_documents.reset_mock()
+    fallback.aembed_documents.return_value = [[0.5, 0.6]]
+
+    assert await emb.aembed_query("hello") == [0.5, 0.6]
+    primary.aembed_query.assert_not_awaited()
+    fallback.aembed_documents.assert_awaited_once_with(
+        ["hello"], output_dimensionality=EMBEDDING_MODEL_DIMS
+    )
+    assert "Using sticky embedding provider p2 first" in caplog.text
+    assert "configured primary provider p1 will not be retried" in caplog.text
+
+
+def test_circuit_breaker_opens_after_threshold() -> None:
+    """Circuit breaker should disable provider after threshold failures."""
+    cb = CircuitBreaker(threshold=2, window_seconds=10, cooldown_seconds=60)
+    cb.record_failure("p1")
+    assert cb.is_available("p1") is True
+    cb.record_failure("p1")
+    assert cb.is_available("p1") is False
+    cb.record_failure("p1")
+    assert cb.is_available("p1") is False
+
+
+def test_circuit_breaker_success_resets() -> None:
+    """Circuit breaker should reset on success."""
+    cb = CircuitBreaker(threshold=2, window_seconds=10, cooldown_seconds=60)
+    cb.record_failure("p1")
+    cb.record_failure("p1")
+    assert cb.is_available("p1") is False
+    cb.record_success("p1")
+    assert cb.is_available("p1") is True
+
+
+@pytest.mark.asyncio
+async def test_fallback_chat_circuit_breaker_skips_broken() -> None:
+    """Circuit-broken provider should be skipped."""
+    primary = AsyncMock()
+    primary.ainvoke.side_effect = HomeAssistantError("primary down")
+    fallback = AsyncMock()
+    fallback.ainvoke.return_value = FakeAIMessage("fallback")
+
+    cb = CircuitBreaker(threshold=1, window_seconds=10, cooldown_seconds=60)
+    cb.record_failure("p1")
+
+    model = FallbackChatModel(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")],
+        circuit_breaker=cb,
+    )
+    result = await model.ainvoke(["hello"])
+    assert result.content == "fallback"
+    primary.ainvoke.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fallback_chat_all_circuit_broken_reports_no_provider() -> None:
+    """All-skipped providers should raise a clean HomeAssistantError."""
+    primary = AsyncMock()
+    fallback = AsyncMock()
+    cb = CircuitBreaker(threshold=1, window_seconds=10, cooldown_seconds=60)
+    cb.record_failure("p1")
+    cb.record_failure("p2")
+
+    model = FallbackChatModel(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")],
+        circuit_breaker=cb,
+    )
+    with pytest.raises(HomeAssistantError, match="No provider was available"):
+        await model.ainvoke(["hello"])
+    primary.ainvoke.assert_not_awaited()
+    fallback.ainvoke.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fallback_chat_bind_tools() -> None:
+    """bind_tools should propagate to each model in chain."""
+    primary = MagicMock()
+    primary.bind_tools.return_value = AsyncMock()
+    fallback = MagicMock()
+    fallback.bind_tools.return_value = AsyncMock()
+
+    model = FallbackChatModel(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")]
+    )
+    bound = model.bind_tools(["tool1"])
+    assert isinstance(bound, FallbackChatModel)
+    assert len(bound.chain) == 2
+    primary.bind_tools.assert_called_once_with(["tool1"])
+    fallback.bind_tools.assert_called_once_with(["tool1"])
+
+
+@pytest.mark.asyncio
+async def test_fallback_chat_with_config() -> None:
+    """with_config should propagate to each model and store config."""
+    primary = MagicMock()
+    primary.with_config.return_value = AsyncMock()
+    primary.config = {"configurable": {"model": "gpt-4o"}}
+    fallback = MagicMock()
+    fallback.with_config.return_value = AsyncMock()
+
+    model = FallbackChatModel(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")],
+        config={"configurable": {"temperature": 0.5}},
+    )
+    wrapped = model.with_config(config={"configurable": {"top_p": 1.0}})
+    assert isinstance(wrapped, FallbackChatModel)
+    assert len(wrapped.chain) == 2
+    primary.with_config.assert_called_once()
+    fallback.with_config.assert_called_once()
+    assert "top_p" in wrapped.config.get("configurable", {})
+
+
+@pytest.mark.asyncio
+async def test_fallback_vlm_with_config() -> None:
+    """with_config should propagate to VLM models and store config."""
+    primary = MagicMock()
+    primary.with_config.return_value = AsyncMock()
+    fallback = MagicMock()
+    fallback.with_config.return_value = AsyncMock()
+
+    model = FallbackVLM(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")],
+        config={"configurable": {"temperature": 0.5}},
+    )
+
+    wrapped = model.with_config(config={"configurable": {"num_predict": 128}})
+
+    assert isinstance(wrapped, FallbackVLM)
+    assert len(wrapped.chain) == 2
+    primary.with_config.assert_called_once()
+    fallback.with_config.assert_called_once()
+    assert "num_predict" in wrapped.config.get("configurable", {})
+
+
+def test_fallback_embeddings_sync_raises() -> None:
+    """Synchronous embedding methods must raise NotImplementedError."""
+    primary = AsyncMock()
+    emb = FallbackEmbeddings(chain=[(primary, "edge", "p1")])
+    with pytest.raises(NotImplementedError, match="Use aembed_documents"):
+        emb.embed_documents(["hello"])
+    with pytest.raises(NotImplementedError, match="Use aembed_query"):
+        emb.embed_query("hello")
+
+
+@pytest.mark.asyncio
+async def test_fallback_vlm_all_providers_fail() -> None:
+    """When all VLM providers fail, HomeAssistantError is raised."""
+    primary = AsyncMock()
+    primary.ainvoke.side_effect = HomeAssistantError("vlm primary down")
+    fallback = AsyncMock()
+    fallback.ainvoke.side_effect = HomeAssistantError("vlm fallback down")
+
+    model = FallbackVLM(chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")])
+    with pytest.raises(HomeAssistantError, match="All VLM providers failed"):
+        await model.ainvoke(["image"])
+
+
+@pytest.mark.asyncio
+async def test_fallback_embeddings_aembed_documents_all_fail() -> None:
+    """When all embedding providers fail on documents, HomeAssistantError is raised."""
+    primary = AsyncMock()
+    primary.aembed_documents.side_effect = HomeAssistantError("emb primary down")
+    fallback = AsyncMock()
+    fallback.aembed_documents.side_effect = HomeAssistantError("emb fallback down")
+
+    emb = FallbackEmbeddings(chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")])
+    with pytest.raises(HomeAssistantError, match="All embedding providers failed"):
+        await emb.aembed_documents(["hello"])
+
+
+@pytest.mark.asyncio
+async def test_fallback_embeddings_aembed_query_all_fail() -> None:
+    """When all embedding providers fail on query, HomeAssistantError is raised."""
+    primary = AsyncMock()
+    primary.aembed_query.side_effect = HomeAssistantError("emb primary down")
+    fallback = AsyncMock()
+    fallback.aembed_query.side_effect = HomeAssistantError("emb fallback down")
+
+    emb = FallbackEmbeddings(chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")])
+    with pytest.raises(HomeAssistantError, match="All embedding providers failed"):
+        await emb.aembed_query("hello")
+
+
+def test_circuit_breaker_window_expiry() -> None:
+    """Failures outside the window are not counted toward the threshold."""
+    cb = CircuitBreaker(threshold=2, window_seconds=10.0, cooldown_seconds=60.0)
+
+    with patch(
+        "custom_components.home_generative_agent.core.fallback.monotonic"
+    ) as mock_time:
+        mock_time.return_value = 0.0
+        cb.record_failure("p1")
+
+        mock_time.return_value = 15.0
+        cb.record_failure("p1")
+
+        assert cb.is_available("p1") is True

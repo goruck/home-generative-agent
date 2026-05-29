@@ -41,3 +41,4 @@ class FeatureConfig:
     model_provider_id: str | None
     model: Mapping[str, object]
     config: Mapping[str, object]
+    fallback_provider_ids: list[str] | None = None
