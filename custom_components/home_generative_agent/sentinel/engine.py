@@ -69,6 +69,7 @@ from .rules.appliance_power_duration import AppliancePowerDurationRule
 from .rules.camera_entry_unsecured import CameraEntryUnsecuredRule
 from .rules.camera_missing_snapshot import CameraMissingSnapshotRule
 from .rules.open_entry_while_away import OpenEntryWhileAwayRule
+from .rules.pet_detected_at_night_no_occupancy import PetDetectedAtNightNoOccupancyRule
 from .rules.phone_battery_low_at_night import PhoneBatteryLowAtNightRule
 from .rules.unknown_person_camera_night_home import UnknownPersonAtNightWhileHomeRule
 from .rules.unknown_person_camera_no_home import UnknownPersonCameraNoHomeRule
@@ -213,6 +214,7 @@ class SentinelEngine:
             UnknownPersonCameraNoHomeRule(),
             UnknownPersonAtNightWhileHomeRule(),
             VehicleDetectedNearCameraRule(),
+            PetDetectedAtNightNoOccupancyRule(),
             CameraMissingSnapshotRule(),
             AlarmDisarmedDuringExternalThreatRule(),
             PhoneBatteryLowAtNightRule(),
