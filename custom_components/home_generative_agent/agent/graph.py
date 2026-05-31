@@ -1099,7 +1099,8 @@ def _tool_retrieval_fallback_reason(
 
 
 def _ensure_array_items(schema: dict[str, Any]) -> dict[str, Any]:
-    """Recursively ensure every array-type node has an ``items`` field.
+    """
+    Recursively ensure every array-type node has an ``items`` field.
 
     Gemini rejects function declarations where an array property lacks ``items``.
     OpenAI tolerates the omission; this normalisation is a no-op for other providers.
@@ -1115,7 +1116,9 @@ def _ensure_array_items(schema: dict[str, Any]) -> dict[str, Any]:
     # can find them when it resolves the anyOf to type_:ARRAY.
     if "anyOf" in schema and "items" not in schema:
         array_variants = [
-            v for v in schema["anyOf"] if isinstance(v, dict) and v.get("type") == "array"
+            v
+            for v in schema["anyOf"]
+            if isinstance(v, dict) and v.get("type") == "array"
         ]
         if array_variants:
             schema = {

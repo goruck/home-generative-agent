@@ -107,7 +107,10 @@ def test_ensure_array_items_recurses_into_properties() -> None:
         },
     }
     result = _ensure_array_items(schema)
-    assert result["properties"]["domain"] == {"type": "array", "items": {"type": "string"}}
+    assert result["properties"]["domain"] == {
+        "type": "array",
+        "items": {"type": "string"},
+    }
     assert result["properties"]["name"] == {"type": "string"}
 
 
@@ -119,7 +122,8 @@ def test_ensure_array_items_recurses_into_nested_items() -> None:
 
 
 def test_ensure_array_items_hoists_items_from_any_of_array_variant() -> None:
-    """anyOf with an array variant gets items hoisted to the top level.
+    """
+    AnyOf with an array variant gets items hoisted to the top level.
 
     GetLiveContextTool.domain uses vol.Any(cv.string, [cv.string]) which
     safe_convert emits as {"anyOf": [{}, {"type": "array", "items": {...}}]}.
@@ -139,14 +143,14 @@ def test_ensure_array_items_hoists_items_from_any_of_array_variant() -> None:
 
 
 def test_ensure_array_items_any_of_array_variant_without_items() -> None:
-    """anyOf array variant with no items gets the string default."""
+    """AnyOf array variant with no items gets the string default."""
     schema = {"anyOf": [{}, {"type": "array"}]}
     result = _ensure_array_items(schema)
     assert result["items"] == {"type": "string"}
 
 
 def test_ensure_array_items_any_of_no_array_variant_unchanged() -> None:
-    """anyOf without an array variant is left alone."""
+    """AnyOf without an array variant is left alone."""
     schema = {"anyOf": [{"type": "string"}, {"type": "integer"}]}
     result = _ensure_array_items(schema)
     assert "items" not in result
