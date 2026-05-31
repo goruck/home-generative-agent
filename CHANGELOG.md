@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.15] - 2026-05-31
+
+### Fixed
+
+- **Gemini provider: 400 error on every chat interaction** — Gemini's Protobuf schema validation requires an explicit `items` field on all array-type tool parameters. `GetLiveContextTool.domain` (always injected on tool-retrieval turns) uses `vol.Any(cv.string, [cv.string])`, which `voluptuous_openapi` emits as an `anyOf` schema. `langchain_google_genai` resolved the `anyOf` to `type_:ARRAY` but checked `items` on the outer dict where it was absent, producing a declaration Gemini rejected. Added `_ensure_array_items()` to `_format_and_dedupe_tools()` which hoists `items` from `anyOf` array variants and recursively patches any bare `{"type": "array"}` node. Closes [#428](https://github.com/goruck/home-generative-agent/issues/428).
+
 ## [3.14.14] - 2026-05-31
 
 ### Added

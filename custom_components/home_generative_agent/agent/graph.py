@@ -1098,6 +1098,47 @@ def _tool_retrieval_fallback_reason(
     return reason, tool_index_ready, tool_indexing_in_progress, tool_index_failed
 
 
+def _ensure_array_items(schema: dict[str, Any]) -> dict[str, Any]:
+    """
+    Recursively ensure every array-type node has an ``items`` field.
+
+    Gemini rejects function declarations where an array property lacks ``items``.
+    OpenAI tolerates the omission; this normalisation is a no-op for other providers.
+
+    Also handles anyOf schemas such as ``vol.Any(cv.string, [cv.string])`` which
+    safe_convert emits as ``{"anyOf": [{}, {"type": "array", "items": {...}}]}``.
+    langchain_google_genai resolves these to type_:ARRAY but then checks
+    ``v.get("items")`` on the outer anyOf dict (where items is absent), so it
+    never populates properties_item["items"].  Hoisting items to the top level
+    of the anyOf schema makes it visible to the library's check.
+    """
+    # anyOf with an array variant: hoist items upward so langchain_google_genai
+    # can find them when it resolves the anyOf to type_:ARRAY.
+    if "anyOf" in schema and "items" not in schema:
+        array_variants = [
+            v
+            for v in schema["anyOf"]
+            if isinstance(v, dict) and v.get("type") == "array"
+        ]
+        if array_variants:
+            schema = {
+                **schema,
+                "items": array_variants[-1].get("items", {"type": "string"}),
+            }
+    if schema.get("type") == "array" and "items" not in schema:
+        schema = {**schema, "items": {"type": "string"}}
+    if "properties" in schema:
+        schema = {
+            **schema,
+            "properties": {
+                k: _ensure_array_items(v) for k, v in schema["properties"].items()
+            },
+        }
+    if isinstance(schema.get("items"), dict):
+        schema = {**schema, "items": _ensure_array_items(schema["items"])}
+    return schema
+
+
 def _format_and_dedupe_tools(
     raw_tools: list[RawTool],
 ) -> tuple[list[dict[str, Any]], dict[str, str]]:
@@ -1119,6 +1160,8 @@ def _format_and_dedupe_tools(
         # OpenAI requires 'properties' on all type:object schemas.
         if parameters.get("type") == "object" and "properties" not in parameters:
             parameters["properties"] = {}
+        # Gemini requires 'items' on all type:array properties.
+        parameters = _ensure_array_items(parameters)
         selected_tools.append(
             {
                 "type": "function",
