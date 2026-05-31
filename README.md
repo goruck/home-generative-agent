@@ -147,8 +147,6 @@ actions:
 
 If you want to contribute to this, please read the [Contribution guidelines](CONTRIBUTING.md).
 
-Thanks to [Alex Ultra](https://github.com/alex-mextner) for the original STT hallucination filter and model-provider fallback work in [PR #421](https://github.com/goruck/home-generative-agent/pull/421).
-
 ***
 
 [commits-shield]: https://img.shields.io/github/commit-activity/y/goruck/home-generative-agent.svg?style=for-the-badge
