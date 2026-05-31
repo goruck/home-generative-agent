@@ -91,6 +91,7 @@ These rules run on every detection cycle without any configuration or approval.
 | Rule | Description |
 |---|---|
 | `vehicle_detected_near_camera_home` | Vehicle detected on any monitored camera while residents are home |
+| `pet_detected_at_night_no_occupancy` | Pet detected on any monitored camera at night while no residents are home (informational; no suggested action) |
 | `camera_missing_snapshot_night_home` | Any monitored camera (with active motion sensors) has no snapshot summary at night while the home is occupied |
 
 **Devices**

@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.14] - 2026-05-31
+
+### Added
+
+- **Sentinel built-in rule: `pet_detected_at_night_no_occupancy`** — fires when a pet (cat, dog, rabbit, hamster, bird, or parrot) is detected on any monitored camera at night while no residents are home. Requires at least one active motion or VMD signal. Severity: low, confidence: 0.85, informational only (no suggested action). Closes [#422](https://github.com/goruck/home-generative-agent/issues/422).
+
+### Changed
+
+- **`langchain-core` manifest pin loosened** — changed from `==1.3.2` to `>=1.3.2,<2.0.0` to prevent `uv` from silently skipping installation on hosts where a newer compatible version is already present.
+
 ## [3.14.13] - 2026-05-23
 
 Thanks to [Alex Ultra](https://github.com/alex-mextner) for contributing the original STT hallucination filter and model-provider fallback work in [#421](https://github.com/goruck/home-generative-agent/pull/421).

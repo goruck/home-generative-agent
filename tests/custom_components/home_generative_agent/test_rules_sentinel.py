@@ -24,6 +24,9 @@ from custom_components.home_generative_agent.sentinel.rules.camera_missing_snaps
 from custom_components.home_generative_agent.sentinel.rules.open_entry_while_away import (
     OpenEntryWhileAwayRule,
 )
+from custom_components.home_generative_agent.sentinel.rules.pet_detected_at_night_no_occupancy import (
+    PetDetectedAtNightNoOccupancyRule,
+)
 from custom_components.home_generative_agent.sentinel.rules.phone_battery_low_at_night import (
     PhoneBatteryLowAtNightRule,
 )
@@ -2279,3 +2282,151 @@ def test_unlocked_lock_at_night_no_one_home_is_high_severity() -> None:
     f = findings[0]
     assert f.severity == "high"
     assert f.is_sensitive is True
+
+
+# ---------------------------------------------------------------------------
+# PetDetectedAtNightNoOccupancyRule
+# ---------------------------------------------------------------------------
+
+
+def test_pet_detected_at_night_no_occupancy_triggers() -> None:
+    """Cat in snapshot summary at night with no one home should trigger."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = True
+    snapshot["derived"]["anyone_home"] = False
+    snapshot["derived"]["people_away"] = ["person.alice"]
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.tapo_c225_hd_stream",
+            snapshot_summary="A cat is walking across the living room floor.",
+            motion_entities=["binary_sensor.living_room_motion"],
+        )
+    ]
+    findings = PetDetectedAtNightNoOccupancyRule().evaluate(snapshot)
+    assert len(findings) == 1
+    assert findings[0].type == "pet_detected_at_night_no_occupancy"
+    assert findings[0].severity == "low"
+    assert findings[0].confidence == 0.85
+    assert findings[0].triggering_entities == ["camera.tapo_c225_hd_stream"]
+
+
+def test_pet_detected_at_night_no_occupancy_dog_triggers() -> None:
+    """Dog keyword in summary also triggers."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = True
+    snapshot["derived"]["anyone_home"] = False
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.hallway",
+            snapshot_summary="A small dog is resting near the couch.",
+            vmd_entities=["binary_sensor.hallway_vmd"],
+        )
+    ]
+    findings = PetDetectedAtNightNoOccupancyRule().evaluate(snapshot)
+    assert len(findings) == 1
+    assert findings[0].triggering_entities == ["camera.hallway"]
+
+
+def test_pet_detected_at_night_no_occupancy_two_cameras() -> None:
+    """Two cameras with pet summaries yield two findings."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = True
+    snapshot["derived"]["anyone_home"] = False
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.living_room",
+            snapshot_summary="A cat is sleeping on the sofa.",
+            motion_entities=["binary_sensor.living_room_motion"],
+        ),
+        _camera_activity(
+            "camera.hallway",
+            snapshot_summary="A dog is walking down the hallway.",
+            motion_entities=["binary_sensor.hallway_motion"],
+        ),
+    ]
+    findings = PetDetectedAtNightNoOccupancyRule().evaluate(snapshot)
+    assert len(findings) == 2
+    entity_ids = {f.triggering_entities[0] for f in findings}
+    assert entity_ids == {"camera.living_room", "camera.hallway"}
+
+
+def test_pet_detected_at_night_no_occupancy_no_trigger_when_home() -> None:
+    """No finding when someone is home."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = True
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.living_room",
+            snapshot_summary="A cat is walking across the living room.",
+            motion_entities=["binary_sensor.living_room_motion"],
+        )
+    ]
+    findings = PetDetectedAtNightNoOccupancyRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_pet_detected_at_night_no_occupancy_no_trigger_daytime() -> None:
+    """No finding during the day even when away."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = False
+    snapshot["derived"]["anyone_home"] = False
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.living_room",
+            snapshot_summary="A cat is on the couch.",
+            motion_entities=["binary_sensor.living_room_motion"],
+        )
+    ]
+    findings = PetDetectedAtNightNoOccupancyRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_pet_detected_at_night_no_occupancy_no_trigger_no_pet_keyword() -> None:
+    """No finding when summary doesn't mention a pet."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = True
+    snapshot["derived"]["anyone_home"] = False
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.living_room",
+            snapshot_summary="The room appears empty and dark.",
+            motion_entities=["binary_sensor.living_room_motion"],
+        )
+    ]
+    findings = PetDetectedAtNightNoOccupancyRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_pet_detected_at_night_no_occupancy_no_trigger_no_motion_context() -> None:
+    """No finding when camera has no motion context."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = True
+    snapshot["derived"]["anyone_home"] = False
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.living_room",
+            snapshot_summary="A cat is on the couch.",
+            motion_entities=None,
+            vmd_entities=None,
+            last_activity=None,
+        )
+    ]
+    findings = PetDetectedAtNightNoOccupancyRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_pet_detected_at_night_no_occupancy_no_trigger_no_summary() -> None:
+    """No finding when camera has no snapshot summary."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = True
+    snapshot["derived"]["anyone_home"] = False
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.living_room",
+            snapshot_summary=None,
+            motion_entities=["binary_sensor.living_room_motion"],
+        )
+    ]
+    findings = PetDetectedAtNightNoOccupancyRule().evaluate(snapshot)
+    assert len(findings) == 0
