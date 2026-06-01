@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.16] - 2026-06-01
+
+### Fixed
+
+- **Sentinel daily digest never fires** — `_apply_sentinel_options()` in `core/subentry_resolver.py` propagates sentinel subentry settings into the runtime options dict by iterating over an explicit `sentinel_defaults` allowlist. Six keys were missing from that list, so user-configured values were silently replaced by their built-in defaults at every integration load. The most user-visible impact was `CONF_SENTINEL_DAILY_DIGEST_ENABLED`, whose default is `False`; the digest timer was therefore never registered regardless of what was set in the config flow. Also fixed silent misconfiguration of `CONF_SENTINEL_BASELINE_SUSTAINED_MINUTES`, `CONF_SENTINEL_BASELINE_WEEKLY_PATTERNS`, `CONF_SENTINEL_BASELINE_DOW_MIN_SAMPLES`, and `CONF_SENTINEL_CAMERA_ENTRY_LINKS`. Closes [#431](https://github.com/goruck/home-generative-agent/pull/431).
+
 ## [3.14.15] - 2026-05-31
 
 ### Fixed
