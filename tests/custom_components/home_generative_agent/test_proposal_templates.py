@@ -992,21 +992,62 @@ def test_normalize_candidate_power_sensor_no_numeric_threshold_falls_back_to_bas
 ):
     """Candidate with power signal but no numeric threshold normalizes via baseline_deviation."""
     candidate = {
-        "candidate_id": "high_energy_consumption_night",
-        "title": "High Energy Consumption at Night",
-        "summary": "Anomalously high energy consumption detected during overnight hours.",
-        "pattern": "is_night AND sensor.power_meter > baseline",
-        "suggested_type": "energy",
+        "candidate_id": "high_power_consumption_night",
+        "title": "High Power Consumption at Night",
+        "summary": "Anomalously high power draw detected during overnight hours.",
+        "pattern": "is_night AND sensor.power_meter_power > baseline",
+        "suggested_type": "power",
         "confidence_hint": 0.75,
         "evidence_paths": [
             "derived.is_night",
-            "entities[entity_ids contains sensor.power_meter_energy].state",
+            "entities[entity_ids contains sensor.power_meter_power].state",
         ],
     }
     normalized = normalize_candidate(candidate)
     assert normalized is not None
     assert normalized.template_id == "baseline_deviation"
-    assert normalized.params["entity_id"] == "sensor.power_meter_energy"
+    assert normalized.params["entity_id"] == "sensor.power_meter_power"
+
+
+def test_normalize_candidate_cyclical_load_routes_to_time_of_day_anomaly() -> None:
+    """Fridge/freezer power sensors must normalize to time_of_day_anomaly, not baseline_deviation."""
+    for entity_id in (
+        "sensor.fridge_switch_0_power",
+        "sensor.refrigerator_power",
+        "sensor.freezer_power",
+    ):
+        candidate = {
+            "candidate_id": f"cyclical_{entity_id}",
+            "title": "Unusual fridge power consumption",
+            "summary": "Fridge power deviates from expected pattern.",
+            "pattern": f"{entity_id} != expected",
+            "suggested_type": "power",
+            "confidence_hint": 0.75,
+            "evidence_paths": [f"entities[entity_ids contains {entity_id}].state"],
+        }
+        normalized = normalize_candidate(candidate)
+        assert normalized is not None, f"Expected rule for {entity_id}"
+        assert normalized.template_id == "time_of_day_anomaly", (
+            f"Expected time_of_day_anomaly for {entity_id}, got {normalized.template_id}"
+        )
+        assert normalized.params["entity_id"] == entity_id
+
+
+def test_normalize_candidate_cumulative_energy_sensor_rejected() -> None:
+    """Cumulative energy sensors must not be normalized to baseline_deviation."""
+    candidate = {
+        "candidate_id": "fridge_energy_baseline",
+        "title": "Fridge Energy Baseline Deviation",
+        "summary": "Fridge energy consumption deviates from baseline.",
+        "pattern": "sensor.fridge_switch_0_energy > baseline",
+        "suggested_type": "energy",
+        "confidence_hint": 0.8,
+        "evidence_paths": [
+            "entities[entity_ids contains sensor.fridge_switch_0_energy].state",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is None
 
 
 # ---------------------------------------------------------------------------
@@ -1069,21 +1110,21 @@ def test_normalize_candidate_window_open_duration_no_entry_ids_falls_back() -> N
 def test_normalize_candidate_power_sensor_dot_notation_evidence_paths() -> None:
     """Sensor entity IDs in dot-notation paths (e.g. sensor.foo.state) are extracted."""
     candidate = {
-        "candidate_id": "high_energy_consumption_night",
-        "title": "High Energy Consumption at Night",
-        "summary": "Anomalously high energy consumption detected during overnight hours.",
-        "pattern": "is_night AND sensor.power_meter > baseline",
-        "suggested_type": "energy",
+        "candidate_id": "high_power_consumption_night",
+        "title": "High Power Consumption at Night",
+        "summary": "Anomalously high power draw detected during overnight hours.",
+        "pattern": "is_night AND sensor.power_meter_power > baseline",
+        "suggested_type": "power",
         "confidence_hint": 0.75,
         "evidence_paths": [
             "derived.is_night",
-            "sensor.power_meter_energy.state",
+            "sensor.power_meter_power.state",
         ],
     }
     normalized = normalize_candidate(candidate)
     assert normalized is not None
     assert normalized.template_id == "baseline_deviation"
-    assert normalized.params["entity_id"] == "sensor.power_meter_energy"
+    assert normalized.params["entity_id"] == "sensor.power_meter_power"
 
 
 def test_normalize_candidate_lock_battery_dot_notation_evidence_paths() -> None:

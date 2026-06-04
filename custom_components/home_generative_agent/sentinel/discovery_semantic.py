@@ -79,6 +79,13 @@ def candidate_semantic_key(  # noqa: PLR0912, PLR0915
         predicate = "unavailable"
     elif "motion" in text or "activity" in text:
         predicate = "active"
+    elif _contains_any(
+        text,
+        ("power", "energy", "watt", "consumption", "kilowatt", "baseline", "deviation"),
+    ):
+        predicate = "power_anomaly"
+        if not entities and sensor_ids:
+            entities = sensor_ids
     elif (
         camera_ids
         and _contains_any(text, ("unknown", "unrecognized", "stranger"))
@@ -118,7 +125,7 @@ def candidate_semantic_key(  # noqa: PLR0912, PLR0915
     )
 
 
-def rule_semantic_key(rule: dict[str, Any]) -> str | None:  # noqa: PLR0911, PLR0912
+def rule_semantic_key(rule: dict[str, Any]) -> str | None:  # noqa: C901, PLR0911, PLR0912
     """Build a stable semantic key for an active/generated rule."""
     template_id = str(rule.get("template_id", ""))
     params = rule.get("params", {}) or {}
@@ -203,6 +210,33 @@ def rule_semantic_key(rule: dict[str, Any]) -> str | None:  # noqa: PLR0911, PLR
             "v1|subject=sensor|predicate=low_battery|night=any|home=any|scope=any|"
             f"entities={','.join(sensor_ids)}"
         )
+    if template_id in {"baseline_deviation", "time_of_day_anomaly"}:
+        entity_id = str(params.get("entity_id", ""))
+        if not entity_id:
+            return None
+        return (
+            f"v1|subject=sensor|predicate=power_anomaly"
+            f"|template={template_id}|entities={entity_id}"
+        )
+    if template_id == "sensor_threshold_condition":
+        sensor_id = str(params.get("sensor_entity_id", ""))
+        if not sensor_id:
+            return None
+        return f"v1|subject=sensor|predicate=power_threshold|entities={sensor_id}"
+    if template_id == "entity_state_duration":
+        entity_id = str(params.get("entity_id", ""))
+        target_state = str(params.get("target_state", ""))
+        if not entity_id:
+            return None
+        return (
+            f"v1|subject=entity|predicate=state_duration"
+            f"|entities={entity_id}|state={target_state}"
+        )
+    if template_id == "entity_staleness":
+        entity_id = str(params.get("entity_id", ""))
+        if not entity_id:
+            return None
+        return f"v1|subject=entity|predicate=staleness|entities={entity_id}"
     return None
 
 
