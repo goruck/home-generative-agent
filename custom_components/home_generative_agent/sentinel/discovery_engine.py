@@ -157,7 +157,7 @@ class SentinelDiscoveryEngine:
             "unsupported_ttl_expired": 0,
         }
         if self._model is None:
-            LOGGER.debug("Discovery skipped: no model available.")
+            LOGGER.warning("Discovery skipped: no model configured.")
             return
 
         try:
@@ -222,7 +222,7 @@ class SentinelDiscoveryEngine:
                 health_stats=self._health_stats,
             )
         except SentinelLLMDeferredError as err:
-            LOGGER.debug("Discovery LLM call deferred: %s", err)
+            LOGGER.info("Discovery LLM call deferred: %s", err)
             return
         except TimeoutError:
             self._log_limiter.warning(
@@ -298,6 +298,12 @@ class SentinelDiscoveryEngine:
         validated["candidates"] = filtered
         validated["filtered_candidates"] = filtered_candidates
         await self._store.async_append(validated)
+        LOGGER.info(
+            "Discovery cycle complete: %d generated, %d novel, %d deduplicated.",
+            len(candidates),
+            len(filtered),
+            len(filtered_candidates),
+        )
 
     async def _existing_semantic_context(  # noqa: PLR0912
         self,
