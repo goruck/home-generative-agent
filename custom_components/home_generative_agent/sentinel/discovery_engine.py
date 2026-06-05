@@ -213,11 +213,26 @@ class SentinelDiscoveryEngine:
         # filter_keys: full set including history — used only by the post-hoc
         # dedup filter to prevent identical candidates from re-appearing.
         capped_keys = sorted(hint_keys)[:_MAX_SEMANTIC_KEYS_IN_PROMPT]
+
+        # Compute monitoring gaps: baseline-ready entities not covered by any
+        # active rule.  Covered = their entity_id appears verbatim in a hint key.
+        try:
+            baseline_ready: list[str] = (
+                reduced_snapshot.get("derived", {}).get("baseline_ready_entities") or []
+            )
+        except (AttributeError, TypeError):
+            baseline_ready = []
+        unmonitored = [
+            eid for eid in baseline_ready if not any(eid in key for key in hint_keys)
+        ]
+        unmonitored_json = json.dumps(unmonitored, separators=(",", ":"))
+
         now = dt_util.utcnow().isoformat()
         prompt = USER_PROMPT_TEMPLATE.format(
             snapshot=compact_snapshot,
             active_rule_ids=json.dumps(sorted(active_rule_ids), separators=(",", ":")),
             existing_semantic_keys=json.dumps(capped_keys, separators=(",", ":")),
+            unmonitored_baseline_entities=unmonitored_json,
         )
         messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
 

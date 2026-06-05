@@ -77,8 +77,6 @@ def candidate_semantic_key(  # noqa: PLR0912, PLR0915
         predicate = "unavailable"
     elif "disarmed" in text:
         predicate = "disarmed"
-    elif "motion" in text or "activity" in text:
-        predicate = "active"
     elif _contains_any(
         text,
         ("power", "energy", "watt", "consumption", "kilowatt", "baseline", "deviation"),
@@ -86,6 +84,8 @@ def candidate_semantic_key(  # noqa: PLR0912, PLR0915
         predicate = "power_anomaly"
         if not entities and sensor_ids:
             entities = sensor_ids
+    elif "motion" in text or "activity" in text:
+        predicate = "active"
     elif (
         camera_ids
         and _contains_any(text, ("unknown", "unrecognized", "stranger"))

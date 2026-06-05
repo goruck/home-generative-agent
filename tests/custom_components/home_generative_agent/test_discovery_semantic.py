@@ -266,6 +266,29 @@ def test_rule_semantic_key_baseline_deviation_and_time_of_day_differ() -> None:
     assert rule_semantic_key(baseline_rule) != rule_semantic_key(tod_rule)
 
 
+def test_candidate_semantic_key_power_anomaly_wins_over_activity_in_summary() -> None:
+    """'power_anomaly' must win even when summary says 'appliance activity'."""
+    candidate = {
+        "title": "Washing Machine Power Active During Night While Home",
+        "summary": (
+            "The washing machine power sensor reports non-zero consumption (0.5W) "
+            "while it is night and someone is home, suggesting potential unexpected "
+            "appliance activity or baseline deviation."
+        ),
+        "pattern": "deviation_from_normal",
+        "suggested_type": "statistical_anomaly",
+        "evidence_paths": [
+            "entities[entity_ids contains sensor.washing_machine_switch_0_power].state",
+            "derived.is_night",
+            "derived.anyone_home",
+        ],
+    }
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert "predicate=power_anomaly" in key, f"expected power_anomaly, got: {key}"
+    assert "active" not in key
+
+
 def test_candidate_semantic_key_unavailable_wins_over_disarmed_context() -> None:
     """'unavailable' predicate must win even when summary mentions 'disarmed' as context."""
     candidate = {
