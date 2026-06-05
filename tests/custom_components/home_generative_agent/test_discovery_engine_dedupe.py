@@ -197,6 +197,57 @@ def test_filter_null_key_candidate_novel_when_not_seen() -> None:
 
 
 # ---------------------------------------------------------------------------
+# hint_keys vs filter_keys split
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_history_keys_in_filter_not_hint() -> None:
+    """
+    Discovery history record keys must appear in filter_keys but NOT hint_keys.
+
+    This prevents multi-entity bundle history records from misleading the LLM
+    into thinking individual entities are already covered.
+    """
+    history_candidate = {
+        "candidate_id": "hist_power_bundle",
+        "title": "Kitchen power mismatch",
+        "summary": "Multiple kitchen appliances power deviates from baseline.",
+        "pattern": "deviation_from_baseline",
+        "suggested_type": "statistical_anomaly",
+        "confidence_hint": 0.8,
+        "evidence_paths": [
+            "entities[entity_ids contains sensor.fridge_switch_0_power].state",
+            "entities[entity_ids contains sensor.kettle_switch_0_power].state",
+        ],
+    }
+
+    class _HistoryStore:
+        async def async_get_latest(self, _limit: int) -> list[dict[str, Any]]:
+            return [{"candidates": [history_candidate], "filtered_candidates": []}]
+
+        async def async_append(self, _payload: Any) -> None:
+            pass
+
+    engine = SentinelDiscoveryEngine(
+        hass=cast("HomeAssistant", object()),
+        options={},
+        model=None,
+        store=cast("DiscoveryStore", _HistoryStore()),
+    )
+    _active, hint_keys, filter_keys = await engine._existing_semantic_context()
+
+    # The history candidate's key should appear in filter_keys (post-hoc dedup)
+    assert any("fridge" in k for k in filter_keys), (
+        "filter_keys must contain history key"
+    )
+    # But NOT in hint_keys (LLM prompt) — it would suppress standalone fridge proposals
+    assert not any("fridge" in k for k in hint_keys), (
+        "hint_keys must NOT contain history keys (they mislead the LLM)"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Bug 1: rejected proposals must still block re-suggestion
 # ---------------------------------------------------------------------------
 
@@ -230,9 +281,9 @@ async def test_existing_context_rejected_proposal_adds_key() -> None:
         store=cast("DiscoveryStore", _DummyStore()),
         proposal_store=cast("Any", proposal_store),
     )
-    _, semantic_keys = await engine._existing_semantic_context()
+    _, hint_keys, _filter_keys = await engine._existing_semantic_context()
     # The lock+home semantic key must be present even though status=="rejected".
-    assert any("lock" in k and "unlocked" in k for k in semantic_keys)
+    assert any("lock" in k and "unlocked" in k for k in hint_keys)
 
 
 @pytest.mark.asyncio
@@ -252,9 +303,9 @@ async def test_existing_context_null_key_rejected_proposal_adds_hash() -> None:
         store=cast("DiscoveryStore", _DummyStore()),
         proposal_store=cast("Any", proposal_store),
     )
-    _, semantic_keys = await engine._existing_semantic_context()
+    _, hint_keys, _filter_keys = await engine._existing_semantic_context()
     expected_hash = _candidate_identity_hash(_NULL_KEY_CANDIDATE)
-    assert expected_hash in semantic_keys
+    assert expected_hash in hint_keys
 
 
 # ---------------------------------------------------------------------------
@@ -271,7 +322,7 @@ async def test_existing_context_includes_static_rule_ids() -> None:
         model=None,
         store=cast("DiscoveryStore", _DummyStore()),
     )
-    active_rule_ids, _ = await engine._existing_semantic_context()
+    active_rule_ids, _hint, _filter = await engine._existing_semantic_context()
     assert _STATIC_RULE_IDS.issubset(active_rule_ids)
 
 
@@ -290,7 +341,7 @@ async def test_existing_context_static_ids_present_alongside_dynamic() -> None:
         store=cast("DiscoveryStore", _DummyStore()),
         rule_registry=cast("Any", _DummyRegistry()),
     )
-    active_rule_ids, _ = await engine._existing_semantic_context()
+    active_rule_ids, _hint, _filter = await engine._existing_semantic_context()
     assert "my_dynamic_rule" in active_rule_ids
     assert _STATIC_RULE_IDS.issubset(active_rule_ids)
 
@@ -350,7 +401,7 @@ async def test_discovery_prompt_caps_semantic_keys(hass: HomeAssistant) -> None:
             engine,
             "_existing_semantic_context",
             new_callable=AsyncMock,
-            return_value=(set(), oversized_keys),
+            return_value=(set(), oversized_keys, oversized_keys),
         ),
         patch(
             "custom_components.home_generative_agent.sentinel.discovery_engine.async_build_full_state_snapshot",
