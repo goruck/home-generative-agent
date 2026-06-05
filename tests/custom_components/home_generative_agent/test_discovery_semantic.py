@@ -264,3 +264,25 @@ def test_rule_semantic_key_baseline_deviation_and_time_of_day_differ() -> None:
         "params": {"entity_id": "sensor.fridge_switch_0_power"},
     }
     assert rule_semantic_key(baseline_rule) != rule_semantic_key(tod_rule)
+
+
+def test_candidate_semantic_key_unavailable_wins_over_disarmed_context() -> None:
+    """'unavailable' predicate must win even when summary mentions 'disarmed' as context."""
+    candidate = {
+        "title": "Outdoor Motion Sensors Unavailable During Active Monitoring",
+        "summary": (
+            "Multiple outdoor motion sensors are unavailable while the alarm system "
+            "is disarmed and motion is detected elsewhere."
+        ),
+        "pattern": "state_mismatch",
+        "suggested_type": "device_health",
+        "evidence_paths": [
+            "entities[entity_ids contains binary_sensor.backyard_vmd3_0].state",
+            "entities[entity_ids contains binary_sensor.east_vmd3_0].state",
+            "derived.anyone_home",
+        ],
+    }
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert "predicate=unavailable" in key, f"expected unavailable, got: {key}"
+    assert "disarmed" not in key

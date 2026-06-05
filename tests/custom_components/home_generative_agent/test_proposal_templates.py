@@ -1050,6 +1050,32 @@ def test_normalize_candidate_cumulative_energy_sensor_rejected() -> None:
     assert normalized is None
 
 
+def test_normalize_candidate_mixed_energy_and_power_skips_energy_sensors() -> None:
+    """Multi-entity bundle with *_energy and *_power sensors picks the first *_power entity."""
+    candidate = {
+        "candidate_id": "candidate_kitchen_power_mismatch",
+        "title": "Kitchen Power Consumption Mismatch",
+        "summary": "Kitchen appliances power and energy readings deviate from baseline.",
+        "pattern": "deviation_from_baseline",
+        "suggested_type": "statistical_anomaly",
+        "confidence_hint": 0.85,
+        "evidence_paths": [
+            # Energy sensors (cumulative — must be skipped)
+            "entities[entity_ids contains sensor.dishwasher_switch_0_energy].state",
+            "entities[entity_ids contains sensor.fridge_switch_0_energy].state",
+            # Power sensors (instantaneous — first one wins)
+            "entities[entity_ids contains sensor.dishwasher_switch_0_power].state",
+            "entities[entity_ids contains sensor.fridge_switch_0_power].state",
+            "entities[entity_ids contains sensor.kettle_switch_0_power].state",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    # Must not be rejected — there are valid instantaneous power sensors
+    assert normalized is not None
+    # The first non-cumulative power sensor is dishwasher
+    assert normalized.params.get("entity_id") == "sensor.dishwasher_switch_0_power"
+
+
 # ---------------------------------------------------------------------------
 # Regression: alarm disarmed during external threat — presence is "any"
 # ---------------------------------------------------------------------------

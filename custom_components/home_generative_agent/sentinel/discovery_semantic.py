@@ -71,12 +71,12 @@ def candidate_semantic_key(  # noqa: PLR0912, PLR0915
         predicate = "unlocked"
     elif "open" in text:
         predicate = "open"
-    elif "disarmed" in text:
-        predicate = "disarmed"
     elif "battery" in text and _contains_any(text, ("low", "below", "under")):
         predicate = "low_battery"
     elif _contains_any(text, ("unavailable", "offline", "unreachable")):
         predicate = "unavailable"
+    elif "disarmed" in text:
+        predicate = "disarmed"
     elif "motion" in text or "activity" in text:
         predicate = "active"
     elif _contains_any(

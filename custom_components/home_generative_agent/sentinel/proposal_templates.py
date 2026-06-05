@@ -668,15 +668,21 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     suggested_actions=["check_appliance"],
                 )
             )
-        # No numeric threshold in text — fall back to a statistical detector.
-        # Cumulative energy sensors (e.g. sensor.*_energy) accumulate monotonically;
-        # baseline_deviation fires continuously as the counter grows past its average.
-        if _is_cumulative_energy_sensor(sensor_id):
+        # No numeric threshold — fall back to a statistical detector.
+        # When the candidate bundles multiple sensors (e.g. LLM lists both
+        # *_power and *_energy variants), pick the first non-cumulative one so
+        # that energy counters don't silently discard the whole candidate.
+        instantaneous_id = next(
+            (s for s in non_battery_sensor_ids if not _is_cumulative_energy_sensor(s)),
+            None,
+        )
+        if instantaneous_id is None:
             return NormalizationResult(
                 normalized=None,
                 reason_code="cumulative_energy_sensor",
                 details={"sensor_id": sensor_id},
             )
+        sensor_id = instantaneous_id
         # Cyclical loads (fridge, freezer, compressor) have a bimodal power
         # distribution — rolling-average baselines mix on/off states and produce
         # systematic false positives on every normal off-cycle.  time_of_day_anomaly
