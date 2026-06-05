@@ -256,12 +256,16 @@ def _extract_camera_ids(evidence_paths: list[str]) -> list[str]:
 
 def _extract_entity_ids(evidence_paths: list[str]) -> list[str]:
     entity_ids: list[str] = []
-    prefix = "entities[entity_id="
     for path in evidence_paths:
-        if not path.startswith(prefix):
-            continue
-        entity_id = path.split(prefix, 1)[1].split("]", 1)[0]
-        entity_ids.append(entity_id)
+        if path.startswith("entities[entity_id="):
+            entity_id = path.split("entities[entity_id=", 1)[1].split("]", 1)[0]
+            entity_ids.append(entity_id)
+        elif "entity_ids contains " in path:
+            # LLM-generated format: entities[entity_ids contains sensor.foo].state
+            part = path.split("entity_ids contains ", 1)[1]
+            entity_id = part.split("]")[0].strip()
+            if entity_id:
+                entity_ids.append(entity_id)
     return entity_ids
 
 

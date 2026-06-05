@@ -179,3 +179,88 @@ def test_rule_semantic_key_unknown_person_camera_no_home_any_camera() -> None:
         key
         == "v1|subject=camera|predicate=unknown_person|night=any|home=0|scope=any|entities="
     )
+
+
+def test_candidate_semantic_key_entity_ids_contains_format() -> None:
+    """LLM-generated evidence paths use 'entity_ids contains' — must extract entity."""
+    candidate = {
+        "title": "Fridge power anomaly",
+        "summary": "Fridge power deviates from baseline during off-cycle.",
+        "pattern": "power deviation baseline",
+        "suggested_type": "power_anomaly",
+        "evidence_paths": [
+            "entities[entity_ids contains sensor.fridge_switch_0_power].state",
+        ],
+    }
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert "predicate=power_anomaly" in key
+    assert "sensor.fridge_switch_0_power" in key
+
+
+def test_candidate_semantic_key_entity_ids_contains_distinct_entities() -> None:
+    """Two candidates with different entities in 'entity_ids contains' get different keys."""
+    fridge = {
+        "title": "Fridge power anomaly",
+        "summary": "Fridge power baseline deviation.",
+        "pattern": "power deviation baseline",
+        "suggested_type": "power_anomaly",
+        "evidence_paths": [
+            "entities[entity_ids contains sensor.fridge_switch_0_power].state",
+        ],
+    }
+    freezer = {
+        "title": "Freezer power anomaly",
+        "summary": "Freezer power baseline deviation.",
+        "pattern": "power deviation baseline",
+        "suggested_type": "power_anomaly",
+        "evidence_paths": [
+            "entities[entity_ids contains sensor.freezer_switch_0_power].state",
+        ],
+    }
+    key_fridge = candidate_semantic_key(fridge)
+    key_freezer = candidate_semantic_key(freezer)
+    assert key_fridge is not None
+    assert key_freezer is not None
+    assert key_fridge != key_freezer
+
+
+def test_rule_semantic_key_baseline_deviation() -> None:
+    rule = {
+        "rule_id": "sensor_baseline_fridge_power",
+        "template_id": "baseline_deviation",
+        "params": {"entity_id": "sensor.fridge_switch_0_power"},
+    }
+    key = rule_semantic_key(rule)
+    assert key is not None
+    assert "predicate=power_anomaly" in key
+    assert "sensor.fridge_switch_0_power" in key
+    assert "template=baseline_deviation" in key
+
+
+def test_rule_semantic_key_time_of_day_anomaly() -> None:
+    rule = {
+        "rule_id": "sensor_tod_fridge_power",
+        "template_id": "time_of_day_anomaly",
+        "params": {"entity_id": "sensor.fridge_switch_0_power"},
+    }
+    key = rule_semantic_key(rule)
+    assert key is not None
+    assert "predicate=power_anomaly" in key
+    assert "sensor.fridge_switch_0_power" in key
+    assert "template=time_of_day_anomaly" in key
+
+
+def test_rule_semantic_key_baseline_deviation_and_time_of_day_differ() -> None:
+    """baseline_deviation and time_of_day_anomaly for same entity have distinct keys."""
+    baseline_rule = {
+        "rule_id": "sensor_baseline_fridge",
+        "template_id": "baseline_deviation",
+        "params": {"entity_id": "sensor.fridge_switch_0_power"},
+    }
+    tod_rule = {
+        "rule_id": "sensor_tod_fridge",
+        "template_id": "time_of_day_anomaly",
+        "params": {"entity_id": "sensor.fridge_switch_0_power"},
+    }
+    assert rule_semantic_key(baseline_rule) != rule_semantic_key(tod_rule)
