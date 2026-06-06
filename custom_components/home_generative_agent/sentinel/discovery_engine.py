@@ -54,9 +54,20 @@ _DISCOVERY_LLM_TIMEOUT_S: float = 60.0
 # any duplicates that slip through, so a generous cap is safe.
 _MAX_SEMANTIC_KEYS_IN_PROMPT: int = 60
 
-# Rule IDs for static built-in rules (deterministic, always active).
-# Included in active_rule_ids so the LLM knows these topics are already covered
-# and does not re-suggest candidates that map to an existing static rule.
+# Markers that identify rule-derived baseline monitoring hint keys.
+# rule_semantic_key() for baseline_deviation and time_of_day_anomaly embeds
+# |template=<name>| in the key; candidate_semantic_key() never does.
+# Using template markers (not predicate markers) is critical: candidate keys
+# with predicate=power_anomaly may be multi-entity bundles from rejected or
+# pending proposals, and a single bundle key must not suppress individual
+# entity proposals for all entities it lists.
+_BASELINE_TEMPLATE_MARKERS: frozenset[str] = frozenset(
+    {
+        "|template=baseline_deviation",
+        "|template=time_of_day_anomaly",
+    }
+)
+
 _STATIC_RULE_IDS: frozenset[str] = frozenset(
     {
         "unlocked_lock_at_night",
@@ -214,8 +225,15 @@ class SentinelDiscoveryEngine:
         # dedup filter to prevent identical candidates from re-appearing.
         capped_keys = sorted(hint_keys)[:_MAX_SEMANTIC_KEYS_IN_PROMPT]
 
-        # Compute monitoring gaps: baseline-ready entities not covered by any
-        # active rule.  Covered = their entity_id appears verbatim in a hint key.
+        # Compute monitoring gaps: baseline-ready entities with no active
+        # statistical anomaly rule.  Only rule_semantic_key()-derived keys
+        # contain |template=<name>|; candidate_semantic_key()-derived keys never
+        # do.  Using template markers prevents rejected or pending multi-entity
+        # bundle proposals (which list many entity_ids in one key) from
+        # suppressing individual entity proposals for every entity they mention.
+        baseline_hint_keys = {
+            k for k in hint_keys if any(m in k for m in _BASELINE_TEMPLATE_MARKERS)
+        }
         try:
             baseline_ready: list[str] = (
                 reduced_snapshot.get("derived", {}).get("baseline_ready_entities") or []
@@ -223,8 +241,28 @@ class SentinelDiscoveryEngine:
         except (AttributeError, TypeError):
             baseline_ready = []
         unmonitored = [
-            eid for eid in baseline_ready if not any(eid in key for key in hint_keys)
+            eid
+            for eid in baseline_ready
+            if not any(eid in key for key in baseline_hint_keys)
         ]
+        if LOGGER.isEnabledFor(logging.DEBUG):
+            for eid in baseline_ready:
+                covering = [k for k in baseline_hint_keys if eid in k]
+                if covering:
+                    LOGGER.debug(
+                        "Discovery gap: %s covered by %d key(s): %s",
+                        eid,
+                        len(covering),
+                        covering,
+                    )
+        LOGGER.debug(
+            "Discovery gap analysis: %d baseline-ready, %d baseline hint keys, "
+            "%d unmonitored: %s",
+            len(baseline_ready),
+            len(baseline_hint_keys),
+            len(unmonitored),
+            unmonitored,
+        )
         unmonitored_json = json.dumps(unmonitored, separators=(",", ":"))
 
         now = dt_util.utcnow().isoformat()
@@ -366,6 +404,15 @@ class SentinelDiscoveryEngine:
                 # Bug 1 fix: rejected proposals must still block re-suggestion.
                 # The old `continue` meant rejected candidates' keys were never
                 # added to the exclusion set, letting identical proposals recur.
+                #
+                # Accepted proposals are excluded from hint_keys: their coverage
+                # is tracked by the live rule via rule_semantic_key (if enabled).
+                # If the user later disables the rule, the topic becomes
+                # re-proposable — the accepted proposal must not silently suppress
+                # it forever.
+                status = str(proposal.get("status", "pending"))
+                if status == "approved":
+                    continue
                 candidate = proposal.get("candidate")
                 if isinstance(candidate, dict):
                     key = candidate_semantic_key(candidate)

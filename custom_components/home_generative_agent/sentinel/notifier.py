@@ -225,20 +225,7 @@ class SentinelNotifier:
         severity = finding.severity
         title = _SEVERITY_TITLE.get(severity, "Home Alert")
         interrupt_level = _SEVERITY_INTERRUPT_LEVEL.get(severity, "active")
-        if finding.evidence.get("is_completion"):
-            # Use the appliance's display name so the subtitle reads
-            # "Dishwasher finished" rather than a raw rule-type slug.
-            # Strip trailing power-sensor suffixes ("Power", "Wattage", etc.)
-            # so "Dishwasher Power" → "Dishwasher" → "Dishwasher finished".
-            raw_name = str(finding.evidence.get("friendly_name") or "").strip()
-            if not raw_name and finding.triggering_entities:
-                raw_name = _friendly_entity(finding.triggering_entities[0])
-            appliance = _strip_power_suffix(raw_name).title()
-            subtitle = (
-                f"{appliance} finished" if appliance else "Appliance cycle complete"
-            )
-        else:
-            subtitle = _friendly_type(finding.type)
+        subtitle = _build_subtitle(finding)
         mobile_msg = _mobile_message(clean_explanation, finding)
         persistent_msg = _persistent_message(clean_explanation, finding)
         actions = _build_actions(finding)
@@ -787,6 +774,28 @@ def _appliance_power_duration_mobile_message(finding: AnomalyFinding) -> str:
     return msg[:MAX_MOBILE_MESSAGE_CHARS].rstrip()
 
 
+def _build_subtitle(finding: AnomalyFinding) -> str:
+    """Return the notification subtitle line for *finding*."""
+    if finding.evidence.get("is_completion"):
+        raw_name = str(finding.evidence.get("friendly_name") or "").strip()
+        if not raw_name and finding.triggering_entities:
+            raw_name = _friendly_entity(finding.triggering_entities[0])
+        appliance = _strip_power_suffix(raw_name).title()
+        return f"{appliance} finished" if appliance else "Appliance cycle complete"
+    if finding.evidence.get("template_id") in {
+        "baseline_deviation",
+        "time_of_day_anomaly",
+    }:
+        raw_name = str(finding.evidence.get("friendly_name") or "").strip()
+        if not raw_name and finding.triggering_entities:
+            raw_name = _friendly_entity(finding.triggering_entities[0])
+        appliance = _strip_power_suffix(raw_name).title() or "Sensor"
+        direction = str(finding.evidence.get("deviation_direction") or "")
+        direction_word = "lower" if direction == "below" else "higher"
+        return f"{appliance}: power {direction_word} than expected"
+    return _friendly_type(finding.type)
+
+
 def _fallback_message(finding: AnomalyFinding) -> str:
     summary = _friendly_type(finding.type)
     entity = (
@@ -834,11 +843,48 @@ def _alarm_disarmed_mobile_message(finding: AnomalyFinding) -> str:
     return (activity_phrase + alarm_phrase + cta)[:MAX_MOBILE_MESSAGE_CHARS].rstrip()
 
 
+def _baseline_deviation_mobile_message(finding: AnomalyFinding) -> str:
+    """Deterministic mobile copy for baseline_deviation and time_of_day_anomaly."""
+    ev = finding.evidence
+    raw_name = (ev.get("friendly_name") or "").strip()
+    if not raw_name and finding.triggering_entities:
+        raw_name = _friendly_entity(finding.triggering_entities[0])
+    appliance = _strip_power_suffix(raw_name).title() or "Sensor"
+
+    current_value = ev.get("current_value")
+    baseline_value = ev.get("baseline_value")
+    deviation_pct = ev.get("deviation_pct")
+    direction = str(ev.get("deviation_direction") or "")
+
+    entity_id = str(ev.get("entity_id") or "")
+    unit = "W" if "power" in entity_id else "kWh" if "energy" in entity_id else ""
+
+    direction_word = "below" if direction == "below" else "above"
+    if current_value is not None and baseline_value is not None:
+        cur = round(float(current_value), 1)
+        base = round(float(baseline_value), 1)
+        pct = (
+            f" ({round(float(deviation_pct))}% {direction_word} normal)"
+            if deviation_pct is not None
+            else ""
+        )
+        msg = f"{appliance}: {cur}{unit} vs usual {base}{unit}{pct}. Check appliance."
+    else:
+        dev = f" {round(float(deviation_pct))}%" if deviation_pct is not None else ""
+        msg = f"{appliance} power{dev} {direction_word} normal. Check appliance."
+    return msg[:MAX_MOBILE_MESSAGE_CHARS].rstrip()
+
+
 def _mobile_message(explanation: str | None, finding: AnomalyFinding) -> str:
     if finding.type == "alarm_disarmed_during_external_threat":
         return _alarm_disarmed_mobile_message(finding)
     if finding.type == "appliance_power_duration":
         return _appliance_power_duration_mobile_message(finding)
+    if finding.evidence.get("template_id") in {
+        "baseline_deviation",
+        "time_of_day_anomaly",
+    }:
+        return _baseline_deviation_mobile_message(finding)
     if explanation:
         text = _normalize_text(explanation)
         if text and len(text) <= MAX_MOBILE_MESSAGE_CHARS:

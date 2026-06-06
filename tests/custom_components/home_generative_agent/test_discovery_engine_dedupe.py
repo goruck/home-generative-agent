@@ -309,6 +309,86 @@ async def test_existing_context_null_key_rejected_proposal_adds_hash() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Bug 5: accepted proposals must NOT block re-suggestion when rule is disabled
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_existing_context_approved_proposal_does_not_add_key_to_hints() -> None:
+    """
+    An approved proposal must NOT appear in hint_keys.
+
+    When a proposal is approved, a rule is created to track coverage.  If the
+    user later disables that rule, the topic should become re-proposable.
+    Keeping the approved proposal in hint_keys would silently suppress it
+    forever, regardless of whether the rule is still active.
+    """
+    accepted_candidate = {
+        "candidate_id": "a1",
+        "title": "Fridge power baseline deviation",
+        "summary": "Fridge power deviates from rolling average.",
+        "pattern": "deviation_from_normal",
+        "suggested_type": "statistical_anomaly",
+        "confidence_hint": 0.8,
+        "evidence_paths": [
+            "entities[entity_ids contains sensor.fridge_switch_0_power].state",
+        ],
+    }
+    proposal = {
+        "candidate_id": "a1",
+        "candidate": accepted_candidate,
+        "status": "approved",
+        "created_at": "2026-01-01T00:00:00+00:00",
+    }
+    proposal_store = _DummyProposalStore([proposal])
+    engine = SentinelDiscoveryEngine(
+        hass=cast("HomeAssistant", object()),
+        options={},
+        model=None,
+        store=cast("DiscoveryStore", _DummyStore()),
+        proposal_store=cast("Any", proposal_store),
+    )
+    _, hint_keys, _filter_keys = await engine._existing_semantic_context()
+    # Accepted proposal key must NOT block re-proposal of the fridge.
+    assert not any("fridge" in k for k in hint_keys), (
+        "Accepted proposal key must not appear in hint_keys"
+    )
+
+
+@pytest.mark.asyncio
+async def test_existing_context_pending_proposal_still_blocks() -> None:
+    """A pending proposal's candidate key must still appear in hint_keys."""
+    pending_candidate = {
+        "candidate_id": "p1",
+        "title": "Front door unlocked while home",
+        "summary": "Lock left unlocked with occupant home.",
+        "pattern": "unlocked lock while home",
+        "suggested_type": "security",
+        "confidence_hint": 0.8,
+        "evidence_paths": [
+            "entities[entity_id=lock.front_door].state",
+            "derived.anyone_home",
+        ],
+    }
+    proposal = {
+        "candidate_id": "p1",
+        "candidate": pending_candidate,
+        "status": "pending",
+        "created_at": "2026-01-01T00:00:00+00:00",
+    }
+    proposal_store = _DummyProposalStore([proposal])
+    engine = SentinelDiscoveryEngine(
+        hass=cast("HomeAssistant", object()),
+        options={},
+        model=None,
+        store=cast("DiscoveryStore", _DummyStore()),
+        proposal_store=cast("Any", proposal_store),
+    )
+    _, hint_keys, _filter_keys = await engine._existing_semantic_context()
+    assert any("lock" in k and "unlocked" in k for k in hint_keys)
+
+
+# ---------------------------------------------------------------------------
 # Bug 4: static built-in rule IDs must appear in active_rule_ids
 # ---------------------------------------------------------------------------
 
@@ -429,3 +509,269 @@ async def test_discovery_prompt_caps_semantic_keys(hass: HomeAssistant) -> None:
     array_end = human_content.index("]", array_start) + 1
     keys_in_prompt: list[str] = json.loads(human_content[array_start:array_end])
     assert len(keys_in_prompt) <= _MAX_SEMANTIC_KEYS_IN_PROMPT
+
+
+# ---------------------------------------------------------------------------
+# Monitoring gap: unavailability keys must not suppress baseline-ready entities
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_monitoring_gap_ignores_non_baseline_hint_keys(
+    hass: HomeAssistant,
+) -> None:
+    """
+    A sensor in a predicate=unavailable key must still be in unmonitored.
+
+    Broad rules like unavailable_sensors cover many entity_ids as side-effects;
+    the gap analysis must only check baseline/power-anomaly keys.
+    """
+    # Hint key that mentions the fridge entity_id but is for unavailability, not
+    # baseline monitoring.
+    unavail_key = (
+        "v1|subject=sensor|predicate=unavailable|night=any|home=1|scope=any|"
+        "entities=sensor.backyard_vmd3_0,sensor.fridge_switch_0_power"
+    )
+    captured_prompts: list[str] = []
+
+    class _CapturingModel:
+        async def ainvoke(self, messages: list[Any]) -> Any:
+            captured_prompts.extend(
+                str(msg.content) for msg in messages if hasattr(msg, "content")
+            )
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "schema_version": 1,
+                        "generated_at": "2026-01-01T00:00:00Z",
+                        "model": "test",
+                        "candidates": [],
+                    }
+                )
+            )
+
+    class _FullDummyStore:
+        async def async_get_latest(self, _limit: int) -> list[dict[str, Any]]:
+            return []
+
+        async def async_append(self, _payload: Any) -> None:
+            pass
+
+    engine = SentinelDiscoveryEngine(
+        hass=hass,
+        options={},
+        model=_CapturingModel(),
+        store=_FullDummyStore(),  # type: ignore[arg-type]
+    )
+
+    async def _fake_run(model: Any, messages: Any, **_kw: Any) -> Any:
+        return await model.ainvoke(messages)
+
+    with (
+        patch.object(
+            engine,
+            "_existing_semantic_context",
+            new_callable=AsyncMock,
+            return_value=(set(), {unavail_key}, {unavail_key}),
+        ),
+        patch(
+            "custom_components.home_generative_agent.sentinel.discovery_engine.async_build_full_state_snapshot",
+            new_callable=AsyncMock,
+            return_value={
+                "entities": [],
+                "camera_activity": [],
+                "derived": {
+                    "is_night": False,
+                    "now": "2026-01-01T00:00:00Z",
+                    "baseline_ready_entities": ["sensor.fridge_switch_0_power"],
+                },
+                "generated_at": "2026-01-01T00:00:00Z",
+            },
+        ),
+        patch(
+            "custom_components.home_generative_agent.sentinel.discovery_engine.run_sentinel_model_call",
+            side_effect=_fake_run,
+        ),
+    ):
+        await engine._run_once()
+
+    assert captured_prompts, "Model was never invoked"
+    human_content = captured_prompts[-1]
+    # The fridge must appear in the MONITORING GAPS section even though it
+    # appears in an unavailability hint key.
+    assert "sensor.fridge_switch_0_power" in human_content, (
+        "Fridge must be in MONITORING GAPS when only covered by unavailability key"
+    )
+
+
+@pytest.mark.asyncio
+async def test_monitoring_gap_suppressed_by_power_anomaly_key(
+    hass: HomeAssistant,
+) -> None:
+    """A sensor with an active power_anomaly key must NOT be in unmonitored."""
+    power_key = (
+        "v1|subject=sensor|predicate=power_anomaly"
+        "|template=baseline_deviation|entities=sensor.fridge_switch_0_power"
+    )
+    captured_prompts: list[str] = []
+
+    class _CapturingModel:
+        async def ainvoke(self, messages: list[Any]) -> Any:
+            captured_prompts.extend(
+                str(msg.content) for msg in messages if hasattr(msg, "content")
+            )
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "schema_version": 1,
+                        "generated_at": "2026-01-01T00:00:00Z",
+                        "model": "test",
+                        "candidates": [],
+                    }
+                )
+            )
+
+    class _FullDummyStore:
+        async def async_get_latest(self, _limit: int) -> list[dict[str, Any]]:
+            return []
+
+        async def async_append(self, _payload: Any) -> None:
+            pass
+
+    engine = SentinelDiscoveryEngine(
+        hass=hass,
+        options={},
+        model=_CapturingModel(),
+        store=_FullDummyStore(),  # type: ignore[arg-type]
+    )
+
+    async def _fake_run(model: Any, messages: Any, **_kw: Any) -> Any:
+        return await model.ainvoke(messages)
+
+    with (
+        patch.object(
+            engine,
+            "_existing_semantic_context",
+            new_callable=AsyncMock,
+            return_value=(set(), {power_key}, {power_key}),
+        ),
+        patch(
+            "custom_components.home_generative_agent.sentinel.discovery_engine.async_build_full_state_snapshot",
+            new_callable=AsyncMock,
+            return_value={
+                "entities": [],
+                "camera_activity": [],
+                "derived": {
+                    "is_night": False,
+                    "now": "2026-01-01T00:00:00Z",
+                    "baseline_ready_entities": ["sensor.fridge_switch_0_power"],
+                },
+                "generated_at": "2026-01-01T00:00:00Z",
+            },
+        ),
+        patch(
+            "custom_components.home_generative_agent.sentinel.discovery_engine.run_sentinel_model_call",
+            side_effect=_fake_run,
+        ),
+    ):
+        await engine._run_once()
+
+    assert captured_prompts, "Model was never invoked"
+    human_content = captured_prompts[-1]
+    gaps_start = human_content.find("MONITORING GAPS:")
+    assert gaps_start != -1
+    gaps_section = human_content[gaps_start : gaps_start + 200]
+    # Fridge is already baseline-monitored; it must NOT appear in MONITORING GAPS.
+    assert "sensor.fridge_switch_0_power" not in gaps_section, (
+        "Fridge must not be in MONITORING GAPS when covered by power_anomaly key"
+    )
+
+
+@pytest.mark.asyncio
+async def test_monitoring_gap_bundle_candidate_key_does_not_suppress(
+    hass: HomeAssistant,
+) -> None:
+    """
+    A multi-entity bundle candidate key must NOT suppress individual entity gaps.
+
+    A rejected proposal that bundles many appliances into one candidate key
+    (no |template=| marker) must not prevent each individual appliance from
+    appearing in unmonitored_baseline_entities.
+    """
+    # A candidate key covering 8 appliances as a bundle (no template= marker).
+    bundle_key = (
+        "v1|subject=sensor|predicate=power_anomaly|night=any|home=any|scope=any|"
+        "entities=sensor.dishwasher_switch_0_energy,sensor.dishwasher_switch_0_power,"
+        "sensor.fridge_switch_0_energy,sensor.fridge_switch_0_power,"
+        "sensor.kettle_switch_0_energy,sensor.kettle_switch_0_power,"
+        "sensor.microwave_switch_0_energy,sensor.microwave_switch_0_power"
+    )
+    captured_prompts: list[str] = []
+
+    class _CapturingModel:
+        async def ainvoke(self, messages: list[Any]) -> Any:
+            captured_prompts.extend(
+                str(msg.content) for msg in messages if hasattr(msg, "content")
+            )
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "schema_version": 1,
+                        "generated_at": "2026-01-01T00:00:00Z",
+                        "model": "test",
+                        "candidates": [],
+                    }
+                )
+            )
+
+    class _FullDummyStore:
+        async def async_get_latest(self, _limit: int) -> list[dict[str, Any]]:
+            return []
+
+        async def async_append(self, _payload: Any) -> None:
+            pass
+
+    engine = SentinelDiscoveryEngine(
+        hass=hass,
+        options={},
+        model=_CapturingModel(),
+        store=_FullDummyStore(),  # type: ignore[arg-type]
+    )
+
+    async def _fake_run(model: Any, messages: Any, **_kw: Any) -> Any:
+        return await model.ainvoke(messages)
+
+    with (
+        patch.object(
+            engine,
+            "_existing_semantic_context",
+            new_callable=AsyncMock,
+            return_value=(set(), {bundle_key}, {bundle_key}),
+        ),
+        patch(
+            "custom_components.home_generative_agent.sentinel.discovery_engine.async_build_full_state_snapshot",
+            new_callable=AsyncMock,
+            return_value={
+                "entities": [],
+                "camera_activity": [],
+                "derived": {
+                    "is_night": False,
+                    "now": "2026-01-01T00:00:00Z",
+                    "baseline_ready_entities": ["sensor.fridge_switch_0_power"],
+                },
+                "generated_at": "2026-01-01T00:00:00Z",
+            },
+        ),
+        patch(
+            "custom_components.home_generative_agent.sentinel.discovery_engine.run_sentinel_model_call",
+            side_effect=_fake_run,
+        ),
+    ):
+        await engine._run_once()
+
+    assert captured_prompts, "Model was never invoked"
+    human_content = captured_prompts[-1]
+    # Bundle key has no |template=| marker — fridge must still appear in MONITORING GAPS.
+    assert "sensor.fridge_switch_0_power" in human_content, (
+        "Fridge must appear in MONITORING GAPS even when covered only by a bundle key"
+    )
