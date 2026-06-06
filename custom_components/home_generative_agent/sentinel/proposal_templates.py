@@ -115,6 +115,14 @@ _POWER_ENERGY_TERMS = (
     "usage",
     "kilowatt",
 )
+# Entity-name tokens that identify loads whose compressor/motor cycles continuously.
+# These sensors have a bimodal power distribution (on vs. standby) that makes a
+# rolling average a poor baseline — time_of_day_anomaly is used instead, because
+# its variance-aware threshold (max(2*stddev, drift%)) tolerates the cycling noise.
+# Mirrors CYCLICAL_LOAD_HINTS in baseline.py; kept inline to avoid HA-stack imports.
+_CYCLICAL_LOAD_TOKENS: frozenset[str] = frozenset(
+    {"fridge", "refrigerator", "freezer", "compressor"}
+)
 _ALARM_STATES = ("armed_home", "armed_away", "armed_night", "disarmed", "triggered")
 _UNKNOWN_TERMS = (
     "unknown",
@@ -660,7 +668,38 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     suggested_actions=["check_appliance"],
                 )
             )
-        # No numeric threshold in text — fall back to baseline deviation detection.
+        # No numeric threshold — fall back to a statistical detector.
+        # When the candidate bundles multiple sensors (e.g. LLM lists both
+        # *_power and *_energy variants), pick the first non-cumulative one so
+        # that energy counters don't silently discard the whole candidate.
+        instantaneous_id = next(
+            (s for s in non_battery_sensor_ids if not _is_cumulative_energy_sensor(s)),
+            None,
+        )
+        if instantaneous_id is None:
+            return NormalizationResult(
+                normalized=None,
+                reason_code="cumulative_energy_sensor",
+                details={"sensor_id": sensor_id},
+            )
+        sensor_id = instantaneous_id
+        # Cyclical loads (fridge, freezer, compressor) have a bimodal power
+        # distribution — rolling-average baselines mix on/off states and produce
+        # systematic false positives on every normal off-cycle.  time_of_day_anomaly
+        # uses a variance-aware threshold (max(2*stddev, drift%)) that tolerates it.
+        if _is_cyclical_load(sensor_id):
+            default_rule_id = f"sensor_tod_{sensor_id.replace('.', '_')}"
+            return NormalizationResult(
+                normalized=NormalizedRule(
+                    rule_id=_candidate_rule_id(candidate, default=default_rule_id),
+                    template_id="time_of_day_anomaly",
+                    params={"entity_id": sensor_id},
+                    severity="low",
+                    confidence=float(candidate.get("confidence_hint", 0.65)),
+                    is_sensitive=False,
+                    suggested_actions=["check_appliance"],
+                )
+            )
         default_rule_id = f"sensor_baseline_{sensor_id.replace('.', '_')}"
         return NormalizationResult(
             normalized=NormalizedRule(
@@ -1095,6 +1134,18 @@ def _has_multiple_signal(text: str) -> bool:
 
 def _has_power_energy_signal(text: str) -> bool:
     return _contains_any(text, _POWER_ENERGY_TERMS)
+
+
+def _is_cumulative_energy_sensor(entity_id: str) -> bool:
+    local = entity_id.split(".", 1)[-1] if "." in entity_id else entity_id
+    return local.endswith("_energy") or local == "energy"
+
+
+def _is_cyclical_load(entity_id: str) -> bool:
+    import re  # noqa: PLC0415
+
+    tokens = set(re.split(r"[._\s]+", entity_id.lower()))
+    return bool(tokens & _CYCLICAL_LOAD_TOKENS)
 
 
 def _contains_any(text: str, words: tuple[str, ...]) -> bool:

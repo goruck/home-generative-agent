@@ -7,6 +7,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import re
 from typing import TYPE_CHECKING, Any, cast
 
 import voluptuous as vol
@@ -54,9 +55,31 @@ _DISCOVERY_LLM_TIMEOUT_S: float = 60.0
 # any duplicates that slip through, so a generous cap is safe.
 _MAX_SEMANTIC_KEYS_IN_PROMPT: int = 60
 
-# Rule IDs for static built-in rules (deterministic, always active).
-# Included in active_rule_ids so the LLM knows these topics are already covered
-# and does not re-suggest candidates that map to an existing static rule.
+# Markers that identify rule-derived baseline monitoring hint keys.
+# rule_semantic_key() for baseline_deviation and time_of_day_anomaly embeds
+# |template=<name>| in the key; candidate_semantic_key() never does.
+# Using template markers (not predicate markers) is critical: candidate keys
+# with predicate=power_anomaly may be multi-entity bundles from rejected or
+# pending proposals, and a single bundle key must not suppress individual
+# entity proposals for all entities it lists.
+_BASELINE_TEMPLATE_MARKERS: frozenset[str] = frozenset(
+    {
+        "|template=baseline_deviation",
+        "|template=time_of_day_anomaly",
+    }
+)
+
+_ENTITIES_FIELD_RE = re.compile(r"\|entities=([^|]*)")
+
+
+def _entity_ids_from_key(key: str) -> set[str]:
+    """Parse the entities= CSV field from a semantic key into exact entity IDs."""
+    m = _ENTITIES_FIELD_RE.search(key)
+    if not m:
+        return set()
+    return {e for e in m.group(1).split(",") if e}
+
+
 _STATIC_RULE_IDS: frozenset[str] = frozenset(
     {
         "unlocked_lock_at_night",
@@ -157,7 +180,7 @@ class SentinelDiscoveryEngine:
             "unsupported_ttl_expired": 0,
         }
         if self._model is None:
-            LOGGER.debug("Discovery skipped: no model available.")
+            LOGGER.warning("Discovery skipped: no model configured.")
             return
 
         try:
@@ -199,15 +222,68 @@ class SentinelDiscoveryEngine:
                     "Discovery TTL cleanup failed; continuing.",
                     exc_info=True,
                 )
-        active_rule_ids, existing_keys = await self._existing_semantic_context()
-        # Cap keys sent to the LLM to bound prompt token cost. Post-hoc filter
-        # handles duplicates that slip through.
-        capped_keys = sorted(existing_keys)[:_MAX_SEMANTIC_KEYS_IN_PROMPT]
+        (
+            active_rule_ids,
+            hint_keys,
+            filter_keys,
+        ) = await self._existing_semantic_context()
+        # hint_keys: active rules + pending proposals — what is truly active or
+        # awaiting approval.  Sent to the LLM so it avoids re-proposing covered
+        # topics.  History record keys are intentionally excluded: a past
+        # multi-entity bundle key listing "sensor.fridge_switch_0_power" among
+        # several others would mislead the LLM into thinking each individual
+        # entity is already monitored, suppressing standalone proposals.
+        # filter_keys: full set including history — used only by the post-hoc
+        # dedup filter to prevent identical candidates from re-appearing.
+        capped_keys = sorted(hint_keys)[:_MAX_SEMANTIC_KEYS_IN_PROMPT]
+
+        # Compute monitoring gaps: baseline-ready entities with no active
+        # statistical anomaly rule.  Only rule_semantic_key()-derived keys
+        # contain |template=<name>|; candidate_semantic_key()-derived keys never
+        # do.  Using template markers prevents rejected or pending multi-entity
+        # bundle proposals (which list many entity_ids in one key) from
+        # suppressing individual entity proposals for every entity they mention.
+        baseline_hint_keys = {
+            k for k in hint_keys if any(m in k for m in _BASELINE_TEMPLATE_MARKERS)
+        }
+        try:
+            baseline_ready: list[str] = (
+                reduced_snapshot.get("derived", {}).get("baseline_ready_entities") or []
+            )
+        except (AttributeError, TypeError):
+            baseline_ready = []
+        covered_entity_ids: set[str] = set()
+        for key in baseline_hint_keys:
+            covered_entity_ids.update(_entity_ids_from_key(key))
+        unmonitored = [eid for eid in baseline_ready if eid not in covered_entity_ids]
+        if LOGGER.isEnabledFor(logging.DEBUG):
+            for eid in baseline_ready:
+                if eid in covered_entity_ids:
+                    covering = [
+                        k for k in baseline_hint_keys if eid in _entity_ids_from_key(k)
+                    ]
+                    LOGGER.debug(
+                        "Discovery gap: %s covered by %d key(s): %s",
+                        eid,
+                        len(covering),
+                        covering,
+                    )
+        LOGGER.debug(
+            "Discovery gap analysis: %d baseline-ready, %d baseline hint keys, "
+            "%d unmonitored: %s",
+            len(baseline_ready),
+            len(baseline_hint_keys),
+            len(unmonitored),
+            unmonitored,
+        )
+        unmonitored_json = json.dumps(unmonitored, separators=(",", ":"))
+
         now = dt_util.utcnow().isoformat()
         prompt = USER_PROMPT_TEMPLATE.format(
             snapshot=compact_snapshot,
             active_rule_ids=json.dumps(sorted(active_rule_ids), separators=(",", ":")),
             existing_semantic_keys=json.dumps(capped_keys, separators=(",", ":")),
+            unmonitored_baseline_entities=unmonitored_json,
         )
         messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
 
@@ -222,7 +298,7 @@ class SentinelDiscoveryEngine:
                 health_stats=self._health_stats,
             )
         except SentinelLLMDeferredError as err:
-            LOGGER.debug("Discovery LLM call deferred: %s", err)
+            LOGGER.info("Discovery LLM call deferred: %s", err)
             return
         except TimeoutError:
             self._log_limiter.warning(
@@ -289,7 +365,7 @@ class SentinelDiscoveryEngine:
         self._discovery_cycle_stats["candidates_generated"] = len(candidates)
         filtered, filtered_candidates = self._filter_novel_candidates(
             candidates,
-            existing_keys,
+            filter_keys,
         )
         self._discovery_cycle_stats["candidates_novel"] = len(filtered)
         self._discovery_cycle_stats["candidates_deduplicated"] = len(
@@ -298,14 +374,33 @@ class SentinelDiscoveryEngine:
         validated["candidates"] = filtered
         validated["filtered_candidates"] = filtered_candidates
         await self._store.async_append(validated)
+        LOGGER.info(
+            "Discovery cycle complete: %d generated, %d novel, %d deduplicated.",
+            len(candidates),
+            len(filtered),
+            len(filtered_candidates),
+        )
 
     async def _existing_semantic_context(  # noqa: PLR0912
         self,
-    ) -> tuple[set[str], set[str]]:
+    ) -> tuple[set[str], set[str], set[str]]:
+        """
+        Return (active_rule_ids, hint_keys, filter_keys).
+
+        hint_keys — active rules + pending proposals.  Sent to the LLM so it
+        avoids re-proposing what is genuinely monitored or already in the
+        approval queue.  History record keys are excluded because past
+        multi-entity bundles would mislead the LLM into suppressing individual
+        entity proposals that were never actually activated.
+
+        filter_keys — full superset including discovery history.  Used only by
+        the post-hoc dedup filter so identical candidates do not re-appear.
+        """
         # Bug 4 fix: seed with static built-in rule IDs so the LLM is told
         # those topics are already covered and stops re-suggesting them.
         active_rule_ids: set[str] = set(_STATIC_RULE_IDS)
-        semantic_keys: set[str] = set()
+        hint_keys: set[str] = set()
+        filter_keys: set[str] = set()
 
         if self._rule_registry is not None:
             for rule in self._rule_registry.list_rules():
@@ -314,7 +409,7 @@ class SentinelDiscoveryEngine:
                     active_rule_ids.add(rule_id)
                 key = rule_semantic_key(rule)
                 if key:
-                    semantic_keys.add(key)
+                    hint_keys.add(key)
 
         if self._proposal_store is not None:
             proposals = await self._proposal_store.async_get_latest(200)
@@ -322,17 +417,28 @@ class SentinelDiscoveryEngine:
                 # Bug 1 fix: rejected proposals must still block re-suggestion.
                 # The old `continue` meant rejected candidates' keys were never
                 # added to the exclusion set, letting identical proposals recur.
+                #
+                # Accepted proposals are excluded from hint_keys: their coverage
+                # is tracked by the live rule via rule_semantic_key (if enabled).
+                # If the user later disables the rule, the topic becomes
+                # re-proposable — the accepted proposal must not silently suppress
+                # it forever.
+                status = str(proposal.get("status", "pending"))
+                if status == "approved":
+                    continue
                 candidate = proposal.get("candidate")
                 if isinstance(candidate, dict):
                     key = candidate_semantic_key(candidate)
                     if key:
-                        semantic_keys.add(key)
+                        hint_keys.add(key)
                     else:
                         # Bug 2 fix: null-key candidates (e.g. "stale tracking"
                         # patterns that don't resolve to a known subject/predicate)
                         # use a title+summary hash so they are still excluded.
-                        semantic_keys.add(_candidate_identity_hash(candidate))
+                        hint_keys.add(_candidate_identity_hash(candidate))
 
+        # filter_keys starts as a copy of hint_keys, then adds history records.
+        filter_keys = set(hint_keys)
         discovery_records = await self._store.async_get_latest(200)
         for payload in discovery_records:
             for candidate in payload.get("candidates", []):
@@ -342,12 +448,12 @@ class SentinelDiscoveryEngine:
                     candidate
                 )
                 if key:
-                    semantic_keys.add(key)
+                    filter_keys.add(key)
                 else:
                     # Bug 2 fix: same null-key hash fallback for past records.
-                    semantic_keys.add(_candidate_identity_hash(candidate))
+                    filter_keys.add(_candidate_identity_hash(candidate))
 
-        return active_rule_ids, semantic_keys
+        return active_rule_ids, hint_keys, filter_keys
 
     def _filter_novel_candidates(
         self,

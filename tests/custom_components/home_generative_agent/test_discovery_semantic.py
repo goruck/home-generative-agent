@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+from custom_components.home_generative_agent.__init__ import (
+    _rule_key_covers_candidate_key,
+)
 from custom_components.home_generative_agent.sentinel.discovery_semantic import (
     candidate_semantic_key,
     rule_semantic_key,
@@ -179,3 +182,202 @@ def test_rule_semantic_key_unknown_person_camera_no_home_any_camera() -> None:
         key
         == "v1|subject=camera|predicate=unknown_person|night=any|home=0|scope=any|entities="
     )
+
+
+def test_candidate_semantic_key_entity_ids_contains_format() -> None:
+    """LLM-generated evidence paths use 'entity_ids contains' — must extract entity."""
+    candidate = {
+        "title": "Fridge power anomaly",
+        "summary": "Fridge power deviates from baseline during off-cycle.",
+        "pattern": "power deviation baseline",
+        "suggested_type": "power_anomaly",
+        "evidence_paths": [
+            "entities[entity_ids contains sensor.fridge_switch_0_power].state",
+        ],
+    }
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert "predicate=power_anomaly" in key
+    assert "sensor.fridge_switch_0_power" in key
+
+
+def test_candidate_semantic_key_entity_ids_contains_distinct_entities() -> None:
+    """Two candidates with different entities in 'entity_ids contains' get different keys."""
+    fridge = {
+        "title": "Fridge power anomaly",
+        "summary": "Fridge power baseline deviation.",
+        "pattern": "power deviation baseline",
+        "suggested_type": "power_anomaly",
+        "evidence_paths": [
+            "entities[entity_ids contains sensor.fridge_switch_0_power].state",
+        ],
+    }
+    freezer = {
+        "title": "Freezer power anomaly",
+        "summary": "Freezer power baseline deviation.",
+        "pattern": "power deviation baseline",
+        "suggested_type": "power_anomaly",
+        "evidence_paths": [
+            "entities[entity_ids contains sensor.freezer_switch_0_power].state",
+        ],
+    }
+    key_fridge = candidate_semantic_key(fridge)
+    key_freezer = candidate_semantic_key(freezer)
+    assert key_fridge is not None
+    assert key_freezer is not None
+    assert key_fridge != key_freezer
+
+
+def test_rule_semantic_key_baseline_deviation() -> None:
+    rule = {
+        "rule_id": "sensor_baseline_fridge_power",
+        "template_id": "baseline_deviation",
+        "params": {"entity_id": "sensor.fridge_switch_0_power"},
+    }
+    key = rule_semantic_key(rule)
+    assert key is not None
+    assert "predicate=power_anomaly" in key
+    assert "sensor.fridge_switch_0_power" in key
+    assert "template=baseline_deviation" in key
+
+
+def test_rule_semantic_key_time_of_day_anomaly() -> None:
+    rule = {
+        "rule_id": "sensor_tod_fridge_power",
+        "template_id": "time_of_day_anomaly",
+        "params": {"entity_id": "sensor.fridge_switch_0_power"},
+    }
+    key = rule_semantic_key(rule)
+    assert key is not None
+    assert "predicate=power_anomaly" in key
+    assert "sensor.fridge_switch_0_power" in key
+    assert "template=time_of_day_anomaly" in key
+
+
+def test_rule_semantic_key_baseline_deviation_and_time_of_day_differ() -> None:
+    """baseline_deviation and time_of_day_anomaly for same entity have distinct keys."""
+    baseline_rule = {
+        "rule_id": "sensor_baseline_fridge",
+        "template_id": "baseline_deviation",
+        "params": {"entity_id": "sensor.fridge_switch_0_power"},
+    }
+    tod_rule = {
+        "rule_id": "sensor_tod_fridge",
+        "template_id": "time_of_day_anomaly",
+        "params": {"entity_id": "sensor.fridge_switch_0_power"},
+    }
+    assert rule_semantic_key(baseline_rule) != rule_semantic_key(tod_rule)
+
+
+def test_candidate_semantic_key_power_anomaly_wins_over_activity_in_summary() -> None:
+    """'power_anomaly' must win even when summary says 'appliance activity'."""
+    candidate = {
+        "title": "Washing Machine Power Active During Night While Home",
+        "summary": (
+            "The washing machine power sensor reports non-zero consumption (0.5W) "
+            "while it is night and someone is home, suggesting potential unexpected "
+            "appliance activity or baseline deviation."
+        ),
+        "pattern": "deviation_from_normal",
+        "suggested_type": "statistical_anomaly",
+        "evidence_paths": [
+            "entities[entity_ids contains sensor.washing_machine_switch_0_power].state",
+            "derived.is_night",
+            "derived.anyone_home",
+        ],
+    }
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert "predicate=power_anomaly" in key, f"expected power_anomaly, got: {key}"
+    assert "active" not in key
+
+
+def test_candidate_semantic_key_unavailable_wins_over_disarmed_context() -> None:
+    """'unavailable' predicate must win even when summary mentions 'disarmed' as context."""
+    candidate = {
+        "title": "Outdoor Motion Sensors Unavailable During Active Monitoring",
+        "summary": (
+            "Multiple outdoor motion sensors are unavailable while the alarm system "
+            "is disarmed and motion is detected elsewhere."
+        ),
+        "pattern": "state_mismatch",
+        "suggested_type": "device_health",
+        "evidence_paths": [
+            "entities[entity_ids contains binary_sensor.backyard_vmd3_0].state",
+            "entities[entity_ids contains binary_sensor.east_vmd3_0].state",
+            "derived.anyone_home",
+        ],
+    }
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert "predicate=unavailable" in key, f"expected unavailable, got: {key}"
+    assert "disarmed" not in key
+
+
+# ---------------------------------------------------------------------------
+# P1: _rule_key_covers_candidate_key — template-aware comparison
+# ---------------------------------------------------------------------------
+
+
+def test_rule_key_covers_candidate_key_exact_match() -> None:
+    """Identical keys must be covered."""
+    key = "v1|subject=lock|predicate=unlocked|night=any|home=1|scope=any|entities=lock.front_door"
+    assert _rule_key_covers_candidate_key(key, key)
+
+
+def test_rule_key_covers_candidate_key_different_entities() -> None:
+    """Same template, different entity must NOT match."""
+    rule_key = (
+        "v1|subject=sensor|predicate=power_anomaly"
+        "|template=time_of_day_anomaly|entities=sensor.fridge_switch_0_power"
+    )
+    candidate_key = (
+        "v1|subject=sensor|predicate=power_anomaly"
+        "|night=any|home=any|scope=any|entities=sensor.freezer_switch_0_power"
+    )
+    assert not _rule_key_covers_candidate_key(rule_key, candidate_key)
+
+
+def test_rule_key_covers_candidate_key_time_of_day_anomaly_vs_candidate() -> None:
+    """
+    time_of_day_anomaly rule key must cover a matching power_anomaly candidate key.
+
+    This is the P1 regression: rule_semantic_key embeds |template=…| and omits
+    night/home/scope; candidate_semantic_key never emits |template=…|. The
+    normalized comparison must return True for the same entity.
+    """
+    rule_key = (
+        "v1|subject=sensor|predicate=power_anomaly"
+        "|template=time_of_day_anomaly|entities=sensor.fridge_switch_0_power"
+    )
+    candidate_key = (
+        "v1|subject=sensor|predicate=power_anomaly"
+        "|night=any|home=any|scope=any|entities=sensor.fridge_switch_0_power"
+    )
+    assert _rule_key_covers_candidate_key(rule_key, candidate_key)
+
+
+def test_rule_key_covers_candidate_key_baseline_deviation_vs_candidate() -> None:
+    """baseline_deviation rule key must cover a matching power_anomaly candidate key."""
+    rule_key = (
+        "v1|subject=sensor|predicate=power_anomaly"
+        "|template=baseline_deviation|entities=sensor.fridge_switch_0_power"
+    )
+    candidate_key = (
+        "v1|subject=sensor|predicate=power_anomaly"
+        "|night=any|home=any|scope=any|entities=sensor.fridge_switch_0_power"
+    )
+    assert _rule_key_covers_candidate_key(rule_key, candidate_key)
+
+
+def test_rule_key_covers_candidate_key_non_template_no_cross_match() -> None:
+    """A rule key without |template=| must not match a structurally different candidate key."""
+    rule_key = (
+        "v1|subject=sensor|predicate=power_anomaly"
+        "|night=any|home=any|scope=any|entities=sensor.fridge_switch_0_power"
+    )
+    candidate_key = (
+        "v1|subject=sensor|predicate=power_anomaly"
+        "|night=1|home=1|scope=any|entities=sensor.fridge_switch_0_power"
+    )
+    assert not _rule_key_covers_candidate_key(rule_key, candidate_key)
