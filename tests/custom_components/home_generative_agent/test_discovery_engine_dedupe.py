@@ -824,7 +824,8 @@ def test_entity_ids_from_key_no_substring_match() -> None:
 async def test_monitoring_gap_power_factor_does_not_suppress_power(
     hass: HomeAssistant,
 ) -> None:
-    """A baseline key for power_factor must not suppress the power sensor via substring.
+    """
+    A baseline key for power_factor must not suppress the power sensor via substring.
 
     This is the P2 regression: 'sensor.fridge_switch_0_power' is a substring of
     'sensor.fridge_switch_0_power_factor'.  The old `eid in key` check treated

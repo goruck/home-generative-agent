@@ -339,7 +339,8 @@ def test_rule_key_covers_candidate_key_different_entities() -> None:
 
 
 def test_rule_key_covers_candidate_key_time_of_day_anomaly_vs_candidate() -> None:
-    """time_of_day_anomaly rule key must cover a matching power_anomaly candidate key.
+    """
+    time_of_day_anomaly rule key must cover a matching power_anomaly candidate key.
 
     This is the P1 regression: rule_semantic_key embeds |template=…| and omits
     night/home/scope; candidate_semantic_key never emits |template=…|. The
