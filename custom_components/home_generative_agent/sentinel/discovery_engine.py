@@ -70,6 +70,26 @@ _BASELINE_TEMPLATE_MARKERS: frozenset[str] = frozenset(
 )
 
 _ENTITIES_FIELD_RE = re.compile(r"\|entities=([^|]*)")
+_EVIDENCE_ENTITY_RE = re.compile(
+    r"\bentity_id=([a-z0-9_]+\.[a-z0-9_]+)|"
+    r"\bentity_ids\s+contains\s+([a-z0-9_]+\.[a-z0-9_]+)"
+)
+_TEXT_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_ENTITY_DESCRIPTOR_STOPWORDS: frozenset[str] = frozenset(
+    {
+        "binary",
+        "class",
+        "device",
+        "entity",
+        "high",
+        "low",
+        "percentage",
+        "sensor",
+        "state",
+        "switch",
+    }
+)
+_MIN_PLURAL_TOKEN_LENGTH = 3
 
 
 def _entity_ids_from_key(key: str) -> set[str]:
@@ -366,6 +386,7 @@ class SentinelDiscoveryEngine:
         filtered, filtered_candidates = self._filter_novel_candidates(
             candidates,
             filter_keys,
+            baseline_ready,
         )
         self._discovery_cycle_stats["candidates_novel"] = len(filtered)
         self._discovery_cycle_stats["candidates_deduplicated"] = len(
@@ -459,10 +480,12 @@ class SentinelDiscoveryEngine:
         self,
         candidates: list[dict[str, Any]],
         existing_keys: set[str],
+        known_entity_ids: list[str] | None = None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
         seen_batch: set[str] = set()
         filtered: list[dict[str, Any]] = []
         dropped: list[dict[str, str]] = []
+        entity_descriptor_index = _build_entity_descriptor_index(known_entity_ids or [])
         for candidate in candidates:
             key = candidate_semantic_key(candidate)
             # Bug 2 fix: null-key candidates (unknown subject/predicate) fall
@@ -483,6 +506,22 @@ class SentinelDiscoveryEngine:
                     {
                         "candidate_id": str(candidate.get("candidate_id", "")),
                         "dedupe_reason": "derived_only_paths",
+                    }
+                )
+                continue
+
+            evidence_entity_ids = _entity_ids_from_evidence_paths(evidence_paths)
+            mismatch_entities = _candidate_text_entity_mismatches(
+                candidate,
+                evidence_entity_ids,
+                entity_descriptor_index,
+            )
+            if mismatch_entities:
+                dropped.append(
+                    {
+                        "candidate_id": str(candidate.get("candidate_id", "")),
+                        "dedupe_reason": "entity_text_mismatch",
+                        "mismatch_entities": ",".join(sorted(mismatch_entities)),
                     }
                 )
                 continue
@@ -526,6 +565,83 @@ def _candidate_identity_hash(candidate: dict[str, Any]) -> str:
     summary = str(candidate.get("summary", "")).strip().lower()
     blob = f"{title}\x00{summary}".encode()
     return "ident|sha256=" + hashlib.sha256(blob).hexdigest()[:16]
+
+
+def _entity_ids_from_evidence_paths(evidence_paths: object) -> set[str]:
+    """Extract concrete entity IDs from LLM evidence path strings."""
+    if not isinstance(evidence_paths, list):
+        return set()
+    entity_ids: set[str] = set()
+    for path in evidence_paths:
+        if not isinstance(path, str):
+            continue
+        for match in _EVIDENCE_ENTITY_RE.finditer(path.lower()):
+            entity_id = match.group(1) or match.group(2)
+            if entity_id:
+                entity_ids.add(entity_id)
+    return entity_ids
+
+
+def _build_entity_descriptor_index(
+    entity_ids: list[str],
+) -> dict[str, frozenset[str]]:
+    """Map entity IDs to distinctive text tokens usable in LLM output checks."""
+    index: dict[str, frozenset[str]] = {}
+    for entity_id in entity_ids:
+        if not isinstance(entity_id, str) or "." not in entity_id:
+            continue
+        normalized = entity_id.lower()
+        _domain, _dot, object_id = normalized.partition(".")
+        tokens = _normalized_descriptor_tokens(object_id)
+        if tokens:
+            index[normalized] = frozenset(tokens)
+    return index
+
+
+def _candidate_text_entity_mismatches(
+    candidate: dict[str, Any],
+    evidence_entity_ids: set[str],
+    entity_descriptor_index: dict[str, frozenset[str]],
+) -> set[str]:
+    """Return known non-evidence entities named by candidate text."""
+    if not evidence_entity_ids or not entity_descriptor_index:
+        return set()
+    text = " ".join(
+        str(candidate.get(field, ""))
+        for field in ("candidate_id", "title", "summary", "pattern")
+    ).lower()
+    text_tokens = _normalized_descriptor_tokens(text)
+    if not text_tokens:
+        return set()
+
+    evidence_entity_ids = {entity_id.lower() for entity_id in evidence_entity_ids}
+    mismatches: set[str] = set()
+    for entity_id, descriptor_tokens in entity_descriptor_index.items():
+        if entity_id in evidence_entity_ids:
+            continue
+        if descriptor_tokens and descriptor_tokens.issubset(text_tokens):
+            mismatches.add(entity_id)
+    return mismatches
+
+
+def _normalized_descriptor_tokens(value: str) -> frozenset[str]:
+    """Return normalized entity-description tokens for text comparison."""
+    return frozenset(
+        _singularize_token(token)
+        for token in _TEXT_TOKEN_RE.findall(value)
+        if len(token) > 1
+        and not token.isdigit()
+        and token not in _ENTITY_DESCRIPTOR_STOPWORDS
+    )
+
+
+def _singularize_token(token: str) -> str:
+    """Normalize simple English plurals that appear in LLM summaries."""
+    if len(token) > _MIN_PLURAL_TOKEN_LENGTH and token.endswith("ies"):
+        return token[: -len("ies")] + "y"
+    if len(token) > _MIN_PLURAL_TOKEN_LENGTH and token.endswith("s"):
+        return token[:-1]
+    return token
 
 
 def _coerce_int(value: object | None, default: int) -> int:

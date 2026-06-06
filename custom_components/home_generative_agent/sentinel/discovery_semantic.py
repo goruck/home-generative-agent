@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
+
+_SEMANTIC_KEY_CONTEXT_RE = re.compile(r"\|(?:template|night|home|scope)=[^|]+")
 
 
 def candidate_semantic_key(  # noqa: PLR0912, PLR0915
@@ -238,6 +241,26 @@ def rule_semantic_key(rule: dict[str, Any]) -> str | None:  # noqa: C901, PLR091
             return None
         return f"v1|subject=entity|predicate=staleness|entities={entity_id}"
     return None
+
+
+def rule_key_covers_candidate_key(rule_key: str, candidate_key: str) -> bool:
+    """
+    Return True if rule_key semantically covers candidate_key.
+
+    For most templates the keys are structurally identical and simple equality
+    suffices. For baseline_deviation / time_of_day_anomaly, rule_semantic_key
+    embeds |template=<name>| and omits |night=|home=|scope=|, while
+    candidate_semantic_key always emits those context fields. When |template=|
+    is present in the rule key, normalize both to subject+predicate+entities
+    before comparing.
+    """
+    if rule_key == candidate_key:
+        return True
+    if "|template=" not in rule_key:
+        return False
+    return _SEMANTIC_KEY_CONTEXT_RE.sub("", rule_key) == _SEMANTIC_KEY_CONTEXT_RE.sub(
+        "", candidate_key
+    )
 
 
 def _extract_camera_ids(evidence_paths: list[str]) -> list[str]:
