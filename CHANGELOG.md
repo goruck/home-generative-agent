@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.17] - 2026-06-06
+
+### Fixed
+
+- **Sentinel Discovery: cyclical-load false positives** — `baseline_deviation` averages compressor-on (~150 W) and compressor-off (~5 W) samples into a single rolling mean (~40–60 W). Every normal off-cycle then fires as a 90%+ deviation. Cyclical loads (entities whose `friendly_name` or `entity_id` contains `fridge`, `refrigerator`, `freezer`, or `compressor`) are now routed to `time_of_day_anomaly` at normalization time. Its variance-aware threshold `max(2*stddev, drift%)` tolerates the oscillation without false alarms. Closes [#432](https://github.com/goruck/home-generative-agent/pull/432).
+
+- **Sentinel Discovery: cumulative energy sensors proposed as baseline rules** — `sensor.*_energy` entities are monotonically increasing counters. Normalizing them to `baseline_deviation` caused continuous firings as the cumulative value grew past its rolling average. Energy sensor candidates are now rejected at normalization time with `reason_code="cumulative_energy_sensor"`.
+
+- **Sentinel Discovery: rule duplication for baseline and other templates** — `rule_semantic_key` returned `None` for `baseline_deviation`, `time_of_day_anomaly`, `sensor_threshold_condition`, `entity_state_duration`, and `entity_staleness` rules, so approved rules of those types were never added to the deduplication exclusion set. Discovery re-proposed identical rules on every cycle, producing duplicate rule entries in the registry. Fixed by adding semantic key generation for all missing templates. Keys for `baseline_deviation` and `time_of_day_anomaly` embed a `|template=<name>|` marker used by the baseline coverage check.
+
+- **Sentinel Discovery: `entity_ids contains` evidence path format not parsed** — LLM-generated evidence paths sometimes use the form `entities[entity_ids contains sensor.foo].state`. `candidate_semantic_key` was not extracting the entity ID from this syntax, producing keys without the entity ID and preventing per-entity deduplication. A dedicated regex branch now handles this format alongside the existing `entity_id=` form.
+
+- **Sentinel Discovery: history record keys leaked into LLM hint set** — `_existing_semantic_context` was including past discovery-cycle record keys in the `hint_keys` set sent to the LLM as "already covered" topics. Past record keys are `candidate_semantic_key`-derived (no `|template=…|` marker) and could silently block proposals for entities that merely appeared in a historical finding. Fixed by splitting into `hint_keys` (active rules + pending/rejected proposals only) and `filter_keys` (hint_keys + history, used for post-hoc dedup only).
+
+- **Sentinel Discovery: approved proposals blocked re-proposal after rule is disabled** — `_existing_semantic_context` checked `status == "accepted"` (wrong string; the store uses `"approved"`), so approved proposals were never excluded from `hint_keys`. Their candidate key remained in the hint set indefinitely, suppressing re-proposal even if the user later disabled the resulting rule. Fixed by checking `"approved"` and skipping approved proposals from `hint_keys` (coverage is already tracked by the live rule via `rule_semantic_key`).
+
+- **Sentinel Discovery: broad unavailability rule keys counted as baseline coverage** — the monitoring gap analysis checked whether a baseline-ready entity ID appeared in _any_ hint key, including `predicate=unavailable` keys from rules like `unavailable_sensors_while_home`. These rules list many entity IDs as a side-effect, causing baseline-ready entities to be incorrectly marked "monitored." Multi-entity bundle candidate keys from rejected or pending proposals had the same effect. Fixed by switching to `_BASELINE_TEMPLATE_MARKERS`: only keys containing `|template=baseline_deviation|` or `|template=time_of_day_anomaly|` — emitted exclusively by `rule_semantic_key()` for real statistical monitoring rules — count as baseline coverage.
+
+- **Sentinel notifications: baseline deviation subtitle and body were generic** — baseline deviation and time-of-day anomaly findings used the raw `finding.type` slug as the mobile notification subtitle (e.g. "Fridge power baseline deviation home") and fell through to the LLM explanation path for the body, which sometimes described the baseline value as "current state." Both are now deterministic: the subtitle reads "Fridge: power lower than expected" (direction from `deviation_direction` evidence field) and the body includes actual measured values: "Fridge: 4.6 W vs usual 85.0 W (95% below normal). Check appliance."
+
 ## [3.14.16] - 2026-06-01
 
 ### Fixed

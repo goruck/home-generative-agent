@@ -110,7 +110,7 @@ When Sentinel notifications are enabled:
 
 - Mobile push text is compact and plain-language (targeted for small screens).
 - Explanation text is normalized before send (markdown/backticks removed, whitespace collapsed).
-- `appliance_power_duration` and `alarm_disarmed_during_external_threat` always use deterministic message builders that name the relevant entity.
+- `appliance_power_duration`, `alarm_disarmed_during_external_threat`, and findings from `baseline_deviation` or `time_of_day_anomaly` rules always use deterministic message builders. Baseline deviation notifications include the measured value, historical average, and percent deviation (e.g. "Fridge: 4.6 W vs usual 85.0 W (95% below normal). Check appliance.") and a subtitle indicating direction ("Fridge: power lower than expected").
 - For all other finding types, if explanation text is missing or too long, Sentinel falls back to a deterministic message.
 - Fallback urgency wording depends on severity:
   - `high`: *"Urgent: check and secure it now."*
@@ -384,6 +384,13 @@ Discovery uses an LLM to suggest new rule candidates based on the current home s
 
 Candidates with a resolvable subject and predicate are matched by a deterministic semantic key (`v1|subject=...|predicate=...|...`). Candidates without a resolvable subject/predicate fall back to a title+summary hash (`ident|sha256=...`).
 
+**Hint keys vs. filter keys:** The engine maintains two distinct key sets each cycle:
+
+- **`hint_keys`** — sent to the LLM as "already covered" topics so it avoids proposing duplicates. Contains active rule keys and keys from `pending` or `rejected` proposals only. Approved proposals are intentionally excluded: their coverage is tracked by the live rule via `rule_semantic_key`. If the user later disables the rule, the topic becomes re-proposable.
+- **`filter_keys`** — used for post-hoc deduplication of LLM output. Superset of `hint_keys`, plus keys from historical discovery records.
+
+**Baseline coverage check:** When computing which baseline-ready entities lack monitoring (the "monitoring gap" surfaced to the LLM), only keys with a `|template=baseline_deviation|` or `|template=time_of_day_anomaly|` marker are counted as coverage. These markers are emitted exclusively by `rule_semantic_key()` for live statistical monitoring rules. Candidate keys (from pending, rejected, or historical proposals) never contain `|template=…|`, so rejected bundle proposals listing many entities cannot accidentally suppress individual per-entity proposals.
+
 Discovery records include:
 - `semantic_key` — canonical normalized key
 - `dedupe_reason` — `novel`, `existing_semantic_key`, `existing_identity_hash`, or `batch_duplicate`
@@ -412,7 +419,9 @@ Unsupported proposals never acted on are automatically removed after 30 days.
 
 | Pattern | Fallback |
 |---|---|
-| Power/energy sensor without numeric threshold | Routes to `baseline_deviation` |
+| Power sensor for a cyclical load (`fridge`, `refrigerator`, `freezer`, `compressor`) | Routes to `time_of_day_anomaly` — variance-aware per-hour threshold tolerates compressor cycling |
+| Power sensor without numeric threshold (non-cyclical) | Routes to `baseline_deviation` |
+| Cumulative energy sensor (`*_energy`) | Rejected with `reason_code="cumulative_energy_sensor"` — monotonically increasing counters cannot be baselined this way |
 | Lock battery low | Routes to `low_battery_sensors` |
 | Alarm disarmed with no occupancy signal | `alarm_state_mismatch` with `expected_presence="home"` |
 | `armed_home` / `armed_night` with home presence | Rejected — these modes are designed for occupancy |
