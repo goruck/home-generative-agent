@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Mapping, Sequence
 from functools import partial
 from pathlib import Path
@@ -417,6 +418,29 @@ def _candidate_entity_ids(candidate: dict[str, Any]) -> list[str]:
     return _rule_entity_ids(normalized.params)
 
 
+_SEMANTIC_KEY_CONTEXT_RE = re.compile(r"\|(?:template|night|home|scope)=[^|]+")
+
+
+def _rule_key_covers_candidate_key(rule_key: str, candidate_key: str) -> bool:
+    """
+    Return True if rule_key semantically covers candidate_key.
+
+    For most templates the keys are structurally identical and simple equality
+    suffices.  For baseline_deviation / time_of_day_anomaly, rule_semantic_key
+    embeds |template=<name>| and omits |night=|home=|scope=|, while
+    candidate_semantic_key always emits those context fields.  When |template=|
+    is present in the rule key, normalize both to subject+predicate+entities
+    before comparing.
+    """
+    if rule_key == candidate_key:
+        return True
+    if "|template=" not in rule_key:
+        return False
+    return _SEMANTIC_KEY_CONTEXT_RE.sub("", rule_key) == _SEMANTIC_KEY_CONTEXT_RE.sub(
+        "", candidate_key
+    )
+
+
 def _covered_rule_for_candidate(
     entry: HGAConfigEntry,
     candidate: dict[str, Any],
@@ -426,7 +450,8 @@ def _covered_rule_for_candidate(
     candidate_entities = _candidate_entity_ids(candidate)
     if rule_registry is not None and candidate_key:
         for rule in rule_registry.list_rules():
-            if rule_semantic_key(rule) != candidate_key:
+            rkey = rule_semantic_key(rule)
+            if not rkey or not _rule_key_covers_candidate_key(rkey, candidate_key):
                 continue
             rule_id = str(rule.get("rule_id", ""))
             if rule_id:
@@ -2844,7 +2869,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             return None
         candidate_entities = _candidate_entity_ids(candidate)
         for rule in rule_registry.list_rules():
-            if rule_semantic_key(rule) != candidate_key:
+            rkey = rule_semantic_key(rule)
+            if not rkey or not _rule_key_covers_candidate_key(rkey, candidate_key):
                 continue
             rule_id = str(rule.get("rule_id", ""))
             if rule_id:

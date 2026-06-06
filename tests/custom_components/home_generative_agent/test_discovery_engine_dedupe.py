@@ -15,6 +15,7 @@ from custom_components.home_generative_agent.sentinel.discovery_engine import (
     _STATIC_RULE_IDS,
     SentinelDiscoveryEngine,
     _candidate_identity_hash,
+    _entity_ids_from_key,
 )
 
 if TYPE_CHECKING:
@@ -774,4 +775,131 @@ async def test_monitoring_gap_bundle_candidate_key_does_not_suppress(
     # Bundle key has no |template=| marker — fridge must still appear in MONITORING GAPS.
     assert "sensor.fridge_switch_0_power" in human_content, (
         "Fridge must appear in MONITORING GAPS even when covered only by a bundle key"
+    )
+
+
+# ---------------------------------------------------------------------------
+# P2: _entity_ids_from_key — exact entity ID extraction (no substring matches)
+# ---------------------------------------------------------------------------
+
+
+def test_entity_ids_from_key_single_entity() -> None:
+    key = (
+        "v1|subject=sensor|predicate=power_anomaly"
+        "|template=time_of_day_anomaly|entities=sensor.fridge_switch_0_power"
+    )
+    assert _entity_ids_from_key(key) == {"sensor.fridge_switch_0_power"}
+
+
+def test_entity_ids_from_key_multiple_entities() -> None:
+    key = (
+        "v1|subject=sensor|predicate=unavailable|night=any|home=1|scope=any|"
+        "entities=sensor.foo,sensor.bar,sensor.baz"
+    )
+    assert _entity_ids_from_key(key) == {"sensor.foo", "sensor.bar", "sensor.baz"}
+
+
+def test_entity_ids_from_key_empty_entities_field() -> None:
+    key = "v1|subject=camera|predicate=unknown_person|night=any|home=0|scope=any|entities="
+    assert _entity_ids_from_key(key) == set()
+
+
+def test_entity_ids_from_key_no_entities_field() -> None:
+    key = "v1|subject=sensor|predicate=power_anomaly"
+    assert _entity_ids_from_key(key) == set()
+
+
+def test_entity_ids_from_key_no_substring_match() -> None:
+    """sensor.fridge_switch_0_power must NOT match sensor.fridge_switch_0_power_factor."""
+    key = (
+        "v1|subject=sensor|predicate=power_anomaly"
+        "|template=baseline_deviation|entities=sensor.fridge_switch_0_power_factor"
+    )
+    ids = _entity_ids_from_key(key)
+    assert "sensor.fridge_switch_0_power" not in ids
+    assert "sensor.fridge_switch_0_power_factor" in ids
+
+
+@pytest.mark.asyncio
+async def test_monitoring_gap_power_factor_does_not_suppress_power(
+    hass: HomeAssistant,
+) -> None:
+    """A baseline key for power_factor must not suppress the power sensor via substring.
+
+    This is the P2 regression: 'sensor.fridge_switch_0_power' is a substring of
+    'sensor.fridge_switch_0_power_factor'.  The old `eid in key` check treated
+    them as covered; the new exact entity-set parse must not.
+    """
+    power_factor_key = (
+        "v1|subject=sensor|predicate=power_anomaly"
+        "|template=time_of_day_anomaly|entities=sensor.fridge_switch_0_power_factor"
+    )
+    captured_prompts: list[str] = []
+
+    class _CapturingModel:
+        async def ainvoke(self, messages: list[Any]) -> Any:
+            captured_prompts.extend(
+                str(msg.content) for msg in messages if hasattr(msg, "content")
+            )
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "schema_version": 1,
+                        "generated_at": "2026-01-01T00:00:00Z",
+                        "model": "test",
+                        "candidates": [],
+                    }
+                )
+            )
+
+    class _FullDummyStore:
+        async def async_get_latest(self, _limit: int) -> list[dict[str, Any]]:
+            return []
+
+        async def async_append(self, _payload: Any) -> None:
+            pass
+
+    engine = SentinelDiscoveryEngine(
+        hass=hass,
+        options={},
+        model=_CapturingModel(),
+        store=_FullDummyStore(),  # type: ignore[arg-type]
+    )
+
+    async def _fake_run(model: Any, messages: Any, **_kw: Any) -> Any:
+        return await model.ainvoke(messages)
+
+    with (
+        patch.object(
+            engine,
+            "_existing_semantic_context",
+            new_callable=AsyncMock,
+            return_value=(set(), {power_factor_key}, {power_factor_key}),
+        ),
+        patch(
+            "custom_components.home_generative_agent.sentinel.discovery_engine.async_build_full_state_snapshot",
+            new_callable=AsyncMock,
+            return_value={
+                "entities": [],
+                "camera_activity": [],
+                "derived": {
+                    "is_night": False,
+                    "now": "2026-01-01T00:00:00Z",
+                    "baseline_ready_entities": ["sensor.fridge_switch_0_power"],
+                },
+                "generated_at": "2026-01-01T00:00:00Z",
+            },
+        ),
+        patch(
+            "custom_components.home_generative_agent.sentinel.discovery_engine.run_sentinel_model_call",
+            side_effect=_fake_run,
+        ),
+    ):
+        await engine._run_once()
+
+    assert captured_prompts, "Model was never invoked"
+    human_content = captured_prompts[-1]
+    # power_factor key must NOT suppress power sensor — it must appear in MONITORING GAPS.
+    assert "sensor.fridge_switch_0_power" in human_content, (
+        "power sensor must appear in MONITORING GAPS when only power_factor has a baseline key"
     )

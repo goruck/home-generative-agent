@@ -7,6 +7,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import re
 from typing import TYPE_CHECKING, Any, cast
 
 import voluptuous as vol
@@ -67,6 +68,17 @@ _BASELINE_TEMPLATE_MARKERS: frozenset[str] = frozenset(
         "|template=time_of_day_anomaly",
     }
 )
+
+_ENTITIES_FIELD_RE = re.compile(r"\|entities=([^|]*)")
+
+
+def _entity_ids_from_key(key: str) -> set[str]:
+    """Parse the entities= CSV field from a semantic key into exact entity IDs."""
+    m = _ENTITIES_FIELD_RE.search(key)
+    if not m:
+        return set()
+    return {e for e in m.group(1).split(",") if e}
+
 
 _STATIC_RULE_IDS: frozenset[str] = frozenset(
     {
@@ -240,15 +252,16 @@ class SentinelDiscoveryEngine:
             )
         except (AttributeError, TypeError):
             baseline_ready = []
-        unmonitored = [
-            eid
-            for eid in baseline_ready
-            if not any(eid in key for key in baseline_hint_keys)
-        ]
+        covered_entity_ids: set[str] = set()
+        for key in baseline_hint_keys:
+            covered_entity_ids.update(_entity_ids_from_key(key))
+        unmonitored = [eid for eid in baseline_ready if eid not in covered_entity_ids]
         if LOGGER.isEnabledFor(logging.DEBUG):
             for eid in baseline_ready:
-                covering = [k for k in baseline_hint_keys if eid in k]
-                if covering:
+                if eid in covered_entity_ids:
+                    covering = [
+                        k for k in baseline_hint_keys if eid in _entity_ids_from_key(k)
+                    ]
                     LOGGER.debug(
                         "Discovery gap: %s covered by %d key(s): %s",
                         eid,

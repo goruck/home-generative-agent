@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+from custom_components.home_generative_agent.__init__ import (
+    _rule_key_covers_candidate_key,
+)
 from custom_components.home_generative_agent.sentinel.discovery_semantic import (
     candidate_semantic_key,
     rule_semantic_key,
@@ -309,3 +312,71 @@ def test_candidate_semantic_key_unavailable_wins_over_disarmed_context() -> None
     assert key is not None
     assert "predicate=unavailable" in key, f"expected unavailable, got: {key}"
     assert "disarmed" not in key
+
+
+# ---------------------------------------------------------------------------
+# P1: _rule_key_covers_candidate_key — template-aware comparison
+# ---------------------------------------------------------------------------
+
+
+def test_rule_key_covers_candidate_key_exact_match() -> None:
+    """Identical keys must be covered."""
+    key = "v1|subject=lock|predicate=unlocked|night=any|home=1|scope=any|entities=lock.front_door"
+    assert _rule_key_covers_candidate_key(key, key)
+
+
+def test_rule_key_covers_candidate_key_different_entities() -> None:
+    """Same template, different entity must NOT match."""
+    rule_key = (
+        "v1|subject=sensor|predicate=power_anomaly"
+        "|template=time_of_day_anomaly|entities=sensor.fridge_switch_0_power"
+    )
+    candidate_key = (
+        "v1|subject=sensor|predicate=power_anomaly"
+        "|night=any|home=any|scope=any|entities=sensor.freezer_switch_0_power"
+    )
+    assert not _rule_key_covers_candidate_key(rule_key, candidate_key)
+
+
+def test_rule_key_covers_candidate_key_time_of_day_anomaly_vs_candidate() -> None:
+    """time_of_day_anomaly rule key must cover a matching power_anomaly candidate key.
+
+    This is the P1 regression: rule_semantic_key embeds |template=…| and omits
+    night/home/scope; candidate_semantic_key never emits |template=…|. The
+    normalized comparison must return True for the same entity.
+    """
+    rule_key = (
+        "v1|subject=sensor|predicate=power_anomaly"
+        "|template=time_of_day_anomaly|entities=sensor.fridge_switch_0_power"
+    )
+    candidate_key = (
+        "v1|subject=sensor|predicate=power_anomaly"
+        "|night=any|home=any|scope=any|entities=sensor.fridge_switch_0_power"
+    )
+    assert _rule_key_covers_candidate_key(rule_key, candidate_key)
+
+
+def test_rule_key_covers_candidate_key_baseline_deviation_vs_candidate() -> None:
+    """baseline_deviation rule key must cover a matching power_anomaly candidate key."""
+    rule_key = (
+        "v1|subject=sensor|predicate=power_anomaly"
+        "|template=baseline_deviation|entities=sensor.fridge_switch_0_power"
+    )
+    candidate_key = (
+        "v1|subject=sensor|predicate=power_anomaly"
+        "|night=any|home=any|scope=any|entities=sensor.fridge_switch_0_power"
+    )
+    assert _rule_key_covers_candidate_key(rule_key, candidate_key)
+
+
+def test_rule_key_covers_candidate_key_non_template_no_cross_match() -> None:
+    """A rule key without |template=| must not match a structurally different candidate key."""
+    rule_key = (
+        "v1|subject=sensor|predicate=power_anomaly"
+        "|night=any|home=any|scope=any|entities=sensor.fridge_switch_0_power"
+    )
+    candidate_key = (
+        "v1|subject=sensor|predicate=power_anomaly"
+        "|night=1|home=1|scope=any|entities=sensor.fridge_switch_0_power"
+    )
+    assert not _rule_key_covers_candidate_key(rule_key, candidate_key)
