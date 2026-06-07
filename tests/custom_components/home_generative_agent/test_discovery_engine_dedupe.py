@@ -115,6 +115,113 @@ def test_filter_novel_candidates_sets_novel_reason() -> None:
     assert dropped == []
 
 
+def test_filter_novel_candidates_drops_entity_text_mismatch() -> None:
+    """Candidate text must not name baseline entities missing from evidence."""
+    engine = SentinelDiscoveryEngine(
+        hass=cast("HomeAssistant", object()),
+        options={},
+        model=None,
+        store=cast("DiscoveryStore", _DummyStore()),
+    )
+    candidates = [
+        {
+            "candidate_id": "candidate_battery_baseline_deviation_kitchen",
+            "title": "Kitchen Lock Battery Baseline Deviation",
+            "summary": (
+                "Detect unusual battery drops for garage and playroom door locks."
+            ),
+            "pattern": "deviation from normal battery level",
+            "suggested_type": "statistical_anomaly",
+            "confidence_hint": 0.8,
+            "evidence_paths": [
+                "entities[entity_ids contains sensor.kitchen_lock_battery].state"
+            ],
+        }
+    ]
+    filtered, dropped = engine._filter_novel_candidates(
+        candidates,
+        set(),
+        [
+            "sensor.kitchen_lock_battery",
+            "sensor.garage_door_lock_battery",
+            "sensor.playroom_door_lock_battery",
+        ],
+    )
+    assert filtered == []
+    assert len(dropped) == 1
+    assert dropped[0]["dedupe_reason"] == "entity_text_mismatch"
+    assert dropped[0]["mismatch_entities"] == (
+        "sensor.garage_door_lock_battery,sensor.playroom_door_lock_battery"
+    )
+
+
+def test_filter_novel_candidates_allows_generic_entity_summary() -> None:
+    """Generic summaries can pass when they do not name a different entity."""
+    engine = SentinelDiscoveryEngine(
+        hass=cast("HomeAssistant", object()),
+        options={},
+        model=None,
+        store=cast("DiscoveryStore", _DummyStore()),
+    )
+    candidate = {
+        "candidate_id": "candidate_battery_baseline_deviation_kitchen",
+        "title": "Kitchen Lock Battery Baseline Deviation",
+        "summary": "Detect unusual drops for this lock battery sensor.",
+        "pattern": "deviation from normal battery level",
+        "suggested_type": "statistical_anomaly",
+        "confidence_hint": 0.8,
+        "evidence_paths": [
+            "entities[entity_ids contains sensor.kitchen_lock_battery].state"
+        ],
+    }
+    filtered, dropped = engine._filter_novel_candidates(
+        [candidate],
+        set(),
+        [
+            "sensor.kitchen_lock_battery",
+            "sensor.garage_door_lock_battery",
+            "sensor.playroom_door_lock_battery",
+        ],
+    )
+    assert len(filtered) == 1
+    assert filtered[0]["dedupe_reason"] == "novel"
+    assert dropped == []
+
+
+def test_filter_novel_candidates_allows_intentional_entity_bundle() -> None:
+    """Text may name multiple entities when evidence paths cite all of them."""
+    engine = SentinelDiscoveryEngine(
+        hass=cast("HomeAssistant", object()),
+        options={},
+        model=None,
+        store=cast("DiscoveryStore", _DummyStore()),
+    )
+    candidate = {
+        "candidate_id": "candidate_battery_baseline_deviation_garage_playroom",
+        "title": "Garage and Playroom Lock Battery Baseline Deviation",
+        "summary": "Detect unusual battery drops for garage and playroom door locks.",
+        "pattern": "deviation from normal battery level",
+        "suggested_type": "statistical_anomaly",
+        "confidence_hint": 0.8,
+        "evidence_paths": [
+            "entities[entity_ids contains sensor.garage_door_lock_battery].state",
+            "entities[entity_ids contains sensor.playroom_door_lock_battery].state",
+        ],
+    }
+    filtered, dropped = engine._filter_novel_candidates(
+        [candidate],
+        set(),
+        [
+            "sensor.kitchen_lock_battery",
+            "sensor.garage_door_lock_battery",
+            "sensor.playroom_door_lock_battery",
+        ],
+    )
+    assert len(filtered) == 1
+    assert filtered[0]["dedupe_reason"] == "novel"
+    assert dropped == []
+
+
 # ---------------------------------------------------------------------------
 # Bug 2: null-key candidates (unknown subject/predicate) must be deduplicated
 # ---------------------------------------------------------------------------
