@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.18] - 2026-06-07
+
+### Fixed
+
+- **Sentinel Discovery: candidate entity mismatch** — monitoring-gap candidates can no longer pass through when the title, summary, or pattern names a different known baseline entity than the entities listed in `evidence_paths`. The Discovery prompt now tells the LLM to describe only the cited monitoring-gap entity or entities, and a post-generation quality gate drops mismatched candidates with `dedupe_reason="entity_text_mismatch"`. Regression coverage includes the reported kitchen-vs-garage/playroom lock battery mismatch, generic single-entity summaries, and intentional multi-entity bundles. Closes [#437](https://github.com/goruck/home-generative-agent/issues/437).
+
+- **Discovery semantic coverage helper import** — moved the rule-vs-candidate semantic-key coverage helper into `sentinel/discovery_semantic.py` so runtime code and semantic tests import it from the same module. This fixes the Pyright error from importing `_rule_key_covers_candidate_key` from the integration entrypoint.
+
 ## [3.14.17] - 2026-06-06
 
 ### Fixed
