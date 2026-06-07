@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.19] - 2026-06-07
+
+### Fixed
+
+- **Sentinel Baseline: cyclical-load sustained gate default too short** — the default `sentinel_baseline_sustained_minutes` of 20 minutes matched the length of a normal fridge/freezer compressor off-cycle, causing a notification on every idle cycle. Raised to 45 minutes, which filters normal off-cycles (20–40 min) while still catching genuine malfunctions (door left open, failed compressor) that sustain for hours. The setting is now documented in `docs/sentinel.md` with tuning guidance.
+
 ## [3.14.18] - 2026-06-07
 
 ### Fixed
