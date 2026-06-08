@@ -182,6 +182,11 @@ Both templates produce no findings while the table is empty — baselines accumu
 | `sentinel_baseline_drift_threshold_pct` | `30.0` | Default percent deviation that triggers a finding |
 | `sentinel_baseline_weekly_patterns` | `false` | Enable per-(day-of-week, hour) baselines for `time_of_day_anomaly` |
 | `sentinel_baseline_dow_min_samples` | `4` | Observations per DOW-hour slot before blend weight reaches 1.0 |
+| `sentinel_baseline_sustained_minutes` | `45` | Minutes a cyclical-load entity (fridge, freezer, compressor) must remain anomalous before a notification fires. Set to `0` to disable the gate. |
+
+> **Tuning `sentinel_baseline_sustained_minutes` for cyclical loads**
+>
+> Appliances with a natural on/off duty cycle — refrigerators, freezers, and anything with a compressor — will always read far below their time-averaged baseline while the compressor is idle. Sentinel suppresses these transient deviations until they have persisted for `sentinel_baseline_sustained_minutes` across consecutive detection cycles. The default of 45 minutes is chosen because normal compressor off-cycles typically last 20–40 minutes, while genuine malfunctions (door left open, failed compressor) sustain for hours. If your fridge has unusually long idle cycles you may need to raise this value; if you want faster alerting for high-value appliances you can lower it or set it to `0` to fire immediately.
 
 ---
 

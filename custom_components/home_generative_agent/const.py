@@ -252,8 +252,11 @@ RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES: int = 4
 # Cyclical load sustained deviation gate — Sprint 4
 # Entities matching CYCLICAL_LOAD_HINTS (fridge/freezer/compressor) must stay
 # above the deviation threshold for this many minutes before firing.  0 = disabled.
+# Default is 45 min: normal compressor off-cycles run 20-40 min, so 20 min fired
+# on every normal cycle.  Real malfunctions (door left open, failed compressor)
+# sustain for hours, so 45 min still catches them while eliminating false positives.
 CONF_SENTINEL_BASELINE_SUSTAINED_MINUTES = "sentinel_baseline_sustained_minutes"
-RECOMMENDED_SENTINEL_BASELINE_SUSTAINED_MINUTES: int = 20
+RECOMMENDED_SENTINEL_BASELINE_SUSTAINED_MINUTES: int = 45
 
 # ---- Sentinel daily digest notification ----
 CONF_SENTINEL_DAILY_DIGEST_ENABLED = "sentinel_daily_digest_enabled"
