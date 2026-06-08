@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
 import voluptuous as vol
 
@@ -37,7 +39,7 @@ def test_discovery_schema_valid() -> None:
             }
         ],
     }
-    validated = DISCOVERY_OUTPUT_SCHEMA(payload)
+    validated = cast("dict[str, object]", DISCOVERY_OUTPUT_SCHEMA(payload))
     assert validated["schema_version"] == DISCOVERY_SCHEMA_VERSION
 
 
