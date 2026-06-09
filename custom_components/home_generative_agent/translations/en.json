@@ -226,7 +226,7 @@
         },
         "setup_status": {
           "title": "Setup complete",
-          "description": "Basic setup is done.\n\n**Features enabled:** {features_enabled}{skipped_section}\n\n**Database:** {database_status}\n\n**Next steps:**\n- Run **Configure Sentinel** to enable anomaly monitoring.\n- Go to **Settings → Voice Assistants** to add Home Generative Agent as your voice assistant."
+          "description": "Setup is done.\n\n**Features enabled:** {features_enabled}{skipped_section}\n\n**Database:** {database_status}\n\n**Next steps:**\n- Run **Configure Sentinel** to enable anomaly monitoring.\n- Add an **STT Provider** for voice input.\n- Go to **Settings → Voice Assistants** to add Home Generative Agent as your voice assistant."
         },
         "feature_enable": {
           "title": "Feature setup",

@@ -1372,9 +1372,9 @@ async def test_feature_basic_setup_creates_all_features(hass: HomeAssistant) -> 
     await flow.async_step_user()
     result = await flow.async_step_setup_mode({"setup_mode": "basic"})
 
-    # Feature subentries are written before the database form is shown.
+    # Basic setup skips the database form and shows the status screen directly.
     assert result.get("type") == "form"
-    assert result.get("step_id") == "database"
+    assert result.get("step_id") == "setup_status"
 
     feature_types = {
         s.data.get("feature_type")
@@ -1386,6 +1386,17 @@ async def test_feature_basic_setup_creates_all_features(hass: HomeAssistant) -> 
         "camera_image_analysis",
         "conversation_summary",
     }
+
+    # A database subentry with default credentials was created.
+    db_subentry = next(
+        (
+            s
+            for s in entry.subentries.values()
+            if s.subentry_type == SUBENTRY_TYPE_DATABASE
+        ),
+        None,
+    )
+    assert db_subentry is not None
 
 
 @pytest.mark.asyncio

@@ -357,8 +357,33 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
                 )
 
         self._persist_disabled_cache(disabled_cache)
+        current_db = next(
+            (
+                s
+                for s in entry.subentries.values()
+                if s.subentry_type == SUBENTRY_TYPE_DATABASE
+            ),
+            None,
+        )
+        if current_db is None:
+            db_subentry = ConfigSubentry(
+                subentry_type=SUBENTRY_TYPE_DATABASE,
+                title="Database",
+                unique_id=f"{entry.entry_id}_database",
+                data=MappingProxyType(
+                    {
+                        CONF_USERNAME: RECOMMENDED_DB_USERNAME,
+                        CONF_PASSWORD: RECOMMENDED_DB_PASSWORD,
+                        CONF_HOST: RECOMMENDED_DB_HOST,
+                        CONF_PORT: RECOMMENDED_DB_PORT,
+                        CONF_DB_NAME: RECOMMENDED_DB_NAME,
+                        CONF_DB_PARAMS: RECOMMENDED_DB_PARAMS,
+                    }
+                ),
+            )
+            self.hass.config_entries.async_add_subentry(entry, db_subentry)
         self._schedule_reload()
-        return await self.async_step_database(None)
+        return await self.async_step_setup_status()
 
     async def async_step_setup_status(
         self, user_input: dict[str, Any] | None = None
@@ -957,7 +982,7 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
             )
         self._schedule_reload()
 
-        if self._basic_mode:
+        if self._setup_mode:
             return await self.async_step_setup_status()
         if not _provider_options(entry, "chat"):
             return await self.async_step_instructions()
