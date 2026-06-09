@@ -230,14 +230,10 @@
         },
         "feature_enable": {
           "title": "Feature setup",
-          "description": "Enable or disable features.",
+          "description": "**Conversation** is always enabled. Enable or disable optional features below.",
           "data": {
-            "conversation": "Conversation",
             "camera_image_analysis": "Camera Image Analysis",
             "conversation_summary": "Conversation Summary"
-          },
-          "data_description": {
-            "conversation": "Always enabled."
           }
         },
         "feature_provider": {

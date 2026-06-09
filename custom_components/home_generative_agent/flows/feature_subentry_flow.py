@@ -431,11 +431,10 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
         if user_input is None:
             schema_dict: dict[Any, Any] = {}
             for feature_type, info in FEATURE_DEFS.items():
-                is_required = info["required"]
-                enabled = (
-                    is_required or _feature_subentry(entry, feature_type) is not None
-                )
-                if not is_required and feature_type in disabled_cache:
+                if info["required"]:
+                    continue
+                enabled = _feature_subentry(entry, feature_type) is not None
+                if feature_type in disabled_cache:
                     enabled = False
                 schema_dict[vol.Required(feature_type, default=enabled)] = (
                     BooleanSelector()
