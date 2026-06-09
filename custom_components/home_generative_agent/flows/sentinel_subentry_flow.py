@@ -374,8 +374,185 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
-        """Entry point for Sentinel setup/reconfigure."""
+        """Entry point for new Sentinel setup — show mode selector."""
+        return await self.async_step_setup_mode(user_input)
+
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Reconfigure — bypass mode selector, go directly to full settings."""
         return await self.async_step_settings(user_input)
+
+    async def async_step_setup_mode(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Show Basic/Advanced mode selector for new Sentinel setup."""
+        if user_input is None:
+            return self.async_show_form(
+                step_id="setup_mode",
+                data_schema=vol.Schema(
+                    {
+                        vol.Required("setup_mode", default="basic"): SelectSelector(
+                            SelectSelectorConfig(
+                                options=[
+                                    SelectOptionDict(
+                                        label="Basic setup", value="basic"
+                                    ),
+                                    SelectOptionDict(
+                                        label="Advanced setup", value="advanced"
+                                    ),
+                                ],
+                                mode=SelectSelectorMode.LIST,
+                                sort=False,
+                                custom_value=False,
+                            )
+                        )
+                    }
+                ),
+            )
+        if user_input.get("setup_mode", "basic") == "basic":
+            return await self.async_step_basic_settings(None)
+        return await self.async_step_settings(None)
+
+    async def async_step_basic_settings(  # noqa: PLR0912
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Expose only the four essential Sentinel fields; fill rest from defaults."""
+        current = _current_subentry(self)
+        payload = _default_payload()
+        if current is not None:
+            payload.update(dict(current.data))
+
+        mobile_opts = list_mobile_notify_services(self.hass)
+        notify_value = str(payload.get(CONF_NOTIFY_SERVICE, "") or "")
+
+        schema: dict[Any, Any] = {
+            vol.Required(
+                CONF_SENTINEL_ENABLED,
+                default=bool(
+                    payload.get(CONF_SENTINEL_ENABLED, RECOMMENDED_SENTINEL_ENABLED)
+                ),
+            ): BooleanSelector(),
+            vol.Required(
+                CONF_SENTINEL_DAILY_DIGEST_ENABLED,
+                default=bool(
+                    payload.get(
+                        CONF_SENTINEL_DAILY_DIGEST_ENABLED,
+                        RECOMMENDED_SENTINEL_DAILY_DIGEST_ENABLED,
+                    )
+                ),
+            ): BooleanSelector(),
+            vol.Required(
+                CONF_SENTINEL_DAILY_DIGEST_TIME,
+                default=str(
+                    payload.get(
+                        CONF_SENTINEL_DAILY_DIGEST_TIME,
+                        RECOMMENDED_SENTINEL_DAILY_DIGEST_TIME,
+                    )
+                ),
+            ): TimeSelector(),
+            vol.Optional(
+                CONF_CRITICAL_ACTION_PIN,
+                description={"suggested_value": ""},
+                default="",
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
+        }
+
+        if mobile_opts:
+            default_notify = notify_value if notify_value in mobile_opts else ""
+            schema[
+                vol.Optional(
+                    CONF_NOTIFY_SERVICE,
+                    description={"suggested_value": notify_value},
+                    default=default_notify,
+                )
+            ] = SelectSelector(
+                SelectSelectorConfig(
+                    options=[
+                        SelectOptionDict(label=s.replace("notify.", ""), value=s)
+                        for s in ["", *mobile_opts]
+                    ],
+                    mode=SelectSelectorMode.DROPDOWN,
+                    sort=False,
+                    custom_value=False,
+                )
+            )
+        else:
+            schema[
+                vol.Optional(
+                    CONF_NOTIFY_SERVICE,
+                    description={"suggested_value": notify_value},
+                    default=notify_value,
+                )
+            ] = TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT))
+
+        if user_input is None:
+            return self.async_show_form(
+                step_id="basic_settings",
+                data_schema=vol.Schema(schema),
+            )
+
+        data = _default_payload()
+        errors: dict[str, str] = {}
+
+        notify_service = str(user_input.get(CONF_NOTIFY_SERVICE, "") or "").strip()
+        if notify_service:
+            data[CONF_NOTIFY_SERVICE] = notify_service
+        else:
+            data.pop(CONF_NOTIFY_SERVICE, None)
+
+        raw_pin = str(user_input.get(CONF_CRITICAL_ACTION_PIN, "") or "").strip()
+        data.pop(CONF_CRITICAL_ACTION_PIN, None)
+        if raw_pin:
+            if (
+                not raw_pin.isdigit()
+                or not CRITICAL_PIN_MIN_LEN <= len(raw_pin) <= CRITICAL_PIN_MAX_LEN
+            ):
+                errors["base"] = "invalid_pin"
+            else:
+                hashed, salt = hash_pin(raw_pin)
+                data[CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH] = hashed
+                data[CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT] = salt
+
+        data[CONF_SENTINEL_ENABLED] = bool(
+            user_input.get(CONF_SENTINEL_ENABLED, RECOMMENDED_SENTINEL_ENABLED)
+        )
+        data[CONF_SENTINEL_DAILY_DIGEST_ENABLED] = bool(
+            user_input.get(
+                CONF_SENTINEL_DAILY_DIGEST_ENABLED,
+                RECOMMENDED_SENTINEL_DAILY_DIGEST_ENABLED,
+            )
+        )
+        data[CONF_SENTINEL_DAILY_DIGEST_TIME] = str(
+            user_input.get(
+                CONF_SENTINEL_DAILY_DIGEST_TIME,
+                RECOMMENDED_SENTINEL_DAILY_DIGEST_TIME,
+            )
+        )
+
+        if errors:
+            return self.async_show_form(
+                step_id="basic_settings",
+                data_schema=vol.Schema(schema),
+                errors=errors,
+            )
+
+        if current is None:
+            if self.source not in (SOURCE_USER, SOURCE_RECONFIGURE):
+                return self.async_abort(reason="no_existing_subentry")
+            if self.source == SOURCE_RECONFIGURE:
+                self._source = SOURCE_USER
+                self.context["source"] = SOURCE_USER
+            self._schedule_reload()
+            return self.async_create_entry(title="Sentinel", data=data)
+
+        self._schedule_reload()
+        return self.async_update_and_abort(
+            self._get_entry(),
+            current,
+            data=data,
+            title="Sentinel",
+        )
 
     async def async_step_settings(  # noqa: PLR0912, PLR0915
         self, user_input: dict[str, Any] | None = None
@@ -475,5 +652,3 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
             data=data,
             title="Sentinel",
         )
-
-    async_step_reconfigure = async_step_user

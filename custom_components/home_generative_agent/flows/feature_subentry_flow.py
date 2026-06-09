@@ -193,6 +193,8 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
     def __init__(self) -> None:
         """Initialize the feature subentry flow."""
         self._setup_mode = False
+        self._basic_mode = False
+        self._basic_skipped_features: list[str] = []
         self._feature_queue: list[str] = []
         self._active_feature: str | None = None
         self._pending_provider_id: str | None = None
@@ -255,11 +257,131 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
             self._setup_mode = False
             self._active_feature = current.data.get("feature_type")
             return await self._async_step_feature(self._active_feature, user_input)
+        return await self.async_step_setup_mode(user_input)
 
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Reconfigure — bypass mode selector, go directly to the Advanced path."""
+        current = _current_subentry(self)
+        if current is not None:
+            self._setup_mode = False
+            self._active_feature = current.data.get("feature_type")
+            return await self._async_step_feature(self._active_feature, user_input)
         self._setup_mode = True
         return await self.async_step_feature_enable(user_input)
 
-    async_step_reconfigure = async_step_user
+    async def async_step_setup_mode(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Show Basic/Advanced mode selector for new setup."""
+        if user_input is None:
+            return self.async_show_form(
+                step_id="setup_mode",
+                data_schema=vol.Schema(
+                    {
+                        vol.Required("setup_mode", default="basic"): SelectSelector(
+                            SelectSelectorConfig(
+                                options=[
+                                    SelectOptionDict(
+                                        label="Basic setup", value="basic"
+                                    ),
+                                    SelectOptionDict(
+                                        label="Advanced setup", value="advanced"
+                                    ),
+                                ],
+                                mode=SelectSelectorMode.LIST,
+                                sort=False,
+                                custom_value=False,
+                            )
+                        )
+                    }
+                ),
+            )
+        self._setup_mode = True
+        if user_input.get("setup_mode", "basic") == "basic":
+            self._basic_mode = True
+            return await self._async_step_basic_setup()
+        self._basic_mode = False
+        return await self.async_step_feature_enable(None)
+
+    async def _async_step_basic_setup(self) -> SubentryFlowResult:
+        """Auto-create feature subentries with the first compatible provider."""
+        entry = self._get_entry()
+        any_providers = any(
+            s.subentry_type == SUBENTRY_TYPE_MODEL_PROVIDER
+            for s in entry.subentries.values()
+        )
+        if not any_providers:
+            return self.async_abort(reason="no_provider_for_basic_setup")
+
+        self._basic_skipped_features = []
+        disabled_cache = self._disabled_feature_cache()
+
+        for feature_type, info in FEATURE_DEFS.items():
+            category = FEATURE_CATEGORY_MAP.get(feature_type, "")
+            provider_opts = _provider_options(entry, category)
+            if not provider_opts:
+                self._basic_skipped_features.append(feature_type)
+                continue
+            provider_id = provider_opts[0]["value"]
+            provider_type = _provider_type_for_id(entry, provider_id)
+            model_data = _default_model_data(category, provider_type)
+            payload = self._feature_payload(feature_type, provider_id, model_data, {})
+            existing = _feature_subentry(entry, feature_type)
+            if existing is None:
+                disabled_cache.pop(feature_type, None)
+                subentry = ConfigSubentry(
+                    subentry_type=SUBENTRY_TYPE_FEATURE,
+                    title=info["name"],
+                    unique_id=f"{entry.entry_id}_{feature_type}",
+                    data=MappingProxyType(payload),
+                )
+                self.hass.config_entries.async_add_subentry(entry, subentry)
+            else:
+                self.hass.config_entries.async_update_subentry(  # type: ignore[attr-defined]
+                    entry, existing, data=payload, title=info["name"]
+                )
+
+        self._persist_disabled_cache(disabled_cache)
+        self._schedule_reload()
+        return await self.async_step_database(None)
+
+    async def async_step_setup_status(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Show final status screen after basic setup writes."""
+        if user_input is not None:
+            return self.async_abort(reason="setup_complete")
+
+        entry = self._get_entry()
+        enabled_names = [
+            FEATURE_DEFS[ft]["name"]
+            for ft in FEATURE_DEFS
+            if _feature_subentry(entry, ft) is not None
+        ]
+        db_ok = any(
+            s.subentry_type == SUBENTRY_TYPE_DATABASE for s in entry.subentries.values()
+        )
+        skipped_names = [
+            FEATURE_DEFS[ft]["name"] for ft in self._basic_skipped_features
+        ]
+        skipped_section = (
+            f"\n\n**Skipped (no compatible provider):** {', '.join(skipped_names)}"
+            if skipped_names
+            else ""
+        )
+        return self.async_show_form(
+            step_id="setup_status",
+            data_schema=vol.Schema({}),
+            description_placeholders={
+                "features_enabled": (
+                    ", ".join(enabled_names) if enabled_names else "None"
+                ),
+                "database_status": "Configured" if db_ok else "Not configured",
+                "skipped_section": skipped_section,
+            },
+        )
 
     async def async_step_feature_enable(
         self, user_input: dict[str, Any] | None = None
@@ -822,6 +944,8 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
             )
         self._schedule_reload()
 
+        if self._basic_mode:
+            return await self.async_step_setup_status()
         if not _provider_options(entry, "chat"):
             return await self.async_step_instructions()
         return self.async_abort(reason="setup_complete")
