@@ -1314,6 +1314,48 @@ async def test_feature_new_setup_shows_mode_selector(hass: HomeAssistant) -> Non
 
 
 @pytest.mark.asyncio
+async def test_feature_mode_selector_shows_overwrite_warning_when_features_exist(
+    hass: HomeAssistant,
+) -> None:
+    """Mode selector includes overwrite warning when feature subentries already exist."""
+    provider = DummySubentry(
+        "prov1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Provider",
+        {"provider_type": "openai", "capabilities": ["chat"]},
+    )
+    existing_feature = DummySubentry(
+        "feat1",
+        SUBENTRY_TYPE_FEATURE,
+        "Conversation",
+        {"feature_type": "conversation", "model_provider_id": "prov1"},
+    )
+    entry = DummyEntry()
+    entry.subentries = {
+        provider.subentry_id: provider,
+        existing_feature.subentry_id: existing_feature,
+    }
+    flow = _make_feature_flow_for_basic(hass, entry)
+
+    result = await flow.async_step_user()
+    placeholders = result.get("description_placeholders") or {}
+    assert placeholders.get("overwrite_warning") != ""
+
+
+@pytest.mark.asyncio
+async def test_feature_mode_selector_no_warning_when_no_features_exist(
+    hass: HomeAssistant,
+) -> None:
+    """Mode selector has an empty overwrite_warning when no feature subentries exist."""
+    entry = DummyEntry()
+    flow = _make_feature_flow_for_basic(hass, entry)
+
+    result = await flow.async_step_user()
+    placeholders = result.get("description_placeholders") or {}
+    assert placeholders.get("overwrite_warning") == ""
+
+
+@pytest.mark.asyncio
 async def test_feature_basic_setup_creates_all_features(hass: HomeAssistant) -> None:
     """Basic setup creates feature subentries for all three features when a compatible provider exists."""
     provider = DummySubentry(

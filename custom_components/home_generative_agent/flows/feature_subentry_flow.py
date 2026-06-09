@@ -276,6 +276,18 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
     ) -> SubentryFlowResult:
         """Show Basic/Advanced mode selector for new setup."""
         if user_input is None:
+            entry = self._get_entry()
+            has_existing = any(
+                s.subentry_type == SUBENTRY_TYPE_FEATURE
+                for s in entry.subentries.values()
+            )
+            overwrite_warning = (
+                "\n\n⚠️ Features are already configured. "
+                "Choosing **Basic setup** will overwrite your current "
+                "provider assignments with recommended defaults."
+                if has_existing
+                else ""
+            )
             return self.async_show_form(
                 step_id="setup_mode",
                 data_schema=vol.Schema(
@@ -297,6 +309,7 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
                         )
                     }
                 ),
+                description_placeholders={"overwrite_warning": overwrite_warning},
             )
         self._setup_mode = True
         if user_input.get("setup_mode", "basic") == "basic":

@@ -219,7 +219,7 @@
       "step": {
         "setup_mode": {
           "title": "Setup",
-          "description": "Choose a setup type. Basic setup enables all features with recommended defaults. Advanced setup gives you full control over each feature.",
+          "description": "Choose a setup type. Basic setup enables all features with recommended defaults. Advanced setup gives you full control over each feature.{overwrite_warning}",
           "data": {
             "setup_mode": "Setup type"
           }
