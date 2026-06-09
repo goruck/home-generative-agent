@@ -436,13 +436,9 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
                 enabled = _feature_subentry(entry, feature_type) is not None
                 if feature_type in disabled_cache:
                     enabled = False
-                schema_dict[
-                    vol.Optional(
-                        feature_type,
-                        default=enabled,
-                        description={"suggested_value": enabled},
-                    )
-                ] = BooleanSelector()
+                schema_dict[vol.Required(feature_type, default=enabled)] = (
+                    BooleanSelector()
+                )
             return self.async_show_form(
                 step_id="feature_enable", data_schema=vol.Schema(schema_dict)
             )
