@@ -431,10 +431,11 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
         if user_input is None:
             schema_dict: dict[Any, Any] = {}
             for feature_type, info in FEATURE_DEFS.items():
-                if info["required"]:
-                    continue
-                enabled = _feature_subentry(entry, feature_type) is not None
-                if feature_type in disabled_cache:
+                is_required = info["required"]
+                enabled = (
+                    is_required or _feature_subentry(entry, feature_type) is not None
+                )
+                if not is_required and feature_type in disabled_cache:
                     enabled = False
                 schema_dict[vol.Required(feature_type, default=enabled)] = (
                     BooleanSelector()
@@ -444,11 +445,10 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
             )
 
         cache = self._disabled_feature_cache()
-        enabled_features = {"conversation"}
+        enabled_features: set[str] = set()
         for feature_type, info in FEATURE_DEFS.items():
-            if info["required"]:
-                continue
-            enabled = bool(user_input.get(feature_type, False))
+            is_required = info["required"]
+            enabled = is_required or bool(user_input.get(feature_type, False))
             if enabled:
                 enabled_features.add(feature_type)
             existing = _feature_subentry(entry, feature_type)
