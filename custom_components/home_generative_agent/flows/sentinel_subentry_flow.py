@@ -97,14 +97,13 @@ def _current_subentry(flow: ConfigSubentryFlow) -> ConfigSubentry | None:
         subentry_id = flow.context.get("subentry_id")
     if subentry_id:
         return entry.subentries.get(subentry_id)
-    if flow.source == SOURCE_RECONFIGURE:
-        matches = [
-            subentry
-            for subentry in entry.subentries.values()
-            if subentry.subentry_type == SUBENTRY_TYPE_SENTINEL
-        ]
-        if len(matches) == 1:
-            return matches[0]
+    matches = [
+        subentry
+        for subentry in entry.subentries.values()
+        if subentry.subentry_type == SUBENTRY_TYPE_SENTINEL
+    ]
+    if len(matches) == 1:
+        return matches[0]
     return None
 
 
