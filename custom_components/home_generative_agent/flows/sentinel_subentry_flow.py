@@ -96,7 +96,12 @@ def _current_subentry(flow: ConfigSubentryFlow) -> ConfigSubentry | None:
     if not subentry_id:
         subentry_id = flow.context.get("subentry_id")
     if subentry_id:
-        return entry.subentries.get(subentry_id)
+        # For reconfigure flows this will find the subentry being edited.
+        # For user flows HA pre-generates a UUID that doesn't exist yet, so
+        # the get() returns None and we fall through to the type scan below.
+        found = entry.subentries.get(subentry_id)
+        if found is not None:
+            return found
     matches = [
         subentry
         for subentry in entry.subentries.values()
