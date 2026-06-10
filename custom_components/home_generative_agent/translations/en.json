@@ -152,7 +152,7 @@
       "step": {
         "setup_mode": {
           "title": "Sentinel Setup",
-          "description": "Choose how to configure Sentinel monitoring.",
+          "description": "Choose how to configure Sentinel monitoring.{overwrite_warning}",
           "data": {
             "setup_mode": "Setup type"
           }

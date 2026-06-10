@@ -1604,6 +1604,7 @@ def _make_sentinel_flow_for_mode(hass: Any, entry: DummyEntry) -> SentinelSubent
         "step_id": kwargs.get("step_id"),
         "data_schema": kwargs["data_schema"],
         "errors": kwargs.get("errors"),
+        "description_placeholders": kwargs.get("description_placeholders"),
     }
     flow.async_create_entry = lambda **kwargs: {  # type: ignore[assignment]
         "type": "create_entry",
@@ -1628,6 +1629,39 @@ async def test_sentinel_new_setup_shows_mode_selector(hass: HomeAssistant) -> No
     result = await flow.async_step_user()
     assert result.get("type") == "form"
     assert result.get("step_id") == "setup_mode"
+
+
+@pytest.mark.asyncio
+async def test_sentinel_mode_selector_shows_overwrite_warning_when_configured(
+    hass: HomeAssistant,
+) -> None:
+    """Mode selector includes overwrite warning when a Sentinel subentry already exists."""
+    existing = DummySubentry(
+        "sent1",
+        SUBENTRY_TYPE_SENTINEL,
+        "Sentinel",
+        {CONF_SENTINEL_ENABLED: True},
+    )
+    entry = DummyEntry()
+    entry.subentries[existing.subentry_id] = existing
+    flow = _make_sentinel_flow_for_mode(hass, entry)
+
+    result = await flow.async_step_user()
+    placeholders = result.get("description_placeholders") or {}
+    assert placeholders.get("overwrite_warning") != ""
+
+
+@pytest.mark.asyncio
+async def test_sentinel_mode_selector_no_warning_when_not_configured(
+    hass: HomeAssistant,
+) -> None:
+    """Mode selector has an empty overwrite_warning when no Sentinel subentry exists."""
+    entry = DummyEntry()
+    flow = _make_sentinel_flow_for_mode(hass, entry)
+
+    result = await flow.async_step_user()
+    placeholders = result.get("description_placeholders") or {}
+    assert placeholders.get("overwrite_warning") == ""
 
 
 @pytest.mark.asyncio
