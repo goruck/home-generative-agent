@@ -292,6 +292,9 @@ def _apply_sentinel_options(
     if sentinel_subentry is None:
         for key, value in sentinel_defaults.items():
             options.setdefault(key, value)
+        # No subentry → Sentinel is not configured; force disabled so that tasks
+        # are not restarted after the subentry is deleted and the entry reloads.
+        options[CONF_SENTINEL_ENABLED] = False
         return
 
     data = dict(sentinel_subentry.data)

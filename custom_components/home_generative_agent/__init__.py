@@ -17,7 +17,12 @@ import voluptuous as vol
 from homeassistant.components import media_source
 from homeassistant.components.camera.const import DOMAIN as CAMERA_DOMAIN
 from homeassistant.components.http import StaticPathConfig
-from homeassistant.config_entries import ConfigEntry, ConfigSubentry
+from homeassistant.config_entries import (
+    SIGNAL_CONFIG_ENTRY_CHANGED,
+    ConfigEntry,
+    ConfigEntryChange,
+    ConfigSubentry,
+)
 from homeassistant.const import (
     CONF_API_KEY,
     CONF_HOST,
@@ -29,10 +34,13 @@ from homeassistant.const import (
     EVENT_HOMEASSISTANT_STOP,
     Platform,
 )
-from homeassistant.core import HomeAssistant, SupportsResponse
+from homeassistant.core import HomeAssistant, SupportsResponse, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.helpers.dispatcher import (
+    async_dispatcher_connect,
+    async_dispatcher_send,
+)
 from homeassistant.helpers.httpx_client import get_async_client
 from homeassistant.helpers.network import get_url
 from homeassistant.helpers.target import (
@@ -992,40 +1000,6 @@ def _assign_first_provider_if_needed(hass: HomeAssistant, entry: ConfigEntry) ->
         )
 
 
-def _ensure_default_sentinel_subentry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Ensure a singleton sentinel subentry exists for deterministic settings."""
-    exists = any(
-        s.subentry_type == SUBENTRY_TYPE_SENTINEL for s in entry.subentries.values()
-    )
-    if exists:
-        return
-
-    payload = {
-        CONF_SENTINEL_ENABLED: RECOMMENDED_SENTINEL_ENABLED,
-        CONF_SENTINEL_INTERVAL_SECONDS: RECOMMENDED_SENTINEL_INTERVAL_SECONDS,
-        CONF_SENTINEL_COOLDOWN_MINUTES: RECOMMENDED_SENTINEL_COOLDOWN_MINUTES,
-        CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES: (
-            RECOMMENDED_SENTINEL_ENTITY_COOLDOWN_MINUTES
-        ),
-        CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES: (
-            RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES
-        ),
-        CONF_SENTINEL_DISCOVERY_ENABLED: RECOMMENDED_SENTINEL_DISCOVERY_ENABLED,
-        CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS: (
-            RECOMMENDED_SENTINEL_DISCOVERY_INTERVAL_SECONDS
-        ),
-        CONF_SENTINEL_DISCOVERY_MAX_RECORDS: RECOMMENDED_SENTINEL_DISCOVERY_MAX_RECORDS,
-        CONF_EXPLAIN_ENABLED: RECOMMENDED_EXPLAIN_ENABLED,
-    }
-    subentry = ConfigSubentry(
-        subentry_type=SUBENTRY_TYPE_SENTINEL,
-        title="Sentinel",
-        unique_id=f"{entry.entry_id}_sentinel",
-        data=MappingProxyType(payload),
-    )
-    hass.config_entries.async_add_subentry(entry, subentry)
-
-
 # Database and vector index bootstrapping.
 # store.setup() only runs the vector migrations when store.index_config is set.
 # If index_config is None (no embeddings configured yet), setup() runs only the
@@ -1294,7 +1268,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
     _register_services(hass, entry)
     _ensure_default_feature_subentries(hass, entry)
-    _ensure_default_sentinel_subentry(hass, entry)
     _assign_first_provider_if_needed(hass, entry)
 
     # Resolve effective options (data + options + subentries).
@@ -3112,6 +3085,58 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         _handle_sentinel_reset_baseline,
         schema=SENTINEL_RESET_BASELINE_SCHEMA,
         supports_response=_SERVICE_RESPONSE_ONLY,
+    )
+
+    # Reload whenever a Sentinel subentry is added, updated, or removed so that
+    # tasks started during setup are stopped or started to match the current
+    # subentry configuration.
+    #
+    # We use SIGNAL_CONFIG_ENTRY_CHANGED (dispatcher) rather than
+    # entry.add_update_listener because OptionsFlowWithReload forbids update
+    # listeners and raises ValueError when the options flow completes.
+    #
+    # SIGNAL_CONFIG_ENTRY_CHANGED fires for all entry mutations AND for every
+    # entry state transition (setup-in-progress → loaded, etc.) via
+    # ConfigEntry._async_set_state.  Reacting to state transitions would create
+    # an infinite reload loop.  Guard by snapshotting {subentry_id: dict(data)}
+    # at setup time; state transitions never alter subentry data.
+    _sentinel_snapshot: dict[str, dict[str, object]] = {
+        s.subentry_id: dict(s.data)
+        for s in entry.subentries.values()
+        if s.subentry_type == SUBENTRY_TYPE_SENTINEL
+    }
+
+    @callback
+    def _on_entry_changed(
+        change_type: ConfigEntryChange, changed_entry: HGAConfigEntry
+    ) -> None:
+        if changed_entry.entry_id != entry.entry_id:
+            return
+        if change_type != ConfigEntryChange.UPDATED:
+            return
+        current_snapshot = {
+            s.subentry_id: dict(s.data)
+            for s in changed_entry.subentries.values()
+            if s.subentry_type == SUBENTRY_TYPE_SENTINEL
+        }
+        if current_snapshot == _sentinel_snapshot:
+            return
+        # Sentinel subentry was added, removed, or its data changed.
+        # When removed, stop tasks immediately before the reload unloads the entry.
+        if not current_snapshot:
+            rd = changed_entry.runtime_data
+            if rd.sentinel is not None:
+                hass.async_create_task(rd.sentinel.stop())
+            if rd.baseline_updater is not None:
+                hass.async_create_task(rd.baseline_updater.stop())
+            if rd.discovery_engine is not None:
+                hass.async_create_task(rd.discovery_engine.stop())
+            if rd.notifier is not None:
+                rd.notifier.stop()
+        hass.config_entries.async_schedule_reload(entry.entry_id)
+
+    entry.async_on_unload(
+        async_dispatcher_connect(hass, SIGNAL_CONFIG_ENTRY_CHANGED, _on_entry_changed)
     )
 
     return True

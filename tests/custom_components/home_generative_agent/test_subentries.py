@@ -52,6 +52,7 @@ from custom_components.home_generative_agent.const import (
     DOMAIN,
     MODEL_CATEGORY_SPECS,
     RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
+    SUBENTRY_TYPE_DATABASE,
     SUBENTRY_TYPE_FEATURE,
     SUBENTRY_TYPE_MODEL_PROVIDER,
     SUBENTRY_TYPE_SENTINEL,
@@ -502,6 +503,13 @@ def test_legacy_ollama_urls_split_providers() -> None:
     assert options[CONF_OLLAMA_CHAT_URL] == "http://ollama-chat:11434"
     assert options[CONF_OLLAMA_VLM_URL] == "http://ollama-vlm:11434"
     assert options[CONF_OLLAMA_SUMMARIZATION_URL] == "http://ollama-sum:11434"
+
+
+def test_resolve_runtime_options_no_sentinel_subentry_disables_sentinel() -> None:
+    """When no Sentinel subentry exists, CONF_SENTINEL_ENABLED must be False."""
+    entry = DummyEntry(options={})
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_SENTINEL_ENABLED] is False
 
 
 def test_resolve_runtime_options_prefers_sentinel_subentry() -> None:
@@ -1257,3 +1265,560 @@ def test_build_model_deployments_anthropic_returns_cloud() -> None:
     assert result.get("chat") == "cloud"
     assert result.get("vlm") == "cloud"
     assert result.get("summarization") == "cloud"
+
+
+# ---------------------------------------------------------------------------
+# Basic and Advanced setup mode — feature flow (Issue #433)
+# ---------------------------------------------------------------------------
+
+
+def _make_feature_flow_for_basic(hass: Any, entry: DummyEntry) -> FeatureSubentryFlow:
+    """Return a FeatureSubentryFlow patched for basic-setup tests."""
+    flow = FeatureSubentryFlow()
+    flow.hass = hass
+    flow.async_show_form = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "form",
+        "step_id": kwargs.get("step_id"),
+        "data_schema": kwargs["data_schema"],
+        "errors": kwargs.get("errors"),
+        "description_placeholders": kwargs.get("description_placeholders"),
+    }
+    flow.async_abort = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "abort",
+        "reason": kwargs.get("reason"),
+    }
+    flow._schedule_reload = lambda: None  # type: ignore[assignment]
+    _patch_entry(flow, entry)
+
+    def _add_subentry(_entry: Any, subentry: Any) -> None:
+        entry.subentries[subentry.subentry_id] = subentry
+
+    def _update_subentry(
+        _entry: Any, subentry: Any, data: Any = None, **_kw: Any
+    ) -> None:
+        if data is not None:
+            subentry.data = dict(data)
+
+    def _update_entry(_entry: Any, **kwargs: Any) -> None:
+        if "options" in kwargs:
+            _entry.options = kwargs["options"]
+
+    flow.hass.config_entries.async_add_subentry = _add_subentry  # type: ignore[assignment]
+    flow.hass.config_entries.async_update_subentry = _update_subentry  # type: ignore[assignment]
+    flow.hass.config_entries.async_update_entry = _update_entry  # type: ignore[assignment]
+    return flow
+
+
+@pytest.mark.asyncio
+async def test_feature_new_setup_shows_mode_selector(hass: HomeAssistant) -> None:
+    """New setup shows the Basic/Advanced mode selector."""
+    entry = DummyEntry()
+    flow = _make_feature_flow_for_basic(hass, entry)
+
+    result = await flow.async_step_user()
+    assert result.get("type") == "form"
+    assert result.get("step_id") == "setup_mode"
+
+
+@pytest.mark.asyncio
+async def test_feature_mode_selector_shows_overwrite_warning_when_features_exist(
+    hass: HomeAssistant,
+) -> None:
+    """Mode selector includes overwrite warning when feature subentries already exist."""
+    provider = DummySubentry(
+        "prov1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Provider",
+        {"provider_type": "openai", "capabilities": ["chat"]},
+    )
+    existing_feature = DummySubentry(
+        "feat1",
+        SUBENTRY_TYPE_FEATURE,
+        "Conversation",
+        {"feature_type": "conversation", "model_provider_id": "prov1"},
+    )
+    entry = DummyEntry()
+    entry.subentries = {
+        provider.subentry_id: provider,
+        existing_feature.subentry_id: existing_feature,
+    }
+    flow = _make_feature_flow_for_basic(hass, entry)
+
+    result = await flow.async_step_user()
+    placeholders = result.get("description_placeholders") or {}
+    assert placeholders.get("overwrite_warning") != ""
+
+
+@pytest.mark.asyncio
+async def test_feature_mode_selector_no_warning_when_no_features_exist(
+    hass: HomeAssistant,
+) -> None:
+    """Mode selector has an empty overwrite_warning when no feature subentries exist."""
+    entry = DummyEntry()
+    flow = _make_feature_flow_for_basic(hass, entry)
+
+    result = await flow.async_step_user()
+    placeholders = result.get("description_placeholders") or {}
+    assert placeholders.get("overwrite_warning") == ""
+
+
+@pytest.mark.asyncio
+async def test_feature_basic_setup_creates_all_features(hass: HomeAssistant) -> None:
+    """Basic setup creates feature subentries for all three features when a compatible provider exists."""
+    provider = DummySubentry(
+        "prov1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "All-in-one Provider",
+        {"provider_type": "openai", "capabilities": ["chat", "vlm", "summarization"]},
+    )
+    entry = DummyEntry()
+    entry.subentries[provider.subentry_id] = provider
+
+    flow = _make_feature_flow_for_basic(hass, entry)
+
+    await flow.async_step_user()
+    result = await flow.async_step_setup_mode({"setup_mode": "basic"})
+
+    # Basic setup skips the database form and shows the status screen directly.
+    assert result.get("type") == "form"
+    assert result.get("step_id") == "setup_status"
+
+    feature_types = {
+        s.data.get("feature_type")
+        for s in entry.subentries.values()
+        if s.subentry_type == SUBENTRY_TYPE_FEATURE
+    }
+    assert feature_types == {
+        "conversation",
+        "camera_image_analysis",
+        "conversation_summary",
+    }
+
+    # A database subentry with default credentials was created.
+    db_subentry = next(
+        (
+            s
+            for s in entry.subentries.values()
+            if s.subentry_type == SUBENTRY_TYPE_DATABASE
+        ),
+        None,
+    )
+    assert db_subentry is not None
+
+
+@pytest.mark.asyncio
+async def test_feature_basic_setup_assigns_first_compatible_provider(
+    hass: HomeAssistant,
+) -> None:
+    """Basic setup assigns the first provider in entry.subentries.values() order."""
+    prov_a = DummySubentry(
+        "prov_a",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Provider A",
+        {"provider_type": "openai", "capabilities": ["chat", "vlm", "summarization"]},
+    )
+    prov_b = DummySubentry(
+        "prov_b",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Provider B",
+        {"provider_type": "openai", "capabilities": ["chat", "vlm", "summarization"]},
+    )
+    entry = DummyEntry()
+    entry.subentries["prov_a"] = prov_a
+    entry.subentries["prov_b"] = prov_b
+
+    flow = _make_feature_flow_for_basic(hass, entry)
+
+    await flow.async_step_setup_mode({"setup_mode": "basic"})
+
+    conversation_subentry = next(
+        (
+            s
+            for s in entry.subentries.values()
+            if s.subentry_type == SUBENTRY_TYPE_FEATURE
+            and s.data.get("feature_type") == "conversation"
+        ),
+        None,
+    )
+    assert conversation_subentry is not None
+    assert conversation_subentry.data.get("model_provider_id") == "prov_a"
+
+
+@pytest.mark.asyncio
+async def test_feature_basic_setup_skips_camera_without_vlm_provider(
+    hass: HomeAssistant,
+) -> None:
+    """Basic setup skips Camera Image Analysis when no VLM-capable provider exists."""
+    chat_only = DummySubentry(
+        "chat1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Chat Only",
+        {"provider_type": "openai", "capabilities": ["chat", "summarization"]},
+    )
+    entry = DummyEntry()
+    entry.subentries[chat_only.subentry_id] = chat_only
+
+    flow = _make_feature_flow_for_basic(hass, entry)
+
+    await flow.async_step_setup_mode({"setup_mode": "basic"})
+
+    feature_types = {
+        s.data.get("feature_type")
+        for s in entry.subentries.values()
+        if s.subentry_type == SUBENTRY_TYPE_FEATURE
+    }
+    assert "camera_image_analysis" not in feature_types
+    assert "conversation" in feature_types
+    assert "camera_image_analysis" in flow._basic_skipped_features
+
+
+@pytest.mark.asyncio
+async def test_feature_basic_setup_aborts_when_no_providers(
+    hass: HomeAssistant,
+) -> None:
+    """Basic setup aborts with no_provider_for_basic_setup when no providers exist."""
+    entry = DummyEntry()
+    flow = _make_feature_flow_for_basic(hass, entry)
+
+    result = await flow.async_step_setup_mode({"setup_mode": "basic"})
+
+    assert result.get("type") == "abort"
+    assert result.get("reason") == "no_provider_for_basic_setup"
+
+
+@pytest.mark.asyncio
+async def test_feature_basic_setup_status_screen(hass: HomeAssistant) -> None:
+    """Basic setup status screen shows feature and database status after writes."""
+    provider = DummySubentry(
+        "prov1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Provider",
+        {"provider_type": "openai", "capabilities": ["chat", "vlm", "summarization"]},
+    )
+    db_subentry = DummySubentry(
+        "db1",
+        SUBENTRY_TYPE_DATABASE,
+        "Database",
+        {"username": "user"},
+    )
+    feature_subentry = DummySubentry(
+        "feat1",
+        SUBENTRY_TYPE_FEATURE,
+        "Conversation",
+        {"feature_type": "conversation"},
+    )
+    entry = DummyEntry()
+    entry.subentries = {
+        provider.subentry_id: provider,
+        db_subentry.subentry_id: db_subentry,
+        feature_subentry.subentry_id: feature_subentry,
+    }
+
+    flow = _make_feature_flow_for_basic(hass, entry)
+    flow._basic_mode = True
+    flow._basic_skipped_features = ["camera_image_analysis"]
+
+    result = await flow.async_step_setup_status(None)
+
+    assert result.get("type") == "form"
+    assert result.get("step_id") == "setup_status"
+    placeholders = result.get("description_placeholders") or {}
+    assert "Conversation" in placeholders.get("features_enabled", "")
+    assert "Configured" in placeholders.get("database_status", "")
+    assert "Camera Image Analysis" in placeholders.get("skipped_section", "")
+
+    # Submitting the form aborts with setup_complete.
+    done = await flow.async_step_setup_status({})
+    assert done.get("type") == "abort"
+    assert done.get("reason") == "setup_complete"
+
+
+@pytest.mark.asyncio
+async def test_feature_reconfigure_bypasses_mode_selector(
+    hass: HomeAssistant,
+) -> None:
+    """async_step_reconfigure goes directly to the Advanced path, not the mode selector."""
+    provider = DummySubentry(
+        "prov1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Provider",
+        {"provider_type": "openai", "capabilities": ["chat"]},
+    )
+    feature = DummySubentry(
+        "feat1",
+        SUBENTRY_TYPE_FEATURE,
+        "Conversation",
+        {"feature_type": "conversation", "model_provider_id": "prov1"},
+    )
+    entry = DummyEntry()
+    entry.subentries = {
+        provider.subentry_id: provider,
+        feature.subentry_id: feature,
+    }
+
+    flow = _make_feature_flow_for_basic(hass, entry)
+    flow.context["subentry_id"] = feature.subentry_id
+
+    result = await flow.async_step_reconfigure()
+
+    assert result.get("type") == "form"
+    assert result.get("step_id") != "setup_mode"
+
+
+@pytest.mark.asyncio
+async def test_feature_advanced_mode_reaches_feature_enable(
+    hass: HomeAssistant,
+) -> None:
+    """Selecting Advanced setup routes to the feature_enable form."""
+    provider = DummySubentry(
+        "prov1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Provider",
+        {"provider_type": "openai", "capabilities": ["chat"]},
+    )
+    feature = DummySubentry(
+        "feat1",
+        SUBENTRY_TYPE_FEATURE,
+        "Conversation",
+        {"feature_type": "conversation", "model_provider_id": "prov1"},
+    )
+    entry = DummyEntry()
+    entry.subentries = {
+        provider.subentry_id: provider,
+        feature.subentry_id: feature,
+    }
+
+    flow = _make_feature_flow_for_basic(hass, entry)
+
+    await flow.async_step_user()
+    result = await flow.async_step_setup_mode({"setup_mode": "advanced"})
+
+    assert result.get("type") == "form"
+    assert result.get("step_id") == "feature_enable"
+
+
+# ---------------------------------------------------------------------------
+# Basic and Advanced setup mode — Sentinel flow (Issue #433)
+# ---------------------------------------------------------------------------
+
+
+def _make_sentinel_flow_for_mode(hass: Any, entry: DummyEntry) -> SentinelSubentryFlow:
+    """Return a SentinelSubentryFlow patched for mode-selector tests."""
+    flow = SentinelSubentryFlow()
+    flow.hass = hass
+    flow.async_show_form = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "form",
+        "step_id": kwargs.get("step_id"),
+        "data_schema": kwargs["data_schema"],
+        "errors": kwargs.get("errors"),
+        "description_placeholders": kwargs.get("description_placeholders"),
+    }
+    flow.async_create_entry = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "create_entry",
+        "title": kwargs.get("title"),
+        "data": kwargs.get("data"),
+    }
+    flow.async_abort = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "abort",
+        "reason": kwargs.get("reason"),
+    }
+    flow._schedule_reload = lambda: None  # type: ignore[assignment]
+    _patch_entry(flow, entry)
+    return flow
+
+
+@pytest.mark.asyncio
+async def test_sentinel_new_setup_shows_mode_selector(hass: HomeAssistant) -> None:
+    """New Sentinel setup shows the Basic/Advanced mode selector."""
+    entry = DummyEntry()
+    flow = _make_sentinel_flow_for_mode(hass, entry)
+
+    result = await flow.async_step_user()
+    assert result.get("type") == "form"
+    assert result.get("step_id") == "setup_mode"
+
+
+@pytest.mark.asyncio
+async def test_sentinel_mode_selector_shows_overwrite_warning_when_configured(
+    hass: HomeAssistant,
+) -> None:
+    """Mode selector includes overwrite warning when a Sentinel subentry already exists."""
+    existing = DummySubentry(
+        "sent1",
+        SUBENTRY_TYPE_SENTINEL,
+        "Sentinel",
+        {CONF_SENTINEL_ENABLED: True},
+    )
+    entry = DummyEntry()
+    entry.subentries[existing.subentry_id] = existing
+    flow = _make_sentinel_flow_for_mode(hass, entry)
+
+    result = await flow.async_step_user()
+    placeholders = result.get("description_placeholders") or {}
+    assert placeholders.get("overwrite_warning") != ""
+
+
+@pytest.mark.asyncio
+async def test_sentinel_mode_selector_no_warning_when_not_configured(
+    hass: HomeAssistant,
+) -> None:
+    """Mode selector has an empty overwrite_warning when no Sentinel subentry exists."""
+    entry = DummyEntry()
+    flow = _make_sentinel_flow_for_mode(hass, entry)
+
+    result = await flow.async_step_user()
+    placeholders = result.get("description_placeholders") or {}
+    assert placeholders.get("overwrite_warning") == ""
+
+
+@pytest.mark.asyncio
+async def test_sentinel_basic_setup_stores_defaults_plus_user_fields(
+    hass: HomeAssistant,
+) -> None:
+    """Sentinel Basic setup stores _default_payload() values plus the user-provided fields."""
+    entry = DummyEntry()
+    flow = _make_sentinel_flow_for_mode(hass, entry)
+
+    await flow.async_step_setup_mode({"setup_mode": "basic"})
+    result = await flow.async_step_basic_settings(
+        {
+            CONF_SENTINEL_ENABLED: False,
+            CONF_SENTINEL_DAILY_DIGEST_ENABLED: True,
+            CONF_SENTINEL_DAILY_DIGEST_TIME: "07:00:00",
+        }
+    )
+
+    assert result.get("type") == "create_entry"
+    data = result.get("data")
+    assert data is not None
+    assert data[CONF_SENTINEL_ENABLED] is False
+    assert data[CONF_SENTINEL_DAILY_DIGEST_ENABLED] is True
+    assert data[CONF_SENTINEL_DAILY_DIGEST_TIME] == "07:00:00"
+    # All default-payload keys must also be present.
+    defaults = _default_payload()
+    for key in defaults:
+        assert key in data, f"missing default key in basic settings result: {key}"
+
+
+@pytest.mark.asyncio
+async def test_sentinel_basic_setup_rejects_invalid_pin(hass: HomeAssistant) -> None:
+    """Sentinel Basic setup returns an error for a non-digit PIN."""
+    entry = DummyEntry()
+    flow = _make_sentinel_flow_for_mode(hass, entry)
+
+    await flow.async_step_setup_mode({"setup_mode": "basic"})
+    result = await flow.async_step_basic_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_DAILY_DIGEST_ENABLED: False,
+            CONF_SENTINEL_DAILY_DIGEST_TIME: "08:00:00",
+            CONF_CRITICAL_ACTION_PIN: "abc",
+        }
+    )
+    assert result.get("type") == "form"
+    assert (result.get("errors") or {}).get("base") == "invalid_pin"
+
+
+@pytest.mark.asyncio
+async def test_sentinel_advanced_setup_still_works(hass: HomeAssistant) -> None:
+    """Selecting Advanced setup routes to the full settings form."""
+    entry = DummyEntry()
+    flow = _make_sentinel_flow_for_mode(hass, entry)
+
+    await flow.async_step_user()
+    result = await flow.async_step_setup_mode({"setup_mode": "advanced"})
+
+    assert result.get("type") == "form"
+    assert result.get("step_id") == "settings"
+
+
+@pytest.mark.asyncio
+async def test_sentinel_reconfigure_bypasses_mode_selector(
+    hass: HomeAssistant,
+) -> None:
+    """async_step_reconfigure goes directly to the full settings form."""
+    sentinel_sub = DummySubentry(
+        "sentinel1",
+        SUBENTRY_TYPE_SENTINEL,
+        "Sentinel",
+        {CONF_SENTINEL_ENABLED: True},
+    )
+    entry = DummyEntry()
+    entry.subentries[sentinel_sub.subentry_id] = sentinel_sub
+
+    flow = _make_sentinel_flow_for_mode(hass, entry)
+
+    result = await flow.async_step_reconfigure()
+
+    assert result.get("type") == "form"
+    assert result.get("step_id") != "setup_mode"
+
+
+@pytest.mark.asyncio
+async def test_sentinel_user_flow_updates_existing_not_duplicate(
+    hass: HomeAssistant,
+) -> None:
+    """User flow with an existing Sentinel subentry updates it, not create a duplicate."""
+    existing = DummySubentry(
+        "sentinel1",
+        SUBENTRY_TYPE_SENTINEL,
+        "Sentinel",
+        {CONF_SENTINEL_ENABLED: True},
+    )
+    entry = DummyEntry()
+    entry.subentries[existing.subentry_id] = existing
+
+    flow = _make_sentinel_flow_for_mode(hass, entry)
+    update_calls: list[Any] = []
+    flow.async_update_and_abort = lambda *args, **_kwargs: (  # type: ignore[assignment]
+        update_calls.append(args)
+        or {"type": "abort", "reason": "reconfigure_successful"}
+    )
+
+    await flow.async_step_setup_mode({"setup_mode": "advanced"})
+    # Minimal user_input — schema validation is bypassed in unit tests
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            CONF_SENTINEL_DAILY_DIGEST_ENABLED: False,
+            CONF_SENTINEL_DAILY_DIGEST_TIME: "08:00:00",
+            CONF_SENTINEL_CAMERA_ENTRY_LINKS: "{}",
+        }
+    )
+
+    assert result.get("type") == "abort", "expected update-and-abort, not create_entry"
+    assert len(update_calls) == 1, "async_update_and_abort should be called once"
+
+
+@pytest.mark.asyncio
+async def test_sentinel_user_flow_with_duplicate_sentinels_updates_first(
+    hass: HomeAssistant,
+) -> None:
+    """User flow with multiple Sentinel subentries updates the first, adds no more."""
+    sub1 = DummySubentry("sent1", SUBENTRY_TYPE_SENTINEL, "Sentinel", {})
+    sub2 = DummySubentry("sent2", SUBENTRY_TYPE_SENTINEL, "Sentinel", {})
+    entry = DummyEntry()
+    entry.subentries[sub1.subentry_id] = sub1
+    entry.subentries[sub2.subentry_id] = sub2
+
+    flow = _make_sentinel_flow_for_mode(hass, entry)
+    update_calls: list[Any] = []
+    flow.async_update_and_abort = lambda *args, **_kwargs: (  # type: ignore[assignment]
+        update_calls.append(args)
+        or {"type": "abort", "reason": "reconfigure_successful"}
+    )
+
+    await flow.async_step_setup_mode({"setup_mode": "basic"})
+    result = await flow.async_step_basic_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_DAILY_DIGEST_ENABLED: False,
+            CONF_SENTINEL_DAILY_DIGEST_TIME: "08:00:00",
+        }
+    )
+
+    assert result.get("type") == "abort", (
+        "must update, not create, when duplicates exist"
+    )
+    assert len(update_calls) == 1

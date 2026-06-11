@@ -141,11 +141,33 @@
       "abort": {
         "reconfigure_successful": "Sentinel configuration updated."
       },
+      "error": {
+        "invalid_camera_entry_links": "Must be a JSON object mapping camera entity IDs to lists of entry entity IDs, e.g. {{\"camera.driveway\": [\"lock.front_door\"]}}.",
+        "invalid_pin": "PIN must be 4-10 digits."
+      },
       "initiate_flow": {
         "reconfigure": "Reconfigure Sentinel",
         "user": "Configure Sentinel"
       },
       "step": {
+        "setup_mode": {
+          "title": "Sentinel Setup",
+          "description": "Choose how to configure Sentinel monitoring.{overwrite_warning}",
+          "data": {
+            "setup_mode": "Setup type"
+          }
+        },
+        "basic_settings": {
+          "title": "Sentinel",
+          "description": "Configure the essential Sentinel settings. All other options use recommended defaults.",
+          "data": {
+            "sentinel_enabled": "Enable anomaly alerting",
+            "sentinel_daily_digest_enabled": "Enable daily digest notification",
+            "sentinel_daily_digest_time": "Daily digest time (HH:MM:SS)",
+            "critical_action_pin": "Level-increase PIN (optional, 4-10 digits)",
+            "notify_service": "Notify service (optional)"
+          }
+        },
         "settings": {
           "title": "Sentinel",
           "description": "Configure proactive Sentinel monitoring and discovery.",
@@ -174,16 +196,14 @@
             "notify_service": "Sentinel Notify Service (optional)"
           }
         }
-      },
-      "error": {
-        "invalid_camera_entry_links": "Must be a JSON object mapping camera entity IDs to lists of entry entity IDs, e.g. {{\"camera.driveway\": [\"lock.front_door\"]}}."
       }
     },
     "feature": {
       "entry_type": "service",
       "abort": {
         "reconfigure_successful": "Feature updated.",
-        "setup_complete": "Setup completed."
+        "setup_complete": "Setup completed.",
+        "no_provider_for_basic_setup": "No model provider is configured. Add a **Model Provider** first, then retry setup."
       },
       "error": {
         "no_providers": "No model providers are configured.",
@@ -197,9 +217,20 @@
         "user": "Setup"
       },
       "step": {
+        "setup_mode": {
+          "title": "Setup",
+          "description": "Choose a setup type. Basic setup enables all features with recommended defaults. Advanced setup gives you full control over each feature.{overwrite_warning}",
+          "data": {
+            "setup_mode": "Setup type"
+          }
+        },
+        "setup_status": {
+          "title": "Setup complete",
+          "description": "Setup is done.\n\n**Features enabled:** {features_enabled}{skipped_section}\n\n**Database:** {database_status}\n\n**Next steps:**\n- Run **Configure Sentinel** to enable anomaly monitoring.\n- Add an **STT Provider** for voice input.\n- Go to **Settings → Voice Assistants** to add Home Generative Agent as your voice assistant."
+        },
         "feature_enable": {
           "title": "Feature setup",
-          "description": "Enable or disable optional features.",
+          "description": "**Conversation** is always enabled. Enable or disable optional features below.",
           "data": {
             "camera_image_analysis": "Camera Image Analysis",
             "conversation_summary": "Conversation Summary"
