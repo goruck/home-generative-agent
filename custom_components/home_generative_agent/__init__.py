@@ -3087,17 +3087,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         supports_response=_SERVICE_RESPONSE_ONLY,
     )
 
-    # Reload whenever a subentry is added, updated, or removed so that tasks
-    # started during setup (sentinel, baseline, discovery) are stopped or
-    # started to match the current subentry configuration.  Without this,
-    # deleting a Sentinel subentry through the UI leaves background tasks
-    # running indefinitely.
+    # Reload whenever a Sentinel subentry is added, updated, or removed so that
+    # tasks started during setup are stopped or started to match the current
+    # subentry configuration.
     #
     # We use SIGNAL_CONFIG_ENTRY_CHANGED (dispatcher) rather than
     # entry.add_update_listener because OptionsFlowWithReload forbids update
-    # listeners on its config entry and raises ValueError when the options flow
-    # completes.  The dispatcher signal fires for all entry mutations (options
-    # and subentry changes alike) without registering to update_listeners.
+    # listeners and raises ValueError when the options flow completes.
+    #
+    # SIGNAL_CONFIG_ENTRY_CHANGED fires for all entry mutations AND for every
+    # entry state transition (setup-in-progress → loaded, etc.) via
+    # ConfigEntry._async_set_state.  Reacting to state transitions would create
+    # an infinite reload loop.  Guard by snapshotting {subentry_id: dict(data)}
+    # at setup time; state transitions never alter subentry data.
+    _sentinel_snapshot: dict[str, dict[str, object]] = {
+        s.subentry_id: dict(s.data)
+        for s in entry.subentries.values()
+        if s.subentry_type == SUBENTRY_TYPE_SENTINEL
+    }
+
     @callback
     def _on_entry_changed(
         change_type: ConfigEntryChange, changed_entry: HGAConfigEntry
@@ -3106,13 +3114,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             return
         if change_type != ConfigEntryChange.UPDATED:
             return
-        # When the Sentinel subentry is removed, stop its background tasks
-        # immediately rather than waiting for the reload to call async_unload_entry.
-        sentinel_present = any(
-            s.subentry_type == SUBENTRY_TYPE_SENTINEL
+        current_snapshot = {
+            s.subentry_id: dict(s.data)
             for s in changed_entry.subentries.values()
-        )
-        if not sentinel_present:
+            if s.subentry_type == SUBENTRY_TYPE_SENTINEL
+        }
+        if current_snapshot == _sentinel_snapshot:
+            return
+        # Sentinel subentry was added, removed, or its data changed.
+        # When removed, stop tasks immediately before the reload unloads the entry.
+        if not current_snapshot:
             rd = changed_entry.runtime_data
             if rd.sentinel is not None:
                 hass.async_create_task(rd.sentinel.stop())
