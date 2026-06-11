@@ -80,7 +80,7 @@ Click the button below to add the repository, then install and configure the app
 
 **4. Add the integration:** Settings → Devices & Services → Add Integration → search **Home Generative Agent** → complete the initial instruction screen.
 
-**5. Open the integration page and click + Setup.** Enable the features you want (Conversation is on by default) and complete the database configuration step.
+**5. Open the integration page and click + Setup.** Choose **Basic** to enable all features with recommended defaults (fastest path), or **Advanced** to configure each feature individually. Complete the database step when prompted.
 
 **6. Add a Model Provider:** on the integration page click **+ Model Provider** and configure OpenAI, Ollama, Gemini, Anthropic, or any OpenAI-compatible endpoint.
 

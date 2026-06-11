@@ -17,13 +17,19 @@ Configuration is done entirely in the Home Assistant UI using subentry flows. A 
 ## Basic Setup
 
 1. Open **Settings → Devices & Services → Home Generative Agent**.
-2. Click **+ Setup** to enable features and configure the database.
-   - Default features: Conversation, Camera Image Analysis, Conversation Summary.
-   - Each feature can be individually enabled and assigned its own model.
+2. Click **+ Setup** to enable features and configure the database. Choose a setup mode:
+   - **Basic** — enables all features (Conversation, Camera Image Analysis, Conversation Summary) with recommended defaults. Completes in one screen plus a database step.
+   - **Advanced** — step through each feature individually to assign providers, models, and fallback chains.
 3. Click **+ Model Provider** to add a provider (Cloud or Edge → provider type → credentials → model defaults).
    - The first provider added is automatically assigned to all features.
 4. Use the **gear icon** on any feature to adjust its model settings later.
-5. Click **+ Sentinel** to configure proactive anomaly detection (see [Sentinel guide](sentinel.md)).
+5. Click **+ Sentinel** to configure proactive anomaly detection (see [Sentinel guide](sentinel.md)). Choose a setup mode:
+   - **Basic** — enables anomaly alerting with recommended defaults. Prompts for notify service, daily digest, and an optional level-increase PIN.
+   - **Advanced** — exposes all Sentinel options: intervals, cooldowns, triage, baseline, discovery, and camera entry links.
+
+> **Reconfiguring:** Running **+ Setup** or **+ Sentinel** again when a subentry already exists opens the same mode selector. Advanced mode pre-populates every field with the current saved values. Basic mode always starts from recommended defaults and warns before overwriting.
+
+> **Removing Sentinel:** Delete the Sentinel subentry from the integration page to stop all monitoring immediately. Sentinel background tasks stop and the health sensor transitions to `disabled`.
 
 ---
 

@@ -27,9 +27,13 @@ Sentinel is a singleton service per Home Generative Agent config entry. Configur
 
 1. Open **Settings → Devices & Services → Home Generative Agent**.
 2. Click **+ Sentinel**.
-3. Configure runtime options (detection interval, cooldowns, notify service, autonomy level).
-4. Optionally enable Discovery, Triage, and Baseline (see sections below).
-5. Save. Sentinel starts on the next HA restart or integration reload.
+3. Choose a setup mode:
+   - **Basic** — enables anomaly alerting with recommended defaults. Configure only the essentials: notify service, daily digest toggle and time, and an optional level-increase PIN.
+   - **Advanced** — exposes all options: detection interval, cooldowns, triage, baseline, discovery, and camera entry links. All fields pre-populate with current values when reconfiguring.
+4. Optionally enable Discovery, Triage, and Baseline via **Advanced** setup or by reconfiguring later (see sections below).
+5. Save. Sentinel starts automatically — no HA restart required.
+
+> **Removing Sentinel:** Delete the Sentinel subentry from the integration page. Background tasks stop immediately and monitoring is disabled. The `sentinel_health` sensor transitions to `disabled`.
 
 ### Autonomy Levels
 
