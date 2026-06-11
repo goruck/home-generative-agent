@@ -173,17 +173,37 @@
             "critical_action_pin": "Sentinel level-increase PIN (optional)",
             "notify_service": "Sentinel Notify Service (optional)"
           }
+        },
+        "setup_mode": {
+          "title": "Sentinel Setup",
+          "description": "Choose how to configure Sentinel monitoring.{overwrite_warning}",
+          "data": {
+            "setup_mode": "Setup type"
+          }
+        },
+        "basic_settings": {
+          "title": "Sentinel",
+          "description": "Configure the essential Sentinel settings. All other options use recommended defaults.",
+          "data": {
+            "sentinel_enabled": "Enable anomaly alerting",
+            "sentinel_daily_digest_enabled": "Enable daily digest notification",
+            "sentinel_daily_digest_time": "Daily digest time (HH:MM:SS)",
+            "notify_service": "Notify service (optional)",
+            "critical_action_pin": "Level-increase PIN (optional, 4-10 digits)"
+          }
         }
       },
       "error": {
-        "invalid_camera_entry_links": "Must be a JSON object mapping camera entity IDs to lists of entry entity IDs, e.g. {{\"camera.driveway\": [\"lock.front_door\"]}}."
+        "invalid_camera_entry_links": "Must be a JSON object mapping camera entity IDs to lists of entry entity IDs, e.g. {{\"camera.driveway\": [\"lock.front_door\"]}}.",
+        "invalid_pin": "PIN must be 4-10 digits."
       }
     },
     "feature": {
       "entry_type": "service",
       "abort": {
         "reconfigure_successful": "Feature updated.",
-        "setup_complete": "Setup completed."
+        "setup_complete": "Setup completed.",
+        "no_provider_for_basic_setup": "No model provider is configured. Add a **Model Provider** first, then retry setup."
       },
       "error": {
         "no_providers": "No model providers are configured.",
@@ -242,6 +262,17 @@
         "instructions": {
           "title": "Add a model provider",
           "description": "No model provider is configured yet. Add one from **Model Provider**."
+        },
+        "setup_mode": {
+          "title": "Setup",
+          "description": "Choose a setup type. Basic setup enables all features with recommended defaults. Advanced setup gives you full control over each feature.{overwrite_warning}",
+          "data": {
+            "setup_mode": "Setup type"
+          }
+        },
+        "setup_status": {
+          "title": "Setup complete",
+          "description": "Setup is done.\n\n**Features enabled:** {features_enabled}{skipped_section}\n\n**Database:** {database_status}\n\n**Next steps:**\n- Run **Configure Sentinel** to enable anomaly monitoring.\n- Add an **STT Provider** for voice input.\n- Go to **Settings → Voice Assistants** to add Home Generative Agent as your voice assistant."
         }
       }
     }

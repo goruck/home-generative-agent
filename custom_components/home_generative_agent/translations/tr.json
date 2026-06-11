@@ -167,19 +167,43 @@
             "sentinel_daily_digest_time": "Günlük özet saati (SS:DD:SN)",
             "sentinel_camera_entry_links": "Kamera giriş bağlantıları (JSON, isteğe bağlı)",
             "critical_action_pin": "Sentinel düzey artırma PIN'i (isteğe bağlı)",
-            "notify_service": "Sentinel Bildirim Servisi (isteğe bağlı)"
+            "notify_service": "Sentinel Bildirim Servisi (isteğe bağlı)",
+            "sentinel_baseline_weekly_patterns": "Haftanın günü temellerini etkinleştir (hafta sonu yanlış pozitiflerini azaltır)",
+            "sentinel_baseline_dow_min_samples": "HGG temel minimum örnek sayısı (slot başına veri haftası)",
+            "sentinel_baseline_min_samples": "Sapma uyarıları tetiklenmeden önce gereken minimum örnek sayısı",
+            "sentinel_baseline_sustained_minutes": "Döngüsel yük kapısı: Uyarı vermeden önce eşiğin üzerinde geçen dakika (0 = devre dışı)"
+          }
+        },
+        "setup_mode": {
+          "title": "Sentinel Kurulumu",
+          "description": "Sentinel izlemeyi nasıl yapılandıracağınızı seçin.{overwrite_warning}",
+          "data": {
+            "setup_mode": "Kurulum türü"
+          }
+        },
+        "basic_settings": {
+          "title": "Sentinel",
+          "description": "Temel Sentinel ayarlarını yapılandırın. Diğer tüm seçenekler önerilen varsayılanları kullanır.",
+          "data": {
+            "sentinel_enabled": "Anomali uyarılarını etkinleştir",
+            "sentinel_daily_digest_enabled": "Günlük özet bildirimini etkinleştir",
+            "sentinel_daily_digest_time": "Günlük özet saati (SS:DD:SN)",
+            "notify_service": "Bildirim servisi (isteğe bağlı)",
+            "critical_action_pin": "Düzey artırma PIN'i (isteğe bağlı, 4-10 rakam)"
           }
         }
       },
       "error": {
-        "invalid_camera_entry_links": "Kamera varlık kimliklerini giriş varlık kimliklerinin listesiyle eşleştiren bir JSON nesnesi olmalıdır, ör. {{\"camera.driveway\": [\"lock.front_door\"]}}."
+        "invalid_camera_entry_links": "Kamera varlık kimliklerini giriş varlık kimliklerinin listesiyle eşleştiren bir JSON nesnesi olmalıdır, ör. {{\"camera.driveway\": [\"lock.front_door\"]}}.",
+        "invalid_pin": "PIN 4-10 rakam olmalıdır."
       }
     },
     "feature": {
       "entry_type": "service",
       "abort": {
         "reconfigure_successful": "Özellik güncellendi.",
-        "setup_complete": "Kurulum tamamlandı."
+        "setup_complete": "Kurulum tamamlandı.",
+        "no_provider_for_basic_setup": "Model sağlayıcı yapılandırılmamış. Önce bir **Model Sağlayıcı** ekleyin, sonra kurulumu tekrar deneyin."
       },
       "error": {
         "no_providers": "Hiç model sağlayıcı yapılandırılmamış.",
@@ -238,6 +262,17 @@
         "instructions": {
           "title": "Model sağlayıcı ekleyin",
           "description": "Henüz bir model sağlayıcı yok. **Model Sağlayıcı** bölümünden bir tane ekleyin."
+        },
+        "setup_mode": {
+          "title": "Kurulum",
+          "description": "Kurulum türünü seçin. Temel kurulum tüm özellikleri önerilen varsayılanlarla etkinleştirir. Gelişmiş kurulum her özellik üzerinde tam kontrol sağlar.{overwrite_warning}",
+          "data": {
+            "setup_mode": "Kurulum türü"
+          }
+        },
+        "setup_status": {
+          "title": "Kurulum tamamlandı",
+          "description": "Kurulum tamamlandı.\n\n**Etkinleştirilen özellikler:** {features_enabled}{skipped_section}\n\n**Veritabanı:** {database_status}\n\n**Sonraki adımlar:**\n- Anomali izlemeyi etkinleştirmek için **Sentinel Yapılandır**'ı çalıştırın.\n- Sesli giriş için bir **STT Sağlayıcı** ekleyin.\n- Home Generative Agent'ı sesli asistanınız olarak eklemek için **Ayarlar → Sesli Asistanlar**'a gidin."
         }
       }
     }
@@ -281,13 +316,17 @@
           "schema_first_yaml": "YAML istekleri için şema-öncelikli JSON",
           "stt_filters_section": "Konuşma girişi filtreleri",
           "stt_hallucination_patterns": "Yok sayılan STT alt dizeleri",
-          "stt_hallucination_exact_patterns": "Yok sayılan tam STT ifadeleri"
+          "stt_hallucination_exact_patterns": "Yok sayılan tam STT ifadeleri",
+          "tool_relevance_threshold": "Araç ilgi eşiği",
+          "tool_retrieval_limit": "Araç getirme limiti"
         },
         "data_description": {
           "prompt": "LLM'in nasıl yanıt vermesi gerektiğini belirtin. Bu bir şablon olabilir.",
           "schema_first_yaml": "Etkinleştirildiğinde, YAML istekleri YAML'ye çevrilecek sıkı JSON ile yanıtlanır.",
           "stt_hallucination_patterns": "Her satıra bir alt dize yazın. STT metni herhangi bir girdiyi içerirse LLM çalışmadan önce yok sayılır. Eşleşme büyük/küçük harfe duyarsızdır.",
-          "stt_hallucination_exact_patterns": "Her satıra bir ifade yazın. STT metninin tamamı herhangi bir girdiye eşitse LLM çalışmadan önce yok sayılır. Eşleşme büyük/küçük harfe duyarsızdır."
+          "stt_hallucination_exact_patterns": "Her satıra bir ifade yazın. STT metninin tamamı herhangi bir girdiye eşitse LLM çalışmadan önce yok sayılır. Eşleşme büyük/küçük harfe duyarsızdır.",
+          "tool_relevance_threshold": "Bir aracın getirilmesi için gereken minimum anlamsal benzerlik puanı (0,0 ile 1,0 arasında).",
+          "tool_retrieval_limit": "Kullanıcının sorgusuna anlamsal benzerliğe göre getirilecek maksimum araç sayısı."
         }
       }
     }
