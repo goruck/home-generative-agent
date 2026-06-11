@@ -17,7 +17,12 @@ import voluptuous as vol
 from homeassistant.components import media_source
 from homeassistant.components.camera.const import DOMAIN as CAMERA_DOMAIN
 from homeassistant.components.http import StaticPathConfig
-from homeassistant.config_entries import ConfigEntry, ConfigSubentry
+from homeassistant.config_entries import (
+    SIGNAL_CONFIG_ENTRY_CHANGED,
+    ConfigEntry,
+    ConfigEntryChange,
+    ConfigSubentry,
+)
 from homeassistant.const import (
     CONF_API_KEY,
     CONF_HOST,
@@ -29,10 +34,13 @@ from homeassistant.const import (
     EVENT_HOMEASSISTANT_STOP,
     Platform,
 )
-from homeassistant.core import HomeAssistant, SupportsResponse
+from homeassistant.core import HomeAssistant, SupportsResponse, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.helpers.dispatcher import (
+    async_dispatcher_connect,
+    async_dispatcher_send,
+)
 from homeassistant.helpers.httpx_client import get_async_client
 from homeassistant.helpers.network import get_url
 from homeassistant.helpers.target import (
@@ -3084,27 +3092,41 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     # started to match the current subentry configuration.  Without this,
     # deleting a Sentinel subentry through the UI leaves background tasks
     # running indefinitely.
-    async def _reload_on_subentry_change(h: HomeAssistant, e: HGAConfigEntry) -> None:
+    #
+    # We use SIGNAL_CONFIG_ENTRY_CHANGED (dispatcher) rather than
+    # entry.add_update_listener because OptionsFlowWithReload forbids update
+    # listeners on its config entry and raises ValueError when the options flow
+    # completes.  The dispatcher signal fires for all entry mutations (options
+    # and subentry changes alike) without registering to update_listeners.
+    @callback
+    def _on_entry_changed(
+        change_type: ConfigEntryChange, changed_entry: HGAConfigEntry
+    ) -> None:
+        if changed_entry.entry_id != entry.entry_id:
+            return
+        if change_type != ConfigEntryChange.UPDATED:
+            return
         # When the Sentinel subentry is removed, stop its background tasks
         # immediately rather than waiting for the reload to call async_unload_entry.
-        # Without this, the sentinel engine can fire one more evaluation cycle
-        # during the async window between deletion and unload.
         sentinel_present = any(
-            s.subentry_type == SUBENTRY_TYPE_SENTINEL for s in e.subentries.values()
+            s.subentry_type == SUBENTRY_TYPE_SENTINEL
+            for s in changed_entry.subentries.values()
         )
         if not sentinel_present:
-            rd = e.runtime_data
+            rd = changed_entry.runtime_data
             if rd.sentinel is not None:
-                await rd.sentinel.stop()
+                hass.async_create_task(rd.sentinel.stop())
             if rd.baseline_updater is not None:
-                await rd.baseline_updater.stop()
+                hass.async_create_task(rd.baseline_updater.stop())
             if rd.discovery_engine is not None:
-                await rd.discovery_engine.stop()
+                hass.async_create_task(rd.discovery_engine.stop())
             if rd.notifier is not None:
                 rd.notifier.stop()
-        h.config_entries.async_schedule_reload(e.entry_id)
+        hass.config_entries.async_schedule_reload(entry.entry_id)
 
-    entry.async_on_unload(entry.add_update_listener(_reload_on_subentry_change))
+    entry.async_on_unload(
+        async_dispatcher_connect(hass, SIGNAL_CONFIG_ENTRY_CHANGED, _on_entry_changed)
+    )
 
     return True
 
