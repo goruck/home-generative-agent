@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.20] - 2026-06-11
+
+### Added
+
+- **Basic and Advanced setup modes** — Feature setup and Sentinel setup now offer a mode selector. **Basic** enables all features (Conversation, Camera Image Analysis, Conversation Summary) with recommended defaults in a single screen and auto-creates the database subentry with no database prompt. **Advanced** steps through each feature individually, lets you assign providers, models, and fallback chains, and includes an explicit database configuration step. Closes [#433](https://github.com/goruck/home-generative-agent/issues/433).
+
+### Fixed
+
+- **Sentinel background tasks continue running after subentry deletion** — deleting the Sentinel subentry now stops all background tasks (monitor loop, baseline updater, discovery engine, notifier) immediately without waiting for the next integration reload. `_apply_sentinel_options` also forces `CONF_SENTINEL_ENABLED=False` when no Sentinel subentry exists, preventing tasks from being restarted on the subsequent reload.
+
+- **`ValueError: Config entry update listeners should not be used with OptionsFlowWithReload`** — saving main configuration options raised this error because the integration registered an `update_listener` on the config entry, which `OptionsFlowWithReload` explicitly forbids. The listener is now registered via `async_dispatcher_connect` on `SIGNAL_CONFIG_ENTRY_CHANGED`, which fires the same signals without touching `entry.update_listeners`.
+
+- **Infinite reload loop after subentry change** — `SIGNAL_CONFIG_ENTRY_CHANGED` fires on every entry state transition, not just data changes, causing the dispatcher callback to schedule an unbounded sequence of reloads. A snapshot of Sentinel subentry data captured at setup time is now compared on each signal; reloads are only scheduled when the subentry data actually changes.
+
+- **Advanced setup form not pre-populated when reconfiguring Sentinel** — reopening Sentinel Advanced setup now pre-fills every field with the current saved values instead of showing empty defaults.
+
+- **Basic setup silently overwrites existing configuration** — running Basic setup when a Setup or Sentinel subentry already exists now displays a warning and requires confirmation before overwriting the saved configuration.
+
+- **Misleading Conversation toggle removed from feature enable form** — the Conversation feature toggle was shown in the Advanced feature enable step but had no effect (Conversation is always enabled). It is no longer displayed.
+
 ## [3.14.19] - 2026-06-07
 
 ### Fixed
