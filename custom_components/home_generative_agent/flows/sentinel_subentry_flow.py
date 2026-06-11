@@ -107,7 +107,7 @@ def _current_subentry(flow: ConfigSubentryFlow) -> ConfigSubentry | None:
         for subentry in entry.subentries.values()
         if subentry.subentry_type == SUBENTRY_TYPE_SENTINEL
     ]
-    if len(matches) == 1:
+    if matches:
         return matches[0]
     return None
 
@@ -441,7 +441,8 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
             payload.update(dict(current.data))
 
         mobile_opts = list_mobile_notify_services(self.hass)
-        notify_value = str(payload.get(CONF_NOTIFY_SERVICE, "") or "")
+        # Basic setup always starts from defaults — no pre-existing notify service.
+        notify_value = ""
 
         schema: dict[Any, Any] = {
             vol.Required(
@@ -503,10 +504,19 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                 )
             ] = TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT))
 
+        # Basic setup always shows recommended defaults in the form, regardless of
+        # any existing configuration (the overwrite warning makes this intent explicit).
+        defaults = _default_payload()
+        suggested: dict[str, Any] = {
+            k: v for k, v in defaults.items() if k != CONF_CRITICAL_ACTION_PIN
+        }
+
         if user_input is None:
             return self.async_show_form(
                 step_id="basic_settings",
-                data_schema=vol.Schema(schema),
+                data_schema=self.add_suggested_values_to_schema(
+                    vol.Schema(schema), suggested
+                ),
             )
 
         data = _default_payload()
@@ -550,7 +560,9 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
         if errors:
             return self.async_show_form(
                 step_id="basic_settings",
-                data_schema=vol.Schema(schema),
+                data_schema=self.add_suggested_values_to_schema(
+                    vol.Schema(schema), suggested
+                ),
                 errors=errors,
             )
 
@@ -581,9 +593,17 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
             payload.update(dict(current.data))
 
         if user_input is None:
+            suggested: dict[str, Any] = {
+                k: v for k, v in payload.items() if k != CONF_CRITICAL_ACTION_PIN
+            }
+            suggested[CONF_SENTINEL_CAMERA_ENTRY_LINKS] = _camera_entry_links_json(
+                payload
+            )
             return self.async_show_form(
                 step_id="settings",
-                data_schema=self._schema(payload),
+                data_schema=self.add_suggested_values_to_schema(
+                    self._schema(payload), suggested
+                ),
             )
 
         data = dict(user_input)
@@ -647,9 +667,17 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                 error_payload.get(CONF_SENTINEL_CAMERA_ENTRY_LINKS), dict
             ):
                 error_payload.pop(CONF_SENTINEL_CAMERA_ENTRY_LINKS, None)
+            error_suggested: dict[str, Any] = {
+                k: v for k, v in error_payload.items() if k != CONF_CRITICAL_ACTION_PIN
+            }
+            error_suggested[CONF_SENTINEL_CAMERA_ENTRY_LINKS] = (
+                _camera_entry_links_json(error_payload)
+            )
             return self.async_show_form(
                 step_id="settings",
-                data_schema=self._schema(error_payload),
+                data_schema=self.add_suggested_values_to_schema(
+                    self._schema(error_payload), error_suggested
+                ),
                 errors=errors,
             )
 

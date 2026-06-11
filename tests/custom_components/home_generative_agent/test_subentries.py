@@ -505,6 +505,13 @@ def test_legacy_ollama_urls_split_providers() -> None:
     assert options[CONF_OLLAMA_SUMMARIZATION_URL] == "http://ollama-sum:11434"
 
 
+def test_resolve_runtime_options_no_sentinel_subentry_disables_sentinel() -> None:
+    """When no Sentinel subentry exists, CONF_SENTINEL_ENABLED must be False."""
+    entry = DummyEntry(options={})
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_SENTINEL_ENABLED] is False
+
+
 def test_resolve_runtime_options_prefers_sentinel_subentry() -> None:
     """Sentinel subentry should override legacy sentinel option keys."""
     sentinel_interval = 120
@@ -1745,3 +1752,73 @@ async def test_sentinel_reconfigure_bypasses_mode_selector(
 
     assert result.get("type") == "form"
     assert result.get("step_id") != "setup_mode"
+
+
+@pytest.mark.asyncio
+async def test_sentinel_user_flow_updates_existing_not_duplicate(
+    hass: HomeAssistant,
+) -> None:
+    """User flow with an existing Sentinel subentry updates it, not create a duplicate."""
+    existing = DummySubentry(
+        "sentinel1",
+        SUBENTRY_TYPE_SENTINEL,
+        "Sentinel",
+        {CONF_SENTINEL_ENABLED: True},
+    )
+    entry = DummyEntry()
+    entry.subentries[existing.subentry_id] = existing
+
+    flow = _make_sentinel_flow_for_mode(hass, entry)
+    update_calls: list[Any] = []
+    flow.async_update_and_abort = lambda *args, **_kwargs: (  # type: ignore[assignment]
+        update_calls.append(args)
+        or {"type": "abort", "reason": "reconfigure_successful"}
+    )
+
+    await flow.async_step_setup_mode({"setup_mode": "advanced"})
+    # Minimal user_input — schema validation is bypassed in unit tests
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            CONF_SENTINEL_DAILY_DIGEST_ENABLED: False,
+            CONF_SENTINEL_DAILY_DIGEST_TIME: "08:00:00",
+            CONF_SENTINEL_CAMERA_ENTRY_LINKS: "{}",
+        }
+    )
+
+    assert result.get("type") == "abort", "expected update-and-abort, not create_entry"
+    assert len(update_calls) == 1, "async_update_and_abort should be called once"
+
+
+@pytest.mark.asyncio
+async def test_sentinel_user_flow_with_duplicate_sentinels_updates_first(
+    hass: HomeAssistant,
+) -> None:
+    """User flow with multiple Sentinel subentries updates the first, adds no more."""
+    sub1 = DummySubentry("sent1", SUBENTRY_TYPE_SENTINEL, "Sentinel", {})
+    sub2 = DummySubentry("sent2", SUBENTRY_TYPE_SENTINEL, "Sentinel", {})
+    entry = DummyEntry()
+    entry.subentries[sub1.subentry_id] = sub1
+    entry.subentries[sub2.subentry_id] = sub2
+
+    flow = _make_sentinel_flow_for_mode(hass, entry)
+    update_calls: list[Any] = []
+    flow.async_update_and_abort = lambda *args, **_kwargs: (  # type: ignore[assignment]
+        update_calls.append(args)
+        or {"type": "abort", "reason": "reconfigure_successful"}
+    )
+
+    await flow.async_step_setup_mode({"setup_mode": "basic"})
+    result = await flow.async_step_basic_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_DAILY_DIGEST_ENABLED: False,
+            CONF_SENTINEL_DAILY_DIGEST_TIME: "08:00:00",
+        }
+    )
+
+    assert result.get("type") == "abort", (
+        "must update, not create, when duplicates exist"
+    )
+    assert len(update_calls) == 1

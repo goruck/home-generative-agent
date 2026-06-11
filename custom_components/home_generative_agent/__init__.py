@@ -992,40 +992,6 @@ def _assign_first_provider_if_needed(hass: HomeAssistant, entry: ConfigEntry) ->
         )
 
 
-def _ensure_default_sentinel_subentry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Ensure a singleton sentinel subentry exists for deterministic settings."""
-    exists = any(
-        s.subentry_type == SUBENTRY_TYPE_SENTINEL for s in entry.subentries.values()
-    )
-    if exists:
-        return
-
-    payload = {
-        CONF_SENTINEL_ENABLED: RECOMMENDED_SENTINEL_ENABLED,
-        CONF_SENTINEL_INTERVAL_SECONDS: RECOMMENDED_SENTINEL_INTERVAL_SECONDS,
-        CONF_SENTINEL_COOLDOWN_MINUTES: RECOMMENDED_SENTINEL_COOLDOWN_MINUTES,
-        CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES: (
-            RECOMMENDED_SENTINEL_ENTITY_COOLDOWN_MINUTES
-        ),
-        CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES: (
-            RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES
-        ),
-        CONF_SENTINEL_DISCOVERY_ENABLED: RECOMMENDED_SENTINEL_DISCOVERY_ENABLED,
-        CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS: (
-            RECOMMENDED_SENTINEL_DISCOVERY_INTERVAL_SECONDS
-        ),
-        CONF_SENTINEL_DISCOVERY_MAX_RECORDS: RECOMMENDED_SENTINEL_DISCOVERY_MAX_RECORDS,
-        CONF_EXPLAIN_ENABLED: RECOMMENDED_EXPLAIN_ENABLED,
-    }
-    subentry = ConfigSubentry(
-        subentry_type=SUBENTRY_TYPE_SENTINEL,
-        title="Sentinel",
-        unique_id=f"{entry.entry_id}_sentinel",
-        data=MappingProxyType(payload),
-    )
-    hass.config_entries.async_add_subentry(entry, subentry)
-
-
 # Database and vector index bootstrapping.
 # store.setup() only runs the vector migrations when store.index_config is set.
 # If index_config is None (no embeddings configured yet), setup() runs only the
@@ -1294,7 +1260,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
     _register_services(hass, entry)
     _ensure_default_feature_subentries(hass, entry)
-    _ensure_default_sentinel_subentry(hass, entry)
     _assign_first_provider_if_needed(hass, entry)
 
     # Resolve effective options (data + options + subentries).
@@ -3113,6 +3078,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         schema=SENTINEL_RESET_BASELINE_SCHEMA,
         supports_response=_SERVICE_RESPONSE_ONLY,
     )
+
+    # Reload whenever a subentry is added, updated, or removed so that tasks
+    # started during setup (sentinel, baseline, discovery) are stopped or
+    # started to match the current subentry configuration.  Without this,
+    # deleting a Sentinel subentry through the UI leaves background tasks
+    # running indefinitely.
+    async def _reload_on_subentry_change(h: HomeAssistant, e: HGAConfigEntry) -> None:
+        # When the Sentinel subentry is removed, stop its background tasks
+        # immediately rather than waiting for the reload to call async_unload_entry.
+        # Without this, the sentinel engine can fire one more evaluation cycle
+        # during the async window between deletion and unload.
+        sentinel_present = any(
+            s.subentry_type == SUBENTRY_TYPE_SENTINEL for s in e.subentries.values()
+        )
+        if not sentinel_present:
+            rd = e.runtime_data
+            if rd.sentinel is not None:
+                await rd.sentinel.stop()
+            if rd.baseline_updater is not None:
+                await rd.baseline_updater.stop()
+            if rd.discovery_engine is not None:
+                await rd.discovery_engine.stop()
+            if rd.notifier is not None:
+                rd.notifier.stop()
+        h.config_entries.async_schedule_reload(e.entry_id)
+
+    entry.async_on_unload(entry.add_update_listener(_reload_on_subentry_change))
 
     return True
 

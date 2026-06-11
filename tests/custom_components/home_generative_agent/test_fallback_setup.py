@@ -278,9 +278,6 @@ def _patch_setup_dependencies(
         hga_component, "_ensure_default_feature_subentries", lambda *_args: None
     )
     monkeypatch.setattr(
-        hga_component, "_ensure_default_sentinel_subentry", lambda *_args: None
-    )
-    monkeypatch.setattr(
         hga_component, "_assign_first_provider_if_needed", lambda *_args: None
     )
     monkeypatch.setattr(
