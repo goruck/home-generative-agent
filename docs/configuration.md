@@ -17,11 +17,12 @@ Configuration is done entirely in the Home Assistant UI using subentry flows. A 
 ## Basic Setup
 
 1. Open **Settings → Devices & Services → Home Generative Agent**.
-2. Click **+ Setup** to enable features and configure the database. Choose a setup mode:
-   - **Basic** — enables all features (Conversation, Camera Image Analysis, Conversation Summary) with recommended defaults. Completes in one screen plus a database step.
-   - **Advanced** — step through each feature individually to assign providers, models, and fallback chains.
-3. Click **+ Model Provider** to add a provider (Cloud or Edge → provider type → credentials → model defaults).
+2. Click **+ Model Provider** to add a provider (Cloud or Edge → provider type → credentials → model defaults).
    - The first provider added is automatically assigned to all features.
+   - A provider must exist before you can run **+ Setup**.
+3. Click **+ Setup** to enable features. Choose a setup mode:
+   - **Basic** — enables all features (Conversation, Camera Image Analysis, Conversation Summary) with recommended defaults and creates the database subentry automatically. No database prompt appears.
+   - **Advanced** — step through each feature individually to assign providers, models, and fallback chains; includes a database configuration step.
 4. Use the **gear icon** on any feature to adjust its model settings later.
 5. Click **+ Sentinel** to configure proactive anomaly detection (see [Sentinel guide](sentinel.md)). Choose a setup mode:
    - **Basic** — enables anomaly alerting with recommended defaults. Prompts for notify service, daily digest, and an optional level-increase PIN.
