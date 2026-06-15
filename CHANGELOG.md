@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.21] - 2026-06-15
+
+### Fixed
+
+- **Entity staleness alert falsely reported as resolved after Execute** — after tapping Execute on a person tracking staleness alert, the agent incorrectly replied that the alert had resolved ("the person is no longer in a stale state") even though the person never came home. The generic execute prompt did not define what "resolved" means for staleness findings, so the agent treated `state = not_home` from `GetLiveContext` as a definitive non-stale state. A specialized execute prompt for `entity_staleness` findings now tells the agent the alert resolves only if the person is home (`state = 'home'`); if still away, it must acknowledge the staleness and advise the user to check whether the person's phone is on and reachable. Follows up on the incomplete fix in [#417](https://github.com/goruck/home-generative-agent/pull/417).
+
+- **Person name missing from entity staleness initial notification** — the initial notification body for person tracking staleness was generic ("The person tracking data has been outdated...") with no person name, while the Execute follow-up named the person. `_eval_entity_staleness` now includes `friendly_name` in the evidence dict, and a deterministic `_entity_staleness_mobile_message` generates a named, consistent body: e.g. "Lindo St Angel's location tracking has been outdated for about 1 day. Check if their phone is on and reachable."
+
+- **`friendly_name` in entity_staleness evidence caused unstable anomaly_id** — adding `friendly_name` to the evidence hash would make the anomaly_id change if the display name is renamed or temporarily unavailable, breaking cooldown/suppression/audit continuity for long-running alerts. `_build_finding` now strips `friendly_name` before hashing, matching the existing pattern in `baseline.py` and `appliance_power_duration.py`.
+
 ## [3.14.20] - 2026-06-11
 
 ### Added
