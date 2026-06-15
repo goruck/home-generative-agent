@@ -864,6 +864,7 @@ def _eval_entity_staleness(
         "rule_id": rule.get("rule_id"),
         "template_id": rule.get("template_id"),
         "entity_id": entity_id,
+        "friendly_name": entity.get("friendly_name") or None,
         "state": entity.get("state"),
         "max_stale_hours": max_stale_hours,
         "age_hours": age_hours,
@@ -930,7 +931,8 @@ def _build_finding(
     if not isinstance(suggested_actions, list):
         suggested_actions = []
     is_sensitive = bool(rule.get("is_sensitive", False))
-    anomaly_id = build_anomaly_id(rule_id, triggering_entities, evidence)
+    _hash_evidence = {k: v for k, v in evidence.items() if k != "friendly_name"}
+    anomaly_id = build_anomaly_id(rule_id, triggering_entities, _hash_evidence)
     return AnomalyFinding(
         anomaly_id=anomaly_id,
         type=rule_id,

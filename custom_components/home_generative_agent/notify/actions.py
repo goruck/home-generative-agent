@@ -243,8 +243,54 @@ def _format_evidence_summary(evidence: dict[str, Any]) -> str:
     return ", ".join(parts[:6]) or "see entity"
 
 
+def _build_entity_staleness_execute_prompt(finding: AnomalyFinding) -> str:
+    """Build execute prompt for entity_staleness findings."""
+    entity_id = finding.evidence.get("entity_id") or (
+        finding.triggering_entities[0] if finding.triggering_entities else None
+    )
+    friendly = finding.evidence.get("friendly_name") or (
+        entity_id.split(".")[-1].replace("_", " ").title() if entity_id else "an entity"
+    )
+    detected_at_str = dt_util.as_utc(finding.detected_at).strftime(
+        "%Y-%m-%d %H:%M:%S UTC"
+    )
+    age_hours = finding.evidence.get("age_hours")
+    age_str = (
+        f"{float(age_hours):.0f}h" if age_hours is not None else "an extended period"
+    )
+    max_stale_hours = finding.evidence.get("max_stale_hours", 24)
+    is_person = bool(entity_id and entity_id.startswith("person."))
+
+    if is_person:
+        resolution_clause = (
+            f"Use GetLiveContext to check the current state of {entity_id}. "
+            f"This alert resolves ONLY if {friendly} is now home (state = 'home'). "
+            f"A Home Assistant restart resets last_changed without resuming "
+            f"location tracking — do NOT report resolved if last_changed looks recent. "
+            f"If {friendly} is still not_home, acknowledge the staleness and advise "
+            f"the user to check whether {friendly}'s phone is on and reachable."
+        )
+    else:
+        resolution_clause = (
+            f"Use GetLiveContext to check the current state of {entity_id}. "
+            f"This alert resolves only if the sensor has genuinely updated since "
+            f"{detected_at_str}. A system restart resets timestamps without the sensor "
+            f"actually reporting new data — report what you find honestly."
+        )
+
+    return (
+        f"Sentinel staleness alert detected at {detected_at_str}: "
+        f"{friendly} ({entity_id}) had not updated for {age_str} "
+        f"(threshold: {max_stale_hours}h). "
+        f"{resolution_clause} "
+        f"After assessing, reply in 1-2 plain-text sentences under 220 characters."
+    )
+
+
 def _build_execute_prompt(finding: AnomalyFinding) -> str:
     """Build a natural-language prompt for non-sensitive execute actions."""
+    if finding.evidence.get("template_id") == "entity_staleness":
+        return _build_entity_staleness_execute_prompt(finding)
     entity_id = finding.evidence.get("entity_id") or (
         finding.triggering_entities[0] if finding.triggering_entities else None
     )
