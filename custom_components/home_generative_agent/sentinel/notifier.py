@@ -875,6 +875,43 @@ def _baseline_deviation_mobile_message(finding: AnomalyFinding) -> str:
     return msg[:MAX_MOBILE_MESSAGE_CHARS].rstrip()
 
 
+def _entity_staleness_mobile_message(finding: AnomalyFinding) -> str:
+    """Deterministic mobile copy for entity_staleness findings."""
+    ev = finding.evidence
+    entity_id = str(ev.get("entity_id") or "").strip()
+    raw_name = str(ev.get("friendly_name") or "").strip()
+    if not raw_name and entity_id:
+        raw_name = _friendly_entity(entity_id)
+
+    age_hours = ev.get("age_hours")
+    age_str = "an extended period"
+    if age_hours is not None:
+        try:
+            age_h = float(age_hours)
+            if age_h >= 48:  # noqa: PLR2004
+                age_str = f"about {int(age_h // 24)} days"
+            elif age_h >= 24:  # noqa: PLR2004
+                age_str = "about 1 day"
+            elif age_h >= 2:  # noqa: PLR2004
+                age_str = f"about {int(age_h)} hours"
+            else:
+                age_str = "about 1 hour"
+        except (TypeError, ValueError):
+            pass
+
+    if entity_id.startswith("person."):
+        msg = (
+            f"{raw_name}'s location tracking has been outdated for {age_str}. "
+            f"Check if their phone is on and reachable."
+        )
+    else:
+        msg = (
+            f"{raw_name or 'Sensor'} data has been outdated for {age_str}. "
+            f"Please check the sensor."
+        )
+    return msg[:MAX_MOBILE_MESSAGE_CHARS].rstrip()
+
+
 def _mobile_message(explanation: str | None, finding: AnomalyFinding) -> str:
     if finding.type == "alarm_disarmed_during_external_threat":
         return _alarm_disarmed_mobile_message(finding)
@@ -885,6 +922,8 @@ def _mobile_message(explanation: str | None, finding: AnomalyFinding) -> str:
         "time_of_day_anomaly",
     }:
         return _baseline_deviation_mobile_message(finding)
+    if finding.evidence.get("template_id") == "entity_staleness":
+        return _entity_staleness_mobile_message(finding)
     if explanation:
         text = _normalize_text(explanation)
         if text and len(text) <= MAX_MOBILE_MESSAGE_CHARS:

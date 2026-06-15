@@ -26,6 +26,7 @@ from custom_components.home_generative_agent.sentinel.notifier import (
     _alarm_disarmed_mobile_message,
     _appliance_power_duration_mobile_message,
     _build_actions,
+    _entity_staleness_mobile_message,
     _friendly_type,
     _mobile_message,
     _redact_if_sensitive,
@@ -1221,6 +1222,82 @@ def test_appliance_power_duration_mobile_message_wins_over_llm() -> None:
     msg = _mobile_message(llm_explanation, finding)
     assert msg.startswith("Washer ")
     assert "An appliance" not in msg
+
+
+# ---------------------------------------------------------------------------
+# entity_staleness mobile message
+# ---------------------------------------------------------------------------
+
+
+def _staleness_finding(
+    entity_id: str = "person.lindo_st_angel",
+    friendly_name: str | None = "Lindo St Angel",
+    age_hours: float = 42.0,
+) -> AnomalyFinding:
+    return AnomalyFinding(
+        anomaly_id="stale-1",
+        type="person_tracking_staleness",
+        severity="low",
+        confidence=0.9,
+        triggering_entities=[entity_id],
+        evidence={
+            "template_id": "entity_staleness",
+            "entity_id": entity_id,
+            "friendly_name": friendly_name,
+            "state": "not_home",
+            "max_stale_hours": 24.0,
+            "age_hours": age_hours,
+        },
+        suggested_actions=["check_sensor"],
+        is_sensitive=False,
+    )
+
+
+def test_entity_staleness_mobile_message_person_name() -> None:
+    """Mobile message includes the person's friendly name."""
+    msg = _entity_staleness_mobile_message(_staleness_finding())
+    assert "Lindo St Angel" in msg
+    assert len(msg) <= MAX_MOBILE_MESSAGE_CHARS
+
+
+def test_entity_staleness_mobile_message_age_about_1_day() -> None:
+    """42-hour staleness rounds to 'about 1 day'."""
+    msg = _entity_staleness_mobile_message(_staleness_finding(age_hours=42.0))
+    assert "about 1 day" in msg
+
+
+def test_entity_staleness_mobile_message_age_over_2_days() -> None:
+    """50-hour staleness rounds to 'about 2 days'."""
+    msg = _entity_staleness_mobile_message(_staleness_finding(age_hours=50.0))
+    assert "2 days" in msg
+
+
+def test_entity_staleness_mobile_message_person_fallback_name() -> None:
+    """Falls back to entity_id-derived name when friendly_name is absent."""
+    finding = _staleness_finding(friendly_name=None)
+    msg = _entity_staleness_mobile_message(finding)
+    assert "Lindo St Angel" in msg
+
+
+def test_entity_staleness_mobile_message_non_person() -> None:
+    """Non-person entity uses 'data has been outdated' phrasing."""
+    finding = _staleness_finding(
+        entity_id="sensor.front_door_battery",
+        friendly_name="Front Door Battery",
+        age_hours=30.0,
+    )
+    msg = _entity_staleness_mobile_message(finding)
+    assert "Front Door Battery" in msg
+    assert "data has been outdated" in msg
+
+
+def test_entity_staleness_mobile_message_wins_over_llm() -> None:
+    """Deterministic copy wins even when an LLM explanation is available."""
+    finding = _staleness_finding()
+    llm_msg = "The person tracking data has been outdated for about 42 hours."
+    msg = _mobile_message(llm_msg, finding)
+    assert "Lindo St Angel" in msg
+    assert "person tracking data" not in msg
 
 
 # ---------------------------------------------------------------------------

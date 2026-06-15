@@ -864,6 +864,7 @@ def _eval_entity_staleness(
         "rule_id": rule.get("rule_id"),
         "template_id": rule.get("template_id"),
         "entity_id": entity_id,
+        "friendly_name": entity.get("friendly_name") or None,
         "state": entity.get("state"),
         "max_stale_hours": max_stale_hours,
         "age_hours": age_hours,

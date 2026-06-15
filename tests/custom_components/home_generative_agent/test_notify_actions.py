@@ -13,6 +13,7 @@ from custom_components.home_generative_agent.notify.actions import (
     EVENT_SENTINEL_EXECUTE_REQUESTED,
     ActionHandler,
     _build_ask_prompt,
+    _build_entity_staleness_execute_prompt,
     _build_execute_prompt,
     _format_evidence_summary,
 )
@@ -671,3 +672,80 @@ def test_anomaly_finding_as_dict_includes_detected_at() -> None:
         or "Z" in detected_at_str
         or "UTC" not in detected_at_str
     )
+
+
+# ---------------------------------------------------------------------------
+# entity_staleness execute prompt
+# ---------------------------------------------------------------------------
+
+
+def _make_staleness_finding(
+    entity_id: str = "person.lindo_st_angel",
+    friendly_name: str | None = "Lindo St Angel",
+    age_hours: float = 42.0,
+) -> AnomalyFinding:
+    return AnomalyFinding(
+        anomaly_id="stale-1",
+        type="person_tracking_staleness",
+        severity="low",
+        confidence=0.9,
+        triggering_entities=[entity_id],
+        evidence={
+            "template_id": "entity_staleness",
+            "entity_id": entity_id,
+            "friendly_name": friendly_name,
+            "state": "not_home",
+            "max_stale_hours": 24.0,
+            "age_hours": age_hours,
+        },
+        suggested_actions=["check_sensor"],
+        is_sensitive=False,
+    )
+
+
+def test_entity_staleness_execute_prompt_dispatched() -> None:
+    """entity_staleness findings use the specialized prompt, not the generic one."""
+    finding = _make_staleness_finding()
+    prompt = _build_execute_prompt(finding)
+    assert "Alert-time evidence:" not in prompt  # generic prompt marker absent
+
+
+def test_entity_staleness_execute_prompt_person_not_home_guidance() -> None:
+    """Prompt tells agent NOT to report resolved if person is still not_home."""
+    finding = _make_staleness_finding()
+    prompt = _build_entity_staleness_execute_prompt(finding)
+    assert "not_home" in prompt
+    assert "ONLY if" in prompt or "only if" in prompt
+
+
+def test_entity_staleness_execute_prompt_restart_warning() -> None:
+    """Prompt warns that HA restarts can reset last_changed without tracking resuming."""
+    finding = _make_staleness_finding()
+    prompt = _build_entity_staleness_execute_prompt(finding)
+    assert "restart" in prompt.lower()
+    assert "last_changed" in prompt
+
+
+def test_entity_staleness_execute_prompt_includes_person_name() -> None:
+    """Prompt contains the person's friendly name."""
+    finding = _make_staleness_finding()
+    prompt = _build_entity_staleness_execute_prompt(finding)
+    assert "Lindo St Angel" in prompt
+
+
+def test_entity_staleness_execute_prompt_includes_detected_at() -> None:
+    """Prompt includes the detection timestamp."""
+    finding = _make_staleness_finding()
+    prompt = _build_entity_staleness_execute_prompt(finding)
+    assert "UTC" in prompt
+
+
+def test_entity_staleness_execute_prompt_non_person() -> None:
+    """Non-person entity uses sensor-specific resolution guidance (no home check)."""
+    finding = _make_staleness_finding(
+        entity_id="sensor.front_door_battery",
+        friendly_name="Front Door Battery",
+    )
+    prompt = _build_entity_staleness_execute_prompt(finding)
+    assert "Front Door Battery" in prompt
+    assert "home" not in prompt.lower() or "not_home" not in prompt
