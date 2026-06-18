@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from custom_components.home_generative_agent.sentinel.proposal_templates import (
     _extract_threshold_numeric,
+    _find_battery_sensor_entity_ids,
     _find_entry_entity_ids,
     _find_sensor_entity_ids,
     _presence_signal,
@@ -1223,6 +1224,36 @@ def test_find_sensor_entity_ids_excludes_binary_sensor_domain() -> None:
     ids = _find_sensor_entity_ids(paths)
     assert "binary_sensor.motion_hallway" not in ids
     assert "sensor.power_meter_power" in ids
+
+
+def test_find_battery_sensor_entity_ids_excludes_binary_sensor_domain() -> None:
+    """binary_sensor.* battery entities are excluded; only sensor.* are valid for low_battery_sensors."""
+    paths = [
+        "binary_sensor.playroom_door_lock_battery",
+        "sensor.garage_door_lock_battery",
+    ]
+    ids = _find_battery_sensor_entity_ids(paths)
+    assert "binary_sensor.playroom_door_lock_battery" not in ids
+    assert "sensor.garage_door_lock_battery" in ids
+
+
+def test_normalize_candidate_lock_battery_binary_sensor_returns_unsupported() -> None:
+    """Lock battery candidate with only binary_sensor.* battery entities returns unsupported_pattern."""
+    candidate = {
+        "candidate_id": "lock_battery_binary",
+        "title": "Lock Battery Low",
+        "summary": "The lock battery sensor reports low.",
+        "pattern": "binary_sensor.lock_battery == on",
+        "suggested_type": "maintenance",
+        "confidence_hint": 0.8,
+        "evidence_paths": [
+            "lock.front_door_lock.state",
+            "binary_sensor.front_door_lock_battery.state",
+        ],
+    }
+    result = explain_normalize_candidate(candidate)
+    assert result.normalized is None
+    assert result.reason_code == "unsupported_pattern"
 
 
 # ---------------------------------------------------------------------------

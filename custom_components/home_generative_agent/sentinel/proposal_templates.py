@@ -989,7 +989,7 @@ def _find_battery_sensor_entity_ids(evidence_paths: list[str]) -> list[str]:
             ids.append(entity_id)
             continue
         domain = entity_id.split(".", 1)[0]
-        if domain in {"sensor", "binary_sensor"}:
+        if domain == "sensor":
             ids.append(entity_id)
     return sorted(set(ids))
 
