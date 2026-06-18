@@ -4,6 +4,10 @@
 from __future__ import annotations
 
 from custom_components.home_generative_agent.sentinel.proposal_templates import (
+    _extract_threshold_numeric,
+    _find_entry_entity_ids,
+    _find_sensor_entity_ids,
+    _presence_signal,
     explain_normalize_candidate,
     normalize_candidate,
 )
@@ -1110,7 +1114,7 @@ def test_normalize_candidate_alarm_disarmed_any_presence_routes_to_alarm_state_m
 
 
 def test_normalize_candidate_window_open_duration_no_entry_ids_falls_back() -> None:
-    """Window open duration candidate with no entity IDs in evidence uses selector fallback."""
+    """Window duration candidate with no entry entity IDs and no night/away signal is unsupported."""
     candidate = {
         "candidate_id": "window_open_duration_exceeded",
         "title": "Window Open Duration Exceeded",
@@ -1122,10 +1126,9 @@ def test_normalize_candidate_window_open_duration_no_entry_ids_falls_back() -> N
             "derived.anyone_home",
         ],
     }
-    normalized = normalize_candidate(candidate)
-    assert normalized is not None
-    assert normalized.template_id == "open_any_window_at_night_while_away"
-    assert normalized.params["entry_selector"] == "window"
+    result = explain_normalize_candidate(candidate)
+    assert result.normalized is None
+    assert result.reason_code == "missing_required_entities"
 
 
 # ---------------------------------------------------------------------------
@@ -1154,7 +1157,7 @@ def test_normalize_candidate_power_sensor_dot_notation_evidence_paths() -> None:
 
 
 def test_normalize_candidate_lock_battery_dot_notation_evidence_paths() -> None:
-    """Lock entity IDs in dot-notation paths (e.g. lock.foo.battery_level) are extracted."""
+    """Lock battery candidate without a sensor.* battery entity ID returns unsupported_pattern."""
     candidate = {
         "candidate_id": "playroom_lock_battery_low",
         "title": "Playroom Lock Battery Low",
@@ -1167,7 +1170,189 @@ def test_normalize_candidate_lock_battery_dot_notation_evidence_paths() -> None:
             "derived.anyone_home",
         ],
     }
+    result = explain_normalize_candidate(candidate)
+    assert result.normalized is None
+    assert result.reason_code == "unsupported_pattern"
+
+
+def test_normalize_candidate_lock_battery_with_sensor_entity() -> None:
+    """Lock battery candidate with a sensor.* battery entity routes to low_battery_sensors."""
+    candidate = {
+        "candidate_id": "playroom_lock_battery_low",
+        "title": "Playroom Lock Battery Low",
+        "summary": "The playroom door lock battery is below 20%.",
+        "pattern": "sensor.playroom_lock_battery < 20",
+        "suggested_type": "maintenance",
+        "confidence_hint": 0.9,
+        "evidence_paths": [
+            "lock.playroom_door_lock.state",
+            "sensor.playroom_lock_battery.state",
+        ],
+    }
     normalized = normalize_candidate(candidate)
     assert normalized is not None
     assert normalized.template_id == "low_battery_sensors"
-    assert "lock.playroom_door_lock" in normalized.params.get("sensor_entity_ids", [])
+    assert "sensor.playroom_lock_battery" in normalized.params["sensor_entity_ids"]
+    assert "lock.playroom_door_lock" not in normalized.params["sensor_entity_ids"]
+
+
+# ---------------------------------------------------------------------------
+# Bug fixes: entity type filtering
+# ---------------------------------------------------------------------------
+
+
+def test_find_entry_entity_ids_excludes_plain_sensor_domain() -> None:
+    """sensor.* entities are not treated as entry sensors; only binary_sensor.* and cover.*."""
+    paths = [
+        "sensor.front_door_temperature",
+        "binary_sensor.front_door_contact",
+        "cover.garage_door",
+    ]
+    ids = _find_entry_entity_ids(paths)
+    assert "sensor.front_door_temperature" not in ids
+    assert "binary_sensor.front_door_contact" in ids
+    assert "cover.garage_door" in ids
+
+
+def test_find_sensor_entity_ids_excludes_binary_sensor_domain() -> None:
+    """binary_sensor.* entities are excluded from sensor_ids to prevent misrouting."""
+    paths = [
+        "binary_sensor.motion_hallway",
+        "sensor.power_meter_power",
+    ]
+    ids = _find_sensor_entity_ids(paths)
+    assert "binary_sensor.motion_hallway" not in ids
+    assert "sensor.power_meter_power" in ids
+
+
+# ---------------------------------------------------------------------------
+# Bug fixes: presence signal
+# ---------------------------------------------------------------------------
+
+
+def test_presence_signal_not_derived_anyone_home_path() -> None:
+    """'not derived.anyone_home' evidence path returns 'away'."""
+    assert _presence_signal(["not derived.anyone_home"], "") == "away"
+
+
+def test_presence_signal_derived_anyone_home_path_alone_returns_any() -> None:
+    """'derived.anyone_home' without text signals returns 'any', not 'home'."""
+    assert _presence_signal(["derived.anyone_home"], "") == "any"
+
+
+def test_presence_signal_not_derived_anyone_home_takes_priority_over_text() -> None:
+    """'not derived.anyone_home' path wins even when text contains home terms."""
+    assert (
+        _presence_signal(["not derived.anyone_home"], "someone is home occupied")
+        == "away"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Bug fixes: entry branch "any" presence path
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_candidate_entry_any_presence_defaults_to_away_template() -> None:
+    """Entry candidate with unknown presence (no occupancy signal) defaults to open_entry_while_away."""
+    candidate = {
+        "candidate_id": "front_door_open",
+        "title": "Front Door Open",
+        "summary": "The front door has been detected open.",
+        "pattern": "binary_sensor.front_door_contact == on",
+        "suggested_type": "security",
+        "confidence_hint": 0.8,
+        "evidence_paths": [
+            "binary_sensor.front_door_contact",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "open_entry_while_away"
+
+
+# ---------------------------------------------------------------------------
+# Bug fixes: multiple_entries_open_count with "any" presence
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_candidate_multiple_entries_any_presence_sets_require_away() -> None:
+    """multiple_entries_open_count with unknown presence defaults require_away=True."""
+    candidate = {
+        "candidate_id": "multiple_windows_open",
+        "title": "Multiple Windows Open Simultaneously",
+        "summary": "Several windows are open at the same time.",
+        "pattern": "multiple binary_sensor windows == on simultaneously",
+        "suggested_type": "security",
+        "confidence_hint": 0.75,
+        "evidence_paths": [
+            "binary_sensor.window_living_room",
+            "binary_sensor.window_bedroom",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "multiple_entries_open_count"
+    assert normalized.params["require_away"] is True
+    assert normalized.params["require_home"] is False
+
+
+# ---------------------------------------------------------------------------
+# Bug fixes: threshold floor
+# ---------------------------------------------------------------------------
+
+
+def test_extract_threshold_numeric_rejects_zero() -> None:
+    """_extract_threshold_numeric returns None when the matched value is 0."""
+    assert _extract_threshold_numeric("power above 0 watts") is None
+    assert _extract_threshold_numeric("exceeds 0") is None
+
+
+def test_extract_threshold_numeric_accepts_positive() -> None:
+    """_extract_threshold_numeric returns a positive float normally."""
+    assert _extract_threshold_numeric("above 5 watts") == 5.0
+    assert _extract_threshold_numeric("exceeds 100") == 100.0
+
+
+def test_normalize_candidate_power_zero_threshold_falls_back_to_baseline() -> None:
+    """Power sensor candidate with 'above 0' threshold falls back to baseline_deviation."""
+    candidate = {
+        "candidate_id": "phantom_load_above_0",
+        "title": "Phantom Load Active",
+        "summary": "Device draws power above 0 watts when not in use.",
+        "pattern": "sensor.device_power > 0",
+        "suggested_type": "power",
+        "confidence_hint": 0.65,
+        "evidence_paths": [
+            "sensor.device_power.state",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "baseline_deviation"
+    assert normalized.params["entity_id"] == "sensor.device_power"
+
+
+# ---------------------------------------------------------------------------
+# Bug fixes: open_any_window_at_night_while_away late guarded fallback
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_candidate_window_night_away_no_entry_ids_uses_selector() -> None:
+    """No-entry-ID window candidate WITH night+away signals uses open_any_window_at_night_while_away."""
+    candidate = {
+        "candidate_id": "window_open_night_away",
+        "title": "Window Open at Night While Away",
+        "summary": "A window is open at night while no one is home.",
+        "pattern": "is_night AND anyone_home == false AND window == open",
+        "suggested_type": "security",
+        "confidence_hint": 0.8,
+        "evidence_paths": [
+            "derived.is_night",
+            "not derived.anyone_home",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "open_any_window_at_night_while_away"
+    assert normalized.params["entry_selector"] == "window"

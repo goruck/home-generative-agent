@@ -406,37 +406,24 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
             )
         )
 
-    # open_any_window_at_night_while_away: window/entry open too long, but evidence
-    # paths lack explicit entry entity IDs (e.g. candidate uses generic evidence).
-    # Fall back to the selector-based window rule rather than returning unsupported.
-    if (
-        not entry_ids
-        and _has_duration_signal(text)
-        and _contains_any(text, ("window", "open", "door", "entry"))
-        and not lock_ids
-    ):
-        return NormalizationResult(
-            normalized=NormalizedRule(
-                rule_id=_candidate_rule_id(
-                    candidate, default="open_any_window_at_night_while_away"
-                ),
-                template_id="open_any_window_at_night_while_away",
-                params={"entry_selector": "window"},
-                severity="medium",
-                confidence=float(candidate.get("confidence_hint", 0.6)),
-                is_sensitive=True,
-                suggested_actions=["close_entry"],
-            )
-        )
-
     # low_battery on a lock entity: battery signal takes priority over unlocked routing.
+    # Requires a sensor.* battery entity — lock entities cannot be sensor_entity_ids.
     if lock_ids and "battery" in text and _contains_any(text, ("low", "below", "weak")):
+        if not battery_sensor_ids:
+            return NormalizationResult(
+                normalized=None,
+                reason_code="unsupported_pattern",
+                details={
+                    "reason": "lock battery candidate lacks sensor.* battery IDs",
+                    **summary,
+                },
+            )
         return NormalizationResult(
             normalized=NormalizedRule(
                 rule_id=_candidate_rule_id(candidate, default="low_battery_sensors"),
                 template_id="low_battery_sensors",
                 params={
-                    "sensor_entity_ids": lock_ids,
+                    "sensor_entity_ids": battery_sensor_ids,
                     "threshold": _extract_threshold_percent(text, default=40.0),
                 },
                 severity="low",
@@ -488,7 +475,7 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
         and _contains_any(text, ("open", "window", "door", "entry"))
     ):
         require_home = presence == "home"
-        require_away = presence == "away"
+        require_away = presence in {"away", "any"}
         default_rule_id = "multiple_entries_open_count"
         return NormalizationResult(
             normalized=NormalizedRule(
@@ -544,6 +531,16 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     entry_ids,
                 )
             )
+        # presence == "any": occupancy unknown — default to "away" template (safer,
+        # fires whenever an entry is open regardless of confirmed home/away state).
+        return NormalizationResult(
+            normalized=_build_entry_rule(
+                candidate,
+                "open_entry_while_away",
+                f"open_entry_while_away_{entry_kind}",
+                entry_ids,
+            )
+        )
     if (
         not entry_ids
         and has_night
@@ -946,7 +943,7 @@ def _find_entry_entity_ids(evidence_paths: list[str]) -> list[str]:
                 ids.append(entity_id)
             continue
         domain = entity_id.split(".", 1)[0]
-        if domain not in {"binary_sensor", "sensor", "cover"}:
+        if domain not in {"binary_sensor", "cover"}:
             continue
         if any(key in entity_id for key in ("door", "window", "entry")):
             ids.append(entity_id)
@@ -975,7 +972,7 @@ def _find_sensor_entity_ids(evidence_paths: list[str]) -> list[str]:
             ids.append(entity_id)
             continue
         domain = entity_id.split(".", 1)[0]
-        if domain in {"sensor", "binary_sensor"}:
+        if domain == "sensor":
             ids.append(entity_id)
     return sorted(set(ids))
 
@@ -1018,9 +1015,12 @@ def _has_night_signal(evidence_paths: list[str], text: str) -> bool:
 
 
 def _presence_signal(evidence_paths: list[str], text: str) -> str:
-    # Explicit boolean expressions take priority — they are unambiguous and must
-    # be resolved before term matching, which can misfire on substrings like
-    # "home" inside "armed_home" or "anyone_home".
+    # Explicit evidence-path expressions take absolute priority.
+    # "not derived.anyone_home" is the LLM's canonical absence-of-occupancy path.
+    if "not derived.anyone_home" in evidence_paths:
+        return "away"
+    # Explicit boolean expressions resolve next — unambiguous and must precede
+    # term matching, which can misfire on substrings like "home" inside "armed_home".
     if _ANYONE_HOME_FALSE_PATTERN.search(text):
         return "away"
     if _ANYONE_HOME_TRUE_PATTERN.search(text):
@@ -1029,8 +1029,8 @@ def _presence_signal(evidence_paths: list[str], text: str) -> str:
         return "away"
     if _contains_any(text, _HOME_TERMS):
         return "home"
-    if "derived.anyone_home" in evidence_paths:
-        return "home"
+    # "derived.anyone_home" alone (without direction signals) means occupancy matters
+    # but direction is unknown — return "any" rather than guessing "home".
     return "any"
 
 
@@ -1088,7 +1088,6 @@ def _find_camera_id(  # noqa: PLR0911
     if not object_candidates:
         return None
     return f"camera.{object_candidates[-1]}"
-    return None
 
 
 def _extract_threshold_hours(
@@ -1108,9 +1107,10 @@ def _extract_threshold_numeric(text: str) -> float | None:
     if not match:
         return None
     try:
-        return float(match.group(1))
+        value = float(match.group(1))
     except ValueError:
         return None
+    return value if value > 0 else None
 
 
 def _extract_alarm_state(text: str) -> str | None:

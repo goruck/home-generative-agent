@@ -978,3 +978,25 @@ async def test_rule_registry_toggle_enabled(hass) -> None:
     enabled_rules = registry.list_rules()
     assert len(enabled_rules) == 1
     assert enabled_rules[0]["rule_id"] == "rule_toggle"
+
+
+@pytest.mark.asyncio
+async def test_rule_registry_patch_params(hass) -> None:
+    registry = RuleRegistry(hass=cast("HomeAssistant", hass))
+    await registry.async_load()
+    rule = {
+        "rule_id": "rule_patch",
+        "template_id": "sensor_threshold_condition",
+        "params": {"sensor_entity_id": "sensor.foo", "threshold": 0},
+    }
+    assert await registry.async_add_rule(rule)
+
+    # patch a single field — other fields survive
+    assert await registry.async_patch_rule_params("rule_patch", {"threshold": 5})
+    patched = registry.find_rule("rule_patch")
+    assert patched is not None
+    assert patched["params"]["threshold"] == 5
+    assert patched["params"]["sensor_entity_id"] == "sensor.foo"
+
+    # patching a non-existent rule returns False
+    assert not await registry.async_patch_rule_params("no_such_rule", {"threshold": 5})

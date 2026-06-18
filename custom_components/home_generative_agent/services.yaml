@@ -208,6 +208,29 @@ reactivate_dynamic_rule:
       selector:
         text:
 
+patch_dynamic_rule:
+  name: Patch dynamic rule params
+  description: >
+    Merge a partial params dict into an existing dynamic rule.
+    Only the supplied keys are updated; omitted keys are left unchanged.
+    Use this to correct Discovery hallucinations (wrong entity, bad threshold, etc.)
+    without removing and re-approving the rule.
+  fields:
+    rule_id:
+      name: Rule ID
+      description: ID of the rule to patch.
+      required: true
+      example: "washing_machine_phantom_load_away"
+      selector:
+        text:
+    params:
+      name: Params patch
+      description: Key/value pairs to merge into the rule's params field.
+      required: true
+      example: '{"threshold": 5}'
+      selector:
+        object:
+
 sentinel_set_autonomy_level:
   name: Set sentinel autonomy level
   description: >

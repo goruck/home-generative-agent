@@ -98,3 +98,20 @@ class RuleRegistry:
             )
             return True
         return False
+
+    async def async_patch_rule_params(
+        self, rule_id: str, params_patch: dict[str, Any]
+    ) -> bool:
+        """Merge params_patch into an existing rule's params. Returns True if found."""
+        for rule in self._rules:
+            if rule.get("rule_id") != rule_id:
+                continue
+            existing = rule.get("params")
+            if isinstance(existing, dict):
+                existing.update(params_patch)
+            else:
+                rule["params"] = dict(params_patch)
+            await self.async_save()
+            LOGGER.info("Rule registry patched params for dynamic rule %s.", rule_id)
+            return True
+        return False

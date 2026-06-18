@@ -60,6 +60,12 @@ class DummyRuleRegistry:
         _ = (rule_id, enabled)
         return True
 
+    async def async_patch_rule_params(
+        self, rule_id: str, params_patch: dict[str, Any]
+    ) -> bool:
+        _ = (rule_id, params_patch)
+        return True
+
 
 def _make_entry(
     *,
