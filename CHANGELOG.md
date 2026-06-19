@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.22] - 2026-06-19
+
+### Fixed
+
+- **Sentinel Discovery: normalization produced defective dynamic rules** — nine bugs in `explain_normalize_candidate` caused approved Discovery candidates to register rules with wrong entity types, missing domain prefixes, or semantically incorrect templates. Fixes:
+  - `_find_sensor_entity_ids` now accepts only `sensor.*`; `binary_sensor.*` entities (motion, contact) no longer bleed into power-sensor branches.
+  - `_find_battery_sensor_entity_ids` now accepts only `sensor.*`; `binary_sensor.*` battery entities (on/off state) are excluded so they cannot produce `low_battery_sensors` rules that silently generate no findings.
+  - `_find_entry_entity_ids` now accepts only `binary_sensor.*` and `cover.*`; plain `sensor.*` numeric sensors can no longer be treated as door/window contacts.
+  - The `low_battery_sensors` branch for lock candidates now requires a `sensor.*` battery entity; candidates that reference only `lock.*` entities return `unsupported_pattern` instead of emitting a rule with a lock ID in `sensor_entity_ids`.
+  - `_extract_threshold_numeric` returns `None` for values ≤ 0 (e.g. "above 0 watts"), preventing `sensor_threshold_condition` rules with a useless threshold of zero; such candidates now fall back to `baseline_deviation`.
+  - `_presence_signal` checks `"not derived.anyone_home"` in `evidence_paths` first (returns `"away"`); `"derived.anyone_home"` alone now returns `"any"` instead of incorrectly inferring `"home"`.
+  - Entry branches now handle `presence == "any"` (unknown occupancy) by defaulting to `open_entry_while_away` rather than falling through to `_normalization_failure`.
+  - The early broad `open_any_window_at_night_while_away` fallback that fired before battery/sensor/energy branches is removed; the guarded late fallback (requires night + away signals) remains.
+  - `multiple_entries_open_count` defaults to `require_away=True` when occupancy is unknown, replacing the previous `require_home=False, require_away=False` state that made the rule fire unconditionally.
+  - Dead `return None` after the final `return` in `_find_camera_id` is removed.
+
+- **`patch_dynamic_rule` service added** — new HA service `home_generative_agent.patch_dynamic_rule` merges a partial params dict into an existing dynamic rule without removing and re-approving it. Useful for repairing defective rules in the registry that were created before the normalization fixes.
+
 ## [3.14.21] - 2026-06-15
 
 ### Fixed

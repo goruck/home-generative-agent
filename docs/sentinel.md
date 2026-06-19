@@ -470,6 +470,7 @@ Discovery and baseline both require `sentinel_enabled` to be `true`. Discovery a
 | `home_generative_agent.get_dynamic_rules` | List active dynamic rules |
 | `home_generative_agent.deactivate_dynamic_rule` | Deactivate a dynamic rule |
 | `home_generative_agent.reactivate_dynamic_rule` | Reactivate a dynamic rule |
+| `home_generative_agent.patch_dynamic_rule` | Merge a partial params dict into an existing dynamic rule without removing it. Supply `rule_id` and a `params` object containing only the keys to update. Use this to repair a defective rule in-place (e.g. correct a wrong entity ID) after the discovery normalization code has been fixed. |
 | `home_generative_agent.get_audit_records` | Fetch audit records |
 | `home_generative_agent.sentinel_set_autonomy_level` | Admin-only; applies a TTL-bounded runtime override. Requires PIN if `sentinel_require_pin_for_level_increase` is enabled. |
 | `home_generative_agent.sentinel_get_baselines` | Return raw baseline statistics for all tracked entities |

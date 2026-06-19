@@ -323,6 +323,7 @@ SERVICE_REJECT_RULE_PROPOSAL = "reject_rule_proposal"
 SERVICE_GET_DYNAMIC_RULES = "get_dynamic_rules"
 SERVICE_DEACTIVATE_DYNAMIC_RULE = "deactivate_dynamic_rule"
 SERVICE_REACTIVATE_DYNAMIC_RULE = "reactivate_dynamic_rule"
+SERVICE_PATCH_DYNAMIC_RULE = "patch_dynamic_rule"
 SERVICE_SENTINEL_SET_AUTONOMY_LEVEL = "sentinel_set_autonomy_level"
 SERVICE_SENTINEL_GET_BASELINES = "sentinel_get_baselines"
 SERVICE_SENTINEL_RESET_BASELINE = "sentinel_reset_baseline"
@@ -383,6 +384,13 @@ GET_DYNAMIC_RULES_SCHEMA = vol.Schema(
 TOGGLE_DYNAMIC_RULE_SCHEMA = vol.Schema(
     {
         vol.Required("rule_id"): cv.string,
+    }
+)
+
+PATCH_DYNAMIC_RULE_SCHEMA = vol.Schema(
+    {
+        vol.Required("rule_id"): cv.string,
+        vol.Required("params"): dict,
     }
 )
 
@@ -3000,6 +3008,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         SERVICE_REACTIVATE_DYNAMIC_RULE,
         _handle_reactivate_dynamic_rule,
         schema=TOGGLE_DYNAMIC_RULE_SCHEMA,
+        supports_response=_SERVICE_RESPONSE_ONLY,
+    )
+
+    async def _handle_patch_dynamic_rule(call: ServiceCall) -> dict[str, Any]:
+        rule_id = str(call.data.get("rule_id"))
+        params_patch = dict(call.data.get("params", {}))
+        rule_registry = entry.runtime_data.rule_registry
+        if rule_registry is None:
+            return {"status": "unavailable", "rule_id": rule_id}
+        ok = await rule_registry.async_patch_rule_params(rule_id, params_patch)
+        return {"status": "ok" if ok else "not_found", "rule_id": rule_id}
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_PATCH_DYNAMIC_RULE,
+        _handle_patch_dynamic_rule,
+        schema=PATCH_DYNAMIC_RULE_SCHEMA,
         supports_response=_SERVICE_RESPONSE_ONLY,
     )
 
