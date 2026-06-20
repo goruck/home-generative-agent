@@ -748,4 +748,53 @@ def test_entity_staleness_execute_prompt_non_person() -> None:
     )
     prompt = _build_entity_staleness_execute_prompt(finding)
     assert "Front Door Battery" in prompt
+
+
+# ---------------------------------------------------------------------------
+# _build_ask_prompt — alarm_disarmed_open_entry branch
+# ---------------------------------------------------------------------------
+
+
+def _make_open_entry_finding(entry_id: str) -> AnomalyFinding:
+    return AnomalyFinding(
+        anomaly_id="oe-ask-1",
+        type="alarm_disarmed_open_entry_alarm_control_panel_home_alarm",
+        severity="high",
+        confidence=0.6,
+        triggering_entities=["alarm_control_panel.home_alarm", entry_id],
+        evidence={
+            "template_id": "alarm_disarmed_open_entry",
+            "alarm_entity_id": "alarm_control_panel.home_alarm",
+            "entry_entity_id": entry_id,
+            "entry_state": "on",
+            "alarm_state": "disarmed",
+            "alarm_last_changed": "2025-01-01T22:15:00+00:00",
+        },
+        suggested_actions=["close_entry"],
+        is_sensitive=True,
+    )
+
+
+def test_ask_prompt_open_entry_binary_sensor_forbids_arming() -> None:
+    """For read-only binary_sensor entries the prompt must not suggest arming."""
+    finding = _make_open_entry_finding("binary_sensor.family_room_right_window")
+    prompt = _build_ask_prompt(finding)
+    assert "Do NOT attempt to arm the alarm" in prompt
+
+
+def test_ask_prompt_open_entry_binary_sensor_advises_manual_close() -> None:
+    """Prompt tells agent to direct user to close manually or snooze."""
+    finding = _make_open_entry_finding("binary_sensor.family_room_right_window")
+    prompt = _build_ask_prompt(finding)
+    assert "manually" in prompt
+    assert "Snooze" in prompt
+
+
+def test_ask_prompt_open_entry_cover_uses_close_action() -> None:
+    """For a cover.* entry the prompt should direct agent to close the cover."""
+    finding = _make_open_entry_finding("cover.garage_door")
+    prompt = _build_ask_prompt(finding)
+    assert "close" in prompt.lower()
+    assert "cover.garage_door" in prompt
+    assert "Do NOT attempt to arm the alarm" not in prompt
     assert "home" not in prompt.lower() or "not_home" not in prompt
