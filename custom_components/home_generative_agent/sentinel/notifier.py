@@ -782,6 +782,10 @@ def _build_subtitle(finding: AnomalyFinding) -> str:
             raw_name = _friendly_entity(finding.triggering_entities[0])
         appliance = _strip_power_suffix(raw_name).title()
         return f"{appliance} finished" if appliance else "Appliance cycle complete"
+    if finding.evidence.get("template_id") == "alarm_disarmed_open_entry":
+        entry_id = str(finding.evidence.get("entry_entity_id") or "")
+        entry_name = _friendly_entity(entry_id) if entry_id else "Entry"
+        return f"{entry_name} open, alarm disarmed"
     if finding.evidence.get("template_id") in {
         "baseline_deviation",
         "time_of_day_anomaly",
@@ -841,6 +845,27 @@ def _alarm_disarmed_mobile_message(finding: AnomalyFinding) -> str:
 
     cta = " Arm the alarm or view the camera."
     return (activity_phrase + alarm_phrase + cta)[:MAX_MOBILE_MESSAGE_CHARS].rstrip()
+
+
+def _alarm_disarmed_open_entry_mobile_message(finding: AnomalyFinding) -> str:
+    """Deterministic mobile copy for alarm_disarmed_open_entry dynamic rule."""
+    ev = finding.evidence
+    entry_id = str(ev.get("entry_entity_id") or "")
+    entry_name = _friendly_entity(entry_id) if entry_id else "An entry"
+
+    alarm_last_changed = ev.get("alarm_last_changed")
+    if alarm_last_changed:
+        parsed = dt_util.parse_datetime(str(alarm_last_changed))
+        if parsed is not None:
+            time_str = dt_util.as_local(parsed).strftime("%-I:%M %p")
+            alarm_phrase = f"Alarm disarmed since {time_str}."
+        else:
+            alarm_phrase = "Alarm is disarmed."
+    else:
+        alarm_phrase = "Alarm is disarmed."
+
+    msg = f"{entry_name} is open. {alarm_phrase} Close it or snooze if expected."
+    return msg[:MAX_MOBILE_MESSAGE_CHARS].rstrip()
 
 
 def _baseline_deviation_mobile_message(finding: AnomalyFinding) -> str:
@@ -912,18 +937,27 @@ def _entity_staleness_mobile_message(finding: AnomalyFinding) -> str:
     return msg[:MAX_MOBILE_MESSAGE_CHARS].rstrip()
 
 
+_TEMPLATE_MOBILE_FORMATTERS: dict[
+    str,
+    Any,
+] = {
+    "alarm_disarmed_open_entry": _alarm_disarmed_open_entry_mobile_message,
+    "baseline_deviation": _baseline_deviation_mobile_message,
+    "time_of_day_anomaly": _baseline_deviation_mobile_message,
+    "entity_staleness": _entity_staleness_mobile_message,
+}
+
+
 def _mobile_message(explanation: str | None, finding: AnomalyFinding) -> str:
     if finding.type == "alarm_disarmed_during_external_threat":
         return _alarm_disarmed_mobile_message(finding)
     if finding.type == "appliance_power_duration":
         return _appliance_power_duration_mobile_message(finding)
-    if finding.evidence.get("template_id") in {
-        "baseline_deviation",
-        "time_of_day_anomaly",
-    }:
-        return _baseline_deviation_mobile_message(finding)
-    if finding.evidence.get("template_id") == "entity_staleness":
-        return _entity_staleness_mobile_message(finding)
+    formatter = _TEMPLATE_MOBILE_FORMATTERS.get(
+        str(finding.evidence.get("template_id") or "")
+    )
+    if formatter:
+        return formatter(finding)
     if explanation:
         text = _normalize_text(explanation)
         if text and len(text) <= MAX_MOBILE_MESSAGE_CHARS:

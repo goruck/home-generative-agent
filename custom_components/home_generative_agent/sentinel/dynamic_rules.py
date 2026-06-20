@@ -217,7 +217,8 @@ def _eval_alarm_disarmed_open_entry(
             "entry_entity_id": entry_id,
             "entry_state": entry.get("state"),
             "alarm_state": alarm.get("state"),
-            "last_changed": entry.get("last_changed"),
+            "entry_last_changed": entry.get("last_changed"),
+            "alarm_last_changed": alarm.get("last_changed"),
         }
         findings.append(_build_finding(rule, [alarm_id, entry_id], evidence))
     return findings
