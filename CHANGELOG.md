@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.23] - 2026-06-19
+
+### Fixed
+
+- **Sentinel: `alarm_disarmed_open_entry` notifications were confusing and showed the wrong timestamp** — the notification subtitle was derived from the raw rule ID ("Alarm disarmed open entry alarm control panel home alarm") and the message body showed the window sensor's `last_changed` time instead of when the alarm was actually disarmed. Fixes:
+  - Added a dedicated subtitle and mobile message formatter for the `alarm_disarmed_open_entry` template; subtitle now reads e.g. "Family Room Right Window open, alarm disarmed" and the body shows the actual disarm time ("Alarm disarmed since 10:15 PM").
+  - Dynamic rule evaluator now stores `alarm_last_changed` and `entry_last_changed` as separate evidence fields so the correct timestamp is always available.
+  - "Ask Agent" handoff prompt now distinguishes read-only `binary_sensor` entries (cannot be closed programmatically) from actuatable `cover.*` entities. For sensors it explicitly forbids arming the alarm as a substitute and instructs the agent to advise the user to close the entry manually or use "Snooze 24h"/"Snooze Always" if the open window is expected.
+  - Added direct regression tests for the new mobile copy, subtitle, LLM-bypass routing, and the binary_sensor vs cover Ask Agent prompt branches.
+
 ## [3.14.22] - 2026-06-19
 
 ### Fixed
