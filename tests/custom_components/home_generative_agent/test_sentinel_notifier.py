@@ -24,8 +24,10 @@ from custom_components.home_generative_agent.sentinel.notifier import (
     MAX_MOBILE_MESSAGE_CHARS,
     SentinelNotifier,
     _alarm_disarmed_mobile_message,
+    _alarm_disarmed_open_entry_mobile_message,
     _appliance_power_duration_mobile_message,
     _build_actions,
+    _build_subtitle,
     _entity_staleness_mobile_message,
     _friendly_type,
     _mobile_message,
@@ -1686,3 +1688,71 @@ async def test_daily_digest_callback_dispatches_coroutine() -> None:
         await hass.drain_tasks()
 
     run_mock.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# alarm_disarmed_open_entry — mobile message and subtitle
+# ---------------------------------------------------------------------------
+
+
+def _open_entry_finding(
+    entry_id: str = "binary_sensor.family_room_right_window",
+    alarm_last_changed: str | None = "2025-01-01T22:15:00+00:00",
+    entry_last_changed: str | None = "2025-01-01T21:00:00+00:00",
+) -> AnomalyFinding:
+    return AnomalyFinding(
+        anomaly_id="oe1",
+        type="alarm_disarmed_open_entry_alarm_control_panel_home_alarm",
+        severity="high",
+        confidence=0.6,
+        triggering_entities=["alarm_control_panel.home_alarm", entry_id],
+        evidence={
+            "template_id": "alarm_disarmed_open_entry",
+            "alarm_entity_id": "alarm_control_panel.home_alarm",
+            "entry_entity_id": entry_id,
+            "entry_state": "on",
+            "alarm_state": "disarmed",
+            "entry_last_changed": entry_last_changed,
+            "alarm_last_changed": alarm_last_changed,
+        },
+        suggested_actions=["close_entry"],
+        is_sensitive=True,
+    )
+
+
+def test_alarm_disarmed_open_entry_mobile_message_with_alarm_time() -> None:
+    """Mobile copy shows entry name and the alarm disarm time, not the entry timestamp."""
+    finding = _open_entry_finding(alarm_last_changed="2025-01-01T22:15:00+00:00")
+    msg = _alarm_disarmed_open_entry_mobile_message(finding)
+    assert "Family Room Right Window" in msg
+    assert "disarmed since" in msg
+    assert "close" in msg.lower() or "snooze" in msg.lower()
+    assert len(msg) <= MAX_MOBILE_MESSAGE_CHARS
+
+
+def test_alarm_disarmed_open_entry_mobile_message_no_alarm_time() -> None:
+    """Falls back gracefully when alarm_last_changed is absent."""
+    finding = _open_entry_finding(alarm_last_changed=None)
+    msg = _alarm_disarmed_open_entry_mobile_message(finding)
+    assert "Family Room Right Window" in msg
+    assert "disarmed" in msg
+    assert len(msg) <= MAX_MOBILE_MESSAGE_CHARS
+
+
+def test_alarm_disarmed_open_entry_mobile_message_no_llm_fallback() -> None:
+    """Template-id dispatch routes to deterministic builder, not the LLM explanation."""
+    finding = _open_entry_finding()
+    llm_explanation = "The alarm is disarmed and the window is open."
+    msg = _mobile_message(llm_explanation, finding)
+    # Deterministic copy must be used — LLM text should NOT appear verbatim.
+    assert "window is open" not in msg
+    assert "Family Room Right Window" in msg
+
+
+def test_alarm_disarmed_open_entry_subtitle() -> None:
+    """Subtitle shows entry name and rule context, not raw rule id."""
+    finding = _open_entry_finding()
+    subtitle = _build_subtitle(finding)
+    assert "Family Room Right Window" in subtitle
+    assert "open" in subtitle.lower()
+    assert "alarm disarmed" in subtitle.lower()

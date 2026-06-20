@@ -359,6 +359,30 @@ def _build_ask_prompt(finding: AnomalyFinding) -> str:
         "%Y-%m-%d %H:%M:%S UTC"
     )
     evidence_summary = _format_evidence_summary(finding.evidence)
+
+    template_id = finding.evidence.get("template_id", "")
+    if template_id == "alarm_disarmed_open_entry":
+        entry_id = str(finding.evidence.get("entry_entity_id") or entity_id or "")
+        entry_domain = entry_id.split(".", maxsplit=1)[0] if "." in entry_id else ""
+        if entry_domain == "cover":
+            action_clause = (
+                f"Use your Home Assistant tools to close the cover entity {entry_id}."
+            )
+        else:
+            action_clause = (
+                f"The open entry ({entry_id}) is a read-only sensor — "
+                f"you cannot close it programmatically. "
+                f"Check if someone is home using GetLiveContext. "
+                f"If home, this is likely expected behaviour; tell the user they can "
+                f"close it manually or tap 'Snooze 24h' / 'Snooze Always' on the alert "
+                f"if this is routine. Do NOT attempt to arm the alarm."
+            )
+    else:
+        action_clause = (
+            "If still active, use your Home Assistant tools to perform "
+            "the suggested action now."
+        )
+
     return (
         f"Sentinel security alert — {finding.severity} severity, "
         f"{finding.confidence:.0%} confidence, detected at {detected_at_str}. "
@@ -367,8 +391,7 @@ def _build_ask_prompt(finding: AnomalyFinding) -> str:
         f"Suggested remediation: {suggested}. "
         f"Use GetLiveContext to check whether the alert condition is still active "
         f"(state may have changed since detection).{camera_clause} "
-        f"If still active, use your Home Assistant tools to perform "
-        f"the suggested action now. "
+        f"{action_clause} "
         f"If the condition has since resolved, explicitly acknowledge what Sentinel "
         f"detected at {detected_at_str} and confirm it has resolved. "
         f"Do not ask clarifying questions — proceed autonomously. "
