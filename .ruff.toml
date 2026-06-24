@@ -18,6 +18,7 @@ ignore = [
 [lint.per-file-ignores]
 "tests/**/*.py" = [
     "ANN001", # Allow untyped pytest fixture args
+    "ANN201", # Allow untyped pytest fixture return types
     "ARG002", # Allow unused args in test doubles
     "D102",   # Test helper methods do not require docstrings
     "D103",   # Test functions do not require docstrings

@@ -3,9 +3,9 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from homeassistant.helpers.recorder import DATA_INSTANCE
@@ -14,6 +14,8 @@ from custom_components.home_generative_agent.sentinel.lock_enrichment import (
     async_enrich_lock_last_changed,
 )
 from custom_components.home_generative_agent.snapshot.schema import validate_snapshot
+
+_NOW = datetime(2026, 6, 22, 5, 16, 0, tzinfo=UTC)
 
 
 def _base_snapshot(**kwargs: Any) -> Any:
@@ -71,6 +73,12 @@ def _make_hass(recorder_states: list[MagicMock] | None = None) -> MagicMock:
     return hass
 
 
+@pytest.fixture(autouse=True)
+def freeze_utcnow():
+    with patch("homeassistant.util.dt.utcnow", return_value=_NOW):
+        yield
+
+
 @pytest.mark.asyncio
 async def test_no_recorder_skips_enrichment() -> None:
     """If recorder isn't loaded, enrichment is a no-op."""
@@ -103,11 +111,11 @@ async def test_no_unlocked_lock_skips_enrichment() -> None:
 @pytest.mark.asyncio
 async def test_corrects_startup_reset_direct_unlock() -> None:
     """Lock unlocked before HA startup (no unavailable) gets last_changed corrected."""
-    actual_unlock = datetime(2026, 6, 20, 10, 0, 0, tzinfo=UTC)
-    ha_startup = datetime(2026, 6, 22, 5, 16, 0, tzinfo=UTC)
+    actual_unlock = _NOW - timedelta(days=1, hours=19, minutes=16)  # ~June 20 10:00
+    ha_startup = _NOW
 
     recorder_states = [
-        _mock_state("locked", datetime(2026, 6, 20, 9, 0, 0, tzinfo=UTC)),
+        _mock_state("locked", _NOW - timedelta(days=1, hours=20, minutes=16)),
         _mock_state("unlocked", actual_unlock),
         _mock_state("unlocked", ha_startup),  # HA restart re-report
     ]
@@ -124,11 +132,11 @@ async def test_corrects_startup_reset_direct_unlock() -> None:
 @pytest.mark.asyncio
 async def test_corrects_startup_reset_via_unavailable() -> None:
     """HA restart: unavailable → unlocked re-report; finds true unlock."""
-    actual_unlock = datetime(2026, 6, 20, 10, 0, 0, tzinfo=UTC)
-    ha_startup = datetime(2026, 6, 22, 5, 16, 0, tzinfo=UTC)
+    actual_unlock = _NOW - timedelta(days=1, hours=19, minutes=16)  # ~June 20 10:00
+    ha_startup = _NOW
 
     recorder_states = [
-        _mock_state("locked", datetime(2026, 6, 20, 9, 0, 0, tzinfo=UTC)),
+        _mock_state("locked", _NOW - timedelta(days=1, hours=20, minutes=16)),
         _mock_state("unlocked", actual_unlock),
         _mock_state("unavailable", ha_startup),
         _mock_state("unlocked", ha_startup),
@@ -146,11 +154,11 @@ async def test_corrects_startup_reset_via_unavailable() -> None:
 @pytest.mark.asyncio
 async def test_unlocking_intermediate_state_handled() -> None:
     """Locked → unlocking → unlocked sequence; true unlock identified correctly."""
-    actual_unlock = datetime(2026, 6, 22, 5, 16, 0, tzinfo=UTC)
+    actual_unlock = _NOW
 
     recorder_states = [
-        _mock_state("locked", datetime(2026, 6, 22, 5, 15, 0, tzinfo=UTC)),
-        _mock_state("unlocking", datetime(2026, 6, 22, 5, 15, 59, tzinfo=UTC)),
+        _mock_state("locked", _NOW - timedelta(minutes=1)),
+        _mock_state("unlocking", _NOW - timedelta(seconds=1)),
         _mock_state("unlocked", actual_unlock),
     ]
     hass = _make_hass(recorder_states)
@@ -167,10 +175,10 @@ async def test_unlocking_intermediate_state_handled() -> None:
 @pytest.mark.asyncio
 async def test_genuine_unlock_not_changed() -> None:
     """Lock truly unlocked at startup time; no correction needed."""
-    unlock_time = datetime(2026, 6, 22, 5, 16, 0, tzinfo=UTC)
+    unlock_time = _NOW
 
     recorder_states = [
-        _mock_state("locked", datetime(2026, 6, 21, 22, 0, 0, tzinfo=UTC)),
+        _mock_state("locked", _NOW - timedelta(hours=7, minutes=16)),
         _mock_state("unlocked", unlock_time),
     ]
     hass = _make_hass(recorder_states)
@@ -186,15 +194,15 @@ async def test_genuine_unlock_not_changed() -> None:
 @pytest.mark.asyncio
 async def test_multiple_restarts_finds_original_unlock() -> None:
     """Multiple HA restarts all re-reporting unlocked; finds first unlock."""
-    original_unlock = datetime(2026, 6, 18, 14, 0, 0, tzinfo=UTC)
+    original_unlock = _NOW - timedelta(days=3, hours=15, minutes=16)  # ~June 18 14:00
 
     recorder_states = [
-        _mock_state("locked", datetime(2026, 6, 18, 13, 0, 0, tzinfo=UTC)),
+        _mock_state("locked", _NOW - timedelta(days=3, hours=16, minutes=16)),
         _mock_state("unlocked", original_unlock),
-        _mock_state("unavailable", datetime(2026, 6, 20, 8, 0, 0, tzinfo=UTC)),
-        _mock_state("unlocked", datetime(2026, 6, 20, 8, 0, 0, tzinfo=UTC)),
-        _mock_state("unavailable", datetime(2026, 6, 22, 5, 16, 0, tzinfo=UTC)),
-        _mock_state("unlocked", datetime(2026, 6, 22, 5, 16, 0, tzinfo=UTC)),
+        _mock_state("unavailable", _NOW - timedelta(days=1, hours=21, minutes=16)),
+        _mock_state("unlocked", _NOW - timedelta(days=1, hours=21, minutes=16)),
+        _mock_state("unavailable", _NOW),
+        _mock_state("unlocked", _NOW),
     ]
     hass = _make_hass(recorder_states)
 
@@ -209,12 +217,12 @@ async def test_multiple_restarts_finds_original_unlock() -> None:
 @pytest.mark.asyncio
 async def test_armed_record_purged_uses_oldest_within_window() -> None:
     """All records unlocked, locked record purged: uses oldest as best estimate."""
-    oldest_unlock = datetime(2026, 6, 14, 20, 46, 53, tzinfo=UTC)
+    oldest_unlock = _NOW - timedelta(days=7, hours=8, minutes=29, seconds=7)
 
     recorder_states = [
         _mock_state("unlocked", oldest_unlock),
-        _mock_state("unlocked", datetime(2026, 6, 15, 12, 0, 0, tzinfo=UTC)),
-        _mock_state("unlocked", datetime(2026, 6, 22, 5, 16, 0, tzinfo=UTC)),
+        _mock_state("unlocked", _NOW - timedelta(days=6, hours=17, minutes=16)),
+        _mock_state("unlocked", _NOW),
     ]
     hass = _make_hass(recorder_states)
 
@@ -230,11 +238,11 @@ async def test_armed_record_purged_uses_oldest_within_window() -> None:
 async def test_all_unlocked_beyond_window_clears_last_changed() -> None:
     """Synthetic anchor also unlocked (lock open > 30 days): clears last_changed."""
     recorder_states = [
+        _mock_state("unlocked", _NOW - timedelta(days=52)),  # before 30-day window
         _mock_state(
-            "unlocked", datetime(2026, 5, 1, 10, 0, 0, tzinfo=UTC)
-        ),  # before window
-        _mock_state("unlocked", datetime(2026, 5, 20, 8, 0, 0, tzinfo=UTC)),
-        _mock_state("unlocked", datetime(2026, 6, 22, 5, 16, 0, tzinfo=UTC)),
+            "unlocked", _NOW - timedelta(days=33)
+        ),  # still outside 30-day window
+        _mock_state("unlocked", _NOW),
     ]
     hass = _make_hass(recorder_states)
 
@@ -251,7 +259,7 @@ async def test_insufficient_history_leaves_unchanged() -> None:
     """Fewer than 2 history records → snapshot unchanged."""
     hass = _make_hass(
         recorder_states=[
-            _mock_state("unlocked", datetime(2026, 6, 22, 5, 16, 0, tzinfo=UTC)),
+            _mock_state("unlocked", _NOW),
         ]
     )
 

@@ -3,9 +3,9 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from homeassistant.helpers.recorder import DATA_INSTANCE
@@ -14,6 +14,8 @@ from custom_components.home_generative_agent.sentinel.alarm_enrichment import (
     async_enrich_alarm_last_changed,
 )
 from custom_components.home_generative_agent.snapshot.schema import validate_snapshot
+
+_NOW = datetime(2026, 6, 22, 5, 16, 0, tzinfo=UTC)
 
 
 def _base_snapshot(**kwargs: Any) -> Any:
@@ -72,6 +74,12 @@ def _make_hass(recorder_states: list[MagicMock] | None = None) -> MagicMock:
     return hass
 
 
+@pytest.fixture(autouse=True)
+def freeze_utcnow():
+    with patch("homeassistant.util.dt.utcnow", return_value=_NOW):
+        yield
+
+
 @pytest.mark.asyncio
 async def test_no_recorder_skips_enrichment() -> None:
     """If recorder isn't loaded, enrichment is a no-op."""
@@ -104,11 +112,11 @@ async def test_no_disarmed_alarm_skips_enrichment() -> None:
 @pytest.mark.asyncio
 async def test_corrects_startup_reset_last_changed() -> None:
     """Alarm disarmed before HA startup (no unavailable) gets last_changed corrected."""
-    actual_disarm = datetime(2026, 6, 20, 10, 0, 0, tzinfo=UTC)
-    ha_startup = datetime(2026, 6, 22, 5, 16, 0, tzinfo=UTC)
+    actual_disarm = _NOW - timedelta(days=1, hours=19, minutes=16)  # ~June 20 10:00
+    ha_startup = _NOW
 
     recorder_states = [
-        _mock_state("armed_away", datetime(2026, 6, 20, 9, 0, 0, tzinfo=UTC)),
+        _mock_state("armed_away", _NOW - timedelta(days=1, hours=20, minutes=16)),
         _mock_state("disarmed", actual_disarm),  # actual disarm
         _mock_state("disarmed", ha_startup),  # HA restart reset (no unavailable)
     ]
@@ -125,11 +133,11 @@ async def test_corrects_startup_reset_last_changed() -> None:
 @pytest.mark.asyncio
 async def test_corrects_startup_reset_via_unavailable() -> None:
     """Real-world case: HA restart sets unavailable then disarmed; finds true disarm."""
-    actual_disarm = datetime(2026, 6, 20, 10, 0, 0, tzinfo=UTC)
-    ha_startup = datetime(2026, 6, 22, 5, 16, 0, tzinfo=UTC)
+    actual_disarm = _NOW - timedelta(days=1, hours=19, minutes=16)  # ~June 20 10:00
+    ha_startup = _NOW
 
     recorder_states = [
-        _mock_state("armed_away", datetime(2026, 6, 20, 9, 0, 0, tzinfo=UTC)),
+        _mock_state("armed_away", _NOW - timedelta(days=1, hours=20, minutes=16)),
         _mock_state("disarmed", actual_disarm),  # actual disarm days ago
         _mock_state(
             "unavailable", ha_startup
@@ -151,12 +159,12 @@ async def test_corrects_startup_reset_via_unavailable() -> None:
 @pytest.mark.asyncio
 async def test_multiple_restarts_with_unavailable() -> None:
     """Multiple HA restarts each producing unavailable→disarmed; finds original."""
-    original_disarm = datetime(2026, 6, 18, 14, 0, 0, tzinfo=UTC)
-    restart1 = datetime(2026, 6, 20, 8, 0, 0, tzinfo=UTC)
-    restart2 = datetime(2026, 6, 22, 5, 16, 0, tzinfo=UTC)
+    original_disarm = _NOW - timedelta(days=3, hours=15, minutes=16)  # ~June 18 14:00
+    restart1 = _NOW - timedelta(days=1, hours=21, minutes=16)  # ~June 20 08:00
+    restart2 = _NOW
 
     recorder_states = [
-        _mock_state("armed_away", datetime(2026, 6, 18, 13, 0, 0, tzinfo=UTC)),
+        _mock_state("armed_away", _NOW - timedelta(days=3, hours=16, minutes=16)),
         _mock_state("disarmed", original_disarm),
         _mock_state("unavailable", restart1),
         _mock_state("disarmed", restart1),
@@ -176,11 +184,11 @@ async def test_multiple_restarts_with_unavailable() -> None:
 @pytest.mark.asyncio
 async def test_genuine_disarm_after_unavailable_not_changed() -> None:
     """Genuine armed→unavailable→disarmed sequence keeps the disarm time."""
-    disarm_time = datetime(2026, 6, 22, 5, 16, 0, tzinfo=UTC)
+    disarm_time = _NOW
 
     recorder_states = [
-        _mock_state("armed_home", datetime(2026, 6, 21, 22, 0, 0, tzinfo=UTC)),
-        _mock_state("unavailable", datetime(2026, 6, 22, 5, 15, 0, tzinfo=UTC)),
+        _mock_state("armed_home", _NOW - timedelta(hours=7, minutes=16)),
+        _mock_state("unavailable", _NOW - timedelta(minutes=1)),
         _mock_state("disarmed", disarm_time),  # genuine disarm after brief outage
     ]
     hass = _make_hass(recorder_states)
@@ -196,10 +204,10 @@ async def test_genuine_disarm_after_unavailable_not_changed() -> None:
 @pytest.mark.asyncio
 async def test_no_change_when_disarm_is_genuine() -> None:
     """If the alarm really was just disarmed at startup time, no change is made."""
-    disarm_time = datetime(2026, 6, 22, 5, 16, 0, tzinfo=UTC)
+    disarm_time = _NOW
 
     recorder_states = [
-        _mock_state("armed_home", datetime(2026, 6, 21, 22, 0, 0, tzinfo=UTC)),
+        _mock_state("armed_home", _NOW - timedelta(hours=7, minutes=16)),
         _mock_state("disarmed", disarm_time),  # genuine disarm = startup time
     ]
     hass = _make_hass(recorder_states)
@@ -215,17 +223,15 @@ async def test_no_change_when_disarm_is_genuine() -> None:
 @pytest.mark.asyncio
 async def test_multiple_ha_restarts_finds_original_disarm() -> None:
     """Multiple HA restarts produce multiple disarmed records; finds the first."""
-    original_disarm = datetime(2026, 6, 18, 14, 0, 0, tzinfo=UTC)
+    original_disarm = _NOW - timedelta(days=3, hours=15, minutes=16)  # ~June 18 14:00
 
     recorder_states = [
-        _mock_state("armed_away", datetime(2026, 6, 18, 13, 0, 0, tzinfo=UTC)),
+        _mock_state("armed_away", _NOW - timedelta(days=3, hours=16, minutes=16)),
         _mock_state("disarmed", original_disarm),
         _mock_state(
-            "disarmed", datetime(2026, 6, 20, 8, 0, 0, tzinfo=UTC)
+            "disarmed", _NOW - timedelta(days=1, hours=21, minutes=16)
         ),  # restart 1
-        _mock_state(
-            "disarmed", datetime(2026, 6, 22, 5, 16, 0, tzinfo=UTC)
-        ),  # restart 2
+        _mock_state("disarmed", _NOW),  # restart 2
     ]
     hass = _make_hass(recorder_states)
 
@@ -242,7 +248,7 @@ async def test_insufficient_history_leaves_unchanged() -> None:
     """Fewer than 2 history records → snapshot left unchanged."""
     hass = _make_hass(
         recorder_states=[
-            _mock_state("disarmed", datetime(2026, 6, 22, 5, 16, 0, tzinfo=UTC)),
+            _mock_state("disarmed", _NOW),
         ]
     )
 
@@ -273,11 +279,11 @@ async def test_recorder_error_leaves_unchanged() -> None:
 @pytest.mark.asyncio
 async def test_all_disarmed_within_window_uses_oldest() -> None:
     """All records disarmed within window: armed record purged, oldest used as best estimate."""
-    oldest_disarm = datetime(2026, 6, 18, 10, 0, 0, tzinfo=UTC)
+    oldest_disarm = _NOW - timedelta(days=3, hours=19, minutes=16)  # ~June 18 10:00
     recorder_states = [
         _mock_state("disarmed", oldest_disarm),
-        _mock_state("disarmed", datetime(2026, 6, 20, 8, 0, 0, tzinfo=UTC)),
-        _mock_state("disarmed", datetime(2026, 6, 22, 5, 16, 0, tzinfo=UTC)),
+        _mock_state("disarmed", _NOW - timedelta(days=1, hours=21, minutes=16)),
+        _mock_state("disarmed", _NOW),
     ]
     hass = _make_hass(recorder_states)
 
@@ -298,27 +304,39 @@ async def test_real_world_armed_record_purged() -> None:
     include_start_time_state synthetic anchor were purged from the short-term DB.
     The oldest surviving record IS the actual disarm, and the fallback path uses it.
     """
-    actual_disarm = datetime(2026, 6, 14, 20, 46, 53, tzinfo=UTC)
+    actual_disarm = _NOW - timedelta(days=7, hours=8, minutes=29, seconds=7)
     recorder_states = [
         # Oldest surviving record — the actual disarm 8 days ago.
         _mock_state("disarmed", actual_disarm),
         # 11 subsequent HA-restart re-reports of "disarmed".
-        _mock_state("disarmed", datetime(2026, 6, 15, 12, 55, 35, tzinfo=UTC)),
-        _mock_state("disarmed", datetime(2026, 6, 15, 19, 28, 37, tzinfo=UTC)),
-        _mock_state("disarmed", datetime(2026, 6, 17, 2, 7, 0, tzinfo=UTC)),
-        _mock_state("disarmed", datetime(2026, 6, 18, 19, 28, 49, tzinfo=UTC)),
-        _mock_state("disarmed", datetime(2026, 6, 19, 12, 33, 50, tzinfo=UTC)),
-        _mock_state("disarmed", datetime(2026, 6, 19, 18, 25, 35, tzinfo=UTC)),
-        _mock_state("disarmed", datetime(2026, 6, 20, 5, 14, 18, tzinfo=UTC)),
-        _mock_state("disarmed", datetime(2026, 6, 20, 5, 16, 33, tzinfo=UTC)),
-        _mock_state("disarmed", datetime(2026, 6, 22, 13, 13, 48, tzinfo=UTC)),
-        _mock_state("disarmed", datetime(2026, 6, 22, 18, 41, 8, tzinfo=UTC)),
-        _mock_state("disarmed", datetime(2026, 6, 22, 19, 8, 19, tzinfo=UTC)),
+        _mock_state(
+            "disarmed", _NOW - timedelta(days=6, hours=16, minutes=20, seconds=25)
+        ),
+        _mock_state(
+            "disarmed", _NOW - timedelta(days=6, hours=9, minutes=47, seconds=23)
+        ),
+        _mock_state("disarmed", _NOW - timedelta(days=5, hours=3, minutes=9)),
+        _mock_state(
+            "disarmed", _NOW - timedelta(days=3, hours=9, minutes=47, seconds=11)
+        ),
+        _mock_state(
+            "disarmed", _NOW - timedelta(days=2, hours=16, minutes=42, seconds=10)
+        ),
+        _mock_state(
+            "disarmed", _NOW - timedelta(days=2, hours=10, minutes=50, seconds=25)
+        ),
+        _mock_state("disarmed", _NOW - timedelta(days=2, minutes=1, seconds=42)),
+        _mock_state(
+            "disarmed", _NOW - timedelta(days=1, hours=23, minutes=59, seconds=27)
+        ),
+        _mock_state("disarmed", _NOW - timedelta(minutes=3)),
+        _mock_state("disarmed", _NOW - timedelta(minutes=2)),
+        _mock_state("disarmed", _NOW - timedelta(minutes=1)),
     ]
     hass = _make_hass(recorder_states)
 
     snapshot = _base_snapshot()
-    snapshot["entities"] = [_alarm_entity(last_changed="2026-06-22T19:08:19+00:00")]
+    snapshot["entities"] = [_alarm_entity(last_changed="2026-06-22T05:15:00+00:00")]
 
     await async_enrich_alarm_last_changed(hass, snapshot)
 
@@ -328,28 +346,40 @@ async def test_real_world_armed_record_purged() -> None:
 @pytest.mark.asyncio
 async def test_real_world_with_armed_anchor_in_window() -> None:
     """Armed record still within recorder window: transition detection finds it directly."""
-    actual_disarm = datetime(2026, 6, 14, 20, 46, 53, tzinfo=UTC)
+    actual_disarm = _NOW - timedelta(days=7, hours=8, minutes=29, seconds=7)
     recorder_states = [
         # Armed record still in the short-term DB (not yet purged).
-        _mock_state("armed_away", datetime(2026, 5, 28, 18, 0, 0, tzinfo=UTC)),
+        _mock_state("armed_away", _NOW - timedelta(days=24, hours=11, minutes=16)),
         # Actual disarm 8 days ago — found via transition detection.
         _mock_state("disarmed", actual_disarm),
         # 10 subsequent HA-restart re-reports of "disarmed".
-        _mock_state("disarmed", datetime(2026, 6, 15, 12, 55, 35, tzinfo=UTC)),
-        _mock_state("disarmed", datetime(2026, 6, 15, 19, 28, 37, tzinfo=UTC)),
-        _mock_state("disarmed", datetime(2026, 6, 17, 2, 7, 0, tzinfo=UTC)),
-        _mock_state("disarmed", datetime(2026, 6, 18, 19, 28, 49, tzinfo=UTC)),
-        _mock_state("disarmed", datetime(2026, 6, 19, 12, 33, 50, tzinfo=UTC)),
-        _mock_state("disarmed", datetime(2026, 6, 20, 1, 25, 35, tzinfo=UTC)),
-        _mock_state("disarmed", datetime(2026, 6, 20, 12, 14, 18, tzinfo=UTC)),
-        _mock_state("disarmed", datetime(2026, 6, 20, 12, 16, 33, tzinfo=UTC)),
-        _mock_state("disarmed", datetime(2026, 6, 22, 13, 13, 48, tzinfo=UTC)),
-        _mock_state("disarmed", datetime(2026, 6, 23, 1, 41, 8, tzinfo=UTC)),
+        _mock_state(
+            "disarmed", _NOW - timedelta(days=6, hours=16, minutes=20, seconds=25)
+        ),
+        _mock_state(
+            "disarmed", _NOW - timedelta(days=6, hours=9, minutes=47, seconds=23)
+        ),
+        _mock_state("disarmed", _NOW - timedelta(days=5, hours=3, minutes=9)),
+        _mock_state(
+            "disarmed", _NOW - timedelta(days=3, hours=9, minutes=47, seconds=11)
+        ),
+        _mock_state(
+            "disarmed", _NOW - timedelta(days=2, hours=16, minutes=50, seconds=25)
+        ),
+        _mock_state(
+            "disarmed", _NOW - timedelta(days=1, hours=17, minutes=1, seconds=42)
+        ),
+        _mock_state(
+            "disarmed", _NOW - timedelta(days=1, hours=16, minutes=59, seconds=27)
+        ),
+        _mock_state("disarmed", _NOW - timedelta(minutes=3)),
+        _mock_state("disarmed", _NOW - timedelta(minutes=2)),
+        _mock_state("disarmed", _NOW - timedelta(minutes=1)),
     ]
     hass = _make_hass(recorder_states)
 
     snapshot = _base_snapshot()
-    snapshot["entities"] = [_alarm_entity(last_changed="2026-06-23T01:41:08+00:00")]
+    snapshot["entities"] = [_alarm_entity(last_changed="2026-06-22T05:15:00+00:00")]
 
     await async_enrich_alarm_last_changed(hass, snapshot)
 
@@ -361,9 +391,11 @@ async def test_all_disarmed_beyond_lookback_window() -> None:
     """Alarm disarmed longer than _LOOKBACK_DAYS: synthetic anchor is also disarmed."""
     recorder_states = [
         # Synthetic anchor — alarm was already disarmed before the window started.
-        _mock_state("disarmed", datetime(2026, 5, 1, 10, 0, 0, tzinfo=UTC)),
-        _mock_state("disarmed", datetime(2026, 5, 20, 8, 0, 0, tzinfo=UTC)),
-        _mock_state("disarmed", datetime(2026, 6, 22, 5, 16, 0, tzinfo=UTC)),
+        _mock_state("disarmed", _NOW - timedelta(days=52)),  # before 30-day window
+        _mock_state(
+            "disarmed", _NOW - timedelta(days=33)
+        ),  # still outside 30-day window
+        _mock_state("disarmed", _NOW),
     ]
     hass = _make_hass(recorder_states)
 
