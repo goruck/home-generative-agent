@@ -56,14 +56,17 @@ from custom_components.home_generative_agent.snapshot.builder import (
     async_build_full_state_snapshot,
 )
 
+from .alarm_enrichment import async_enrich_alarm_last_changed
 from .baseline import CYCLICAL_LOAD_HINTS
 from .correlator import SentinelCorrelator
 from .dynamic_rules import evaluate_dynamic_rules
 from .execution import (
     SentinelExecutionService,
 )
+from .lock_enrichment import async_enrich_lock_last_changed
 from .logging_utils import RepeatingLogLimiter
 from .models import AnomalyFinding, CompoundFinding
+from .power_enrichment import async_enrich_power_last_changed
 from .rules.alarm_disarmed_external_threat import AlarmDisarmedDuringExternalThreatRule
 from .rules.appliance_power_duration import AppliancePowerDurationRule
 from .rules.camera_entry_unsecured import CameraEntryUnsecuredRule
@@ -449,7 +452,7 @@ class SentinelEngine:
             self.run_stats["scheduler"] = self._trigger_scheduler.stats
             async_dispatcher_send(self._hass, SIGNAL_SENTINEL_RUN_COMPLETE)
 
-    async def _run_once(self, trigger_source: str = "poll") -> None:  # noqa: PLR0912
+    async def _run_once(self, trigger_source: str = "poll") -> None:  # noqa: PLR0912, PLR0915
         try:
             snapshot = await async_build_full_state_snapshot(self._hass)
         except (ValueError, TypeError, KeyError):
@@ -462,6 +465,9 @@ class SentinelEngine:
             "snapshot_build",
             "Sentinel snapshot build recovered after %d failed cycle(s).",
         )
+        await async_enrich_alarm_last_changed(self._hass, snapshot)
+        await async_enrich_lock_last_changed(self._hass, snapshot)
+        await async_enrich_power_last_changed(self._hass, snapshot)
 
         # Force Level 0 when suppression state is in read-only mode (version
         # mismatch after a downgrade).

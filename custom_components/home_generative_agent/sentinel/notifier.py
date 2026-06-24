@@ -810,6 +810,21 @@ def _fallback_message(finding: AnomalyFinding) -> str:
     return f"{summary}: {entity}. {_severity_action_hint(finding.severity)}"
 
 
+def _format_disarm_since(parsed: datetime) -> str:
+    """
+    Return a human-readable 'since …' string for a disarm timestamp.
+
+    Shows time-only when the disarm was today; prepends the date otherwise so
+    a disarm from days ago is not mistaken for earlier today.
+    """
+    local = dt_util.as_local(parsed)
+    local_now = dt_util.now()
+    time_str = local.strftime("%-I:%M %p")
+    if local.date() == local_now.date():
+        return time_str
+    return local.strftime(f"%-d %b at {time_str}")
+
+
 def _alarm_disarmed_mobile_message(finding: AnomalyFinding) -> str:
     """Deterministic mobile copy for alarm_disarmed_during_external_threat."""
     ev = finding.evidence
@@ -838,8 +853,9 @@ def _alarm_disarmed_mobile_message(finding: AnomalyFinding) -> str:
     if last_changed:
         parsed = dt_util.parse_datetime(str(last_changed))
         if parsed is not None:
-            time_str = dt_util.as_local(parsed).strftime("%-I:%M %p")
-            alarm_phrase = f" The alarm has been disarmed since {time_str}."
+            alarm_phrase = (
+                f" The alarm has been disarmed since {_format_disarm_since(parsed)}."
+            )
     if not alarm_phrase:
         alarm_phrase = " The alarm is currently disarmed."
 
@@ -857,8 +873,7 @@ def _alarm_disarmed_open_entry_mobile_message(finding: AnomalyFinding) -> str:
     if alarm_last_changed:
         parsed = dt_util.parse_datetime(str(alarm_last_changed))
         if parsed is not None:
-            time_str = dt_util.as_local(parsed).strftime("%-I:%M %p")
-            alarm_phrase = f"Alarm disarmed since {time_str}."
+            alarm_phrase = f"Alarm disarmed since {_format_disarm_since(parsed)}."
         else:
             alarm_phrase = "Alarm is disarmed."
     else:
