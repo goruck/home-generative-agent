@@ -105,7 +105,7 @@ class AlarmDisarmedDuringExternalThreatRule:
                 "alarm_entity_id": primary_alarm_id,
                 "alarm_state": _DISARMED_STATE,
                 "last_activity": activity.get("last_activity"),
-                "alarm_last_changed": primary_alarm["last_changed"],
+                "alarm_last_changed": primary_alarm["last_changed"] or None,
             }
             anomaly_id = build_anomaly_id(
                 self.rule_id, [primary_alarm_id, cam], id_evidence

@@ -218,7 +218,7 @@ def _eval_alarm_disarmed_open_entry(
             "entry_state": entry.get("state"),
             "alarm_state": alarm.get("state"),
             "entry_last_changed": entry.get("last_changed"),
-            "alarm_last_changed": alarm.get("last_changed"),
+            "alarm_last_changed": alarm.get("last_changed") or None,
         }
         findings.append(_build_finding(rule, [alarm_id, entry_id], evidence))
     return findings
@@ -350,7 +350,7 @@ def _eval_unlocked_lock_when_home(
         "lock_entity_id": lock_id,
         "lock_state": lock.get("state"),
         "anyone_home": snapshot["derived"]["anyone_home"],
-        "last_changed": lock.get("last_changed"),
+        "last_changed": lock.get("last_changed") or None,
     }
     return [_build_finding(rule, [lock_id], evidence)]
 
@@ -728,7 +728,7 @@ def _eval_unlocked_lock_while_away(
         "lock_entity_id": lock_id,
         "lock_state": lock.get("state"),
         "anyone_home": snapshot["derived"]["anyone_home"],
-        "last_changed": lock.get("last_changed"),
+        "last_changed": lock.get("last_changed") or None,
     }
     return [_build_finding(rule, [lock_id], evidence)]
 

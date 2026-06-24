@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.24] - 2026-06-24
+
+### Fixed
+
+- **Sentinel notifications showed HA restart time instead of actual state-change time** — when Home Assistant restarts, entities re-report their current state with a new `last_changed` stamped at startup time. Three Sentinel rule categories were computing falsely short durations as a result ("Alarm disarmed since 5:16 AM", "Garage door lock unlocked for about 15 minutes", "Dishwasher running for 5 minutes" — all actually much older). Fixes:
+  - New `alarm_enrichment.py`: queries 30 days of HA recorder history (date-range query, replaces count-based `get_last_state_changes`), walks newest-to-oldest skipping `unavailable`/`unknown` transient states, finds the true `armed_*→disarmed` transition, and corrects `last_changed` before rule evaluation. Falls back to the oldest within-window disarmed record when the armed record has been purged from the DB; clears `last_changed` to `""` (suppressing the misleading timestamp) when the alarm has been disarmed for more than the 30-day lookback window.
+  - New `lock_enrichment.py`: same recorder-based pattern for unlocked lock entities. Finds the last `non-unlocked→unlocked` transition (handles `locked`, `locking`, `unlocking`, `jammed` as anchors); uses the oldest within-window record as a fallback for purged records; clears `last_changed` to `""` when the lock has been open for more than 30 days.
+  - New `power_enrichment.py`: for power sensors currently drawing more than 10 W, finds the last `off→on` transition in 30-day history. Handles both W and kW units. Leaves `last_changed` unchanged (rather than clearing) when no useful transition can be determined.
+  - `engine.py`: calls all three enrichments in sequence after snapshot build, before rule evaluation.
+  - `dynamic_rules.py`: lock evidence now uses `lock.get("last_changed") or None` so an empty-string `last_changed` (set by enrichment when the lock has been open >30 days) propagates as `None` to LLM context.
+
+- **Disarm notifications showed time-only for old disarms** — notifications like "Alarm disarmed since 1:46 PM" were ambiguous when the disarm occurred on a previous day. `notifier.py` now uses a `_format_disarm_since()` helper that prepends the date ("14 Jun at 1:46 PM") when the disarm was on a different calendar day, and shows time-only for same-day disarms.
+
 ## [3.14.23] - 2026-06-19
 
 ### Fixed
