@@ -101,8 +101,8 @@ _VIDEO_QUEUE_BACKLOG_THRESHOLD: Final[int] = (
     2  # drop stale frames when queue exceeds this
 )
 # --- Uniqueness gate tuning ---
-_UNIQUENESS_ENABLED: Final[bool] = False
-_UNIQUENESS_HAMMING_MAX: Final[int] = 4  # <= this => "too similar" (tune 4-10)
+_UNIQUENESS_ENABLED: Final[bool] = True
+_UNIQUENESS_HAMMING_MAX: Final[int] = 6  # <= this => "too similar"; 6 tolerates spider-web motion
 _UNIQUENESS_HISTORY: Final[int] = 2  # compare against last N accepted hashes
 _UNIQUENESS_HEARTBEAT_SEC: Final[int] = 10  # always allow a frame at least this often
 
