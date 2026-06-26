@@ -7,4 +7,4 @@ pytest==9.*
 pytest-asyncio==1.*
 
 colorlog==6.10.1
-PyTurboJPEG>=2.2.0
+PyTurboJPEG>=2.4.0
