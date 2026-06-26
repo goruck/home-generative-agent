@@ -1041,7 +1041,8 @@ def test_is_cumulative_energy_entity_allows_power_sensors() -> None:
 async def test_monitoring_gap_excludes_cumulative_energy_entities(
     hass: HomeAssistant,
 ) -> None:
-    """Cumulative _energy sensors must be excluded from MONITORING GAPS.
+    """
+    Cumulative _energy sensors must be excluded from MONITORING GAPS.
 
     These entities grow monotonically and produce noise when proposed as
     baseline_deviation or time_of_day_anomaly candidates.  The discovery
@@ -1097,9 +1098,7 @@ async def test_monitoring_gap_excludes_cumulative_energy_entities(
     # Both _energy (device_class=energy) and _power (device_class=power) pass
     # through _ALLOWED_SENSOR_DEVICE_CLASSES so both land in entity_id_set and
     # survive the reducer's baseline_ready_entities trim.
-    def _make_sensor(
-        entity_id: str, device_class: str, state: str
-    ) -> dict[str, Any]:
+    def _make_sensor(entity_id: str, device_class: str, state: str) -> dict[str, Any]:
         return {
             "entity_id": entity_id,
             "domain": "sensor",
@@ -1119,28 +1118,18 @@ async def test_monitoring_gap_excludes_cumulative_energy_entities(
             new_callable=AsyncMock,
             return_value={
                 "entities": [
-                    _make_sensor(
-                        "sensor.microwave_switch_0_energy", "energy", "125.3"
-                    ),
-                    _make_sensor(
-                        "sensor.microwave_switch_0_power", "power", "0.0"
-                    ),
+                    _make_sensor("sensor.microwave_switch_0_energy", "energy", "125.3"),
+                    _make_sensor("sensor.microwave_switch_0_power", "power", "0.0"),
                     _make_sensor(
                         "sensor.washing_machine_switch_0_energy", "energy", "88.1"
                     ),
                     _make_sensor(
                         "sensor.washing_machine_switch_0_power", "power", "0.0"
                     ),
-                    _make_sensor(
-                        "sensor.fridge_switch_0_energy", "energy", "310.7"
-                    ),
+                    _make_sensor("sensor.fridge_switch_0_energy", "energy", "310.7"),
                     _make_sensor("sensor.fridge_switch_0_power", "power", "42.0"),
-                    _make_sensor(
-                        "sensor.dishwasher_switch_0_energy", "energy", "55.2"
-                    ),
-                    _make_sensor(
-                        "sensor.dishwasher_switch_0_power", "power", "0.0"
-                    ),
+                    _make_sensor("sensor.dishwasher_switch_0_energy", "energy", "55.2"),
+                    _make_sensor("sensor.dishwasher_switch_0_power", "power", "0.0"),
                 ],
                 "camera_activity": [],
                 "derived": {

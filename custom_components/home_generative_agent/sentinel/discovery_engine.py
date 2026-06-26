@@ -93,7 +93,8 @@ _MIN_PLURAL_TOKEN_LENGTH = 3
 
 
 def _is_cumulative_energy_entity(entity_id: str) -> bool:
-    """Return True for monotonically increasing kWh counters.
+    """
+    Return True for monotonically increasing kWh counters.
 
     These sensors can never produce meaningful rolling-average baseline
     proposals — the ever-growing value drifts away from any fixed baseline.
@@ -290,8 +291,7 @@ class SentinelDiscoveryEngine:
         unmonitored = [
             eid
             for eid in baseline_ready
-            if eid not in covered_entity_ids
-            and not _is_cumulative_energy_entity(eid)
+            if eid not in covered_entity_ids and not _is_cumulative_energy_entity(eid)
         ]
         if LOGGER.isEnabledFor(logging.DEBUG):
             for eid in baseline_ready:
