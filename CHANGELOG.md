@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.25] - 2026-06-25
+
+### Fixed
+
+- **Video analyzer sent burst notifications from near-camera motion artifacts (e.g. spider webs)** — a spider web in front of a camera repeatedly triggers the motion sensor, causing the video analyzer to generate multiple notifications for the same static background scene. The LLM-generated captions described the same empty scene with slightly different phrasing (e.g. "paved patio enclosed by a white picket gate" vs "paved patio with a white picket fence"), scoring ~0.87 cosine similarity — just below the old 0.89 suppress threshold — so each one fired a mobile notification. Fix: lower `VIDEO_ANALYZER_SIMILARITY_THRESHOLD` from 0.89 to 0.85, catching "same scene, different wording" duplicates within the existing 30-minute dedup window. Genuine events with semantically different content (person arriving, vehicle with headlights) still score below 0.85 against empty-scene captions and correctly notify.
+
 ## [3.14.24] - 2026-06-24
 
 ### Fixed

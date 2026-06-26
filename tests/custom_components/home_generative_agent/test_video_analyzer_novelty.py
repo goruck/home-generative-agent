@@ -578,14 +578,14 @@ async def test_artifact_bucket_recent_lower_score_suppresses(
     """
     Recent artifact match at lower score suppresses even if best result is old.
 
-    best_result (score=0.85) is an artifact from 2 hours ago — stale.
+    best_result (score=0.80) is an artifact from 2 hours ago — stale.
     A second result (score=0.70) is a recent artifact from 5 minutes ago.
     The fast path must scan all candidates and suppress based on the recent one.
     """
     results = [
         _make_search_result(
             "a bright horizontal blur streaks across the walkway",
-            score=0.85,
+            score=0.80,
             age_seconds=7200,  # 2 hours — outside window
         ),
         _make_search_result(
@@ -614,7 +614,7 @@ async def test_artifact_bucket_all_old_notifies_stale_match(
     results = [
         _make_search_result(
             "a bright horizontal blur streaks across the walkway",
-            score=0.85,
+            score=0.80,
             age_seconds=3600,  # 1 hour
         ),
         _make_search_result(
