@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.26] - 2026-06-27
+
+### Fixed
+
+- **Sentinel discovery proposed unsupported candidates for cumulative energy sensors** — the baseline DB tracks all numeric entities, including kWh energy counters (`_energy` suffix). These appeared in the `unmonitored_baseline_entities` list injected into the discovery prompt, causing the LLM to propose appliance anomaly candidates (microwave, washing machine, fridge, dishwasher) that referenced cumulative sensors. Normalization correctly rejects them (`reason_code=cumulative_energy_sensor`) because a monotonically increasing counter cannot produce a meaningful rolling-average baseline, but the proposals showed as "unsupported" in the UI with no actionable path. Fix: added `_is_cumulative_energy_entity()` to filter cumulative sensors from the unmonitored list before prompt injection, and added an `ENERGY SENSOR RULE` hint to the discovery prompt directing the LLM to use `_power` (instantaneous Watts) sensors in `evidence_paths` instead of `_energy` (cumulative kWh) sensors. Corrected proposals map to the existing `baseline_deviation` or `time_of_day_anomaly` templates without any further code changes.
+
 ## [3.14.25] - 2026-06-25
 
 ### Fixed
