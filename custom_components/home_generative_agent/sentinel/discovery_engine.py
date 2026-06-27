@@ -92,6 +92,19 @@ _ENTITY_DESCRIPTOR_STOPWORDS: frozenset[str] = frozenset(
 _MIN_PLURAL_TOKEN_LENGTH = 3
 
 
+def _is_cumulative_energy_entity(entity_id: str) -> bool:
+    """
+    Return True for monotonically increasing kWh counters.
+
+    These sensors can never produce meaningful rolling-average baseline
+    proposals — the ever-growing value drifts away from any fixed baseline.
+    Mirrors proposal_templates._is_cumulative_energy_sensor; kept local to
+    avoid coupling the discovery pipeline to the normalization module.
+    """
+    local = entity_id.split(".", 1)[-1] if "." in entity_id else entity_id
+    return local.endswith("_energy") or local == "energy"
+
+
 def _entity_ids_from_key(key: str) -> set[str]:
     """Parse the entities= CSV field from a semantic key into exact entity IDs."""
     m = _ENTITIES_FIELD_RE.search(key)
@@ -275,7 +288,11 @@ class SentinelDiscoveryEngine:
         covered_entity_ids: set[str] = set()
         for key in baseline_hint_keys:
             covered_entity_ids.update(_entity_ids_from_key(key))
-        unmonitored = [eid for eid in baseline_ready if eid not in covered_entity_ids]
+        unmonitored = [
+            eid
+            for eid in baseline_ready
+            if eid not in covered_entity_ids and not _is_cumulative_energy_entity(eid)
+        ]
         if LOGGER.isEnabledFor(logging.DEBUG):
             for eid in baseline_ready:
                 if eid in covered_entity_ids:

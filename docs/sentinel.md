@@ -400,6 +400,8 @@ Candidates with a resolvable subject and predicate are matched by a deterministi
 
 **Baseline coverage check:** When computing which baseline-ready entities lack monitoring (the "monitoring gap" surfaced to the LLM), only keys with a `|template=baseline_deviation|` or `|template=time_of_day_anomaly|` marker are counted as coverage. These markers are emitted exclusively by `rule_semantic_key()` for live statistical monitoring rules. Candidate keys (from pending, rejected, or historical proposals) never contain `|template=…|`, so rejected bundle proposals listing many entities cannot accidentally suppress individual per-entity proposals.
 
+**Cumulative energy sensor filtering:** Entities whose ID ends in `_energy` (cumulative kWh totals) are excluded from the monitoring gap list before it is injected into the discovery prompt. A monotonically increasing counter cannot produce a meaningful rolling-average baseline, so any candidate the LLM proposed for such an entity would be rejected by normalization anyway. The LLM is additionally instructed to use `_power` (instantaneous Watts) sensors in `evidence_paths` when proposing baseline or time-of-day anomaly candidates.
+
 Discovery records include:
 - `semantic_key` — canonical normalized key
 - `dedupe_reason` — `novel`, `existing_semantic_key`, `existing_identity_hash`, or `batch_duplicate`

@@ -16,6 +16,7 @@ from custom_components.home_generative_agent.sentinel.discovery_engine import (
     SentinelDiscoveryEngine,
     _candidate_identity_hash,
     _entity_ids_from_key,
+    _is_cumulative_energy_entity,
 )
 
 if TYPE_CHECKING:
@@ -1011,3 +1012,171 @@ async def test_monitoring_gap_power_factor_does_not_suppress_power(
     assert "sensor.fridge_switch_0_power" in human_content, (
         "power sensor must appear in MONITORING GAPS when only power_factor has a baseline key"
     )
+
+
+# ---------------------------------------------------------------------------
+# Cumulative energy sensor filtering
+# ---------------------------------------------------------------------------
+
+
+def test_is_cumulative_energy_entity_rejects_energy_suffix() -> None:
+    """Entity IDs ending in _energy are cumulative kWh counters."""
+    assert _is_cumulative_energy_entity("sensor.microwave_switch_0_energy")
+    assert _is_cumulative_energy_entity("sensor.washing_machine_switch_0_energy")
+    assert _is_cumulative_energy_entity("sensor.fridge_switch_0_energy")
+    assert _is_cumulative_energy_entity("sensor.dishwasher_switch_0_energy")
+    assert _is_cumulative_energy_entity("sensor.energy")
+    assert _is_cumulative_energy_entity("energy")
+
+
+def test_is_cumulative_energy_entity_allows_power_sensors() -> None:
+    """Instantaneous power sensors must pass through the filter."""
+    assert not _is_cumulative_energy_entity("sensor.microwave_switch_0_power")
+    assert not _is_cumulative_energy_entity("sensor.fridge_switch_0_power")
+    assert not _is_cumulative_energy_entity("sensor.fridge_switch_0_power_factor")
+    assert not _is_cumulative_energy_entity("sensor.washing_machine_switch_0_power")
+
+
+@pytest.mark.asyncio
+async def test_monitoring_gap_excludes_cumulative_energy_entities(
+    hass: HomeAssistant,
+) -> None:
+    """
+    Cumulative _energy sensors must be excluded from MONITORING GAPS.
+
+    These entities grow monotonically and produce noise when proposed as
+    baseline_deviation or time_of_day_anomaly candidates.  The discovery
+    engine must strip them before injecting the unmonitored list into the
+    prompt so the LLM is never directed to propose candidates for them.
+
+    Both _energy and _power sensors are present in the snapshot entities so
+    the discovery reducer keeps them all in baseline_ready_entities.  The
+    engine's _is_cumulative_energy_entity filter then removes the _energy
+    ones from the MONITORING GAPS injection even though they survive in the
+    snapshot JSON.  We verify MONITORING GAPS specifically, not the full
+    prompt, to avoid false matches against the snapshot data.
+    """
+    import re  # noqa: PLC0415
+
+    captured_prompts: list[str] = []
+
+    class _CapturingModel:
+        async def ainvoke(self, messages: list[Any]) -> Any:
+            captured_prompts.extend(
+                str(msg.content) for msg in messages if hasattr(msg, "content")
+            )
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "schema_version": 1,
+                        "generated_at": "2026-01-01T00:00:00Z",
+                        "model": "test",
+                        "candidates": [],
+                    }
+                )
+            )
+
+    class _FullDummyStore:
+        async def async_get_latest(self, _limit: int) -> list[dict[str, Any]]:
+            return []
+
+        async def async_append(self, _payload: Any) -> None:
+            pass
+
+    engine = SentinelDiscoveryEngine(
+        hass=hass,
+        options={},
+        model=_CapturingModel(),
+        store=_FullDummyStore(),  # type: ignore[arg-type]
+    )
+
+    async def _fake_run(model: Any, messages: Any, **_kw: Any) -> Any:
+        return await model.ainvoke(messages)
+
+    # Entities must use the raw snapshot format that _filter_entities expects:
+    # each entity is a flat dict with entity_id, domain, state, and attributes.
+    # Both _energy (device_class=energy) and _power (device_class=power) pass
+    # through _ALLOWED_SENSOR_DEVICE_CLASSES so both land in entity_id_set and
+    # survive the reducer's baseline_ready_entities trim.
+    def _make_sensor(entity_id: str, device_class: str, state: str) -> dict[str, Any]:
+        return {
+            "entity_id": entity_id,
+            "domain": "sensor",
+            "state": state,
+            "attributes": {"device_class": device_class},
+        }
+
+    with (
+        patch.object(
+            engine,
+            "_existing_semantic_context",
+            new_callable=AsyncMock,
+            return_value=(set(), set(), set()),
+        ),
+        patch(
+            "custom_components.home_generative_agent.sentinel.discovery_engine.async_build_full_state_snapshot",
+            new_callable=AsyncMock,
+            return_value={
+                "entities": [
+                    _make_sensor("sensor.microwave_switch_0_energy", "energy", "125.3"),
+                    _make_sensor("sensor.microwave_switch_0_power", "power", "0.0"),
+                    _make_sensor(
+                        "sensor.washing_machine_switch_0_energy", "energy", "88.1"
+                    ),
+                    _make_sensor(
+                        "sensor.washing_machine_switch_0_power", "power", "0.0"
+                    ),
+                    _make_sensor("sensor.fridge_switch_0_energy", "energy", "310.7"),
+                    _make_sensor("sensor.fridge_switch_0_power", "power", "42.0"),
+                    _make_sensor("sensor.dishwasher_switch_0_energy", "energy", "55.2"),
+                    _make_sensor("sensor.dishwasher_switch_0_power", "power", "0.0"),
+                ],
+                "camera_activity": [],
+                "derived": {
+                    "is_night": False,
+                    "now": "2026-01-01T00:00:00Z",
+                    "baseline_ready_entities": [
+                        # Cumulative kWh counters — must be excluded from MONITORING GAPS
+                        "sensor.microwave_switch_0_energy",
+                        "sensor.washing_machine_switch_0_energy",
+                        "sensor.fridge_switch_0_energy",
+                        "sensor.dishwasher_switch_0_energy",
+                        # Instantaneous power — must remain in MONITORING GAPS
+                        "sensor.microwave_switch_0_power",
+                        "sensor.washing_machine_switch_0_power",
+                        "sensor.fridge_switch_0_power",
+                        "sensor.dishwasher_switch_0_power",
+                    ],
+                },
+                "generated_at": "2026-01-01T00:00:00Z",
+            },
+        ),
+        patch(
+            "custom_components.home_generative_agent.sentinel.discovery_engine.run_sentinel_model_call",
+            side_effect=_fake_run,
+        ),
+    ):
+        await engine._run_once()
+
+    assert captured_prompts, "Model was never invoked"
+    human_content = captured_prompts[-1]
+
+    # Extract the MONITORING GAPS JSON array from the prompt.  The template
+    # embeds it as: "MONITORING GAPS: <json_array> are baseline-ready entities"
+    gap_match = re.search(
+        r"MONITORING GAPS: (\[.*?\]) are baseline-ready", human_content, re.DOTALL
+    )
+    assert gap_match, "MONITORING GAPS section not found in prompt"
+    gap_entities: list[str] = json.loads(gap_match.group(1))
+
+    # Cumulative sensors must NOT be in MONITORING GAPS.
+    assert "sensor.microwave_switch_0_energy" not in gap_entities
+    assert "sensor.washing_machine_switch_0_energy" not in gap_entities
+    assert "sensor.fridge_switch_0_energy" not in gap_entities
+    assert "sensor.dishwasher_switch_0_energy" not in gap_entities
+
+    # Instantaneous power sensors must appear in MONITORING GAPS.
+    assert "sensor.microwave_switch_0_power" in gap_entities
+    assert "sensor.washing_machine_switch_0_power" in gap_entities
+    assert "sensor.fridge_switch_0_power" in gap_entities
+    assert "sensor.dishwasher_switch_0_power" in gap_entities
