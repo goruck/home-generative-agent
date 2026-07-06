@@ -507,6 +507,69 @@ async def test_summary_null_chat_with_config_does_not_raise(
         await va._generate_summary(frame_descs)  # type: ignore[attr-defined]
 
 
+# ---------------------------------------------------------------------------
+# _resolve_camera_from_motion: motion sensor → camera entity resolution
+# ---------------------------------------------------------------------------
+
+
+def _make_va_with_states(
+    hass: MagicMock, entry: MagicMock, existing_camera_ids: list[str]
+) -> VideoAnalyzer:
+    """Return a VideoAnalyzer whose hass.states.get mirrors existing_camera_ids."""
+    existing = set(existing_camera_ids)
+    hass.states.get.side_effect = lambda eid: MagicMock() if eid in existing else None
+    return VideoAnalyzer(hass, entry)
+
+
+def test_resolve_direct_name_match(hass: MagicMock, entry: MagicMock) -> None:
+    """binary_sensor.X maps to camera.X when that entity exists."""
+    va = _make_va_with_states(hass, entry, ["camera.frontgate"])
+    result = va._resolve_camera_from_motion("binary_sensor.frontgate")  # type: ignore[attr-defined]
+    assert result == "camera.frontgate"
+
+
+def test_resolve_vmd_suffix_stripped(hass: MagicMock, entry: MagicMock) -> None:
+    """UniFi Protect VMD sensors (binary_sensor.X_vmd1) resolve to camera.X."""
+    va = _make_va_with_states(hass, entry, ["camera.frontgate"])
+    result = va._resolve_camera_from_motion("binary_sensor.frontgate_vmd1")  # type: ignore[attr-defined]
+    assert result == "camera.frontgate"
+
+
+def test_resolve_motion_suffix_reolink(hass: MagicMock, entry: MagicMock) -> None:
+    """Reolink: binary_sensor.X_motion resolves to camera.X."""
+    va = _make_va_with_states(hass, entry, ["camera.front_door"])
+    result = va._resolve_camera_from_motion("binary_sensor.front_door_motion")  # type: ignore[attr-defined]
+    assert result == "camera.front_door"
+
+
+def test_resolve_motion_suffix_ring_mqtt(hass: MagicMock, entry: MagicMock) -> None:
+    """Ring-MQTT: binary_sensor.X_motion resolves to camera.X_snapshot."""
+    va = _make_va_with_states(hass, entry, ["camera.front_door_snapshot"])
+    result = va._resolve_camera_from_motion("binary_sensor.front_door_motion")  # type: ignore[attr-defined]
+    assert result == "camera.front_door_snapshot"
+
+
+def test_resolve_no_match_returns_none(hass: MagicMock, entry: MagicMock) -> None:
+    """Returns None when no camera entity can be resolved."""
+    va = _make_va_with_states(hass, entry, [])
+    result = va._resolve_camera_from_motion("binary_sensor.unknown_sensor_motion")  # type: ignore[attr-defined]
+    assert result is None
+
+
+def test_resolve_override_map_takes_precedence(
+    hass: MagicMock, entry: MagicMock
+) -> None:
+    """Explicit override map is checked before any inference."""
+    va = _make_va_with_states(hass, entry, ["camera.override_cam", "camera.inferred"])
+    override = {"binary_sensor.front_door_motion": "camera.override_cam"}
+    with patch(
+        "custom_components.home_generative_agent.core.video_analyzer.VIDEO_ANALYZER_MOTION_CAMERA_MAP",
+        override,
+    ):
+        result = va._resolve_camera_from_motion("binary_sensor.front_door_motion")  # type: ignore[attr-defined]
+    assert result == "camera.override_cam"
+
+
 @pytest.mark.asyncio
 async def test_null_chat_ainvoke_accepts_positional_config() -> None:
     """NullChat.ainvoke accepts config as a positional arg (LangChain convention)."""

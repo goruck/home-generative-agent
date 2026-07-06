@@ -1193,6 +1193,14 @@ class VideoAnalyzer:
         if self.hass.states.get(inferred_camera_id):
             return inferred_camera_id
 
+        # Strip _motion suffix and try bare name + Ring-MQTT _snapshot variant.
+        # Covers Reolink (camera.X) and Ring-MQTT (camera.X_snapshot).
+        if base.endswith("_motion"):
+            stripped = base[: -len("_motion")]
+            for candidate in (f"camera.{stripped}", f"camera.{stripped}_snapshot"):
+                if self.hass.states.get(candidate):
+                    return candidate
+
         return None
 
     async def _get_snapshot_dir(self, camera_id: str) -> Path:

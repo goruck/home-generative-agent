@@ -87,7 +87,15 @@ tap_action:
 
 ## Proactive Video Analysis
 
-Enable proactive video scene analysis from cameras visible to Home Assistant. When enabled, motion detection triggers analysis, results are stored in the database for use by the agent, and optional notifications are sent to the mobile app. Anomaly detection can be enabled to send notifications only for semantically novel scenes.
+Enable proactive video scene analysis from cameras visible to Home Assistant. When enabled, the integration listens for motion-sensor state changes and automatically triggers snapshot analysis on the associated camera. Results are stored in the database for use by the agent, and optional notifications are sent to the mobile app. Anomaly detection can be enabled to send notifications only for semantically novel scenes.
+
+**How motion → camera pairing works:** The integration listens to all `binary_sensor.*` state-changed events and resolves the associated camera entity using the following lookup order:
+
+1. **Explicit override map** (`VIDEO_ANALYZER_MOTION_CAMERA_MAP` in `const.py`) — checked first; lets you pin any motion sensor to any camera.
+2. **Direct name match** — replaces `binary_sensor.` with `camera.` (e.g., `binary_sensor.frontgate` → `camera.frontgate`). Also strips UniFi Protect `_vmd<N>` suffixes first.
+3. **`_motion` suffix strip** — tries `camera.{base}` then `camera.{base}_snapshot` after stripping `_motion` (e.g., `binary_sensor.front_door_motion` → `camera.front_door` or `camera.front_door_snapshot`). This covers Reolink and Ring-MQTT cameras automatically.
+
+If none of the above resolves to an existing camera entity, the motion event is silently ignored for that sensor.
 
 **Caption deduplication:** In anomaly mode, repeated low-value notifications are suppressed. If the new caption is semantically close to a recent caption (vector similarity ≥ 0.89), the notification is withheld. A 30-minute lexical fast path additionally suppresses repeated artifact captions (nighttime glare, monochrome blur scenes, empty walkway descriptions) even when the vector score falls below the threshold. Notifications for scenes with real subjects (people, vehicles, packages, animals) are always preserved — and if a subject was last seen more than 30 minutes ago, notification resumes even if the vector score is high.
 
