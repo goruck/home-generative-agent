@@ -40,6 +40,7 @@ from ..const import (  # noqa: TID252
     VIDEO_ANALYZER_LATEST_NAME,
     VIDEO_ANALYZER_LATEST_SUBFOLDER,
     VIDEO_ANALYZER_MOTION_CAMERA_MAP,
+    VIDEO_ANALYZER_MOTION_SCAN_INTERVAL,
     VIDEO_ANALYZER_PROMPT,
     VIDEO_ANALYZER_SCAN_INTERVAL,
     VIDEO_ANALYZER_SIMILARITY_THRESHOLD,
@@ -1338,7 +1339,7 @@ class VideoAnalyzer:
             while True:
                 now = dt_util.utcnow()
                 await self._take_single_snapshot(camera_id, now)
-                await asyncio.sleep(VIDEO_ANALYZER_SCAN_INTERVAL)
+                await asyncio.sleep(VIDEO_ANALYZER_MOTION_SCAN_INTERVAL)
         except asyncio.CancelledError:
             LOGGER.debug("Snapshot loop cancelled for camera: %s", camera_id)
 

@@ -16,6 +16,8 @@ Covers (test plan items):
 - Startup logs video_model_semaphore size and uncontended flag
 - Startup capability probe logs model/memory data when available
 - Startup capability probe falls back silently when probe fails
+- Motion snapshot loop uses VIDEO_ANALYZER_MOTION_SCAN_INTERVAL, not VIDEO_ANALYZER_SCAN_INTERVAL
+- _resolve_camera_from_motion: direct match, VMD strip, _motion strip (Reolink + Ring-MQTT), no match, override precedence
 """
 
 from __future__ import annotations
@@ -34,6 +36,8 @@ import custom_components.home_generative_agent as hga_mod
 import custom_components.home_generative_agent.core.utils as utils_mod
 import custom_components.home_generative_agent.core.video_analyzer as va_mod
 from custom_components.home_generative_agent.const import (
+    VIDEO_ANALYZER_MOTION_SCAN_INTERVAL,
+    VIDEO_ANALYZER_SCAN_INTERVAL,
     VIDEO_SUMMARY_NUM_PREDICT,
     VIDEO_VLM_NUM_PREDICT,
 )
@@ -568,6 +572,12 @@ def test_resolve_override_map_takes_precedence(
     ):
         result = va._resolve_camera_from_motion("binary_sensor.front_door_motion")  # type: ignore[attr-defined]
     assert result == "camera.override_cam"
+
+
+def test_motion_scan_interval_is_longer_than_recording_interval() -> None:
+    """Motion loop uses a longer interval than the recording-camera poll to avoid
+    notification bursts on cameras with extended motion windows (e.g. Ring-MQTT)."""
+    assert VIDEO_ANALYZER_MOTION_SCAN_INTERVAL > VIDEO_ANALYZER_SCAN_INTERVAL
 
 
 @pytest.mark.asyncio

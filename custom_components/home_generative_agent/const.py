@@ -612,6 +612,10 @@ RECOMMENDED_VIDEO_ANALYZER_MODE: VideoAnalyzerMode = VIDEO_ANALYZER_MODE_DISABLE
 
 # Interval units are seconds.
 VIDEO_ANALYZER_SCAN_INTERVAL = 1.5
+# Interval between snapshots while a motion sensor is active. Longer than the
+# recording-camera poll interval to avoid notification bursts on cameras with
+# extended motion windows (e.g. Ring-MQTT default of 60-180 s).
+VIDEO_ANALYZER_MOTION_SCAN_INTERVAL = 8
 VIDEO_ANALYZER_SNAPSHOT_ROOT = "/media/snapshots"
 VIDEO_ANALYZER_SYSTEM_MESSAGE = """
 BEGIN_RULES
