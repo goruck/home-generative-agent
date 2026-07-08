@@ -27,6 +27,7 @@ import asyncio
 import contextlib
 import logging
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -576,8 +577,7 @@ def test_resolve_override_map_takes_precedence(
 
 
 def test_motion_scan_interval_exceeds_recording_interval() -> None:
-    """Motion loop interval is longer than the recording-camera poll so the motion
-    loop generates fewer model calls while still capturing fast walk-bys."""
+    """Motion loop interval exceeds recording-camera poll interval."""
     assert VIDEO_ANALYZER_MOTION_SCAN_INTERVAL > VIDEO_ANALYZER_SCAN_INTERVAL
 
 
@@ -586,8 +586,6 @@ async def test_recording_poll_skips_motion_tracked_cameras(
     hass: MagicMock, entry: MagicMock
 ) -> None:
     """_take_snapshots_from_recording_cameras skips cameras already in the motion loop."""
-    from datetime import datetime, timezone
-
     va = _make_va_with_states(hass, entry, ["camera.frontgate"])
     va._active_motion_cameras["camera.frontgate"] = MagicMock()  # type: ignore[attr-defined]
 
@@ -597,7 +595,7 @@ async def test_recording_poll_skips_motion_tracked_cameras(
 
     with patch.object(va, "_take_single_snapshot") as mock_snap:
         await va._take_snapshots_from_recording_cameras(  # type: ignore[attr-defined]
-            datetime.now(tz=timezone.utc)
+            datetime.now(tz=datetime.UTC)
         )
         mock_snap.assert_not_called()
 
