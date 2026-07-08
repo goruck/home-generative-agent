@@ -39,9 +39,8 @@ from ..const import (  # noqa: TID252
     VIDEO_ANALYZER_FACE_CROP,
     VIDEO_ANALYZER_LATEST_NAME,
     VIDEO_ANALYZER_LATEST_SUBFOLDER,
-    VIDEO_ANALYZER_MOTION_BURST_COUNT,
-    VIDEO_ANALYZER_MOTION_BURST_INTERVAL,
     VIDEO_ANALYZER_MOTION_CAMERA_MAP,
+    VIDEO_ANALYZER_MOTION_SCAN_INTERVAL,
     VIDEO_ANALYZER_PROMPT,
     VIDEO_ANALYZER_SCAN_INTERVAL,
     VIDEO_ANALYZER_SIMILARITY_THRESHOLD,
@@ -1337,15 +1336,12 @@ class VideoAnalyzer:
 
     async def _motion_snapshot_loop(self, camera_id: str) -> None:
         try:
-            for _ in range(VIDEO_ANALYZER_MOTION_BURST_COUNT):
+            while True:
                 now = dt_util.utcnow()
                 await self._take_single_snapshot(camera_id, now)
-                await asyncio.sleep(VIDEO_ANALYZER_MOTION_BURST_INTERVAL)
+                await asyncio.sleep(VIDEO_ANALYZER_MOTION_SCAN_INTERVAL)
         except asyncio.CancelledError:
             LOGGER.debug("Snapshot loop cancelled for camera: %s", camera_id)
-        finally:
-            self._active_motion_cameras.pop(camera_id, None)
-            self.hass.async_create_task(self._process_snapshot_queue(camera_id))
 
     @callback
     def _handle_motion_event(self, event: Event) -> None:
@@ -1371,10 +1367,11 @@ class VideoAnalyzer:
                 self._active_motion_cameras[camera_id] = task
 
         elif new_state.state == "off" and camera_id in self._active_motion_cameras:
-            LOGGER.debug("Motion OFF: Cancelling snapshot burst for %s", camera_id)
-            task = self._active_motion_cameras.get(camera_id)
+            LOGGER.debug("Motion OFF: Stopping snapshot loop for %s", camera_id)
+            task = self._active_motion_cameras.pop(camera_id, None)
             if task and not task.done():
-                task.cancel()  # finally block in _motion_snapshot_loop handles cleanup
+                task.cancel()
+                self.hass.async_create_task(self._process_snapshot_queue(camera_id))
 
     @callback
     def _get_recording_cameras(self) -> list[str]:
@@ -1386,6 +1383,11 @@ class VideoAnalyzer:
 
     async def _take_snapshots_from_recording_cameras(self, now: datetime) -> None:
         for camera_id in self._get_recording_cameras():
+            if camera_id in self._active_motion_cameras:
+                LOGGER.debug(
+                    "[%s] Skipping recording poll — motion loop active.", camera_id
+                )
+                continue
             try:
                 path = await self._take_single_snapshot(camera_id, now)
                 if path:
