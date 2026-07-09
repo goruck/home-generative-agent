@@ -31,6 +31,7 @@ from ..const import (  # noqa: TID252
     CONF_MODEL_PROVIDER_UNCONTENDED,
     CONF_NOTIFY_SERVICE,
     CONF_VIDEO_ANALYZER_MODE,
+    CONF_VIDEO_ANALYZER_UNIQUENESS_ENABLED,
     CONF_VIDEO_MODEL_SEMAPHORE,
     RECOMMENDED_VIDEO_MODEL_SEMAPHORE,
     SIGNAL_HGA_NEW_LATEST,
@@ -102,7 +103,7 @@ _VIDEO_QUEUE_BACKLOG_THRESHOLD: Final[int] = (
     2  # drop stale frames when queue exceeds this
 )
 # --- Uniqueness gate tuning ---
-_UNIQUENESS_ENABLED: Final[bool] = False
+# Enabled at runtime via CONF_VIDEO_ANALYZER_UNIQUENESS_ENABLED option (default off).
 _UNIQUENESS_HAMMING_MAX: Final[int] = 4  # <= this => "too similar" (tune 4-10)
 _UNIQUENESS_HISTORY: Final[int] = 2  # compare against last N accepted hashes
 _UNIQUENESS_HEARTBEAT_SEC: Final[int] = 10  # always allow a frame at least this often
@@ -251,6 +252,7 @@ class VideoAnalyzer:
         self._active_queue_tasks: dict[str, asyncio.Task] = {}
         self._initialized_dirs: set[str] = set()
         self._active_motion_cameras: dict[str, asyncio.Task] = {}
+        self._active_recording_cameras: dict[str, asyncio.Task] = {}
         self._last_recognized: dict[str, list[str]] = {}
         # Protect images referenced in notifications from immediate pruning
         self._notify_protected: dict[Path, float] = {}  # path -> expiry time
@@ -571,6 +573,13 @@ class VideoAnalyzer:
             domain = "notify"
 
         clean_msg = msg.replace("**", "").replace("`", "")
+        LOGGER.debug(
+            "[%s] Dispatching notification via %s.%s: %r",
+            camera_name,
+            domain,
+            service,
+            clean_msg[:80],
+        )
         await self.hass.services.async_call(
             domain,
             service,
@@ -1223,7 +1232,9 @@ class VideoAnalyzer:
 
         Returns True to enqueue, False to skip.
         """
-        if not _UNIQUENESS_ENABLED:
+        if not self.entry.runtime_data.options.get(
+            CONF_VIDEO_ANALYZER_UNIQUENESS_ENABLED, False
+        ):
             return True
 
         # Heartbeat: always allow at least one frame every N seconds
@@ -1359,6 +1370,11 @@ class VideoAnalyzer:
             return
 
         if new_state.state == "on" and (old_state is None or old_state.state != "on"):
+            # If a recording-state loop is running, cancel it and promote to motion loop
+            # so the motion OFF event controls the lifecycle and queue flush.
+            rec_task = self._active_recording_cameras.pop(camera_id, None)
+            if rec_task and not rec_task.done():
+                rec_task.cancel()
             if camera_id not in self._active_motion_cameras:
                 LOGGER.debug("Motion ON: Starting snapshot loop for %s", camera_id)
                 task = self.hass.async_create_task(
@@ -1383,9 +1399,12 @@ class VideoAnalyzer:
 
     async def _take_snapshots_from_recording_cameras(self, now: datetime) -> None:
         for camera_id in self._get_recording_cameras():
-            if camera_id in self._active_motion_cameras:
+            if (
+                camera_id in self._active_motion_cameras
+                or camera_id in self._active_recording_cameras
+            ):
                 LOGGER.debug(
-                    "[%s] Skipping recording poll — motion loop active.", camera_id
+                    "[%s] Skipping recording poll — loop already active.", camera_id
                 )
                 continue
             try:
@@ -1408,7 +1427,26 @@ class VideoAnalyzer:
         if old_state is None or new_state is None:
             return
 
-        if old_state.state == "recording" and new_state.state != "recording":
+        was_recording = old_state.state == "recording"
+        is_recording = new_state.state == "recording"
+
+        if not was_recording and is_recording:
+            # Entered recording state (e.g. Ring cloud detection, no HA motion event).
+            if (
+                entity_id not in self._active_motion_cameras
+                and entity_id not in self._active_recording_cameras
+            ):
+                LOGGER.debug(
+                    "[%s] Recording started: starting snapshot loop", entity_id
+                )
+                task = self.hass.async_create_task(
+                    self._motion_snapshot_loop(entity_id)
+                )
+                self._active_recording_cameras[entity_id] = task
+        elif was_recording and not is_recording:
+            task = self._active_recording_cameras.pop(entity_id, None)
+            if task and not task.done():
+                task.cancel()
             self.hass.async_create_task(self._process_snapshot_queue(entity_id))
 
     def start(self) -> None:
@@ -1469,15 +1507,15 @@ class VideoAnalyzer:
 
         tasks_to_await: list[asyncio.Task] = []
 
-        for task in self._active_motion_cameras.values():
-            task.cancel()
-            tasks_to_await.append(task)
-        self._active_motion_cameras.clear()
-
-        for task in self._active_queue_tasks.values():
-            task.cancel()
-            tasks_to_await.append(task)
-        self._active_queue_tasks.clear()
+        for task_dict in (
+            self._active_motion_cameras,
+            self._active_recording_cameras,
+            self._active_queue_tasks,
+        ):
+            for task in task_dict.values():
+                task.cancel()
+                tasks_to_await.append(task)
+            task_dict.clear()
 
         # Orphan the semaphore reference; tasks already cancelled above will
         # absorb CancelledError and exit — not released by this None assignment.

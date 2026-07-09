@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import datetime as dt
 import logging
 import time
 from datetime import datetime
@@ -595,7 +596,7 @@ async def test_recording_poll_skips_motion_tracked_cameras(
 
     with patch.object(va, "_take_single_snapshot") as mock_snap:
         await va._take_snapshots_from_recording_cameras(  # type: ignore[attr-defined]
-            datetime.now(tz=datetime.UTC)
+            datetime.now(tz=dt.UTC)
         )
         mock_snap.assert_not_called()
 

@@ -101,12 +101,15 @@ If none of the above resolves to an existing camera entity, the motion event is 
 
 **Resource management on edge deployments:** The video pipeline enforces a per-entry semaphore that limits concurrent VLM and summary model calls (default: 1, sequential). Frames that cannot acquire the semaphore within 30 s are dropped. If a chat turn starts while the video pipeline is waiting for the model, it waits briefly for the chat turn to complete before dropping the frame — avoiding GPU contention. The video token budget is intentionally capped (256 tokens for VLM scene descriptions, 128 tokens for summaries).
 
+**VLM quality requirement for semantic deduplication:** The `notify_on_anomaly` mode uses vector similarity to suppress repeated notifications. For this to work reliably, the vision model must produce *consistent captions* — i.e., two snapshots of the same static scene should yield nearly identical text. Small models like `moondream` describe the same scene differently on each call, causing the dedup to fail and every frame to appear "novel." Use at minimum a 7B-class vision model such as `qwen2.5vl:7b` (recommended) for stable caption output. If you are on `always_notify` mode, VLM consistency is less critical.
+
 **Advanced options** (in the Camera Image Analysis feature subentry):
 
 | Option | Default | Description |
 |---|---|---|
 | `video_model_semaphore` | `1` | Concurrent video model call limit. Increase only if your server has dedicated GPU headroom. |
 | `model_provider_uncontended` | `false` | (Global Options) Bypass all local gates when the model server has dedicated capacity. |
+| `video_analyzer_uniqueness_enabled` | `false` | Enable perceptual hash (dHash) pre-filter to skip visually identical frames before VLM analysis. **Caveat:** enabling this drops near-duplicate snapshots, which removes the visual continuity that the summary model uses to narrate motion across frames. Only enable if you are getting excessive repeated notifications from a nearly-static scene *and* you accept that inter-frame motion context may be lost. |
 
 ![Video analysis notification example](../assets/video-analysis-screenshot.jpeg)
 
