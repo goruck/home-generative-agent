@@ -21,6 +21,7 @@ import httpx
 from homeassistant.components.camera.const import DOMAIN as CAMERA_DOMAIN
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.httpx_client import get_async_client
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -31,6 +32,7 @@ from ..const import (  # noqa: TID252
     CONF_MODEL_PROVIDER_UNCONTENDED,
     CONF_NOTIFY_SERVICE,
     CONF_VIDEO_ANALYZER_MODE,
+    CONF_VIDEO_ANALYZER_MOTION_CAMERA_MAP,
     CONF_VIDEO_ANALYZER_UNIQUENESS_ENABLED,
     CONF_VIDEO_MODEL_SEMAPHORE,
     RECOMMENDED_VIDEO_MODEL_SEMAPHORE,
@@ -1191,12 +1193,26 @@ class VideoAnalyzer:
         await self._analyze_and_finalize(camera_id, ordered)
 
     def _resolve_camera_from_motion(self, motion_entity_id: str) -> str | None:
-        """Resolve a camera entity ID from a motion sensor ID."""
-        overrides: dict = VIDEO_ANALYZER_MOTION_CAMERA_MAP
+        """
+        Resolve a camera entity ID from a motion sensor ID.
+
+        Resolution order: (1) explicit override map, (2) device-based lookup,
+        (3) name-based heuristics (direct, VMD-strip, _motion-strip).
+        """
+        # 1. Explicit override — options-configured map takes priority over const.
+        overrides: dict = self.entry.runtime_data.options.get(
+            CONF_VIDEO_ANALYZER_MOTION_CAMERA_MAP, VIDEO_ANALYZER_MOTION_CAMERA_MAP
+        )
         camera_id = overrides.get(motion_entity_id)
         if camera_id and self.hass.states.get(camera_id):
             return camera_id
 
+        # 2. Device-based resolution: find the camera on the same HA device.
+        camera_id = self._resolve_camera_by_device(motion_entity_id)
+        if camera_id:
+            return camera_id
+
+        # 3. Name-based resolution (fallback for integrations without device links).
         base = motion_entity_id.replace("binary_sensor.", "")
         base = re.sub(r"_vmd\d+.*", "", base)
         inferred_camera_id = f"camera.{base}"
@@ -1204,12 +1220,39 @@ class VideoAnalyzer:
             return inferred_camera_id
 
         # Strip _motion suffix and try bare name + Ring-MQTT _snapshot variant.
-        # Covers Reolink (camera.X) and Ring-MQTT (camera.X_snapshot).
         if base.endswith("_motion"):
             stripped = base[: -len("_motion")]
             for candidate in (f"camera.{stripped}", f"camera.{stripped}_snapshot"):
                 if self.hass.states.get(candidate):
                     return candidate
+
+        return None
+
+    def _resolve_camera_by_device(self, motion_entity_id: str) -> str | None:
+        """
+        Return the camera on the same HA device as the motion sensor.
+
+        Returns None when the sensor has no device, the device has no camera
+        entities, or the device has more than one camera (ambiguous).
+        """
+        ent_reg = er.async_get(self.hass)
+        motion_entry = ent_reg.async_get(motion_entity_id)
+        if motion_entry is None or motion_entry.device_id is None:
+            return None
+
+        camera_entries = [
+            entry
+            for entry in er.async_entries_for_device(ent_reg, motion_entry.device_id)
+            if entry.domain == "camera" and self.hass.states.get(entry.entity_id)
+        ]
+
+        if len(camera_entries) == 1:
+            LOGGER.debug(
+                "[%s] Resolved via device registry → %s",
+                motion_entity_id,
+                camera_entries[0].entity_id,
+            )
+            return camera_entries[0].entity_id
 
         return None
 

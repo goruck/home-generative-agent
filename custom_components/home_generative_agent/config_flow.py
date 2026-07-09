@@ -53,6 +53,7 @@ from .const import (
     CONF_TOOL_RELEVANCE_THRESHOLD,
     CONF_TOOL_RETRIEVAL_LIMIT,
     CONF_VIDEO_ANALYZER_MODE,
+    CONF_VIDEO_ANALYZER_MOTION_CAMERA_MAP,
     CONF_VIDEO_ANALYZER_UNIQUENESS_ENABLED,
     CONFIG_ENTRY_VERSION,
     CRITICAL_PIN_MAX_LEN,
@@ -132,6 +133,30 @@ def _patterns_as_text(raw: Any) -> str:
     return ""
 
 
+def _map_as_text(raw: Any) -> str:
+    """Render a dict as 'key: value' lines for display in a text area."""
+    if isinstance(raw, dict):
+        return "\n".join(f"{k}: {v}" for k, v in raw.items() if k and v)
+    if isinstance(raw, str):
+        return raw
+    return ""
+
+
+def _text_as_map(text: str) -> dict[str, str]:
+    """Parse 'key: value' lines into a dict; silently skips malformed lines."""
+    result: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        stripped = raw_line.strip()
+        if not stripped or ":" not in stripped:
+            continue
+        key, _, value = stripped.partition(":")
+        key = key.strip()
+        value = value.strip()
+        if key and value:
+            result[key] = value
+    return result
+
+
 async def _schema_for_options(
     hass: HomeAssistant, opts: Mapping[str, Any]
 ) -> VolDictType:
@@ -197,6 +222,10 @@ async def _schema_for_options(
                 RECOMMENDED_VIDEO_ANALYZER_UNIQUENESS_ENABLED,
             ),
         ): BooleanSelector(),
+        vol.Optional(
+            CONF_VIDEO_ANALYZER_MOTION_CAMERA_MAP,
+            default=_map_as_text(opts.get(CONF_VIDEO_ANALYZER_MOTION_CAMERA_MAP, {})),
+        ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT, multiline=True)),
         vol.Optional(
             CONF_FACE_API_URL,
             description={"suggested_value": opts.get(CONF_FACE_API_URL)},
@@ -461,6 +490,16 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         """Remove schema-only fields before storing options."""
         options.pop(_CONF_STT_FILTERS_SECTION, None)
 
+    def _parse_motion_camera_map(self, options: dict[str, Any]) -> None:
+        """Convert the motion camera map text area to a dict before storing."""
+        raw = options.get(CONF_VIDEO_ANALYZER_MOTION_CAMERA_MAP, "")
+        if isinstance(raw, str):
+            parsed = _text_as_map(raw)
+            if parsed:
+                options[CONF_VIDEO_ANALYZER_MOTION_CAMERA_MAP] = parsed
+            else:
+                options.pop(CONF_VIDEO_ANALYZER_MOTION_CAMERA_MAP, None)
+
     # ---- main step ----
 
     async def async_step_init(
@@ -498,4 +537,5 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         self._cleanup_none_llm_api(options)
         self._cleanup_ui_only_options(options)
         self._drop_empty_fields(options)
+        self._parse_motion_camera_map(options)
         return self.async_create_entry(title="", data=options)
