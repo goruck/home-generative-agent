@@ -1474,7 +1474,7 @@ class VideoAnalyzer:
         is_recording = new_state.state == "recording"
 
         if not was_recording and is_recording:
-            # Entered recording state (e.g. Ring cloud detection, no HA motion event).
+            # Camera entered recording state with no associated motion binary sensor.
             if (
                 entity_id not in self._active_motion_cameras
                 and entity_id not in self._active_recording_cameras
