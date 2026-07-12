@@ -5,6 +5,13 @@ The integration creates image and sensor entities for each configured camera, an
 - [Entity Overview](#entity-overview)
 - [On-Demand Snapshot Analysis](#on-demand-snapshot-analysis)
 - [Proactive Video Analysis](#proactive-video-analysis)
+  - [How triggers work by camera type](#how-triggers-work-by-camera-type)
+  - [Motion → camera resolution](#motion--camera-resolution)
+  - [Notification modes](#notification-modes)
+  - [Caption deduplication](#caption-deduplication)
+  - [VLM quality requirement](#vlm-quality-requirement)
+  - [Resource management](#resource-management)
+  - [Advanced options](#advanced-options)
 - [Lovelace Dashboards](#lovelace-dashboards)
 - [Automations](#automations)
 - [Events and Signals](#events-and-signals)
@@ -87,13 +94,131 @@ tap_action:
 
 ## Proactive Video Analysis
 
-Enable proactive video scene analysis from cameras visible to Home Assistant. When enabled, motion detection triggers analysis, results are stored in the database for use by the agent, and optional notifications are sent to the mobile app. Anomaly detection can be enabled to send notifications only for semantically novel scenes.
+When enabled, the integration watches for motion and recording events and automatically triggers snapshot analysis on the associated camera. Results are stored in the database for use by the agent, and optional notifications are sent to the mobile app.
 
-**Caption deduplication:** In anomaly mode, repeated low-value notifications are suppressed. If the new caption is semantically close to a recent caption (vector similarity ≥ 0.89), the notification is withheld. A 30-minute lexical fast path additionally suppresses repeated artifact captions (nighttime glare, monochrome blur scenes, empty walkway descriptions) even when the vector score falls below the threshold. Notifications for scenes with real subjects (people, vehicles, packages, animals) are always preserved — and if a subject was last seen more than 30 minutes ago, notification resumes even if the vector score is high.
+### How triggers work by camera type
 
-**Resource management on edge deployments:** The video pipeline enforces a per-entry semaphore that limits concurrent VLM and summary model calls (default: 1, sequential). Frames that cannot acquire the semaphore within 30 s are dropped. If a chat turn starts while the video pipeline is waiting for the model, it waits briefly for the chat turn to complete before dropping the frame — avoiding GPU contention. The video token budget is intentionally capped (256 tokens for VLM scene descriptions, 128 tokens for summaries).
+Different camera integrations surface motion in different ways. The video analyzer handles all of them:
 
-**Advanced options** (in the Camera Image Analysis feature subentry):
+#### Axis cameras (VMD-based)
+
+The Axis HA integration creates `binary_sensor.<name>_vmd<N>` entities that pulse briefly when motion is detected. The analyzer listens for these rising edges, starts a snapshot loop at 3-second intervals, and cancels it when the sensor returns to `off`, then flushes the collected frames through the VLM pipeline as a batch.
+
+The `_vmd<N>` suffix is stripped automatically during resolution (e.g. `binary_sensor.frontgate_vmd1` → `camera.frontgate`). The camera entity itself does not need to enter any particular state.
+
+#### Ring cameras via ring-mqtt
+
+The [ring-mqtt add-on](https://github.com/tsightler/ring-mqtt) bridges Ring devices to HA over MQTT. It creates:
+
+- `binary_sensor.<name>_motion` — the doorbell's or camera's own motion sensor. This stays `on` for a configurable duration (10–180 s, default 180 s) then reverts to `off` automatically.
+- `camera.<name>_snapshot` — the associated camera entity for snapshots.
+
+The analyzer starts a snapshot loop when `binary_sensor.<name>_motion` goes `on` and cancels it when it goes `off`, collecting frames every 3 seconds across the full motion window before flushing as a batch.
+
+**Important:** ring-mqtt cameras are resolved using the [device registry](#motion--camera-resolution) rather than name matching. This is necessary because Ring Alarm motion sensors (indoor PIRs) often share a name prefix with the doorbell — e.g. `binary_sensor.front_door_motion` (a wall PIR) and `binary_sensor.front_door_motion_3` (the doorbell). The device registry approach selects the sensor that shares a device entry with the camera, avoiding false bindings to unrelated sensors.
+
+Ring cameras do not expose a `recording` state in HA via ring-mqtt, so the recording-state path described below does not apply.
+
+#### Cameras with recording state (UniFi Protect, generic)
+
+Some integrations (e.g. UniFi Protect) expose cameras that enter a `recording` HA state when an event is detected, without necessarily firing a corresponding `binary_sensor.*` motion event. The analyzer handles this via an event-driven recording loop:
+
+- When a camera enters `recording` state, a snapshot loop starts at 3-second intervals.
+- When the camera exits `recording` state, the loop is cancelled and collected frames are flushed as a batch.
+- If a `binary_sensor.*` motion event fires for the same camera while a recording loop is already running, the motion event takes ownership — the motion loop's `off` transition then controls the queue flush.
+
+A periodic poll (every 1.5 s) also runs as a safety net for cameras that were already in `recording` state when the integration started (no `state_changed` event fires in that case). It skips any camera already covered by a motion or recording loop.
+
+#### Official Ring HA integration
+
+The official Ring HA integration communicates via the Ring cloud. Camera entities update their `last_video_id` and `video_url` attributes on a 1-minute poll cycle once a recording is ready — they do not enter a `recording` state. Motion binary sensors fire immediately via a Ring WebSocket push and revert after `expires_in` seconds (controlled by Ring's API). The ring-mqtt add-on is generally preferred over the official integration for proactive analysis because it provides more reliable and immediate motion signals.
+
+---
+
+### Motion → camera resolution
+
+When a `binary_sensor.*` motion event fires, the integration resolves the associated camera using a three-tier lookup:
+
+**Tier 1 — Explicit override map** (checked first)
+
+Configure overrides in **Global Options → Motion sensor → camera overrides**. One pair per line:
+
+```
+binary_sensor.front_door_motion_3: camera.front_door_snapshot
+binary_sensor.backyard_pir: camera.backyard
+```
+
+Use this when automatic resolution picks the wrong camera, or when you want to pin a sensor to a specific camera regardless of other logic. Leave blank to rely on tiers 2 and 3.
+
+The hardcoded `VIDEO_ANALYZER_MOTION_CAMERA_MAP` constant in `const.py` is the code-level fallback if nothing is configured in Global Options.
+
+**Tier 2 — Device registry** (recommended path for most modern integrations)
+
+Finds the `camera.*` entity registered to the same HA device as the motion sensor. This is how Axis, ring-mqtt, and most well-integrated camera systems are resolved. It correctly handles naming collisions — for example, a Ring Alarm wall PIR and a Ring doorbell that share a name prefix are on different HA devices, so only the doorbell's own sensor binds to the doorbell camera.
+
+Returns no result if the sensor has no device link, the device has no camera entities, or the device has more than one camera (ambiguous).
+
+**Tier 3 — Name heuristics** (fallback for integrations without device links)
+
+Applied in order:
+
+1. Direct substitution: `binary_sensor.X` → `camera.X`
+2. VMD-suffix strip: `binary_sensor.X_vmd1` → `camera.X`
+3. `_motion`-suffix strip: `binary_sensor.X_motion` → `camera.X` or `camera.X_snapshot`
+
+If none of the three tiers resolves to an existing camera entity, the motion event is silently ignored for that sensor.
+
+---
+
+### Notification modes
+
+Set in **Global Options → Video analyzer mode**:
+
+| Mode | Behavior |
+|---|---|
+| `disable` | Video analysis off |
+| `notify_on_anomaly` | Notify only for semantically novel scenes (uses caption deduplication) |
+| `always_notify` | Notify on every analyzed event |
+
+---
+
+### Caption deduplication
+
+Active only in `notify_on_anomaly` mode. Repeated low-value notifications are suppressed using two complementary mechanisms:
+
+**Semantic dedup:** The new caption is compared against recent captions using vector similarity. If the score meets or exceeds the similarity threshold (default 0.85), the notification is withheld. A 30-minute window is used; notifications for scenes with real subjects (people, vehicles, packages, animals) are always preserved. If a subject was last seen more than 30 minutes ago, notification resumes even if the similarity score is high.
+
+**Lexical fast path:** A 30-minute window suppresses repeated artifact captions (nighttime glare, monochrome blur, empty walkway descriptions) even when the vector score falls below the threshold.
+
+---
+
+### VLM quality requirement
+
+Semantic deduplication in `notify_on_anomaly` mode depends on the VLM producing **consistent captions** for the same scene. If two snapshots of an unchanged porch are described differently, the similarity score will be low and every frame will appear novel — resulting in a notification per snapshot.
+
+Small models like `moondream` are too inconsistent for reliable dedup. Use at minimum a **7B-class vision model** such as `qwen2.5vl:7b` (recommended) or `llava:7b`. The default Ollama VLM model is `qwen3-vl:8b`.
+
+If you are using `always_notify` mode, VLM consistency affects caption quality but not notification volume.
+
+---
+
+### Resource management
+
+The video pipeline enforces a per-entry semaphore that limits concurrent VLM and summary model calls (default: 1, sequential). Frames that cannot acquire the semaphore within 30 s are dropped. If a chat turn starts while the video pipeline is waiting for the model, it waits briefly for the chat turn to complete before dropping the frame — avoiding GPU contention. The video token budget is intentionally capped (256 tokens for VLM scene descriptions, 128 tokens for summaries).
+
+---
+
+### Advanced options
+
+**In Global Options** (gear icon on the integration page):
+
+| Option | Default | Description |
+|---|---|---|
+| `video_analyzer_mode` | `disable` | Notification mode: disable / notify_on_anomaly / always_notify |
+| `video_analyzer_uniqueness_enabled` | `false` | Enable perceptual hash (dHash) pre-filter to skip visually identical frames before VLM analysis. **Caveat:** drops near-duplicate snapshots, removing the visual continuity the summary model uses to narrate motion. Only enable if a nearly-static scene generates excessive duplicates and you accept that motion context may be lost. |
+| `video_analyzer_motion_camera_map` | *(empty)* | Explicit `binary_sensor: camera` overrides, one per line. Use when automatic resolution picks the wrong camera. |
+
+**In the Camera Image Analysis feature subentry:**
 
 | Option | Default | Description |
 |---|---|---|

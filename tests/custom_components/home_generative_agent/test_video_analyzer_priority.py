@@ -16,14 +16,22 @@ Covers (test plan items):
 - Startup logs video_model_semaphore size and uncontended flag
 - Startup capability probe logs model/memory data when available
 - Startup capability probe falls back silently when probe fails
+- Motion snapshot loop runs at VIDEO_ANALYZER_MOTION_SCAN_INTERVAL until cancelled
+- Recording poll skips cameras already tracked by the motion loop (mutual exclusion)
+- _resolve_camera_from_motion: direct match, VMD strip, _motion strip (Reolink + Ring-MQTT), no match, override precedence
+- Event lifecycle: motion-held snapshots are not analyzed until the OFF/exit
+  flush, which processes the whole window as one ordered batch
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import datetime as dt
 import logging
 import time
+from collections import deque
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -34,6 +42,8 @@ import custom_components.home_generative_agent as hga_mod
 import custom_components.home_generative_agent.core.utils as utils_mod
 import custom_components.home_generative_agent.core.video_analyzer as va_mod
 from custom_components.home_generative_agent.const import (
+    VIDEO_ANALYZER_MOTION_SCAN_INTERVAL,
+    VIDEO_ANALYZER_SCAN_INTERVAL,
     VIDEO_SUMMARY_NUM_PREDICT,
     VIDEO_VLM_NUM_PREDICT,
 )
@@ -505,6 +515,200 @@ async def test_summary_null_chat_with_config_does_not_raise(
     # from with_config would propagate uncaught and fail this test.
     with contextlib.suppress(ValueError):
         await va._generate_summary(frame_descs)  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# _resolve_camera_from_motion: motion sensor → camera entity resolution
+# ---------------------------------------------------------------------------
+
+
+def _make_va_with_states(
+    hass: MagicMock, entry: MagicMock, existing_camera_ids: list[str]
+) -> VideoAnalyzer:
+    """Return a VideoAnalyzer whose hass.states.get mirrors existing_camera_ids."""
+    existing = set(existing_camera_ids)
+    hass.states.get.side_effect = lambda eid: MagicMock() if eid in existing else None
+    return VideoAnalyzer(hass, entry)
+
+
+def test_resolve_direct_name_match(hass: MagicMock, entry: MagicMock) -> None:
+    """binary_sensor.X maps to camera.X when that entity exists."""
+    va = _make_va_with_states(hass, entry, ["camera.frontgate"])
+    result = va._resolve_camera_from_motion("binary_sensor.frontgate")  # type: ignore[attr-defined]
+    assert result == "camera.frontgate"
+
+
+def test_resolve_vmd_suffix_stripped(hass: MagicMock, entry: MagicMock) -> None:
+    """UniFi Protect VMD sensors (binary_sensor.X_vmd1) resolve to camera.X."""
+    va = _make_va_with_states(hass, entry, ["camera.frontgate"])
+    result = va._resolve_camera_from_motion("binary_sensor.frontgate_vmd1")  # type: ignore[attr-defined]
+    assert result == "camera.frontgate"
+
+
+def test_resolve_motion_suffix_reolink(hass: MagicMock, entry: MagicMock) -> None:
+    """Reolink: binary_sensor.X_motion resolves to camera.X."""
+    va = _make_va_with_states(hass, entry, ["camera.front_door"])
+    result = va._resolve_camera_from_motion("binary_sensor.front_door_motion")  # type: ignore[attr-defined]
+    assert result == "camera.front_door"
+
+
+def test_resolve_motion_suffix_ring_mqtt(hass: MagicMock, entry: MagicMock) -> None:
+    """Ring-MQTT: binary_sensor.X_motion resolves to camera.X_snapshot."""
+    va = _make_va_with_states(hass, entry, ["camera.front_door_snapshot"])
+    result = va._resolve_camera_from_motion("binary_sensor.front_door_motion")  # type: ignore[attr-defined]
+    assert result == "camera.front_door_snapshot"
+
+
+def test_resolve_no_match_returns_none(hass: MagicMock, entry: MagicMock) -> None:
+    """Returns None when no camera entity can be resolved."""
+    va = _make_va_with_states(hass, entry, [])
+    result = va._resolve_camera_from_motion("binary_sensor.unknown_sensor_motion")  # type: ignore[attr-defined]
+    assert result is None
+
+
+def test_resolve_override_map_takes_precedence(
+    hass: MagicMock, entry: MagicMock
+) -> None:
+    """Explicit override map is checked before any inference."""
+    va = _make_va_with_states(hass, entry, ["camera.override_cam", "camera.inferred"])
+    override = {"binary_sensor.front_door_motion": "camera.override_cam"}
+    with patch(
+        "custom_components.home_generative_agent.core.video_analyzer.VIDEO_ANALYZER_MOTION_CAMERA_MAP",
+        override,
+    ):
+        result = va._resolve_camera_from_motion("binary_sensor.front_door_motion")  # type: ignore[attr-defined]
+    assert result == "camera.override_cam"
+
+
+def test_motion_scan_interval_exceeds_recording_interval() -> None:
+    """Motion loop interval exceeds recording-camera poll interval."""
+    assert VIDEO_ANALYZER_MOTION_SCAN_INTERVAL > VIDEO_ANALYZER_SCAN_INTERVAL
+
+
+@pytest.mark.asyncio
+async def test_recording_poll_skips_motion_tracked_cameras(
+    hass: MagicMock, entry: MagicMock
+) -> None:
+    """_take_snapshots_from_recording_cameras skips cameras already in the motion loop."""
+    va = _make_va_with_states(hass, entry, ["camera.frontgate"])
+    va._active_motion_cameras["camera.frontgate"] = MagicMock()  # type: ignore[attr-defined]
+
+    hass.states.async_all.return_value = [
+        MagicMock(entity_id="camera.frontgate", state="recording"),
+    ]
+
+    with patch.object(va, "_take_single_snapshot") as mock_snap:
+        await va._take_snapshots_from_recording_cameras(  # type: ignore[attr-defined]
+            datetime.now(tz=dt.UTC)
+        )
+        mock_snap.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Event lifecycle: held snapshots flush as one batch at motion OFF
+# ---------------------------------------------------------------------------
+
+
+def _prepare_snapshot_capture(va: VideoAnalyzer, tmp_path: Path) -> AsyncMock:
+    """Stub HA service calls and snapshot dir so _take_single_snapshot runs."""
+    mock_hass = cast("MagicMock", va.hass)
+    mock_hass.services.async_call = AsyncMock()
+    mock_hass.async_add_executor_job = AsyncMock(return_value=True)
+    return AsyncMock(return_value=tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_held_snapshots_not_analyzed_until_flush(
+    va: VideoAnalyzer, tmp_path: Path
+) -> None:
+    """Motion-held snapshots wait for the event flush; no per-frame analysis."""
+    camera_id = "camera.test"
+    mock_dir = _prepare_snapshot_capture(va, tmp_path)
+    base = datetime(2025, 1, 1, 12, 0, 0, tzinfo=dt.UTC)
+
+    with (
+        patch.object(va, "_get_snapshot_dir", new=mock_dir),
+        patch.object(va, "_analyze_and_finalize", new=AsyncMock()) as mock_analyze,
+    ):
+        for i in range(3):
+            now = base + dt.timedelta(seconds=3 * i)
+            path = await va._take_single_snapshot(  # type: ignore[attr-defined]
+                camera_id, now, hold_for_batch=True
+            )
+            assert path is not None
+
+        # While motion is on: nothing analyzed, no live worker spawned.
+        mock_analyze.assert_not_called()
+        assert camera_id not in va._snapshot_queues  # type: ignore[attr-defined]
+        assert len(va._event_snapshot_buffers[camera_id]) == 3  # type: ignore[attr-defined]
+
+        # Motion OFF → flush: exactly one batch containing the whole window.
+        await va._process_snapshot_queue(camera_id)  # type: ignore[attr-defined]
+
+        mock_analyze.assert_called_once()
+        ordered = mock_analyze.call_args.args[1]
+        assert len(ordered) == 3
+        epochs = [epoch for _, epoch in ordered]
+        assert epochs == sorted(epochs)
+        assert camera_id not in va._event_snapshot_buffers  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_motion_loop_holds_snapshots_for_batch(va: VideoAnalyzer) -> None:
+    """The motion snapshot loop captures with hold_for_batch=True."""
+    seen: list[bool] = []
+
+    async def fake_take(
+        _camera_id: str, _now: datetime, *, hold_for_batch: bool = False
+    ) -> Path | None:
+        seen.append(hold_for_batch)
+        raise asyncio.CancelledError
+
+    with patch.object(va, "_take_single_snapshot", new=fake_take):
+        await va._motion_snapshot_loop("camera.test")  # type: ignore[attr-defined]
+
+    assert seen == [True]
+
+
+@pytest.mark.asyncio
+async def test_unheld_snapshot_goes_to_live_queue(
+    va: VideoAnalyzer, tmp_path: Path
+) -> None:
+    """Poll-path snapshots (no active loop) still feed the live worker queue."""
+    camera_id = "camera.test"
+    mock_dir = _prepare_snapshot_capture(va, tmp_path)
+    # Close the worker coroutine instead of scheduling it (hass is a MagicMock).
+    cast("MagicMock", va.hass).async_create_task = MagicMock(
+        side_effect=lambda coro: (coro.close(), MagicMock())[1]  # type: ignore[no-any-return]
+    )
+
+    with patch.object(va, "_get_snapshot_dir", new=mock_dir):
+        now = datetime(2025, 1, 1, 12, 0, 0, tzinfo=dt.UTC)
+        path = await va._take_single_snapshot(camera_id, now)  # type: ignore[attr-defined]
+
+    assert path is not None
+    assert camera_id not in va._event_snapshot_buffers  # type: ignore[attr-defined]
+    assert va._snapshot_queues[camera_id].qsize() == 1  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_flush_combines_held_and_queued_frames(va: VideoAnalyzer) -> None:
+    """The event flush drains both the hold buffer and queued leftovers."""
+    camera_id = "camera.test"
+    held = Path("snapshot_20250101_120000.jpg")
+    queued = Path("snapshot_20250101_120003.jpg")
+
+    va._event_snapshot_buffers[camera_id] = deque([held])  # type: ignore[attr-defined]
+    q: asyncio.Queue[_SnapshotItem] = asyncio.Queue()
+    q.put_nowait(_SnapshotItem(path=queued, enqueued=0.0))
+    va._snapshot_queues[camera_id] = q  # type: ignore[attr-defined]
+
+    with patch.object(va, "_analyze_and_finalize", new=AsyncMock()) as mock_analyze:
+        await va._process_snapshot_queue(camera_id)  # type: ignore[attr-defined]
+
+    mock_analyze.assert_called_once()
+    ordered = mock_analyze.call_args.args[1]
+    assert [p for p, _ in ordered] == [held, queued]
 
 
 @pytest.mark.asyncio

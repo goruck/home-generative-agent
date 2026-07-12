@@ -612,6 +612,10 @@ RECOMMENDED_VIDEO_ANALYZER_MODE: VideoAnalyzerMode = VIDEO_ANALYZER_MODE_DISABLE
 
 # Interval units are seconds.
 VIDEO_ANALYZER_SCAN_INTERVAL = 1.5
+# Snapshot interval while a motion sensor is active. Longer than the recording-camera
+# poll (1.5 s) to reduce redundant model calls; short enough to capture fast walk-bys
+# (a person crossing a typical home camera FOV in ~3-5 s gets at least one frame).
+VIDEO_ANALYZER_MOTION_SCAN_INTERVAL = 3
 VIDEO_ANALYZER_SNAPSHOT_ROOT = "/media/snapshots"
 VIDEO_ANALYZER_SYSTEM_MESSAGE = """
 BEGIN_RULES
@@ -669,7 +673,10 @@ VIDEO_ANALYZER_DELETE_SNAPSHOTS = False
 VIDEO_ANALYZER_SNAPSHOTS_TO_KEEP = 200
 VIDEO_ANALYZER_TRIGGER_ON_MOTION = True
 VIDEO_ANALYZER_MOTION_CAMERA_MAP: dict = {}
+CONF_VIDEO_ANALYZER_MOTION_CAMERA_MAP = "video_analyzer_motion_camera_map"
 VIDEO_ANALYZER_FACE_CROP = False
+CONF_VIDEO_ANALYZER_UNIQUENESS_ENABLED = "video_analyzer_uniqueness_enabled"
+RECOMMENDED_VIDEO_ANALYZER_UNIQUENESS_ENABLED = False
 
 # Stable “latest” file publication
 VIDEO_ANALYZER_SAVE_LATEST = True

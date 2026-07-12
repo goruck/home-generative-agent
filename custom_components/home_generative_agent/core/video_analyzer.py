@@ -21,6 +21,7 @@ import httpx
 from homeassistant.components.camera.const import DOMAIN as CAMERA_DOMAIN
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.httpx_client import get_async_client
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -31,6 +32,8 @@ from ..const import (  # noqa: TID252
     CONF_MODEL_PROVIDER_UNCONTENDED,
     CONF_NOTIFY_SERVICE,
     CONF_VIDEO_ANALYZER_MODE,
+    CONF_VIDEO_ANALYZER_MOTION_CAMERA_MAP,
+    CONF_VIDEO_ANALYZER_UNIQUENESS_ENABLED,
     CONF_VIDEO_MODEL_SEMAPHORE,
     RECOMMENDED_VIDEO_MODEL_SEMAPHORE,
     SIGNAL_HGA_NEW_LATEST,
@@ -40,6 +43,7 @@ from ..const import (  # noqa: TID252
     VIDEO_ANALYZER_LATEST_NAME,
     VIDEO_ANALYZER_LATEST_SUBFOLDER,
     VIDEO_ANALYZER_MOTION_CAMERA_MAP,
+    VIDEO_ANALYZER_MOTION_SCAN_INTERVAL,
     VIDEO_ANALYZER_PROMPT,
     VIDEO_ANALYZER_SCAN_INTERVAL,
     VIDEO_ANALYZER_SIMILARITY_THRESHOLD,
@@ -101,7 +105,7 @@ _VIDEO_QUEUE_BACKLOG_THRESHOLD: Final[int] = (
     2  # drop stale frames when queue exceeds this
 )
 # --- Uniqueness gate tuning ---
-_UNIQUENESS_ENABLED: Final[bool] = False
+# Enabled at runtime via CONF_VIDEO_ANALYZER_UNIQUENESS_ENABLED option (default off).
 _UNIQUENESS_HAMMING_MAX: Final[int] = 4  # <= this => "too similar" (tune 4-10)
 _UNIQUENESS_HISTORY: Final[int] = 2  # compare against last N accepted hashes
 _UNIQUENESS_HEARTBEAT_SEC: Final[int] = 10  # always allow a frame at least this often
@@ -250,6 +254,10 @@ class VideoAnalyzer:
         self._active_queue_tasks: dict[str, asyncio.Task] = {}
         self._initialized_dirs: set[str] = set()
         self._active_motion_cameras: dict[str, asyncio.Task] = {}
+        self._active_recording_cameras: dict[str, asyncio.Task] = {}
+        # Frames captured during a motion/recording window, held out of the
+        # live worker queue until the event ends and they flush as one batch.
+        self._event_snapshot_buffers: dict[str, deque[Path]] = {}
         self._last_recognized: dict[str, list[str]] = {}
         # Protect images referenced in notifications from immediate pruning
         self._notify_protected: dict[Path, float] = {}  # path -> expiry time
@@ -570,6 +578,13 @@ class VideoAnalyzer:
             domain = "notify"
 
         clean_msg = msg.replace("**", "").replace("`", "")
+        LOGGER.debug(
+            "[%s] Dispatching notification via %s.%s: %r",
+            camera_name,
+            domain,
+            service,
+            clean_msg[:80],
+        )
         await self.hass.services.async_call(
             domain,
             service,
@@ -1158,14 +1173,14 @@ class VideoAnalyzer:
             )
 
     async def _process_snapshot_queue(self, camera_id: str) -> None:
-        """Flush any queued snapshots for a camera as one ordered batch."""
+        """Flush held and queued snapshots for a camera as one ordered batch."""
+        batch: list[Path] = list(self._event_snapshot_buffers.pop(camera_id, []))
+
         queue: asyncio.Queue[_SnapshotItem] | None = self._snapshot_queues.get(
             camera_id
         )
-        if not queue:
-            return
-
-        batch = self._drain_queue(queue)
+        if queue:
+            batch.extend(self._drain_queue(queue))
         if not batch:
             return
 
@@ -1181,17 +1196,66 @@ class VideoAnalyzer:
         await self._analyze_and_finalize(camera_id, ordered)
 
     def _resolve_camera_from_motion(self, motion_entity_id: str) -> str | None:
-        """Resolve a camera entity ID from a motion sensor ID."""
-        overrides: dict = VIDEO_ANALYZER_MOTION_CAMERA_MAP
+        """
+        Resolve a camera entity ID from a motion sensor ID.
+
+        Resolution order: (1) explicit override map, (2) device-based lookup,
+        (3) name-based heuristics (direct, VMD-strip, _motion-strip).
+        """
+        # 1. Explicit override — options-configured map takes priority over const.
+        overrides: dict = self.entry.runtime_data.options.get(
+            CONF_VIDEO_ANALYZER_MOTION_CAMERA_MAP, VIDEO_ANALYZER_MOTION_CAMERA_MAP
+        )
         camera_id = overrides.get(motion_entity_id)
         if camera_id and self.hass.states.get(camera_id):
             return camera_id
 
+        # 2. Device-based resolution: find the camera on the same HA device.
+        camera_id = self._resolve_camera_by_device(motion_entity_id)
+        if camera_id:
+            return camera_id
+
+        # 3. Name-based resolution (fallback for integrations without device links).
         base = motion_entity_id.replace("binary_sensor.", "")
         base = re.sub(r"_vmd\d+.*", "", base)
         inferred_camera_id = f"camera.{base}"
         if self.hass.states.get(inferred_camera_id):
             return inferred_camera_id
+
+        # Strip _motion suffix and try bare name + Ring-MQTT _snapshot variant.
+        if base.endswith("_motion"):
+            stripped = base[: -len("_motion")]
+            for candidate in (f"camera.{stripped}", f"camera.{stripped}_snapshot"):
+                if self.hass.states.get(candidate):
+                    return candidate
+
+        return None
+
+    def _resolve_camera_by_device(self, motion_entity_id: str) -> str | None:
+        """
+        Return the camera on the same HA device as the motion sensor.
+
+        Returns None when the sensor has no device, the device has no camera
+        entities, or the device has more than one camera (ambiguous).
+        """
+        ent_reg = er.async_get(self.hass)
+        motion_entry = ent_reg.async_get(motion_entity_id)
+        if motion_entry is None or motion_entry.device_id is None:
+            return None
+
+        camera_entries = [
+            entry
+            for entry in er.async_entries_for_device(ent_reg, motion_entry.device_id)
+            if entry.domain == "camera" and self.hass.states.get(entry.entity_id)
+        ]
+
+        if len(camera_entries) == 1:
+            LOGGER.debug(
+                "[%s] Resolved via device registry → %s",
+                motion_entity_id,
+                camera_entries[0].entity_id,
+            )
+            return camera_entries[0].entity_id
 
         return None
 
@@ -1214,7 +1278,9 @@ class VideoAnalyzer:
 
         Returns True to enqueue, False to skip.
         """
-        if not _UNIQUENESS_ENABLED:
+        if not self.entry.runtime_data.options.get(
+            CONF_VIDEO_ANALYZER_UNIQUENESS_ENABLED, False
+        ):
             return True
 
         # Heartbeat: always allow at least one frame every N seconds
@@ -1256,7 +1322,9 @@ class VideoAnalyzer:
         self._last_unique_ts[camera_id] = now
         return True
 
-    async def _take_single_snapshot(self, camera_id: str, now: datetime) -> Path | None:
+    async def _take_single_snapshot(
+        self, camera_id: str, now: datetime, *, hold_for_batch: bool = False
+    ) -> Path | None:
         snapshot_dir = await self._get_snapshot_dir(camera_id)
         timestamp = dt_util.as_local(now).strftime("%Y%m%d_%H%M%S")
         path = snapshot_dir / f"snapshot_{timestamp}.jpg"
@@ -1297,7 +1365,6 @@ class VideoAnalyzer:
                 return None
 
             self._m_inc(camera_id, "captured")
-            queue = self._get_snapshot_queue(camera_id)
 
             # --- Uniqueness gate: skip near-duplicate frames unless heartbeat due ---
             try:
@@ -1312,12 +1379,26 @@ class VideoAnalyzer:
                 )
                 return None
 
-            await put_with_backpressure(
-                queue, _SnapshotItem(path=path, enqueued=monotonic())
-            )
+            if hold_for_batch:
+                # Motion/recording loop owns this camera: hold the frame until
+                # the event ends so the whole window flushes as one batch,
+                # instead of the live worker analyzing (and notifying) per frame.
+                buffer = self._event_snapshot_buffers.setdefault(
+                    camera_id, deque(maxlen=_QUEUE_MAXSIZE)
+                )
+                buffer.append(path)  # deque drops oldest when full
+            else:
+                queue = self._get_snapshot_queue(camera_id)
+                await put_with_backpressure(
+                    queue, _SnapshotItem(path=path, enqueued=monotonic())
+                )
             self._m_inc(camera_id, "enqueued")
             LOGGER.debug(
-                "[%s] Enqueue t=%s %s", camera_id, dt_util.utcnow().isoformat(), path
+                "[%s] Enqueue t=%s held=%s %s",
+                camera_id,
+                dt_util.utcnow().isoformat(),
+                hold_for_batch,
+                path,
             )
         except HomeAssistantError as err:
             LOGGER.warning("Snapshot failed for %s: %s", camera_id, err)
@@ -1329,8 +1410,8 @@ class VideoAnalyzer:
         try:
             while True:
                 now = dt_util.utcnow()
-                await self._take_single_snapshot(camera_id, now)
-                await asyncio.sleep(VIDEO_ANALYZER_SCAN_INTERVAL)
+                await self._take_single_snapshot(camera_id, now, hold_for_batch=True)
+                await asyncio.sleep(VIDEO_ANALYZER_MOTION_SCAN_INTERVAL)
         except asyncio.CancelledError:
             LOGGER.debug("Snapshot loop cancelled for camera: %s", camera_id)
 
@@ -1350,6 +1431,11 @@ class VideoAnalyzer:
             return
 
         if new_state.state == "on" and (old_state is None or old_state.state != "on"):
+            # If a recording-state loop is running, cancel it and promote to motion loop
+            # so the motion OFF event controls the lifecycle and queue flush.
+            rec_task = self._active_recording_cameras.pop(camera_id, None)
+            if rec_task and not rec_task.done():
+                rec_task.cancel()
             if camera_id not in self._active_motion_cameras:
                 LOGGER.debug("Motion ON: Starting snapshot loop for %s", camera_id)
                 task = self.hass.async_create_task(
@@ -1374,6 +1460,14 @@ class VideoAnalyzer:
 
     async def _take_snapshots_from_recording_cameras(self, now: datetime) -> None:
         for camera_id in self._get_recording_cameras():
+            if (
+                camera_id in self._active_motion_cameras
+                or camera_id in self._active_recording_cameras
+            ):
+                LOGGER.debug(
+                    "[%s] Skipping recording poll — loop already active.", camera_id
+                )
+                continue
             try:
                 path = await self._take_single_snapshot(camera_id, now)
                 if path:
@@ -1394,7 +1488,26 @@ class VideoAnalyzer:
         if old_state is None or new_state is None:
             return
 
-        if old_state.state == "recording" and new_state.state != "recording":
+        was_recording = old_state.state == "recording"
+        is_recording = new_state.state == "recording"
+
+        if not was_recording and is_recording:
+            # Camera entered recording state with no associated motion binary sensor.
+            if (
+                entity_id not in self._active_motion_cameras
+                and entity_id not in self._active_recording_cameras
+            ):
+                LOGGER.debug(
+                    "[%s] Recording started: starting snapshot loop", entity_id
+                )
+                task = self.hass.async_create_task(
+                    self._motion_snapshot_loop(entity_id)
+                )
+                self._active_recording_cameras[entity_id] = task
+        elif was_recording and not is_recording:
+            task = self._active_recording_cameras.pop(entity_id, None)
+            if task and not task.done():
+                task.cancel()
             self.hass.async_create_task(self._process_snapshot_queue(entity_id))
 
     def start(self) -> None:
@@ -1455,15 +1568,17 @@ class VideoAnalyzer:
 
         tasks_to_await: list[asyncio.Task] = []
 
-        for task in self._active_motion_cameras.values():
-            task.cancel()
-            tasks_to_await.append(task)
-        self._active_motion_cameras.clear()
+        for task_dict in (
+            self._active_motion_cameras,
+            self._active_recording_cameras,
+            self._active_queue_tasks,
+        ):
+            for task in task_dict.values():
+                task.cancel()
+                tasks_to_await.append(task)
+            task_dict.clear()
 
-        for task in self._active_queue_tasks.values():
-            task.cancel()
-            tasks_to_await.append(task)
-        self._active_queue_tasks.clear()
+        self._event_snapshot_buffers.clear()
 
         # Orphan the semaphore reference; tasks already cancelled above will
         # absorb CancelledError and exit — not released by this None assignment.
