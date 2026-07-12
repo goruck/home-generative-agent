@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.27] - 2026-07-10
+
+### Added
+
+- **UI-configurable motion sensor → camera override map** — a new `video_analyzer_motion_camera_map` option in Global Options lets you pin specific `binary_sensor.*` entities to specific `camera.*` entities, one pair per line (`binary_sensor.X: camera.Y`). Previously this mapping required editing `const.py`. Useful when automatic resolution picks the wrong camera for a given sensor.
+
+- **UI toggle for perceptual-hash (dHash) frame deduplication** — `video_analyzer_uniqueness_enabled` (default off) replaces the hardcoded `_UNIQUENESS_ENABLED = False` constant. When enabled, visually identical frames are dropped before VLM analysis. Caveat: enabling this removes the visual continuity the summary model uses to narrate motion; only enable it if a static scene generates excessive duplicate snapshots and you accept that motion context may be lost.
+
+- **Event-driven recording state loop for UniFi Protect and similar cameras** — cameras that expose a `recording` HA state (e.g. UniFi Protect) now start a snapshot loop on `recording` entry and flush the collected batch on exit, replacing the previous 1.5s polling loop. If a motion binary sensor fires for the same camera while a recording loop is already running, the motion loop takes ownership and controls the queue flush.
+
+### Fixed
+
+- **Ring-MQTT cameras triggered phantom notifications from interior PIR sensors** — `_resolve_camera_from_motion` matched `binary_sensor.front_door_motion` (a Ring Alarm wall PIR that stays ON for up to 3 minutes) to the doorbell camera instead of the doorbell's own motion sensor (`binary_sensor.front_door_motion_3`). This caused up to 62 snapshot-analysis cycles and mobile notifications per motion event on the wrong subject. Root cause: name heuristics could not distinguish two sensors that share a name prefix but belong to different physical devices.
+
+  Fix: motion → camera resolution is now a **three-tier lookup**:
+  1. Explicit override map (UI-configurable, checked first)
+  2. HA device registry — finds the `camera.*` entity on the same HA device as the motion sensor; correctly separates Ring Alarm PIRs from doorbell cameras because they are registered to different devices
+  3. Name heuristics — fallback for integrations without device links (direct substitution, VMD-suffix strip, `_motion`-suffix strip)
+
+  Closes [#459](https://github.com/goruck/home-generative-agent/issues/459). Credit to @andymcmanus for detailed bug reports, debug log analysis, and patient re-testing that identified the PIR/doorbell sensor collision as the root cause.
+
+- **Motion/recording snapshots were analyzed per frame instead of as one event batch** — frames captured by a motion or recording loop were enqueued into the per-camera live worker queue, whose worker consumed them immediately. For long-held motion sensors (ring-mqtt holds ON up to 180s), this produced an analysis cycle and notification every few seconds while motion remained active, and the OFF-event "flush" only drained leftovers. Fix: loop-captured frames are now held in a per-camera buffer (bypassing the live worker) and flushed as a single ordered batch when motion turns OFF or recording exits — one summary and at most one notification per event. The live worker queue still serves the recording-poll safety-net path. The hold buffer is capped at 50 frames (oldest dropped first).
+
 ## [3.14.26] - 2026-06-27
 
 ### Fixed

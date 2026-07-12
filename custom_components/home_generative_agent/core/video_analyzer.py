@@ -255,6 +255,9 @@ class VideoAnalyzer:
         self._initialized_dirs: set[str] = set()
         self._active_motion_cameras: dict[str, asyncio.Task] = {}
         self._active_recording_cameras: dict[str, asyncio.Task] = {}
+        # Frames captured during a motion/recording window, held out of the
+        # live worker queue until the event ends and they flush as one batch.
+        self._event_snapshot_buffers: dict[str, deque[Path]] = {}
         self._last_recognized: dict[str, list[str]] = {}
         # Protect images referenced in notifications from immediate pruning
         self._notify_protected: dict[Path, float] = {}  # path -> expiry time
@@ -1170,14 +1173,14 @@ class VideoAnalyzer:
             )
 
     async def _process_snapshot_queue(self, camera_id: str) -> None:
-        """Flush any queued snapshots for a camera as one ordered batch."""
+        """Flush held and queued snapshots for a camera as one ordered batch."""
+        batch: list[Path] = list(self._event_snapshot_buffers.pop(camera_id, []))
+
         queue: asyncio.Queue[_SnapshotItem] | None = self._snapshot_queues.get(
             camera_id
         )
-        if not queue:
-            return
-
-        batch = self._drain_queue(queue)
+        if queue:
+            batch.extend(self._drain_queue(queue))
         if not batch:
             return
 
@@ -1319,7 +1322,9 @@ class VideoAnalyzer:
         self._last_unique_ts[camera_id] = now
         return True
 
-    async def _take_single_snapshot(self, camera_id: str, now: datetime) -> Path | None:
+    async def _take_single_snapshot(
+        self, camera_id: str, now: datetime, *, hold_for_batch: bool = False
+    ) -> Path | None:
         snapshot_dir = await self._get_snapshot_dir(camera_id)
         timestamp = dt_util.as_local(now).strftime("%Y%m%d_%H%M%S")
         path = snapshot_dir / f"snapshot_{timestamp}.jpg"
@@ -1360,7 +1365,6 @@ class VideoAnalyzer:
                 return None
 
             self._m_inc(camera_id, "captured")
-            queue = self._get_snapshot_queue(camera_id)
 
             # --- Uniqueness gate: skip near-duplicate frames unless heartbeat due ---
             try:
@@ -1375,12 +1379,26 @@ class VideoAnalyzer:
                 )
                 return None
 
-            await put_with_backpressure(
-                queue, _SnapshotItem(path=path, enqueued=monotonic())
-            )
+            if hold_for_batch:
+                # Motion/recording loop owns this camera: hold the frame until
+                # the event ends so the whole window flushes as one batch,
+                # instead of the live worker analyzing (and notifying) per frame.
+                buffer = self._event_snapshot_buffers.setdefault(
+                    camera_id, deque(maxlen=_QUEUE_MAXSIZE)
+                )
+                buffer.append(path)  # deque drops oldest when full
+            else:
+                queue = self._get_snapshot_queue(camera_id)
+                await put_with_backpressure(
+                    queue, _SnapshotItem(path=path, enqueued=monotonic())
+                )
             self._m_inc(camera_id, "enqueued")
             LOGGER.debug(
-                "[%s] Enqueue t=%s %s", camera_id, dt_util.utcnow().isoformat(), path
+                "[%s] Enqueue t=%s held=%s %s",
+                camera_id,
+                dt_util.utcnow().isoformat(),
+                hold_for_batch,
+                path,
             )
         except HomeAssistantError as err:
             LOGGER.warning("Snapshot failed for %s: %s", camera_id, err)
@@ -1392,7 +1410,7 @@ class VideoAnalyzer:
         try:
             while True:
                 now = dt_util.utcnow()
-                await self._take_single_snapshot(camera_id, now)
+                await self._take_single_snapshot(camera_id, now, hold_for_batch=True)
                 await asyncio.sleep(VIDEO_ANALYZER_MOTION_SCAN_INTERVAL)
         except asyncio.CancelledError:
             LOGGER.debug("Snapshot loop cancelled for camera: %s", camera_id)
@@ -1559,6 +1577,8 @@ class VideoAnalyzer:
                 task.cancel()
                 tasks_to_await.append(task)
             task_dict.clear()
+
+        self._event_snapshot_buffers.clear()
 
         # Orphan the semaphore reference; tasks already cancelled above will
         # absorb CancelledError and exit — not released by this None assignment.

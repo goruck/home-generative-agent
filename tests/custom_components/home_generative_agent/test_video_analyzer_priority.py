@@ -19,6 +19,8 @@ Covers (test plan items):
 - Motion snapshot loop runs at VIDEO_ANALYZER_MOTION_SCAN_INTERVAL until cancelled
 - Recording poll skips cameras already tracked by the motion loop (mutual exclusion)
 - _resolve_camera_from_motion: direct match, VMD strip, _motion strip (Reolink + Ring-MQTT), no match, override precedence
+- Event lifecycle: motion-held snapshots are not analyzed until the OFF/exit
+  flush, which processes the whole window as one ordered batch
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ import contextlib
 import datetime as dt
 import logging
 import time
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -599,6 +602,113 @@ async def test_recording_poll_skips_motion_tracked_cameras(
             datetime.now(tz=dt.UTC)
         )
         mock_snap.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Event lifecycle: held snapshots flush as one batch at motion OFF
+# ---------------------------------------------------------------------------
+
+
+def _prepare_snapshot_capture(va: VideoAnalyzer, tmp_path: Path) -> AsyncMock:
+    """Stub HA service calls and snapshot dir so _take_single_snapshot runs."""
+    mock_hass = cast("MagicMock", va.hass)
+    mock_hass.services.async_call = AsyncMock()
+    mock_hass.async_add_executor_job = AsyncMock(return_value=True)
+    return AsyncMock(return_value=tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_held_snapshots_not_analyzed_until_flush(
+    va: VideoAnalyzer, tmp_path: Path
+) -> None:
+    """Motion-held snapshots wait for the event flush; no per-frame analysis."""
+    camera_id = "camera.test"
+    mock_dir = _prepare_snapshot_capture(va, tmp_path)
+    base = datetime(2025, 1, 1, 12, 0, 0, tzinfo=dt.UTC)
+
+    with (
+        patch.object(va, "_get_snapshot_dir", new=mock_dir),
+        patch.object(va, "_analyze_and_finalize", new=AsyncMock()) as mock_analyze,
+    ):
+        for i in range(3):
+            now = base + dt.timedelta(seconds=3 * i)
+            path = await va._take_single_snapshot(  # type: ignore[attr-defined]
+                camera_id, now, hold_for_batch=True
+            )
+            assert path is not None
+
+        # While motion is on: nothing analyzed, no live worker spawned.
+        mock_analyze.assert_not_called()
+        assert camera_id not in va._snapshot_queues  # type: ignore[attr-defined]
+        assert len(va._event_snapshot_buffers[camera_id]) == 3  # type: ignore[attr-defined]
+
+        # Motion OFF → flush: exactly one batch containing the whole window.
+        await va._process_snapshot_queue(camera_id)  # type: ignore[attr-defined]
+
+        mock_analyze.assert_called_once()
+        ordered = mock_analyze.call_args.args[1]
+        assert len(ordered) == 3
+        epochs = [epoch for _, epoch in ordered]
+        assert epochs == sorted(epochs)
+        assert camera_id not in va._event_snapshot_buffers  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_motion_loop_holds_snapshots_for_batch(va: VideoAnalyzer) -> None:
+    """The motion snapshot loop captures with hold_for_batch=True."""
+    seen: list[bool] = []
+
+    async def fake_take(
+        _camera_id: str, _now: datetime, *, hold_for_batch: bool = False
+    ) -> Path | None:
+        seen.append(hold_for_batch)
+        raise asyncio.CancelledError
+
+    with patch.object(va, "_take_single_snapshot", new=fake_take):
+        await va._motion_snapshot_loop("camera.test")  # type: ignore[attr-defined]
+
+    assert seen == [True]
+
+
+@pytest.mark.asyncio
+async def test_unheld_snapshot_goes_to_live_queue(
+    va: VideoAnalyzer, tmp_path: Path
+) -> None:
+    """Poll-path snapshots (no active loop) still feed the live worker queue."""
+    camera_id = "camera.test"
+    mock_dir = _prepare_snapshot_capture(va, tmp_path)
+    # Close the worker coroutine instead of scheduling it (hass is a MagicMock).
+    cast("MagicMock", va.hass).async_create_task = MagicMock(
+        side_effect=lambda coro: (coro.close(), MagicMock())[1]  # type: ignore[no-any-return]
+    )
+
+    with patch.object(va, "_get_snapshot_dir", new=mock_dir):
+        now = datetime(2025, 1, 1, 12, 0, 0, tzinfo=dt.UTC)
+        path = await va._take_single_snapshot(camera_id, now)  # type: ignore[attr-defined]
+
+    assert path is not None
+    assert camera_id not in va._event_snapshot_buffers  # type: ignore[attr-defined]
+    assert va._snapshot_queues[camera_id].qsize() == 1  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_flush_combines_held_and_queued_frames(va: VideoAnalyzer) -> None:
+    """The event flush drains both the hold buffer and queued leftovers."""
+    camera_id = "camera.test"
+    held = Path("snapshot_20250101_120000.jpg")
+    queued = Path("snapshot_20250101_120003.jpg")
+
+    va._event_snapshot_buffers[camera_id] = deque([held])  # type: ignore[attr-defined]
+    q: asyncio.Queue[_SnapshotItem] = asyncio.Queue()
+    q.put_nowait(_SnapshotItem(path=queued, enqueued=0.0))
+    va._snapshot_queues[camera_id] = q  # type: ignore[attr-defined]
+
+    with patch.object(va, "_analyze_and_finalize", new=AsyncMock()) as mock_analyze:
+        await va._process_snapshot_queue(camera_id)  # type: ignore[attr-defined]
+
+    mock_analyze.assert_called_once()
+    ordered = mock_analyze.call_args.args[1]
+    assert [p for p, _ in ordered] == [held, queued]
 
 
 @pytest.mark.asyncio
