@@ -20,3 +20,4 @@ visualize_graph.py
 # Home Assistant configuration
 config/*
 #!config/configuration.yaml
+.gstack/
