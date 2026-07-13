@@ -73,6 +73,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.store.postgres import AsyncPostgresStore
 from langgraph.store.postgres.base import PostgresIndexConfig
+from ollama import ResponseError as OllamaResponseError
 from psycopg.rows import DictRow, dict_row
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 from pydantic import SecretStr
@@ -1160,7 +1161,13 @@ def _register_services(hass: HomeAssistant, entry: HGAConfigEntry) -> None:
 
             # 5) Run AI analysis (summary) and face recognition if available.
             summary: str | None
-            summary = await analyze_image(vision_model, img_bytes, None, prev_text=None)
+            try:
+                summary = await analyze_image(
+                    vision_model, img_bytes, None, prev_text=None
+                )
+            except OllamaResponseError as err:
+                msg = f"VLM analysis failed for {camera_id}: {err}"
+                raise HomeAssistantError(msg) from err
 
             people: list[str] = []
             people = await video_analyzer.recognize_faces(img_bytes, camera_id)

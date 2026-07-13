@@ -25,6 +25,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.httpx_client import get_async_client
 from langchain_core.messages import HumanMessage, SystemMessage
+from ollama import ResponseError as OllamaResponseError
 from PIL import Image
 
 from ..agent.tools import analyze_image  # noqa: TID252
@@ -104,6 +105,7 @@ _VIDEO_MODEL_SEMAPHORE_WAIT_SEC: Final[int] = (
 _VIDEO_QUEUE_BACKLOG_THRESHOLD: Final[int] = (
     2  # drop stale frames when queue exceeds this
 )
+_WORKER_ERROR_BACKOFF_SEC: Final[int] = 5  # pause after unexpected worker error
 # --- Uniqueness gate tuning ---
 # Enabled at runtime via CONF_VIDEO_ANALYZER_UNIQUENESS_ENABLED option (default off).
 _UNIQUENESS_HAMMING_MAX: Final[int] = 4  # <= this => "too similar" (tune 4-10)
@@ -545,22 +547,41 @@ class VideoAnalyzer:
         LOGGER.debug("[%s] Worker started", camera_id)
         try:
             while True:
-                batch = await self._get_batch(queue, camera_id)
-                ordered = order_batch(batch)
+                try:
+                    batch = await self._get_batch(queue, camera_id)
+                    ordered = order_batch(batch)
 
-                if ordered:
-                    first_epoch = ordered[0][1]
-                    age = int(dt_util.utcnow().timestamp() - first_epoch)
-                    LOGGER.debug(
-                        "[%s] Dequeue age=%ds qsize=%d", camera_id, age, queue.qsize()
+                    if ordered:
+                        first_epoch = ordered[0][1]
+                        age = int(dt_util.utcnow().timestamp() - first_epoch)
+                        LOGGER.debug(
+                            "[%s] Dequeue age=%ds qsize=%d",
+                            camera_id,
+                            age,
+                            queue.qsize(),
+                        )
+
+                    await self._analyze_and_finalize(camera_id, ordered)
+                except Exception:
+                    # Batch is dropped but the worker must survive; a dead
+                    # worker silently disables camera analysis (issue #473).
+                    LOGGER.exception(
+                        "[%s] Worker error; batch dropped, worker continues",
+                        camera_id,
                     )
-
-                await self._analyze_and_finalize(camera_id, ordered)
+                    await asyncio.sleep(_WORKER_ERROR_BACKOFF_SEC)
         except asyncio.CancelledError:
             LOGGER.debug("[%s] Worker cancelled", camera_id)
             raise
-        except Exception:
-            LOGGER.exception("[%s] Worker crashed", camera_id)
+        finally:
+            # Drop this camera's entries so the next snapshot respawns a fresh
+            # worker instead of enqueueing to a queue nobody consumes. Identity
+            # checks guard against a respawned worker's entries being removed
+            # by a stale worker whose cancellation landed after the respawn.
+            if self._snapshot_queues.get(camera_id) is queue:
+                del self._snapshot_queues[camera_id]
+            if self._active_queue_tasks.get(camera_id) is asyncio.current_task():
+                del self._active_queue_tasks[camera_id]
 
     async def _send_notification(
         self, msg: str, camera_name: str, notify_img_path: Path
@@ -666,7 +687,10 @@ class VideoAnalyzer:
         base_sum = self.entry.runtime_data.summarization_model
         sum_cfg = dict(getattr(base_sum, "config", {}).get("configurable", {}))
         sum_cfg["num_predict"] = VIDEO_SUMMARY_NUM_PREDICT
-        if is_edge_deployment(sum_deployment):
+        # Only force-disable thinking when the base config carries a reasoning
+        # key (set via reasoning_field() for thinking-capable models); sending
+        # one for non-thinking models makes some Ollama builds reject the call.
+        if is_edge_deployment(sum_deployment) and "reasoning" in sum_cfg:
             sum_cfg["reasoning"] = False
         model = base_sum.with_config(config={"configurable": sum_cfg})
         summary = await model.ainvoke(messages)
@@ -1008,7 +1032,11 @@ class VideoAnalyzer:
                 base_vlm = self.entry.runtime_data.vision_model
                 vlm_cfg = dict(getattr(base_vlm, "config", {}).get("configurable", {}))
                 vlm_cfg["num_predict"] = VIDEO_VLM_NUM_PREDICT
-                if is_edge_deployment(vlm_deployment):
+                # Only force-disable thinking when the base config carries a
+                # reasoning key (set via reasoning_field() for thinking-capable
+                # models); sending one for non-thinking models makes some
+                # Ollama builds reject the call.
+                if is_edge_deployment(vlm_deployment) and "reasoning" in vlm_cfg:
                     vlm_cfg["reasoning"] = False
                 vision_model = base_vlm.with_config(config={"configurable": vlm_cfg})
                 if use_gate:
@@ -1063,7 +1091,7 @@ class VideoAnalyzer:
                 self._m_inc(camera_id, "timeouts")
                 self._log_snapshot_error(camera_id, path, exc)
                 return {}
-        except (FileNotFoundError, HomeAssistantError) as exc:
+        except (FileNotFoundError, HomeAssistantError, OllamaResponseError) as exc:
             self._log_snapshot_error(camera_id, path, exc)
             return {}
         else:

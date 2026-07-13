@@ -9,9 +9,13 @@ Covers (test plan items):
 - Semaphore acquisition timeout causes frame drop rather than 90 s wait
 - Semaphore timeout increments the semaphore_timeouts counter
 - VLM calls include bounded num_predict matching VIDEO_VLM_NUM_PREDICT
-- VLM calls pass reasoning=False via configurable
+- VLM calls force reasoning=False only when the base config carries a reasoning key
 - Summarization calls include bounded num_predict matching VIDEO_SUMMARY_NUM_PREDICT
-- Summarization calls pass reasoning=False via configurable
+- Summarization calls force reasoning=False only when the base config carries one
+- Worker survives unexpected exceptions (e.g. ollama.ResponseError) and keeps consuming
+- Worker exit removes the queue entry so the next snapshot respawns a worker
+- analyze_image propagates ollama.ResponseError; _process_snapshot and the
+  camera chat tool handle it at their own boundaries (issue #473)
 - VLM frame analysis and summary generation share the same semaphore concurrency limit
 - Startup logs video_model_semaphore size and uncontended flag
 - Startup capability probe logs model/memory data when available
@@ -37,10 +41,15 @@ from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from ollama import ResponseError as OllamaResponseError
 
 import custom_components.home_generative_agent as hga_mod
 import custom_components.home_generative_agent.core.utils as utils_mod
 import custom_components.home_generative_agent.core.video_analyzer as va_mod
+from custom_components.home_generative_agent.agent.tools import (
+    analyze_image,
+    get_and_analyze_camera_image,
+)
 from custom_components.home_generative_agent.const import (
     VIDEO_ANALYZER_MOTION_SCAN_INTERVAL,
     VIDEO_ANALYZER_SCAN_INTERVAL,
@@ -398,8 +407,10 @@ async def test_vlm_call_uses_video_vlm_num_predict(va: VideoAnalyzer) -> None:
 
 @pytest.mark.asyncio
 async def test_vlm_call_disables_reasoning(va: VideoAnalyzer) -> None:
-    """Edge VLM frame analysis binds reasoning=False to suppress Ollama thinking."""
+    """Edge VLM analysis forces reasoning=False for thinking-capable models."""
     _model_deployment_get(va).return_value = "edge"
+    # Base config carries a reasoning key (reasoning_field() for thinking models).
+    va.entry.runtime_data.vision_model.config = {"configurable": {"reasoning": True}}
 
     with (
         patch(
@@ -419,6 +430,39 @@ async def test_vlm_call_disables_reasoning(va: VideoAnalyzer) -> None:
     call_cfg = va.entry.runtime_data.vision_model.with_config.call_args.kwargs["config"]
     assert call_cfg["configurable"]["num_predict"] == VIDEO_VLM_NUM_PREDICT
     assert call_cfg["configurable"]["reasoning"] is False
+
+
+@pytest.mark.asyncio
+async def test_vlm_call_omits_reasoning_for_non_thinking_model(
+    va: VideoAnalyzer,
+) -> None:
+    """
+    Edge VLM analysis must not inject a reasoning key for non-thinking models.
+
+    reasoning_field() returns {} for models like gemma3/qwen2.5vl; sending
+    think=false anyway makes some Ollama builds reject the request (issue #473).
+    """
+    _model_deployment_get(va).return_value = "edge"
+    # Base config has no reasoning key — the model does not support thinking.
+    va.entry.runtime_data.vision_model.config = {"configurable": {}}
+
+    with (
+        patch(
+            "custom_components.home_generative_agent.core.video_analyzer.epoch_from_path",
+            return_value=int(time.time()),
+        ),
+        patch("aiofiles.open", return_value=_FakeImageFile()),
+        patch(
+            "custom_components.home_generative_agent.core.video_analyzer.analyze_image",
+            new=AsyncMock(return_value="desc"),
+        ),
+    ):
+        await va._process_snapshot(  # type: ignore[attr-defined]
+            Path("snapshot_20250101_120000.jpg"), "camera.test"
+        )
+
+    call_cfg = va.entry.runtime_data.vision_model.with_config.call_args.kwargs["config"]
+    assert "reasoning" not in call_cfg["configurable"]
 
 
 # ---------------------------------------------------------------------------
@@ -448,8 +492,12 @@ async def test_summary_uses_video_summary_num_predict(va: VideoAnalyzer) -> None
 
 @pytest.mark.asyncio
 async def test_summary_disables_reasoning(va: VideoAnalyzer) -> None:
-    """Edge summarization passes reasoning=False directly to ainvoke."""
+    """Edge summarization forces reasoning=False for thinking-capable models."""
     _model_deployment_get(va).return_value = "edge"
+    # Base config carries a reasoning key (reasoning_field() for thinking models).
+    va.entry.runtime_data.summarization_model.config = {
+        "configurable": {"reasoning": True}
+    }
 
     frame_descs = [
         {"Scene A.": []},
@@ -465,6 +513,27 @@ async def test_summary_disables_reasoning(va: VideoAnalyzer) -> None:
     # reasoning is in the config, not in ainvoke kwargs
     configured_sum = va.entry.runtime_data.summarization_model.with_config.return_value
     assert configured_sum.ainvoke.call_args.kwargs.get("reasoning") is None
+
+
+@pytest.mark.asyncio
+async def test_summary_omits_reasoning_for_non_thinking_model(
+    va: VideoAnalyzer,
+) -> None:
+    """Edge summarization must not inject a reasoning key for non-thinking models."""
+    _model_deployment_get(va).return_value = "edge"
+    # Base config has no reasoning key — the model does not support thinking.
+    va.entry.runtime_data.summarization_model.config = {"configurable": {}}
+
+    frame_descs = [
+        {"Scene A.": []},
+        {"Scene B.": []},
+    ]
+    await va._generate_summary(frame_descs)  # type: ignore[attr-defined]
+
+    call_cfg = va.entry.runtime_data.summarization_model.with_config.call_args.kwargs[
+        "config"
+    ]
+    assert "reasoning" not in call_cfg["configurable"]
 
 
 # ---------------------------------------------------------------------------
@@ -954,3 +1023,158 @@ async def test_log_ollama_server_info_logs_shared_url_swap_warning(
 
     messages = [r.message for r in caplog.records]
     assert any("model_swapping_may_add_latency" in m for m in messages)
+
+
+# ---------------------------------------------------------------------------
+# Issue #473: un-pulled Ollama model must not kill the snapshot worker
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_worker_survives_unexpected_exception(
+    va: VideoAnalyzer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ResponseError from analysis drops the batch but keeps the worker alive."""
+    camera_id = "camera.test"
+    queue: asyncio.Queue[_SnapshotItem] = asyncio.Queue()
+    va._snapshot_queues[camera_id] = queue  # type: ignore[attr-defined]
+    monkeypatch.setattr(va_mod, "_WORKER_ERROR_BACKOFF_SEC", 0)
+
+    calls: list[object] = []
+    first_call = asyncio.Event()
+    second_call = asyncio.Event()
+
+    not_found_msg = "model 'ghost:latest' not found"
+
+    async def flaky_analyze(_camera_id: str, ordered: object) -> None:
+        calls.append(ordered)
+        if len(calls) == 1:
+            first_call.set()
+            raise OllamaResponseError(not_found_msg, 404)
+        second_call.set()
+
+    with patch.object(
+        va, "_analyze_and_finalize", new=AsyncMock(side_effect=flaky_analyze)
+    ):
+        task = asyncio.create_task(va._snapshot_worker(camera_id))  # type: ignore[attr-defined]
+
+        await queue.put(
+            _SnapshotItem(path=Path("snapshot_20250101_120000.jpg"), enqueued=1.0)
+        )
+        await asyncio.wait_for(first_call.wait(), timeout=5)
+
+        # Worker must still be consuming after the exception.
+        await queue.put(
+            _SnapshotItem(path=Path("snapshot_20250101_120003.jpg"), enqueued=2.0)
+        )
+        await asyncio.wait_for(second_call.wait(), timeout=5)
+
+        assert not task.done()
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_worker_exit_removes_queue_entry(va: VideoAnalyzer) -> None:
+    """Worker exit clears its queue entry so the next snapshot respawns a worker."""
+    camera_id = "camera.test"
+    queue: asyncio.Queue[_SnapshotItem] = asyncio.Queue()
+    va._snapshot_queues[camera_id] = queue  # type: ignore[attr-defined]
+
+    task = asyncio.create_task(va._snapshot_worker(camera_id))  # type: ignore[attr-defined]
+    va._active_queue_tasks[camera_id] = task  # type: ignore[attr-defined]
+    await asyncio.sleep(0)  # let the worker start
+
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    assert camera_id not in va._snapshot_queues  # type: ignore[attr-defined]
+    assert camera_id not in va._active_queue_tasks  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_worker_cleanup_spares_respawned_queue(va: VideoAnalyzer) -> None:
+    """A stale worker's cleanup must not remove a respawned worker's entries."""
+    camera_id = "camera.test"
+    old_queue: asyncio.Queue[_SnapshotItem] = asyncio.Queue()
+    va._snapshot_queues[camera_id] = old_queue  # type: ignore[attr-defined]
+
+    task = asyncio.create_task(va._snapshot_worker(camera_id))  # type: ignore[attr-defined]
+    await asyncio.sleep(0)  # let the worker capture its queue
+
+    # Simulate a respawn landing before the old worker's cancellation completes.
+    new_queue: asyncio.Queue[_SnapshotItem] = asyncio.Queue()
+    new_task = MagicMock()
+    va._snapshot_queues[camera_id] = new_queue  # type: ignore[attr-defined]
+    va._active_queue_tasks[camera_id] = new_task  # type: ignore[attr-defined]
+
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    assert va._snapshot_queues[camera_id] is new_queue  # type: ignore[attr-defined]
+    assert va._active_queue_tasks[camera_id] is new_task  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_analyze_image_propagates_ollama_response_error() -> None:
+    """analyze_image lets ResponseError escape so callers can skip the frame."""
+    model = MagicMock()
+    model.ainvoke = AsyncMock(
+        side_effect=OllamaResponseError("model 'ghost:latest' not found", 404)
+    )
+
+    with pytest.raises(OllamaResponseError):
+        await analyze_image(model, _FakeImageFile.BYTES, None)
+
+
+@pytest.mark.asyncio
+async def test_camera_tool_swallows_ollama_response_error() -> None:
+    """The chat tool returns an error string instead of raising to the graph."""
+    model = MagicMock()
+    model.ainvoke = AsyncMock(
+        side_effect=OllamaResponseError("model 'ghost:latest' not found", 404)
+    )
+    config = {"configurable": {"hass": MagicMock(), "vlm_model": model}}
+
+    with patch(
+        "custom_components.home_generative_agent.agent.tools._get_camera_image",
+        new=AsyncMock(return_value=_FakeImageFile.BYTES),
+    ):
+        result = await get_and_analyze_camera_image.coroutine(  # type: ignore[misc]
+            camera_name="camera.test", detection_keywords=None, config=config
+        )
+
+    assert result == "Error analyzing image with VLM model."
+
+
+@pytest.mark.asyncio
+async def test_process_snapshot_swallows_ollama_response_error(
+    va: VideoAnalyzer,
+) -> None:
+    """_process_snapshot drops the frame when a ResponseError escapes analysis."""
+    _model_deployment_get(va).return_value = "cloud"
+
+    with (
+        patch(
+            "custom_components.home_generative_agent.core.video_analyzer.epoch_from_path",
+            return_value=int(time.time()),
+        ),
+        patch("aiofiles.open", return_value=_FakeImageFile()),
+        patch(
+            "custom_components.home_generative_agent.core.video_analyzer.analyze_image",
+            new=AsyncMock(
+                side_effect=OllamaResponseError("model 'ghost:latest' not found", 404)
+            ),
+        ),
+    ):
+        result = await va._process_snapshot(  # type: ignore[attr-defined]
+            Path("snapshot_20250101_120000.jpg"), "camera.test"
+        )
+
+    assert result == {}
