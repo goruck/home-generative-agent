@@ -4,6 +4,7 @@
   - [Required Steps](#required-steps)
   - [Optional Apps](#optional-apps)
 - [Manual Install](#manual-install)
+- [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -103,3 +104,28 @@ Install the Blueprints from the `blueprints/` directory to create automations th
 7. Restart Home Assistant.
 8. Go to **Settings → Devices & Services**, click **Add Integration**, and search for **Home Generative Agent**.
 9. Follow steps 4–7 from the [Required Steps](#required-steps) above.
+
+---
+
+## Troubleshooting
+
+### Database tables owned by the PostgreSQL superuser
+
+The integration's tables (`checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `store`, `store_vectors`, and their `*_migrations` tables) must be owned by the database user configured in the integration (default `hga`). If they were created by the `postgres` superuser instead — common when tables are created manually during troubleshooting — the LangGraph schema migrations run by `store.setup()` fail silently on startup due to insufficient privileges, and features that depend on the store (memory, tool index, vector search) degrade or crash.
+
+Fix: connect to the integration's database as the superuser and transfer ownership of all tables to the configured user, then reload the integration:
+
+```sql
+-- Run as the postgres superuser, connected to the integration's database.
+-- Replace hga if you configured a different database user.
+DO $$
+DECLARE t record;
+BEGIN
+  FOR t IN SELECT tablename FROM pg_tables WHERE schemaname = 'public'
+  LOOP
+    EXECUTE format('ALTER TABLE public.%I OWNER TO hga;', t.tablename);
+  END LOOP;
+END $$;
+```
+
+To avoid the problem entirely, let the integration create its own tables: create only the database and user, grant the user ownership of the database (`ALTER DATABASE <db> OWNER TO hga;`), and let the first startup run the migrations.
