@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from time import monotonic
-from typing import TYPE_CHECKING, Final, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal, cast
 from urllib.parse import urljoin
 
 import aiofiles
@@ -84,7 +84,7 @@ from .video_helpers import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable, Coroutine, Iterable
 
     from homeassistant.core import Event, HomeAssistant
 
@@ -253,10 +253,10 @@ class VideoAnalyzer:
         self.entry = entry
         self._snapshot_queues: dict[str, asyncio.Queue[_SnapshotItem]] = {}
         self._retention_deques: dict[str, deque[Path]] = {}
-        self._active_queue_tasks: dict[str, asyncio.Task] = {}
+        self._active_queue_tasks: dict[str, asyncio.Task[Any]] = {}
         self._initialized_dirs: set[str] = set()
-        self._active_motion_cameras: dict[str, asyncio.Task] = {}
-        self._active_recording_cameras: dict[str, asyncio.Task] = {}
+        self._active_motion_cameras: dict[str, asyncio.Task[Any]] = {}
+        self._active_recording_cameras: dict[str, asyncio.Task[Any]] = {}
         # Frames captured during a motion/recording window, held out of the
         # live worker queue until the event ends and they flush as one batch.
         self._event_snapshot_buffers: dict[str, deque[Path]] = {}
@@ -374,9 +374,23 @@ class VideoAnalyzer:
         if camera_id not in self._snapshot_queues:
             queue: asyncio.Queue[_SnapshotItem] = asyncio.Queue(maxsize=_QUEUE_MAXSIZE)
             self._snapshot_queues[camera_id] = queue
-            task = self.hass.async_create_task(self._snapshot_worker(camera_id))
+            task = self._create_background_task(
+                self._snapshot_worker(camera_id),
+                f"hga video snapshot worker {camera_id}",
+            )
             self._active_queue_tasks[camera_id] = task
         return self._snapshot_queues[camera_id]
+
+    def _create_background_task(
+        self,
+        target: Coroutine[Any, Any, object],
+        name: str,
+    ) -> asyncio.Task[Any]:
+        """Create a task that must not hold Home Assistant startup open."""
+        task = self.hass.async_create_background_task(target, name)
+        if not isinstance(task, asyncio.Task):
+            target.close()
+        return cast("asyncio.Task[Any]", task)
 
     async def _get_batch(
         self,
@@ -1466,8 +1480,9 @@ class VideoAnalyzer:
                 rec_task.cancel()
             if camera_id not in self._active_motion_cameras:
                 LOGGER.debug("Motion ON: Starting snapshot loop for %s", camera_id)
-                task = self.hass.async_create_task(
+                task = self._create_background_task(
                     self._motion_snapshot_loop(camera_id),
+                    f"hga video motion snapshot loop {camera_id}",
                 )
                 self._active_motion_cameras[camera_id] = task
 
@@ -1476,7 +1491,10 @@ class VideoAnalyzer:
             task = self._active_motion_cameras.pop(camera_id, None)
             if task and not task.done():
                 task.cancel()
-                self.hass.async_create_task(self._process_snapshot_queue(camera_id))
+                self._create_background_task(
+                    self._process_snapshot_queue(camera_id),
+                    f"hga video process motion queue {camera_id}",
+                )
 
     @callback
     def _get_recording_cameras(self) -> list[str]:
@@ -1528,15 +1546,19 @@ class VideoAnalyzer:
                 LOGGER.debug(
                     "[%s] Recording started: starting snapshot loop", entity_id
                 )
-                task = self.hass.async_create_task(
-                    self._motion_snapshot_loop(entity_id)
+                task = self._create_background_task(
+                    self._motion_snapshot_loop(entity_id),
+                    f"hga video recording snapshot loop {entity_id}",
                 )
                 self._active_recording_cameras[entity_id] = task
         elif was_recording and not is_recording:
             task = self._active_recording_cameras.pop(entity_id, None)
             if task and not task.done():
                 task.cancel()
-            self.hass.async_create_task(self._process_snapshot_queue(entity_id))
+            self._create_background_task(
+                self._process_snapshot_queue(entity_id),
+                f"hga video process recording queue {entity_id}",
+            )
 
     def start(self) -> None:
         """Start the video analyzer."""
@@ -1594,7 +1616,7 @@ class VideoAnalyzer:
             LOGGER.warning("VideoAnalyzer not started.")
             return
 
-        tasks_to_await: list[asyncio.Task] = []
+        tasks_to_await: list[asyncio.Task[Any]] = []
 
         for task_dict in (
             self._active_motion_cameras,
