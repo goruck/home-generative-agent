@@ -394,7 +394,7 @@ RECOMMENDED_MAX_MESSAGES_IN_CONTEXT = 60
 
 # ---------------- VLM (vision) ----------------
 VLM_TOP_P = 1.0
-VLM_OLLAMA_SUPPORTED = Literal["qwen2.5vl:7b", "qwen3-vl:8b"]
+VLM_OLLAMA_SUPPORTED = Literal["qwen2.5vl:7b", "qwen3-vl:8b", "gemma3:4b"]
 VLM_OPENAI_SUPPORTED = Literal["gpt-5-nano", "gpt-4.1", "gpt-4.1-nano"]
 VLM_GEMINI_SUPPORTED = Literal[
     "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"

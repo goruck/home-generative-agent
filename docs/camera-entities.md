@@ -196,7 +196,7 @@ Active only in `notify_on_anomaly` mode. Repeated low-value notifications are su
 
 Semantic deduplication in `notify_on_anomaly` mode depends on the VLM producing **consistent captions** for the same scene. If two snapshots of an unchanged porch are described differently, the similarity score will be low and every frame will appear novel — resulting in a notification per snapshot.
 
-Small models like `moondream` are too inconsistent for reliable dedup. Use at minimum a **7B-class vision model** such as `qwen2.5vl:7b` (recommended) or `llava:7b`. The default Ollama VLM model is `qwen3-vl:8b`.
+Small models like `moondream` are too inconsistent for reliable dedup. Use a model with tested caption stability: `gemma3:4b` (the smallest tested option — reproduces the same core scene across repeated captions of identical frames) or a **7B-class vision model** such as `qwen2.5vl:7b`. The default Ollama VLM model is `qwen3-vl:8b`.
 
 If you are using `always_notify` mode, VLM consistency affects caption quality but not notification volume.
 

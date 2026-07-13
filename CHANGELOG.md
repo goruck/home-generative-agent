@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.29] - 2026-07-13
+
+### Added
+
+- **`gemma3:4b` is now a selectable Ollama VLM for Camera Image Analysis** — listed alongside `qwen2.5vl:7b` and `qwen3-vl:8b` in the VLM model dropdown. Tested for caption stability: across repeated captions of identical frames it reproduces the same core scene with only cosmetic wording differences, which is what the semantic notification dedup in `notify_on_anomaly` mode depends on. A lighter option than the 7B/8B models for smaller GPUs (requires Ollama 0.6+; on iGPUs consider lowering the VLM context size, since the 32k default dominates memory use regardless of model size). Docs updated to reflect that a stable 4B model is now a viable choice. Closes [#469](https://github.com/goruck/home-generative-agent/issues/469). Credit to @andymcmanus for the caption-consistency benchmarking on an AMD Radeon 780M iGPU that motivated this.
+
 ## [3.14.28] - 2026-07-12
 
 ### Added
