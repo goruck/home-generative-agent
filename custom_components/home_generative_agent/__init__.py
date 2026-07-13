@@ -129,8 +129,10 @@ from .const import (
     CONF_OPENAI_COMPATIBLE_API_KEY,
     CONF_OPENAI_COMPATIBLE_BASE_URL,
     CONF_OPENAI_COMPATIBLE_CHAT_MODEL,
+    CONF_OPENAI_COMPATIBLE_EMBEDDING_API_KEY,
     CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
     CONF_OPENAI_COMPATIBLE_EMBEDDING_MODEL,
+    CONF_OPENAI_COMPATIBLE_EMBEDDING_URL,
     CONF_OPENAI_COMPATIBLE_SUMMARIZATION_MODEL,
     CONF_OPENAI_COMPATIBLE_VLM,
     CONF_OPENAI_EMBEDDING_MODEL,
@@ -264,6 +266,7 @@ from .core.utils import (
     ensure_http_url,
     gemini_healthy,
     generate_embeddings,
+    normalize_openai_compatible_base_url,
     ollama_healthy,
     ollama_url_for_category,
     openai_compatible_healthy,
@@ -950,7 +953,10 @@ def _default_model_data(category: str, provider_type: str) -> dict[str, Any]:
         keepalive = keepalive_map.get(category)
         if keepalive is not None:
             model_data[CONF_FEATURE_MODEL_KEEPALIVE] = keepalive
-        model_data[CONF_FEATURE_MODEL_CONTEXT_SIZE] = RECOMMENDED_OLLAMA_CONTEXT_SIZE
+        if category in keepalive_map:
+            model_data[CONF_FEATURE_MODEL_CONTEXT_SIZE] = (
+                RECOMMENDED_OLLAMA_CONTEXT_SIZE
+            )
         if category == "chat":
             model_data[CONF_FEATURE_MODEL_REASONING] = RECOMMENDED_OLLAMA_REASONING
     return model_data
@@ -998,6 +1004,9 @@ def _assign_first_provider_if_needed(hass: HomeAssistant, entry: ConfigEntry) ->
             if isinstance(feature_type, str)
             else None
         )
+        capabilities = {str(c) for c in provider.data.get("capabilities") or []}
+        if category and capabilities and category not in capabilities:
+            continue
         model_data = dict(data.get(CONF_FEATURE_MODEL, {}))
         if not model_data and category:
             model_data = _default_model_data(category, provider_type)
@@ -1480,6 +1489,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         or _provider_setting(providers, "openai_compatible", "api_key")
         or "none"
     )
+    # Embeddings may live on a separate OpenAI-compatible server from chat.
+    openai_compatible_embedding_url = (
+        conf.get(CONF_OPENAI_COMPATIBLE_EMBEDDING_URL) or openai_compatible_base_url
+    )
+    openai_compatible_embedding_api_key = (
+        conf.get(CONF_OPENAI_COMPATIBLE_EMBEDDING_API_KEY) or openai_compatible_api_key
+    )
     base_ollama_url = ensure_http_url(conf.get(CONF_OLLAMA_URL, RECOMMENDED_OLLAMA_URL))
     ollama_chat_url = (
         ollama_url_for_category(conf, "chat", fallback=base_ollama_url)
@@ -1491,6 +1507,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     )
     ollama_sum_url = (
         ollama_url_for_category(conf, "summarization", fallback=base_ollama_url)
+        or base_ollama_url
+    )
+    ollama_embedding_url = (
+        ollama_url_for_category(conf, "embedding", fallback=base_ollama_url)
         or base_ollama_url
     )
     face_api_url = conf.get(CONF_FACE_API_URL, RECOMMENDED_FACE_API_URL)
@@ -1520,6 +1540,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         ),
         anthropic_healthy(hass, anthropic_key, timeout_s=health_timeout),
     )
+    if openai_compatible_embedding_url == openai_compatible_base_url:
+        openai_compatible_embedding_ok = openai_compatible_ok
+    elif openai_compatible_embedding_url:
+        openai_compatible_embedding_ok = await openai_compatible_healthy(
+            hass,
+            openai_compatible_embedding_url,
+            openai_compatible_embedding_api_key,
+            timeout_s=health_timeout,
+        )
+    else:
+        openai_compatible_embedding_ok = False
     ollama_any_ok = any(ollama_health.values())
 
     http_async_client = get_async_client(hass)
@@ -1634,7 +1665,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         try:
             openai_compatible_provider = ChatOpenAI(
                 api_key=SecretStr(openai_compatible_api_key),
-                base_url=openai_compatible_base_url,
+                base_url=normalize_openai_compatible_base_url(
+                    openai_compatible_base_url
+                ),
                 timeout=120,
                 http_client=openai_http_client,
                 http_async_client=http_async_client,
@@ -1666,13 +1699,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             LOGGER.exception("OpenAI embeddings init failed; continuing without them.")
 
     ollama_embeddings: OllamaEmbeddings | None = None
-    if ollama_health.get(base_ollama_url):
+    if ollama_health.get(ollama_embedding_url):
         try:
             ollama_embeddings = OllamaEmbeddings(
                 model=options.get(
                     CONF_OLLAMA_EMBEDDING_MODEL, RECOMMENDED_OLLAMA_EMBEDDING_MODEL
                 ),
-                base_url=base_ollama_url,
+                base_url=ollama_embedding_url,
                 num_ctx=EMBEDDING_MODEL_CTX,
                 sync_client_kwargs=_ollama_httpx_client_kwargs(),
                 async_client_kwargs=_ollama_httpx_client_kwargs(),
@@ -1693,11 +1726,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             LOGGER.exception("Gemini embeddings init failed; continuing without them.")
 
     openai_compatible_embeddings: OpenAIEmbeddings | None = None
-    if openai_compatible_ok and openai_compatible_base_url:
+    if openai_compatible_embedding_ok and openai_compatible_embedding_url:
         try:
             openai_compatible_embeddings = OpenAIEmbeddings(
-                api_key=SecretStr(openai_compatible_api_key),
-                base_url=openai_compatible_base_url,
+                api_key=SecretStr(openai_compatible_embedding_api_key),
+                base_url=normalize_openai_compatible_base_url(
+                    openai_compatible_embedding_url
+                ),
                 model=options.get(
                     CONF_OPENAI_COMPATIBLE_EMBEDDING_MODEL,
                     RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_MODEL,
@@ -1726,7 +1761,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 or settings.get("chat_url")
                 or RECOMMENDED_OLLAMA_URL
             )
-            if url != base_ollama_url:
+            if url != ollama_embedding_url:
                 return None
             return ollama_embeddings
         return None
@@ -2663,7 +2698,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             "summarization": ollama_sum_url,
         }
         if embedding_provider not in {"openai", "openai_compatible", "gemini"}:
-            ollama_probe_urls["embeddings"] = base_ollama_url
+            ollama_probe_urls["embeddings"] = ollama_embedding_url
         hass.async_create_task(_log_ollama_server_info(hass, ollama_probe_urls))
 
     if options.get(CONF_VIDEO_ANALYZER_MODE) != "disable":

@@ -222,7 +222,8 @@
           "description": "Enable or disable optional features.",
           "data": {
             "camera_image_analysis": "Camera Image Analysis",
-            "conversation_summary": "Conversation Summary"
+            "conversation_summary": "Conversation Summary",
+            "embedding": "Embeddings"
           }
         },
         "feature_provider": {

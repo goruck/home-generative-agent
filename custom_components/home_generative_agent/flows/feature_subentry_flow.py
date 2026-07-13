@@ -172,7 +172,8 @@ def _default_model_data(category: str, provider_type: str | None) -> dict[str, A
         keepalive = KEEPALIVE_DEFAULTS.get(category)
         if keepalive is not None:
             defaults[CONF_FEATURE_MODEL_KEEPALIVE] = keepalive
-        defaults[CONF_FEATURE_MODEL_CONTEXT_SIZE] = RECOMMENDED_OLLAMA_CONTEXT_SIZE
+        if category in KEEPALIVE_DEFAULTS:
+            defaults[CONF_FEATURE_MODEL_CONTEXT_SIZE] = RECOMMENDED_OLLAMA_CONTEXT_SIZE
         if category == "chat":
             defaults[CONF_FEATURE_MODEL_REASONING] = RECOMMENDED_OLLAMA_REASONING
 
@@ -875,6 +876,12 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
     ) -> SubentryFlowResult:
         """Handle the conversation summary feature step."""
         return await self._async_step_feature("conversation_summary", user_input)
+
+    async def async_step_embedding(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Handle the embedding feature step."""
+        return await self._async_step_feature("embedding", user_input)
 
     async def async_step_database(
         self, user_input: dict[str, Any] | None = None

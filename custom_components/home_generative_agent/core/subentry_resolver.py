@@ -40,6 +40,7 @@ from ..const import (  # noqa: TID252
     CONF_OLLAMA_CHAT_MODEL,
     CONF_OLLAMA_CHAT_URL,
     CONF_OLLAMA_EMBEDDING_MODEL,
+    CONF_OLLAMA_EMBEDDING_URL,
     CONF_OLLAMA_REASONING,
     CONF_OLLAMA_SUMMARIZATION_CONTEXT_SIZE,
     CONF_OLLAMA_SUMMARIZATION_KEEPALIVE,
@@ -53,7 +54,9 @@ from ..const import (  # noqa: TID252
     CONF_OPENAI_CHAT_MODEL,
     CONF_OPENAI_COMPATIBLE_API_KEY,
     CONF_OPENAI_COMPATIBLE_BASE_URL,
+    CONF_OPENAI_COMPATIBLE_EMBEDDING_API_KEY,
     CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
+    CONF_OPENAI_COMPATIBLE_EMBEDDING_URL,
     CONF_OPENAI_EMBEDDING_MODEL,
     CONF_OPENAI_SUMMARIZATION_MODEL,
     CONF_OPENAI_VLM,
@@ -718,6 +721,26 @@ def resolve_feature_configs(
     return legacy_feature_configs(entry, providers, options)
 
 
+def _apply_openai_compatible_to_category(
+    options: dict[str, Any], category: str, settings: Mapping[str, Any]
+) -> None:
+    """Overlay OpenAI-compatible provider settings for a model category."""
+    if category == "embedding":
+        # Embedding-specific keys so a dedicated embedding server does not
+        # clobber the chat provider's base URL (and vice versa).
+        if base_url := settings.get("base_url"):
+            options[CONF_OPENAI_COMPATIBLE_EMBEDDING_URL] = base_url
+        options[CONF_OPENAI_COMPATIBLE_EMBEDDING_API_KEY] = settings.get(
+            "api_key", "none"
+        )
+        if (dims := settings.get(CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS)) is not None:
+            options[CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS] = dims
+    else:
+        if base_url := settings.get("base_url"):
+            options[CONF_OPENAI_COMPATIBLE_BASE_URL] = base_url
+        options[CONF_OPENAI_COMPATIBLE_API_KEY] = settings.get("api_key", "none")
+
+
 def _apply_provider_to_category(
     options: dict[str, Any], category: str, provider: ModelProviderConfig
 ) -> None:
@@ -737,20 +760,14 @@ def _apply_provider_to_category(
             options[CONF_OLLAMA_VLM_URL] = base_url
         if category == "summarization":
             options[CONF_OLLAMA_SUMMARIZATION_URL] = base_url
+        if category == "embedding":
+            options[CONF_OLLAMA_EMBEDDING_URL] = base_url
 
     if provider.provider_type == "openai" and (api_key := settings.get("api_key")):
         options[CONF_API_KEY] = api_key
 
     if provider.provider_type == "openai_compatible":
-        if base_url := settings.get("base_url"):
-            options[CONF_OPENAI_COMPATIBLE_BASE_URL] = base_url
-        options[CONF_OPENAI_COMPATIBLE_API_KEY] = settings.get("api_key", "none")
-        if (
-            category == "embedding"
-            and (dims := settings.get(CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS))
-            is not None
-        ):
-            options[CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS] = dims
+        _apply_openai_compatible_to_category(options, category, settings)
 
     if provider.provider_type == "gemini" and (api_key := settings.get("api_key")):
         options[CONF_GEMINI_API_KEY] = api_key
