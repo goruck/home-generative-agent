@@ -40,6 +40,7 @@ from langchain_core.runnables import RunnableConfig  # noqa: TC002
 from langchain_core.tools import InjectedToolArg, tool
 from langgraph.prebuilt.tool_node import InjectedStore
 from langgraph.store.base import BaseStore  # noqa: TC002
+from ollama import ResponseError as OllamaResponseError
 from voluptuous import MultipleInvalid
 
 from ..const import (  # noqa: TID252
@@ -387,6 +388,10 @@ async def analyze_image(
         }
     )
 
+    # ollama.ResponseError (e.g. a configured model that was never pulled)
+    # intentionally propagates: callers decide whether to skip the frame,
+    # return a message to the LLM, or surface a HomeAssistantError. Returning
+    # an error string here would let it masquerade as a real caption.
     try:
         resp = await vlm_model.ainvoke(messages)
     except HomeAssistantError:
@@ -425,7 +430,12 @@ async def get_and_analyze_camera_image(  # noqa: D417
     image = await _get_camera_image(hass, camera_name)
     if image is None:
         return "Error getting image from camera."
-    return await analyze_image(vlm_model, image, detection_keywords)
+    try:
+        return await analyze_image(vlm_model, image, detection_keywords)
+    except OllamaResponseError:
+        msg = "Error analyzing image with VLM model."
+        LOGGER.exception(msg)
+        return msg
 
 
 @tool(parse_docstring=True)
