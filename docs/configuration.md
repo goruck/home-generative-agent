@@ -60,7 +60,7 @@ Supported providers and their default models:
 | Embeddings | Gemini | gemini-embedding-001 | Semantic search |
 | Embeddings | OpenAI Compatible | text-embedding-3-small | Semantic search |
 
-**Embedding model selection:** The integration uses the first provider that supports embeddings (or the feature's own provider when it advertises embedding capability). To use a specific embedding model, add a provider that supports embeddings and select the desired model name in that provider's defaults, then reload the integration.
+**Embedding model selection:** Embeddings are configured like any other feature: enable the **Embeddings** feature under **+ Setup** (Advanced mode) and assign it a provider and model. The embedding provider can be completely separate from the chat provider — e.g. llama.cpp for chat and a dedicated llama.cpp or Ollama server for embeddings. When the Embeddings feature is disabled, the provider is chosen automatically: the Conversation provider if it supports embeddings, otherwise the first embedding-capable provider.
 
 **Multiple providers:** You can add multiple Model Provider subentries and assign them per-feature. For example: a "Primary Ollama" provider for chat and a "Vision Ollama" provider for camera analysis. You can also mix types — a local vLLM server as **OpenAI Compatible** alongside an Ollama provider.
 
@@ -82,7 +82,7 @@ Chat fallback chains are invoked as complete model calls rather than direct toke
 
 To switch back to a recovered primary provider, reload the Home Generative Agent integration or restart Home Assistant.
 
-> **llama-server embedding incompatibility** — If you use llama-server as an OpenAI-compatible provider and see `Memory semantic search failed — embedding endpoint returned an incompatible response` in the logs, the agent has fallen back to recency-based memory retrieval. llama-server's `/v1/embeddings` response format does not match the OpenAI SDK's expected structure, causing semantic search (memory and RAG tool retrieval) to degrade silently. For reliable semantic embeddings, use a dedicated Ollama provider with `mxbai-embed-large`. Chat and embedding providers can be different — e.g. llama-server for chat, Ollama for embeddings.
+> **llama-server embeddings** — OpenAI-compatible base URLs are normalized to include the `/v1` prefix, so embedding requests reach llama-server's OpenAI-format `/v1/embeddings` endpoint (its bare `/embeddings` route returns a non-OpenAI response that used to crash embedding calls). Enter the base URL with or without `/v1` — both work. Start llama-server with `--embeddings` on the instance that serves the embedding model. If you still see `Memory semantic search failed — embedding endpoint returned an incompatible response` in the logs, the agent has fallen back to recency-based memory retrieval; check the embedding server's response format or use a dedicated Ollama provider with `mxbai-embed-large`.
 
 ---
 
@@ -93,6 +93,7 @@ Each feature is enabled separately under **+ Setup** and has its own model/provi
 - **Conversation** — the main conversational agent
 - **Camera Image Analysis** — on-demand and proactive vision analysis
 - **Conversation Summary** — automatic context window management
+- **Embeddings** — embedding model for semantic memory and tool retrieval; assign it a dedicated provider/server or leave it off for automatic selection
 
 Global options such as system prompt, face recognition URL, context management parameters, and the critical-action PIN live in the integration's **Options** flow (gear icon on the integration page).
 

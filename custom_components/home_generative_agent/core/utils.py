@@ -96,6 +96,22 @@ def _normalized_url(value: Any) -> str | None:
     return ensure_http_url(str(value))
 
 
+def normalize_openai_compatible_base_url(url: str) -> str:
+    """
+    Return an OpenAI-compatible base URL that ends with /v1.
+
+    The OpenAI SDK appends bare paths (/chat/completions, /embeddings) to the
+    base URL, and servers such as llama.cpp only guarantee OpenAI-format
+    responses under the /v1 prefix — its bare /embeddings route returns a raw
+    JSON list that crashes the SDK parser. Accepts URLs entered with or
+    without a trailing /v1.
+    """
+    base = ensure_http_url(url.strip()).rstrip("/")
+    if base.endswith("/v1"):
+        return base
+    return f"{base}/v1"
+
+
 def ollama_url_for_category(
     options: Mapping[str, Any],
     category: str,
@@ -687,7 +703,7 @@ async def validate_openai_compatible_url(
     """Validate an OpenAI-compatible endpoint by calling its /v1/models path."""
     if not base_url:
         raise CannotConnectError
-    url = urljoin(base_url.rstrip("/") + "/", "v1/models")
+    url = normalize_openai_compatible_base_url(base_url) + "/models"
     headers: dict[str, str] = {}
     if api_key and api_key != "none":
         headers["Authorization"] = f"Bearer {api_key}"

@@ -233,7 +233,11 @@
           "description": "**Conversation** is always enabled. Enable or disable optional features below.",
           "data": {
             "camera_image_analysis": "Camera Image Analysis",
-            "conversation_summary": "Conversation Summary"
+            "conversation_summary": "Conversation Summary",
+            "embedding": "Embeddings"
+          },
+          "data_description": {
+            "embedding": "Embedding model for semantic memory and tool search. When off, the provider is chosen automatically (the Conversation provider if it supports embeddings)."
           }
         },
         "feature_provider": {

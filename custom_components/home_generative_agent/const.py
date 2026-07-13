@@ -90,10 +90,13 @@ CONF_OLLAMA_VLM_URL = "ollama_vlm_url"
 RECOMMENDED_OLLAMA_VLM_URL = RECOMMENDED_OLLAMA_URL
 CONF_OLLAMA_SUMMARIZATION_URL = "ollama_summarization_url"
 RECOMMENDED_OLLAMA_SUMMARIZATION_URL = RECOMMENDED_OLLAMA_URL
+CONF_OLLAMA_EMBEDDING_URL = "ollama_embedding_url"
+RECOMMENDED_OLLAMA_EMBEDDING_URL = RECOMMENDED_OLLAMA_URL
 OLLAMA_CATEGORY_URL_KEYS = {
     "chat": CONF_OLLAMA_CHAT_URL,
     "vlm": CONF_OLLAMA_VLM_URL,
     "summarization": CONF_OLLAMA_SUMMARIZATION_URL,
+    "embedding": CONF_OLLAMA_EMBEDDING_URL,
 }
 
 CONF_OLLAMA_REASONING = "ollama_reasoning"
@@ -269,12 +272,16 @@ DEFAULT_FEATURE_TYPES: tuple[str, ...] = (
     "conversation",
     "camera_image_analysis",
     "conversation_summary",
+    "embedding",
 )
 
 FEATURE_DEFS: dict[str, dict[str, Any]] = {
     "conversation": {"name": "Conversation", "required": True},
     "camera_image_analysis": {"name": "Camera Image Analysis", "required": False},
     "conversation_summary": {"name": "Conversation Summary", "required": False},
+    # When disabled, the embedding provider is selected automatically
+    # (conversation provider if capable, else first embedding-capable provider).
+    "embedding": {"name": "Embeddings", "required": False},
 }
 
 FEATURE_NAMES: dict[str, str] = {
@@ -285,6 +292,7 @@ FEATURE_CATEGORY_MAP: dict[str, str] = {
     "conversation": "chat",
     "camera_image_analysis": "vlm",
     "conversation_summary": "summarization",
+    "embedding": "embedding",
 }
 
 # ---- Feature model config (per-feature subentry) ----
@@ -601,6 +609,11 @@ RECOMMENDED_VIDEO_MODEL_SEMAPHORE: int = 1
 # ---------------- OpenAI-compatible endpoint (edge) ----------------
 CONF_OPENAI_COMPATIBLE_BASE_URL = "openai_compatible_base_url"
 CONF_OPENAI_COMPATIBLE_API_KEY = "openai_compatible_api_key"
+# Embedding-specific endpoint/key; set when the embedding feature is assigned
+# to an OpenAI-compatible provider so embeddings can run on a separate server
+# from chat (e.g. a dedicated llama.cpp embedding instance).
+CONF_OPENAI_COMPATIBLE_EMBEDDING_URL = "openai_compatible_embedding_url"
+CONF_OPENAI_COMPATIBLE_EMBEDDING_API_KEY = "openai_compatible_embedding_api_key"
 
 # ---------------- Camera video analyzer ----------------
 CONF_VIDEO_ANALYZER_MODE = "video_analyzer_mode"
