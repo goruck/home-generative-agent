@@ -32,12 +32,16 @@ from custom_components.home_generative_agent.const import (
     CONF_NOTIFY_SERVICE,
     CONF_OLLAMA_CHAT_MODEL,
     CONF_OLLAMA_CHAT_URL,
+    CONF_OLLAMA_EMBEDDING_URL,
     CONF_OLLAMA_SUMMARIZATION_URL,
     CONF_OLLAMA_URL,
     CONF_OLLAMA_VLM_URL,
     CONF_OPENAI_COMPATIBLE_API_KEY,
     CONF_OPENAI_COMPATIBLE_BASE_URL,
+    CONF_OPENAI_COMPATIBLE_EMBEDDING_API_KEY,
     CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
+    CONF_OPENAI_COMPATIBLE_EMBEDDING_MODEL,
+    CONF_OPENAI_COMPATIBLE_EMBEDDING_URL,
     CONF_SENTINEL_CAMERA_ENTRY_LINKS,
     CONF_SENTINEL_DAILY_DIGEST_ENABLED,
     CONF_SENTINEL_DAILY_DIGEST_TIME,
@@ -49,7 +53,10 @@ from custom_components.home_generative_agent.const import (
     CONF_SUMMARIZATION_MODEL_PROVIDER,
     CONF_VLM_PROVIDER,
     CONFIG_ENTRY_VERSION,
+    DEFAULT_FEATURE_TYPES,
     DOMAIN,
+    FEATURE_CATEGORY_MAP,
+    FEATURE_DEFS,
     MODEL_CATEGORY_SPECS,
     RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
     SUBENTRY_TYPE_DATABASE,
@@ -1132,6 +1139,176 @@ def test_resolve_runtime_options_openai_compatible_embedding_dims_none() -> None
 def test_recommended_openai_compatible_embedding_dims_value() -> None:
     """Default dims constant is 768 — matches nomic-embed-text native output size."""
     assert RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_DIMS == 768
+
+
+# ---------------------------------------------------------------------------
+# Embedding feature (issue #457)
+# ---------------------------------------------------------------------------
+
+
+def test_embedding_feature_registered() -> None:
+    """The embedding feature type is defined and mapped to its model category."""
+    assert "embedding" in FEATURE_DEFS
+    assert FEATURE_DEFS["embedding"]["required"] is False
+    assert FEATURE_CATEGORY_MAP["embedding"] == "embedding"
+    assert "embedding" in DEFAULT_FEATURE_TYPES
+
+
+def _make_entry_with_features(
+    providers: list[DummySubentry], features: list[DummySubentry]
+) -> DummyEntry:
+    entry = DummyEntry()
+    entry.subentries = {s.subentry_id: s for s in [*providers, *features]}
+    return entry
+
+
+def test_embedding_feature_selects_separate_openai_compatible_server() -> None:
+    """
+    Chat and embedding features on different OpenAI-compatible servers.
+
+    The embedding provider's base URL must land in the embedding-specific
+    option key without clobbering the chat provider's base URL.
+    """
+    chat_provider = DummySubentry(
+        "chat_prov",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Chat llama-server",
+        {
+            "provider_type": "openai_compatible",
+            "capabilities": ["chat", "embedding"],
+            "settings": {"base_url": "http://chat-host:8080", "api_key": "sk-chat"},
+        },
+    )
+    emb_provider = DummySubentry(
+        "emb_prov",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Embedding llama-server",
+        {
+            "provider_type": "openai_compatible",
+            "capabilities": ["embedding"],
+            "settings": {
+                "base_url": "http://emb-host:8081",
+                "api_key": "sk-emb",
+                CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS: 768,
+            },
+        },
+    )
+    chat_feature = DummySubentry(
+        "chat_feat",
+        SUBENTRY_TYPE_FEATURE,
+        "Conversation",
+        {
+            "feature_type": "conversation",
+            "model_provider_id": "chat_prov",
+            CONF_FEATURE_MODEL: {CONF_FEATURE_MODEL_NAME: "qwen3.5-vl"},
+        },
+    )
+    emb_feature = DummySubentry(
+        "emb_feat",
+        SUBENTRY_TYPE_FEATURE,
+        "Embeddings",
+        {
+            "feature_type": "embedding",
+            "model_provider_id": "emb_prov",
+            CONF_FEATURE_MODEL: {CONF_FEATURE_MODEL_NAME: "nomic-embed-text-v1.5"},
+        },
+    )
+    entry = _make_entry_with_features(
+        [chat_provider, emb_provider], [chat_feature, emb_feature]
+    )
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_CHAT_MODEL_PROVIDER] == "openai_compatible"
+    assert options[CONF_EMBEDDING_MODEL_PROVIDER] == "openai_compatible"
+    assert options[CONF_OPENAI_COMPATIBLE_BASE_URL] == "http://chat-host:8080"
+    assert options[CONF_OPENAI_COMPATIBLE_API_KEY] == "sk-chat"
+    assert options[CONF_OPENAI_COMPATIBLE_EMBEDDING_URL] == "http://emb-host:8081"
+    assert options[CONF_OPENAI_COMPATIBLE_EMBEDDING_API_KEY] == "sk-emb"
+    assert options[CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS] == 768
+    assert options[CONF_OPENAI_COMPATIBLE_EMBEDDING_MODEL] == "nomic-embed-text-v1.5"
+
+
+def test_embedding_feature_selects_ollama_on_custom_url() -> None:
+    """An Ollama embedding provider propagates its own URL for embeddings."""
+    chat_provider = DummySubentry(
+        "chat_prov",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Chat llama-server",
+        {
+            "provider_type": "openai_compatible",
+            "capabilities": ["chat", "embedding"],
+            "settings": {"base_url": "http://chat-host:8080", "api_key": "none"},
+        },
+    )
+    emb_provider = DummySubentry(
+        "emb_prov",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Embedding Ollama",
+        {
+            "provider_type": "ollama",
+            "capabilities": ["embedding"],
+            "settings": {"base_url": "http://ollama-host:11434"},
+        },
+    )
+    chat_feature = DummySubentry(
+        "chat_feat",
+        SUBENTRY_TYPE_FEATURE,
+        "Conversation",
+        {
+            "feature_type": "conversation",
+            "model_provider_id": "chat_prov",
+            CONF_FEATURE_MODEL: {CONF_FEATURE_MODEL_NAME: "qwen3.5-vl"},
+        },
+    )
+    emb_feature = DummySubentry(
+        "emb_feat",
+        SUBENTRY_TYPE_FEATURE,
+        "Embeddings",
+        {
+            "feature_type": "embedding",
+            "model_provider_id": "emb_prov",
+            CONF_FEATURE_MODEL: {CONF_FEATURE_MODEL_NAME: "mxbai-embed-large"},
+        },
+    )
+    entry = _make_entry_with_features(
+        [chat_provider, emb_provider], [chat_feature, emb_feature]
+    )
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_EMBEDDING_MODEL_PROVIDER] == "ollama"
+    assert options[CONF_OLLAMA_EMBEDDING_URL] == "http://ollama-host:11434"
+    # Chat provider's URL is untouched.
+    assert options[CONF_OPENAI_COMPATIBLE_BASE_URL] == "http://chat-host:8080"
+
+
+def test_embedding_without_feature_inherits_chat_provider() -> None:
+    """Without an embedding feature, the chat provider is inherited (legacy behavior)."""
+    chat_provider = DummySubentry(
+        "chat_prov",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Chat llama-server",
+        {
+            "provider_type": "openai_compatible",
+            "capabilities": ["chat", "embedding"],
+            "settings": {"base_url": "http://chat-host:8080", "api_key": "sk-x"},
+        },
+    )
+    chat_feature = DummySubentry(
+        "chat_feat",
+        SUBENTRY_TYPE_FEATURE,
+        "Conversation",
+        {
+            "feature_type": "conversation",
+            "model_provider_id": "chat_prov",
+            CONF_FEATURE_MODEL: {CONF_FEATURE_MODEL_NAME: "qwen3.5-vl"},
+        },
+    )
+    entry = _make_entry_with_features([chat_provider], [chat_feature])
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_EMBEDDING_MODEL_PROVIDER] == "openai_compatible"
+    assert options[CONF_OPENAI_COMPATIBLE_EMBEDDING_URL] == "http://chat-host:8080"
+    assert options[CONF_OPENAI_COMPATIBLE_EMBEDDING_API_KEY] == "sk-x"
 
 
 # ---------------------------------------------------------------------------

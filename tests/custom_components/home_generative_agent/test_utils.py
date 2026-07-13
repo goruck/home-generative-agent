@@ -13,6 +13,7 @@ from custom_components.home_generative_agent.core.utils import (
     InvalidAuthError,
     anthropic_healthy,
     extract_final,
+    normalize_openai_compatible_base_url,
     openai_compatible_healthy,
     reasoning_field,
     validate_anthropic_key,
@@ -115,6 +116,43 @@ class _FakeClient:
 
 
 # ---------------------------------------------------------------------------
+# normalize_openai_compatible_base_url tests
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_base_url_appends_v1() -> None:
+    """A bare host:port URL gains the /v1 prefix the OpenAI SDK expects."""
+    result = normalize_openai_compatible_base_url("http://localhost:8080")
+    assert result == "http://localhost:8080/v1"
+
+
+def test_normalize_base_url_keeps_existing_v1() -> None:
+    """A URL already ending in /v1 is not doubled."""
+    result = normalize_openai_compatible_base_url("http://localhost:8080/v1")
+    assert result == "http://localhost:8080/v1"
+
+
+def test_normalize_base_url_strips_trailing_slash() -> None:
+    """Trailing slashes are removed before appending /v1."""
+    result = normalize_openai_compatible_base_url("http://localhost:8080/")
+    assert result == "http://localhost:8080/v1"
+    result = normalize_openai_compatible_base_url("http://localhost:8080/v1/")
+    assert result == "http://localhost:8080/v1"
+
+
+def test_normalize_base_url_adds_scheme() -> None:
+    """A URL without a scheme gains http://."""
+    result = normalize_openai_compatible_base_url("localhost:8080")
+    assert result == "http://localhost:8080/v1"
+
+
+def test_normalize_base_url_preserves_path_prefix() -> None:
+    """A reverse-proxy path prefix is preserved with /v1 appended."""
+    result = normalize_openai_compatible_base_url("http://myhost/llm")
+    assert result == "http://myhost/llm/v1"
+
+
+# ---------------------------------------------------------------------------
 # validate_openai_compatible_url tests
 # ---------------------------------------------------------------------------
 
@@ -141,6 +179,22 @@ async def test_validate_openai_compatible_url_success_no_key(
 
     assert client.last_url == "http://localhost:8000/v1/models"
     assert "Authorization" not in client.last_headers
+
+
+@pytest.mark.asyncio
+async def test_validate_openai_compatible_url_accepts_v1_suffix(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A base URL entered with /v1 probes /v1/models, not /v1/v1/models."""
+    client = _FakeClient(status_code=HTTP_OK)
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+
+    await validate_openai_compatible_url(hass, "http://localhost:8000/v1")
+
+    assert client.last_url == "http://localhost:8000/v1/models"
 
 
 @pytest.mark.asyncio
