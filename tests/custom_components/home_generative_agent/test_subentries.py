@@ -834,6 +834,16 @@ def test_provider_capabilities_includes_openai_compatible() -> None:
         )
 
 
+def test_vlm_ollama_supported_models() -> None:
+    """Curated Ollama VLM options include the tested models (issue #469)."""
+    vlm_ollama = MODEL_CATEGORY_SPECS["vlm"]["providers"]["ollama"]
+    assert "qwen2.5vl:7b" in vlm_ollama
+    assert "qwen3-vl:8b" in vlm_ollama
+    assert "gemma3:4b" in vlm_ollama
+    recommended = MODEL_CATEGORY_SPECS["vlm"]["recommended_models"]["ollama"]
+    assert recommended in vlm_ollama
+
+
 # ---------------------------------------------------------------------------
 # Sentinel subentry — daily digest fields (Fix 4)
 # ---------------------------------------------------------------------------

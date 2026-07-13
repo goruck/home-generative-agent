@@ -72,6 +72,7 @@ Run models locally for lower cost and latency.
   ollama pull qwen3:1.7b         # summarization (lighter)
   ollama pull qwen3-vl:8b        # vision (VLM)
   ollama pull qwen2.5vl:7b       # vision alternative
+  ollama pull gemma3:4b          # vision alternative (lighter; needs Ollama 0.6+)
   ollama pull mxbai-embed-large  # embeddings
   ```
 

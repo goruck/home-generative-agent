@@ -91,7 +91,7 @@ This document covers the named constants that affect integration behaviour, orga
 
 | Constant | Allowed values |
 |---|---|
-| `VLM_OLLAMA_SUPPORTED` | `qwen2.5vl:7b`, `qwen3-vl:8b` |
+| `VLM_OLLAMA_SUPPORTED` | `qwen2.5vl:7b`, `qwen3-vl:8b`, `gemma3:4b` |
 | `VLM_OPENAI_SUPPORTED` | `gpt-5-nano`, `gpt-4.1`, `gpt-4.1-nano` |
 | `VLM_GEMINI_SUPPORTED` | `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite` |
 | `VLM_ANTHROPIC_SUPPORTED` | `claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5-20251001` |
