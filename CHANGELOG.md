@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.28] - 2026-07-12
+
+### Added
+
+- **Embeddings feature in the UI** — a new **Embeddings** feature under **+ Setup** lets you explicitly assign the embedding provider and model, just like Conversation/VLM/Summarization. Previously the embedding provider was inherited silently from the chat provider with no UI to change it. When the feature is off, provider selection stays automatic (Conversation provider if embedding-capable, else the first capable provider), preserving existing behavior. Closes [#457](https://github.com/goruck/home-generative-agent/issues/457).
+
+- **Separate embedding endpoints** — chat and embeddings can now run on different servers. Assigning the Embeddings feature to a second OpenAI-compatible provider (e.g. a dedicated llama.cpp embedding instance) or an Ollama provider on another host propagates that provider's own base URL, API key, and dims into the embedding client, without clobbering the chat provider's base URL. Ollama embedding endpoints get their own health probe instead of piggybacking on the global Ollama URL.
+
+### Fixed
+
+- **`AttributeError: 'list' object has no attribute 'data'` with llama.cpp embeddings** — OpenAI-compatible base URLs are now normalized to end with `/v1` before being handed to the OpenAI SDK. The SDK appends bare paths (`/embeddings`, `/chat/completions`) to the base URL, and the config flow validated URLs *without* the `/v1` prefix — so embedding requests hit llama-server's native `/embeddings` route, which returns a raw JSON list instead of the OpenAI `{"data": [...]}` shape and crashed the tool index build and semantic search. Chat only worked by accident because llama-server aliases `/chat/completions` in OpenAI format. Base URLs may now be entered with or without a trailing `/v1`. Root cause of the incompatibility previously documented (and worked around) in #394.
+
+- **Single-provider auto-assignment respects capabilities** — when exactly one model provider exists it is auto-assigned to unconfigured features, but it is no longer assigned to features whose category it cannot serve (e.g. an Anthropic-only setup no longer claims the Embeddings feature).
+
 ## [3.14.27] - 2026-07-10
 
 ### Added
