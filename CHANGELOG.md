@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.30] - 2026-07-13
+
+### Fixed
+
+- **Selecting an Ollama VLM that was never pulled no longer silently kills camera analysis** — a missing model made the Ollama server return a 404 (`ollama.ResponseError`), which escaped the video pipeline's error handling and permanently stopped the per-camera snapshot worker with a single log line as the only evidence; camera analysis and Sentinel camera-activity signals stayed dead until an integration reload. The worker now survives unexpected errors (the failed batch is dropped, logged, and processing resumes after a short backoff), and if a worker ever exits its queue entry is cleaned up so the next snapshot starts a fresh one. The `ResponseError` is also handled at each call boundary: video frames are skipped and logged (never turned into bogus "Error analyzing image" captions that could reach notifications), the camera chat tool returns a clear error message to the conversation, and the snapshot-and-analyze service raises a proper Home Assistant error. Closes [#473](https://github.com/goruck/home-generative-agent/issues/473).
+
+- **`think: false` is no longer sent to Ollama vision/summarization models that don't support thinking** — camera frame analysis and video summarization force-disabled reasoning for all edge deployments, bypassing the per-model heuristic that correctly omits the field for non-thinking models like `gemma3` and `qwen2.5vl`. Some Ollama server builds reject a non-nil `think` for models without the thinking capability (HTTP 400), which fed the same worker-death failure chain above. Reasoning is now only force-disabled for models that actually support it.
+
 ## [3.14.29] - 2026-07-13
 
 ### Added
