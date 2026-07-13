@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.31] - 2026-07-13
+
+### Fixed
+
+- **Video analyzer no longer delays Home Assistant startup when cameras are already active** — motion/recording snapshot loops could start during HGA config-entry setup, so Home Assistant counted long-lived `_motion_snapshot_loop()` tasks and in-flight `camera.snapshot` calls as startup work. On busy camera systems this produced bootstrap warnings and delayed startup until HA timed out waiting on those tasks. The video analyzer now starts after `EVENT_HOMEASSISTANT_STARTED`, and its snapshot loops/workers are created as HA background tasks so they do not block startup accounting. Runtime motion/recording behavior after startup is unchanged.
+
 ## [3.14.30] - 2026-07-13
 
 ### Fixed
