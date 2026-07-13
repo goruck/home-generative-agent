@@ -2709,7 +2709,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         hass.async_create_task(_log_ollama_server_info(hass, ollama_probe_urls))
 
     if options.get(CONF_VIDEO_ANALYZER_MODE) != "disable":
-        video_analyzer.start()
+        if hass.is_running:
+            video_analyzer.start()
+        else:
+
+            def _start_video_analyzer(_event: object) -> None:
+                hass.loop.call_soon_threadsafe(video_analyzer.start)
+
+            hass.bus.async_listen_once(
+                EVENT_HOMEASSISTANT_STARTED, _start_video_analyzer
+            )
     if options.get(CONF_SENTINEL_ENABLED, RECOMMENDED_SENTINEL_ENABLED):
         if hass.is_running:
             sentinel.start()
