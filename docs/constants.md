@@ -354,6 +354,8 @@ This document covers the named constants that affect integration behaviour, orga
 
 | Constant | Config key | Default | Purpose |
 |---|---|---|---|
+| `CONF_SENTINEL_QUIET_HOURS_START` | `sentinel_quiet_hours_start` | unset (disabled) | Local hour (0–23) the quiet-hours window opens. Both start and end must be set for suppression to take effect. |
+| `CONF_SENTINEL_QUIET_HOURS_END` | `sentinel_quiet_hours_end` | unset (disabled) | Local hour (0–23) the window closes. Windows may wrap midnight (e.g. 22:00–07:00); start = end suppresses all day. |
 | `RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES` | `sentinel_quiet_hours_severities` | `["low"]` | Which finding severities are suppressed during configured quiet hours |
 | `RECOMMENDED_SENTINEL_PRESENCE_GRACE_MINUTES` | `sentinel_presence_grace_minutes` | `10` | After everyone leaves home, suppress `open_entry_while_away` and `unknown_person_camera_no_home` for this many minutes to allow time for departure actions to settle |
 | `RECOMMENDED_SENTINEL_DAILY_DIGEST_ENABLED` | `sentinel_daily_digest_enabled` | `False` | Send a daily push summary of the past 24 hours |
