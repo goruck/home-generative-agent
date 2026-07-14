@@ -206,6 +206,8 @@ RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE: bool = False
 CONF_SENTINEL_QUIET_HOURS_START = "sentinel_quiet_hours_start"
 CONF_SENTINEL_QUIET_HOURS_END = "sentinel_quiet_hours_end"
 CONF_SENTINEL_QUIET_HOURS_SEVERITIES = "sentinel_quiet_hours_severities"
+# Must mirror the Severity literal in sentinel/models.py.
+SENTINEL_SEVERITIES: tuple[str, ...] = ("low", "medium", "high")
 RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES: list[str] = ["low"]
 
 CONF_SENTINEL_PRESENCE_GRACE_MINUTES = "sentinel_presence_grace_minutes"

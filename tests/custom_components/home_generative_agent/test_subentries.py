@@ -49,6 +49,9 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_INTERVAL_SECONDS,
     CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH,
     CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT,
+    CONF_SENTINEL_QUIET_HOURS_END,
+    CONF_SENTINEL_QUIET_HOURS_SEVERITIES,
+    CONF_SENTINEL_QUIET_HOURS_START,
     CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
     CONF_SUMMARIZATION_MODEL_PROVIDER,
     CONF_VLM_PROVIDER,
@@ -59,6 +62,7 @@ from custom_components.home_generative_agent.const import (
     FEATURE_DEFS,
     MODEL_CATEGORY_SPECS,
     RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
+    RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES,
     SUBENTRY_TYPE_DATABASE,
     SUBENTRY_TYPE_FEATURE,
     SUBENTRY_TYPE_MODEL_PROVIDER,
@@ -86,6 +90,7 @@ from custom_components.home_generative_agent.flows.model_provider_subentry_flow 
 from custom_components.home_generative_agent.flows.sentinel_subentry_flow import (
     SentinelSubentryFlow,
     _default_payload,
+    _quiet_hour_str,
 )
 from custom_components.home_generative_agent.flows.stt_provider_subentry_flow import (
     SttProviderSubentryFlow,
@@ -1048,6 +1053,338 @@ async def test_sentinel_flow_camera_entry_links_wrong_structure(hass: Any) -> No
     assert result is not None
     assert result.get("type") == "form"
     assert (result.get("errors") or {}).get("base") == "invalid_camera_entry_links"
+
+
+def _quiet_hours_flow(hass: Any) -> tuple[SentinelSubentryFlow, DummyEntry]:
+    """Return a Sentinel flow wired with stub form/entry callbacks."""
+    entry = DummyEntry()
+    flow = SentinelSubentryFlow()
+    flow.hass = hass
+    flow.async_show_form = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "form",
+        "data_schema": kwargs["data_schema"],
+        "errors": kwargs.get("errors"),
+    }
+    flow.async_create_entry = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "create_entry",
+        "title": kwargs.get("title"),
+        "data": kwargs.get("data"),
+    }
+    flow.async_abort = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "abort",
+        "reason": kwargs.get("reason"),
+    }
+    flow._schedule_reload = lambda: None  # type: ignore[assignment]
+    _patch_entry(flow, entry)
+    return flow, entry
+
+
+def test_sentinel_default_payload_contains_quiet_hours_severities() -> None:
+    """_default_payload() includes quiet-hours severities but no start/end (off)."""
+    payload = _default_payload()
+    assert payload[CONF_SENTINEL_QUIET_HOURS_SEVERITIES] == (
+        RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES
+    )
+    # Start/end absent means quiet hours are disabled by default.
+    assert CONF_SENTINEL_QUIET_HOURS_START not in payload
+    assert CONF_SENTINEL_QUIET_HOURS_END not in payload
+
+
+def test_sentinel_schema_contains_quiet_hours_fields(hass: Any) -> None:
+    """_schema() includes the three quiet-hours selectors."""
+    flow = SentinelSubentryFlow()
+    flow.hass = hass
+    schema = flow._schema(_default_payload())
+    schema_keys = {str(k) for k in schema.schema}
+    assert CONF_SENTINEL_QUIET_HOURS_START in schema_keys
+    assert CONF_SENTINEL_QUIET_HOURS_END in schema_keys
+    assert CONF_SENTINEL_QUIET_HOURS_SEVERITIES in schema_keys
+
+
+@pytest.mark.asyncio
+async def test_sentinel_flow_stores_quiet_hours(hass: Any) -> None:
+    """Flow converts quiet-hours select values to ints and stores severities."""
+    flow, _entry = _quiet_hours_flow(hass)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            CONF_SENTINEL_QUIET_HOURS_START: "22",
+            CONF_SENTINEL_QUIET_HOURS_END: "7",
+            CONF_SENTINEL_QUIET_HOURS_SEVERITIES: ["low", "medium"],
+        }
+    )
+    assert result.get("type") == "create_entry"
+    data = result.get("data")
+    assert data is not None
+    assert data[CONF_SENTINEL_QUIET_HOURS_START] == 22
+    assert data[CONF_SENTINEL_QUIET_HOURS_END] == 7
+    assert data[CONF_SENTINEL_QUIET_HOURS_SEVERITIES] == ["low", "medium"]
+
+
+@pytest.mark.asyncio
+async def test_sentinel_flow_quiet_hours_disabled_by_default(hass: Any) -> None:
+    """Empty quiet-hours selects leave the keys absent (feature off)."""
+    flow, _entry = _quiet_hours_flow(hass)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            CONF_SENTINEL_QUIET_HOURS_START: "",
+            CONF_SENTINEL_QUIET_HOURS_END: "",
+        }
+    )
+    assert result.get("type") == "create_entry"
+    data = result.get("data")
+    assert data is not None
+    assert CONF_SENTINEL_QUIET_HOURS_START not in data
+    assert CONF_SENTINEL_QUIET_HOURS_END not in data
+    assert data[CONF_SENTINEL_QUIET_HOURS_SEVERITIES] == (
+        RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES
+    )
+
+
+@pytest.mark.asyncio
+async def test_sentinel_flow_quiet_hours_incomplete_pair_errors(hass: Any) -> None:
+    """Setting only one of start/end returns a form error."""
+    flow, _entry = _quiet_hours_flow(hass)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            CONF_SENTINEL_QUIET_HOURS_START: "22",
+            CONF_SENTINEL_QUIET_HOURS_END: "",
+        }
+    )
+    assert result is not None
+    assert result.get("type") == "form"
+    assert (result.get("errors") or {}).get("base") == "quiet_hours_incomplete"
+
+
+@pytest.mark.asyncio
+async def test_sentinel_flow_quiet_hours_invalid_hour_errors(hass: Any) -> None:
+    """Out-of-range or non-numeric quiet-hours values return a form error."""
+    flow, _entry = _quiet_hours_flow(hass)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            CONF_SENTINEL_QUIET_HOURS_START: "25",
+            CONF_SENTINEL_QUIET_HOURS_END: "7",
+        }
+    )
+    assert result is not None
+    assert result.get("type") == "form"
+    assert (result.get("errors") or {}).get("base") == "invalid_quiet_hours"
+
+
+def _suggested_value(schema: Any, key: str) -> Any:
+    """Return the suggested_value attached to a schema key, or None."""
+    for marker in schema.schema:
+        if str(marker) == key:
+            description = getattr(marker, "description", None)
+            if isinstance(description, dict):
+                return description.get("suggested_value")
+    return None
+
+
+def test_quiet_hour_str_normalizes_values() -> None:
+    """_quiet_hour_str maps stored ints to select strings and garbage to ''."""
+    key = CONF_SENTINEL_QUIET_HOURS_START
+    assert _quiet_hour_str({}, key) == ""
+    assert _quiet_hour_str({key: None}, key) == ""
+    assert _quiet_hour_str({key: ""}, key) == ""
+    assert _quiet_hour_str({key: 22}, key) == "22"
+    assert _quiet_hour_str({key: "7"}, key) == "7"
+    # Corrupted stored values degrade to disabled rather than crashing the form.
+    assert _quiet_hour_str({key: "garbage"}, key) == ""
+
+
+@pytest.mark.asyncio
+async def test_sentinel_flow_quiet_hours_non_numeric_errors(hass: Any) -> None:
+    """Non-numeric quiet-hours values return the invalid_quiet_hours error."""
+    flow, _entry = _quiet_hours_flow(hass)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            CONF_SENTINEL_QUIET_HOURS_START: "abc",
+            CONF_SENTINEL_QUIET_HOURS_END: "7",
+        }
+    )
+    assert result is not None
+    assert result.get("type") == "form"
+    assert (result.get("errors") or {}).get("base") == "invalid_quiet_hours"
+
+
+@pytest.mark.asyncio
+async def test_sentinel_flow_quiet_hours_reconfigure_prefill(hass: Any) -> None:
+    """Stored int quiet hours prefill the form as select string values."""
+    flow, entry = _quiet_hours_flow(hass)
+    sentinel = DummySubentry(
+        "sentinel1",
+        SUBENTRY_TYPE_SENTINEL,
+        "Sentinel",
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_QUIET_HOURS_START: 22,
+            CONF_SENTINEL_QUIET_HOURS_END: 7,
+            CONF_SENTINEL_QUIET_HOURS_SEVERITIES: ["low", "medium"],
+        },
+    )
+    entry.subentries[sentinel.subentry_id] = sentinel
+
+    result = await flow.async_step_settings(None)
+    assert result.get("type") == "form"
+    schema = result.get("data_schema")
+    assert schema is not None
+    # Ints stored in the subentry must surface as select option strings.
+    assert _suggested_value(schema, CONF_SENTINEL_QUIET_HOURS_START) == "22"
+    assert _suggested_value(schema, CONF_SENTINEL_QUIET_HOURS_END) == "7"
+    assert _suggested_value(schema, CONF_SENTINEL_QUIET_HOURS_SEVERITIES) == [
+        "low",
+        "medium",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sentinel_flow_quiet_hours_error_redisplay_preserves_input(
+    hass: Any,
+) -> None:
+    """After a quiet-hours error the redisplayed form keeps the entered values."""
+    flow, _entry = _quiet_hours_flow(hass)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            CONF_SENTINEL_QUIET_HOURS_START: "22",
+            CONF_SENTINEL_QUIET_HOURS_END: "",
+        }
+    )
+    assert result.get("type") == "form"
+    assert (result.get("errors") or {}).get("base") == "quiet_hours_incomplete"
+    schema = result.get("data_schema")
+    assert schema is not None
+    assert _suggested_value(schema, CONF_SENTINEL_QUIET_HOURS_START) == "22"
+    assert _suggested_value(schema, CONF_SENTINEL_QUIET_HOURS_END) == ""
+
+
+@pytest.mark.asyncio
+async def test_sentinel_flow_quiet_hours_midnight_boundary(hass: Any) -> None:
+    """Hour 0 (midnight) is a valid boundary value, not treated as Disabled."""
+    flow, _entry = _quiet_hours_flow(hass)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            CONF_SENTINEL_QUIET_HOURS_START: "0",
+            CONF_SENTINEL_QUIET_HOURS_END: "23",
+        }
+    )
+    assert result.get("type") == "create_entry"
+    data = result.get("data")
+    assert data is not None
+    assert data[CONF_SENTINEL_QUIET_HOURS_START] == 0
+    assert data[CONF_SENTINEL_QUIET_HOURS_END] == 23
+    # A stored int 0 must round-trip to the "0" select value, not "Disabled".
+    assert (
+        _quiet_hour_str(
+            {CONF_SENTINEL_QUIET_HOURS_START: 0}, CONF_SENTINEL_QUIET_HOURS_START
+        )
+        == "0"
+    )
+
+
+@pytest.mark.asyncio
+async def test_sentinel_flow_quiet_hours_severities_filtered(hass: Any) -> None:
+    """Unknown severity values are dropped on save; known values are kept."""
+    flow, _entry = _quiet_hours_flow(hass)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            CONF_SENTINEL_QUIET_HOURS_START: "22",
+            CONF_SENTINEL_QUIET_HOURS_END: "7",
+            CONF_SENTINEL_QUIET_HOURS_SEVERITIES: ["low", "critical", "Medium"],
+        }
+    )
+    assert result.get("type") == "create_entry"
+    data = result.get("data")
+    assert data is not None
+    assert data[CONF_SENTINEL_QUIET_HOURS_SEVERITIES] == ["low"]
+
+
+def test_resolve_runtime_options_passes_quiet_hours_through() -> None:
+    """Quiet-hours keys stored in the Sentinel subentry reach runtime options."""
+    entry = DummyEntry(options={})
+    sentinel = DummySubentry(
+        "sentinel1",
+        SUBENTRY_TYPE_SENTINEL,
+        "Sentinel",
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_QUIET_HOURS_START: 22,
+            CONF_SENTINEL_QUIET_HOURS_END: 7,
+            CONF_SENTINEL_QUIET_HOURS_SEVERITIES: ["low", "medium"],
+        },
+    )
+    entry.subentries[sentinel.subentry_id] = sentinel
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_SENTINEL_QUIET_HOURS_START] == 22
+    assert options[CONF_SENTINEL_QUIET_HOURS_END] == 7
+    assert options[CONF_SENTINEL_QUIET_HOURS_SEVERITIES] == ["low", "medium"]
+
+
+def test_resolve_runtime_options_quiet_hours_default_disabled() -> None:
+    """Without stored quiet-hours keys, resolved options disable the feature."""
+    entry = DummyEntry(options={})
+    sentinel = DummySubentry(
+        "sentinel1",
+        SUBENTRY_TYPE_SENTINEL,
+        "Sentinel",
+        {CONF_SENTINEL_ENABLED: True},
+    )
+    entry.subentries[sentinel.subentry_id] = sentinel
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_SENTINEL_QUIET_HOURS_START] is None
+    assert options[CONF_SENTINEL_QUIET_HOURS_END] is None
+    assert options[CONF_SENTINEL_QUIET_HOURS_SEVERITIES] == (
+        RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES
+    )
 
 
 # ---------------------------------------------------------------------------

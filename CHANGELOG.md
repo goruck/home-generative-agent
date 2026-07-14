@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.33] - 2026-07-14
+
+### Fixed
+
+- **Sentinel quiet hours can now be enabled from the UI** — the quiet-hours options (`sentinel_quiet_hours_start`, `sentinel_quiet_hours_end`, `sentinel_quiet_hours_severities`) were fully implemented in the suppression engine but never exposed in the Sentinel settings form, and the runtime option resolver didn't pass them through even if stored, so the feature was unreachable. The Sentinel subentry's Advanced settings now offer start/end hour dropdowns (with a Disabled option) and a severity multi-select (default: low only); setting only one of start/end or an out-of-range hour returns a form error instead of saving a broken window. While wiring this up, the newly reachable engine seam was hardened so a corrupted stored value (hand-edited `.storage`, bad restore) degrades to "quiet hours off" instead of raising inside the Sentinel run loop, unknown severity values are filtered on save and at runtime, an invalid timezone now logs a warning on the UTC fallback, and start = end is defined as a full 24-hour window (previously a silent no-op, and all-day suppression was inexpressible). Documented in the Sentinel guide under Notification Behavior. Thanks [@andymcmanus](https://github.com/andymcmanus) for the report. Closes [#463](https://github.com/goruck/home-generative-agent/issues/463).
+
 ## [3.14.32] - 2026-07-13
 
 ### Fixed
