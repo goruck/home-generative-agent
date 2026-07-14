@@ -73,7 +73,10 @@ class LLMExplainer:
                 _EXPLAIN_LLM_TIMEOUT_S,
             )
             return None
-        except (ValueError, TypeError, RuntimeError) as err:
+        except Exception as err:  # noqa: BLE001
+            # Provider errors (e.g. ollama.ResponseError, httpx transport
+            # failures) do not subclass the families above; explanations are
+            # best-effort, so any failure degrades to None (issue #465).
             LOGGER.warning("LLM explanation failed: %s", err)
             return None
 

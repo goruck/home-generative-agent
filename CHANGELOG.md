@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.32] - 2026-07-13
+
+### Fixed
+
+- **Sentinel Discovery no longer dies silently on LLM provider errors** — a provider error during the discovery LLM call (e.g. `ollama.ResponseError` when the configured model isn't pulled, or an httpx transport failure while the Ollama server restarts) escaped the narrow exception handling and permanently killed the discovery background loop; no proposals were ever produced again until an integration reload, with the error only surfacing if the task was cancelled mid-call at unload. Provider errors are now caught and logged (rate-limited, with recovery messages), and the discovery loop itself is additionally guarded so no unexpected error in any cycle stage can end it — mirroring the snapshot-worker resilience fix from #473. The same narrow-catch escape is fixed in LLM triage (which now truly fails open to notify on any exception, as documented) and LLM explanations (which degrade to the deterministic fallback text). Discovery audit payloads now also record the actually-configured model name (previously always `unknown` for bound models), making model misconfiguration diagnosable from the Sentinel audit trail. Note: discovery was already using the configured chat model — the model selection reported in the issue could not be reproduced, but the silent-failure mode it described is real and fixed. Closes [#465](https://github.com/goruck/home-generative-agent/issues/465).
+
 ## [3.14.31] - 2026-07-13
 
 ### Fixed
