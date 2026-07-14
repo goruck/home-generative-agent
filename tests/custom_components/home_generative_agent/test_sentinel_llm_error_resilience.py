@@ -20,6 +20,7 @@ from ollama import ResponseError as OllamaResponseError
 from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS,
 )
+from custom_components.home_generative_agent.core.fallback import FallbackChatModel
 from custom_components.home_generative_agent.explain.llm_explain import LLMExplainer
 from custom_components.home_generative_agent.sentinel.discovery_engine import (
     SentinelDiscoveryEngine,
@@ -217,6 +218,21 @@ def test_resolved_model_name_from_bound_runnable_config() -> None:
 def test_resolved_model_name_prefers_model_name_key_for_openai_style() -> None:
     bound = SimpleNamespace(config={"configurable": {"model_name": "gpt-4o-mini"}})
     assert _resolved_model_name(bound) == "gpt-4o-mini"
+
+
+def test_resolved_model_name_from_fallback_chain_primary() -> None:
+    """A FallbackChatModel's empty wrapper config must not hide the primary."""
+    primary = SimpleNamespace(config={"configurable": {"model": "qwen3:8b"}})
+    fallback = SimpleNamespace(config={"configurable": {"model": "gpt-4o-mini"}})
+    wrapper = FallbackChatModel(
+        [(primary, "edge", "provider-1"), (fallback, "cloud", "provider-2")]
+    )
+    assert _resolved_model_name(wrapper) == "qwen3:8b"
+
+
+def test_resolved_model_name_from_empty_fallback_chain() -> None:
+    wrapper = FallbackChatModel([])
+    assert _resolved_model_name(wrapper) == "unknown"
 
 
 def test_resolved_model_name_from_raw_chat_model_attribute() -> None:

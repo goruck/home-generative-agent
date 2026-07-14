@@ -686,10 +686,12 @@ def _resolved_model_name(model: Any) -> str:
     Best-effort name of the model a runnable will actually invoke.
 
     Models arrive here as bound runnables (``.with_config(...)``) whose
-    effective model lives in the binding's configurable section; raw chat
-    models expose it as a ``model`` attribute. Recording the resolved name
-    in discovery payloads makes model misconfiguration diagnosable from the
-    audit trail (issue #465).
+    effective model lives in the binding's configurable section; fallback
+    wrappers (``FallbackChatModel``) carry an empty wrapper config and expose
+    the bound per-provider models via ``chain``, whose first member is the
+    primary selected at setup; raw chat models expose a ``model`` attribute.
+    Recording the resolved name in discovery payloads makes model
+    misconfiguration diagnosable from the audit trail (issue #465).
     """
     config = getattr(model, "config", None)
     if isinstance(config, Mapping):
@@ -699,6 +701,11 @@ def _resolved_model_name(model: Any) -> str:
                 name = configurable.get(key)
                 if name:
                     return str(name)
+    chain = getattr(model, "chain", None)
+    if isinstance(chain, list) and chain:
+        first = chain[0]
+        if isinstance(first, tuple) and first:
+            return _resolved_model_name(first[0])
     name = getattr(model, "model", None)
     return str(name) if name else "unknown"
 
