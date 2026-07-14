@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.34] - 2026-07-14
+
+### Fixed
+
+- **Camera snapshot failures are no longer silent or undiagnosable** — when a snapshot never landed on disk, the only evidence was a generic "Snapshot failed to appear on disk" warning: the `camera.snapshot` service was dispatched fire-and-forget, so the actual error (camera unavailable, write failure, disallowed path) vanished, and the analysis for that event was dropped with no metric or escalation. The service is now called blocking under a 15-second budget, producing three distinguishable diagnostics — the service call failed (logged with the underlying error), the call timed out (camera unresponsive), or the call succeeded but the file never appeared (points at a media mount/permissions problem). Failures count toward a new `snapshot_failures` field in the hourly per-camera metrics line, and three consecutive failures on the same camera escalate the log from WARNING to ERROR so a camera that stops producing snapshots is visible instead of quietly dark. A per-camera in-flight guard also prevents the 1.5s recording poll from stacking overlapping snapshot calls on a slow or wedged camera. The two root causes suspected in the original report were fixed in 3.14.30 (un-pulled Ollama VLM killing the snapshot worker) and 3.14.31 (startup race after reload); this closes the remaining observability gap. Thanks [@andymcmanus](https://github.com/andymcmanus) for the detailed report. Closes [#464](https://github.com/goruck/home-generative-agent/issues/464).
+
 ## [3.14.33] - 2026-07-14
 
 ### Fixed
