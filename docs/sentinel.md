@@ -29,7 +29,7 @@ Sentinel is a singleton service per Home Generative Agent config entry. Configur
 2. Click **+ Sentinel**.
 3. Choose a setup mode:
    - **Basic** — enables anomaly alerting with recommended defaults. Configure only the essentials: notify service, daily digest toggle and time, and an optional level-increase PIN.
-   - **Advanced** — exposes all options: detection interval, cooldowns, triage, baseline, discovery, and camera entry links. All fields pre-populate with current values when reconfiguring.
+   - **Advanced** — exposes all options: detection interval, cooldowns, quiet hours, triage, baseline, discovery, and camera entry links. All fields pre-populate with current values when reconfiguring.
 4. Optionally enable Discovery, Triage, and Baseline via **Advanced** setup or by reconfiguring later (see sections below).
 5. Save. Sentinel starts automatically — no HA restart required.
 
@@ -133,6 +133,16 @@ When Sentinel notifications are enabled:
 | `Snooze Always` | Suppresses this finding type permanently. A confirmation notification is sent first; the snooze is written only after the user taps **Confirm**. |
 
 **Per-area routing:** When `sentinel_area_notify_map` maps an area name to a notify service, findings whose triggering entities belong to that area are routed to that service instead of the global `notify_service`.
+
+**Quiet hours:** Configure in the Sentinel subentry (Advanced setup) to suppress notifications for selected severities during a nightly window:
+
+| Option | Description |
+|---|---|
+| `sentinel_quiet_hours_start` | Local hour (0–23) the window opens; `Disabled` turns quiet hours off |
+| `sentinel_quiet_hours_end` | Local hour (0–23) the window closes; windows may wrap midnight (e.g. 22:00–07:00), and start = end means all day |
+| `sentinel_quiet_hours_severities` | Severities suppressed during the window (default: `low` only) |
+
+Both start and end must be set for quiet hours to take effect. Findings with severities outside the list are still delivered, and suppressed findings remain in the audit trail (individual findings carry the reason code `quiet_hours`).
 
 ---
 

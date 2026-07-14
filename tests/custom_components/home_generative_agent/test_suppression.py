@@ -3,10 +3,20 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 from homeassistant.util import dt as dt_util
 
+from custom_components.home_generative_agent.const import (
+    CONF_SENTINEL_QUIET_HOURS_END,
+    CONF_SENTINEL_QUIET_HOURS_SEVERITIES,
+    CONF_SENTINEL_QUIET_HOURS_START,
+)
+from custom_components.home_generative_agent.sentinel.engine import (
+    _build_suppress_kwargs,
+    _coerce_quiet_hour,
+    _coerce_quiet_severities,
+)
 from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
 from custom_components.home_generative_agent.sentinel.suppression import (
     MAX_COOLDOWN_MULTIPLIER,
@@ -16,6 +26,7 @@ from custom_components.home_generative_agent.sentinel.suppression import (
     SUPPRESSION_REASON_PENDING_PROMPT,
     SUPPRESSION_REASON_TYPE_COOLDOWN,
     SuppressionState,
+    _is_quiet_hours,
     _migrate_suppression_state,
     purge_expired_prompts,
     record_cooldown_feedback,
@@ -320,3 +331,101 @@ def test_from_dict_round_trip_preserves_multipliers() -> None:
         "unlocked_lock_at_night:lock.front": 3,
         "camera_entry_unsecured:sensor.motion": 1,
     }
+
+
+# ---------------------------------------------------------------------------
+# Quiet hours
+# ---------------------------------------------------------------------------
+
+
+def test_is_quiet_hours_window_and_severity_filter() -> None:
+    """Quiet hours honors midnight-wrapping windows and severity filtering."""
+    now = datetime(2026, 7, 14, 23, 0, tzinfo=UTC)
+
+    assert _is_quiet_hours(
+        now,
+        start_hour=22,
+        end_hour=7,
+        timezone="UTC",
+        severity="low",
+        quiet_severities=["low"],
+    )
+    # Severity outside the configured list is never suppressed.
+    assert not _is_quiet_hours(
+        now,
+        start_hour=22,
+        end_hour=7,
+        timezone="UTC",
+        severity="high",
+        quiet_severities=["low"],
+    )
+    # Absent config disables the feature.
+    assert not _is_quiet_hours(
+        now,
+        start_hour=None,
+        end_hour=None,
+        timezone="UTC",
+        severity="low",
+        quiet_severities=["low"],
+    )
+    # start == end means a full 24-hour window.
+    assert _is_quiet_hours(
+        now,
+        start_hour=12,
+        end_hour=12,
+        timezone="UTC",
+        severity="low",
+        quiet_severities=["low"],
+    )
+
+
+def test_is_quiet_hours_invalid_timezone_falls_back_to_utc() -> None:
+    """A malformed timezone key falls back to UTC instead of raising."""
+    now = datetime(2026, 7, 14, 23, 0, tzinfo=UTC)
+    assert _is_quiet_hours(
+        now,
+        start_hour=22,
+        end_hour=7,
+        timezone="Not/A..Zone",
+        severity="low",
+        quiet_severities=["low"],
+    )
+
+
+def test_coerce_quiet_hour_rejects_corrupt_values() -> None:
+    """Corrupt stored quiet-hours values degrade to None instead of raising."""
+    assert _coerce_quiet_hour(22) == 22
+    assert _coerce_quiet_hour("7") == 7
+    assert _coerce_quiet_hour(0) == 0
+    assert _coerce_quiet_hour(None) is None
+    assert _coerce_quiet_hour("") is None
+    assert _coerce_quiet_hour("disabled") is None
+    assert _coerce_quiet_hour("22:00") is None
+    assert _coerce_quiet_hour(99) is None
+    assert _coerce_quiet_hour(-1) is None
+    assert _coerce_quiet_hour(True) is None  # noqa: FBT003
+    assert _coerce_quiet_hour(["22"]) is None
+
+
+def test_coerce_quiet_severities_rejects_corrupt_values() -> None:
+    """Corrupt stored severity lists degrade safely instead of raising."""
+    assert _coerce_quiet_severities(["low", "high"]) == ["low", "high"]
+    # A scalar string must not be iterated character-by-character; non-list
+    # values fall back to the recommended default.
+    assert _coerce_quiet_severities("high") == ["low"]
+    assert _coerce_quiet_severities(None) == ["low"]
+    assert _coerce_quiet_severities(["Low", "critical", 3]) == []
+
+
+def test_build_suppress_kwargs_survives_corrupt_options() -> None:
+    """Corrupt stored quiet-hours options never raise inside the Sentinel loop."""
+    options = {
+        CONF_SENTINEL_QUIET_HOURS_START: "disabled",
+        CONF_SENTINEL_QUIET_HOURS_END: 999,
+        CONF_SENTINEL_QUIET_HOURS_SEVERITIES: None,
+    }
+    snapshot: dict = {"derived": {"timezone": "UTC"}}
+    kwargs = _build_suppress_kwargs(options, snapshot)  # type: ignore[arg-type]
+    assert kwargs["quiet_hours_start"] is None
+    assert kwargs["quiet_hours_end"] is None
+    assert kwargs["quiet_hours_severities"] == ["low"]

@@ -49,6 +49,7 @@ from custom_components.home_generative_agent.const import (
     RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES,
     RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
     RECOMMENDED_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
+    SENTINEL_SEVERITIES,
     SIGNAL_SENTINEL_RUN_COMPLETE,
 )
 from custom_components.home_generative_agent.core.utils import verify_pin
@@ -1184,6 +1185,37 @@ def _coerce_float(value: object | None, default: float) -> float:
     return default
 
 
+_QUIET_HOUR_MAX = 23
+
+
+def _coerce_quiet_hour(value: object | None) -> int | None:
+    """Coerce a stored quiet-hours value to a local hour, or None (disabled)."""
+    hour: int
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        hour = value
+    elif isinstance(value, float):
+        hour = int(value)
+    elif isinstance(value, str):
+        try:
+            hour = int(value)
+        except ValueError:
+            return None
+    else:
+        return None
+    if not 0 <= hour <= _QUIET_HOUR_MAX:
+        return None
+    return hour
+
+
+def _coerce_quiet_severities(value: object | None) -> list[str]:
+    """Coerce stored quiet-hours severities to known values, with a safe default."""
+    if not isinstance(value, (list, tuple, set)):
+        return list(RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES)
+    return [s for s in value if isinstance(s, str) and s in SENTINEL_SEVERITIES]
+
+
 def _build_suppress_kwargs(
     options: dict[str, Any],
     snapshot: FullStateSnapshot,
@@ -1191,13 +1223,11 @@ def _build_suppress_kwargs(
     """Build keyword args for ``should_suppress()`` from options + snapshot."""
     timezone: str | None = snapshot.get("derived", {}).get("timezone")
 
-    quiet_start_raw = options.get(CONF_SENTINEL_QUIET_HOURS_START)
-    quiet_end_raw = options.get(CONF_SENTINEL_QUIET_HOURS_END)
-    quiet_start: int | None = (
-        int(quiet_start_raw) if quiet_start_raw is not None else None
-    )
-    quiet_end: int | None = int(quiet_end_raw) if quiet_end_raw is not None else None
-    quiet_severities: list[str] = list(
+    # Stored config is user-editable JSON; a malformed value must degrade to
+    # "quiet hours off" rather than raise inside the Sentinel run loop.
+    quiet_start = _coerce_quiet_hour(options.get(CONF_SENTINEL_QUIET_HOURS_START))
+    quiet_end = _coerce_quiet_hour(options.get(CONF_SENTINEL_QUIET_HOURS_END))
+    quiet_severities = _coerce_quiet_severities(
         options.get(
             CONF_SENTINEL_QUIET_HOURS_SEVERITIES,
             RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES,

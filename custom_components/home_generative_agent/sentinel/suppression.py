@@ -371,7 +371,8 @@ def _is_quiet_hours(  # noqa: PLR0913
 
     ``start_hour`` and ``end_hour`` are local hours (0-23).  When
     ``start_hour > end_hour`` the window wraps midnight
-    (e.g. start=22, end=7 means 22:00-07:00).
+    (e.g. start=22, end=7 means 22:00-07:00).  When ``start_hour ==
+    end_hour`` the window covers the full 24 hours.
 
     Returns False when quiet-hours config is absent or incomplete.
     """
@@ -379,12 +380,17 @@ def _is_quiet_hours(  # noqa: PLR0913
         return False
     if severity not in quiet_severities:
         return False
+    if start_hour == end_hour:
+        return True
 
     import zoneinfo  # noqa: PLC0415
 
     try:
         tz = zoneinfo.ZoneInfo(timezone or "UTC")
-    except (zoneinfo.ZoneInfoNotFoundError, KeyError):
+    except (zoneinfo.ZoneInfoNotFoundError, KeyError, ValueError):
+        LOGGER.warning(
+            "Quiet hours: unknown timezone %r, falling back to UTC", timezone
+        )
         tz = zoneinfo.ZoneInfo("UTC")
 
     local_now = now.astimezone(tz)
