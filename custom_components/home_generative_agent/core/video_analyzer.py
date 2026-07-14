@@ -106,6 +106,10 @@ _VIDEO_QUEUE_BACKLOG_THRESHOLD: Final[int] = (
     2  # drop stale frames when queue exceeds this
 )
 _WORKER_ERROR_BACKOFF_SEC: Final[int] = 5  # pause after unexpected worker error
+# --- Snapshot capture (issue #464) ---
+_SNAPSHOT_SERVICE_TIMEOUT_SEC: Final[int] = 15  # camera.snapshot blocking-call budget
+_SNAPSHOT_APPEAR_ATTEMPTS: Final[int] = 10  # post-service file visibility polls (0.2s)
+_SNAPSHOT_FAILURE_ESCALATION: Final[int] = 3  # consecutive failures before ERROR log
 # --- Uniqueness gate tuning ---
 # Enabled at runtime via CONF_VIDEO_ANALYZER_UNIQUENESS_ENABLED option (default off).
 _UNIQUENESS_HAMMING_MAX: Final[int] = 4  # <= this => "too similar" (tune 4-10)
@@ -238,6 +242,7 @@ class _Metrics:
     analyzed: int = 0
     timeouts: int = 0
     semaphore_timeouts: int = 0
+    snapshot_failures: int = 0
     # PEP 585: deque is subscriptable; keep in a field to avoid shared default
     lat_ms: deque[float] = field(
         default_factory=lambda: deque(maxlen=_METRICS_LAT_HISTORY)
@@ -272,6 +277,12 @@ class VideoAnalyzer:
         ] = {}  # camera_id -> monotonic() of last accepted
         # Per-camera counters and latency samples
         self._metrics: dict[str, _Metrics] = defaultdict(_Metrics)
+        # camera_id -> consecutive capture failures (issue #464 escalation)
+        self._snapshot_fail_streak: dict[str, int] = {}
+        # Cameras with a capture in flight: the 1.5s recording poll doesn't
+        # wait for the previous tick, so a wedged camera holding the blocking
+        # camera.snapshot call must not accumulate overlapping calls.
+        self._snapshot_inflight: set[str] = set()
         self._metrics_job_cancel: Callable[[], None] | None = (
             None  # hourly report handle
         )
@@ -309,9 +320,29 @@ class VideoAnalyzer:
             m.timeouts += n
         elif key == "semaphore_timeout":
             m.semaphore_timeouts += n
+        elif key == "snapshot_failures":
+            m.snapshot_failures += n
         else:
             # ignore unknown keys silently to avoid noisy logs in prod
             return
+
+    def _record_snapshot_failure(self, camera_id: str, reason: str) -> None:
+        """
+        Count a failed snapshot capture and log it with its cause.
+
+        Repeated consecutive failures escalate from WARNING to ERROR so a
+        camera that silently stops producing snapshots is visible (issue #464).
+        """
+        self._m_inc(camera_id, "snapshot_failures")
+        streak = self._snapshot_fail_streak.get(camera_id, 0) + 1
+        self._snapshot_fail_streak[camera_id] = streak
+        log = LOGGER.error if streak >= _SNAPSHOT_FAILURE_ESCALATION else LOGGER.warning
+        log(
+            "[%s] Snapshot capture failed (%d consecutive): %s",
+            camera_id,
+            streak,
+            reason,
+        )
 
     def _m_add_latency(self, camera_id: str, ms: float) -> None:
         """Record a single latency sample in milliseconds."""
@@ -328,7 +359,7 @@ class VideoAnalyzer:
                 "[%s] Metrics (last interval): "
                 "captured=%d enqueued=%d skipped_duplicate=%d "
                 "dropped_stale=%d dropped_backlog=%d analyzed=%d "
-                "timeouts=%d semaphore_timeouts=%d "
+                "timeouts=%d semaphore_timeouts=%d snapshot_failures=%d "
                 "avg_latency_ms=%.1f p95_latency_ms=%.1f"
             )
             LOGGER.info(
@@ -342,6 +373,7 @@ class VideoAnalyzer:
                 m.analyzed,
                 m.timeouts,
                 m.semaphore_timeouts,
+                m.snapshot_failures,
                 avg_ms,
                 p95_ms,
             )
@@ -355,6 +387,7 @@ class VideoAnalyzer:
             m.analyzed = 0
             m.timeouts = 0
             m.semaphore_timeouts = 0
+            m.snapshot_failures = 0
             m.lat_ms.clear()
 
     def protect_notify_image(self, p: Path, ttl_sec: int = 1800) -> None:
@@ -1367,86 +1400,117 @@ class VideoAnalyzer:
     async def _take_single_snapshot(
         self, camera_id: str, now: datetime, *, hold_for_batch: bool = False
     ) -> Path | None:
+        if camera_id in self._snapshot_inflight:
+            LOGGER.debug(
+                "[%s] Skipping snapshot — previous capture still in flight.",
+                camera_id,
+            )
+            return None
+        self._snapshot_inflight.add(camera_id)
+        try:
+            return await self._capture_snapshot(
+                camera_id, now, hold_for_batch=hold_for_batch
+            )
+        finally:
+            self._snapshot_inflight.discard(camera_id)
+
+    async def _capture_snapshot(
+        self, camera_id: str, now: datetime, *, hold_for_batch: bool = False
+    ) -> Path | None:
         snapshot_dir = await self._get_snapshot_dir(camera_id)
         timestamp = dt_util.as_local(now).strftime("%Y%m%d_%H%M%S")
         path = snapshot_dir / f"snapshot_{timestamp}.jpg"
 
+        start_time = dt_util.utcnow()
+        LOGGER.debug("[%s] Initiating snapshot at %s", camera_id, start_time)
+
+        # Blocking call so platform errors (camera unavailable, disallowed
+        # path, write failure) surface here instead of vanishing in a
+        # fire-and-forget dispatch (issue #464).
         try:
-            start_time = dt_util.utcnow()
-            LOGGER.debug("[%s] Initiating snapshot at %s", camera_id, start_time)
-
-            await self.hass.services.async_call(
-                CAMERA_DOMAIN,
-                "snapshot",
-                {"entity_id": camera_id, "filename": str(path)},
-                blocking=False,
-            )
-            LOGGER.debug("[%s] Snapshot service call completed.", camera_id)
-
-            for i in range(50):
-                exists = await self.hass.async_add_executor_job(path.exists)
-                if exists:
-                    LOGGER.debug(
-                        "[%s] Snapshot appeared after %.2f s.",
-                        camera_id,
-                        (dt_util.utcnow() - start_time).total_seconds(),
-                    )
-                    break
-                await asyncio.sleep(0.2)
-                LOGGER.debug(
-                    "[%s] Waiting for snapshot to appear... attempt %d",
-                    camera_id,
-                    i + 1,
+            async with asyncio.timeout(_SNAPSHOT_SERVICE_TIMEOUT_SEC):
+                await self.hass.services.async_call(
+                    CAMERA_DOMAIN,
+                    "snapshot",
+                    {"entity_id": camera_id, "filename": str(path)},
+                    blocking=True,
                 )
-            else:
-                LOGGER.warning(
-                    "[%s] Snapshot failed to appear on disk after waiting: %s",
-                    camera_id,
-                    path,
-                )
-                return None
-
-            self._m_inc(camera_id, "captured")
-
-            # --- Uniqueness gate: skip near-duplicate frames unless heartbeat due ---
-            try:
-                should_enqueue = await self._is_unique_enough(camera_id, path)
-            except (OSError, FileNotFoundError, ValueError):
-                should_enqueue = True  # fail-open
-
-            if not should_enqueue:
-                self._m_inc(camera_id, "skipped_duplicate")
-                LOGGER.debug(
-                    "[%s] Skipping enqueue (near-duplicate): %s", camera_id, path
-                )
-                return None
-
-            if hold_for_batch:
-                # Motion/recording loop owns this camera: hold the frame until
-                # the event ends so the whole window flushes as one batch,
-                # instead of the live worker analyzing (and notifying) per frame.
-                buffer = self._event_snapshot_buffers.setdefault(
-                    camera_id, deque(maxlen=_QUEUE_MAXSIZE)
-                )
-                buffer.append(path)  # deque drops oldest when full
-            else:
-                queue = self._get_snapshot_queue(camera_id)
-                await put_with_backpressure(
-                    queue, _SnapshotItem(path=path, enqueued=monotonic())
-                )
-            self._m_inc(camera_id, "enqueued")
-            LOGGER.debug(
-                "[%s] Enqueue t=%s held=%s %s",
+        except TimeoutError:
+            self._record_snapshot_failure(
                 camera_id,
-                dt_util.utcnow().isoformat(),
-                hold_for_batch,
-                path,
+                f"camera.snapshot did not complete within "
+                f"{_SNAPSHOT_SERVICE_TIMEOUT_SEC}s "
+                f"(camera unresponsive or service wedged): {path}",
             )
+            return None
         except HomeAssistantError as err:
-            LOGGER.warning("Snapshot failed for %s: %s", camera_id, err)
+            self._record_snapshot_failure(
+                camera_id, f"camera.snapshot service call failed: {err}"
+            )
+            return None
+        LOGGER.debug("[%s] Snapshot service call completed.", camera_id)
+
+        # The service writes the file before returning, so it normally exists
+        # on the first check; poll briefly to absorb filesystem lag.
+        for i in range(_SNAPSHOT_APPEAR_ATTEMPTS):
+            exists = await self.hass.async_add_executor_job(path.exists)
+            if exists:
+                LOGGER.debug(
+                    "[%s] Snapshot appeared after %.2f s.",
+                    camera_id,
+                    (dt_util.utcnow() - start_time).total_seconds(),
+                )
+                break
+            await asyncio.sleep(0.2)
+            LOGGER.debug(
+                "[%s] Waiting for snapshot to appear... attempt %d",
+                camera_id,
+                i + 1,
+            )
         else:
-            return path
-        return None
+            self._record_snapshot_failure(
+                camera_id,
+                f"camera.snapshot succeeded but the file never appeared on "
+                f"disk (check the media mount and permissions): {path}",
+            )
+            return None
+
+        self._m_inc(camera_id, "captured")
+        self._snapshot_fail_streak.pop(camera_id, None)
+
+        # --- Uniqueness gate: skip near-duplicate frames unless heartbeat due ---
+        try:
+            should_enqueue = await self._is_unique_enough(camera_id, path)
+        except (OSError, FileNotFoundError, ValueError):
+            should_enqueue = True  # fail-open
+
+        if not should_enqueue:
+            self._m_inc(camera_id, "skipped_duplicate")
+            LOGGER.debug("[%s] Skipping enqueue (near-duplicate): %s", camera_id, path)
+            return None
+
+        if hold_for_batch:
+            # Motion/recording loop owns this camera: hold the frame until
+            # the event ends so the whole window flushes as one batch,
+            # instead of the live worker analyzing (and notifying) per frame.
+            buffer = self._event_snapshot_buffers.setdefault(
+                camera_id, deque(maxlen=_QUEUE_MAXSIZE)
+            )
+            buffer.append(path)  # deque drops oldest when full
+        else:
+            queue = self._get_snapshot_queue(camera_id)
+            await put_with_backpressure(
+                queue, _SnapshotItem(path=path, enqueued=monotonic())
+            )
+        self._m_inc(camera_id, "enqueued")
+        LOGGER.debug(
+            "[%s] Enqueue t=%s held=%s %s",
+            camera_id,
+            dt_util.utcnow().isoformat(),
+            hold_for_batch,
+            path,
+        )
+        return path
 
     async def _motion_snapshot_loop(self, camera_id: str) -> None:
         try:

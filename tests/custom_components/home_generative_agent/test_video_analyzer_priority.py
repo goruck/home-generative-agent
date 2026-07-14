@@ -25,6 +25,9 @@ Covers (test plan items):
 - _resolve_camera_from_motion: direct match, VMD strip, _motion strip (Reolink + Ring-MQTT), no match, override precedence
 - Event lifecycle: motion-held snapshots are not analyzed until the OFF/exit
   flush, which processes the whole window as one ordered batch
+- Snapshot capture failure visibility (issue #464): camera.snapshot is called
+  blocking, service errors/timeouts/missing files are counted and logged with
+  a cause, and repeated consecutive failures escalate to ERROR then reset
 """
 
 from __future__ import annotations
@@ -41,6 +44,7 @@ from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from homeassistant.exceptions import HomeAssistantError
 from ollama import ResponseError as OllamaResponseError
 
 import custom_components.home_generative_agent as hga_mod
@@ -1178,3 +1182,201 @@ async def test_process_snapshot_swallows_ollama_response_error(
         )
 
     assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# Snapshot capture failure visibility (issue #464)
+# ---------------------------------------------------------------------------
+
+_VA_LOGGER = "custom_components.home_generative_agent.core.video_analyzer"
+
+
+@pytest.mark.asyncio
+async def test_snapshot_service_call_is_blocking(
+    va: VideoAnalyzer, tmp_path: Path
+) -> None:
+    """camera.snapshot is called blocking so platform errors surface."""
+    mock_dir = _prepare_snapshot_capture(va, tmp_path)
+    cast("MagicMock", va.hass).async_create_task = MagicMock(
+        side_effect=lambda coro: (coro.close(), MagicMock())[1]  # type: ignore[no-any-return]
+    )
+
+    with patch.object(va, "_get_snapshot_dir", new=mock_dir):
+        now = datetime(2025, 1, 1, 12, 0, 0, tzinfo=dt.UTC)
+        path = await va._take_single_snapshot("camera.test", now)  # type: ignore[attr-defined]
+
+    assert path is not None
+    call_kwargs = cast("MagicMock", va.hass.services.async_call).call_args.kwargs
+    assert call_kwargs["blocking"] is True
+
+
+@pytest.mark.asyncio
+async def test_snapshot_service_error_counted_and_logged(
+    va: VideoAnalyzer,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A failing camera.snapshot call is counted and logged with its cause."""
+    camera_id = "camera.test"
+    mock_dir = _prepare_snapshot_capture(va, tmp_path)
+    cast("MagicMock", va.hass).services.async_call = AsyncMock(
+        side_effect=HomeAssistantError("Camera is unavailable")
+    )
+
+    with (
+        patch.object(va, "_get_snapshot_dir", new=mock_dir),
+        caplog.at_level(logging.WARNING, logger=_VA_LOGGER),
+    ):
+        now = datetime(2025, 1, 1, 12, 0, 0, tzinfo=dt.UTC)
+        path = await va._take_single_snapshot(camera_id, now)  # type: ignore[attr-defined]
+
+    assert path is None
+    assert va._metrics[camera_id].snapshot_failures == 1  # type: ignore[attr-defined]
+    messages = [r.message for r in caplog.records]
+    assert any(
+        "service call failed" in m and "Camera is unavailable" in m for m in messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_snapshot_service_timeout_counted_and_logged(
+    va: VideoAnalyzer,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wedged camera.snapshot call times out, is counted, and is logged."""
+    camera_id = "camera.test"
+    mock_dir = _prepare_snapshot_capture(va, tmp_path)
+    monkeypatch.setattr(va_mod, "_SNAPSHOT_SERVICE_TIMEOUT_SEC", 0.01)
+
+    async def wedged_call(*_args: object, **_kwargs: object) -> None:
+        await asyncio.sleep(5)
+
+    cast("MagicMock", va.hass).services.async_call = wedged_call
+
+    with (
+        patch.object(va, "_get_snapshot_dir", new=mock_dir),
+        caplog.at_level(logging.WARNING, logger=_VA_LOGGER),
+    ):
+        now = datetime(2025, 1, 1, 12, 0, 0, tzinfo=dt.UTC)
+        path = await va._take_single_snapshot(camera_id, now)  # type: ignore[attr-defined]
+
+    assert path is None
+    assert va._metrics[camera_id].snapshot_failures == 1  # type: ignore[attr-defined]
+    assert any("did not complete" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_snapshot_missing_file_counted_and_logged(
+    va: VideoAnalyzer,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Service success without a file on disk is counted and diagnosed."""
+    camera_id = "camera.test"
+    mock_dir = _prepare_snapshot_capture(va, tmp_path)
+    # File never appears despite the service call succeeding.
+    cast("MagicMock", va.hass).async_add_executor_job = AsyncMock(return_value=False)
+    monkeypatch.setattr(va_mod, "_SNAPSHOT_APPEAR_ATTEMPTS", 1)
+
+    with (
+        patch.object(va, "_get_snapshot_dir", new=mock_dir),
+        caplog.at_level(logging.WARNING, logger=_VA_LOGGER),
+    ):
+        now = datetime(2025, 1, 1, 12, 0, 0, tzinfo=dt.UTC)
+        path = await va._take_single_snapshot(camera_id, now)  # type: ignore[attr-defined]
+
+    assert path is None
+    assert va._metrics[camera_id].snapshot_failures == 1  # type: ignore[attr-defined]
+    assert any("never appeared on disk" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_snapshot_failure_streak_escalates_then_resets(
+    va: VideoAnalyzer,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Three consecutive failures escalate to ERROR; a success resets the streak."""
+    camera_id = "camera.test"
+    mock_dir = _prepare_snapshot_capture(va, tmp_path)
+    mock_hass = cast("MagicMock", va.hass)
+    mock_hass.services.async_call = AsyncMock(side_effect=HomeAssistantError("down"))
+
+    with (
+        patch.object(va, "_get_snapshot_dir", new=mock_dir),
+        caplog.at_level(logging.WARNING, logger=_VA_LOGGER),
+    ):
+        base = datetime(2025, 1, 1, 12, 0, 0, tzinfo=dt.UTC)
+        for i in range(3):
+            await va._take_single_snapshot(  # type: ignore[attr-defined]
+                camera_id, base + dt.timedelta(seconds=i)
+            )
+
+    failure_levels = [
+        r.levelno for r in caplog.records if "Snapshot capture failed" in r.message
+    ]
+    assert failure_levels == [logging.WARNING, logging.WARNING, logging.ERROR]
+    assert va._snapshot_fail_streak[camera_id] == 3  # type: ignore[attr-defined]
+
+    # A subsequent successful capture resets the streak.
+    mock_hass.services.async_call = AsyncMock()
+    mock_hass.async_add_executor_job = AsyncMock(return_value=True)
+    mock_hass.async_create_task = MagicMock(
+        side_effect=lambda coro: (coro.close(), MagicMock())[1]  # type: ignore[no-any-return]
+    )
+    with patch.object(va, "_get_snapshot_dir", new=mock_dir):
+        path = await va._take_single_snapshot(  # type: ignore[attr-defined]
+            camera_id, datetime(2025, 1, 1, 12, 1, 0, tzinfo=dt.UTC)
+        )
+
+    assert path is not None
+    assert camera_id not in va._snapshot_fail_streak  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_snapshot_inflight_guard_prevents_overlap(
+    va: VideoAnalyzer, tmp_path: Path
+) -> None:
+    """A second capture for the same camera is skipped while one is in flight."""
+    camera_id = "camera.test"
+    mock_dir = _prepare_snapshot_capture(va, tmp_path)
+    mock_hass = cast("MagicMock", va.hass)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_call(*_args: object, **_kwargs: object) -> None:
+        started.set()
+        await release.wait()
+
+    mock_hass.services.async_call = slow_call
+    mock_hass.async_create_task = MagicMock(
+        side_effect=lambda coro: (coro.close(), MagicMock())[1]  # type: ignore[no-any-return]
+    )
+
+    with patch.object(va, "_get_snapshot_dir", new=mock_dir):
+        now = datetime(2025, 1, 1, 12, 0, 0, tzinfo=dt.UTC)
+        first = asyncio.create_task(
+            va._take_single_snapshot(camera_id, now)  # type: ignore[attr-defined]
+        )
+        await started.wait()
+
+        # Overlapping tick for the same camera: skipped, no second service call.
+        overlap = await va._take_single_snapshot(camera_id, now)  # type: ignore[attr-defined]
+        assert overlap is None
+
+        release.set()
+        path = await first
+
+    assert path is not None
+    assert camera_id not in va._snapshot_inflight  # type: ignore[attr-defined]
+
+    # Guard is released: a fresh capture goes through again.
+    mock_hass.services.async_call = AsyncMock()
+    with patch.object(va, "_get_snapshot_dir", new=mock_dir):
+        again = await va._take_single_snapshot(  # type: ignore[attr-defined]
+            camera_id, datetime(2025, 1, 1, 12, 0, 1, tzinfo=dt.UTC)
+        )
+    assert again is not None
