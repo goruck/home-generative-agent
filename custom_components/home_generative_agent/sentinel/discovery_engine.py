@@ -8,6 +8,7 @@ import hashlib
 import json
 import logging
 import re
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, cast
 
 import voluptuous as vol
@@ -182,7 +183,22 @@ class SentinelDiscoveryEngine:
             self._options.get(CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS), default=3600
         )
         while not self._stop_event.is_set():
-            await self._run_once_guarded()
+            try:
+                await self._run_once_guarded()
+            except Exception:  # noqa: BLE001
+                # A dead loop silently disables discovery until the
+                # integration reloads (issue #465); drop the cycle and
+                # keep the loop alive.
+                self._log_limiter.warning(
+                    "cycle_error",
+                    "Discovery cycle failed unexpectedly; will retry next interval.",
+                    exc_info=True,
+                )
+            else:
+                self._log_limiter.recovered(
+                    "cycle_error",
+                    "Discovery cycle recovered after %d failed cycle(s).",
+                )
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=interval)
             except TimeoutError:
@@ -344,7 +360,11 @@ class SentinelDiscoveryEngine:
                 _DISCOVERY_LLM_TIMEOUT_S,
             )
             return
-        except (ValueError, TypeError, RuntimeError) as err:
+        except Exception as err:  # noqa: BLE001
+            # Provider errors (e.g. ollama.ResponseError for an un-pulled
+            # model, httpx transport failures) do not subclass the usual
+            # ValueError/RuntimeError families; a narrow catch here let them
+            # escape and kill the discovery loop (issue #465).
             self._log_limiter.warning(
                 "llm_call",
                 "Discovery LLM call failed: %s",
@@ -372,7 +392,7 @@ class SentinelDiscoveryEngine:
 
         payload.setdefault("schema_version", DISCOVERY_SCHEMA_VERSION)
         payload.setdefault("generated_at", now)
-        payload.setdefault("model", str(getattr(self._model, "model", "unknown")))
+        payload.setdefault("model", _resolved_model_name(self._model))
 
         try:
             validated = cast("dict[str, Any]", DISCOVERY_OUTPUT_SCHEMA(payload))
@@ -659,6 +679,28 @@ def _singularize_token(token: str) -> str:
     if len(token) > _MIN_PLURAL_TOKEN_LENGTH and token.endswith("s"):
         return token[:-1]
     return token
+
+
+def _resolved_model_name(model: Any) -> str:
+    """
+    Best-effort name of the model a runnable will actually invoke.
+
+    Models arrive here as bound runnables (``.with_config(...)``) whose
+    effective model lives in the binding's configurable section; raw chat
+    models expose it as a ``model`` attribute. Recording the resolved name
+    in discovery payloads makes model misconfiguration diagnosable from the
+    audit trail (issue #465).
+    """
+    config = getattr(model, "config", None)
+    if isinstance(config, Mapping):
+        configurable = config.get("configurable")
+        if isinstance(configurable, Mapping):
+            for key in ("model", "model_name"):
+                name = configurable.get(key)
+                if name:
+                    return str(name)
+    name = getattr(model, "model", None)
+    return str(name) if name else "unknown"
 
 
 def _coerce_int(value: object | None, default: int) -> int:

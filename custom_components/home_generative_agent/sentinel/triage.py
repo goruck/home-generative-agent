@@ -202,7 +202,11 @@ class SentinelTriageService:
                 triage_confidence=None,
                 summary="Triage timed out; defaulting to notify.",
             )
-        except (ValueError, TypeError, RuntimeError, OSError) as err:
+        except Exception as err:  # noqa: BLE001
+            # Fail-open must hold for *any* exception: provider errors such
+            # as ollama.ResponseError (un-pulled model) or httpx transport
+            # failures do not subclass the families above, and an escaped
+            # error here would abort finding processing (issue #465).
             self._log_limiter.warning(
                 "llm_call",
                 "Triage LLM call failed: %s; failing open to notify.",
