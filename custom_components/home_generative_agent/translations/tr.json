@@ -165,6 +165,9 @@
             "sentinel_require_pin_for_level_increase": "Özerklik düzeyi artışları için PIN iste",
             "sentinel_daily_digest_enabled": "Günlük özet bildirimini etkinleştir",
             "sentinel_daily_digest_time": "Günlük özet saati (SS:DD:SN)",
+            "sentinel_quiet_hours_start": "Sessiz saatler başlangıcı (seçili önem düzeylerini bastırır)",
+            "sentinel_quiet_hours_end": "Sessiz saatler bitişi",
+            "sentinel_quiet_hours_severities": "Sessiz saatlerde bastırılan önem düzeyleri",
             "sentinel_camera_entry_links": "Kamera giriş bağlantıları (JSON, isteğe bağlı)",
             "critical_action_pin": "Sentinel düzey artırma PIN'i (isteğe bağlı)",
             "notify_service": "Sentinel Bildirim Servisi (isteğe bağlı)",
@@ -195,7 +198,9 @@
       },
       "error": {
         "invalid_camera_entry_links": "Kamera varlık kimliklerini giriş varlık kimliklerinin listesiyle eşleştiren bir JSON nesnesi olmalıdır, ör. {{\"camera.driveway\": [\"lock.front_door\"]}}.",
-        "invalid_pin": "PIN 4-10 rakam olmalıdır."
+        "invalid_pin": "PIN 4-10 rakam olmalıdır.",
+        "quiet_hours_incomplete": "Sessiz saatler için başlangıç ve bitişin ikisini de ayarlayın (veya ikisini de devre dışı bırakın).",
+        "invalid_quiet_hours": "Sessiz saatler 0 ile 23 arasında yerel saat olmalıdır."
       }
     },
     "feature": {
