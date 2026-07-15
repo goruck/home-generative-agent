@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from custom_components.home_generative_agent.explain.prompts import SYSTEM_PROMPT
 from custom_components.home_generative_agent.sentinel.dynamic_rules import (
@@ -48,6 +48,9 @@ from custom_components.home_generative_agent.snapshot.schema import (
     SnapshotEntity,
     validate_snapshot,
 )
+
+if TYPE_CHECKING:
+    from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
 
 
 def _base_snapshot() -> FullStateSnapshot:
@@ -152,61 +155,246 @@ def test_open_entry_while_away_triggers() -> None:
     assert len(findings) == 1
 
 
-def test_appliance_power_duration_triggers() -> None:
-    """High power draw over duration should trigger and expose friendly_name."""
-    snapshot = _base_snapshot()
-    snapshot["derived"]["now"] = "2025-01-01T02:00:00+00:00"
-    snapshot["entities"] = [
-        {
-            "entity_id": "sensor.washer_power",
-            "domain": "sensor",
-            "state": "250",
-            "friendly_name": "Washer Power",
-            "area": "Laundry",
-            "attributes": {"device_class": "power", "unit_of_measurement": "W"},
-            "last_changed": "2025-01-01T00:00:00+00:00",
-            "last_updated": "2025-01-01T00:00:00+00:00",
-        }
-    ]
+def _power_entity(
+    state: str,
+    last_changed: str,
+    entity_id: str = "sensor.washer_power",
+    friendly_name: str = "Washer Power",
+) -> SnapshotEntity:
+    return {
+        "entity_id": entity_id,
+        "domain": "sensor",
+        "state": state,
+        "friendly_name": friendly_name,
+        "area": "Laundry",
+        "attributes": {"device_class": "power", "unit_of_measurement": "W"},
+        "last_changed": last_changed,
+        "last_updated": last_changed,
+    }
 
-    findings = AppliancePowerDurationRule(duration_min=30).evaluate(snapshot)
+
+def _evaluate_power_at(
+    rule: AppliancePowerDurationRule,
+    now: str,
+    state: str,
+    friendly_name: str = "Washer Power",
+) -> list[AnomalyFinding]:
+    snapshot = _base_snapshot()
+    snapshot["derived"]["now"] = now
+    snapshot["entities"] = [
+        _power_entity(state=state, last_changed=now, friendly_name=friendly_name)
+    ]
+    return rule.evaluate(snapshot)
+
+
+def test_appliance_power_duration_triggers() -> None:
+    """Observed high power draw over the duration should trigger."""
+    rule = AppliancePowerDurationRule(duration_min=30)
+
+    # First observation above threshold starts the episode — no finding yet,
+    # regardless of how old last_changed is (issue #461: last_changed
+    # measures value-unchangedness, not running time).
+    assert _evaluate_power_at(rule, "2025-01-01T00:00:00+00:00", "250") == []
+
+    findings = _evaluate_power_at(rule, "2025-01-01T02:00:00+00:00", "250")
     assert len(findings) == 1
     assert findings[0].evidence["friendly_name"] == "Washer Power"
+    assert findings[0].evidence["duration_min"] == 120
+    assert findings[0].evidence["since"] == "2025-01-01T00:00:00+00:00"
+
+
+def test_appliance_power_duration_fluctuating_reading_still_triggers() -> None:
+    """
+    A wattage that changes every few seconds must not reset the clock.
+
+    Regression test for issue #461 (false-negative direction): HA advances
+    last_changed on every value change, so `now - last_changed` never reaches
+    the threshold for real-power sensors even when the appliance has been
+    running for hours.
+    """
+    rule = AppliancePowerDurationRule(duration_min=30)
+    snapshot = _base_snapshot()
+
+    # First observation above threshold; the reading just changed.
+    snapshot["derived"]["now"] = "2025-01-01T00:00:00+00:00"
+    snapshot["entities"] = [
+        _power_entity(state="250", last_changed="2025-01-01T00:00:00+00:00")
+    ]
+    assert rule.evaluate(snapshot) == []
+
+    # 35 minutes later the value changed again (last_changed == now), but it
+    # has been above threshold since the first observation.
+    snapshot["derived"]["now"] = "2025-01-01T00:35:00+00:00"
+    snapshot["entities"] = [
+        _power_entity(state="260", last_changed="2025-01-01T00:35:00+00:00")
+    ]
+    findings = rule.evaluate(snapshot)
+    assert len(findings) == 1
+    assert findings[0].evidence["duration_min"] == 35
+
+
+def test_appliance_power_duration_resets_below_threshold() -> None:
+    """Dropping below the power threshold starts a fresh episode."""
+    rule = AppliancePowerDurationRule(duration_min=30)
+    snapshot = _base_snapshot()
+
+    snapshot["derived"]["now"] = "2025-01-01T00:00:00+00:00"
+    snapshot["entities"] = [
+        _power_entity(state="250", last_changed="2025-01-01T00:00:00+00:00")
+    ]
+    assert rule.evaluate(snapshot) == []
+
+    # Falls below threshold: episode ends.
+    snapshot["derived"]["now"] = "2025-01-01T00:20:00+00:00"
+    snapshot["entities"] = [
+        _power_entity(state="50", last_changed="2025-01-01T00:20:00+00:00")
+    ]
+    assert rule.evaluate(snapshot) == []
+
+    # Rises again at 00:25: the clock restarts, so 25 minutes into the new
+    # episode (00:50, which is 50 min after the very first observation) it
+    # must not fire yet.
+    snapshot["derived"]["now"] = "2025-01-01T00:25:00+00:00"
+    snapshot["entities"] = [
+        _power_entity(state="240", last_changed="2025-01-01T00:25:00+00:00")
+    ]
+    assert rule.evaluate(snapshot) == []
+    snapshot["derived"]["now"] = "2025-01-01T00:50:00+00:00"
+    snapshot["entities"] = [
+        _power_entity(state="255", last_changed="2025-01-01T00:50:00+00:00")
+    ]
+    assert rule.evaluate(snapshot) == []
+
+    # 30 minutes into the new episode it fires.
+    snapshot["derived"]["now"] = "2025-01-01T00:55:00+00:00"
+    snapshot["entities"] = [
+        _power_entity(state="245", last_changed="2025-01-01T00:55:00+00:00")
+    ]
+    findings = rule.evaluate(snapshot)
+    assert len(findings) == 1
+    assert findings[0].evidence["duration_min"] == 30
+
+
+def test_appliance_power_duration_resets_on_unavailable() -> None:
+    """A non-numeric reading (e.g. unavailable) starts a fresh episode."""
+    rule = AppliancePowerDurationRule(duration_min=30)
+    snapshot = _base_snapshot()
+
+    snapshot["derived"]["now"] = "2025-01-01T00:00:00+00:00"
+    snapshot["entities"] = [
+        _power_entity(state="250", last_changed="2025-01-01T00:00:00+00:00")
+    ]
+    assert rule.evaluate(snapshot) == []
+
+    snapshot["derived"]["now"] = "2025-01-01T00:20:00+00:00"
+    snapshot["entities"] = [
+        _power_entity(state="unavailable", last_changed="2025-01-01T00:20:00+00:00")
+    ]
+    assert rule.evaluate(snapshot) == []
+
+    # Back above threshold: new episode, no finding yet.
+    snapshot["derived"]["now"] = "2025-01-01T00:40:00+00:00"
+    snapshot["entities"] = [
+        _power_entity(state="250", last_changed="2025-01-01T00:40:00+00:00")
+    ]
+    assert rule.evaluate(snapshot) == []
+
+    # The new episode is a fresh clock, not a blacklist: 30 minutes after
+    # recovery the rule fires.
+    snapshot["derived"]["now"] = "2025-01-01T01:10:00+00:00"
+    snapshot["entities"] = [
+        _power_entity(state="250", last_changed="2025-01-01T01:10:00+00:00")
+    ]
+    findings = rule.evaluate(snapshot)
+    assert len(findings) == 1
+    assert findings[0].evidence["duration_min"] == 30
+
+
+def test_appliance_power_duration_resets_when_entity_leaves_snapshot() -> None:
+    """An entity missing from a snapshot ends its episode."""
+    rule = AppliancePowerDurationRule(duration_min=30)
+    assert _evaluate_power_at(rule, "2025-01-01T00:00:00+00:00", "250") == []
+
+    # Snapshot without the entity (e.g. removed or filtered out).
+    snapshot = _base_snapshot()
+    snapshot["derived"]["now"] = "2025-01-01T00:20:00+00:00"
+    assert rule.evaluate(snapshot) == []
+
+    # Reappears above threshold: fresh episode, so nothing fires at what
+    # would have been 40 minutes into the original episode.
+    assert _evaluate_power_at(rule, "2025-01-01T00:40:00+00:00", "250") == []
+
+
+def test_appliance_power_duration_kw_unit() -> None:
+    """Readings in kW are converted to W before the threshold comparison."""
+    rule = AppliancePowerDurationRule(duration_min=30)
+    snapshot = _base_snapshot()
+    entity = _power_entity(state="0.25", last_changed="2025-01-01T00:00:00+00:00")
+    entity["attributes"] = {"device_class": "power", "unit_of_measurement": "kW"}
+
+    snapshot["derived"]["now"] = "2025-01-01T00:00:00+00:00"
+    snapshot["entities"] = [entity]
+    assert rule.evaluate(snapshot) == []
+
+    snapshot["derived"]["now"] = "2025-01-01T00:35:00+00:00"
+    snapshot["entities"] = [entity]
+    findings = rule.evaluate(snapshot)
+    assert len(findings) == 1
+    assert findings[0].evidence["power_w"] == 250.0
+
+
+def test_appliance_power_duration_ignores_non_finite_readings() -> None:
+    """A 'nan' state must not count as above threshold (nan < x is False)."""
+    rule = AppliancePowerDurationRule(duration_min=30)
+    assert _evaluate_power_at(rule, "2025-01-01T00:00:00+00:00", "nan") == []
+    assert _evaluate_power_at(rule, "2025-01-01T01:00:00+00:00", "nan") == []
 
 
 def test_appliance_power_duration_friendly_name_excluded_from_anomaly_id() -> None:
     """Changing friendly_name must not change the anomaly_id hash."""
-    snapshot = _base_snapshot()
-    snapshot["derived"]["now"] = "2025-01-01T02:00:00+00:00"
-    snapshot["entities"] = [
-        {
-            "entity_id": "sensor.washer_power",
-            "domain": "sensor",
-            "state": "250",
-            "friendly_name": "Washer Power",
-            "area": "Laundry",
-            "attributes": {"device_class": "power", "unit_of_measurement": "W"},
-            "last_changed": "2025-01-01T00:00:00+00:00",
-            "last_updated": "2025-01-01T00:00:00+00:00",
-        }
-    ]
-    findings_a = AppliancePowerDurationRule(duration_min=30).evaluate(snapshot)
+    rule_a = AppliancePowerDurationRule(duration_min=30)
+    assert (
+        _evaluate_power_at(
+            rule_a, "2025-01-01T00:00:00+00:00", "250", friendly_name="Washer Power"
+        )
+        == []
+    )
+    findings_a = _evaluate_power_at(
+        rule_a, "2025-01-01T02:00:00+00:00", "250", friendly_name="Washer Power"
+    )
 
-    snapshot["entities"] = [
-        {
-            "entity_id": "sensor.washer_power",
-            "domain": "sensor",
-            "state": "250",
-            "friendly_name": "My Washing Machine Power",
-            "area": "Laundry",
-            "attributes": {"device_class": "power", "unit_of_measurement": "W"},
-            "last_changed": "2025-01-01T00:00:00+00:00",
-            "last_updated": "2025-01-01T00:00:00+00:00",
-        }
-    ]
-    findings_b = AppliancePowerDurationRule(duration_min=30).evaluate(snapshot)
+    rule_b = AppliancePowerDurationRule(duration_min=30)
+    assert (
+        _evaluate_power_at(
+            rule_b,
+            "2025-01-01T00:00:00+00:00",
+            "250",
+            friendly_name="My Washing Machine Power",
+        )
+        == []
+    )
+    findings_b = _evaluate_power_at(
+        rule_b, "2025-01-01T02:00:00+00:00", "250", friendly_name="My Washing Machine"
+    )
 
     assert findings_a[0].anomaly_id == findings_b[0].anomaly_id
+
+
+def test_appliance_power_duration_anomaly_id_stable_within_episode() -> None:
+    """
+    An ongoing episode keeps one anomaly_id even as duration/power change.
+
+    duration_min grows and power_w fluctuates every cycle; if they entered the
+    hash, each cycle would mint a new anomaly and defeat pending-prompt
+    suppression.
+    """
+    rule = AppliancePowerDurationRule(duration_min=30)
+    assert _evaluate_power_at(rule, "2025-01-01T00:00:00+00:00", "250") == []
+    findings_a = _evaluate_power_at(rule, "2025-01-01T00:30:00+00:00", "250")
+    findings_b = _evaluate_power_at(rule, "2025-01-01T00:45:00+00:00", "310")
+    assert len(findings_a) == len(findings_b) == 1
+    assert findings_a[0].anomaly_id == findings_b[0].anomaly_id
+    assert findings_b[0].evidence["duration_min"] == 45
 
 
 def test_camera_entry_unsecured_triggers() -> None:
