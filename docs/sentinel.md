@@ -88,7 +88,7 @@ These rules run on every detection cycle without any configuration or approval.
 
 | Rule | Description |
 |---|---|
-| `appliance_power_duration` | Appliance drawing power beyond a configurable duration threshold (e.g. *"Washer drew about 296 W for 633 min, above the 60 min threshold. Check it."*) |
+| `appliance_power_duration` | Appliance observed drawing more than 100 W continuously for longer than 60 min, measured from when the sensor was first seen above the threshold (e.g. *"Washer drew about 296 W for 633 min, above the 60 min threshold. Check it."*) |
 
 **Cameras**
 

@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.35] - 2026-07-14
+
+### Fixed
+
+- **Appliance power-duration findings now measure how long the appliance has actually been drawing power** — the `appliance_power_duration` rule compared the current time against the sensor's `last_changed`, which Home Assistant only advances when the reported *value* changes. For steady or quantized readings (e.g. an estimated compressor power that sits on one value for hours) the reported `duration_min` was really "minutes since the number last changed", and for real-power sensors whose wattage fluctuates every few seconds the clock reset constantly, so the rule could stay silent even though the recorder-history enrichment added in 3.14.24 usually corrected the timestamp before rules ran. The rule now tracks the rising edge itself — remembering when each sensor was first observed at or above the power threshold across evaluation cycles — and reports exactly that observed running time, independent of recorder availability. This also removes a false-positive path where an appliance idling between 10 W and the 100 W threshold (so the recorder enrichment considered it "on" the whole time) could fire instantly on a brief spike with a duration of up to 30 days. Dropping below the threshold, going unavailable, or disappearing from the snapshot ends the episode and starts a fresh clock; after a restart an already-running appliance is re-detected once it has been observed above the threshold for the full duration. Repeated findings for one ongoing episode now also share one anomaly identity instead of minting a new one each evaluation cycle, so snoozing works for the whole episode. Thanks [@andymcmanus](https://github.com/andymcmanus) for the detailed report with audit-trail evidence. Closes [#461](https://github.com/goruck/home-generative-agent/issues/461).
+
 ## [3.14.34] - 2026-07-14
 
 ### Fixed
