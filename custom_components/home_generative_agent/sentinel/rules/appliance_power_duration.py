@@ -8,6 +8,12 @@ from typing import TYPE_CHECKING
 
 from homeassistant.util import dt as dt_util
 
+from custom_components.home_generative_agent.const import (
+    RECOMMENDED_SENTINEL_APPLIANCE_DURATION_MIN as DEFAULT_DURATION_MIN,
+)
+from custom_components.home_generative_agent.const import (
+    RECOMMENDED_SENTINEL_APPLIANCE_POWER_THRESHOLD_W as DEFAULT_POWER_THRESHOLD_W,
+)
 from custom_components.home_generative_agent.sentinel.models import (
     AnomalyFinding,
     build_anomaly_id,
@@ -19,9 +25,6 @@ if TYPE_CHECKING:
     from custom_components.home_generative_agent.snapshot.schema import (
         FullStateSnapshot,
     )
-
-DEFAULT_POWER_THRESHOLD_W = 100.0
-DEFAULT_DURATION_MIN = 60
 
 # Evidence keys excluded from the anomaly-id hash: friendly_name is cosmetic,
 # and duration_min/power_w change on every evaluation cycle of an ongoing

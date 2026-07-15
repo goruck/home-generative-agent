@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.15.0] - 2026-07-15
+
+### Added
+
+- **Sentinel rules can now be tuned and scoped per entity from the settings UI** — two long-requested controls land in the Sentinel subentry's Advanced settings. First, a generic per-rule entity exclusion map (`sentinel_rule_entity_exclusions`): a JSON object mapping an anomaly type to a list of entity IDs (with `"*"` as a wildcard for all types) that the engine applies to every finding source — built-in static rules, approved dynamic rules, and baseline deviations — before correlation and dispatch. This is the supported way to stop, say, inverter air-conditioner power sensors from tripping `appliance_power_duration` during perfectly normal all-day compressor runs, while the rule stays live for ovens, irons, and anything genuinely left on; previously the only options were snoozing the entire finding type (losing the safety value for every appliance) or hiding the sensors. Second, the `appliance_power_duration` thresholds are now configurable: `sentinel_appliance_power_threshold_w` (default 100 W) and `sentinel_appliance_duration_min` (default 60 min) replace the previously hardcoded values, so households with legitimately long-running high-draw devices can raise the bar instead of suppressing alerts. Malformed exclusion values (hand-edited `.storage`, bad restore) are validated in the settings form and additionally degrade safely at runtime — a bad entry is dropped rather than ever disabling the detection engine. Documented in the Sentinel guide under Built-in Static Rules. Thanks [@andymcmanus](https://github.com/andymcmanus) for the detailed feature request with real-world Daikin inverter data. Closes [#462](https://github.com/goruck/home-generative-agent/issues/462).
+
 ## [3.14.35] - 2026-07-14
 
 ### Fixed

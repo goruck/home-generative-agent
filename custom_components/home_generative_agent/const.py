@@ -224,6 +224,21 @@ CONF_SENTINEL_AREA_NOTIFY_MAP = "sentinel_area_notify_map"
 CONF_SENTINEL_CAMERA_ENTRY_LINKS: str = "sentinel_camera_entry_links"
 RECOMMENDED_SENTINEL_CAMERA_ENTRY_LINKS: dict[str, list[str]] = {}
 
+# ---- Sentinel per-rule entity exclusions (Issue #462) ----
+# Maps anomaly type (rule_id) -> list of entity_ids to exclude from that rule.
+# The wildcard key "*" excludes the listed entities from every rule.  Applied
+# generically by the engine to all findings (static rules, dynamic rules, and
+# baseline deviations) before correlation and dispatch.
+# e.g. {"appliance_power_duration": ["sensor.living_room_ac_power"]}
+CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: str = "sentinel_rule_entity_exclusions"
+RECOMMENDED_SENTINEL_RULE_ENTITY_EXCLUSIONS: dict[str, list[str]] = {}
+
+# ---- Sentinel appliance power duration rule thresholds (Issue #462) ----
+CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W = "sentinel_appliance_power_threshold_w"
+CONF_SENTINEL_APPLIANCE_DURATION_MIN = "sentinel_appliance_duration_min"
+RECOMMENDED_SENTINEL_APPLIANCE_POWER_THRESHOLD_W: float = 100.0
+RECOMMENDED_SENTINEL_APPLIANCE_DURATION_MIN: int = 60
+
 # ---- Sentinel LLM triage (Issue #262) ----
 CONF_SENTINEL_TRIAGE_ENABLED = "sentinel_triage_enabled"
 CONF_SENTINEL_TRIAGE_TIMEOUT_SECONDS = "sentinel_triage_timeout_seconds"

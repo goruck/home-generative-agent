@@ -169,12 +169,15 @@
             "sentinel_quiet_hours_end": "Sessiz saatler bitişi",
             "sentinel_quiet_hours_severities": "Sessiz saatlerde bastırılan önem düzeyleri",
             "sentinel_camera_entry_links": "Kamera giriş bağlantıları (JSON, isteğe bağlı)",
+            "sentinel_rule_entity_exclusions": "Kural varlık hariç tutmaları (JSON, isteğe bağlı)",
             "critical_action_pin": "Sentinel düzey artırma PIN'i (isteğe bağlı)",
             "notify_service": "Sentinel Bildirim Servisi (isteğe bağlı)",
             "sentinel_baseline_weekly_patterns": "Haftanın günü temellerini etkinleştir (hafta sonu yanlış pozitiflerini azaltır)",
             "sentinel_baseline_dow_min_samples": "HGG temel minimum örnek sayısı (slot başına veri haftası)",
             "sentinel_baseline_min_samples": "Sapma uyarıları tetiklenmeden önce gereken minimum örnek sayısı",
-            "sentinel_baseline_sustained_minutes": "Döngüsel yük kapısı: Uyarı vermeden önce eşiğin üzerinde geçen dakika (0 = devre dışı)"
+            "sentinel_baseline_sustained_minutes": "Döngüsel yük kapısı: Uyarı vermeden önce eşiğin üzerinde geçen dakika (0 = devre dışı)",
+            "sentinel_appliance_power_threshold_w": "Cihaz güç kuralı: güç eşiği (W)",
+            "sentinel_appliance_duration_min": "Cihaz güç kuralı: uyarıdan önceki süre (dakika)"
           }
         },
         "setup_mode": {
@@ -200,7 +203,8 @@
         "invalid_camera_entry_links": "Kamera varlık kimliklerini giriş varlık kimliklerinin listesiyle eşleştiren bir JSON nesnesi olmalıdır, ör. {{\"camera.driveway\": [\"lock.front_door\"]}}.",
         "invalid_pin": "PIN 4-10 rakam olmalıdır.",
         "quiet_hours_incomplete": "Sessiz saatler için başlangıç ve bitişin ikisini de ayarlayın (veya ikisini de devre dışı bırakın).",
-        "invalid_quiet_hours": "Sessiz saatler 0 ile 23 arasında yerel saat olmalıdır."
+        "invalid_quiet_hours": "Sessiz saatler 0 ile 23 arasında yerel saat olmalıdır.",
+        "invalid_rule_entity_exclusions": "Bir anomali türünü (veya tüm türler için \"*\") varlık kimliği listeleriyle eşleştiren bir JSON nesnesi olmalıdır, ör. {{\"appliance_power_duration\": [\"sensor.ac_power\"]}}."
       }
     },
     "feature": {

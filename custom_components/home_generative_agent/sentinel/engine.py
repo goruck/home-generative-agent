@@ -19,6 +19,8 @@ from custom_components.home_generative_agent.const import (
     ACTION_POLICY_AUTO_EXECUTE,
     ACTION_POLICY_BLOCKED,
     CONF_EXPLAIN_ENABLED,
+    CONF_SENTINEL_APPLIANCE_DURATION_MIN,
+    CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
     CONF_SENTINEL_AUTO_EXEC_CANARY_MODE,
     CONF_SENTINEL_AUTONOMY_LEVEL,
     CONF_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
@@ -37,7 +39,10 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_QUIET_HOURS_SEVERITIES,
     CONF_SENTINEL_QUIET_HOURS_START,
     CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
+    CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS,
     CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
+    RECOMMENDED_SENTINEL_APPLIANCE_DURATION_MIN,
+    RECOMMENDED_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
     RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE,
     RECOMMENDED_SENTINEL_AUTONOMY_LEVEL,
     RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
@@ -205,10 +210,22 @@ class SentinelEngine:
         self._trigger_scheduler = SentinelTriggerScheduler()
         self._execution_service = SentinelExecutionService(dict(options))
         self._log_limiter = RepeatingLogLimiter(LOGGER)
+        self._rule_entity_exclusions = _parse_rule_entity_exclusions(
+            options.get(CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS)
+        )
         self._rules = [
             UnlockedLockAtNightRule(),
             OpenEntryWhileAwayRule(),
-            AppliancePowerDurationRule(),
+            AppliancePowerDurationRule(
+                power_threshold_w=_coerce_float(
+                    options.get(CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W),
+                    RECOMMENDED_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
+                ),
+                duration_min=_coerce_int(
+                    options.get(CONF_SENTINEL_APPLIANCE_DURATION_MIN),
+                    default=RECOMMENDED_SENTINEL_APPLIANCE_DURATION_MIN,
+                ),
+            ),
             CameraEntryUnsecuredRule(
                 camera_entry_links=cast(
                     "dict[str, list[str]]",
@@ -587,6 +604,9 @@ class SentinelEngine:
                     )
                 all_findings.extend(dynamic_findings)
 
+        if self._rule_entity_exclusions:
+            all_findings = self._filter_excluded_findings(all_findings)
+
         if not all_findings:
             return
 
@@ -604,6 +624,41 @@ class SentinelEngine:
                 explain_enabled,
                 trigger_source=trigger_source,
             )
+
+    # ---------------------------------------------------------------------- #
+    # Per-rule entity exclusions (Issue #462)
+    # ---------------------------------------------------------------------- #
+
+    def _filter_excluded_findings(
+        self, findings: list[AnomalyFinding]
+    ) -> list[AnomalyFinding]:
+        """
+        Drop findings whose triggering entities are user-excluded for their type.
+
+        A finding is dropped when *any* of its triggering entities appears in
+        the exclusion set for the finding's type or in the wildcard ("*") set —
+        excluding one entity of a multi-entity finding expresses "stop alerting
+        about this entity".  Applied to every finding source (static rules,
+        dynamic rules, baseline deviations) before correlation, so exclusions
+        are generic across rules rather than per-rule logic.
+        """
+        wildcard = self._rule_entity_exclusions.get("*", frozenset())
+        kept: list[AnomalyFinding] = []
+        for finding in findings:
+            excluded = (
+                self._rule_entity_exclusions.get(finding.type, frozenset()) | wildcard
+            )
+            if excluded and any(
+                entity_id in excluded for entity_id in finding.triggering_entities
+            ):
+                LOGGER.debug(
+                    "Sentinel dropped %s finding for %s (user entity exclusion).",
+                    finding.type,
+                    finding.triggering_entities,
+                )
+                continue
+            kept.append(finding)
+        return kept
 
     # ---------------------------------------------------------------------- #
     # Cyclical load sustained deviation gate
@@ -1155,6 +1210,32 @@ async def _auto_execute_finding(
         "actions": results,
         "execution_id": execution_id,
     }
+
+
+def _parse_rule_entity_exclusions(value: object | None) -> dict[str, frozenset[str]]:
+    """
+    Normalize the configured rule→entity exclusion map.
+
+    Accepts the stored option shape (dict of anomaly type -> list of entity
+    IDs, with "*" as a wildcard type) and drops anything malformed rather than
+    raising — a bad exclusion entry must never disable the engine.
+    """
+    if not isinstance(value, dict):
+        return {}
+    exclusions: dict[str, frozenset[str]] = {}
+    for rule_type, entity_ids in cast("dict[object, object]", value).items():
+        if not isinstance(rule_type, str) or not rule_type:
+            continue
+        if not isinstance(entity_ids, (list, tuple, set, frozenset)):
+            continue
+        cleaned = frozenset(
+            item.strip()
+            for item in cast("list[object]", list(entity_ids))
+            if isinstance(item, str) and item.strip()
+        )
+        if cleaned:
+            exclusions[rule_type] = cleaned
+    return exclusions
 
 
 def _coerce_int(value: object | None, default: int) -> int:
