@@ -88,7 +88,7 @@ These rules run on every detection cycle without any configuration or approval.
 
 | Rule | Description |
 |---|---|
-| `appliance_power_duration` | Appliance observed drawing more than 100 W continuously for longer than 60 min, measured from when the sensor was first seen above the threshold (e.g. *"Washer drew about 296 W for 633 min, above the 60 min threshold. Check it."*) |
+| `appliance_power_duration` | Appliance observed drawing more than `sentinel_appliance_power_threshold_w` (default 100 W) continuously for longer than `sentinel_appliance_duration_min` (default 60 min), measured from when the sensor was first seen above the threshold (e.g. *"Washer drew about 296 W for 633 min, above the 60 min threshold. Check it."*). Both thresholds are configurable in the Sentinel subentry (Advanced setup). |
 
 **Cameras**
 
@@ -105,6 +105,19 @@ These rules run on every detection cycle without any configuration or approval.
 | `phone_battery_low_at_night_home` | Any phone battery sensor below 20% at night while someone is home |
 
 Static rules are registered automatically at startup. They cannot be deactivated through the proposal flow.
+
+### Per-entity rule exclusions
+
+`sentinel_rule_entity_exclusions` (Sentinel subentry, Advanced setup) excludes specific entities from specific rules without silencing the rule for everything else. It is a JSON object mapping an anomaly type to a list of entity IDs; the key `"*"` excludes the listed entities from every rule:
+
+```json
+{
+  "appliance_power_duration": ["sensor.living_room_ac_power", "sensor.bedroom_ac_power"],
+  "*": ["sensor.test_bench_power"]
+}
+```
+
+Exclusions are applied generically by the engine to every finding source — built-in static rules, approved dynamic rules, and baseline deviations — before correlation and dispatch. A finding is dropped when any of its triggering entities is excluded for its type. This is the supported way to stop, for example, HVAC power sensors from tripping `appliance_power_duration` during long compressor runs while keeping the rule active for ovens, irons, and other appliances.
 
 ---
 
@@ -462,6 +475,9 @@ In the Sentinel subentry:
 | `sentinel_require_pin_for_level_increase` | Require PIN to increase autonomy level |
 | `sentinel_area_notify_map` | Area name → notify service (e.g. `{"Garage": "notify.mobile_app_garage_tablet"}`) |
 | `sentinel_camera_entry_links` | Camera entity ID → list of entry/lock entity IDs in other areas (e.g. `{"camera.driveway": ["lock.front_door"]}`) |
+| `sentinel_rule_entity_exclusions` | Anomaly type (or `"*"` for all) → list of entity IDs excluded from that rule (e.g. `{"appliance_power_duration": ["sensor.ac_power"]}`) |
+| `sentinel_appliance_power_threshold_w` | `appliance_power_duration`: power level treated as "running" (default 100 W) |
+| `sentinel_appliance_duration_min` | `appliance_power_duration`: continuous minutes above the threshold before alerting (default 60) |
 | `audit_hot_max_records` | Max records in local hot store (default 500) |
 
 Discovery and baseline both require `sentinel_enabled` to be `true`. Discovery and triage also require a configured chat model.

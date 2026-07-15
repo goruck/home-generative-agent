@@ -42,6 +42,8 @@ from custom_components.home_generative_agent.const import (
     CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
     CONF_OPENAI_COMPATIBLE_EMBEDDING_MODEL,
     CONF_OPENAI_COMPATIBLE_EMBEDDING_URL,
+    CONF_SENTINEL_APPLIANCE_DURATION_MIN,
+    CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
     CONF_SENTINEL_CAMERA_ENTRY_LINKS,
     CONF_SENTINEL_DAILY_DIGEST_ENABLED,
     CONF_SENTINEL_DAILY_DIGEST_TIME,
@@ -53,6 +55,7 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_QUIET_HOURS_SEVERITIES,
     CONF_SENTINEL_QUIET_HOURS_START,
     CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
+    CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS,
     CONF_SUMMARIZATION_MODEL_PROVIDER,
     CONF_VLM_PROVIDER,
     CONFIG_ENTRY_VERSION,
@@ -558,6 +561,38 @@ def test_resolve_runtime_options_prefers_sentinel_subentry() -> None:
     assert options[CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT] == "salt"
 
 
+def test_resolve_runtime_options_propagates_exclusions_and_thresholds() -> None:
+    """Exclusions and appliance thresholds flow from subentry data to options."""
+    exclusions = {"appliance_power_duration": ["sensor.ac_power"]}
+    entry = DummyEntry(options={})
+    sentinel = DummySubentry(
+        "sentinel1",
+        SUBENTRY_TYPE_SENTINEL,
+        "Sentinel",
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: exclusions,
+            CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W: 500.0,
+            CONF_SENTINEL_APPLIANCE_DURATION_MIN: 180,
+        },
+    )
+    entry.subentries[sentinel.subentry_id] = sentinel
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS] == exclusions
+    assert options[CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W] == 500.0
+    assert options[CONF_SENTINEL_APPLIANCE_DURATION_MIN] == 180
+
+    # Without the keys in subentry data, defaults apply.
+    sentinel.data.pop(CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS)
+    sentinel.data.pop(CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W)
+    sentinel.data.pop(CONF_SENTINEL_APPLIANCE_DURATION_MIN)
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS] == {}
+    assert options[CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W] == 100.0
+    assert options[CONF_SENTINEL_APPLIANCE_DURATION_MIN] == 60
+
+
 def test_resolve_runtime_options_sentinel_notify_fallback() -> None:
     """Sentinel notify service should override global only when explicitly set."""
     entry = DummyEntry(options={CONF_NOTIFY_SERVICE: "notify.mobile_app_global"})
@@ -1053,6 +1088,118 @@ async def test_sentinel_flow_camera_entry_links_wrong_structure(hass: Any) -> No
     assert result is not None
     assert result.get("type") == "form"
     assert (result.get("errors") or {}).get("base") == "invalid_camera_entry_links"
+
+
+def test_sentinel_default_payload_contains_exclusions_and_thresholds() -> None:
+    """_default_payload() includes exclusions (empty) and appliance thresholds."""
+    payload = _default_payload()
+    assert payload[CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS] == {}
+    assert payload[CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W] == 100.0
+    assert payload[CONF_SENTINEL_APPLIANCE_DURATION_MIN] == 60
+
+
+def test_sentinel_schema_contains_exclusions_and_threshold_fields(hass: Any) -> None:
+    """_schema() includes the exclusions text selector and threshold selectors."""
+    flow = SentinelSubentryFlow()
+    flow.hass = hass
+    schema = flow._schema(_default_payload())
+    schema_keys = {str(k) for k in schema.schema}
+    assert CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS in schema_keys
+    assert CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W in schema_keys
+    assert CONF_SENTINEL_APPLIANCE_DURATION_MIN in schema_keys
+
+
+@pytest.mark.asyncio
+async def test_sentinel_flow_rule_entity_exclusions_valid_json(hass: Any) -> None:
+    """Flow parses a valid JSON string into a dict for rule entity exclusions."""
+    flow, _entry = _quiet_hours_flow(hass)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: (
+                '{"appliance_power_duration": ["sensor.ac_power"], '
+                '"*": ["sensor.test_bench"]}'
+            ),
+        }
+    )
+    assert result.get("type") == "create_entry"
+    data = result.get("data")
+    assert data is not None
+    assert data[CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS] == {
+        "appliance_power_duration": ["sensor.ac_power"],
+        "*": ["sensor.test_bench"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_sentinel_flow_rule_entity_exclusions_invalid_json(hass: Any) -> None:
+    """Flow returns an error for malformed rule entity exclusions JSON."""
+    flow, _entry = _quiet_hours_flow(hass)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: "not valid json {{",
+        }
+    )
+    assert result is not None
+    assert result.get("type") == "form"
+    assert (result.get("errors") or {}).get("base") == "invalid_rule_entity_exclusions"
+
+
+@pytest.mark.asyncio
+async def test_sentinel_flow_rule_entity_exclusions_wrong_structure(hass: Any) -> None:
+    """Flow returns an error when exclusions are not dict[str, list[str]]."""
+    flow, _entry = _quiet_hours_flow(hass)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            # Value is a string, not a list — wrong structure.
+            CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: (
+                '{"appliance_power_duration": "sensor.ac_power"}'
+            ),
+        }
+    )
+    assert result is not None
+    assert result.get("type") == "form"
+    assert (result.get("errors") or {}).get("base") == "invalid_rule_entity_exclusions"
+
+
+@pytest.mark.asyncio
+async def test_sentinel_flow_accepts_appliance_thresholds(hass: Any) -> None:
+    """Flow stores appliance threshold fields when provided in user_input."""
+    flow, _entry = _quiet_hours_flow(hass)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W: 500,
+            CONF_SENTINEL_APPLIANCE_DURATION_MIN: 180,
+        }
+    )
+    assert result.get("type") == "create_entry"
+    data = result.get("data")
+    assert data is not None
+    assert data[CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W] == 500
+    assert data[CONF_SENTINEL_APPLIANCE_DURATION_MIN] == 180
 
 
 def _quiet_hours_flow(hass: Any) -> tuple[SentinelSubentryFlow, DummyEntry]:

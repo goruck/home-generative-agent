@@ -31,6 +31,8 @@ from ..const import (  # noqa: TID252
     CONF_CRITICAL_ACTION_PIN,
     CONF_EXPLAIN_ENABLED,
     CONF_NOTIFY_SERVICE,
+    CONF_SENTINEL_APPLIANCE_DURATION_MIN,
+    CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
     CONF_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
     CONF_SENTINEL_BASELINE_ENABLED,
     CONF_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS,
@@ -55,9 +57,12 @@ from ..const import (  # noqa: TID252
     CONF_SENTINEL_QUIET_HOURS_SEVERITIES,
     CONF_SENTINEL_QUIET_HOURS_START,
     CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
+    CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS,
     CRITICAL_PIN_MAX_LEN,
     CRITICAL_PIN_MIN_LEN,
     RECOMMENDED_EXPLAIN_ENABLED,
+    RECOMMENDED_SENTINEL_APPLIANCE_DURATION_MIN,
+    RECOMMENDED_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
     RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
     RECOMMENDED_SENTINEL_BASELINE_ENABLED,
     RECOMMENDED_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS,
@@ -78,6 +83,7 @@ from ..const import (  # noqa: TID252
     RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
     RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES,
     RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
+    RECOMMENDED_SENTINEL_RULE_ENTITY_EXCLUSIONS,
     SENTINEL_SEVERITIES,
     SUBENTRY_TYPE_SENTINEL,
 )
@@ -88,6 +94,49 @@ def _camera_entry_links_json(payload: dict[str, Any]) -> str:
     """Serialize sentinel_camera_entry_links from payload to a JSON string."""
     value = payload.get(
         CONF_SENTINEL_CAMERA_ENTRY_LINKS, RECOMMENDED_SENTINEL_CAMERA_ENTRY_LINKS
+    )
+    if not isinstance(value, dict):
+        value = {}
+    return json.dumps(value)
+
+
+def _parse_json_entity_map(
+    data: dict[str, Any],
+    key: str,
+    errors: dict[str, str],
+    error_key: str,
+) -> None:
+    """
+    Parse a JSON ``dict[str, list[str]]`` text field into ``data[key]`` in place.
+
+    Records ``error_key`` in ``errors`` (leaving the raw string in ``data``)
+    when the value is not valid JSON of that shape.  Empty input stores ``{}``.
+    """
+    raw = str(data.get(key, "") or "").strip()
+    if not raw or raw == "{}":
+        data[key] = {}
+        return
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        errors.setdefault("base", error_key)
+        return
+    if not isinstance(parsed, dict) or not all(
+        isinstance(k, str)
+        and isinstance(v, list)
+        and all(isinstance(i, str) for i in v)
+        for k, v in parsed.items()
+    ):
+        errors.setdefault("base", error_key)
+        return
+    data[key] = parsed
+
+
+def _rule_entity_exclusions_json(payload: dict[str, Any]) -> str:
+    """Serialize sentinel_rule_entity_exclusions from payload to a JSON string."""
+    value = payload.get(
+        CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS,
+        RECOMMENDED_SENTINEL_RULE_ENTITY_EXCLUSIONS,
     )
     if not isinstance(value, dict):
         value = {}
@@ -202,6 +251,12 @@ def _default_payload() -> dict[str, Any]:
         CONF_SENTINEL_BASELINE_SUSTAINED_MINUTES: (
             RECOMMENDED_SENTINEL_BASELINE_SUSTAINED_MINUTES
         ),
+        CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W: (
+            RECOMMENDED_SENTINEL_APPLIANCE_POWER_THRESHOLD_W
+        ),
+        CONF_SENTINEL_APPLIANCE_DURATION_MIN: (
+            RECOMMENDED_SENTINEL_APPLIANCE_DURATION_MIN
+        ),
         CONF_EXPLAIN_ENABLED: RECOMMENDED_EXPLAIN_ENABLED,
         CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: (
             RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE
@@ -213,6 +268,9 @@ def _default_payload() -> dict[str, Any]:
             RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES
         ),
         CONF_SENTINEL_CAMERA_ENTRY_LINKS: RECOMMENDED_SENTINEL_CAMERA_ENTRY_LINKS,
+        CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: (
+            RECOMMENDED_SENTINEL_RULE_ENTITY_EXCLUSIONS
+        ),
     }
 
 
@@ -361,6 +419,24 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                 ),
             ): NumberSelector(NumberSelectorConfig(min=0, max=120, step=5)),
             vol.Required(
+                CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
+                default=float(
+                    payload.get(
+                        CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
+                        RECOMMENDED_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
+                    )
+                ),
+            ): NumberSelector(NumberSelectorConfig(min=10, max=10000, step=10)),
+            vol.Required(
+                CONF_SENTINEL_APPLIANCE_DURATION_MIN,
+                default=int(
+                    payload.get(
+                        CONF_SENTINEL_APPLIANCE_DURATION_MIN,
+                        RECOMMENDED_SENTINEL_APPLIANCE_DURATION_MIN,
+                    )
+                ),
+            ): NumberSelector(NumberSelectorConfig(min=5, max=1440, step=5)),
+            vol.Required(
                 CONF_EXPLAIN_ENABLED,
                 default=bool(
                     payload.get(CONF_EXPLAIN_ENABLED, RECOMMENDED_EXPLAIN_ENABLED)
@@ -424,6 +500,13 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                     "suggested_value": _camera_entry_links_json(payload),
                 },
                 default=_camera_entry_links_json(payload),
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+            vol.Optional(
+                CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS,
+                description={
+                    "suggested_value": _rule_entity_exclusions_json(payload),
+                },
+                default=_rule_entity_exclusions_json(payload),
             ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             vol.Optional(
                 CONF_CRITICAL_ACTION_PIN,
@@ -690,6 +773,9 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
             suggested[CONF_SENTINEL_CAMERA_ENTRY_LINKS] = _camera_entry_links_json(
                 payload
             )
+            suggested[CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS] = (
+                _rule_entity_exclusions_json(payload)
+            )
             for key in (CONF_SENTINEL_QUIET_HOURS_START, CONF_SENTINEL_QUIET_HOURS_END):
                 suggested[key] = _quiet_hour_str(payload, key)
             return self.async_show_form(
@@ -756,23 +842,18 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
             else list(RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES)
         )
 
-        raw_links = str(data.get(CONF_SENTINEL_CAMERA_ENTRY_LINKS, "") or "").strip()
-        if raw_links and raw_links != "{}":
-            try:
-                parsed_links = json.loads(raw_links)
-                if not isinstance(parsed_links, dict) or not all(
-                    isinstance(k, str)
-                    and isinstance(v, list)
-                    and all(isinstance(i, str) for i in v)
-                    for k, v in parsed_links.items()
-                ):
-                    errors.setdefault("base", "invalid_camera_entry_links")
-                else:
-                    data[CONF_SENTINEL_CAMERA_ENTRY_LINKS] = parsed_links
-            except (json.JSONDecodeError, ValueError):
-                errors.setdefault("base", "invalid_camera_entry_links")
-        else:
-            data[CONF_SENTINEL_CAMERA_ENTRY_LINKS] = {}
+        _parse_json_entity_map(
+            data,
+            CONF_SENTINEL_CAMERA_ENTRY_LINKS,
+            errors,
+            "invalid_camera_entry_links",
+        )
+        _parse_json_entity_map(
+            data,
+            CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS,
+            errors,
+            "invalid_rule_entity_exclusions",
+        )
 
         if errors:
             # Strip any raw (non-dict) value for camera_entry_links so the schema
@@ -783,11 +864,18 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                 error_payload.get(CONF_SENTINEL_CAMERA_ENTRY_LINKS), dict
             ):
                 error_payload.pop(CONF_SENTINEL_CAMERA_ENTRY_LINKS, None)
+            if not isinstance(
+                error_payload.get(CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS), dict
+            ):
+                error_payload.pop(CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS, None)
             error_suggested: dict[str, Any] = {
                 k: v for k, v in error_payload.items() if k != CONF_CRITICAL_ACTION_PIN
             }
             error_suggested[CONF_SENTINEL_CAMERA_ENTRY_LINKS] = (
                 _camera_entry_links_json(error_payload)
+            )
+            error_suggested[CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS] = (
+                _rule_entity_exclusions_json(error_payload)
             )
             for key in (CONF_SENTINEL_QUIET_HOURS_START, CONF_SENTINEL_QUIET_HOURS_END):
                 error_suggested[key] = _quiet_hour_str(error_payload, key)

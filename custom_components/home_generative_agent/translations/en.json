@@ -145,7 +145,8 @@
         "invalid_camera_entry_links": "Must be a JSON object mapping camera entity IDs to lists of entry entity IDs, e.g. {{\"camera.driveway\": [\"lock.front_door\"]}}.",
         "invalid_pin": "PIN must be 4-10 digits.",
         "quiet_hours_incomplete": "Set both quiet hours start and end (or set both to Disabled).",
-        "invalid_quiet_hours": "Quiet hours must be local hours between 0 and 23."
+        "invalid_quiet_hours": "Quiet hours must be local hours between 0 and 23.",
+        "invalid_rule_entity_exclusions": "Must be a JSON object mapping an anomaly type (or \"*\" for all types) to lists of entity IDs, e.g. {{\"appliance_power_duration\": [\"sensor.ac_power\"]}}."
       },
       "initiate_flow": {
         "reconfigure": "Reconfigure Sentinel",
@@ -189,6 +190,8 @@
             "sentinel_baseline_dow_min_samples": "DOW baseline minimum samples (weeks of data per slot)",
             "sentinel_baseline_min_samples": "Baseline minimum samples before deviation alerts fire",
             "sentinel_baseline_sustained_minutes": "Cyclical load gate: minutes above threshold before alerting (0 = disabled)",
+            "sentinel_appliance_power_threshold_w": "Appliance power rule: power threshold (W)",
+            "sentinel_appliance_duration_min": "Appliance power rule: duration before alert (minutes)",
             "explain_enabled": "Enable LLM explanations for sentinel findings",
             "sentinel_require_pin_for_level_increase": "Require PIN for autonomy level increases",
             "sentinel_daily_digest_enabled": "Enable daily digest notification",
@@ -197,6 +200,7 @@
             "sentinel_quiet_hours_end": "Quiet hours end",
             "sentinel_quiet_hours_severities": "Quiet hours suppressed severities",
             "sentinel_camera_entry_links": "Camera entry links (JSON, optional)",
+            "sentinel_rule_entity_exclusions": "Rule entity exclusions (JSON, optional)",
             "critical_action_pin": "Sentinel level-increase PIN (optional)",
             "notify_service": "Sentinel Notify Service (optional)"
           }
