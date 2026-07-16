@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -14,6 +15,7 @@ from custom_components.home_generative_agent.const import (
 )
 from custom_components.home_generative_agent.sentinel.engine import (
     SentinelEngine,
+    _entity_excluded,
     _parse_rule_entity_exclusions,
 )
 from custom_components.home_generative_agent.sentinel.rules.appliance_power_duration import (
@@ -186,6 +188,44 @@ def test_parse_exclusions_drops_malformed_entries() -> None:
     assert parsed == {"rule_b": frozenset({"sensor.kept"})}
 
 
+def test_parse_exclusions_keeps_glob_patterns() -> None:
+    """Glob patterns are ordinary entries and survive normalization."""
+    parsed = _parse_rule_entity_exclusions(
+        {"camera_entry_unsecured": ["camera.map_*", "camera.?_screenshot"]}
+    )
+    assert parsed == {
+        "camera_entry_unsecured": frozenset({"camera.map_*", "camera.?_screenshot"})
+    }
+
+
+# --------------------------------------------------------------------------- #
+# _entity_excluded matching
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("entity_id", "excluded", "expected"),
+    [
+        ("camera.map_home", frozenset({"camera.map_home"}), True),
+        ("camera.map_home", frozenset({"camera.map_*"}), True),
+        ("camera.map_alice_google", frozenset({"camera.map_*"}), True),
+        ("camera.driveway", frozenset({"camera.map_*"}), False),
+        ("camera.driveway", frozenset[str](), False),
+        # "*" in a pattern matches across dots — whole-domain exclusion works.
+        ("person.alice", frozenset({"person.*"}), True),
+        # Matching is case-sensitive like entity IDs themselves.
+        ("camera.Map_home", frozenset({"camera.map_*"}), False),
+    ],
+)
+def test_entity_excluded_matching(
+    entity_id: str,
+    excluded: frozenset[str],
+    expected: bool,  # noqa: FBT001
+) -> None:
+    """Exact IDs and fnmatch-style globs both match; others do not."""
+    assert _entity_excluded(entity_id, excluded) is expected
+
+
 # --------------------------------------------------------------------------- #
 # Engine exclusion filtering
 # --------------------------------------------------------------------------- #
@@ -221,6 +261,26 @@ async def test_engine_wildcard_exclusion_applies_to_all_types(
     _patch_snapshot(monkeypatch, _open_door_snapshot())
     engine = _make_engine(
         {CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: {"*": ["binary_sensor.front_door"]}}
+    )
+
+    await engine._run_once()
+
+    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+    assert notifier.calls == []
+
+
+@pytest.mark.asyncio
+async def test_engine_drops_finding_for_glob_excluded_entity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A glob exclusion entry drops findings for every matching entity."""
+    _patch_snapshot(monkeypatch, _open_door_snapshot())
+    engine = _make_engine(
+        {
+            CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: {
+                "open_entry_while_away": ["binary_sensor.front_*"]
+            }
+        }
     )
 
     await engine._run_once()
@@ -296,3 +356,78 @@ def test_engine_appliance_thresholds_default_when_unset() -> None:
     )
     assert rule._power_threshold_w == 100.0
     assert rule._duration_min == 60
+
+
+# --------------------------------------------------------------------------- #
+# Event-driven trigger exclusions (#481)
+# --------------------------------------------------------------------------- #
+
+
+def _state_change_event(entity_id: str) -> Any:
+    """Build a minimal state-change event for _on_state_changed."""
+    state = MagicMock()
+    state.entity_id = entity_id
+    state.attributes = {}
+    event = MagicMock()
+    event.data = {"entity_id": entity_id, "new_state": state}
+    return event
+
+
+def test_trigger_excluded_entity_not_enqueued() -> None:
+    """An entity excluded for its mapped anomaly type never enqueues."""
+    engine = _make_engine(
+        {
+            CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: {
+                "camera_entry_unsecured": ["camera.map_home"]
+            }
+        }
+    )
+
+    engine._on_state_changed(_state_change_event("camera.map_home"))
+    assert engine._trigger_scheduler.queue_depth == 0
+
+    engine._on_state_changed(_state_change_event("camera.driveway"))
+    assert engine._trigger_scheduler.queue_depth == 1
+
+
+def test_trigger_glob_excluded_entity_not_enqueued() -> None:
+    """Glob exclusion entries suppress triggers for all matching entities."""
+    engine = _make_engine(
+        {
+            CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: {
+                "camera_entry_unsecured": ["camera.map_*"]
+            }
+        }
+    )
+
+    engine._on_state_changed(_state_change_event("camera.map_alice_google"))
+    engine._on_state_changed(_state_change_event("camera.map_bob_mapbox"))
+    assert engine._trigger_scheduler.queue_depth == 0
+
+    engine._on_state_changed(_state_change_event("camera.driveway"))
+    assert engine._trigger_scheduler.queue_depth == 1
+
+
+def test_trigger_wildcard_exclusion_suppresses_all_types() -> None:
+    """The "*" type key suppresses event triggers for the listed entities."""
+    engine = _make_engine({CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: {"*": ["person.bob"]}})
+
+    engine._on_state_changed(_state_change_event("person.bob"))
+    assert engine._trigger_scheduler.queue_depth == 0
+
+    engine._on_state_changed(_state_change_event("person.alice"))
+    assert engine._trigger_scheduler.queue_depth == 1
+
+
+def test_trigger_exclusion_for_other_type_still_enqueues() -> None:
+    """An exclusion for an unrelated anomaly type does not suppress triggers."""
+    engine = _make_engine(
+        {
+            CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: {
+                "appliance_power_duration": ["camera.map_home"]
+            }
+        }
+    )
+
+    engine._on_state_changed(_state_change_event("camera.map_home"))
+    assert engine._trigger_scheduler.queue_depth == 1

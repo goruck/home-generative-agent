@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import fnmatch
 import logging
 import re
 from datetime import datetime, timedelta
@@ -397,7 +398,12 @@ class SentinelEngine:
         Handle a HA state-change event.
 
         Maps the changed entity to a sentinel anomaly type and enqueues a
-        trigger in the scheduler.  Irrelevant entities are silently ignored.
+        trigger in the scheduler.  Irrelevant entities are silently ignored,
+        as are entities the user excluded for that anomaly type via
+        ``sentinel_rule_entity_exclusions`` — their findings would be dropped
+        anyway, so they must not wake the engine or occupy queue slots
+        (Issue #481: chatty non-security camera/person entities flooding the
+        bounded trigger queue).
         """
         entity_id: str = event.data.get("entity_id", "")
         new_state: State | None = event.data.get("new_state")
@@ -409,7 +415,19 @@ class SentinelEngine:
         if anomaly_type is None:
             return
 
+        if self._is_trigger_excluded(entity_id, anomaly_type):
+            return
+
         self._trigger_scheduler.enqueue(TriggerRecord(anomaly_type=anomaly_type))
+
+    def _is_trigger_excluded(self, entity_id: str, anomaly_type: str) -> bool:
+        """Return True when the entity is excluded for this anomaly type."""
+        if not self._rule_entity_exclusions:
+            return False
+        excluded = self._rule_entity_exclusions.get(
+            anomaly_type, frozenset()
+        ) | self._rule_entity_exclusions.get("*", frozenset())
+        return bool(excluded) and _entity_excluded(entity_id, excluded)
 
     # ---------------------------------------------------------------------- #
     # Run loop
@@ -635,12 +653,13 @@ class SentinelEngine:
         """
         Drop findings whose triggering entities are user-excluded for their type.
 
-        A finding is dropped when *any* of its triggering entities appears in
-        the exclusion set for the finding's type or in the wildcard ("*") set —
-        excluding one entity of a multi-entity finding expresses "stop alerting
-        about this entity".  Applied to every finding source (static rules,
-        dynamic rules, baseline deviations) before correlation, so exclusions
-        are generic across rules rather than per-rule logic.
+        A finding is dropped when *any* of its triggering entities matches an
+        entry (exact ID or glob pattern) in the exclusion set for the finding's
+        type or in the wildcard ("*") set — excluding one entity of a
+        multi-entity finding expresses "stop alerting about this entity".
+        Applied to every finding source (static rules, dynamic rules, baseline
+        deviations) before correlation, so exclusions are generic across rules
+        rather than per-rule logic.
         """
         wildcard = self._rule_entity_exclusions.get("*", frozenset())
         kept: list[AnomalyFinding] = []
@@ -649,7 +668,8 @@ class SentinelEngine:
                 self._rule_entity_exclusions.get(finding.type, frozenset()) | wildcard
             )
             if excluded and any(
-                entity_id in excluded for entity_id in finding.triggering_entities
+                _entity_excluded(entity_id, excluded)
+                for entity_id in finding.triggering_entities
             ):
                 LOGGER.debug(
                     "Sentinel dropped %s finding for %s (user entity exclusion).",
@@ -1217,8 +1237,9 @@ def _parse_rule_entity_exclusions(value: object | None) -> dict[str, frozenset[s
     Normalize the configured rule→entity exclusion map.
 
     Accepts the stored option shape (dict of anomaly type -> list of entity
-    IDs, with "*" as a wildcard type) and drops anything malformed rather than
-    raising — a bad exclusion entry must never disable the engine.
+    IDs or fnmatch-style glob patterns, with "*" as a wildcard type) and drops
+    anything malformed rather than raising — a bad exclusion entry must never
+    disable the engine.
     """
     if not isinstance(value, dict):
         return {}
@@ -1236,6 +1257,20 @@ def _parse_rule_entity_exclusions(value: object | None) -> dict[str, frozenset[s
         if cleaned:
             exclusions[rule_type] = cleaned
     return exclusions
+
+
+def _entity_excluded(entity_id: str, excluded: frozenset[str]) -> bool:
+    """
+    Return True when *entity_id* matches any exclusion entry.
+
+    Entries are matched as exact entity IDs first, then as fnmatch-style glob
+    patterns (e.g. ``camera.map_*``), so a handful of patterned entities (map
+    cameras, per-person template cameras) can be excluded without listing each
+    ID. ``fnmatchcase`` keeps matching case-sensitive and platform-independent.
+    """
+    if entity_id in excluded:
+        return True
+    return any(fnmatch.fnmatchcase(entity_id, pattern) for pattern in excluded)
 
 
 def _coerce_int(value: object | None, default: int) -> int:

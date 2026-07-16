@@ -108,16 +108,19 @@ Static rules are registered automatically at startup. They cannot be deactivated
 
 ### Per-entity rule exclusions
 
-`sentinel_rule_entity_exclusions` (Sentinel subentry, Advanced setup) excludes specific entities from specific rules without silencing the rule for everything else. It is a JSON object mapping an anomaly type to a list of entity IDs; the key `"*"` excludes the listed entities from every rule:
+`sentinel_rule_entity_exclusions` (Sentinel subentry, Advanced setup) excludes specific entities from specific rules without silencing the rule for everything else. It is a JSON object mapping an anomaly type to a list of entity IDs or fnmatch-style glob patterns (`*`, `?`, `[...]`); the key `"*"` excludes the listed entities from every rule:
 
 ```json
 {
   "appliance_power_duration": ["sensor.living_room_ac_power", "sensor.bedroom_ac_power"],
+  "camera_entry_unsecured": ["camera.map_*"],
   "*": ["sensor.test_bench_power"]
 }
 ```
 
-Exclusions are applied generically by the engine to every finding source — built-in static rules, approved dynamic rules, and baseline deviations — before correlation and dispatch. A finding is dropped when any of its triggering entities is excluded for its type. This is the supported way to stop, for example, HVAC power sensors from tripping `appliance_power_duration` during long compressor runs while keeping the rule active for ovens, irons, and other appliances.
+Exclusions are applied generically by the engine to every finding source — built-in static rules, approved dynamic rules, and baseline deviations — before correlation and dispatch. A finding is dropped when any of its triggering entities matches an entry (exact ID or glob) for its type. This is the supported way to stop, for example, HVAC power sensors from tripping `appliance_power_duration` during long compressor runs while keeping the rule active for ovens, irons, and other appliances.
+
+Exclusions also suppress **event-driven triggering**: a state change from an excluded entity no longer wakes the engine or occupies a slot in the bounded trigger queue. This matters for non-security uses of the `camera` and `person` domains — for example, the `person_location` platform exposes map snapshots as `camera.*` entities whose state flips on every GPS update; without an exclusion these flood the trigger queue with security-critical `camera_entry_unsecured` triggers and crowd out real events. Excluding them with a glob like `{"camera_entry_unsecured": ["camera.map_*"]}` (or under `"*"`) stops both the findings and the trigger noise. Note that excluded entities still appear in snapshots and remain visible to other rules and anomaly types.
 
 ---
 
@@ -475,7 +478,7 @@ In the Sentinel subentry:
 | `sentinel_require_pin_for_level_increase` | Require PIN to increase autonomy level |
 | `sentinel_area_notify_map` | Area name → notify service (e.g. `{"Garage": "notify.mobile_app_garage_tablet"}`) |
 | `sentinel_camera_entry_links` | Camera entity ID → list of entry/lock entity IDs in other areas (e.g. `{"camera.driveway": ["lock.front_door"]}`) |
-| `sentinel_rule_entity_exclusions` | Anomaly type (or `"*"` for all) → list of entity IDs excluded from that rule (e.g. `{"appliance_power_duration": ["sensor.ac_power"]}`) |
+| `sentinel_rule_entity_exclusions` | Anomaly type (or `"*"` for all) → list of entity IDs or glob patterns excluded from that rule and from event-driven triggering (e.g. `{"appliance_power_duration": ["sensor.ac_power"], "camera_entry_unsecured": ["camera.map_*"]}`) |
 | `sentinel_appliance_power_threshold_w` | `appliance_power_duration`: power level treated as "running" (default 100 W) |
 | `sentinel_appliance_duration_min` | `appliance_power_duration`: continuous minutes above the threshold before alerting (default 60) |
 | `audit_hot_max_records` | Max records in local hot store (default 500) |
