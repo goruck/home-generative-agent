@@ -234,7 +234,9 @@ This document covers the named constants that affect integration behaviour, orga
 | `VIDEO_ANALYZER_SIMILARITY_THRESHOLD` | `const.py` | `0.89` | Cosine similarity threshold for caption deduplication. Captions above this score are considered duplicates and suppressed. |
 | `VIDEO_ANALYZER_DELETE_SNAPSHOTS` | `const.py` | `False` | Whether to delete snapshot files after analysis |
 | `VIDEO_ANALYZER_SNAPSHOTS_TO_KEEP` | `const.py` | `200` | Rolling snapshot retention count per camera |
-| `VIDEO_ANALYZER_TRIGGER_ON_MOTION` | `const.py` | `True` | Trigger analysis on HA motion sensor state changes |
+| `VIDEO_ANALYZER_TRIGGER_ON_MOTION` | `const.py` | `True` | Trigger analysis on HA motion sensor state changes (also gates the ring-mqtt `event_select` trigger) |
+| `VIDEO_ANALYZER_EVENT_SELECT_WINDOW` | `const.py` | `30` (s) | Snapshot-loop window after a ring-mqtt `event_select` eventId change; each new eventId extends it |
+| `VIDEO_ANALYZER_EVENT_SELECT_MAX_WINDOW` | `const.py` | `300` (s) | Cap on total event_select window length across extensions; hitting it flushes the batch |
 | `VIDEO_ANALYZER_FACE_CROP` | `const.py` | `False` | Crop detected faces before sending to face recognition |
 | `VIDEO_ANALYZER_SAVE_LATEST` | `const.py` | `True` | Publish a stable `_latest/latest.jpg` alongside each snapshot |
 | `_MAX_BATCH` | `core/video_analyzer.py` | `5` | Maximum frames per analysis batch |
