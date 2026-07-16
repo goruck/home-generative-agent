@@ -112,8 +112,13 @@ The [ring-mqtt add-on](https://github.com/tsightler/ring-mqtt) bridges Ring devi
 
 - `binary_sensor.<name>_motion` — the doorbell's or camera's own motion sensor. This stays `on` for a configurable duration (10–180 s, default 180 s) then reverts to `off` automatically.
 - `camera.<name>_snapshot` — the associated camera entity for snapshots.
+- `select.<name>_event_select` — an event-history selector whose `eventId` attribute changes on every Ring event.
 
 The analyzer starts a snapshot loop when `binary_sensor.<name>_motion` goes `on` and cancels it when it goes `off`, collecting frames every 3 seconds across the full motion window before flushing as a batch.
+
+**Battery-powered Ring cameras** (e.g. Ring Battery Doorbell Plus) may not push `binary_sensor.*_motion` promptly or reliably over MQTT. For these, the analyzer also listens for `eventId` changes on `select.<name>_event_select` entities. When the `eventId` changes, the associated camera is resolved (same three-tier lookup as motion sensors) and the same snapshot loop starts. Because ring-mqtt sends no corresponding "event over" signal on this entity, the loop runs for a fixed 30-second window and then flushes the collected frames as a batch; another `eventId` change during the window extends it (total window length is capped at 5 minutes so continuous events cannot defer the flush forever).
+
+Both triggers coexist safely via loop ownership: the window timer only ever ends a loop that `event_select` itself started. If the motion sensor started the loop (or fires `on` while an `event_select` loop is running), the motion sensor owns the lifecycle — the window timer is retired and the loop runs until motion returns to `off`, exactly as before. Retained-state replays are ignored: an `eventId` that appears when the entity leaves `unknown`/`unavailable` (HA startup, MQTT broker reconnect, ring-mqtt add-on restart) carries the *previous* event and does not trigger. No configuration is needed; the `event_select` path is detected automatically.
 
 **Important:** ring-mqtt cameras are resolved using the [device registry](#motion--camera-resolution) rather than name matching. This is necessary because Ring Alarm motion sensors (indoor PIRs) often share a name prefix with the doorbell — e.g. `binary_sensor.front_door_motion` (a wall PIR) and `binary_sensor.front_door_motion_3` (the doorbell). The device registry approach selects the sensor that shares a device entry with the camera, avoiding false bindings to unrelated sensors.
 
@@ -137,7 +142,7 @@ The official Ring HA integration communicates via the Ring cloud. Camera entitie
 
 ### Motion → camera resolution
 
-When a `binary_sensor.*` motion event fires, the integration resolves the associated camera using a three-tier lookup:
+When a `binary_sensor.*` motion event (or a `select.*_event_select` `eventId` change) fires, the integration resolves the associated camera using a three-tier lookup:
 
 **Tier 1 — Explicit override map** (checked first)
 
@@ -165,6 +170,8 @@ Applied in order:
 1. Direct substitution: `binary_sensor.X` → `camera.X`
 2. VMD-suffix strip: `binary_sensor.X_vmd1` → `camera.X`
 3. `_motion`-suffix strip: `binary_sensor.X_motion` → `camera.X` or `camera.X_snapshot`
+
+For `select.X_event_select` entities the heuristic strips the `_event_select` suffix instead: `select.X_event_select` → `camera.X` or `camera.X_snapshot`.
 
 If none of the three tiers resolves to an existing camera entity, the motion event is silently ignored for that sensor.
 

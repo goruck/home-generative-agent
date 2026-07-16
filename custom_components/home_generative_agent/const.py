@@ -702,6 +702,16 @@ VIDEO_ANALYZER_SIMILARITY_THRESHOLD = 0.85
 VIDEO_ANALYZER_DELETE_SNAPSHOTS = False
 VIDEO_ANALYZER_SNAPSHOTS_TO_KEEP = 200
 VIDEO_ANALYZER_TRIGGER_ON_MOTION = True
+# How long (seconds) the snapshot loop runs after an event_select eventId change
+# (ring-mqtt battery cameras, issue #466). These entities publish a new eventId per
+# Ring event but no "event over" signal, so the loop ends on a fixed window that
+# each new eventId extends. 30 s at the 3 s motion interval yields ~10 frames.
+VIDEO_ANALYZER_EVENT_SELECT_WINDOW = 30
+# Cap on total window length across extensions: continuous eventId churn (busy
+# street, or a misbehaving entity) must not defer the flush and grow the frame
+# buffer forever. When the cap is hit the loop flushes; a later eventId starts
+# a fresh window.
+VIDEO_ANALYZER_EVENT_SELECT_MAX_WINDOW = 300
 VIDEO_ANALYZER_MOTION_CAMERA_MAP: dict = {}
 CONF_VIDEO_ANALYZER_MOTION_CAMERA_MAP = "video_analyzer_motion_camera_map"
 VIDEO_ANALYZER_FACE_CROP = False

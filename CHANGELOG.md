@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.16.0] - 2026-07-16
+
+### Added
+
+- **Battery-powered Ring cameras now trigger proactive video analysis reliably via ring-mqtt's `event_select` entity** — battery Ring hardware (e.g. Ring Battery Doorbell Plus) often doesn't push `binary_sensor.*_motion` promptly or at all over MQTT, so motion events were missed entirely unless users built workaround automations. The video analyzer now also listens for `eventId` attribute changes on `select.<camera>_event_select` entities, which ring-mqtt publishes for every Ring event. When the `eventId` changes, the camera is resolved through the same three-tier lookup as motion sensors (override map → device registry → name heuristics, including the `camera.<name>_snapshot` variant) and the standard motion snapshot loop starts — no configuration needed. Because `event_select` has no "event over" signal, the loop ends on a fixed 30-second window that each new `eventId` extends, capped at 5 minutes total so continuous events can't defer the analysis flush indefinitely. The window only ever governs loops it started: a loop the motion binary sensor started (or takes over by firing `on`) is immune to the timer and runs until motion returns to `off`, exactly as before, so hybrid cameras with both signals keep their full motion window. Retained-state replays are ignored — an `eventId` that appears when the entity leaves `unknown`/`unavailable` (HA restart, MQTT broker reconnect, ring-mqtt add-on restart) belongs to the previous event and no longer risks a spurious burst of snapshots on every camera at once. Thanks [@andymcmanus](https://github.com/andymcmanus) for identifying the `event_select` signal during #460 testing. Closes [#466](https://github.com/goruck/home-generative-agent/issues/466).
+
+### Fixed
+
+- **A camera leaving the `recording` state no longer flushes a motion-triggered analysis batch mid-event** — when a motion (or event_select) loop owned a camera whose entity also toggled through `recording`, the recording-exit handler flushed the held frames early, splitting one event into two analysis batches. The flush is now skipped while a motion loop owns the camera; the motion lifecycle flushes the whole window as one batch.
+- **A crashed snapshot loop no longer strands its captured frames** — if the per-camera snapshot loop died unexpectedly (e.g. a filesystem error), frames it had already buffered were silently dropped or leaked into the next event's batch. The loop teardown now always flushes whatever was captured.
+
 ## [3.15.0] - 2026-07-15
 
 ### Added

@@ -28,6 +28,14 @@ Covers (test plan items):
 - Snapshot capture failure visibility (issue #464): camera.snapshot is called
   blocking, service errors/timeouts/missing files are counted and logged with
   a cause, and repeated consecutive failures escalate to ERROR then reset
+- event_select trigger (issue #466): select.*_event_select eventId changes
+  resolve the camera and start the motion loop; a fixed window (extended by
+  each new eventId, capped in total) ends the loop and flushes; the window
+  only governs loops event_select started (motion-owned loops are immune and
+  motion ON takes over an event_select loop); retained-state replays after
+  unknown/unavailable are ignored; motion OFF retires the window; a crashed
+  loop task still flushes; recording-stop does not flush a camera owned by
+  an active motion loop
 """
 
 from __future__ import annotations
@@ -1380,3 +1388,466 @@ async def test_snapshot_inflight_guard_prevents_overlap(
             camera_id, datetime(2025, 1, 1, 12, 0, 1, tzinfo=dt.UTC)
         )
     assert again is not None
+
+
+# ---------------------------------------------------------------------------
+# event_select trigger (issue #466): ring-mqtt battery cameras
+# ---------------------------------------------------------------------------
+
+
+def _stub_bg_task(va: VideoAnalyzer) -> MagicMock:
+    """Replace _create_background_task with a stub that closes coroutines."""
+
+    def _consume(coro: Any, _name: str) -> MagicMock:
+        coro.close()
+        task = MagicMock()
+        task.done.return_value = False
+        return task
+
+    stub = MagicMock(side_effect=_consume)
+    va._create_background_task = stub  # type: ignore[method-assign]
+    return stub
+
+
+def _select_event(
+    entity_id: str, old_event_id: str | None, new_event_id: str | None
+) -> MagicMock:
+    """Build a fake state_changed Event for an event_select entity."""
+    event = MagicMock()
+    old_state = (
+        None
+        if old_event_id is None
+        else MagicMock(attributes={"eventId": old_event_id})
+    )
+    new_state = (
+        None
+        if new_event_id is None
+        else MagicMock(attributes={"eventId": new_event_id})
+    )
+    event.data = {
+        "entity_id": entity_id,
+        "old_state": old_state,
+        "new_state": new_state,
+    }
+    return event
+
+
+def _state_event(entity_id: str, old: str | None, new: str) -> MagicMock:
+    """Build a fake state_changed Event carrying plain state strings."""
+    event = MagicMock()
+    event.data = {
+        "entity_id": entity_id,
+        "old_state": None if old is None else MagicMock(state=old),
+        "new_state": MagicMock(state=new),
+    }
+    return event
+
+
+def test_resolve_event_select_direct_name(hass: MagicMock, entry: MagicMock) -> None:
+    """select.X_event_select resolves to camera.X when that entity exists."""
+    va = _make_va_with_states(hass, entry, ["camera.front_door"])
+    result = va._resolve_camera_from_event_select(  # type: ignore[attr-defined]
+        "select.front_door_event_select"
+    )
+    assert result == "camera.front_door"
+
+
+def test_resolve_event_select_ring_mqtt_snapshot(
+    hass: MagicMock, entry: MagicMock
+) -> None:
+    """Ring-MQTT: select.X_event_select resolves to camera.X_snapshot."""
+    va = _make_va_with_states(hass, entry, ["camera.front_door_snapshot"])
+    result = va._resolve_camera_from_event_select(  # type: ignore[attr-defined]
+        "select.front_door_event_select"
+    )
+    assert result == "camera.front_door_snapshot"
+
+
+def test_resolve_event_select_no_match_returns_none(
+    hass: MagicMock, entry: MagicMock
+) -> None:
+    """Returns None when no camera entity can be resolved."""
+    va = _make_va_with_states(hass, entry, [])
+    result = va._resolve_camera_from_event_select(  # type: ignore[attr-defined]
+        "select.unknown_event_select"
+    )
+    assert result is None
+
+
+def test_resolve_event_select_override_precedence(
+    hass: MagicMock, entry: MagicMock
+) -> None:
+    """Explicit override map is checked before any inference."""
+    va = _make_va_with_states(hass, entry, ["camera.override_cam", "camera.front_door"])
+    override = {"select.front_door_event_select": "camera.override_cam"}
+    with patch(
+        "custom_components.home_generative_agent.core.video_analyzer.VIDEO_ANALYZER_MOTION_CAMERA_MAP",
+        override,
+    ):
+        result = va._resolve_camera_from_event_select(  # type: ignore[attr-defined]
+            "select.front_door_event_select"
+        )
+    assert result == "camera.override_cam"
+
+
+def test_event_select_eventid_change_starts_loop_and_arms_window(
+    hass: MagicMock, entry: MagicMock
+) -> None:
+    """A new eventId starts the motion loop and arms the window timer."""
+    va = _make_va_with_states(hass, entry, ["camera.front_door"])
+    _stub_bg_task(va)
+    with patch.object(va_mod, "async_call_later") as call_later:
+        va._handle_event_select_change(  # type: ignore[attr-defined]
+            _select_event("select.front_door_event_select", "111", "222")
+        )
+    assert "camera.front_door" in va._active_motion_cameras  # type: ignore[attr-defined]
+    assert "camera.front_door" in va._event_select_window_cancels  # type: ignore[attr-defined]
+    assert call_later.call_args[0][1] == va_mod.VIDEO_ANALYZER_EVENT_SELECT_WINDOW
+
+
+def test_event_select_unchanged_eventid_ignored(
+    hass: MagicMock, entry: MagicMock
+) -> None:
+    """A state change without a new eventId does not start a loop."""
+    va = _make_va_with_states(hass, entry, ["camera.front_door"])
+    _stub_bg_task(va)
+    with patch.object(va_mod, "async_call_later"):
+        va._handle_event_select_change(  # type: ignore[attr-defined]
+            _select_event("select.front_door_event_select", "111", "111")
+        )
+    assert not va._active_motion_cameras  # type: ignore[attr-defined]
+    assert not va._event_select_window_cancels  # type: ignore[attr-defined]
+
+
+def test_event_select_missing_old_state_ignored(
+    hass: MagicMock, entry: MagicMock
+) -> None:
+    """Entity creation at HA startup (old_state None) is not a Ring event."""
+    va = _make_va_with_states(hass, entry, ["camera.front_door"])
+    _stub_bg_task(va)
+    with patch.object(va_mod, "async_call_later"):
+        va._handle_event_select_change(  # type: ignore[attr-defined]
+            _select_event("select.front_door_event_select", None, "222")
+        )
+    assert not va._active_motion_cameras  # type: ignore[attr-defined]
+
+
+def test_event_select_wrong_entity_ignored(hass: MagicMock, entry: MagicMock) -> None:
+    """Entities without the select domain + _event_select suffix are ignored."""
+    va = _make_va_with_states(hass, entry, ["camera.front_door"])
+    _stub_bg_task(va)
+    with patch.object(va_mod, "async_call_later"):
+        va._handle_event_select_change(  # type: ignore[attr-defined]
+            _select_event("select.front_door_light_mode", "111", "222")
+        )
+        va._handle_event_select_change(  # type: ignore[attr-defined]
+            _select_event("sensor.front_door_event_select", "111", "222")
+        )
+    assert not va._active_motion_cameras  # type: ignore[attr-defined]
+
+
+def test_event_select_second_event_extends_window(
+    hass: MagicMock, entry: MagicMock
+) -> None:
+    """A new eventId while the loop runs re-arms the timer, no second loop."""
+    va = _make_va_with_states(hass, entry, ["camera.front_door"])
+    bg_stub = _stub_bg_task(va)
+    first_cancel = MagicMock()
+    second_cancel = MagicMock()
+    with patch.object(
+        va_mod, "async_call_later", side_effect=[first_cancel, second_cancel]
+    ):
+        va._handle_event_select_change(  # type: ignore[attr-defined]
+            _select_event("select.front_door_event_select", "111", "222")
+        )
+        va._handle_event_select_change(  # type: ignore[attr-defined]
+            _select_event("select.front_door_event_select", "222", "333")
+        )
+    assert bg_stub.call_count == 1  # one loop, not two
+    first_cancel.assert_called_once()
+    second_cancel.assert_not_called()
+    cancels = va._event_select_window_cancels  # type: ignore[attr-defined]
+    assert cancels["camera.front_door"] is second_cancel
+
+
+def test_event_select_window_close_stops_loop_and_flushes(
+    hass: MagicMock, entry: MagicMock
+) -> None:
+    """Window expiry cancels the loop task and flushes the held batch."""
+    va = _make_va_with_states(hass, entry, ["camera.front_door"])
+    bg_stub = _stub_bg_task(va)
+    loop_task = MagicMock()
+    loop_task.done.return_value = False
+    va._active_motion_cameras["camera.front_door"] = loop_task  # type: ignore[attr-defined]
+    va._event_select_window_cancels["camera.front_door"] = MagicMock()  # type: ignore[attr-defined]
+
+    va._close_event_select_window(  # type: ignore[attr-defined]
+        "camera.front_door", datetime(2025, 1, 1, 12, 0, 0, tzinfo=dt.UTC)
+    )
+
+    loop_task.cancel.assert_called_once()
+    assert "camera.front_door" not in va._active_motion_cameras  # type: ignore[attr-defined]
+    assert not va._event_select_window_cancels  # type: ignore[attr-defined]
+    assert bg_stub.call_count == 1  # queue flush spawned
+
+
+def test_motion_off_retires_event_select_window(
+    hass: MagicMock, entry: MagicMock
+) -> None:
+    """The motion OFF edge cancels a pending event_select window timer."""
+    va = _make_va_with_states(hass, entry, ["camera.front_door"])
+    _stub_bg_task(va)
+    loop_task = MagicMock()
+    loop_task.done.return_value = False
+    va._active_motion_cameras["camera.front_door"] = loop_task  # type: ignore[attr-defined]
+    window_cancel = MagicMock()
+    va._event_select_window_cancels["camera.front_door"] = window_cancel  # type: ignore[attr-defined]
+
+    va._handle_motion_event(  # type: ignore[attr-defined]
+        _state_event("binary_sensor.front_door_motion", "on", "off")
+    )
+
+    window_cancel.assert_called_once()
+    assert not va._event_select_window_cancels  # type: ignore[attr-defined]
+    loop_task.cancel.assert_called_once()
+
+
+def test_recording_stop_skips_flush_when_motion_loop_active(
+    hass: MagicMock, entry: MagicMock
+) -> None:
+    """Recording-stop does not flush a camera owned by an active motion loop."""
+    va = _make_va_with_states(hass, entry, ["camera.front_door"])
+    bg_stub = _stub_bg_task(va)
+    loop_task = MagicMock()
+    loop_task.done.return_value = False
+    va._active_motion_cameras["camera.front_door"] = loop_task  # type: ignore[attr-defined]
+
+    va._handle_camera_recording_state_change(  # type: ignore[attr-defined]
+        _state_event("camera.front_door", "recording", "idle")
+    )
+
+    bg_stub.assert_not_called()
+    assert "camera.front_door" in va._active_motion_cameras  # type: ignore[attr-defined]
+
+
+def test_event_select_promotes_recording_loop(
+    hass: MagicMock, entry: MagicMock
+) -> None:
+    """An eventId change cancels a recording-state loop and takes ownership."""
+    va = _make_va_with_states(hass, entry, ["camera.front_door"])
+    _stub_bg_task(va)
+    rec_task = MagicMock()
+    rec_task.done.return_value = False
+    va._active_recording_cameras["camera.front_door"] = rec_task  # type: ignore[attr-defined]
+
+    with patch.object(va_mod, "async_call_later"):
+        va._handle_event_select_change(  # type: ignore[attr-defined]
+            _select_event("select.front_door_event_select", "111", "222")
+        )
+
+    rec_task.cancel.assert_called_once()
+    assert "camera.front_door" not in va._active_recording_cameras  # type: ignore[attr-defined]
+    assert "camera.front_door" in va._active_motion_cameras  # type: ignore[attr-defined]
+
+
+def test_event_select_unresolvable_camera_ignored(
+    hass: MagicMock, entry: MagicMock
+) -> None:
+    """No loop starts and no window is armed when no camera resolves."""
+    va = _make_va_with_states(hass, entry, [])
+    _stub_bg_task(va)
+    with patch.object(va_mod, "async_call_later") as call_later:
+        va._handle_event_select_change(  # type: ignore[attr-defined]
+            _select_event("select.front_door_event_select", "111", "222")
+        )
+    assert not va._active_motion_cameras  # type: ignore[attr-defined]
+    call_later.assert_not_called()
+
+
+def test_resolve_event_select_override_missing_camera_falls_through(
+    hass: MagicMock, entry: MagicMock
+) -> None:
+    """An override to a nonexistent camera is ignored; inference proceeds."""
+    va = _make_va_with_states(hass, entry, ["camera.front_door"])
+    override = {"select.front_door_event_select": "camera.gone"}
+    with patch(
+        "custom_components.home_generative_agent.core.video_analyzer.VIDEO_ANALYZER_MOTION_CAMERA_MAP",
+        override,
+    ):
+        result = va._resolve_camera_from_event_select(  # type: ignore[attr-defined]
+            "select.front_door_event_select"
+        )
+    assert result == "camera.front_door"
+
+
+def test_recording_stop_flushes_when_no_motion_loop(
+    hass: MagicMock, entry: MagicMock
+) -> None:
+    """Recording-stop still cancels its loop and flushes when unowned."""
+    va = _make_va_with_states(hass, entry, ["camera.front_door"])
+    bg_stub = _stub_bg_task(va)
+    rec_task = MagicMock()
+    rec_task.done.return_value = False
+    va._active_recording_cameras["camera.front_door"] = rec_task  # type: ignore[attr-defined]
+
+    va._handle_camera_recording_state_change(  # type: ignore[attr-defined]
+        _state_event("camera.front_door", "recording", "idle")
+    )
+
+    rec_task.cancel.assert_called_once()
+    assert bg_stub.call_count == 1  # queue flush spawned
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_window_timers_and_unsubscribes(
+    hass: MagicMock, entry: MagicMock
+) -> None:
+    """stop() cancels pending window timers and the event_select listener."""
+    va = _make_va_with_states(hass, entry, [])
+    va._cancel_track = MagicMock()  # type: ignore[attr-defined]
+    va._cancel_listen = MagicMock()  # type: ignore[attr-defined]
+    # _cancel_motion_listen deliberately unset: _unsubscribe must skip it.
+    va._cancel_event_select_listen = MagicMock()  # type: ignore[attr-defined]
+    window_cancel = MagicMock()
+    va._event_select_window_cancels["camera.front_door"] = window_cancel  # type: ignore[attr-defined]
+
+    await va.stop()
+
+    window_cancel.assert_called_once()
+    assert not va._event_select_window_cancels  # type: ignore[attr-defined]
+    va._cancel_event_select_listen.assert_called_once()  # type: ignore[attr-defined]
+    va._cancel_track.assert_called_once()  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# event_select trigger: ownership, retained-state guard, cap (review fixes)
+# ---------------------------------------------------------------------------
+
+
+def test_event_select_does_not_arm_window_on_motion_owned_loop(
+    hass: MagicMock, entry: MagicMock
+) -> None:
+    """An eventId change must not arm the window on a motion-owned loop."""
+    va = _make_va_with_states(hass, entry, ["camera.front_door"])
+    bg_stub = _stub_bg_task(va)
+    va._handle_motion_event(  # type: ignore[attr-defined]
+        _state_event("binary_sensor.front_door_motion", "off", "on")
+    )
+    assert "camera.front_door" in va._active_motion_cameras  # type: ignore[attr-defined]
+
+    with patch.object(va_mod, "async_call_later") as call_later:
+        va._handle_event_select_change(  # type: ignore[attr-defined]
+            _select_event("select.front_door_event_select", "111", "222")
+        )
+
+    call_later.assert_not_called()
+    assert not va._event_select_window_cancels  # type: ignore[attr-defined]
+    # Still exactly one loop, owned by the motion sensor's OFF edge.
+    assert bg_stub.call_count == 1
+    assert "camera.front_door" in va._active_motion_cameras  # type: ignore[attr-defined]
+
+
+def test_motion_on_takes_over_event_select_loop(
+    hass: MagicMock, entry: MagicMock
+) -> None:
+    """Motion ON retires the window and owns an event_select-started loop."""
+    va = _make_va_with_states(hass, entry, ["camera.front_door"])
+    bg_stub = _stub_bg_task(va)
+    window_cancel = MagicMock()
+    with patch.object(va_mod, "async_call_later", return_value=window_cancel):
+        va._handle_event_select_change(  # type: ignore[attr-defined]
+            _select_event("select.front_door_event_select", "111", "222")
+        )
+    assert "camera.front_door" in va._event_select_owned  # type: ignore[attr-defined]
+
+    va._handle_motion_event(  # type: ignore[attr-defined]
+        _state_event("binary_sensor.front_door_motion", "off", "on")
+    )
+
+    window_cancel.assert_called_once()
+    assert not va._event_select_window_cancels  # type: ignore[attr-defined]
+    assert "camera.front_door" not in va._event_select_owned  # type: ignore[attr-defined]
+    # The loop itself keeps running (no second loop, no flush yet).
+    assert "camera.front_door" in va._active_motion_cameras  # type: ignore[attr-defined]
+    assert bg_stub.call_count == 1
+
+
+def test_event_select_ignores_retained_state_replay(
+    hass: MagicMock, entry: MagicMock
+) -> None:
+    """Leaving unknown/unavailable with a retained eventId is not an event."""
+    va = _make_va_with_states(hass, entry, ["camera.front_door"])
+    _stub_bg_task(va)
+    for old in ("unknown", "unavailable"):
+        event = MagicMock()
+        event.data = {
+            "entity_id": "select.front_door_event_select",
+            "old_state": MagicMock(state=old, attributes={}),
+            "new_state": MagicMock(attributes={"eventId": "stale-123"}),
+        }
+        with patch.object(va_mod, "async_call_later") as call_later:
+            va._handle_event_select_change(event)  # type: ignore[attr-defined]
+        call_later.assert_not_called()
+    assert not va._active_motion_cameras  # type: ignore[attr-defined]
+
+
+def test_event_select_missing_eventid_attribute_ignored(
+    hass: MagicMock, entry: MagicMock
+) -> None:
+    """A state change whose new state lacks an eventId attribute is ignored."""
+    va = _make_va_with_states(hass, entry, ["camera.front_door"])
+    _stub_bg_task(va)
+    event = MagicMock()
+    event.data = {
+        "entity_id": "select.front_door_event_select",
+        "old_state": MagicMock(attributes={"eventId": "111"}),
+        "new_state": MagicMock(attributes={}),
+    }
+    with patch.object(va_mod, "async_call_later") as call_later:
+        va._handle_event_select_change(event)  # type: ignore[attr-defined]
+    call_later.assert_not_called()
+    assert not va._active_motion_cameras  # type: ignore[attr-defined]
+
+
+def test_stop_motion_loop_flushes_even_when_task_done(
+    hass: MagicMock, entry: MagicMock
+) -> None:
+    """A crashed (done) loop task still gets its buffered frames flushed."""
+    va = _make_va_with_states(hass, entry, ["camera.front_door"])
+    bg_stub = _stub_bg_task(va)
+    dead_task = MagicMock()
+    dead_task.done.return_value = True
+    va._active_motion_cameras["camera.front_door"] = dead_task  # type: ignore[attr-defined]
+
+    va._stop_motion_loop_and_flush("camera.front_door")  # type: ignore[attr-defined]
+
+    dead_task.cancel.assert_not_called()
+    assert "camera.front_door" not in va._active_motion_cameras  # type: ignore[attr-defined]
+    assert bg_stub.call_count == 1  # flush spawned despite dead task
+
+
+def test_event_select_window_cap_forces_flush(
+    hass: MagicMock, entry: MagicMock
+) -> None:
+    """Continuous eventId churn cannot extend the window past the cap."""
+    va = _make_va_with_states(hass, entry, ["camera.front_door"])
+    bg_stub = _stub_bg_task(va)
+    loop_task = MagicMock()
+    loop_task.done.return_value = False
+    va._active_motion_cameras["camera.front_door"] = loop_task  # type: ignore[attr-defined]
+    va._event_select_owned.add("camera.front_door")  # type: ignore[attr-defined]
+    va._event_select_window_started["camera.front_door"] = (  # type: ignore[attr-defined]
+        time.monotonic() - va_mod.VIDEO_ANALYZER_EVENT_SELECT_MAX_WINDOW - 1
+    )
+
+    with patch.object(va_mod, "async_call_later") as call_later:
+        va._handle_event_select_change(  # type: ignore[attr-defined]
+            _select_event("select.front_door_event_select", "111", "222")
+        )
+
+    call_later.assert_not_called()  # no re-arm past the cap
+    loop_task.cancel.assert_called_once()
+    assert "camera.front_door" not in va._active_motion_cameras  # type: ignore[attr-defined]
+    assert not va._event_select_owned  # type: ignore[attr-defined]
+    assert not va._event_select_window_started  # type: ignore[attr-defined]
+    assert bg_stub.call_count == 1  # flush spawned
