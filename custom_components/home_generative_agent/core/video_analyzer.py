@@ -10,6 +10,7 @@ import statistics
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from functools import partial
 from pathlib import Path
 from time import monotonic
 from typing import TYPE_CHECKING, Any, Final, Literal, cast
@@ -19,10 +20,11 @@ import aiofiles
 import homeassistant.util.dt as dt_util
 import httpx
 from homeassistant.components.camera.const import DOMAIN as CAMERA_DOMAIN
+from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.event import async_call_later, async_track_time_interval
 from homeassistant.helpers.httpx_client import get_async_client
 from langchain_core.messages import HumanMessage, SystemMessage
 from ollama import ResponseError as OllamaResponseError
@@ -40,6 +42,8 @@ from ..const import (  # noqa: TID252
     SIGNAL_HGA_NEW_LATEST,
     SIGNAL_HGA_RECOGNIZED,
     VIDEO_ANALYZER_CAPTION_DEDUPE_WINDOW_SEC,
+    VIDEO_ANALYZER_EVENT_SELECT_MAX_WINDOW,
+    VIDEO_ANALYZER_EVENT_SELECT_WINDOW,
     VIDEO_ANALYZER_FACE_CROP,
     VIDEO_ANALYZER_LATEST_NAME,
     VIDEO_ANALYZER_LATEST_SUBFOLDER,
@@ -119,6 +123,11 @@ _UNIQUENESS_HEARTBEAT_SEC: Final[int] = 10  # always allow a frame at least this
 # --- Metrics reporting ---
 _METRICS_REPORT_INTERVAL_SEC: Final[int] = 3600  # once per hour
 _METRICS_LAT_HISTORY: Final[int] = 512  # keep up to 512 lat samples per camera
+
+# --- ring-mqtt event_select trigger (issue #466) ---
+# ring-mqtt publishes a new eventId attribute on select.*_event_select per Ring
+# event; used as a motion trigger for battery cameras.
+_EVENT_SELECT_SUFFIX: Final[str] = "_event_select"
 
 # --- Caption novelty: lexical fast-path terms ---
 _ARTIFACT_RE: Final = re.compile(
@@ -265,6 +274,16 @@ class VideoAnalyzer:
         # Frames captured during a motion/recording window, held out of the
         # live worker queue until the event ends and they flush as one batch.
         self._event_snapshot_buffers: dict[str, deque[Path]] = {}
+        # camera_id -> cancel for the timer that ends an event_select-triggered
+        # loop (issue #466); event_select has no "off" edge to key on.
+        self._event_select_window_cancels: dict[str, Callable[[], None]] = {}
+        # Cameras whose motion loop was started by (and is terminated by) the
+        # event_select window. A loop the binary motion sensor started is
+        # never subject to the window timer — its OFF edge owns the lifecycle.
+        self._event_select_owned: set[str] = set()
+        # camera_id -> monotonic() when the current window opened, enforcing
+        # VIDEO_ANALYZER_EVENT_SELECT_MAX_WINDOW across extensions.
+        self._event_select_window_started: dict[str, float] = {}
         self._last_recognized: dict[str, list[str]] = {}
         # Protect images referenced in notifications from immediate pruning
         self._notify_protected: dict[Path, float] = {}  # path -> expiry time
@@ -1278,11 +1297,8 @@ class VideoAnalyzer:
         (3) name-based heuristics (direct, VMD-strip, _motion-strip).
         """
         # 1. Explicit override — options-configured map takes priority over const.
-        overrides: dict = self.entry.runtime_data.options.get(
-            CONF_VIDEO_ANALYZER_MOTION_CAMERA_MAP, VIDEO_ANALYZER_MOTION_CAMERA_MAP
-        )
-        camera_id = overrides.get(motion_entity_id)
-        if camera_id and self.hass.states.get(camera_id):
+        camera_id = self._resolve_camera_override(motion_entity_id)
+        if camera_id:
             return camera_id
 
         # 2. Device-based resolution: find the camera on the same HA device.
@@ -1331,6 +1347,41 @@ class VideoAnalyzer:
                 camera_entries[0].entity_id,
             )
             return camera_entries[0].entity_id
+
+        return None
+
+    def _resolve_camera_override(self, entity_id: str) -> str | None:
+        """Return the camera mapped to entity_id in the override map, if any."""
+        overrides: dict = self.entry.runtime_data.options.get(
+            CONF_VIDEO_ANALYZER_MOTION_CAMERA_MAP, VIDEO_ANALYZER_MOTION_CAMERA_MAP
+        )
+        camera_id = overrides.get(entity_id)
+        if camera_id and self.hass.states.get(camera_id):
+            return camera_id
+        return None
+
+    def _resolve_camera_from_event_select(self, select_entity_id: str) -> str | None:
+        """
+        Resolve a camera entity ID from a ring-mqtt event_select entity.
+
+        Resolution order mirrors _resolve_camera_from_motion: (1) explicit
+        override map, (2) device-based lookup, (3) name-based heuristics
+        (bare name + Ring-MQTT _snapshot variant).
+        """
+        camera_id = self._resolve_camera_override(select_entity_id)
+        if camera_id:
+            return camera_id
+
+        camera_id = self._resolve_camera_by_device(select_entity_id)
+        if camera_id:
+            return camera_id
+
+        base = select_entity_id.removeprefix("select.").removesuffix(
+            _EVENT_SELECT_SUFFIX
+        )
+        for candidate in (f"camera.{base}", f"camera.{base}_snapshot"):
+            if self.hass.states.get(candidate):
+                return candidate
 
         return None
 
@@ -1549,16 +1600,141 @@ class VideoAnalyzer:
                     f"hga video motion snapshot loop {camera_id}",
                 )
                 self._active_motion_cameras[camera_id] = task
+            elif camera_id in self._event_select_owned:
+                # Motion sensor takes over an event_select-started loop: its
+                # OFF edge now owns the lifecycle, so retire the window timer
+                # instead of letting it cut the motion event short.
+                LOGGER.debug("Motion ON: taking over event_select loop %s", camera_id)
+                self._event_select_owned.discard(camera_id)
+                self._event_select_window_started.pop(camera_id, None)
+                self._cancel_event_select_window(camera_id)
 
         elif new_state.state == "off" and camera_id in self._active_motion_cameras:
             LOGGER.debug("Motion OFF: Stopping snapshot loop for %s", camera_id)
-            task = self._active_motion_cameras.pop(camera_id, None)
-            if task and not task.done():
-                task.cancel()
-                self._create_background_task(
-                    self._process_snapshot_queue(camera_id),
-                    f"hga video process motion queue {camera_id}",
-                )
+            # The motion OFF edge owns the lifecycle; retire any pending
+            # event_select window so it can't cut a later event short.
+            self._cancel_event_select_window(camera_id)
+            self._stop_motion_loop_and_flush(camera_id)
+
+    @callback
+    def _stop_motion_loop_and_flush(self, camera_id: str) -> None:
+        """Cancel the camera's motion loop and flush its batch, if running."""
+        self._event_select_owned.discard(camera_id)
+        self._event_select_window_started.pop(camera_id, None)
+        task = self._active_motion_cameras.pop(camera_id, None)
+        if task is None:
+            return
+        if not task.done():
+            task.cancel()
+        # Flush even when the loop crashed (task already done): frames it
+        # captured must not strand in the buffer or leak into the next
+        # event's batch. An empty flush is a no-op.
+        self._create_background_task(
+            self._process_snapshot_queue(camera_id),
+            f"hga video process motion queue {camera_id}",
+        )
+
+    @callback
+    def _handle_event_select_change(self, event: Event) -> None:
+        """
+        Trigger the motion snapshot loop on ring-mqtt event_select changes.
+
+        Battery-powered Ring cameras publish a new eventId attribute on
+        select.*_event_select for every Ring event, while their motion binary
+        sensor may lag or never fire (issue #466). There is no corresponding
+        "off" signal, so the loop is ended by a fixed window that each new
+        eventId extends.
+        """
+        entity_id = event.data.get("entity_id")
+        if (
+            not entity_id
+            or not entity_id.startswith("select.")
+            or not entity_id.endswith(_EVENT_SELECT_SUFFIX)
+        ):
+            return
+
+        new_state = event.data.get("new_state")
+        old_state = event.data.get("old_state")
+        if new_state is None or old_state is None:
+            # Entity creation/removal (e.g. HA startup) is not a Ring event.
+            return
+        if old_state.state in (STATE_UNKNOWN, STATE_UNAVAILABLE):
+            # Retained-state replay: on HA startup or an MQTT broker/ring-mqtt
+            # reconnect the entity leaves unknown/unavailable carrying the
+            # eventId of the LAST event (possibly hours old). Treating that as
+            # a new event would start a spurious loop on every camera at once
+            # (the issue #460 flood shape).
+            return
+
+        new_event_id = new_state.attributes.get("eventId")
+        if not new_event_id or new_event_id == old_state.attributes.get("eventId"):
+            return
+
+        camera_id = self._resolve_camera_from_event_select(entity_id)
+        if not camera_id:
+            return
+
+        # If a recording-state loop is running, cancel it and promote to the
+        # motion loop, same as the binary-sensor motion path.
+        rec_task = self._active_recording_cameras.pop(camera_id, None)
+        if rec_task and not rec_task.done():
+            rec_task.cancel()
+
+        if camera_id not in self._active_motion_cameras:
+            LOGGER.debug(
+                "Event select %s: starting snapshot loop for %s",
+                entity_id,
+                camera_id,
+            )
+            task = self._create_background_task(
+                self._motion_snapshot_loop(camera_id),
+                f"hga video event_select snapshot loop {camera_id}",
+            )
+            self._active_motion_cameras[camera_id] = task
+            self._event_select_owned.add(camera_id)
+
+        # Only a loop this path started is subject to the window timer; a
+        # motion-sensor-owned loop keeps running until its OFF edge so the
+        # window can't truncate it mid-event.
+        if camera_id in self._event_select_owned:
+            self._extend_event_select_window(camera_id)
+
+    @callback
+    def _extend_event_select_window(self, camera_id: str) -> None:
+        """
+        (Re)arm the timer that ends an event_select-triggered loop.
+
+        Total window length is capped so continuous eventId churn cannot
+        defer the flush (and grow the frame buffer) forever.
+        """
+        now = monotonic()
+        started = self._event_select_window_started.setdefault(camera_id, now)
+        remaining = VIDEO_ANALYZER_EVENT_SELECT_MAX_WINDOW - (now - started)
+        if remaining <= 0:
+            LOGGER.debug("Event select window cap reached for %s", camera_id)
+            self._cancel_event_select_window(camera_id)
+            self._stop_motion_loop_and_flush(camera_id)
+            return
+        self._cancel_event_select_window(camera_id)
+        self._event_select_window_cancels[camera_id] = async_call_later(
+            self.hass,
+            min(VIDEO_ANALYZER_EVENT_SELECT_WINDOW, remaining),
+            partial(self._close_event_select_window, camera_id),
+        )
+
+    @callback
+    def _cancel_event_select_window(self, camera_id: str) -> None:
+        """Cancel the camera's pending event_select window timer, if any."""
+        cancel = self._event_select_window_cancels.pop(camera_id, None)
+        if cancel:
+            cancel()
+
+    @callback
+    def _close_event_select_window(self, camera_id: str, _now: datetime) -> None:
+        """End the event_select window: stop the loop and flush the batch."""
+        LOGGER.debug("Event select window closed for %s", camera_id)
+        self._event_select_window_cancels.pop(camera_id, None)
+        self._stop_motion_loop_and_flush(camera_id)
 
     @callback
     def _get_recording_cameras(self) -> list[str]:
@@ -1619,10 +1795,13 @@ class VideoAnalyzer:
             task = self._active_recording_cameras.pop(entity_id, None)
             if task and not task.done():
                 task.cancel()
-            self._create_background_task(
-                self._process_snapshot_queue(entity_id),
-                f"hga video process recording queue {entity_id}",
-            )
+            # A motion/event_select loop owns the camera's lifecycle; don't
+            # flush its held frames mid-window when recording stops early.
+            if entity_id not in self._active_motion_cameras:
+                self._create_background_task(
+                    self._process_snapshot_queue(entity_id),
+                    f"hga video process recording queue {entity_id}",
+                )
 
     def start(self) -> None:
         """Start the video analyzer."""
@@ -1664,6 +1843,9 @@ class VideoAnalyzer:
             self._cancel_motion_listen = self.hass.bus.async_listen(
                 "state_changed", self._handle_motion_event
             )
+            self._cancel_event_select_listen = self.hass.bus.async_listen(
+                "state_changed", self._handle_event_select_change
+            )
 
         # hourly metrics reporting
         self._metrics_job_cancel = async_track_time_interval(
@@ -1673,6 +1855,16 @@ class VideoAnalyzer:
         )
 
         LOGGER.info("Video analyzer started.")
+
+    def _unsubscribe(self, attr: str, what: str) -> None:
+        """Invoke a stored listener-cancel callback if it was ever set."""
+        cancel = getattr(self, attr, None)
+        if cancel is None:
+            return
+        try:
+            cancel()
+        except HomeAssistantError:
+            LOGGER.warning("Error unsubscribing %s", what, exc_info=True)
 
     async def stop(self) -> None:
         """Stop the video analyzer."""
@@ -1694,29 +1886,20 @@ class VideoAnalyzer:
 
         self._event_snapshot_buffers.clear()
 
+        for cancel in self._event_select_window_cancels.values():
+            cancel()
+        self._event_select_window_cancels.clear()
+        self._event_select_owned.clear()
+        self._event_select_window_started.clear()
+
         # Orphan the semaphore reference; tasks already cancelled above will
         # absorb CancelledError and exit — not released by this None assignment.
         self._video_model_sem = None
 
-        try:
-            self._cancel_track()
-        except HomeAssistantError:
-            LOGGER.warning("Error unsubscribing time interval listener", exc_info=True)
-
-        try:
-            self._cancel_listen()
-        except HomeAssistantError:
-            LOGGER.warning(
-                "Error unsubscribing recording state listener", exc_info=True
-            )
-
-        if hasattr(self, "_cancel_motion_listen"):
-            try:
-                self._cancel_motion_listen()
-            except HomeAssistantError:
-                LOGGER.warning(
-                    "Error unsubscribing motion event listener", exc_info=True
-                )
+        self._unsubscribe("_cancel_track", "time interval listener")
+        self._unsubscribe("_cancel_listen", "recording state listener")
+        self._unsubscribe("_cancel_motion_listen", "motion event listener")
+        self._unsubscribe("_cancel_event_select_listen", "event_select listener")
 
         if tasks_to_await:
             _, pending = await asyncio.wait(tasks_to_await, timeout=5)
