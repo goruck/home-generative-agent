@@ -87,7 +87,11 @@ from ..const import (  # noqa: TID252
     SENTINEL_SEVERITIES,
     SUBENTRY_TYPE_SENTINEL,
 )
-from ..core.utils import hash_pin, list_mobile_notify_services  # noqa: TID252
+from ..core.utils import (  # noqa: TID252
+    hash_pin,
+    list_mobile_notify_services,
+    valid_exclusion_entry,
+)
 
 
 def _camera_entry_links_json(payload: dict[str, Any]) -> str:
@@ -106,17 +110,18 @@ def _parse_json_entity_map(
     errors: dict[str, str],
     error_key: str,
     *,
-    require_dot_in_values: bool = False,
+    validate_exclusion_entries: bool = False,
 ) -> None:
     """
     Parse a JSON ``dict[str, list[str]]`` text field into ``data[key]`` in place.
 
     Records ``error_key`` in ``errors`` (leaving the raw string in ``data``)
     when the value is not valid JSON of that shape.  Empty input stores ``{}``.
-    With ``require_dot_in_values`` every list item must contain a dot (entity
-    IDs are ``domain.object``) — this rejects a bare ``"*"`` glob entry, which
-    would silently match every entity (the ``"*"`` wildcard belongs in the map
-    *key*, not the values).
+    With ``validate_exclusion_entries`` every list item must pass
+    ``valid_exclusion_entry`` (a dot, at least one literal character, length
+    cap) — mirroring the engine parser so the form rejects entries the engine
+    would silently drop, in particular match-everything globs like ``"*"`` or
+    ``"*.*"`` (the ``"*"`` wildcard belongs in the map *key*, not the values).
     """
     raw = str(data.get(key, "") or "").strip()
     if not raw or raw == "{}":
@@ -131,7 +136,9 @@ def _parse_json_entity_map(
         isinstance(k, str)
         and isinstance(v, list)
         and all(
-            isinstance(i, str) and (not require_dot_in_values or "." in i) for i in v
+            isinstance(i, str)
+            and (not validate_exclusion_entries or valid_exclusion_entry(i))
+            for i in v
         )
         for k, v in parsed.items()
     ):
@@ -861,7 +868,7 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
             CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS,
             errors,
             "invalid_rule_entity_exclusions",
-            require_dot_in_values=True,
+            validate_exclusion_entries=True,
         )
 
         if errors:

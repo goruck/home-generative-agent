@@ -561,6 +561,30 @@ def verify_pin(pin: str, *, hashed: str, salt: str) -> bool:
     return hmac.compare_digest(digest, hashed)
 
 
+EXCLUSION_ENTRY_MAX_LEN = 256
+
+# Glob metacharacters and the entity-ID separator, deleted to test whether an
+# exclusion entry has any literal (matchable) characters left.
+_EXCLUSION_NON_LITERAL_DELETE = str.maketrans("", "", "*?[].")
+
+
+def valid_exclusion_entry(entry: str) -> bool:
+    """
+    Return True when *entry* is a usable sentinel exclusion entry.
+
+    Entries are entity IDs or fnmatch-style glob patterns. Three rules keep a
+    security engine from failing open on a typo: the entry must contain a dot
+    (entity IDs are ``domain.object``), must contain at least one literal
+    non-wildcard character (rejecting match-everything spellings like ``*``
+    and ``*.*``), and must fit in ``EXCLUSION_ENTRY_MAX_LEN``. Shared by the
+    engine option parser and the config-flow field validator so both stay in
+    lockstep.
+    """
+    if "." not in entry or len(entry) > EXCLUSION_ENTRY_MAX_LEN:
+        return False
+    return bool(entry.translate(_EXCLUSION_NON_LITERAL_DELETE))
+
+
 # ---------------------------
 # Health checks
 # ---------------------------

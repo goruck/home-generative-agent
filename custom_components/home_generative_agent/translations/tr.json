@@ -204,7 +204,7 @@
         "invalid_pin": "PIN 4-10 rakam olmalıdır.",
         "quiet_hours_incomplete": "Sessiz saatler için başlangıç ve bitişin ikisini de ayarlayın (veya ikisini de devre dışı bırakın).",
         "invalid_quiet_hours": "Sessiz saatler 0 ile 23 arasında yerel saat olmalıdır.",
-        "invalid_rule_entity_exclusions": "Bir anomali türünü (veya tüm türler için \"*\") her biri nokta içeren varlık kimliği veya glob deseni listeleriyle eşleştiren bir JSON nesnesi olmalıdır, ör. {{\"appliance_power_duration\": [\"sensor.ac_power\"], \"camera_entry_unsecured\": [\"camera.map_*\"]}}. Tek başına \"*\" girdisine izin verilmez — bunun yerine \"*\" tür anahtarını kullanın."
+        "invalid_rule_entity_exclusions": "Bir anomali türünü (veya tüm türler için \"*\") her biri nokta ve en az bir sabit karakter içeren varlık kimliği veya glob deseni listeleriyle eşleştiren bir JSON nesnesi olmalıdır, ör. {{\"appliance_power_duration\": [\"sensor.ac_power\"], \"camera_entry_unsecured\": [\"camera.map_*\"]}}. \"*\" veya \"*.*\" gibi tümüyle eşleşen girdilere izin verilmez — bunun yerine \"*\" tür anahtarını kullanın."
       }
     },
     "feature": {

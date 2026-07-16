@@ -59,7 +59,11 @@ from custom_components.home_generative_agent.const import (
     SENTINEL_SEVERITIES,
     SIGNAL_SENTINEL_RUN_COMPLETE,
 )
-from custom_components.home_generative_agent.core.utils import verify_pin
+from custom_components.home_generative_agent.core.utils import (
+    EXCLUSION_ENTRY_MAX_LEN,
+    valid_exclusion_entry,
+    verify_pin,
+)
 from custom_components.home_generative_agent.snapshot.builder import (
     async_build_full_state_snapshot,
 )
@@ -216,6 +220,16 @@ class SentinelEngine:
             options.get(CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS)
         )
         self._excluded_trigger_count = 0
+        if self._rule_entity_exclusions:
+            # One-time visibility that exclusions now also gate event-driven
+            # triggering (#481) — upgrading users configured them when they
+            # only filtered findings.
+            LOGGER.info(
+                "Sentinel entity exclusions active for %d anomaly type key(s); "
+                "matching entities are excluded from findings and from "
+                "event-driven triggering (evaluation falls back to polling).",
+                len(self._rule_entity_exclusions),
+            )
         self._rules = [
             UnlockedLockAtNightRule(),
             OpenEntryWhileAwayRule(),
@@ -1245,7 +1259,6 @@ async def _auto_execute_finding(
     }
 
 
-_EXCLUSION_ENTRY_MAX_LEN = 256
 _GLOB_CHARS = ("*", "?", "[")
 
 
@@ -1268,28 +1281,29 @@ def _compile_exclusion_entries(entries: frozenset[str]) -> _ExclusionSet | None:
     Compile raw exclusion entries into an ``_ExclusionSet``.
 
     Entries are exact entity IDs or fnmatch-style glob patterns (e.g.
-    ``camera.map_*``); matching is case-sensitive. Every entry must contain a
-    dot (entity IDs are ``domain.object``): a bare ``"*"`` entry would silently
-    exclude every entity — a fail-open path for a security engine — so
-    dot-less entries are dropped with a warning (the ``"*"`` *type key* is the
-    supported way to exclude an entity from all rules). Over-long entries are
-    dropped likewise. Globs are precompiled here because matching runs in the
-    per-event trigger path; Python's atomic-group ``fnmatch.translate`` output
-    and short entity IDs keep per-match cost trivial.
+    ``camera.map_*``); matching is case-sensitive. Entries that fail
+    ``valid_exclusion_entry`` are dropped with a warning: a match-everything
+    entry (``"*"``, ``"*.*"``) would silently exclude every entity — a
+    fail-open path for a security engine — so every entry must contain a dot
+    and at least one literal character, and fit the length cap (the ``"*"``
+    *type key* is the supported way to exclude an entity from all rules).
+    Globs are precompiled here because matching runs in the per-event trigger
+    path; Python's atomic-group ``fnmatch.translate`` output and short entity
+    IDs keep per-match cost trivial.
 
     Returns None when no valid entry remains.
     """
     exact: set[str] = set()
     patterns: list[re.Pattern[str]] = []
     for entry in entries:
-        if "." not in entry or len(entry) > _EXCLUSION_ENTRY_MAX_LEN:
+        if not valid_exclusion_entry(entry):
             LOGGER.warning(
                 "Ignoring sentinel exclusion entry %r: entries must contain a "
-                "dot (entity IDs are domain.object) and be at most %d "
-                'characters. Use the "*" type key to exclude an entity from '
-                "all rules.",
+                "dot (entity IDs are domain.object), at least one literal "
+                'character, and be at most %d characters. Use the "*" type '
+                "key to exclude an entity from all rules.",
                 entry[:64],
-                _EXCLUSION_ENTRY_MAX_LEN,
+                EXCLUSION_ENTRY_MAX_LEN,
             )
             continue
         if any(char in entry for char in _GLOB_CHARS):
@@ -1318,6 +1332,13 @@ def _parse_rule_entity_exclusions(value: object | None) -> dict[str, _ExclusionS
     for rule_type, entity_ids in cast("dict[object, object]", value).items():
         if not isinstance(rule_type, str) or not rule_type:
             continue
+        if rule_type != "*" and any(char in rule_type for char in _GLOB_CHARS):
+            LOGGER.warning(
+                "Sentinel exclusion type key %r contains glob characters; "
+                "type keys are matched exactly, so this key will never apply. "
+                'Use the full anomaly type name or the "*" key.',
+                rule_type[:64],
+            )
         if not isinstance(entity_ids, (list, tuple, set, frozenset)):
             continue
         cleaned = frozenset(

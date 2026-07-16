@@ -218,6 +218,13 @@ def test_parse_exclusions_drops_dotless_and_overlong_entries() -> None:
     assert compiled.patterns == ()
 
 
+@pytest.mark.parametrize("entry", ["*.*", "?*.*", "*.?*", "*..*", "[*].*"])
+def test_parse_exclusions_drops_match_all_globs(entry: str) -> None:
+    """Globs with a dot but no literal character are rejected (match-all bypass)."""
+    parsed = _parse_rule_entity_exclusions({"*": [entry]})
+    assert parsed == {}
+
+
 # --------------------------------------------------------------------------- #
 # _ExclusionSet matching
 # --------------------------------------------------------------------------- #
@@ -477,3 +484,23 @@ def test_trigger_exclusion_for_other_type_still_enqueues() -> None:
 
     engine._on_state_changed(_state_change_event("camera.map_home"))
     assert engine._trigger_scheduler.queue_depth == 1
+
+
+@pytest.mark.asyncio
+async def test_timed_run_exposes_triggers_excluded_stat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A completed run publishes the suppression counter in run_stats."""
+    _patch_snapshot(monkeypatch, _open_door_snapshot())
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.sentinel.engine.async_dispatcher_send",
+        lambda *_args, **_kwargs: None,
+    )
+    engine = _make_engine(
+        {CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: {"*": ["camera.map_*"]}}
+    )
+
+    engine._on_state_changed(_state_change_event("camera.map_home"))
+    await engine._timed_run()
+
+    assert engine.run_stats["triggers_excluded"] == 1
