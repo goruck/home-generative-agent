@@ -7,6 +7,7 @@ import contextlib
 import fnmatch
 import logging
 import re
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
@@ -214,6 +215,7 @@ class SentinelEngine:
         self._rule_entity_exclusions = _parse_rule_entity_exclusions(
             options.get(CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS)
         )
+        self._excluded_trigger_count = 0
         self._rules = [
             UnlockedLockAtNightRule(),
             OpenEntryWhileAwayRule(),
@@ -398,12 +400,16 @@ class SentinelEngine:
         Handle a HA state-change event.
 
         Maps the changed entity to a sentinel anomaly type and enqueues a
-        trigger in the scheduler.  Irrelevant entities are silently ignored,
-        as are entities the user excluded for that anomaly type via
-        ``sentinel_rule_entity_exclusions`` — their findings would be dropped
-        anyway, so they must not wake the engine or occupy queue slots
-        (Issue #481: chatty non-security camera/person entities flooding the
-        bounded trigger queue).
+        trigger in the scheduler.  Irrelevant entities are silently ignored.
+        Entities the user excluded for the mapped anomaly type (or under the
+        "*" wildcard key) via ``sentinel_rule_entity_exclusions`` do not wake
+        the engine at all — the deliberate #481 trade-off that keeps chatty
+        non-security camera/person entities from flooding the bounded trigger
+        queue.  Because a wake-up evaluates every rule, suppressing it defers
+        event-driven evaluation of ALL anomaly types involving that entity to
+        the polling cadence (and to wake-ups from other entities), not just
+        the excluded type.  Suppressions are counted in
+        ``run_stats["triggers_excluded"]`` and logged at debug level.
         """
         entity_id: str = event.data.get("entity_id", "")
         new_state: State | None = event.data.get("new_state")
@@ -415,19 +421,28 @@ class SentinelEngine:
         if anomaly_type is None:
             return
 
-        if self._is_trigger_excluded(entity_id, anomaly_type):
+        if self._entity_excluded_for_type(entity_id, anomaly_type):
+            self._excluded_trigger_count += 1
+            LOGGER.debug(
+                "Sentinel suppressed event trigger for %s (type=%s, user "
+                "entity exclusion).",
+                entity_id,
+                anomaly_type,
+            )
             return
 
         self._trigger_scheduler.enqueue(TriggerRecord(anomaly_type=anomaly_type))
 
-    def _is_trigger_excluded(self, entity_id: str, anomaly_type: str) -> bool:
+    def _entity_excluded_for_type(self, entity_id: str, anomaly_type: str) -> bool:
         """Return True when the entity is excluded for this anomaly type."""
-        if not self._rule_entity_exclusions:
+        exclusions = self._rule_entity_exclusions
+        if not exclusions:
             return False
-        excluded = self._rule_entity_exclusions.get(
-            anomaly_type, frozenset()
-        ) | self._rule_entity_exclusions.get("*", frozenset())
-        return bool(excluded) and _entity_excluded(entity_id, excluded)
+        wildcard = exclusions.get("*")
+        if wildcard is not None and wildcard.matches(entity_id):
+            return True
+        typed = exclusions.get(anomaly_type)
+        return typed is not None and typed.matches(entity_id)
 
     # ---------------------------------------------------------------------- #
     # Run loop
@@ -486,6 +501,7 @@ class SentinelEngine:
                 else 0
             )
             self.run_stats["scheduler"] = self._trigger_scheduler.stats
+            self.run_stats["triggers_excluded"] = self._excluded_trigger_count
             async_dispatcher_send(self._hass, SIGNAL_SENTINEL_RUN_COMPLETE)
 
     async def _run_once(self, trigger_source: str = "poll") -> None:  # noqa: PLR0912, PLR0915
@@ -659,16 +675,13 @@ class SentinelEngine:
         multi-entity finding expresses "stop alerting about this entity".
         Applied to every finding source (static rules, dynamic rules, baseline
         deviations) before correlation, so exclusions are generic across rules
-        rather than per-rule logic.
+        rather than per-rule logic.  Shares ``_entity_excluded_for_type`` with
+        the event-trigger suppression path so both stay in lockstep.
         """
-        wildcard = self._rule_entity_exclusions.get("*", frozenset())
         kept: list[AnomalyFinding] = []
         for finding in findings:
-            excluded = (
-                self._rule_entity_exclusions.get(finding.type, frozenset()) | wildcard
-            )
-            if excluded and any(
-                _entity_excluded(entity_id, excluded)
+            if any(
+                self._entity_excluded_for_type(entity_id, finding.type)
                 for entity_id in finding.triggering_entities
             ):
                 LOGGER.debug(
@@ -1232,18 +1245,76 @@ async def _auto_execute_finding(
     }
 
 
-def _parse_rule_entity_exclusions(value: object | None) -> dict[str, frozenset[str]]:
+_EXCLUSION_ENTRY_MAX_LEN = 256
+_GLOB_CHARS = ("*", "?", "[")
+
+
+@dataclass(frozen=True)
+class _ExclusionSet:
+    """Compiled per-type exclusion entries: exact entity IDs plus globs."""
+
+    exact: frozenset[str]
+    patterns: tuple[re.Pattern[str], ...]
+
+    def matches(self, entity_id: str) -> bool:
+        """Return True when *entity_id* matches an exact entry or a glob."""
+        return entity_id in self.exact or any(
+            pattern.match(entity_id) for pattern in self.patterns
+        )
+
+
+def _compile_exclusion_entries(entries: frozenset[str]) -> _ExclusionSet | None:
+    """
+    Compile raw exclusion entries into an ``_ExclusionSet``.
+
+    Entries are exact entity IDs or fnmatch-style glob patterns (e.g.
+    ``camera.map_*``); matching is case-sensitive. Every entry must contain a
+    dot (entity IDs are ``domain.object``): a bare ``"*"`` entry would silently
+    exclude every entity — a fail-open path for a security engine — so
+    dot-less entries are dropped with a warning (the ``"*"`` *type key* is the
+    supported way to exclude an entity from all rules). Over-long entries are
+    dropped likewise. Globs are precompiled here because matching runs in the
+    per-event trigger path; Python's atomic-group ``fnmatch.translate`` output
+    and short entity IDs keep per-match cost trivial.
+
+    Returns None when no valid entry remains.
+    """
+    exact: set[str] = set()
+    patterns: list[re.Pattern[str]] = []
+    for entry in entries:
+        if "." not in entry or len(entry) > _EXCLUSION_ENTRY_MAX_LEN:
+            LOGGER.warning(
+                "Ignoring sentinel exclusion entry %r: entries must contain a "
+                "dot (entity IDs are domain.object) and be at most %d "
+                'characters. Use the "*" type key to exclude an entity from '
+                "all rules.",
+                entry[:64],
+                _EXCLUSION_ENTRY_MAX_LEN,
+            )
+            continue
+        if any(char in entry for char in _GLOB_CHARS):
+            patterns.append(re.compile(fnmatch.translate(entry)))
+        else:
+            exact.add(entry)
+    if not exact and not patterns:
+        return None
+    return _ExclusionSet(exact=frozenset(exact), patterns=tuple(patterns))
+
+
+def _parse_rule_entity_exclusions(value: object | None) -> dict[str, _ExclusionSet]:
     """
     Normalize the configured rule→entity exclusion map.
 
     Accepts the stored option shape (dict of anomaly type -> list of entity
-    IDs or fnmatch-style glob patterns, with "*" as a wildcard type) and drops
-    anything malformed rather than raising — a bad exclusion entry must never
-    disable the engine.
+    IDs or fnmatch-style glob patterns, with "*" as a wildcard type key) and
+    drops anything malformed rather than raising — a bad exclusion entry must
+    never disable the engine. Type keys are matched exactly (globs are only
+    supported in the entry values); entries are compiled once here because
+    matching runs on the per-event trigger path.
     """
     if not isinstance(value, dict):
         return {}
-    exclusions: dict[str, frozenset[str]] = {}
+    exclusions: dict[str, _ExclusionSet] = {}
     for rule_type, entity_ids in cast("dict[object, object]", value).items():
         if not isinstance(rule_type, str) or not rule_type:
             continue
@@ -1254,23 +1325,10 @@ def _parse_rule_entity_exclusions(value: object | None) -> dict[str, frozenset[s
             for item in cast("list[object]", list(entity_ids))
             if isinstance(item, str) and item.strip()
         )
-        if cleaned:
-            exclusions[rule_type] = cleaned
+        compiled = _compile_exclusion_entries(cleaned) if cleaned else None
+        if compiled is not None:
+            exclusions[rule_type] = compiled
     return exclusions
-
-
-def _entity_excluded(entity_id: str, excluded: frozenset[str]) -> bool:
-    """
-    Return True when *entity_id* matches any exclusion entry.
-
-    Entries are matched as exact entity IDs first, then as fnmatch-style glob
-    patterns (e.g. ``camera.map_*``), so a handful of patterned entities (map
-    cameras, per-person template cameras) can be excluded without listing each
-    ID. ``fnmatchcase`` keeps matching case-sensitive and platform-independent.
-    """
-    if entity_id in excluded:
-        return True
-    return any(fnmatch.fnmatchcase(entity_id, pattern) for pattern in excluded)
 
 
 def _coerce_int(value: object | None, default: int) -> int:

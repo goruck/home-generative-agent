@@ -15,7 +15,6 @@ from custom_components.home_generative_agent.const import (
 )
 from custom_components.home_generative_agent.sentinel.engine import (
     SentinelEngine,
-    _entity_excluded,
     _parse_rule_entity_exclusions,
 )
 from custom_components.home_generative_agent.sentinel.rules.appliance_power_duration import (
@@ -147,17 +146,19 @@ def _patch_snapshot(
 
 
 def test_parse_exclusions_normalizes_valid_map() -> None:
-    """Valid map is normalized to frozensets, whitespace stripped."""
+    """Valid map is normalized to compiled sets, whitespace stripped."""
     parsed = _parse_rule_entity_exclusions(
         {
             "appliance_power_duration": ["sensor.ac_power", " sensor.other "],
             "*": ["sensor.test_bench"],
         }
     )
-    assert parsed == {
-        "appliance_power_duration": frozenset({"sensor.ac_power", "sensor.other"}),
-        "*": frozenset({"sensor.test_bench"}),
-    }
+    assert set(parsed) == {"appliance_power_duration", "*"}
+    assert parsed["appliance_power_duration"].exact == frozenset(
+        {"sensor.ac_power", "sensor.other"}
+    )
+    assert parsed["appliance_power_duration"].patterns == ()
+    assert parsed["*"].exact == frozenset({"sensor.test_bench"})
 
 
 @pytest.mark.parametrize(
@@ -185,45 +186,64 @@ def test_parse_exclusions_drops_malformed_entries() -> None:
             "rule_c": ["", 1],  # nothing valid left
         }
     )
-    assert parsed == {"rule_b": frozenset({"sensor.kept"})}
+    assert set(parsed) == {"rule_b"}
+    assert parsed["rule_b"].exact == frozenset({"sensor.kept"})
 
 
-def test_parse_exclusions_keeps_glob_patterns() -> None:
-    """Glob patterns are ordinary entries and survive normalization."""
+def test_parse_exclusions_compiles_glob_patterns() -> None:
+    """Glob entries are compiled into patterns, exact IDs into the set."""
     parsed = _parse_rule_entity_exclusions(
-        {"camera_entry_unsecured": ["camera.map_*", "camera.?_screenshot"]}
+        {"camera_entry_unsecured": ["camera.map_*", "camera.?_shot", "camera.fixed"]}
     )
-    assert parsed == {
-        "camera_entry_unsecured": frozenset({"camera.map_*", "camera.?_screenshot"})
-    }
+    compiled = parsed["camera_entry_unsecured"]
+    assert compiled.exact == frozenset({"camera.fixed"})
+    assert len(compiled.patterns) == 2
+    assert compiled.matches("camera.map_alice_google")
+    assert compiled.matches("camera.a_shot")
+    assert compiled.matches("camera.fixed")
+    assert not compiled.matches("camera.driveway")
+
+
+def test_parse_exclusions_drops_dotless_and_overlong_entries() -> None:
+    """A bare "*" (or any dot-less/overlong entry) is rejected, not match-all."""
+    parsed = _parse_rule_entity_exclusions(
+        {
+            "camera_entry_unsecured": ["*", "nodots", "x" * 300, "camera.kept"],
+            "*": ["*"],  # would silently disable ALL monitoring if honored
+        }
+    )
+    assert set(parsed) == {"camera_entry_unsecured"}
+    compiled = parsed["camera_entry_unsecured"]
+    assert compiled.exact == frozenset({"camera.kept"})
+    assert compiled.patterns == ()
 
 
 # --------------------------------------------------------------------------- #
-# _entity_excluded matching
+# _ExclusionSet matching
 # --------------------------------------------------------------------------- #
 
 
 @pytest.mark.parametrize(
-    ("entity_id", "excluded", "expected"),
+    ("entry", "entity_id", "expected"),
     [
-        ("camera.map_home", frozenset({"camera.map_home"}), True),
-        ("camera.map_home", frozenset({"camera.map_*"}), True),
-        ("camera.map_alice_google", frozenset({"camera.map_*"}), True),
-        ("camera.driveway", frozenset({"camera.map_*"}), False),
-        ("camera.driveway", frozenset[str](), False),
+        ("camera.map_home", "camera.map_home", True),
+        ("camera.map_*", "camera.map_home", True),
+        ("camera.map_*", "camera.map_alice_google", True),
+        ("camera.map_*", "camera.driveway", False),
         # "*" in a pattern matches across dots — whole-domain exclusion works.
-        ("person.alice", frozenset({"person.*"}), True),
+        ("person.*", "person.alice", True),
         # Matching is case-sensitive like entity IDs themselves.
-        ("camera.Map_home", frozenset({"camera.map_*"}), False),
+        ("camera.map_*", "camera.Map_home", False),
     ],
 )
-def test_entity_excluded_matching(
+def test_exclusion_entry_matching(
+    entry: str,
     entity_id: str,
-    excluded: frozenset[str],
     expected: bool,  # noqa: FBT001
 ) -> None:
     """Exact IDs and fnmatch-style globs both match; others do not."""
-    assert _entity_excluded(entity_id, excluded) is expected
+    parsed = _parse_rule_entity_exclusions({"some_type": [entry]})
+    assert parsed["some_type"].matches(entity_id) is expected
 
 
 # --------------------------------------------------------------------------- #
@@ -363,11 +383,13 @@ def test_engine_appliance_thresholds_default_when_unset() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _state_change_event(entity_id: str) -> Any:
+def _state_change_event(entity_id: str, device_class: str | None = None) -> Any:
     """Build a minimal state-change event for _on_state_changed."""
     state = MagicMock()
     state.entity_id = entity_id
-    state.attributes = {}
+    state.attributes = (
+        {"device_class": device_class} if device_class is not None else {}
+    )
     event = MagicMock()
     event.data = {"entity_id": entity_id, "new_state": state}
     return event
@@ -385,8 +407,32 @@ def test_trigger_excluded_entity_not_enqueued() -> None:
 
     engine._on_state_changed(_state_change_event("camera.map_home"))
     assert engine._trigger_scheduler.queue_depth == 0
+    assert engine._excluded_trigger_count == 1
 
     engine._on_state_changed(_state_change_event("camera.driveway"))
+    assert engine._trigger_scheduler.queue_depth == 1
+    assert engine._excluded_trigger_count == 1
+
+
+@pytest.mark.parametrize(
+    ("device_class", "anomaly_type"),
+    [
+        ("door", "open_entry_while_away"),
+        ("occupancy", "unknown_person_camera_no_home"),
+    ],
+)
+def test_trigger_device_class_excluded_entity_not_enqueued(
+    device_class: str, anomaly_type: str
+) -> None:
+    """Exclusions also suppress binary_sensor device-class mapped triggers."""
+    engine = _make_engine(
+        {CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: {anomaly_type: ["binary_sensor.a"]}}
+    )
+
+    engine._on_state_changed(_state_change_event("binary_sensor.a", device_class))
+    assert engine._trigger_scheduler.queue_depth == 0
+
+    engine._on_state_changed(_state_change_event("binary_sensor.b", device_class))
     assert engine._trigger_scheduler.queue_depth == 1
 
 

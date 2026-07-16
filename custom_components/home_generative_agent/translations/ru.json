@@ -204,7 +204,7 @@
         "invalid_pin": "PIN must be 4-10 digits.",
         "quiet_hours_incomplete": "Set both quiet hours start and end (or set both to Disabled).",
         "invalid_quiet_hours": "Quiet hours must be local hours between 0 and 23.",
-        "invalid_rule_entity_exclusions": "Must be a JSON object mapping an anomaly type (or \"*\" for all types) to lists of entity IDs or glob patterns, e.g. {{\"appliance_power_duration\": [\"sensor.ac_power\"], \"camera_entry_unsecured\": [\"camera.map_*\"]}}."
+        "invalid_rule_entity_exclusions": "Must be a JSON object mapping an anomaly type (or \"*\" for all types) to lists of entity IDs or glob patterns, each containing a dot, e.g. {{\"appliance_power_duration\": [\"sensor.ac_power\"], \"camera_entry_unsecured\": [\"camera.map_*\"]}}. A bare \"*\" entry is not allowed — use the \"*\" type key instead."
       }
     },
     "feature": {

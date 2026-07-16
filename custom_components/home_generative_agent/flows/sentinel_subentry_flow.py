@@ -105,12 +105,18 @@ def _parse_json_entity_map(
     key: str,
     errors: dict[str, str],
     error_key: str,
+    *,
+    require_dot_in_values: bool = False,
 ) -> None:
     """
     Parse a JSON ``dict[str, list[str]]`` text field into ``data[key]`` in place.
 
     Records ``error_key`` in ``errors`` (leaving the raw string in ``data``)
     when the value is not valid JSON of that shape.  Empty input stores ``{}``.
+    With ``require_dot_in_values`` every list item must contain a dot (entity
+    IDs are ``domain.object``) — this rejects a bare ``"*"`` glob entry, which
+    would silently match every entity (the ``"*"`` wildcard belongs in the map
+    *key*, not the values).
     """
     raw = str(data.get(key, "") or "").strip()
     if not raw or raw == "{}":
@@ -124,7 +130,9 @@ def _parse_json_entity_map(
     if not isinstance(parsed, dict) or not all(
         isinstance(k, str)
         and isinstance(v, list)
-        and all(isinstance(i, str) for i in v)
+        and all(
+            isinstance(i, str) and (not require_dot_in_values or "." in i) for i in v
+        )
         for k, v in parsed.items()
     ):
         errors.setdefault("base", error_key)
@@ -853,6 +861,7 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
             CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS,
             errors,
             "invalid_rule_entity_exclusions",
+            require_dot_in_values=True,
         )
 
         if errors:

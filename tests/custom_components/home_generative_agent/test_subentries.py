@@ -1157,6 +1157,27 @@ async def test_sentinel_flow_rule_entity_exclusions_invalid_json(hass: Any) -> N
 
 
 @pytest.mark.asyncio
+async def test_sentinel_flow_rule_entity_exclusions_dotless_entry(hass: Any) -> None:
+    """Flow rejects dot-less entries (a bare "*" glob would match everything)."""
+    flow, _entry = _quiet_hours_flow(hass)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            # "*" belongs in the type key, never as an entity entry.
+            CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: '{"*": ["*"]}',
+        }
+    )
+    assert result is not None
+    assert result.get("type") == "form"
+    assert (result.get("errors") or {}).get("base") == "invalid_rule_entity_exclusions"
+
+
+@pytest.mark.asyncio
 async def test_sentinel_flow_rule_entity_exclusions_wrong_structure(hass: Any) -> None:
     """Flow returns an error when exclusions are not dict[str, list[str]]."""
     flow, _entry = _quiet_hours_flow(hass)
