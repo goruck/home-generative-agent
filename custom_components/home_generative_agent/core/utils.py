@@ -561,6 +561,39 @@ def verify_pin(pin: str, *, hashed: str, salt: str) -> bool:
     return hmac.compare_digest(digest, hashed)
 
 
+EXCLUSION_ENTRY_MAX_LEN = 256
+
+# Exclusion entries may only use the entity-ID alphabet (lowercase letters,
+# digits, underscore, the domain separator dot) plus the two simple glob
+# wildcards. Character classes ("[...]") are rejected outright: their syntax
+# characters defeat any "has a literal character" check — e.g. "[!.]*.*"
+# reads as having literals but matches every valid entity ID — and no
+# realistic entity-ID pattern needs them.
+_EXCLUSION_ENTRY_ALLOWED_RE = re.compile(r"[a-z0-9_.*?]+\Z")
+_EXCLUSION_ENTRY_LITERAL_RE = re.compile(r"[a-z0-9_]")
+
+
+def valid_exclusion_entry(entry: str) -> bool:
+    """
+    Return True when *entry* is a usable sentinel exclusion entry.
+
+    Entries are entity IDs or glob patterns over them (``*`` and ``?`` only).
+    Four rules keep a security engine from failing open on a typo: the entry
+    must use only the entity-ID alphabet plus ``*``/``?`` (no ``[...]``
+    character classes — see the comment above), must contain a dot (entity
+    IDs are ``domain.object``), must contain at least one literal
+    ``[a-z0-9_]`` character (rejecting match-everything spellings like ``*``
+    and ``*.*``), and must fit in ``EXCLUSION_ENTRY_MAX_LEN``. Shared by the
+    engine option parser and the config-flow field validator so both stay in
+    lockstep.
+    """
+    if "." not in entry or len(entry) > EXCLUSION_ENTRY_MAX_LEN:
+        return False
+    if _EXCLUSION_ENTRY_ALLOWED_RE.fullmatch(entry) is None:
+        return False
+    return _EXCLUSION_ENTRY_LITERAL_RE.search(entry) is not None
+
+
 # ---------------------------
 # Health checks
 # ---------------------------

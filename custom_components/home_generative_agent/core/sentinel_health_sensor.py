@@ -263,6 +263,7 @@ class SentinelHealthSensor(SensorEntity):
             "sentinel_admission_degraded_category",
             "sentinel_admission_consecutive_deferrals",
             "sentinel_admission_starved_for_s",
+            "triggers_excluded",
         ):
             self._attrs[key] = run_stats.get(key)
 

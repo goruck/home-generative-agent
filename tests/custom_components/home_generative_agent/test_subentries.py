@@ -1157,6 +1157,59 @@ async def test_sentinel_flow_rule_entity_exclusions_invalid_json(hass: Any) -> N
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_entries",
+    [
+        '{"*": ["*"]}',  # dot-less: "*" belongs in the type key
+        '{"*": ["*.*"]}',  # match-all glob with a dot but no literal char
+        '{"camera_entry_unsecured": ["?*.*"]}',  # match-all variant
+        '{"*": ["[!.]*.*"]}',  # char-class match-all bypass (PR #483 review, P1)
+        f'{{"camera_entry_unsecured": ["camera.{"x" * 300}"]}}',  # overlong
+    ],
+)
+async def test_sentinel_flow_rule_entity_exclusions_invalid_entries(
+    hass: Any, bad_entries: str
+) -> None:
+    """Flow rejects match-all, dot-less, and overlong exclusion entries."""
+    flow, _entry = _quiet_hours_flow(hass)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: bad_entries,
+        }
+    )
+    assert result is not None
+    assert result.get("type") == "form"
+    assert (result.get("errors") or {}).get("base") == "invalid_rule_entity_exclusions"
+
+
+@pytest.mark.asyncio
+async def test_sentinel_flow_camera_links_not_exclusion_validated(hass: Any) -> None:
+    """Exclusion-entry strictness must not leak into the camera-links field."""
+    flow, _entry = _quiet_hours_flow(hass)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            # A dot-less value is nonsense for camera links but must still be
+            # accepted: only the exclusions field validates entry shape.
+            CONF_SENTINEL_CAMERA_ENTRY_LINKS: '{"camera.driveway": ["nodots"]}',
+        }
+    )
+    assert result is not None
+    assert result.get("type") == "create_entry"
+
+
+@pytest.mark.asyncio
 async def test_sentinel_flow_rule_entity_exclusions_wrong_structure(hass: Any) -> None:
     """Flow returns an error when exclusions are not dict[str, list[str]]."""
     flow, _entry = _quiet_hours_flow(hass)

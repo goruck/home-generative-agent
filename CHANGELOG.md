@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.17.0] - 2026-07-16
+
+### Added
+
+- **Sentinel entity exclusions now silence event-driven triggering too, and accept glob patterns** — Sentinel treats every `camera.*` and `person.*` entity as security-relevant, so non-security uses of those domains (most notably `person_location` map-snapshot cameras, whose state flips on every GPS update) could flood the bounded trigger queue with security-critical wake-ups and crowd out real events — one report measured ~1,970 dropped triggers in 23 minutes with no actual security activity. Entities excluded via `sentinel_rule_entity_exclusions` (for their domain-mapped anomaly type, or under the `"*"` key) now stop waking the engine at all: their findings were already filtered, and their state changes no longer occupy trigger-queue slots. Detection for other rules involving an excluded entity continues on the polling cadence and via other entities' triggers — don't per-type-exclude a real security camera you want low-latency alerts from; the Sentinel guide documents the trade-off. Exclusion entries may now be fnmatch-style glob patterns (e.g. `camera.map_*`), so a fleet of per-person map cameras doesn't need listing one by one; patterns are precompiled and matching stays cheap on the per-event hot path. Suppressed wake-ups are observable: the Sentinel health sensor gains a `triggers_excluded` attribute, each suppression logs at debug level, and the engine logs a one-time notice at startup when exclusions are active so upgrading users learn the new behavior. Thanks [@hruba202](https://github.com/hruba202) for the precise diagnosis and proposed approach — credited as commit co-author. Closes [#481](https://github.com/goruck/home-generative-agent/issues/481).
+
+### Changed
+
+- **Exclusion entries are validated against match-everything mistakes** — with glob support, a stray `"*"` or `"*.*"` entry would silently match every entity and could disable the entire detection engine (findings *and* triggers) with nothing in the UI to show for it. Entries are restricted to the entity-ID alphabet plus the `*` and `?` wildcards — fnmatch character classes are rejected outright, because their syntax defeats literal-character checks (`[!.]*.*` reads as having literals yet matches every entity ID) — and every entry must contain a dot and at least one literal character. The settings form rejects offending entries (and over-long ones beyond 256 characters) with a validation error, and hand-edited `.storage` entries failing the rules are ignored at startup with a log warning — fail-closed, so the affected entity resumes alerting rather than going dark. The engine also warns when an exclusion *type key* contains glob characters, since type keys are matched exactly and such a key would be silently inert. Pre-existing stored entries that fail the new validation stop applying after upgrade.
+
 ## [3.16.0] - 2026-07-16
 
 ### Added

@@ -317,6 +317,7 @@ async def test_refresh_merges_run_stats() -> None:
         "last_run_end": "2025-01-01T12:00:01+00:00",
         "run_duration_ms": 1000,
         "active_rule_count": 12,
+        "triggers_excluded": 7,
     }
     sensor = _make_sensor(run_stats=run_stats)
     _mock_async_write_ha_state(sensor)
@@ -326,6 +327,7 @@ async def test_refresh_merges_run_stats() -> None:
     assert sensor._attrs["last_run_start"] == "2025-01-01T12:00:00+00:00"
     assert sensor._attrs["run_duration_ms"] == 1000
     assert sensor._attrs["active_rule_count"] == 12
+    assert sensor._attrs["triggers_excluded"] == 7
 
 
 @pytest.mark.asyncio
