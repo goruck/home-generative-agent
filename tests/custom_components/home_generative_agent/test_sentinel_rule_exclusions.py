@@ -218,9 +218,27 @@ def test_parse_exclusions_drops_dotless_and_overlong_entries() -> None:
     assert compiled.patterns == ()
 
 
-@pytest.mark.parametrize("entry", ["*.*", "?*.*", "*.?*", "*..*", "[*].*"])
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "*.*",
+        "?*.*",
+        "*.?*",
+        "*..*",
+        "[*].*",
+        # Character-class syntax reads as "has literals" to naive checks but
+        # can still match every entity ID — the whole [...] grammar is
+        # rejected (PR #483 review, P1).
+        "[!.]*.*",
+        "[a-z]*.*",
+        "camera.[abc]",
+        # Uppercase never matches a real entity ID; reject instead of a
+        # silent no-op.
+        "camera.Map_*",
+    ],
+)
 def test_parse_exclusions_drops_match_all_globs(entry: str) -> None:
-    """Globs with a dot but no literal character are rejected (match-all bypass)."""
+    """Match-all spellings, character classes, and bad charsets are rejected."""
     parsed = _parse_rule_entity_exclusions({"*": [entry]})
     assert parsed == {}
 

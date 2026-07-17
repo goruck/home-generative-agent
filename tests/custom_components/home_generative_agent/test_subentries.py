@@ -1163,6 +1163,7 @@ async def test_sentinel_flow_rule_entity_exclusions_invalid_json(hass: Any) -> N
         '{"*": ["*"]}',  # dot-less: "*" belongs in the type key
         '{"*": ["*.*"]}',  # match-all glob with a dot but no literal char
         '{"camera_entry_unsecured": ["?*.*"]}',  # match-all variant
+        '{"*": ["[!.]*.*"]}',  # char-class match-all bypass (PR #483 review, P1)
         f'{{"camera_entry_unsecured": ["camera.{"x" * 300}"]}}',  # overlong
     ],
 )

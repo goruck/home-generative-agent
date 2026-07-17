@@ -108,7 +108,7 @@ Static rules are registered automatically at startup. They cannot be deactivated
 
 ### Per-entity rule exclusions
 
-`sentinel_rule_entity_exclusions` (Sentinel subentry, Advanced setup) excludes specific entities from specific rules without silencing the rule for everything else. It is a JSON object mapping an anomaly type to a list of entity IDs or fnmatch-style glob patterns (`*`, `?`, `[...]`); the key `"*"` excludes the listed entities from every rule:
+`sentinel_rule_entity_exclusions` (Sentinel subentry, Advanced setup) excludes specific entities from specific rules without silencing the rule for everything else. It is a JSON object mapping an anomaly type to a list of entity IDs or glob patterns (`*` and `?` wildcards only); the key `"*"` excludes the listed entities from every rule:
 
 ```json
 {

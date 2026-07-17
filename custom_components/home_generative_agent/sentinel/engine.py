@@ -1298,10 +1298,11 @@ def _compile_exclusion_entries(entries: frozenset[str]) -> _ExclusionSet | None:
     for entry in entries:
         if not valid_exclusion_entry(entry):
             LOGGER.warning(
-                "Ignoring sentinel exclusion entry %r: entries must contain a "
-                "dot (entity IDs are domain.object), at least one literal "
-                'character, and be at most %d characters. Use the "*" type '
-                "key to exclude an entity from all rules.",
+                "Ignoring sentinel exclusion entry %r: entries may use only "
+                "lowercase entity-ID characters plus the * and ? wildcards, "
+                "must contain a dot (entity IDs are domain.object) and at "
+                "least one literal character, and be at most %d characters. "
+                'Use the "*" type key to exclude an entity from all rules.',
                 entry[:64],
                 EXCLUSION_ENTRY_MAX_LEN,
             )
