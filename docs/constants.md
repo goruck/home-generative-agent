@@ -248,6 +248,10 @@ This document covers the named constants that affect integration behaviour, orga
 | `_VIDEO_MODEL_SEMAPHORE_WAIT_SEC` | `core/video_analyzer.py` | `30` (s) | Max wait for the video semaphore before dropping the frame |
 | `_VIDEO_QUEUE_BACKLOG_THRESHOLD` | `core/video_analyzer.py` | `2` | Drop stale queued frames when the backlog exceeds this count |
 | `_METRICS_REPORT_INTERVAL_SEC` | `core/video_analyzer.py` | `3600` (s) | How often per-camera latency metrics are logged |
+| `_SNAPSHOT_STALE_MAX_AGE_SEC` | `core/video_analyzer.py` | `1800` (s) | Skip capture and count a snapshot failure (once per staleness episode) when a ring-mqtt camera's `timestamp` attribute shows the retained frame is older than this (frozen interval snapshot, issue #490); 3x the slowest known ring-mqtt interval (600 s on battery). Only applies to cameras with an `event_select` sibling |
+| `_SNAPSHOT_TS_EPOCH_MIN` | `core/video_analyzer.py` | `1_000_000_000` | `timestamp` attribute values below this are not epoch seconds and never trigger the stale guard |
+| `_SNAPSHOT_TS_FUTURE_SLACK_SEC` | `core/video_analyzer.py` | `3600` (s) | `timestamp` values further in the future than this (e.g. millisecond epochs) are not plausible epoch seconds and never trigger the stale guard |
+| `_STALE_REREPORT_INTERVAL_SEC` | `core/video_analyzer.py` | `3600` (s) | Re-record an ongoing staleness episode this often so the failure streak can escalate and hourly metrics reflect a persistent freeze |
 
 ---
 

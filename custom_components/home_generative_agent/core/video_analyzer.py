@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import re
 import statistics
 from collections import defaultdict, deque
@@ -114,6 +115,50 @@ _WORKER_ERROR_BACKOFF_SEC: Final[int] = 5  # pause after unexpected worker error
 _SNAPSHOT_SERVICE_TIMEOUT_SEC: Final[int] = 15  # camera.snapshot blocking-call budget
 _SNAPSHOT_APPEAR_ATTEMPTS: Final[int] = 10  # post-service file visibility polls (0.2s)
 _SNAPSHOT_FAILURE_ESCALATION: Final[int] = 3  # consecutive failures before ERROR log
+# --- Stale retained snapshot guard (issue #490) ---
+# ring-mqtt snapshot cameras expose a `timestamp` attribute (epoch seconds of
+# the last published frame). The interval snapshot can silently freeze on
+# battery cameras, leaving MQTT serving a days-old retained frame; capturing it
+# would send stale imagery to the VLM with no visible failure. The threshold is
+# 3x the slowest known ring-mqtt interval (600 s on battery power).
+_SNAPSHOT_STALE_MAX_AGE_SEC: Final[int] = 1800
+_SNAPSHOT_TS_EPOCH_MIN: Final[int] = 1_000_000_000  # ignore non-epoch timestamps
+# Timestamps further in the future than this are not epoch seconds (e.g. a
+# millisecond epoch) — treating one as valid would silently defeat the guard.
+_SNAPSHOT_TS_FUTURE_SLACK_SEC: Final[int] = 3600
+# Re-record an ONGOING staleness episode this often, so the issue #464 streak
+# can escalate to ERROR and hourly metrics show a multi-day freeze.
+_STALE_REREPORT_INTERVAL_SEC: Final[int] = 3600
+
+
+def _plausible_epoch(ts: object, now: datetime) -> float | None:
+    """
+    Coerce a `timestamp` attribute to plausible epoch seconds, else None.
+
+    An implausible value must never drive the stale guard: NaN would fail it
+    permanently closed (all captures blocked) while a millisecond epoch or
+    inf would fail it permanently open (guard silently defeated). Numeric
+    strings are coerced so a broker delivering string epochs is not inert.
+    """
+    if isinstance(ts, bool) or not isinstance(ts, (int, float, str)):
+        return None
+    try:
+        ts_val = float(ts)
+    except (ValueError, OverflowError):
+        # OverflowError: float(10**4000) — a corrupt huge int must not kill
+        # the capture loop.
+        return None
+    if (
+        not math.isfinite(ts_val)
+        or ts_val < _SNAPSHOT_TS_EPOCH_MIN
+        or ts_val > now.timestamp() + _SNAPSHOT_TS_FUTURE_SLACK_SEC
+    ):
+        # Log so an upstream unit change (e.g. seconds -> milliseconds) shows.
+        LOGGER.debug("Ignoring implausible snapshot timestamp attribute: %r", ts)
+        return None
+    return ts_val
+
+
 # --- Uniqueness gate tuning ---
 # Enabled at runtime via CONF_VIDEO_ANALYZER_UNIQUENESS_ENABLED option (default off).
 _UNIQUENESS_HAMMING_MAX: Final[int] = 4  # <= this => "too similar" (tune 4-10)
@@ -281,9 +326,23 @@ class VideoAnalyzer:
         # event_select window. A loop the binary motion sensor started is
         # never subject to the window timer — its OFF edge owns the lifecycle.
         self._event_select_owned: set[str] = set()
+        # Cameras whose CURRENT loop was started by event_select and must
+        # dedupe frames (issue #489). Separate from ownership: a motion-sensor
+        # takeover transfers the lifecycle but keeps the dedupe requirement,
+        # since battery motion sensors typically lag the eventId by seconds.
+        # Cleared only when the loop stops.
+        self._event_select_dedupe: set[str] = set()
         # camera_id -> monotonic() when the current window opened, enforcing
         # VIDEO_ANALYZER_EVENT_SELECT_MAX_WINDOW across extensions.
         self._event_select_window_started: dict[str, float] = {}
+        # camera_id -> the frozen timestamp value whose staleness episode was
+        # last recorded (issue #490); prevents one frozen snapshot from
+        # spamming a failure per 3-second loop iteration. A changed frozen
+        # value is a NEW episode (freeze -> unobserved recovery -> freeze must
+        # not be silent), and an ongoing episode is re-recorded hourly so the
+        # #464 streak escalation and hourly metrics stay truthful.
+        self._stale_reported: dict[str, float] = {}
+        self._stale_reported_at: dict[str, float] = {}
         self._last_recognized: dict[str, list[str]] = {}
         # Protect images referenced in notifications from immediate pruning
         self._notify_protected: dict[Path, float] = {}  # path -> expiry time
@@ -1404,15 +1463,26 @@ class VideoAnalyzer:
 
         Returns True to enqueue, False to skip.
         """
-        if not self.entry.runtime_data.options.get(
+        # Loops the event_select path started always dedupe (issue #489):
+        # battery Ring cameras refresh their snapshot at best every 600 s, so
+        # a capture window would otherwise batch ~10 identical frames (= VLM
+        # calls). The flag is per-loop and survives a motion-sensor takeover —
+        # battery motion sensors commonly fire seconds AFTER the eventId, and
+        # dropping the gate at takeover would reintroduce the duplicate flood
+        # with an even longer window. The heartbeat bypass is skipped for these
+        # loops too — within one window an unchanged frame never becomes worth
+        # re-analyzing.
+        forced = camera_id in self._event_select_dedupe
+        if not forced and not self.entry.runtime_data.options.get(
             CONF_VIDEO_ANALYZER_UNIQUENESS_ENABLED, False
         ):
             return True
 
-        # Heartbeat: always allow at least one frame every N seconds
+        # Heartbeat: allow at least one frame every N seconds (disabled for
+        # loops with forced dedupe — see above).
         now = monotonic()
         last_ok = self._last_unique_ts.get(camera_id, 0.0)
-        heartbeat_due = now - last_ok >= _UNIQUENESS_HEARTBEAT_SEC
+        heartbeat_due = not forced and now - last_ok >= _UNIQUENESS_HEARTBEAT_SEC
 
         # Load bytes async, compute hash off the loop if needed
         try:
@@ -1421,10 +1491,12 @@ class VideoAnalyzer:
         except (FileNotFoundError, OSError):
             return True  # if we can't read, don't block processing
 
-        # Hash compute is fast; do it inline (PIL decode already occurs)
+        # dhash_bytes does a full PIL decode; keep it off the event loop.
+        # RuntimeError: executor rejects jobs during HA shutdown — fail open
+        # rather than killing the loop task.
         try:
-            dh = dhash_bytes(data)
-        except (Image.UnidentifiedImageError, OSError, ValueError):
+            dh = await self.hass.async_add_executor_job(dhash_bytes, data)
+        except (Image.UnidentifiedImageError, OSError, ValueError, RuntimeError):
             return True  # be permissive on failures
 
         hist = self._last_hashes.setdefault(
@@ -1465,9 +1537,100 @@ class VideoAnalyzer:
         finally:
             self._snapshot_inflight.discard(camera_id)
 
+    def _retained_frame_is_stale(self, camera_id: str, now: datetime) -> bool:
+        """
+        Detect a frozen ring-mqtt interval snapshot before capturing it.
+
+        ring-mqtt publishes the last frame's epoch seconds as a `timestamp`
+        attribute on the snapshot camera. The interval snapshot can silently
+        stop on battery cameras (issue #490), after which MQTT serves the
+        retained frame indefinitely; capturing it would analyze days-old
+        imagery as if it were current.
+
+        The guard only applies to cameras with a ring-mqtt event_select
+        sibling — other integrations may publish an epoch `timestamp` with
+        different semantics (stream start, boot time), and suppressing their
+        capture on it would silently kill analysis. Values that are not
+        plausible current epochs (non-numeric, non-finite, pre-2001, or more
+        than an hour in the future — e.g. millisecond epochs) never mark the
+        frame stale.
+
+        On the True path this also records a snapshot failure (issue #464
+        streak/metric), rate-limited per staleness episode: recorded when the
+        frozen timestamp value first appears (a changed value is a new
+        episode, so freeze -> unobserved recovery -> freeze is not silent) and
+        re-recorded hourly while the episode persists, so the streak can
+        escalate to ERROR and hourly metrics show the ongoing freeze without
+        emitting a failure per 3-second loop iteration.
+        """
+        state = self.hass.states.get(camera_id)
+        if state is None:
+            return False
+        ts_val = _plausible_epoch(state.attributes.get("timestamp"), now)
+        if ts_val is None or not self._has_event_select_sibling(camera_id):
+            return False
+        age_sec = now.timestamp() - ts_val
+        if age_sec <= _SNAPSHOT_STALE_MAX_AGE_SEC:
+            self._stale_reported.pop(camera_id, None)
+            self._stale_reported_at.pop(camera_id, None)
+            return False
+        mono_now = monotonic()
+        if (
+            self._stale_reported.get(camera_id) != ts_val
+            or mono_now - self._stale_reported_at.get(camera_id, 0.0)
+            >= _STALE_REREPORT_INTERVAL_SEC
+        ):
+            self._stale_reported[camera_id] = ts_val
+            self._stale_reported_at[camera_id] = mono_now
+            self._record_snapshot_failure(
+                camera_id,
+                f"retained snapshot frame is {age_sec / 3600.0:.1f} h old "
+                f"(limit {_SNAPSHOT_STALE_MAX_AGE_SEC} s); the ring-mqtt "
+                f"interval snapshot appears frozen — restarting the ring-mqtt "
+                f"add-on usually clears it (issue #490)",
+            )
+        return True
+
+    def _has_event_select_sibling(self, camera_id: str) -> bool:
+        """
+        Return True when camera_id is a ring-mqtt camera with an event_select.
+
+        Checked by ring-mqtt's naming scheme (`camera.<name>[_snapshot]` pairs
+        with `select.<name>_event_select`), by the user's motion→camera
+        override map, and — mirroring _resolve_camera_by_device for renamed
+        entities — by a select.*_event_select entity on the same HA device.
+        """
+        base = camera_id.removeprefix("camera.")
+        candidates = {base}
+        if base.endswith("_snapshot"):
+            candidates.add(base.removesuffix("_snapshot"))
+        if any(
+            self.hass.states.get(f"select.{name}{_EVENT_SELECT_SUFFIX}") is not None
+            for name in candidates
+        ):
+            return True
+        overrides: dict = self.entry.runtime_data.options.get(
+            CONF_VIDEO_ANALYZER_MOTION_CAMERA_MAP, VIDEO_ANALYZER_MOTION_CAMERA_MAP
+        )
+        if any(
+            key.endswith(_EVENT_SELECT_SUFFIX) and mapped == camera_id
+            for key, mapped in overrides.items()
+        ):
+            return True
+        ent_reg = er.async_get(self.hass)
+        camera_entry = ent_reg.async_get(camera_id)
+        if camera_entry is None or camera_entry.device_id is None:
+            return False
+        return any(
+            entry.domain == "select" and entry.entity_id.endswith(_EVENT_SELECT_SUFFIX)
+            for entry in er.async_entries_for_device(ent_reg, camera_entry.device_id)
+        )
+
     async def _capture_snapshot(
         self, camera_id: str, now: datetime, *, hold_for_batch: bool = False
     ) -> Path | None:
+        if self._retained_frame_is_stale(camera_id, now):
+            return None
         snapshot_dir = await self._get_snapshot_dir(camera_id)
         timestamp = dt_util.as_local(now).strftime("%Y%m%d_%H%M%S")
         path = snapshot_dir / f"snapshot_{timestamp}.jpg"
@@ -1529,7 +1692,8 @@ class VideoAnalyzer:
         self._m_inc(camera_id, "captured")
         self._snapshot_fail_streak.pop(camera_id, None)
 
-        # --- Uniqueness gate: skip near-duplicate frames unless heartbeat due ---
+        # --- Uniqueness gate: skip near-duplicate frames (forced for loops
+        # the event_select path started; opt-in with heartbeat otherwise) ---
         try:
             should_enqueue = await self._is_unique_enough(camera_id, path)
         except (OSError, FileNotFoundError, ValueError):
@@ -1538,6 +1702,10 @@ class VideoAnalyzer:
         if not should_enqueue:
             self._m_inc(camera_id, "skipped_duplicate")
             LOGGER.debug("[%s] Skipping enqueue (near-duplicate): %s", camera_id, path)
+            # camera.snapshot already wrote the file; register it for normal
+            # retention so skipped duplicates can't grow the disk unbounded
+            # (analysis-path frames are registered on batch finalize).
+            await self._prune_old_snapshots(camera_id, [path])
             return None
 
         if hold_for_batch:
@@ -1603,7 +1771,10 @@ class VideoAnalyzer:
             elif camera_id in self._event_select_owned:
                 # Motion sensor takes over an event_select-started loop: its
                 # OFF edge now owns the lifecycle, so retire the window timer
-                # instead of letting it cut the motion event short.
+                # instead of letting it cut the motion event short. The
+                # dedupe flag (_event_select_dedupe) deliberately survives
+                # the takeover: the underlying frames are still 600 s
+                # interval snapshots (issue #489).
                 LOGGER.debug("Motion ON: taking over event_select loop %s", camera_id)
                 self._event_select_owned.discard(camera_id)
                 self._event_select_window_started.pop(camera_id, None)
@@ -1620,6 +1791,7 @@ class VideoAnalyzer:
     def _stop_motion_loop_and_flush(self, camera_id: str) -> None:
         """Cancel the camera's motion loop and flush its batch, if running."""
         self._event_select_owned.discard(camera_id)
+        self._event_select_dedupe.discard(camera_id)
         self._event_select_window_started.pop(camera_id, None)
         task = self._active_motion_cameras.pop(camera_id, None)
         if task is None:
@@ -1679,6 +1851,18 @@ class VideoAnalyzer:
         rec_task = self._active_recording_cameras.pop(camera_id, None)
         if rec_task and not rec_task.done():
             rec_task.cancel()
+
+        # An eventId is evidence this camera serves interval snapshots, so the
+        # dedupe requirement applies to the CURRENT loop even when the motion
+        # sensor started it first (motion-first arrival order otherwise
+        # bypasses forced dedupe for the whole 180 s motion window). Whenever
+        # the requirement NEWLY engages, drop stale hash history so the first
+        # frame of the window is always accepted (issue #489) — a hash left
+        # over from a prior event would otherwise reject every frame (forced
+        # mode has no heartbeat) and the window would analyze nothing.
+        if camera_id not in self._event_select_dedupe:
+            self._event_select_dedupe.add(camera_id)
+            self._last_hashes.pop(camera_id, None)
 
         if camera_id not in self._active_motion_cameras:
             LOGGER.debug(
@@ -1890,7 +2074,10 @@ class VideoAnalyzer:
             cancel()
         self._event_select_window_cancels.clear()
         self._event_select_owned.clear()
+        self._event_select_dedupe.clear()
         self._event_select_window_started.clear()
+        self._stale_reported.clear()
+        self._stale_reported_at.clear()
 
         # Orphan the semaphore reference; tasks already cancelled above will
         # absorb CancelledError and exit — not released by this None assignment.
