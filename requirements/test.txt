@@ -1,6 +1,6 @@
 # Home Assistant integration testing requirements
 
-homeassistant==2026.7.1
+homeassistant==2026.7.2
 pytest-homeassistant-custom-component==0.13.346
 
 pytest==9.*
