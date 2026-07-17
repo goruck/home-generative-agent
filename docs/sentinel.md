@@ -550,6 +550,7 @@ Sentinel registers `sensor.sentinel_health`, updated after every detection run.
 | `triggers_dropped_incoming` | Cumulative triggers dropped on arrival |
 | `triggers_dropped_queued` | Cumulative lower-priority queued triggers evicted |
 | `triggers_ttl_expired` | Cumulative queued triggers discarded past TTL |
+| `triggers_excluded` | Cumulative event triggers suppressed by user entity exclusions (see [Per-entity rule exclusions](#per-entity-rule-exclusions)) |
 | `findings_count_by_severity` | Count by severity: `{low: N, medium: N, high: N}` |
 | `triage_suppress_rate` | Percentage of triaged findings suppressed (null if none triaged) |
 | `auto_exec_count` | Number of autonomous execution attempts |
