@@ -268,7 +268,7 @@ against all stored analyses) is acceptable.
 ### Caption novelty: tune threshold and artifact terms from real logs
 
 **What:** Review accumulated debug logs from `_is_caption_novel` decisions to
-check whether `VIDEO_ANALYZER_SIMILARITY_THRESHOLD = 0.89` and the `_ARTIFACT_RE`
+check whether `VIDEO_ANALYZER_SIMILARITY_THRESHOLD = 0.85` and the `_ARTIFACT_RE`
 vocabulary produce the right suppress/notify balance in production.
 
 **Why:** The threshold and terms were set conservatively. Real logs can reveal
