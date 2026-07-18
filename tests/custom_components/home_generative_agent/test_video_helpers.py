@@ -3,9 +3,30 @@
 
 from __future__ import annotations
 
+import pytest
+
 from custom_components.home_generative_agent.core.video_helpers import (
+    dedupe_desc,
+    is_no_change_reply,
     limit_sentences_and_chars,
 )
+
+# ---------------------------------------------------------------------------
+# Override autouse fixtures from pytest-homeassistant-custom-component:
+# these are pure synchronous helpers; the HA event-loop/cleanup fixtures
+# only add per-case overhead across the parametrized matrix.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def enable_event_loop_debug() -> None:
+    """No-op override: pure sync tests don't need HA's debug-mode hook."""
+
+
+@pytest.fixture(autouse=True)
+def verify_cleanup() -> None:
+    """No-op override: no HA resources to clean up."""
+
 
 # ---------------------------------------------------------------------------
 # limit_sentences_and_chars tests
@@ -58,3 +79,126 @@ def test_no_mid_word_truncation() -> None:
     words = result.split()
     assert all(w == words[-1] or w for w in words)
     assert len(result) <= 150
+
+
+# ---------------------------------------------------------------------------
+# is_no_change_reply tests (issue #493 repeated-scene sentinel)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Scene unchanged.",
+        "scene unchanged",
+        "Scene unchanged",
+        "  Scene unchanged.  ",
+        "The scene is unchanged.",
+        "The scene remains unchanged since the previous frame.",
+        "The view appears identical.",
+        "No change.",
+        "No changes since the last frame.",
+        "Nothing has changed.",
+        "Nothing changed from the previous image.",
+        "Same scene as before.",
+        "The setting is the same.",
+        "Unchanged.",
+        # Models sometimes combine sentinel-ish sentences.
+        "Scene unchanged. Still no activity.",
+        "The scene is unchanged. No new activity.",
+    ],
+)
+def test_no_change_reply_matches_sentinel_variants(text: str) -> None:
+    assert is_no_change_reply(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "An empty driveway with a parked car and a small tree nearby.",
+        "A man in a gray shirt stands on a porch with white railing.",
+        "A dog sits by the gate of a fenced yard.",
+        # Mentions "unchanged" but reports a change — must stay a description.
+        "The scene is unchanged except a car has arrived.",
+        "The driveway is unchanged.",  # unknown subject noun: be conservative
+        "Same porch, but the chair has moved.",
+        "No activity, though a package now sits by the door.",
+        # "still" is ambiguous (motionless vs. truncated "still <adjective>").
+        "The view is still.",
+        # Stillness-only phrases say nothing about equality with the previous
+        # frame — a delivered package is "no activity" yet a changed scene.
+        "Still no activity.",
+        "No activity.",
+        "No new activity detected.",
+        "No motion detected.",
+        "The scene is static.",
+        # Short mixed reply: exercises the per-sentence branch, not the
+        # length gate.
+        "Scene unchanged. A person walks by.",
+        # Overlong all-sentinel reply: exercises the length gate.
+        "Scene unchanged. " * 10,
+        # The VLM failure caption must never classify as a sentinel.
+        "Error analyzing image with VLM model.",
+        # Sentinel-like text buried in a long reply should not match.
+        "The scene is unchanged. A person walks down the steps of the house. "
+        "The porch light is on and the street beyond is empty of vehicles.",
+    ],
+)
+def test_no_change_reply_rejects_real_descriptions(text: str) -> None:
+    assert not is_no_change_reply(text)
+
+
+# ---------------------------------------------------------------------------
+# dedupe_desc tests
+# ---------------------------------------------------------------------------
+
+
+def test_dedupe_desc_merges_identical_texts_across_timestamps() -> None:
+    """Regression: the t+<n>s. prefix must not defeat deduplication."""
+    descs = [
+        {"t+0s. An empty driveway with a parked car.": ["None"]},
+        {"t+8s. An empty driveway with a parked car.": ["None"]},
+        {"t+16s. An empty driveway with a parked car.": ["None"]},
+    ]
+    out = dedupe_desc(descs)
+    assert len(out) == 1
+    assert next(iter(out[0])) == "t+0s. An empty driveway with a parked car."
+
+
+def test_dedupe_desc_keeps_distinct_texts() -> None:
+    descs = [
+        {"t+0s. An empty driveway.": ["None"]},
+        {"t+8s. A person walks up the driveway.": ["None"]},
+        {"t+16s. An empty driveway.": ["None"]},  # not consecutive: kept
+    ]
+    out = dedupe_desc(descs)
+    assert len(out) == 3
+
+
+def test_dedupe_desc_merges_faces_from_dropped_duplicates() -> None:
+    """A face recognized only on a dropped duplicate frame must survive."""
+    descs = [
+        {"t+0s. A person stands at the door.": ["None"]},
+        {"t+8s. A person stands at the door.": ["Alice"]},
+        {"t+16s. A person stands at the door.": ["Alice"]},
+    ]
+    out = dedupe_desc(descs)
+    assert len(out) == 1
+    # "Alice" seen on two dropped frames must not be double-appended.
+    assert next(iter(out[0].values())) == ["None", "Alice"]
+
+
+def test_dedupe_desc_empty_input() -> None:
+    assert dedupe_desc([]) == []
+
+
+def test_dedupe_desc_does_not_mutate_input() -> None:
+    """Merging identities must not alias into the caller's face lists."""
+    faces = ["None"]
+    descs = [
+        {"t+0s. A person stands at the door.": faces},
+        {"t+8s. A person stands at the door.": ["Alice"]},
+    ]
+    dedupe_desc(descs)
+    assert faces == ["None"]

@@ -453,6 +453,8 @@ CONF_VLM_TEMPERATURE = "vlm_temperature"
 RECOMMENDED_VLM_TEMPERATURE = 0.2
 
 # Prompts + input image size
+# The Repeated-scene rule's "Scene unchanged." sentinel below is detected by
+# core/video_helpers.is_no_change_reply — keep the two in sync when editing.
 VLM_SYSTEM_PROMPT = """
 You are a vision-language model describing a single image frame.
 
@@ -469,6 +471,16 @@ Style and policy:
 - Describe visible setting and key actions, not the photographer or camera.
 - Mention animals, major objects, or clear activities only if visible.
 - If nothing moves or no people appear, describe the environment plainly.
+
+Repeated-scene rule:
+- If a 'Previous frame (text only): ...' line is present, no people or
+  animals are visible, and the current image shows the same static setting
+  as that previous description (same objects, same layout, no new
+  activity), do not restate the environment. Reply with exactly:
+  Scene unchanged.
+- Never use that reply when there is no previous frame text, or when
+  anything visible has changed since it — give the normal full
+  description instead.
 
 Motion-description rule:
 - When a 'Previous frame (text only): ...' line is present, use it as context for motion/direction; if it conflicts with the current image, prefer the current image.”
