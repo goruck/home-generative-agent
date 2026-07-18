@@ -206,6 +206,8 @@ Safeguards:
 
 Independently of the sentinel, consecutive frames whose descriptions are identical after normalization (timestamp prefix, case, and whitespace stripped) are merged before summarization in every mode, with face identities from dropped duplicates preserved on the kept frame.
 
+The reference image attached to notifications (and published as the camera's latest event frame) is chosen from the frames that actually fed the summary — preferring a frame where a person was detected (recognized face, or a frame caption affirmatively mentioning a person) — never from dropped sentinel frames. This keeps the image consistent with the notification text even when most of a batch is suppressed as unchanged.
+
 Dropped sentinel frames are counted per camera in the `sentinel_dropped` field of the hourly metrics log line and logged at debug level. No configuration is needed; a VLM that never emits the sentinel behaves exactly as before.
 
 ---

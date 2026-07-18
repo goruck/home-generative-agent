@@ -21,7 +21,7 @@ from ..const import (  # noqa: TID252
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Callable, Iterable, Sequence
 
     from homeassistant.core import HomeAssistant
 
@@ -101,9 +101,32 @@ def crop_resize_encode_jpeg(
 
 def dedupe_desc(descs: list[dict[str, list[str]]]) -> list[dict[str, list[str]]]:
     """Collapse consecutive near-duplicate frame texts to reduce prompt size."""
+    deduped, _ = dedupe_desc_tagged(descs, list(range(len(descs))))
+    return deduped
+
+
+def dedupe_desc_tagged[T](
+    descs: list[dict[str, list[str]]],
+    tags: Sequence[T],
+    *,
+    tag_person_check: Callable[[list[str]], bool] | None = None,
+) -> tuple[list[dict[str, list[str]]], list[T]]:
+    """
+    Collapse consecutive near-duplicate frame texts, keeping tags aligned.
+
+    tags[i] labels descs[i] (typically its snapshot Path). When a duplicate
+    run merges, the tag of the run's first entry survives, mirroring the kept
+    text — unless tag_person_check is given and a later frame in the run is
+    the first whose OWN faces pass it, in which case that frame's tag replaces
+    the kept one. Merged identities would otherwise let the kept entry name a
+    person recognized only on a dropped duplicate, attaching an image where
+    that person is not actually identifiable.
+    """
     out: list[dict[str, list[str]]] = []
+    out_tags: list[T] = []
     last_norm: str | None = None
-    for d in descs:
+    kept_has_person = False
+    for d, tag in zip(descs, tags, strict=True):
         # dict has single key
         text, faces = next(iter(d.items()))
         # Compare without the "t+<n>s." prefix — it differs on every frame,
@@ -117,10 +140,21 @@ def dedupe_desc(descs: list[dict[str, list[str]]]) -> list[dict[str, list[str]]]
             kept_text, kept_faces = next(iter(out[-1].items()))
             merged = kept_faces + [p for p in faces if p not in kept_faces]
             out[-1] = {kept_text: merged}
+            if (
+                tag_person_check is not None
+                and not kept_has_person
+                and tag_person_check(faces)
+            ):
+                out_tags[-1] = tag
+                kept_has_person = True
             continue
         out.append(d)
+        out_tags.append(tag)
         last_norm = norm
-    return out
+        kept_has_person = (
+            tag_person_check(faces) if tag_person_check is not None else False
+        )
+    return out, out_tags
 
 
 # The VLM is prompted to reply with exactly "Scene unchanged." for repeated

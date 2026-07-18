@@ -7,6 +7,7 @@ import pytest
 
 from custom_components.home_generative_agent.core.video_helpers import (
     dedupe_desc,
+    dedupe_desc_tagged,
     is_no_change_reply,
     limit_sentences_and_chars,
 )
@@ -202,3 +203,53 @@ def test_dedupe_desc_does_not_mutate_input() -> None:
     ]
     dedupe_desc(descs)
     assert faces == ["None"]
+
+
+def test_dedupe_desc_tagged_keeps_first_tag_of_duplicate_run() -> None:
+    """Tags must stay aligned with kept texts; a run keeps its first tag."""
+    descs = [
+        {"t+0s. A person stands at the door.": ["None"]},
+        {"t+8s. A person stands at the door.": ["Alice"]},
+        {"t+16s. An empty driveway.": ["None"]},
+    ]
+    out, tags = dedupe_desc_tagged(descs, ["p0", "p1", "p2"])
+    assert len(out) == len(tags) == 2
+    assert tags == ["p0", "p2"]
+    # Identity from the dropped duplicate still merged into the kept entry.
+    assert next(iter(out[0].values())) == ["None", "Alice"]
+
+
+def test_dedupe_desc_tagged_length_mismatch_raises() -> None:
+    with pytest.raises(ValueError, match="argument"):
+        dedupe_desc_tagged([{"t+0s. A.": ["None"]}], [])
+
+
+def _fake_person_check(faces: list[str]) -> bool:
+    return any(p and p not in ("Indeterminate", "None") for p in faces)
+
+
+def test_dedupe_desc_tagged_upgrades_tag_to_recognized_face_frame() -> None:
+    """A merged run's tag must follow the frame whose own faces saw the person."""
+    descs = [
+        {"t+0s. A person stands at the door.": ["Indeterminate"]},
+        {"t+8s. A person stands at the door.": ["Alice"]},
+        {"t+16s. A person stands at the door.": ["Bob"]},
+    ]
+    out, tags = dedupe_desc_tagged(
+        descs, ["p0", "p1", "p2"], tag_person_check=_fake_person_check
+    )
+    assert len(out) == 1
+    # First person-bearing frame in the run wins; later ones don't re-upgrade.
+    assert tags == ["p1"]
+    assert next(iter(out[0].values())) == ["Indeterminate", "Alice", "Bob"]
+
+
+def test_dedupe_desc_tagged_keeps_first_tag_when_run_starts_with_person() -> None:
+    descs = [
+        {"t+0s. A person stands at the door.": ["Alice"]},
+        {"t+8s. A person stands at the door.": ["Indeterminate"]},
+    ]
+    _out, tags = dedupe_desc_tagged(
+        descs, ["p0", "p1"], tag_person_check=_fake_person_check
+    )
+    assert tags == ["p0"]
