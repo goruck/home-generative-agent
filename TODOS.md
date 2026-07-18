@@ -289,9 +289,11 @@ descriptions (all frames stale/errored/sentinel-dropped) or no summary
 batch's snapshot files are never registered in the retention deque and are never
 deleted — the only deletion mechanism is deque-driven.
 
-**Why:** Post-#493, a fully-sentinel batch on a quiet camera is routine, and a
-VLM outage makes all-error batches routine; both accumulate files unboundedly
-until manual cleanup. Flagged by red-team review on the notify-frame fix branch;
+**Why:** A VLM outage makes all-error batches routine, and all-stale batches
+occur after backlogs; both accumulate files unboundedly until manual cleanup.
+(A fully-sentinel batch keeps its first sentinel-shaped reply as a description,
+so it skips the no-descriptions return — but it can still hit the no-summary
+return on timeout.) Flagged by red-team review on the notify-frame fix branch;
 pre-existing behavior, deferred there as separate retention-semantics scope.
 
 **How to apply:** On the early-return paths in `_analyze_and_finalize`, still
