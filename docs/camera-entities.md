@@ -8,6 +8,7 @@ The integration creates image and sensor entities for each configured camera, an
   - [How triggers work by camera type](#how-triggers-work-by-camera-type)
   - [Motion → camera resolution](#motion--camera-resolution)
   - [Notification modes](#notification-modes)
+  - [Repeated-scene frame suppression](#repeated-scene-frame-suppression)
   - [Caption deduplication](#caption-deduplication)
   - [VLM quality requirement](#vlm-quality-requirement)
   - [Resource management](#resource-management)
@@ -193,6 +194,22 @@ Set in **Global Options → Video analyzer mode**:
 
 ---
 
+### Repeated-scene frame suppression
+
+When a frame in a batch shows the same static scene as the previous one — no people, no animals, nothing moved — the VLM replies with a short `Scene unchanged.` sentinel instead of re-describing the environment. The analyzer detects the sentinel tolerantly (phrasing variants like "The scene is unchanged." or "Nothing has changed." also count, but stillness-only phrases such as "No activity." never qualify — a newly delivered package is "no activity" yet a changed scene) and drops the frame from the summary input, so multi-frame summaries of quiet events stay anchored on the one real description instead of a stack of near-duplicates.
+
+Safeguards:
+
+- The previous frame's **full description** always remains the comparison anchor — a sentinel never becomes context for later frames, so a slow real change (a package appearing, a car leaving) is still caught against actual scene content.
+- If face recognition detects a person ("Unknown Person" or a known name), the frame is kept regardless of the sentinel, so a visitor the VLM missed can never be suppressed.
+- A VLM reply that comes back as an error or empty caption is skipped rather than injected into summaries, notifications, or the vector store; if face recognition saw a person on that frame, the frame is kept under a neutral caption ("A person is present; scene analysis unavailable.") so the detection survives the failed analysis. (Frames whose VLM call times out or raises are skipped entirely, as before.)
+
+Independently of the sentinel, consecutive frames whose descriptions are identical after normalization (timestamp prefix, case, and whitespace stripped) are merged before summarization in every mode, with face identities from dropped duplicates preserved on the kept frame.
+
+Dropped sentinel frames are counted per camera in the `sentinel_dropped` field of the hourly metrics log line and logged at debug level. No configuration is needed; a VLM that never emits the sentinel behaves exactly as before.
+
+---
+
 ### Caption deduplication
 
 Active only in `notify_on_anomaly` mode. Repeated low-value notifications are suppressed using two complementary mechanisms:
@@ -205,7 +222,7 @@ Active only in `notify_on_anomaly` mode. Repeated low-value notifications are su
 
 ### VLM quality requirement
 
-Semantic deduplication in `notify_on_anomaly` mode depends on the VLM producing **consistent captions** for the same scene. If two snapshots of an unchanged porch are described differently, the similarity score will be low and every frame will appear novel — resulting in a notification per snapshot.
+Semantic deduplication in `notify_on_anomaly` mode depends on the VLM producing **consistent captions** for the same scene. If two snapshots of an unchanged porch are described differently, the similarity score will be low and every event summary will appear novel — resulting in a notification per event.
 
 Small models like `moondream` are too inconsistent for reliable dedup. Use a model with tested caption stability: `gemma3:4b` (the smallest tested option — reproduces the same core scene across repeated captions of identical frames) or a **7B-class vision model** such as `qwen2.5vl:7b`. The default Ollama VLM model is `qwen3-vl:8b`.
 

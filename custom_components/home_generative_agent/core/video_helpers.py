@@ -100,17 +100,84 @@ def crop_resize_encode_jpeg(
 
 
 def dedupe_desc(descs: list[dict[str, list[str]]]) -> list[dict[str, list[str]]]:
-    """Collapse near-duplicate frame texts to reduce prompt size."""
+    """Collapse consecutive near-duplicate frame texts to reduce prompt size."""
     out: list[dict[str, list[str]]] = []
     last_norm: str | None = None
     for d in descs:
         # dict has single key
-        text = next(iter(d.keys()))
-        norm = re.sub(r"\s+", " ", text.lower()).strip()
-        if norm != last_norm:
-            out.append(d)
-            last_norm = norm
+        text, faces = next(iter(d.items()))
+        # Compare without the "t+<n>s." prefix — it differs on every frame,
+        # so leaving it in would prevent identical descriptions from merging.
+        core = re.sub(r"^t\+\d+s\.\s*", "", text)
+        norm = re.sub(r"\s+", " ", core.lower()).strip()
+        if norm == last_norm and out:
+            # Merge identities so a face recognized only on the dropped
+            # duplicate frame is not lost. Rebuild the kept entry instead of
+            # extending in place — out[-1] may alias a caller-owned dict.
+            kept_text, kept_faces = next(iter(out[-1].items()))
+            merged = kept_faces + [p for p in faces if p not in kept_faces]
+            out[-1] = {kept_text: merged}
+            continue
+        out.append(d)
+        last_norm = norm
     return out
+
+
+# The VLM is prompted to reply with exactly "Scene unchanged." for repeated
+# static scenes (issue #493), but models drift from mandated phrasing, so the
+# sentinel is detected tolerantly: every sentence of a short reply must be, in
+# full, a no-change statement, AND at least one sentence must explicitly claim
+# equality with the previous frame. Activity-only phrases ("Still no
+# activity.") never qualify alone — a newly delivered package is "no activity"
+# yet a changed scene, and dropping such a frame would hide the change from
+# summaries and Sentinel. A missed sentinel is harmless — the reply is simply
+# treated as a normal description.
+_NO_CHANGE_MAX_CHARS = 120
+_NO_CHANGE_TAIL = (
+    r"(?: (?:since|from|compared (?:to|with)|as in) "
+    r"the (?:previous|last|prior) (?:frame|image|description|one))?"
+)
+# Phrases that assert the scene equals the previous one.
+_NO_CHANGE_EQUALITY_CORE = (
+    r"(?:the )?(?:scene|view|image|frame|setting|environment)"
+    r"(?: is| remains| appears| looks| stays)?"
+    r" (?:unchanged|identical|the same|same as before)"
+    + _NO_CHANGE_TAIL
+    + r"|unchanged"
+    r"|no changes?(?: (?:in|to) the (?:scene|view|image|frame))?"
+    + _NO_CHANGE_TAIL
+    + r"|nothing (?:has |is )?changed"
+    + _NO_CHANGE_TAIL
+    + r"|same (?:static )?(?:scene|setting|view)(?: as before)?"
+)
+# Phrases that merely report stillness; allowed only alongside an equality
+# claim, never sufficient on their own.
+_NO_CHANGE_SUPPORT_CORE = (
+    r"(?:the )?(?:scene|view|image|frame|setting|environment)"
+    r"(?: is| remains| appears| looks| stays)? static"
+    r"|(?:still )?no (?:new )?(?:activity|motion|movement)"
+    r"(?: (?:visible|detected|observed))?"
+)
+_NO_CHANGE_EQUALITY = re.compile(f"(?:{_NO_CHANGE_EQUALITY_CORE})")
+_NO_CHANGE_SENTENCE = re.compile(
+    f"(?:{_NO_CHANGE_EQUALITY_CORE}|{_NO_CHANGE_SUPPORT_CORE})"
+)
+
+
+def is_no_change_reply(text: str) -> bool:
+    """Return True if a VLM reply is a no-change sentinel ("Scene unchanged.")."""
+    if not text or len(text) > _NO_CHANGE_MAX_CHARS:
+        return False
+    sentences = [
+        re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", " ", s.lower())).strip()
+        for s in re.split(r"[.!?]", text)
+    ]
+    sentences = [s for s in sentences if s]
+    return (
+        bool(sentences)
+        and all(_NO_CHANGE_SENTENCE.fullmatch(s) for s in sentences)
+        and any(_NO_CHANGE_EQUALITY.fullmatch(s) for s in sentences)
+    )
 
 
 def hamming64(a: int, b: int) -> int:

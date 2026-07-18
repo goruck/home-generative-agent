@@ -31,7 +31,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from ollama import ResponseError as OllamaResponseError
 from PIL import Image
 
-from ..agent.tools import analyze_image  # noqa: TID252
+from ..agent.tools import VLM_ERROR_CAPTION, analyze_image  # noqa: TID252
 from ..const import (  # noqa: TID252
     CONF_MODEL_PROVIDER_UNCONTENDED,
     CONF_NOTIFY_SERVICE,
@@ -80,6 +80,7 @@ from .video_helpers import (
     format_subject,
     hamming64,
     has_human_terms,
+    is_no_change_reply,
     latest_target,
     limit_sentences_and_chars,
     load_image_rgb,
@@ -260,6 +261,23 @@ def _has_real_subject(normalized: str, recognized_names: list[str]) -> bool:
     return any(n and n != "Indeterminate" for n in recognized_names)
 
 
+# Neutral stand-in caption for a frame whose VLM analysis failed or came back
+# empty while face recognition detected a person. Keeps the detection in the
+# pipeline without leaking the raw error text into user-facing output.
+_PERSON_FALLBACK_CAPTION = "A person is present; scene analysis unavailable."
+
+
+def _has_detected_person(faces: list[str]) -> bool:
+    """
+    Return True when face recognition saw an actual person in the frame.
+
+    "Unknown Person" (seen but unenrolled) and known names count;
+    "Indeterminate" (ran, no identifiable face), legacy "None", and empty
+    entries do not.
+    """
+    return any(p and p not in ("Indeterminate", "None") for p in faces)
+
+
 @dataclass(frozen=True)
 class CaptionNoveltyDecision:
     """Result of _is_caption_novel."""
@@ -294,6 +312,7 @@ class _Metrics:
     dropped_stale: int = 0
     dropped_backlog: int = 0
     analyzed: int = 0
+    sentinel_dropped: int = 0
     timeouts: int = 0
     semaphore_timeouts: int = 0
     snapshot_failures: int = 0
@@ -394,6 +413,8 @@ class VideoAnalyzer:
             m.dropped_backlog += n
         elif key == "analyzed":
             m.analyzed += n
+        elif key == "sentinel_dropped":
+            m.sentinel_dropped += n
         elif key == "timeouts":
             m.timeouts += n
         elif key == "semaphore_timeout":
@@ -437,6 +458,7 @@ class VideoAnalyzer:
                 "[%s] Metrics (last interval): "
                 "captured=%d enqueued=%d skipped_duplicate=%d "
                 "dropped_stale=%d dropped_backlog=%d analyzed=%d "
+                "sentinel_dropped=%d "
                 "timeouts=%d semaphore_timeouts=%d snapshot_failures=%d "
                 "avg_latency_ms=%.1f p95_latency_ms=%.1f"
             )
@@ -449,6 +471,7 @@ class VideoAnalyzer:
                 m.dropped_stale,
                 m.dropped_backlog,
                 m.analyzed,
+                m.sentinel_dropped,
                 m.timeouts,
                 m.semaphore_timeouts,
                 m.snapshot_failures,
@@ -463,6 +486,7 @@ class VideoAnalyzer:
             m.dropped_stale = 0
             m.dropped_backlog = 0
             m.analyzed = 0
+            m.sentinel_dropped = 0
             m.timeouts = 0
             m.semaphore_timeouts = 0
             m.snapshot_failures = 0
@@ -560,8 +584,47 @@ class VideoAnalyzer:
             if not fd:
                 continue
             frame_desc, faces = next(iter(fd.items()))
-            frame_descriptions.append({f"t+{ts - t0}s. {frame_desc}": faces})
-            prev_text = frame_desc
+            if not frame_desc or frame_desc == VLM_ERROR_CAPTION:
+                # Empty and error captions carry no scene content. Skip the
+                # frame — matching the return-{} error paths above — so the
+                # caption can neither anchor a later sentinel comparison nor
+                # reach summaries, notifications, or the vector store. But if
+                # face recognition caught an actual person, keep the frame:
+                # dropping it would erase the detection (recognized list,
+                # sensor, notifications) whenever the VLM call fails. Use a
+                # neutral caption so the raw error text never leaks into
+                # user-facing summaries either.
+                if _has_detected_person(faces):
+                    frame_descriptions.append(
+                        {f"t+{ts - t0}s. {_PERSON_FALLBACK_CAPTION}": faces}
+                    )
+                continue
+            entry = {f"t+{ts - t0}s. {frame_desc}": faces}
+            is_sentinel = is_no_change_reply(frame_desc)
+            if prev_text is not None and is_sentinel:
+                # Repeated-scene sentinel (issue #493): the VLM judged this
+                # frame identical to prev_text. Keep prev_text anchored on
+                # that full description — a sentinel carries no scene content
+                # for later frames to be compared against — and drop the
+                # frame from the summary input, unless face recognition
+                # caught an actual person the VLM missed.
+                if _has_detected_person(faces):
+                    frame_descriptions.append(entry)
+                else:
+                    self._m_inc(camera_id, "sentinel_dropped")
+                    LOGGER.debug(
+                        "[%s] Sentinel frame dropped: %r (anchor: %.80r)",
+                        camera_id,
+                        frame_desc,
+                        prev_text,
+                    )
+                continue
+            frame_descriptions.append(entry)
+            if not is_sentinel:
+                # A sentinel-shaped reply that arrives without previous-frame
+                # context (kept above as a description) must still never
+                # become the comparison anchor.
+                prev_text = frame_desc
 
         # dedupe near-identical, then cap to last 8
         frame_descriptions = dedupe_desc(frame_descriptions)[-8:]
