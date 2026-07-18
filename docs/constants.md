@@ -475,6 +475,7 @@ These constants live outside `const.py` in individual modules. They affect runti
 | `_MAX_CHARS` | `300` | Maximum characters in a video caption |
 | `_MAX_NAMES` | `2` | Maximum person names included in a single caption |
 | `_UNIQUENESS_HASH_SIZE` | `8` | dHash grid size (8 → 64-bit perceptual hash) for frame deduplication |
+| `_NO_CHANGE_MAX_CHARS` | `120` | Maximum reply length considered for `Scene unchanged.` sentinel detection (issue #493); longer VLM replies are always treated as real descriptions |
 
 ### `core/utils.py`
 

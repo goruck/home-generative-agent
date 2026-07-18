@@ -8,6 +8,7 @@ The integration creates image and sensor entities for each configured camera, an
   - [How triggers work by camera type](#how-triggers-work-by-camera-type)
   - [Motion → camera resolution](#motion--camera-resolution)
   - [Notification modes](#notification-modes)
+  - [Repeated-scene frame suppression](#repeated-scene-frame-suppression)
   - [Caption deduplication](#caption-deduplication)
   - [VLM quality requirement](#vlm-quality-requirement)
   - [Resource management](#resource-management)
@@ -190,6 +191,20 @@ Set in **Global Options → Video analyzer mode**:
 | `disable` | Video analysis off |
 | `notify_on_anomaly` | Notify only for semantically novel scenes (uses caption deduplication) |
 | `always_notify` | Notify on every analyzed event |
+
+---
+
+### Repeated-scene frame suppression
+
+When a frame in a batch shows the same static scene as the previous one — no people, no animals, nothing moved — the VLM replies with a short `Scene unchanged.` sentinel instead of re-describing the environment. The analyzer detects the sentinel tolerantly (phrasing variants like "The scene is unchanged." or "Nothing has changed." also count, but stillness-only phrases such as "No activity." never qualify — a newly delivered package is "no activity" yet a changed scene) and drops the frame from the summary input, so multi-frame summaries of quiet events stay anchored on the one real description instead of a stack of near-duplicates.
+
+Safeguards:
+
+- The previous frame's **full description** always remains the comparison anchor — a sentinel never becomes context for later frames, so a slow real change (a package appearing, a car leaving) is still caught against actual scene content.
+- If face recognition detects a person ("Unknown Person" or a known name), the frame is kept regardless of the sentinel, so a visitor the VLM missed can never be suppressed.
+- A failed or empty VLM analysis is skipped rather than injected into summaries, notifications, or the vector store; if face recognition saw a person on that frame, the frame is kept under a neutral caption ("A person is present; scene analysis unavailable.") so a VLM failure can never erase a real detection.
+
+Dropped frames are counted per camera in the `sentinel_dropped` field of the hourly metrics log line and logged at debug level. No configuration is needed; a VLM that never emits the sentinel behaves exactly as before.
 
 ---
 
