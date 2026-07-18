@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.18.0] - 2026-07-18
+
+### Added
+
+- **Static camera scenes no longer get the full environment re-described on every frame** — when a frame shows the same static setting as the previous one (no people, no animals, nothing moved), the VLM now replies with a short `Scene unchanged.` sentinel instead of restating the porch, the railing, and the parked car for the tenth time. The analyzer detects the sentinel tolerantly (models drift from mandated phrasing, so variants like "The scene is unchanged." or "Nothing has changed." also count), but only replies that explicitly claim equality with the previous frame qualify — stillness-only phrases such as "No activity." never do, because a newly delivered package is "no activity" yet a changed scene. Qualifying frames are dropped from the summary input, so multi-frame summaries of quiet events stay anchored on the one real description instead of a pile of near-duplicates. The previous frame's *full* description always remains the comparison anchor — a sentinel never becomes context for later frames, so a slow real change (a package appearing, a car leaving) is still caught against actual scene content. If face recognition spots a person the VLM missed ("Unknown Person" or a known name), the frame is kept regardless, so an unrecognized visitor can never be suppressed by a no-change reply. Dropped frames are counted in a new per-camera `sentinel_dropped` metric and logged at debug level for diagnosability. A model that never emits the sentinel simply behaves exactly as before. Idea and prompt draft by [@hruba202](https://github.com/hruba202). Closes [#493](https://github.com/goruck/home-generative-agent/issues/493).
+
+### Fixed
+
+- **Frame-description deduplication now actually merges duplicates** — `dedupe_desc()` compared descriptions with their `t+<n>s.` timestamp prefix included, which differs on every frame, so byte-identical descriptions at different offsets never collapsed and the function was effectively inert. The prefix is now stripped before comparison; identities recognized only on a dropped duplicate frame are merged into the kept entry so no face result is lost, and the merge no longer mutates caller-owned face lists.
+- **A failed VLM call can no longer leak its error text into summaries, notifications, or the vector store** — the literal `Error analyzing image with VLM model.` caption returned on a model failure was previously appended to the frame list like a real description (and, with dedupe now live, an all-error batch would have collapsed to that single caption and shipped it as the event's mobile notification). Error and empty captions are now skipped, matching how every other per-frame error path already behaves, and they can never become the previous-frame context injected into later VLM prompts; the one exception is a frame where face recognition detected a person — that frame is kept under a neutral caption ("A person is present; scene analysis unavailable.") so a VLM failure can never erase a real detection, while the raw error text still stays out of user-facing output.
+
 ## [3.17.1] - 2026-07-17
 
 ### Fixed
