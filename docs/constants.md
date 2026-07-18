@@ -231,7 +231,7 @@ This document covers the named constants that affect integration behaviour, orga
 | `VIDEO_ANALYZER_SNAPSHOT_ROOT` | `const.py` | `/media/snapshots` | Root directory for saved camera snapshots |
 | `VIDEO_ANALYZER_TIME_OFFSET` | `const.py` | `15` (min) | Lookback window for fetching recent camera activity when building a video batch |
 | `VIDEO_ANALYZER_CAPTION_DEDUPE_WINDOW_SEC` | `const.py` | `1800` (s, 30 min) | Lexical deduplication window. Artifact captions within this window are suppressed even when the vector score is below threshold. |
-| `VIDEO_ANALYZER_SIMILARITY_THRESHOLD` | `const.py` | `0.89` | Cosine similarity threshold for caption deduplication. Captions above this score are considered duplicates and suppressed. |
+| `VIDEO_ANALYZER_SIMILARITY_THRESHOLD` | `const.py` | `0.85` | Cosine similarity threshold for caption deduplication. Captions above this score are considered duplicates and suppressed. |
 | `VIDEO_ANALYZER_DELETE_SNAPSHOTS` | `const.py` | `False` | Whether to delete snapshot files after analysis |
 | `VIDEO_ANALYZER_SNAPSHOTS_TO_KEEP` | `const.py` | `200` | Rolling snapshot retention count per camera |
 | `VIDEO_ANALYZER_TRIGGER_ON_MOTION` | `const.py` | `True` | Trigger analysis on HA motion sensor state changes (also gates the ring-mqtt `event_select` trigger) |
@@ -239,7 +239,7 @@ This document covers the named constants that affect integration behaviour, orga
 | `VIDEO_ANALYZER_EVENT_SELECT_MAX_WINDOW` | `const.py` | `300` (s) | Cap on total event_select window length across extensions; hitting it flushes the batch |
 | `VIDEO_ANALYZER_FACE_CROP` | `const.py` | `False` | Crop detected faces before sending to face recognition |
 | `VIDEO_ANALYZER_SAVE_LATEST` | `const.py` | `True` | Publish a stable `_latest/latest.jpg` alongside each snapshot |
-| `_MAX_BATCH` | `core/video_analyzer.py` | `5` | Maximum frames per analysis batch |
+| `_MAX_BATCH` | `core/video_analyzer.py` | `5` | Frames pulled per batch by the live analysis worker; a motion/`event_select` window flush processes the entire held buffer as one batch |
 | `_QUEUE_MAXSIZE` | `core/video_analyzer.py` | `50` | Per-camera frame backlog capacity before drops |
 | `_FRAME_DEADLINE_SEC` | `core/video_analyzer.py` | `600` (s) | Skip frames older than this; prevents stale results from backlog buildup |
 | `_SUMMARY_TIMEOUT_SEC` | `core/video_analyzer.py` | `60` (s) | Timeout for the summarization model call during batch synthesis |
@@ -248,6 +248,10 @@ This document covers the named constants that affect integration behaviour, orga
 | `_VIDEO_MODEL_SEMAPHORE_WAIT_SEC` | `core/video_analyzer.py` | `30` (s) | Max wait for the video semaphore before dropping the frame |
 | `_VIDEO_QUEUE_BACKLOG_THRESHOLD` | `core/video_analyzer.py` | `2` | Drop stale queued frames when the backlog exceeds this count |
 | `_METRICS_REPORT_INTERVAL_SEC` | `core/video_analyzer.py` | `3600` (s) | How often per-camera latency metrics are logged |
+| `_SNAPSHOT_STALE_MAX_AGE_SEC` | `core/video_analyzer.py` | `1800` (s) | Skip capture and count a snapshot failure (once per staleness episode) when a ring-mqtt camera's `timestamp` attribute shows the retained frame is older than this (frozen interval snapshot, issue #490); 3x the slowest known ring-mqtt interval (600 s on battery). Only applies to cameras with an `event_select` sibling |
+| `_SNAPSHOT_TS_EPOCH_MIN` | `core/video_analyzer.py` | `1_000_000_000` | `timestamp` attribute values below this are not epoch seconds and never trigger the stale guard |
+| `_SNAPSHOT_TS_FUTURE_SLACK_SEC` | `core/video_analyzer.py` | `3600` (s) | `timestamp` values further in the future than this (e.g. millisecond epochs) are not plausible epoch seconds and never trigger the stale guard |
+| `_STALE_REREPORT_INTERVAL_SEC` | `core/video_analyzer.py` | `3600` (s) | Re-record an ongoing staleness episode this often so the failure streak can escalate and hourly metrics reflect a persistent freeze |
 
 ---
 
@@ -453,7 +457,7 @@ These constants live outside `const.py` in individual modules. They affect runti
 
 | Constant | Value | Purpose |
 |---|---|---|
-| `_MAX_BATCH` | `5` | Maximum video frames processed per analysis batch |
+| `_MAX_BATCH` | `5` | Frames pulled per batch by the live analysis worker; motion/`event_select` window flushes process the whole held buffer |
 | `_QUEUE_MAXSIZE` | `50` | Per-camera frame queue capacity. Frames are dropped when full. |
 | `_FRAME_DEADLINE_SEC` | `600` (s) | Frames older than this are skipped to avoid processing stale data |
 | `_SUMMARY_TIMEOUT_SEC` | `60` (s) | Timeout for the summarization model call in a video batch |

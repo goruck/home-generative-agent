@@ -204,7 +204,7 @@ The **Options** flow (gear icon on the integration page) exposes:
 - Tool retrieval limit and relevance threshold
 - `model_provider_uncontended` — bypass all local GPU gates when the server has dedicated capacity
 - **Video analyzer mode** — disable / notify_on_anomaly / always_notify
-- **Enable perceptual-hash frame filter (dHash)** — skip visually identical frames before VLM analysis (off by default; see caveat in [Camera Entities](camera-entities.md#advanced-options))
+- **Enable perceptual-hash frame filter (dHash)** — skip visually identical frames before VLM analysis (off by default; always active for ring-mqtt `event_select` capture loops regardless of this setting; see caveat in [Camera Entities](camera-entities.md#advanced-options))
 - **Motion sensor → camera overrides** — one `binary_sensor.X: camera.Y` pair per line; use when automatic resolution picks the wrong camera (see [Motion → camera resolution](camera-entities.md#motion--camera-resolution))
 
 See [Architecture](architecture.md#llm-context-management) for detail on context management parameters.
