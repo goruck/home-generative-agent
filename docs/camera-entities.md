@@ -202,9 +202,11 @@ Safeguards:
 
 - The previous frame's **full description** always remains the comparison anchor — a sentinel never becomes context for later frames, so a slow real change (a package appearing, a car leaving) is still caught against actual scene content.
 - If face recognition detects a person ("Unknown Person" or a known name), the frame is kept regardless of the sentinel, so a visitor the VLM missed can never be suppressed.
-- A failed or empty VLM analysis is skipped rather than injected into summaries, notifications, or the vector store; if face recognition saw a person on that frame, the frame is kept under a neutral caption ("A person is present; scene analysis unavailable.") so a VLM failure can never erase a real detection.
+- A VLM reply that comes back as an error or empty caption is skipped rather than injected into summaries, notifications, or the vector store; if face recognition saw a person on that frame, the frame is kept under a neutral caption ("A person is present; scene analysis unavailable.") so the detection survives the failed analysis. (Frames whose VLM call times out or raises are skipped entirely, as before.)
 
-Dropped frames are counted per camera in the `sentinel_dropped` field of the hourly metrics log line and logged at debug level. No configuration is needed; a VLM that never emits the sentinel behaves exactly as before.
+Independently of the sentinel, consecutive frames whose descriptions are identical after normalization (timestamp prefix, case, and whitespace stripped) are merged before summarization in every mode, with face identities from dropped duplicates preserved on the kept frame.
+
+Dropped sentinel frames are counted per camera in the `sentinel_dropped` field of the hourly metrics log line and logged at debug level. No configuration is needed; a VLM that never emits the sentinel behaves exactly as before.
 
 ---
 
@@ -220,7 +222,7 @@ Active only in `notify_on_anomaly` mode. Repeated low-value notifications are su
 
 ### VLM quality requirement
 
-Semantic deduplication in `notify_on_anomaly` mode depends on the VLM producing **consistent captions** for the same scene. If two snapshots of an unchanged porch are described differently, the similarity score will be low and every frame will appear novel — resulting in a notification per snapshot.
+Semantic deduplication in `notify_on_anomaly` mode depends on the VLM producing **consistent captions** for the same scene. If two snapshots of an unchanged porch are described differently, the similarity score will be low and every event summary will appear novel — resulting in a notification per event.
 
 Small models like `moondream` are too inconsistent for reliable dedup. Use a model with tested caption stability: `gemma3:4b` (the smallest tested option — reproduces the same core scene across repeated captions of identical frames) or a **7B-class vision model** such as `qwen2.5vl:7b`. The default Ollama VLM model is `qwen3-vl:8b`.
 
