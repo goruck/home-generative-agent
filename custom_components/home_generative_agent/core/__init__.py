@@ -38,6 +38,7 @@ from .utils import (
 from .video_analyzer import VideoAnalyzer
 from .video_helpers import (
     apply_name_substitution,
+    camera_id_from_fs_dir,
     clean_frame_text,
     crop_resize_encode_jpeg,
     dedupe_desc,
@@ -72,6 +73,7 @@ __all__ = [
     "_maybe_fix_dashboard_entities",
     "_resolve_entity_id",
     "apply_name_substitution",
+    "camera_id_from_fs_dir",
     "clean_frame_text",
     "configured_ollama_urls",
     "crop_resize_encode_jpeg",

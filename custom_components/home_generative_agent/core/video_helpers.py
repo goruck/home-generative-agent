@@ -285,6 +285,22 @@ def _camera_fs_dir(root: Path, camera_id: str) -> Path:
     return root / camera_id.replace(".", "_")
 
 
+def camera_id_from_fs_dir(name: str) -> str | None:
+    """
+    Invert _camera_fs_dir's naming for a directory name, else None.
+
+    Entity IDs contain exactly one dot, so "camera_front_door" maps back to
+    "camera.front_door" unambiguously (including object ids that themselves
+    contain "camera_", e.g. "camera_camera_2"). Non-camera directories
+    ("faces", future layouts) return None. Keep this next to _camera_fs_dir
+    so both directions of the mapping live in one place.
+    """
+    prefix = "camera_"
+    if not name.startswith(prefix) or name == prefix:
+        return None
+    return "camera." + name.removeprefix(prefix)
+
+
 def latest_target(root: Path, camera_id: str) -> Path:
     """Return the target 'latest.jpg' path for a camera under the snapshot root."""
     return _camera_fs_dir(root, camera_id) / _LATEST_SUBFOLDER / _LATEST_NAME
