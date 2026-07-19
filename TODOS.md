@@ -281,28 +281,27 @@ common false-positives (suppressing events that should notify) or false-negative
 
 ---
 
-### Snapshot retention misses batches that never reach _finalize
+### save_and_analyze_snapshot tmp files leak in the latest/ subfolder
 
-**What:** `_analyze_and_finalize` returns early when a batch produces no frame
-descriptions (all frames stale/errored/sentinel-dropped) or no summary
-(timeout/semaphore). Those early returns skip `_prune_old_snapshots`, so the
-batch's snapshot files are never registered in the retention deque and are never
-deleted — the only deletion mechanism is deque-driven.
+**What:** The service writes `snapshot_<ts>.jpg` into `latest_target(...).parent`
+(the `latest/` subfolder), publishes a copy to `latest.jpg`, and never removes
+the tmp file. `_prune_old_snapshots` deliberately never deletes files in the
+`latest/` subfolder (guard re-appends and breaks), so these files can neither
+be registered nor swept by the current mechanism.
 
-**Why:** A VLM outage makes all-error batches routine, and all-stale batches
-occur after backlogs; both accumulate files unboundedly until manual cleanup.
-(A fully-sentinel batch keeps its first sentinel-shaped reply as a description,
-so it skips the no-descriptions return — but it can still hit the no-summary
-return on timeout.) Flagged by red-team review on the notify-frame fix branch;
-pre-existing behavior, deferred there as separate retention-semantics scope.
+**Why:** Each service call leaks one file. Low volume (manual/automation
+calls), but unbounded. Registering them is not an option without rethinking
+the latest-subfolder guard — a registered `latest/` file would permanently
+clog the deque head.
 
-**How to apply:** On the early-return paths in `_analyze_and_finalize`, still
-register the batch for retention (e.g. call
-`await self._prune_old_snapshots(camera_id, [p for p, _ in ordered])`). Verify
-interaction with `protect_notify_image` and the recording-poll re-seed first.
+**How to apply:** Either unlink the tmp file after `publish_latest_atomic`
+(it's a copy, the dst survives), or write the tmp into the camera's normal
+snapshot directory so capture-time retention covers it. Unlinking after
+publish is simplest; check the bus event's `"path": str(tmp_path)` consumers
+first (same dangling-path concern as the suppressed-notification TODO).
 
 **Effort:** S
-**Priority:** P1
+**Priority:** P3
 
 ---
 
@@ -399,6 +398,40 @@ early-frame selection.
 ---
 
 ## Completed
+
+### Snapshot retention misses batches that never reach _finalize
+
+**What:** Deletion is deque-driven (in-memory), but registration was coupled to
+successful analysis completion (`_finalize`). Six runtime paths abandoned
+captured files without registration: the two `_analyze_and_finalize` early
+returns, the worker's blanket exception handler, notify/store exceptions inside
+`_finalize`, the `_get_batch` backlog drop, and event-hold-buffer eviction.
+
+**Why:** VLM outages and backlogs made these paths routine; files accumulated
+unboundedly. Third occurrence of the same bug class (#489 dedupe-skip was a
+point patch), so the fix moved registration to capture success in
+`_capture_snapshot` — a single site that makes every downstream drop
+retention-irrelevant — and removed the per-site registrations. In-flight frames
+(≤ ~105/camera) can never reach the deque's pop position (cap 200).
+
+**Effort:** S
+**Priority:** P1
+**Completed:** v3.18.2 (2026-07-19)
+
+### Restart orphans snapshot files predating the restart
+
+**What:** Retention deques are in-memory with no filesystem sweep, so every
+on-disk snapshot from before an HA restart was orphaned forever. Fixed with a
+one-shot startup task (`_seed_retention_from_disk`) that scans each
+`camera_*` snapshot directory (skipping `latest/` and non-camera dirs like
+`faces/`), merges pre-existing files into the retention deque as the oldest
+entries (never after live captures, so new frames can't be rotated out
+first), and runs the normal budget shrink with the usual latest-asset and
+protection guards.
+
+**Effort:** M
+**Priority:** P2
+**Completed:** v3.18.2 (2026-07-19)
 
 ### iOS notification priority tiers
 
