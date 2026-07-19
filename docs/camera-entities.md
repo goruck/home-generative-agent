@@ -236,6 +236,8 @@ If you are using `always_notify` mode, VLM consistency affects caption quality b
 
 The video pipeline enforces a per-entry semaphore that limits concurrent VLM and summary model calls (default: 1, sequential). Frames that cannot acquire the semaphore within 30 s are dropped. If a chat turn starts while the video pipeline is waiting for the model, it waits briefly for the chat turn to complete before dropping the frame — avoiding GPU contention. The video token budget is intentionally capped (256 tokens for VLM scene descriptions, 128 tokens for summaries).
 
+**Snapshot disk retention.** The analyzer keeps a rolling window of roughly the most recent 200 snapshot files per camera (`VIDEO_ANALYZER_SNAPSHOTS_TO_KEEP`) and deletes the oldest as new ones arrive. Files are registered for retention the moment they are captured, so frames dropped later in the pipeline (VLM errors, summary timeouts, backlog drops) cannot accumulate on disk. On startup, snapshots left over from before a restart are folded into the same retention window as the oldest entries — only files matching the analyzer's own naming pattern (`snapshot_YYYYMMDD_HHMMSS.jpg`) are claimed, so a file with any other name placed in a camera's snapshot folder is never touched. The published `latest.jpg` and images attached to notifications from the last 30 minutes are protected from deletion; because cleanup pauses at a protected file, the on-disk count can temporarily exceed the 200-file budget until protection expires.
+
 ---
 
 ### Advanced options

@@ -2716,8 +2716,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             def _start_video_analyzer(_event: object) -> None:
                 hass.loop.call_soon_threadsafe(video_analyzer.start)
 
-            hass.bus.async_listen_once(
-                EVENT_HOMEASSISTANT_STARTED, _start_video_analyzer
+            # Cancel on unload: if the entry reloads before HA finishes
+            # starting, a leaked listener would start the ORPHANED analyzer
+            # instance alongside the new one — duplicate capture loops, and
+            # (since retention now deletes at capture/seed time) an
+            # independent deque with deletion power over live files.
+            entry.async_on_unload(
+                hass.bus.async_listen_once(
+                    EVENT_HOMEASSISTANT_STARTED, _start_video_analyzer
+                )
             )
     if options.get(CONF_SENTINEL_ENABLED, RECOMMENDED_SENTINEL_ENABLED):
         if hass.is_running:

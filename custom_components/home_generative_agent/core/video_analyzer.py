@@ -71,6 +71,7 @@ from .utils import (
 )
 from .video_helpers import (
     apply_name_substitution,
+    camera_id_from_fs_dir,
     clean_frame_text,
     crop_resize_encode_jpeg,
     dedupe_desc_tagged,
@@ -113,6 +114,26 @@ _VIDEO_QUEUE_BACKLOG_THRESHOLD: Final[int] = (
 )
 _WORKER_ERROR_BACKOFF_SEC: Final[int] = 5  # pause after unexpected worker error
 _SUMMARY_MAX_FRAMES: Final[int] = 8  # kept frame descriptions fed to the summary
+_NOTIFY_PROTECT_TTL_SEC: Final[int] = 1800  # pruning protection for notified images
+# Exact filename shape _capture_snapshot writes; the retention seed claims
+# ONLY these (user files like "snapshot_family.jpg" must never match).
+# ASCII digit class on purpose: \d is Unicode-aware and would also claim
+# user files named with e.g. Arabic-Indic digits.
+_SNAPSHOT_FILE_RE: Final = re.compile(r"snapshot_([0-9]{8}_[0-9]{6})\.jpg")
+
+
+def _is_analyzer_snapshot_name(name: str) -> bool:
+    """Return True only for names _capture_snapshot can actually produce."""
+    m = _SNAPSHOT_FILE_RE.fullmatch(name)
+    if m is None:
+        return False
+    try:
+        datetime.strptime(m.group(1), "%Y%m%d_%H%M%S")  # noqa: DTZ007
+    except ValueError:
+        return False
+    return True
+
+
 # --- Snapshot capture (issue #464) ---
 _SNAPSHOT_SERVICE_TIMEOUT_SEC: Final[int] = 15  # camera.snapshot blocking-call budget
 _SNAPSHOT_APPEAR_ATTEMPTS: Final[int] = 10  # post-service file visibility polls (0.2s)
@@ -382,6 +403,8 @@ class VideoAnalyzer:
         self.entry = entry
         self._snapshot_queues: dict[str, asyncio.Queue[_SnapshotItem]] = {}
         self._retention_deques: dict[str, deque[Path]] = {}
+        # One-shot startup task that folds pre-restart files into retention.
+        self._retention_seed_task: asyncio.Task[None] | None = None
         self._active_queue_tasks: dict[str, asyncio.Task[Any]] = {}
         self._initialized_dirs: set[str] = set()
         self._active_motion_cameras: dict[str, asyncio.Task[Any]] = {}
@@ -791,9 +814,11 @@ class VideoAnalyzer:
         msg: str,
         notify_frame: Path | None = None,
     ) -> None:
+        # Retention registration happens at capture time (_capture_snapshot),
+        # so batches that never reach this point cannot leak files — and
+        # registering again here would duplicate deque entries.
         await self._handle_notification(camera_id, msg, batch, notify_frame)
         await self._store_results(camera_id, batch, msg)
-        await self._prune_old_snapshots(camera_id, batch)
 
     async def _analyze_and_finalize(
         self, camera_id: str, ordered: list[tuple[Path, int]]
@@ -1111,29 +1136,133 @@ class VideoAnalyzer:
     async def _prune_old_snapshots(self, camera_id: str, batch: list[Path]) -> None:
         retention = self._retention_deques.setdefault(camera_id, deque())
         for path in batch:
+            # Membership guard: the startup seed can scan a file whose capture
+            # registers it moments later; a duplicate entry would waste a
+            # budget slot and double-unlink on rollover. O(budget) is cheap at
+            # one capture per camera per few seconds.
+            if path in retention:
+                continue
             retention.append(path)
-            while len(retention) > VIDEO_ANALYZER_SNAPSHOTS_TO_KEEP:
-                old = retention.popleft()
+            await self._shrink_retention(camera_id, retention)
 
-                # Do not delete published "latest" assets
-                if (
-                    old.name == VIDEO_ANALYZER_LATEST_NAME
-                    or old.parent.name == VIDEO_ANALYZER_LATEST_SUBFOLDER
-                ):
-                    retention.append(old)
-                    break
+    async def _shrink_retention(self, camera_id: str, retention: deque[Path]) -> None:
+        """Delete oldest retained snapshots until the per-camera budget holds."""
+        while len(retention) > VIDEO_ANALYZER_SNAPSHOTS_TO_KEEP:
+            old = retention.popleft()
 
-                # Skip if protected by a recent notification
-                if self._is_protected(old):
-                    retention.append(
-                        old
-                    )  # push it to the end once; stop pruning this round
-                    break
+            # Do not delete published "latest" assets
+            if (
+                old.name == VIDEO_ANALYZER_LATEST_NAME
+                or old.parent.name == VIDEO_ANALYZER_LATEST_SUBFOLDER
+            ):
+                retention.append(old)
+                break
+
+            # Skip if protected by a recent notification
+            if self._is_protected(old):
+                retention.append(
+                    old
+                )  # push it to the end once; stop pruning this round
+                break
+            try:
+                await self.hass.async_add_executor_job(old.unlink)
+                LOGGER.debug("[%s] Deleted old snapshot: %s", camera_id, old)
+            except OSError as err:
+                LOGGER.warning("[%s] Failed to delete %s: %s", camera_id, old, err)
+
+    async def _seed_retention_from_disk(self) -> None:
+        """
+        Seed retention deques with snapshot files that predate this start.
+
+        Retention state is in-memory, so files captured before a Home
+        Assistant restart never re-enter a deque and would otherwise leak
+        forever. Existing files are merged in as the OLDEST entries — never
+        appended after live captures, which would rotate the newest frames out
+        first — then the normal budget shrink runs, deleting over-budget files
+        oldest-first with the usual latest-asset and protection guards.
+
+        Only files the analyzer itself writes are claimed, matched against the
+        exact timestamped name _capture_snapshot produces
+        (snapshot_YYYYMMDD_HHMMSS.jpg): /media is user-visible, and a looser
+        match would eventually delete user-owned content such as
+        "snapshot_family.jpg" that the integration never created.
+
+        Frames captured within the last protection TTL are re-protected for a
+        FULL fresh TTL before the shrink: the protection map died with the
+        previous process, and a notification may have fired well after
+        capture (event buffering + processing), so remaining-TTL-from-mtime
+        arithmetic would under-protect. A fresh window is over-protective for
+        at most one TTL, never destructive.
+        """
+
+        def _scan() -> dict[str, list[tuple[float, Path]]]:
+            root = Path(VIDEO_ANALYZER_SNAPSHOT_ROOT)
+            if not root.is_dir():
+                return {}
+            found: dict[str, list[tuple[float, Path]]] = {}
+            for cam_dir in sorted(root.iterdir()):
+                # Only per-camera snapshot dirs are swept; anything else
+                # ("faces", future layouts) has its own lifecycle.
+                camera_id = camera_id_from_fs_dir(cam_dir.name)
+                if camera_id is None or not cam_dir.is_dir():
+                    continue
                 try:
-                    await self.hass.async_add_executor_job(old.unlink)
-                    LOGGER.debug("[%s] Deleted old snapshot: %s", camera_id, old)
-                except OSError as err:
-                    LOGGER.warning("[%s] Failed to delete %s: %s", camera_id, old, err)
+                    # Non-recursive: the VIDEO_ANALYZER_LATEST_SUBFOLDER
+                    # ("_latest") directory entry is skipped by is_file().
+                    entries = list(cam_dir.iterdir())
+                except OSError:
+                    LOGGER.warning(
+                        "[%s] Retention seed scan failed for %s",
+                        camera_id,
+                        cam_dir,
+                        exc_info=True,
+                    )
+                    continue
+                stamped: list[tuple[float, Path]] = []
+                for f in entries:
+                    if not _is_analyzer_snapshot_name(f.name):
+                        continue
+                    # Per-file guard: one unreadable entry must cost one
+                    # file, not the whole camera's seed.
+                    try:
+                        if f.is_file():
+                            stamped.append((f.stat().st_mtime, f))
+                    except OSError:
+                        LOGGER.warning(
+                            "[%s] Retention seed skipped unreadable %s",
+                            camera_id,
+                            f,
+                            exc_info=True,
+                        )
+                if stamped:
+                    stamped.sort()
+                    found[camera_id] = stamped
+            return found
+
+        try:
+            found = await self.hass.async_add_executor_job(_scan)
+        except OSError:
+            LOGGER.warning("Retention seed scan failed", exc_info=True)
+            return
+
+        now_ts = dt_util.utcnow().timestamp()
+        for camera_id, stamped in found.items():
+            retention = self._retention_deques.setdefault(camera_id, deque())
+            known = set(retention)
+            seed = [(m, f) for m, f in stamped if f not in known]
+            if not seed:
+                continue
+            # Oldest-first seed lands left of any live registrations.
+            retention.extendleft(reversed([f for _, f in seed]))
+            for mtime, f in seed:
+                if now_ts - mtime < _NOTIFY_PROTECT_TTL_SEC:
+                    self.protect_notify_image(f, ttl_sec=_NOTIFY_PROTECT_TTL_SEC)
+            LOGGER.info(
+                "[%s] Seeded %d pre-existing snapshots into retention",
+                camera_id,
+                len(seed),
+            )
+            await self._shrink_retention(camera_id, retention)
 
     async def recognize_faces(self, data: bytes, camera_id: str) -> list[str]:  # noqa: PLR0911, PLR0912, PLR0915
         """Call face API to recognize faces in the snapshot image."""
@@ -1462,10 +1591,10 @@ class VideoAnalyzer:
             )
             if decision.notify:
                 # Protect the chosen file from pruning for 30 minutes
-                self.protect_notify_image(chosen, ttl_sec=1800)
+                self.protect_notify_image(chosen, ttl_sec=_NOTIFY_PROTECT_TTL_SEC)
                 await self._send_notification(msg, camera_name, notify_img)
         else:
-            self.protect_notify_image(chosen, ttl_sec=1800)
+            self.protect_notify_image(chosen, ttl_sec=_NOTIFY_PROTECT_TTL_SEC)
             await self._send_notification(msg, camera_name, notify_img)
 
     async def _store_results(self, camera_id: str, batch: list[Path], msg: str) -> None:
@@ -1606,7 +1735,10 @@ class VideoAnalyzer:
                 lambda: any(cam_dir.iterdir()),
             )
             if dir_not_empty:
-                msg = "[{id}] Folder not empty. Existing snapshots will not be pruned."
+                msg = (
+                    "[{id}] Folder not empty; pre-existing snapshots were "
+                    "seeded into retention at startup."
+                )
                 LOGGER.info(msg.format(id=camera_id))
         return Path(VIDEO_ANALYZER_SNAPSHOT_ROOT) / camera_id.replace(".", "_")
 
@@ -1845,6 +1977,19 @@ class VideoAnalyzer:
         self._m_inc(camera_id, "captured")
         self._snapshot_fail_streak.pop(camera_id, None)
 
+        # Register the file for retention NOW, while its existence is the only
+        # thing that matters. (A file that appears only after the poll window
+        # above returned None is deliberately left to the next restart's
+        # retention seed.) Deletion is deque-driven and the deque lives in
+        # memory, so any frame that missed registration leaked forever; tying
+        # registration to analysis completing meant every downstream drop path
+        # (all-error batches, summary timeouts, worker crashes, backlog drops,
+        # hold-buffer evictions) was a leak. A registered frame cannot be
+        # pruned while still awaiting analysis: the queue, hold buffer, and
+        # batch bound in-flight frames well below
+        # VIDEO_ANALYZER_SNAPSHOTS_TO_KEEP.
+        await self._prune_old_snapshots(camera_id, [path])
+
         # --- Uniqueness gate: skip near-duplicate frames (forced for loops
         # the event_select path started; opt-in with heartbeat otherwise) ---
         try:
@@ -1855,10 +2000,6 @@ class VideoAnalyzer:
         if not should_enqueue:
             self._m_inc(camera_id, "skipped_duplicate")
             LOGGER.debug("[%s] Skipping enqueue (near-duplicate): %s", camera_id, path)
-            # camera.snapshot already wrote the file; register it for normal
-            # retention so skipped duplicates can't grow the disk unbounded
-            # (analysis-path frames are registered on batch finalize).
-            await self._prune_old_snapshots(camera_id, [path])
             return None
 
         if hold_for_batch:
@@ -2166,6 +2307,12 @@ class VideoAnalyzer:
         if self._httpx_client is None:
             self._httpx_client = get_async_client(self.hass)
 
+        # Fold snapshot files that predate this start into retention before
+        # they can be orphaned (deques are in-memory; issue: restart leak).
+        self._retention_seed_task = self.hass.async_create_task(
+            self._seed_retention_from_disk(), "hga video retention seed"
+        )
+
         self._cancel_track = async_track_time_interval(
             self.hass,
             self._take_snapshots_from_recording_cameras,
@@ -2210,6 +2357,11 @@ class VideoAnalyzer:
             return
 
         tasks_to_await: list[asyncio.Task[Any]] = []
+
+        if self._retention_seed_task is not None:
+            self._retention_seed_task.cancel()
+            tasks_to_await.append(self._retention_seed_task)
+            self._retention_seed_task = None
 
         for task_dict in (
             self._active_motion_cameras,

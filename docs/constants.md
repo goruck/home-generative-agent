@@ -232,8 +232,8 @@ This document covers the named constants that affect integration behaviour, orga
 | `VIDEO_ANALYZER_TIME_OFFSET` | `const.py` | `15` (min) | Lookback window for fetching recent camera activity when building a video batch |
 | `VIDEO_ANALYZER_CAPTION_DEDUPE_WINDOW_SEC` | `const.py` | `1800` (s, 30 min) | Lexical deduplication window. Artifact captions within this window are suppressed even when the vector score is below threshold. |
 | `VIDEO_ANALYZER_SIMILARITY_THRESHOLD` | `const.py` | `0.85` | Cosine similarity threshold for caption deduplication. Captions above this score are considered duplicates and suppressed. |
-| `VIDEO_ANALYZER_DELETE_SNAPSHOTS` | `const.py` | `False` | Whether to delete snapshot files after analysis |
-| `VIDEO_ANALYZER_SNAPSHOTS_TO_KEEP` | `const.py` | `200` | Rolling snapshot retention count per camera |
+| `VIDEO_ANALYZER_DELETE_SNAPSHOTS` | `const.py` | `False` | Currently unused. Snapshot deletion is governed by the retention budget (`VIDEO_ANALYZER_SNAPSHOTS_TO_KEEP`) regardless of this value |
+| `VIDEO_ANALYZER_SNAPSHOTS_TO_KEEP` | `const.py` | `200` | Rolling snapshot retention budget per camera. Files register at capture time; on startup, analyzer-written snapshots that predate the restart are seeded into retention as the oldest entries. Cleanup pauses at protected files (`_latest/` assets, recently notified images), so the on-disk count can temporarily exceed the budget |
 | `VIDEO_ANALYZER_TRIGGER_ON_MOTION` | `const.py` | `True` | Trigger analysis on HA motion sensor state changes (also gates the ring-mqtt `event_select` trigger) |
 | `VIDEO_ANALYZER_EVENT_SELECT_WINDOW` | `const.py` | `30` (s) | Snapshot-loop window after a ring-mqtt `event_select` eventId change; each new eventId extends it |
 | `VIDEO_ANALYZER_EVENT_SELECT_MAX_WINDOW` | `const.py` | `300` (s) | Cap on total event_select window length across extensions; hitting it flushes the batch |
@@ -466,6 +466,7 @@ These constants live outside `const.py` in individual modules. They affect runti
 | `_VIDEO_MODEL_SEMAPHORE_WAIT_SEC` | `30` (s) | Max time a video frame waits for the concurrency semaphore before being dropped |
 | `_VIDEO_QUEUE_BACKLOG_THRESHOLD` | `2` | Drop oldest queued frames when the backlog exceeds this depth |
 | `_SUMMARY_MAX_FRAMES` | `8` | Maximum deduplicated frame descriptions fed to the summary model (newest kept). The notification reference image is chosen from these frames. |
+| `_NOTIFY_PROTECT_TTL_SEC` | `1800` (s) | How long a snapshot attached to a notification is protected from retention pruning. Also the fresh protection window granted at startup to pre-restart snapshots younger than this when they are seeded into retention. |
 | `_METRICS_REPORT_INTERVAL_SEC` | `3600` (s) | How often the per-camera metrics line (counters plus latency percentiles) is logged |
 
 ### `core/video_helpers.py`

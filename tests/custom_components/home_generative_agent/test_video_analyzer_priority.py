@@ -44,6 +44,7 @@ import asyncio
 import contextlib
 import datetime as dt
 import logging
+import os
 import time
 from collections import deque
 from datetime import datetime
@@ -184,7 +185,17 @@ def entry() -> MagicMock:
 
 @pytest.fixture
 def hass() -> MagicMock:
-    return MagicMock()
+    mock = MagicMock()
+
+    def _close_coro(coro: Any, _name: str | None = None) -> MagicMock:
+        # Close un-awaited coroutines (e.g. start()'s retention seed) so tests
+        # that stub task creation don't emit RuntimeWarning noise.
+        if asyncio.iscoroutine(coro):
+            coro.close()
+        return MagicMock()
+
+    mock.async_create_task = MagicMock(side_effect=_close_coro)
+    return mock
 
 
 @pytest.fixture
@@ -2041,6 +2052,568 @@ async def test_skipped_duplicate_registered_for_retention(
 
     assert result is None
     mock_prune.assert_awaited_once_with(camera_id, [expected])
+
+
+@pytest.mark.asyncio
+async def test_captured_frame_registered_for_retention_at_capture(
+    va: VideoAnalyzer, tmp_path: Path
+) -> None:
+    """
+    Every successfully captured frame enters retention at capture time.
+
+    Registration must not depend on the batch later reaching _finalize:
+    all-error batches, summary timeouts, worker crashes, backlog drops, and
+    hold-buffer evictions previously leaked their files forever because the
+    in-memory retention deque is the only deletion mechanism.
+    """
+    camera_id = "camera.front_door"
+    _enable_hash_executor(va)
+    cast("MagicMock", va.hass).services.async_call = AsyncMock()
+    cast("MagicMock", va.hass).states.get.return_value = MagicMock(attributes={})
+
+    now = datetime(2025, 1, 1, 12, 0, 0, tzinfo=dt.UTC)
+    expected = tmp_path / (
+        "snapshot_" + va_mod.dt_util.as_local(now).strftime("%Y%m%d_%H%M%S") + ".jpg"
+    )
+    _write_jpeg(expected, ascending=True)
+
+    with (
+        patch.object(va, "_get_snapshot_dir", new=AsyncMock(return_value=tmp_path)),
+        patch.object(va, "_prune_old_snapshots", new=AsyncMock()) as mock_prune,
+    ):
+        result = await va._capture_snapshot(  # type: ignore[attr-defined]
+            camera_id, now, hold_for_batch=True
+        )
+
+    assert result == expected
+    mock_prune.assert_awaited_once_with(camera_id, [expected])
+
+
+@pytest.mark.asyncio
+async def test_finalize_does_not_reregister_batch_for_retention(
+    va: VideoAnalyzer,
+) -> None:
+    """
+    _finalize must not register the batch again.
+
+    Frames are registered once at capture; a second registration would
+    duplicate deque entries and double-delete on rollover.
+    """
+    va._handle_notification = AsyncMock()  # type: ignore[method-assign]
+    va._store_results = AsyncMock()  # type: ignore[method-assign]
+
+    with patch.object(va, "_prune_old_snapshots", new=AsyncMock()) as mock_prune:
+        await va._finalize(  # type: ignore[attr-defined]
+            "camera.front_door", [Path("snap_0.jpg")], "a summary", None
+        )
+
+    mock_prune.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_abandoned_batch_files_still_enter_retention_deque(
+    va: VideoAnalyzer, tmp_path: Path
+) -> None:
+    """
+    End-to-end leak regression: an all-error batch must not orphan its files.
+
+    Captured frames land in the retention deque even when analysis produces
+    no descriptions and _analyze_and_finalize returns before _finalize.
+    """
+    camera_id = "camera.front_door"
+    _enable_hash_executor(va)
+    cast("MagicMock", va.hass).services.async_call = AsyncMock()
+    cast("MagicMock", va.hass).states.get.return_value = MagicMock(attributes={})
+
+    captured: list[Path] = []
+    with patch.object(va, "_get_snapshot_dir", new=AsyncMock(return_value=tmp_path)):
+        for i in range(2):
+            now = datetime(2025, 1, 1, 12, 0, 3 * i, tzinfo=dt.UTC)
+            expected = tmp_path / (
+                "snapshot_"
+                + va_mod.dt_util.as_local(now).strftime("%Y%m%d_%H%M%S")
+                + ".jpg"
+            )
+            _write_jpeg(expected, ascending=(i % 2 == 0))
+            path = await va._take_single_snapshot(  # type: ignore[attr-defined]
+                camera_id, now, hold_for_batch=True
+            )
+            assert path == expected
+            captured.append(expected)
+
+    # Analysis aborts before _finalize (every frame errors out).
+    va._process_snapshot = AsyncMock(return_value={})  # type: ignore[method-assign]
+    ordered = [(p, 1000 + 3 * i) for i, p in enumerate(captured)]
+    await va._analyze_and_finalize(camera_id, ordered)  # type: ignore[attr-defined]
+
+    retention = va._retention_deques.get(camera_id)  # type: ignore[attr-defined]
+    assert retention is not None
+    assert list(retention) == captured
+
+
+def _make_snapshot_tree(root: Path, camera_dir: str, names: list[str]) -> list[Path]:
+    """Create a per-camera snapshot dir (production layout) with mtime-ordered files."""
+    cam = root / camera_dir
+    cam.mkdir(parents=True)
+    latest_dir = cam / va_mod.VIDEO_ANALYZER_LATEST_SUBFOLDER
+    latest_dir.mkdir()
+    (latest_dir / va_mod.VIDEO_ANALYZER_LATEST_NAME).write_bytes(b"latest")
+    files: list[Path] = []
+    for i, name in enumerate(names):
+        f = cam / name
+        f.write_bytes(b"jpeg")
+        # Explicit mtimes so sort order is deterministic regardless of fs speed.
+        ts = 1_700_000_000 + i
+        os.utime(f, (ts, ts))
+        files.append(f)
+    return files
+
+
+@pytest.mark.asyncio
+async def test_seed_retention_registers_pre_restart_files_oldest_first(
+    va: VideoAnalyzer, tmp_path: Path
+) -> None:
+    """
+    Startup seeds pre-existing files as the OLDEST retention entries.
+
+    Retention deques are in-memory; without the seed, every file captured
+    before an HA restart leaked forever. Seeded entries must sort before live
+    registrations so new frames are never rotated out first, and the latest/
+    subfolder plus non-camera dirs must be untouched.
+    """
+    _enable_hash_executor(va)
+    disk = _make_snapshot_tree(
+        tmp_path,
+        "camera_front_door",
+        [
+            "snapshot_20250101_120000.jpg",
+            "snapshot_20250101_120003.jpg",
+            "snapshot_20250101_120006.jpg",
+        ],
+    )
+    # Non-camera dir (face crops) must not be swept.
+    (tmp_path / "faces").mkdir()
+    (tmp_path / "faces" / "x.jpg").write_bytes(b"face")
+
+    # A live capture registered before the seed ran (startup race).
+    live = tmp_path / "camera_front_door" / "snapshot_20250101_130000.jpg"
+    live.write_bytes(b"jpeg")
+    va._retention_deques["camera.front_door"] = deque([live])  # type: ignore[attr-defined]
+
+    with patch.object(va_mod, "VIDEO_ANALYZER_SNAPSHOT_ROOT", str(tmp_path)):
+        await va._seed_retention_from_disk()  # type: ignore[attr-defined]
+
+    retention = va._retention_deques["camera.front_door"]  # type: ignore[attr-defined]
+    # live.jpg exists on disk too: seeded set must dedupe it, and the disk
+    # files (older) must sit left of the live registration.
+    assert list(retention) == [*disk, live]
+    assert "faces" not in va._retention_deques  # type: ignore[attr-defined]
+    assert (
+        tmp_path
+        / "camera_front_door"
+        / va_mod.VIDEO_ANALYZER_LATEST_SUBFOLDER
+        / va_mod.VIDEO_ANALYZER_LATEST_NAME
+    ).exists()
+
+
+@pytest.mark.asyncio
+async def test_seed_retention_deletes_over_budget_files(
+    va: VideoAnalyzer, tmp_path: Path
+) -> None:
+    """Seeding beyond the per-camera budget deletes the oldest files."""
+    _enable_hash_executor(va)
+    disk = _make_snapshot_tree(
+        tmp_path,
+        "camera_yard",
+        [
+            "snapshot_20250101_120000.jpg",
+            "snapshot_20250101_120003.jpg",
+            "snapshot_20250101_120006.jpg",
+            "snapshot_20250101_120009.jpg",
+        ],
+    )
+
+    with (
+        patch.object(va_mod, "VIDEO_ANALYZER_SNAPSHOT_ROOT", str(tmp_path)),
+        patch.object(va_mod, "VIDEO_ANALYZER_SNAPSHOTS_TO_KEEP", 2),
+    ):
+        await va._seed_retention_from_disk()  # type: ignore[attr-defined]
+
+    retention = va._retention_deques["camera.yard"]  # type: ignore[attr-defined]
+    assert list(retention) == disk[2:]
+    assert not disk[0].exists()
+    assert not disk[1].exists()
+    assert disk[2].exists()
+    assert disk[3].exists()
+
+
+@pytest.mark.asyncio
+async def test_seed_retention_missing_root_is_noop(va: VideoAnalyzer) -> None:
+    """First run (no snapshot root yet) must not error or create deques."""
+    _enable_hash_executor(va)
+    with patch.object(
+        va_mod, "VIDEO_ANALYZER_SNAPSHOT_ROOT", "/nonexistent/hga-test-root"
+    ):
+        await va._seed_retention_from_disk()  # type: ignore[attr-defined]
+
+    assert va._retention_deques == {}  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_seed_retention_never_claims_user_files(
+    va: VideoAnalyzer, tmp_path: Path
+) -> None:
+    """
+    Only analyzer-written snapshot_*.jpg files are seeded.
+
+    /media is user-visible: a photo dropped into a camera dir via Samba or a
+    user automation must never enter retention, where the budget shrink would
+    eventually delete it.
+    """
+    _enable_hash_executor(va)
+    disk = _make_snapshot_tree(
+        tmp_path, "camera_yard", ["snapshot_20250101_120000.jpg"]
+    )
+    user_file = tmp_path / "camera_yard" / "vacation.jpg"
+    user_file.write_bytes(b"user photo")
+    not_jpeg = tmp_path / "camera_yard" / "snapshot_notes.txt"
+    not_jpeg.write_bytes(b"notes")
+    # Prefix alone must not qualify — only the exact timestamped shape.
+    prefix_only = tmp_path / "camera_yard" / "snapshot_family.jpg"
+    prefix_only.write_bytes(b"user photo")
+    # Digit-shaped but impossible date: the analyzer cannot produce this name.
+    bad_date = tmp_path / "camera_yard" / "snapshot_99999999_999999.jpg"
+    bad_date.write_bytes(b"user photo")
+
+    with patch.object(va_mod, "VIDEO_ANALYZER_SNAPSHOT_ROOT", str(tmp_path)):
+        await va._seed_retention_from_disk()  # type: ignore[attr-defined]
+
+    assert list(va._retention_deques["camera.yard"]) == disk  # type: ignore[attr-defined]
+    assert user_file.exists()
+    assert not_jpeg.exists()
+    assert prefix_only.exists()
+    assert bad_date.exists()
+
+
+@pytest.mark.asyncio
+async def test_seed_retention_empty_camera_dir_creates_no_deque(
+    va: VideoAnalyzer, tmp_path: Path
+) -> None:
+    """A camera dir holding only the latest subfolder must not create a deque."""
+    _enable_hash_executor(va)
+    _make_snapshot_tree(tmp_path, "camera_empty", [])
+
+    with patch.object(va_mod, "VIDEO_ANALYZER_SNAPSHOT_ROOT", str(tmp_path)):
+        await va._seed_retention_from_disk()  # type: ignore[attr-defined]
+
+    assert va._retention_deques == {}  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_seed_retention_reprotects_recent_notification_frames(
+    va: VideoAnalyzer, tmp_path: Path
+) -> None:
+    """
+    Recently captured frames survive the seed shrink even when over budget.
+
+    The notification-protection map died with the previous process; a
+    minutes-old mobile notification may still link to these files, so the
+    seed re-protects them for their remaining TTL before shrinking.
+    """
+    _enable_hash_executor(va)
+    disk = _make_snapshot_tree(
+        tmp_path,
+        "camera_porch",
+        [
+            "snapshot_20250101_120000.jpg",
+            "snapshot_20250101_120003.jpg",
+            "snapshot_20250101_120006.jpg",
+        ],
+    )
+    now = va_mod.dt_util.utcnow().timestamp()
+    for i, f in enumerate(disk):
+        ts = now - 60 + i  # captured about a minute ago
+        os.utime(f, (ts, ts))
+
+    with (
+        patch.object(va_mod, "VIDEO_ANALYZER_SNAPSHOT_ROOT", str(tmp_path)),
+        patch.object(va_mod, "VIDEO_ANALYZER_SNAPSHOTS_TO_KEEP", 1),
+    ):
+        await va._seed_retention_from_disk()  # type: ignore[attr-defined]
+
+    # All three survive: the shrink stops at the protected head (the guard
+    # re-appends it), leaving the deque temporarily over budget by design.
+    assert all(f.exists() for f in disk)
+    assert set(va._retention_deques["camera.porch"]) == set(disk)  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_prune_skips_paths_already_registered(va: VideoAnalyzer) -> None:
+    """
+    Double registration must not duplicate deque entries.
+
+    The startup seed can scan a file whose in-flight capture registers it
+    moments later; a duplicate would waste a budget slot and double-unlink.
+    """
+    path = Path("snapshot_x.jpg")
+    await va._prune_old_snapshots("camera.front_door", [path])  # type: ignore[attr-defined]
+    await va._prune_old_snapshots("camera.front_door", [path])  # type: ignore[attr-defined]
+
+    assert list(va._retention_deques["camera.front_door"]) == [path]  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_failed_capture_not_registered_for_retention(
+    va: VideoAnalyzer,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A capture whose file never appears on disk must not enter retention.
+
+    Registering a nonexistent path would consume a budget slot and later
+    rotate a real file out to make room for a phantom entry.
+    """
+    mock_dir = _prepare_snapshot_capture(va, tmp_path)
+    # camera.snapshot "succeeds" but the file never materializes.
+    cast("MagicMock", va.hass).async_add_executor_job = AsyncMock(return_value=False)
+    monkeypatch.setattr(va_mod, "_SNAPSHOT_APPEAR_ATTEMPTS", 1)
+
+    with (
+        patch.object(va, "_get_snapshot_dir", new=mock_dir),
+        patch.object(va, "_prune_old_snapshots", new=AsyncMock()) as mock_prune,
+    ):
+        now = datetime(2025, 1, 1, 12, 0, 0, tzinfo=dt.UTC)
+        path = await va._take_single_snapshot("camera.test", now)  # type: ignore[attr-defined]
+
+    assert path is None
+    mock_prune.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_shrink_retention_never_deletes_latest_assets(
+    va: VideoAnalyzer, tmp_path: Path
+) -> None:
+    """
+    Both legs of the latest-asset guard spare the published file.
+
+    An entry named latest.jpg, or living in the _latest/ subfolder, is
+    re-appended (not unlinked) and pruning stops for that round.
+    """
+    _enable_hash_executor(va)
+
+    # Leg 1: filename matches VIDEO_ANALYZER_LATEST_NAME.
+    by_name = tmp_path / "latest.jpg"
+    by_name.write_bytes(b"latest")
+    newer_a = tmp_path / "newer_a.jpg"
+    newer_a.write_bytes(b"jpeg")
+    retention_a = deque([by_name, newer_a])
+
+    # Leg 2: parent dir matches VIDEO_ANALYZER_LATEST_SUBFOLDER.
+    latest_dir = tmp_path / "_latest"
+    latest_dir.mkdir()
+    by_parent = latest_dir / "published.jpg"
+    by_parent.write_bytes(b"latest")
+    newer_b = tmp_path / "newer_b.jpg"
+    newer_b.write_bytes(b"jpeg")
+    retention_b = deque([by_parent, newer_b])
+
+    with patch.object(va_mod, "VIDEO_ANALYZER_SNAPSHOTS_TO_KEEP", 1):
+        await va._shrink_retention("camera.test", retention_a)  # type: ignore[attr-defined]
+        await va._shrink_retention("camera.test", retention_b)  # type: ignore[attr-defined]
+
+    assert by_name.exists()
+    assert by_parent.exists()
+    # Guarded entry is pushed to the newest end; nothing else is touched.
+    assert list(retention_a) == [newer_a, by_name]
+    assert list(retention_b) == [newer_b, by_parent]
+    assert newer_a.exists()
+    assert newer_b.exists()
+
+
+@pytest.mark.asyncio
+async def test_shrink_retention_spares_notification_protected_snapshot(
+    va: VideoAnalyzer, tmp_path: Path
+) -> None:
+    """A snapshot within its notification-protection TTL is not deleted."""
+    _enable_hash_executor(va)
+    protected = tmp_path / "protected.jpg"
+    protected.write_bytes(b"jpeg")
+    newer = tmp_path / "newer.jpg"
+    newer.write_bytes(b"jpeg")
+    va.protect_notify_image(protected)
+    retention = deque([protected, newer])
+
+    with patch.object(va_mod, "VIDEO_ANALYZER_SNAPSHOTS_TO_KEEP", 1):
+        await va._shrink_retention("camera.test", retention)  # type: ignore[attr-defined]
+
+    assert protected.exists()
+    # Pushed to the end once; pruning stopped for this round.
+    assert list(retention) == [newer, protected]
+    assert newer.exists()
+
+
+@pytest.mark.asyncio
+async def test_shrink_retention_unlink_failure_logged_and_pruning_continues(
+    va: VideoAnalyzer,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """
+    An unlink OSError drops the entry, warns, and keeps pruning.
+
+    A single bad file (already gone, permission error) must not wedge the
+    budget loop or re-enter the deque forever.
+    """
+    _enable_hash_executor(va)
+    missing = tmp_path / "already_gone.jpg"  # never created: unlink raises
+    old = tmp_path / "old.jpg"
+    old.write_bytes(b"jpeg")
+    keep = tmp_path / "keep.jpg"
+    keep.write_bytes(b"jpeg")
+    retention = deque([missing, old, keep])
+
+    with (
+        patch.object(va_mod, "VIDEO_ANALYZER_SNAPSHOTS_TO_KEEP", 1),
+        caplog.at_level(logging.WARNING, logger=_VA_LOGGER),
+    ):
+        await va._shrink_retention("camera.test", retention)  # type: ignore[attr-defined]
+
+    # The failed entry is dropped, the next-oldest is still deleted, and the
+    # newest survives within budget.
+    assert list(retention) == [keep]
+    assert not old.exists()
+    assert keep.exists()
+    assert any("Failed to delete" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_seed_retention_unreadable_camera_dir_skipped(
+    va: VideoAnalyzer,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """One unreadable camera dir warns and is skipped; other cameras still seed."""
+    _enable_hash_executor(va)
+    disk = _make_snapshot_tree(tmp_path, "camera_ok", ["snapshot_20250101_120000.jpg"])
+    # sorted() scans camera_bad first, so the continue must reach camera_ok.
+    bad = tmp_path / "camera_bad"
+    bad.mkdir()
+    (bad / "x.jpg").write_bytes(b"jpeg")
+    bad.chmod(0o000)
+
+    try:
+        with (
+            patch.object(va_mod, "VIDEO_ANALYZER_SNAPSHOT_ROOT", str(tmp_path)),
+            caplog.at_level(logging.WARNING, logger=_VA_LOGGER),
+        ):
+            await va._seed_retention_from_disk()  # type: ignore[attr-defined]
+    finally:
+        bad.chmod(0o755)  # let pytest clean tmp_path up
+
+    assert list(va._retention_deques["camera.ok"]) == disk  # type: ignore[attr-defined]
+    assert "camera.bad" not in va._retention_deques  # type: ignore[attr-defined]
+    assert any("Retention seed scan failed" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_seed_retention_executor_failure_is_swallowed(
+    va: VideoAnalyzer,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A scan failure surfacing through the executor warns and aborts cleanly."""
+    cast("MagicMock", va.hass).async_add_executor_job = AsyncMock(
+        side_effect=OSError("root unreadable")
+    )
+
+    with caplog.at_level(logging.WARNING, logger=_VA_LOGGER):
+        await va._seed_retention_from_disk()  # type: ignore[attr-defined]
+
+    assert va._retention_deques == {}  # type: ignore[attr-defined]
+    assert any("Retention seed scan failed" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_seed_retention_all_files_already_registered_is_noop(
+    va: VideoAnalyzer,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When every disk file is already live, the seed adds and logs nothing."""
+    _enable_hash_executor(va)
+    disk = _make_snapshot_tree(
+        tmp_path,
+        "camera_front_door",
+        ["snapshot_20250101_120000.jpg", "snapshot_20250101_120003.jpg"],
+    )
+    va._retention_deques["camera.front_door"] = deque(disk)  # type: ignore[attr-defined]
+
+    with (
+        patch.object(va_mod, "VIDEO_ANALYZER_SNAPSHOT_ROOT", str(tmp_path)),
+        caplog.at_level(logging.INFO, logger=_VA_LOGGER),
+    ):
+        await va._seed_retention_from_disk()  # type: ignore[attr-defined]
+
+    assert list(va._retention_deques["camera.front_door"]) == disk  # type: ignore[attr-defined]
+    assert not any("Seeded" in r.message for r in caplog.records)
+
+
+def test_start_schedules_retention_seed_task(va: VideoAnalyzer) -> None:
+    """start() schedules the one-shot retention seed and stores the task handle."""
+    va.entry.runtime_data.options = {}
+    created: dict[str, Any] = {}
+
+    def _fake_create_task(coro: Any, name: str | None = None) -> MagicMock:
+        created["qualname"] = coro.__qualname__
+        created["name"] = name
+        coro.close()
+        return MagicMock()
+
+    cast("MagicMock", va.hass).async_create_task = MagicMock(
+        side_effect=_fake_create_task
+    )
+
+    with (
+        patch(
+            "custom_components.home_generative_agent.core.video_analyzer.async_track_time_interval",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "custom_components.home_generative_agent.core.video_analyzer.get_async_client",
+            return_value=MagicMock(),
+        ),
+    ):
+        va.start()
+
+    assert created["qualname"].endswith("_seed_retention_from_disk")
+    assert created["name"] == "hga video retention seed"
+    assert va._retention_seed_task is not None  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_inflight_retention_seed_task(
+    hass: MagicMock, entry: MagicMock
+) -> None:
+    """stop() cancels a still-running seed task and clears the handle."""
+    va = _make_va_with_states(hass, entry, [])
+    va._cancel_track = MagicMock()  # type: ignore[attr-defined]
+    va._cancel_listen = MagicMock()  # type: ignore[attr-defined]
+    va._cancel_event_select_listen = MagicMock()  # type: ignore[attr-defined]
+
+    started = asyncio.Event()
+
+    async def _hang() -> None:
+        started.set()
+        await asyncio.Event().wait()  # blocks until cancelled
+
+    task = asyncio.get_running_loop().create_task(_hang())
+    va._retention_seed_task = task  # type: ignore[attr-defined]
+    await started.wait()
+
+    await va.stop()
+
+    assert task.cancelled()
+    assert va._retention_seed_task is None  # type: ignore[attr-defined]
 
 
 def test_stale_retained_frame_detected(hass: MagicMock, va: VideoAnalyzer) -> None:

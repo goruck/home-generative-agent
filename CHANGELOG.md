@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.18.2] - 2026-07-19
+
+### Fixed
+
+- **Camera snapshots no longer pile up on disk when analysis fails or Home Assistant restarts** — snapshot cleanup is bookkeeping-driven (the analyzer tracks the last 200 files per camera and deletes the oldest), but that bookkeeping only happened after a batch finished analysis. Any batch that didn't finish — every frame erroring during a VLM outage, a summary timeout, an internal crash, frames dropped under backlog pressure, or frames evicted from a full event buffer — left its files on disk forever. Files are now tracked the moment they are captured, so nothing that happens downstream can leak them. On startup the analyzer also folds snapshots left over from before a restart into the same cleanup (previously they were orphaned permanently, since the bookkeeping lives in memory): only files the integration itself wrote (`snapshot_*.jpg`) are claimed — a photo you drop into a camera's snapshot folder yourself is never touched — and pre-existing files are treated as the oldest entries, so a backlog is cleaned before any new frame. The published `latest.jpg` and images attached to recent notifications remain protected from cleanup, exactly as before.
+- **A stale reload can no longer run a second copy of the video analyzer** — if the integration was reloaded before Home Assistant finished starting, a leftover startup listener could start the previous analyzer instance alongside the new one (duplicate capture loops, and with the new cleanup, two bookkeepers deleting files independently). The listener is now cancelled when the integration unloads.
+
 ## [3.18.1] - 2026-07-18
 
 ### Fixed
