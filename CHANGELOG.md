@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.18.1] - 2026-07-18
+
+### Fixed
+
+- **The image attached to a camera alert now matches what the alert says** — since 3.18.0's repeated-scene suppression, the notification text describes only the frames with real activity (typically the first seconds of an event), but the attached reference image was still taken from the middle of the whole snapshot batch. For a "man walks down the stairs" alert, that was usually an empty porch several unchanged frames after he left. The reference image (and the camera's latest-event frame shown by the image entity) is now chosen from the frames that actually fed the summary, preferring a frame where a person was detected — a recognized face, or a caption that affirmatively mentions a person. The caption check is word-bounded, plural-aware, and negation-aware, so "no people visible", "no person is present", or "a manicured lawn" cannot masquerade as person frames, while "two men" counts. When identical captions are merged, the surviving image is the frame where the recognized person is actually identifiable, so an alert naming someone can no longer attach the frame from before they appeared. If frame selection ever fails internally, the alert still goes out with the previous middle-of-batch image rather than being dropped.
+
 ## [3.18.0] - 2026-07-18
 
 ### Added

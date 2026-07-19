@@ -281,6 +281,74 @@ common false-positives (suppressing events that should notify) or false-negative
 
 ---
 
+### Snapshot retention misses batches that never reach _finalize
+
+**What:** `_analyze_and_finalize` returns early when a batch produces no frame
+descriptions (all frames stale/errored/sentinel-dropped) or no summary
+(timeout/semaphore). Those early returns skip `_prune_old_snapshots`, so the
+batch's snapshot files are never registered in the retention deque and are never
+deleted — the only deletion mechanism is deque-driven.
+
+**Why:** A VLM outage makes all-error batches routine, and all-stale batches
+occur after backlogs; both accumulate files unboundedly until manual cleanup.
+(A fully-sentinel batch keeps its first sentinel-shaped reply as a description,
+so it skips the no-descriptions return — but it can still hit the no-summary
+return on timeout.) Flagged by red-team review on the notify-frame fix branch;
+pre-existing behavior, deferred there as separate retention-semantics scope.
+
+**How to apply:** On the early-return paths in `_analyze_and_finalize`, still
+register the batch for retention (e.g. call
+`await self._prune_old_snapshots(camera_id, [p for p, _ in ordered])`). Verify
+interaction with `protect_notify_image` and the recording-poll re-seed first.
+
+**Effort:** S
+**Priority:** P1
+
+---
+
+### Bus event path can dangle when notification is suppressed
+
+**What:** In `notify_on_anomaly` mode with `decision.notify=False`,
+`protect_notify_image` is never called, but the chosen frame was already
+published as `latest.jpg` and announced on `hga_last_event_frame` with
+`"path": str(chosen)`. Consumers resolving that path can read a pruned file.
+The notify-frame fix biases `chosen` toward the batch head (oldest end of the
+retention deque), shortening time-to-dangle.
+
+**Why:** Suppressed-notification events hand out a path with no pruning
+protection. The `latest` dst copy is stable; the raw `path` is not. Test
+`test_handle_notification_suppresses_when_decision_is_no_notify` currently
+asserts protect is NOT called, so changing this is a deliberate behavior change.
+
+**How to apply:** Either call `protect_notify_image(chosen)` unconditionally
+before the mode branch, or document that consumers must use `latest` and keep
+`path` best-effort. Update the suppression test accordingly.
+
+**Effort:** S
+**Priority:** P2
+
+---
+
+### Dispatch frame epoch instead of utcnow() as latest-frame timestamp
+
+**What:** `SIGNAL_HGA_NEW_LATEST` and `SIGNAL_HGA_RECOGNIZED` dispatch
+`dt_util.utcnow().isoformat()` as the frame timestamp. The notify-frame fix
+preferentially selects early person frames, so for long held event-buffer
+batches the image entity and sensor can label a frame that is minutes old as
+captured "now".
+
+**Why:** The frame's true epoch is already available (`epoch_from_path(chosen)`
+/ the `ordered` tuples) but is discarded. Pre-existing pattern; skew widened by
+early-frame selection.
+
+**How to apply:** Thread the chosen frame's epoch through
+`_finalize`/`_handle_notification` and dispatch it as the timestamp.
+
+**Effort:** S
+**Priority:** P3
+
+---
+
 ## Notifier / Observability
 
 ### Feedback-trained per-entity cooldowns — wire feedback signal

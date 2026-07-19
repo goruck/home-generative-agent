@@ -73,7 +73,7 @@ from .video_helpers import (
     apply_name_substitution,
     clean_frame_text,
     crop_resize_encode_jpeg,
-    dedupe_desc,
+    dedupe_desc_tagged,
     dhash_bytes,
     ensure_dir,
     epoch_from_path,
@@ -112,6 +112,7 @@ _VIDEO_QUEUE_BACKLOG_THRESHOLD: Final[int] = (
     2  # drop stale frames when queue exceeds this
 )
 _WORKER_ERROR_BACKOFF_SEC: Final[int] = 5  # pause after unexpected worker error
+_SUMMARY_MAX_FRAMES: Final[int] = 8  # kept frame descriptions fed to the summary
 # --- Snapshot capture (issue #464) ---
 _SNAPSHOT_SERVICE_TIMEOUT_SEC: Final[int] = 15  # camera.snapshot blocking-call budget
 _SNAPSHOT_APPEAR_ATTEMPTS: Final[int] = 10  # post-service file visibility polls (0.2s)
@@ -266,6 +267,29 @@ def _has_real_subject(normalized: str, recognized_names: list[str]) -> bool:
 # pipeline without leaking the raw error text into user-facing output.
 _PERSON_FALLBACK_CAPTION = "A person is present; scene analysis unavailable."
 
+# Word-bounded human terms (singular + plural) for notify-frame selection.
+# has_human_terms does bare substring matching ("man" hits "manicured lawn")
+# and counts negated phrases ("no people visible") — good enough for subject
+# formatting, but a false person hit here would steer the notification image
+# back to an empty scene, the exact mismatch _pick_notify_frame exists to
+# prevent.
+_HUMAN_TERMS_WORDS: Final = (
+    r"person|persons|people|man|men|woman|women|boy|boys|girl|girls|"
+    r"child|children"
+)
+_HUMAN_TERM_RE: Final = re.compile(rf"\b(?:{_HUMAN_TERMS_WORDS})\b")
+# Any "no <human term>" span, regardless of trailing wording — broader than
+# _NEGATED_HUMAN_RE, which only covers "no ... visible" phrasings.
+_NEGATED_PERSON_RE: Final = re.compile(
+    rf"\bno\s+(?:{_HUMAN_TERMS_WORDS}|one|body|humans?)\b"
+)
+
+
+def _caption_mentions_person(caption: str) -> bool:
+    """Return True if the caption affirmatively mentions a human."""
+    scrubbed = _NEGATED_PERSON_RE.sub(" ", _normalize_caption(caption))
+    return bool(_HUMAN_TERM_RE.search(scrubbed))
+
 
 def _has_detected_person(faces: list[str]) -> bool:
     """
@@ -276,6 +300,33 @@ def _has_detected_person(faces: list[str]) -> bool:
     entries do not.
     """
     return any(p and p not in ("Indeterminate", "None") for p in faces)
+
+
+def _pick_notify_frame(
+    descs: list[dict[str, list[str]]], paths: list[Path]
+) -> Path | None:
+    """
+    Choose the snapshot whose image best illustrates the summary.
+
+    The summary is generated from descs only, so the reference image must come
+    from those frames — never from sentinel/error frames dropped in
+    _process_batch, which show a scene the summary does not describe. Prefer
+    frames showing a person (recognized face or human terms in the caption)
+    since summaries lead with people; otherwise use the middle kept frame.
+
+    descs and paths must be index-aligned (descs[i] describes paths[i]);
+    a length mismatch raises ValueError.
+    """
+    person_idxs = [
+        i
+        for i, (d, _path) in enumerate(zip(descs, paths, strict=True))
+        for text, faces in d.items()
+        if _has_detected_person(faces) or _caption_mentions_person(text)
+    ]
+    if not paths:
+        return None
+    pool = person_idxs or list(range(len(paths)))
+    return paths[pool[len(pool) // 2]]
 
 
 @dataclass(frozen=True)
@@ -571,12 +622,13 @@ class VideoAnalyzer:
         self,
         camera_id: str,
         ordered: list[tuple[Path, int]],
-    ) -> tuple[list[dict[str, list[str]]], list[str]]:
+    ) -> tuple[list[dict[str, list[str]]], list[str], Path | None]:
         if not ordered:
-            return [], []
+            return [], [], None
 
         t0: int = ordered[0][1]
         frame_descriptions: list[dict[str, list[str]]] = []
+        frame_paths: list[Path] = []
         prev_text: str | None = None
 
         for path, ts in ordered:
@@ -598,6 +650,7 @@ class VideoAnalyzer:
                     frame_descriptions.append(
                         {f"t+{ts - t0}s. {_PERSON_FALLBACK_CAPTION}": faces}
                     )
+                    frame_paths.append(path)
                 continue
             entry = {f"t+{ts - t0}s. {frame_desc}": faces}
             is_sentinel = is_no_change_reply(frame_desc)
@@ -610,6 +663,7 @@ class VideoAnalyzer:
                 # caught an actual person the VLM missed.
                 if _has_detected_person(faces):
                     frame_descriptions.append(entry)
+                    frame_paths.append(path)
                 else:
                     self._m_inc(camera_id, "sentinel_dropped")
                     LOGGER.debug(
@@ -620,14 +674,22 @@ class VideoAnalyzer:
                     )
                 continue
             frame_descriptions.append(entry)
+            frame_paths.append(path)
             if not is_sentinel:
                 # A sentinel-shaped reply that arrives without previous-frame
                 # context (kept above as a description) must still never
                 # become the comparison anchor.
                 prev_text = frame_desc
 
-        # dedupe near-identical, then cap to last 8
-        frame_descriptions = dedupe_desc(frame_descriptions)[-8:]
+        # dedupe near-identical, then cap to the newest frames; both lists get
+        # the same cap so descs/paths stay index-aligned for _pick_notify_frame.
+        # tag_person_check keeps the path of the frame where a person was
+        # actually recognized when a duplicate run merges identities.
+        frame_descriptions, frame_paths = dedupe_desc_tagged(
+            frame_descriptions, frame_paths, tag_person_check=_has_detected_person
+        )
+        frame_descriptions = frame_descriptions[-_SUMMARY_MAX_FRAMES:]
+        frame_paths = frame_paths[-_SUMMARY_MAX_FRAMES:]
 
         recognized: list[str] = sorted(
             {
@@ -638,7 +700,17 @@ class VideoAnalyzer:
                 if p != "None"
             }
         )
-        return frame_descriptions, recognized
+        try:
+            notify_frame = _pick_notify_frame(frame_descriptions, frame_paths)
+        except ValueError:
+            # A descs/paths misalignment is a code bug, but it must cost image
+            # accuracy (batch-middle fallback), never the alert itself.
+            LOGGER.exception(
+                "[%s] Notify-frame selection failed; falling back to batch middle",
+                camera_id,
+            )
+            notify_frame = None
+        return frame_descriptions, recognized, notify_frame
 
     async def _summarize(  # noqa: PLR0911
         self, camera_id: str, frame_descriptions: list[dict[str, list[str]]]
@@ -712,22 +784,30 @@ class VideoAnalyzer:
         LOGGER.debug("[%s] Video analysis: %s", camera_id, summary_text)
         return summary_text
 
-    async def _finalize(self, camera_id: str, batch: list[Path], msg: str) -> None:
-        await self._handle_notification(camera_id, msg, batch)
+    async def _finalize(
+        self,
+        camera_id: str,
+        batch: list[Path],
+        msg: str,
+        notify_frame: Path | None = None,
+    ) -> None:
+        await self._handle_notification(camera_id, msg, batch, notify_frame)
         await self._store_results(camera_id, batch, msg)
         await self._prune_old_snapshots(camera_id, batch)
 
     async def _analyze_and_finalize(
         self, camera_id: str, ordered: list[tuple[Path, int]]
     ) -> None:
-        frame_descs, recognized = await self._process_batch(camera_id, ordered)
+        frame_descs, recognized, notify_frame = await self._process_batch(
+            camera_id, ordered
+        )
         if not frame_descs:
             return
         self._last_recognized[camera_id] = recognized
         msg = await self._summarize(camera_id, frame_descs)
         if not msg:
             return
-        await self._finalize(camera_id, [p for p, _ in ordered], msg)
+        await self._finalize(camera_id, [p for p, _ in ordered], msg, notify_frame)
 
     async def _snapshot_worker(self, camera_id: str) -> None:
         """Consume and process snapshots for one camera."""
@@ -1289,11 +1369,21 @@ class VideoAnalyzer:
             return {frame_description: faces_in_frame}
 
     async def _handle_notification(
-        self, camera_id: str, msg: str, batch: list[Path]
+        self,
+        camera_id: str,
+        msg: str,
+        batch: list[Path],
+        notify_frame: Path | None = None,
     ) -> None:
         """Decide whether to notify and send if needed."""
         camera_name = camera_id.rsplit(".", maxsplit=1)[-1]
-        chosen = batch[len(batch) // 2]
+        # notify_frame is the frame _process_batch judged representative of
+        # the summary text. Middle-of-batch is only a legacy fallback: after
+        # the sentinel drop (issue #493) the raw batch is dominated by
+        # unchanged-scene frames the summary does not describe.
+        if notify_frame is None:
+            LOGGER.debug("[%s] No notify frame provided; using batch middle", camera_id)
+        chosen = notify_frame if notify_frame is not None else batch[len(batch) // 2]
 
         dst = latest_target(Path(VIDEO_ANALYZER_SNAPSHOT_ROOT), camera_id)
         await publish_latest_atomic(self.hass, chosen, dst)
