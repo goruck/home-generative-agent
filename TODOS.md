@@ -281,17 +281,17 @@ common false-positives (suppressing events that should notify) or false-negative
 
 ---
 
-### save_and_analyze_snapshot tmp files leak in the latest/ subfolder
+### save_and_analyze_snapshot tmp files leak in the _latest/ subfolder
 
 **What:** The service writes `snapshot_<ts>.jpg` into `latest_target(...).parent`
-(the `latest/` subfolder), publishes a copy to `latest.jpg`, and never removes
+(the `_latest/` subfolder), publishes a copy to `latest.jpg`, and never removes
 the tmp file. `_prune_old_snapshots` deliberately never deletes files in the
-`latest/` subfolder (guard re-appends and breaks), so these files can neither
+`_latest/` subfolder (guard re-appends and breaks), so these files can neither
 be registered nor swept by the current mechanism.
 
 **Why:** Each service call leaks one file. Low volume (manual/automation
 calls), but unbounded. Registering them is not an option without rethinking
-the latest-subfolder guard — a registered `latest/` file would permanently
+the latest-subfolder guard — a registered `_latest/` file would permanently
 clog the deque head.
 
 **How to apply:** Either unlink the tmp file after `publish_latest_atomic`
@@ -423,7 +423,7 @@ retention-irrelevant — and removed the per-site registrations. In-flight frame
 **What:** Retention deques are in-memory with no filesystem sweep, so every
 on-disk snapshot from before an HA restart was orphaned forever. Fixed with a
 one-shot startup task (`_seed_retention_from_disk`) that scans each
-`camera_*` snapshot directory (skipping `latest/` and non-camera dirs like
+`camera_*` snapshot directory (skipping `_latest/` and non-camera dirs like
 `faces/`), merges pre-existing files into the retention deque as the oldest
 entries (never after live captures, so new frames can't be rotated out
 first), and runs the normal budget shrink with the usual latest-asset and
