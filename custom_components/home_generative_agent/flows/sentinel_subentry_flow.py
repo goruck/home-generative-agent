@@ -92,6 +92,7 @@ from ..core.utils import (  # noqa: TID252
     list_mobile_notify_services,
     valid_exclusion_entry,
 )
+from .localization import async_common_translation
 
 
 def _camera_entry_links_json(payload: dict[str, Any]) -> str:
@@ -586,27 +587,25 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                 s.subentry_type == SUBENTRY_TYPE_SENTINEL
                 for s in entry.subentries.values()
             )
-            overwrite_warning = (
-                "\n\n⚠️ Sentinel is already configured. "
-                "Choosing **Basic setup** will overwrite your current "
-                "settings with recommended defaults."
-                if has_existing
-                else ""
-            )
+            overwrite_warning = ""
+            if has_existing:
+                # Separator lives here: hassfest forbids leading whitespace
+                # in translation values.
+                overwrite_warning = "\n\n" + await async_common_translation(
+                    self.hass,
+                    "sentinel_overwrite_warning",
+                    "⚠️ Sentinel is already configured. "
+                    "Choosing **Basic setup** will overwrite your current "
+                    "settings with recommended defaults.",
+                )
             return self.async_show_form(
                 step_id="setup_mode",
                 data_schema=vol.Schema(
                     {
                         vol.Required("setup_mode", default="basic"): SelectSelector(
                             SelectSelectorConfig(
-                                options=[
-                                    SelectOptionDict(
-                                        label="Basic setup", value="basic"
-                                    ),
-                                    SelectOptionDict(
-                                        label="Advanced setup", value="advanced"
-                                    ),
-                                ],
+                                options=["basic", "advanced"],
+                                translation_key="setup_mode",
                                 mode=SelectSelectorMode.LIST,
                                 sort=False,
                                 custom_value=False,

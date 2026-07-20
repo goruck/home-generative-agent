@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -13,6 +15,7 @@ from homeassistant.const import (
     CONF_PASSWORD,
     CONF_USERNAME,
 )
+from homeassistant.exceptions import HomeAssistantError
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 import custom_components.home_generative_agent as hga_component
@@ -2546,3 +2549,246 @@ async def test_sentinel_user_flow_with_duplicate_sentinels_updates_first(
         "must update, not create, when duplicates exist"
     )
     assert len(update_calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Localized setup_mode step — translation lookup and selector (Issue #494)
+# ---------------------------------------------------------------------------
+
+
+def _load_en_translations() -> dict[str, Any]:
+    """Load the integration's English translation file."""
+    path = (
+        Path(__file__).parents[3]
+        / "custom_components"
+        / "home_generative_agent"
+        / "translations"
+        / "en.json"
+    )
+    with path.open(encoding="utf-8") as fp:
+        return json.load(fp)
+
+
+def _setup_mode_selector_config(result: Any) -> dict[str, Any]:
+    """Extract the SelectSelector config from a setup_mode form result."""
+    schema = result["data_schema"].schema
+    selector = next(value for key, value in schema.items() if str(key) == "setup_mode")
+    return selector.config
+
+
+def _patch_common_translations(
+    monkeypatch: pytest.MonkeyPatch, translations: dict[str, str]
+) -> list[tuple[Any, ...]]:
+    """Patch the localization translation loader; return recorded call args."""
+    calls: list[tuple[Any, ...]] = []
+
+    async def _fake_get_translations(*args: Any) -> dict[str, str]:
+        calls.append(args)
+        return translations
+
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.flows.localization."
+        "async_get_translations",
+        _fake_get_translations,
+    )
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_setup_mode_warning_survives_translation_load_failure(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A corrupt translation file (loader raises) degrades to the English text."""
+
+    async def _raise_load_error(*_args: Any) -> dict[str, str]:
+        msg = "corrupt translation file"
+        raise HomeAssistantError(msg)
+
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.flows.localization."
+        "async_get_translations",
+        _raise_load_error,
+    )
+    existing = DummySubentry(
+        "sent1",
+        SUBENTRY_TYPE_SENTINEL,
+        "Sentinel",
+        {CONF_SENTINEL_ENABLED: True},
+    )
+    entry = DummyEntry()
+    entry.subentries[existing.subentry_id] = existing
+    flow = _make_sentinel_flow_for_mode(hass, entry)
+
+    result = await flow.async_step_user()
+
+    expected = "\n\n" + _load_en_translations()["common"]["sentinel_overwrite_warning"]
+    placeholders = result.get("description_placeholders") or {}
+    assert placeholders.get("overwrite_warning") == expected
+
+
+@pytest.mark.asyncio
+async def test_feature_setup_mode_warning_falls_back_to_english(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Missing translations: the warning falls back to the en.json English text."""
+    _patch_common_translations(monkeypatch, {})
+    existing_feature = DummySubentry(
+        "feat1",
+        SUBENTRY_TYPE_FEATURE,
+        "Conversation",
+        {"feature_type": "conversation", "model_provider_id": "prov1"},
+    )
+    entry = DummyEntry()
+    entry.subentries[existing_feature.subentry_id] = existing_feature
+    flow = _make_feature_flow_for_basic(hass, entry)
+
+    result = await flow.async_step_user()
+
+    expected = "\n\n" + _load_en_translations()["common"]["feature_overwrite_warning"]
+    placeholders = result.get("description_placeholders") or {}
+    assert placeholders.get("overwrite_warning") == expected
+
+
+@pytest.mark.asyncio
+async def test_feature_setup_mode_warning_uses_translation(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Translation available: the overwrite warning comes from the loader."""
+    localized = "Lokalizovane varovani pro funkce."
+    key = f"component.{DOMAIN}.common.feature_overwrite_warning"
+    calls = _patch_common_translations(monkeypatch, {key: localized})
+
+    existing_feature = DummySubentry(
+        "feat1",
+        SUBENTRY_TYPE_FEATURE,
+        "Conversation",
+        {"feature_type": "conversation", "model_provider_id": "prov1"},
+    )
+    entry = DummyEntry()
+    entry.subentries[existing_feature.subentry_id] = existing_feature
+    flow = _make_feature_flow_for_basic(hass, entry)
+
+    result = await flow.async_step_user()
+
+    placeholders = result.get("description_placeholders") or {}
+    assert placeholders.get("overwrite_warning") == "\n\n" + localized
+    assert calls == [(hass, hass.config.language, "common", {DOMAIN})]
+
+
+@pytest.mark.asyncio
+async def test_feature_setup_mode_selector_uses_translation_key(
+    hass: HomeAssistant,
+) -> None:
+    """The setup_mode selector uses plain values with a translation key."""
+    entry = DummyEntry()
+    flow = _make_feature_flow_for_basic(hass, entry)
+
+    result = await flow.async_step_user()
+
+    config = _setup_mode_selector_config(result)
+    assert config["options"] == ["basic", "advanced"]
+    assert config["translation_key"] == "setup_mode"
+    assert config["mode"] == "list"
+    assert config["sort"] is False
+    assert config["custom_value"] is False
+
+
+@pytest.mark.asyncio
+async def test_feature_setup_mode_translation_hidden_without_existing(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No existing feature subentry: warning stays empty, loader never called."""
+    key = f"component.{DOMAIN}.common.feature_overwrite_warning"
+    calls = _patch_common_translations(monkeypatch, {key: "\n\nLokalizovane varovani."})
+    entry = DummyEntry()
+    flow = _make_feature_flow_for_basic(hass, entry)
+
+    result = await flow.async_step_user()
+
+    placeholders = result.get("description_placeholders") or {}
+    assert placeholders.get("overwrite_warning") == ""
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_sentinel_setup_mode_warning_falls_back_to_english(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Missing translations: the warning falls back to the en.json English text."""
+    _patch_common_translations(monkeypatch, {})
+    existing = DummySubentry(
+        "sent1",
+        SUBENTRY_TYPE_SENTINEL,
+        "Sentinel",
+        {CONF_SENTINEL_ENABLED: True},
+    )
+    entry = DummyEntry()
+    entry.subentries[existing.subentry_id] = existing
+    flow = _make_sentinel_flow_for_mode(hass, entry)
+
+    result = await flow.async_step_user()
+
+    expected = "\n\n" + _load_en_translations()["common"]["sentinel_overwrite_warning"]
+    placeholders = result.get("description_placeholders") or {}
+    assert placeholders.get("overwrite_warning") == expected
+
+
+@pytest.mark.asyncio
+async def test_sentinel_setup_mode_warning_uses_translation(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Translation available: the overwrite warning comes from the loader."""
+    localized = "Lokalizovane varovani pro Sentinel."
+    key = f"component.{DOMAIN}.common.sentinel_overwrite_warning"
+    calls = _patch_common_translations(monkeypatch, {key: localized})
+
+    existing = DummySubentry(
+        "sent1",
+        SUBENTRY_TYPE_SENTINEL,
+        "Sentinel",
+        {CONF_SENTINEL_ENABLED: True},
+    )
+    entry = DummyEntry()
+    entry.subentries[existing.subentry_id] = existing
+    flow = _make_sentinel_flow_for_mode(hass, entry)
+
+    result = await flow.async_step_user()
+
+    placeholders = result.get("description_placeholders") or {}
+    assert placeholders.get("overwrite_warning") == "\n\n" + localized
+    assert calls == [(hass, hass.config.language, "common", {DOMAIN})]
+
+
+@pytest.mark.asyncio
+async def test_sentinel_setup_mode_translation_hidden_without_existing(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No existing Sentinel subentry: warning stays empty, loader never called."""
+    key = f"component.{DOMAIN}.common.sentinel_overwrite_warning"
+    calls = _patch_common_translations(monkeypatch, {key: "\n\nLokalizovane varovani."})
+    entry = DummyEntry()
+    flow = _make_sentinel_flow_for_mode(hass, entry)
+
+    result = await flow.async_step_user()
+
+    placeholders = result.get("description_placeholders") or {}
+    assert placeholders.get("overwrite_warning") == ""
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_sentinel_setup_mode_selector_uses_translation_key(
+    hass: HomeAssistant,
+) -> None:
+    """The setup_mode selector uses plain values with a translation key."""
+    entry = DummyEntry()
+    flow = _make_sentinel_flow_for_mode(hass, entry)
+
+    result = await flow.async_step_user()
+
+    config = _setup_mode_selector_config(result)
+    assert config["options"] == ["basic", "advanced"]
+    assert config["translation_key"] == "setup_mode"
+    assert config["mode"] == "list"
+    assert config["sort"] is False
+    assert config["custom_value"] is False

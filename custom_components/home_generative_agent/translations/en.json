@@ -1,4 +1,8 @@
 {
+  "common": {
+    "feature_overwrite_warning": "⚠️ Features are already configured. Choosing **Basic setup** will overwrite your current provider assignments with recommended defaults.",
+    "sentinel_overwrite_warning": "⚠️ Sentinel is already configured. Choosing **Basic setup** will overwrite your current settings with recommended defaults."
+  },
   "config": {
     "step": {
       "user": {
@@ -291,6 +295,12 @@
     }
   },
   "selector": {
+    "setup_mode": {
+      "options": {
+        "basic": "Basic setup",
+        "advanced": "Advanced setup"
+      }
+    },
     "db_params": {
       "fields": {
         "key": {
