@@ -6,6 +6,7 @@ Contributions are welcome! Please read the [Contribution guidelines](../CONTRIBU
 - [Makefile Reference](#makefile-reference)
 - [Deploying to Home Assistant](#deploying-to-home-assistant)
 - [Dependency Workflow](#dependency-workflow)
+- [Translations](#translations)
 
 ---
 
@@ -91,4 +92,22 @@ After changing `manifest.json`:
 make runtimedeps
 # or
 python scripts/gen_manifest_requirements.py
+```
+
+---
+
+## Translations
+
+The configuration UI is translated via the standard Home Assistant mechanism. `custom_components/home_generative_agent/strings.json` is the English source of truth; `translations/en.json` must be an exact copy of it. Localized files (currently `cs.json`, `ru.json`, `tr.json`) live alongside it.
+
+To add a language, copy `translations/en.json` to `translations/<code>.json` and translate the values. Rules, enforced by `tests/custom_components/home_generative_agent/test_translations.py`:
+
+- A translation file may lag behind `en.json` (Home Assistant falls back to English for missing keys) but must never contain keys that don't exist in `en.json`.
+- `{placeholder}` names on shared keys must match `en.json` exactly.
+- No value may have leading or trailing whitespace (hassfest rejects it).
+
+Run the checks with:
+
+```bash
+PYTHONPATH=$(pwd) hga/bin/pytest tests/custom_components/home_generative_agent/test_translations.py
 ```
