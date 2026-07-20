@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.19.0] - 2026-07-19
+
+### Added
+
+- **Czech translation** — the entire configuration UI (setup flows, Sentinel options, error messages, selectors) is now available in Czech. The new `cs` translation has full key parity with the English source, verified by tests that also guard every translation file against key drift, placeholder mismatches, and formatting Home Assistant would reject. Contributed by [@hruba202](https://github.com/hruba202). Closes [#494](https://github.com/goruck/home-generative-agent/issues/494).
+
+### Fixed
+
+- **The Basic/Advanced setup step can now actually be localized** — the "Basic setup"/"Advanced setup" choice labels and the "already configured — Basic setup will overwrite your settings" warning on the Feature and Sentinel setup screens were hardcoded English strings in Python, so they stayed English in every language even though the title and description on the very same form translated correctly. The labels now go through Home Assistant's standard selector translation mechanism (each language's frontend shows its own labels), and the warning text is loaded from the integration's translation files following the server-configured language, falling back to English if a translation is missing. Reported, diagnosed, and drafted by [@hruba202](https://github.com/hruba202) in [#494](https://github.com/goruck/home-generative-agent/issues/494).
+
 ## [3.18.2] - 2026-07-19
 
 ### Fixed

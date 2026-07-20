@@ -2,6 +2,8 @@
 
 Configuration is done entirely in the Home Assistant UI using subentry flows. A *subentry* is a discrete, independently configured capability — for example a Model Provider, a Feature set, or Sentinel. Each subentry has its own settings and can be added, reconfigured, or removed without affecting others.
 
+The configuration UI is available in English, Czech, and Turkish, with a partial Russian translation. Text follows your Home Assistant language settings and falls back to English for untranslated strings. To contribute a new language, see [Translations](contributing.md#translations).
+
 - [Basic Setup](#basic-setup)
 - [Model Providers](#model-providers)
 - [Features](#features)

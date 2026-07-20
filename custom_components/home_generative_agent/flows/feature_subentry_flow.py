@@ -70,6 +70,7 @@ from ..core.utils import (  # noqa: TID252
     list_ollama_models,
     validate_db_uri,
 )
+from .localization import async_common_translation
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -282,27 +283,25 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
                 s.subentry_type == SUBENTRY_TYPE_FEATURE
                 for s in entry.subentries.values()
             )
-            overwrite_warning = (
-                "\n\n⚠️ Features are already configured. "
-                "Choosing **Basic setup** will overwrite your current "
-                "provider assignments with recommended defaults."
-                if has_existing
-                else ""
-            )
+            overwrite_warning = ""
+            if has_existing:
+                # Separator lives here: hassfest forbids leading whitespace
+                # in translation values.
+                overwrite_warning = "\n\n" + await async_common_translation(
+                    self.hass,
+                    "feature_overwrite_warning",
+                    "⚠️ Features are already configured. "
+                    "Choosing **Basic setup** will overwrite your current "
+                    "provider assignments with recommended defaults.",
+                )
             return self.async_show_form(
                 step_id="setup_mode",
                 data_schema=vol.Schema(
                     {
                         vol.Required("setup_mode", default="basic"): SelectSelector(
                             SelectSelectorConfig(
-                                options=[
-                                    SelectOptionDict(
-                                        label="Basic setup", value="basic"
-                                    ),
-                                    SelectOptionDict(
-                                        label="Advanced setup", value="advanced"
-                                    ),
-                                ],
+                                options=["basic", "advanced"],
+                                translation_key="setup_mode",
                                 mode=SelectSelectorMode.LIST,
                                 sort=False,
                                 custom_value=False,

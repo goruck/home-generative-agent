@@ -1,0 +1,361 @@
+{
+  "common": {
+    "feature_overwrite_warning": "⚠️ Funkce jsou již nakonfigurovány. Výběr **základního nastavení** přepíše vaše stávající přiřazení poskytovatelů doporučenými výchozími hodnotami.",
+    "sentinel_overwrite_warning": "⚠️ Sentinel je již nakonfigurován. Výběr **základního nastavení** přepíše vaše stávající nastavení doporučenými výchozími hodnotami."
+  },
+  "config": {
+    "step": {
+      "user": {
+        "title": "Home Generative Agent",
+        "description": "Vytvářejí se výchozí funkce. Poté spusťte **Nastavení** pro povolení/konfiguraci funkcí a databáze a následně přidejte **Poskytovatele modelu**."
+      }
+    },
+    "error": {
+      "cannot_connect": "Ke službě se nelze připojit. Zkontrolujte klíče/URL a zkuste to znovu.",
+      "invalid_auth": "Neplatný API klíč.",
+      "invalid_pin": "PIN musí mít 4-10 číslic.",
+      "unknown": "Neočekávaná chyba."
+    }
+  },
+  "config_subentries": {
+    "database": {
+      "entry_type": "service",
+      "abort": {
+        "reconfigure_successful": "Konfigurace databáze byla úspěšně aktualizována."
+      },
+      "initiate_flow": {
+        "reconfigure": "Přenastavit databázi",
+        "user": "Nastavit databázi"
+      },
+      "step": {
+        "set_options": {
+          "title": "Nastavení databáze",
+          "description": "Zadejte potřebné parametry pro databázi",
+          "data": {
+            "username": "Uživatelské jméno databáze",
+            "password": "Heslo databáze",
+            "host": "Hostitel databáze",
+            "port": "Port databáze (volitelné)",
+            "db_name": "Název databáze",
+            "db_params": "Parametry připojení databáze (volitelné)"
+          }
+        }
+      },
+      "error": {
+        "cannot_connect": "Nelze se připojit k databázi. Zkontrolujte nastavení databáze a zkuste to znovu.",
+        "invalid_auth": "Neplatná autorizace.",
+        "invalid_uri": "URI se nepodařilo vygenerovat.",
+        "unknown": "Neočekávaná chyba."
+      }
+    },
+    "model_provider": {
+      "entry_type": "service",
+      "abort": {
+        "reconfigure_successful": "Poskytovatel modelu byl aktualizován."
+      },
+      "initiate_flow": {
+        "reconfigure": "Přenastavit poskytovatele modelu",
+        "user": "Přidat poskytovatele modelu"
+      },
+      "step": {
+        "deployment": {
+          "title": "Nasazení",
+          "description": "Vyberte, kde tento poskytovatel běží.",
+          "data": {
+            "deployment": "Nasazení"
+          }
+        },
+        "provider": {
+          "title": "Poskytovatel",
+          "description": "Vyberte typ a název poskytovatele.",
+          "data": {
+            "provider_type": "Poskytovatel",
+            "name": "Název poskytovatele"
+          }
+        },
+        "settings": {
+          "title": "Nastavení poskytovatele",
+          "description": "Konfigurujte koncový bod nebo přihlašovací údaje poskytovatele.",
+          "data": {
+            "base_url": "Základní URL",
+            "api_key": "API klíč",
+            "gemini_api_key": "Gemini API klíč",
+            "anthropic_api_key": "Anthropic API klíč"
+          },
+          "data_description": {
+            "api_key": "Vyžadováno pro OpenAI. Pro poskytovatele kompatibilní s OpenAI ponechte prázdné nebo zadejte 'none', pokud koncový bod nevyžaduje autentizaci."
+          }
+        }
+      },
+      "error": {
+        "cannot_connect": "K poskytovateli se nelze připojit.",
+        "invalid_auth": "Neplatné přihlašovací údaje.",
+        "unknown": "Neočekávaná chyba."
+      }
+    },
+    "stt_provider": {
+      "entry_type": "service",
+      "abort": {
+        "reconfigure_successful": "Poskytovatel STT byl aktualizován."
+      },
+      "initiate_flow": {
+        "reconfigure": "Přenastavit poskytovatele STT",
+        "user": "Přidat poskytovatele STT"
+      },
+      "step": {
+        "provider": {
+          "title": "Poskytovatel převodu řeči na text (STT)",
+          "description": "Vyberte typ a název poskytovatele.",
+          "data": {
+            "provider_type": "Poskytovatel",
+            "name": "Název poskytovatele"
+          }
+        },
+        "credentials": {
+          "title": "Přihlašovací údaje",
+          "description": "Vyberte způsob autentizace poskytovatele STT.",
+          "data": {
+            "openai_provider_subentry_id": "Znovu použít poskytovatele OpenAI",
+            "api_key": "OpenAI API klíč"
+          }
+        },
+        "model": {
+          "title": "Model a pokročilé možnosti",
+          "description": "Vyberte model a volitelná pokročilá nastavení.",
+          "data": {
+            "model_name": "Model",
+            "language": "Jazyk (volitelné)",
+            "prompt": "Prompt (volitelné)",
+            "temperature": "Teplota (volitelné)",
+            "translate": "Přeložit do angličtiny",
+            "response_format": "Formát odpovědi"
+          }
+        }
+      },
+      "error": {
+        "cannot_connect": "K poskytovateli se nelze připojit.",
+        "invalid_auth": "Neplatné přihlašovací údaje.",
+        "invalid_model": "Vyberte platný model.",
+        "not_supported": "Poskytovatel zatím není podporován.",
+        "unknown": "Neočekávaná chyba."
+      }
+    },
+    "sentinel": {
+      "entry_type": "service",
+      "abort": {
+        "reconfigure_successful": "Konfigurace Sentinel byla aktualizována."
+      },
+      "error": {
+        "invalid_camera_entry_links": "Musí se jednat o objekt JSON mapující ID entit kamer na seznamy ID entit vstupů, např. {{\"camera.driveway\": [\"lock.front_door\"]}}.",
+        "invalid_pin": "PIN musí mít 4-10 číslic.",
+        "quiet_hours_incomplete": "Nastavte čas začátku i konce nočního klidu (nebo obojí nastavte na Zakázáno).",
+        "invalid_quiet_hours": "Časy nočního klidu musí být v místních hodinách mezi 0 a 23.",
+        "invalid_rule_entity_exclusions": "Musí se jednat o objekt JSON mapující typ anomálie (nebo \"*\" pro všechny typy) na seznamy ID entit nebo vzory glob (pouze zástupné znaky * a ?, malá písmena ID entit), každý musí obsahovat tečku a alespoň jeden doslovný znak, např. {{\"appliance_power_duration\": [\"sensor.ac_power\"], \"camera_entry_unsecured\": [\"camera.map_*\"]}}. Položky odpovídající všemu, jako například \"*\" nebo \"*.*\", nejsou povoleny — místo toho použijte klíč typu \"*\"."
+      },
+      "initiate_flow": {
+        "reconfigure": "Přenastavit Sentinel",
+        "user": "Konfigurovat Sentinel"
+      },
+      "step": {
+        "setup_mode": {
+          "title": "Nastavení Sentinel",
+          "description": "Vyberte, jak chcete Sentinel monitorování nakonfigurovat.{overwrite_warning}",
+          "data": {
+            "setup_mode": "Typ nastavení"
+          }
+        },
+        "basic_settings": {
+          "title": "Sentinel",
+          "description": "Konfigurujte základní nastavení Sentinel. Všechny ostatní možnosti využívají doporučené výchozí hodnoty.",
+          "data": {
+            "sentinel_enabled": "Povolit upozornění na anomálie",
+            "sentinel_daily_digest_enabled": "Povolit denní souhrn oznámení",
+            "sentinel_daily_digest_time": "Čas denního souhrnu (HH:MM:SS)",
+            "critical_action_pin": "PIN pro zvýšení úrovně (volitelné, 4-10 číslic)",
+            "notify_service": "Oznamovací služba (volitelné)"
+          }
+        },
+        "settings": {
+          "title": "Sentinel",
+          "description": "Konfigurujte proaktivní monitorování a zjišťování Sentinel.",
+          "data": {
+            "sentinel_enabled": "Povolit upozornění na anomálie",
+            "sentinel_interval_seconds": "Interval Sentinel (sekundy)",
+            "sentinel_cooldown_minutes": "Doba vychladnutí Sentinel podle typu (minuty)",
+            "sentinel_entity_cooldown_minutes": "Doba vychladnutí Sentinel podle entity (minuty)",
+            "sentinel_pending_prompt_ttl_minutes": "TTL čekajícího promptu (minuty)",
+            "sentinel_discovery_enabled": "Povolit zjišťování (vyžaduje upozornění na anomálie)",
+            "sentinel_discovery_interval_seconds": "Interval zjišťování (sekundy)",
+            "sentinel_discovery_max_records": "Max. počet uchovávaných záznamů zjišťování",
+            "sentinel_baseline_enabled": "Povolit sběr základní úrovně (vyžaduje upozornění na anomálie)",
+            "sentinel_baseline_update_interval_minutes": "Interval aktualizace základní úrovně (minuty)",
+            "sentinel_baseline_freshness_threshold_seconds": "Práh aktuálnosti základní úrovně (sekundy)",
+            "sentinel_baseline_weekly_patterns": "Povolit základní úrovně podle dnů v týdnu (snižuje falešná pozitiva o víkendech)",
+            "sentinel_baseline_dow_min_samples": "Minimální počet vzorků pro den v týdnu (týdny dat na slot)",
+            "sentinel_baseline_min_samples": "Minimální počet vzorků před spuštěním upozornění na odchylku",
+            "sentinel_baseline_sustained_minutes": "Filtr cyklické zátěže: minuty nad prahem před upozorněním (0 = vypnuto)",
+            "sentinel_appliance_power_threshold_w": "Pravidlo výkonu spotřebiče: práh výkonu (W)",
+            "sentinel_appliance_duration_min": "Pravidlo výkonu spotřebiče: doba trvání před upozorněním (minuty)",
+            "explain_enabled": "Povolit LLM vysvětlení pro nálezy Sentinel",
+            "sentinel_require_pin_for_level_increase": "Vyžadovat PIN pro zvýšení úrovně autonomie",
+            "sentinel_daily_digest_enabled": "Povolit denní souhrn oznámení",
+            "sentinel_daily_digest_time": "Čas denního souhrnu (HH:MM:SS)",
+            "sentinel_quiet_hours_start": "Začátek nočního klidu (potlačí vybrané závažnosti)",
+            "sentinel_quiet_hours_end": "Konec nočního klidu",
+            "sentinel_quiet_hours_severities": "Závažnosti potlačené během nočního klidu",
+            "sentinel_camera_entry_links": "Odkazy na vstupy kamer (JSON, volitelné)",
+            "sentinel_rule_entity_exclusions": "Vyloučení entit z pravidel (JSON, volitelné)",
+            "critical_action_pin": "Sentinel PIN pro zvýšení úrovně (volitelné)",
+            "notify_service": "Sentinel oznamovací služba (volitelné)"
+          }
+        }
+      }
+    },
+    "feature": {
+      "entry_type": "service",
+      "abort": {
+        "reconfigure_successful": "Funkce byla aktualizována.",
+        "setup_complete": "Nastavení dokončeno.",
+        "no_provider_for_basic_setup": "Není nakonfigurován žádný poskytovatel modelu. Nejprve přidejte **Poskytovatele modelu** a poté zkuste nastavení znovu."
+      },
+      "error": {
+        "no_providers": "Nejsou nakonfigurováni žádní poskytovatelé modelů.",
+        "cannot_connect": "Nelze se připojit k databázi. Zkontrolujte nastavení a zkuste to znovu.",
+        "invalid_auth": "Neplatná autorizace.",
+        "invalid_uri": "URI se nepodařilo vygenerovat.",
+        "unknown": "Neočekávaná chyba."
+      },
+      "initiate_flow": {
+        "reconfigure": "Přenastavit funkci",
+        "user": "Nastavení"
+      },
+      "step": {
+        "setup_mode": {
+          "title": "Nastavení",
+          "description": "Vyberte typ nastavení. Základní nastavení povolí všechny funkce s doporučenými výchozími hodnotami. Pokročilé nastavení vám dává plnou kontrolu nad každou funkcí.{overwrite_warning}",
+          "data": {
+            "setup_mode": "Typ nastavení"
+          }
+        },
+        "setup_status": {
+          "title": "Nastavení dokončeno",
+          "description": "Nastavení je hotovo.\n\n**Povolené funkce:** {features_enabled}{skipped_section}\n\n**Databáze:** {database_status}\n\n**Další kroky:**\n- Spusťte **Konfigurovat Sentinel** pro povolení monitorování anomálií.\n- Přidejte **Poskytovatele STT** pro hlasový vstup.\n- Přejděte do **Nastavení → Hlasoví asistenti** a přidejte Home Generative Agent jako svého hlasového asistenta."
+        },
+        "feature_enable": {
+          "title": "Nastavení funkcí",
+          "description": "**Konverzace** je vždy povolena. Níže povolte nebo zakažte volitelné funkce.",
+          "data": {
+            "camera_image_analysis": "Analýza obrazu z kamery",
+            "conversation_summary": "Souhrn konverzace",
+            "embedding": "Embeddings"
+          },
+          "data_description": {
+            "embedding": "Embedding model pro sémantickou paměť a vyhledávání nástrojů. Pokud je vypnuto, poskytovatel je vybrán automaticky (poskytovatel konverzace, pokud podporuje embeddings)."
+          }
+        },
+        "feature_provider": {
+          "title": "Vyberte poskytovatele modelu",
+          "description": "Vyberte poskytovatele modelu pro {feature_name}.",
+          "data": {
+            "model_provider_id": "Poskytovatel modelu"
+          }
+        },
+        "feature_model": {
+          "title": "{feature_name}",
+          "description": "Konfigurujte nastavení modelu pro tuto funkci. {provider_notice}",
+          "data": {
+            "model_name": "Model",
+            "fallback_provider_ids": "Záložní poskytovatelé",
+            "temperature": "Teplota",
+            "keepalive_s": "Ollama keepalive (sekundy nebo Nikdy neuvolňovat (-1))",
+            "context_size": "Ollama velikost kontextu (tokeny)",
+            "reasoning": "Ollama uvažování (reasoning)"
+          },
+          "data_description": {
+            "fallback_provider_ids": "Seřazený seznam záložních poskytovatelů. První dostupný poskytovatel se použije, pokud primární selže."
+          }
+        },
+        "database": {
+          "title": "Nastavení databáze",
+          "description": "Zadejte potřebné parametry pro databázi.",
+          "data": {
+            "username": "Uživatelské jméno databáze",
+            "password": "Heslo databáze",
+            "host": "Hostitel databáze",
+            "port": "Port databáze (volitelné)",
+            "db_name": "Název databáze",
+            "db_params": "Parametry připojení databáze (volitelné)"
+          }
+        },
+        "instructions": {
+          "title": "Přidat poskytovatele modelu",
+          "description": "Zatím není nakonfigurován žádný poskytovatel modelu. Přidejte jej v sekci **Poskytovatel modelu**."
+        }
+      }
+    }
+  },
+  "selector": {
+    "db_params": {
+      "fields": {
+        "key": {
+          "name": "Klíč",
+          "description": "Název parametru připojení (například: sslmode, connect_timeout)"
+        },
+        "value": {
+          "name": "Hodnota",
+          "description": "Hodnota parametru připojení (například: disable, 30)"
+        }
+      }
+    },
+    "setup_mode": {
+      "options": {
+        "basic": "Základní nastavení",
+        "advanced": "Pokročilé nastavení"
+      }
+    }
+  },
+  "exceptions": {
+    "invalid_config_entry": {
+      "message": "Byla poskytnuta neplatná konfigurační položka. Získáno: {config_entry}"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Možnosti Home Generative Agent",
+        "description": "Konfigurujte globální chování a prompty.",
+        "data": {
+          "face_api_url": "URL API pro rozpoznávání obličejů (volitelné)",
+          "prompt": "Instrukce",
+          "llm_hass_api": "Ovládat Home Assistant",
+          "video_analyzer_mode": "Režim video analyzátoru",
+          "video_analyzer_uniqueness_enabled": "Povolit filtr snímků dHash (perceptuální hash)",
+          "video_analyzer_motion_camera_map": "Pohybový senzor → přepsání kamery (volitelné)",
+          "notify_service": "Oznamovací služba video analyzátoru (volitelné)",
+          "face_recognition": "Povolit rozpoznávání obličejů",
+          "manage_context_with_tokens": "Metoda správy kontextu",
+          "max_tokens_in_context": "Max. tokenů v kontextu chatu",
+          "max_messages_in_context": "Max. zpráv v kontextu chatu",
+          "critical_action_pin_enabled": "Vyžadovat PIN pro kritické akce",
+          "critical_action_pin": "PIN pro kritické akce (vyžadován pro odemknutí/zabezpečení/otevření citlivých zařízení)",
+          "schema_first_yaml": "JSON podle schématu pro požadavky YAML",
+          "stt_filters_section": "Filtry řečového vstupu",
+          "stt_hallucination_patterns": "Ignorované podřetězce STT",
+          "stt_hallucination_exact_patterns": "Ignorované přesné fráze STT",
+          "tool_retrieval_limit": "Limit načítání nástrojů",
+          "tool_relevance_threshold": "Práh relevance nástrojů"
+        },
+        "data_description": {
+          "prompt": "Instruujte LLM, jak má odpovídat. Může to být šablona.",
+          "schema_first_yaml": "Pokud je povoleno, požadavky YAML jsou zodpovídány striktním JSON, který je následně převeden na YAML.",
+          "stt_hallucination_patterns": "Jeden podřetězec na řádek. Pokud přepis STT obsahuje jakoukoli položku, je ignorován před spuštěním LLM. Shoda nerozlišuje malá a velká písmena.",
+          "stt_hallucination_exact_patterns": "Jedna fráze na řádek. Pokud se celý přepis STT rovná jakékoli položce, je ignorován před spuštěním LLM. Shoda nerozlišuje malá a velká písmena.",
+          "tool_retrieval_limit": "Maximální počet nástrojů k načtení na základě sémantické podobnosti s dotazem uživatele.",
+          "tool_relevance_threshold": "Minimální skóre sémantické podobnosti (0.0 až 1.0) vyžadované pro načtení nástroje.",
+          "video_analyzer_uniqueness_enabled": "Přeskočit vizuálně téměř identické snímky před analýzou VLM. Varování: povolení této funkce odstraní kontext pohybu mezi snímky, který souhrnný model používá k popisu pohybu. Povolte pouze v případě, že statická scéna generuje nadměrné duplikáty a akceptujete ztrátu kontinuity pohybu.",
+          "video_analyzer_motion_camera_map": "Jedno přepsání na řádek: binary_sensor.X_motion: camera.Y — použijte, když automatické rozpoznávání vybere špatnou kameru. Ponechte prázdné pro spoléhání na rozpoznávání založené na zařízení a názvu."
+        }
+      }
+    }
+  }
+}
