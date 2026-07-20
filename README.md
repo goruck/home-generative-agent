@@ -99,7 +99,7 @@ You can now open the HA Assist panel and start talking to your home.
 | [Sentinel](docs/sentinel.md) | Anomaly detection pipeline, built-in rules, triage, baseline, blueprints, notification quiet hours, services API, health sensor |
 | [Camera Entities](docs/camera-entities.md) | Image and sensor entities, dashboards, automations, proactive video analysis, face recognition |
 | [Architecture](docs/architecture.md) | LangGraph agent, model tiers, context management, streaming, latency, tools |
-| [Contributing](docs/contributing.md) | Dev setup, Makefile reference, dependency workflow |
+| [Contributing](docs/contributing.md) | Dev setup, Makefile reference, dependency workflow, translations |
 
 ## More Examples
 
