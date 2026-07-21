@@ -113,6 +113,10 @@ OLLAMA_BOOL_HINT_TAGS = {
 # ---- Global options ----
 CONF_RECOMMENDED = "recommended"
 CONF_PROMPT = "prompt"
+CONF_VLM_RESPONSE_LANGUAGE = "vlm_response_language"
+RECOMMENDED_VLM_RESPONSE_LANGUAGE = ""
+CONF_VLM_PROMPT_EXTRA = "vlm_prompt_extra"
+RECOMMENDED_VLM_PROMPT_EXTRA = ""
 CONF_SCHEMA_FIRST_YAML = "schema_first_yaml"
 CONF_DISABLED_FEATURES = "disabled_features"
 
@@ -455,6 +459,9 @@ RECOMMENDED_VLM_TEMPERATURE = 0.2
 # Prompts + input image size
 # The Repeated-scene rule's "Scene unchanged." sentinel below is detected by
 # core/video_helpers.is_no_change_reply — keep the two in sync when editing.
+# When CONF_VLM_RESPONSE_LANGUAGE is set, agent/tools.analyze_image appends a
+# language instruction that carves the sentinel out of translation; keep that
+# carve-out in sync with the sentinel text as well.
 VLM_SYSTEM_PROMPT = """
 You are a vision-language model describing a single image frame.
 

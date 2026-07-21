@@ -200,6 +200,8 @@ Alarm control panels use their own alarm code, which is separate from the critic
 The **Options** flow (gear icon on the integration page) exposes:
 
 - System prompt override
+- **Camera description language** (`vlm_response_language`) — optional, e.g. `Czech`. When set, camera image descriptions (chat camera tool, `save_and_analyze_snapshot`, and the proactive video analyzer) are requested in that language. Leave empty for English. The internal `Scene unchanged.` repeated-scene reply is deliberately kept in English — it is matched by code, not shown to users (see [Camera Entities](camera-entities.md)).
+- **Additional camera analysis instructions** (`vlm_prompt_extra`) — optional multiline text appended to the VLM system prompt, e.g. `Ignore cars in the driveway`. Appended after the built-in rules, never replacing them.
 - Face recognition service URL
 - Context management parameters (`max_messages_in_context`, `max_tokens_in_context`, `manage_context_with_tokens`)
 - Critical action PIN toggle and value

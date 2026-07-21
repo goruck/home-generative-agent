@@ -314,6 +314,8 @@
         "data": {
           "face_api_url": "Yüz tanıma API URL'si (isteğe bağlı)",
           "prompt": "Talimatlar",
+          "vlm_response_language": "Kamera açıklama dili (isteğe bağlı)",
+          "vlm_prompt_extra": "Ek kamera analizi talimatları (isteğe bağlı)",
           "llm_hass_api": "Home Assistant'ı kontrol et",
           "video_analyzer_mode": "Video analizci modu",
           "notify_service": "Video Analizci Bildirim Servisi (isteğe bağlı)",
@@ -332,6 +334,8 @@
         },
         "data_description": {
           "prompt": "LLM'in nasıl yanıt vermesi gerektiğini belirtin. Bu bir şablon olabilir.",
+          "vlm_response_language": "VLM kamera görüntüsü açıklamalarının dili, örn. 'Czech'. İngilizce için boş bırakın. Dahili 'Scene unchanged.' yanıtı her zaman İngilizce kalır.",
+          "vlm_prompt_extra": "VLM kamera analizi istemine eklenen ek talimatlar, örn. 'Garaj yolundaki arabaları yok say'. Yerleşik kuralların yerini almazlar.",
           "schema_first_yaml": "Etkinleştirildiğinde, YAML istekleri YAML'ye çevrilecek sıkı JSON ile yanıtlanır.",
           "stt_hallucination_patterns": "Her satıra bir alt dize yazın. STT metni herhangi bir girdiyi içerirse LLM çalışmadan önce yok sayılır. Eşleşme büyük/küçük harfe duyarsızdır.",
           "stt_hallucination_exact_patterns": "Her satıra bir ifade yazın. STT metninin tamamı herhangi bir girdiye eşitse LLM çalışmadan önce yok sayılır. Eşleşme büyük/küçük harfe duyarsızdır.",

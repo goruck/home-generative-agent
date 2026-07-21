@@ -9,6 +9,7 @@ import logging
 import math
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, cast
@@ -49,10 +50,14 @@ from ..const import (  # noqa: TID252
     CONF_CRITICAL_ACTION_PIN_HASH,
     CONF_CRITICAL_ACTION_PIN_SALT,
     CONF_NOTIFY_SERVICE,
+    CONF_VLM_PROMPT_EXTRA,
+    CONF_VLM_RESPONSE_LANGUAGE,
     CRITICAL_PIN_MAX_LEN,
     CRITICAL_PIN_MIN_LEN,
     HISTORY_TOOL_CONTEXT_LIMIT,
     HISTORY_TOOL_PURGE_KEEP_DAYS,
+    RECOMMENDED_VLM_PROMPT_EXTRA,
+    RECOMMENDED_VLM_RESPONSE_LANGUAGE,
     VLM_IMAGE_HEIGHT,
     VLM_IMAGE_WIDTH,
     VLM_SYSTEM_PROMPT,
@@ -369,11 +374,28 @@ def _prompt_func(data: dict[str, Any]) -> list[AnyMessage]:
     return [SystemMessage(content=system), HumanMessage(content=content_parts)]
 
 
+@dataclass(frozen=True)
+class VLMPromptOverrides:
+    """
+    User-configurable additions layered onto VLM_SYSTEM_PROMPT.
+
+    Both fields are optional and appended after VLM_SYSTEM_PROMPT rather
+    than replacing it, so the Repeated-scene / Brevity / Motion-description
+    rules and their sentinel-detection contract stay intact regardless of
+    what a user adds here. See CONF_VLM_RESPONSE_LANGUAGE and
+    CONF_VLM_PROMPT_EXTRA in const.py.
+    """
+
+    response_language: str | None = None
+    prompt_extra: str | None = None
+
+
 async def analyze_image(
     vlm_model: RunnableSerializable[LanguageModelInput, BaseMessage],
     image: bytes,
     detection_keywords: list[str] | None = None,
     prev_text: str | None = None,
+    overrides: VLMPromptOverrides | None = None,
 ) -> str:
     """Analyze an image with the preconfigured VLM model."""
     await asyncio.sleep(0)  # keep the event loop snappy
@@ -385,9 +407,22 @@ async def analyze_image(
     else:
         prompt = VLM_USER_PROMPT
 
+    system_prompt = VLM_SYSTEM_PROMPT
+    if overrides and overrides.response_language:
+        sentinel_note = 'the exact sentinel reply "Scene unchanged."'
+        system_prompt += (
+            f"\n\nRespond in {overrides.response_language} for all descriptive "
+            f"text. Exception: {sentinel_note} defined above under the "
+            "Repeated-scene rule must stay in English, word for word, "
+            "whenever that rule applies — it is matched by code, not read "
+            "by a person, so do not translate or paraphrase it."
+        )
+    if overrides and overrides.prompt_extra:
+        system_prompt += f"\n\n{overrides.prompt_extra}"
+
     messages = _prompt_func(
         {
-            "system": VLM_SYSTEM_PROMPT,
+            "system": system_prompt,
             "text": prompt,
             "image": image_data,
             "prev_text": prev_text,
@@ -432,11 +467,22 @@ async def get_and_analyze_camera_image(  # noqa: D417
 
     hass = config["configurable"]["hass"]
     vlm_model = config["configurable"]["vlm_model"]
+    options = config["configurable"].get("options", {})
     image = await _get_camera_image(hass, camera_name)
     if image is None:
         return "Error getting image from camera."
     try:
-        return await analyze_image(vlm_model, image, detection_keywords)
+        overrides = VLMPromptOverrides(
+            response_language=options.get(
+                CONF_VLM_RESPONSE_LANGUAGE, RECOMMENDED_VLM_RESPONSE_LANGUAGE
+            ),
+            prompt_extra=options.get(
+                CONF_VLM_PROMPT_EXTRA, RECOMMENDED_VLM_PROMPT_EXTRA
+            ),
+        )
+        return await analyze_image(
+            vlm_model, image, detection_keywords, overrides=overrides
+        )
     except OllamaResponseError:
         LOGGER.exception(VLM_ERROR_CAPTION)
         return VLM_ERROR_CAPTION
