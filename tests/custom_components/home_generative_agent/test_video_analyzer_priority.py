@@ -2647,6 +2647,28 @@ def test_stale_recorded_once_per_episode(hass: MagicMock, va: VideoAnalyzer) -> 
     assert va._snapshot_fail_streak["camera.front_door"] == 2  # type: ignore[attr-defined]
 
 
+def test_stale_reason_names_snapshot_mode_cause(
+    hass: MagicMock, va: VideoAnalyzer
+) -> None:
+    """
+    The stale-frame failure reason must point at the snapshot-mode cause.
+
+    Field data (#466, upstream tsightler/ring-mqtt#1103) showed ring-mqtt's
+    Auto/Motion modes never snapshot battery cameras — nothing "freezes", so
+    the reason must name the mode remedy instead of implying a crash that an
+    add-on restart would fix.
+    """
+    now = datetime.now(dt.UTC)
+    hass.states.get.return_value = _state_with_ts(now.timestamp() - 5 * 86400)
+    recorder = MagicMock()
+    va._record_snapshot_failure = recorder  # type: ignore[method-assign]
+    assert va._retained_frame_is_stale("camera.front_door", now) is True  # type: ignore[attr-defined]
+    reason = recorder.call_args.args[1]
+    assert "ring-mqtt#1103" in reason
+    assert "Interval" in reason
+    assert "appears frozen" not in reason
+
+
 def test_stale_threshold_boundary(hass: MagicMock, va: VideoAnalyzer) -> None:
     """Exactly-threshold and future (clock-skew) ages are not stale."""
     now = datetime.now(dt.UTC)
