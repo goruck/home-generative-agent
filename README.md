@@ -14,7 +14,7 @@ A [Home Assistant](https://www.home-assistant.io/) integration that brings a gen
 | --- | --- |
 | **Conversational control** | Talk to your home in natural language. Turn things on, check status, ask questions. |
 | **Automation creation** | Describe what you want in chat and the agent writes and registers the HA automation. |
-| **Camera & image analysis** | Ask the agent what it sees in any camera. Proactive motion-triggered analysis with anomaly detection. Works with Axis (VMD), Ring via ring-mqtt (including battery cameras via `event_select`), Reolink, UniFi Protect, and any camera that exposes a `binary_sensor.*` motion entity or a `recording` state in HA. |
+| **Camera & image analysis** | Ask the agent what it sees in any camera. Proactive motion-triggered analysis with anomaly detection. Works with Axis (VMD), Ring via ring-mqtt (including battery cameras via `event_select` — battery models need the `Interval` snapshot mode or a small [take-snapshot automation](docs/camera-entities.md#ring-cameras-via-ring-mqtt), because ring-mqtt's default `Auto` mode never refreshes their snapshots), Reolink, UniFi Protect, and any camera that exposes a `binary_sensor.*` motion entity or a `recording` state in HA. |
 | **Sentinel anomaly detection** | Deterministic rules watch for security and safety issues (unlocked locks, open entries, unknown people) and alert your phone. Optional LLM-powered triage and rule discovery. Approved discovery rules can be inspected, deactivated, reactivated, and surgically repaired via HA services. |
 | **Face recognition** | Identify people in camera frames and personalize alerts. |
 | **Long-term memory** | Semantic search over past conversations. The agent remembers your preferences and context. |

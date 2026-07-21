@@ -348,6 +348,42 @@ early-frame selection.
 
 ---
 
+### Scale stale-snapshot budget from the camera's own refresh interval
+
+**What:** The stale-snapshot guard (issue #490) uses a fixed 30-minute budget
+(`_SNAPSHOT_STALE_MAX_AGE_SEC = 1800`), sized as 3× the battery-camera
+interval. ring-mqtt publishes each camera's actual interval as
+`number.<camera>_snapshot_interval` (field-observed: 600 s battery, 30 s
+wired), so the budget is ~60× too lenient for wired cameras — a frozen wired
+cam goes undetected for half an hour. Better still for `event_select`-owned
+windows: compare the snapshot `timestamp` against the event that opened the
+window, which is exact rather than a heuristic.
+
+**Why:** Raised by @andymcmanus in #466 field testing (2026-07-18 comment,
+n=12 events: frame staleness at event open ranged 3–54 min, mean 21 min).
+The guard already only applies to ring-mqtt `event_select` cameras, so
+reading ring-mqtt's own interval entity adds no new integration coupling.
+
+**How to apply:** In `_retained_frame_is_stale`, resolve
+`number.<base>_snapshot_interval` via the same sibling/device-registry
+lookup as `_has_event_select_sibling`; budget = 3× that value, falling back
+to 1800 s when absent. For loops the `event_select` path owns, prefer
+comparing against the window-opening event's timestamp. The two halves are
+NOT interchangeable: interval scaling only tightens the wired case — in
+Auto/Motion mode on battery the real cadence is *never* (ring-mqtt#1103),
+which no scaled budget can detect; only the event-timestamp comparison
+covers it. The event-timestamp comparison also governs the common case
+today: with mean staleness of 21 min at event open (n=12), the previous
+event's frame usually passes the 30-min budget and is analyzed as if
+current (misattributed imagery), and with the take_snapshot automation
+installed, quiet cameras (>30 min gaps) log one expected snapshot-failure
+WARNING per event that a window-scoped check could suppress.
+
+**Effort:** M
+**Priority:** P2
+
+---
+
 ## Notifier / Observability
 
 ### Feedback-trained per-entity cooldowns — wire feedback signal

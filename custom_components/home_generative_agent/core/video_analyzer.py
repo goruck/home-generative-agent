@@ -140,10 +140,12 @@ _SNAPSHOT_APPEAR_ATTEMPTS: Final[int] = 10  # post-service file visibility polls
 _SNAPSHOT_FAILURE_ESCALATION: Final[int] = 3  # consecutive failures before ERROR log
 # --- Stale retained snapshot guard (issue #490) ---
 # ring-mqtt snapshot cameras expose a `timestamp` attribute (epoch seconds of
-# the last published frame). The interval snapshot can silently freeze on
-# battery cameras, leaving MQTT serving a days-old retained frame; capturing it
-# would send stale imagery to the VLM with no visible failure. The threshold is
-# 3x the slowest known ring-mqtt interval (600 s on battery power).
+# the last published frame). On battery cameras the frame can stop refreshing —
+# the interval snapshot can silently freeze, or the Auto/Motion snapshot modes
+# never request battery snapshots at all (ring-mqtt#1103) — leaving MQTT
+# serving a days-old retained frame; capturing it would send stale imagery to
+# the VLM with no visible failure. The threshold is 3x the slowest known
+# ring-mqtt Interval-mode refresh (600 s on battery power).
 _SNAPSHOT_STALE_MAX_AGE_SEC: Final[int] = 1800
 _SNAPSHOT_TS_EPOCH_MIN: Final[int] = 1_000_000_000  # ignore non-epoch timestamps
 # Timestamps further in the future than this are not epoch seconds (e.g. a
@@ -1827,10 +1829,13 @@ class VideoAnalyzer:
         Detect a frozen ring-mqtt interval snapshot before capturing it.
 
         ring-mqtt publishes the last frame's epoch seconds as a `timestamp`
-        attribute on the snapshot camera. The interval snapshot can silently
-        stop on battery cameras (issue #490), after which MQTT serves the
-        retained frame indefinitely; capturing it would analyze days-old
-        imagery as if it were current.
+        attribute on the snapshot camera. On battery cameras the frame can
+        stop refreshing (issue #490) — either because the interval snapshot
+        silently stalls, or because ring-mqtt's Auto/Motion snapshot modes
+        never request snapshots from battery devices at all (upstream
+        tsightler/ring-mqtt#1103) — after which MQTT serves the retained
+        frame indefinitely; capturing it would analyze days-old imagery as
+        if it were current.
 
         The guard only applies to cameras with a ring-mqtt event_select
         sibling — other integrations may publish an epoch `timestamp` with
@@ -1870,9 +1875,14 @@ class VideoAnalyzer:
             self._record_snapshot_failure(
                 camera_id,
                 f"retained snapshot frame is {age_sec / 3600.0:.1f} h old "
-                f"(limit {_SNAPSHOT_STALE_MAX_AGE_SEC} s); the ring-mqtt "
-                f"interval snapshot appears frozen — restarting the ring-mqtt "
-                f"add-on usually clears it (issue #490)",
+                f"(limit {_SNAPSHOT_STALE_MAX_AGE_SEC} s); ring-mqtt has not "
+                f"published a fresh frame (issue #490). On battery cameras "
+                f"the Auto and Motion snapshot modes never refresh the frame "
+                f"(ring-mqtt#1103) — use snapshot mode 'Interval' or a "
+                f"take_snapshot-on-event automation (see docs/camera-entities"
+                f".md in the home-generative-agent repo); if Interval mode "
+                f"was working and stopped, restarting the ring-mqtt add-on "
+                f"usually clears it",
             )
         return True
 
