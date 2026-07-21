@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.19.1] - 2026-07-20
+
+### Fixed
+
+- **The "snapshot appears frozen" warning no longer sends you chasing a crash that never happened** — field testing on battery Ring cameras ([@andymcmanus](https://github.com/andymcmanus) in [#466](https://github.com/goruck/home-generative-agent/issues/466)) proved that ring-mqtt's `Auto` (default) and `Motion` snapshot modes never request snapshots from battery cameras at all (filed upstream as [tsightler/ring-mqtt#1103](https://github.com/tsightler/ring-mqtt/issues/1103)): nothing froze, and restarting the add-on doesn't help in those modes. The stale-snapshot warning now names both possible causes and the matching remedy — switch the camera's snapshot mode to `Interval`, or add a small automation that presses the camera's take-snapshot button on each Ring event. The [camera documentation](docs/camera-entities.md) now tells the full battery-camera snapshot story, including a copy-paste automation example with the guard condition that keeps it from waking every camera after a Home Assistant or MQTT restart, what happens to the previous event's leftover frame, and the side effects to expect on quiet or very busy cameras.
+
 ## [3.19.0] - 2026-07-19
 
 ### Added
