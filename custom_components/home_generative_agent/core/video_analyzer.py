@@ -69,6 +69,7 @@ from ..const import (  # noqa: TID252
     VIDEO_SUMMARY_NUM_PREDICT,
     VIDEO_VLM_NUM_PREDICT,
 )
+from .fallback import ainvoke_dropping_unsupported_params
 from .utils import (
     discover_mobile_notify_service,
     dispatch_on_loop,
@@ -996,7 +997,7 @@ class VideoAnalyzer:
         if is_edge_deployment(sum_deployment) and "reasoning" in sum_cfg:
             sum_cfg["reasoning"] = False
         model = base_sum.with_config(config={"configurable": sum_cfg})
-        summary = await model.ainvoke(messages)
+        summary = await ainvoke_dropping_unsupported_params(model, messages)
         LOGGER.debug("Raw video analyzer summary: %s", summary)
 
         text = extract_final(getattr(summary, "content", "") or "", max_chars=150)

@@ -67,15 +67,46 @@ def _stub_ha_conversation() -> None:
     sys.modules["homeassistant.components.conversation.models"] = models_mod
 
 
+def _ensure_content_classes() -> None:
+    """
+    Guarantee AssistantContent/UserContent exist on the loaded module.
+
+    Suite ordering decides whether the real HA conversation module or another
+    test file's import stub is in sys.modules; leaner stubs (e.g. the one in
+    test_conversation_stream.py) omit the content classes. The integration
+    resolves them at runtime through the module object, so adding them here
+    keeps isinstance checks and test construction consistent.
+    """
+    conv: Any = sys.modules["homeassistant.components.conversation"]
+    if not hasattr(conv, "AssistantContent"):
+
+        class _StubAssistantContent:
+            pass
+
+        conv.AssistantContent = _StubAssistantContent
+    if not hasattr(conv, "UserContent"):
+
+        class _StubUserContent:
+            pass
+
+        conv.UserContent = _StubUserContent
+
+
 _stub_ha_conversation()
+_ensure_content_classes()
 
 # These imports must come AFTER the stub so conversation.py loads cleanly.
+from homeassistant.components import conversation as ha_conversation  # noqa: E402
+
 from custom_components.home_generative_agent.conversation import (  # noqa: E402
+    _STREAM_ERROR_REASON_MAX_CHARS,
     MultiLLMAPI,
     _get_stt_hallucination_exact_patterns,
     _get_stt_hallucination_patterns,
     _is_stt_hallucination,
+    _recommit_final_assistant_content,
     _run_tool_index_background,
+    _streaming_failure_content,
 )
 
 # ---------------------------------------------------------------------------
@@ -307,3 +338,163 @@ def test_is_stt_hallucination_no_match() -> None:
     assert (
         _is_stt_hallucination("subtitle", ("subtitles",), ()) is False
     )  # partial, not full
+
+
+# ---------------------------------------------------------------------------
+# _streaming_failure_content: user-visible failure message (issue #502)
+# ---------------------------------------------------------------------------
+
+
+def test_streaming_failure_content_without_error() -> None:
+    """No captured stream error yields the generic try-again message."""
+    assert (
+        _streaming_failure_content(None)
+        == "I'm sorry, I was unable to respond in time. Please try again."
+    )
+
+
+def test_streaming_failure_content_includes_error_reason() -> None:
+    """The captured stream error's message is surfaced in the chat reply."""
+    err = HomeAssistantError("temperature does not support 0.2 with this model")
+    result = _streaming_failure_content(err)
+    assert result == (
+        "I'm sorry, I was unable to respond: "
+        "temperature does not support 0.2 with this model"
+    )
+
+
+def test_streaming_failure_content_uses_type_name_for_empty_message() -> None:
+    """A HomeAssistantError with an empty str() falls back to the class name."""
+    result = _streaming_failure_content(HomeAssistantError())
+    assert result == "I'm sorry, I was unable to respond: HomeAssistantError"
+
+
+def test_streaming_failure_content_hides_non_ha_error_details() -> None:
+    """
+    Arbitrary exceptions surface only their class name, never their message.
+
+    Non-HomeAssistantError text can carry internals (DSNs, paths, request
+    IDs) and is rendered in chat, spoken by voice pipelines, and persisted
+    into the model's future context — so the message must stay in the log.
+    """
+    result = _streaming_failure_content(
+        RuntimeError("internal-detail-that-must-not-leak /var/lib/private/path")
+    )
+    assert "internal-detail" not in result
+    assert "/var/lib" not in result
+    assert (
+        result == "I'm sorry, I was unable to respond (RuntimeError). Please try again."
+    )
+
+
+def test_streaming_failure_content_truncates_long_reason() -> None:
+    """Reasons longer than the cap are truncated with an ellipsis marker."""
+    long_reason = "x" * (_STREAM_ERROR_REASON_MAX_CHARS + 100)
+    result = _streaming_failure_content(HomeAssistantError(long_reason))
+    reason = result.removeprefix("I'm sorry, I was unable to respond: ")
+    assert len(reason) == _STREAM_ERROR_REASON_MAX_CHARS + 1
+    assert reason.endswith("…")
+    assert reason[:-1] == "x" * _STREAM_ERROR_REASON_MAX_CHARS
+
+
+# ---------------------------------------------------------------------------
+# _recommit_final_assistant_content: CONTENT_ADDED re-fire after stream failure
+# ---------------------------------------------------------------------------
+
+
+class _FakeChatLog:
+    """Minimal ChatLog stand-in tracking recommitted assistant content."""
+
+    def __init__(self, content: list[Any]) -> None:
+        self.content = content
+        self.recommitted: list[Any] = []
+
+    def async_add_assistant_content_without_tools(self, item: Any) -> None:
+        self.recommitted.append(item)
+        self.content.append(item)
+
+
+def _assistant_content(text: str, tool_calls: Any = None) -> Any:
+    """
+    Build an AssistantContent instance with the given payload.
+
+    Works against both the import stub (no-arg class) and the real HA
+    dataclass (required kwargs), since suite ordering decides which one
+    is loaded when this module runs.
+    """
+    try:
+        item: Any = ha_conversation.AssistantContent(
+            agent_id="conversation.test", content=text
+        )
+    except TypeError:
+        stub_cls: Any = ha_conversation.AssistantContent
+        item = stub_cls()
+        item.content = text
+    item.tool_calls = tool_calls
+    return item
+
+
+def _user_content() -> Any:
+    """Build a UserContent instance against either the stub or the real class."""
+    try:
+        return ha_conversation.UserContent(content="hi")
+    except TypeError:
+        stub_cls: Any = ha_conversation.UserContent
+        return stub_cls()
+
+
+def test_recommit_refires_final_assistant_content() -> None:
+    """
+    The final tool-free AssistantContent is popped and re-added.
+
+    Re-adding fires CONTENT_ADDED so the frontend streaming UI shows the
+    final text in the main chat area.
+    """
+    final = _assistant_content("Here is your answer.")
+    chat_log = _FakeChatLog([_user_content(), final])
+
+    _recommit_final_assistant_content(chat_log)  # type: ignore[arg-type]
+
+    assert chat_log.recommitted == [final]
+    assert chat_log.content[-1] is final
+    assert len(chat_log.content) == 2
+
+
+def test_recommit_skips_empty_chat_log() -> None:
+    """An empty chat log is left untouched."""
+    chat_log = _FakeChatLog([])
+    _recommit_final_assistant_content(chat_log)  # type: ignore[arg-type]
+    assert chat_log.recommitted == []
+
+
+def test_recommit_skips_content_with_tool_calls() -> None:
+    """AssistantContent carrying tool calls must not be recommitted."""
+    final = _assistant_content("calling tool", tool_calls=[MagicMock()])
+    chat_log = _FakeChatLog([final])
+
+    _recommit_final_assistant_content(chat_log)  # type: ignore[arg-type]
+
+    assert chat_log.recommitted == []
+    assert chat_log.content == [final]
+
+
+def test_recommit_skips_empty_assistant_text() -> None:
+    """AssistantContent with empty text must not be recommitted."""
+    final = _assistant_content("")
+    chat_log = _FakeChatLog([final])
+
+    _recommit_final_assistant_content(chat_log)  # type: ignore[arg-type]
+
+    assert chat_log.recommitted == []
+    assert chat_log.content == [final]
+
+
+def test_recommit_skips_non_assistant_final_content() -> None:
+    """A trailing non-assistant entry (e.g. UserContent) is left in place."""
+    user_item = _user_content()
+    chat_log = _FakeChatLog([user_item])
+
+    _recommit_final_assistant_content(chat_log)  # type: ignore[arg-type]
+
+    assert chat_log.recommitted == []
+    assert chat_log.content == [user_item]

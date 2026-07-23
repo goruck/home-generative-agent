@@ -71,6 +71,11 @@ from custom_components.home_generative_agent.const import (
     TOOL_CALL_TRANSIENT_ERROR_TEMPLATE,
 )
 
+from ..core.fallback import (  # noqa: TID252
+    DROPPABLE_SAMPLING_PARAMS,
+    ainvoke_dropping_unsupported_params,
+    unsupported_sampling_param_in_chain,
+)
 from ..core.utils import extract_final  # noqa: TID252
 from .helpers import (
     format_tool,
@@ -1545,11 +1550,19 @@ def _build_system_message(
 
 
 async def _invoke_model(
-    model: Any, messages: list[AnyMessage], config: RunnableConfig
+    model: Any,
+    messages: list[AnyMessage],
+    config: RunnableConfig,
+    *,
+    drop_unsupported: bool = True,
 ) -> Any:
     """Invoke a chat model, wrapping non-HA exceptions as HomeAssistantError."""
     try:
         async with asyncio.timeout(_LLM_INVOKE_TIMEOUT_S):
+            if drop_unsupported:
+                return await ainvoke_dropping_unsupported_params(
+                    model, messages, config
+                )
             return await model.ainvoke(messages, config)
     except TimeoutError:
         msg = f"Model invocation timed out after {_LLM_INVOKE_TIMEOUT_S}s."
@@ -1559,6 +1572,54 @@ async def _invoke_model(
     except Exception as err:
         msg = f"Model invocation failed: {err}"
         raise HomeAssistantError(msg) from err
+
+
+async def _invoke_chat_model_with_sampling_rebind(  # noqa: PLR0913
+    hass: Any,
+    base_model: Any,
+    model: Any,
+    messages: list[AnyMessage],
+    config: RunnableConfig,
+    selected_tools: list[Any],
+    *,
+    disable_reasoning: bool,
+) -> Any:
+    """
+    Invoke the (possibly tool-bound) chat model, rebinding on sampling 400s.
+
+    bind_tools() collapses a configurable-fields model into a concrete binding
+    with sampling params baked in, so the invoke-time config drop in
+    ainvoke_dropping_unsupported_params cannot help a tool-bound chat model.
+    When the provider rejects temperature/top_p (issue #502), rebuild from the
+    pre-bind model with both sampling params nulled, re-bind the tools, and
+    retry once. Configurable-field models omit None params from the payload.
+    """
+    try:
+        return await _invoke_model(
+            model, messages, config, drop_unsupported=not selected_tools
+        )
+    except HomeAssistantError as err:
+        param = unsupported_sampling_param_in_chain(err)
+        if param is None:
+            raise
+        LOGGER.warning(
+            "Chat model rejected unsupported sampling parameter %r; retrying "
+            "once with provider-default sampling parameters.",
+            param,
+        )
+        stripped = base_model.with_config(
+            config={"configurable": dict.fromkeys(DROPPABLE_SAMPLING_PARAMS)}
+        )
+        if selected_tools:
+            stripped = await hass.async_add_executor_job(
+                partial(
+                    _bind_model_tools,
+                    stripped,
+                    selected_tools,
+                    disable_reasoning=disable_reasoning,
+                )
+            )
+        return await _invoke_model(stripped, messages, config, drop_unsupported=False)
 
 
 def _bind_model_tools(
@@ -1646,7 +1707,9 @@ async def _call_model(
     LOGGER.debug("Model call messages: %s", trimmed_messages)
 
     # Bind retrieved tools
+    base_model = model
     selected_tools = state.get("selected_tools", [])
+    disable_reasoning = bool(chat_model_options.get("reasoning"))
     if selected_tools:
         # Disable reasoning/thinking before binding tools: Qwen3's <think> tokens
         # interleave with tool call JSON output and break Ollama's qwen3.go parser
@@ -1656,7 +1719,7 @@ async def _call_model(
                 _bind_model_tools,
                 model,
                 selected_tools,
-                disable_reasoning=bool(chat_model_options.get("reasoning")),
+                disable_reasoning=disable_reasoning,
             )
         )
 
@@ -1666,7 +1729,15 @@ async def _call_model(
     if llm_api and hasattr(llm_api, "routing_map"):
         llm_api.routing_map = routing_map
 
-    raw_response = await _invoke_model(model, trimmed_messages, config)
+    raw_response = await _invoke_chat_model_with_sampling_rebind(
+        hass,
+        base_model,
+        model,
+        trimmed_messages,
+        config,
+        selected_tools,
+        disable_reasoning=disable_reasoning,
+    )
     LOGGER.debug("Raw chat model response: %s", raw_response)
 
     response = extract_final(getattr(raw_response, "content", "") or "")

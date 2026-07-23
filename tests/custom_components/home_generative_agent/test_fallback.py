@@ -8,6 +8,7 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+import openai
 import pytest
 from homeassistant.exceptions import HomeAssistantError
 
@@ -18,6 +19,10 @@ from custom_components.home_generative_agent.core.fallback import (
     FallbackEmbeddings,
     FallbackVLM,
     _is_retryable,
+    ainvoke_dropping_unsupported_params,
+    invoke_dropping_unsupported_params,
+    unsupported_sampling_param,
+    unsupported_sampling_param_in_chain,
 )
 
 
@@ -570,3 +575,287 @@ def test_circuit_breaker_window_expiry() -> None:
         cb.record_failure("p1")
 
         assert cb.is_available("p1") is True
+
+
+# ---------------------------------------------------------------------------
+# Unsupported sampling parameter retry (issue #502)
+# ---------------------------------------------------------------------------
+
+
+def _bad_request_error(
+    param: str | None = "temperature", code: str | None = "unsupported_value"
+) -> Exception:
+    """Build a real openai.BadRequestError like the API returns for temperature."""
+    request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+    response = httpx.Response(400, request=request)
+    body = {
+        "message": (
+            f"Unsupported value: '{param}' does not support 0.2 with this model. "
+            "Only the default (1) value is supported."
+        ),
+        "type": "invalid_request_error",
+        "param": param,
+        "code": code,
+    }
+    return openai.BadRequestError(
+        f"Error code: 400 - {{'error': {body}}}", response=response, body=body
+    )
+
+
+def test_unsupported_sampling_param_detects_temperature() -> None:
+    """The OpenAI unsupported-temperature 400 is detected as droppable."""
+    assert unsupported_sampling_param(_bad_request_error()) == "temperature"
+
+
+def test_unsupported_sampling_param_detects_top_p() -> None:
+    """The OpenAI unsupported-top_p 400 is detected as droppable."""
+    assert unsupported_sampling_param(_bad_request_error(param="top_p")) == "top_p"
+
+
+def test_unsupported_sampling_param_ignores_other_params() -> None:
+    """A 400 for a non-sampling param must not trigger a retry."""
+    assert unsupported_sampling_param(_bad_request_error(param="messages")) is None
+
+
+def test_unsupported_sampling_param_ignores_other_codes() -> None:
+    """A temperature 400 with an unrelated code must not trigger a retry."""
+    err = _bad_request_error(code="invalid_type")
+    assert unsupported_sampling_param(err) is None
+
+
+def test_unsupported_sampling_param_ignores_other_exceptions() -> None:
+    """Non-OpenAI exceptions must not trigger a retry."""
+    assert unsupported_sampling_param(ValueError("temperature")) is None
+
+
+@pytest.mark.asyncio
+async def test_ainvoke_drops_rejected_temperature() -> None:
+    """A model rejecting temperature is retried once with temperature nulled."""
+    model = AsyncMock()
+    model.ainvoke.side_effect = [_bad_request_error(), FakeAIMessage("ok")]
+
+    result = await ainvoke_dropping_unsupported_params(model, ["hi"])
+
+    assert result.content == "ok"
+    assert model.ainvoke.await_count == 2
+    retry_config = model.ainvoke.await_args_list[1].args[1]
+    assert retry_config["configurable"]["temperature"] is None
+
+
+@pytest.mark.asyncio
+async def test_ainvoke_drop_preserves_existing_config() -> None:
+    """The retry keeps callbacks and other configurable entries intact."""
+    model = AsyncMock()
+    model.ainvoke.side_effect = [_bad_request_error(), FakeAIMessage("ok")]
+    config = {"callbacks": ["cb"], "configurable": {"user_id": "u1"}}
+
+    await ainvoke_dropping_unsupported_params(model, ["hi"], config)
+
+    first_config = model.ainvoke.await_args_list[0].args[1]
+    assert first_config is config
+    retry_config = model.ainvoke.await_args_list[1].args[1]
+    assert retry_config["callbacks"] == ["cb"]
+    assert retry_config["configurable"] == {"user_id": "u1", "temperature": None}
+
+
+@pytest.mark.asyncio
+async def test_ainvoke_drops_temperature_then_top_p() -> None:
+    """Sequential rejections of temperature and top_p are both dropped."""
+    model = AsyncMock()
+    model.ainvoke.side_effect = [
+        _bad_request_error(),
+        _bad_request_error(param="top_p"),
+        FakeAIMessage("ok"),
+    ]
+
+    result = await ainvoke_dropping_unsupported_params(model, ["hi"])
+
+    assert result.content == "ok"
+    assert model.ainvoke.await_count == 3
+    final_config = model.ainvoke.await_args_list[2].args[1]
+    assert final_config["configurable"] == {"temperature": None, "top_p": None}
+
+
+@pytest.mark.asyncio
+async def test_ainvoke_reraises_when_drop_does_not_help() -> None:
+    """A second rejection of an already-dropped param is re-raised, not looped."""
+    model = AsyncMock()
+    model.ainvoke.side_effect = [_bad_request_error(), _bad_request_error()]
+
+    with pytest.raises(openai.BadRequestError):
+        await ainvoke_dropping_unsupported_params(model, ["hi"])
+    assert model.ainvoke.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_ainvoke_reraises_unrelated_errors() -> None:
+    """Errors that are not droppable sampling-param 400s propagate unchanged."""
+    model = AsyncMock()
+    model.ainvoke.side_effect = ValueError("boom")
+
+    with pytest.raises(ValueError, match="boom"):
+        await ainvoke_dropping_unsupported_params(model, ["hi"])
+    assert model.ainvoke.await_count == 1
+
+
+def test_sync_invoke_drops_rejected_temperature() -> None:
+    """The sync variant (Sentinel executor path) retries without temperature."""
+    model = MagicMock()
+    model.invoke.side_effect = [_bad_request_error(), FakeAIMessage("ok")]
+
+    result = invoke_dropping_unsupported_params(model, ["hi"])
+
+    assert result.content == "ok"
+    assert model.invoke.call_count == 2
+    retry_config = model.invoke.call_args_list[1].args[1]
+    assert retry_config["configurable"]["temperature"] is None
+
+
+@pytest.mark.asyncio
+async def test_fallback_chat_drops_temperature_without_switching_provider() -> None:
+    """A temperature 400 is retried on the same provider, not failed over."""
+    primary = AsyncMock()
+    primary.ainvoke.side_effect = [_bad_request_error(), FakeAIMessage("primary")]
+    fallback = AsyncMock()
+
+    model = FallbackChatModel(
+        chain=[(primary, "cloud", "p1"), (fallback, "cloud", "p2")]
+    )
+    result = await model.ainvoke(["hello"])
+
+    assert result.content == "primary"
+    assert primary.ainvoke.await_count == 2
+    fallback.ainvoke.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fallback_vlm_drops_temperature_without_switching_provider() -> None:
+    """FallbackVLM also retries the same provider on a temperature 400."""
+    primary = AsyncMock()
+    primary.ainvoke.side_effect = [_bad_request_error(), FakeAIMessage("caption")]
+    fallback = AsyncMock()
+
+    vlm = FallbackVLM(chain=[(primary, "cloud", "p1"), (fallback, "cloud", "p2")])
+    result = await vlm.ainvoke({"image": "x"})
+
+    assert result.content == "caption"
+    assert primary.ainvoke.await_count == 2
+    fallback.ainvoke.assert_not_awaited()
+
+
+def test_unsupported_sampling_param_in_chain_direct_and_wrapped() -> None:
+    """The chain walker finds the rejected param through HomeAssistantError causes."""
+    direct = _bad_request_error()
+    assert unsupported_sampling_param_in_chain(direct) == "temperature"
+
+    wrapped = HomeAssistantError(f"Model invocation failed: {direct}")
+    wrapped.__cause__ = direct
+    assert unsupported_sampling_param_in_chain(wrapped) == "temperature"
+
+    assert unsupported_sampling_param_in_chain(ValueError("boom")) is None
+
+
+@pytest.mark.asyncio
+async def test_ainvoke_helper_passes_through_fallback_wrappers() -> None:
+    """The outer helper must not merge drops into a fallback chain's shared config."""
+    provider = AsyncMock()
+    provider.ainvoke.side_effect = [_bad_request_error(), _bad_request_error()]
+    wrapper = FallbackChatModel(chain=[(provider, "cloud", "p1")])
+
+    with pytest.raises(HomeAssistantError, match="All LLM providers failed"):
+        await ainvoke_dropping_unsupported_params(wrapper, ["hi"])
+
+    # Inner per-provider drop retried once (2 calls); the outer helper must NOT
+    # re-run the chain with a contaminated shared config (which would be 4).
+    assert provider.ainvoke.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_fallback_chat_surviving_sampling_400_falls_over() -> None:
+    """A provider still rejecting after the drop fails over to the next provider."""
+
+    def _always_temp_400(*_args: Any, **_kwargs: Any) -> None:
+        raise _bad_request_error()
+
+    primary = AsyncMock()
+    primary.ainvoke.side_effect = _always_temp_400
+    fallback = AsyncMock()
+    fallback.ainvoke.return_value = FakeAIMessage("fallback")
+    breaker = CircuitBreaker(threshold=3)
+
+    model = FallbackChatModel(
+        chain=[(primary, "cloud", "p1"), (fallback, "cloud", "p2")],
+        circuit_breaker=breaker,
+    )
+    result = await model.ainvoke(["hello"])
+
+    assert result.content == "fallback"
+    # Drop retry on p1 (2 calls), then fail over to p2 with p1's failure recorded.
+    assert primary.ainvoke.await_count == 2
+    assert len(breaker._failures.get("p1", [])) == 1
+
+
+@pytest.mark.asyncio
+async def test_fallback_chat_tool_bound_rebinds_same_provider() -> None:
+    """
+    A tool-bound provider rejecting sampling params is rebound, not failed over.
+
+    bind_tools bakes sampling params into a concrete binding, so the
+    config-drop retry cannot help; the wrapper must rebuild that provider
+    from its pre-bind source with default sampling and retry it in place.
+    """
+    bound_p1 = AsyncMock()
+    bound_p1.ainvoke.side_effect = [_bad_request_error(), _bad_request_error()]
+    rebound_p1 = AsyncMock()
+    rebound_p1.ainvoke.return_value = FakeAIMessage("rebound")
+    stripped_p1 = MagicMock()
+    stripped_p1.bind_tools.return_value = rebound_p1
+    src_p1 = MagicMock()
+    src_p1.bind_tools.return_value = bound_p1
+    src_p1.with_config.return_value = stripped_p1
+
+    bound_p2 = AsyncMock()
+    src_p2 = MagicMock()
+    src_p2.bind_tools.return_value = bound_p2
+
+    breaker = CircuitBreaker(threshold=3)
+    model = FallbackChatModel(
+        chain=[(src_p1, "cloud", "p1"), (src_p2, "cloud", "p2")],
+        circuit_breaker=breaker,
+    )
+    bound = model.bind_tools([{"name": "t"}])
+
+    result = await bound.ainvoke(["hello"])
+
+    assert result.content == "rebound"
+    # p1 was retried in place with default sampling; p2 never entered.
+    bound_p2.ainvoke.assert_not_awaited()
+    strip_config = src_p1.with_config.call_args.kwargs["config"]
+    assert strip_config == {"configurable": {"temperature": None, "top_p": None}}
+    # The rebind success cleared p1 instead of recording a breaker failure.
+    assert breaker._failures.get("p1") in (None, [])
+
+
+@pytest.mark.asyncio
+async def test_fallback_chat_rebind_failure_still_falls_over() -> None:
+    """When the rebound provider also fails, normal provider fallback proceeds."""
+    bound_p1 = AsyncMock()
+    bound_p1.ainvoke.side_effect = [_bad_request_error(), _bad_request_error()]
+    rebound_p1 = AsyncMock()
+    rebound_p1.ainvoke.side_effect = HomeAssistantError("still down")
+    stripped_p1 = MagicMock()
+    stripped_p1.bind_tools.return_value = rebound_p1
+    src_p1 = MagicMock()
+    src_p1.bind_tools.return_value = bound_p1
+    src_p1.with_config.return_value = stripped_p1
+
+    bound_p2 = AsyncMock()
+    bound_p2.ainvoke.return_value = FakeAIMessage("fallback")
+    src_p2 = MagicMock()
+    src_p2.bind_tools.return_value = bound_p2
+
+    model = FallbackChatModel(chain=[(src_p1, "cloud", "p1"), (src_p2, "cloud", "p2")])
+    bound = model.bind_tools([{"name": "t"}])
+
+    result = await bound.ainvoke(["hello"])
+    assert result.content == "fallback"

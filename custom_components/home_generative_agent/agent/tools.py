@@ -8,6 +8,7 @@ import json
 import logging
 import math
 import re
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -65,6 +66,7 @@ from ..const import (  # noqa: TID252
     VLM_USER_PROMPT,
 )
 from ..core.conversation_helpers import _resolve_entity_id  # noqa: TID252
+from ..core.fallback import ainvoke_dropping_unsupported_params  # noqa: TID252
 from ..core.utils import extract_final, verify_pin  # noqa: TID252
 from .camera_activity import get_camera_last_events_from_states
 from .helpers import (
@@ -275,9 +277,95 @@ async def _perform_alarm_control(
     }
 
 
-async def _get_camera_image(hass: HomeAssistant, camera_name: str) -> bytes | None:
-    """Get an image from a given camera."""
-    camera_entity_id: str = f"camera.{camera_name.lower()}"
+def _normalize_camera_name(name: str) -> str:
+    """
+    Normalize a camera name for entity matching.
+
+    Strips diacritics, lowercases, and removes everything that isn't
+    alphanumeric, so "Kamera obývák 2", "kamera_obyvak_2" and "kamera obyvak2"
+    all normalize to the same value.
+    """
+    ascii_name = (
+        unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
+    )
+    normalized = re.sub(r"[^a-z0-9]", "", ascii_name.lower())
+    unicode_form = "".join(
+        c for c in unicodedata.normalize("NFKC", name).casefold() if c.isalnum()
+    )
+    # Non-Latin characters (Cyrillic, CJK, Greek, ...) vanish under the ASCII
+    # fold, so "Камера улица 1" would collapse to just "1" and cross-match any
+    # other digit-bearing foreign name. Whenever the fold discarded characters
+    # the unicode form kept, use the lossless casefolded unicode form instead.
+    # Latin diacritics fold 1:1 (obývák -> obyvak), so equal lengths keep the
+    # diacritic-insensitive ASCII behavior.
+    if len(normalized) == len(unicode_form):
+        return normalized
+    return unicode_form
+
+
+def _resolve_camera_entity_id(hass: HomeAssistant, camera_name: str) -> str | None:
+    """
+    Resolve a free-form camera name from the LLM to a real camera entity_id.
+
+    The LLM produces friendly names as spoken by the user (e.g. "kamera
+    obývák 2"), which frequently differ from the entity_id slug (e.g.
+    "camera.kamera_obyvak_2"). Tries, in order: the literal entity_id, the
+    legacy lowercase-prefixed form, then a diacritics-stripped alphanumeric
+    match against every camera's friendly name (preferred) or entity_id slug.
+    """
+    lowered = camera_name.lower()
+    candidate = lowered if lowered.startswith("camera.") else f"camera.{lowered}"
+    if hass.states.get(candidate) is not None:
+        return candidate
+
+    normalized_target = _normalize_camera_name(lowered.removeprefix("camera."))
+    if not normalized_target:
+        return None
+    friendly_matches: list[str] = []
+    slug_matches: list[str] = []
+    for cam_state in hass.states.async_all("camera"):
+        # Coerce: custom integrations can set friendly_name to None.
+        friendly = str(cam_state.attributes.get(ATTR_FRIENDLY_NAME) or "")
+        if _normalize_camera_name(friendly) == normalized_target:
+            friendly_matches.append(cam_state.entity_id)
+            continue
+        slug = cam_state.entity_id.removeprefix("camera.")
+        if _normalize_camera_name(slug) == normalized_target:
+            slug_matches.append(cam_state.entity_id)
+
+    matches = friendly_matches or slug_matches
+    if len(matches) > 1:
+        # Two cameras normalize to the same name: picking one by state-machine
+        # iteration order could silently analyze the wrong room. Refuse and
+        # let the tool return the camera list so the LLM can disambiguate.
+        LOGGER.warning(
+            "Camera name %r is ambiguous; matches %s. Not resolving.",
+            camera_name,
+            matches,
+        )
+        return None
+    return matches[0] if matches else None
+
+
+# Cap the not-found camera hint: an unbounded list could exceed the model
+# context on large installations and turn a harmless miss into a failed turn.
+_AVAILABLE_CAMERA_NAMES_MAX = 25
+
+
+def _available_camera_names(hass: HomeAssistant) -> str:
+    """Return a comma-separated list of camera friendly names for the LLM."""
+    names = sorted(
+        str(s.attributes.get(ATTR_FRIENDLY_NAME) or s.entity_id)
+        for s in hass.states.async_all("camera")
+    )
+    if len(names) > _AVAILABLE_CAMERA_NAMES_MAX:
+        hidden = len(names) - _AVAILABLE_CAMERA_NAMES_MAX
+        names = [*names[:_AVAILABLE_CAMERA_NAMES_MAX], f"and {hidden} more"]
+    return ", ".join(names)
+
+
+async def _get_camera_image(hass: HomeAssistant, camera_entity_id: str) -> bytes | None:
+    """Get an image from a given camera entity."""
     state = hass.states.get(camera_entity_id)
     if state and state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
         LOGGER.warning(
@@ -450,7 +538,7 @@ async def analyze_image(
     # return a message to the LLM, or surface a HomeAssistantError. Returning
     # an error string here would let it masquerade as a real caption.
     try:
-        resp = await vlm_model.ainvoke(messages)
+        resp = await ainvoke_dropping_unsupported_params(vlm_model, messages)
     except HomeAssistantError:
         LOGGER.exception(VLM_ERROR_CAPTION)
         return VLM_ERROR_CAPTION
@@ -484,7 +572,18 @@ async def get_and_analyze_camera_image(  # noqa: D417
     hass = config["configurable"]["hass"]
     vlm_model = config["configurable"]["vlm_model"]
     options = config["configurable"].get("options", {})
-    image = await _get_camera_image(hass, camera_name)
+    camera_entity_id = _resolve_camera_entity_id(hass, camera_name)
+    if camera_entity_id is None:
+        LOGGER.error(
+            "Could not resolve camera name %r to a known camera entity", camera_name
+        )
+        available = _available_camera_names(hass)
+        if available:
+            return (
+                f"Camera '{camera_name}' was not found. Available cameras: {available}."
+            )
+        return f"Camera '{camera_name}' was not found. No cameras are available."
+    image = await _get_camera_image(hass, camera_entity_id)
     if image is None:
         return "Error getting image from camera."
     try:
