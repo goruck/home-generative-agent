@@ -91,6 +91,8 @@ tap_action:
     entity_id: camera.frontgate
 ```
 
+**Asking the agent in chat** ("what do you see on the front gate camera?") uses the `get_and_analyze_camera_image` tool instead of this service. The camera name from chat is resolved to a real `camera.*` entity with spaces, capitalization, and diacritics normalized ("kamera obývák 2" finds `camera.kamera_obyvak_2`; non-Latin names such as Cyrillic match too). If two cameras' names collide after normalization the tool refuses to guess, and an unknown name returns the list of available cameras (capped at 25) so the agent can correct itself. See [Architecture — Tools](architecture.md#tools) for the full tool list.
+
 ---
 
 ## Proactive Video Analysis
