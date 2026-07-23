@@ -59,6 +59,32 @@
 
 ---
 
+### Expose-aware camera resolution and enumeration
+
+**What:** `_resolve_camera_entity_id` and `_available_camera_names` (agent/tools.py) scan every `camera.*` state with no Assist expose filtering. The not-found hint lists every camera name — including entities deliberately hidden from the conversation LLM API — and resolution captures any camera by name.
+
+**Why:** Cross-model adversarial finding on the #502 camera resolver (Codex rated P1). Deferred at ship time (2026-07-23, user decision): strict `async_should_expose` filtering would break camera analysis on default installs, because HA does not expose cameras to Assist by default. Capture-by-name reach is pre-existing behavior; the new surface is the name enumeration. Needs a deliberate design — likely an opt-in option (`respect Assist expose settings`) or filtering the hint list only, with migration notes.
+
+**How to apply:** Evaluate `homeassistant.components.homeassistant.exposed_entities.async_should_expose(hass, "conversation", entity_id)` for both the resolver candidate set and the hint list, behind a config option; decide the default with reporter input.
+
+**Effort:** M
+**Priority:** P2
+
+---
+
+### Sentinel sync sampling-retry can outlive the triage timeout
+
+**What:** `run_sentinel_model_call`'s executor leg now runs `invoke_dropping_unsupported_params` in the worker thread. The thread already outlives `asyncio.timeout` cancellation (threads can't be cancelled); the drop-retry can add up to two more provider HTTP calls after the sentinel caller has timed out and moved on.
+
+**Why:** Codex adversarial note on #502. Bounded (max 2 extra calls, only when a provider rejects sampling params — a misconfiguration state that also logs warnings), and the underlying thread-outlives-timeout shape is pre-existing. Worth a deadline check between retry attempts if field reports show thread/request pile-ups.
+
+**How to apply:** Pass a deadline (monotonic timestamp) into the sync helper and skip the retry when it has passed.
+
+**Effort:** S
+**Priority:** P3
+
+---
+
 ## Explain / Prompts
 
 ### Sanitize area/entity strings before injecting into LLM prompts
