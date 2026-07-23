@@ -23,6 +23,7 @@ from custom_components.home_generative_agent.const import (
     CONF_VLM_PROMPT_EXTRA,
     CONF_VLM_RESPONSE_LANGUAGE,
     VLM_SYSTEM_PROMPT,
+    VLM_USER_PROMPT,
 )
 from custom_components.home_generative_agent.core.video_helpers import (
     is_no_change_reply,
@@ -46,6 +47,12 @@ def _system_prompt(model: MagicMock) -> str:
     return cast("str", messages[0].content)
 
 
+def _user_text(model: MagicMock) -> str:
+    """Return the user-turn request text passed to the stub model."""
+    messages = model.ainvoke.await_args.args[0]
+    return cast("str", messages[1].content[0]["text"])
+
+
 # ---------------------------
 # analyze_image prompt assembly
 # ---------------------------
@@ -63,10 +70,11 @@ def _system_prompt(model: MagicMock) -> str:
 async def test_no_overrides_leaves_system_prompt_unchanged(
     overrides: VLMPromptOverrides | None,
 ) -> None:
-    """Without overrides the system prompt is exactly VLM_SYSTEM_PROMPT."""
+    """Without overrides both prompt sides are exactly the base constants."""
     model = _capture_model()
     await analyze_image(model, _IMAGE_BYTES, None, overrides=overrides)
     assert _system_prompt(model) == VLM_SYSTEM_PROMPT
+    assert _user_text(model) == VLM_USER_PROMPT
 
 
 @pytest.mark.asyncio
@@ -85,15 +93,50 @@ async def test_language_override_appends_with_sentinel_carve_out() -> None:
 
 
 @pytest.mark.asyncio
-async def test_prompt_extra_appends_after_base_prompt() -> None:
-    """Extra instructions are appended, never replacing the base prompt."""
+async def test_prompt_extra_appends_to_both_prompt_sides() -> None:
+    """
+    Extra instructions are appended on both sides, never replacing the base.
+
+    The user-turn restatement exists because chat-tuned VLMs weight the
+    user turn's description request over system-prompt-only instructions.
+    """
     model = _capture_model()
     overrides = VLMPromptOverrides(prompt_extra="Ignore cars in the driveway.")
     await analyze_image(model, _IMAGE_BYTES, None, overrides=overrides)
 
     system = _system_prompt(model)
     assert system.startswith(VLM_SYSTEM_PROMPT)
-    assert system.endswith("\n\nIgnore cars in the driveway.")
+    assert "Ignore cars in the driveway." in system
+    assert "except " in system  # precedence framing keeps the sentinel contract
+    assert '"Scene unchanged." sentinel contract' in system
+
+    user = _user_text(model)
+    assert user.startswith(VLM_USER_PROMPT)
+    assert user.endswith(
+        "this instruction takes precedence: Ignore cars in the driveway."
+    )
+
+
+@pytest.mark.asyncio
+async def test_prompt_extra_keyword_path_keeps_user_turn_untouched() -> None:
+    """
+    Detection keywords come from the live chat request and outrank config.
+
+    The user-turn restatement must not fire on the focused-keyword path;
+    the system-prompt append still applies there.
+    """
+    model = _capture_model()
+    overrides = VLMPromptOverrides(prompt_extra="Ignore cars in the driveway.")
+    await analyze_image(model, _IMAGE_BYTES, ["boxes", "dogs"], overrides=overrides)
+
+    user = _user_text(model)
+    assert "boxes or dogs" in user
+    assert "takes precedence" not in user
+    assert "Ignore cars in the driveway." not in user
+
+    system = _system_prompt(model)
+    assert system.startswith(VLM_SYSTEM_PROMPT)
+    assert "Ignore cars in the driveway." in system
 
 
 @pytest.mark.asyncio

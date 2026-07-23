@@ -418,7 +418,23 @@ async def analyze_image(
             "by a person, so do not translate or paraphrase it."
         )
     if overrides and overrides.prompt_extra:
-        system_prompt += f"\n\n{overrides.prompt_extra}"
+        system_prompt += (
+            "\n\nUser instruction (highest priority — follow this even "
+            "where it conflicts with or narrows the rules above, except "
+            'the "Scene unchanged." sentinel contract, which always '
+            f"applies as written):\n{overrides.prompt_extra}"
+        )
+        # Chat-tuned VLMs weight the user turn's description request over
+        # anything stated only in the system prompt, so the override must be
+        # restated on the request side to reliably take effect. Skipped on
+        # the keyword path: detection keywords come from the live chat
+        # request, which outranks stored config.
+        if detection_keywords is None:
+            prompt += (
+                "\n\nApply this instruction to the request above; where "
+                "they conflict, this instruction takes precedence: "
+                f"{overrides.prompt_extra}"
+            )
 
     messages = _prompt_func(
         {
