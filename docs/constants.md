@@ -459,7 +459,7 @@ These constants live outside `const.py` in individual modules. They affect runti
 
 | Constant | Value | Purpose |
 |---|---|---|
-| `_AVAILABLE_CAMERA_NAMES_MAX` | `25` | Maximum camera names listed in the "available cameras" hint returned when a chat-requested camera name cannot be resolved. Larger installs get a truncated list with a `(+N more)` marker. |
+| `_AVAILABLE_CAMERA_NAMES_MAX` | `25` | Maximum camera names listed in the "available cameras" hint returned when a chat-requested camera name cannot be resolved. Larger installs get a truncated list with an `and N more` marker. |
 
 ### `conversation.py`
 
