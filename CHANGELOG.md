@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.20.0] - 2026-07-21
+
+### Added
+
+- **Camera descriptions in your own language, and your own house rules for the camera analyst** — two new optional fields in the integration's Options flow, right below the system prompt. **Camera description language** (e.g. `Czech`) makes every VLM camera description — the chat camera tool, the `save_and_analyze_snapshot` service, and the proactive video analyzer — come back in that language instead of hardcoded English. **Additional camera analysis instructions** is free-form multiline text appended to the VLM system prompt for scene-specific guidance like `Ignore cars in the driveway`. Both are appended after the built-in prompt rules, never replacing them — though where your extra instructions conflict with or narrow the built-in description request, your instructions win (field testing on chat-tuned VLMs showed the instruction must also ride on the per-image request itself, not just the system prompt, to be honored; live in-chat "check the camera for X" requests always keep priority over stored instructions) — so the repeated-scene detection from [#493](https://github.com/goruck/home-generative-agent/issues/493) stays intact: the internal `Scene unchanged.` reply is explicitly carved out to stay in English, word for word, because it is matched by code rather than shown to users. Both fields default to empty — behavior is unchanged unless you opt in. Designed, implemented, and field-tested with Czech by [@hruba202](https://github.com/hruba202) in [#497](https://github.com/goruck/home-generative-agent/issues/497).
+
 ## [3.19.1] - 2026-07-20
 
 ### Fixed

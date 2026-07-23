@@ -327,6 +327,8 @@
         "data": {
           "face_api_url": "Face recognition API URL (optional)",
           "prompt": "Instructions",
+          "vlm_response_language": "Camera description language (optional)",
+          "vlm_prompt_extra": "Additional camera analysis instructions (optional)",
           "llm_hass_api": "Control Home Assistant",
           "video_analyzer_mode": "Video analyzer mode",
           "video_analyzer_uniqueness_enabled": "Enable perceptual-hash frame filter (dHash)",
@@ -347,6 +349,8 @@
         },
         "data_description": {
           "prompt": "Instruct how the LLM should respond. This can be a template.",
+          "vlm_response_language": "Language for VLM camera image descriptions, e.g. 'Czech'. Leave empty for English. The internal 'Scene unchanged.' reply always stays in English.",
+          "vlm_prompt_extra": "Extra instructions appended to the VLM camera analysis prompt, e.g. 'Ignore cars in the driveway'. They never replace the built-in rules.",
           "schema_first_yaml": "When enabled, YAML requests are answered with strict JSON that is converted to YAML.",
           "stt_hallucination_patterns": "One substring per line. If an STT transcript contains any entry, it is ignored before the LLM runs. Matching is case-insensitive.",
           "stt_hallucination_exact_patterns": "One phrase per line. If the entire STT transcript equals any entry, it is ignored before the LLM runs. Matching is case-insensitive.",

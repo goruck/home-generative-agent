@@ -327,6 +327,8 @@
         "data": {
           "face_api_url": "URL API pro rozpoznávání obličejů (volitelné)",
           "prompt": "Instrukce",
+          "vlm_response_language": "Jazyk popisů z kamer (volitelné)",
+          "vlm_prompt_extra": "Další pokyny pro analýzu obrazu z kamer (volitelné)",
           "llm_hass_api": "Ovládat Home Assistant",
           "video_analyzer_mode": "Režim video analyzátoru",
           "video_analyzer_uniqueness_enabled": "Povolit filtr snímků dHash (perceptuální hash)",
@@ -347,6 +349,8 @@
         },
         "data_description": {
           "prompt": "Instruujte LLM, jak má odpovídat. Může to být šablona.",
+          "vlm_response_language": "Jazyk, ve kterém VLM popisuje snímky z kamer, např. „Czech“. Ponechte prázdné pro angličtinu. Interní odpověď „Scene unchanged.“ zůstává vždy v angličtině.",
+          "vlm_prompt_extra": "Další pokyny připojené k promptu VLM pro analýzu snímků z kamer, např. „Ignoruj auta na příjezdové cestě“. Nikdy nenahrazují vestavěná pravidla.",
           "schema_first_yaml": "Pokud je povoleno, požadavky YAML jsou zodpovídány striktním JSON, který je následně převeden na YAML.",
           "stt_hallucination_patterns": "Jeden podřetězec na řádek. Pokud přepis STT obsahuje jakoukoli položku, je ignorován před spuštěním LLM. Shoda nerozlišuje malá a velká písmena.",
           "stt_hallucination_exact_patterns": "Jedna fráze na řádek. Pokud se celý přepis STT rovná jakékoli položce, je ignorován před spuštěním LLM. Shoda nerozlišuje malá a velká písmena.",

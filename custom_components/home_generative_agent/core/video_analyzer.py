@@ -31,7 +31,11 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from ollama import ResponseError as OllamaResponseError
 from PIL import Image
 
-from ..agent.tools import VLM_ERROR_CAPTION, analyze_image  # noqa: TID252
+from ..agent.tools import (  # noqa: TID252
+    VLM_ERROR_CAPTION,
+    VLMPromptOverrides,
+    analyze_image,
+)
 from ..const import (  # noqa: TID252
     CONF_MODEL_PROVIDER_UNCONTENDED,
     CONF_NOTIFY_SERVICE,
@@ -39,7 +43,11 @@ from ..const import (  # noqa: TID252
     CONF_VIDEO_ANALYZER_MOTION_CAMERA_MAP,
     CONF_VIDEO_ANALYZER_UNIQUENESS_ENABLED,
     CONF_VIDEO_MODEL_SEMAPHORE,
+    CONF_VLM_PROMPT_EXTRA,
+    CONF_VLM_RESPONSE_LANGUAGE,
     RECOMMENDED_VIDEO_MODEL_SEMAPHORE,
+    RECOMMENDED_VLM_PROMPT_EXTRA,
+    RECOMMENDED_VLM_RESPONSE_LANGUAGE,
     SIGNAL_HGA_NEW_LATEST,
     SIGNAL_HGA_RECOGNIZED,
     VIDEO_ANALYZER_CAPTION_DEDUPE_WINDOW_SEC,
@@ -1438,6 +1446,14 @@ class VideoAnalyzer:
                 if is_edge_deployment(vlm_deployment) and "reasoning" in vlm_cfg:
                     vlm_cfg["reasoning"] = False
                 vision_model = base_vlm.with_config(config={"configurable": vlm_cfg})
+                vlm_overrides = VLMPromptOverrides(
+                    response_language=self.entry.runtime_data.options.get(
+                        CONF_VLM_RESPONSE_LANGUAGE, RECOMMENDED_VLM_RESPONSE_LANGUAGE
+                    ),
+                    prompt_extra=self.entry.runtime_data.options.get(
+                        CONF_VLM_PROMPT_EXTRA, RECOMMENDED_VLM_PROMPT_EXTRA
+                    ),
+                )
                 if use_gate:
                     sem = self._video_model_sem
                     if sem is None:
@@ -1472,7 +1488,11 @@ class VideoAnalyzer:
                         try:
                             async with asyncio.timeout(_VISION_TIMEOUT_SEC):
                                 frame_description = await analyze_image(
-                                    vision_model, data, None, prev_text=prev_text
+                                    vision_model,
+                                    data,
+                                    None,
+                                    prev_text=prev_text,
+                                    overrides=vlm_overrides,
                                 )
                         finally:
                             sem.release()
@@ -1484,7 +1504,11 @@ class VideoAnalyzer:
                 else:
                     async with asyncio.timeout(_VISION_TIMEOUT_SEC):
                         frame_description = await analyze_image(
-                            vision_model, data, None, prev_text=prev_text
+                            vision_model,
+                            data,
+                            None,
+                            prev_text=prev_text,
+                            overrides=vlm_overrides,
                         )
             except TimeoutError as exc:
                 self._m_inc(camera_id, "timeouts")

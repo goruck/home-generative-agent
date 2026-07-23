@@ -78,7 +78,7 @@ from psycopg.rows import DictRow, dict_row
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 from pydantic import SecretStr
 
-from .agent.tools import analyze_image
+from .agent.tools import VLMPromptOverrides, analyze_image
 from .audit.store import AuditStore
 from .const import (
     CHAT_MODEL_MAX_TOKENS,
@@ -154,7 +154,9 @@ from .const import (
     CONF_SUMMARIZATION_MODEL_TEMPERATURE,
     CONF_VECTORS_BOOTSTRAPPED,
     CONF_VIDEO_ANALYZER_MODE,
+    CONF_VLM_PROMPT_EXTRA,
     CONF_VLM_PROVIDER,
+    CONF_VLM_RESPONSE_LANGUAGE,
     CONF_VLM_TEMPERATURE,
     CONFIG_ENTRY_VERSION,
     DEFAULT_FEATURE_TYPES,
@@ -221,7 +223,9 @@ from .const import (
     RECOMMENDED_SENTINEL_TRIAGE_TIMEOUT_SECONDS,
     RECOMMENDED_SUMMARIZATION_MODEL_PROVIDER,
     RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
+    RECOMMENDED_VLM_PROMPT_EXTRA,
     RECOMMENDED_VLM_PROVIDER,
+    RECOMMENDED_VLM_RESPONSE_LANGUAGE,
     RECOMMENDED_VLM_TEMPERATURE,
     SIGNAL_HGA_NEW_LATEST,
     SIGNAL_HGA_RECOGNIZED,
@@ -1162,8 +1166,20 @@ def _register_services(hass: HomeAssistant, entry: HGAConfigEntry) -> None:
             # 5) Run AI analysis (summary) and face recognition if available.
             summary: str | None
             try:
+                vlm_overrides = VLMPromptOverrides(
+                    response_language=entry.runtime_data.options.get(
+                        CONF_VLM_RESPONSE_LANGUAGE, RECOMMENDED_VLM_RESPONSE_LANGUAGE
+                    ),
+                    prompt_extra=entry.runtime_data.options.get(
+                        CONF_VLM_PROMPT_EXTRA, RECOMMENDED_VLM_PROMPT_EXTRA
+                    ),
+                )
                 summary = await analyze_image(
-                    vision_model, img_bytes, None, prev_text=None
+                    vision_model,
+                    img_bytes,
+                    None,
+                    prev_text=None,
+                    overrides=vlm_overrides,
                 )
             except OllamaResponseError as err:
                 msg = f"VLM analysis failed for {camera_id}: {err}"

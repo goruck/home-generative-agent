@@ -74,6 +74,8 @@ This document covers the named constants that affect integration behaviour, orga
 | `RECOMMENDED_OPENAI_COMPATIBLE_VLM` | `gpt-4o` | OpenAI-compatible VLM model |
 | `RECOMMENDED_VLM_TEMPERATURE` | `0.2` | Sampling temperature for vision responses |
 | `RECOMMENDED_OLLAMA_VLM_KEEPALIVE` | `300` (s) | Seconds to keep Ollama VLM loaded |
+| `RECOMMENDED_VLM_RESPONSE_LANGUAGE` | `""` (empty) | Language for VLM camera descriptions; empty = English. The `Scene unchanged.` sentinel always stays in English |
+| `RECOMMENDED_VLM_PROMPT_EXTRA` | `""` (empty) | Extra instructions appended to the VLM system prompt; never replaces built-in rules |
 
 **Code-only:**
 
