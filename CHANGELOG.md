@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.20.1] - 2026-07-23
+
+### Fixed
+
+- **Chat and camera analysis no longer fail on models that pin their sampling settings** — some OpenAI models (o-series and other reasoning-style deployments) only accept their default `temperature`/`top_p` and reject any other value with a 400 error, which previously killed the whole turn. The integration now detects that rejection and retries without the rejected setting (once per rejected parameter), everywhere a model is called: conversation turns (including tool-using turns, which need a full re-bind because binding tools freezes the model's sampling settings), camera image analysis, conversation summaries, the video analyzer, and Sentinel triage/discovery. In multi-provider fallback chains, a provider that keeps rejecting its sampling settings now fails over to the next provider and counts toward the circuit breaker instead of aborting the call. And when a turn still fails, the chat reply now shows the real reason (e.g. the provider's error message) instead of the generic "unable to respond in time" — while errors not raised by the integration show only their type, so internal details never leak into chat, voice replies, or the model's future context. Reported by [@hruba202](https://github.com/hruba202) in [#502](https://github.com/goruck/home-generative-agent/issues/502).
+- **Cameras with spaces or diacritics in their names are found again** — asking to check "kamera obývák 2" used to fail because the camera tool guessed `camera.kamera obývák 2` as the entity id. Camera names from chat are now resolved properly: the exact entity id first, then a diacritics-insensitive match against each camera's friendly name or entity id slug ("kamera obývák 2" finds `camera.kamera_obyvak_2`; Cyrillic and other non-Latin names match too). When two cameras' names collide after normalization the tool refuses to guess rather than risk analyzing the wrong room, and an unknown name returns the list of available cameras (capped at 25 names) so the assistant can correct itself instead of retrying a bad guess. Based on the fix contributed by [@hruba202](https://github.com/hruba202) in [#502](https://github.com/goruck/home-generative-agent/issues/502).
+
 ## [3.20.0] - 2026-07-21
 
 ### Added

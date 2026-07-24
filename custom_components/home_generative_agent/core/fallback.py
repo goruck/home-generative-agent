@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from time import monotonic
 from typing import TYPE_CHECKING, Any, cast
@@ -40,10 +41,129 @@ try:
 except ImportError:
     pass
 
+try:
+    from openai import BadRequestError as OpenAIBadRequestError
+except ImportError:
+    OpenAIBadRequestError = None  # type: ignore[assignment, misc]
+
+# Sampling parameters that can be safely omitted when a model rejects them
+# (e.g. OpenAI reasoning-style models only accept the default temperature=1).
+DROPPABLE_SAMPLING_PARAMS = frozenset({"temperature", "top_p"})
+
+_UNSUPPORTED_PARAM_CODES = frozenset({"unsupported_value", "unsupported_parameter"})
+
+
+def unsupported_sampling_param(err: Exception) -> str | None:
+    """Return the droppable sampling param an OpenAI 400 rejected, if any."""
+    if OpenAIBadRequestError is None or not isinstance(err, OpenAIBadRequestError):
+        return None
+    param = getattr(err, "param", None)
+    code = getattr(err, "code", None)
+    if param in DROPPABLE_SAMPLING_PARAMS and code in _UNSUPPORTED_PARAM_CODES:
+        return param
+    return None
+
+
+def _config_dropping(config: Any, dropped: dict[str, Any]) -> Any:
+    """Merge dropped sampling params into a Runnable config."""
+    if not dropped:
+        return config
+    return _merge_config(config, {"configurable": dropped})
+
+
+def unsupported_sampling_param_in_chain(
+    err: BaseException, max_depth: int = 10
+) -> str | None:
+    """Return the droppable param rejected anywhere in an exception cause chain."""
+    current: BaseException | None = err
+    for _ in range(max_depth):
+        if current is None:
+            return None
+        if isinstance(current, Exception) and (
+            param := unsupported_sampling_param(current)
+        ):
+            return param
+        current = current.__cause__
+    return None
+
+
+def _record_dropped_param(err: Exception, dropped: dict[str, Any]) -> None:
+    """Register the rejected param for the retry, re-raising if not droppable."""
+    param = unsupported_sampling_param(err)
+    if param is None or param in dropped:
+        raise err
+    dropped[param] = None
+    LOGGER.warning(
+        "Model rejected unsupported parameter %r (%s); retrying without it. "
+        "Configure the model's %s to its supported default to avoid this retry.",
+        param,
+        _safe_err_summary(err),
+        param,
+    )
+
+
+async def ainvoke_dropping_unsupported_params(
+    model: Any,
+    input_data: Any,
+    config: Any = None,
+    **kwargs: Any,
+) -> Any:
+    """
+    Invoke a model, dropping sampling params its provider rejects with a 400.
+
+    Some OpenAI models (o-series / gpt-5-style reasoning models and certain
+    mini deployments) only accept the default temperature/top_p and reject any
+    other value with ``unsupported_value``. Configurable-field models omit a
+    param entirely when it is None, so retry with the rejected param nulled.
+
+    NOTE: the config-merge retry only works on configurable-field models. It
+    is a no-op on tool-bound models (bind_tools bakes params into a concrete
+    binding) — the chat path handles those by rebinding in agent/graph.py.
+    """
+    if isinstance(model, (FallbackChatModel, FallbackVLM)):
+        # The wrapper already drops rejected params per provider; merging
+        # drops into the shared config here would silently null sampling
+        # params for every provider in the chain.
+        return await model.ainvoke(input_data, config, **kwargs)
+    dropped: dict[str, Any] = {}
+    while True:
+        # Omit a None config entirely: duck-typed models (e.g. Sentinel test
+        # doubles) may only accept ainvoke(messages).
+        call_config = _config_dropping(config, dropped)
+        try:
+            if call_config is None:
+                return await model.ainvoke(input_data, **kwargs)
+            return await model.ainvoke(input_data, call_config, **kwargs)
+        except Exception as err:  # noqa: BLE001 — re-raised unless droppable
+            _record_dropped_param(err, dropped)
+
+
+def invoke_dropping_unsupported_params(
+    model: Any,
+    input_data: Any,
+    config: Any = None,
+    **kwargs: Any,
+) -> Any:
+    """Sync variant of ainvoke_dropping_unsupported_params for executor calls."""
+    dropped: dict[str, Any] = {}
+    while True:
+        call_config = _config_dropping(config, dropped)
+        try:
+            if call_config is None:
+                return model.invoke(input_data, **kwargs)
+            return model.invoke(input_data, call_config, **kwargs)
+        except Exception as err:  # noqa: BLE001 — re-raised unless droppable
+            _record_dropped_param(err, dropped)
+
 
 def _is_retryable(err: Exception) -> bool:
     """Return True if the exception should trigger a fallback attempt."""
     if isinstance(err, FALLBACK_RETRYABLE_EXCEPTIONS):
+        return True
+    if unsupported_sampling_param(err) is not None:
+        # A sampling-param 400 that survived the in-provider drop retry:
+        # treat the provider as misconfigured — record the failure (so the
+        # circuit breaker can open) and let the chain try the next provider.
         return True
     # Also retry on rate-limit / API errors from common providers
     err_str = str(err).lower()
@@ -211,6 +331,11 @@ class FallbackChatModel:
         self.circuit_breaker = circuit_breaker
         self.alert_callback = alert_callback or _default_alert
         self._config = config or {}
+        # Parallel to chain after bind_tools: (pre-bind model, tools, kwargs)
+        # per provider, so a sampling-param 400 can rebind THAT provider with
+        # default sampling instead of failing over (bind_tools bakes sampling
+        # params into a concrete binding the config-drop retry can't reach).
+        self._rebind_sources: list[tuple[Any, list[Any], dict[str, Any]] | None] = []
 
     @property
     def config(self) -> dict[str, Any]:
@@ -220,19 +345,71 @@ class FallbackChatModel:
     def bind_tools(self, tools: list[Any], **kwargs: Any) -> FallbackChatModel:
         """Return a new FallbackChatModel with tools bound to each model."""
         bound_chain: list[tuple[Any, str, str]] = []
+        rebind_sources: list[tuple[Any, list[Any], dict[str, Any]] | None] = []
         for model, deployment, provider_id in self.chain:
             if hasattr(model, "bind_tools"):
                 bound_chain.append(
                     (model.bind_tools(tools, **kwargs), deployment, provider_id)
                 )
+                rebind_sources.append((model, list(tools), dict(kwargs)))
             else:
                 bound_chain.append((model, deployment, provider_id))
-        return FallbackChatModel(
+                rebind_sources.append(None)
+        bound = FallbackChatModel(
             bound_chain,
             self.circuit_breaker,
             self.alert_callback,
             dict(self._config),
         )
+        bound._rebind_sources = rebind_sources
+        return bound
+
+    async def _retry_with_default_sampling(
+        self,
+        index: int,
+        err: Exception,
+        input_data: LanguageModelInput,
+        config: dict[str, Any] | None,
+        **kwargs: Any,
+    ) -> BaseMessage | None:
+        """
+        Rebind one provider without rejected sampling params and retry it.
+
+        Returns the result on success, or None when this error is not a
+        sampling-param rejection, the provider has no pre-bind source, or the
+        rebound call failed (callers fall through to normal fallback).
+        """
+        if unsupported_sampling_param_in_chain(err) is None:
+            return None
+        source = (
+            self._rebind_sources[index] if index < len(self._rebind_sources) else None
+        )
+        if source is None:
+            return None
+        src_model, tools, tool_kwargs = source
+        provider_id = self.chain[index][2]
+
+        def _rebuild() -> Any:
+            stripped = src_model.with_config(
+                config={"configurable": dict.fromkeys(DROPPABLE_SAMPLING_PARAMS)}
+            )
+            return stripped.bind_tools(tools, **tool_kwargs)
+
+        try:
+            rebound = await asyncio.to_thread(_rebuild)
+            result = await rebound.ainvoke(input_data, config, **kwargs)
+            _raise_for_retryable_empty_response(result)
+        except Exception:
+            LOGGER.exception(
+                "Sampling-param rebind retry failed for provider %s", provider_id
+            )
+            return None
+        LOGGER.warning(
+            "Provider %s rejected an unsupported sampling parameter with tools "
+            "bound; retried with provider-default sampling parameters.",
+            provider_id,
+        )
+        return result
 
     def with_config(
         self, config: dict[str, Any] | None = None, **kwargs: Any
@@ -273,9 +450,18 @@ class FallbackChatModel:
                 LOGGER.debug("Provider %s is circuit-broken; skipping.", provider_id)
                 continue
             try:
-                result = await model.ainvoke(input_data, config, **kwargs)
+                result = await ainvoke_dropping_unsupported_params(
+                    model, input_data, config, **kwargs
+                )
                 _raise_for_retryable_empty_response(result)
             except Exception as err:
+                rebind_result = await self._retry_with_default_sampling(
+                    i, err, input_data, config, **kwargs
+                )
+                if rebind_result is not None:
+                    if self.circuit_breaker:
+                        self.circuit_breaker.record_success(provider_id)
+                    return rebind_result
                 last_err = err
                 if not _is_retryable(err):
                     raise
@@ -375,7 +561,9 @@ class FallbackVLM:
             ):
                 continue
             try:
-                return await model.ainvoke(input_data, config, **kwargs)
+                return await ainvoke_dropping_unsupported_params(
+                    model, input_data, config, **kwargs
+                )
             except Exception as err:
                 last_err = err
                 if not _is_retryable(err):

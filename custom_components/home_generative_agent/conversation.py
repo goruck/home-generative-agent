@@ -100,6 +100,56 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
+# Cap on the error detail appended to the user-visible fallback chat message.
+_STREAM_ERROR_REASON_MAX_CHARS = 280
+
+
+def _recommit_final_assistant_content(chat_log: conversation.ChatLog) -> None:
+    """
+    Re-fire CONTENT_ADDED for the final AssistantContent.
+
+    The HA frontend's streaming UI only shows the final content in the main
+    chat area when CONTENT_ADDED fires. async_add_delta_content_stream flushes
+    via async_add_assistant_content, which does NOT fire CONTENT_ADDED for
+    AssistantContent; re-committing via
+    async_add_assistant_content_without_tools does fire it. Runs even on
+    cancellation so the UI is consistent if HA reads partial chat_log state
+    after a cancelled turn.
+    """
+    if (
+        chat_log.content
+        and isinstance(chat_log.content[-1], conversation.AssistantContent)
+        and not chat_log.content[-1].tool_calls
+        and chat_log.content[-1].content
+    ):
+        _final_content = cast("conversation.AssistantContent", chat_log.content.pop())
+        chat_log.async_add_assistant_content_without_tools(_final_content)
+
+
+def _streaming_failure_content(stream_error: Exception | None) -> str:
+    """
+    Build the user-visible chat message for a failed streaming turn.
+
+    Includes the real failure reason so it is debuggable from the chat log
+    instead of only from home-assistant.log (issue #502). Only
+    HomeAssistantError messages are surfaced verbatim — they are authored by
+    this integration (e.g. "Model invocation failed: ...") and safe to show.
+    Arbitrary exceptions may carry internals (DSNs, paths, request IDs), and
+    this text is rendered in chat, spoken by voice pipelines, and persisted
+    into the model's future context, so they surface only their class name.
+    """
+    if stream_error is None:
+        return "I'm sorry, I was unable to respond in time. Please try again."
+    if not isinstance(stream_error, HomeAssistantError):
+        return (
+            f"I'm sorry, I was unable to respond "
+            f"({type(stream_error).__name__}). Please try again."
+        )
+    reason = str(stream_error) or type(stream_error).__name__
+    if len(reason) > _STREAM_ERROR_REASON_MAX_CHARS:
+        reason = reason[:_STREAM_ERROR_REASON_MAX_CHARS] + "…"
+    return f"I'm sorry, I was unable to respond: {reason}"
+
 
 if LANGCHAIN_LOGGING_LEVEL == "verbose":
     set_verbose(True)
@@ -976,11 +1026,13 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         # Create a task for the streaming process to enable explicit cancellation
         # if the client disconnects or the conversation turn is aborted.
         stream_task = hass.async_create_task(_run_streaming_task())
+        stream_error: Exception | None = None
         try:
             await stream_task
-        except HomeAssistantError:
+        except HomeAssistantError as err:
             # Partial content already committed — cannot roll back.
             # Log and return whatever was committed.
+            stream_error = err
             _LOGGER.exception(
                 "HomeAssistantError mid-stream; partial content committed."
             )
@@ -988,9 +1040,10 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             # Hard kill: cancel the background graph run if the consumer has left.
             stream_task.cancel()
             raise
-        except Exception:
+        except Exception as err:
             # Any other exception (e.g. GraphRecursionError, tool failure) leaves
             # the chat_log in a partial state. Log and fall through to recovery.
+            stream_error = err
             _LOGGER.exception(
                 "Unexpected error in streaming task; attempting state recovery."
             )
@@ -1000,23 +1053,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 # Non-blocking wait to allow generators to close.
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await stream_task
-            # Re-fire CONTENT_ADDED for the final AssistantContent so the HA
-            # frontend's streaming UI shows it in the main chat area.
-            # async_add_delta_content_stream flushes via async_add_assistant_content,
-            # which does NOT fire CONTENT_ADDED for AssistantContent. Re-committing
-            # via async_add_assistant_content_without_tools does fire it.
-            # Runs even on cancellation so the UI is consistent if HA reads
-            # partial chat_log state after a cancelled turn.
-            if (
-                chat_log.content
-                and isinstance(chat_log.content[-1], conversation.AssistantContent)
-                and not chat_log.content[-1].tool_calls
-                and chat_log.content[-1].content
-            ):
-                _final_content = cast(
-                    "conversation.AssistantContent", chat_log.content.pop()
-                )
-                chat_log.async_add_assistant_content_without_tools(_final_content)
+            _recommit_final_assistant_content(chat_log)
 
         try:
             final_state = await app.aget_state(config)
@@ -1079,10 +1116,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 chat_log.async_add_assistant_content_without_tools(
                     conversation.AssistantContent(
                         agent_id=self.entity_id,
-                        content=(
-                            "I'm sorry, I was unable to respond in time. "
-                            "Please try again."
-                        ),
+                        content=_streaming_failure_content(stream_error),
                     )
                 )
                 _LOGGER.debug(

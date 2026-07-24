@@ -19,6 +19,8 @@ import threading
 import time
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
+import openai
 import pytest
 from langchain_ollama import OllamaEmbeddings
 
@@ -428,3 +430,80 @@ async def test_run_sentinel_model_call_uses_sync_invoke_off_event_loop() -> None
     assert model.invoke_thread_id is not None
     assert model.invoke_thread_id != loop_thread_id
     assert model.ainvoke_called is False
+
+
+def _unsupported_temperature_error() -> Exception:
+    """Build the OpenAI 400 raised when a model rejects the temperature param."""
+    request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+    response = httpx.Response(400, request=request)
+    body = {
+        "message": "Unsupported value: 'temperature' does not support 0.2.",
+        "type": "invalid_request_error",
+        "param": "temperature",
+        "code": "unsupported_value",
+    }
+    return openai.BadRequestError("Error code: 400", response=response, body=body)
+
+
+@pytest.mark.asyncio
+async def test_run_sentinel_model_call_sync_leg_drops_unsupported_temperature() -> None:
+    """The executor (sync invoke) leg retries once without temperature (issue #502)."""
+
+    class SyncModel:
+        def __init__(self) -> None:
+            self.calls: list[object] = []
+
+        def invoke(self, _messages: list[str], config: object = None) -> str:
+            self.calls.append(config)
+            if len(self.calls) == 1:
+                raise _unsupported_temperature_error()
+            return "ok"
+
+    model = SyncModel()
+
+    result = await utils_mod.run_sentinel_model_call(
+        model,
+        ["message"],
+        deployment="cloud",
+        category="triage",
+        admission_timeout_s=0.1,
+        call_timeout_s=5.0,
+    )
+
+    assert result == "ok"
+    assert len(model.calls) == 2
+    retry_config = model.calls[1]
+    assert retry_config["configurable"]["temperature"] is None  # type: ignore[index]
+
+
+@pytest.mark.asyncio
+async def test_run_sentinel_model_call_async_leg_drops_unsupported_temperature() -> (
+    None
+):
+    """The async (ainvoke-only) leg retries once without temperature (issue #502)."""
+
+    class AsyncOnlyModel:
+        def __init__(self) -> None:
+            self.calls: list[object] = []
+
+        async def ainvoke(self, _messages: list[str], config: object = None) -> str:
+            self.calls.append(config)
+            if len(self.calls) == 1:
+                raise _unsupported_temperature_error()
+            return "ok"
+
+    model = AsyncOnlyModel()
+
+    result = await utils_mod.run_sentinel_model_call(
+        model,
+        ["message"],
+        deployment="cloud",
+        category="triage",
+        admission_timeout_s=0.1,
+        call_timeout_s=5.0,
+    )
+
+    assert result == "ok"
+    assert len(model.calls) == 2
+    retry_config = model.calls[1]
+    assert retry_config["configurable"]["temperature"] is None  # type: ignore[index]

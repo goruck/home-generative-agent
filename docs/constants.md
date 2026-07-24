@@ -455,6 +455,18 @@ These constants live outside `const.py` in individual modules. They affect runti
 |---|---|---|
 | `EMBEDDING_INDEX_TEXT_MAX_CHARS` | `1200` | Maximum characters embedded per tool in the tool index. Controls how much of each tool's description is stored in the vector DB. |
 
+### `agent/tools.py`
+
+| Constant | Value | Purpose |
+|---|---|---|
+| `_AVAILABLE_CAMERA_NAMES_MAX` | `25` | Maximum camera names listed in the "available cameras" hint returned when a chat-requested camera name cannot be resolved. Larger installs get a truncated list with an `and N more` marker. |
+
+### `conversation.py`
+
+| Constant | Value | Purpose |
+|---|---|---|
+| `_STREAM_ERROR_REASON_MAX_CHARS` | `280` | Maximum characters of the failure reason appended to the fallback chat message when a streaming turn fails (only `HomeAssistantError` messages are shown verbatim; other exceptions surface their class name only). |
+
 ### `core/video_analyzer.py`
 
 | Constant | Value | Purpose |

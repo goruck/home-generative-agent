@@ -11,11 +11,16 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
+import openai
 import psycopg
 import pytest
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.dispatcher import async_dispatcher_send
+from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.runnables import ConfigurableField
 
 import custom_components.home_generative_agent as hga_component
 import custom_components.home_generative_agent.agent.graph as agent_graph
@@ -297,6 +302,42 @@ async def test_invoke_model_returns_result_within_timeout(
 
     result = await agent_graph._invoke_model(mock_model, [], {})
     assert result is expected
+
+
+@pytest.mark.asyncio
+async def test_invoke_model_drops_unsupported_temperature(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    _invoke_model retries once without temperature on an OpenAI 400 (issue #502).
+
+    Regression: reasoning-style OpenAI models reject non-default temperature
+    with unsupported_value; the chat graph must drop the param and retry on
+    the same model instead of failing the turn.
+    """
+    monkeypatch.setattr(agent_graph, "_LLM_INVOKE_TIMEOUT_S", 5.0)
+
+    request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+    response = httpx.Response(400, request=request)
+    err = openai.BadRequestError(
+        "Error code: 400",
+        response=response,
+        body={
+            "message": "Unsupported value: 'temperature' does not support 0.2.",
+            "type": "invalid_request_error",
+            "param": "temperature",
+            "code": "unsupported_value",
+        },
+    )
+    mock_model = MagicMock()
+    mock_model.ainvoke = AsyncMock(side_effect=[err, AIMessage(content="ok")])
+
+    result = await agent_graph._invoke_model(mock_model, [], {})
+
+    assert result.content == "ok"
+    assert mock_model.ainvoke.await_count == 2
+    retry_config = mock_model.ainvoke.await_args_list[1].args[1]
+    assert retry_config["configurable"]["temperature"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -603,3 +644,94 @@ async def test_openai_compatible_repeated_tool_calls_hit_loop_guard() -> None:
     guard_result = await _tool_loop_guard(state)
     response_text = guard_result["messages"][0].content
     assert "wasn't able to complete" in response_text
+
+
+@pytest.mark.asyncio
+async def test_sampling_rebind_recovers_tool_bound_chat_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    The chat path recovers from a temperature 400 even with tools bound.
+
+    Regression for the issue #502 review finding: bind_tools() collapses a
+    configurable-fields model into a concrete RunnableBinding with sampling
+    params baked in, so the invoke-time config drop is a no-op there. The
+    graph must rebuild from the pre-bind model with sampling params nulled
+    and re-bind the tools. Uses a real configurable_fields -> with_config ->
+    bind_tools chain, not mocks, to prove the production shape works.
+    """
+    monkeypatch.setattr(agent_graph, "_LLM_INVOKE_TIMEOUT_S", 5.0)
+
+    seen_temperatures: list[float | None] = []
+
+    def _temp_400() -> openai.BadRequestError:
+        request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+        response = httpx.Response(400, request=request)
+        return openai.BadRequestError(
+            "Error code: 400",
+            response=response,
+            body={
+                "message": "Unsupported value: 'temperature' does not support 0.2.",
+                "type": "invalid_request_error",
+                "param": "temperature",
+                "code": "unsupported_value",
+            },
+        )
+
+    class _PickyChatModel(BaseChatModel):
+        """Rejects any non-default temperature like OpenAI reasoning models."""
+
+        temperature: float | None = None
+        top_p: float | None = None
+
+        @property
+        def _llm_type(self) -> str:
+            return "picky"
+
+        def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
+            return self.bind(tools=list(tools))
+
+        def _generate(
+            self,
+            messages: Any,
+            stop: Any = None,
+            run_manager: Any = None,
+            **kwargs: Any,
+        ) -> ChatResult:
+            seen_temperatures.append(self.temperature)
+            if self.temperature is not None:
+                raise _temp_400()
+            return ChatResult(
+                generations=[ChatGeneration(message=AIMessage(content="ok"))]
+            )
+
+    base_model = (
+        _PickyChatModel()
+        .configurable_fields(
+            temperature=ConfigurableField(id="temperature"),
+            top_p=ConfigurableField(id="top_p"),
+        )
+        .with_config(config={"configurable": {"temperature": 0.2}})
+    )
+
+    selected_tools = [{"type": "function", "function": {"name": "t"}}]
+    hass = MagicMock()
+    hass.async_add_executor_job = AsyncMock(side_effect=lambda fn: fn())
+
+    bound = agent_graph._bind_model_tools(
+        base_model, selected_tools, disable_reasoning=False
+    )
+
+    result = await agent_graph._invoke_chat_model_with_sampling_rebind(
+        hass,
+        base_model,
+        bound,
+        [HumanMessage(content="hi")],
+        {},
+        selected_tools,
+        disable_reasoning=False,
+    )
+
+    assert result.content == "ok"
+    # Exactly two API calls: baked 0.2 rejected once, rebind with None succeeds.
+    assert seen_temperatures == [0.2, None]
