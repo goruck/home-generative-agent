@@ -43,6 +43,9 @@ from pydantic import PydanticInvalidForJsonSchema, ValidationError
 
 from custom_components.home_generative_agent.const import (
     ACTUATION_KEYWORDS_REGEX,
+    AUTOMATION_ACTION_KEYWORDS_REGEX,
+    AUTOMATION_INTENT_MARKERS_REGEX,
+    AUTOMATION_TRIGGER_CLAUSE_REGEX,
     CONF_ANTHROPIC_CHAT_MODEL,
     CONF_CHAT_MODEL_PROVIDER,
     CONF_CRITICAL_ACTION_PIN_ENABLED,
@@ -56,6 +59,7 @@ from custom_components.home_generative_agent.const import (
     CONF_OLLAMA_CHAT_MODEL,
     CONF_OPENAI_CHAT_MODEL,
     CONF_OPENAI_COMPATIBLE_CHAT_MODEL,
+    CONF_SCHEMA_FIRST_YAML,
     CONF_TOOL_RELEVANCE_THRESHOLD,
     CONF_TOOL_RETRIEVAL_LIMIT,
     EMBEDDING_MODEL_PROMPT_TEMPLATE,
@@ -855,6 +859,92 @@ async def _get_rag_retrieved_tools(
 _MAX_ACTION_ROUNDS = 3
 
 
+def _message_text(msg: BaseMessage) -> str:
+    """Return only the text portions of a message's content."""
+    content = msg.content
+    if isinstance(content, str):
+        return content
+    return " ".join(
+        p["text"] for p in content if isinstance(p, dict) and p.get("type") == "text"
+    )
+
+
+# Cap intent scans so a pathological multi-MB chat message cannot stall the
+# event loop (the regexes are linear, ~1s/MB, but scans run synchronously).
+_MAX_INTENT_SCAN_CHARS = 20_000
+
+
+def _query_wants_automation(query: str) -> bool:
+    """
+    Return True when the query asks to create an automation.
+
+    Matches either standalone automation vocabulary ("automate", "every
+    morning", "remind me") or a conditional-actuation phrasing — an action
+    verb plus a trigger clause ("turn on the porch light when motion is
+    detected"). Read-only open-state queries ("check if the garage door is
+    open") suppress the weaker conditional-actuation signal so step 3d does
+    not re-add an actuation-adjacent tool that step 3b deliberately strips;
+    explicit markers still win. Used to force-bind add_automation, whose
+    instruction-heavy description cannot win embedding ranking against
+    entity-control tools for these phrasings.
+    """
+    query = query[:_MAX_INTENT_SCAN_CHARS]
+    if re.search(AUTOMATION_INTENT_MARKERS_REGEX, query):
+        return True
+    if _query_is_read_only_open_state(query):
+        return False
+    return bool(
+        re.search(AUTOMATION_ACTION_KEYWORDS_REGEX, query)
+        and re.search(AUTOMATION_TRIGGER_CLAUSE_REGEX, query)
+    )
+
+
+# How many trailing HUMAN turns establish automation-creation context for
+# follow-up turns: the current message plus two prior user exchanges. Counting
+# human turns (not raw messages) keeps the window stable when a single turn
+# emits many AI/tool messages (up to _MAX_ACTION_ROUNDS tool rounds), which
+# would otherwise push the intent message out of a fixed-size slice. The
+# footprint is real: while context is active, add_automation stays bound on
+# every turn (one extra store lookup plus its description's prompt tokens).
+_AUTOMATION_CONTEXT_HUMAN_TURNS = 3
+
+
+def _conversation_has_automation_context(
+    messages: Sequence[BaseMessage], summary: str = ""
+) -> bool:
+    """
+    Return True when recent turns establish automation-creation context.
+
+    Short continuations ("yes", "do that") carry the prior turn's intent but
+    produce useless retrieval queries, so add_automation must stay bound when
+    a recent human message asked for an automation or a recent turn already
+    called add_automation — including malformed attempts — (field report:
+    "yes" after an add_automation offer was rejected because the tool was no
+    longer retrieved). The conversation summary is also scanned because
+    end-of-turn trimming can delete the original intent message while the
+    model still sees the automation-in-progress in the summary.
+    """
+    if summary and _query_wants_automation(summary):
+        return True
+    human_turns = 0
+    for msg in reversed(messages):
+        if isinstance(msg, HumanMessage):
+            human_turns += 1
+            if _query_wants_automation(_message_text(msg)):
+                return True
+            if human_turns >= _AUTOMATION_CONTEXT_HUMAN_TURNS:
+                return False
+        elif (isinstance(msg, ToolMessage) and msg.name == "add_automation") or (
+            isinstance(msg, AIMessage)
+            and any(
+                tc.get("name") == "add_automation"
+                for tc in [*msg.tool_calls, *msg.invalid_tool_calls]
+            )
+        ):
+            return True
+    return False
+
+
 def _query_is_read_only_open_state(query: str) -> bool:
     """Return True when open/opened describes state instead of an action."""
     return bool(
@@ -1350,12 +1440,7 @@ async def _retrieve_tools(
     store: BaseStore,
 ) -> dict[str, Any]:
     """Retrieve relevant tools from the vector store and merge with essentials."""
-    query = state["messages"][-1].content if state["messages"] else ""
-    if not isinstance(query, str):
-        # Multimodal content is a list of parts; extract text segments.
-        query = " ".join(
-            p["text"] for p in query if isinstance(p, dict) and p.get("type") == "text"
-        )
+    query = _message_text(state["messages"][-1]) if state["messages"] else ""
 
     allowed_api_ids = _get_allowed_api_ids(config)
     opts = config.get("configurable", {}).get("options", {})
@@ -1458,6 +1543,36 @@ async def _retrieve_tools(
         )
         if fetched_live_ctx is not None:
             all_candidates = [*all_candidates, fetched_live_ctx]
+
+    # 3d. Force-bind add_automation for automation-creation intents. Natural
+    # phrasings ("always turn on X when Y") embed closer to entity-control
+    # tools than to add_automation's instruction-heavy description, so RAG
+    # ranking alone cannot guarantee selection. Recent-context check keeps the
+    # tool bound across short follow-ups ("yes" to an offered modification),
+    # whose retrieval queries carry no intent signal. Appended outside the
+    # limit, like GetLiveContext above, so it never evicts a RAG/safety
+    # selection. Skipped in schema-first YAML mode, which deliberately
+    # excludes add_automation from both the index and dispatch.
+    if (
+        not opts.get(CONF_SCHEMA_FIRST_YAML, False)
+        and (
+            _query_wants_automation(query)
+            or _conversation_has_automation_context(
+                state["messages"], state.get("summary", "")
+            )
+        )
+        and not any(t["name"] == "add_automation" for t in all_candidates)
+    ):
+        fetched_add_automation = await _get_tool_by_name(
+            store, config, "add_automation", allowed_api_ids
+        )
+        if fetched_add_automation is not None:
+            all_candidates = [*all_candidates, fetched_add_automation]
+        else:
+            LOGGER.debug(
+                "Automation intent detected but add_automation is not in the "
+                "tool index or fallback; skipping force-injection"
+            )
 
     # 4. Format and deduplicate
     selected_tools, routing_map = _format_and_dedupe_tools(all_candidates)

@@ -12,10 +12,11 @@ from unittest.mock import AsyncMock, MagicMock
 import psycopg
 import pytest
 from homeassistant.helpers import llm
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
 from custom_components.home_generative_agent.agent.graph import (
     State,
+    _conversation_has_automation_context,
     _filter_open_state_live_context_content,
     _get_actuation_safety_tools,
     _get_allowed_api_ids,
@@ -23,6 +24,7 @@ from custom_components.home_generative_agent.agent.graph import (
     _latest_open_state_query,
     _normalize_live_context_args_for_open_state,
     _query_needs_actuation_safety,
+    _query_wants_automation,
     _retrieve_tools,
     _split_query_intents,
 )
@@ -1183,3 +1185,471 @@ async def test_retrieve_tools_action_rounds_reset() -> None:
 
     result = await _retrieve_tools(state, config, store=store)
     assert result["action_rounds"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Automation-creation intent: _query_wants_automation + add_automation
+# force-injection (regression for field report: "Always turn on the garage
+# light when the garage door is unloacked and send a notification" bound only
+# entity-control tools, so the agent could not create the automation).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        # Field repro, typo preserved.
+        "Always turn on the garage light when the garage door is unloacked "
+        "and send a notification",
+        "Create an automation to water the plants every day",
+        "remind me every 30 minutes if the litter box waste drawer is over 90% full",
+        "whenever the front door opens announce it on the kitchen speaker",
+        "turn on the porch light when motion is detected",
+        "automatically close the garage at 10pm",
+        "every morning turn up the thermostat",
+    ],
+)
+def test_query_wants_automation_positive(query: str) -> None:
+    """Automation-creation phrasings must be detected."""
+    assert _query_wants_automation(query)
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "turn on the kitchen lights",
+        "find my phone",
+        "is the garage door open",
+        "what is the temperature in the living room",
+        "dim the bedroom lights to 50%",
+    ],
+)
+def test_query_wants_automation_negative(query: str) -> None:
+    """Direct commands and read-only queries must not be detected."""
+    assert not _query_wants_automation(query)
+
+
+def _make_search_item(
+    name: str, *, score: float, is_actuation: bool = False, api_id: str = "assist"
+) -> MagicMock:
+    item = MagicMock()
+    item.value = {
+        "name": name,
+        "api_id": api_id,
+        "description": f"{name} description",
+        "parameters": "{}",
+        "is_actuation": is_actuation,
+    }
+    item.score = score
+    return item
+
+
+def _field_report_store() -> MagicMock:
+    """Store mock replicating the field log: control tools win RAG ranking."""
+    store = MagicMock()
+    store.asearch = AsyncMock(
+        return_value=[
+            _make_search_item("HassBroadcast", score=0.635),
+            _make_search_item(
+                "confirm_sensitive_action", score=0.580, api_id="hga_local"
+            ),
+            _make_search_item(
+                "alarm_control", score=0.580, is_actuation=True, api_id="hga_local"
+            ),
+            _make_search_item("HassTurnOn", score=0.578, is_actuation=True),
+            _make_search_item("HassLightSet", score=0.559, is_actuation=True),
+        ]
+    )
+
+    add_automation_item = MagicMock()
+    add_automation_item.value = {
+        "name": "add_automation",
+        "api_id": "hga_local",
+        "description": "Add an automation to Home Assistant.",
+        "parameters": "{}",
+        "is_actuation": False,
+    }
+
+    async def aget(namespace: Any, key: str = "", **_kwargs: Any) -> Any:  # noqa: ARG001
+        if key.endswith("::add_automation"):
+            return add_automation_item
+        return None
+
+    store.aget = AsyncMock(side_effect=aget)
+    return store
+
+
+def _field_report_state() -> State:
+    return {
+        "messages": [
+            MagicMock(
+                content=(
+                    "Always turn on the garage light when the garage door is "
+                    "unloacked and send a notification"
+                )
+            )
+        ],
+        "summary": "",
+        "chat_model_usage_metadata": {},
+        "messages_to_remove": [],
+        "selected_tools": [],
+        "tool_routing_map": {},
+    }
+
+
+def _field_report_config(**extra_options: Any) -> RunnableConfig:
+    return {
+        "configurable": {
+            "options": {
+                "llm_hass_api": ["assist"],
+                "tool_relevance_threshold": 0.15,
+                **extra_options,
+            },
+            "tool_index_ready": True,
+            "langchain_tools": {},
+            "ha_llm_api": MagicMock(apis={}),
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_retrieve_tools_injects_add_automation_for_automation_intent() -> None:
+    """add_automation is force-bound when RAG ranking misses it (field repro)."""
+    store = _field_report_store()
+
+    result = await _retrieve_tools(
+        _field_report_state(), _field_report_config(), store=store
+    )
+
+    assert "add_automation" in result["tool_routing_map"]
+    assert result["tool_routing_map"]["add_automation"] == "hga_local"
+    # Injection must not evict the RAG/safety selections.
+    assert "HassTurnOn" in result["tool_routing_map"]
+    assert "HassBroadcast" in result["tool_routing_map"]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_tools_no_add_automation_in_schema_first_yaml_mode() -> None:
+    """Schema-first YAML mode must not force-bind add_automation."""
+    store = _field_report_store()
+
+    result = await _retrieve_tools(
+        _field_report_state(),
+        _field_report_config(schema_first_yaml=True),
+        store=store,
+    )
+
+    assert "add_automation" not in result["tool_routing_map"]
+    add_automation_lookups = [
+        call
+        for call in store.aget.call_args_list
+        if str(call.kwargs.get("key", "")).endswith("::add_automation")
+    ]
+    assert not add_automation_lookups
+
+
+@pytest.mark.asyncio
+async def test_retrieve_tools_no_add_automation_without_intent() -> None:
+    """Plain commands must not trigger the add_automation lookup."""
+    store = _field_report_store()
+    state = _field_report_state()
+    state["messages"] = [MagicMock(content="turn on the kitchen lights")]
+
+    result = await _retrieve_tools(state, _field_report_config(), store=store)
+
+    assert "add_automation" not in result["tool_routing_map"]
+    add_automation_lookups = [
+        call
+        for call in store.aget.call_args_list
+        if str(call.kwargs.get("key", "")).endswith("::add_automation")
+    ]
+    assert not add_automation_lookups
+
+
+def _automation_followup_messages() -> list[Any]:
+    """Replicate the field log: automation created, model offers more, user says yes."""
+    return [
+        HumanMessage(
+            content=(
+                "Always turn on the garage light when the garage door is "
+                "unlocked and send a notification"
+            )
+        ),
+        AIMessage(
+            content="I'll create this for you.",
+            tool_calls=[
+                {
+                    "name": "add_automation",
+                    "args": {"automation_yaml": "alias: Garage Light"},
+                    "id": "call-1",
+                    "type": "tool_call",
+                }
+            ],
+        ),
+        ToolMessage(
+            content="Added automation 01KYB3K9TQWXST6AR28EQ9Q3NB",
+            name="add_automation",
+            tool_call_id="call-1",
+        ),
+        AIMessage(content="Done. Want me to add the notification action as well?"),
+        HumanMessage(content="yes"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_tools_keeps_add_automation_for_yes_followup() -> None:
+    """A bare 'yes' after an add_automation turn must keep the tool bound."""
+    store = _field_report_store()
+    state = _field_report_state()
+    state["messages"] = _automation_followup_messages()
+
+    result = await _retrieve_tools(state, _field_report_config(), store=store)
+
+    assert "add_automation" in result["tool_routing_map"]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_tools_no_add_automation_for_unrelated_yes() -> None:
+    """A bare 'yes' with no automation context must not bind add_automation."""
+    store = _field_report_store()
+    state = _field_report_state()
+    state["messages"] = [
+        HumanMessage(content="is the front door open"),
+        AIMessage(content="It is closed. Want me to check the windows too?"),
+        HumanMessage(content="yes"),
+    ]
+
+    result = await _retrieve_tools(state, _field_report_config(), store=store)
+
+    assert "add_automation" not in result["tool_routing_map"]
+
+
+def test_conversation_has_automation_context_detects_recent_turns() -> None:
+    """Human intent, AI tool call, and ToolMessage all establish context."""
+    assert _conversation_has_automation_context(_automation_followup_messages())
+    assert _conversation_has_automation_context(
+        [
+            ToolMessage(
+                content="Added automation X",
+                name="add_automation",
+                tool_call_id="call-9",
+            ),
+            HumanMessage(content="yes"),
+        ]
+    )
+    assert not _conversation_has_automation_context(
+        [
+            HumanMessage(content="is the front door open"),
+            AIMessage(content="It is closed."),
+            HumanMessage(content="yes"),
+        ]
+    )
+
+
+def test_conversation_has_automation_context_respects_lookback_window() -> None:
+    """Automation context older than the lookback window must not persist."""
+    old_context = _automation_followup_messages()[:3]
+    padding: list[Any] = []
+    for i in range(4):
+        padding.append(HumanMessage(content=f"what is the temperature {i}"))
+        padding.append(AIMessage(content=f"It is {70 + i} degrees."))
+    messages = [*old_context, *padding, HumanMessage(content="yes")]
+
+    assert not _conversation_has_automation_context(messages)
+
+
+@pytest.mark.asyncio
+async def test_retrieve_tools_add_automation_missing_from_store_is_noop() -> None:
+    """Automation intent with no indexed add_automation must not crash or bind."""
+    store = _field_report_store()
+    store.aget = AsyncMock(return_value=None)
+
+    result = await _retrieve_tools(
+        _field_report_state(), _field_report_config(), store=store
+    )
+
+    assert "add_automation" not in result["tool_routing_map"]
+    # The RAG/safety selections must be unaffected by the failed lookup.
+    assert "HassTurnOn" in result["tool_routing_map"]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_tools_add_automation_from_rag_skips_injection() -> None:
+    """When RAG already ranked add_automation, the force-inject lookup is skipped."""
+    store = _field_report_store()
+    items = list(store.asearch.return_value)
+    items.append(_make_search_item("add_automation", score=0.7, api_id="hga_local"))
+    store.asearch = AsyncMock(return_value=items)
+
+    result = await _retrieve_tools(
+        _field_report_state(), _field_report_config(), store=store
+    )
+
+    assert "add_automation" in result["tool_routing_map"]
+    add_automation_lookups = [
+        call
+        for call in store.aget.call_args_list
+        if str(call.kwargs.get("key", "")).endswith("::add_automation")
+    ]
+    assert not add_automation_lookups
+    assert (
+        sum(
+            1
+            for t in result["selected_tools"]
+            if t["function"]["name"] == "add_automation"
+        )
+        == 1
+    )
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "tell me when the front door opens",
+        "let me know when the washing machine finishes",
+        "text me when the kids get home",
+        "warn me if the basement gets wet",
+    ],
+)
+def test_query_wants_automation_notification_phrasings(query: str) -> None:
+    """Notify-me automation phrasings must be detected."""
+    assert _query_wants_automation(query)
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "when is sunset today",
+        "if it rains will the deck stay dry",
+    ],
+)
+def test_query_wants_automation_trigger_without_action(query: str) -> None:
+    """A bare trigger word without an action verb must not signal automation."""
+    assert not _query_wants_automation(query)
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "when did the front door last open",
+    ],
+)
+def test_query_wants_automation_accepted_overmatch(query: str) -> None:
+    """
+    Documented over-match: history questions with trigger+verb bind the tool.
+
+    The injection never evicts RAG selections, but while matched the tool
+    stays bound for the human-turn context window (extra store lookup plus
+    prompt tokens per turn). If tightening the detector, change deliberately.
+    """
+    assert _query_wants_automation(query)
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "check if the garage door is open",
+        "tell me if the garage door is open",
+    ],
+)
+def test_query_wants_automation_read_only_open_state_suppressed(query: str) -> None:
+    """
+    Read-only open-state queries suppress the conditional-actuation signal.
+
+    Step 3b strips actuation tools for these queries; step 3d must not hand
+    an actuation-adjacent tool straight back. Explicit markers still win.
+    """
+    assert not _query_wants_automation(query)
+
+
+def test_conversation_has_automation_context_survives_tool_heavy_turn() -> None:
+    """A tool-heavy intermediate turn must not evict the intent message."""
+    intent = HumanMessage(content="create an automation to water the plants")
+    tool_heavy_turn = [
+        HumanMessage(content="what is the fridge power draw"),
+        AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "GetLiveContext",
+                    "args": {},
+                    "id": "c1",
+                    "type": "tool_call",
+                }
+            ],
+        ),
+        ToolMessage(content="42W", name="GetLiveContext", tool_call_id="c1"),
+        AIMessage(content="It is 42W."),
+    ]
+    # Intent is the 3rd-most-recent human turn — still in the window,
+    # regardless of how many AI/tool messages the middle turn emitted.
+    messages = [intent, *tool_heavy_turn, HumanMessage(content="yes")]
+    assert _conversation_has_automation_context(messages)
+    # One more human exchange pushes intent to the 4th turn — out of window.
+    messages = [
+        intent,
+        *tool_heavy_turn,
+        HumanMessage(content="thanks"),
+        AIMessage(content="You're welcome."),
+        HumanMessage(content="yes"),
+    ]
+    assert not _conversation_has_automation_context(messages)
+
+
+def test_conversation_has_automation_context_from_summary() -> None:
+    """Trimmed-away intent must still be found in the conversation summary."""
+    messages: list[Any] = [HumanMessage(content="yes")]
+    assert not _conversation_has_automation_context(messages)
+    assert _conversation_has_automation_context(
+        messages,
+        "The user asked to create an automation turning on the garage light "
+        "whenever the door unlocks; the assistant offered notifications.",
+    )
+
+
+def test_conversation_has_automation_context_scans_text_parts_only() -> None:
+    """Stringified non-text multimodal parts must not satisfy the detector."""
+    image_part = {
+        "type": "image_url",
+        "image_url": {"url": "https://cam.local/when-motion/if-day.jpg"},
+    }
+    messages: list[Any] = [
+        HumanMessage(
+            content=[image_part, {"type": "text", "text": "what is in this picture"}]
+        ),
+        HumanMessage(content="yes"),
+    ]
+    assert not _conversation_has_automation_context(messages)
+    messages = [
+        HumanMessage(
+            content=[
+                image_part,
+                {
+                    "type": "text",
+                    "text": "always turn on the light when the door opens",
+                },
+            ]
+        ),
+        HumanMessage(content="yes"),
+    ]
+    assert _conversation_has_automation_context(messages)
+
+
+def test_conversation_has_automation_context_counts_invalid_tool_calls() -> None:
+    """A malformed add_automation attempt still establishes context."""
+    messages: list[Any] = [
+        AIMessage(
+            content="",
+            invalid_tool_calls=[
+                {
+                    "name": "add_automation",
+                    "args": "not json",
+                    "id": "bad-1",
+                    "error": "malformed",
+                    "type": "invalid_tool_call",
+                }
+            ],
+        ),
+        HumanMessage(content="yes"),
+    ]
+    assert _conversation_has_automation_context(messages)

@@ -987,7 +987,9 @@ RECOMMENDED_TOOL_RETRIEVAL_LIMIT = 5
 CONF_TOOL_RELEVANCE_THRESHOLD = "tool_relevance_threshold"
 RECOMMENDED_TOOL_RELEVANCE_THRESHOLD = 0.15
 
-# Actuation Safety Net: Keywords that trigger force-attachment of control tools
+# Actuation Safety Net: Keywords that trigger force-attachment of control tools.
+# Derivatives that must stay in sync when verbs are added here:
+# NON_OPEN_ACTUATION_KEYWORDS_REGEX, AUTOMATION_ACTION_KEYWORDS_REGEX.
 ACTUATION_KEYWORDS_REGEX = (
     r"(?i)\b(turn|switch|lock|unlock|open|close|set|activate|deactivate|arm|"
     r"disarm|start|stop|dim|brighten|play|pause|mute|run|trigger|enable|"
@@ -1023,6 +1025,42 @@ NON_OPEN_ACTUATION_KEYWORDS_REGEX = (
 OPEN_COMMAND_CLAUSE_REGEX = (
     r"(?i)\b(?:then|and then|after that)\s+open\b"
     r"|\band\s+open\s+(?:the|a|an)\b"
+)
+
+# Automation-creation intent signals: used to force-bind the add_automation
+# tool during retrieval. Natural automation requests ("always turn on X when
+# Y") share almost no vocabulary with add_automation's instruction-heavy tool
+# description, so embedding similarity alone cannot guarantee selection — the
+# actuation fragments of the query rank entity-control tools higher.
+# Two signal classes, combined in graph._query_wants_automation:
+# 1. Standalone markers: explicit automation vocabulary or recurring
+#    schedules. Sufficient on their own.
+AUTOMATION_INTENT_MARKERS_REGEX = (
+    r"(?i)\b(?:automat(?:ions?|es?|ed|ically)|"
+    r"whenever|every\s+time|each\s+time|any\s*time|"
+    r"remind\s+me|let\s+me\s+know|on\s+a\s+schedule|"
+    r"(?:every|each)\s+\d+\s*(?:seconds?|minutes?|hours?|days?|weeks?)|"
+    r"(?:every|each)\s+(?:day|morning|afternoon|evening|night|week|"
+    r"weekday|weekend|month)|"
+    r"daily|nightly|hourly|weekly|monthly)\b"
+)
+# 2. Conditional actuation: an action verb combined with a trigger clause
+#    ("turn on the porch light when motion is detected"). Both regexes below
+#    must match. Over-matching is acceptable — the tool is appended after
+#    RAG/safety selection without evicting anything, so a false positive
+#    costs one unused tool slot, while a false negative silently breaks
+#    automation creation.
+AUTOMATION_TRIGGER_CLAUSE_REGEX = r"(?i)\b(?:when|whenever|always|if)\b"
+# Action verbs for the conditional-actuation signal. Must stay in sync with
+# ACTUATION_KEYWORDS_REGEX — adds notification verbs only (automations
+# commonly notify rather than actuate: "tell me when the door opens").
+# All automation-intent patterns are English-only; non-English requests fall
+# back to plain RAG ranking (localized markers are tracked as future scope).
+AUTOMATION_ACTION_KEYWORDS_REGEX = (
+    r"(?i)\b(turn|switch|lock|unlock|open|close|set|activate|deactivate|arm|"
+    r"disarm|start|stop|dim|brighten|play|pause|mute|run|trigger|enable|"
+    r"disable|toggle|notify|alert|send|announce|broadcast|remind|flash|"
+    r"tell|text|warn)\b"
 )
 
 # Tool prefixes/names for actuation safety net
