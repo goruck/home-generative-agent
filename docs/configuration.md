@@ -109,6 +109,8 @@ Global options such as system prompt, face recognition URL, context management p
 
 On startup the integration indexes all available tools as vector embeddings in PostgreSQL. Each turn, only the most relevant tools for the user's message are loaded into the agent's prompt — keeping context short and tool selection accurate.
 
+A few tools bypass similarity ranking: `GetLiveContext` is always available, and `add_automation` is guaranteed to be available whenever your message signals automation-creation intent — explicit wording ("automate...", "remind me every 30 minutes") or an action verb plus a when/if trigger clause ("turn on the porch light when motion is detected"). These are appended on top of the retrieval limit, so they never crowd out ranked tools. Intent detection is English-only for now; see [Architecture](architecture.md#tools) for details.
+
 Two options in the **Options** flow control this:
 
 - **Retrieval Limit** (`tool_retrieval_limit`, default `5`) — maximum tools made available per turn. Raise if the agent misses tools on complex multi-step requests; lower to reduce prompt size.
