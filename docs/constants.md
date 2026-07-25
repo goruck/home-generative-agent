@@ -211,6 +211,11 @@ This document covers the named constants that affect integration behaviour, orga
 | Constant | File | Value | Purpose |
 |---|---|---|---|
 | `ACTUATION_KEYWORDS_REGEX` | `const.py` | (regex) | Keywords that force-attach entity control tools regardless of similarity score. Prevents the agent from missing control tools when the user issues a command verb. |
+| `AUTOMATION_INTENT_MARKERS_REGEX` | `const.py` | (regex) | Standalone automation-intent vocabulary ("automate", "remind me", recurring schedules like "every 30 minutes") that force-binds the `add_automation` tool during retrieval. English-only; non-matching languages fall back to similarity ranking. |
+| `AUTOMATION_TRIGGER_CLAUSE_REGEX` | `const.py` | (regex) | Trigger-clause words (when/whenever/always/if). Combined with an action verb it signals conditional-actuation automation intent ("turn on the porch light when motion is detected"). |
+| `AUTOMATION_ACTION_KEYWORDS_REGEX` | `const.py` | (regex) | Action verbs for the conditional-actuation signal. Mirrors `ACTUATION_KEYWORDS_REGEX` plus notification verbs (notify, tell, warn, text); the two must stay in sync when verbs are added. |
+| `_MAX_INTENT_SCAN_CHARS` | `agent/graph.py` | `20000` | Cap on message characters scanned by the intent regexes so a pathologically long chat message cannot stall the event loop. |
+| `_AUTOMATION_CONTEXT_HUMAN_TURNS` | `agent/graph.py` | `3` | Trailing human turns checked for automation-creation context, so short follow-ups ("yes") keep `add_automation` bound. |
 | `_LC_TOOL_TIMEOUT_S` | `agent/graph.py` | `30.0` (s) | Per-tool execution timeout. Tools that do not return within this window are cancelled and the agent receives an error. Affects VLM and any slow external tool. |
 
 ---

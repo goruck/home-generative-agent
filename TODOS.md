@@ -2,6 +2,42 @@
 
 ## Agent
 
+### PIN-gate add_automation for critical service calls
+
+**What:** `add_automation` writes arbitrary automation YAML and reloads HA without ever passing the critical-action PIN gate: `_is_critical_action` inspects `domain`/`service` tool args, and `add_automation`'s payload is opaque `automation_yaml`. "Unlock the front door whenever I get home" installs a `lock.unlock` automation with no PIN, while the direct command "unlock the front door" is gated.
+
+**Why:** Pre-existing hole, but v3.20.2's automation-intent force-binding makes the tool deterministically available on everyday phrasings, so the bypass path is now reliable. Converged on independently by both adversarial review agents (Claude adversarial + red team) during the v3.20.2 ship as the top finding. Deferred out of that branch by user decision (2026-07-24) so the PIN-flow change gets its own focused review and live validation.
+
+**How to apply:** After `_async_validate_config_item` in `add_automation` (tools.py) — or in a langchain-branch guard in `_call_tools` (graph.py) — walk the parsed automation config's `action` list (including `choose`/`repeat`/`wait_for_trigger` nesting), extract each `service`/`action` call, and run it through `_is_critical_action` with the configured critical actions. If any matches and PIN is enabled, return the existing `requires_pin` ToolMessage flow (register in `pending_actions`) instead of writing the automation. Mind the prior pitfall: `confirm_sensitive_action` ToolMessages with `status=error` must not count as resolved.
+
+**Effort:** M
+**Priority:** P1
+**Depends on:** v3.20.2 (fix/tool-rag-automation-intent)
+
+---
+
+### Purge stale add_automation row from tool index when schema-first YAML is enabled
+
+**What:** The tool indexer only `aput()`s changed tools and never deletes; a user who ran normal mode once has `hga_local::add_automation` in the vector store forever. After toggling schema-first YAML on, RAG ranking can still retrieve it even though dispatch excludes it, producing a confusing routing failure. Step 3d's guard is correct but the invariant it mirrors is unenforced for pre-existing rows.
+
+**How to apply:** On entry setup with `CONF_SCHEMA_FIRST_YAML` true, `adelete` the `hga_local::add_automation` store key and drop its content hash; or filter `add_automation` out of RAG results when schema-first is active.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** v3.20.2
+
+---
+
+### Tool-name collision hardening for force-injection guard
+
+**What:** The step-3d injection guard and `_format_and_dedupe_tools` key on bare tool name. A remote (e.g. MCP) API exposing a tool named `add_automation` would suppress injection of the local tool and route automation YAML to the foreign tool (first-seen-wins dedupe predates v3.20.2). Consider `(api_id, name)` matching for the guard and explicit precedence in dedupe.
+
+**Effort:** S
+**Priority:** P4
+**Depends on:** v3.20.2
+
+---
+
 ### asyncio.gather concurrency policy for state-mutating tools
 
 **What:** Add per-tool annotation or global policy for whether a tool is safe to run concurrently. State-mutating HA tools (`turn_on`, `turn_off`, lock, unlock, `alarm_control`) called in the same model batch could interleave under `asyncio.gather`.

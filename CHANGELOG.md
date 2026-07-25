@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.20.2] - 2026-07-24
+
+### Fixed
+
+- **Creating automations from chat works reliably again** — asking for an automation in plain English ("Always turn on the garage light when the garage door is unlocked and send a notification") could silently fail: the tool selector ranked entity-control tools above the automation tool, so the agent either replied that it can't create automations or just acted directly. The automation tool is now guaranteed to be available whenever a message signals automation intent — explicit wording ("automate", "remind me every 30 minutes", "every morning"), conditional phrasings ("turn on the porch light when motion is detected"), and notify-me requests ("tell me when the front door opens", "let me know when the washing machine finishes", "warn me if the basement gets wet"). It also stays available through short follow-ups like "yes" or "make it persistent and use mobile notification" — counted in user turns so long tool-heavy exchanges don't break the chain, and surviving conversation summarization. Read-only questions ("check if the garage door is open") deliberately do not trigger it, intent detection is capped against pathologically long messages, and schema-first YAML mode is unaffected. Intent phrases are English-only for now; other languages fall back to the previous similarity-ranking behavior. Field-validated on a local qwen3.5:35b edge deployment, including the original demo phrase and a two-turn create-then-refine flow.
+
 ## [3.20.1] - 2026-07-23
 
 ### Fixed
