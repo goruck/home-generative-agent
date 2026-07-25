@@ -12,8 +12,9 @@
 
 A [Home Assistant](https://www.home-assistant.io/) integration that brings a generative AI agent into your smart home. Talk to your home, create automations in plain English, analyze camera footage, and get proactive alerts — all powered by your choice of cloud or local LLMs. HGA is a single integration that gives you conversational control over every HA entity, camera understanding with face recognition, long-term semantic memory, and the Sentinel anomaly engine.
 
-<!-- TODO: replace with a short demo GIF (Assist chat → automation created) -->
-![Create an automation](./assets/automation1.png)
+![Create an automation](./assets/create_automation.gif)
+
+*Creating an automation in plain English — the agent writes the YAML, registers it, and it shows up in the HA automation editor.*
 
 ## Why HGA?
 
@@ -36,7 +37,7 @@ Most AI conversation integrations are prompt passthroughs: they forward your wor
 
 ### Camera analysis
 
-![Check a single camera](./assets/one_camera.png)
+![Camera analysis demo](./assets/camera_analysis.gif)
 
 ### Long-term memory with semantic search
 
