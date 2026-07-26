@@ -48,6 +48,11 @@ SUPPRESSION_REASON_PRESENCE_GRACE = "presence_grace"
 SUPPRESSION_REASON_USER_SNOOZE_24H = "user_snooze_24h"
 SUPPRESSION_REASON_USER_SNOOZE_7D = "user_snooze_7d"
 SUPPRESSION_REASON_USER_SNOOZE_PERMANENT = "user_snooze_permanent"
+# Findings that passed should_suppress() but were suppressed downstream
+# (LLM triage or execution policy). Distinct from SUPPRESSION_REASON_NOT_SUPPRESSED
+# so the audit store's eviction logic can correctly treat them as evictable.
+SUPPRESSION_REASON_TRIAGE_SUPPRESSED = "triage_suppressed"
+SUPPRESSION_REASON_POLICY_BLOCKED = "policy_blocked"
 PENDING_PROMPT_DEFAULT_TTL = timedelta(hours=4)
 
 # Finding types considered presence-sensitive.  These are suppressed when a
