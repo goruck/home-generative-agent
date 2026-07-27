@@ -195,21 +195,28 @@ class HgaProposalsCard extends HTMLElement {
       return [];
     }
     const entityIds = [];
+    const markers = ["entities[entity_id=", "entities[entity_ids contains "];
     for (const path of evidencePaths) {
       if (typeof path !== "string") {
         continue;
       }
-      const marker = "entities[entity_id=";
-      const start = path.indexOf(marker);
-      if (start === -1) {
-        continue;
+      for (const marker of markers) {
+        const start = path.indexOf(marker);
+        if (start === -1) {
+          continue;
+        }
+        const rest = path.slice(start + marker.length);
+        const end = rest.indexOf("]");
+        if (end === -1) {
+          continue;
+        }
+        // Entity IDs may be quote-wrapped (LLM output variance).
+        const token = rest.slice(0, end).replace(/^['"`]+|['"`]+$/g, "");
+        if (token) {
+          entityIds.push(token);
+        }
+        break;
       }
-      const rest = path.slice(start + marker.length);
-      const end = rest.indexOf("]");
-      if (end === -1) {
-        continue;
-      }
-      entityIds.push(rest.slice(0, end));
     }
     return entityIds;
   }
@@ -225,12 +232,43 @@ class HgaProposalsCard extends HTMLElement {
       .toLowerCase();
     const evidencePaths = candidate?.evidence_paths || [];
     const entityIds = this._extractEntityIds(evidencePaths);
-    const entryIds = entityIds.filter(
+    // Word-bounded so "indoor"/"outdoor"/"doorbell" don't read as entries;
+    // mirrors _ENTRY_TEXT_PATTERN in proposal_templates.py.
+    const entryTextRe = /\b(?:doors?|windows?|entry|entries)\b/;
+    const nonEntryIdTokens = [
+      "motion",
+      "vmd",
+      "battery",
+      "occupancy",
+      "presence",
+      "smoke",
+      "gas",
+      "leak",
+      "moisture",
+      "flood",
+      "tamper",
+      "vibration",
+      "carbon",
+      "safety",
+    ];
+    let entryIds = entityIds.filter(
       (entityId) =>
         entityId.includes("window") ||
         entityId.includes("door") ||
         entityId.includes("entry")
     );
+    let entryIdsFromText = false;
+    if (entryIds.length === 0 && entryTextRe.test(text)) {
+      // Locale-named entity IDs (e.g. Czech "okno") carry no English entry
+      // token — when the candidate text names an entry, promote unclassified
+      // binary_sensor/cover IDs (mirrors proposal_templates.py, issue #504).
+      entryIds = entityIds.filter(
+        (entityId) =>
+          (entityId.startsWith("binary_sensor.") || entityId.startsWith("cover.")) &&
+          !nonEntryIdTokens.some((token) => entityId.includes(token))
+      );
+      entryIdsFromText = entryIds.length > 0;
+    }
     const hasNight =
       evidencePaths.includes("derived.is_night") || text.includes("night");
     const isAway =
@@ -245,9 +283,15 @@ class HgaProposalsCard extends HTMLElement {
       text.includes("present") ||
       evidencePaths.includes("derived.anyone_home");
     if (entryIds.length > 0) {
+      // Text-derived kind only for text-derived entry IDs — mirrors the
+      // registry-stability gating in proposal_templates.py.
       const entryKind = entryIds.some((entityId) => entityId.includes("window"))
         ? "window"
         : entryIds.some((entityId) => entityId.includes("door"))
+        ? "door"
+        : entryIdsFromText && /\bwindows?\b/.test(text)
+        ? "window"
+        : entryIdsFromText && /\bdoors?\b/.test(text)
         ? "door"
         : "entry";
       if (hasNight && isAway) {
@@ -255,6 +299,15 @@ class HgaProposalsCard extends HTMLElement {
       }
       if (hasNight && isHome) {
         return `open_entry_at_night_when_home_${entryKind}`;
+      }
+      // Alarm candidates fall through to the alarm_disarmed_open_entry
+      // inference below, mirroring the normalizer's branch order.
+      const hasAlarmSignal =
+        text.includes("alarm") ||
+        text.includes("disarmed") ||
+        entityIds.some((entityId) => entityId.startsWith("alarm_control_panel."));
+      if (hasNight && !hasAlarmSignal) {
+        return `open_entry_at_night_${entryKind}`;
       }
       if (isAway) {
         return `open_entry_while_away_${entryKind}`;
@@ -551,10 +604,10 @@ class HgaProposalsCard extends HTMLElement {
         const card = document.createElement("div");
         card.className = "card";
         card.innerHTML = `
-          <div><strong>${candidate.title || candidate.candidate_id}</strong></div>
-          <div>${candidate.summary || ""}</div>
-          <div class="meta">Candidate ID: ${candidate.candidate_id}</div>
-          <div class="meta">Type: ${candidate.suggested_type || "unspecified"}</div>
+          <div><strong>${this._esc(candidate.title || candidate.candidate_id)}</strong></div>
+          <div>${this._esc(candidate.summary || "")}</div>
+          <div class="meta">Candidate ID: ${this._esc(candidate.candidate_id)}</div>
+          <div class="meta">Type: ${this._esc(candidate.suggested_type || "unspecified")}</div>
         `;
         const row = document.createElement("div");
         row.className = "row";
@@ -602,9 +655,9 @@ class HgaProposalsCard extends HTMLElement {
         const card = document.createElement("div");
         card.className = "card";
         card.innerHTML = `
-          <div><strong>${filteredCandidate.candidate_id}</strong></div>
-          <div class="meta">Reason: ${this._dedupeReasonLabel(filteredCandidate.dedupe_reason)}</div>
-          <div class="meta">Semantic Key: ${filteredCandidate.semantic_key || "-"}</div>
+          <div><strong>${this._esc(filteredCandidate.candidate_id)}</strong></div>
+          <div class="meta">Reason: ${this._esc(this._dedupeReasonLabel(filteredCandidate.dedupe_reason))}</div>
+          <div class="meta">Semantic Key: ${this._esc(filteredCandidate.semantic_key || "-")}</div>
         `;
         discoveryFiltered.appendChild(card);
       }
@@ -667,12 +720,12 @@ class HgaProposalsCard extends HTMLElement {
         const card = document.createElement("div");
         card.className = "card";
         card.innerHTML = `
-          <div><strong>${candidate.title || rec.candidate_id}</strong></div>
-          <div class="meta">Status: ${rec.status || "draft"}</div>
-          <div>${candidate.summary || ""}</div>
-          <div class="meta">Candidate ID: ${rec.candidate_id}</div>
-          <div class="meta">Rule ID: ${rec.rule_id || "-"}</div>
-          <div class="meta">Covered Rule: ${rec.covered_rule_id || "-"}</div>
+          <div><strong>${this._esc(candidate.title || rec.candidate_id)}</strong></div>
+          <div class="meta">Status: ${this._esc(rec.status || "draft")}</div>
+          <div>${this._esc(candidate.summary || "")}</div>
+          <div class="meta">Candidate ID: ${this._esc(rec.candidate_id)}</div>
+          <div class="meta">Rule ID: ${this._esc(rec.rule_id || "-")}</div>
+          <div class="meta">Covered Rule: ${this._esc(rec.covered_rule_id || "-")}</div>
           ${
             isUnsupported
               ? `<div class="warn">Unsupported: this proposal cannot be mapped to an existing deterministic template yet.</div>`
@@ -772,12 +825,12 @@ class HgaProposalsCard extends HTMLElement {
         const card = document.createElement("div");
         card.className = "card";
         card.innerHTML = `
-          <div><strong>${candidate.title || rec.candidate_id}</strong></div>
-          <div class="meta">Status: ${rec.status || "draft"}</div>
-          <div>${candidate.summary || ""}</div>
-          <div class="meta">Candidate ID: ${rec.candidate_id}</div>
-          <div class="meta">Rule ID: ${rec.rule_id || "-"}</div>
-          <div class="meta">Covered Rule: ${rec.covered_rule_id || "-"}</div>
+          <div><strong>${this._esc(candidate.title || rec.candidate_id)}</strong></div>
+          <div class="meta">Status: ${this._esc(rec.status || "draft")}</div>
+          <div>${this._esc(candidate.summary || "")}</div>
+          <div class="meta">Candidate ID: ${this._esc(rec.candidate_id)}</div>
+          <div class="meta">Rule ID: ${this._esc(rec.rule_id || "-")}</div>
+          <div class="meta">Covered Rule: ${this._esc(rec.covered_rule_id || "-")}</div>
           <div class="meta">Rule State: ${
             historyRuleId
               ? isRuleEnabled === false
@@ -854,6 +907,17 @@ class HgaProposalsCard extends HTMLElement {
       novel: "Novel candidate",
     };
     return reasonMap[reason] || reason || "Unknown";
+  }
+
+  // Candidate fields originate from LLM output — escape before any innerHTML
+  // interpolation so a prompt-injected candidate cannot become stored XSS.
+  _esc(value) {
+    return String(value ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#39;");
   }
 
 }
