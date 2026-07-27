@@ -509,6 +509,38 @@ def test_trigger_source_breakdown_missing_notification_skipped() -> None:
     assert result["event"] == 0
 
 
+def test_trigger_source_breakdown_excludes_suppressed_records() -> None:
+    """Records explicitly marked suppressed are not counted, even within 24h."""
+    now = datetime.now(UTC)
+    recent_str = (now - timedelta(minutes=5)).isoformat()
+    records = [
+        {
+            "trigger_source": "poll",
+            "suppression_reason_code": "not_suppressed",
+            "notification": {"notified_at": recent_str},
+        },
+        {
+            "trigger_source": "event",
+            "suppression_reason_code": "triage_suppressed",
+            "notification": {"notified_at": recent_str},
+        },
+        {
+            "trigger_source": "event",
+            "suppression_reason_code": "policy_blocked",
+            "notification": {"notified_at": recent_str},
+        },
+        {
+            "trigger_source": "on_demand",
+            "suppression_reason_code": "type_cooldown",
+            "notification": {"notified_at": recent_str},
+        },
+    ]
+    result = _compute_trigger_source_breakdown(records)
+    assert result["poll"] == 1
+    assert result["event"] == 0
+    assert result["on_demand"] == 0
+
+
 def test_trigger_source_breakdown_no_trigger_source_skipped() -> None:
     """Records within 24h but with no trigger_source do not affect counts."""
     now = datetime.now(UTC)

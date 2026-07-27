@@ -170,6 +170,34 @@
 
 ## Audit Store
 
+### Audit notifier-drop findings as non-user-facing (delivery status from async_notify)
+
+**What:** The engine audits every finding that reaches the notify path as `not_suppressed`, but `SentinelNotifier.async_notify` can still drop or defer it internally: the per-finding 30-minute cooldown (`_FINDING_COOLDOWN_SECS`) returns silently for non-high severities, and the rate limiter buffers findings into `_held_batch` (delivered later as a summary without action buttons). Those records are non-evictable and counted by the daily digest and notified KPIs despite no individual notification being delivered. Structural cousin: `async_append_finding` stamps `notification.notified_at` on every record unconditionally (audit/store.py), which is why all "notified" consumers must filter on `suppression_reason_code` instead.
+
+**Why:** Same class of KPI inflation and buffer clogging that PR #511 fixed for triage/policy suppression — found by Codex review of #511 (engine.py notify path → notifier.py cooldown/batch returns). Trigger: type/entity cooldowns configured below 30 min, finding re-fires between the engine and notifier cooldown windows.
+
+**How to apply:** Have `async_notify` return a delivery status (`delivered` | `cooldown_dropped` | `batched`); in the engine's final `_append_finding_audit` call, map non-delivered statuses to a new reason code (e.g. `notifier_cooldown`, reusing the evictable-by-default semantics). Consider only stamping `notified_at` for delivered records (audit consumers already gate on reason code, but tests assert the stamp — sweep them).
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** PR #511 (reason-code relabeling)
+
+---
+
+### Persist notified anomaly_id so compound responses attach to the right record
+
+**What:** `async_update_response` matches compound records by ANY constituent `anomaly_id`, but the notification only carries the highest-confidence constituent's id. If an older compound C1 notified via constituent A, and a newer compound C2 also contains A but notified via higher-confidence B, a late user response for A attaches to C2 — wrong compound, corrupted response KPIs and false-positive attribution.
+
+**Why:** Found by Codex review of #511. Pre-existing; #511's not_suppressed preference doesn't change it (newest-match semantics already existed). Needs a schema touch, so it deserves its own change.
+
+**How to apply:** Record the dispatched constituent's `anomaly_id` in the audit record at append time (e.g. `notification.notified_anomaly_id`, set from `best.anomaly_id` in `_dispatch_compound` / `finding.anomaly_id` in the simple path). In `async_update_response`, match on `notified_anomaly_id` first, falling back to the current constituent scan for old records.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** PR #511
+
+---
+
 ### Severity-aware eviction for audit store
 
 **What:** Extend the priority eviction helper introduced in the audit-flood fix to also prefer dropping `low`-severity records before `medium`, and `medium` before `high`. Currently all suppressed records are treated equally by the eviction priority.
