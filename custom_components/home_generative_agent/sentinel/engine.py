@@ -91,6 +91,7 @@ from .rules.unknown_person_camera_no_home import UnknownPersonCameraNoHomeRule
 from .rules.unlocked_lock_at_night import UnlockedLockAtNightRule
 from .rules.vehicle_detected_near_camera import VehicleDetectedNearCameraRule
 from .suppression import (
+    SUPPRESSION_REASON_NOT_SUPPRESSED,
     SUPPRESSION_REASON_POLICY_BLOCKED,
     SUPPRESSION_REASON_TRIAGE_SUPPRESSED,
     SuppressionManager,
@@ -1169,7 +1170,7 @@ class SentinelEngine:
             snapshot,
             compound,
             explanation,
-            "not_suppressed",
+            SUPPRESSION_REASON_NOT_SUPPRESSED,
             triage_decision=None,
             triage_reason_code=None,
             triage_confidence=None,

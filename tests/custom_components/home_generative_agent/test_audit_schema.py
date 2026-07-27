@@ -448,6 +448,125 @@ async def test_eviction_priority_spares_not_suppressed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_migration_relabels_mislabeled_downstream_suppressed_records() -> None:
+    """Old not_suppressed records that were triage-suppressed or policy-blocked are relabeled."""
+    triage_suppressed = _record_with_code("t1", "not_suppressed")
+    triage_suppressed["triage_decision"] = "suppress"
+    triage_suppressed["version"] = 2
+
+    policy_blocked = _record_with_code("p1", "not_suppressed")
+    policy_blocked["action_policy_path"] = "blocked"
+    policy_blocked["version"] = 2
+
+    genuinely_notified = _record_with_code("n1", "not_suppressed")
+    genuinely_notified["triage_decision"] = "notify"
+    genuinely_notified["action_policy_path"] = "notify_only"
+    genuinely_notified["version"] = 2
+
+    gate_suppressed = _record_with_code("g1", "type_cooldown")
+    gate_suppressed["version"] = 2
+
+    assert (
+        _migrate_record(triage_suppressed)["suppression_reason_code"]
+        == "triage_suppressed"
+    )
+    assert (
+        _migrate_record(policy_blocked)["suppression_reason_code"] == "policy_blocked"
+    )
+    assert (
+        _migrate_record(genuinely_notified)["suppression_reason_code"]
+        == "not_suppressed"
+    )
+    assert (
+        _migrate_record(gate_suppressed)["suppression_reason_code"] == "type_cooldown"
+    )
+
+    # Idempotent: a second migration pass changes nothing.
+    assert (
+        _migrate_record(triage_suppressed)["suppression_reason_code"]
+        == "triage_suppressed"
+    )
+
+
+@pytest.mark.asyncio
+async def test_update_response_prefers_not_suppressed_record() -> None:
+    """A response lands on the newest not_suppressed record, not a newer suppressed one."""
+    store = _make_store()
+    notified = _record_with_code("dup1", "not_suppressed")
+    shadowing = _record_with_code("dup1", "triage_suppressed")
+    store._records = [notified, shadowing]
+
+    await store.async_update_response(
+        anomaly_id="dup1",
+        response={"action": "dismiss", "false_positive": True},
+        outcome=None,
+    )
+
+    assert notified["user_response"] == {"action": "dismiss", "false_positive": True}
+    assert shadowing["user_response"] is None
+
+
+@pytest.mark.asyncio
+async def test_update_response_prefers_unknown_code_over_suppressed() -> None:
+    """A v1 record (no reason code) is preferred over an explicitly suppressed one."""
+    store = _make_store()
+    v1_notified = _record_with_code("dup3", None)
+    shadowing = _record_with_code("dup3", "triage_suppressed")
+    store._records = [v1_notified, shadowing]
+
+    await store.async_update_response(
+        anomaly_id="dup3",
+        response={"action": "dismiss"},
+        outcome=None,
+    )
+
+    assert v1_notified["user_response"] == {"action": "dismiss"}
+    assert shadowing["user_response"] is None
+
+
+@pytest.mark.asyncio
+async def test_update_response_falls_back_to_newest_match() -> None:
+    """With no not_suppressed match, the response lands on the newest match."""
+    store = _make_store()
+    older = _record_with_code("dup2", "triage_suppressed")
+    newer = _record_with_code("dup2", "policy_blocked")
+    store._records = [older, newer]
+
+    await store.async_update_response(
+        anomaly_id="dup2",
+        response={"action": "dismiss"},
+        outcome=None,
+    )
+
+    assert newer["user_response"] == {"action": "dismiss"}
+    assert older["user_response"] is None
+
+
+@pytest.mark.asyncio
+async def test_eviction_treats_downstream_suppression_codes_as_evictable() -> None:
+    """triage_suppressed and policy_blocked records are evicted before user-facing ones."""
+    store = _make_store()
+    store._max_records = 3
+    store._records = [
+        _record_with_code("ts1", "triage_suppressed"),
+        _record_with_code("ns1", "not_suppressed"),
+        _record_with_code("pb1", "policy_blocked"),
+        _record_with_code("ns2", "not_suppressed"),  # triggers eviction
+    ]
+    store._evict_one()
+    assert len(store._records) == 3
+    ids = [r["finding"]["anomaly_id"] for r in store._records]
+    # Oldest downstream-suppressed record (ts1) evicted first; user-facing survive.
+    assert ids == ["ns1", "pb1", "ns2"]
+
+    store._records.append(_record_with_code("ns3", "not_suppressed"))
+    store._evict_one()
+    ids = [r["finding"]["anomaly_id"] for r in store._records]
+    # Next eviction drops pb1, still sparing every not_suppressed record.
+    assert ids == ["ns1", "ns2", "ns3"]
+
+
+@pytest.mark.asyncio
 async def test_eviction_last_resort_when_all_not_suppressed() -> None:
     """When every record is not_suppressed, the oldest is evicted as last resort."""
     store = _make_store()

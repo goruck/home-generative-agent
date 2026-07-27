@@ -73,6 +73,28 @@ def _is_evictable(record: dict[str, Any]) -> bool:
     return record.get("suppression_reason_code") != "not_suppressed"
 
 
+def _relabel_downstream_suppressed(record: dict[str, Any]) -> dict[str, Any]:
+    """
+    Relabel records mislabeled ``not_suppressed`` before the reason-code fix.
+
+    Findings suppressed by LLM triage or blocked by execution policy were
+    historically audited as ``not_suppressed`` even though they never reached
+    the user, making them permanently non-evictable and inflating notified
+    KPIs.  A genuinely notified record can never carry
+    ``triage_decision == "suppress"`` or ``action_policy_path == "blocked"``
+    (both engine branches return before notifying), so the relabel is
+    deterministic.  Idempotent; runs on every load because affected records
+    are already ``version: 2``.
+    """
+    if record.get("suppression_reason_code") != "not_suppressed":
+        return record
+    if record.get("triage_decision") == "suppress":
+        record["suppression_reason_code"] = "triage_suppressed"
+    elif record.get("action_policy_path") == "blocked":
+        record["suppression_reason_code"] = "policy_blocked"
+    return record
+
+
 def _migrate_record(record: dict[str, Any]) -> dict[str, Any]:
     """Backfill missing v2 fields into a raw record dict (in-place, returns it)."""
     record_version = record.get("version", 1)
@@ -80,7 +102,7 @@ def _migrate_record(record: dict[str, Any]) -> dict[str, Any]:
         for field_name, default in _V2_FIELD_DEFAULTS.items():
             record.setdefault(field_name, default)
         record["version"] = 2
-    return record
+    return _relabel_downstream_suppressed(record)
 
 
 class AuditStore:
@@ -191,18 +213,41 @@ class AuditStore:
         by any ``finding.constituent_findings[].anomaly_id``, since compound
         notifications are dispatched using the highest-confidence constituent's
         anomaly_id.
+
+        Prefers the newest ``not_suppressed`` match: ``anomaly_id`` is a stable
+        content hash, so a re-fired finding that was suppressed downstream
+        (triage/policy) can produce a newer record with the same id.  User
+        responses always originate from a notification, which only
+        ``not_suppressed`` records represent; landing the response there keeps
+        it KPI-visible and eviction-protected.  Records missing the reason
+        code (v1) may have been notified, so they are preferred over records
+        explicitly marked suppressed.  Falls back to the newest match of any
+        kind so responses are never dropped.
         """
+        notified_match: dict[str, Any] | None = None
+        unknown_match: dict[str, Any] | None = None
+        suppressed_match: dict[str, Any] | None = None
         for record in reversed(self._records):
             finding = record.get("finding", {})
             if finding.get("anomaly_id") == anomaly_id or any(
                 cf.get("anomaly_id") == anomaly_id
                 for cf in finding.get("constituent_findings", [])
             ):
-                record["user_response"] = response
-                record["action_outcome"] = outcome
-                record.setdefault("notification", {})["responded_at"] = _now_iso()
-                await self.async_save()
-                return
+                reason_code = record.get("suppression_reason_code")
+                if reason_code == "not_suppressed":
+                    notified_match = record
+                    break
+                if reason_code is None:
+                    unknown_match = unknown_match or record
+                else:
+                    suppressed_match = suppressed_match or record
+        match = notified_match or unknown_match or suppressed_match
+        if match is None:
+            return
+        match["user_response"] = response
+        match["action_outcome"] = outcome
+        match.setdefault("notification", {})["responded_at"] = _now_iso()
+        await self.async_save()
 
     async def async_get_latest(self, limit: int) -> list[dict[str, Any]]:
         """Return the latest audit records, newest first."""

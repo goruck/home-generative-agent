@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -23,10 +23,19 @@ from custom_components.home_generative_agent.sentinel.engine import SentinelEngi
 from custom_components.home_generative_agent.sentinel.execution import (
     ActionPolicyResult,
 )
-from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
+from custom_components.home_generative_agent.sentinel.models import (
+    AnomalyFinding,
+    CompoundFinding,
+)
 from custom_components.home_generative_agent.sentinel.suppression import (
+    SUPPRESSION_REASON_POLICY_BLOCKED,
+    SUPPRESSION_REASON_TRIAGE_SUPPRESSED,
     SuppressionManager,
     SuppressionState,
+)
+from custom_components.home_generative_agent.sentinel.triage import (
+    TRIAGE_SUPPRESS,
+    TriageDecision,
 )
 from custom_components.home_generative_agent.snapshot.schema import (
     FullStateSnapshot,
@@ -85,6 +94,8 @@ class DummyAudit:
                 "finding": finding,
                 "snapshot": snapshot,
                 "suppression_reason_code": kwargs.get("suppression_reason_code"),
+                "triage_decision": kwargs.get("triage_decision"),
+                "triage_reason_code": kwargs.get("triage_reason_code"),
                 "canary_would_execute": kwargs.get("canary_would_execute"),
                 "action_policy_path": kwargs.get("action_policy_path"),
                 "action_outcome": kwargs.get("action_outcome"),
@@ -685,6 +696,90 @@ async def test_blocked_finding_creates_audit_record(
         await engine._run_once("poll")
 
     assert len(audit.calls) == 1
+    assert audit.calls[0]["action_policy_path"] == ACTION_POLICY_BLOCKED
+    assert (
+        audit.calls[0]["suppression_reason_code"] == SUPPRESSION_REASON_POLICY_BLOCKED
+    )
+
+
+@pytest.mark.asyncio
+async def test_triage_suppressed_finding_audit_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A triage-suppressed finding must audit as triage_suppressed, not notify."""
+    snapshot = _make_snapshot()
+    engine, notifier, audit = _make_engine(monkeypatch, snapshot, cooldown_minutes=0)
+
+    triage_service = MagicMock()
+    triage_service.triage = AsyncMock(
+        return_value=TriageDecision(
+            decision=TRIAGE_SUPPRESS,
+            reason_code="routine_state",
+            triage_confidence=0.9,
+            summary="routine",
+        )
+    )
+    cast("Any", engine)._triage_service = triage_service
+
+    await engine._run_once("poll")
+
+    assert len(notifier.calls) == 0
+    assert len(audit.calls) == 1
+    assert (
+        audit.calls[0]["suppression_reason_code"]
+        == SUPPRESSION_REASON_TRIAGE_SUPPRESSED
+    )
+    assert audit.calls[0]["triage_decision"] == TRIAGE_SUPPRESS
+    assert audit.calls[0]["triage_reason_code"] == "routine_state"
+
+
+@pytest.mark.asyncio
+async def test_compound_blocked_finding_audit_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A BLOCKED compound finding must audit as policy_blocked, not notify."""
+    snapshot = _make_snapshot()
+    engine, notifier, audit = _make_engine(monkeypatch, snapshot, cooldown_minutes=0)
+
+    finding = AnomalyFinding(
+        anomaly_id="test-compound-1",
+        type="unlocked_lock_at_night",
+        severity="high",
+        confidence=0.9,
+        triggering_entities=["lock.front_door"],
+        evidence={"state": "unlocked"},
+        suggested_actions=["lock.lock"],
+        is_sensitive=False,
+    )
+    compound = CompoundFinding.from_findings([finding])
+
+    blocked_result = ActionPolicyResult(
+        action_policy_path=ACTION_POLICY_BLOCKED,
+        data_quality="unavailable",
+        data_quality_details={},
+        execution_id=None,
+        block_reason="data_quality_unavailable",
+    )
+
+    with patch.object(
+        cast("Any", engine)._execution_service,
+        "evaluate_canary",
+        return_value=blocked_result,
+    ):
+        await engine._dispatch_compound(
+            compound,
+            snapshot,
+            datetime.now(UTC),
+            timedelta(minutes=0),
+            timedelta(minutes=0),
+            False,  # noqa: FBT003
+        )
+
+    assert len(notifier.calls) == 0
+    assert len(audit.calls) == 1
+    assert (
+        audit.calls[0]["suppression_reason_code"] == SUPPRESSION_REASON_POLICY_BLOCKED
+    )
     assert audit.calls[0]["action_policy_path"] == ACTION_POLICY_BLOCKED
 
 

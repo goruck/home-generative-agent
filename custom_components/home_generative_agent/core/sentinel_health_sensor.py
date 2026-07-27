@@ -163,6 +163,13 @@ def _compute_trigger_source_breakdown(
     cutoff_24h = datetime.now(UTC) - timedelta(hours=24)
     counts: dict[str, int] = dict.fromkeys(_TRIGGER_SOURCE_KEYS, 0)
     for r in records:
+        # notified_at is stamped on every audit record, including suppressed
+        # ones — the reason code is what distinguishes actual notifications.
+        # Records missing the code (v1) pass through; they carry no
+        # trigger_source either, so they cannot skew the counts.
+        reason_code = r.get("suppression_reason_code")
+        if reason_code is not None and reason_code != "not_suppressed":
+            continue
         notified_at_str = r.get("notification", {}).get("notified_at")
         if not notified_at_str:
             continue
