@@ -20,6 +20,7 @@ SUPPORTED_TEMPLATES = {
     "open_any_window_at_night_while_away",
     "open_entry_when_home",
     "open_entry_while_away",
+    "open_entry_at_night",
     "open_entry_at_night_when_home",
     "open_entry_at_night_while_away",
     "unlocked_lock_when_home",
@@ -81,14 +82,10 @@ _MAX_PERCENT = 100.0
 _DEFAULT_DURATION_HOURS = 2.0
 _DEFAULT_STALE_HOURS = 24.0
 _MIN_MULTI_ENTRY_COUNT = 2
-_DURATION_TERMS = (
-    "duration",
-    "extended",
-    "prolonged",
-    "for",
-    "since",
-    "hours",
-    "long",
+# Word-bounded so "before"/"forecast" don't match "for", "along" doesn't
+# match "long" (issue #504 adversarial review).
+_DURATION_TERMS_PATTERN = re.compile(
+    r"\b(?:duration|extended|prolonged|for|since|long)\b"
 )
 _STALENESS_TERMS = (
     "stale",
@@ -159,6 +156,34 @@ _HOME_TERMS = (
     "occupants",
     "residents",
 )
+_ENTRY_ID_TOKENS = ("door", "window", "entry")
+# Word-bounded so "indoor", "outdoor", and "doorbell" don't read as entries.
+_ENTRY_TEXT_PATTERN = re.compile(r"\b(?:doors?|windows?|entry|entries)\b")
+_WINDOW_TEXT_PATTERN = re.compile(r"\bwindows?\b")
+_DOOR_TEXT_PATTERN = re.compile(r"\bdoors?\b")
+# Entity-ID tokens that disqualify a binary_sensor/cover from the text-driven
+# entry fallback — these are sensor kinds that commonly appear alongside entry
+# candidates but are never door/window contacts themselves. ("co"/"carbon
+# monoxide" tokens are deliberately absent: "co" is a substring of "contact".)
+_NON_ENTRY_ID_TOKENS = (
+    "motion",
+    "vmd",
+    "battery",
+    "occupancy",
+    "presence",
+    "smoke",
+    "gas",
+    "leak",
+    "moisture",
+    "flood",
+    "tamper",
+    "vibration",
+    "carbon",
+    "safety",
+)
+# Quote characters the discovery LLM sometimes wraps around entity IDs inside
+# evidence paths, e.g. entities[entity_ids contains 'binary_sensor.x'].state.
+_EVIDENCE_QUOTE_CHARS = "'\"`"
 
 
 @dataclass(frozen=True)
@@ -216,6 +241,16 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
     lock_ids = _find_entity_ids(evidence_paths, "lock")
     alarm_id = _find_entity_id(evidence_paths, "alarm_control_panel")
     entry_ids = _find_entry_entity_ids(evidence_paths)
+    entry_ids_from_text = False
+    if not entry_ids and not lock_ids and alarm_id is None:
+        # Entity IDs follow the user's locale (e.g. Czech "okno" for window),
+        # so keyword matching on the ID can miss real entry sensors. The
+        # candidate text is always English — fall back to it (issue #504).
+        # Skipped when lock/alarm entities resolved: lock candidates routinely
+        # say "door" ("front door lock"), and a promoted non-entry sensor
+        # would defeat the `not entry_ids` guards on those branches.
+        entry_ids = _find_text_entry_entity_ids(evidence_paths, text)
+        entry_ids_from_text = bool(entry_ids)
     motion_ids = _find_motion_entity_ids(evidence_paths)
     person_ids = _find_entity_ids(evidence_paths, "person")
     sensor_ids = _find_sensor_entity_ids(evidence_paths)
@@ -223,7 +258,9 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
     camera_id = _find_camera_id(evidence_paths, candidate)
     has_night = _has_night_signal(evidence_paths, text)
     presence = _presence_signal(evidence_paths, text)
-    entry_kind = _entry_kind(entry_ids)
+    # Text-derived kind only for text-derived entry IDs — keyword-derived IDs
+    # keep their historical rule_id suffixes for registry stability.
+    entry_kind = _entry_kind(entry_ids, text if entry_ids_from_text else "")
     has_unknown_person_signal = _contains_any(text, _UNKNOWN_TERMS) and _contains_any(
         text, _PERSON_TERMS
     )
@@ -510,6 +547,18 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     candidate,
                     "open_entry_at_night_when_home",
                     f"open_entry_at_night_when_home_{entry_kind}",
+                    entry_ids,
+                )
+            )
+        if has_night:
+            # presence == "any": night is explicit but occupancy direction is
+            # unknown — use the presence-agnostic night template so the rule
+            # fires whether or not anyone is home (issue #504).
+            return NormalizationResult(
+                normalized=_build_entry_rule(
+                    candidate,
+                    "open_entry_at_night",
+                    f"open_entry_at_night_{entry_kind}",
                     entry_ids,
                 )
             )
@@ -899,12 +948,17 @@ def _extract_entity_id_from_evidence_path(path: str) -> str | None:
     - ``entities[entity_id=domain.object_id]`` (snapshot query format)
     - ``entities[entity_ids contains domain.object_id].attr`` (discovery format)
     - ``domain.object_id`` or ``domain.object_id.attribute`` (dot-notation)
+
+    Entity IDs may be wrapped in quotes (LLM output variance); quotes are
+    stripped before the ID is returned.
     """
     if path.startswith("entities[entity_id="):
-        return path.split("entities[entity_id=", 1)[1].split("]", 1)[0]
+        token = path.split("entities[entity_id=", 1)[1].split("]", 1)[0]
+        return token.strip(_EVIDENCE_QUOTE_CHARS) or None
     if path.startswith("entities[entity_ids contains "):
-        return path.split("entities[entity_ids contains ", 1)[1].split("]", 1)[0]
-    m = _DOT_NOTATION_ENTITY_PATTERN.match(path)
+        token = path.split("entities[entity_ids contains ", 1)[1].split("]", 1)[0]
+        return token.strip(_EVIDENCE_QUOTE_CHARS) or None
+    m = _DOT_NOTATION_ENTITY_PATTERN.match(path.strip(_EVIDENCE_QUOTE_CHARS))
     if m:
         entity_id = m.group(1)
         domain = entity_id.split(".", 1)[0]
@@ -939,14 +993,40 @@ def _find_entry_entity_ids(evidence_paths: list[str]) -> list[str]:
         if "." not in entity_id:
             # Object ID without domain — check for entry keywords and accept
             # as-is (same tolerant pattern used by _find_sensor_entity_ids).
-            if any(key in entity_id for key in ("door", "window", "entry")):
+            if any(key in entity_id for key in _ENTRY_ID_TOKENS):
                 ids.append(entity_id)
             continue
         domain = entity_id.split(".", 1)[0]
         if domain not in {"binary_sensor", "cover"}:
             continue
-        if any(key in entity_id for key in ("door", "window", "entry")):
+        if any(key in entity_id for key in _ENTRY_ID_TOKENS):
             ids.append(entity_id)
+    return sorted(set(ids))
+
+
+def _find_text_entry_entity_ids(evidence_paths: list[str], text: str) -> list[str]:
+    """
+    Fallback entry detection for entity IDs without English entry keywords.
+
+    Entity IDs are named in the user's locale (e.g. Czech ``okno`` for
+    window), so ``_find_entry_entity_ids`` keyword matching can miss real
+    entry sensors. The discovery LLM's candidate text is always English, so
+    when the text names a door/window/entry, promote binary_sensor/cover
+    evidence IDs that are not some other recognizable sensor kind.
+    """
+    if not _ENTRY_TEXT_PATTERN.search(text):
+        return []
+    ids: list[str] = []
+    for path in evidence_paths:
+        entity_id = _extract_entity_id_from_evidence_path(path)
+        if entity_id is None or "." not in entity_id:
+            continue
+        domain = entity_id.split(".", 1)[0]
+        if domain not in {"binary_sensor", "cover"}:
+            continue
+        if any(token in entity_id for token in _NON_ENTRY_ID_TOKENS):
+            continue
+        ids.append(entity_id)
     return sorted(set(ids))
 
 
@@ -1034,10 +1114,16 @@ def _presence_signal(evidence_paths: list[str], text: str) -> str:
     return "any"
 
 
-def _entry_kind(entry_ids: list[str]) -> str:
+def _entry_kind(entry_ids: list[str], text: str = "") -> str:
     if any("window" in entity_id for entity_id in entry_ids):
         return "window"
     if any("door" in entity_id for entity_id in entry_ids):
+        return "door"
+    # Locale-named entity IDs carry no English kind token — fall back to the
+    # candidate text (callers pass it only for text-derived entry IDs).
+    if _WINDOW_TEXT_PATTERN.search(text):
+        return "window"
+    if _DOOR_TEXT_PATTERN.search(text):
         return "door"
     return "entry"
 
@@ -1047,13 +1133,18 @@ def _find_camera_id(  # noqa: PLR0911
 ) -> str | None:
     for path in evidence_paths:
         if path.startswith("camera_activity[entity_id="):
-            return path.split("camera_activity[entity_id=", 1)[1].split("]", 1)[0]
+            token = path.split("camera_activity[entity_id=", 1)[1].split("]", 1)[0]
+            return token.strip(_EVIDENCE_QUOTE_CHARS) or None
         if path.startswith("camera_activity[camera_entity_id="):
-            return path.split("camera_activity[camera_entity_id=", 1)[1].split("]", 1)[
+            token = path.split("camera_activity[camera_entity_id=", 1)[1].split("]", 1)[
                 0
             ]
-        if path.startswith("entities[entity_id=camera."):
-            return path.split("entities[entity_id=", 1)[1].split("]", 1)[0]
+            return token.strip(_EVIDENCE_QUOTE_CHARS) or None
+        if path.startswith(
+            ("entities[entity_id=camera.", "entities[entity_id='camera.")
+        ):
+            token = path.split("entities[entity_id=", 1)[1].split("]", 1)[0]
+            return token.strip(_EVIDENCE_QUOTE_CHARS) or None
     candidate_id = candidate.get("candidate_id")
     if not isinstance(candidate_id, str):
         return None
@@ -1121,7 +1212,11 @@ def _extract_alarm_state(text: str) -> str | None:
 
 
 def _has_duration_signal(text: str) -> bool:
-    return _contains_any(text, _DURATION_TERMS)
+    if _DURATION_TERMS_PATTERN.search(text):
+        return True
+    # Bare "hours" counts only with a numeric threshold ("2 hours") — phrases
+    # like "during night hours" are time-of-day context, not a duration.
+    return _HOURS_THRESHOLD_PATTERN.search(text) is not None
 
 
 def _has_staleness_signal(text: str) -> bool:
