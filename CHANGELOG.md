@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.21.1] - 2026-07-27
+
+### Fixed
+
+- **Sentinel audit history no longer fills up with findings you never saw** — findings filtered out by LLM triage or blocked by the execution policy were recorded in the audit trail as if they had been notified. The audit store protects notified records from eviction, so during busy periods the hot buffer could fill with this invisible noise and push out genuine alert history; the same mislabeling inflated the "notified" health-sensor KPIs and daily digest counts. These findings now get their own reason codes (`triage_suppressed`, `policy_blocked`), records stored before this fix are relabeled automatically on load, user responses (dismiss / false-positive taps) attach to the record that actually produced the notification instead of a newer suppressed duplicate, and the trigger-source health breakdown counts only real notifications. Notified-KPI values and digest counts may show a one-time corrective drop after upgrading. Reported and fixed by [@hruba202](https://github.com/hruba202) in [#511](https://github.com/goruck/home-generative-agent/pull/511).
+
 ## [3.21.0] - 2026-07-26
 
 ### Added
