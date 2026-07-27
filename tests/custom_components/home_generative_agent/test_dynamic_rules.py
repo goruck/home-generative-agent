@@ -1108,3 +1108,80 @@ def test_dynamic_rule_entry_accepts_cover_open_state(
     ]
     findings = evaluate_dynamic_rules(snapshot, rules)
     assert len(findings) == expected_findings
+
+
+@pytest.mark.parametrize(
+    ("cover_state", "expected_findings"),
+    [("open", 1), ("closed", 0)],
+)
+def test_dynamic_rule_entity_state_duration_accepts_cover_open(
+    cover_state: str, expected_findings: int
+) -> None:
+    """Codex P1: duration rules with target 'on' must match a cover's 'open'."""
+    snapshot = _snapshot(
+        [
+            _base_entity("cover.rolety_loznice", "cover", cover_state),
+        ],
+        [],
+        {
+            "now": "2026-02-01T06:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": False,
+            "anyone_home": True,
+            "people_home": [],
+            "people_away": [],
+            "last_motion_by_area": {},
+        },
+    )
+    rules = [
+        {
+            "rule_id": "cover_open_duration",
+            "template_id": "entity_state_duration",
+            "params": {
+                "entity_id": "cover.rolety_loznice",
+                "target_state": "on",
+                "threshold_hours": 2.0,
+            },
+            "severity": "medium",
+            "confidence": 0.7,
+            "is_sensitive": False,
+            "suggested_actions": ["close_entry"],
+        }
+    ]
+    findings = evaluate_dynamic_rules(snapshot, rules)
+    assert len(findings) == expected_findings
+
+
+def test_dynamic_rule_entity_state_duration_lock_target_unchanged() -> None:
+    """Non-'on' targets keep exact matching — 'open' must not match 'unlocked'."""
+    snapshot = _snapshot(
+        [
+            _base_entity("lock.front_door", "lock", "open"),
+        ],
+        [],
+        {
+            "now": "2026-02-01T06:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": False,
+            "anyone_home": True,
+            "people_home": [],
+            "people_away": [],
+            "last_motion_by_area": {},
+        },
+    )
+    rules = [
+        {
+            "rule_id": "lock_unlocked_duration",
+            "template_id": "entity_state_duration",
+            "params": {
+                "entity_id": "lock.front_door",
+                "target_state": "unlocked",
+                "threshold_hours": 2.0,
+            },
+            "severity": "medium",
+            "confidence": 0.7,
+            "is_sensitive": True,
+            "suggested_actions": ["lock.lock"],
+        }
+    ]
+    assert evaluate_dynamic_rules(snapshot, rules) == []

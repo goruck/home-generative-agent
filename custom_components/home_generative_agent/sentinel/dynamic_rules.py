@@ -792,7 +792,14 @@ def _eval_entity_state_duration(
     if not entity_id or not target_state:
         return []
     entity = entity_map.get(entity_id)
-    if not entity or entity.get("state") != target_state:
+    if not entity:
+        return []
+    state = entity.get("state")
+    # Target "on" also matches covers, which report "open" for the same
+    # physical condition (issue #504 Codex review).
+    if state != target_state and not (
+        target_state == "on" and state in _OPEN_ENTRY_STATES
+    ):
         return []
     now = dt_util.parse_datetime(snapshot["derived"]["now"]) or dt_util.utcnow()
     last_changed = dt_util.parse_datetime(str(entity.get("last_changed") or ""))

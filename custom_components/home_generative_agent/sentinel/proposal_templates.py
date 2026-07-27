@@ -87,6 +87,12 @@ _MIN_MULTI_ENTRY_COUNT = 2
 _DURATION_TERMS_PATTERN = re.compile(
     r"\b(?:duration|extended|prolonged|for|since|long)\b"
 )
+# Qualitative hours phrases ("many hours", "several hours") are durations even
+# without a digit; bare "night hours"/"daytime hours" phrasing is not.
+_QUALITATIVE_HOURS_PATTERN = re.compile(
+    r"\b(?:many|several|(?:a\s+)?few|(?:a\s+)?couple(?:\s+of)?)\s+(?:hour|hr)s?\b",
+    re.IGNORECASE,
+)
 _STALENESS_TERMS = (
     "stale",
     "not updated",
@@ -1140,11 +1146,11 @@ def _find_camera_id(  # noqa: PLR0911
                 0
             ]
             return token.strip(_EVIDENCE_QUOTE_CHARS) or None
-        if path.startswith(
-            ("entities[entity_id=camera.", "entities[entity_id='camera.")
-        ):
+        if path.startswith("entities[entity_id="):
             token = path.split("entities[entity_id=", 1)[1].split("]", 1)[0]
-            return token.strip(_EVIDENCE_QUOTE_CHARS) or None
+            token = token.strip(_EVIDENCE_QUOTE_CHARS)
+            if token.startswith("camera."):
+                return token
     candidate_id = candidate.get("candidate_id")
     if not isinstance(candidate_id, str):
         return None
@@ -1214,8 +1220,11 @@ def _extract_alarm_state(text: str) -> str | None:
 def _has_duration_signal(text: str) -> bool:
     if _DURATION_TERMS_PATTERN.search(text):
         return True
-    # Bare "hours" counts only with a numeric threshold ("2 hours") — phrases
-    # like "during night hours" are time-of-day context, not a duration.
+    # Bare "hours" counts only with a numeric ("2 hours") or qualitative
+    # ("many hours") quantifier — phrases like "during night hours" are
+    # time-of-day context, not a duration.
+    if _QUALITATIVE_HOURS_PATTERN.search(text):
+        return True
     return _HOURS_THRESHOLD_PATTERN.search(text) is not None
 
 

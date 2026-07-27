@@ -8,6 +8,7 @@ from custom_components.home_generative_agent.sentinel.proposal_templates import 
     _extract_entity_id_from_evidence_path,
     _extract_threshold_numeric,
     _find_battery_sensor_entity_ids,
+    _find_camera_id,
     _find_entry_entity_ids,
     _find_sensor_entity_ids,
     _find_text_entry_entity_ids,
@@ -1628,3 +1629,20 @@ def test_duration_terms_are_word_bounded() -> None:
     assert not _has_duration_signal("moving along the hallway")
     assert _has_duration_signal("open for a while")
     assert _has_duration_signal("unlocked since sunset")
+
+
+def test_qualitative_hours_still_count_as_duration() -> None:
+    """Codex P2: 'many hours'/'several hours' are durations; 'night hours' is not."""
+    assert _has_duration_signal("window remained open many hours")
+    assert _has_duration_signal("door left open several hours")
+    assert _has_duration_signal("open a couple of hours")
+    assert not _has_duration_signal("window opened during night hours")
+
+
+def test_find_camera_id_accepts_all_quote_styles() -> None:
+    """Codex P2: double-quoted and backticked camera evidence paths resolve."""
+    for quote in ("", "'", '"', "`"):
+        candidate = {"candidate_id": "cam_check"}
+        paths = [f"entities[entity_id={quote}camera.front_porch{quote}].state"]
+        assert _find_camera_id(paths, candidate) == "camera.front_porch"
+    assert _find_camera_id(['entities[entity_id="sensor.foo"].state'], {}) is None
