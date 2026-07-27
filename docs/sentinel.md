@@ -470,7 +470,7 @@ Unsupported proposals never acted on are automatically removed after 30 days.
 | Alarm disarmed with no occupancy signal | `alarm_state_mismatch` with `expected_presence="home"` |
 | `armed_home` / `armed_night` with home presence | Rejected — these modes are designed for occupancy |
 | Window/entry open duration without entity IDs | Falls back to `open_any_window_at_night_while_away` |
-| Door/window candidate whose entity IDs carry no English `door`/`window`/`entry` token (locale-named IDs, e.g. Czech `okno`) | When the candidate's English text names a door or window, `binary_sensor`/`cover` evidence entities are promoted to entry sensors — word-bounded so "indoor"/"doorbell" don't match, and safety-sensor kinds (smoke, gas, leak, tamper, motion, …) are never promoted. Lock and alarm candidates keep their original routing |
+| Door/window candidate whose entity IDs carry no English `door`/`window`/`entry` token (locale-named IDs, e.g. Czech `okno`) | When the candidate's English text names a door or window, `binary_sensor`/`cover` evidence entities are promoted to entry sensors — word-bounded so "indoor"/"doorbell" don't match, and sensor kinds that are never door/window contacts (motion, occupancy, presence, smoke, gas, leak, battery, tamper, …) are never promoted. Lock and alarm candidates keep their original routing |
 | Night-time entry candidate with unknown occupancy | Routes to `open_entry_at_night` (presence-agnostic) instead of `open_entry_while_away` |
 
 ### Configuring Discovery
