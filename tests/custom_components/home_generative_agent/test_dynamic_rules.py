@@ -1000,3 +1000,188 @@ async def test_rule_registry_patch_params(hass) -> None:
 
     # patching a non-existent rule returns False
     assert not await registry.async_patch_rule_params("no_such_rule", {"threshold": 5})
+
+
+@pytest.mark.parametrize("anyone_home", [True, False])
+def test_dynamic_rule_open_entry_at_night_fires_regardless_of_presence(
+    anyone_home: bool,  # noqa: FBT001
+) -> None:
+    """Issue #504: presence-agnostic night template fires whether home or away."""
+    snapshot = _snapshot(
+        [
+            _base_entity("binary_sensor.bedroom_loznice_okno", "binary_sensor", "on"),
+        ],
+        [],
+        {
+            "now": "2026-02-01T00:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": True,
+            "anyone_home": anyone_home,
+            "people_home": [],
+            "people_away": [],
+            "last_motion_by_area": {},
+        },
+    )
+    rules = [
+        {
+            "rule_id": "open_entry_at_night_window",
+            "template_id": "open_entry_at_night",
+            "params": {"entry_entity_ids": ["binary_sensor.bedroom_loznice_okno"]},
+            "severity": "medium",
+            "confidence": 0.5,
+            "is_sensitive": True,
+            "suggested_actions": ["close_entry"],
+        }
+    ]
+    findings = evaluate_dynamic_rules(snapshot, rules)
+    assert len(findings) == 1
+    assert findings[0].type == "open_entry_at_night_window"
+    assert (
+        findings[0].evidence["entry_entity_id"] == "binary_sensor.bedroom_loznice_okno"
+    )
+
+
+def test_dynamic_rule_open_entry_at_night_no_finding_during_day() -> None:
+    """open_entry_at_night requires derived.is_night."""
+    snapshot = _snapshot(
+        [
+            _base_entity("binary_sensor.bedroom_loznice_okno", "binary_sensor", "on"),
+        ],
+        [],
+        {
+            "now": "2026-02-01T12:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": False,
+            "anyone_home": True,
+            "people_home": [],
+            "people_away": [],
+            "last_motion_by_area": {},
+        },
+    )
+    rules = [
+        {
+            "rule_id": "open_entry_at_night_window",
+            "template_id": "open_entry_at_night",
+            "params": {"entry_entity_ids": ["binary_sensor.bedroom_loznice_okno"]},
+            "severity": "medium",
+            "confidence": 0.5,
+            "is_sensitive": True,
+            "suggested_actions": ["close_entry"],
+        }
+    ]
+    assert evaluate_dynamic_rules(snapshot, rules) == []
+
+
+@pytest.mark.parametrize(
+    ("cover_state", "expected_findings"),
+    [("open", 1), ("closed", 0)],
+)
+def test_dynamic_rule_entry_accepts_cover_open_state(
+    cover_state: str, expected_findings: int
+) -> None:
+    """Covers report open/closed rather than on/off; open must count as open."""
+    snapshot = _snapshot(
+        [
+            _base_entity("cover.rolety_loznice", "cover", cover_state),
+        ],
+        [],
+        {
+            "now": "2026-02-01T00:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": True,
+            "anyone_home": True,
+            "people_home": [],
+            "people_away": [],
+            "last_motion_by_area": {},
+        },
+    )
+    rules = [
+        {
+            "rule_id": "open_entry_at_night_window",
+            "template_id": "open_entry_at_night",
+            "params": {"entry_entity_ids": ["cover.rolety_loznice"]},
+            "severity": "medium",
+            "confidence": 0.5,
+            "is_sensitive": True,
+            "suggested_actions": ["close_entry"],
+        }
+    ]
+    findings = evaluate_dynamic_rules(snapshot, rules)
+    assert len(findings) == expected_findings
+
+
+@pytest.mark.parametrize(
+    ("cover_state", "expected_findings"),
+    [("open", 1), ("closed", 0)],
+)
+def test_dynamic_rule_entity_state_duration_accepts_cover_open(
+    cover_state: str, expected_findings: int
+) -> None:
+    """Codex P1: duration rules with target 'on' must match a cover's 'open'."""
+    snapshot = _snapshot(
+        [
+            _base_entity("cover.rolety_loznice", "cover", cover_state),
+        ],
+        [],
+        {
+            "now": "2026-02-01T06:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": False,
+            "anyone_home": True,
+            "people_home": [],
+            "people_away": [],
+            "last_motion_by_area": {},
+        },
+    )
+    rules = [
+        {
+            "rule_id": "cover_open_duration",
+            "template_id": "entity_state_duration",
+            "params": {
+                "entity_id": "cover.rolety_loznice",
+                "target_state": "on",
+                "threshold_hours": 2.0,
+            },
+            "severity": "medium",
+            "confidence": 0.7,
+            "is_sensitive": False,
+            "suggested_actions": ["close_entry"],
+        }
+    ]
+    findings = evaluate_dynamic_rules(snapshot, rules)
+    assert len(findings) == expected_findings
+
+
+def test_dynamic_rule_entity_state_duration_lock_target_unchanged() -> None:
+    """Non-'on' targets keep exact matching — 'open' must not match 'unlocked'."""
+    snapshot = _snapshot(
+        [
+            _base_entity("lock.front_door", "lock", "open"),
+        ],
+        [],
+        {
+            "now": "2026-02-01T06:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": False,
+            "anyone_home": True,
+            "people_home": [],
+            "people_away": [],
+            "last_motion_by_area": {},
+        },
+    )
+    rules = [
+        {
+            "rule_id": "lock_unlocked_duration",
+            "template_id": "entity_state_duration",
+            "params": {
+                "entity_id": "lock.front_door",
+                "target_state": "unlocked",
+                "threshold_hours": 2.0,
+            },
+            "severity": "medium",
+            "confidence": 0.7,
+            "is_sensitive": True,
+            "suggested_actions": ["lock.lock"],
+        }
+    ]
+    assert evaluate_dynamic_rules(snapshot, rules) == []

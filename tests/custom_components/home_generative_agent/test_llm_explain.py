@@ -13,6 +13,7 @@ import pytest
 from custom_components.home_generative_agent.core.utils import SentinelLLMDeferredError
 from custom_components.home_generative_agent.explain.llm_explain import (
     LLMExplainer,
+    _friendly_type,
     _iso_to_relative,
     _relativize_timestamps,
 )
@@ -222,3 +223,14 @@ async def test_async_explain_returns_none_on_value_error() -> None:
     ):
         result = await explainer.async_explain(_finding())
     assert result is None
+
+
+def test_friendly_type_open_entry_at_night_variants() -> None:
+    """Issue #504: presence-agnostic night rule IDs get the clean entry label."""
+    for anomaly_type in (
+        "open_entry_at_night",
+        "open_entry_at_night_window",
+        "open_entry_at_night_door",
+        "open_entry_at_night_entry",
+    ):
+        assert _friendly_type(anomaly_type) == "Open entry at night"

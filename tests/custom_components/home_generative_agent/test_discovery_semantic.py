@@ -379,3 +379,24 @@ def test_rule_key_covers_candidate_key_non_template_no_cross_match() -> None:
         "|night=1|home=1|scope=any|entities=sensor.fridge_switch_0_power"
     )
     assert not rule_key_covers_candidate_key(rule_key, candidate_key)
+
+
+def test_candidate_semantic_key_strips_quoted_entity_ids() -> None:
+    """Quoted evidence-path entity IDs yield the same semantic key as unquoted."""
+    quoted = {
+        "candidate_id": "lock_unlocked_night",
+        "title": "Lock unlocked at night",
+        "summary": "The front lock is unlocked during the night.",
+        "evidence_paths": [
+            "entities[entity_ids contains 'lock.front_door'].state",
+            "derived.is_night",
+        ],
+    }
+    unquoted = {
+        **quoted,
+        "evidence_paths": [
+            "entities[entity_ids contains lock.front_door].state",
+            "derived.is_night",
+        ],
+    }
+    assert candidate_semantic_key(quoted) == candidate_semantic_key(unquoted)

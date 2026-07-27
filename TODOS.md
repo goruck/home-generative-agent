@@ -305,6 +305,20 @@
 
 ## Discovery
 
+### Use snapshot device_class as positive signal for text-driven entry fallback
+
+**What:** `_find_text_entry_entity_ids` (proposal_templates.py) promotes binary_sensor/cover evidence IDs to entry sensors via an English-token denylist (`_NON_ENTRY_ID_TOKENS`). The denylist is English-only, so a locale-named non-entry sensor (e.g. Czech `binary_sensor.pohyb_zahrada`, a motion sensor) can still be promoted when candidate text legitimately mentions a door/window. A positive signal — the snapshot entity's `device_class` in `{door, window, opening, garage_door}` — would be language-independent.
+
+**Why:** Flagged by both the security specialist and the adversarial review during the v3.21.0 ship (issue #504). Impact today is bounded to mislabeled proposals (rules require user approval and the evaluator is read-only), so the denylist shipped as the v3.21.0 mitigation. The structural fix needs the normalizer to receive snapshot context, which it currently doesn't.
+
+**How to apply:** Thread the current snapshot (or an `entity_id -> device_class` map) into `explain_normalize_candidate` from its `__init__.py` call sites; in `_find_text_entry_entity_ids`, prefer device_class membership when available and fall back to the denylist otherwise. Also surface resolved `entry_entity_ids` in the proposals card so users can see the entity binding before approving.
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** v3.21.0 (fix/sentinel-window-open-at-night-504)
+
+---
+
 ### Tighten discovery prompt to require entity-backed evidence paths
 
 **Completed:** v3.9.0 (2026-04-06)
@@ -475,6 +489,18 @@ WARNING per event that a window-scoped check could suppress.
 ---
 
 ## Notifier / Observability
+
+### Deduplicate the _friendly_type label maps
+
+**What:** `sentinel/notifier.py` and `explain/llm_explain.py` each carry a byte-identical `_friendly_type` `known` map (and matching prefix-stripping fallback). Every new anomaly type requires the same entries in both maps plus mirrored tests in `test_sentinel_notifier.py` and `test_llm_explain.py` — the v3.21.0 ship added the four `open_entry_at_night*` keys in four places. A missed side silently regresses user-visible labels to the title-cased fallback.
+
+**How to apply:** Extract the type→label map and the fallback prettifier into one shared helper module (e.g. `sentinel/labels.py` or `core/`), import it from both `notifier.py` and `llm_explain.py`, and collapse the duplicated tests into one suite against the shared module.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+---
 
 ### Feedback-trained per-entity cooldowns — wire feedback signal
 

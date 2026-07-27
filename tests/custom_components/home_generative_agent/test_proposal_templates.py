@@ -4,10 +4,15 @@
 from __future__ import annotations
 
 from custom_components.home_generative_agent.sentinel.proposal_templates import (
+    _entry_kind,
+    _extract_entity_id_from_evidence_path,
     _extract_threshold_numeric,
     _find_battery_sensor_entity_ids,
+    _find_camera_id,
     _find_entry_entity_ids,
     _find_sensor_entity_ids,
+    _find_text_entry_entity_ids,
+    _has_duration_signal,
     _presence_signal,
     explain_normalize_candidate,
     normalize_candidate,
@@ -1387,3 +1392,257 @@ def test_normalize_candidate_window_night_away_no_entry_ids_uses_selector() -> N
     assert normalized is not None
     assert normalized.template_id == "open_any_window_at_night_while_away"
     assert normalized.params["entry_selector"] == "window"
+
+
+# ---------------------------------------------------------------------------
+# Issue #504: localized entity IDs, quoted evidence paths, night+any presence
+# ---------------------------------------------------------------------------
+
+
+def test_extract_entity_id_strips_quotes() -> None:
+    """Quote-wrapped entity IDs in evidence paths resolve to clean IDs."""
+    assert (
+        _extract_entity_id_from_evidence_path(
+            "entities[entity_ids contains 'binary_sensor.bedroom_loznice_okno'].state"
+        )
+        == "binary_sensor.bedroom_loznice_okno"
+    )
+    assert (
+        _extract_entity_id_from_evidence_path('entities[entity_id="lock.front_door"]')
+        == "lock.front_door"
+    )
+    assert (
+        _extract_entity_id_from_evidence_path("'binary_sensor.front_door_contact'")
+        == "binary_sensor.front_door_contact"
+    )
+
+
+def test_normalize_candidate_issue_504_localized_window_at_night() -> None:
+    """Exact candidate from issue #504: Czech-named window sensor, quoted path."""
+    candidate = {
+        "candidate_id": "window_open_at_night",
+        "title": "Window Open Detected at Night",
+        "summary": "The bedroom window was opened during night hours.",
+        "pattern": "state_change",
+        "confidence_hint": 0.5,
+        "evidence_paths": [
+            "entities[entity_ids contains 'binary_sensor.bedroom_loznice_okno'].state",
+            "derived.is_night",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "open_entry_at_night"
+    assert normalized.rule_id == "open_entry_at_night_window"
+    assert normalized.params["entry_entity_ids"] == [
+        "binary_sensor.bedroom_loznice_okno"
+    ]
+    assert normalized.suggested_actions == ["close_entry"]
+
+
+def test_normalize_candidate_entry_night_any_presence_uses_night_template() -> None:
+    """Night entry candidate with unknown presence routes to open_entry_at_night."""
+    candidate = {
+        "candidate_id": "living_room_window_night",
+        "title": "Window Open at Night",
+        "summary": "The living room window is open during the night.",
+        "pattern": "state_change",
+        "confidence_hint": 0.6,
+        "evidence_paths": [
+            "entities[entity_id=binary_sensor.living_room_window].state",
+            "derived.is_night",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "open_entry_at_night"
+    assert normalized.rule_id == "open_entry_at_night_window"
+
+
+def test_normalize_candidate_text_entry_fallback_ignores_motion_sensors() -> None:
+    """Text fallback never promotes motion/battery-style binary sensors to entries."""
+    candidate = {
+        "candidate_id": "door_motion_night",
+        "title": "Door Area Motion at Night",
+        "summary": "Motion near the front door during the night.",
+        "pattern": "state_change",
+        "confidence_hint": 0.6,
+        "evidence_paths": [
+            "entities[entity_id=binary_sensor.hallway_motion].state",
+            "derived.is_night",
+        ],
+    }
+    result = explain_normalize_candidate(candidate)
+    assert result.normalized is None
+    assert result.reason_code == "missing_required_entities"
+
+
+def test_normalize_candidate_night_hours_text_is_not_a_duration_signal() -> None:
+    """Phrasing like 'during night hours' must not route to entity_state_duration."""
+    candidate = {
+        "candidate_id": "window_open_at_night_english",
+        "title": "Window Open Detected at Night",
+        "summary": "The bedroom window was opened during night hours.",
+        "pattern": "state_change",
+        "confidence_hint": 0.5,
+        "evidence_paths": [
+            "entities[entity_id=binary_sensor.bedroom_window].state",
+            "derived.is_night",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "open_entry_at_night"
+
+
+def test_has_duration_signal_numeric_hours_still_counts() -> None:
+    """Regression: a numeric hours threshold alone is still a duration signal."""
+    # "2 hours" with no other duration term must keep routing to duration.
+    assert _has_duration_signal("window open more than 2 hours") is True
+    # Bare "hours" without a number is time-of-day context, not a duration.
+    assert _has_duration_signal("window opened during night hours") is False
+    # Classic term-based signals are unchanged.
+    assert _has_duration_signal("open for an extended period") is True
+
+
+def test_entry_kind_text_fallback_branches() -> None:
+    """_entry_kind falls back to candidate text only when IDs carry no token."""
+    # Locale-named IDs: kind comes from the text.
+    assert (
+        _entry_kind(["binary_sensor.loznice_okno"], "bedroom window open") == "window"
+    )
+    assert _entry_kind(["binary_sensor.chodba_dvere"], "front door open") == "door"
+    # Text names an entry but neither window nor door: generic kind.
+    assert _entry_kind(["binary_sensor.chodba_dvere"], "entry point open") == "entry"
+    # Entity-ID tokens take priority over conflicting text.
+    assert _entry_kind(["binary_sensor.front_window_contact"], "door open") == "window"
+    # Regression: single-argument call (keyword-derived IDs) still works.
+    assert _entry_kind(["binary_sensor.front_door_contact"]) == "door"
+
+
+def test_find_text_entry_entity_ids_branches() -> None:
+    """Text fallback promotes only binary_sensor/cover IDs with no sensor-kind token."""
+    paths = [
+        "entities[entity_id=cover.garaz_vrata].state",
+        "entities[entity_id=binary_sensor.chodba_vmd].state",
+        "entities[entity_id=lock.front_lock].state",
+        "entities[entity_id=okno].state",
+        "derived.is_night",
+    ]
+    # Text without an entry keyword: fallback declines entirely.
+    assert _find_text_entry_entity_ids(paths, "high power usage overnight") == []
+    # cover.* is promoted; vmd, lock.*, and domain-less IDs are all skipped.
+    assert _find_text_entry_entity_ids(paths, "garage door open at night") == [
+        "cover.garaz_vrata"
+    ]
+
+
+def test_extract_entity_id_quote_edge_cases() -> None:
+    """Quotes-only tokens resolve to None; backtick quoting is stripped."""
+    assert _extract_entity_id_from_evidence_path("entities[entity_id='']") is None
+    assert (
+        _extract_entity_id_from_evidence_path("entities[entity_ids contains '']")
+        is None
+    )
+    assert (
+        _extract_entity_id_from_evidence_path("entities[entity_id=`lock.front_door`]")
+        == "lock.front_door"
+    )
+
+
+def test_normalize_candidate_issue_504_localized_door_at_night() -> None:
+    """Text-derived door kind: Czech-named door sensor yields the _door rule_id."""
+    candidate = {
+        "candidate_id": "door_open_at_night",
+        "title": "Door Open Detected at Night",
+        "summary": "The hallway door was open during the night.",
+        "pattern": "state_change",
+        "confidence_hint": 0.5,
+        "evidence_paths": [
+            "entities[entity_ids contains 'binary_sensor.chodba_dvere'].state",
+            "derived.is_night",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "open_entry_at_night"
+    assert normalized.rule_id == "open_entry_at_night_door"
+    assert normalized.params["entry_entity_ids"] == ["binary_sensor.chodba_dvere"]
+
+
+def test_text_entry_fallback_requires_word_boundaries() -> None:
+    """'indoor'/'outdoor'/'doorbell' must not activate the text entry fallback."""
+    paths = ["entities[entity_id=binary_sensor.chodba_cidlo].state"]
+    assert _find_text_entry_entity_ids(paths, "indoor air quality alert") == []
+    assert _find_text_entry_entity_ids(paths, "outdoor activity at night") == []
+    assert _find_text_entry_entity_ids(paths, "doorbell pressed at night") == []
+    assert _find_text_entry_entity_ids(paths, "the front door is open") == [
+        "binary_sensor.chodba_cidlo"
+    ]
+
+
+def test_text_entry_fallback_excludes_safety_sensors() -> None:
+    """Smoke/gas/leak-style binary sensors are never promoted to entry sensors."""
+    paths = [
+        "entities[entity_id=binary_sensor.kitchen_smoke].state",
+        "entities[entity_id=binary_sensor.cellar_gas].state",
+        "entities[entity_id=binary_sensor.bathroom_leak].state",
+        "entities[entity_id=binary_sensor.hall_tamper].state",
+        "entities[entity_id=binary_sensor.loznice_okno].state",
+    ]
+    assert _find_text_entry_entity_ids(paths, "window opened during the night") == [
+        "binary_sensor.loznice_okno"
+    ]
+
+
+def test_entry_kind_text_fallback_uses_word_boundaries() -> None:
+    """'windowsill'/'doorbell' must not set the entry kind from text."""
+    assert _entry_kind([], "windowsill decoration moved") == "entry"
+    assert _entry_kind([], "doorbell pressed") == "entry"
+    assert _entry_kind([], "windows were opened") == "window"
+    assert _entry_kind([], "the doors were left open") == "door"
+
+
+def test_text_entry_fallback_skipped_for_lock_candidates() -> None:
+    """Lock candidates saying 'door' must keep lock routing, not promote entries."""
+    candidate = {
+        "candidate_id": "front_door_lock_unlocked_night",
+        "title": "Front Door Lock Unlocked at Night",
+        "summary": "The front door lock is unlocked during the night.",
+        "pattern": "state_change",
+        "confidence_hint": 0.8,
+        "evidence_paths": [
+            "entities[entity_id=lock.front_door].state",
+            "entities[entity_id=binary_sensor.chodba_svetlo].state",
+            "derived.is_night",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "unlocked_lock_when_home"
+    assert normalized.params["lock_entity_id"] == "lock.front_door"
+
+
+def test_duration_terms_are_word_bounded() -> None:
+    """'before'/'along' must not satisfy the 'for'/'long' duration terms."""
+    assert not _has_duration_signal("window open before midnight")
+    assert not _has_duration_signal("moving along the hallway")
+    assert _has_duration_signal("open for a while")
+    assert _has_duration_signal("unlocked since sunset")
+
+
+def test_qualitative_hours_still_count_as_duration() -> None:
+    """Codex P2: 'many hours'/'several hours' are durations; 'night hours' is not."""
+    assert _has_duration_signal("window remained open many hours")
+    assert _has_duration_signal("door left open several hours")
+    assert _has_duration_signal("open a couple of hours")
+    assert not _has_duration_signal("window opened during night hours")
+
+
+def test_find_camera_id_accepts_all_quote_styles() -> None:
+    """Codex P2: double-quoted and backticked camera evidence paths resolve."""
+    for quote in ("", "'", '"', "`"):
+        candidate = {"candidate_id": "cam_check"}
+        paths = [f"entities[entity_id={quote}camera.front_porch{quote}].state"]
+        assert _find_camera_id(paths, candidate) == "camera.front_porch"
+    assert _find_camera_id(['entities[entity_id="sensor.foo"].state'], {}) is None

@@ -975,6 +975,17 @@ def test_friendly_type_alarm_disarmed_external_threat() -> None:
     )
 
 
+def test_friendly_type_open_entry_at_night_variants() -> None:
+    """Issue #504: presence-agnostic night rule IDs get the clean entry label."""
+    for anomaly_type in (
+        "open_entry_at_night",
+        "open_entry_at_night_window",
+        "open_entry_at_night_door",
+        "open_entry_at_night_entry",
+    ):
+        assert _friendly_type(anomaly_type) == "Open entry at night"
+
+
 # ---------------------------------------------------------------------------
 # 15. alarm_disarmed_during_external_threat — deterministic mobile copy
 # ---------------------------------------------------------------------------
