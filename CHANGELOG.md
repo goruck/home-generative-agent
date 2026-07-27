@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.21.0] - 2026-07-26
+
+### Added
+
+- **"Window open at night" is now a supported Sentinel rule** — a new `open_entry_at_night` template alerts when a door or window is open during night hours, whether or not anyone is home. Previously, night-time entry candidates with unknown occupancy were forced into the "while away" template, which never fires for someone asleep at home with a bedroom window open. Requested by [@hruba202](https://github.com/hruba202) in [#504](https://github.com/goruck/home-generative-agent/issues/504).
+- **Discovery proposals now work with entity names in any language** — rule candidates for sensors named in the user's locale (e.g. Czech `binary_sensor.bedroom_loznice_okno`, where "okno" means window) were rejected as unsupported because entry detection only recognized English "door"/"window"/"entry" tokens in the entity ID. When the candidate's English description names a door or window, matching binary sensors and covers are now promoted to entry sensors — with word-boundary matching so "indoor", "outdoor", and "doorbell" don't count, and with sensor kinds that are never door/window contacts (motion, occupancy, smoke, gas, leak, battery, tamper, and similar) never promoted. Lock and alarm candidates keep their original routing. Quote-wrapped entity IDs in LLM evidence paths (`entities[entity_ids contains 'binary_sensor.x']`) are also accepted now, across normalization, camera matching, and duplicate detection.
+
+### Fixed
+
+- **Entry rules bound to cover entities actually fire now** — Home Assistant covers report `open`/`closed` rather than a binary sensor's `on`/`off`, so any approved entry rule watching a `cover.*` entity silently never alerted. Both states now count as open across the entry, alarm-entry, and multiple-entries templates.
+- **"During night hours" no longer misroutes to a duration rule** — candidate text like "the window was opened during night hours" matched the bare word "hours" and produced a rule that only alerts after the window has been open two hours, ignoring night entirely. Duration wording now requires a real duration phrase or a numeric threshold ("open for 2 hours"), and duration keywords are word-bounded so "before" no longer counts as "for".
+
+### Changed
+
+- **Night-time entry candidates with unknown occupancy now map to `open_entry_at_night`** instead of `open_entry_while_away`. If you previously approved an `open_entry_while_away_*` rule from such a candidate and discovery re-proposes it, decline the new proposal to avoid duplicate alerts — the two rules would both fire on the same open window at night while away.
+
+### Security
+
+- **The Sentinel proposals card now escapes LLM-generated text before rendering** — discovery candidate titles, summaries, and IDs are HTML-escaped in the Lovelace card, closing a stored-XSS path where a prompt-injected candidate could have executed script in the dashboard.
+
 ## [3.20.2] - 2026-07-24
 
 ### Fixed

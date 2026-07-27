@@ -30,6 +30,9 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 _SEVERITIES = {"low", "medium", "high"}
+# HA covers report "open"/"closed" rather than binary_sensor's "on"/"off";
+# both count as an open entry (issue #504 adversarial review).
+_OPEN_ENTRY_STATES = frozenset({"on", "open"})
 
 
 def evaluate_dynamic_rules(  # noqa: PLR0913
@@ -111,6 +114,16 @@ def evaluate_dynamic_rules(  # noqa: PLR0913
             entity_map,
             require_home=False,
             require_away=True,
+            require_night=True,
+        ),
+        # Presence-agnostic night template (issue #504): fires whenever an
+        # entry is open at night, regardless of occupancy.
+        "open_entry_at_night": lambda rule: _eval_open_entry_with_context(
+            snapshot,
+            rule,
+            entity_map,
+            require_home=False,
+            require_away=False,
             require_night=True,
         ),
         "motion_without_camera_activity": (
@@ -208,7 +221,7 @@ def _eval_alarm_disarmed_open_entry(
     findings: list[AnomalyFinding] = []
     for entry_id in entry_ids:
         entry = entity_map.get(entry_id)
-        if not entry or entry.get("state") != "on":
+        if not entry or entry.get("state") not in _OPEN_ENTRY_STATES:
             continue
         evidence = {
             "rule_id": rule.get("rule_id"),
@@ -648,7 +661,7 @@ def _eval_open_entry_with_context(  # noqa: PLR0913
     findings: list[AnomalyFinding] = []
     for entry_id in entry_ids:
         entry = entity_map.get(entry_id)
-        if not entry or entry.get("state") != "on":
+        if not entry or entry.get("state") not in _OPEN_ENTRY_STATES:
             continue
         evidence = {
             "rule_id": rule.get("rule_id"),
@@ -779,7 +792,14 @@ def _eval_entity_state_duration(
     if not entity_id or not target_state:
         return []
     entity = entity_map.get(entity_id)
-    if not entity or entity.get("state") != target_state:
+    if not entity:
+        return []
+    state = entity.get("state")
+    # Target "on" also matches covers, which report "open" for the same
+    # physical condition (issue #504 Codex review).
+    if state != target_state and not (
+        target_state == "on" and state in _OPEN_ENTRY_STATES
+    ):
         return []
     now = dt_util.parse_datetime(snapshot["derived"]["now"]) or dt_util.utcnow()
     last_changed = dt_util.parse_datetime(str(entity.get("last_changed") or ""))
@@ -898,7 +918,7 @@ def _eval_multiple_entries_open_count(
         if not entity:
             continue
         states[entry_id] = entity.get("state")
-        if entity.get("state") == "on":
+        if entity.get("state") in _OPEN_ENTRY_STATES:
             triggering.append(entry_id)
     if len(triggering) < min_count:
         return []

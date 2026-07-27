@@ -6,6 +6,10 @@ import re
 from typing import Any
 
 _SEMANTIC_KEY_CONTEXT_RE = re.compile(r"\|(?:template|night|home|scope)=[^|]+")
+# Quote characters the discovery LLM sometimes wraps around entity IDs in
+# evidence paths. Mirrors proposal_templates._EVIDENCE_QUOTE_CHARS; kept local
+# to avoid coupling the semantic-key module to the normalization module.
+_EVIDENCE_QUOTE_CHARS = "'\"`"
 
 
 def candidate_semantic_key(  # noqa: PLR0912, PLR0915
@@ -282,11 +286,13 @@ def _extract_entity_ids(evidence_paths: list[str]) -> list[str]:
     for path in evidence_paths:
         if path.startswith("entities[entity_id="):
             entity_id = path.split("entities[entity_id=", 1)[1].split("]", 1)[0]
-            entity_ids.append(entity_id)
+            entity_id = entity_id.strip(_EVIDENCE_QUOTE_CHARS)
+            if entity_id:
+                entity_ids.append(entity_id)
         elif "entity_ids contains " in path:
             # LLM-generated format: entities[entity_ids contains sensor.foo].state
             part = path.split("entity_ids contains ", 1)[1]
-            entity_id = part.split("]")[0].strip()
+            entity_id = part.split("]")[0].strip().strip(_EVIDENCE_QUOTE_CHARS)
             if entity_id:
                 entity_ids.append(entity_id)
     return entity_ids
