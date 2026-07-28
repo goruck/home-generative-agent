@@ -198,6 +198,20 @@
 
 ---
 
+### Per-rule precision tracking with retirement flagging
+
+**What:** Health-sensor KPIs (`_compute_kpis` in `core/sentinel_health_sensor.py`) are aggregate-only: `false_positive_rate_14d`, `user_override_rate`, and `triage_suppress_rate` are computed across all findings, so a single decaying rule is invisible until it drags the global numbers. Add per-rule breakdowns keyed by finding type (and dynamic-rule id where available): notified count, user-response count, false-positive count, snooze/dismiss count. Flag rules whose per-rule FP or snooze rate exceeds a threshold as retirement candidates.
+
+**Why:** Committed publicly as roadmap in the 2026-07-27 LinkedIn reply on rule maintainability ("per-rule precision tracking that auto-flags candidates for retirement is the natural next step"). The suppression layer already lets users retire rules via permanent snooze, but nothing proactively tells them which rules deserve it — decay is only discoverable by annoyance, which contradicts the maintainability story. Snooze/dismiss feedback is already captured per rule+entity (`record_cooldown_feedback`, keyed `rule_type:entity_id`), so most of the signal exists.
+
+**How to apply:** In `_compute_kpis`, accumulate a `per_rule_stats: dict[str, dict]` keyed by `finding.type` (fall back to compound constituents' types for compound records), counting notified / responded / false-positive / snoozed per key from the same audit-record fields the aggregate KPIs use. Expose a `rules_flagged_for_review` attribute on `sensor.sentinel_health` listing keys whose 14-day FP rate or snooze rate exceeds a configurable threshold (min-sample gate, e.g. ≥5 notified, to avoid flagging on one bad night). Optionally surface flagged dynamic rules in the Sentinel proposals card with a one-tap disable. Mind attribute size limits — cap the exposed dict to worst-N rules.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** PR #511 (reason-code relabeling — per-rule notified counts need trustworthy `suppression_reason_code`)
+
+---
+
 ### Severity-aware eviction for audit store
 
 **What:** Extend the priority eviction helper introduced in the audit-flood fix to also prefer dropping `low`-severity records before `medium`, and `medium` before `high`. Currently all suppressed records are treated equally by the eviction priority.
