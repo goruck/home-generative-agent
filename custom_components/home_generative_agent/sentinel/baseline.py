@@ -909,7 +909,7 @@ class SentinelBaselineUpdater:
             async with self._pool.connection() as conn, conn.cursor() as cur:
                 await cur.execute(_FETCH_FULL_SQL)
                 rows = await cur.fetchall()
-        except Exception:  # noqa: BLE001
+        except Exception:
             LOGGER.warning("Full baseline fetch failed.", exc_info=True)
             return None
 
@@ -982,7 +982,7 @@ class SentinelBaselineUpdater:
                     ),
                 )
                 row = await cur.fetchone()
-        except Exception:  # noqa: BLE001
+        except Exception:
             LOGGER.warning("Baseline stats fetch failed.", exc_info=True)
             return None
         if row is None:

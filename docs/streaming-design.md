@@ -209,7 +209,8 @@ text, but with `"type": "thinking"` and `"thinking": "..."` keys. They do NOT ap
 `additional_kwargs`. To extract:
 ```python
 chunk_thinking = "".join(
-    b.get("thinking", "") for b in chunk.content
+    b.get("thinking", "")
+    for b in chunk.content
     if isinstance(b, dict) and b.get("type") == "thinking"
 )
 ```
@@ -244,9 +245,7 @@ if options.get(CONF_SCHEMA_FIRST_YAML, False):
     # ... existing post-processing and _populate_chat_log_from_response ...
 else:
     # Streaming path — tokens reach HA as they arrive.
-    event_stream = app.astream_events(
-        input=app_input, config=app_config, version="v2"
-    )
+    event_stream = app.astream_events(input=app_input, config=app_config, version="v2")
     try:
         async for _ in chat_log.async_add_delta_content_stream(
             self.entity_id,
@@ -269,7 +268,10 @@ else:
         final_state = await app.aget_state(app_config)
         trace.async_conversation_trace_append(
             trace.ConversationTraceEventType.AGENT_DETAIL,
-            {"messages": final_state.values.get("messages", []), "tools": tools or None},
+            {
+                "messages": final_state.values.get("messages", []),
+                "tools": tools or None,
+            },
         )
     except Exception:  # noqa: BLE001
         _LOGGER.debug("aget_state unavailable; skipping trace for streaming turn.")

@@ -79,8 +79,10 @@ def test_filter_novel_candidates_drops_existing_and_batch_duplicates() -> None:
         },
     ]
     existing_keys = {
-        "v1|subject=entry_window|predicate=open|night=1|home=1|scope=any|"
-        "entities=binary_sensor.playroom_window"
+        (
+            "v1|subject=entry_window|predicate=open|night=1|home=1|scope=any|"
+            "entities=binary_sensor.playroom_window"
+        )
     }
     filtered, dropped = engine._filter_novel_candidates(candidates, existing_keys)
     assert filtered == []

@@ -1383,9 +1383,11 @@ class VideoAnalyzer:
         elif isinstance(exc, TimeoutError):
             LOGGER.warning("[%s] Image analysis timed out for %s", camera_id, path)
         elif isinstance(exc, HomeAssistantError):
-            LOGGER.exception("[%s] Error analyzing %s", camera_id, path)
+            LOGGER.error("[%s] Error analyzing %s", camera_id, path, exc_info=exc)
         else:
-            LOGGER.exception("[%s] Unexpected error analyzing %s.", camera_id, path)
+            LOGGER.error(
+                "[%s] Unexpected error analyzing %s.", camera_id, path, exc_info=exc
+            )
 
     def _drain_queue(self, queue: asyncio.Queue[_SnapshotItem]) -> list[Path]:
         """Drain all items from the asyncio queue into a list."""

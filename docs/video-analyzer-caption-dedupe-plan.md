@@ -111,9 +111,14 @@ therefore the correct aggregator for "best match."
    class CaptionNoveltyDecision:
        notify: bool
        reason: Literal[
-           "stale_snapshot", "no_match", "score_none",
-           "score_below_threshold", "score_above_threshold",
-           "artifact_bucket", "stale_match", "store_timeout",
+           "stale_snapshot",
+           "no_match",
+           "score_none",
+           "score_below_threshold",
+           "score_above_threshold",
+           "artifact_bucket",
+           "stale_match",
+           "store_timeout",
        ]
        best_score: float | None = None
        matched_caption: str | None = None
@@ -244,7 +249,9 @@ therefore the correct aggregator for "best match."
 
    ```python
    decision = await self._is_caption_novel(
-       camera_name, msg, first_snapshot,
+       camera_name,
+       msg,
+       first_snapshot,
        recognized_names=list(self._last_recognized.get(camera_id, [])),
    )
    ```

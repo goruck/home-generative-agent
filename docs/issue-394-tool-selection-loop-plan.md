@@ -240,15 +240,7 @@ both regexes from those constants instead of manually keeping two regex strings 
 sync. For example:
 
 ```python
-ACTUATION_KEYWORDS = (
-    "turn",
-    "switch",
-    "lock",
-    "unlock",
-    "open",
-    "close",
-    ...
-)
+ACTUATION_KEYWORDS = ("turn", "switch", "lock", "unlock", "open", "close", ...)
 NON_OPEN_ACTUATION_KEYWORDS = tuple(
     kw for kw in ACTUATION_KEYWORDS if kw not in {"open", "opened"}
 )
@@ -340,7 +332,8 @@ async def _tool_loop_guard(state: State) -> dict[str, Any]:
         for tc in (last.tool_calls if isinstance(last, AIMessage) else [])
     ]
     return {
-        "messages": cancellations + [
+        "messages": cancellations
+        + [
             AIMessage(
                 content=(
                     "I wasn't able to complete this request after several "
