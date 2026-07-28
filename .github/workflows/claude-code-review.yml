@@ -19,6 +19,11 @@ jobs:
     #   github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
 
     runs-on: ubuntu-latest
+    env:
+      # secrets is not an allowed context in step-level `if`, so surface the
+      # check here. Dependabot-triggered runs read from the Dependabot secrets
+      # store, which has no token, so this is 'false' for them.
+      HAS_CLAUDE_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
     permissions:
       contents: read
       pull-requests: read
@@ -33,9 +38,8 @@ jobs:
 
       - name: Run Claude Code Review
         id: claude-review
-        # Only run if credentials are available. Dependabot-triggered runs read
-        # from the Dependabot secrets store, which has no token, so they skip.
-        if: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+        # Only run if credentials are available (see HAS_CLAUDE_TOKEN above).
+        if: ${{ env.HAS_CLAUDE_TOKEN == 'true' }}
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
