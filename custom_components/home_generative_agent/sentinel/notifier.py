@@ -449,7 +449,7 @@ class SentinelNotifier:
         cutoff = dt_util.utcnow() - timedelta(hours=24)
         try:
             records = await self._audit_store.async_get_latest(_AUDIT_FETCH_LIMIT)
-        except Exception:  # noqa: BLE001
+        except Exception:
             LOGGER.warning(
                 "Daily digest: failed to fetch audit records.", exc_info=True
             )

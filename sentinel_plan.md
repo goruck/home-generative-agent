@@ -282,24 +282,26 @@ For each finding record, persist:
 class AuditRecord:
     snapshot_ref: dict
     finding: dict
-    data_quality: str                    # target state; current code stores {"quality": "..."} or None
-    trigger_source: str                  # "poll" | "event"
-    correlation_metadata: dict | None    # planned
-    suppression_decision: str | None     # planned
+    data_quality: str  # target state; current code stores {"quality": "..."} or None
+    trigger_source: str  # "poll" | "event"
+    correlation_metadata: dict | None  # planned
+    suppression_decision: str | None  # planned
     suppression_reason_code: str | None
-    triage_decision: str | None          # "notify" | "suppress" | "error" | None
+    triage_decision: str | None  # "notify" | "suppress" | "error" | None
     triage_reason_code: str | None
-    triage_confidence: float | None      # audit-only
-    triage_model: str | None             # planned
-    triage_latency_ms: int | None        # planned
-    action_policy_path: str | None       # "prompt_user" | "handoff" | "auto_execute" | "blocked"
+    triage_confidence: float | None  # audit-only
+    triage_model: str | None  # planned
+    triage_latency_ms: int | None  # planned
+    action_policy_path: (
+        str | None
+    )  # "prompt_user" | "handoff" | "auto_execute" | "blocked"
     canary_would_execute: bool | None
     execution_id: str | None
     notification: dict
     user_response: dict | None
     action_outcome: dict | None
-    rule_version: str                    # planned end-to-end; currently usually None
-    autonomy_level_at_decision: int      # current store serializes this as string
+    rule_version: str  # planned end-to-end; currently usually None
+    autonomy_level_at_decision: int  # current store serializes this as string
     # timestamps in UTC ISO 8601
 ```
 

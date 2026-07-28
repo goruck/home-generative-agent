@@ -142,8 +142,10 @@ def test_no_change_reply_matches_sentinel_variants(text: str) -> None:
         # The VLM failure caption must never classify as a sentinel.
         "Error analyzing image with VLM model.",
         # Sentinel-like text buried in a long reply should not match.
-        "The scene is unchanged. A person walks down the steps of the house. "
-        "The porch light is on and the street beyond is empty of vehicles.",
+        (
+            "The scene is unchanged. A person walks down the steps of the house. "
+            "The porch light is on and the street beyond is empty of vehicles."
+        ),
     ],
 )
 def test_no_change_reply_rejects_real_descriptions(text: str) -> None:

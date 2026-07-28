@@ -1199,8 +1199,10 @@ async def test_retrieve_tools_action_rounds_reset() -> None:
     "query",
     [
         # Field repro, typo preserved.
-        "Always turn on the garage light when the garage door is unloacked "
-        "and send a notification",
+        (
+            "Always turn on the garage light when the garage door is unloacked "
+            "and send a notification"
+        ),
         "Create an automation to water the plants every day",
         "remind me every 30 minutes if the litter box waste drawer is over 90% full",
         "whenever the front door opens announce it on the kitchen speaker",

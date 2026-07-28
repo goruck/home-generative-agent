@@ -1232,7 +1232,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         # Use the already-configured chat model from __init__.py.
         base_llm = runtime_data.chat_model
         if not hasattr(base_llm, "bind_tools"):
-            _LOGGER.exception("Error during conversation processing.")
+            _LOGGER.error("Error during conversation processing.")
             intent_response = intent.IntentResponse(language=user_input.language)
             has_provider = any(
                 subentry.subentry_type == SUBENTRY_TYPE_MODEL_PROVIDER
