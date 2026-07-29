@@ -18,6 +18,10 @@ from custom_components.home_generative_agent.sentinel.models import (
     AnomalyFinding,
     build_anomaly_id,
 )
+from custom_components.home_generative_agent.sentinel.power_units import (
+    is_power_unit,
+    watts_per_unit,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -51,6 +55,11 @@ class AppliancePowerDurationRule:
     appliance is re-detected after a full ``duration_min`` of observation
     (same accepted tradeoff as the engine's cyclical sustained-deviation
     gate).
+
+    Readings are normalized to watts from any HA power unit (W, kW, MW, GW,
+    TW, mW, BTU/h) before comparison against ``power_threshold_w``; power
+    sensors in a non-power unit (e.g. VA) are skipped rather than compared
+    raw.
     """
 
     rule_id = "appliance_power_duration"
@@ -82,18 +91,32 @@ class AppliancePowerDurationRule:
             attrs = entity["attributes"]
             device_class = attrs.get("device_class")
             unit = attrs.get("unit_of_measurement")
-            if device_class != "power" and unit not in {"W", "kW"}:
-                continue
             entity_id = entity["entity_id"]
-            power_val = _coerce_float(entity["state"])
-            if power_val is None:
-                # Falling edge is applied eagerly (not only in the post-loop
-                # sweep) so an exception later in the loop — swallowed by the
-                # engine — cannot preserve a stale episode start.
+            if device_class != "power" and not is_power_unit(unit):
+                # Same eager falling edge as below: an entity whose attributes
+                # stop identifying it as a power sensor must not retain a
+                # stale episode if a later exception skips the post-loop
+                # sweep.
                 self._above_since.pop(entity_id, None)
                 continue
-            if unit == "kW":
-                power_val *= 1000.0
+            power_val = _coerce_float(entity["state"])
+            unit_factor = watts_per_unit(unit)
+            if power_val is None or unit_factor is None:
+                # Non-numeric reading, or a device_class:power sensor in a
+                # non-power unit (e.g. VA) that cannot be compared against a
+                # watts threshold.  Falling edge is applied eagerly (not only
+                # in the post-loop sweep) so an exception later in the loop —
+                # swallowed by the engine — cannot preserve a stale episode
+                # start.
+                self._above_since.pop(entity_id, None)
+                continue
+            power_val *= unit_factor
+            if not math.isfinite(power_val):
+                # Finite native value, infinite in watts (1e300 TW): garbage.
+                # An inf power_w in evidence would crash the notifier's
+                # round() during dispatch, killing the run loop.
+                self._above_since.pop(entity_id, None)
+                continue
             if power_val < self._power_threshold_w:
                 self._above_since.pop(entity_id, None)
                 continue

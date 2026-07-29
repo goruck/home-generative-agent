@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+import pytest
+
 from custom_components.home_generative_agent.explain.prompts import SYSTEM_PROMPT
 from custom_components.home_generative_agent.sentinel.dynamic_rules import (
     evaluate_dynamic_rule,
@@ -343,11 +345,196 @@ def test_appliance_power_duration_kw_unit() -> None:
     assert findings[0].evidence["power_w"] == 250.0
 
 
+def test_appliance_power_duration_all_power_units_normalized() -> None:
+    """Every HA power unit is converted to W before the threshold comparison."""
+    for unit, state, expected_w in [
+        ("MW", "0.00025", 250.0),
+        ("GW", "0.00000025", pytest.approx(250.0)),
+        ("TW", "0.00000000025", pytest.approx(250.0)),
+        ("mW", "250000", 250.0),
+        ("BTU/h", "1000", pytest.approx(293.07107)),
+    ]:
+        rule = AppliancePowerDurationRule(duration_min=30)
+        entity = _power_entity(state=state, last_changed="2025-01-01T00:00:00+00:00")
+        entity["attributes"] = {"device_class": "power", "unit_of_measurement": unit}
+        snapshot = _base_snapshot()
+
+        snapshot["derived"]["now"] = "2025-01-01T00:00:00+00:00"
+        snapshot["entities"] = [entity]
+        assert rule.evaluate(snapshot) == [], unit
+
+        snapshot["derived"]["now"] = "2025-01-01T00:35:00+00:00"
+        findings = rule.evaluate(snapshot)
+        assert len(findings) == 1, unit
+        assert findings[0].evidence["power_w"] == expected_w, unit
+
+
+def test_appliance_power_duration_skips_non_power_units() -> None:
+    """
+    A device_class:power sensor in a non-power unit (e.g. VA) is skipped.
+
+    Comparing apparent power (or any unconvertible unit) raw against the
+    watts threshold would be silently wrong, and a switch to such a unit
+    mid-episode must also end the episode.
+    """
+    rule = AppliancePowerDurationRule(duration_min=30)
+    entity = _power_entity(state="250", last_changed="2025-01-01T00:00:00+00:00")
+    entity["attributes"] = {"device_class": "power", "unit_of_measurement": "VA"}
+    snapshot = _base_snapshot()
+    snapshot["derived"]["now"] = "2025-01-01T00:00:00+00:00"
+    snapshot["entities"] = [entity]
+    assert rule.evaluate(snapshot) == []
+    snapshot["derived"]["now"] = "2025-01-01T01:00:00+00:00"
+    assert rule.evaluate(snapshot) == []
+
+    # Episode started under "W" must reset when the unit becomes unconvertible.
+    rule = AppliancePowerDurationRule(duration_min=30)
+    assert _evaluate_power_at(rule, "2025-01-01T00:00:00+00:00", "250") == []
+    snapshot["derived"]["now"] = "2025-01-01T00:20:00+00:00"
+    snapshot["entities"] = [entity]
+    assert rule.evaluate(snapshot) == []
+    # Back to W: the clock restarted, so 25 min later there is still no finding.
+    assert _evaluate_power_at(rule, "2025-01-01T00:25:00+00:00", "250") == []
+    assert _evaluate_power_at(rule, "2025-01-01T00:45:00+00:00", "250") == []
+    findings = _evaluate_power_at(rule, "2025-01-01T00:56:00+00:00", "250")
+    assert len(findings) == 1
+
+
+def test_appliance_power_duration_unit_only_sensor_admitted() -> None:
+    """A sensor with a power unit but no device_class is still tracked."""
+    rule = AppliancePowerDurationRule(duration_min=30)
+    entity = _power_entity(state="0.25", last_changed="2025-01-01T00:00:00+00:00")
+    entity["attributes"] = {"unit_of_measurement": "kW"}
+    snapshot = _base_snapshot()
+
+    snapshot["derived"]["now"] = "2025-01-01T00:00:00+00:00"
+    snapshot["entities"] = [entity]
+    assert rule.evaluate(snapshot) == []
+
+    snapshot["derived"]["now"] = "2025-01-01T00:35:00+00:00"
+    findings = rule.evaluate(snapshot)
+    assert len(findings) == 1
+    assert findings[0].evidence["power_w"] == 250.0
+
+    # Without device_class, a non-power unit means the sensor is not a power
+    # sensor at all — it must never be admitted, no matter how long it reads
+    # above threshold.
+    rule = AppliancePowerDurationRule(duration_min=30)
+    entity = _power_entity(state="250", last_changed="2025-01-01T00:00:00+00:00")
+    entity["attributes"] = {"unit_of_measurement": "VA"}
+    snapshot["derived"]["now"] = "2025-01-01T00:00:00+00:00"
+    snapshot["entities"] = [entity]
+    assert rule.evaluate(snapshot) == []
+    snapshot["derived"]["now"] = "2025-01-01T01:00:00+00:00"
+    assert rule.evaluate(snapshot) == []
+
+
+def test_appliance_power_duration_missing_unit_treated_as_watts() -> None:
+    """A device_class:power sensor with no unit is compared as watts."""
+    rule = AppliancePowerDurationRule(duration_min=30)
+    entity = _power_entity(state="250", last_changed="2025-01-01T00:00:00+00:00")
+    entity["attributes"] = {"device_class": "power"}
+    snapshot = _base_snapshot()
+
+    snapshot["derived"]["now"] = "2025-01-01T00:00:00+00:00"
+    snapshot["entities"] = [entity]
+    assert rule.evaluate(snapshot) == []
+
+    snapshot["derived"]["now"] = "2025-01-01T00:35:00+00:00"
+    findings = rule.evaluate(snapshot)
+    assert len(findings) == 1
+    assert findings[0].evidence["power_w"] == 250.0
+
+
+def test_appliance_power_duration_unhashable_unit_does_not_crash() -> None:
+    """
+    A poisoned unit_of_measurement (list) must not raise from the filter.
+
+    Raw frozenset membership hashes its operand; TypeError here fails the
+    whole rule for every entity on every cycle (engine catches per-rule),
+    silently disabling appliance monitoring while the poisoned entity exists.
+    """
+    rule = AppliancePowerDurationRule(duration_min=30)
+    entity = _power_entity(state="250", last_changed="2025-01-01T00:00:00+00:00")
+    entity["attributes"] = {"unit_of_measurement": ["W"]}  # no device_class
+    snapshot = _base_snapshot()
+    snapshot["derived"]["now"] = "2025-01-01T00:00:00+00:00"
+    snapshot["entities"] = [entity]
+    assert rule.evaluate(snapshot) == []
+    snapshot["derived"]["now"] = "2025-01-01T01:00:00+00:00"
+    assert rule.evaluate(snapshot) == []
+
+
+def test_appliance_power_duration_case_variant_unit_still_monitored() -> None:
+    """
+    A hand-typed unit like "w" (ESPHome/MQTT free text) keeps monitoring.
+
+    Pre-normalization these sensors were compared raw as watts; skipping them
+    for case alone would silently disable the rule for that appliance.
+    """
+    rule = AppliancePowerDurationRule(duration_min=30)
+    entity = _power_entity(state="250", last_changed="2025-01-01T00:00:00+00:00")
+    entity["attributes"] = {"device_class": "power", "unit_of_measurement": "w"}
+    snapshot = _base_snapshot()
+    snapshot["derived"]["now"] = "2025-01-01T00:00:00+00:00"
+    snapshot["entities"] = [entity]
+    assert rule.evaluate(snapshot) == []
+
+    snapshot["derived"]["now"] = "2025-01-01T00:35:00+00:00"
+    findings = rule.evaluate(snapshot)
+    assert len(findings) == 1
+    assert findings[0].evidence["power_w"] == 250.0
+
+
+def test_appliance_power_duration_reclassified_entity_resets_episode() -> None:
+    """
+    An entity that stops being a power sensor ends its episode eagerly.
+
+    Attributes changing mid-episode (device_class cleared, unit no longer a
+    power unit) must reset the rising-edge tracker on the classification skip
+    path itself, not only in the post-loop sweep.
+    """
+    rule = AppliancePowerDurationRule(duration_min=30)
+    assert _evaluate_power_at(rule, "2025-01-01T00:00:00+00:00", "250") == []
+
+    entity = _power_entity(state="250", last_changed="2025-01-01T00:20:00+00:00")
+    entity["attributes"] = {"device_class": "temperature", "unit_of_measurement": "°C"}
+    snapshot = _base_snapshot()
+    snapshot["derived"]["now"] = "2025-01-01T00:20:00+00:00"
+    snapshot["entities"] = [entity]
+    assert rule.evaluate(snapshot) == []
+    assert not rule._above_since  # eager reset is the invariant under test
+
+    # Back to a power sensor: the clock restarted at 00:25.
+    assert _evaluate_power_at(rule, "2025-01-01T00:25:00+00:00", "250") == []
+    assert _evaluate_power_at(rule, "2025-01-01T00:45:00+00:00", "250") == []
+    findings = _evaluate_power_at(rule, "2025-01-01T00:56:00+00:00", "250")
+    assert len(findings) == 1
+
+
 def test_appliance_power_duration_ignores_non_finite_readings() -> None:
     """A 'nan' state must not count as above threshold (nan < x is False)."""
     rule = AppliancePowerDurationRule(duration_min=30)
     assert _evaluate_power_at(rule, "2025-01-01T00:00:00+00:00", "nan") == []
     assert _evaluate_power_at(rule, "2025-01-01T01:00:00+00:00", "nan") == []
+
+
+def test_appliance_power_duration_rejects_overflow_after_conversion() -> None:
+    """
+    A finite native reading that overflows to inf in watts is rejected.
+
+    1e300 TW converts to inf; an inf power_w in evidence would crash the
+    notifier's round() during dispatch and end the Sentinel run loop.
+    """
+    rule = AppliancePowerDurationRule(duration_min=30)
+    entity = _power_entity(state="1e300", last_changed="2025-01-01T00:00:00+00:00")
+    entity["attributes"] = {"device_class": "power", "unit_of_measurement": "TW"}
+    snapshot = _base_snapshot()
+    snapshot["derived"]["now"] = "2025-01-01T00:00:00+00:00"
+    snapshot["entities"] = [entity]
+    assert rule.evaluate(snapshot) == []
+    snapshot["derived"]["now"] = "2025-01-01T01:00:00+00:00"
+    assert rule.evaluate(snapshot) == []
 
 
 def test_appliance_power_duration_friendly_name_excluded_from_anomaly_id() -> None:
