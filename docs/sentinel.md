@@ -88,7 +88,7 @@ These rules run on every detection cycle without any configuration or approval.
 
 | Rule | Description |
 |---|---|
-| `appliance_power_duration` | Appliance observed drawing more than `sentinel_appliance_power_threshold_w` (default 100 W) continuously for longer than `sentinel_appliance_duration_min` (default 60 min), measured from when the sensor was first seen above the threshold (e.g. *"Washer drew about 296 W for 633 min, above the 60 min threshold. Check it."*). Both thresholds are configurable in the Sentinel subentry (Advanced setup). Readings are normalized to watts from any HA power unit (W, kW, MW, GW, TW, mW, BTU/h), matching unit strings case-insensitively where unambiguous (`mW` vs `MW` must match exact-case); power sensors reporting a non-power unit (e.g. VA) are skipped rather than compared raw, with a once-per-unit debug log. |
+| `appliance_power_duration` | Appliance observed drawing at or above `sentinel_appliance_power_threshold_w` (default 100 W) continuously for at least `sentinel_appliance_duration_min` (default 60 min), measured from when the sensor was first seen above the threshold (e.g. *"Washer drew about 296 W for 633 min, above the 60 min threshold. Check it."*). Both thresholds are configurable in the Sentinel subentry (Advanced setup). Readings are normalized to watts from any HA power unit (W, kW, MW, GW, TW, mW, BTU/h), matching unit strings case-insensitively where unambiguous (`mW` vs `MW` must match exact-case); power sensors reporting a non-power unit (e.g. VA) are skipped rather than compared raw, with a once-per-unit debug log. |
 
 **Cameras**
 
@@ -193,7 +193,7 @@ When `sentinel_baseline_enabled` is `true` and `sentinel_enabled` is `true`, a b
 
 On each detection cycle the engine reads current baseline values and passes them to dynamic-rule evaluators. Two temporal templates are always registered:
 
-- **`baseline_deviation`** — fires when a numeric entity state deviates from its rolling average by more than `threshold_pct` percent (default `50.0`).
+- **`baseline_deviation`** — fires when a numeric entity state deviates from its rolling average by at least `threshold_pct` percent (default `50.0`).
 - **`time_of_day_anomaly`** — fires when a numeric entity state differs from the expected hour-of-day rolling average by more than `threshold_pct` percent (default `50.0`). When day-of-week baselines are enabled, this template uses a weighted blend of the DOW-hour mean and the global hourly mean, transitioning smoothly from global to DOW baselines as data accumulates.
 
 Both templates produce no findings while the table is empty — baselines accumulate over time.

@@ -141,7 +141,7 @@
 
 ### Dynamic `sensor_threshold_condition` rules don't normalize units
 
-**What:** Discovery's `sensor_threshold_condition` template (`sentinel/proposal_templates.py`) compares an LLM-extracted numeric threshold against the sensor's native state with no unit normalization — the #461 bug class: a rule meaning "over 100 watts" against a kW sensor never fires (or a "below 1 kW" against a W sensor always fires). Arguably the user's threshold is native-unit by intent, but nothing disambiguates. Surfaced by adversarial review during the v3.21.3 ship.
+**What:** Discovery's `sensor_threshold_condition` template (`sentinel/proposal_templates.py`) compares an LLM-extracted numeric threshold against the sensor's native state with no unit normalization — the #461 bug class: a rule meaning "over 100 watts" against a kW sensor never fires (the template only extracts above-thresholds today; a below-variant would invert the failure — always firing). Arguably the user's threshold is native-unit by intent, but nothing disambiguates. Surfaced by adversarial review during the v3.21.3 ship.
 
 **How to apply:** When the target sensor has `device_class: power` (or a power unit), normalize both the threshold and the reading via `sentinel/power_units.watts_per_unit` — requires deciding/recording the threshold's intended unit at proposal-approval time (candidate text usually names it: "100 W", "1.5 kW").
 
@@ -254,7 +254,7 @@
 
 ### Store baselines unit-normalized (or reset on unit change)
 
-**What:** `sentinel_baselines` rows store native-unit values with no unit column; evaluation interprets the stored value in the entity's *current* unit. After a W→kW sensor reconfiguration, a stored `1200` (W) baseline against a current `1.2` (kW) reading produces a false ~99.9% deviation (misclassified as cycle completion), and new `1.2` samples blend into the old `1200` rolling average, corrupting rolling/hourly/DOW metrics until the EMA converges. Pre-existing design property; surfaced by Codex adversarial review during the v3.21.3 ship.
+**What:** `sentinel_baselines` rows store native-unit values with no unit column; evaluation interprets the stored value in the entity's *current* unit. After a W→kW sensor reconfiguration, a stored `1200` (W) baseline against a current `1.2` (kW) reading produces a false ~99.9% deviation (misclassified as cycle completion), and new `1.2` samples blend into the old `1200` rolling average, corrupting rolling/hourly/DOW metrics until the averages re-converge (rolling/hourly are EMA-based; DOW slots use Welford accumulators). Pre-existing design property; surfaced by Codex adversarial review during the v3.21.3 ship.
 
 **How to apply:** Either normalize power-class samples to watts at write time in `SentinelBaselineUpdater` (with a one-time migration or metric-version bump), or store `unit_of_measurement` alongside the value and reset the row when the recorded unit differs from the current one.
 

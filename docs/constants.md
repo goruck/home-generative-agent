@@ -287,7 +287,7 @@ This document covers the named constants that affect integration behaviour, orga
 |---|---|---|---|
 | `SENTINEL_CAMERA_ACTIVITY_STALENESS_MINUTES` | `const.py` | `10` | Staleness gate for `alarm_disarmed_during_external_threat`. Camera activity must be within this window of the snapshot to fire the rule. |
 | `SENTINEL_OCCUPANCY_ARMED_STATES` | `const.py` | `{"armed_home", "armed_night"}` | Alarm states treated as occupancy-compatible. These states never trigger an `alarm_state_mismatch` finding when `expected_presence=home`. |
-| `_POWER_OFF_W` | `sentinel/power_enrichment.py` | `10.0` (W) | Below this wattage a power sensor is treated as "appliance off" when walking recorder history for the last off→on transition. Only affects the enriched `last_changed` used as advisory context (dynamic rules, triage); the `appliance_power_duration` rule measures duration by direct observation and does not use it. |
+| `_POWER_OFF_W` | `sentinel/power_enrichment.py` | `10.0` (W) | At or below this wattage a power sensor is treated as "appliance off" when walking recorder history for the last off→on transition. Only affects the enriched `last_changed` consumed downstream (dynamic rules, triage context, and the baseline cycle-completion recency window); the `appliance_power_duration` rule measures duration by direct observation and does not use it. |
 | `_LOOKBACK_DAYS` | `sentinel/power_enrichment.py` | `30` (days) | Recorder history window searched for a power sensor's last off→on transition. |
 | `SENTINEL_ADMISSION_TIMEOUT_S` | `core/utils.py` | `2.0` (s) | How long a Sentinel LLM call waits for the chat/video foreground to become idle before deferring. Keeps interactive latency unaffected by Sentinel background work. |
 | `_SENTINEL_STARVATION_WARN_S` | `core/utils.py` | `300.0` (s) | Consecutive deferral duration that triggers a `degraded` sentinel health state and a WARNING log. |
@@ -353,7 +353,7 @@ This document covers the named constants that affect integration behaviour, orga
 | `RECOMMENDED_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT` | `sentinel_baseline_drift_threshold_pct` | `30.0` | Percent deviation from rolling average that triggers a `baseline_deviation` or `time_of_day_anomaly` finding |
 | `RECOMMENDED_SENTINEL_BASELINE_WEEKLY_PATTERNS` | `sentinel_baseline_weekly_patterns` | `False` | Enable per-(day-of-week, hour) baselines for `time_of_day_anomaly`. Requires more data to warm up. |
 | `RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES` | `sentinel_baseline_dow_min_samples` | `4` | Observations per DOW-hour slot before the DOW blend weight reaches 1.0. Lower than global min because DOW slots update at most once per week. |
-| `RECOMMENDED_SENTINEL_BASELINE_SUSTAINED_MINUTES` | `sentinel_baseline_sustained_minutes` | `20` | For cyclic loads (fridge, compressor), the deviation must persist this long before firing. Set `0` to disable the sustained gate. |
+| `RECOMMENDED_SENTINEL_BASELINE_SUSTAINED_MINUTES` | `sentinel_baseline_sustained_minutes` | `45` | For cyclic loads (fridge, compressor), the deviation must persist this long before firing. Set `0` to disable the sustained gate. |
 
 **Code-only:**
 
