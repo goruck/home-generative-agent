@@ -319,6 +319,44 @@
 
 ## Discovery
 
+### Surface dead unavailable-sensors rules (unresolvable entity IDs, all-of semantics)
+
+**What:** `_eval_unavailable_sensors` / `_eval_unavailable_sensors_while_home` (dynamic_rules.py) return `[]` for the whole rule when any single listed entity fails to resolve in the snapshot, with no logging, audit entry, or KPI. This resolve-abort alone means one hallucinated LLM evidence ID, a re-paired zigbee device (hex-address entity IDs change on re-pair — the exact issue #514 ID shape), or a renamed entity permanently disarms an approved rule with zero diagnostics — in both variants. (Trigger semantics differ: the plain variant is all-of — every listed sensor must be unavailable — while the while-home variant emits one finding per unavailable sensor.)
+
+**Why:** Flagged independently by both the Claude adversarial review and Codex during the v3.21.2 ship (issue #514) — cross-model agreement. The abort-on-missing behavior is deliberate and test-pinned (conservative fail-closed), so changing it is a product decision: skip-unresolvable-with-warning, any-of semantics, an audit metric for rules whose entities never resolve, or surfacing unresolved params in the approval preview.
+
+**How to apply:** Prefer the least invasive option first: emit a low-severity audit/diagnostic entry when an approved rule's entity fails to resolve during evaluation, and show unresolved entity IDs in the proposals card preview at approval time. Revisit any-of semantics only with field data.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** v3.21.2 (fix/514-unavailable-binary-occupancy-sensors)
+
+---
+
+### Widen entity_staleness normalization to binary_sensor evidence
+
+**What:** The `entity_staleness` branch in `explain_normalize_candidate` still keys on `person_ids or sensor_ids` (sensor.* only), so "occupancy sensor not updated / last seen" candidates citing only `binary_sensor.*` evidence fail normalization as `unsupported_pattern` — the same bug class as issue #514, one branch down.
+
+**Why:** Flagged by the adversarial review during the v3.21.2 ship; likely the next field report from discovery installs with binary occupancy/presence sensors. Needs its own trigger/non-trigger tests and a check that the staleness evaluator resolves binary_sensor IDs.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** v3.21.2 (fix/514-unavailable-binary-occupancy-sensors)
+
+---
+
+### Validate domainless evidence tokens as object-id slugs
+
+**What:** `_find_domain_entity_ids` (proposal_templates.py) accepts any dot-free bracket token verbatim as a legacy domainless object ID — including tokens with spaces or other non-slug characters. At runtime, `_resolve_sensor_entity_id` tries `sensor.X` before `binary_sensor.X`, so a name collision can bind a different entity than the LLM cited.
+
+**Why:** Flagged by the adversarial review during the v3.21.2 ship. Low impact (lookup keys only, no actuation path), but a cheap `[a-z0-9_]+` fullmatch guard would remove the ambiguity. Applies to the shared helper, so it also tightens the legacy sensor collector — verify legacy drafts still normalize.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** v3.21.2 (fix/514-unavailable-binary-occupancy-sensors)
+
+---
+
 ### Use snapshot device_class as positive signal for text-driven entry fallback
 
 **What:** `_find_text_entry_entity_ids` (proposal_templates.py) promotes binary_sensor/cover evidence IDs to entry sensors via an English-token denylist (`_NON_ENTRY_ID_TOKENS`). The denylist is English-only, so a locale-named non-entry sensor (e.g. Czech `binary_sensor.pohyb_zahrada`, a motion sensor) can still be promoted when candidate text legitimately mentions a door/window. A positive signal — the snapshot entity's `device_class` in `{door, window, opening, garage_door}` — would be language-independent.

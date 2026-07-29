@@ -604,6 +604,103 @@ def test_dynamic_rule_unavailable_sensors_issue_223_non_trigger() -> None:
     assert findings == []
 
 
+def test_dynamic_rule_unavailable_binary_occupancy_sensors_issue_514_triggers() -> None:
+    snapshot = _snapshot(
+        [
+            _base_entity(
+                "binary_sensor.0x00124b0010b0a987_occupancy",
+                "binary_sensor",
+                "unavailable",
+            ),
+            _base_entity(
+                "binary_sensor.smart_presence_sensor_obsazenost",
+                "binary_sensor",
+                "unavailable",
+            ),
+        ],
+        [],
+        {
+            "now": "2026-02-01T00:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": False,
+            "anyone_home": False,
+            "people_home": [],
+            "people_away": [],
+            "last_motion_by_area": {},
+        },
+    )
+    rules = [
+        {
+            "rule_id": "multiple_occupancy_sensors_unavailable",
+            "template_id": "unavailable_sensors",
+            "params": {
+                "sensor_entity_ids": [
+                    "binary_sensor.0x00124b0010b0a987_occupancy",
+                    "binary_sensor.smart_presence_sensor_obsazenost",
+                ]
+            },
+            "severity": "low",
+            "confidence": 0.3,
+            "is_sensitive": False,
+            "suggested_actions": ["check_sensor"],
+        }
+    ]
+    findings = evaluate_dynamic_rules(snapshot, rules)
+    assert len(findings) == 1
+    assert findings[0].type == "multiple_occupancy_sensors_unavailable"
+    assert findings[0].triggering_entities == [
+        "binary_sensor.0x00124b0010b0a987_occupancy",
+        "binary_sensor.smart_presence_sensor_obsazenost",
+    ]
+
+
+def test_dynamic_rule_unavailable_binary_occupancy_sensors_issue_514_non_trigger() -> (
+    None
+):
+    snapshot = _snapshot(
+        [
+            _base_entity(
+                "binary_sensor.0x00124b0010b0a987_occupancy",
+                "binary_sensor",
+                "unavailable",
+            ),
+            _base_entity(
+                "binary_sensor.smart_presence_sensor_obsazenost",
+                "binary_sensor",
+                "off",
+            ),
+        ],
+        [],
+        {
+            "now": "2026-02-01T00:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": False,
+            "anyone_home": False,
+            "people_home": [],
+            "people_away": [],
+            "last_motion_by_area": {},
+        },
+    )
+    rules = [
+        {
+            "rule_id": "multiple_occupancy_sensors_unavailable",
+            "template_id": "unavailable_sensors",
+            "params": {
+                "sensor_entity_ids": [
+                    "binary_sensor.0x00124b0010b0a987_occupancy",
+                    "binary_sensor.smart_presence_sensor_obsazenost",
+                ]
+            },
+            "severity": "low",
+            "confidence": 0.3,
+            "is_sensitive": False,
+            "suggested_actions": ["check_sensor"],
+        }
+    ]
+    findings = evaluate_dynamic_rules(snapshot, rules)
+    assert findings == []
+
+
 def test_dynamic_rule_low_battery_sensors_issue_236_triggers() -> None:
     snapshot = _snapshot(
         [

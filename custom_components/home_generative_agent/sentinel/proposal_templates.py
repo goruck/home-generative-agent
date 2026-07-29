@@ -145,22 +145,27 @@ _PERSON_TERMS = (
 )
 _CAMERA_TERMS = ("camera", "cam")
 _MIN_CAMERA_TOKEN_LEN = 3
-_AWAY_TERMS = (
-    "away",
-    "no one home",
-    "nobody home",
-    "empty",
-    "unoccupied",
-    "no occupants",
-    "without occupants",
+# Word-bounded so "present" doesn't match "presence" (an availability
+# candidate about presence sensors is not a someone-is-home condition) and
+# "home" doesn't match "anyone_home"/"armed_home" (issue #514 adversarial
+# review).
+_AWAY_TERMS_PATTERN = re.compile(
+    r"\b(?:away|no one home|nobody home|empty|unoccupied"
+    r"|no occupants|without occupants)\b"
 )
-_HOME_TERMS = (
-    "someone home",
-    "occupied",
-    "home",
-    "present",
-    "occupants",
-    "residents",
+_HOME_TERMS_PATTERN = re.compile(
+    r"\b(?:someone home|occupied|home|present|occupants|residents)\b"
+)
+# Explicit someone-is-home phrasing. Availability prose routinely contains
+# incidental home wording ("sensors around the home"), which must not scope
+# an outage rule to occupied hours — the while_home evaluator is silent
+# exactly when nobody is home, the highest-value moment for an availability
+# alert (issue #514 adversarial review).
+_EXPLICIT_HOME_OCCUPANCY_PATTERN = re.compile(
+    r"\b(?:someone|anyone|somebody|occupants?|residents?)\s+(?:is\s+|are\s+)?"
+    r"(?:at\s+)?(?:home|present)\b"
+    r"|\b(?:while|when)\s+(?:the\s+home\s+is\s+|the\s+house\s+is\s+)?"
+    r"(?:at\s+)?(?:home|occupied)\b"
 )
 _ENTRY_ID_TOKENS = ("door", "window", "entry")
 # Word-bounded so "indoor", "outdoor", and "doorbell" don't read as entries.
@@ -260,6 +265,7 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
     motion_ids = _find_motion_entity_ids(evidence_paths)
     person_ids = _find_entity_ids(evidence_paths, "person")
     sensor_ids = _find_sensor_entity_ids(evidence_paths)
+    availability_ids = _find_availability_entity_ids(evidence_paths)
     battery_sensor_ids = _find_battery_sensor_entity_ids(evidence_paths)
     camera_id = _find_camera_id(evidence_paths, candidate)
     has_night = _has_night_signal(evidence_paths, text)
@@ -278,6 +284,7 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
         "motion_ids": motion_ids,
         "person_ids": person_ids,
         "sensor_ids": sensor_ids,
+        "availability_ids": availability_ids,
         "battery_sensor_ids": battery_sensor_ids,
         "camera_id": camera_id,
         "presence": presence,
@@ -395,6 +402,47 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 confidence=float(candidate.get("confidence_hint", 0.85)),
                 is_sensitive=False,
                 suggested_actions=["alarm_control_panel.alarm_disarm"],
+            )
+        )
+
+    # unavailable_sensors: availability candidates route before the entry/
+    # lock/battery branches — an entry- or battery-named sensor that is
+    # *unavailable* would otherwise be captured by a state-based template
+    # whose evaluator can never match "unavailable" (issue #514 adversarial
+    # review). Person-tracker staleness candidates ("offline" + "last seen"/
+    # "not updated") keep routing to entity_staleness below.
+    availability_target_ids = (
+        _availability_target_ids(candidate, availability_ids)
+        if availability_ids
+        else []
+    )
+    if (
+        availability_target_ids
+        and _contains_any(text, ("unavailable", "offline", "unreachable"))
+        and not (person_ids and _has_staleness_signal(text))
+    ):
+        if _has_explicit_home_occupancy_signal(evidence_paths, text):
+            default_rule_id = "unavailable_sensors_while_home"
+            return NormalizationResult(
+                normalized=NormalizedRule(
+                    rule_id=_candidate_rule_id(candidate, default=default_rule_id),
+                    template_id="unavailable_sensors_while_home",
+                    params={"sensor_entity_ids": availability_target_ids},
+                    severity="low",
+                    confidence=float(candidate.get("confidence_hint", 0.8)),
+                    is_sensitive=False,
+                    suggested_actions=["check_sensor"],
+                )
+            )
+        return NormalizationResult(
+            normalized=NormalizedRule(
+                rule_id=_candidate_rule_id(candidate, default="unavailable_sensors"),
+                template_id="unavailable_sensors",
+                params={"sensor_entity_ids": availability_target_ids},
+                severity="low",
+                confidence=float(candidate.get("confidence_hint", 0.6)),
+                is_sensitive=False,
+                suggested_actions=["check_sensor"],
             )
         )
 
@@ -765,31 +813,6 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
             )
         )
 
-    if sensor_ids and _contains_any(text, ("unavailable", "offline", "unreachable")):
-        if presence == "home":
-            return NormalizationResult(
-                normalized=NormalizedRule(
-                    rule_id="unavailable_sensors_while_home",
-                    template_id="unavailable_sensors_while_home",
-                    params={"sensor_entity_ids": sensor_ids},
-                    severity="low",
-                    confidence=float(candidate.get("confidence_hint", 0.8)),
-                    is_sensitive=False,
-                    suggested_actions=["check_sensor"],
-                )
-            )
-        return NormalizationResult(
-            normalized=NormalizedRule(
-                rule_id=_candidate_rule_id(candidate, default="unavailable_sensors"),
-                template_id="unavailable_sensors",
-                params={"sensor_entity_ids": sensor_ids},
-                severity="low",
-                confidence=float(candidate.get("confidence_hint", 0.6)),
-                is_sensitive=False,
-                suggested_actions=["check_sensor"],
-            )
-        )
-
     # entity_staleness: entity last_changed has not advanced past a threshold.
     # Matches person tracking (person_ids) or explicit sensor staleness signals.
     if (person_ids or sensor_ids) and _has_staleness_signal(text):
@@ -821,6 +844,7 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
         motion_ids=motion_ids,
         person_ids=person_ids,
         sensor_ids=sensor_ids,
+        availability_ids=availability_ids,
         battery_sensor_ids=battery_sensor_ids,
         camera_id=camera_id,
         presence=presence,
@@ -862,6 +886,7 @@ def _normalization_failure(  # noqa: PLR0911, PLR0913
     motion_ids: list[str],
     person_ids: list[str],
     sensor_ids: list[str],
+    availability_ids: list[str],
     battery_sensor_ids: list[str],
     camera_id: str | None,
     presence: str,
@@ -899,12 +924,12 @@ def _normalization_failure(  # noqa: PLR0911, PLR0913
         )
     if (
         _contains_any(text, ("unavailable", "offline", "unreachable"))
-        and not sensor_ids
+        and not availability_ids
     ):
         return NormalizationResult(
             normalized=None,
             reason_code="missing_required_entities",
-            details={"required": ["sensor"], **summary},
+            details={"required": ["sensor", "binary_sensor"], **summary},
         )
     if (
         _contains_any(text, _CAMERA_TERMS)
@@ -927,6 +952,7 @@ def _normalization_failure(  # noqa: PLR0911, PLR0913
                 motion_ids,
                 person_ids,
                 sensor_ids,
+                availability_ids,
                 battery_sensor_ids,
                 camera_id,
             )
@@ -1047,7 +1073,9 @@ def _find_motion_entity_ids(evidence_paths: list[str]) -> list[str]:
     return sorted(set(ids))
 
 
-def _find_sensor_entity_ids(evidence_paths: list[str]) -> list[str]:
+def _find_domain_entity_ids(
+    evidence_paths: list[str], domains: frozenset[str]
+) -> list[str]:
     ids: list[str] = []
     for path in evidence_paths:
         entity_id = _extract_entity_id_from_evidence_path(path)
@@ -1058,9 +1086,28 @@ def _find_sensor_entity_ids(evidence_paths: list[str]) -> list[str]:
             ids.append(entity_id)
             continue
         domain = entity_id.split(".", 1)[0]
-        if domain == "sensor":
+        if domain in domains:
             ids.append(entity_id)
     return sorted(set(ids))
+
+
+def _find_sensor_entity_ids(evidence_paths: list[str]) -> list[str]:
+    return _find_domain_entity_ids(evidence_paths, frozenset({"sensor"}))
+
+
+def _find_availability_entity_ids(evidence_paths: list[str]) -> list[str]:
+    """
+    Entity IDs eligible for the unavailable-sensors templates.
+
+    Availability candidates routinely cite ``binary_sensor.*`` entities
+    (occupancy/presence sensors, issue #514), which the ``sensor.``-only
+    collector misses. The dynamic-rule evaluator resolves any entity ID
+    present in the snapshot, so accept both measurement domains here along
+    with legacy domainless object IDs.
+    """
+    return _find_domain_entity_ids(
+        evidence_paths, frozenset({"sensor", "binary_sensor"})
+    )
 
 
 def _find_battery_sensor_entity_ids(evidence_paths: list[str]) -> list[str]:
@@ -1111,13 +1158,132 @@ def _presence_signal(evidence_paths: list[str], text: str) -> str:
         return "away"
     if _ANYONE_HOME_TRUE_PATTERN.search(text):
         return "home"
-    if _contains_any(text, _AWAY_TERMS):
+    if _AWAY_TERMS_PATTERN.search(text):
         return "away"
-    if _contains_any(text, _HOME_TERMS):
+    if _HOME_TERMS_PATTERN.search(text):
         return "home"
     # "derived.anyone_home" alone (without direction signals) means occupancy matters
     # but direction is unknown — return "any" rather than guessing "home".
     return "any"
+
+
+# The evaluator fires only on the literal HA "unavailable" state
+# (_eval_unavailable_sensors), so only that predicate marks a target —
+# accepting e.g. == 'unknown' would register a rule that can never fire.
+_AVAILABILITY_TARGET_STATE = "unavailable"
+# State literal following an equality comparison in a candidate pattern
+# clause, e.g. ``.state == 'off'`` or ``state = unavailable``. Negative
+# lookbehind keeps ``!=``/``<=``/``>=`` comparisons from reading as equality.
+_PREDICATE_STATE_PATTERN = re.compile(r"(?<![!<>=])==?\s*['\"]?([a-z_]+)['\"]?")
+# Bare state words in free-form clauses without an equality operator, e.g.
+# ``sensor.temperature unavailable AND binary_sensor.occupancy off``. Word
+# boundaries keep ``state_unavailable`` (underscore-joined) from matching.
+_BARE_STATE_PATTERN = re.compile(
+    r"\b(?:unavailable|unknown|on|off|open|closed|locked|unlocked"
+    r"|home|not_home|detected|clear|idle)\b"
+)
+# Any comparison operator: a clause carrying one but failing the equality
+# regex is a negated/inequality condition (!=, <, >=) — contextual, never a
+# target, even when the bare word "unavailable" appears in it.
+_COMPARISON_OPERATOR_PATTERN = re.compile(r"!=|<=?|>=?|==?")
+_BOOLEAN_CONNECTOR_PATTERN = re.compile(r"\band\b|\bor\b")
+# Sentinel predicate for explicitly non-availability conditions; any value
+# other than "unavailable" excludes the entity from the target list.
+_CONTEXTUAL_PREDICATE = "__contextual__"
+
+
+def _availability_target_ids(
+    candidate: dict[str, Any], availability_ids: list[str]
+) -> list[str]:
+    """
+    Restrict availability targets to entities the candidate says are unavailable.
+
+    Compound candidate patterns can mix the unavailable target with a
+    contextual condition (``sensor.x == 'unavailable' AND binary_sensor.y ==
+    'off'``). Collecting the contextual entity as a target deadlocks the
+    all-of evaluator — ``off`` never equals ``unavailable`` — so the rule
+    silently never fires (issue #514 adversarial review).
+
+    When the pattern carries no per-entity predicates at all (issue #514
+    lists bare evidence paths with a candidate-wide ``state_unavailable``
+    pattern), every collected entity is a target. Once any per-entity
+    predicate is present, only entities explicitly compared to
+    ``unavailable`` qualify — entities omitted from the pattern, or compared
+    to any other state, are contextual. May return an empty list: the caller
+    must then skip the availability templates entirely rather than register
+    a rule with different semantics.
+    """
+    pattern = str(candidate.get("pattern", "")).lower()
+    predicate_by_id: dict[str, str | None] = {}
+    has_any_predicate = False
+    for entity_id in availability_ids:
+        # Token-bounded on both sides so a prefix ID (sensor.hall) doesn't
+        # read as an occurrence of sensor.hall_temperature, and an ID sharing
+        # an object-id suffix (sensor.temperature) doesn't match inside
+        # binary_sensor.temperature.
+        id_match = re.search(
+            r"(?<![a-z0-9_.])" + re.escape(entity_id.lower()) + r"(?![a-z0-9_])",
+            pattern,
+        )
+        if id_match is None:
+            predicate_by_id[entity_id] = None
+            continue
+        clause = pattern[id_match.end() :]
+        clause = _BOOLEAN_CONNECTOR_PATTERN.split(clause, 1)[0]
+        equality = _PREDICATE_STATE_PATTERN.search(clause)
+        if equality is not None:
+            state: str | None = equality.group(1)
+        elif _COMPARISON_OPERATOR_PATTERN.search(clause):
+            # A comparison the equality regex rejected (!=, <, >=) is a
+            # negated/inequality condition — contextual, never a target.
+            state = _CONTEXTUAL_PREDICATE
+        else:
+            # Free-form patterns state per-entity semantics without an
+            # equality operator ("sensor.x unavailable AND sensor.y off").
+            bare = _BARE_STATE_PATTERN.search(clause)
+            if bare is not None and re.search(r"\bnot\s*$", clause[: bare.start()]):
+                state = _CONTEXTUAL_PREDICATE
+            else:
+                state = None if bare is None else bare.group(0)
+        predicate_by_id[entity_id] = state
+        if state is not None:
+            has_any_predicate = True
+    if not has_any_predicate:
+        return availability_ids
+    return [
+        entity_id
+        for entity_id, state in predicate_by_id.items()
+        if state == _AVAILABILITY_TARGET_STATE
+    ]
+
+
+def _has_explicit_home_occupancy_signal(evidence_paths: list[str], text: str) -> bool:
+    """
+    Return True only for an explicit someone-is-home condition.
+
+    Availability prose routinely contains incidental home wording ("sensors
+    around the home", "presence sensors"), which must not scope an outage
+    rule to occupied hours — the while_home evaluator is silent exactly when
+    nobody is home, the highest-value moment for an availability alert
+    (issue #514 adversarial review).
+    """
+    if "not derived.anyone_home" in evidence_paths:
+        return False
+    # Explicit absence signals override the bare evidence path — the
+    # candidate cites occupancy to require absence, not presence: an
+    # anyone_home == false expression, a negated path in the pattern text,
+    # or away wording ("nobody home", "while away") in the prose.
+    if (
+        _ANYONE_HOME_FALSE_PATTERN.search(text)
+        or "not derived.anyone_home" in text
+        or _AWAY_TERMS_PATTERN.search(text)
+    ):
+        return False
+    if "derived.anyone_home" in evidence_paths:
+        return True
+    if _ANYONE_HOME_TRUE_PATTERN.search(text):
+        return True
+    return _EXPLICIT_HOME_OCCUPANCY_PATTERN.search(text) is not None
 
 
 def _entry_kind(entry_ids: list[str], text: str = "") -> str:
