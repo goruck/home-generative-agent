@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.21.2] - 2026-07-28
+
+### Fixed
+
+- **"Multiple occupancy sensors unavailable" is now a supported Sentinel proposal** — discovery candidates whose evidence cites `binary_sensor.*` entities (occupancy and presence sensors) with an unavailability pattern were rejected as unsupported, because rule normalization only accepted `sensor.*` entity IDs for the unavailable-sensors templates. Both domains are accepted now, so approving such a candidate registers an `unavailable_sensors` rule that alerts when every listed sensor is simultaneously unavailable — a likely hub or network outage — and stays quiet while any of them is still reporting. Diagnostics for availability candidates that remain unsupported now correctly reflect which entity kinds were recognized. Requested by [@hruba202](https://github.com/hruba202) in [#514](https://github.com/goruck/home-generative-agent/issues/514).
+- **Availability rules no longer get silently scoped to occupied hours by incidental wording** — prose like "presence sensors" or "sensors around the home" in a discovery candidate previously counted as a someone-is-home condition, routing the rule to the while-home template that is silent exactly when nobody is home — the moment a hub-outage alert matters most. The while-home variant now requires an explicit occupancy condition (the `anyone_home` evidence path or phrasing like "while someone is home"), and home/away wording is matched on whole words across normalization and the proposals card.
+- **Unavailable door-contact and battery sensors no longer become rules that can never fire** — a candidate like "front door contact sensor is unavailable" was captured by the open-entry template (which only matches `on`/`open` states) and a "battery sensor unavailable" candidate by the low-battery template (which needs a numeric reading), producing approved rules that silently never alerted. Availability candidates now route to the unavailable-sensors template ahead of those branches, while person-tracker "offline / last seen" candidates keep their staleness routing.
+- **Contextual condition entities are excluded from availability targets** — in a compound candidate ("temperature sensor unavailable while occupancy is off"), the contextual entity was included in the rule's all-of target list, so the rule could never fire because `off` never equals `unavailable`. When a candidate's pattern carries per-entity predicates, only entities explicitly compared to `unavailable` become targets; entities compared to other states (or omitted from the pattern) are treated as context, and candidates with no availability target at all stay unsupported instead of registering a rule that watches for the wrong state.
+- **Approving a second while-home availability proposal no longer collides with the first** — every `unavailable_sensors_while_home` rule shared one hardcoded rule ID, so a proposal for one batch of sensors marked any later proposal for different sensors as already covered. Rule IDs now derive from the candidate, matching the presence-agnostic variant.
+
 ## [3.21.1] - 2026-07-27
 
 ### Fixed
