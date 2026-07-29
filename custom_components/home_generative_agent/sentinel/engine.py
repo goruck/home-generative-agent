@@ -534,9 +534,23 @@ class SentinelEngine:
             "snapshot_build",
             "Sentinel snapshot build recovered after %d failed cycle(s).",
         )
-        await async_enrich_alarm_last_changed(self._hass, snapshot)
-        await async_enrich_lock_last_changed(self._hass, snapshot)
-        await async_enrich_power_last_changed(self._hass, snapshot)
+        try:
+            await async_enrich_alarm_last_changed(self._hass, snapshot)
+            await async_enrich_lock_last_changed(self._hass, snapshot)
+            await async_enrich_power_last_changed(self._hass, snapshot)
+        except (ValueError, TypeError, KeyError):
+            # Enrichment only corrects last_changed context; a bug here must
+            # degrade to un-enriched snapshots, not kill the run loop (an
+            # unguarded exception would end Sentinel until reload).
+            self._log_limiter.warning(
+                "snapshot_enrichment",
+                "Snapshot enrichment failed; continuing with raw last_changed.",
+            )
+        else:
+            self._log_limiter.recovered(
+                "snapshot_enrichment",
+                "Sentinel snapshot enrichment recovered after %d failed cycle(s).",
+            )
 
         # Force Level 0 when suppression state is in read-only mode (version
         # mismatch after a downgrade).
