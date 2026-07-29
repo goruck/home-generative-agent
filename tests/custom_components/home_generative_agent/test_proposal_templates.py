@@ -202,7 +202,7 @@ def test_normalize_candidate_unavailable_sensors_while_home_template() -> None:
     normalized = normalize_candidate(candidate)
     assert normalized is not None
     assert normalized.template_id == "unavailable_sensors_while_home"
-    assert normalized.rule_id == "unavailable_sensors_while_home"
+    assert normalized.rule_id == "sensor_unavailable_home"
     assert normalized.params == {
         "sensor_entity_ids": [
             "sensor.backyard_vmd3_0",
@@ -264,6 +264,478 @@ def test_normalize_candidate_unavailable_sensors_template_issue_223() -> None:
             "backyard_vmd3_0",
             "backyard_vmd4_camera1profile1",
         ]
+    }
+
+
+def test_normalize_candidate_unavailable_binary_occupancy_sensors_issue_514() -> None:
+    candidate = {
+        "candidate_id": "multiple_occupancy_sensors_unavailable",
+        "title": "Multiple Occupancy Sensors Unavailable",
+        "summary": (
+            "Several occupancy sensors are simultaneously unavailable, "
+            "potentially indicating a system outage."
+        ),
+        "pattern": "state_unavailable",
+        "suggested_type": "availability",
+        "confidence_hint": 0.3,
+        "evidence_paths": [
+            (
+                "entities[entity_ids contains "
+                '"binary_sensor.0x00124b0010b0a987_occupancy"].state'
+            ),
+            (
+                "entities[entity_ids contains "
+                '"binary_sensor.0xfc012cfffef62ae0_occupancy"].state'
+            ),
+            (
+                "entities[entity_ids contains "
+                '"binary_sensor.smart_presence_sensor_obsazenost"].state'
+            ),
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "unavailable_sensors"
+    assert normalized.rule_id == "multiple_occupancy_sensors_unavailable"
+    assert normalized.params == {
+        "sensor_entity_ids": [
+            "binary_sensor.0x00124b0010b0a987_occupancy",
+            "binary_sensor.0xfc012cfffef62ae0_occupancy",
+            "binary_sensor.smart_presence_sensor_obsazenost",
+        ]
+    }
+    assert normalized.confidence == 0.3
+
+
+def test_normalize_candidate_presence_sensor_wording_stays_presence_agnostic() -> None:
+    """'Presence sensors' prose must not read as a someone-is-home condition."""
+    normalized = normalize_candidate(
+        {
+            "candidate_id": "presence_sensors_unavailable",
+            "title": "Presence Sensors Unavailable",
+            "summary": (
+                "Several presence sensors are unavailable, "
+                "potentially indicating a hub outage."
+            ),
+            "pattern": "state_unavailable",
+            "suggested_type": "availability",
+            "confidence_hint": 0.4,
+            "evidence_paths": [
+                "entities[entity_id=binary_sensor.hall_presence].state",
+                "entities[entity_id=binary_sensor.kitchen_presence].state",
+            ],
+        }
+    )
+    assert normalized is not None
+    assert normalized.template_id == "unavailable_sensors"
+    assert normalized.rule_id == "presence_sensors_unavailable"
+
+
+def test_normalize_candidate_incidental_home_wording_stays_presence_agnostic() -> None:
+    """'Around the home' is location color, not an occupancy condition."""
+    normalized = normalize_candidate(
+        {
+            "candidate_id": "occupancy_sensors_hub_outage",
+            "title": "Occupancy Sensors Unavailable",
+            "summary": (
+                "Several occupancy sensors around the home are unavailable, "
+                "suggesting a Zigbee hub outage."
+            ),
+            "pattern": "state_unavailable",
+            "suggested_type": "availability",
+            "confidence_hint": 0.4,
+            "evidence_paths": [
+                "entities[entity_id=binary_sensor.hall_occupancy].state",
+                "entities[entity_id=binary_sensor.garage_occupancy].state",
+            ],
+        }
+    )
+    assert normalized is not None
+    assert normalized.template_id == "unavailable_sensors"
+    assert normalized.rule_id == "occupancy_sensors_hub_outage"
+
+
+def test_normalize_candidate_unavailable_entry_named_sensor_is_availability() -> None:
+    """An unavailable door contact must not become a dead open_entry rule."""
+    normalized = normalize_candidate(
+        {
+            "candidate_id": "front_door_contact_unavailable",
+            "title": "Front Door Contact Sensor Unavailable",
+            "summary": (
+                "The front door contact sensor is reporting unavailable, "
+                "so entry monitoring is degraded."
+            ),
+            "pattern": "state_unavailable",
+            "suggested_type": "availability",
+            "confidence_hint": 0.5,
+            "evidence_paths": [
+                "entities[entity_id=binary_sensor.front_door_contact].state",
+            ],
+        }
+    )
+    assert normalized is not None
+    assert normalized.template_id == "unavailable_sensors"
+    assert normalized.rule_id == "front_door_contact_unavailable"
+
+
+def test_normalize_candidate_unavailable_battery_named_sensor_is_availability() -> None:
+    """An unavailable battery sensor must not become a dead low_battery rule."""
+    normalized = normalize_candidate(
+        {
+            "candidate_id": "bedroom_battery_sensor_unavailable",
+            "title": "Bedroom Battery Sensor Unavailable",
+            "summary": "The bedroom sensor battery level is reporting unavailable.",
+            "pattern": "state_unavailable",
+            "suggested_type": "availability",
+            "confidence_hint": 0.5,
+            "evidence_paths": [
+                "entities[entity_id=sensor.bedroom_t_h_battery].state",
+            ],
+        }
+    )
+    assert normalized is not None
+    assert normalized.template_id == "unavailable_sensors"
+    assert normalized.rule_id == "bedroom_battery_sensor_unavailable"
+
+
+def test_normalize_candidate_contextual_entities_excluded_from_availability() -> None:
+    """A contextual condition entity must not deadlock the all-of evaluator."""
+    normalized = normalize_candidate(
+        {
+            "candidate_id": "hall_temperature_unavailable_while_unoccupied",
+            "title": "Hall temperature sensor unavailable",
+            "summary": (
+                "The hall temperature sensor reports unavailable while the "
+                "hall occupancy condition is off."
+            ),
+            "pattern": (
+                "entities[entity_id=sensor.hall_temperature].state == "
+                "'unavailable' AND "
+                "entities[entity_id=binary_sensor.hall_occupancy].state == 'off'"
+            ),
+            "suggested_type": "availability",
+            "confidence_hint": 0.5,
+            "evidence_paths": [
+                "entities[entity_id=sensor.hall_temperature].state",
+                "entities[entity_id=binary_sensor.hall_occupancy].state",
+            ],
+        }
+    )
+    assert normalized is not None
+    assert normalized.template_id == "unavailable_sensors"
+    assert normalized.params == {"sensor_entity_ids": ["sensor.hall_temperature"]}
+
+
+def test_normalize_candidate_all_contextual_predicates_stay_unsupported() -> None:
+    """A candidate whose only predicate is a non-availability state is not a rule."""
+    result = explain_normalize_candidate(
+        {
+            "candidate_id": "occupancy_stuck_off_hub_unavailable",
+            "title": "Occupancy sensor stuck",
+            "summary": "Occupancy sensor stuck off while the hub is unavailable.",
+            "pattern": (
+                "entities[entity_id=binary_sensor.hall_occupancy].state == 'off'"
+            ),
+            "suggested_type": "availability",
+            "confidence_hint": 0.4,
+            "evidence_paths": [
+                "entities[entity_id=binary_sensor.hall_occupancy].state",
+            ],
+        }
+    )
+    assert result.normalized is None
+    assert result.reason_code == "unsupported_pattern"
+
+
+def test_normalize_candidate_pattern_omitted_entity_is_contextual() -> None:
+    """Evidence entities absent from a predicated pattern are not targets."""
+    normalized = normalize_candidate(
+        {
+            "candidate_id": "hall_temperature_unavailable_context_omitted",
+            "title": "Hall temperature sensor unavailable",
+            "summary": (
+                "The hall temperature sensor reports unavailable when the "
+                "occupancy condition holds."
+            ),
+            "pattern": (
+                "entities[entity_id=sensor.hall_temperature].state == 'unavailable'"
+            ),
+            "suggested_type": "availability",
+            "confidence_hint": 0.5,
+            "evidence_paths": [
+                "entities[entity_id=sensor.hall_temperature].state",
+                "entities[entity_id=binary_sensor.hall_occupancy].state",
+            ],
+        }
+    )
+    assert normalized is not None
+    assert normalized.template_id == "unavailable_sensors"
+    assert normalized.params == {"sensor_entity_ids": ["sensor.hall_temperature"]}
+
+
+def test_normalize_candidate_anyone_home_false_pattern_overrides_evidence() -> None:
+    """anyone_home == false must not scope an availability rule to while-home."""
+    normalized = normalize_candidate(
+        {
+            "candidate_id": "occupancy_sensors_unavailable_away",
+            "title": "Occupancy sensors unavailable while away",
+            "summary": "Occupancy sensors report unavailable.",
+            "pattern": "derived.anyone_home == false AND state_unavailable",
+            "suggested_type": "availability",
+            "confidence_hint": 0.5,
+            "evidence_paths": [
+                "derived.anyone_home",
+                "entities[entity_id=binary_sensor.hall_occupancy].state",
+            ],
+        }
+    )
+    assert normalized is not None
+    assert normalized.template_id == "unavailable_sensors"
+
+
+def test_normalize_candidate_while_occupied_phrasing_selects_while_home() -> None:
+    """Explicit 'while occupied' conditions keep the while-home template."""
+    normalized = normalize_candidate(
+        {
+            "candidate_id": "sensors_unavailable_while_occupied",
+            "title": "Sensors unavailable while occupied",
+            "summary": (
+                "Sensors report unavailable while the home is occupied, "
+                "reducing coverage."
+            ),
+            "pattern": "state_unavailable",
+            "suggested_type": "availability",
+            "confidence_hint": 0.7,
+            "evidence_paths": [
+                "entities[entity_id=binary_sensor.hall_occupancy].state",
+            ],
+        }
+    )
+    assert normalized is not None
+    assert normalized.template_id == "unavailable_sensors_while_home"
+
+
+def test_normalize_candidate_prefix_entity_id_is_not_a_predicate_match() -> None:
+    """A prefix ID (sensor.hall) must not inherit sensor.hall_temperature's predicate."""
+    normalized = normalize_candidate(
+        {
+            "candidate_id": "hall_temperature_unavailable_prefix",
+            "title": "Hall temperature sensor unavailable",
+            "summary": "The hall temperature sensor reports unavailable.",
+            "pattern": (
+                "entities[entity_id=sensor.hall_temperature].state == 'unavailable'"
+            ),
+            "suggested_type": "availability",
+            "confidence_hint": 0.5,
+            "evidence_paths": [
+                "entities[entity_id=sensor.hall].state",
+                "entities[entity_id=sensor.hall_temperature].state",
+            ],
+        }
+    )
+    assert normalized is not None
+    assert normalized.template_id == "unavailable_sensors"
+    assert normalized.params == {"sensor_entity_ids": ["sensor.hall_temperature"]}
+
+
+def test_normalize_candidate_free_form_predicates_without_equality_operator() -> None:
+    """Bare-word per-entity states still separate targets from context."""
+    normalized = normalize_candidate(
+        {
+            "candidate_id": "hall_temperature_unavailable_free_form",
+            "title": "Hall temperature sensor unavailable",
+            "summary": "Temperature sensor drops out while the occupancy input is off.",
+            "pattern": (
+                "sensor.hall_temperature unavailable AND "
+                "binary_sensor.hall_occupancy off"
+            ),
+            "suggested_type": "availability",
+            "confidence_hint": 0.5,
+            "evidence_paths": [
+                "entities[entity_id=sensor.hall_temperature].state",
+                "entities[entity_id=binary_sensor.hall_occupancy].state",
+            ],
+        }
+    )
+    assert normalized is not None
+    assert normalized.template_id == "unavailable_sensors"
+    assert normalized.params == {"sensor_entity_ids": ["sensor.hall_temperature"]}
+
+
+def test_normalize_candidate_negated_unavailable_predicate_is_contextual() -> None:
+    """!= 'unavailable' clauses are context, not targets."""
+    normalized = normalize_candidate(
+        {
+            "candidate_id": "kitchen_sensor_unavailable_negated_context",
+            "title": "Kitchen sensor unavailable",
+            "summary": "Kitchen sensor unavailable while the hall sensor is fine.",
+            "pattern": (
+                "entities[entity_id=sensor.hall_temperature].state != 'unavailable' "
+                "AND entities[entity_id=sensor.kitchen_temperature].state == "
+                "'unavailable'"
+            ),
+            "suggested_type": "availability",
+            "confidence_hint": 0.5,
+            "evidence_paths": [
+                "entities[entity_id=sensor.hall_temperature].state",
+                "entities[entity_id=sensor.kitchen_temperature].state",
+            ],
+        }
+    )
+    assert normalized is not None
+    assert normalized.template_id == "unavailable_sensors"
+    assert normalized.params == {"sensor_entity_ids": ["sensor.kitchen_temperature"]}
+
+
+def test_normalize_candidate_suffix_sharing_entity_id_is_not_a_target() -> None:
+    """sensor.temperature must not match inside binary_sensor.temperature."""
+    normalized = normalize_candidate(
+        {
+            "candidate_id": "binary_temperature_unavailable_suffix",
+            "title": "Temperature binary sensor unavailable",
+            "summary": "The temperature binary sensor reports unavailable.",
+            "pattern": (
+                "entities[entity_id=binary_sensor.temperature].state == 'unavailable'"
+            ),
+            "suggested_type": "availability",
+            "confidence_hint": 0.5,
+            "evidence_paths": [
+                "entities[entity_id=sensor.temperature].state",
+                "entities[entity_id=binary_sensor.temperature].state",
+            ],
+        }
+    )
+    assert normalized is not None
+    assert normalized.template_id == "unavailable_sensors"
+    assert normalized.params == {"sensor_entity_ids": ["binary_sensor.temperature"]}
+
+
+def test_normalize_candidate_away_wording_overrides_anyone_home_evidence() -> None:
+    """'Nobody home' prose with bare anyone_home evidence is not while-home."""
+    normalized = normalize_candidate(
+        {
+            "candidate_id": "occupancy_sensors_unavailable_nobody_home",
+            "title": "Occupancy sensors unavailable while nobody home",
+            "summary": (
+                "Occupancy sensors report unavailable while nobody home, "
+                "leaving the house unmonitored."
+            ),
+            "pattern": "state_unavailable",
+            "suggested_type": "availability",
+            "confidence_hint": 0.5,
+            "evidence_paths": [
+                "derived.anyone_home",
+                "entities[entity_id=binary_sensor.hall_occupancy].state",
+            ],
+        }
+    )
+    assert normalized is not None
+    assert normalized.template_id == "unavailable_sensors"
+
+
+def test_normalize_candidate_unknown_state_predicate_is_not_a_target() -> None:
+    """== 'unknown' predicates must not register a rule that can never fire."""
+    result = explain_normalize_candidate(
+        {
+            "candidate_id": "hall_occupancy_unknown_state",
+            "title": "Occupancy sensor state unknown",
+            "summary": "The hall occupancy sensor is unreachable or unknown.",
+            "pattern": (
+                "entities[entity_id=binary_sensor.hall_occupancy].state == 'unknown'"
+            ),
+            "suggested_type": "availability",
+            "confidence_hint": 0.4,
+            "evidence_paths": [
+                "entities[entity_id=binary_sensor.hall_occupancy].state",
+            ],
+        }
+    )
+    assert result.normalized is None
+    assert result.reason_code == "unsupported_pattern"
+
+
+def test_normalize_candidate_tracker_staleness_keeps_entity_staleness_routing() -> None:
+    """'Offline' tracker candidates with last-seen wording stay staleness rules."""
+    normalized = normalize_candidate(
+        {
+            "candidate_id": "phone_tracker_stale",
+            "title": "Phone tracker offline",
+            "summary": (
+                "person.jane was last seen many hours ago and the BLE "
+                "presence binary sensor has not updated."
+            ),
+            "pattern": "tracker_staleness",
+            "suggested_type": "availability",
+            "confidence_hint": 0.6,
+            "evidence_paths": [
+                "entities[entity_id=person.jane].state",
+                "entities[entity_id=binary_sensor.jane_phone_ble].state",
+            ],
+        }
+    )
+    assert normalized is not None
+    assert normalized.template_id == "entity_staleness"
+    assert normalized.params["entity_id"] == "person.jane"
+
+
+def test_normalize_candidate_unavailable_unsupported_domain_still_fails() -> None:
+    """Unavailability evidence outside sensor/binary_sensor domains stays rejected."""
+    result = explain_normalize_candidate(
+        {
+            "candidate_id": "cameras_unavailable",
+            "title": "Cameras unavailable",
+            "summary": "Cameras are reporting unavailable.",
+            "pattern": "state_unavailable",
+            "suggested_type": "availability",
+            "confidence_hint": 0.5,
+            "evidence_paths": ["entities[entity_id=light.living_room].state"],
+        }
+    )
+    assert result.normalized is None
+    assert result.reason_code == "missing_required_entities"
+
+
+def test_normalize_candidate_binary_availability_evidence_without_keywords() -> None:
+    """Recognized binary_sensor evidence without a matched pattern is 'unsupported'."""
+    result = explain_normalize_candidate(
+        {
+            "candidate_id": "occupancy_flapping",
+            "title": "Occupancy toggling oddly",
+            "summary": "Occupancy readings look inconsistent across rooms.",
+            "pattern": "state_flapping",
+            "suggested_type": "availability",
+            "confidence_hint": 0.5,
+            "evidence_paths": [
+                "entities[entity_id=binary_sensor.hall_occupancy].state",
+            ],
+        }
+    )
+    assert result.normalized is None
+    assert result.reason_code == "unsupported_pattern"
+
+
+def test_normalize_candidate_unavailable_binary_sensors_while_home() -> None:
+    candidate = {
+        "candidate_id": "occupancy_sensors_unavailable_home",
+        "title": "Occupancy sensors unavailable while someone is home",
+        "summary": (
+            "Occupancy sensors report unavailable while someone is home, "
+            "reducing presence coverage."
+        ),
+        "pattern": "derived.anyone_home AND state_unavailable",
+        "suggested_type": "availability",
+        "confidence_hint": 0.8,
+        "evidence_paths": [
+            "derived.anyone_home",
+            "entities[entity_id=binary_sensor.smart_presence_sensor_obsazenost].state",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "unavailable_sensors_while_home"
+    assert normalized.rule_id == "occupancy_sensors_unavailable_home"
+    assert normalized.params == {
+        "sensor_entity_ids": ["binary_sensor.smart_presence_sensor_obsazenost"]
     }
 
 
