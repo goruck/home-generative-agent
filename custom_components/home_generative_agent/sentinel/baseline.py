@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 from datetime import UTC, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -1100,6 +1101,10 @@ def evaluate_baseline_deviation(  # noqa: PLR0911, PLR0912, PLR0915
         current_value = float(str(entity.get("state", "")))
     except (TypeError, ValueError):
         return []
+    if not math.isfinite(current_value):
+        # nan/inf poison every downstream comparison and evidence field
+        # (round(inf) raises in the notifier during dispatch).
+        return []
 
     baseline_value = (baselines.get(entity_id) or {}).get(metric)
     if baseline_value is None:
@@ -1342,6 +1347,10 @@ def _evaluate_dow_anomaly(  # noqa: PLR0913
     try:
         current_value = float(str(entity.get("state", "")))
     except (TypeError, ValueError):
+        return []
+    if not math.isfinite(current_value):
+        # Same guard as evaluate_baseline_deviation: non-finite readings must
+        # not reach evidence fields the notifier rounds during dispatch.
         return []
 
     # Global hourly mean for this hour (the fallback anchor).

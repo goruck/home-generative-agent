@@ -121,10 +121,12 @@ async def async_enrich_power_last_changed(
     Correct last_changed for power sensors reset by HA startup.
 
     When HA restarts, a power sensor re-reports its current wattage, creating a
-    new last_changed at startup time.  The appliance duration rule then computes
-    a falsely short duration and fires too late (or not at all).  This function
-    queries the recorder to find when the sensor last crossed from off to on and
-    corrects last_changed before rules evaluate.
+    new last_changed at startup time.  This function queries the recorder to
+    find when the sensor last crossed from off to on and corrects last_changed
+    before rules evaluate.  The appliance duration rule does NOT consume this
+    (it measures duration by direct observation); the enriched value informs
+    advisory context only — dynamic rules, triage, and the baseline
+    cycle-completion recency check.
     """
     if DATA_INSTANCE not in getattr(hass, "data", {}):
         return

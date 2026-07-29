@@ -1203,6 +1203,26 @@ def test_baseline_deviation_standby_baseline_not_completion() -> None:
     assert len(findings) == 0
 
 
+def test_baseline_deviation_rejects_non_finite_readings() -> None:
+    """
+    nan/inf states must not produce findings.
+
+    A nan current_value defeats every comparison, and an inf deviation_pct in
+    evidence would crash the notifier's round() during dispatch.
+    """
+    for bad_state in ("nan", "inf", "1e309"):
+        snapshot = _snapshot(
+            [
+                _power_entity(
+                    "sensor.washer_power", bad_state, device_class="power", unit="W"
+                )
+            ]
+        )
+        baselines = {"sensor.washer_power": {METRIC_ROLLING_AVG: 800.0}}
+        rule = _rule(entity_id="sensor.washer_power", threshold_pct=50.0)
+        assert evaluate_baseline_deviation(snapshot, rule, baselines) == [], bad_state
+
+
 def test_baseline_deviation_standby_guard_normalizes_all_power_units() -> None:
     """
     A kW-beyond unit (MW) is normalized to watts before the standby guard.
