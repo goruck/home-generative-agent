@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 from datetime import UTC, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -51,6 +52,7 @@ from custom_components.home_generative_agent.const import (
 )
 
 from .models import AnomalyFinding, Severity, build_anomaly_id
+from .power_units import is_power_unit, watts_per_unit
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -1099,6 +1101,10 @@ def evaluate_baseline_deviation(  # noqa: PLR0911, PLR0912, PLR0915
         current_value = float(str(entity.get("state", "")))
     except (TypeError, ValueError):
         return []
+    if not math.isfinite(current_value):
+        # nan/inf poison every downstream comparison and evidence field
+        # (round(inf) raises in the notifier during dispatch).
+        return []
 
     baseline_value = (baselines.get(entity_id) or {}).get(metric)
     if baseline_value is None:
@@ -1120,10 +1126,9 @@ def evaluate_baseline_deviation(  # noqa: PLR0911, PLR0912, PLR0915
     # standby guard and for completion detection below.
     _attrs: dict[str, Any] = (entity.get("attributes") or {}) if entity else {}
     _unit = str(_attrs.get("unit_of_measurement") or "")
-    is_power_entity = str(_attrs.get("device_class") or "") == "power" or _unit in {
-        "W",
-        "kW",
-    }
+    is_power_entity = str(_attrs.get("device_class") or "") == "power" or is_power_unit(
+        _unit
+    )
     friendly_name = str(entity.get("friendly_name") or "").lower()
     is_appliance = is_power_entity and any(
         hint in entity_id.lower() or hint in friendly_name for hint in _APPLIANCE_HINTS
@@ -1133,11 +1138,15 @@ def evaluate_baseline_deviation(  # noqa: PLR0911, PLR0912, PLR0915
     # A 2.9 W → 0 W swing on a washer sensor is pure noise; a 40 W UPS or
     # 30 W switch going dark is a real event worth notifying on.
     # Normalize to watts first: kW entities report values like 30.0 (kW).
-    _deviation_w = abs(current_value - baseline_value) * (
-        1000.0 if _unit == "kW" else 1.0
-    )
-    if is_appliance and _deviation_w < MINIMUM_POWER_DEVIATION_WATTS:
-        return []
+    # A power sensor in a non-power unit (e.g. VA) cannot be normalized — the
+    # guard is skipped (fails open) while completion detection below fails
+    # closed: both directions deliberately prefer visibility (notify, keep
+    # severity) over suppression when the unit is unintelligible.
+    _unit_factor = watts_per_unit(_unit) if is_appliance else None
+    if is_appliance and _unit_factor is not None:
+        _deviation_w = abs(current_value - baseline_value) * _unit_factor
+        if _deviation_w < MINIMUM_POWER_DEVIATION_WATTS:
+            return []
 
     rule_id = str(rule.get("rule_id") or "baseline_deviation")
     evidence = {
@@ -1158,10 +1167,13 @@ def evaluate_baseline_deviation(  # noqa: PLR0911, PLR0912, PLR0915
     # a dedicated appliance circuit (washer, dryer, dishwasher, etc.).
     # Generic power sensors (UPS, fridge, whole-home, server rack) are
     # intentionally excluded to avoid silencing real faults.
-    # (is_appliance already computed above for the standby guard)
+    # (is_appliance and _unit_factor already computed above for the standby
+    # guard; the active-wattage floor compares in watts, so the native
+    # baseline is normalized first — 1.2 kW is 1200 W, not 1.2 W.)
     if (
         is_appliance
-        and baseline_value >= COMPLETION_MIN_ACTIVE_WATTS
+        and _unit_factor is not None
+        and baseline_value * _unit_factor >= COMPLETION_MIN_ACTIVE_WATTS
         and current_value < COMPLETION_THRESHOLD_PCT * baseline_value
     ):
         # Only treat as completion if the state changed recently.  If the
@@ -1335,6 +1347,10 @@ def _evaluate_dow_anomaly(  # noqa: PLR0913
     try:
         current_value = float(str(entity.get("state", "")))
     except (TypeError, ValueError):
+        return []
+    if not math.isfinite(current_value):
+        # Same guard as evaluate_baseline_deviation: non-finite readings must
+        # not reach evidence fields the notifier rounds during dispatch.
         return []
 
     # Global hourly mean for this hour (the fallback anchor).

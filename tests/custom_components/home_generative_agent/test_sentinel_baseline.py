@@ -1203,6 +1203,85 @@ def test_baseline_deviation_standby_baseline_not_completion() -> None:
     assert len(findings) == 0
 
 
+def test_baseline_deviation_rejects_non_finite_readings() -> None:
+    """
+    nan/inf states must not produce findings.
+
+    A nan current_value defeats every comparison, and an inf deviation_pct in
+    evidence would crash the notifier's round() during dispatch.
+    """
+    for bad_state in ("nan", "inf", "1e309"):
+        snapshot = _snapshot(
+            [
+                _power_entity(
+                    "sensor.washer_power", bad_state, device_class="power", unit="W"
+                )
+            ]
+        )
+        baselines = {"sensor.washer_power": {METRIC_ROLLING_AVG: 800.0}}
+        rule = _rule(entity_id="sensor.washer_power", threshold_pct=50.0)
+        assert evaluate_baseline_deviation(snapshot, rule, baselines) == [], bad_state
+
+
+def test_baseline_deviation_standby_guard_normalizes_all_power_units() -> None:
+    """
+    A kW-beyond unit (MW) is normalized to watts before the standby guard.
+
+    A washer sensor in MW dropping 0.0002 MW (200 W) is a real deviation: the
+    raw native value (0.0002) is far below MINIMUM_POWER_DEVIATION_WATTS, so
+    comparing it un-normalized would silently suppress the finding.
+    """
+    snapshot = _snapshot(
+        [_power_entity("sensor.washer_power", "0.0", device_class="power", unit="MW")]
+    )
+    baselines = {"sensor.washer_power": {METRIC_ROLLING_AVG: 0.0002}}
+    rule = _rule(entity_id="sensor.washer_power", threshold_pct=50.0)
+
+    findings = evaluate_baseline_deviation(snapshot, rule, baselines)
+
+    assert len(findings) == 1
+
+
+def test_baseline_deviation_non_power_unit_skips_standby_guard() -> None:
+    """
+    A device_class:power sensor in VA cannot be normalized to watts.
+
+    The standby guard is skipped rather than fed a raw apparent-power value,
+    so the deviation still notifies.
+    """
+    snapshot = _snapshot(
+        [_power_entity("sensor.washer_power", "0.0", device_class="power", unit="VA")]
+    )
+    baselines = {"sensor.washer_power": {METRIC_ROLLING_AVG: 30.0}}
+    rule = _rule(entity_id="sensor.washer_power", threshold_pct=50.0)
+
+    findings = evaluate_baseline_deviation(snapshot, rule, baselines)
+
+    assert len(findings) == 1
+
+
+def test_baseline_deviation_kw_appliance_completion_detected() -> None:
+    """
+    Completion detection normalizes the active-wattage floor for kW sensors.
+
+    A washer with a 1.2 kW baseline (1200 W) dropping to 0.05 kW is a cycle
+    end; comparing the native 1.2 against COMPLETION_MIN_ACTIVE_WATTS=100
+    un-normalized would silently disable completion downgrading for every
+    kW-denominated appliance.
+    """
+    snapshot = _snapshot(
+        [_power_entity("sensor.washer_power", "0.05", device_class="power", unit="kW")]
+    )
+    baselines = {"sensor.washer_power": {METRIC_ROLLING_AVG: 1.2}}
+    rule = _rule(entity_id="sensor.washer_power", threshold_pct=50.0, severity="medium")
+
+    findings = evaluate_baseline_deviation(snapshot, rule, baselines)
+
+    assert len(findings) == 1
+    assert findings[0].evidence.get("is_completion") is True
+    assert findings[0].severity == "low"
+
+
 def test_baseline_deviation_stale_idle_appliance_not_completion() -> None:
     """
     Appliance idle for longer than COMPLETION_RECENCY_SECS → no is_completion.

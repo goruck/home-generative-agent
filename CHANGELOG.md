@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.21.3] - 2026-07-29
+
+### Fixed
+
+- **Power sensors reporting in any Home Assistant power unit are now measured correctly** — the `appliance_power_duration` rule and the power-history enrichment converted only kW readings to watts; a sensor denominated in MW, mW, GW, TW, or BTU/h was compared raw against the watts threshold, so a 0.25 MW (250,000 W) reading looked like 0.25 W and could never trigger — silently. All HA power units are now normalized to watts before any comparison, and a `device_class: power` sensor reporting a unit that *isn't* power (e.g. VA apparent power) is skipped rather than compared wrongly — skipped ends any in-progress episode, so a sensor that changes units mid-run restarts its clock. Surfaced by [@andymcmanus](https://github.com/andymcmanus)'s unit-mixing question in [#461](https://github.com/goruck/home-generative-agent/issues/461).
+- **Cycle-completion detection now works for kW-denominated appliances** — the baseline anomaly detector compared a sensor's native baseline value against its 100 W activity floor without unit conversion, so a washer reporting 1.2 (kW) never passed `1.2 >= 100` and its cycle-end power drops were never downgraded to low severity. The floor now compares in watts (1.2 kW = 1200 W). The baseline standby-noise guard gets the same treatment: deviations are normalized to watts from any power unit before the 50 W minimum, instead of only kW.
+
+- **Hand-typed unit spellings keep their sensors monitored** — ESPHome/MQTT/template sensors carry free-text units, and a `device_class: power` sensor labeled `"w"` or `"KW"` would have been skipped by the new normalization (it was previously compared raw). Unit strings are now matched case-insensitively where unambiguous; `mW` vs `MW` must match exact-case since lowercase "mw" could mean either. Sensors whose unit still can't be recognized are logged (debug, once per unit string) instead of disappearing silently.
+- **A malformed sensor attribute can no longer stop Sentinel** — an entity whose `unit_of_measurement` is a list or dict (settable via the REST API or misbehaving custom integrations) crashed the power-sensor filter, and in the enrichment step that exception killed the entire Sentinel detection loop until the integration was reloaded. The filter now coerces attribute values safely, and snapshot enrichment as a whole is guarded so a failure degrades to un-enriched snapshots instead of ending detection. Found by adversarial review with an empirical reproduction.
+- **Recorder history is read in each row's own unit** — when a sensor's unit was reconfigured mid-window (say W → kW in a template), the "on since" search interpreted old readings in the new unit, missing the off boundary and pushing the on-since time arbitrarily far back. Historical rows now honor their recorded `unit_of_measurement`, falling back to the current unit when absent. `nan`/`inf` readings are also rejected in this walk (they compared as "on") — mirroring the guard the rule already had — and a finite reading that overflows to infinity in watts (a garbage 1e300 TW value) is rejected after conversion everywhere, since an infinite value in a finding would crash notification dispatch.
+
+### Changed
+
+- The appliance power rule's episode tracker now also resets eagerly when a sensor stops identifying as a power sensor (attributes change), closing a narrow path where a stale episode start could survive an evaluation error.
+- The power enrichment's 10 W "off" level and 30-day recorder lookback are now documented in `docs/constants.md`.
+
 ## [3.21.2] - 2026-07-28
 
 ### Fixed

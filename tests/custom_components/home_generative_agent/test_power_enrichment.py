@@ -55,10 +55,15 @@ def _power_entity(
     }
 
 
-def _mock_state(state: str, last_changed: datetime) -> MagicMock:
+def _mock_state(
+    state: str, last_changed: datetime, unit: str | None = None
+) -> MagicMock:
     s = MagicMock()
     s.state = state
     s.last_changed = last_changed
+    # No unit → empty attributes dict: the walk falls back to the sensor's
+    # current unit factor, matching rows recorded without attribute payloads.
+    s.attributes = {"unit_of_measurement": unit} if unit is not None else {}
     return s
 
 
@@ -197,6 +202,187 @@ async def test_kw_unit_sensor_corrected() -> None:
     await async_enrich_power_last_changed(hass, snapshot)
 
     assert snapshot["entities"][0]["last_changed"] == true_on_time.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_mw_unit_sensor_corrected() -> None:
+    """MW-unit sensor: off threshold applied in native MW units."""
+    true_on_time = _NOW - timedelta(hours=2, minutes=16)
+
+    recorder_states = [
+        _mock_state("0.000001", _NOW - timedelta(hours=2, minutes=17)),  # 1W — off
+        _mock_state("0.0015", true_on_time),  # 1500W — on
+        _mock_state("unavailable", _NOW),
+        _mock_state("0.0015", _NOW),
+    ]
+    hass = _make_hass(recorder_states)
+
+    snapshot = _base_snapshot()
+    snapshot["entities"] = [
+        _power_entity(
+            state="0.0015", unit="MW", last_changed="2026-06-22T05:16:00+00:00"
+        )
+    ]
+
+    await async_enrich_power_last_changed(hass, snapshot)
+
+    assert snapshot["entities"][0]["last_changed"] == true_on_time.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_non_power_unit_sensor_skipped() -> None:
+    """A device_class:power sensor in VA cannot be compared to the watts off level."""
+    hass = MagicMock()
+    instance = MagicMock()
+    instance.async_add_executor_job = AsyncMock()
+    hass.data = {DATA_INSTANCE: instance}
+
+    snapshot = _base_snapshot()
+    snapshot["entities"] = [
+        _power_entity(state="1500", unit="VA", last_changed="2026-06-22T05:16:00+00:00")
+    ]
+
+    await async_enrich_power_last_changed(hass, snapshot)
+
+    instance.async_add_executor_job.assert_not_called()
+    assert snapshot["entities"][0]["last_changed"] == "2026-06-22T05:16:00+00:00"
+
+
+@pytest.mark.asyncio
+async def test_unit_only_sensor_enriched() -> None:
+    """A sensor with a power unit but no device_class is still enriched."""
+    true_on_time = _NOW - timedelta(hours=2, minutes=16)
+
+    recorder_states = [
+        _mock_state("2", _NOW - timedelta(hours=2, minutes=17)),  # off
+        _mock_state("1500", true_on_time),  # on
+        _mock_state("1500", _NOW),
+    ]
+    hass = _make_hass(recorder_states)
+
+    snapshot = _base_snapshot()
+    entity = _power_entity(state="1500", last_changed="2026-06-22T05:16:00+00:00")
+    entity["attributes"] = {"unit_of_measurement": "W"}
+    snapshot["entities"] = [entity]
+
+    await async_enrich_power_last_changed(hass, snapshot)
+
+    assert snapshot["entities"][0]["last_changed"] == true_on_time.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_missing_unit_sensor_treated_as_watts() -> None:
+    """A device_class:power sensor with no unit is compared in watts."""
+    true_on_time = _NOW - timedelta(hours=2, minutes=16)
+
+    recorder_states = [
+        _mock_state("2", _NOW - timedelta(hours=2, minutes=17)),  # off
+        _mock_state("1500", true_on_time),  # on
+        _mock_state("1500", _NOW),
+    ]
+    hass = _make_hass(recorder_states)
+
+    snapshot = _base_snapshot()
+    entity = _power_entity(state="1500", last_changed="2026-06-22T05:16:00+00:00")
+    entity["attributes"] = {"device_class": "power"}
+    snapshot["entities"] = [entity]
+
+    await async_enrich_power_last_changed(hass, snapshot)
+
+    assert snapshot["entities"][0]["last_changed"] == true_on_time.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_historical_rows_honor_their_own_unit() -> None:
+    """
+    A sensor reconfigured from W to kW mid-window walks history correctly.
+
+    The historical 5 (W, off) row must read as 5 W, not 5 kW: interpreting old
+    rows in the sensor's *current* unit would miss the off boundary and push
+    the on-since arbitrarily far back.
+    """
+    true_on_time = _NOW - timedelta(hours=2, minutes=16)
+
+    recorder_states = [
+        _mock_state("5", _NOW - timedelta(hours=2, minutes=17), unit="W"),  # off
+        _mock_state("1498", true_on_time, unit="W"),  # on, recorded as W
+        _mock_state("1.500", _NOW, unit="kW"),  # after unit reconfiguration
+    ]
+    hass = _make_hass(recorder_states)
+
+    snapshot = _base_snapshot()
+    snapshot["entities"] = [
+        _power_entity(
+            state="1.500", unit="kW", last_changed="2026-06-22T05:16:00+00:00"
+        )
+    ]
+
+    await async_enrich_power_last_changed(hass, snapshot)
+
+    assert snapshot["entities"][0]["last_changed"] == true_on_time.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_non_finite_states_never_treated_as_on() -> None:
+    """
+    nan/inf states are rejected at both the current-state gate and the walk.
+
+    nan compares False against the off threshold, so without the isfinite
+    guard a nan reading would look 'on' and could be captured as the on-since
+    boundary — rewriting last_changed from garbage.
+    """
+    # Current state nan: enrichment skips the sensor without querying.
+    hass = MagicMock()
+    instance = MagicMock()
+    instance.async_add_executor_job = AsyncMock()
+    hass.data = {DATA_INSTANCE: instance}
+    snapshot = _base_snapshot()
+    snapshot["entities"] = [
+        _power_entity(state="nan", last_changed="2026-06-22T05:16:00+00:00")
+    ]
+    await async_enrich_power_last_changed(hass, snapshot)
+    instance.async_add_executor_job.assert_not_called()
+
+    # Historical nan/inf rows are skipped like transients, not read as 'on'.
+    true_on_time = _NOW - timedelta(hours=2, minutes=16)
+    recorder_states = [
+        _mock_state("0.5", _NOW - timedelta(hours=2, minutes=17)),  # off
+        _mock_state("nan", _NOW - timedelta(hours=2, minutes=17)),
+        _mock_state("1498.5", true_on_time),  # true on-start
+        _mock_state("1e309", _NOW - timedelta(hours=1)),  # inf
+        _mock_state("1500.1", _NOW),
+    ]
+    hass = _make_hass(recorder_states)
+    snapshot = _base_snapshot()
+    snapshot["entities"] = [_power_entity(last_changed="2026-06-22T05:16:00+00:00")]
+    await async_enrich_power_last_changed(hass, snapshot)
+    assert snapshot["entities"][0]["last_changed"] == true_on_time.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_unhashable_unit_attribute_does_not_crash() -> None:
+    """
+    A poisoned unit_of_measurement (list) must not raise from the filter.
+
+    Raw frozenset membership hashes its operand; an unhashable unit on a
+    sensor without device_class:power previously raised TypeError, which
+    propagated out of the engine's unguarded enrichment call and killed the
+    Sentinel run loop until reload.
+    """
+    hass = MagicMock()
+    instance = MagicMock()
+    instance.async_add_executor_job = AsyncMock()
+    hass.data = {DATA_INSTANCE: instance}
+
+    snapshot = _base_snapshot()
+    entity = _power_entity(state="1500", last_changed="2026-06-22T05:16:00+00:00")
+    entity["attributes"] = {"unit_of_measurement": ["W"]}  # no device_class
+    snapshot["entities"] = [entity]
+
+    await async_enrich_power_last_changed(hass, snapshot)
+
+    instance.async_add_executor_job.assert_not_called()
+    assert snapshot["entities"][0]["last_changed"] == "2026-06-22T05:16:00+00:00"
 
 
 @pytest.mark.asyncio

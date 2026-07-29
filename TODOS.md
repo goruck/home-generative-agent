@@ -139,6 +139,16 @@
 
 ## Sentinel Rules
 
+### Dynamic `sensor_threshold_condition` rules don't normalize units
+
+**What:** Discovery's `sensor_threshold_condition` template (`sentinel/proposal_templates.py`) compares an LLM-extracted numeric threshold against the sensor's native state with no unit normalization — the #461 bug class: a rule meaning "over 100 watts" against a kW sensor never fires (the template only extracts above-thresholds today; a below-variant would invert the failure — always firing). Arguably the user's threshold is native-unit by intent, but nothing disambiguates. Surfaced by adversarial review during the v3.21.3 ship.
+
+**How to apply:** When the target sensor has `device_class: power` (or a power unit), normalize both the threshold and the reading via `sentinel/power_units.watts_per_unit` — requires deciding/recording the threshold's intended unit at proposal-approval time (candidate text usually names it: "100 W", "1.5 kW").
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** v3.21.3
+
 ### Add `sentinel_camera_entry_links` config for explicit camera-to-entry mapping
 
 **What:** Add a `sentinel_camera_entry_links` config key (Sentinel subentry options flow) that allows users to explicitly associate cameras with entry sensors regardless of HA area assignment. Format: `{camera_entity_id: [entry_entity_id, ...]}`.
@@ -241,6 +251,30 @@
 ---
 
 ## Baseline
+
+### Store baselines unit-normalized (or reset on unit change)
+
+**What:** `sentinel_baselines` rows store native-unit values with no unit column; evaluation interprets the stored value in the entity's *current* unit. After a W→kW sensor reconfiguration, a stored `1200` (W) baseline against a current `1.2` (kW) reading produces a false ~99.9% deviation (misclassified as cycle completion), and new `1.2` samples blend into the old `1200` rolling average, corrupting rolling/hourly/DOW metrics until the averages re-converge (rolling/hourly are EMA-based; DOW slots use Welford accumulators). Pre-existing design property; surfaced by Codex adversarial review during the v3.21.3 ship.
+
+**How to apply:** Either normalize power-class samples to watts at write time in `SentinelBaselineUpdater` (with a one-time migration or metric-version bump), or store `unit_of_measurement` alongside the value and reset the row when the recorded unit differs from the current one.
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** v3.21.3
+
+---
+
+### Bound the power-enrichment recorder walk
+
+**What:** `async_enrich_power_last_changed` fetches up to 30 days of `state_changes_during_period` rows with `limit=None` and `no_attributes=False` for every on-state power sensor, every Sentinel cycle. A high-frequency (~1 Hz) power sensor materializes millions of rows per cycle; several such sensors can exhaust memory or monopolize recorder executor workers. Pre-existing for `device_class: power` sensors; v3.21.3 marginally broadened admission (unit-only sensors). Surfaced by Codex adversarial review.
+
+**How to apply:** Walk history in capped descending pages (e.g. `limit=` batches, newest first) and stop at the first off-boundary; or cache the resolved on-since per entity and only re-query when the sensor drops below the off level.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** None
+
+---
 
 ### Config flow UI for CONF_SENTINEL_BASELINE_MIN_SAMPLES
 
@@ -541,6 +575,18 @@ WARNING per event that a window-scoped check could suppress.
 ---
 
 ## Notifier / Observability
+
+### Baseline-deviation notifications guess the display unit from the entity_id
+
+**What:** `_baseline_deviation_mobile_message` (`sentinel/notifier.py:904`) picks the display unit with `"W" if "power" in entity_id else "kWh" if "energy" in entity_id else ""`. A kW-denominated sensor renders as e.g. "0.4W vs usual 0.3W", and a power sensor without "power" in its entity_id gets no unit at all. Surfaced during the #461 unit-normalization review (v3.21.3).
+
+**How to apply:** Plumb the sensor's `unit_of_measurement` into the baseline finding evidence in `sentinel/baseline.py` (alongside `current_value`/`baseline_value`, which stay native) and render it verbatim in the notifier, falling back to the current heuristic for old persisted findings.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+---
 
 ### Deduplicate the _friendly_type label maps
 

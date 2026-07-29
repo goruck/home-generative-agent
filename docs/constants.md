@@ -278,7 +278,7 @@ This document covers the named constants that affect integration behaviour, orga
 | `RECOMMENDED_AUDIT_HOT_MAX_RECORDS` | `audit_hot_max_records` | `500` | Maximum records kept in the in-memory audit hot store. User-visible findings are preserved in preference to suppressed records when at capacity. |
 | `RECOMMENDED_SENTINEL_CAMERA_ENTRY_LINKS` | `sentinel_camera_entry_links` | `{}` | Maps camera `entity_id` → list of entry/lock `entity_id`s in other HA areas. Used by the `camera_entry_unsecured` rule for cameras that physically overlook entries not in the same HA area (e.g. `{"camera.driveway": ["lock.front_door"]}`). |
 | `RECOMMENDED_SENTINEL_RULE_ENTITY_EXCLUSIONS` | `sentinel_rule_entity_exclusions` | `{}` | Maps an anomaly type (or `"*"` for all types) → list of `entity_id`s or glob patterns (`*` and `?` wildcards only) to exclude from that rule. Type keys are exact; entries may use only lowercase entity-ID characters plus the wildcards, must contain a dot and at least one literal character, and be at most 256 characters (match-all entries like `"*"`, `"*.*"`, or character-class tricks like `"[!.]*.*"` are rejected). Applied to all finding sources (static rules, dynamic rules, baseline) before correlation and dispatch; exclusions under the entity's domain-mapped anomaly type or `"*"` also suppress event-driven triggering — those entities' state changes do not enqueue triggers (e.g. `{"appliance_power_duration": ["sensor.living_room_ac_power"], "camera_entry_unsecured": ["camera.map_*"]}`). |
-| `RECOMMENDED_SENTINEL_APPLIANCE_POWER_THRESHOLD_W` | `sentinel_appliance_power_threshold_w` | `100.0` (W) | Power level the `appliance_power_duration` rule treats as "appliance running" |
+| `RECOMMENDED_SENTINEL_APPLIANCE_POWER_THRESHOLD_W` | `sentinel_appliance_power_threshold_w` | `100.0` (W) | Power level the `appliance_power_duration` rule treats as "appliance running". Sensor readings are normalized to watts from any HA power unit (W, kW, MW, GW, TW, mW, BTU/h) before comparison; power sensors reporting a non-power unit (e.g. VA) are skipped. |
 | `RECOMMENDED_SENTINEL_APPLIANCE_DURATION_MIN` | `sentinel_appliance_duration_min` | `60` (min) | Continuous minutes above the power threshold before `appliance_power_duration` fires |
 
 **Code-only:**
@@ -287,6 +287,8 @@ This document covers the named constants that affect integration behaviour, orga
 |---|---|---|---|
 | `SENTINEL_CAMERA_ACTIVITY_STALENESS_MINUTES` | `const.py` | `10` | Staleness gate for `alarm_disarmed_during_external_threat`. Camera activity must be within this window of the snapshot to fire the rule. |
 | `SENTINEL_OCCUPANCY_ARMED_STATES` | `const.py` | `{"armed_home", "armed_night"}` | Alarm states treated as occupancy-compatible. These states never trigger an `alarm_state_mismatch` finding when `expected_presence=home`. |
+| `_POWER_OFF_W` | `sentinel/power_enrichment.py` | `10.0` (W) | At or below this wattage a power sensor is treated as "appliance off" when walking recorder history for the last off→on transition. Only affects the enriched `last_changed` consumed downstream (dynamic rules, triage context, and the baseline cycle-completion recency window); the `appliance_power_duration` rule measures duration by direct observation and does not use it. |
+| `_LOOKBACK_DAYS` | `sentinel/power_enrichment.py` | `30` (days) | Recorder history window searched for a power sensor's last off→on transition. |
 | `SENTINEL_ADMISSION_TIMEOUT_S` | `core/utils.py` | `2.0` (s) | How long a Sentinel LLM call waits for the chat/video foreground to become idle before deferring. Keeps interactive latency unaffected by Sentinel background work. |
 | `_SENTINEL_STARVATION_WARN_S` | `core/utils.py` | `300.0` (s) | Consecutive deferral duration that triggers a `degraded` sentinel health state and a WARNING log. |
 | `_SENTINEL_CANCEL_WAIT_S` | `core/utils.py` | `2.0` (s) | Grace period given to a Sentinel task to cancel cleanly when a chat turn begins. |
@@ -351,16 +353,16 @@ This document covers the named constants that affect integration behaviour, orga
 | `RECOMMENDED_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT` | `sentinel_baseline_drift_threshold_pct` | `30.0` | Percent deviation from rolling average that triggers a `baseline_deviation` or `time_of_day_anomaly` finding |
 | `RECOMMENDED_SENTINEL_BASELINE_WEEKLY_PATTERNS` | `sentinel_baseline_weekly_patterns` | `False` | Enable per-(day-of-week, hour) baselines for `time_of_day_anomaly`. Requires more data to warm up. |
 | `RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES` | `sentinel_baseline_dow_min_samples` | `4` | Observations per DOW-hour slot before the DOW blend weight reaches 1.0. Lower than global min because DOW slots update at most once per week. |
-| `RECOMMENDED_SENTINEL_BASELINE_SUSTAINED_MINUTES` | `sentinel_baseline_sustained_minutes` | `20` | For cyclic loads (fridge, compressor), the deviation must persist this long before firing. Set `0` to disable the sustained gate. |
+| `RECOMMENDED_SENTINEL_BASELINE_SUSTAINED_MINUTES` | `sentinel_baseline_sustained_minutes` | `45` | For cyclic loads (fridge, compressor), the deviation must persist this long before firing. Set `0` to disable the sustained gate. |
 
 **Code-only:**
 
 | Constant | File | Value | Purpose |
 |---|---|---|---|
 | `COMPLETION_THRESHOLD_PCT` | `sentinel/baseline.py` | `0.10` | Appliance cycle-completion threshold: power must drop below 10% of baseline to be considered complete |
-| `COMPLETION_MIN_ACTIVE_WATTS` | `sentinel/baseline.py` | `100.0` (W) | Minimum baseline wattage to consider cycle-completion detection meaningful |
+| `COMPLETION_MIN_ACTIVE_WATTS` | `sentinel/baseline.py` | `100.0` (W) | Minimum baseline wattage to consider cycle-completion detection meaningful. The native baseline is normalized to watts first (1.2 kW = 1200 W). |
 | `COMPLETION_RECENCY_SECS` | `sentinel/baseline.py` | `900` (s) | Recency window for completion detection |
-| `MINIMUM_POWER_DEVIATION_WATTS` | `sentinel/baseline.py` | `50.0` (W) | Absolute minimum power deviation required to fire a baseline anomaly, even if percent threshold is met |
+| `MINIMUM_POWER_DEVIATION_WATTS` | `sentinel/baseline.py` | `50.0` (W) | Absolute minimum power deviation required to fire a baseline anomaly, even if percent threshold is met. The deviation is normalized to watts from any HA power unit; power sensors in a non-power unit (e.g. VA) skip this guard rather than compare raw. |
 
 ---
 

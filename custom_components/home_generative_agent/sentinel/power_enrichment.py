@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import math
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -11,6 +12,8 @@ from homeassistant.components.recorder import history as recorder_history
 from homeassistant.helpers.recorder import DATA_INSTANCE
 from homeassistant.helpers.recorder import get_instance as get_recorder_instance
 from homeassistant.util import dt as dt_util
+
+from .power_units import is_power_unit, watts_per_unit
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -31,22 +34,52 @@ _TRANSIENT_STATES = frozenset({"unavailable", "unknown"})
 
 def _parse_float(raw: str) -> float | None:
     try:
-        return float(raw)
+        parsed = float(raw)
     except (ValueError, TypeError):
         return None
+    # nan compares False against the off threshold and would masquerade as an
+    # 'on' reading (rewriting last_changed from garbage); inf likewise.
+    return parsed if math.isfinite(parsed) else None
+
+
+def _row_watts(state: Any, current_factor: float) -> float | None:
+    """
+    Return a recorder row's reading in watts, or None if unusable.
+
+    The row's own unit_of_measurement is honored when present — a sensor whose
+    unit was reconfigured mid-window (W → kW template edit) must not have its
+    old readings interpreted in the new unit.  Rows without a unit attribute
+    fall back to the sensor's current factor; rows in a non-power unit are
+    skipped like transients.
+    """
+    val = _parse_float(state.state)
+    if val is None:
+        return None
+    attrs = getattr(state, "attributes", None) or {}
+    if "unit_of_measurement" in attrs:
+        factor = watts_per_unit(attrs.get("unit_of_measurement"))
+        if factor is None:
+            return None
+    else:
+        factor = current_factor
+    val_w = val * factor
+    # Finite native value can overflow to inf in watts (1e300 TW); inf
+    # compares False against the off level and would masquerade as 'on'.
+    return val_w if math.isfinite(val_w) else None
 
 
 def _find_true_on_since(
     state_list: list[Any],
-    off_threshold_native: float,
+    current_factor: float,
     start_time: datetime,
 ) -> Any | None:
     """
     Return the state when the sensor last transitioned from off to on.
 
     Walk newest-to-oldest, skip transients.  The first reading at or below
-    off_threshold_native marks the boundary of the current 'on' episode; the
-    state immediately after it (newer) is the true start.
+    the off level (compared in watts, honoring each row's own unit) marks the
+    boundary of the current 'on' episode; the state immediately after it
+    (newer) is the true start.
 
     If no 'off' reading exists in the window, the oldest within-window record
     is returned as the best available approximation (the sensor has been on
@@ -57,10 +90,10 @@ def _find_true_on_since(
     for state in reversed(state_list):
         if state.state in _TRANSIENT_STATES:
             continue
-        val = _parse_float(state.state)
-        if val is None:
+        val_w = _row_watts(state, current_factor)
+        if val_w is None:
             continue
-        if val <= off_threshold_native:
+        if val_w <= _POWER_OFF_W:
             # 'Off' reading found — prev is the true on-start (may be None if
             # the first non-transient record is already below threshold).
             return prev
@@ -71,7 +104,8 @@ def _find_true_on_since(
         (
             s
             for s in state_list
-            if s.state not in _TRANSIENT_STATES and _parse_float(s.state) is not None
+            if s.state not in _TRANSIENT_STATES
+            and _row_watts(s, current_factor) is not None
         ),
         None,
     )
@@ -87,10 +121,12 @@ async def async_enrich_power_last_changed(
     Correct last_changed for power sensors reset by HA startup.
 
     When HA restarts, a power sensor re-reports its current wattage, creating a
-    new last_changed at startup time.  The appliance duration rule then computes
-    a falsely short duration and fires too late (or not at all).  This function
-    queries the recorder to find when the sensor last crossed from off to on and
-    corrects last_changed before rules evaluate.
+    new last_changed at startup time.  This function queries the recorder to
+    find when the sensor last crossed from off to on and corrects last_changed
+    before rules evaluate.  The appliance duration rule does NOT consume this
+    (it measures duration by direct observation); the enriched value informs
+    advisory context only — dynamic rules, triage, and the baseline
+    cycle-completion recency check.
     """
     if DATA_INSTANCE not in getattr(hass, "data", {}):
         return
@@ -101,7 +137,7 @@ async def async_enrich_power_last_changed(
         if e["domain"] == "sensor"
         and (
             e["attributes"].get("device_class") == "power"
-            or e["attributes"].get("unit_of_measurement") in {"W", "kW"}
+            or is_power_unit(e["attributes"].get("unit_of_measurement"))
         )
     ]
     if not power_entities:
@@ -113,16 +149,19 @@ async def async_enrich_power_last_changed(
 
     for power_entity in power_entities:
         entity_id = power_entity["entity_id"]
-        unit = str(power_entity["attributes"].get("unit_of_measurement") or "W")
+        unit_factor = watts_per_unit(
+            power_entity["attributes"].get("unit_of_measurement")
+        )
 
         current_val = _parse_float(power_entity["state"])
-        if current_val is None:
+        if current_val is None or unit_factor is None:
+            # Non-numeric reading, or a device_class:power sensor in a
+            # non-power unit (e.g. VA) whose history cannot be compared
+            # against the watts off level.
             continue
-        current_w = current_val * 1000.0 if unit == "kW" else current_val
-        if current_w <= _POWER_OFF_W:
-            continue  # appliance is off — nothing to correct
-
-        off_threshold_native = _POWER_OFF_W / (1000.0 if unit == "kW" else 1.0)
+        current_w = current_val * unit_factor
+        if not math.isfinite(current_w) or current_w <= _POWER_OFF_W:
+            continue  # off, or garbage that overflowed to inf in watts
 
         try:
             states = await instance.async_add_executor_job(
@@ -149,9 +188,7 @@ async def async_enrich_power_last_changed(
         if len(state_list) < 2:  # noqa: PLR2004
             continue
 
-        true_on_state = _find_true_on_since(
-            state_list, off_threshold_native, start_time
-        )
+        true_on_state = _find_true_on_since(state_list, unit_factor, start_time)
         if true_on_state is None:
             continue
 
