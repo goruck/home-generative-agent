@@ -321,7 +321,7 @@
 
 ### Surface dead unavailable-sensors rules (unresolvable entity IDs, all-of semantics)
 
-**What:** `_eval_unavailable_sensors` / `_eval_unavailable_sensors_while_home` (dynamic_rules.py) return `[]` for the whole rule when any single listed entity fails to resolve in the snapshot, with no logging, audit entry, or KPI. Combined with all-of trigger semantics, one hallucinated LLM evidence ID, a re-paired zigbee device (hex-address entity IDs change on re-pair — the exact issue #514 ID shape), or a renamed entity permanently disarms an approved rule with zero diagnostics.
+**What:** `_eval_unavailable_sensors` / `_eval_unavailable_sensors_while_home` (dynamic_rules.py) return `[]` for the whole rule when any single listed entity fails to resolve in the snapshot, with no logging, audit entry, or KPI. This resolve-abort alone means one hallucinated LLM evidence ID, a re-paired zigbee device (hex-address entity IDs change on re-pair — the exact issue #514 ID shape), or a renamed entity permanently disarms an approved rule with zero diagnostics — in both variants. (Trigger semantics differ: the plain variant is all-of — every listed sensor must be unavailable — while the while-home variant emits one finding per unavailable sensor.)
 
 **Why:** Flagged independently by both the Claude adversarial review and Codex during the v3.21.2 ship (issue #514) — cross-model agreement. The abort-on-missing behavior is deliberate and test-pinned (conservative fail-closed), so changing it is a product decision: skip-unresolvable-with-warning, any-of semantics, an audit metric for rules whose entities never resolve, or surfacing unresolved params in the approval preview.
 
