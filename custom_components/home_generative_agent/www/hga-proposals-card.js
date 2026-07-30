@@ -253,9 +253,13 @@ class HgaProposalsCard extends HTMLElement {
     ];
     let entryIds = entityIds.filter(
       (entityId) =>
-        entityId.includes("window") ||
-        entityId.includes("door") ||
-        entityId.includes("entry")
+        (entityId.includes("window") ||
+          entityId.includes("door") ||
+          entityId.includes("entry")) &&
+        // Motion-named IDs with an entry substring (outdoor_motion,
+        // doorbell_motion) are motion sensors, not entries — mirrors the
+        // server's non_motion_entry_ids guard (issue #516).
+        !(entityId.includes("motion") || entityId.includes("vmd"))
     );
     let entryIdsFromText = false;
     if (entryIds.length === 0 && entryTextRe.test(text)) {
@@ -275,7 +279,8 @@ class HgaProposalsCard extends HTMLElement {
     // proposal_templates.py — "present" must not match "presence" and "home"
     // must not match "anyone_home"/"armed_home" (issue #514).
     const isAway =
-      /\b(?:away|no one home|nobody home|empty|unoccupied|no occupants|without occupants)\b/.test(
+      evidencePaths.includes("not derived.anyone_home") ||
+      /\b(?:away|no(?:body|\s+one)\s+(?:is\s+)?(?:at\s+)?home|empty|unoccupied|no occupants|without occupants)\b/.test(
         text
       );
     const isHome =
@@ -331,6 +336,35 @@ class HgaProposalsCard extends HTMLElement {
       if (alarmId && entryIds.length > 0) {
         return `alarm_disarmed_open_entry_${alarmId.replaceAll(".", "_")}`;
       }
+    }
+
+    // Motion at night while away (issue #516) — mirrors the normalizer's
+    // motion_detected_at_night_while_away branch: binary_sensor motion
+    // evidence, night + away context, no alarm/armed signal (alarm-motion
+    // candidates route to the alarm templates server-side), no lock entity,
+    // and no battery/availability signal (those candidates keep routing to
+    // their own templates — mirrors the Python guards).
+    if (
+      hasNight &&
+      isAway &&
+      (text.includes("motion") || text.includes("vmd")) &&
+      entityIds.some(
+        (entityId) =>
+          entityId.startsWith("binary_sensor.") &&
+          (entityId.includes("motion") || entityId.includes("vmd"))
+      ) &&
+      !/\b(?:alarms?|(?:dis)?armed)\b/.test(text) &&
+      !text.includes("unavailable") &&
+      !text.includes("offline") &&
+      !text.includes("unreachable") &&
+      !entityIds.some(
+        (entityId) =>
+          entityId.startsWith("alarm_control_panel.") ||
+          entityId.startsWith("lock.") ||
+          entityId.includes("battery")
+      )
+    ) {
+      return "motion_detected_at_night_while_away";
     }
 
     if (text.includes("motion") || text.includes("camera")) {

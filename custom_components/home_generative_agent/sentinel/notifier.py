@@ -392,7 +392,7 @@ class SentinelNotifier:
             return
 
         count = len(held)
-        types = list({_friendly_type(f.type) for f, _, _svc in held})
+        types = list({_display_type(f) for f, _, _svc in held})
         type_summary = ", ".join(types)
         message = f"{count} home update{'s' if count > 1 else ''}: {type_summary}."
 
@@ -517,7 +517,7 @@ class SentinelNotifier:
             )
             return
 
-        friendly = _friendly_type(finding.type)
+        friendly = _display_type(finding)
         confirm_action = f"{ACTION_PREFIX}{ACT_SNOOZE_CONFIRM}_{finding.anomaly_id}"
         cancel_action = f"{ACTION_PREFIX}{ACT_SNOOZE_CANCEL}_{finding.anomaly_id}"
         domain, _, service = notify_service.partition(".")
@@ -672,25 +672,43 @@ def _normalize_text(text: str) -> str:
     return text.replace("**", "").replace("`", "")
 
 
+_KNOWN_TYPE_LABELS = {
+    "open_entry_while_away": "Open entry while away",
+    "open_entry_at_night_when_home": "Open entry at night",
+    "open_entry_at_night_when_home_window": "Open entry at night",
+    "open_entry_at_night_while_away": "Open entry at night",
+    "open_entry_at_night": "Open entry at night",
+    "open_entry_at_night_window": "Open entry at night",
+    "open_entry_at_night_door": "Open entry at night",
+    "open_entry_at_night_entry": "Open entry at night",
+    "open_any_window_at_night_while_away": "Window open at night",
+    "motion_detected_at_night_while_away": "Motion at night while away",
+    "unlocked_lock_at_night": "Door lock left unlocked",
+    "camera_entry_unsecured": "Activity near unsecured entry",
+    "alarm_disarmed_during_external_threat": "Outdoor activity while alarm disarmed",
+}
+
+
+def _display_type(finding: AnomalyFinding) -> str:
+    """
+    Friendly label for a finding.
+
+    Dynamic rules carry slugified candidate IDs as ``finding.type``; when the
+    type has no curated label but the rule's template does, prefer the
+    template label so notifications never show raw candidate slugs
+    (issue #516 review).
+    """
+    if finding.type in _KNOWN_TYPE_LABELS:
+        return _KNOWN_TYPE_LABELS[finding.type]
+    template_id = str(finding.evidence.get("template_id") or "")
+    if template_id in _KNOWN_TYPE_LABELS:
+        return _KNOWN_TYPE_LABELS[template_id]
+    return _friendly_type(finding.type)
+
+
 def _friendly_type(anomaly_type: str) -> str:
-    known = {
-        "open_entry_while_away": "Open entry while away",
-        "open_entry_at_night_when_home": "Open entry at night",
-        "open_entry_at_night_when_home_window": "Open entry at night",
-        "open_entry_at_night_while_away": "Open entry at night",
-        "open_entry_at_night": "Open entry at night",
-        "open_entry_at_night_window": "Open entry at night",
-        "open_entry_at_night_door": "Open entry at night",
-        "open_entry_at_night_entry": "Open entry at night",
-        "open_any_window_at_night_while_away": "Window open at night",
-        "unlocked_lock_at_night": "Door lock left unlocked",
-        "camera_entry_unsecured": "Activity near unsecured entry",
-        "alarm_disarmed_during_external_threat": (
-            "Outdoor activity while alarm disarmed"
-        ),
-    }
-    if anomaly_type in known:
-        return known[anomaly_type]
+    if anomaly_type in _KNOWN_TYPE_LABELS:
+        return _KNOWN_TYPE_LABELS[anomaly_type]
     # Strip internal prefixes so they never appear in user-visible text:
     # • "candidate_"          — LLM-proposed dynamic rules awaiting approval
     # • "rule_NN_"            — LLM-generated rules with sequential numbering
@@ -801,11 +819,11 @@ def _build_subtitle(finding: AnomalyFinding) -> str:
         direction = str(finding.evidence.get("deviation_direction") or "")
         direction_word = "lower" if direction == "below" else "higher"
         return f"{appliance}: power {direction_word} than expected"
-    return _friendly_type(finding.type)
+    return _display_type(finding)
 
 
 def _fallback_message(finding: AnomalyFinding) -> str:
-    summary = _friendly_type(finding.type)
+    summary = _display_type(finding)
     entity = (
         _friendly_entity(finding.triggering_entities[0])
         if finding.triggering_entities
@@ -998,7 +1016,7 @@ def _persistent_message(explanation: str | None, finding: AnomalyFinding) -> str
     )
     entities = entities or "Unknown entity"
     return (
-        f"{_friendly_type(finding.type)} "
+        f"{_display_type(finding)} "
         f"(severity {finding.severity}) for {entities}. "
         + _severity_action_hint(finding.severity)
     )
