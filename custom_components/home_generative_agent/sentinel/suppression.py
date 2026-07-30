@@ -65,6 +65,7 @@ _PRESENCE_SENSITIVE_TYPES: frozenset[str] = frozenset(
         "open_entry_while_away",
         "unknown_person_camera_no_home",
         "motion_detected_at_night_while_away",
+        "motion_detected_while_away",
     }
 )
 

@@ -15,6 +15,7 @@ SUPPORTED_TEMPLATES = {
     "low_battery_sensors",
     "motion_detected_at_night_while_alarm_disarmed",
     "motion_detected_at_night_while_away",
+    "motion_detected_while_away",
     "motion_while_alarm_disarmed_and_home_present",
     "unavailable_sensors",
     "unavailable_sensors_while_home",
@@ -198,6 +199,12 @@ _NON_ENTRY_ID_TOKENS = (
 # Quote characters the discovery LLM sometimes wraps around entity IDs inside
 # evidence paths, e.g. entities[entity_ids contains 'binary_sensor.x'].state.
 _EVIDENCE_QUOTE_CHARS = "'\"`"
+# Dot-notation entity IDs embedded in candidate prose, e.g. "(binary_sensor.
+# xiao_esp32_c5_espectre_motion)". Lookarounds keep a domain-qualified ID from
+# matching inside a longer one (sensor.x inside binary_sensor.x); callers
+# filter on _HA_ENTITY_DOMAINS so snapshot paths (derived.anyone_home) and
+# ordinary prose ("e.g." never has a domain) don't read as entities.
+_TEXT_ENTITY_ID_PATTERN = re.compile(r"(?<![a-z0-9_.])([a-z_]+\.[a-z0-9_]+)")
 # Word-bounded so incidental prose ("this is alarming") doesn't read as an
 # alarm-system condition and divert a motion candidate into the
 # missing-alarm-entity failure path; "armed" is included so armed-system
@@ -271,6 +278,13 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
         entry_ids = _find_text_entry_entity_ids(evidence_paths, text)
         entry_ids_from_text = bool(entry_ids)
     motion_ids = _find_motion_entity_ids(evidence_paths)
+    if not motion_ids:
+        # Discovery sometimes emits index-based evidence paths
+        # (entities[31].state, issue #518) that cannot resolve to an entity
+        # ID — the index is only meaningful against the snapshot the
+        # candidate was drafted from. The prose names the sensor directly,
+        # so fall back to motion-named dot-notation IDs found in the text.
+        motion_ids = _find_text_motion_entity_ids(text)
     person_ids = _find_entity_ids(evidence_paths, "person")
     sensor_ids = _find_sensor_entity_ids(evidence_paths)
     availability_ids = _find_availability_entity_ids(evidence_paths)
@@ -397,6 +411,40 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 # so close_entry would have no deterministic target and a
                 # non-sensitive execute tap could actuate an unrelated entry
                 # (issue #516 cross-model review).
+                suggested_actions=["check_camera"],
+            )
+        )
+
+    # motion_detected_while_away (issue #518): same shape as the night
+    # variant above but with no time-of-day gate — motion while nobody is
+    # home, any hour. The night branch precedes with an identical guard set
+    # plus has_night, so night-worded candidates always route there; this
+    # branch keeps the same hijack guards so alarm/entry/lock/battery/
+    # availability candidates retain their existing routing. Severity and
+    # confidence follow the proposal (daytime motion while away has more
+    # benign explanations than night motion, hence low/0.6 vs medium/0.8).
+    if (
+        away_motion_ids
+        and not alarm_id
+        and not non_motion_entry_ids
+        and not lock_ids
+        and not battery_sensor_ids
+        and presence == "away"
+        and _contains_any(text, ("motion", "vmd"))
+        and not _ALARM_TEXT_PATTERN.search(text)
+        and not _contains_any(text, ("unavailable", "offline", "unreachable"))
+    ):
+        return NormalizationResult(
+            normalized=NormalizedRule(
+                rule_id=_candidate_rule_id(
+                    candidate, default="motion_detected_while_away"
+                ),
+                template_id="motion_detected_while_away",
+                params={"motion_entity_ids": away_motion_ids},
+                severity="low",
+                confidence=float(candidate.get("confidence_hint", 0.6)),
+                is_sensitive=False,
+                # Advisory action only — same rationale as the night variant.
                 suggested_actions=["check_camera"],
             )
         )
@@ -1123,6 +1171,28 @@ def _find_motion_entity_ids(evidence_paths: list[str]) -> list[str]:
     for path in evidence_paths:
         entity_id = _extract_entity_id_from_evidence_path(path)
         if entity_id is None:
+            continue
+        if "motion" in entity_id or "vmd" in entity_id:
+            ids.append(entity_id)
+    return sorted(set(ids))
+
+
+def _find_text_motion_entity_ids(text: str) -> list[str]:
+    """
+    Fallback motion detection for candidates without resolvable evidence IDs.
+
+    Discovery sometimes emits index-based evidence paths
+    (``entities[31].state``, issue #518) whose index is only meaningful
+    against the snapshot the candidate was drafted from and so never
+    resolves to an entity ID. The candidate prose names the sensor
+    directly; promote motion-named dot-notation entity IDs found in the
+    text whose domain is a known HA domain.
+    """
+    ids: list[str] = []
+    for match in _TEXT_ENTITY_ID_PATTERN.finditer(text):
+        entity_id = match.group(1)
+        domain = entity_id.split(".", 1)[0]
+        if domain not in _HA_ENTITY_DOMAINS:
             continue
         if "motion" in entity_id or "vmd" in entity_id:
             ids.append(entity_id)

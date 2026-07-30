@@ -482,3 +482,19 @@ def test_presence_grace_ignores_non_sensitive_dynamic_template() -> None:
         cooldown_entity=timedelta(minutes=5),
     )
     assert decision.reason_code != SUPPRESSION_REASON_PRESENCE_GRACE
+
+
+def test_presence_grace_matches_motion_while_away_template() -> None:
+    """Issue #518: the day-agnostic away-motion template is presence-sensitive."""
+    now = dt_util.utcnow()
+    state = _grace_state(now)
+    finding = _dynamic_motion_finding("motion_detected_while_away")
+    decision = should_suppress(
+        state,
+        finding,
+        now,
+        cooldown_type=timedelta(minutes=10),
+        cooldown_entity=timedelta(minutes=5),
+    )
+    assert decision.suppress
+    assert decision.reason_code == SUPPRESSION_REASON_PRESENCE_GRACE

@@ -10,6 +10,29 @@ _SEMANTIC_KEY_CONTEXT_RE = re.compile(r"\|(?:template|night|home|scope)=[^|]+")
 # evidence paths. Mirrors proposal_templates._EVIDENCE_QUOTE_CHARS; kept local
 # to avoid coupling the semantic-key module to the normalization module.
 _EVIDENCE_QUOTE_CHARS = "'\"`"
+# Dot-notation entity IDs embedded in candidate prose. Mirrors
+# proposal_templates._TEXT_ENTITY_ID_PATTERN / _HA_ENTITY_DOMAINS (issue
+# #518): index-based evidence paths (entities[31].state) never resolve to an
+# entity ID, so without a prose fallback such a candidate keys
+# subject=unknown|entities= and can never dedup against its activated rule.
+_TEXT_ENTITY_ID_RE = re.compile(r"(?<![a-z0-9_.])([a-z_]+\.[a-z0-9_]+)")
+_HA_ENTITY_DOMAINS = frozenset(
+    {
+        "alarm_control_panel",
+        "binary_sensor",
+        "camera",
+        "cover",
+        "input_boolean",
+        "input_number",
+        "light",
+        "lock",
+        "media_player",
+        "person",
+        "sensor",
+        "switch",
+        "vacuum",
+    }
+)
 
 
 def candidate_semantic_key(  # noqa: PLR0912, PLR0915
@@ -26,6 +49,11 @@ def candidate_semantic_key(  # noqa: PLR0912, PLR0915
         ]
     ).lower()
     entity_ids = _extract_entity_ids(evidence_paths)
+    if not entity_ids:
+        # Index-based evidence paths (entities[31].state, issue #518) carry
+        # no entity ID — fall back to dot-notation IDs named in the prose so
+        # the candidate keys the same subject/entities as its activated rule.
+        entity_ids = _extract_text_entity_ids(text)
     camera_ids = sorted(_extract_camera_ids(evidence_paths))
     lock_ids = sorted(
         entity_id for entity_id in entity_ids if entity_id.startswith("lock.")
@@ -144,7 +172,9 @@ def candidate_semantic_key(  # noqa: PLR0912, PLR0915
     )
 
 
-def rule_semantic_key(rule: dict[str, Any]) -> str | None:  # noqa: C901, PLR0911, PLR0912
+def rule_semantic_key(  # noqa: C901, PLR0911, PLR0912, PLR0915
+    rule: dict[str, Any],
+) -> str | None:
     """Build a stable semantic key for an active/generated rule."""
     template_id = str(rule.get("template_id", ""))
     params = rule.get("params", {}) or {}
@@ -211,6 +241,14 @@ def rule_semantic_key(rule: dict[str, Any]) -> str | None:  # noqa: C901, PLR091
             return None
         return (
             "v1|subject=motion|predicate=active|night=1|home=0|scope=any|"
+            f"entities={','.join(motion_ids)}"
+        )
+    if template_id == "motion_detected_while_away":
+        motion_ids = sorted(set(_string_list(params.get("motion_entity_ids"))))
+        if not motion_ids:
+            return None
+        return (
+            "v1|subject=motion|predicate=active|night=any|home=0|scope=any|"
             f"entities={','.join(motion_ids)}"
         )
     if template_id == "unavailable_sensors_while_home":
@@ -316,6 +354,15 @@ def _extract_entity_ids(evidence_paths: list[str]) -> list[str]:
             if entity_id:
                 entity_ids.append(entity_id)
     return entity_ids
+
+
+def _extract_text_entity_ids(text: str) -> list[str]:
+    entity_ids: list[str] = []
+    for match in _TEXT_ENTITY_ID_RE.finditer(text):
+        entity_id = match.group(1)
+        if entity_id.split(".", 1)[0] in _HA_ENTITY_DOMAINS:
+            entity_ids.append(entity_id)
+    return sorted(set(entity_ids))
 
 
 def _string_list(value: Any) -> list[str]:

@@ -1452,3 +1452,129 @@ def test_dynamic_rule_motion_night_while_away_multi_entity_partial_on() -> None:
         "binary_sensor.xiao_esp32_c5_espectre_motion": "off",
         "binary_sensor.hall_motion": "on",
     }
+
+
+def _motion_away_rule() -> dict[str, object]:
+    return {
+        "rule_id": "motion_kitchen_while_away",
+        "template_id": "motion_detected_while_away",
+        "params": {
+            "motion_entity_ids": ["binary_sensor.xiao_esp32_c5_espectre_motion"],
+        },
+        "severity": "low",
+        "confidence": 0.6,
+        "is_sensitive": False,
+        "suggested_actions": ["check_camera"],
+    }
+
+
+def test_dynamic_rule_motion_while_away_issue_518_triggers_daytime() -> None:
+    """Issue #518: motion while away fires with no night gate."""
+    snapshot = _motion_night_away_snapshot(
+        motion_state="on", is_night=False, anyone_home=False
+    )
+    findings = evaluate_dynamic_rules(snapshot, [_motion_away_rule()])
+    assert len(findings) == 1
+    assert findings[0].type == "motion_kitchen_while_away"
+    assert findings[0].severity == "low"
+    assert findings[0].triggering_entities == [
+        "binary_sensor.xiao_esp32_c5_espectre_motion"
+    ]
+    assert findings[0].evidence["anyone_home"] is False
+    # The day-agnostic template omits is_night from the evidence so a finding
+    # persisting across the night boundary keeps a stable anomaly ID.
+    assert "is_night" not in findings[0].evidence
+
+
+def test_dynamic_rule_motion_while_away_issue_518_triggers_at_night() -> None:
+    """The day-agnostic template also fires at night."""
+    snapshot = _motion_night_away_snapshot(
+        motion_state="on", is_night=True, anyone_home=False
+    )
+    findings = evaluate_dynamic_rules(snapshot, [_motion_away_rule()])
+    assert len(findings) == 1
+
+
+def test_dynamic_rule_motion_while_away_issue_518_non_trigger() -> None:
+    """No finding when someone is home or without motion."""
+    non_trigger_contexts = (
+        ("on", True),  # someone is home
+        ("off", False),  # no motion
+    )
+    for motion_state, anyone_home in non_trigger_contexts:
+        snapshot = _motion_night_away_snapshot(
+            motion_state=motion_state, is_night=False, anyone_home=anyone_home
+        )
+        assert evaluate_dynamic_rules(snapshot, [_motion_away_rule()]) == []
+
+
+def test_dynamic_rule_motion_while_away_partial_resolution_fires() -> None:
+    """A renamed/removed sensor must not disable the remaining sensors."""
+    rule = _motion_away_rule()
+    rule["params"] = {
+        "motion_entity_ids": [
+            "binary_sensor.removed_motion",
+            "binary_sensor.hall_motion",
+        ],
+    }
+    snapshot = _snapshot(
+        [
+            _base_entity("binary_sensor.hall_motion", "binary_sensor", "on"),
+        ],
+        [],
+        {
+            "now": "2026-02-01T12:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": False,
+            "anyone_home": False,
+            "people_home": [],
+            "people_away": [],
+            "last_motion_by_area": {},
+        },
+    )
+    findings = evaluate_dynamic_rules(snapshot, [rule])
+    assert len(findings) == 1
+    assert findings[0].triggering_entities == ["binary_sensor.hall_motion"]
+    assert findings[0].evidence["unresolved_entity_ids"] == [
+        "binary_sensor.removed_motion"
+    ]
+
+
+def test_dynamic_rule_motion_while_away_issue_518_invalid_params() -> None:
+    """Missing, non-list, or empty motion_entity_ids yield no findings."""
+    snapshot = _motion_night_away_snapshot(
+        motion_state="on", is_night=False, anyone_home=False
+    )
+    invalid_params: tuple[dict[str, object], ...] = (
+        {},
+        {"motion_entity_ids": "binary_sensor.xiao_esp32_c5_espectre_motion"},
+        {"motion_entity_ids": []},
+    )
+    for params in invalid_params:
+        rule = _motion_away_rule()
+        rule["params"] = params
+        assert evaluate_dynamic_rules(snapshot, [rule]) == []
+
+
+def test_dynamic_rule_night_template_evidence_still_carries_is_night() -> None:
+    """
+    The shared evaluator keeps is_night in the night template's evidence.
+
+    build_anomaly_id hashes evidence in insertion order, so dropping or
+    moving the key would silently re-key every existing night finding.
+    """
+    snapshot = _motion_night_away_snapshot(
+        motion_state="on", is_night=True, anyone_home=False
+    )
+    findings = evaluate_dynamic_rules(snapshot, [_motion_night_away_rule()])
+    assert len(findings) == 1
+    evidence_keys = list(findings[0].evidence.keys())
+    assert evidence_keys == [
+        "rule_id",
+        "template_id",
+        "is_night",
+        "anyone_home",
+        "motion_entity_ids",
+        "motion_states",
+        "unresolved_entity_ids",
+    ]

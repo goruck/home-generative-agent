@@ -490,3 +490,98 @@ def test_rule_semantic_key_motion_night_while_away_requires_entities() -> None:
         "params": {"motion_entity_ids": []},
     }
     assert rule_semantic_key(rule) is None
+
+
+def test_rule_semantic_key_motion_while_away_issue_518() -> None:
+    rule = {
+        "rule_id": "motion_kitchen_while_away",
+        "template_id": "motion_detected_while_away",
+        "params": {
+            "motion_entity_ids": ["binary_sensor.xiao_esp32_c5_espectre_motion"],
+        },
+    }
+    key = rule_semantic_key(rule)
+    assert key == (
+        "v1|subject=motion|predicate=active|night=any|home=0|scope=any|"
+        "entities=binary_sensor.xiao_esp32_c5_espectre_motion"
+    )
+
+
+def test_motion_while_away_rule_covers_issue_518_candidate() -> None:
+    """
+    The registered rule's key covers the exact issue #518 candidate.
+
+    The candidate's evidence paths are index-based (entities[31].state) and
+    never resolve to an entity ID — the prose fallback keys the candidate on
+    the sensor named in the summary so the activated rule dedups it.
+    """
+    candidate = {
+        "candidate_id": "motion_kitchen_while_away",
+        "title": "Unexpected Kitchen Motion While Away",
+        "summary": (
+            "Detects motion in the Kitchen area "
+            "(binary_sensor.xiao_esp32_c5_espectre_motion) when no one is home."
+        ),
+        "pattern": "state_change",
+        "evidence_paths": [
+            "entities[31].state",
+            "derived.anyone_home",
+        ],
+    }
+    rule = {
+        "rule_id": "motion_kitchen_while_away",
+        "template_id": "motion_detected_while_away",
+        "params": {
+            "motion_entity_ids": ["binary_sensor.xiao_esp32_c5_espectre_motion"],
+        },
+    }
+    candidate_key = candidate_semantic_key(candidate)
+    rule_key = rule_semantic_key(rule)
+    assert candidate_key is not None
+    assert rule_key is not None
+    assert rule_key_covers_candidate_key(rule_key, candidate_key)
+
+
+def test_candidate_semantic_key_prose_fallback_requires_known_domain() -> None:
+    """Dotted prose tokens without a known HA domain never key entities."""
+    candidate = {
+        "title": "Unexpected Kitchen Motion While Away",
+        "summary": (
+            "Detects motion via derived.last_motion_by_area e.g. in the "
+            "Kitchen when no one is home."
+        ),
+        "pattern": "state_change",
+        "evidence_paths": ["entities[31].state", "derived.anyone_home"],
+    }
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert key.endswith("entities=")
+
+
+def test_candidate_semantic_key_evidence_ids_beat_prose_ids() -> None:
+    """Resolvable evidence-path IDs win over IDs named in the prose."""
+    candidate = {
+        "title": "Unexpected Kitchen Motion While Away",
+        "summary": (
+            "Detects motion in the Kitchen area "
+            "(binary_sensor.xiao_esp32_c5_espectre_motion) when no one is home."
+        ),
+        "pattern": "state_change",
+        "evidence_paths": [
+            "entities[entity_id=binary_sensor.hall_motion].state",
+            "derived.anyone_home",
+        ],
+    }
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert key.endswith("entities=binary_sensor.hall_motion")
+
+
+def test_rule_semantic_key_motion_while_away_requires_entities() -> None:
+    """A motion-while-away rule without motion entities has no semantic key."""
+    rule = {
+        "rule_id": "motion_kitchen_while_away",
+        "template_id": "motion_detected_while_away",
+        "params": {"motion_entity_ids": []},
+    }
+    assert rule_semantic_key(rule) is None

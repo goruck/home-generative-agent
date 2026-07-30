@@ -72,8 +72,13 @@ def evaluate_dynamic_rules(  # noqa: PLR0913
             )
         ),
         "motion_detected_at_night_while_away": (
-            lambda rule: _eval_motion_detected_at_night_while_away(
-                snapshot, rule, entity_map
+            lambda rule: _eval_motion_while_away_common(
+                snapshot, rule, entity_map, require_night=True
+            )
+        ),
+        "motion_detected_while_away": (
+            lambda rule: _eval_motion_while_away_common(
+                snapshot, rule, entity_map, require_night=False
             )
         ),
         "motion_while_alarm_disarmed_and_home_present": (
@@ -348,17 +353,28 @@ def _eval_motion_detected_at_night_while_alarm_disarmed(
     return [_build_finding(rule, [alarm_id, *motion_ids, *required_ids], evidence)]
 
 
-def _eval_motion_detected_at_night_while_away(
+def _eval_motion_while_away_common(
     snapshot: FullStateSnapshot,
     rule: dict[str, Any],
     entity_map: Mapping[str, SnapshotEntity],
+    *,
+    require_night: bool,
 ) -> list[AnomalyFinding]:
+    """
+    Motion while nobody is home, optionally gated to night hours.
+
+    Shared by ``motion_detected_at_night_while_away`` (issue #516,
+    ``require_night=True``) and ``motion_detected_while_away`` (issue #518,
+    ``require_night=False``). The day-agnostic variant omits ``is_night``
+    from the evidence so a finding that persists across the night boundary
+    keeps a stable anomaly ID.
+    """
     params = _rule_params(rule)
     motion_ids = params.get("motion_entity_ids")
     if not isinstance(motion_ids, list) or not motion_ids:
         return []
 
-    if not snapshot["derived"]["is_night"]:
+    if require_night and not snapshot["derived"]["is_night"]:
         return []
     if snapshot["derived"]["anyone_home"]:
         return []
@@ -381,17 +397,25 @@ def _eval_motion_detected_at_night_while_away(
     if not any(motion.get("state") == "on" for motion in resolved.values()):
         return []
 
-    evidence = {
+    evidence: dict[str, Any] = {
         "rule_id": rule.get("rule_id"),
         "template_id": rule.get("template_id"),
-        "is_night": snapshot["derived"]["is_night"],
-        "anyone_home": snapshot["derived"]["anyone_home"],
-        "motion_entity_ids": [str(motion_id) for motion_id in motion_ids],
-        "motion_states": {
-            motion_id: motion.get("state") for motion_id, motion in resolved.items()
-        },
-        "unresolved_entity_ids": unresolved,
     }
+    if require_night:
+        # Keyed in this position so existing night-template findings keep
+        # their anomaly IDs (build_anomaly_id hashes evidence in insertion
+        # order).
+        evidence["is_night"] = snapshot["derived"]["is_night"]
+    evidence.update(
+        {
+            "anyone_home": snapshot["derived"]["anyone_home"],
+            "motion_entity_ids": [str(motion_id) for motion_id in motion_ids],
+            "motion_states": {
+                motion_id: motion.get("state") for motion_id, motion in resolved.items()
+            },
+            "unresolved_entity_ids": unresolved,
+        }
+    )
     return [_build_finding(rule, list(resolved), evidence)]
 
 
