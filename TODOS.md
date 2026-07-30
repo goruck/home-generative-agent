@@ -322,20 +322,6 @@
 
 ---
 
-### Lovelace health card example for baseline attrs
-
-**What:** Add a Lovelace dashboard card YAML snippet to `README.md` showing `baseline_entity_count`, `baseline_fresh_count`, and `baseline_rules_waiting` from `sensor.sentinel_health`.
-
-**Why:** Users enabling baseline collection have no visual confirmation it's working. The new health attrs are invisible unless a user knows to inspect the sensor. A dashboard example closes the discoverability gap and pairs naturally with the existing trigger-drop alert example.
-
-**How to apply:** Under the Baseline section of `README.md`, add a Lovelace glance card example using `sensor.sentinel_health` attributes: `baseline_entity_count` (how many entities are tracked), `baseline_fresh_count` (how many have recent updates), `baseline_rules_waiting` (rules not yet firing due to min-sample gate).
-
-**Effort:** S
-**Priority:** P3
-**Depends on:** Baseline enhancement PR (sentinel-baseline-enhancement)
-
----
-
 ### Weekly / day-of-week baseline patterns
 
 **What:** Extend baseline collection to store `hourly_avg_{DOW}_{H}` metrics (e.g., `hourly_avg_1_14` = Monday 2PM). Gives 7×24=168 time slots per entity instead of 24, enabling time-of-day anomaly detection that accounts for weekday vs. weekend patterns.
@@ -648,6 +634,16 @@ WARNING per event that a window-scoped check could suppress.
 ---
 
 ## Completed
+
+### Lovelace health card example for baseline attrs
+
+**What:** Add a Lovelace dashboard card YAML snippet to `README.md` showing `baseline_entity_count`, `baseline_fresh_count`, and `baseline_rules_waiting` from `sensor.sentinel_health`.
+
+**Why:** Users enabling baseline collection have no visual confirmation it's working; a README dashboard example closes the discoverability gap.
+
+**Resolution:** Completed by the README "Community Dashboards" section (discussion #513, @hruba202): the featured Sentinel health flex-table-card recipe surfaces `baseline_entity_count`, `baseline_fresh_count`, `baseline_rules_waiting`, and the other health KPIs. Placement is the Community Dashboards section rather than the Baseline section, but the discoverability goal is met.
+
+**Completed:** docs PR for discussion #513 (2026-07-29)
 
 ### Snapshot retention misses batches that never reach _finalize
 
