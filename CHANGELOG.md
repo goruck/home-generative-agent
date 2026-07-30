@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.23.0] - 2026-07-30
+
+### Added
+
+- **Sentinel can now alert on motion detected while nobody is home, at any hour** — a new deterministic rule template, `motion_detected_while_away`, proposed by [@hruba202](https://github.com/hruba202) in [#518](https://github.com/goruck/home-generative-agent/issues/518). It is the day-agnostic sibling of `motion_detected_at_night_while_away` (v3.22.0): same any-of sensor semantics, same departure/arrival grace suppression, same advisory *check camera* action (a motion finding has no specific door or window to close, so nothing is actuated). It defaults to low severity — daytime motion while away has more benign explanations (cleaners, deliveries, pets) than night motion — and the same pet/outdoor-VMD noise caveat applies: scope it to interior sensors pets can't reach, or snooze per rule.
+
+### Fixed
+
+- **Discovery candidates with index-based evidence paths can now normalize** — the discovery LLM sometimes cites evidence as `entities[31].state` instead of naming the entity; the index is only meaningful against the snapshot the candidate was drafted from, so such candidates could never resolve their motion sensor and stayed unsupported even when the summary named the entity outright (the exact shape of [#518](https://github.com/goruck/home-generative-agent/issues/518)). Motion-named `binary_sensor` IDs written in the candidate's prose are now promoted as motion evidence, and the semantic dedup key uses the same prose fallback — without it, an activated rule would never suppress re-proposals of its own candidate. Evidence-path entity IDs still win when they resolve, and prose IDs must carry a known Home Assistant domain, so `derived.*` paths and stray dotted words never become rule targets.
+
 ## [3.22.0] - 2026-07-30
 
 ### Added
