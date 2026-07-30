@@ -400,3 +400,93 @@ def test_candidate_semantic_key_strips_quoted_entity_ids() -> None:
         ],
     }
     assert candidate_semantic_key(quoted) == candidate_semantic_key(unquoted)
+
+
+def test_rule_semantic_key_motion_night_while_away_issue_516() -> None:
+    rule = {
+        "rule_id": "motion_detected_at_night_while_away",
+        "template_id": "motion_detected_at_night_while_away",
+        "params": {
+            "motion_entity_ids": ["binary_sensor.xiao_esp32_c5_espectre_motion"],
+        },
+    }
+    key = rule_semantic_key(rule)
+    assert key == (
+        "v1|subject=motion|predicate=active|night=1|home=0|scope=any|"
+        "entities=binary_sensor.xiao_esp32_c5_espectre_motion"
+    )
+
+
+def test_motion_night_while_away_rule_covers_issue_516_candidate() -> None:
+    """The registered rule's key covers the exact issue #516 candidate."""
+    candidate = {
+        "candidate_id": (
+            "v1|subject=motion_sensor|predicate=state_event|night=1|home=0|"
+            "scope=any|entities=binary_sensor.xiao_esp32_c5_espectre_motion"
+        ),
+        "title": "Motion detected at night while away",
+        "summary": (
+            "Trigger when a motion sensor reports ON at night and nobody is home."
+        ),
+        "pattern": "state_event",
+        "evidence_paths": [
+            "derived.is_night",
+            "derived.anyone_home",
+            (
+                "entities[entity_ids contains "
+                "binary_sensor.xiao_esp32_c5_espectre_motion].state"
+            ),
+        ],
+    }
+    rule = {
+        "rule_id": "motion_detected_at_night_while_away",
+        "template_id": "motion_detected_at_night_while_away",
+        "params": {
+            "motion_entity_ids": ["binary_sensor.xiao_esp32_c5_espectre_motion"],
+        },
+    }
+    candidate_key = candidate_semantic_key(candidate)
+    rule_key = rule_semantic_key(rule)
+    assert candidate_key is not None
+    assert rule_key is not None
+    assert rule_key_covers_candidate_key(rule_key, candidate_key)
+
+
+def test_candidate_semantic_key_evidence_path_only_away_is_home_zero() -> None:
+    """'not derived.anyone_home' alone keys home=0 so activated rules dedup."""
+    candidate = {
+        "title": "Motion detected at night",
+        "summary": "Trigger when a motion sensor reports ON at night.",
+        "pattern": "state_event",
+        "evidence_paths": [
+            "derived.is_night",
+            "not derived.anyone_home",
+            (
+                "entities[entity_ids contains "
+                "binary_sensor.xiao_esp32_c5_espectre_motion].state"
+            ),
+        ],
+    }
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert "home=0" in key
+    rule = {
+        "rule_id": "any_slug",
+        "template_id": "motion_detected_at_night_while_away",
+        "params": {
+            "motion_entity_ids": ["binary_sensor.xiao_esp32_c5_espectre_motion"],
+        },
+    }
+    rule_key = rule_semantic_key(rule)
+    assert rule_key is not None
+    assert rule_key_covers_candidate_key(rule_key, key)
+
+
+def test_rule_semantic_key_motion_night_while_away_requires_entities() -> None:
+    """A motion-while-away rule without motion entities has no semantic key."""
+    rule = {
+        "rule_id": "motion_detected_at_night_while_away",
+        "template_id": "motion_detected_at_night_while_away",
+        "params": {"motion_entity_ids": []},
+    }
+    assert rule_semantic_key(rule) is None

@@ -71,6 +71,11 @@ def evaluate_dynamic_rules(  # noqa: PLR0913
                 snapshot, rule, entity_map
             )
         ),
+        "motion_detected_at_night_while_away": (
+            lambda rule: _eval_motion_detected_at_night_while_away(
+                snapshot, rule, entity_map
+            )
+        ),
         "motion_while_alarm_disarmed_and_home_present": (
             lambda rule: _eval_motion_while_alarm_disarmed_and_home_present(
                 snapshot, rule, entity_map
@@ -341,6 +346,53 @@ def _eval_motion_detected_at_night_while_alarm_disarmed(
         },
     }
     return [_build_finding(rule, [alarm_id, *motion_ids, *required_ids], evidence)]
+
+
+def _eval_motion_detected_at_night_while_away(
+    snapshot: FullStateSnapshot,
+    rule: dict[str, Any],
+    entity_map: Mapping[str, SnapshotEntity],
+) -> list[AnomalyFinding]:
+    params = _rule_params(rule)
+    motion_ids = params.get("motion_entity_ids")
+    if not isinstance(motion_ids, list) or not motion_ids:
+        return []
+
+    if not snapshot["derived"]["is_night"]:
+        return []
+    if snapshot["derived"]["anyone_home"]:
+        return []
+
+    # Any-of semantics: resolve per entity rather than all-or-nothing — a
+    # renamed or removed sensor must not silently disable the remaining
+    # sensors (issue #516 cross-model review). Fails closed only when no
+    # configured sensor resolves in the snapshot.
+    resolved: dict[str, SnapshotEntity] = {}
+    unresolved: list[str] = []
+    for motion_id in motion_ids:
+        entity = entity_map.get(motion_id) if isinstance(motion_id, str) else None
+        if entity is None:
+            unresolved.append(str(motion_id))
+        else:
+            resolved[motion_id] = entity
+    if not resolved:
+        return []
+
+    if not any(motion.get("state") == "on" for motion in resolved.values()):
+        return []
+
+    evidence = {
+        "rule_id": rule.get("rule_id"),
+        "template_id": rule.get("template_id"),
+        "is_night": snapshot["derived"]["is_night"],
+        "anyone_home": snapshot["derived"]["anyone_home"],
+        "motion_entity_ids": [str(motion_id) for motion_id in motion_ids],
+        "motion_states": {
+            motion_id: motion.get("state") for motion_id, motion in resolved.items()
+        },
+        "unresolved_entity_ids": unresolved,
+    }
+    return [_build_finding(rule, list(resolved), evidence)]
 
 
 def _eval_unlocked_lock_when_home(

@@ -13,6 +13,7 @@ import pytest
 from custom_components.home_generative_agent.core.utils import SentinelLLMDeferredError
 from custom_components.home_generative_agent.explain.llm_explain import (
     LLMExplainer,
+    _display_type,
     _friendly_type,
     _iso_to_relative,
     _relativize_timestamps,
@@ -234,3 +235,26 @@ def test_friendly_type_open_entry_at_night_variants() -> None:
         "open_entry_at_night_entry",
     ):
         assert _friendly_type(anomaly_type) == "Open entry at night"
+
+
+def test_friendly_type_motion_at_night_while_away() -> None:
+    """Issue #516: the motion-while-away rule ID gets a clean label."""
+    assert (
+        _friendly_type("motion_detected_at_night_while_away")
+        == "Motion at night while away"
+    )
+
+
+def test_display_type_prefers_template_label_for_slug_rule_ids() -> None:
+    """Slugified candidate rule IDs display the curated template label."""
+    finding = AnomalyFinding(
+        anomaly_id="slug-1",
+        type="v1_subject_motion_sensor_candidate_slug",
+        severity="medium",
+        confidence=0.8,
+        triggering_entities=["binary_sensor.hall_motion"],
+        evidence={"template_id": "motion_detected_at_night_while_away"},
+        suggested_actions=["check_camera"],
+        is_sensitive=False,
+    )
+    assert _display_type(finding) == "Motion at night while away"

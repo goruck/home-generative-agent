@@ -14,6 +14,7 @@ SUPPORTED_TEMPLATES = {
     "alarm_disarmed_open_entry",
     "low_battery_sensors",
     "motion_detected_at_night_while_alarm_disarmed",
+    "motion_detected_at_night_while_away",
     "motion_while_alarm_disarmed_and_home_present",
     "unavailable_sensors",
     "unavailable_sensors_while_home",
@@ -148,9 +149,11 @@ _MIN_CAMERA_TOKEN_LEN = 3
 # Word-bounded so "present" doesn't match "presence" (an availability
 # candidate about presence sensors is not a someone-is-home condition) and
 # "home" doesn't match "anyone_home"/"armed_home" (issue #514 adversarial
-# review).
+# review). "nobody/no one (is) (at) home" is matched with optional filler
+# words — bare "nobody home" missed the flagship phrasing "nobody is home"
+# (issue #516 adversarial review).
 _AWAY_TERMS_PATTERN = re.compile(
-    r"\b(?:away|no one home|nobody home|empty|unoccupied"
+    r"\b(?:away|no(?:body|\s+one)\s+(?:is\s+)?(?:at\s+)?home|empty|unoccupied"
     r"|no occupants|without occupants)\b"
 )
 _HOME_TERMS_PATTERN = re.compile(
@@ -195,6 +198,11 @@ _NON_ENTRY_ID_TOKENS = (
 # Quote characters the discovery LLM sometimes wraps around entity IDs inside
 # evidence paths, e.g. entities[entity_ids contains 'binary_sensor.x'].state.
 _EVIDENCE_QUOTE_CHARS = "'\"`"
+# Word-bounded so incidental prose ("this is alarming") doesn't read as an
+# alarm-system condition and divert a motion candidate into the
+# missing-alarm-entity failure path; "armed" is included so armed-system
+# candidates keep their alarm context (issue #516 review).
+_ALARM_TEXT_PATTERN = re.compile(r"\b(?:alarms?|(?:dis)?armed)\b")
 
 
 @dataclass(frozen=True)
@@ -342,6 +350,54 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 confidence=float(candidate.get("confidence_hint", 0.75)),
                 is_sensitive=False,
                 suggested_actions=["close_entry"],
+            )
+        )
+
+    # motion_detected_at_night_while_away (issue #516): binary_sensor motion
+    # at night with nobody home and no alarm involved. Alarm-motion branches
+    # above take priority; alarm/armed-worded candidates without a resolved
+    # alarm entity keep failing with missing_required_entities rather than
+    # losing their alarm gate; entry/lock candidates that also cite a motion
+    # sensor keep routing to their entry/lock branches below. Availability
+    # and battery candidates keep routing to their own templates further
+    # down — a motion-named sensor that is unavailable or battery-low would
+    # otherwise register a rule whose state=="on" evaluator can never match
+    # (issue #514 invariant). The binary_sensor restriction keeps sensor.*
+    # battery/numeric entities and light.* motion-named entities out of the
+    # rule params for the same reason.
+    away_motion_ids = [m for m in motion_ids if m.startswith("binary_sensor.")]
+    # Motion-named IDs that merely contain an entry substring
+    # (binary_sensor.outdoor_motion, *_doorbell_motion) are motion sensors,
+    # not entries — only a genuine non-motion entry entity blocks this
+    # branch (issue #516 review).
+    non_motion_entry_ids = [e for e in entry_ids if e not in motion_ids]
+    if (
+        away_motion_ids
+        and not alarm_id
+        and not non_motion_entry_ids
+        and not lock_ids
+        and not battery_sensor_ids
+        and has_night
+        and presence == "away"
+        and _contains_any(text, ("motion", "vmd"))
+        and not _ALARM_TEXT_PATTERN.search(text)
+        and not _contains_any(text, ("unavailable", "offline", "unreachable"))
+    ):
+        return NormalizationResult(
+            normalized=NormalizedRule(
+                rule_id=_candidate_rule_id(
+                    candidate, default="motion_detected_at_night_while_away"
+                ),
+                template_id="motion_detected_at_night_while_away",
+                params={"motion_entity_ids": away_motion_ids},
+                severity="medium",
+                confidence=float(candidate.get("confidence_hint", 0.8)),
+                is_sensitive=False,
+                # Advisory action only: the finding carries motion entities,
+                # so close_entry would have no deterministic target and a
+                # non-sensitive execute tap could actuate an unrelated entry
+                # (issue #516 cross-model review).
+                suggested_actions=["check_camera"],
             )
         )
 

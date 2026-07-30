@@ -178,6 +178,16 @@
 
 ---
 
+### Extract shared motion-evidence helper across motion evaluators
+
+**What:** `_eval_motion_detected_at_night_while_away`, `_eval_motion_detected_at_night_while_alarm_disarmed`, and `_eval_motion_while_alarm_disarmed_and_home_present` repeat the params list-check / entity resolution / `motion_states` evidence block (the new evaluator now uses per-entity any-of resolution while the alarm two remain all-of `zip(..., strict=False)`). A shared helper would encode the resolution invariant once — and is the natural place to extend any-of resilience to the alarm-motion evaluators.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** v3.22.0
+
+---
+
 ## Audit Store
 
 ### Audit notifier-drop findings as non-user-facing (delivery status from async_notify)
@@ -412,6 +422,30 @@ Entity-backed evidence path instruction added to `USER_PROMPT_TEMPLATE` in `expl
 
 ---
 
+### Text/device_class fallback for locale-named motion sensors
+
+**What:** `_find_motion_entity_ids` matches only the substrings `motion`/`vmd` in entity IDs, so a locale-named PIR like `binary_sensor.chodba` (`device_class: motion`) can never normalize into `motion_detected_at_night_while_away` or the alarm-motion templates — the candidate dies as `missing_required_entities`. Flagged by Codex adversarial review during the v3.22.0 ship (issue #516).
+
+**How to apply:** Mirror the issue-504 locale entry fallback: when candidate text names motion and evidence cites `binary_sensor.*` IDs not classified as any other kind, promote them as motion sensors — with the same gating pitfalls (word-bounded text, absence of higher-priority entity classes, JS card mirror). Alternatively use snapshot `device_class` as the positive signal (see the existing device_class TODO above).
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** v3.22.0
+
+---
+
+### Card severity preview disagrees with server-registered severity
+
+**What:** `_severityForCandidate` in hga-proposals-card.js returns "high" for any away/night candidate, but the server registers e.g. `motion_detected_at_night_while_away` as medium and `open_entry_at_night_when_home` as medium — the GitHub rule-request prefill and UI disagree with what gets stored. Pre-existing; surfaced during the v3.22.0 ship review.
+
+**How to apply:** Mirror the per-template severity table from `proposal_templates.py` into the card, or include the normalized severity in the proposal record and display that.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** v3.22.0
+
+---
+
 ## Video Analyzer
 
 ### Caption novelty: per-analysis notification-status metadata
@@ -576,9 +610,9 @@ WARNING per event that a window-scoped check could suppress.
 
 ### Deduplicate the _friendly_type label maps
 
-**What:** `sentinel/notifier.py` and `explain/llm_explain.py` each carry a byte-identical `_friendly_type` `known` map (and matching prefix-stripping fallback). Every new anomaly type requires the same entries in both maps plus mirrored tests in `test_sentinel_notifier.py` and `test_llm_explain.py` — the v3.21.0 ship added the four `open_entry_at_night*` keys in four places. A missed side silently regresses user-visible labels to the title-cased fallback.
+**What:** `sentinel/notifier.py` and `explain/llm_explain.py` each carry a byte-identical `_friendly_type` `known` map (and matching prefix-stripping fallback). Every new anomaly type requires the same entries in both maps plus mirrored tests in `test_sentinel_notifier.py` and `test_llm_explain.py` — the v3.21.0 ship added the four `open_entry_at_night*` keys in four places. A missed side silently regresses user-visible labels to the title-cased fallback. The v3.22.0 ship widened the duplication: `_KNOWN_TYPE_LABELS` and a `_display_type` helper (template-label fallback for slugified dynamic-rule IDs) are now mirrored verbatim in both modules, so each new rule type needs two edits plus two mirrored tests. Re-flagged by the maintainability specialist during the v3.22.0 ship.
 
-**How to apply:** Extract the type→label map and the fallback prettifier into one shared helper module (e.g. `sentinel/labels.py` or `core/`), import it from both `notifier.py` and `llm_explain.py`, and collapse the duplicated tests into one suite against the shared module.
+**How to apply:** Hoist `_KNOWN_TYPE_LABELS`, `_display_type`, and the fallback prettifier into one shared module (e.g. `sentinel/labels.py` or a small `core/labels.py`), import it from both `notifier.py` and `llm_explain.py`, and collapse the duplicated tests into one suite against the shared module.
 
 **Effort:** S
 **Priority:** P3

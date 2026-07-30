@@ -47,7 +47,7 @@ class LLMExplainer:
             return None
 
         prompt = USER_PROMPT_TEMPLATE.format(
-            anomaly_type=_friendly_type(finding.type),
+            anomaly_type=_display_type(finding),
             severity=finding.severity,
             evidence=_relativize_timestamps(finding.evidence),
             suggested_actions=finding.suggested_actions,
@@ -91,25 +91,43 @@ class LLMExplainer:
         return text
 
 
+_KNOWN_TYPE_LABELS = {
+    "open_entry_while_away": "Open entry while away",
+    "open_entry_at_night_when_home": "Open entry at night",
+    "open_entry_at_night_when_home_window": "Open entry at night",
+    "open_entry_at_night_while_away": "Open entry at night",
+    "open_entry_at_night": "Open entry at night",
+    "open_entry_at_night_window": "Open entry at night",
+    "open_entry_at_night_door": "Open entry at night",
+    "open_entry_at_night_entry": "Open entry at night",
+    "open_any_window_at_night_while_away": "Window open at night",
+    "motion_detected_at_night_while_away": "Motion at night while away",
+    "unlocked_lock_at_night": "Door lock left unlocked",
+    "camera_entry_unsecured": "Activity near unsecured entry",
+    "alarm_disarmed_during_external_threat": "Outdoor activity while alarm disarmed",
+}
+
+
+def _display_type(finding: AnomalyFinding) -> str:
+    """
+    Friendly label for a finding.
+
+    Dynamic rules carry slugified candidate IDs as ``finding.type``; when the
+    type has no curated label but the rule's template does, prefer the
+    template label so explanations never show raw candidate slugs
+    (issue #516 review).
+    """
+    if finding.type in _KNOWN_TYPE_LABELS:
+        return _KNOWN_TYPE_LABELS[finding.type]
+    template_id = str(finding.evidence.get("template_id") or "")
+    if template_id in _KNOWN_TYPE_LABELS:
+        return _KNOWN_TYPE_LABELS[template_id]
+    return _friendly_type(finding.type)
+
+
 def _friendly_type(anomaly_type: str) -> str:
-    known = {
-        "open_entry_while_away": "Open entry while away",
-        "open_entry_at_night_when_home": "Open entry at night",
-        "open_entry_at_night_when_home_window": "Open entry at night",
-        "open_entry_at_night_while_away": "Open entry at night",
-        "open_entry_at_night": "Open entry at night",
-        "open_entry_at_night_window": "Open entry at night",
-        "open_entry_at_night_door": "Open entry at night",
-        "open_entry_at_night_entry": "Open entry at night",
-        "open_any_window_at_night_while_away": "Window open at night",
-        "unlocked_lock_at_night": "Door lock left unlocked",
-        "camera_entry_unsecured": "Activity near unsecured entry",
-        "alarm_disarmed_during_external_threat": (
-            "Outdoor activity while alarm disarmed"
-        ),
-    }
-    if anomaly_type in known:
-        return known[anomaly_type]
+    if anomaly_type in _KNOWN_TYPE_LABELS:
+        return _KNOWN_TYPE_LABELS[anomaly_type]
     display = anomaly_type.removeprefix("candidate_")
     # Strip "rule_<digits>_" prefix (e.g. "rule_02_high_energy_consumption_away")
     parts = display.split("_")
@@ -127,7 +145,7 @@ def _friendly_entity(entity_id: str) -> str:
 
 
 def _compact_fallback(finding: AnomalyFinding) -> str:
-    summary = _friendly_type(finding.type)
+    summary = _display_type(finding)
     entity = "an entry"
     if finding.triggering_entities:
         entity = _friendly_entity(finding.triggering_entities[0])

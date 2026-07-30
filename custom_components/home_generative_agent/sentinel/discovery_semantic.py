@@ -110,8 +110,20 @@ def candidate_semantic_key(  # noqa: PLR0912, PLR0915
         night = "1"
 
     home = "any"
-    if _contains_any(
-        text, ("no one home", "nobody home", "away", "empty", "unoccupied")
+    # "not derived.anyone_home" is the LLM's canonical absence-of-occupancy
+    # path; without this, an evidence-only away candidate keys home=any and
+    # never dedups against its activated home=0 rule (issue #516 review).
+    if "not derived.anyone_home" in evidence_paths or _contains_any(
+        text,
+        (
+            "no one home",
+            "nobody home",
+            "no one is home",
+            "nobody is home",
+            "away",
+            "empty",
+            "unoccupied",
+        ),
     ):
         home = "0"
     elif _contains_any(text, ("someone home", "occupied", "home", "present")):
@@ -191,6 +203,14 @@ def rule_semantic_key(rule: dict[str, Any]) -> str | None:  # noqa: C901, PLR091
             return None
         return (
             "v1|subject=motion|predicate=active|night=1|home=any|scope=any|"
+            f"entities={','.join(motion_ids)}"
+        )
+    if template_id == "motion_detected_at_night_while_away":
+        motion_ids = sorted(set(_string_list(params.get("motion_entity_ids"))))
+        if not motion_ids:
+            return None
+        return (
+            "v1|subject=motion|predicate=active|night=1|home=0|scope=any|"
             f"entities={','.join(motion_ids)}"
         )
     if template_id == "unavailable_sensors_while_home":

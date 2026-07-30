@@ -1282,3 +1282,173 @@ def test_dynamic_rule_entity_state_duration_lock_target_unchanged() -> None:
         }
     ]
     assert evaluate_dynamic_rules(snapshot, rules) == []
+
+
+def _motion_night_away_rule() -> dict[str, object]:
+    return {
+        "rule_id": "motion_detected_at_night_while_away",
+        "template_id": "motion_detected_at_night_while_away",
+        "params": {
+            "motion_entity_ids": ["binary_sensor.xiao_esp32_c5_espectre_motion"],
+        },
+        "severity": "medium",
+        "confidence": 0.8,
+        "is_sensitive": False,
+        "suggested_actions": ["check_camera"],
+    }
+
+
+def _motion_night_away_snapshot(
+    *, motion_state: str, is_night: bool, anyone_home: bool
+) -> FullStateSnapshot:
+    return _snapshot(
+        [
+            _base_entity(
+                "binary_sensor.xiao_esp32_c5_espectre_motion",
+                "binary_sensor",
+                motion_state,
+            ),
+        ],
+        [],
+        {
+            "now": "2026-02-01T00:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": is_night,
+            "anyone_home": anyone_home,
+            "people_home": [],
+            "people_away": [],
+            "last_motion_by_area": {},
+        },
+    )
+
+
+def test_dynamic_rule_motion_night_while_away_issue_516_triggers() -> None:
+    snapshot = _motion_night_away_snapshot(
+        motion_state="on", is_night=True, anyone_home=False
+    )
+    findings = evaluate_dynamic_rules(snapshot, [_motion_night_away_rule()])
+    assert len(findings) == 1
+    assert findings[0].type == "motion_detected_at_night_while_away"
+    assert findings[0].severity == "medium"
+    assert findings[0].triggering_entities == [
+        "binary_sensor.xiao_esp32_c5_espectre_motion"
+    ]
+    assert findings[0].evidence["anyone_home"] is False
+    assert findings[0].evidence["is_night"] is True
+
+
+def test_dynamic_rule_motion_night_while_away_issue_516_non_trigger() -> None:
+    """No finding when someone is home, during the day, or without motion."""
+    non_trigger_contexts = (
+        ("on", True, True),  # someone is home
+        ("on", False, False),  # daytime
+        ("off", True, False),  # no motion
+    )
+    for motion_state, is_night, anyone_home in non_trigger_contexts:
+        snapshot = _motion_night_away_snapshot(
+            motion_state=motion_state, is_night=is_night, anyone_home=anyone_home
+        )
+        assert evaluate_dynamic_rules(snapshot, [_motion_night_away_rule()]) == []
+
+
+def test_dynamic_rule_motion_night_while_away_partial_resolution_fires() -> None:
+    """A renamed/removed sensor must not disable the remaining sensors."""
+    rule = _motion_night_away_rule()
+    rule["params"] = {
+        "motion_entity_ids": [
+            "binary_sensor.removed_motion",
+            "binary_sensor.hall_motion",
+        ],
+    }
+    snapshot = _snapshot(
+        [
+            _base_entity("binary_sensor.hall_motion", "binary_sensor", "on"),
+        ],
+        [],
+        {
+            "now": "2026-02-01T00:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": True,
+            "anyone_home": False,
+            "people_home": [],
+            "people_away": [],
+            "last_motion_by_area": {},
+        },
+    )
+    findings = evaluate_dynamic_rules(snapshot, [rule])
+    assert len(findings) == 1
+    assert findings[0].triggering_entities == ["binary_sensor.hall_motion"]
+    assert findings[0].evidence["unresolved_entity_ids"] == [
+        "binary_sensor.removed_motion"
+    ]
+
+
+def test_dynamic_rule_motion_night_while_away_issue_516_missing_entity() -> None:
+    """No configured motion entity resolving in the snapshot fails closed."""
+    snapshot = _snapshot(
+        [
+            _base_entity("binary_sensor.other_motion", "binary_sensor", "on"),
+        ],
+        [],
+        {
+            "now": "2026-02-01T00:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": True,
+            "anyone_home": False,
+            "people_home": [],
+            "people_away": [],
+            "last_motion_by_area": {},
+        },
+    )
+    assert evaluate_dynamic_rules(snapshot, [_motion_night_away_rule()]) == []
+
+
+def test_dynamic_rule_motion_night_while_away_issue_516_invalid_params() -> None:
+    """Missing, non-list, or empty motion_entity_ids yield no findings."""
+    snapshot = _motion_night_away_snapshot(
+        motion_state="on", is_night=True, anyone_home=False
+    )
+    invalid_params: tuple[dict[str, object], ...] = (
+        {},
+        {"motion_entity_ids": "binary_sensor.xiao_esp32_c5_espectre_motion"},
+        {"motion_entity_ids": []},
+    )
+    for params in invalid_params:
+        rule = _motion_night_away_rule()
+        rule["params"] = params
+        assert evaluate_dynamic_rules(snapshot, [rule]) == []
+
+
+def test_dynamic_rule_motion_night_while_away_multi_entity_partial_on() -> None:
+    """Any-of semantics: one of several motion sensors ON is enough to fire."""
+    rule = _motion_night_away_rule()
+    rule["params"] = {
+        "motion_entity_ids": [
+            "binary_sensor.xiao_esp32_c5_espectre_motion",
+            "binary_sensor.hall_motion",
+        ],
+    }
+    snapshot = _snapshot(
+        [
+            _base_entity(
+                "binary_sensor.xiao_esp32_c5_espectre_motion", "binary_sensor", "off"
+            ),
+            _base_entity("binary_sensor.hall_motion", "binary_sensor", "on"),
+        ],
+        [],
+        {
+            "now": "2026-02-01T00:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": True,
+            "anyone_home": False,
+            "people_home": [],
+            "people_away": [],
+            "last_motion_by_area": {},
+        },
+    )
+    findings = evaluate_dynamic_rules(snapshot, [rule])
+    assert len(findings) == 1
+    assert findings[0].evidence["motion_states"] == {
+        "binary_sensor.xiao_esp32_c5_espectre_motion": "off",
+        "binary_sensor.hall_motion": "on",
+    }

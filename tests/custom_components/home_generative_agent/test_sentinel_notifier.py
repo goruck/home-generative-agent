@@ -28,6 +28,7 @@ from custom_components.home_generative_agent.sentinel.notifier import (
     _appliance_power_duration_mobile_message,
     _build_actions,
     _build_subtitle,
+    _display_type,
     _entity_staleness_mobile_message,
     _friendly_type,
     _mobile_message,
@@ -948,6 +949,14 @@ def test_friendly_type_strips_candidate_prefix() -> None:
     assert _friendly_type("time_of_day_anomaly") == "Time of day anomaly"
 
 
+def test_friendly_type_motion_at_night_while_away() -> None:
+    """Issue #516: the motion-while-away rule ID gets a clean label."""
+    assert (
+        _friendly_type("motion_detected_at_night_while_away")
+        == "Motion at night while away"
+    )
+
+
 def test_friendly_type_strips_rule_number_prefix() -> None:
     """'rule_NN_...' IDs strip the internal numbering prefix."""
     # The fridge notification bug: "rule_02_high_energy_consumption_away"
@@ -1767,3 +1776,22 @@ def test_alarm_disarmed_open_entry_subtitle() -> None:
     assert "Family Room Right Window" in subtitle
     assert "open" in subtitle.lower()
     assert "alarm disarmed" in subtitle.lower()
+
+
+def test_display_type_prefers_template_label_for_slug_rule_ids() -> None:
+    """Slugified candidate rule IDs display the curated template label."""
+    finding = AnomalyFinding(
+        anomaly_id="slug-1",
+        type="v1_subject_motion_sensor_candidate_slug",
+        severity="medium",
+        confidence=0.8,
+        triggering_entities=["binary_sensor.hall_motion"],
+        evidence={"template_id": "motion_detected_at_night_while_away"},
+        suggested_actions=["check_camera"],
+        is_sensitive=False,
+    )
+    assert _display_type(finding) == "Motion at night while away"
+    # Unknown template IDs keep the prefix-stripped fallback.
+    assert _display_type(_finding(ftype="candidate_washing_machine_away")) == (
+        "Washing machine away"
+    )
