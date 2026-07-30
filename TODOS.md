@@ -610,9 +610,9 @@ WARNING per event that a window-scoped check could suppress.
 
 ### Deduplicate the _friendly_type label maps
 
-**What:** `sentinel/notifier.py` and `explain/llm_explain.py` each carry a byte-identical `_friendly_type` `known` map (and matching prefix-stripping fallback). Every new anomaly type requires the same entries in both maps plus mirrored tests in `test_sentinel_notifier.py` and `test_llm_explain.py` — the v3.21.0 ship added the four `open_entry_at_night*` keys in four places. A missed side silently regresses user-visible labels to the title-cased fallback.
+**What:** `sentinel/notifier.py` and `explain/llm_explain.py` each carry a byte-identical `_friendly_type` `known` map (and matching prefix-stripping fallback). Every new anomaly type requires the same entries in both maps plus mirrored tests in `test_sentinel_notifier.py` and `test_llm_explain.py` — the v3.21.0 ship added the four `open_entry_at_night*` keys in four places. A missed side silently regresses user-visible labels to the title-cased fallback. The v3.22.0 ship widened the duplication: `_KNOWN_TYPE_LABELS` and a `_display_type` helper (template-label fallback for slugified dynamic-rule IDs) are now mirrored verbatim in both modules, so each new rule type needs two edits plus two mirrored tests. Re-flagged by the maintainability specialist during the v3.22.0 ship.
 
-**How to apply:** Extract the type→label map and the fallback prettifier into one shared helper module (e.g. `sentinel/labels.py` or `core/`), import it from both `notifier.py` and `llm_explain.py`, and collapse the duplicated tests into one suite against the shared module.
+**How to apply:** Hoist `_KNOWN_TYPE_LABELS`, `_display_type`, and the fallback prettifier into one shared module (e.g. `sentinel/labels.py` or a small `core/labels.py`), import it from both `notifier.py` and `llm_explain.py`, and collapse the duplicated tests into one suite against the shared module.
 
 **Effort:** S
 **Priority:** P3
@@ -664,18 +664,6 @@ WARNING per event that a window-scoped check could suppress.
 **Completed:** v3.9.0 (2026-04-06)
 
 `learned_suppressions_active` attribute exposed on `sensor.sentinel_health`. Count reads `learned_cooldown_multipliers` from suppression state via `engine.learned_suppressions_count` property.
-
----
-
-### Deduplicate the friendly-label maps in notifier.py and llm_explain.py
-
-**What:** `_KNOWN_TYPE_LABELS`, `_friendly_type`, and `_display_type` are now duplicated verbatim in `sentinel/notifier.py` and `explain/llm_explain.py`; every new rule type needs two edits plus two mirrored tests, and a missed one silently degrades to the fallback label. Flagged by the maintainability specialist during the v3.22.0 ship.
-
-**How to apply:** Hoist the map and both helpers into one module (e.g. `sentinel/models.py` or a small `core/labels.py`) and import from both call sites.
-
-**Effort:** S
-**Priority:** P3
-**Depends on:** v3.22.0
 
 ---
 
