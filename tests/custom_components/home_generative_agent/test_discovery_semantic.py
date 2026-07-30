@@ -779,3 +779,48 @@ def test_candidate_semantic_key_unknown_person_beats_motion_subject() -> None:
     motion_rule_key = rule_semantic_key(motion_rule)
     assert motion_rule_key is not None
     assert not rule_key_covers_candidate_key(motion_rule_key, key)
+
+
+def test_candidate_semantic_key_unknown_person_full_vocabulary() -> None:
+    """Every unknown/person term the normalizer accepts keys subject=camera."""
+    for unknown_term, person_term in (
+        ("unidentified", "occupant"),
+        ("indeterminate", "resident"),
+        ("unrecognized", "face"),
+    ):
+        candidate = {
+            "title": "Camera alert while away",
+            "summary": (
+                f"An {unknown_term} {person_term} is seen on camera with "
+                "motion on binary_sensor.kitchen_motion when no one is home."
+            ),
+            "pattern": "state_change",
+            "evidence_paths": [
+                "entities[entity_id=binary_sensor.kitchen_motion].state",
+                "derived.anyone_home",
+            ],
+        }
+        key = candidate_semantic_key(candidate)
+        assert key is not None, (unknown_term, person_term)
+        assert "subject=camera" in key, (unknown_term, person_term)
+        assert "predicate=unknown_person" in key, (unknown_term, person_term)
+
+
+def test_candidate_semantic_key_unknown_person_beats_power_leg() -> None:
+    """Camera semantics beat incidental power wording (verification round 3)."""
+    candidate = {
+        "title": "Unknown person while away",
+        "summary": (
+            "An unknown person is detected on camera during a power spike "
+            "when no one is home."
+        ),
+        "pattern": "state_change",
+        "evidence_paths": [
+            "camera_activity[entity_id=camera.backyard]",
+            "derived.anyone_home",
+        ],
+    }
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert "predicate=unknown_person" in key
+    assert "power_anomaly" not in key

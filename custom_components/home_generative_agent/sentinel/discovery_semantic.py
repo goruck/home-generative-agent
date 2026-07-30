@@ -118,12 +118,37 @@ def candidate_semantic_key(  # noqa: PLR0912, PLR0915
         predicate = "unlocked"
     elif "open" in text:
         predicate = "open"
-    elif "battery" in text and _contains_any(text, ("low", "below", "under")):
-        predicate = "low_battery"
     elif _contains_any(text, ("unavailable", "offline", "unreachable")):
         predicate = "unavailable"
     elif "disarmed" in text:
         predicate = "disarmed"
+    elif (
+        (camera_ids or _contains_any(text, ("camera", "cam ")))
+        and _contains_any(
+            text,
+            ("unknown", "unrecognized", "stranger", "unidentified", "indeterminate"),
+        )
+        and _contains_any(
+            text,
+            ("person", "people", "face", "occupant", "resident"),
+        )
+    ):
+        # Checked before the battery/power/motion legs, mirroring the
+        # normalizer's branch order (camera branches precede the battery
+        # and power branches): an unknown-person camera candidate that also
+        # cites a motion sensor or a power spike normalizes to the
+        # sensitive camera template, so keying it subject=motion or
+        # predicate=power_anomaly would let a plain motion or baseline
+        # rule's coverage check silently swallow the camera proposal
+        # (issue #518 verification reviews). Term lists mirror
+        # proposal_templates._UNKNOWN_TERMS/_PERSON_TERMS ("occupant"/
+        # "resident" cover their plurals as substrings). Text-only camera
+        # signals key entities= to match any-camera rules.
+        subject = "camera"
+        predicate = "unknown_person"
+        entities = camera_ids
+    elif "battery" in text and _contains_any(text, ("low", "below", "under")):
+        predicate = "low_battery"
     elif _contains_any(
         text,
         ("power", "energy", "watt", "consumption", "kilowatt", "baseline", "deviation"),
@@ -131,20 +156,6 @@ def candidate_semantic_key(  # noqa: PLR0912, PLR0915
         predicate = "power_anomaly"
         if not entities and sensor_ids:
             entities = sensor_ids
-    elif (
-        (camera_ids or _contains_any(text, ("camera", "cam ")))
-        and _contains_any(text, ("unknown", "unrecognized", "stranger"))
-        and _contains_any(text, ("person", "people", "face"))
-    ):
-        # Checked before the motion/active leg: an unknown-person camera
-        # candidate that also cites a motion sensor normalizes to the
-        # sensitive camera template, so keying it subject=motion would let
-        # a plain motion rule's coverage check silently swallow the
-        # camera-specific proposal (issue #518 verification review P1).
-        # Text-only camera signals key entities= to match any-camera rules.
-        subject = "camera"
-        predicate = "unknown_person"
-        entities = camera_ids
     elif "motion" in text or "activity" in text:
         predicate = "active"
     if predicate == "unavailable" and sensor_ids:

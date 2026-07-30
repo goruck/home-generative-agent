@@ -782,3 +782,107 @@ async def test_approve_rule_proposal_rechecks_cover_after_dropping_ids(hass) -> 
     assert response["rule_id"] == "existing_kitchen_motion_away"
     assert response["overlapping_entity_ids"] == ["binary_sensor.kitchen_motion"]
     assert rule_registry.added_rules == []
+
+
+@pytest.mark.asyncio
+async def test_approve_rule_proposal_unsupported_not_reported_covered(hass) -> None:
+    """
+    An unsupported candidate is never reported covered by a coarse key match.
+
+    A stale-sensor candidate keys exactly like an active away-motion rule,
+    but that rule cannot detect the dead sensor the user described — the
+    honest answer is unsupported (issue #518 verification round 3).
+    """
+    record = {
+        "candidate_id": "kitchen_motion_stale",
+        "candidate": {
+            "candidate_id": "kitchen_motion_stale",
+            "title": "Kitchen motion sensor stale while away",
+            "summary": (
+                "binary_sensor.kitchen_motion has not updated for days "
+                "when no one is home."
+            ),
+            "pattern": "state_change",
+            "confidence_hint": 0.6,
+            "evidence_paths": [
+                "entities[entity_id=binary_sensor.kitchen_motion].state",
+                "derived.anyone_home",
+            ],
+        },
+        "notes": "",
+        "status": "draft",
+    }
+    proposal_store = ProposalStore(hass)
+    await proposal_store.async_append(record)
+    rule_registry = DummyRuleRegistry(
+        rules=[
+            {
+                "rule_id": "motion_kitchen_while_away",
+                "template_id": "motion_detected_while_away",
+                "params": {"motion_entity_ids": ["binary_sensor.kitchen_motion"]},
+                "enabled": True,
+            }
+        ]
+    )
+    entry = _make_entry(
+        proposal_store=proposal_store,
+        rule_registry=rule_registry,
+        sentinel=SimpleNamespace(async_run_now=AsyncMock(return_value=True)),
+    )
+    response = await _hga_component._approve_rule_proposal(
+        entry,
+        hass=hass,
+        candidate_id="kitchen_motion_stale",
+    )
+
+    assert response["status"] == "unsupported"
+    assert rule_registry.added_rules == []
+
+
+@pytest.mark.asyncio
+async def test_approve_rule_proposal_superset_rule_covers_reduced_set(hass) -> None:
+    """
+    A same-template any-of rule covering a superset of the reduced set counts.
+
+    An existing [kitchen, hall] rule already alerts on kitchen motion, so a
+    candidate reduced to [kitchen] must not register a duplicate
+    (issue #518 verification round 3).
+    """
+    hass.states.async_set("binary_sensor.kitchen_motion", "off")
+    record = _prose_motion_proposal_record("binary_sensor.kitchen_motion")
+    record["candidate"]["summary"] = (
+        "Detects motion via binary_sensor.kitchen_motion and "
+        "binary_sensor.hallucinated_motion when no one is home."
+    )
+    proposal_store = ProposalStore(hass)
+    await proposal_store.async_append(record)
+    rule_registry = DummyRuleRegistry(
+        rules=[
+            {
+                "rule_id": "all_interior_motion_away",
+                "template_id": "motion_detected_while_away",
+                "params": {
+                    "motion_entity_ids": [
+                        "binary_sensor.kitchen_motion",
+                        "binary_sensor.hall_motion",
+                    ]
+                },
+                "enabled": True,
+            }
+        ]
+    )
+    entry = _make_entry(
+        proposal_store=proposal_store,
+        rule_registry=rule_registry,
+        sentinel=SimpleNamespace(async_run_now=AsyncMock(return_value=True)),
+    )
+    response = await _hga_component._approve_rule_proposal(
+        entry,
+        hass=hass,
+        candidate_id="motion_kitchen_while_away",
+    )
+
+    assert response["status"] == "covered_by_existing_rule"
+    assert response["rule_id"] == "all_interior_motion_away"
+    assert response["overlapping_entity_ids"] == ["binary_sensor.kitchen_motion"]
+    assert rule_registry.added_rules == []
