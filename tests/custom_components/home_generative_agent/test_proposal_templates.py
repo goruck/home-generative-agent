@@ -2118,3 +2118,268 @@ def test_find_camera_id_accepts_all_quote_styles() -> None:
         paths = [f"entities[entity_id={quote}camera.front_porch{quote}].state"]
         assert _find_camera_id(paths, candidate) == "camera.front_porch"
     assert _find_camera_id(['entities[entity_id="sensor.foo"].state'], {}) is None
+
+
+def _issue_516_candidate() -> dict[str, object]:
+    return {
+        "candidate_id": (
+            "v1|subject=motion_sensor|predicate=state_event|night=1|home=0|"
+            "scope=any|entities=binary_sensor.xiao_esp32_c5_espectre_motion"
+        ),
+        "title": "Motion detected at night while away",
+        "summary": (
+            "Trigger when a motion sensor reports ON at night and nobody is home."
+        ),
+        "pattern": "state_event",
+        "confidence_hint": 0.8,
+        "evidence_paths": [
+            "derived.is_night",
+            "derived.anyone_home",
+            (
+                "entities[entity_ids contains "
+                "binary_sensor.xiao_esp32_c5_espectre_motion].state"
+            ),
+        ],
+    }
+
+
+def test_normalize_candidate_issue_516_motion_at_night_while_away() -> None:
+    """Exact candidate from issue #516: motion at night while nobody is home."""
+    normalized = normalize_candidate(_issue_516_candidate())
+    assert normalized is not None
+    assert normalized.template_id == "motion_detected_at_night_while_away"
+    # Per-candidate rule ID (slugified candidate_id) so a second candidate
+    # covering different motion sensors registers its own rule instead of
+    # being silently dropped as a duplicate (issue #516 adversarial review).
+    assert normalized.rule_id == (
+        "v1_subject_motion_sensor_predicate_state_event_night_1_home_0"
+        "_scope_any_entities_binary_sensor_xiao_esp32_c5_espectre_motion"
+    )
+    assert normalized.params["motion_entity_ids"] == [
+        "binary_sensor.xiao_esp32_c5_espectre_motion"
+    ]
+    assert normalized.severity == "medium"
+    assert normalized.is_sensitive is False
+    # Advisory action only — a motion finding has no deterministic entry to
+    # close (issue #516 cross-model review).
+    assert normalized.suggested_actions == ["check_camera"]
+
+
+def test_normalize_candidate_motion_away_without_night_stays_unsupported() -> None:
+    """Motion-while-away without a night signal has no template yet."""
+    candidate = _issue_516_candidate()
+    candidate["title"] = "Motion detected while away"
+    candidate["summary"] = "Trigger when a motion sensor reports ON and nobody is home."
+    candidate["evidence_paths"] = [
+        "derived.anyone_home",
+        (
+            "entities[entity_ids contains "
+            "binary_sensor.xiao_esp32_c5_espectre_motion].state"
+        ),
+    ]
+    result = explain_normalize_candidate(candidate)
+    assert result.normalized is None
+    assert result.reason_code == "unsupported_pattern"
+
+
+def test_normalize_candidate_motion_night_home_presence_stays_unsupported() -> None:
+    """Motion at night with someone home must not map to the away template."""
+    candidate = _issue_516_candidate()
+    candidate["title"] = "Motion detected at night while someone is home"
+    candidate["summary"] = (
+        "Trigger when a motion sensor reports ON at night and someone is home."
+    )
+    result = explain_normalize_candidate(candidate)
+    assert result.normalized is None
+    assert result.reason_code == "unsupported_pattern"
+
+
+def test_normalize_candidate_motion_night_away_alarm_text_requires_alarm() -> None:
+    """Alarm-worded motion candidates keep requiring an alarm entity."""
+    candidate = _issue_516_candidate()
+    candidate["summary"] = (
+        "Trigger when a motion sensor reports ON at night with the alarm "
+        "disarmed and nobody is home."
+    )
+    result = explain_normalize_candidate(candidate)
+    assert result.normalized is None
+    assert result.reason_code == "missing_required_entities"
+    assert result.details is not None
+    assert result.details["required"] == ["alarm_control_panel"]
+
+
+def test_normalize_candidate_motion_night_away_with_entry_keeps_entry_route() -> None:
+    """A night/away motion candidate that also cites a window stays on entry."""
+    candidate = _issue_516_candidate()
+    candidate["summary"] = (
+        "Trigger when a motion sensor reports ON while a window is open at "
+        "night and nobody is home."
+    )
+    candidate["evidence_paths"] = [
+        "derived.is_night",
+        "derived.anyone_home",
+        (
+            "entities[entity_ids contains "
+            "binary_sensor.xiao_esp32_c5_espectre_motion].state"
+        ),
+        "entities[entity_id=binary_sensor.living_room_window].state",
+    ]
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "open_entry_at_night_while_away"
+    assert normalized.params["entry_entity_ids"] == ["binary_sensor.living_room_window"]
+
+
+def test_normalize_candidate_motion_night_away_with_lock_keeps_lock_route() -> None:
+    """A night/away motion candidate that also cites a lock stays on lock."""
+    candidate = _issue_516_candidate()
+    candidate["summary"] = (
+        "Trigger when a motion sensor reports ON at night while the front "
+        "door lock is unlocked and nobody is home."
+    )
+    candidate["evidence_paths"] = [
+        "derived.is_night",
+        "derived.anyone_home",
+        (
+            "entities[entity_ids contains "
+            "binary_sensor.xiao_esp32_c5_espectre_motion].state"
+        ),
+        "entities[entity_id=lock.front_door].state",
+    ]
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "unlocked_lock_while_away"
+    assert normalized.params["lock_entity_id"] == "lock.front_door"
+
+
+def test_normalize_candidate_motion_night_away_alarm_entity_blocks_route() -> None:
+    """A resolved alarm entity keeps the candidate off the away template."""
+    candidate = _issue_516_candidate()
+    candidate["evidence_paths"] = [
+        "derived.is_night",
+        "derived.anyone_home",
+        (
+            "entities[entity_ids contains "
+            "binary_sensor.xiao_esp32_c5_espectre_motion].state"
+        ),
+        "entities[entity_id=alarm_control_panel.home_alarm].state",
+    ]
+    result = explain_normalize_candidate(candidate)
+    assert result.normalized is None
+    assert result.reason_code == "unsupported_pattern"
+    assert result.details is not None
+    assert result.details["alarm_id"] == "alarm_control_panel.home_alarm"
+
+
+def test_normalize_candidate_motion_night_away_alarming_prose_still_maps() -> None:
+    """Incidental 'alarming' wording must not defeat the away-motion branch."""
+    candidate = _issue_516_candidate()
+    candidate["summary"] = (
+        "Trigger when a motion sensor reports ON at night and nobody is home. "
+        "This is alarming."
+    )
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "motion_detected_at_night_while_away"
+
+
+def test_normalize_candidate_motion_night_away_via_evidence_path_only() -> None:
+    """'not derived.anyone_home' alone is a valid away signal for issue #516."""
+    candidate = _issue_516_candidate()
+    candidate["title"] = "Motion detected at night"
+    candidate["summary"] = "Trigger when a motion sensor reports ON at night."
+    candidate["evidence_paths"] = [
+        "derived.is_night",
+        "not derived.anyone_home",
+        (
+            "entities[entity_ids contains "
+            "binary_sensor.xiao_esp32_c5_espectre_motion].state"
+        ),
+    ]
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "motion_detected_at_night_while_away"
+
+
+def test_normalize_candidate_nobody_is_home_phrase_reads_as_away() -> None:
+    """'nobody is home' phrasing routes away even without the word 'away'."""
+    candidate = _issue_516_candidate()
+    candidate["title"] = "Motion detected at night"
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "motion_detected_at_night_while_away"
+
+
+def test_normalize_candidate_unavailable_motion_sensor_keeps_availability() -> None:
+    """An unavailable motion sensor is an availability candidate (issue #514)."""
+    candidate = _issue_516_candidate()
+    candidate["title"] = "Motion sensor unavailable at night while away"
+    candidate["summary"] = (
+        "The hallway motion sensor reports unavailable at night while away."
+    )
+    candidate["pattern"] = "state_unavailable"
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "unavailable_sensors"
+
+
+def test_normalize_candidate_motion_battery_low_keeps_battery_template() -> None:
+    """A motion-sensor battery candidate routes to low_battery_sensors."""
+    candidate = _issue_516_candidate()
+    candidate["title"] = "Motion sensor battery low at night while away"
+    candidate["summary"] = (
+        "The hallway motion sensor battery is below 20% at night while away."
+    )
+    candidate["evidence_paths"] = [
+        "derived.is_night",
+        "derived.anyone_home",
+        "entities[entity_id=sensor.hall_motion_battery].state",
+    ]
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "low_battery_sensors"
+    assert normalized.params["sensor_entity_ids"] == ["sensor.hall_motion_battery"]
+
+
+def test_normalize_candidate_armed_text_still_requires_alarm_entity() -> None:
+    """'armed' wording keeps its alarm context off the away-motion template."""
+    candidate = _issue_516_candidate()
+    candidate["summary"] = (
+        "Trigger when a motion sensor reports ON at night with the system "
+        "armed and nobody is home."
+    )
+    result = explain_normalize_candidate(candidate)
+    assert result.normalized is None
+    assert result.reason_code == "missing_required_entities"
+    assert result.details is not None
+    assert result.details["required"] == ["alarm_control_panel"]
+
+
+def test_normalize_candidate_outdoor_motion_id_is_not_an_entry() -> None:
+    """'door' inside outdoor/doorbell motion IDs must not block the branch."""
+    for entity_id in (
+        "binary_sensor.outdoor_motion",
+        "binary_sensor.doorbell_motion",
+    ):
+        candidate = _issue_516_candidate()
+        candidate["evidence_paths"] = [
+            "derived.is_night",
+            "derived.anyone_home",
+            f"entities[entity_id={entity_id}].state",
+        ]
+        normalized = normalize_candidate(candidate)
+        assert normalized is not None
+        assert normalized.template_id == "motion_detected_at_night_while_away"
+        assert normalized.params["motion_entity_ids"] == [entity_id]
+
+
+def test_normalize_candidate_light_motion_entity_not_away_template() -> None:
+    """A motion-named light entity never becomes an away-motion rule param."""
+    candidate = _issue_516_candidate()
+    candidate["evidence_paths"] = [
+        "derived.is_night",
+        "derived.anyone_home",
+        "entities[entity_id=light.hallway_motion_light].state",
+    ]
+    result = explain_normalize_candidate(candidate)
+    assert result.normalized is None

@@ -24,6 +24,7 @@ from custom_components.home_generative_agent.sentinel.suppression import (
     SUPPRESSION_REASON_ENTITY_COOLDOWN,
     SUPPRESSION_REASON_NOT_SUPPRESSED,
     SUPPRESSION_REASON_PENDING_PROMPT,
+    SUPPRESSION_REASON_PRESENCE_GRACE,
     SUPPRESSION_REASON_TYPE_COOLDOWN,
     SuppressionState,
     _is_quiet_hours,
@@ -429,3 +430,55 @@ def test_build_suppress_kwargs_survives_corrupt_options() -> None:
     assert kwargs["quiet_hours_start"] is None
     assert kwargs["quiet_hours_end"] is None
     assert kwargs["quiet_hours_severities"] == ["low"]
+
+
+def _grace_state(now: datetime) -> SuppressionState:
+    state = SuppressionState()
+    state.presence_grace_until = {
+        "person.lindo": (now + timedelta(minutes=5)).isoformat()
+    }
+    return state
+
+
+def _dynamic_motion_finding(template_id: str) -> AnomalyFinding:
+    return AnomalyFinding(
+        anomaly_id="a-grace",
+        type="v1_subject_motion_sensor_candidate_slug",
+        severity="medium",
+        confidence=0.8,
+        triggering_entities=["binary_sensor.hall_motion"],
+        evidence={"template_id": template_id},
+        suggested_actions=[],
+        is_sensitive=False,
+    )
+
+
+def test_presence_grace_matches_dynamic_template_id() -> None:
+    """Dynamic rules carry per-candidate rule IDs; grace matches template_id."""
+    now = dt_util.utcnow()
+    state = _grace_state(now)
+    finding = _dynamic_motion_finding("motion_detected_at_night_while_away")
+    decision = should_suppress(
+        state,
+        finding,
+        now,
+        cooldown_type=timedelta(minutes=10),
+        cooldown_entity=timedelta(minutes=5),
+    )
+    assert decision.suppress
+    assert decision.reason_code == SUPPRESSION_REASON_PRESENCE_GRACE
+
+
+def test_presence_grace_ignores_non_sensitive_dynamic_template() -> None:
+    """Templates outside the presence-sensitive set are unaffected by grace."""
+    now = dt_util.utcnow()
+    state = _grace_state(now)
+    finding = _dynamic_motion_finding("open_entry_at_night")
+    decision = should_suppress(
+        state,
+        finding,
+        now,
+        cooldown_type=timedelta(minutes=10),
+        cooldown_entity=timedelta(minutes=5),
+    )
+    assert decision.reason_code != SUPPRESSION_REASON_PRESENCE_GRACE

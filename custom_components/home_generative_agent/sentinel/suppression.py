@@ -56,11 +56,15 @@ SUPPRESSION_REASON_POLICY_BLOCKED = "policy_blocked"
 PENDING_PROMPT_DEFAULT_TTL = timedelta(hours=4)
 
 # Finding types considered presence-sensitive.  These are suppressed when a
-# person is within their departure/arrival grace window.
+# person is within their departure/arrival grace window.  Matched against
+# both finding.type and the dynamic-rule template_id in the finding evidence
+# — dynamic rules carry per-candidate rule IDs, so type alone would miss
+# them (issue #516 adversarial review).
 _PRESENCE_SENSITIVE_TYPES: frozenset[str] = frozenset(
     {
         "open_entry_while_away",
         "unknown_person_camera_no_home",
+        "motion_detected_at_night_while_away",
     }
 )
 
@@ -343,7 +347,11 @@ def _check_presence_grace(
 
     The finding must be presence-sensitive. Expired entries are cleaned up in-place.
     """
-    if finding.type not in _PRESENCE_SENSITIVE_TYPES:
+    template_id = str(finding.evidence.get("template_id") or "")
+    if (
+        finding.type not in _PRESENCE_SENSITIVE_TYPES
+        and template_id not in _PRESENCE_SENSITIVE_TYPES
+    ):
         return False
 
     expired_keys: list[str] = []
