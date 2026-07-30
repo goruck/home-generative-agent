@@ -824,3 +824,78 @@ def test_candidate_semantic_key_unknown_person_beats_power_leg() -> None:
     assert key is not None
     assert "predicate=unknown_person" in key
     assert "power_anomaly" not in key
+
+
+def test_candidate_semantic_key_cam_wording_matches_normalizer() -> None:
+    """Bare 'cam' wording keys camera — mirrors _CAMERA_TERMS substrings."""
+    candidate = {
+        "title": "Unknown person on cam-based detection while away",
+        "summary": (
+            "An unknown person is seen via cam-based detection with motion "
+            "on binary_sensor.kitchen_motion when no one is home."
+        ),
+        "pattern": "state_change",
+        "evidence_paths": [
+            "entities[entity_id=binary_sensor.kitchen_motion].state",
+            "derived.anyone_home",
+        ],
+    }
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert "predicate=unknown_person" in key
+
+
+def test_candidate_semantic_key_stale_motion_never_keys_active() -> None:
+    """
+    A stale-sensor candidate must not key like an active motion rule.
+
+    Discovery's novelty filter would otherwise drop it as already-covered
+    before the approval gate can return the honest "unsupported"
+    (verification round 4).
+    """
+    candidate = {
+        "title": "Kitchen motion sensor stale while away",
+        "summary": (
+            "binary_sensor.kitchen_motion has not updated for days when no one is home."
+        ),
+        "pattern": "state_change",
+        "evidence_paths": [
+            "entities[entity_id=binary_sensor.kitchen_motion].state",
+            "derived.anyone_home",
+        ],
+    }
+    key = candidate_semantic_key(candidate)
+    rule = {
+        "rule_id": "motion_kitchen_while_away",
+        "template_id": "motion_detected_while_away",
+        "params": {"motion_entity_ids": ["binary_sensor.kitchen_motion"]},
+    }
+    rule_key = rule_semantic_key(rule)
+    assert rule_key is not None
+    assert key is None or not rule_key_covers_candidate_key(rule_key, key)
+
+
+def test_candidate_semantic_key_lock_battery_beats_camera_leg() -> None:
+    """
+    A compound lock + low-battery candidate keys battery, not camera.
+
+    Mirrors the normalizer's lock-battery branch precedence
+    (verification round 4).
+    """
+    candidate = {
+        "title": "Front door lock battery low, unknown person on camera",
+        "summary": (
+            "The front door lock battery is below 20% and an unknown person "
+            "was seen on camera."
+        ),
+        "pattern": "state_change",
+        "evidence_paths": [
+            "entities[entity_id=lock.front_door].state",
+            "entities[entity_id=sensor.front_door_lock_battery].state",
+            "camera_activity[entity_id=camera.porch]",
+        ],
+    }
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert "predicate=low_battery" in key
+    assert "unknown_person" not in key

@@ -825,51 +825,46 @@ async def _approve_rule_proposal(  # noqa: PLR0911, PLR0912, PLR0915
                     "motion_entity_ids": resolved_motion_ids,
                 },
             )
-            # The key-based coverage check above compared the FULL entity
-            # set (real + hallucinated); a rule covering only the real
-            # sensors was not matched. Re-check with the reduced set so a
-            # second overlapping rule is not registered under a different
-            # ID (issue #518 verification review). Same-template rules
-            # whose any-of motion set is a SUPERSET of the reduced set
-            # count as covering — they already alert on every sensor this
-            # candidate would (verification round 3).
-            for existing_rule in rule_registry.list_rules():
-                if (
-                    str(existing_rule.get("template_id") or "")
-                    != normalized.template_id
-                ):
-                    continue
-                existing_motion = {
-                    entity_id
-                    for entity_id in (existing_rule.get("params") or {}).get(
-                        "motion_entity_ids", []
-                    )
-                    if isinstance(entity_id, str)
-                }
-                if not existing_motion or not existing_motion.issuperset(
-                    resolved_motion_ids
-                ):
-                    continue
-                overlapping_entities = sorted(
-                    existing_motion.intersection(resolved_motion_ids)
+    # Same-template any-of superset coverage: the key-based check above uses
+    # exact entity-set equality, so an existing [kitchen, hall] rule does not
+    # cover a kitchen-only candidate there — yet it already alerts on every
+    # sensor this candidate would, and registering a second rule guarantees
+    # duplicate findings on each event. Runs for fully resolved candidates
+    # and for sets reduced by the hallucination filter alike (issue #518
+    # verification rounds 3-4).
+    final_motion_ids = normalized.params.get("motion_entity_ids")
+    if isinstance(final_motion_ids, list) and final_motion_ids:
+        for existing_rule in rule_registry.list_rules():
+            if str(existing_rule.get("template_id") or "") != normalized.template_id:
+                continue
+            existing_motion = {
+                entity_id
+                for entity_id in (existing_rule.get("params") or {}).get(
+                    "motion_entity_ids", []
                 )
-                existing_rule_id = str(existing_rule.get("rule_id") or "")
-                await proposal_store.async_update_status(
-                    candidate_id,
-                    "covered_by_existing_rule",
-                    notes,
-                    extra={
-                        "covered_rule_id": existing_rule_id,
-                        "overlapping_entity_ids": overlapping_entities,
-                        "unresolved_entity_ids": unresolved_motion_ids,
-                    },
-                )
-                return {
-                    "status": "covered_by_existing_rule",
-                    "candidate_id": candidate_id,
-                    "rule_id": existing_rule_id,
+                if isinstance(entity_id, str)
+            }
+            if not existing_motion or not existing_motion.issuperset(final_motion_ids):
+                continue
+            overlapping_entities = sorted(
+                existing_motion.intersection(final_motion_ids)
+            )
+            existing_rule_id = str(existing_rule.get("rule_id") or "")
+            await proposal_store.async_update_status(
+                candidate_id,
+                "covered_by_existing_rule",
+                notes,
+                extra={
+                    "covered_rule_id": existing_rule_id,
                     "overlapping_entity_ids": overlapping_entities,
-                }
+                },
+            )
+            return {
+                "status": "covered_by_existing_rule",
+                "candidate_id": candidate_id,
+                "rule_id": existing_rule_id,
+                "overlapping_entity_ids": overlapping_entities,
+            }
 
     covered_specific = _covered_specific_rule_for_any_camera_normalized(
         entry,

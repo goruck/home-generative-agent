@@ -36,7 +36,7 @@ _HOME_TERMS_RE = re.compile(
 )
 
 
-def candidate_semantic_key(  # noqa: PLR0912, PLR0915
+def candidate_semantic_key(  # noqa: C901, PLR0912, PLR0915
     candidate: dict[str, Any],
 ) -> str | None:
     """Build a stable semantic key for a discovery candidate."""
@@ -123,7 +123,7 @@ def candidate_semantic_key(  # noqa: PLR0912, PLR0915
     elif "disarmed" in text:
         predicate = "disarmed"
     elif (
-        (camera_ids or _contains_any(text, ("camera", "cam ")))
+        (camera_ids or _contains_any(text, ("camera", "cam")))
         and _contains_any(
             text,
             ("unknown", "unrecognized", "stranger", "unidentified", "indeterminate"),
@@ -132,6 +132,11 @@ def candidate_semantic_key(  # noqa: PLR0912, PLR0915
             text,
             ("person", "people", "face", "occupant", "resident"),
         )
+        # The normalizer's lock-battery branch precedes its camera branches:
+        # a compound candidate citing a lock plus low-battery wording
+        # normalizes to low_battery_sensors, so it must not key as an
+        # unknown-person camera candidate (verification round 4).
+        and not (lock_ids and "battery" in text)
     ):
         # Checked before the battery/power/motion legs, mirroring the
         # normalizer's branch order (camera branches precede the battery
@@ -156,6 +161,19 @@ def candidate_semantic_key(  # noqa: PLR0912, PLR0915
         predicate = "power_anomaly"
         if not entities and sensor_ids:
             entities = sensor_ids
+    elif subject != "unknown" and _contains_any(
+        text,
+        ("stale", "staleness", "not updated", "last seen", "last updated"),
+    ):
+        # Mirrors the normalizer's staleness guard: a stale/dead-sensor
+        # candidate must not key predicate=active, or an active motion rule
+        # on the same sensor makes discovery drop it as already-covered
+        # before the approval gate can return the honest "unsupported"
+        # (verification round 4). Subject-less staleness candidates keep
+        # keying None so identity-hash dedup applies — a shared
+        # subject=unknown|predicate=staleness|entities= key would collide
+        # across unrelated stale-tracker candidates.
+        predicate = "staleness"
     elif "motion" in text or "activity" in text:
         predicate = "active"
     if predicate == "unavailable" and sensor_ids:

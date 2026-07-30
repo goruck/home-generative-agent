@@ -886,3 +886,46 @@ async def test_approve_rule_proposal_superset_rule_covers_reduced_set(hass) -> N
     assert response["rule_id"] == "all_interior_motion_away"
     assert response["overlapping_entity_ids"] == ["binary_sensor.kitchen_motion"]
     assert rule_registry.added_rules == []
+
+
+@pytest.mark.asyncio
+async def test_approve_rule_proposal_superset_covers_fully_resolved_set(hass) -> None:
+    """
+    The superset check also runs when every candidate ID resolves.
+
+    A kitchen-only candidate against an existing [kitchen, hall] any-of
+    rule must not register a duplicate (verification round 4).
+    """
+    hass.states.async_set("binary_sensor.kitchen_motion", "off")
+    record = _prose_motion_proposal_record("binary_sensor.kitchen_motion")
+    proposal_store = ProposalStore(hass)
+    await proposal_store.async_append(record)
+    rule_registry = DummyRuleRegistry(
+        rules=[
+            {
+                "rule_id": "all_interior_motion_away",
+                "template_id": "motion_detected_while_away",
+                "params": {
+                    "motion_entity_ids": [
+                        "binary_sensor.kitchen_motion",
+                        "binary_sensor.hall_motion",
+                    ]
+                },
+                "enabled": True,
+            }
+        ]
+    )
+    entry = _make_entry(
+        proposal_store=proposal_store,
+        rule_registry=rule_registry,
+        sentinel=SimpleNamespace(async_run_now=AsyncMock(return_value=True)),
+    )
+    response = await _hga_component._approve_rule_proposal(
+        entry,
+        hass=hass,
+        candidate_id="motion_kitchen_while_away",
+    )
+
+    assert response["status"] == "covered_by_existing_rule"
+    assert response["rule_id"] == "all_interior_motion_away"
+    assert rule_registry.added_rules == []
