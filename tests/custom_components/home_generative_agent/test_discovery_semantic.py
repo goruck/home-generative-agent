@@ -585,3 +585,163 @@ def test_rule_semantic_key_motion_while_away_requires_entities() -> None:
         "params": {"motion_entity_ids": []},
     }
     assert rule_semantic_key(rule) is None
+
+
+def test_candidate_semantic_key_prose_fallback_dedups_and_sorts_ids() -> None:
+    """Multiple prose IDs (motion- and vmd-named) key deduped and sorted."""
+    candidate = {
+        "title": "Unexpected Motion While Away",
+        "summary": (
+            "Detects motion on binary_sensor.hall_motion and "
+            "binary_sensor.backyard_vmd3_0; binary_sensor.hall_motion "
+            "reports on when no one is home."
+        ),
+        "pattern": "state_change",
+        "evidence_paths": ["entities[31].state", "derived.anyone_home"],
+    }
+    key = candidate_semantic_key(candidate)
+    assert key == (
+        "v1|subject=motion|predicate=active|night=any|home=0|scope=any|"
+        "entities=binary_sensor.backyard_vmd3_0,binary_sensor.hall_motion"
+    )
+
+
+def test_candidate_semantic_key_prose_fallback_is_motion_only() -> None:
+    """
+    Prose IDs outside the motion class never mint coverage keys.
+
+    The normalizer can only normalize motion IDs from prose, so a broader
+    fallback would let an unresolvable lock candidate's history key suppress
+    a later fully-evidenced, approvable lock proposal (issue #518 Codex
+    structured review).
+    """
+    candidate = {
+        "title": "Garage lock left unlocked",
+        "summary": "lock.garage reports unlocked overnight.",
+        "pattern": "state_change",
+        "evidence_paths": ["entities[12].state"],
+    }
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert key.endswith("entities=")
+    assert "subject=lock" not in key
+
+
+def test_candidate_semantic_key_mixed_evidence_prose_motion_still_keys() -> None:
+    """
+    Non-motion evidence must not disable the prose motion fallback.
+
+    A candidate citing a person tracker in evidence plus an index-based
+    motion path normalizes from prose, so the key must match the activated
+    rule's — the trigger is 'no motion evidence resolved', not 'no evidence
+    at all' (issue #518 adversarial + Codex structured reviews).
+    """
+    candidate = {
+        "candidate_id": "motion_kitchen_while_away",
+        "title": "Unexpected Kitchen Motion While Away",
+        "summary": (
+            "Detects motion in the Kitchen area "
+            "(binary_sensor.xiao_esp32_c5_espectre_motion) when no one is home."
+        ),
+        "pattern": "state_change",
+        "evidence_paths": [
+            "entities[entity_id=person.lindo].state",
+            "entities[31].state",
+        ],
+    }
+    rule = {
+        "rule_id": "motion_kitchen_while_away",
+        "template_id": "motion_detected_while_away",
+        "params": {
+            "motion_entity_ids": ["binary_sensor.xiao_esp32_c5_espectre_motion"],
+        },
+    }
+    candidate_key = candidate_semantic_key(candidate)
+    rule_key = rule_semantic_key(rule)
+    assert candidate_key is not None
+    assert rule_key is not None
+    assert rule_key_covers_candidate_key(rule_key, candidate_key)
+
+
+def test_candidate_semantic_key_door_named_motion_sensor_keys_as_motion() -> None:
+    """
+    binary_sensor.front_door_motion is a motion sensor, not an entry.
+
+    Without the #516-mirror exclusion the candidate keys subject=entry_door
+    while its activated rule keys subject=motion — dedup never fires for
+    the most common door-named motion naming scheme (issue #518 review).
+    """
+    for evidence_paths in (
+        ["entities[31].state", "derived.anyone_home"],  # prose fallback path
+        [
+            "entities[entity_id=binary_sensor.front_door_motion].state",
+            "derived.anyone_home",
+        ],  # evidence path
+    ):
+        candidate = {
+            "title": "Front door motion while away",
+            "summary": (
+                "Detects motion on binary_sensor.front_door_motion when no one is home."
+            ),
+            "pattern": "state_change",
+            "evidence_paths": evidence_paths,
+        }
+        rule = {
+            "rule_id": "front_door_motion_while_away",
+            "template_id": "motion_detected_while_away",
+            "params": {"motion_entity_ids": ["binary_sensor.front_door_motion"]},
+        }
+        candidate_key = candidate_semantic_key(candidate)
+        rule_key = rule_semantic_key(rule)
+        assert candidate_key is not None
+        assert "subject=motion" in candidate_key
+        assert rule_key is not None
+        assert rule_key_covers_candidate_key(rule_key, candidate_key)
+
+
+def test_candidate_semantic_key_away_phrase_vocabulary_matches_normalizer() -> None:
+    """
+    Every away phrasing the normalizer accepts keys home=0.
+
+    'no one at home' previously matched the bare 'home' substring and keyed
+    home=1 while the activated rule keyed home=0 — no dedup (issue #518
+    Codex structured review, empirically reproduced).
+    """
+    phrases = (
+        "no one at home",
+        "nobody at home",
+        "no one is at home",
+        "without occupants",
+    )
+    rule = {
+        "rule_id": "motion_hall_away",
+        "template_id": "motion_detected_while_away",
+        "params": {"motion_entity_ids": ["binary_sensor.hall_motion"]},
+    }
+    rule_key = rule_semantic_key(rule)
+    assert rule_key is not None
+    for phrase in phrases:
+        candidate = {
+            "candidate_id": "motion_hall_away",
+            "title": "Unexpected motion",
+            "summary": f"binary_sensor.hall_motion is on when {phrase}.",
+            "pattern": "state_change",
+            "evidence_paths": ["entities[31].state", "derived.anyone_home"],
+        }
+        key = candidate_semantic_key(candidate)
+        assert key is not None, phrase
+        assert "home=0" in key, phrase
+        assert rule_key_covers_candidate_key(rule_key, key), phrase
+
+
+def test_candidate_semantic_key_prose_fallback_rejects_sensor_domain() -> None:
+    """Non-binary_sensor prose motion IDs never key — mirrors the normalizer."""
+    candidate = {
+        "title": "Unexpected motion while away",
+        "summary": "Detects motion via sensor.hall_motion_score when away.",
+        "pattern": "state_change",
+        "evidence_paths": ["entities[31].state", "derived.anyone_home"],
+    }
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert key.endswith("entities=")

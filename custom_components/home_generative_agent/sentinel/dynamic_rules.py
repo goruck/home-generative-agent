@@ -202,7 +202,39 @@ def evaluate_dynamic_rules(  # noqa: PLR0913
         if evaluator is None:
             continue
         findings.extend(evaluator(rule))
-    return findings
+    return _dedup_away_motion_overlap(findings)
+
+
+def _dedup_away_motion_overlap(
+    findings: list[AnomalyFinding],
+) -> list[AnomalyFinding]:
+    """
+    Drop day-agnostic away-motion findings duplicated by the night template.
+
+    A household keeping its ``motion_detected_at_night_while_away`` rule and
+    approving the day-agnostic sibling over the same sensors would get two
+    findings — two pushes, doubled audit rows — for every night motion event
+    (issue #518 red-team review). The night finding is kept: it predates the
+    day rule in the field and carries the night-severity judgment.
+    """
+    night_entities: set[str] = set()
+    for finding in findings:
+        if (
+            str(finding.evidence.get("template_id") or "")
+            == "motion_detected_at_night_while_away"
+        ):
+            night_entities.update(finding.triggering_entities)
+    if not night_entities:
+        return findings
+    return [
+        finding
+        for finding in findings
+        if not (
+            str(finding.evidence.get("template_id") or "")
+            == "motion_detected_while_away"
+            and night_entities.intersection(finding.triggering_entities)
+        )
+    ]
 
 
 def evaluate_dynamic_rule(
@@ -394,7 +426,18 @@ def _eval_motion_while_away_common(
     if not resolved:
         return []
 
-    if not any(motion.get("state") == "on" for motion in resolved.values()):
+    # Only sensors actually reporting motion are triggering entities: the
+    # engine's exclusion filter drops a finding when ANY triggering entity
+    # is user-excluded, so listing an idle sensor would let its exclusion
+    # silently kill a genuine alert from the sensor that fired — and
+    # notifications name triggering_entities[0] (issue #518 Codex P1;
+    # applies to the night template too).
+    triggering = [
+        motion_id
+        for motion_id, motion in resolved.items()
+        if motion.get("state") == "on"
+    ]
+    if not triggering:
         return []
 
     evidence: dict[str, Any] = {
@@ -416,7 +459,16 @@ def _eval_motion_while_away_common(
             "unresolved_entity_ids": unresolved,
         }
     )
-    return [_build_finding(rule, list(resolved), evidence)]
+    if not require_night and snapshot["derived"]["is_night"]:
+        # Night motion while away carries the night template's severity
+        # judgment: the recommended quiet-hours config suppresses "low"
+        # overnight, which would otherwise mute the flagship 2am intrusion
+        # signal for users whose only motion coverage is this day-agnostic
+        # rule (issue #518 red-team review). Severity is not hashed into
+        # the anomaly ID, so finding identity stays stable across the
+        # night boundary.
+        rule = {**rule, "severity": "medium"}
+    return [_build_finding(rule, triggering, evidence)]
 
 
 def _eval_unlocked_lock_when_home(

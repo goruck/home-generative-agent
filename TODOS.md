@@ -424,7 +424,7 @@ Entity-backed evidence path instruction added to `USER_PROMPT_TEMPLATE` in `expl
 
 ### Text/device_class fallback for locale-named motion sensors
 
-**What:** `_find_motion_entity_ids` matches only the substrings `motion`/`vmd` in entity IDs, so a locale-named PIR like `binary_sensor.chodba` (`device_class: motion`) can never normalize into `motion_detected_at_night_while_away` or the alarm-motion templates — the candidate dies as `missing_required_entities`. Flagged by Codex adversarial review during the v3.22.0 ship (issue #516).
+**What:** `_find_motion_entity_ids` matches only the substrings `motion`/`vmd` in entity IDs, so a locale-named PIR like `binary_sensor.chodba` (`device_class: motion`) can never normalize into `motion_detected_at_night_while_away` or the alarm-motion templates — the candidate dies as `missing_required_entities`. Flagged by Codex adversarial review during the v3.22.0 ship (issue #516). The v3.23.0 prose fallback (issue #518) shares the same substring limitation — a locale-named ID in prose is not promoted either.
 
 **How to apply:** Mirror the issue-504 locale entry fallback: when candidate text names motion and evidence cites `binary_sensor.*` IDs not classified as any other kind, promote them as motion sensors — with the same gating pitfalls (word-bounded text, absence of higher-priority entity classes, JS card mirror). Alternatively use snapshot `device_class` as the positive signal (see the existing device_class TODO above).
 
@@ -443,6 +443,42 @@ Entity-backed evidence path instruction added to `USER_PROMPT_TEMPLATE` in `expl
 **Effort:** S
 **Priority:** P3
 **Depends on:** v3.22.0
+
+---
+
+### Proposal dedup does not treat night=any motion rules as covering night=1 candidates
+
+**What:** `rule_key_covers_candidate_key` is exact equality for non-template keys, so an active `motion_detected_while_away` rule (`night=any|home=0`) does not cover a later night-worded re-proposal of the same sensors (`night=1|home=0`) — discovery can propose the night sibling of an already-active any-hour rule. Runtime double-alerting is already prevented by the evaluator's overlap dedup (v3.23.0); this is proposal-side noise only. Flagged by testing-specialist + red-team review during the v3.23.0 ship (issue #518).
+
+**How to apply:** Teach `rule_key_covers_candidate_key` that `night=any` subsumes `night=1` when subject/predicate/home/entities are identical (one direction only — a night rule never covers an any-hour candidate). Pin both directions with tests; consider whether `home=any` ⊇ `home=0/1` deserves the same treatment while in there.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** v3.23.0
+
+---
+
+### Proposals card should render normalized rule params before Approve
+
+**What:** The pending-proposal card shows title/summary/candidate_id but never the normalized `template_id`/params, so the user approves prose while the system persists params the prose viewer cannot audit (e.g. a motion entity named only in the hidden `pattern` field). Impact is capped — advisory-only actions, charset-constrained IDs, approval-time entity resolution (v3.23.0) — but the approval trust boundary should show the actual rule scope. Flagged by security-specialist review during the v3.23.0 ship (issue #518).
+
+**How to apply:** Run `explain_normalize_candidate` server-side when listing proposals (or store the normalization in the proposal record) and render template_id + entity params in the card above the Approve button.
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** v3.23.0
+
+---
+
+### Night-branch guard symmetry for unknown-person/camera candidates
+
+**What:** The day-agnostic away-motion branch (v3.23.0) excludes unknown-person and camera-evidence candidates so they keep their camera-template routing, but the night branch (v3.22.0) still captures night-worded candidates of those classes — a "unknown person and motion at night while away" candidate registers a low-signal motion rule instead of the sensitive camera rule. Left asymmetric deliberately: changing the night branch's routing would re-key candidates whose rules users already activated (dedup churn without a migration story).
+
+**How to apply:** Add the `not has_unknown_person_signal` / `camera_id is None` guards to the night branch together with a one-time semantic-key migration or documented re-proposal expectation, and update the card mirror's night branch in the same change.
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** v3.23.0
 
 ---
 

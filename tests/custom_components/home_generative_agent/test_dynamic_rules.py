@@ -1578,3 +1578,149 @@ def test_dynamic_rule_night_template_evidence_still_carries_is_night() -> None:
         "motion_states",
         "unresolved_entity_ids",
     ]
+
+
+def test_dynamic_rule_motion_while_away_issue_518_missing_entity() -> None:
+    """No configured motion entity resolving in the snapshot fails closed."""
+    snapshot = _snapshot(
+        [
+            _base_entity("binary_sensor.other_motion", "binary_sensor", "on"),
+        ],
+        [],
+        {
+            "now": "2026-02-01T12:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": False,
+            "anyone_home": False,
+            "people_home": [],
+            "people_away": [],
+            "last_motion_by_area": {},
+        },
+    )
+    assert evaluate_dynamic_rules(snapshot, [_motion_away_rule()]) == []
+
+
+def test_dynamic_rule_motion_away_triggering_excludes_idle_sensors() -> None:
+    """
+    Only sensors reporting motion are triggering entities.
+
+    The engine's exclusion filter drops a finding when ANY triggering entity
+    is excluded, so an idle sensor in the list would let its exclusion kill
+    a genuine alert from the sensor that fired (issue #518 Codex P1;
+    applies to the night template too).
+    """
+    for template_id, is_night in (
+        ("motion_detected_while_away", False),
+        ("motion_detected_at_night_while_away", True),
+    ):
+        rule = _motion_away_rule()
+        rule["rule_id"] = template_id
+        rule["template_id"] = template_id
+        rule["params"] = {
+            "motion_entity_ids": [
+                "binary_sensor.idle_motion",
+                "binary_sensor.hall_motion",
+            ],
+        }
+        snapshot = _snapshot(
+            [
+                _base_entity("binary_sensor.idle_motion", "binary_sensor", "off"),
+                _base_entity("binary_sensor.hall_motion", "binary_sensor", "on"),
+            ],
+            [],
+            {
+                "now": "2026-02-01T00:00:00+00:00",
+                "timezone": "UTC",
+                "is_night": is_night,
+                "anyone_home": False,
+                "people_home": [],
+                "people_away": [],
+                "last_motion_by_area": {},
+            },
+        )
+        findings = evaluate_dynamic_rules(snapshot, [rule])
+        assert len(findings) == 1, template_id
+        assert findings[0].triggering_entities == ["binary_sensor.hall_motion"], (
+            template_id
+        )
+        # Evidence still records every configured sensor's state.
+        assert findings[0].evidence["motion_states"] == {
+            "binary_sensor.idle_motion": "off",
+            "binary_sensor.hall_motion": "on",
+        }
+
+
+def test_dynamic_rule_motion_while_away_severity_escalates_at_night() -> None:
+    """
+    Night motion carries the night template's severity judgment.
+
+    The recommended quiet-hours config suppresses 'low' overnight, which
+    would mute the flagship 2am intrusion signal for day-rule-only users
+    (issue #518 red-team review).
+    """
+    night_snapshot = _motion_night_away_snapshot(
+        motion_state="on", is_night=True, anyone_home=False
+    )
+    day_snapshot = _motion_night_away_snapshot(
+        motion_state="on", is_night=False, anyone_home=False
+    )
+    night_findings = evaluate_dynamic_rules(night_snapshot, [_motion_away_rule()])
+    day_findings = evaluate_dynamic_rules(day_snapshot, [_motion_away_rule()])
+    assert night_findings[0].severity == "medium"
+    assert day_findings[0].severity == "low"
+    # Severity is not hashed into the anomaly ID — identity is stable
+    # across the night boundary (evidence carries no is_night key).
+    assert night_findings[0].anomaly_id == day_findings[0].anomaly_id
+
+
+def test_dynamic_rule_motion_away_overlap_dedup_keeps_night_finding() -> None:
+    """
+    Night + day rules on the same sensor yield one finding at night.
+
+    Without the run-level dedup, every night motion event would push twice
+    for households keeping both rules (issue #518 red-team review).
+    """
+    snapshot = _motion_night_away_snapshot(
+        motion_state="on", is_night=True, anyone_home=False
+    )
+    rules = [_motion_night_away_rule(), _motion_away_rule()]
+    findings = evaluate_dynamic_rules(snapshot, rules)
+    assert len(findings) == 1
+    assert findings[0].evidence["template_id"] == "motion_detected_at_night_while_away"
+
+
+def test_dynamic_rule_motion_away_overlap_dedup_distinct_sensors_both_fire() -> None:
+    """Non-overlapping sensors are not deduped — both findings survive."""
+    night_rule = _motion_night_away_rule()
+    day_rule = _motion_away_rule()
+    day_rule["params"] = {"motion_entity_ids": ["binary_sensor.hall_motion"]}
+    snapshot = _snapshot(
+        [
+            _base_entity(
+                "binary_sensor.xiao_esp32_c5_espectre_motion", "binary_sensor", "on"
+            ),
+            _base_entity("binary_sensor.hall_motion", "binary_sensor", "on"),
+        ],
+        [],
+        {
+            "now": "2026-02-01T00:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": True,
+            "anyone_home": False,
+            "people_home": [],
+            "people_away": [],
+            "last_motion_by_area": {},
+        },
+    )
+    findings = evaluate_dynamic_rules(snapshot, [night_rule, day_rule])
+    assert len(findings) == 2
+
+
+def test_dynamic_rule_motion_away_day_rule_alone_fires_at_night() -> None:
+    """The dedup only applies when a night finding actually fired."""
+    snapshot = _motion_night_away_snapshot(
+        motion_state="on", is_night=True, anyone_home=False
+    )
+    findings = evaluate_dynamic_rules(snapshot, [_motion_away_rule()])
+    assert len(findings) == 1
+    assert findings[0].evidence["template_id"] == "motion_detected_while_away"

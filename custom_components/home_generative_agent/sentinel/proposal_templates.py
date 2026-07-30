@@ -210,6 +210,20 @@ _TEXT_ENTITY_ID_PATTERN = re.compile(r"(?<![a-z0-9_.])([a-z_]+\.[a-z0-9_]+)")
 # missing-alarm-entity failure path; "armed" is included so armed-system
 # candidates keep their alarm context (issue #516 review).
 _ALARM_TEXT_PATTERN = re.compile(r"\b(?:alarms?|(?:dis)?armed)\b")
+# Word-bounded lock wording ("blocked"/"locker" must not match): a motion
+# candidate whose prose carries a lock condition that resolved no lock
+# entity must stay unsupported rather than register a motion-only rule that
+# silently drops the lock predicate (issue #518 Codex adversarial P1).
+_LOCK_TEXT_PATTERN = re.compile(r"\b(?:un)?lock(?:s|ed)?\b")
+# Contrastive any-hour phrasing ("day or night", "not only at night"): the
+# candidate explicitly proposes all-hours coverage, so the bare "night"
+# substring must not narrow it to the night-gated template now that a
+# day-agnostic sibling exists (issue #518 red-team review).
+_ANY_HOUR_TEXT_PATTERN = re.compile(
+    r"\b(?:day (?:or|and) night|night (?:or|and) day|any ?time|any hour"
+    r"|24/7|around the clock|regardless of (?:the )?time"
+    r"|not (?:just|only) (?:at )?night|including night(?:time)?)\b"
+)
 
 
 @dataclass(frozen=True)
@@ -385,18 +399,19 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
     # not entries — only a genuine non-motion entry entity blocks this
     # branch (issue #516 review).
     non_motion_entry_ids = [e for e in entry_ids if e not in motion_ids]
-    if (
-        away_motion_ids
-        and not alarm_id
-        and not non_motion_entry_ids
-        and not lock_ids
-        and not battery_sensor_ids
-        and has_night
-        and presence == "away"
-        and _contains_any(text, ("motion", "vmd"))
-        and not _ALARM_TEXT_PATTERN.search(text)
-        and not _contains_any(text, ("unavailable", "offline", "unreachable"))
-    ):
+    is_away_motion = _is_away_motion_candidate(
+        away_motion_ids=away_motion_ids,
+        alarm_id=alarm_id,
+        non_motion_entry_ids=non_motion_entry_ids,
+        lock_ids=lock_ids,
+        battery_sensor_ids=battery_sensor_ids,
+        presence=presence,
+        text=text,
+    )
+    # Contrastive any-hour phrasing suppresses the night gate so "day or
+    # night" candidates keep the all-hours coverage they proposed instead of
+    # silently narrowing to the night template (issue #518 red-team review).
+    if is_away_motion and has_night and not _ANY_HOUR_TEXT_PATTERN.search(text):
         return NormalizationResult(
             normalized=NormalizedRule(
                 rule_id=_candidate_rule_id(
@@ -417,23 +432,20 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
     # motion_detected_while_away (issue #518): same shape as the night
     # variant above but with no time-of-day gate — motion while nobody is
-    # home, any hour. The night branch precedes with an identical guard set
-    # plus has_night, so night-worded candidates always route there; this
-    # branch keeps the same hijack guards so alarm/entry/lock/battery/
-    # availability candidates retain their existing routing. Severity and
-    # confidence follow the proposal (daytime motion while away has more
-    # benign explanations than night motion, hence low/0.6 vs medium/0.8).
-    if (
-        away_motion_ids
-        and not alarm_id
-        and not non_motion_entry_ids
-        and not lock_ids
-        and not battery_sensor_ids
-        and presence == "away"
-        and _contains_any(text, ("motion", "vmd"))
-        and not _ALARM_TEXT_PATTERN.search(text)
-        and not _contains_any(text, ("unavailable", "offline", "unreachable"))
-    ):
+    # home, any hour. The night branch precedes with the identical shared
+    # guard set plus has_night, so night-worded candidates always route
+    # there (unless contrastively any-hour worded); the shared guards keep
+    # alarm/entry/lock/battery/availability candidates on their existing
+    # routing. Two extra guards this branch only (the night branch keeps its
+    # shipped v3.22 capture to avoid rule-key churn — see TODOS.md):
+    # unknown-person candidates keep routing to the camera templates below
+    # (is_sensitive high-confidence must not silently downgrade to a low
+    # advisory rule), and camera-evidence candidates keep their
+    # motion_without_camera_activity correlation semantics (issue #518
+    # adversarial review). Severity and confidence follow the proposal
+    # (daytime motion while away has more benign explanations than night
+    # motion, hence low/0.6 vs medium/0.8).
+    if is_away_motion and not has_unknown_person_signal and camera_id is None:
         return NormalizationResult(
             normalized=NormalizedRule(
                 rule_id=_candidate_rule_id(
@@ -956,6 +968,47 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
     )
 
 
+def _is_away_motion_candidate(  # noqa: PLR0913
+    *,
+    away_motion_ids: list[str],
+    alarm_id: str | None,
+    non_motion_entry_ids: list[str],
+    lock_ids: list[str],
+    battery_sensor_ids: list[str],
+    presence: str,
+    text: str,
+) -> bool:
+    """
+    Shared guard set for the two away-motion templates (issues #516/#518).
+
+    Entity guards keep alarm/entry/lock/battery candidates on their existing
+    routing. The text guards handle predicates that resolved no matching
+    entity (index-based evidence paths, issue #518 Codex adversarial P1): a
+    candidate whose prose carries a battery/lock/staleness/open-entry
+    condition must stay unsupported rather than register a motion rule that
+    silently drops that predicate — the registered rule would alert on plain
+    motion while the user believes the stated condition is enforced.
+    """
+    return bool(
+        away_motion_ids
+        and not alarm_id
+        and not non_motion_entry_ids
+        and not lock_ids
+        and not battery_sensor_ids
+        and presence == "away"
+        and _contains_any(text, ("motion", "vmd"))
+        and not _ALARM_TEXT_PATTERN.search(text)
+        and not _contains_any(text, ("unavailable", "offline", "unreachable"))
+        and not ("battery" in text and _contains_any(text, ("low", "below", "weak")))
+        and not _LOCK_TEXT_PATTERN.search(text)
+        # A stale/not-updated motion sensor candidate describes a dead
+        # sensor; routing it here would invert the semantics into alerting
+        # on normal motion (issue #518 adversarial review).
+        and not _has_staleness_signal(text)
+        and not (_ENTRY_TEXT_PATTERN.search(text) and "open" in text)
+    )
+
+
 def _build_entry_rule(
     candidate: dict[str, Any],
     template_id: str,
@@ -1185,14 +1238,16 @@ def _find_text_motion_entity_ids(text: str) -> list[str]:
     (``entities[31].state``, issue #518) whose index is only meaningful
     against the snapshot the candidate was drafted from and so never
     resolves to an entity ID. The candidate prose names the sensor
-    directly; promote motion-named dot-notation entity IDs found in the
-    text whose domain is a known HA domain.
+    directly; promote motion-named ``binary_sensor.`` dot-notation entity
+    IDs found in the text. Restricted to ``binary_sensor`` because these
+    IDs also feed the alarm-motion branches' rule params, whose state=="on"
+    evaluator can never match numeric ``sensor.*`` or ``light.*`` entities
+    (issue #514 invariant; #518 multi-reviewer finding).
     """
     ids: list[str] = []
     for match in _TEXT_ENTITY_ID_PATTERN.finditer(text):
         entity_id = match.group(1)
-        domain = entity_id.split(".", 1)[0]
-        if domain not in _HA_ENTITY_DOMAINS:
+        if not entity_id.startswith("binary_sensor."):
             continue
         if "motion" in entity_id or "vmd" in entity_id:
             ids.append(entity_id)

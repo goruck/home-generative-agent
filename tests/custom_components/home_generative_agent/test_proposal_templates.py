@@ -12,6 +12,7 @@ from custom_components.home_generative_agent.sentinel.proposal_templates import 
     _find_entry_entity_ids,
     _find_sensor_entity_ids,
     _find_text_entry_entity_ids,
+    _find_text_motion_entity_ids,
     _has_duration_signal,
     _presence_signal,
     explain_normalize_candidate,
@@ -2545,9 +2546,14 @@ def test_normalize_candidate_issue_518_unavailable_motion_keeps_availability() -
         "when no one is home."
     )
     result = explain_normalize_candidate(candidate)
-    assert result.normalized is None or (
-        result.normalized.template_id != "motion_detected_while_away"
-    )
+    # The unavailable guard keeps this off the motion template; with only
+    # index-based evidence there is no availability target either, so the
+    # candidate fails closed with the availability entity requirement
+    # rather than registering a rule that can never match (#514 invariant).
+    assert result.normalized is None
+    assert result.reason_code == "missing_required_entities"
+    assert result.details is not None
+    assert result.details["required"] == ["sensor", "binary_sensor"]
 
 
 def test_normalize_candidate_issue_518_battery_keeps_battery_template() -> None:
@@ -2565,3 +2571,248 @@ def test_normalize_candidate_issue_518_battery_keeps_battery_template() -> None:
     assert normalized is not None
     assert normalized.template_id == "low_battery_sensors"
     assert normalized.params["sensor_entity_ids"] == ["sensor.kitchen_motion_battery"]
+
+
+def test_find_text_motion_entity_ids_vmd_dedup_sort_and_regex_edges() -> None:
+    """
+    Prose fallback: vmd counts as motion, output dedups+sorts, edges hold.
+
+    A digit-prefixed pseudo-ID must not match (the lookbehind blocks a match
+    starting mid-token), and non-motion or unknown-domain dotted tokens are
+    filtered out.
+    """
+    text = (
+        "detects motion via binary_sensor.hall_motion and "
+        "binary_sensor.backyard_vmd3_0, then binary_sensor.hall_motion again; "
+        "ignore 9binary_sensor.fake_motion, xdomain.other_motion and "
+        "sensor.kitchen_temperature."
+    )
+    assert _find_text_motion_entity_ids(text) == [
+        "binary_sensor.backyard_vmd3_0",
+        "binary_sensor.hall_motion",
+    ]
+
+
+def test_normalize_candidate_issue_518_confidence_defaults() -> None:
+    """Without a confidence_hint the away-motion template defaults to 0.6."""
+    candidate = _issue_518_candidate()
+    del candidate["confidence_hint"]
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "motion_detected_while_away"
+    assert normalized.confidence == 0.6
+
+
+def test_prose_motion_fallback_is_binary_sensor_only() -> None:
+    """
+    Prose sensor.*/light.* motion-named IDs never become rule params.
+
+    The prose fallback feeds the alarm-motion branches too, whose
+    state=='on' evaluator can never match numeric sensors — a prose
+    sensor.hall_motion_score must not register a dead rule (issue #518
+    multi-reviewer finding, #514 invariant).
+    """
+    candidate = _issue_518_candidate()
+    candidate["summary"] = (
+        "Detects motion via sensor.hall_motion_score when no one is home."
+    )
+    result = explain_normalize_candidate(candidate)
+    assert result.normalized is None
+    assert result.reason_code == "missing_required_entities"
+    assert result.details is not None
+    assert result.details["required"] == ["motion"]
+
+
+def test_prose_motion_fallback_does_not_leak_into_alarm_templates() -> None:
+    """An alarm candidate with a non-binary_sensor prose motion ID fails closed."""
+    candidate = {
+        "candidate_id": "alarm_motion_candidate",
+        "title": "Motion at night while alarm disarmed",
+        "summary": (
+            "Detects motion via sensor.hall_motion_score at night when the "
+            "alarm is disarmed."
+        ),
+        "pattern": "state_change",
+        "evidence_paths": [
+            "entities[entity_id=alarm_control_panel.home_alarm].state",
+            "entities[31].state",
+        ],
+    }
+    result = explain_normalize_candidate(candidate)
+    assert result.normalized is None or (
+        "sensor.hall_motion_score"
+        not in result.normalized.params.get("motion_entity_ids", [])
+    )
+
+
+def test_prose_binary_sensor_motion_reaches_alarm_template() -> None:
+    """A prose binary_sensor motion ID is valid evidence for alarm-motion rules."""
+    candidate = {
+        "candidate_id": "alarm_motion_candidate",
+        "title": "Motion at night while alarm disarmed",
+        "summary": (
+            "Detects motion via binary_sensor.hall_motion at night when the "
+            "alarm is disarmed."
+        ),
+        "pattern": "state_change",
+        "evidence_paths": [
+            "entities[entity_id=alarm_control_panel.home_alarm].state",
+            "entities[31].state",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "motion_detected_at_night_while_alarm_disarmed"
+    assert normalized.params["motion_entity_ids"] == ["binary_sensor.hall_motion"]
+
+
+def test_issue_518_battery_prose_predicate_stays_unsupported() -> None:
+    """
+    A prose battery condition must not collapse into a plain motion rule.
+
+    'battery below 20%' with index-based evidence would otherwise register a
+    rule alerting on state=='on' — silently dropping the battery predicate
+    (issue #518 Codex adversarial P1).
+    """
+    candidate = _issue_518_candidate()
+    candidate["summary"] = (
+        "Alert when the battery of binary_sensor.xiao_esp32_c5_espectre_motion "
+        "is below 20% while no one is home."
+    )
+    result = explain_normalize_candidate(candidate)
+    assert result.normalized is None
+
+
+def test_issue_518_lock_prose_predicate_stays_unsupported() -> None:
+    """A prose unlocked-lock condition must not collapse into a motion rule."""
+    candidate = _issue_518_candidate()
+    candidate["summary"] = (
+        "Detects motion via binary_sensor.xiao_esp32_c5_espectre_motion when "
+        "no one is home and the front door is left unlocked."
+    )
+    result = explain_normalize_candidate(candidate)
+    assert result.normalized is None
+    assert result.reason_code == "missing_required_entities"
+    assert result.details is not None
+    assert result.details["required"] == ["lock"]
+
+
+def test_issue_518_staleness_prose_stays_unsupported() -> None:
+    """
+    A stale-sensor candidate describes a dead sensor, not motion.
+
+    Routing it to the motion template would invert the semantics into
+    alerting on normal motion (issue #518 adversarial review). Applies to
+    the night variant too.
+    """
+    for extra in ("has not updated for days", "is stale for days"):
+        candidate = _issue_518_candidate()
+        candidate["summary"] = (
+            f"binary_sensor.xiao_esp32_c5_espectre_motion {extra} while no one is home."
+        )
+        result = explain_normalize_candidate(candidate)
+        assert result.normalized is None or (
+            result.normalized.template_id
+            not in {
+                "motion_detected_while_away",
+                "motion_detected_at_night_while_away",
+            }
+        )
+
+
+def test_issue_518_open_entry_prose_stays_unsupported() -> None:
+    """A prose open-window condition must not collapse into a motion rule."""
+    candidate = _issue_518_candidate()
+    candidate["summary"] = (
+        "Detects motion via binary_sensor.xiao_esp32_c5_espectre_motion while "
+        "a window is open and no one is home."
+    )
+    result = explain_normalize_candidate(candidate)
+    assert result.normalized is None
+    assert result.reason_code == "missing_required_entities"
+    assert result.details is not None
+    assert result.details["required"] == ["entry"]
+
+
+def test_issue_518_unknown_person_keeps_camera_route() -> None:
+    """
+    Daytime unknown-person candidates keep their camera-template routing.
+
+    The camera template is is_sensitive with higher confidence; capturing it
+    into the low advisory motion template would silently downgrade a
+    security-relevant candidate class (issue #518 adversarial review).
+    """
+    candidate = _issue_518_candidate()
+    candidate["summary"] = (
+        "Detects an unknown person on camera and motion via "
+        "binary_sensor.xiao_esp32_c5_espectre_motion when no one is home."
+    )
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "unknown_person_camera_no_home"
+
+
+def test_issue_518_camera_evidence_keeps_correlation_route() -> None:
+    """Camera-evidence motion candidates keep motion_without_camera semantics."""
+    candidate = _issue_518_candidate()
+    candidate["summary"] = (
+        "Motion on binary_sensor.xiao_esp32_c5_espectre_motion with no "
+        "camera activity when no one is home."
+    )
+    candidate["evidence_paths"] = [
+        "entities[31].state",
+        "derived.anyone_home",
+        "camera_activity[entity_id=camera.kitchen]",
+    ]
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "motion_without_camera_activity"
+
+
+def test_issue_518_any_hour_phrasing_keeps_day_template() -> None:
+    """Contrastive any-hour wording must not narrow to the night template."""
+    phrasings = (
+        "day or night",
+        "any time, including night",
+        "not only at night",
+    )
+    for phrase in phrasings:
+        candidate = _issue_518_candidate()
+        candidate["summary"] = (
+            "Detects motion via binary_sensor.xiao_esp32_c5_espectre_motion "
+            f"{phrase} when no one is home."
+        )
+        normalized = normalize_candidate(candidate)
+        assert normalized is not None, phrase
+        assert normalized.template_id == "motion_detected_while_away", phrase
+
+
+def test_issue_518_plain_night_wording_still_routes_night() -> None:
+    """Non-contrastive night wording keeps the night template routing."""
+    candidate = _issue_518_candidate()
+    candidate["summary"] = (
+        "Detects motion via binary_sensor.xiao_esp32_c5_espectre_motion "
+        "at night when no one is home."
+    )
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "motion_detected_at_night_while_away"
+
+
+def test_issue_518_lock_evidence_keeps_lock_route() -> None:
+    """A day/away motion candidate that also cites a lock stays on lock."""
+    candidate = _issue_518_candidate()
+    candidate["summary"] = (
+        "Detects motion in the Kitchen "
+        "(binary_sensor.xiao_esp32_c5_espectre_motion) while the front door "
+        "lock is unlocked and no one is home."
+    )
+    candidate["evidence_paths"] = [
+        "entities[31].state",
+        "derived.anyone_home",
+        "entities[entity_id=lock.front_door].state",
+    ]
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "unlocked_lock_while_away"
+    assert normalized.params["lock_entity_id"] == "lock.front_door"

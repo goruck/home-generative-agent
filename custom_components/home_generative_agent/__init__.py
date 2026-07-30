@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from types import MappingProxyType
@@ -700,6 +701,7 @@ async def _promote_discovery_candidate(  # noqa: PLR0911
 async def _approve_rule_proposal(  # noqa: PLR0911
     entry: HGAConfigEntry,
     *,
+    hass: HomeAssistant | None = None,
     candidate_id: str,
     notes: str = "",
 ) -> dict[str, Any]:
@@ -755,6 +757,56 @@ async def _approve_rule_proposal(  # noqa: PLR0911
             "reason_code": normalization.reason_code,
             "details": normalization.details or {},
         }
+
+    # Motion entity IDs can come from candidate prose (index-based evidence
+    # paths, issue #518), and prose is LLM output: a hallucinated or
+    # paraphrased sensor name would register a rule whose evaluator fails
+    # closed forever while its semantic key suppresses re-proposals — a
+    # silent, permanent monitoring gap the user believes is active
+    # (issue #518 red-team + Codex reviews). Resolve against live states;
+    # drop unknown IDs, and refuse the approval when none remain.
+    motion_entity_ids = normalized.params.get("motion_entity_ids")
+    if hass is not None and isinstance(motion_entity_ids, list) and motion_entity_ids:
+        resolved_motion_ids = [
+            entity_id
+            for entity_id in motion_entity_ids
+            if isinstance(entity_id, str) and hass.states.get(entity_id) is not None
+        ]
+        unresolved_motion_ids = [
+            entity_id
+            for entity_id in motion_entity_ids
+            if entity_id not in resolved_motion_ids
+        ]
+        if not resolved_motion_ids:
+            LOGGER.info(
+                "Proposal approval rejected for candidate %s: no configured "
+                "motion entity exists (%s)",
+                candidate_id,
+                unresolved_motion_ids,
+            )
+            await proposal_store.async_update_status(
+                candidate_id,
+                "unsupported",
+                notes,
+                extra={
+                    "normalization_reason": "entities_unresolved",
+                    "unresolved_entity_ids": unresolved_motion_ids,
+                },
+            )
+            return {
+                "status": "unsupported",
+                "candidate_id": candidate_id,
+                "reason_code": "entities_unresolved",
+                "details": {"unresolved_entity_ids": unresolved_motion_ids},
+            }
+        if unresolved_motion_ids:
+            normalized = replace(
+                normalized,
+                params={
+                    **normalized.params,
+                    "motion_entity_ids": resolved_motion_ids,
+                },
+            )
 
     covered_specific = _covered_specific_rule_for_any_camera_normalized(
         entry,
@@ -3024,6 +3076,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         notes = str(call.data.get("notes", "") or "")
         return await _approve_rule_proposal(
             entry,
+            hass=hass,
             candidate_id=candidate_id,
             notes=notes,
         )
