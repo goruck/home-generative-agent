@@ -178,6 +178,16 @@
 
 ---
 
+### Extract shared motion-evidence helper across motion evaluators
+
+**What:** `_eval_motion_detected_at_night_while_away`, `_eval_motion_detected_at_night_while_alarm_disarmed`, and `_eval_motion_while_alarm_disarmed_and_home_present` repeat the params list-check / entity resolution / `motion_states` evidence block (the new evaluator now uses per-entity any-of resolution while the alarm two remain all-of `zip(..., strict=False)`). A shared helper would encode the resolution invariant once — and is the natural place to extend any-of resilience to the alarm-motion evaluators.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** v3.22.0
+
+---
+
 ## Audit Store
 
 ### Audit notifier-drop findings as non-user-facing (delivery status from async_notify)
@@ -412,6 +422,30 @@ Entity-backed evidence path instruction added to `USER_PROMPT_TEMPLATE` in `expl
 
 ---
 
+### Text/device_class fallback for locale-named motion sensors
+
+**What:** `_find_motion_entity_ids` matches only the substrings `motion`/`vmd` in entity IDs, so a locale-named PIR like `binary_sensor.chodba` (`device_class: motion`) can never normalize into `motion_detected_at_night_while_away` or the alarm-motion templates — the candidate dies as `missing_required_entities`. Flagged by Codex adversarial review during the v3.22.0 ship (issue #516).
+
+**How to apply:** Mirror the issue-504 locale entry fallback: when candidate text names motion and evidence cites `binary_sensor.*` IDs not classified as any other kind, promote them as motion sensors — with the same gating pitfalls (word-bounded text, absence of higher-priority entity classes, JS card mirror). Alternatively use snapshot `device_class` as the positive signal (see the existing device_class TODO above).
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** v3.22.0
+
+---
+
+### Card severity preview disagrees with server-registered severity
+
+**What:** `_severityForCandidate` in hga-proposals-card.js returns "high" for any away/night candidate, but the server registers e.g. `motion_detected_at_night_while_away` as medium and `open_entry_at_night_when_home` as medium — the GitHub rule-request prefill and UI disagree with what gets stored. Pre-existing; surfaced during the v3.22.0 ship review.
+
+**How to apply:** Mirror the per-template severity table from `proposal_templates.py` into the card, or include the normalized severity in the proposal record and display that.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** v3.22.0
+
+---
+
 ## Video Analyzer
 
 ### Caption novelty: per-analysis notification-status metadata
@@ -630,6 +664,18 @@ WARNING per event that a window-scoped check could suppress.
 **Completed:** v3.9.0 (2026-04-06)
 
 `learned_suppressions_active` attribute exposed on `sensor.sentinel_health`. Count reads `learned_cooldown_multipliers` from suppression state via `engine.learned_suppressions_count` property.
+
+---
+
+### Deduplicate the friendly-label maps in notifier.py and llm_explain.py
+
+**What:** `_KNOWN_TYPE_LABELS`, `_friendly_type`, and `_display_type` are now duplicated verbatim in `sentinel/notifier.py` and `explain/llm_explain.py`; every new rule type needs two edits plus two mirrored tests, and a missed one silently degrades to the fallback label. Flagged by the maintainability specialist during the v3.22.0 ship.
+
+**How to apply:** Hoist the map and both helpers into one module (e.g. `sentinel/models.py` or a small `core/labels.py`) and import from both call sites.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** v3.22.0
 
 ---
 

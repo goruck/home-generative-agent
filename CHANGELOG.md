@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.22.0] - 2026-07-30
+
+### Added
+
+- **Sentinel can now alert on motion detected at night while nobody is home** — a new deterministic rule template, `motion_detected_at_night_while_away`, proposed by [@hruba202](https://github.com/hruba202) in [#516](https://github.com/goruck/home-generative-agent/issues/516). Discovery candidates matching this pattern were previously marked unsupported; they now normalize into an approvable rule that fires when any of its motion sensors reports ON at night with everyone away. The rule suggests the advisory *check camera* action (a motion finding has no specific door or window to close, so nothing is actuated), is suppressed during a resident's departure/arrival grace window so walking out the door at night doesn't page you, and keeps working when one of several configured sensors is renamed or removed — the remaining sensors still alert, with the missing ones recorded in the finding evidence. Note: PIR sensors tripped by pets and outdoor camera VMD entities can make this rule noisy; scope it to interior sensors pets can't reach, or snooze per rule.
+
+### Fixed
+
+- **Candidates phrased "nobody is home" or "no one is home" now route to away templates** — the away-phrase matcher only recognized "nobody home"/"no one home", so the most natural phrasing silently failed to normalize. All away-scoped templates benefit.
+- **Motion sensors named like entries are no longer misread as doors** — `binary_sensor.outdoor_motion` and `*_doorbell_motion` contain the substring "door" and were classified as entry sensors, blocking their motion candidates entirely.
+- **Availability and battery candidates can no longer be captured by motion templates** — a candidate about a motion sensor being *unavailable* (or its battery being low) now keeps routing to the availability/battery templates whose evaluators can actually match, instead of registering a motion rule that could never fire (the issue #514 invariant, re-verified for the new branch).
+- **Notifications for approved discovery rules now show a readable label** — dynamic rules carry slugified candidate IDs (e.g. `v1_subject_motion_sensor…`) as their type; notification titles and explanation prompts now fall back to the rule's template label ("Motion at night while away", "Open entry at night") instead of showing the raw slug.
+- **Departure/arrival grace suppression now covers approved discovery rules** — presence-sensitive matching previously keyed on exact rule IDs, so dynamic rules created from candidates (including existing `open_entry_while_away` variants) never received grace-window suppression; matching now also considers the rule's template.
+- **Discovery no longer re-proposes an already-approved away rule** — candidates that express absence only through the `not derived.anyone_home` evidence path (no away wording) now produce the same semantic key as their activated rule, so they deduplicate instead of reappearing every discovery cycle.
+
 ## [3.21.3] - 2026-07-29
 
 ### Fixed
