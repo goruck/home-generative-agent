@@ -698,7 +698,7 @@ async def _promote_discovery_candidate(  # noqa: PLR0911
     return {"status": "ok", "candidate_id": candidate_id}
 
 
-async def _approve_rule_proposal(  # noqa: PLR0911
+async def _approve_rule_proposal(  # noqa: PLR0911, PLR0912, PLR0915
     entry: HGAConfigEntry,
     *,
     hass: HomeAssistant | None = None,
@@ -714,27 +714,42 @@ async def _approve_rule_proposal(  # noqa: PLR0911
     if not candidate:
         return {"status": "not_found", "candidate_id": candidate_id}
 
+    normalization = explain_normalize_candidate(candidate)
+    normalized = normalization.normalized
+
     covered = _covered_rule_for_candidate(entry, candidate)
     if covered is not None:
         covered_rule_id, overlapping_entities = covered
-        await proposal_store.async_update_status(
-            candidate_id,
-            "covered_by_existing_rule",
-            notes,
-            extra={
-                "covered_rule_id": covered_rule_id,
+        # Key-based coverage is coarser than template semantics: an
+        # unknown-person camera candidate that also cites a motion sensor
+        # must not be swallowed as "already active" by a plain motion rule —
+        # the sensitive camera semantics would be silently lost (issue #518
+        # verification review P1). A cover only stands when the covering
+        # rule's template matches what this candidate actually normalizes
+        # to (or the candidate is unsupported, where any cover is moot).
+        covered_rule = rule_registry.find_rule(covered_rule_id)
+        covered_template = str((covered_rule or {}).get("template_id") or "")
+        if (
+            normalized is None
+            or not covered_template
+            or covered_template == normalized.template_id
+        ):
+            await proposal_store.async_update_status(
+                candidate_id,
+                "covered_by_existing_rule",
+                notes,
+                extra={
+                    "covered_rule_id": covered_rule_id,
+                    "overlapping_entity_ids": overlapping_entities,
+                },
+            )
+            return {
+                "status": "covered_by_existing_rule",
+                "candidate_id": candidate_id,
+                "rule_id": covered_rule_id,
                 "overlapping_entity_ids": overlapping_entities,
-            },
-        )
-        return {
-            "status": "covered_by_existing_rule",
-            "candidate_id": candidate_id,
-            "rule_id": covered_rule_id,
-            "overlapping_entity_ids": overlapping_entities,
-        }
+            }
 
-    normalization = explain_normalize_candidate(candidate)
-    normalized = normalization.normalized
     if normalized is None:
         LOGGER.info(
             "Proposal approval unsupported for candidate %s: reason=%s details=%s",
@@ -807,6 +822,41 @@ async def _approve_rule_proposal(  # noqa: PLR0911
                     "motion_entity_ids": resolved_motion_ids,
                 },
             )
+            # The key-based coverage check above compared the FULL entity
+            # set (real + hallucinated); a rule covering only the real
+            # sensors was not matched. Re-check with the reduced params so
+            # a second overlapping rule is not registered under a different
+            # ID (issue #518 verification review).
+            reduced_key = rule_semantic_key(normalized.as_dict())
+            if reduced_key is not None:
+                for existing_rule in rule_registry.list_rules():
+                    existing_key = rule_semantic_key(existing_rule)
+                    if existing_key is None or not rule_key_covers_candidate_key(
+                        existing_key, reduced_key
+                    ):
+                        continue
+                    overlapping_entities = sorted(
+                        set(resolved_motion_ids).intersection(
+                            _rule_entity_ids(existing_rule.get("params") or {})
+                        )
+                    )
+                    existing_rule_id = str(existing_rule.get("rule_id") or "")
+                    await proposal_store.async_update_status(
+                        candidate_id,
+                        "covered_by_existing_rule",
+                        notes,
+                        extra={
+                            "covered_rule_id": existing_rule_id,
+                            "overlapping_entity_ids": overlapping_entities,
+                            "unresolved_entity_ids": unresolved_motion_ids,
+                        },
+                    )
+                    return {
+                        "status": "covered_by_existing_rule",
+                        "candidate_id": candidate_id,
+                        "rule_id": existing_rule_id,
+                        "overlapping_entity_ids": overlapping_entities,
+                    }
 
     covered_specific = _covered_specific_rule_for_any_camera_normalized(
         entry,

@@ -745,3 +745,37 @@ def test_candidate_semantic_key_prose_fallback_rejects_sensor_domain() -> None:
     key = candidate_semantic_key(candidate)
     assert key is not None
     assert key.endswith("entities=")
+
+
+def test_candidate_semantic_key_unknown_person_beats_motion_subject() -> None:
+    """
+    An unknown-person camera candidate never keys as plain motion.
+
+    Keying it subject=motion would let a plain motion rule's coverage check
+    swallow the sensitive camera proposal before normalization runs
+    (issue #518 verification review P1).
+    """
+    candidate = {
+        "title": "Unknown person with motion while away",
+        "summary": (
+            "An unknown person is detected on camera with motion on "
+            "binary_sensor.kitchen_motion when no one is home."
+        ),
+        "pattern": "state_change",
+        "evidence_paths": [
+            "entities[entity_id=binary_sensor.kitchen_motion].state",
+            "derived.anyone_home",
+        ],
+    }
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert "subject=camera" in key
+    assert "predicate=unknown_person" in key
+    motion_rule = {
+        "rule_id": "motion_kitchen_while_away",
+        "template_id": "motion_detected_while_away",
+        "params": {"motion_entity_ids": ["binary_sensor.kitchen_motion"]},
+    }
+    motion_rule_key = rule_semantic_key(motion_rule)
+    assert motion_rule_key is not None
+    assert not rule_key_covers_candidate_key(motion_rule_key, key)

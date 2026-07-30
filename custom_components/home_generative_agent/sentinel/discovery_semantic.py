@@ -131,16 +131,22 @@ def candidate_semantic_key(  # noqa: PLR0912, PLR0915
         predicate = "power_anomaly"
         if not entities and sensor_ids:
             entities = sensor_ids
-    elif "motion" in text or "activity" in text:
-        predicate = "active"
     elif (
-        camera_ids
+        (camera_ids or _contains_any(text, ("camera", "cam ")))
         and _contains_any(text, ("unknown", "unrecognized", "stranger"))
         and _contains_any(text, ("person", "people", "face"))
     ):
+        # Checked before the motion/active leg: an unknown-person camera
+        # candidate that also cites a motion sensor normalizes to the
+        # sensitive camera template, so keying it subject=motion would let
+        # a plain motion rule's coverage check silently swallow the
+        # camera-specific proposal (issue #518 verification review P1).
+        # Text-only camera signals key entities= to match any-camera rules.
         subject = "camera"
         predicate = "unknown_person"
         entities = camera_ids
+    elif "motion" in text or "activity" in text:
+        predicate = "active"
     if predicate == "unavailable" and sensor_ids:
         subject = "sensor"
         entities = sensor_ids

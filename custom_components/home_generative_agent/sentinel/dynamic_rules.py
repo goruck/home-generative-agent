@@ -226,13 +226,17 @@ def _dedup_away_motion_overlap(
             night_entities.update(finding.triggering_entities)
     if not night_entities:
         return findings
+    # Subset, not intersection: a day finding that also fired for a sensor
+    # the night findings do NOT cover must survive, or that sensor's alert
+    # disappears from notifications and audit entirely (issue #518
+    # verification review).
     return [
         finding
         for finding in findings
         if not (
             str(finding.evidence.get("template_id") or "")
             == "motion_detected_while_away"
-            and night_entities.intersection(finding.triggering_entities)
+            and night_entities.issuperset(finding.triggering_entities)
         )
     ]
 
@@ -459,14 +463,19 @@ def _eval_motion_while_away_common(
             "unresolved_entity_ids": unresolved,
         }
     )
-    if not require_night and snapshot["derived"]["is_night"]:
-        # Night motion while away carries the night template's severity
-        # judgment: the recommended quiet-hours config suppresses "low"
-        # overnight, which would otherwise mute the flagship 2am intrusion
-        # signal for users whose only motion coverage is this day-agnostic
-        # rule (issue #518 red-team review). Severity is not hashed into
-        # the anomaly ID, so finding identity stays stable across the
-        # night boundary.
+    if (
+        not require_night
+        and snapshot["derived"]["is_night"]
+        and str(rule.get("severity") or "low") == "low"
+    ):
+        # Night motion while away carries at least the night template's
+        # severity judgment: the recommended quiet-hours config suppresses
+        # "low" overnight, which would otherwise mute the flagship 2am
+        # intrusion signal for users whose only motion coverage is this
+        # day-agnostic rule (issue #518 red-team review). A floor, not an
+        # override — a user-configured "high" is preserved. Severity is not
+        # hashed into the anomaly ID, so finding identity stays stable
+        # across the night boundary.
         rule = {**rule, "severity": "medium"}
     return [_build_finding(rule, triggering, evidence)]
 

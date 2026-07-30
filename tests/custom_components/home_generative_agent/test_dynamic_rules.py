@@ -1724,3 +1724,55 @@ def test_dynamic_rule_motion_away_day_rule_alone_fires_at_night() -> None:
     findings = evaluate_dynamic_rules(snapshot, [_motion_away_rule()])
     assert len(findings) == 1
     assert findings[0].evidence["template_id"] == "motion_detected_while_away"
+
+
+def test_dynamic_rule_motion_away_overlap_dedup_preserves_uncovered_sensor() -> None:
+    """
+    A day finding covering a sensor the night rule does not is kept.
+
+    Dropping it would erase that sensor's alert from notifications and
+    audit entirely (issue #518 verification review).
+    """
+    night_rule = _motion_night_away_rule()
+    day_rule = _motion_away_rule()
+    day_rule["params"] = {
+        "motion_entity_ids": [
+            "binary_sensor.xiao_esp32_c5_espectre_motion",
+            "binary_sensor.hall_motion",
+        ],
+    }
+    snapshot = _snapshot(
+        [
+            _base_entity(
+                "binary_sensor.xiao_esp32_c5_espectre_motion", "binary_sensor", "on"
+            ),
+            _base_entity("binary_sensor.hall_motion", "binary_sensor", "on"),
+        ],
+        [],
+        {
+            "now": "2026-02-01T00:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": True,
+            "anyone_home": False,
+            "people_home": [],
+            "people_away": [],
+            "last_motion_by_area": {},
+        },
+    )
+    findings = evaluate_dynamic_rules(snapshot, [night_rule, day_rule])
+    templates = sorted(str(f.evidence["template_id"]) for f in findings)
+    assert templates == [
+        "motion_detected_at_night_while_away",
+        "motion_detected_while_away",
+    ]
+
+
+def test_dynamic_rule_motion_while_away_high_severity_not_downgraded() -> None:
+    """Night escalation is a floor: a user-configured high rule stays high."""
+    rule = _motion_away_rule()
+    rule["severity"] = "high"
+    snapshot = _motion_night_away_snapshot(
+        motion_state="on", is_night=True, anyone_home=False
+    )
+    findings = evaluate_dynamic_rules(snapshot, [rule])
+    assert findings[0].severity == "high"
