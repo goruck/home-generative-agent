@@ -153,6 +153,118 @@ actions:
 *User asked: "Are there any packages at the front gate?" Agent analyzed the live camera and confirmed two boxes visible.*
 ![Check for packages](./assets/check-for-boxes.png)
 
+## Community Dashboards
+
+Dashboard recipes shared by users. Have one of your own? Post it in [Discussions](https://github.com/goruck/home-generative-agent/discussions) and it may get featured here.
+
+The recipes below were shared by [@hruba202](https://github.com/hruba202) in [discussion #513](https://github.com/goruck/home-generative-agent/discussions/513) and use the excellent [flex-table-card](https://github.com/custom-cards/flex-table-card) (installable from HACS). Replace the example entity IDs with your own; the column names are in Czech from the original install — rename them to taste. The `grid_options` sizing assumes the newer sections dashboard layout with wide sections — trim the `columns:` values to fit your grid (standard sections are 12 columns wide; the older masonry layout ignores `grid_options` entirely).
+
+### Recognized people across cameras
+
+One row per camera, pulling the `recognized_people` sensor attributes into columns.
+
+![Recognized people flex-table dashboard](./assets/community-flex-table-recognized-people.png)
+
+```yaml
+type: custom:flex-table-card
+title: Rozpoznané osoby
+entities:
+  include:
+    - sensor.kamera_obyvak_1_recognized_people
+    - sensor.kamera_obyvak_2_recognized_people
+    - sensor.kamera2_recognized_people
+    - sensor.kamera3_recognized_people
+    - sensor.kamera4_recognized_people
+columns:
+  - data: name
+    name: kamera
+  - data: state
+    name: osoby
+  - data: count
+    name: počet
+  - data: summary
+    name: shrnutí
+  - data: last_event
+    name: poslední událost
+grid_options:
+  columns: 30
+```
+
+> **Tip:** cameras with no events yet report `null` for `summary` and `last_event` — older flex-table-card releases render that as the `undefined` text visible in the screenshot above; current releases show `n/a`. To substitute your own placeholder, use the column's `modify` option. Two gotchas: quote the expression (its colon otherwise breaks YAML parsing), and current card versions hand `modify` an empty array for missing values, so a plain `x == null` check isn't enough:
+>
+> ```yaml
+>   - data: summary
+>     name: shrnutí
+>     modify: "Array.isArray(x) || x == null ? '—' : x"
+> ```
+
+### Sentinel health at a glance
+
+A two-row grid over the [Sentinel health sensor](docs/sentinel.md#health-sensor), spreading its KPI attributes across columns.
+
+![Sentinel health flex-table dashboard](./assets/community-flex-table-sentinel-health.png)
+
+```yaml
+square: false
+type: grid
+cards:
+  - type: custom:flex-table-card
+    entities:
+      include:
+        - sensor.sentinel_health
+    columns:
+      - data: state
+        name: zdraví
+      - data: baseline_rules_waiting
+        name: bsl_rules_waiting
+      - data: last_run_start
+        name: l_r_s
+      - data: run_duration_ms
+        name: doba
+      - data: active_rule_count
+        name: pravidla aktiv
+      - data: triggers_dropped_incoming
+        name: t_dropped_incoming
+      - data: triggers_ttl_expired
+        name: t_ttl_expired
+      - data: triggers_dropped_queued
+        name: t_d_queued
+    grid_options:
+      columns: 5
+      rows: 1
+  - type: custom:flex-table-card
+    entities:
+      include:
+        - sensor.sentinel_health
+    columns:
+      - data: false_positive_rate_14d
+        name: f_p_rate_14d
+      - data: baseline_fresh_count
+        name: bsl_fresh_count
+      - data: baseline_stale_count
+        name: bsl_stale_count
+      - data: baseline_entity_count
+        name: bsl_entity_count
+      - data: baseline_rules_waiting
+        name: bsl_rules_waiting
+      - data: baseline_last_update
+        name: bsl_last_update
+      - data: findings_count_by_severity
+        name: f_c_by_severity
+      - data: action_success_rate
+        name: a_s_rate
+    grid_options:
+      columns: 5
+      rows: 1
+grid_options:
+  columns: full
+  rows: 3
+title: SENTINEL HEALTH
+columns: 1
+```
+
+> **Tip:** `findings_count_by_severity` is a dictionary attribute (keys `low`/`medium`/`high`), so it renders as `[object Object]` by default. Use the column's `modify` option (same two gotchas as above) to pull out one severity per column, `modify: "Array.isArray(x) || x == null ? '—' : (x.high ?? 0)"`, or render the whole dictionary compactly with `modify: "Array.isArray(x) || x == null ? '—' : JSON.stringify(x)"`.
+
 ## Contributions are welcome
 
 If you want to contribute to this, please read the [Contribution guidelines](CONTRIBUTING.md).

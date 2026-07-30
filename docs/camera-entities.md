@@ -291,6 +291,8 @@ The video pipeline enforces a per-entry semaphore that limits concurrent VLM and
 
 Replace `frontgate` with your camera's slug in all examples below.
 
+> Looking for more ideas? See the community-contributed [flex-table-card recipes](../README.md#community-dashboards) in the README.
+
 **Simple image + summary (two cards per camera):**
 
 ```yaml
