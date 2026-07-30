@@ -17,6 +17,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS,
+    CONF_SENTINEL_RESPONSE_LANGUAGE,
 )
 from custom_components.home_generative_agent.core.utils import (
     SENTINEL_ADMISSION_TIMEOUT_S,
@@ -25,6 +26,7 @@ from custom_components.home_generative_agent.core.utils import (
     run_sentinel_model_call,
 )
 from custom_components.home_generative_agent.explain.discovery_prompts import (
+    LANGUAGE_INSTRUCTION_TEMPLATE,
     SYSTEM_PROMPT,
     USER_PROMPT_TEMPLATE,
 )
@@ -346,6 +348,9 @@ class SentinelDiscoveryEngine:
             existing_semantic_keys=json.dumps(capped_keys, separators=(",", ":")),
             unmonitored_baseline_entities=unmonitored_json,
         )
+        response_language = self._options.get(CONF_SENTINEL_RESPONSE_LANGUAGE, "")
+        if response_language:
+            prompt += LANGUAGE_INSTRUCTION_TEMPLATE.format(language=response_language)
         messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
 
         try:

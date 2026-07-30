@@ -490,6 +490,7 @@ In the Sentinel subentry:
 | `sentinel_discovery_enabled` | Enable LLM discovery |
 | `sentinel_discovery_interval_seconds` | How often discovery runs |
 | `sentinel_discovery_max_records` | Maximum proposal records to keep |
+| `sentinel_response_language` | Optional language (e.g. `Czech`) for LLM-authored discovery candidate `title`/`summary` and triage `summary` text. Empty (default) leaves the model's native English output. Machine-matched fields — `candidate_id`, `pattern`, `evidence_paths`, `decision`, `reason_code`, etc. — are never translated regardless of this setting. Mirrors `vlm_response_language`'s convention (see the VLM options docs). |
 | `sentinel_daily_digest_enabled` | Enable daily push summary of the past 24 hours |
 | `sentinel_daily_digest_time` | Delivery time (default `08:00:00`) |
 | `sentinel_require_pin_for_level_increase` | Require PIN to increase autonomy level |

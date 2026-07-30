@@ -398,6 +398,7 @@ This document covers the named constants that affect integration behaviour, orga
 | `RECOMMENDED_SENTINEL_DISCOVERY_ENABLED` | `sentinel_discovery_enabled` | `False` | Enable LLM-based rule candidate discovery |
 | `RECOMMENDED_SENTINEL_DISCOVERY_INTERVAL_SECONDS` | `sentinel_discovery_interval_seconds` | `3600` (1 h) | How often a discovery cycle runs |
 | `RECOMMENDED_SENTINEL_DISCOVERY_MAX_RECORDS` | `sentinel_discovery_max_records` | `200` | Maximum stored discovery records (older records are pruned) |
+| `RECOMMENDED_SENTINEL_RESPONSE_LANGUAGE` | `sentinel_response_language` | `""` (English) | Optional language override for LLM-authored discovery `title`/`summary` and triage `summary` text; also consumed by Sentinel Triage. Machine-matched fields are unaffected. |
 
 ---
 

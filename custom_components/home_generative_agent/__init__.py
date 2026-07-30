@@ -149,6 +149,7 @@ from .const import (
     CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES,
     CONF_SENTINEL_INTERVAL_SECONDS,
     CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
+    CONF_SENTINEL_RESPONSE_LANGUAGE,
     CONF_SENTINEL_TRIAGE_ENABLED,
     CONF_SENTINEL_TRIAGE_TIMEOUT_SECONDS,
     CONF_SUMMARIZATION_MODEL_PROVIDER,
@@ -2881,6 +2882,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             timeout_seconds=triage_timeout,
             deployment=chat_deployment,
             health_stats=sentinel_run_stats,
+            response_language=options.get(CONF_SENTINEL_RESPONSE_LANGUAGE, ""),
         )
         LOGGER.info("Sentinel LLM triage enabled (timeout=%ds).", triage_timeout)
     # Issue #265: optional baseline updater (requires PostgreSQL pool).
