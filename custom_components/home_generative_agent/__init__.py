@@ -831,9 +831,18 @@ async def _approve_rule_proposal(  # noqa: PLR0911, PLR0912, PLR0915
     # sensor this candidate would, and registering a second rule guarantees
     # duplicate findings on each event. Runs for fully resolved candidates
     # and for sets reduced by the hallucination filter alike (issue #518
-    # verification rounds 3-4).
+    # verification rounds 3-4). Restricted to the two ANY-OF away-motion
+    # templates: motion_while_alarm_disarmed_and_home_present is all-of (a
+    # [kitchen, hall] rule fires only when BOTH are active, so it does NOT
+    # cover a kitchen-only candidate), and alarm-motion templates carry
+    # alarm params that must also match (verification round 5).
     final_motion_ids = normalized.params.get("motion_entity_ids")
-    if isinstance(final_motion_ids, list) and final_motion_ids:
+    if (
+        normalized.template_id
+        in {"motion_detected_while_away", "motion_detected_at_night_while_away"}
+        and isinstance(final_motion_ids, list)
+        and final_motion_ids
+    ):
         for existing_rule in rule_registry.list_rules():
             if str(existing_rule.get("template_id") or "") != normalized.template_id:
                 continue

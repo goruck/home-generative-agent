@@ -2816,3 +2816,21 @@ def test_issue_518_lock_evidence_keeps_lock_route() -> None:
     assert normalized is not None
     assert normalized.template_id == "unlocked_lock_while_away"
     assert normalized.params["lock_entity_id"] == "lock.front_door"
+
+
+def test_issue_518_motion_tracking_wording_still_maps() -> None:
+    """
+    'motion tracking' prose is a motion candidate, not a staleness signal.
+
+    The staleness guard uses explicit stale wording only — the broader
+    tracking/gps terms would reject legitimate candidates
+    (verification round 5).
+    """
+    candidate = _issue_518_candidate()
+    candidate["summary"] = (
+        "Motion tracking via binary_sensor.xiao_esp32_c5_espectre_motion "
+        "when no one is home."
+    )
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "motion_detected_while_away"

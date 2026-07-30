@@ -1673,24 +1673,29 @@ def test_dynamic_rule_motion_while_away_severity_escalates_at_night() -> None:
     assert night_findings[0].anomaly_id == day_findings[0].anomaly_id
 
 
-def test_dynamic_rule_motion_away_overlap_dedup_keeps_night_finding() -> None:
+def test_dynamic_rule_motion_away_overlap_emits_both_findings() -> None:
     """
-    Night + day rules on the same sensor yield one finding at night.
+    Night + day rules on the same sensor both emit at night.
 
-    Without the run-level dedup, every night motion event would push twice
-    for households keeping both rules (issue #518 red-team review).
+    Evaluator-level dedup was reverted (issue #518 verification round 5):
+    it ran before snooze/exclusion suppression, so a snoozed night rule
+    silently lost the day rule's alert. Dispatch-level dedup is a TODO;
+    docs advise replacing the night rule instead of running both.
     """
     snapshot = _motion_night_away_snapshot(
         motion_state="on", is_night=True, anyone_home=False
     )
     rules = [_motion_night_away_rule(), _motion_away_rule()]
     findings = evaluate_dynamic_rules(snapshot, rules)
-    assert len(findings) == 1
-    assert findings[0].evidence["template_id"] == "motion_detected_at_night_while_away"
+    templates = sorted(str(f.evidence["template_id"]) for f in findings)
+    assert templates == [
+        "motion_detected_at_night_while_away",
+        "motion_detected_while_away",
+    ]
 
 
-def test_dynamic_rule_motion_away_overlap_dedup_distinct_sensors_both_fire() -> None:
-    """Non-overlapping sensors are not deduped — both findings survive."""
+def test_dynamic_rule_motion_away_overlap_distinct_sensors_both_fire() -> None:
+    """Non-overlapping sensor sets both emit findings."""
     night_rule = _motion_night_away_rule()
     day_rule = _motion_away_rule()
     day_rule["params"] = {"motion_entity_ids": ["binary_sensor.hall_motion"]}
@@ -1717,7 +1722,7 @@ def test_dynamic_rule_motion_away_overlap_dedup_distinct_sensors_both_fire() -> 
 
 
 def test_dynamic_rule_motion_away_day_rule_alone_fires_at_night() -> None:
-    """The dedup only applies when a night finding actually fired."""
+    """A day rule with no night sibling fires normally at night."""
     snapshot = _motion_night_away_snapshot(
         motion_state="on", is_night=True, anyone_home=False
     )
@@ -1726,13 +1731,8 @@ def test_dynamic_rule_motion_away_day_rule_alone_fires_at_night() -> None:
     assert findings[0].evidence["template_id"] == "motion_detected_while_away"
 
 
-def test_dynamic_rule_motion_away_overlap_dedup_preserves_uncovered_sensor() -> None:
-    """
-    A day finding covering a sensor the night rule does not is kept.
-
-    Dropping it would erase that sensor's alert from notifications and
-    audit entirely (issue #518 verification review).
-    """
+def test_dynamic_rule_motion_away_overlap_superset_sensors_both_fire() -> None:
+    """Day and night rules over nested sensor sets both emit findings."""
     night_rule = _motion_night_away_rule()
     day_rule = _motion_away_rule()
     day_rule["params"] = {

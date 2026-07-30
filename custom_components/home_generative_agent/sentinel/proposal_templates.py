@@ -1003,8 +1003,14 @@ def _is_away_motion_candidate(  # noqa: PLR0913
         and not _LOCK_TEXT_PATTERN.search(text)
         # A stale/not-updated motion sensor candidate describes a dead
         # sensor; routing it here would invert the semantics into alerting
-        # on normal motion (issue #518 adversarial review).
-        and not _has_staleness_signal(text)
+        # on normal motion (issue #518 adversarial review). Explicit stale
+        # wording only — _has_staleness_signal's broader "tracking"/"gps"
+        # terms would reject legitimate "motion tracking" candidates
+        # (verification round 5).
+        and not _contains_any(
+            text,
+            ("stale", "staleness", "not updated", "last seen", "last updated"),
+        )
         and not (_ENTRY_TEXT_PATTERN.search(text) and "open" in text)
     )
 

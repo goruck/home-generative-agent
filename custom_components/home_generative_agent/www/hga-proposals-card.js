@@ -384,8 +384,8 @@ class HgaProposalsCard extends HTMLElement {
         (text.includes("low") || text.includes("below") || text.includes("weak"))
       ) &&
       !/\b(?:un)?lock(?:s|ed)?\b/.test(text) &&
-      !["stale", "not updated", "tracking", "last seen", "last updated", "gps"].some(
-        (term) => text.includes(term)
+      !["stale", "not updated", "last seen", "last updated"].some((term) =>
+        text.includes(term)
       ) &&
       !(entryTextRe.test(text) && text.includes("open")) &&
       !entityIds.some(

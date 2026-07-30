@@ -202,43 +202,15 @@ def evaluate_dynamic_rules(  # noqa: PLR0913
         if evaluator is None:
             continue
         findings.extend(evaluator(rule))
-    return _dedup_away_motion_overlap(findings)
-
-
-def _dedup_away_motion_overlap(
-    findings: list[AnomalyFinding],
-) -> list[AnomalyFinding]:
-    """
-    Drop day-agnostic away-motion findings duplicated by the night template.
-
-    A household keeping its ``motion_detected_at_night_while_away`` rule and
-    approving the day-agnostic sibling over the same sensors would get two
-    findings — two pushes, doubled audit rows — for every night motion event
-    (issue #518 red-team review). The night finding is kept: it predates the
-    day rule in the field and carries the night-severity judgment.
-    """
-    night_entities: set[str] = set()
-    for finding in findings:
-        if (
-            str(finding.evidence.get("template_id") or "")
-            == "motion_detected_at_night_while_away"
-        ):
-            night_entities.update(finding.triggering_entities)
-    if not night_entities:
-        return findings
-    # Subset, not intersection: a day finding that also fired for a sensor
-    # the night findings do NOT cover must survive, or that sensor's alert
-    # disappears from notifications and audit entirely (issue #518
-    # verification review).
-    return [
-        finding
-        for finding in findings
-        if not (
-            str(finding.evidence.get("template_id") or "")
-            == "motion_detected_while_away"
-            and night_entities.issuperset(finding.triggering_entities)
-        )
-    ]
+    # Overlapping night + day away-motion rules on the same sensors emit two
+    # findings for a night motion event. Deduplicating HERE was tried and
+    # reverted (issue #518 verification round 5): the evaluator runs before
+    # snooze/exclusion/pending-prompt suppression, so dropping the day
+    # finding while the night rule is snoozed silently loses the alert
+    # entirely. Dispatch-level dedup is tracked in TODOS.md; until then the
+    # docs advise replacing the night rule when approving the day-agnostic
+    # sibling over the same sensors.
+    return findings
 
 
 def evaluate_dynamic_rule(

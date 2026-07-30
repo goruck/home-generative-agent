@@ -929,3 +929,80 @@ async def test_approve_rule_proposal_superset_covers_fully_resolved_set(hass) ->
     assert response["status"] == "covered_by_existing_rule"
     assert response["rule_id"] == "all_interior_motion_away"
     assert rule_registry.added_rules == []
+
+
+@pytest.mark.asyncio
+async def test_approve_rule_proposal_all_of_template_not_superset_covered(hass) -> None:
+    """
+    All-of templates never cover subsets.
+
+    A [kitchen, hall] alarm-motion rule fires only when BOTH are active,
+    so it does not monitor kitchen-only events (verification round 5).
+    """
+    hass.states.async_set("binary_sensor.kitchen_motion", "off")
+    hass.states.async_set("alarm_control_panel.home_alarm", "disarmed")
+    record = {
+        "candidate_id": "kitchen_motion_alarm_disarmed",
+        "candidate": {
+            "candidate_id": "kitchen_motion_alarm_disarmed",
+            "title": "Kitchen motion at night while alarm disarmed",
+            "summary": (
+                "Motion on binary_sensor.kitchen_motion at night while the "
+                "alarm is disarmed."
+            ),
+            "pattern": "state_change",
+            "confidence_hint": 0.7,
+            "evidence_paths": [
+                "entities[entity_id=alarm_control_panel.home_alarm].state",
+                "entities[entity_id=binary_sensor.kitchen_motion].state",
+                "derived.is_night",
+            ],
+        },
+        "notes": "",
+        "status": "draft",
+    }
+    proposal_store = ProposalStore(hass)
+    await proposal_store.async_append(record)
+    rule_registry = DummyRuleRegistry(
+        rules=[
+            {
+                "rule_id": "all_motion_alarm_disarmed",
+                "template_id": "motion_detected_at_night_while_alarm_disarmed",
+                "params": {
+                    "alarm_entity_id": "alarm_control_panel.home_alarm",
+                    "motion_entity_ids": [
+                        "binary_sensor.kitchen_motion",
+                        "binary_sensor.hall_motion",
+                    ],
+                    "required_entity_ids": [],
+                },
+                "enabled": True,
+            }
+        ]
+    )
+    entry = _make_entry(
+        proposal_store=proposal_store,
+        rule_registry=rule_registry,
+        sentinel=SimpleNamespace(async_run_now=AsyncMock(return_value=True)),
+    )
+    response = await _hga_component._approve_rule_proposal(
+        entry,
+        hass=hass,
+        candidate_id="kitchen_motion_alarm_disarmed",
+    )
+
+    # The superset shortcut must not fire for the all-of template; whatever
+    # the final status, it must not be a superset-based cover by the
+    # two-sensor rule.
+    assert (
+        not (
+            response["status"] == "covered_by_existing_rule"
+            and response.get("rule_id") == "all_motion_alarm_disarmed"
+            and response.get("overlapping_entity_ids")
+            == ["binary_sensor.kitchen_motion"]
+        )
+        or rule_registry.added_rules == []
+    )
+    # Precise expectation: candidate registers its own rule.
+    assert response["status"] == "ok"
+    assert rule_registry.added_rules

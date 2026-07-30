@@ -446,6 +446,18 @@ Entity-backed evidence path instruction added to `USER_PROMPT_TEMPLATE` in `expl
 
 ---
 
+### Dispatch-level dedup for overlapping night/day away-motion findings
+
+**What:** A household running both `motion_detected_at_night_while_away` and `motion_detected_while_away` over the same sensors gets two findings (two pushes, doubled audit rows) for every night motion event. An evaluator-level dedup was implemented and reverted during the v3.23.0 ship: `evaluate_dynamic_rules` runs before snooze/exclusion/pending-prompt suppression, so dropping the day finding while the night rule was snoozed silently lost the alert entirely (verification round 5). Docs currently advise replacing the night rule instead.
+
+**How to apply:** Dedup at dispatch time in the engine/notifier, after per-finding suppression decisions are known: when both findings for overlapping sensors would dispatch, send only the night one; when the night finding is suppressed, the day finding dispatches normally.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** v3.23.0
+
+---
+
 ### Proposal dedup does not treat night=any motion rules as covering night=1 candidates
 
 **What:** `rule_key_covers_candidate_key` is exact equality for non-template keys, so an active `motion_detected_while_away` rule (`night=any|home=0`) does not cover a later night-worded re-proposal of the same sensors (`night=1|home=0`) — discovery can propose the night sibling of an already-active any-hour rule. Runtime double-alerting is already prevented by the evaluator's overlap dedup (v3.23.0); this is proposal-side noise only. Flagged by testing-specialist + red-team review during the v3.23.0 ship (issue #518).
