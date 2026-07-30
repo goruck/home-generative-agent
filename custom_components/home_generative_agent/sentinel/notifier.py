@@ -683,6 +683,7 @@ _KNOWN_TYPE_LABELS = {
     "open_entry_at_night_entry": "Open entry at night",
     "open_any_window_at_night_while_away": "Window open at night",
     "motion_detected_at_night_while_away": "Motion at night while away",
+    "motion_detected_while_away": "Motion while away",
     "unlocked_lock_at_night": "Door lock left unlocked",
     "camera_entry_unsecured": "Activity near unsecured entry",
     "alarm_disarmed_during_external_threat": "Outdoor activity while alarm disarmed",

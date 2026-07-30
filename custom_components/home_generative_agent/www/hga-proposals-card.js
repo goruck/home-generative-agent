@@ -338,21 +338,25 @@ class HgaProposalsCard extends HTMLElement {
       }
     }
 
-    // Motion at night while away (issue #516) — mirrors the normalizer's
-    // motion_detected_at_night_while_away branch: binary_sensor motion
-    // evidence, night + away context, no alarm/armed signal (alarm-motion
-    // candidates route to the alarm templates server-side), no lock entity,
-    // and no battery/availability signal (those candidates keep routing to
-    // their own templates — mirrors the Python guards).
-    if (
-      hasNight &&
-      isAway &&
+    // Motion sensors named in the candidate. Evidence-path IDs first; when
+    // none resolve (index-based paths like entities[31].state carry no
+    // entity ID, issue #518), fall back to dot-notation IDs in the prose —
+    // mirrors _find_text_motion_entity_ids in proposal_templates.py.
+    let motionSensorIds = entityIds.filter(
+      (entityId) =>
+        entityId.startsWith("binary_sensor.") &&
+        (entityId.includes("motion") || entityId.includes("vmd"))
+    );
+    if (entityIds.length === 0) {
+      motionSensorIds = (
+        text.match(/(?<![a-z0-9_.])binary_sensor\.[a-z0-9_]+/g) || []
+      ).filter(
+        (entityId) => entityId.includes("motion") || entityId.includes("vmd")
+      );
+    }
+    const motionGuardsPass =
       (text.includes("motion") || text.includes("vmd")) &&
-      entityIds.some(
-        (entityId) =>
-          entityId.startsWith("binary_sensor.") &&
-          (entityId.includes("motion") || entityId.includes("vmd"))
-      ) &&
+      motionSensorIds.length > 0 &&
       !/\b(?:alarms?|(?:dis)?armed)\b/.test(text) &&
       !text.includes("unavailable") &&
       !text.includes("offline") &&
@@ -362,9 +366,21 @@ class HgaProposalsCard extends HTMLElement {
           entityId.startsWith("alarm_control_panel.") ||
           entityId.startsWith("lock.") ||
           entityId.includes("battery")
-      )
-    ) {
+      );
+    // Motion at night while away (issue #516) — mirrors the normalizer's
+    // motion_detected_at_night_while_away branch: binary_sensor motion
+    // evidence, night + away context, no alarm/armed signal (alarm-motion
+    // candidates route to the alarm templates server-side), no lock entity,
+    // and no battery/availability signal (those candidates keep routing to
+    // their own templates — mirrors the Python guards).
+    if (hasNight && isAway && motionGuardsPass) {
       return "motion_detected_at_night_while_away";
+    }
+    // Motion while away, any hour (issue #518) — same guard set without the
+    // night gate; the night branch above wins for night-worded candidates,
+    // mirroring the normalizer's branch order.
+    if (isAway && motionGuardsPass) {
+      return "motion_detected_while_away";
     }
 
     if (text.includes("motion") || text.includes("camera")) {
