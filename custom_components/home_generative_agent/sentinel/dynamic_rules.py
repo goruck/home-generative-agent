@@ -72,8 +72,13 @@ def evaluate_dynamic_rules(  # noqa: PLR0913
             )
         ),
         "motion_detected_at_night_while_away": (
-            lambda rule: _eval_motion_detected_at_night_while_away(
-                snapshot, rule, entity_map
+            lambda rule: _eval_motion_while_away_common(
+                snapshot, rule, entity_map, require_night=True
+            )
+        ),
+        "motion_detected_while_away": (
+            lambda rule: _eval_motion_while_away_common(
+                snapshot, rule, entity_map, require_night=False
             )
         ),
         "motion_while_alarm_disarmed_and_home_present": (
@@ -197,6 +202,14 @@ def evaluate_dynamic_rules(  # noqa: PLR0913
         if evaluator is None:
             continue
         findings.extend(evaluator(rule))
+    # Overlapping night + day away-motion rules on the same sensors emit two
+    # findings for a night motion event. Deduplicating HERE was tried and
+    # reverted (issue #518 verification round 5): the evaluator runs before
+    # snooze/exclusion/pending-prompt suppression, so dropping the day
+    # finding while the night rule is snoozed silently loses the alert
+    # entirely. Dispatch-level dedup is tracked in TODOS.md; until then the
+    # docs advise replacing the night rule when approving the day-agnostic
+    # sibling over the same sensors.
     return findings
 
 
@@ -348,17 +361,28 @@ def _eval_motion_detected_at_night_while_alarm_disarmed(
     return [_build_finding(rule, [alarm_id, *motion_ids, *required_ids], evidence)]
 
 
-def _eval_motion_detected_at_night_while_away(
+def _eval_motion_while_away_common(
     snapshot: FullStateSnapshot,
     rule: dict[str, Any],
     entity_map: Mapping[str, SnapshotEntity],
+    *,
+    require_night: bool,
 ) -> list[AnomalyFinding]:
+    """
+    Motion while nobody is home, optionally gated to night hours.
+
+    Shared by ``motion_detected_at_night_while_away`` (issue #516,
+    ``require_night=True``) and ``motion_detected_while_away`` (issue #518,
+    ``require_night=False``). The day-agnostic variant omits ``is_night``
+    from the evidence so a finding that persists across the night boundary
+    keeps a stable anomaly ID.
+    """
     params = _rule_params(rule)
     motion_ids = params.get("motion_entity_ids")
     if not isinstance(motion_ids, list) or not motion_ids:
         return []
 
-    if not snapshot["derived"]["is_night"]:
+    if require_night and not snapshot["derived"]["is_night"]:
         return []
     if snapshot["derived"]["anyone_home"]:
         return []
@@ -378,21 +402,54 @@ def _eval_motion_detected_at_night_while_away(
     if not resolved:
         return []
 
-    if not any(motion.get("state") == "on" for motion in resolved.values()):
+    # Only sensors actually reporting motion are triggering entities: the
+    # engine's exclusion filter drops a finding when ANY triggering entity
+    # is user-excluded, so listing an idle sensor would let its exclusion
+    # silently kill a genuine alert from the sensor that fired — and
+    # notifications name triggering_entities[0] (issue #518 Codex P1;
+    # applies to the night template too).
+    triggering = [
+        motion_id
+        for motion_id, motion in resolved.items()
+        if motion.get("state") == "on"
+    ]
+    if not triggering:
         return []
 
-    evidence = {
+    evidence: dict[str, Any] = {
         "rule_id": rule.get("rule_id"),
         "template_id": rule.get("template_id"),
-        "is_night": snapshot["derived"]["is_night"],
-        "anyone_home": snapshot["derived"]["anyone_home"],
-        "motion_entity_ids": [str(motion_id) for motion_id in motion_ids],
-        "motion_states": {
-            motion_id: motion.get("state") for motion_id, motion in resolved.items()
-        },
-        "unresolved_entity_ids": unresolved,
     }
-    return [_build_finding(rule, list(resolved), evidence)]
+    if require_night:
+        # Keyed in this position so existing night-template findings keep
+        # their anomaly IDs (build_anomaly_id hashes evidence in insertion
+        # order).
+        evidence["is_night"] = snapshot["derived"]["is_night"]
+    evidence.update(
+        {
+            "anyone_home": snapshot["derived"]["anyone_home"],
+            "motion_entity_ids": [str(motion_id) for motion_id in motion_ids],
+            "motion_states": {
+                motion_id: motion.get("state") for motion_id, motion in resolved.items()
+            },
+            "unresolved_entity_ids": unresolved,
+        }
+    )
+    if (
+        not require_night
+        and snapshot["derived"]["is_night"]
+        and str(rule.get("severity") or "low") == "low"
+    ):
+        # Night motion while away carries at least the night template's
+        # severity judgment: the recommended quiet-hours config suppresses
+        # "low" overnight, which would otherwise mute the flagship 2am
+        # intrusion signal for users whose only motion coverage is this
+        # day-agnostic rule (issue #518 red-team review). A floor, not an
+        # override — a user-configured "high" is preserved. Severity is not
+        # hashed into the anomaly ID, so finding identity stays stable
+        # across the night boundary.
+        rule = {**rule, "severity": "medium"}
+    return [_build_finding(rule, triggering, evidence)]
 
 
 def _eval_unlocked_lock_when_home(

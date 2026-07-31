@@ -570,3 +570,439 @@ def test_covered_builtin_snapshot_no_camera_in_paths_returns_none() -> None:
     }
     result = _hga_component._covered_builtin_rule_for_candidate(candidate)
     assert result is None
+
+
+def _prose_motion_proposal_record(entity_id: str) -> dict[str, Any]:
+    return {
+        "candidate_id": "motion_kitchen_while_away",
+        "candidate": {
+            "candidate_id": "motion_kitchen_while_away",
+            "title": "Unexpected Kitchen Motion While Away",
+            "summary": (
+                f"Detects motion in the Kitchen area ({entity_id}) when no one is home."
+            ),
+            "pattern": "state_change",
+            "confidence_hint": 0.6,
+            "evidence_paths": ["entities[31].state", "derived.anyone_home"],
+        },
+        "notes": "",
+        "status": "draft",
+    }
+
+
+@pytest.mark.asyncio
+async def test_approve_rule_proposal_rejects_hallucinated_prose_entity(hass) -> None:
+    """
+    A prose-derived motion ID that resolves to no entity blocks approval.
+
+    Registering it would create a rule whose evaluator fails closed forever
+    while its semantic key suppresses re-proposals — a silent, permanent
+    monitoring gap (issue #518 red-team + Codex reviews).
+    """
+    proposal_store = ProposalStore(hass)
+    await proposal_store.async_append(
+        _prose_motion_proposal_record("binary_sensor.hallucinated_motion")
+    )
+    rule_registry = DummyRuleRegistry()
+    entry = _make_entry(
+        proposal_store=proposal_store,
+        rule_registry=rule_registry,
+        sentinel=SimpleNamespace(async_run_now=AsyncMock(return_value=True)),
+    )
+    response = await _hga_component._approve_rule_proposal(
+        entry,
+        hass=hass,
+        candidate_id="motion_kitchen_while_away",
+    )
+
+    assert response["status"] == "unsupported"
+    assert response["reason_code"] == "entities_unresolved"
+    assert response["details"]["unresolved_entity_ids"] == [
+        "binary_sensor.hallucinated_motion"
+    ]
+    assert rule_registry.added_rules == []
+
+
+@pytest.mark.asyncio
+async def test_approve_rule_proposal_accepts_existing_prose_entity(hass) -> None:
+    """The exact issue #518 candidate approves when its sensor exists."""
+    hass.states.async_set("binary_sensor.xiao_esp32_c5_espectre_motion", "off")
+    proposal_store = ProposalStore(hass)
+    await proposal_store.async_append(
+        _prose_motion_proposal_record("binary_sensor.xiao_esp32_c5_espectre_motion")
+    )
+    rule_registry = DummyRuleRegistry()
+    entry = _make_entry(
+        proposal_store=proposal_store,
+        rule_registry=rule_registry,
+        sentinel=SimpleNamespace(async_run_now=AsyncMock(return_value=True)),
+    )
+    response = await _hga_component._approve_rule_proposal(
+        entry,
+        hass=hass,
+        candidate_id="motion_kitchen_while_away",
+    )
+
+    assert response["status"] == "ok"
+    assert rule_registry.added_rules
+    assert rule_registry.added_rules[0]["params"]["motion_entity_ids"] == [
+        "binary_sensor.xiao_esp32_c5_espectre_motion"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_approve_rule_proposal_drops_unresolved_prose_entities(hass) -> None:
+    """Mixed resolved/hallucinated prose IDs approve with only the real ones."""
+    hass.states.async_set("binary_sensor.kitchen_motion", "off")
+    record = _prose_motion_proposal_record("binary_sensor.kitchen_motion")
+    record["candidate"]["summary"] = (
+        "Detects motion via binary_sensor.kitchen_motion and "
+        "binary_sensor.hallucinated_motion when no one is home."
+    )
+    proposal_store = ProposalStore(hass)
+    await proposal_store.async_append(record)
+    rule_registry = DummyRuleRegistry()
+    entry = _make_entry(
+        proposal_store=proposal_store,
+        rule_registry=rule_registry,
+        sentinel=SimpleNamespace(async_run_now=AsyncMock(return_value=True)),
+    )
+    response = await _hga_component._approve_rule_proposal(
+        entry,
+        hass=hass,
+        candidate_id="motion_kitchen_while_away",
+    )
+
+    assert response["status"] == "ok"
+    assert rule_registry.added_rules
+    assert rule_registry.added_rules[0]["params"]["motion_entity_ids"] == [
+        "binary_sensor.kitchen_motion"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_approve_rule_proposal_cover_requires_template_match(hass) -> None:
+    """
+    A key-based cover with different template semantics does not stand.
+
+    A motion-with-camera-evidence candidate keys as motion but normalizes
+    to motion_without_camera_activity; a plain motion rule must not swallow
+    it as already-active (issue #518 verification review P1).
+    """
+    hass.states.async_set("binary_sensor.kitchen_motion", "off")
+    record = {
+        "candidate_id": "kitchen_motion_no_camera",
+        "candidate": {
+            "candidate_id": "kitchen_motion_no_camera",
+            "title": "Motion without camera activity while away",
+            "summary": (
+                "Motion on binary_sensor.kitchen_motion with no camera "
+                "activity when no one is home."
+            ),
+            "pattern": "state_change",
+            "confidence_hint": 0.6,
+            "evidence_paths": [
+                "entities[entity_id=binary_sensor.kitchen_motion].state",
+                "camera_activity[entity_id=camera.kitchen]",
+                "derived.anyone_home",
+            ],
+        },
+        "notes": "",
+        "status": "draft",
+    }
+    proposal_store = ProposalStore(hass)
+    await proposal_store.async_append(record)
+    rule_registry = DummyRuleRegistry(
+        rules=[
+            {
+                "rule_id": "motion_kitchen_while_away",
+                "template_id": "motion_detected_while_away",
+                "params": {"motion_entity_ids": ["binary_sensor.kitchen_motion"]},
+                "enabled": True,
+            }
+        ]
+    )
+    entry = _make_entry(
+        proposal_store=proposal_store,
+        rule_registry=rule_registry,
+        sentinel=SimpleNamespace(async_run_now=AsyncMock(return_value=True)),
+    )
+    response = await _hga_component._approve_rule_proposal(
+        entry,
+        hass=hass,
+        candidate_id="kitchen_motion_no_camera",
+    )
+
+    assert response["status"] == "ok"
+    assert rule_registry.added_rules
+    assert (
+        rule_registry.added_rules[0]["template_id"] == "motion_without_camera_activity"
+    )
+
+
+@pytest.mark.asyncio
+async def test_approve_rule_proposal_rechecks_cover_after_dropping_ids(hass) -> None:
+    """
+    Dropping a hallucinated ID re-checks coverage with the reduced set.
+
+    Without the re-check a second overlapping rule registers under a
+    different ID — duplicate findings and notifications (issue #518
+    verification review).
+    """
+    hass.states.async_set("binary_sensor.kitchen_motion", "off")
+    record = _prose_motion_proposal_record("binary_sensor.kitchen_motion")
+    record["candidate"]["summary"] = (
+        "Detects motion via binary_sensor.kitchen_motion and "
+        "binary_sensor.hallucinated_motion when no one is home."
+    )
+    proposal_store = ProposalStore(hass)
+    await proposal_store.async_append(record)
+    rule_registry = DummyRuleRegistry(
+        rules=[
+            {
+                "rule_id": "existing_kitchen_motion_away",
+                "template_id": "motion_detected_while_away",
+                "params": {"motion_entity_ids": ["binary_sensor.kitchen_motion"]},
+                "enabled": True,
+            }
+        ]
+    )
+    entry = _make_entry(
+        proposal_store=proposal_store,
+        rule_registry=rule_registry,
+        sentinel=SimpleNamespace(async_run_now=AsyncMock(return_value=True)),
+    )
+    response = await _hga_component._approve_rule_proposal(
+        entry,
+        hass=hass,
+        candidate_id="motion_kitchen_while_away",
+    )
+
+    assert response["status"] == "covered_by_existing_rule"
+    assert response["rule_id"] == "existing_kitchen_motion_away"
+    assert response["overlapping_entity_ids"] == ["binary_sensor.kitchen_motion"]
+    assert rule_registry.added_rules == []
+
+
+@pytest.mark.asyncio
+async def test_approve_rule_proposal_unsupported_not_reported_covered(hass) -> None:
+    """
+    An unsupported candidate is never reported covered by a coarse key match.
+
+    A stale-sensor candidate keys exactly like an active away-motion rule,
+    but that rule cannot detect the dead sensor the user described — the
+    honest answer is unsupported (issue #518 verification round 3).
+    """
+    record = {
+        "candidate_id": "kitchen_motion_stale",
+        "candidate": {
+            "candidate_id": "kitchen_motion_stale",
+            "title": "Kitchen motion sensor stale while away",
+            "summary": (
+                "binary_sensor.kitchen_motion has not updated for days "
+                "when no one is home."
+            ),
+            "pattern": "state_change",
+            "confidence_hint": 0.6,
+            "evidence_paths": [
+                "entities[entity_id=binary_sensor.kitchen_motion].state",
+                "derived.anyone_home",
+            ],
+        },
+        "notes": "",
+        "status": "draft",
+    }
+    proposal_store = ProposalStore(hass)
+    await proposal_store.async_append(record)
+    rule_registry = DummyRuleRegistry(
+        rules=[
+            {
+                "rule_id": "motion_kitchen_while_away",
+                "template_id": "motion_detected_while_away",
+                "params": {"motion_entity_ids": ["binary_sensor.kitchen_motion"]},
+                "enabled": True,
+            }
+        ]
+    )
+    entry = _make_entry(
+        proposal_store=proposal_store,
+        rule_registry=rule_registry,
+        sentinel=SimpleNamespace(async_run_now=AsyncMock(return_value=True)),
+    )
+    response = await _hga_component._approve_rule_proposal(
+        entry,
+        hass=hass,
+        candidate_id="kitchen_motion_stale",
+    )
+
+    assert response["status"] == "unsupported"
+    assert rule_registry.added_rules == []
+
+
+@pytest.mark.asyncio
+async def test_approve_rule_proposal_superset_rule_covers_reduced_set(hass) -> None:
+    """
+    A same-template any-of rule covering a superset of the reduced set counts.
+
+    An existing [kitchen, hall] rule already alerts on kitchen motion, so a
+    candidate reduced to [kitchen] must not register a duplicate
+    (issue #518 verification round 3).
+    """
+    hass.states.async_set("binary_sensor.kitchen_motion", "off")
+    record = _prose_motion_proposal_record("binary_sensor.kitchen_motion")
+    record["candidate"]["summary"] = (
+        "Detects motion via binary_sensor.kitchen_motion and "
+        "binary_sensor.hallucinated_motion when no one is home."
+    )
+    proposal_store = ProposalStore(hass)
+    await proposal_store.async_append(record)
+    rule_registry = DummyRuleRegistry(
+        rules=[
+            {
+                "rule_id": "all_interior_motion_away",
+                "template_id": "motion_detected_while_away",
+                "params": {
+                    "motion_entity_ids": [
+                        "binary_sensor.kitchen_motion",
+                        "binary_sensor.hall_motion",
+                    ]
+                },
+                "enabled": True,
+            }
+        ]
+    )
+    entry = _make_entry(
+        proposal_store=proposal_store,
+        rule_registry=rule_registry,
+        sentinel=SimpleNamespace(async_run_now=AsyncMock(return_value=True)),
+    )
+    response = await _hga_component._approve_rule_proposal(
+        entry,
+        hass=hass,
+        candidate_id="motion_kitchen_while_away",
+    )
+
+    assert response["status"] == "covered_by_existing_rule"
+    assert response["rule_id"] == "all_interior_motion_away"
+    assert response["overlapping_entity_ids"] == ["binary_sensor.kitchen_motion"]
+    assert rule_registry.added_rules == []
+
+
+@pytest.mark.asyncio
+async def test_approve_rule_proposal_superset_covers_fully_resolved_set(hass) -> None:
+    """
+    The superset check also runs when every candidate ID resolves.
+
+    A kitchen-only candidate against an existing [kitchen, hall] any-of
+    rule must not register a duplicate (verification round 4).
+    """
+    hass.states.async_set("binary_sensor.kitchen_motion", "off")
+    record = _prose_motion_proposal_record("binary_sensor.kitchen_motion")
+    proposal_store = ProposalStore(hass)
+    await proposal_store.async_append(record)
+    rule_registry = DummyRuleRegistry(
+        rules=[
+            {
+                "rule_id": "all_interior_motion_away",
+                "template_id": "motion_detected_while_away",
+                "params": {
+                    "motion_entity_ids": [
+                        "binary_sensor.kitchen_motion",
+                        "binary_sensor.hall_motion",
+                    ]
+                },
+                "enabled": True,
+            }
+        ]
+    )
+    entry = _make_entry(
+        proposal_store=proposal_store,
+        rule_registry=rule_registry,
+        sentinel=SimpleNamespace(async_run_now=AsyncMock(return_value=True)),
+    )
+    response = await _hga_component._approve_rule_proposal(
+        entry,
+        hass=hass,
+        candidate_id="motion_kitchen_while_away",
+    )
+
+    assert response["status"] == "covered_by_existing_rule"
+    assert response["rule_id"] == "all_interior_motion_away"
+    assert rule_registry.added_rules == []
+
+
+@pytest.mark.asyncio
+async def test_approve_rule_proposal_all_of_template_not_superset_covered(hass) -> None:
+    """
+    All-of templates never cover subsets.
+
+    A [kitchen, hall] alarm-motion rule fires only when BOTH are active,
+    so it does not monitor kitchen-only events (verification round 5).
+    """
+    hass.states.async_set("binary_sensor.kitchen_motion", "off")
+    hass.states.async_set("alarm_control_panel.home_alarm", "disarmed")
+    record = {
+        "candidate_id": "kitchen_motion_alarm_disarmed",
+        "candidate": {
+            "candidate_id": "kitchen_motion_alarm_disarmed",
+            "title": "Kitchen motion at night while alarm disarmed",
+            "summary": (
+                "Motion on binary_sensor.kitchen_motion at night while the "
+                "alarm is disarmed."
+            ),
+            "pattern": "state_change",
+            "confidence_hint": 0.7,
+            "evidence_paths": [
+                "entities[entity_id=alarm_control_panel.home_alarm].state",
+                "entities[entity_id=binary_sensor.kitchen_motion].state",
+                "derived.is_night",
+            ],
+        },
+        "notes": "",
+        "status": "draft",
+    }
+    proposal_store = ProposalStore(hass)
+    await proposal_store.async_append(record)
+    rule_registry = DummyRuleRegistry(
+        rules=[
+            {
+                "rule_id": "all_motion_alarm_disarmed",
+                "template_id": "motion_detected_at_night_while_alarm_disarmed",
+                "params": {
+                    "alarm_entity_id": "alarm_control_panel.home_alarm",
+                    "motion_entity_ids": [
+                        "binary_sensor.kitchen_motion",
+                        "binary_sensor.hall_motion",
+                    ],
+                    "required_entity_ids": [],
+                },
+                "enabled": True,
+            }
+        ]
+    )
+    entry = _make_entry(
+        proposal_store=proposal_store,
+        rule_registry=rule_registry,
+        sentinel=SimpleNamespace(async_run_now=AsyncMock(return_value=True)),
+    )
+    response = await _hga_component._approve_rule_proposal(
+        entry,
+        hass=hass,
+        candidate_id="kitchen_motion_alarm_disarmed",
+    )
+
+    # The superset shortcut must not fire for the all-of template; whatever
+    # the final status, it must not be a superset-based cover by the
+    # two-sensor rule.
+    assert (
+        not (
+            response["status"] == "covered_by_existing_rule"
+            and response.get("rule_id") == "all_motion_alarm_disarmed"
+            and response.get("overlapping_entity_ids")
+            == ["binary_sensor.kitchen_motion"]
+        )
+        or rule_registry.added_rules == []
+    )
+    # Precise expectation: candidate registers its own rule.
+    assert response["status"] == "ok"
+    assert rule_registry.added_rules

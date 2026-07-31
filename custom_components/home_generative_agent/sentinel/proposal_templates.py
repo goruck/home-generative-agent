@@ -15,6 +15,7 @@ SUPPORTED_TEMPLATES = {
     "low_battery_sensors",
     "motion_detected_at_night_while_alarm_disarmed",
     "motion_detected_at_night_while_away",
+    "motion_detected_while_away",
     "motion_while_alarm_disarmed_and_home_present",
     "unavailable_sensors",
     "unavailable_sensors_while_home",
@@ -198,11 +199,31 @@ _NON_ENTRY_ID_TOKENS = (
 # Quote characters the discovery LLM sometimes wraps around entity IDs inside
 # evidence paths, e.g. entities[entity_ids contains 'binary_sensor.x'].state.
 _EVIDENCE_QUOTE_CHARS = "'\"`"
+# Dot-notation entity IDs embedded in candidate prose, e.g. "(binary_sensor.
+# xiao_esp32_c5_espectre_motion)". Lookarounds keep a domain-qualified ID from
+# matching inside a longer one (sensor.x inside binary_sensor.x); callers
+# filter on _HA_ENTITY_DOMAINS so snapshot paths (derived.anyone_home) and
+# ordinary prose ("e.g." never has a domain) don't read as entities.
+_TEXT_ENTITY_ID_PATTERN = re.compile(r"(?<![a-z0-9_.])([a-z_]+\.[a-z0-9_]+)")
 # Word-bounded so incidental prose ("this is alarming") doesn't read as an
 # alarm-system condition and divert a motion candidate into the
 # missing-alarm-entity failure path; "armed" is included so armed-system
 # candidates keep their alarm context (issue #516 review).
 _ALARM_TEXT_PATTERN = re.compile(r"\b(?:alarms?|(?:dis)?armed)\b")
+# Word-bounded lock wording ("blocked"/"locker" must not match): a motion
+# candidate whose prose carries a lock condition that resolved no lock
+# entity must stay unsupported rather than register a motion-only rule that
+# silently drops the lock predicate (issue #518 Codex adversarial P1).
+_LOCK_TEXT_PATTERN = re.compile(r"\b(?:un)?lock(?:s|ed)?\b")
+# Contrastive any-hour phrasing ("day or night", "not only at night"): the
+# candidate explicitly proposes all-hours coverage, so the bare "night"
+# substring must not narrow it to the night-gated template now that a
+# day-agnostic sibling exists (issue #518 red-team review).
+_ANY_HOUR_TEXT_PATTERN = re.compile(
+    r"\b(?:day (?:or|and) night|night (?:or|and) day|any ?time|any hour"
+    r"|24/7|around the clock|regardless of (?:the )?time"
+    r"|not (?:just|only) (?:at )?night|including night(?:time)?)\b"
+)
 
 
 @dataclass(frozen=True)
@@ -271,6 +292,13 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
         entry_ids = _find_text_entry_entity_ids(evidence_paths, text)
         entry_ids_from_text = bool(entry_ids)
     motion_ids = _find_motion_entity_ids(evidence_paths)
+    if not motion_ids:
+        # Discovery sometimes emits index-based evidence paths
+        # (entities[31].state, issue #518) that cannot resolve to an entity
+        # ID — the index is only meaningful against the snapshot the
+        # candidate was drafted from. The prose names the sensor directly,
+        # so fall back to motion-named dot-notation IDs found in the text.
+        motion_ids = _find_text_motion_entity_ids(text)
     person_ids = _find_entity_ids(evidence_paths, "person")
     sensor_ids = _find_sensor_entity_ids(evidence_paths)
     availability_ids = _find_availability_entity_ids(evidence_paths)
@@ -371,18 +399,19 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
     # not entries — only a genuine non-motion entry entity blocks this
     # branch (issue #516 review).
     non_motion_entry_ids = [e for e in entry_ids if e not in motion_ids]
-    if (
-        away_motion_ids
-        and not alarm_id
-        and not non_motion_entry_ids
-        and not lock_ids
-        and not battery_sensor_ids
-        and has_night
-        and presence == "away"
-        and _contains_any(text, ("motion", "vmd"))
-        and not _ALARM_TEXT_PATTERN.search(text)
-        and not _contains_any(text, ("unavailable", "offline", "unreachable"))
-    ):
+    is_away_motion = _is_away_motion_candidate(
+        away_motion_ids=away_motion_ids,
+        alarm_id=alarm_id,
+        non_motion_entry_ids=non_motion_entry_ids,
+        lock_ids=lock_ids,
+        battery_sensor_ids=battery_sensor_ids,
+        presence=presence,
+        text=text,
+    )
+    # Contrastive any-hour phrasing suppresses the night gate so "day or
+    # night" candidates keep the all-hours coverage they proposed instead of
+    # silently narrowing to the night template (issue #518 red-team review).
+    if is_away_motion and has_night and not _ANY_HOUR_TEXT_PATTERN.search(text):
         return NormalizationResult(
             normalized=NormalizedRule(
                 rule_id=_candidate_rule_id(
@@ -397,6 +426,37 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 # so close_entry would have no deterministic target and a
                 # non-sensitive execute tap could actuate an unrelated entry
                 # (issue #516 cross-model review).
+                suggested_actions=["check_camera"],
+            )
+        )
+
+    # motion_detected_while_away (issue #518): same shape as the night
+    # variant above but with no time-of-day gate — motion while nobody is
+    # home, any hour. The night branch precedes with the identical shared
+    # guard set plus has_night, so night-worded candidates always route
+    # there (unless contrastively any-hour worded); the shared guards keep
+    # alarm/entry/lock/battery/availability candidates on their existing
+    # routing. Two extra guards this branch only (the night branch keeps its
+    # shipped v3.22 capture to avoid rule-key churn — see TODOS.md):
+    # unknown-person candidates keep routing to the camera templates below
+    # (is_sensitive high-confidence must not silently downgrade to a low
+    # advisory rule), and camera-evidence candidates keep their
+    # motion_without_camera_activity correlation semantics (issue #518
+    # adversarial review). Severity and confidence follow the proposal
+    # (daytime motion while away has more benign explanations than night
+    # motion, hence low/0.6 vs medium/0.8).
+    if is_away_motion and not has_unknown_person_signal and camera_id is None:
+        return NormalizationResult(
+            normalized=NormalizedRule(
+                rule_id=_candidate_rule_id(
+                    candidate, default="motion_detected_while_away"
+                ),
+                template_id="motion_detected_while_away",
+                params={"motion_entity_ids": away_motion_ids},
+                severity="low",
+                confidence=float(candidate.get("confidence_hint", 0.6)),
+                is_sensitive=False,
+                # Advisory action only — same rationale as the night variant.
                 suggested_actions=["check_camera"],
             )
         )
@@ -908,6 +968,53 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
     )
 
 
+def _is_away_motion_candidate(  # noqa: PLR0913
+    *,
+    away_motion_ids: list[str],
+    alarm_id: str | None,
+    non_motion_entry_ids: list[str],
+    lock_ids: list[str],
+    battery_sensor_ids: list[str],
+    presence: str,
+    text: str,
+) -> bool:
+    """
+    Shared guard set for the two away-motion templates (issues #516/#518).
+
+    Entity guards keep alarm/entry/lock/battery candidates on their existing
+    routing. The text guards handle predicates that resolved no matching
+    entity (index-based evidence paths, issue #518 Codex adversarial P1): a
+    candidate whose prose carries a battery/lock/staleness/open-entry
+    condition must stay unsupported rather than register a motion rule that
+    silently drops that predicate — the registered rule would alert on plain
+    motion while the user believes the stated condition is enforced.
+    """
+    return bool(
+        away_motion_ids
+        and not alarm_id
+        and not non_motion_entry_ids
+        and not lock_ids
+        and not battery_sensor_ids
+        and presence == "away"
+        and _contains_any(text, ("motion", "vmd"))
+        and not _ALARM_TEXT_PATTERN.search(text)
+        and not _contains_any(text, ("unavailable", "offline", "unreachable"))
+        and not ("battery" in text and _contains_any(text, ("low", "below", "weak")))
+        and not _LOCK_TEXT_PATTERN.search(text)
+        # A stale/not-updated motion sensor candidate describes a dead
+        # sensor; routing it here would invert the semantics into alerting
+        # on normal motion (issue #518 adversarial review). Explicit stale
+        # wording only — _has_staleness_signal's broader "tracking"/"gps"
+        # terms would reject legitimate "motion tracking" candidates
+        # (verification round 5).
+        and not _contains_any(
+            text,
+            ("stale", "staleness", "not updated", "last seen", "last updated"),
+        )
+        and not (_ENTRY_TEXT_PATTERN.search(text) and "open" in text)
+    )
+
+
 def _build_entry_rule(
     candidate: dict[str, Any],
     template_id: str,
@@ -1123,6 +1230,30 @@ def _find_motion_entity_ids(evidence_paths: list[str]) -> list[str]:
     for path in evidence_paths:
         entity_id = _extract_entity_id_from_evidence_path(path)
         if entity_id is None:
+            continue
+        if "motion" in entity_id or "vmd" in entity_id:
+            ids.append(entity_id)
+    return sorted(set(ids))
+
+
+def _find_text_motion_entity_ids(text: str) -> list[str]:
+    """
+    Fallback motion detection for candidates without resolvable evidence IDs.
+
+    Discovery sometimes emits index-based evidence paths
+    (``entities[31].state``, issue #518) whose index is only meaningful
+    against the snapshot the candidate was drafted from and so never
+    resolves to an entity ID. The candidate prose names the sensor
+    directly; promote motion-named ``binary_sensor.`` dot-notation entity
+    IDs found in the text. Restricted to ``binary_sensor`` because these
+    IDs also feed the alarm-motion branches' rule params, whose state=="on"
+    evaluator can never match numeric ``sensor.*`` or ``light.*`` entities
+    (issue #514 invariant; #518 multi-reviewer finding).
+    """
+    ids: list[str] = []
+    for match in _TEXT_ENTITY_ID_PATTERN.finditer(text):
+        entity_id = match.group(1)
+        if not entity_id.startswith("binary_sensor."):
             continue
         if "motion" in entity_id or "vmd" in entity_id:
             ids.append(entity_id)

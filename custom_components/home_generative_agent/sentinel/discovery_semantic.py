@@ -10,9 +10,33 @@ _SEMANTIC_KEY_CONTEXT_RE = re.compile(r"\|(?:template|night|home|scope)=[^|]+")
 # evidence paths. Mirrors proposal_templates._EVIDENCE_QUOTE_CHARS; kept local
 # to avoid coupling the semantic-key module to the normalization module.
 _EVIDENCE_QUOTE_CHARS = "'\"`"
+# Dot-notation entity IDs embedded in candidate prose. Mirrors
+# proposal_templates._TEXT_ENTITY_ID_PATTERN / _find_text_motion_entity_ids
+# (issue #518): index-based evidence paths (entities[31].state) never resolve
+# to an entity ID, so without a prose fallback such a candidate keys
+# subject=unknown|entities= and can never dedup against its activated rule.
+# Motion-only, matching what the normalizer can actually normalize from
+# prose: a broader fallback would mint coverage keys for candidate classes
+# (lock/entry) that stay unsupported, letting an unresolvable candidate's
+# history key suppress a later fully-evidenced, approvable proposal
+# (issue #518 Codex structured review).
+_TEXT_ENTITY_ID_RE = re.compile(r"(?<![a-z0-9_.])([a-z_]+\.[a-z0-9_]+)")
+# Away/home occupancy wording. Word-bounded mirrors of
+# proposal_templates._AWAY_TERMS_PATTERN / _HOME_TERMS_PATTERN — the
+# normalizer accepts "no one at home"/"without occupants" as away, and a
+# substring "home" match here would key those candidates home=1 while their
+# activated rule keys home=0, breaking dedup (issue #518 Codex structured
+# review, empirically reproduced).
+_AWAY_TERMS_RE = re.compile(
+    r"\b(?:away|no(?:body|\s+one)\s+(?:is\s+)?(?:at\s+)?home|empty|unoccupied"
+    r"|no occupants|without occupants)\b"
+)
+_HOME_TERMS_RE = re.compile(
+    r"\b(?:someone home|occupied|home|present|occupants|residents)\b"
+)
 
 
-def candidate_semantic_key(  # noqa: PLR0912, PLR0915
+def candidate_semantic_key(  # noqa: C901, PLR0912, PLR0915
     candidate: dict[str, Any],
 ) -> str | None:
     """Build a stable semantic key for a discovery candidate."""
@@ -30,17 +54,33 @@ def candidate_semantic_key(  # noqa: PLR0912, PLR0915
     lock_ids = sorted(
         entity_id for entity_id in entity_ids if entity_id.startswith("lock.")
     )
-    window_ids = sorted(entity_id for entity_id in entity_ids if "window" in entity_id)
+    # Motion-named IDs with an entry substring (binary_sensor.front_door_motion,
+    # *_doorbell_motion) are motion sensors, not entries — without this the
+    # candidate keys subject=entry_door while its activated motion rule keys
+    # subject=motion and dedup never fires (#516 mirror, issue #518 review).
+    window_ids = sorted(
+        entity_id
+        for entity_id in entity_ids
+        if "window" in entity_id and not _is_motion_named(entity_id)
+    )
     door_ids = sorted(
         entity_id
         for entity_id in entity_ids
-        if "door" in entity_id or "entry" in entity_id
+        if ("door" in entity_id or "entry" in entity_id)
+        and not _is_motion_named(entity_id)
     )
     motion_ids = sorted(
-        entity_id
-        for entity_id in entity_ids
-        if "motion" in entity_id or "vmd" in entity_id
+        entity_id for entity_id in entity_ids if _is_motion_named(entity_id)
     )
+    if not motion_ids:
+        # Index-based evidence paths (entities[31].state, issue #518) carry
+        # no entity ID — fall back to motion-named binary_sensor IDs in the
+        # prose so the candidate keys the same subject/entities as its
+        # activated rule. Gated per-class (no *motion* evidence resolved,
+        # not "no evidence at all") to mirror the normalizer: a candidate
+        # citing a person tracker in evidence plus an index-based motion
+        # path still normalizes from prose (issue #518 adversarial review).
+        motion_ids = _extract_text_motion_ids(text)
     sensor_ids = sorted(
         entity_id
         for entity_id in entity_ids
@@ -78,12 +118,42 @@ def candidate_semantic_key(  # noqa: PLR0912, PLR0915
         predicate = "unlocked"
     elif "open" in text:
         predicate = "open"
-    elif "battery" in text and _contains_any(text, ("low", "below", "under")):
-        predicate = "low_battery"
     elif _contains_any(text, ("unavailable", "offline", "unreachable")):
         predicate = "unavailable"
     elif "disarmed" in text:
         predicate = "disarmed"
+    elif (
+        (camera_ids or _contains_any(text, ("camera", "cam")))
+        and _contains_any(
+            text,
+            ("unknown", "unrecognized", "stranger", "unidentified", "indeterminate"),
+        )
+        and _contains_any(
+            text,
+            ("person", "people", "face", "occupant", "resident"),
+        )
+        # The normalizer's lock-battery branch precedes its camera branches:
+        # a compound candidate citing a lock plus low-battery wording
+        # normalizes to low_battery_sensors, so it must not key as an
+        # unknown-person camera candidate (verification round 4).
+        and not (lock_ids and "battery" in text)
+    ):
+        # Checked before the battery/power/motion legs, mirroring the
+        # normalizer's branch order (camera branches precede the battery
+        # and power branches): an unknown-person camera candidate that also
+        # cites a motion sensor or a power spike normalizes to the
+        # sensitive camera template, so keying it subject=motion or
+        # predicate=power_anomaly would let a plain motion or baseline
+        # rule's coverage check silently swallow the camera proposal
+        # (issue #518 verification reviews). Term lists mirror
+        # proposal_templates._UNKNOWN_TERMS/_PERSON_TERMS ("occupant"/
+        # "resident" cover their plurals as substrings). Text-only camera
+        # signals key entities= to match any-camera rules.
+        subject = "camera"
+        predicate = "unknown_person"
+        entities = camera_ids
+    elif "battery" in text and _contains_any(text, ("low", "below", "under")):
+        predicate = "low_battery"
     elif _contains_any(
         text,
         ("power", "energy", "watt", "consumption", "kilowatt", "baseline", "deviation"),
@@ -91,16 +161,21 @@ def candidate_semantic_key(  # noqa: PLR0912, PLR0915
         predicate = "power_anomaly"
         if not entities and sensor_ids:
             entities = sensor_ids
+    elif subject != "unknown" and _contains_any(
+        text,
+        ("stale", "staleness", "not updated", "last seen", "last updated"),
+    ):
+        # Mirrors the normalizer's staleness guard: a stale/dead-sensor
+        # candidate must not key predicate=active, or an active motion rule
+        # on the same sensor makes discovery drop it as already-covered
+        # before the approval gate can return the honest "unsupported"
+        # (verification round 4). Subject-less staleness candidates keep
+        # keying None so identity-hash dedup applies — a shared
+        # subject=unknown|predicate=staleness|entities= key would collide
+        # across unrelated stale-tracker candidates.
+        predicate = "staleness"
     elif "motion" in text or "activity" in text:
         predicate = "active"
-    elif (
-        camera_ids
-        and _contains_any(text, ("unknown", "unrecognized", "stranger"))
-        and _contains_any(text, ("person", "people", "face"))
-    ):
-        subject = "camera"
-        predicate = "unknown_person"
-        entities = camera_ids
     if predicate == "unavailable" and sensor_ids:
         subject = "sensor"
         entities = sensor_ids
@@ -113,20 +188,9 @@ def candidate_semantic_key(  # noqa: PLR0912, PLR0915
     # "not derived.anyone_home" is the LLM's canonical absence-of-occupancy
     # path; without this, an evidence-only away candidate keys home=any and
     # never dedups against its activated home=0 rule (issue #516 review).
-    if "not derived.anyone_home" in evidence_paths or _contains_any(
-        text,
-        (
-            "no one home",
-            "nobody home",
-            "no one is home",
-            "nobody is home",
-            "away",
-            "empty",
-            "unoccupied",
-        ),
-    ):
+    if "not derived.anyone_home" in evidence_paths or _AWAY_TERMS_RE.search(text):
         home = "0"
-    elif _contains_any(text, ("someone home", "occupied", "home", "present")):
+    elif _HOME_TERMS_RE.search(text):
         home = "1"
     if "derived.anyone_home" in evidence_paths and home == "any":
         home = "1"
@@ -144,7 +208,9 @@ def candidate_semantic_key(  # noqa: PLR0912, PLR0915
     )
 
 
-def rule_semantic_key(rule: dict[str, Any]) -> str | None:  # noqa: C901, PLR0911, PLR0912
+def rule_semantic_key(  # noqa: C901, PLR0911, PLR0912, PLR0915
+    rule: dict[str, Any],
+) -> str | None:
     """Build a stable semantic key for an active/generated rule."""
     template_id = str(rule.get("template_id", ""))
     params = rule.get("params", {}) or {}
@@ -211,6 +277,14 @@ def rule_semantic_key(rule: dict[str, Any]) -> str | None:  # noqa: C901, PLR091
             return None
         return (
             "v1|subject=motion|predicate=active|night=1|home=0|scope=any|"
+            f"entities={','.join(motion_ids)}"
+        )
+    if template_id == "motion_detected_while_away":
+        motion_ids = sorted(set(_string_list(params.get("motion_entity_ids"))))
+        if not motion_ids:
+            return None
+        return (
+            "v1|subject=motion|predicate=active|night=any|home=0|scope=any|"
             f"entities={','.join(motion_ids)}"
         )
     if template_id == "unavailable_sensors_while_home":
@@ -316,6 +390,20 @@ def _extract_entity_ids(evidence_paths: list[str]) -> list[str]:
             if entity_id:
                 entity_ids.append(entity_id)
     return entity_ids
+
+
+def _is_motion_named(entity_id: str) -> bool:
+    return "motion" in entity_id or "vmd" in entity_id
+
+
+def _extract_text_motion_ids(text: str) -> list[str]:
+    """Motion-named binary_sensor IDs written in candidate prose (#518)."""
+    entity_ids: list[str] = []
+    for match in _TEXT_ENTITY_ID_RE.finditer(text):
+        entity_id = match.group(1)
+        if entity_id.startswith("binary_sensor.") and _is_motion_named(entity_id):
+            entity_ids.append(entity_id)
+    return sorted(set(entity_ids))
 
 
 def _string_list(value: Any) -> list[str]:

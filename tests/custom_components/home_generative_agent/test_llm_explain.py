@@ -258,3 +258,19 @@ def test_display_type_prefers_template_label_for_slug_rule_ids() -> None:
         is_sensitive=False,
     )
     assert _display_type(finding) == "Motion at night while away"
+
+
+def test_friendly_type_motion_while_away() -> None:
+    """Issue #518: the day-agnostic away-motion template gets a clean label."""
+    assert _friendly_type("motion_detected_while_away") == "Motion while away"
+    finding = AnomalyFinding(
+        anomaly_id="slug-518",
+        type="motion_kitchen_while_away",
+        severity="low",
+        confidence=0.6,
+        triggering_entities=["binary_sensor.xiao_esp32_c5_espectre_motion"],
+        evidence={"template_id": "motion_detected_while_away"},
+        suggested_actions=["check_camera"],
+        is_sensitive=False,
+    )
+    assert _display_type(finding) == "Motion while away"

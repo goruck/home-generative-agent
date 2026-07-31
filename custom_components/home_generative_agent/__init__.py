@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from types import MappingProxyType
@@ -697,9 +698,10 @@ async def _promote_discovery_candidate(  # noqa: PLR0911
     return {"status": "ok", "candidate_id": candidate_id}
 
 
-async def _approve_rule_proposal(  # noqa: PLR0911
+async def _approve_rule_proposal(  # noqa: PLR0911, PLR0912, PLR0915
     entry: HGAConfigEntry,
     *,
+    hass: HomeAssistant | None = None,
     candidate_id: str,
     notes: str = "",
 ) -> dict[str, Any]:
@@ -712,27 +714,45 @@ async def _approve_rule_proposal(  # noqa: PLR0911
     if not candidate:
         return {"status": "not_found", "candidate_id": candidate_id}
 
+    normalization = explain_normalize_candidate(candidate)
+    normalized = normalization.normalized
+
     covered = _covered_rule_for_candidate(entry, candidate)
     if covered is not None:
         covered_rule_id, overlapping_entities = covered
-        await proposal_store.async_update_status(
-            candidate_id,
-            "covered_by_existing_rule",
-            notes,
-            extra={
-                "covered_rule_id": covered_rule_id,
+        # Key-based DYNAMIC-rule coverage is coarser than template
+        # semantics: an unknown-person camera candidate that also cites a
+        # motion sensor must not be swallowed as "already active" by a
+        # plain motion rule — the sensitive camera semantics would be
+        # silently lost — and an unsupported candidate (e.g. a stale-sensor
+        # request keying like an active motion rule) gets the honest
+        # "unsupported" response instead of a false cover (issue #518
+        # verification reviews). Built-in rule covers (not present in the
+        # dynamic registry) are matched by their own targeted semantics in
+        # _covered_builtin_rule_for_candidate and always stand.
+        covered_rule = rule_registry.find_rule(covered_rule_id)
+        covered_template = str((covered_rule or {}).get("template_id") or "")
+        if covered_rule is None or (
+            normalized is not None
+            and covered_template
+            and covered_template == normalized.template_id
+        ):
+            await proposal_store.async_update_status(
+                candidate_id,
+                "covered_by_existing_rule",
+                notes,
+                extra={
+                    "covered_rule_id": covered_rule_id,
+                    "overlapping_entity_ids": overlapping_entities,
+                },
+            )
+            return {
+                "status": "covered_by_existing_rule",
+                "candidate_id": candidate_id,
+                "rule_id": covered_rule_id,
                 "overlapping_entity_ids": overlapping_entities,
-            },
-        )
-        return {
-            "status": "covered_by_existing_rule",
-            "candidate_id": candidate_id,
-            "rule_id": covered_rule_id,
-            "overlapping_entity_ids": overlapping_entities,
-        }
+            }
 
-    normalization = explain_normalize_candidate(candidate)
-    normalized = normalization.normalized
     if normalized is None:
         LOGGER.info(
             "Proposal approval unsupported for candidate %s: reason=%s details=%s",
@@ -755,6 +775,105 @@ async def _approve_rule_proposal(  # noqa: PLR0911
             "reason_code": normalization.reason_code,
             "details": normalization.details or {},
         }
+
+    # Motion entity IDs can come from candidate prose (index-based evidence
+    # paths, issue #518), and prose is LLM output: a hallucinated or
+    # paraphrased sensor name would register a rule whose evaluator fails
+    # closed forever while its semantic key suppresses re-proposals — a
+    # silent, permanent monitoring gap the user believes is active
+    # (issue #518 red-team + Codex reviews). Resolve against live states;
+    # drop unknown IDs, and refuse the approval when none remain.
+    motion_entity_ids = normalized.params.get("motion_entity_ids")
+    if hass is not None and isinstance(motion_entity_ids, list) and motion_entity_ids:
+        resolved_motion_ids = [
+            entity_id
+            for entity_id in motion_entity_ids
+            if isinstance(entity_id, str) and hass.states.get(entity_id) is not None
+        ]
+        unresolved_motion_ids = [
+            entity_id
+            for entity_id in motion_entity_ids
+            if entity_id not in resolved_motion_ids
+        ]
+        if not resolved_motion_ids:
+            LOGGER.info(
+                "Proposal approval rejected for candidate %s: no configured "
+                "motion entity exists (%s)",
+                candidate_id,
+                unresolved_motion_ids,
+            )
+            await proposal_store.async_update_status(
+                candidate_id,
+                "unsupported",
+                notes,
+                extra={
+                    "normalization_reason": "entities_unresolved",
+                    "unresolved_entity_ids": unresolved_motion_ids,
+                },
+            )
+            return {
+                "status": "unsupported",
+                "candidate_id": candidate_id,
+                "reason_code": "entities_unresolved",
+                "details": {"unresolved_entity_ids": unresolved_motion_ids},
+            }
+        if unresolved_motion_ids:
+            normalized = replace(
+                normalized,
+                params={
+                    **normalized.params,
+                    "motion_entity_ids": resolved_motion_ids,
+                },
+            )
+    # Same-template any-of superset coverage: the key-based check above uses
+    # exact entity-set equality, so an existing [kitchen, hall] rule does not
+    # cover a kitchen-only candidate there — yet it already alerts on every
+    # sensor this candidate would, and registering a second rule guarantees
+    # duplicate findings on each event. Runs for fully resolved candidates
+    # and for sets reduced by the hallucination filter alike (issue #518
+    # verification rounds 3-4). Restricted to the two ANY-OF away-motion
+    # templates: motion_while_alarm_disarmed_and_home_present is all-of (a
+    # [kitchen, hall] rule fires only when BOTH are active, so it does NOT
+    # cover a kitchen-only candidate), and alarm-motion templates carry
+    # alarm params that must also match (verification round 5).
+    final_motion_ids = normalized.params.get("motion_entity_ids")
+    if (
+        normalized.template_id
+        in {"motion_detected_while_away", "motion_detected_at_night_while_away"}
+        and isinstance(final_motion_ids, list)
+        and final_motion_ids
+    ):
+        for existing_rule in rule_registry.list_rules():
+            if str(existing_rule.get("template_id") or "") != normalized.template_id:
+                continue
+            existing_motion = {
+                entity_id
+                for entity_id in (existing_rule.get("params") or {}).get(
+                    "motion_entity_ids", []
+                )
+                if isinstance(entity_id, str)
+            }
+            if not existing_motion or not existing_motion.issuperset(final_motion_ids):
+                continue
+            overlapping_entities = sorted(
+                existing_motion.intersection(final_motion_ids)
+            )
+            existing_rule_id = str(existing_rule.get("rule_id") or "")
+            await proposal_store.async_update_status(
+                candidate_id,
+                "covered_by_existing_rule",
+                notes,
+                extra={
+                    "covered_rule_id": existing_rule_id,
+                    "overlapping_entity_ids": overlapping_entities,
+                },
+            )
+            return {
+                "status": "covered_by_existing_rule",
+                "candidate_id": candidate_id,
+                "rule_id": existing_rule_id,
+                "overlapping_entity_ids": overlapping_entities,
+            }
 
     covered_specific = _covered_specific_rule_for_any_camera_normalized(
         entry,
@@ -3024,6 +3143,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         notes = str(call.data.get("notes", "") or "")
         return await _approve_rule_proposal(
             entry,
+            hass=hass,
             candidate_id=candidate_id,
             notes=notes,
         )
