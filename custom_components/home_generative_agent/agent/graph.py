@@ -1234,6 +1234,48 @@ def _ensure_array_items(schema: dict[str, Any]) -> dict[str, Any]:
     return schema
 
 
+def _sanitize_any_of_required(schema: dict[str, Any]) -> dict[str, Any]:
+    """
+    Strip 'required' from anyOf branches that aren't type:object, or whose
+    required properties aren't defined in that branch's 'properties'.
+
+    Gemini rejects 'required' on non-OBJECT anyOf variants, and rejects
+    required entries that reference an undefined property. voluptuous_openapi
+    (vol.Any(...)) and pydantic Optional/Union schemas can emit both, e.g.
+    ``{"anyOf": [{"required": ["x"]}, {"type": "array", ...}]}``.
+    """
+    if "anyOf" in schema:
+        new_variants = []
+        for variant in schema["anyOf"]:
+            if isinstance(variant, dict):
+                variant = _sanitize_any_of_required(variant)
+                if "required" in variant:
+                    props = variant.get("properties", {})
+                    if variant.get("type") != "object":
+                        variant = {
+                            k: v for k, v in variant.items() if k != "required"
+                        }
+                    else:
+                        req = [r for r in variant["required"] if r in props]
+                        variant = (
+                            {**variant, "required": req}
+                            if req
+                            else {k: v for k, v in variant.items() if k != "required"}
+                        )
+            new_variants.append(variant)
+        schema = {**schema, "anyOf": new_variants}
+    if "properties" in schema:
+        schema = {
+            **schema,
+            "properties": {
+                k: _sanitize_any_of_required(v) for k, v in schema["properties"].items()
+            },
+        }
+    if isinstance(schema.get("items"), dict):
+        schema = {**schema, "items": _sanitize_any_of_required(schema["items"])}
+    return schema
+
+
 def _format_and_dedupe_tools(
     raw_tools: list[RawTool],
 ) -> tuple[list[dict[str, Any]], dict[str, str]]:
@@ -1257,6 +1299,9 @@ def _format_and_dedupe_tools(
             parameters["properties"] = {}
         # Gemini requires 'items' on all type:array properties.
         parameters = _ensure_array_items(parameters)
+        # Gemini rejects 'required' on non-OBJECT anyOf branches, or entries
+        # referencing properties undefined in that branch.
+        parameters = _sanitize_any_of_required(parameters)
         selected_tools.append(
             {
                 "type": "function",
