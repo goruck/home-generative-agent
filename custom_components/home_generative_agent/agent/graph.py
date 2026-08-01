@@ -1236,8 +1236,7 @@ def _ensure_array_items(schema: dict[str, Any]) -> dict[str, Any]:
 
 def _sanitize_any_of_required(schema: dict[str, Any]) -> dict[str, Any]:
     """
-    Strip 'required' from anyOf branches that aren't type:object, or whose
-    required properties aren't defined in that branch's 'properties'.
+    Strip invalid 'required' entries from anyOf branches.
 
     Gemini rejects 'required' on non-OBJECT anyOf variants, and rejects
     required entries that reference an undefined property. voluptuous_openapi
@@ -1246,22 +1245,24 @@ def _sanitize_any_of_required(schema: dict[str, Any]) -> dict[str, Any]:
     """
     if "anyOf" in schema:
         new_variants = []
-        for variant in schema["anyOf"]:
-            if isinstance(variant, dict):
-                variant = _sanitize_any_of_required(variant)
-                if "required" in variant:
-                    props = variant.get("properties", {})
-                    if variant.get("type") != "object":
-                        variant = {
-                            k: v for k, v in variant.items() if k != "required"
+        for raw_variant in schema["anyOf"]:
+            variant = raw_variant
+            if isinstance(raw_variant, dict):
+                sanitized = _sanitize_any_of_required(raw_variant)
+                if "required" in sanitized:
+                    props = sanitized.get("properties", {})
+                    if sanitized.get("type") != "object":
+                        sanitized = {
+                            k: v for k, v in sanitized.items() if k != "required"
                         }
                     else:
-                        req = [r for r in variant["required"] if r in props]
-                        variant = (
-                            {**variant, "required": req}
+                        req = [r for r in sanitized["required"] if r in props]
+                        sanitized = (
+                            {**sanitized, "required": req}
                             if req
-                            else {k: v for k, v in variant.items() if k != "required"}
+                            else {k: v for k, v in sanitized.items() if k != "required"}
                         )
+                variant = sanitized
             new_variants.append(variant)
         schema = {**schema, "anyOf": new_variants}
     if "properties" in schema:
