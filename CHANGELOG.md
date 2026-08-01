@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.23.1] - 2026-08-01
+
+### Fixed
+
+- **Locale-language battery proposals can now be approved** — [@hruba202](https://github.com/hruba202)'s Czech-prose discovery proposal for a door-lock battery ([#522](https://github.com/goruck/home-generative-agent/issues/522)) was marked *unsupported* for three stacked reasons, all fixed: the `entities[sensor.x].state` evidence format is now parsed (index-based brackets still resolve nothing), the English low-battery signal is read from the machine-generated candidate ID when the title/summary are written in the home's language (matched on whole slug tokens, and scoped to battery routing only, so it can never change a proposal's night/occupancy coverage), and a single unambiguous locale-named sensor (Czech `baterie`) is promoted as the battery sensor. Thresholds now parse comma decimals ("pod 20,5 %" → 20.5) and candidate-ID-embedded values (`…_battery_below_10` → 10%), with an explicit percent in the summary taking precedence.
+- **Approving a battery proposal now verifies the sensor really is a battery** — each cited entity must exist and look like a battery-percent reading (battery device class, a `%` unit, or a battery-named ID, with a numeric state; a transiently `unavailable`/`unknown` sensor is tolerated). Sensors that fail the check are dropped from the rule, and when none survive the approval is refused with an honest reason (`not_battery_sensor` for entities that exist but aren't battery readings, `entities_unresolved` when nothing resolved) instead of registering a rule that would alert forever on, say, a temperature reading (21 °C is "below 40") or silently never fire on a text state.
+- **Battery proposals now dedup correctly against their approved rules** — the semantic keys that suppress re-proposals mirror the normalizer exactly: unified qualifier words (low/below/under/weak), battery candidates keyed on the battery sensor rather than a cited lock or contextual entity, and night/occupancy wording no longer stops a battery candidate from matching its always-on rule. The evidence-mismatch guard and the proposals card parse the new evidence format too, so card badges, severity, and the GitHub issue prefill agree with what the server registers — and ASCII locale candidate IDs slug to the same rule id on both sides (candidate IDs containing non-ASCII characters additionally get a short server-side digest suffix so distinct locale names cannot collapse into one rule).
+
 ## [3.23.0] - 2026-07-30
 
 ### Added

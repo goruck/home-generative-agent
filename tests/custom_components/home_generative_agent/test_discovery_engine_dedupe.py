@@ -15,6 +15,7 @@ from custom_components.home_generative_agent.sentinel.discovery_engine import (
     _STATIC_RULE_IDS,
     SentinelDiscoveryEngine,
     _candidate_identity_hash,
+    _entity_ids_from_evidence_paths,
     _entity_ids_from_key,
     _is_cumulative_energy_entity,
 )
@@ -1182,3 +1183,32 @@ async def test_monitoring_gap_excludes_cumulative_energy_entities(
     assert "sensor.washing_machine_switch_0_power" in gap_entities
     assert "sensor.fridge_switch_0_power" in gap_entities
     assert "sensor.dishwasher_switch_0_power" in gap_entities
+
+
+def test_entity_ids_from_evidence_paths_bare_bracket_format() -> None:
+    """
+    The hallucination-guard extractor parses all three evidence formats.
+
+    Without the bare-bracket alternative, all-bare-bracket evidence yields
+    an empty set (guard short-circuits) and mixed-format evidence reads a
+    legitimately-cited entity as a hallucination, silently dropping an
+    approvable candidate (issue #522 security review).
+    """
+    ids = _entity_ids_from_evidence_paths(
+        [
+            "entities[entity_id=sensor.named_battery].state",
+            "entities[entity_ids contains sensor.contained_battery].state",
+            "entities[sensor.zamek_vrata_baterie].state",
+            "entities['sensor.quoted_battery'].state",
+            "entities[''sensor.doublequoted_battery''].state",
+            "entities[31].state",
+            "not derived.anyone_home",
+        ]
+    )
+    assert ids == {
+        "sensor.named_battery",
+        "sensor.contained_battery",
+        "sensor.zamek_vrata_baterie",
+        "sensor.quoted_battery",
+        "sensor.doublequoted_battery",
+    }

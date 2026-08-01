@@ -71,9 +71,17 @@ _BASELINE_TEMPLATE_MARKERS: frozenset[str] = frozenset(
 )
 
 _ENTITIES_FIELD_RE = re.compile(r"\|entities=([^|]*)")
+# Third alternative: bare-bracket evidence format entities[sensor.foo].state
+# (issue #522). Without it, all-bare-bracket evidence yields an empty
+# evidence set — short-circuiting the entity-text mismatch guard — and
+# mixed-format evidence reads a legitimately-cited entity as a hallucination,
+# silently dropping an approvable candidate. Pseudo-domain tokens
+# (entities[derived.x]) are harmless here: the evidence set is only an
+# exclusion list matched against real snapshot entity IDs.
 _EVIDENCE_ENTITY_RE = re.compile(
     r"\bentity_id=([a-z0-9_]+\.[a-z0-9_]+)|"
-    r"\bentity_ids\s+contains\s+([a-z0-9_]+\.[a-z0-9_]+)"
+    r"\bentity_ids\s+contains\s+([a-z0-9_]+\.[a-z0-9_]+)|"
+    r"\bentities\[['\"`]*([a-z0-9_]+\.[a-z0-9_]+)"
 )
 _TEXT_TOKEN_RE = re.compile(r"[a-z0-9]+")
 _ENTITY_DESCRIPTOR_STOPWORDS: frozenset[str] = frozenset(
@@ -613,7 +621,7 @@ def _entity_ids_from_evidence_paths(evidence_paths: object) -> set[str]:
         if not isinstance(path, str):
             continue
         for match in _EVIDENCE_ENTITY_RE.finditer(path.lower()):
-            entity_id = match.group(1) or match.group(2)
+            entity_id = match.group(1) or match.group(2) or match.group(3)
             if entity_id:
                 entity_ids.add(entity_id)
     return entity_ids

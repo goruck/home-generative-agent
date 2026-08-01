@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import hashlib
+
 from custom_components.home_generative_agent.sentinel.proposal_templates import (
     _entry_kind,
     _extract_entity_id_from_evidence_path,
@@ -2834,3 +2836,383 @@ def test_issue_518_motion_tracking_wording_still_maps() -> None:
     normalized = normalize_candidate(candidate)
     assert normalized is not None
     assert normalized.template_id == "motion_detected_while_away"
+
+
+def _issue_522_candidate() -> dict[str, object]:
+    """Exact candidate from issue #522: Czech prose, bare-bracket evidence."""
+    return {
+        "candidate_id": "zamek_vrata_baterie_low_battery",
+        "title": "Nízká baterie zámku dveří",
+        "summary": (
+            "Baterie senzoru sensor.zamek_vrata_baterie klesla pod "
+            "nastavenou hranici kritické kapacity."
+        ),
+        "pattern": "threshold_breach",
+        "confidence_hint": 0.7,
+        "evidence_paths": ["entities[sensor.zamek_vrata_baterie].state"],
+    }
+
+
+def test_normalize_candidate_issue_522_locale_battery() -> None:
+    """
+    Czech-prose battery candidate routes via its candidate_id's English slug.
+
+    The prose carries no English keyword and the entity ID uses the Czech
+    "baterie" — the low-battery signal lives solely in the candidate_id.
+    """
+    normalized = normalize_candidate(_issue_522_candidate())
+    assert normalized is not None
+    assert normalized.template_id == "low_battery_sensors"
+    assert normalized.rule_id == "zamek_vrata_baterie_low_battery"
+    assert normalized.params == {
+        "sensor_entity_ids": ["sensor.zamek_vrata_baterie"],
+        "threshold": 40.0,
+    }
+    assert normalized.confidence == 0.7
+    assert normalized.suggested_actions == ["check_sensor"]
+
+
+def test_extract_entity_id_bare_bracket_format() -> None:
+    """entities[<entity_id>] resolves; index and non-entity brackets do not."""
+    assert (
+        _extract_entity_id_from_evidence_path(
+            "entities[sensor.zamek_vrata_baterie].state"
+        )
+        == "sensor.zamek_vrata_baterie"
+    )
+    assert (
+        _extract_entity_id_from_evidence_path("entities['lock.front_door'].state")
+        == "lock.front_door"
+    )
+    # Index-based brackets stay unresolvable (issue #518 semantics).
+    assert _extract_entity_id_from_evidence_path("entities[31].state") is None
+    # Dotted tokens without a known HA entity domain are snapshot paths.
+    assert _extract_entity_id_from_evidence_path("entities[derived.is_night]") is None
+
+
+def test_battery_fallback_excludes_other_sensor_kinds() -> None:
+    """The locale-battery fallback never promotes other recognizable kinds."""
+    candidate = _issue_522_candidate()
+    candidate["evidence_paths"] = [
+        "entities[sensor.zamek_vrata_baterie].state",
+        "entities[sensor.chodba_temperature].state",
+    ]
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "low_battery_sensors"
+    assert normalized.params["sensor_entity_ids"] == ["sensor.zamek_vrata_baterie"]
+
+
+def test_battery_fallback_requires_low_battery_signal() -> None:
+    """A fully-localized candidate (no English surface at all) stays unsupported."""
+    candidate = _issue_522_candidate()
+    candidate["candidate_id"] = "nizka_baterie_zamku_dveri"
+    result = explain_normalize_candidate(candidate)
+    assert result.normalized is None
+    assert result.reason_code == "unsupported_pattern"
+
+
+def test_battery_fallback_index_paths_stay_unsupported() -> None:
+    """A battery signal with only index-based evidence resolves no sensor."""
+    candidate = _issue_522_candidate()
+    candidate["evidence_paths"] = ["entities[7].state"]
+    result = explain_normalize_candidate(candidate)
+    assert result.normalized is None
+    assert result.reason_code == "missing_required_entities"
+    assert result.details is not None
+    assert result.details["required"] == ["battery_sensor"]
+
+
+def test_battery_fallback_multiple_locale_ids_stay_unsupported() -> None:
+    """
+    Two surviving locale-named sensors are ambiguous — neither is promoted.
+
+    The kind-token filter is English-only, so with several locale-named IDs
+    the fallback cannot tell which one is the battery; promoting both would
+    register an all-of rule that deadlocks or false-fires on the contextual
+    sensor's reading.
+    """
+    candidate = _issue_522_candidate()
+    candidate["evidence_paths"] = [
+        "entities[sensor.zamek_vrata_baterie].state",
+        "entities[sensor.chodba_vlhkost].state",
+    ]
+    result = explain_normalize_candidate(candidate)
+    assert result.normalized is None
+    assert result.reason_code == "missing_required_entities"
+    assert result.details is not None
+    assert result.details["required"] == ["battery_sensor"]
+
+
+def test_lock_battery_slug_signal_promotes_locale_sensor() -> None:
+    """
+    Lock-battery branch fires from the candidate_id slug alone (issue #522).
+
+    The prose is Czech, so the branch's low-battery signal comes from
+    battery_text; the locale-named sensor is promoted by the text fallback
+    while the binary_sensor twin — carrying no English exclusion token — is
+    kept out purely by the sensor.* domain gate (issue #514 invariant).
+    """
+    candidate = _issue_522_candidate()
+    candidate["evidence_paths"] = [
+        "entities[lock.zamek_vrata].state",
+        "entities[sensor.zamek_vrata_baterie].state",
+        "entities[binary_sensor.zamek_vrata_baterie].state",
+    ]
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "low_battery_sensors"
+    assert normalized.params["sensor_entity_ids"] == ["sensor.zamek_vrata_baterie"]
+
+
+def test_lock_battery_slug_signal_without_sensor_stays_unsupported() -> None:
+    """A slug-only lock-battery candidate with no sensor.* evidence fails honestly."""
+    candidate = _issue_522_candidate()
+    candidate["evidence_paths"] = ["entities[lock.zamek_vrata].state"]
+    result = explain_normalize_candidate(candidate)
+    assert result.normalized is None
+    assert result.reason_code == "unsupported_pattern"
+    assert result.details is not None
+    assert "lock battery" in str(result.details["reason"])
+
+
+def test_away_motion_guard_blocks_slug_battery_candidate() -> None:
+    """
+    A battery signal hidden in the candidate_id blocks away-motion routing.
+
+    The prose alone reads as night-away motion; without the battery_text
+    guard the candidate would register a motion_detected_at_night_while_away
+    rule for a sensor whose real problem is a low battery (issue #522
+    extension of the #516/#518 guard set).
+    """
+    candidate = {
+        "candidate_id": "hall_motion_battery_low",
+        "title": "Motion at night while away",
+        "summary": "The hall motion sensor reported motion at night while away.",
+        "pattern": "state_change",
+        "confidence_hint": 0.8,
+        "evidence_paths": [
+            "entities[binary_sensor.hall_motion].state",
+            "derived.is_night",
+            "not derived.anyone_home",
+        ],
+    }
+    result = explain_normalize_candidate(candidate)
+    assert result.normalized is None
+    assert result.reason_code == "missing_required_entities"
+    assert result.details is not None
+    assert result.details["required"] == ["battery_sensor"]
+
+
+def test_lock_battery_weak_wording_routes_to_battery_template() -> None:
+    """'weak' qualifies the lock-battery signal without 'low'/'below' present."""
+    candidate = {
+        "candidate_id": "front_lock_battery_weak",
+        "title": "Front lock battery weak",
+        "summary": "The front lock battery is weak and should be replaced.",
+        "pattern": "state_change",
+        "confidence_hint": 0.7,
+        "evidence_paths": [
+            "entities[entity_id=lock.front_door].state",
+            "entities[entity_id=sensor.front_door_lock_battery].state",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "low_battery_sensors"
+    assert normalized.params["sensor_entity_ids"] == ["sensor.front_door_lock_battery"]
+
+
+def test_battery_fallback_duplicate_paths_count_as_one_sensor() -> None:
+    """
+    Two evidence paths naming the same sensor are one survivor, not ambiguity.
+
+    The fallback dedups on entity ID before applying its single-survivor
+    rule, so bare-bracket and dot-notation spellings of the same sensor
+    still promote it.
+    """
+    candidate = _issue_522_candidate()
+    candidate["evidence_paths"] = [
+        "entities[sensor.zamek_vrata_baterie].state",
+        "sensor.zamek_vrata_baterie.state",
+    ]
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "low_battery_sensors"
+    assert normalized.params["sensor_entity_ids"] == ["sensor.zamek_vrata_baterie"]
+
+
+def test_lock_battery_with_locale_sensor_promotes_fallback() -> None:
+    """
+    A lock + locale-battery-sensor candidate routes to low_battery_sensors.
+
+    lock.* evidence must not count toward the fallback's single-target
+    ambiguity rule, and the lock-battery branch (which precedes unlocked-lock
+    routing) must accept the fallback-promoted sensor.
+    """
+    candidate = _issue_522_candidate()
+    candidate["evidence_paths"] = [
+        "entities[lock.zamek_vrata].state",
+        "entities[sensor.zamek_vrata_baterie].state",
+    ]
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "low_battery_sensors"
+    assert normalized.params["sensor_entity_ids"] == ["sensor.zamek_vrata_baterie"]
+
+
+def test_away_motion_slug_battery_signal_stays_unsupported() -> None:
+    """
+    A motion candidate whose candidate_id slug claims low_battery is vetoed.
+
+    Pinning the deliberate #522 tradeoff: the slug is the candidate's own
+    machine identity, so a low_battery slug on motion-shaped evidence is
+    treated like a prose battery predicate (issue #518 class) — the
+    candidate stays unsupported rather than register a motion rule that
+    silently drops the battery semantics the slug claims.
+    """
+    candidate = {
+        "candidate_id": "chodba_low_battery_motion",
+        "title": "Motion in the hallway while away",
+        "summary": (
+            "Detects motion via binary_sensor.chodba_motion when nobody is home."
+        ),
+        "pattern": "state_change",
+        "confidence_hint": 0.6,
+        "evidence_paths": [
+            "entities[binary_sensor.chodba_motion].state",
+            "not derived.anyone_home",
+        ],
+    }
+    result = explain_normalize_candidate(candidate)
+    assert result.normalized is None
+    assert result.reason_code == "missing_required_entities"
+    assert result.details is not None
+    assert result.details["required"] == ["battery_sensor"]
+
+
+def test_incidental_low_slug_substring_does_not_route_battery() -> None:
+    """
+    A slug containing "low" as an incidental substring is not a battery signal.
+
+    The generic battery branch keeps its legacy prose any-of predicate; the
+    slug counts only via the conjunctive battery+low/below/weak signal, so
+    "slow"/"flow" slug substrings cannot hijack routing (issue #522
+    security review).
+    """
+    candidate = {
+        "candidate_id": "slow_water_flow_alert",
+        "title": "Motion while away",
+        "summary": (
+            "Detects motion via binary_sensor.hall_motion when nobody is home."
+        ),
+        "pattern": "state_change",
+        "confidence_hint": 0.6,
+        "evidence_paths": [
+            "entities[binary_sensor.hall_motion].state",
+            "not derived.anyone_home",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "motion_detected_while_away"
+
+
+def test_under_wording_routes_to_battery_template() -> None:
+    """Routing treats "under" as a unified low-battery qualifier."""
+    candidate = _issue_522_candidate()
+    candidate["candidate_id"] = "zamek_vrata_baterie_battery_under_20"
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "low_battery_sensors"
+
+
+def test_threshold_percent_accepts_comma_decimals() -> None:
+    """Czech decimal-comma prose parses the full threshold, not its tail."""
+    candidate = _issue_522_candidate()
+    candidate["summary"] = (
+        "Baterie senzoru sensor.zamek_vrata_baterie klesla pod 20,5 %."
+    )
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.params["threshold"] == 20.5
+
+
+def test_candidate_rule_id_is_ascii_slug() -> None:
+    """
+    A locale candidate_id slugs to ASCII with a stable uniqueness digest.
+
+    Slugging drops non-ASCII characters, so distinct locale IDs would
+    collapse to the same rule_id and the second proposal would read as a
+    duplicate (issue #522 Codex verification round) — a digest suffix keeps
+    them unique while staying ASCII and deterministic.
+    """
+    candidate = _issue_522_candidate()
+    candidate["candidate_id"] = "baterie_nízká_low_battery"
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    digest = hashlib.sha256("baterie_nízká_low_battery".encode()).hexdigest()[:8]
+    assert normalized.rule_id == f"baterie_n_zk_low_battery_{digest}"
+
+
+def test_candidate_rule_id_non_latin_ids_stay_unique() -> None:
+    """Two fully non-Latin candidate IDs never collapse to one rule_id."""
+    first = _issue_522_candidate()
+    first["candidate_id"] = "玄関_low_battery"
+    second = _issue_522_candidate()
+    second["candidate_id"] = "寝室_low_battery"
+    normalized_first = normalize_candidate(first)
+    normalized_second = normalize_candidate(second)
+    assert normalized_first is not None
+    assert normalized_second is not None
+    assert normalized_first.rule_id != normalized_second.rule_id
+    assert normalized_first.rule_id.isascii()
+    assert normalized_second.rule_id.isascii()
+
+
+def test_battery_flow_slug_is_not_a_low_battery_signal() -> None:
+    """
+    "flow" inside a slug must not satisfy the "low" qualifier.
+
+    The slug is matched on whole tokens: "backup_battery_water_flow" has a
+    battery token but no low/below/under/weak token, so it must not promote
+    the flow sensor into a battery rule (issue #522 Codex adversarial,
+    reproduced pre-fix).
+    """
+    candidate = {
+        "candidate_id": "backup_battery_water_flow",
+        "title": "Průtok vody",
+        "summary": "Senzor sensor.prutok_vody hlásí neobvyklou hodnotu.",
+        "pattern": "threshold_breach",
+        "confidence_hint": 0.6,
+        "evidence_paths": ["entities[sensor.prutok_vody].state"],
+    }
+    result = explain_normalize_candidate(candidate)
+    assert result.normalized is None or (
+        result.normalized.template_id != "low_battery_sensors"
+    )
+
+
+def test_threshold_from_candidate_id_slug() -> None:
+    """
+    An explicit slug threshold beats the 40% default.
+
+    candidate_id "…_battery_below_10" with locale prose must register 10%,
+    not silently broaden to the default (issue #522 Codex adversarial).
+    """
+    candidate = _issue_522_candidate()
+    candidate["candidate_id"] = "zamek_vrata_baterie_battery_below_10"
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "low_battery_sensors"
+    assert normalized.params["threshold"] == 10.0
+
+
+def test_threshold_prose_percent_beats_slug_number() -> None:
+    """An explicit percent in prose outranks a slug-embedded threshold."""
+    candidate = _issue_522_candidate()
+    candidate["candidate_id"] = "zamek_vrata_baterie_battery_below_10"
+    candidate["summary"] = "Baterie senzoru sensor.zamek_vrata_baterie klesla pod 25 %."
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.params["threshold"] == 25.0

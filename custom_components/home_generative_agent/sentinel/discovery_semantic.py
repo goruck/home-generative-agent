@@ -19,8 +19,40 @@ _EVIDENCE_QUOTE_CHARS = "'\"`"
 # prose: a broader fallback would mint coverage keys for candidate classes
 # (lock/entry) that stay unsupported, letting an unresolvable candidate's
 # history key suppress a later fully-evidenced, approvable proposal
-# (issue #518 Codex structured review).
+# (issue #518 Codex structured review). Also reused by _extract_entity_ids
+# to shape-check bare-bracket evidence tokens (issue #522) — the domain
+# gate for that use lives in _BARE_BRACKET_DOMAINS below.
 _TEXT_ENTITY_ID_RE = re.compile(r"(?<![a-z0-9_.])([a-z_]+\.[a-z0-9_]+)")
+# Bare-bracket token shape: a dot-notation entity ID optionally followed by
+# an attribute suffix (entities[sensor.x.state], LLM output variance).
+# Mirrors proposal_templates._DOT_NOTATION_ENTITY_PATTERN — a fullmatch-only
+# check would reject the attribute-suffixed form the normalizer accepts,
+# keying entities= empty while the activated rule keys the sensor (issue
+# #522 testing review, empirically reproduced dedup break).
+_BARE_BRACKET_TOKEN_RE = re.compile(r"^([a-z_]+\.[a-z0-9_]+)(?:[.\[]|$)")
+# Domains accepted from bare-bracket evidence tokens (issue #522). Mirrors
+# proposal_templates._HA_ENTITY_DOMAINS; kept local per this module's
+# decoupling convention. Without the gate, snapshot-path tokens like
+# entities[derived.is_night] or entities[attributes.window_state] would key
+# pseudo-entities the normalizer resolves to nothing ("window" substring →
+# subject=entry_window), diverging candidate keys from their rule keys.
+_BARE_BRACKET_DOMAINS = frozenset(
+    {
+        "alarm_control_panel",
+        "binary_sensor",
+        "camera",
+        "cover",
+        "input_boolean",
+        "input_number",
+        "light",
+        "lock",
+        "media_player",
+        "person",
+        "sensor",
+        "switch",
+        "vacuum",
+    }
+)
 # Away/home occupancy wording. Word-bounded mirrors of
 # proposal_templates._AWAY_TERMS_PATTERN / _HOME_TERMS_PATTERN — the
 # normalizer accepts "no one at home"/"without occupants" as away, and a
@@ -34,6 +66,87 @@ _AWAY_TERMS_RE = re.compile(
 _HOME_TERMS_RE = re.compile(
     r"\b(?:someone home|occupied|home|present|occupants|residents)\b"
 )
+# Mirrors proposal_templates._LOW_BATTERY_QUALIFIERS — an asymmetric list
+# breaks dedup in both directions (issue #522 adversarial review).
+_LOW_BATTERY_QUALIFIERS = ("low", "below", "under", "weak")
+_SLUG_TOKEN_SPLIT_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _has_low_battery_signal(text: str, slug_text: str) -> bool:
+    """
+    Mirror of proposal_templates._has_low_battery_signal (issue #522).
+
+    Prose keeps substring semantics; the candidate_id slug is matched on
+    whole tokens, and each surface must carry the full conjunctive signal
+    on its own ("backup_battery_water_flow" must not qualify via "flow").
+    """
+    if "battery" in text and _contains_any(text, _LOW_BATTERY_QUALIFIERS):
+        return True
+    tokens = set(_SLUG_TOKEN_SPLIT_RE.split(slug_text))
+    return "battery" in tokens and any(
+        qualifier in tokens for qualifier in _LOW_BATTERY_QUALIFIERS
+    )
+
+
+# Mirrors proposal_templates._NON_BATTERY_ID_TOKENS for the battery-leg
+# entity normalization below; kept local per this module's decoupling
+# convention.
+_NON_BATTERY_ID_TOKENS = (
+    "power",
+    "energy",
+    "watt",
+    "voltage",
+    "current",
+    "temperature",
+    "humidity",
+    "illuminance",
+    "lux",
+    "pressure",
+    "co2",
+    "motion",
+    "door",
+    "window",
+    "occupancy",
+    "presence",
+    "smoke",
+    "gas",
+    "leak",
+    "moisture",
+    "flood",
+    "signal",
+    "rssi",
+    "linkquality",
+)
+
+
+def _battery_sensor_entity_ids(entity_ids: list[str]) -> list[str]:
+    """
+    Mirror of the normalizer's battery-sensor collection for key entities.
+
+    Battery-named ``sensor.*`` IDs win; otherwise the single unambiguous
+    non-excluded ``sensor.*`` survivor (the issue #522 locale fallback).
+    Returns [] when the normalizer would also resolve nothing.
+    """
+    named = sorted(
+        {
+            entity_id
+            for entity_id in entity_ids
+            if entity_id.startswith("sensor.") and "battery" in entity_id
+        }
+    )
+    if named:
+        return named
+    fallback = sorted(
+        {
+            entity_id
+            for entity_id in entity_ids
+            if entity_id.startswith("sensor.")
+            and not any(token in entity_id for token in _NON_BATTERY_ID_TOKENS)
+        }
+    )
+    if len(fallback) == 1:
+        return fallback
+    return []
 
 
 def candidate_semantic_key(  # noqa: C901, PLR0912, PLR0915
@@ -49,6 +162,14 @@ def candidate_semantic_key(  # noqa: C901, PLR0912, PLR0915
             str(candidate.get("suggested_type", "")),
         ]
     ).lower()
+    # Mirrors the normalizer's slug_text (issue #522): candidate_id is
+    # often the only English surface when the discovery LLM writes prose in
+    # the home's locale, and the normalizer routes such candidates to
+    # low_battery_sensors from the slug alone. Scoped to the battery
+    # predicate leg only — the normalizer keeps every other signal
+    # prose-only, and keying night/home/subject from slug tokens the
+    # normalizer ignores would break the key mirror.
+    slug_text = str(candidate.get("candidate_id", "")).lower()
     entity_ids = _extract_entity_ids(evidence_paths)
     camera_ids = sorted(_extract_camera_ids(evidence_paths))
     lock_ids = sorted(
@@ -114,7 +235,28 @@ def candidate_semantic_key(  # noqa: C901, PLR0912, PLR0915
         entities = sensor_ids
 
     predicate = "unknown"
-    if "unlocked" in text:
+    lock_battery_targets = (
+        _battery_sensor_entity_ids(entity_ids)
+        if lock_ids
+        and _has_low_battery_signal(text, slug_text)
+        # The normalizer's availability branch precedes its lock-battery
+        # branch — an unavailable lock-battery sensor routes to
+        # unavailable_sensors, so the hoist must not steal the predicate
+        # from the unavailable leg below (issue #522 verification round 2).
+        and not _contains_any(text, ("unavailable", "offline", "unreachable"))
+        else []
+    )
+    if lock_battery_targets:
+        # Mirrors the normalizer's lock-battery precedence (issue #522
+        # verification round): a lock candidate with a low-battery signal
+        # routes to low_battery_sensors BEFORE the unlocked-lock and
+        # open-entry branches, so "unlocked"/"open" prose on a compound
+        # lock-battery candidate must not steal the predicate — the key
+        # would never match the activated battery rule.
+        predicate = "low_battery"
+        subject = "sensor"
+        entities = lock_battery_targets
+    elif "unlocked" in text:
         predicate = "unlocked"
     elif "open" in text:
         predicate = "open"
@@ -136,7 +278,11 @@ def candidate_semantic_key(  # noqa: C901, PLR0912, PLR0915
         # a compound candidate citing a lock plus low-battery wording
         # normalizes to low_battery_sensors, so it must not key as an
         # unknown-person camera candidate (verification round 4).
-        and not (lock_ids and "battery" in text)
+        # Full conjunctive signal so a slug-only battery candidate (issue
+        # #522) keeps the same lock-battery precedence the normalizer
+        # applies — and prose with incidental "battery" but no qualifier
+        # keeps its camera keying, matching the normalizer branch order.
+        and not (lock_ids and _has_low_battery_signal(text, slug_text))
     ):
         # Checked before the battery/power/motion legs, mirroring the
         # normalizer's branch order (camera branches precede the battery
@@ -152,8 +298,19 @@ def candidate_semantic_key(  # noqa: C901, PLR0912, PLR0915
         subject = "camera"
         predicate = "unknown_person"
         entities = camera_ids
-    elif "battery" in text and _contains_any(text, ("low", "below", "under")):
+    elif _has_low_battery_signal(text, slug_text):
         predicate = "low_battery"
+        # Mirror the normalizer's battery routing (issue #522 adversarial
+        # review): it always registers subject=sensor rules on the
+        # battery-named sensor.* IDs (or the single fallback survivor),
+        # regardless of lock evidence, night wording, or occupancy — so the
+        # key must not carry a lock subject, contextual evidence entities,
+        # or night/home context the rule key (night=any|home=any) never has,
+        # or the activated rule can never dedup re-proposals.
+        battery_entity_ids = _battery_sensor_entity_ids(entity_ids)
+        if battery_entity_ids:
+            subject = "sensor"
+            entities = battery_entity_ids
     elif _contains_any(
         text,
         ("power", "energy", "watt", "consumption", "kilowatt", "baseline", "deviation"),
@@ -194,6 +351,15 @@ def candidate_semantic_key(  # noqa: C901, PLR0912, PLR0915
         home = "1"
     if "derived.anyone_home" in evidence_paths and home == "any":
         home = "1"
+    if predicate == "low_battery":
+        # The normalizer's battery templates ignore night/occupancy context
+        # entirely, and rule_semantic_key hardcodes night=any|home=any for
+        # low_battery_sensors — a battery candidate carrying night or
+        # occupancy wording would otherwise never dedup against its own
+        # activated rule and be re-proposed indefinitely (issue #522
+        # red-team review).
+        night = "any"
+        home = "any"
     if subject == "unknown" and _contains_any(text, ("window", "windows")):
         subject = "entry_window"
     if predicate == "unknown" and "open" in text:
@@ -389,6 +555,20 @@ def _extract_entity_ids(evidence_paths: list[str]) -> list[str]:
             entity_id = part.split("]")[0].strip().strip(_EVIDENCE_QUOTE_CHARS)
             if entity_id:
                 entity_ids.append(entity_id)
+        elif path.startswith("entities["):
+            # Bare-bracket format: entities[sensor.foo].state (issue #522).
+            # Mirrors proposal_templates._extract_entity_id_from_evidence_path:
+            # the bracket token must be a dot-notation entity ID with a known
+            # HA domain, so index-based brackets (entities[31].state, issue
+            # #518) and snapshot paths (entities[derived.is_night]) still
+            # resolve nothing.
+            token = path.split("entities[", 1)[1].split("]", 1)[0]
+            token = token.strip(_EVIDENCE_QUOTE_CHARS)
+            token_match = _BARE_BRACKET_TOKEN_RE.match(token)
+            if token_match is not None:
+                entity_id = token_match.group(1)
+                if entity_id.split(".", 1)[0] in _BARE_BRACKET_DOMAINS:
+                    entity_ids.append(entity_id)
     return entity_ids
 
 

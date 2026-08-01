@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -51,7 +52,10 @@ _ANYONE_HOME_FALSE_PATTERN = re.compile(
 _ANYONE_HOME_TRUE_PATTERN = re.compile(
     r"anyone_home\s*(?:==?)\s*(?:true|1)\b", re.IGNORECASE
 )
-_PERCENT_THRESHOLD_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*%")
+# Comma decimals cover locale prose (issue #522 red-team review: Czech
+# "klesla pod 20,5 %" would otherwise match the bare "5 %" and silently
+# register a 4x-lower threshold).
+_PERCENT_THRESHOLD_PATTERN = re.compile(r"(\d+(?:[.,]\d+)?)\s*%")
 _DOT_NOTATION_ENTITY_PATTERN = re.compile(r"^([a-z_]+\.[a-z0-9_]+)(?:[.\[]|$)")
 _HA_ENTITY_DOMAINS = frozenset(
     {
@@ -71,7 +75,7 @@ _HA_ENTITY_DOMAINS = frozenset(
     }
 )
 _RELATIVE_THRESHOLD_PATTERN = re.compile(
-    r"(?:at\s+or\s+below|below|under|<=|less than)\s*(\d+(?:\.\d+)?)"
+    r"(?:at\s+or\s+below|below|under|<=|less than)\s*(\d+(?:[.,]\d+)?)"
 )
 _HOURS_THRESHOLD_PATTERN = re.compile(
     r"(\d+(?:\.\d+)?)\s*(?:hour|hr)s?",
@@ -196,6 +200,38 @@ _NON_ENTRY_ID_TOKENS = (
     "carbon",
     "safety",
 )
+# Entity-ID tokens that disqualify a sensor.* from the text-driven battery
+# fallback — sensor kinds that commonly appear alongside battery candidates
+# but are never battery-level readings themselves. Promoting one would
+# poison the all-of low_battery_sensors evaluator: a non-numeric state
+# deadlocks the rule, a numeric non-percentage reading (temperature,
+# wattage) false-fires it against the percent threshold (issue #522).
+_NON_BATTERY_ID_TOKENS = (
+    "power",
+    "energy",
+    "watt",
+    "voltage",
+    "current",
+    "temperature",
+    "humidity",
+    "illuminance",
+    "lux",
+    "pressure",
+    "co2",
+    "motion",
+    "door",
+    "window",
+    "occupancy",
+    "presence",
+    "smoke",
+    "gas",
+    "leak",
+    "moisture",
+    "flood",
+    "signal",
+    "rssi",
+    "linkquality",
+)
 # Quote characters the discovery LLM sometimes wraps around entity IDs inside
 # evidence paths, e.g. entities[entity_ids contains 'binary_sensor.x'].state.
 _EVIDENCE_QUOTE_CHARS = "'\"`"
@@ -278,6 +314,19 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
             str(candidate.get("suggested_type", "")),
         ]
     ).lower()
+    # candidate_id is often the only English surface when the discovery LLM
+    # writes title/summary in the home's locale (issue #522: Czech prose
+    # whose low-battery signal lives solely in
+    # "zamek_vrata_baterie_low_battery"). Scoped to the battery checks only:
+    # feeding the slug into every text signal would let a key-echoing
+    # candidate_id (e.g. "...night=1...") silently narrow a day-agnostic
+    # proposal to the night template — the #518 under-coverage class.
+    slug_text = str(candidate.get("candidate_id", "")).lower()
+    # Threshold prose for the battery branches: slug tokens spaced out so
+    # "…_battery_below_10" contributes its explicit 10% threshold instead of
+    # silently broadening to the 40% default (issue #522 Codex adversarial).
+    # Prose patterns run first, so an explicit percent in the summary wins.
+    battery_threshold_text = f"{text} {_SLUG_TOKEN_SPLIT_RE.sub(' ', slug_text)}"
     lock_ids = _find_entity_ids(evidence_paths, "lock")
     alarm_id = _find_entity_id(evidence_paths, "alarm_control_panel")
     entry_ids = _find_entry_entity_ids(evidence_paths)
@@ -285,7 +334,9 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
     if not entry_ids and not lock_ids and alarm_id is None:
         # Entity IDs follow the user's locale (e.g. Czech "okno" for window),
         # so keyword matching on the ID can miss real entry sensors. The
-        # candidate text is always English — fall back to it (issue #504).
+        # candidate text is usually English — fall back to it (issue #504;
+        # prose can also be locale-written, issue #522, in which case this
+        # fallback misses and the candidate stays unsupported).
         # Skipped when lock/alarm entities resolved: lock candidates routinely
         # say "door" ("front door lock"), and a promoted non-entry sensor
         # would defeat the `not entry_ids` guards on those branches.
@@ -303,6 +354,14 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
     sensor_ids = _find_sensor_entity_ids(evidence_paths)
     availability_ids = _find_availability_entity_ids(evidence_paths)
     battery_sensor_ids = _find_battery_sensor_entity_ids(evidence_paths)
+    if not battery_sensor_ids and _has_low_battery_signal(text, slug_text):
+        # Entity IDs follow the user's locale (issue #522: Czech "baterie"
+        # in sensor.zamek_vrata_baterie), so the "battery" ID-token match
+        # can miss real battery sensors. When the candidate carries an
+        # explicit low-battery signal, promote sensor.* evidence IDs that
+        # are not some other recognizable sensor kind (same tolerant
+        # pattern as the issue #504 entry fallback).
+        battery_sensor_ids = _find_text_battery_sensor_entity_ids(evidence_paths)
     camera_id = _find_camera_id(evidence_paths, candidate)
     has_night = _has_night_signal(evidence_paths, text)
     presence = _presence_signal(evidence_paths, text)
@@ -407,6 +466,7 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
         battery_sensor_ids=battery_sensor_ids,
         presence=presence,
         text=text,
+        slug_text=slug_text,
     )
     # Contrastive any-hour phrasing suppresses the night gate so "day or
     # night" candidates keep the all-hours coverage they proposed instead of
@@ -615,7 +675,7 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
     # low_battery on a lock entity: battery signal takes priority over unlocked routing.
     # Requires a sensor.* battery entity — lock entities cannot be sensor_entity_ids.
-    if lock_ids and "battery" in text and _contains_any(text, ("low", "below", "weak")):
+    if lock_ids and _has_low_battery_signal(text, slug_text):
         if not battery_sensor_ids:
             return NormalizationResult(
                 normalized=None,
@@ -631,7 +691,9 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 template_id="low_battery_sensors",
                 params={
                     "sensor_entity_ids": battery_sensor_ids,
-                    "threshold": _extract_threshold_percent(text, default=40.0),
+                    "threshold": _extract_threshold_percent(
+                        battery_threshold_text, default=40.0
+                    ),
                 },
                 severity="low",
                 confidence=float(candidate.get("confidence_hint", 0.62)),
@@ -837,14 +899,23 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
             )
         )
 
-    if battery_sensor_ids and _contains_any(text, ("battery", "low", "below")):
+    # Prose keeps its legacy any-of predicate; the candidate_id slug counts
+    # only via the conjunctive signal so an incidental "low" substring in a
+    # slug ("slow", "flow") cannot route a non-battery candidate here
+    # (issue #522 security review).
+    if battery_sensor_ids and (
+        _contains_any(text, ("battery", "low", "below"))
+        or _has_low_battery_signal(text, slug_text)
+    ):
         return NormalizationResult(
             normalized=NormalizedRule(
                 rule_id=_candidate_rule_id(candidate, default="low_battery_sensors"),
                 template_id="low_battery_sensors",
                 params={
                     "sensor_entity_ids": battery_sensor_ids,
-                    "threshold": _extract_threshold_percent(text, default=40.0),
+                    "threshold": _extract_threshold_percent(
+                        battery_threshold_text, default=40.0
+                    ),
                 },
                 severity="low",
                 confidence=float(candidate.get("confidence_hint", 0.62)),
@@ -952,6 +1023,7 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
     return _normalization_failure(
         text=text,
+        slug_text=slug_text,
         summary=summary,
         candidate=candidate,
         alarm_id=alarm_id,
@@ -977,6 +1049,7 @@ def _is_away_motion_candidate(  # noqa: PLR0913
     battery_sensor_ids: list[str],
     presence: str,
     text: str,
+    slug_text: str,
 ) -> bool:
     """
     Shared guard set for the two away-motion templates (issues #516/#518).
@@ -999,7 +1072,7 @@ def _is_away_motion_candidate(  # noqa: PLR0913
         and _contains_any(text, ("motion", "vmd"))
         and not _ALARM_TEXT_PATTERN.search(text)
         and not _contains_any(text, ("unavailable", "offline", "unreachable"))
-        and not ("battery" in text and _contains_any(text, ("low", "below", "weak")))
+        and not _has_low_battery_signal(text, slug_text)
         and not _LOCK_TEXT_PATTERN.search(text)
         # A stale/not-updated motion sensor candidate describes a dead
         # sensor; routing it here would invert the semantics into alerting
@@ -1041,6 +1114,7 @@ def _entry_suggested_actions(entry_ids: list[str]) -> list[str]:
 def _normalization_failure(  # noqa: PLR0911, PLR0913
     *,
     text: str,
+    slug_text: str,
     summary: dict[str, Any],
     candidate: dict[str, Any],
     alarm_id: str | None,
@@ -1079,7 +1153,10 @@ def _normalization_failure(  # noqa: PLR0911, PLR0913
             reason_code="missing_required_entities",
             details={"required": ["motion"], **summary},
         )
-    if _contains_any(text, ("battery", "low", "below")) and not battery_sensor_ids:
+    if (
+        _contains_any(text, ("battery", "low", "below"))
+        or _has_low_battery_signal(text, slug_text)
+    ) and not battery_sensor_ids:
         return NormalizationResult(
             normalized=None,
             reason_code="missing_required_entities",
@@ -1142,6 +1219,7 @@ def _extract_entity_id_from_evidence_path(path: str) -> str | None:
     Handles:
     - ``entities[entity_id=domain.object_id]`` (snapshot query format)
     - ``entities[entity_ids contains domain.object_id].attr`` (discovery format)
+    - ``entities[domain.object_id].attr`` (bare-bracket format, issue #522)
     - ``domain.object_id`` or ``domain.object_id.attribute`` (dot-notation)
 
     Entity IDs may be wrapped in quotes (LLM output variance); quotes are
@@ -1153,6 +1231,20 @@ def _extract_entity_id_from_evidence_path(path: str) -> str | None:
     if path.startswith("entities[entity_ids contains "):
         token = path.split("entities[entity_ids contains ", 1)[1].split("]", 1)[0]
         return token.strip(_EVIDENCE_QUOTE_CHARS) or None
+    if path.startswith("entities["):
+        # Bare-bracket form: the bracket token must itself be a
+        # domain-qualified entity ID. Index-based brackets
+        # (entities[31].state, issue #518) stay unresolvable — the index is
+        # only meaningful against the snapshot the candidate was drafted
+        # from.
+        token = path.split("entities[", 1)[1].split("]", 1)[0]
+        token = token.strip(_EVIDENCE_QUOTE_CHARS)
+        m = _DOT_NOTATION_ENTITY_PATTERN.match(token)
+        if m:
+            entity_id = m.group(1)
+            if entity_id.split(".", 1)[0] in _HA_ENTITY_DOMAINS:
+                return entity_id
+        return None
     m = _DOT_NOTATION_ENTITY_PATTERN.match(path.strip(_EVIDENCE_QUOTE_CHARS))
     if m:
         entity_id = m.group(1)
@@ -1205,9 +1297,11 @@ def _find_text_entry_entity_ids(evidence_paths: list[str], text: str) -> list[st
 
     Entity IDs are named in the user's locale (e.g. Czech ``okno`` for
     window), so ``_find_entry_entity_ids`` keyword matching can miss real
-    entry sensors. The discovery LLM's candidate text is always English, so
-    when the text names a door/window/entry, promote binary_sensor/cover
-    evidence IDs that are not some other recognizable sensor kind.
+    entry sensors. The discovery LLM's candidate text is usually English
+    (though it can be locale prose too — issue #522 — in which case this
+    fallback misses and the candidate stays unsupported), so when the text
+    names a door/window/entry, promote binary_sensor/cover evidence IDs
+    that are not some other recognizable sensor kind.
     """
     if not _ENTRY_TEXT_PATTERN.search(text):
         return []
@@ -1297,6 +1391,74 @@ def _find_availability_entity_ids(evidence_paths: list[str]) -> list[str]:
     )
 
 
+def _find_text_battery_sensor_entity_ids(evidence_paths: list[str]) -> list[str]:
+    """
+    Fallback battery detection for entity IDs without an English battery token.
+
+    Entity IDs are named in the user's locale (issue #522: Czech ``baterie``
+    in ``sensor.zamek_vrata_baterie``), so the ``battery`` ID-token match in
+    ``_find_battery_sensor_entity_ids`` can miss real battery sensors. The
+    caller invokes this only when the candidate carries an explicit
+    low-battery signal and no battery-named ID resolved; promote ``sensor.*``
+    evidence IDs that are not some other recognizable sensor kind. The
+    domain restriction matters: the low_battery_sensors evaluator requires
+    a numeric state from every listed sensor, so binary_sensor/lock/etc.
+    entities would deadlock the rule (issue #514 invariant). And because the
+    kind-token filter is English-only, two or more surviving locale-named
+    IDs are ambiguous — which one is the battery? — so only a single
+    unambiguous target is promoted; multi-ID candidates stay honestly
+    unsupported rather than register an all-of rule that deadlocks or
+    false-fires on the contextual sensor's reading.
+
+    The single-ID heuristic is advisory only — an English token filter
+    cannot classify locale IDs, so a lone locale-named contextual sensor
+    still survives it. The authoritative gate is approval-time
+    (``_is_battery_like_state``): the live state must carry a battery
+    device_class / percent unit and a numeric reading before the rule
+    registers.
+    """
+    ids: set[str] = set()
+    for path in evidence_paths:
+        entity_id = _extract_entity_id_from_evidence_path(path)
+        if entity_id is None or not entity_id.startswith("sensor."):
+            continue
+        if any(token in entity_id for token in _NON_BATTERY_ID_TOKENS):
+            continue
+        ids.add(entity_id)
+    if len(ids) != 1:
+        return []
+    return sorted(ids)
+
+
+# One term list across the normalizer, discovery_semantic's battery
+# predicate leg, and the card's _lowBatteryContext — an asymmetric list
+# ("weak" here, "under" there) breaks dedup in both directions: a
+# weak-worded candidate registers a rule its own key never covers, and an
+# under-worded one stays unsupported while minting a low_battery history
+# key that suppresses later approvable proposals (issue #522 adversarial
+# review, reproduced).
+_LOW_BATTERY_QUALIFIERS = ("low", "below", "under", "weak")
+_SLUG_TOKEN_SPLIT_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _has_low_battery_signal(text: str, slug_text: str) -> bool:
+    """
+    Low-battery signal from prose OR the candidate_id slug (issue #522).
+
+    Prose keeps substring semantics ("batteries", "lower"), but the slug is
+    matched on whole tokens and each surface must carry the full conjunctive
+    signal on its own — substring matching over a concatenated corpus lets
+    "backup_battery_water_flow" qualify because "flow" contains "low"
+    (issue #522 Codex adversarial, reproduced).
+    """
+    if "battery" in text and _contains_any(text, _LOW_BATTERY_QUALIFIERS):
+        return True
+    tokens = set(_SLUG_TOKEN_SPLIT_RE.split(slug_text))
+    return "battery" in tokens and any(
+        qualifier in tokens for qualifier in _LOW_BATTERY_QUALIFIERS
+    )
+
+
 def _find_battery_sensor_entity_ids(evidence_paths: list[str]) -> list[str]:
     ids: list[str] = []
     for path in evidence_paths:
@@ -1320,7 +1482,7 @@ def _extract_threshold_percent(text: str, *, default: float) -> float:
         if not match:
             continue
         try:
-            value = float(match.group(1))
+            value = float(match.group(1).replace(",", "."))
         except ValueError:
             continue
         if 0 <= value <= _MAX_PERCENT:
@@ -1613,7 +1775,18 @@ def _candidate_rule_id(candidate: dict[str, Any], *, default: str) -> str:
     candidate_id = candidate.get("candidate_id")
     if not isinstance(candidate_id, str):
         return default
-    slug = "".join(
-        char if (char.isalnum() or char == "_") else "_" for char in candidate_id
-    ).strip("_")
-    return slug.lower() or default
+    # ASCII-only, run-collapsing — converges with the card's
+    # _sanitizeRuleName so a locale candidate_id ("baterie_nízká…") cannot
+    # register a non-ASCII rule_id that diverges from the card's inferred
+    # rule id, dedup key, and issue prefill (issue #522 red-team review).
+    # str.isalnum() alone accepts Unicode letters.
+    slug = re.sub(r"[^a-z0-9]+", "_", candidate_id.lower()).strip("_")
+    if not candidate_id.isascii():
+        # Slugging drops non-ASCII characters, so distinct locale IDs
+        # (玄関_low_battery / 寝室_low_battery) would collapse to the same
+        # slug and the second proposal would be treated as a duplicate rule
+        # (issue #522 Codex verification round). A stable digest suffix
+        # preserves uniqueness while staying ASCII and deterministic.
+        digest = hashlib.sha256(candidate_id.encode("utf-8")).hexdigest()[:8]
+        slug = f"{slug}_{digest}".strip("_")
+    return slug or default

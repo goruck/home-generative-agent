@@ -698,6 +698,143 @@ async def _promote_discovery_candidate(  # noqa: PLR0911
     return {"status": "ok", "candidate_id": candidate_id}
 
 
+def _is_battery_like_state(entity_id: str, state: Any) -> bool:
+    """
+    Return True when a live state plausibly is a battery-percent reading.
+
+    The issue #522 locale fallback promotes sensor IDs its English-only
+    kind-token filter cannot classify, so approval must gate on the live
+    state (red-team review): a battery device_class or a percent unit
+    (excluding percent sensors of another declared class, e.g. humidity),
+    or a legacy English "battery" ID token. The state must also be numeric
+    or transiently unavailable — a text state would permanently deadlock
+    the all-of low_battery_sensors evaluator.
+    """
+    attributes = getattr(state, "attributes", {}) or {}
+    device_class = attributes.get("device_class")
+    unit = attributes.get("unit_of_measurement")
+    if device_class == "battery":
+        plausible = True
+    elif device_class is None:
+        # The battery ID token only grandfathers sensors whose metadata does
+        # not contradict it: sensor.front_door_battery_voltage (unit V,
+        # state 3.1) must not pass and then permanently satisfy the percent
+        # evaluator (issue #522 Codex verification round).
+        plausible = unit == "%" or (unit is None and "battery" in entity_id.lower())
+    else:
+        plausible = False
+    if not plausible:
+        return False
+    value = getattr(state, "state", None)
+    if value in ("unavailable", "unknown"):
+        return True
+    try:
+        float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+async def _validate_low_battery_params(
+    *,
+    hass: HomeAssistant | None,
+    proposal_store: Any,
+    candidate_id: str,
+    notes: str,
+    normalized: Any,
+) -> tuple[Any, dict[str, Any] | None]:
+    """
+    Live-validate low_battery_sensors params at approval (issue #522).
+
+    Battery sensor IDs can come from the locale fallback, which promotes an
+    unnamed sensor.* evidence ID on text signals alone — evidence paths are
+    LLM output, so a hallucinated or paraphrased ID would register a
+    low_battery_sensors rule whose all-of numeric evaluator silently never
+    fires while its semantic key suppresses re-proposals (same
+    permanent-monitoring-gap class as the #518 motion validation). Resolves
+    against live states, drops unknown IDs, and returns an error response
+    (second element) when no usable battery sensor remains.
+    """
+    battery_sensor_ids = (
+        normalized.params.get("sensor_entity_ids")
+        if normalized.template_id == "low_battery_sensors"
+        else None
+    )
+    if (
+        hass is None
+        or not isinstance(battery_sensor_ids, list)
+        or not battery_sensor_ids
+    ):
+        return normalized, None
+    resolved_battery_ids: list[str] = []
+    implausible_battery_ids: list[str] = []
+    unresolved_battery_ids: list[str] = []
+    for entity_id in battery_sensor_ids:
+        state = hass.states.get(entity_id) if isinstance(entity_id, str) else None
+        if state is None and isinstance(entity_id, str) and "." not in entity_id:
+            # Legacy drafts store domainless object IDs; the evaluator's
+            # _resolve_sensor_entity_id tries the sensor/binary_sensor
+            # domains, so approval must use the same resolution or it
+            # newly refuses previously-supported candidates (issue #522
+            # Codex verification round).
+            for qualified_id in (
+                f"sensor.{entity_id}",
+                f"binary_sensor.{entity_id}",
+            ):
+                state = hass.states.get(qualified_id)
+                if state is not None:
+                    break
+        if state is None:
+            unresolved_battery_ids.append(entity_id)
+        elif _is_battery_like_state(entity_id, state):
+            resolved_battery_ids.append(entity_id)
+        else:
+            # Exists but is not a battery-percent reading (issue #522
+            # red-team review): the English-only kind-token filter in
+            # the locale fallback cannot recognize e.g. a Czech
+            # voltage/temperature sensor, and registering one would
+            # false-fire the percent-threshold evaluator every cycle
+            # (3.1 V <= 40) or deadlock it on a non-numeric state.
+            # This live-state gate is the authoritative filter.
+            implausible_battery_ids.append(entity_id)
+    if not resolved_battery_ids:
+        rejected_ids = unresolved_battery_ids + implausible_battery_ids
+        reason_code = (
+            "not_battery_sensor" if implausible_battery_ids else "entities_unresolved"
+        )
+        LOGGER.info(
+            "Proposal approval rejected for candidate %s: no usable "
+            "battery sensor entity (%s: %s)",
+            candidate_id,
+            reason_code,
+            rejected_ids,
+        )
+        await proposal_store.async_update_status(
+            candidate_id,
+            "unsupported",
+            notes,
+            extra={
+                "normalization_reason": reason_code,
+                "unresolved_entity_ids": rejected_ids,
+            },
+        )
+        return normalized, {
+            "status": "unsupported",
+            "candidate_id": candidate_id,
+            "reason_code": reason_code,
+            "details": {"unresolved_entity_ids": rejected_ids},
+        }
+    if unresolved_battery_ids or implausible_battery_ids:
+        normalized = replace(
+            normalized,
+            params={
+                **normalized.params,
+                "sensor_entity_ids": resolved_battery_ids,
+            },
+        )
+    return normalized, None
+
+
 async def _approve_rule_proposal(  # noqa: PLR0911, PLR0912, PLR0915
     entry: HGAConfigEntry,
     *,
@@ -825,6 +962,18 @@ async def _approve_rule_proposal(  # noqa: PLR0911, PLR0912, PLR0915
                     "motion_entity_ids": resolved_motion_ids,
                 },
             )
+    # Battery sensor IDs can come from the locale fallback (issue #522) —
+    # live-validate them (see _validate_low_battery_params) and refuse the
+    # approval when no usable battery sensor remains.
+    normalized, battery_error = await _validate_low_battery_params(
+        hass=hass,
+        proposal_store=proposal_store,
+        candidate_id=candidate_id,
+        notes=notes,
+        normalized=normalized,
+    )
+    if battery_error is not None:
+        return battery_error
     # Same-template any-of superset coverage: the key-based check above uses
     # exact entity-set equality, so an existing [kitchen, hall] rule does not
     # cover a kitchen-only candidate there — yet it already alerts on every

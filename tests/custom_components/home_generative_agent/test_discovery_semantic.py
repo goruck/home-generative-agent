@@ -899,3 +899,307 @@ def test_candidate_semantic_key_lock_battery_beats_camera_leg() -> None:
     assert key is not None
     assert "predicate=low_battery" in key
     assert "unknown_person" not in key
+
+
+def test_low_battery_rule_covers_issue_522_candidate() -> None:
+    """
+    The registered rule's key covers the exact issue #522 candidate.
+
+    The candidate's prose is Czech and its evidence path uses the
+    bare-bracket format (entities[sensor.x].state) — the key must still
+    resolve the sensor and read the low-battery predicate from the
+    candidate_id slug so the activated rule dedups re-proposals.
+    """
+    candidate = {
+        "candidate_id": "zamek_vrata_baterie_low_battery",
+        "title": "Nízká baterie zámku dveří",
+        "summary": (
+            "Baterie senzoru sensor.zamek_vrata_baterie klesla pod "
+            "nastavenou hranici kritické kapacity."
+        ),
+        "pattern": "threshold_breach",
+        "evidence_paths": ["entities[sensor.zamek_vrata_baterie].state"],
+    }
+    rule = {
+        "rule_id": "zamek_vrata_baterie_low_battery",
+        "template_id": "low_battery_sensors",
+        "params": {
+            "sensor_entity_ids": ["sensor.zamek_vrata_baterie"],
+            "threshold": 40.0,
+        },
+    }
+    candidate_key = candidate_semantic_key(candidate)
+    rule_key = rule_semantic_key(rule)
+    assert candidate_key is not None
+    assert rule_key is not None
+    assert rule_key_covers_candidate_key(rule_key, candidate_key)
+
+
+def test_candidate_semantic_key_bare_bracket_entity_format() -> None:
+    """Bare-bracket evidence resolves entity IDs; index brackets never do."""
+    candidate = {
+        "title": "Low battery on the hall sensor",
+        "summary": "The hall sensor battery is below 20%.",
+        "pattern": "threshold_breach",
+        "evidence_paths": [
+            "entities[sensor.hall_battery].state",
+            "entities[31].state",
+        ],
+    }
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert key.endswith("entities=sensor.hall_battery")
+
+
+def test_candidate_semantic_key_bare_bracket_quoted_and_empty_tokens() -> None:
+    """Quoted bare-bracket tokens are stripped; empty brackets resolve nothing."""
+    candidate = {
+        "title": "Low battery on the hall sensor",
+        "summary": "The hall sensor battery is below 20%.",
+        "pattern": "threshold_breach",
+        "evidence_paths": [
+            "entities['sensor.hall_battery'].state",
+            "entities[].state",
+        ],
+    }
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert key.endswith("entities=sensor.hall_battery")
+
+
+def test_candidate_semantic_key_lock_slug_battery_predicate() -> None:
+    """
+    A Czech lock candidate keys predicate=low_battery from its slug.
+
+    Mirrors the normalizer's slug-driven lock-battery routing (issue #522):
+    prose carries no English battery keyword, so the predicate must come
+    from battery_text or the candidate would key predicate=unknown and
+    never dedup against low-battery coverage. The subject is normalized to
+    sensor (not lock) because the registered low_battery_sensors rule keys
+    subject=sensor on the battery sensor — a lock subject would never be
+    covered by its own activated rule (issue #522 adversarial review).
+    """
+    candidate = {
+        "candidate_id": "zamek_vrata_baterie_low_battery",
+        "title": "Nízká baterie zámku dveří",
+        "summary": (
+            "Baterie senzoru sensor.zamek_vrata_baterie klesla pod "
+            "nastavenou hranici kritické kapacity."
+        ),
+        "pattern": "threshold_breach",
+        "evidence_paths": [
+            "entities[lock.zamek_vrata].state",
+            "entities[sensor.zamek_vrata_baterie].state",
+        ],
+    }
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert "subject=sensor" in key
+    assert "predicate=low_battery" in key
+    assert key.endswith("entities=sensor.zamek_vrata_baterie")
+
+
+def test_candidate_semantic_key_bare_bracket_attribute_suffix_mirrors() -> None:
+    """
+    An attribute-suffixed bracket token keys the same entity the normalizer sees.
+
+    entities[sensor.x.state] (LLM variance of the #522 path) prefix-resolves
+    to sensor.x in the normalizer — a fullmatch-only check here would key
+    entities= empty and the activated rule could never dedup re-proposals
+    (issue #522 testing review, empirically reproduced).
+    """
+    candidate = {
+        "candidate_id": "zamek_vrata_baterie_low_battery",
+        "title": "Nízká baterie zámku dveří",
+        "summary": (
+            "Baterie senzoru sensor.zamek_vrata_baterie klesla pod "
+            "nastavenou hranici kritické kapacity."
+        ),
+        "pattern": "threshold_breach",
+        "evidence_paths": ["entities[sensor.zamek_vrata_baterie.state]"],
+    }
+    rule = {
+        "rule_id": "zamek_vrata_baterie_low_battery",
+        "template_id": "low_battery_sensors",
+        "params": {
+            "sensor_entity_ids": ["sensor.zamek_vrata_baterie"],
+            "threshold": 40.0,
+        },
+    }
+    candidate_key = candidate_semantic_key(candidate)
+    rule_key = rule_semantic_key(rule)
+    assert candidate_key is not None
+    assert rule_key is not None
+    assert rule_key_covers_candidate_key(rule_key, candidate_key)
+
+
+def test_candidate_semantic_key_bare_bracket_rejects_non_ha_domains() -> None:
+    """
+    Snapshot-path and pseudo-domain bracket tokens never key entities.
+
+    entities[derived.entry_open_count] resolves nothing in the normalizer;
+    keying subject=entry_door with a pseudo-entity here would diverge the
+    candidate key from any registrable rule key (issue #522 review).
+    """
+    candidate = {
+        "title": "Door left open at night",
+        "summary": "The door has been open at night.",
+        "pattern": "threshold_breach",
+        "evidence_paths": [
+            "entities[derived.entry_open_count].state",
+            "entities[attributes.window_state].state",
+        ],
+    }
+    key = candidate_semantic_key(candidate)
+    assert key is None or "derived." not in key
+    assert key is None or "attributes." not in key
+
+
+def test_candidate_semantic_key_weak_wording_keys_low_battery() -> None:
+    """Key derivation treats "weak" as a unified low-battery qualifier."""
+    candidate = {
+        "candidate_id": "hall_sensor_battery_weak",
+        "title": "Hall sensor battery weak",
+        "summary": "The hall sensor battery is weak.",
+        "pattern": "threshold_breach",
+        "evidence_paths": ["entities[sensor.hall_battery].state"],
+    }
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert "predicate=low_battery" in key
+
+
+def test_lock_battery_candidate_keys_sensor_subject() -> None:
+    """
+    Lock + battery evidence keys subject=sensor on the battery sensor.
+
+    The normalizer registers a subject=sensor low_battery rule regardless of
+    lock evidence — keying subject=lock|entities=lock.* would mean the
+    activated rule never covers re-proposals (issue #522 adversarial
+    review).
+    """
+    candidate = {
+        "candidate_id": "zamek_vrata_baterie_low_battery",
+        "title": "Nízká baterie zámku dveří",
+        "summary": (
+            "Baterie senzoru sensor.zamek_vrata_baterie klesla pod "
+            "nastavenou hranici kritické kapacity."
+        ),
+        "pattern": "threshold_breach",
+        "evidence_paths": [
+            "entities[lock.zamek_vrata].state",
+            "entities[sensor.zamek_vrata_baterie].state",
+        ],
+    }
+    rule = {
+        "rule_id": "zamek_vrata_baterie_low_battery",
+        "template_id": "low_battery_sensors",
+        "params": {
+            "sensor_entity_ids": ["sensor.zamek_vrata_baterie"],
+            "threshold": 40.0,
+        },
+    }
+    candidate_key = candidate_semantic_key(candidate)
+    rule_key = rule_semantic_key(rule)
+    assert candidate_key is not None
+    assert "subject=sensor" in candidate_key
+    assert rule_key is not None
+    assert rule_key_covers_candidate_key(rule_key, candidate_key)
+
+
+def test_battery_candidate_night_context_still_covered_by_rule() -> None:
+    """
+    Night/occupancy context is neutralized for low_battery candidate keys.
+
+    rule_semantic_key hardcodes night=any|home=any for low_battery_sensors;
+    without neutralization a night-worded battery candidate would be
+    re-proposed indefinitely (issue #522 red-team review).
+    """
+    candidate = {
+        "candidate_id": "hall_battery_low_at_night",
+        "title": "Hall sensor battery low at night while someone home",
+        "summary": (
+            "The battery of sensor.hall_battery is low at night while someone is home."
+        ),
+        "pattern": "threshold_breach",
+        "evidence_paths": [
+            "entities[sensor.hall_battery].state",
+            "derived.is_night",
+            "derived.anyone_home",
+        ],
+    }
+    rule = {
+        "rule_id": "hall_battery_low_at_night",
+        "template_id": "low_battery_sensors",
+        "params": {"sensor_entity_ids": ["sensor.hall_battery"], "threshold": 40.0},
+    }
+    candidate_key = candidate_semantic_key(candidate)
+    rule_key = rule_semantic_key(rule)
+    assert candidate_key is not None
+    assert rule_key is not None
+    assert rule_key_covers_candidate_key(rule_key, candidate_key)
+
+
+def test_lock_battery_precedence_beats_unlocked_prose() -> None:
+    """
+    A compound lock-battery candidate keys low_battery despite "unlocked" prose.
+
+    The normalizer's lock-battery branch precedes its unlocked-lock branch,
+    so the key's predicate chain must apply the same precedence or the
+    candidate never matches its activated battery rule (issue #522 Codex
+    verification round).
+    """
+    candidate = {
+        "candidate_id": "zamek_vrata_baterie_low_battery",
+        "title": "Nízká baterie zámku dveří",
+        "summary": (
+            "Baterie senzoru sensor.zamek_vrata_baterie klesla; the door "
+            "may be left unlocked and open."
+        ),
+        "pattern": "threshold_breach",
+        "evidence_paths": [
+            "entities[lock.zamek_vrata].state",
+            "entities[sensor.zamek_vrata_baterie].state",
+        ],
+    }
+    rule = {
+        "rule_id": "zamek_vrata_baterie_low_battery",
+        "template_id": "low_battery_sensors",
+        "params": {
+            "sensor_entity_ids": ["sensor.zamek_vrata_baterie"],
+            "threshold": 40.0,
+        },
+    }
+    candidate_key = candidate_semantic_key(candidate)
+    rule_key = rule_semantic_key(rule)
+    assert candidate_key is not None
+    assert "predicate=low_battery" in candidate_key
+    assert rule_key is not None
+    assert rule_key_covers_candidate_key(rule_key, candidate_key)
+
+
+def test_unavailable_lock_battery_keeps_availability_predicate() -> None:
+    """
+    Availability wording outranks the lock-battery key hoist.
+
+    The normalizer's availability branch precedes its lock-battery branch,
+    so an unavailable lock-battery sensor routes to unavailable_sensors —
+    the key must agree or the active availability rule never covers the
+    candidate (issue #522 verification round 2).
+    """
+    candidate = {
+        "candidate_id": "zamek_vrata_baterie_low_battery",
+        "title": "Lock battery sensor unavailable",
+        "summary": (
+            "The battery sensor sensor.zamek_vrata_baterie of lock.zamek_vrata "
+            "is low and has become unavailable."
+        ),
+        "pattern": "availability",
+        "evidence_paths": [
+            "entities[lock.zamek_vrata].state",
+            "entities[sensor.zamek_vrata_baterie].state",
+        ],
+    }
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert "predicate=unavailable" in key
