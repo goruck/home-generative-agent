@@ -69,3 +69,28 @@ USER_PROMPT_TEMPLATE = (
     "raw ISO timestamps to clock times — leave that to computed fields.\n"
     "Return only the final message. Do not explain your reasoning."
 )
+
+
+# Appended to SYSTEM_PROMPT when CONF_SENTINEL_RESPONSE_LANGUAGE is set. This
+# output is display-only (mobile/persistent notifications) -- nothing
+# machine-parses it -- so it is the safe target for a language override,
+# unlike discovery candidate title/summary (see #524) or triage decision/
+# reason_code, which are matched by code downstream.
+#
+# The name-form requirement exists because notifier._redact_if_sensitive
+# replaces recognized_people names with an exact, case-insensitive string
+# match against finding.evidence. Czech (and other inflected languages)
+# decline names by grammatical case -- e.g. nominative "Petra" becomes
+# accusative/dative "Petru" -- so a translated explanation could contain an
+# inflected name that no longer matches the stored nominative form and slips
+# through redaction unredacted. Instructing the model to keep names in their
+# given (nominative) form, uninflected, closes that gap. See
+# test_llm_explain.py for a regression test with an inflected name.
+LANGUAGE_INSTRUCTION_TEMPLATE = (
+    "\n\nWrite your explanation in {language}. If it mentions a person by "
+    "name, keep that name exactly as given, in its base (nominative, "
+    "dictionary) form -- do not decline, conjugate, or otherwise inflect "
+    "it for grammatical case, even where {language} grammar would normally "
+    "require this. Every other aspect of the explanation should read "
+    "naturally in {language}."
+)

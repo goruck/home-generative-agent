@@ -187,7 +187,7 @@
             "sentinel_discovery_enabled": "Enable discovery (requires anomaly alerting)",
             "sentinel_discovery_interval_seconds": "Discovery interval (seconds)",
             "sentinel_discovery_max_records": "Max discovery records to retain",
-            "sentinel_response_language": "Discovery/triage text language (optional)",
+            "sentinel_response_language": "Finding explanation language (optional)",
             "sentinel_baseline_enabled": "Enable baseline collection (requires anomaly alerting)",
             "sentinel_baseline_update_interval_minutes": "Baseline update interval (minutes)",
             "sentinel_baseline_freshness_threshold_seconds": "Baseline freshness threshold (seconds)",
@@ -210,7 +210,7 @@
             "notify_service": "Sentinel Notify Service (optional)"
           },
           "data_description": {
-            "sentinel_response_language": "Language for LLM-authored discovery candidate titles/summaries and triage summaries, e.g. 'Czech'. Leave empty for English. Machine-matched fields (candidate_id, pattern, decision, reason_code, etc.) always stay in their defined form."
+            "sentinel_response_language": "Language for the LLM-authored finding explanation shown in notifications, e.g. 'Czech'. Leave empty for English. Discovery candidate title/summary and triage decision/reason_code/summary are unaffected -- those are parsed by code and always stay in English."
           }
         }
       }
@@ -332,7 +332,6 @@
           "face_api_url": "Face recognition API URL (optional)",
           "prompt": "Instructions",
           "vlm_response_language": "Camera description language (optional)",
-          
           "vlm_prompt_extra": "Additional camera analysis instructions (optional)",
           "llm_hass_api": "Control Home Assistant",
           "video_analyzer_mode": "Video analyzer mode",

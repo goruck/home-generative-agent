@@ -187,7 +187,7 @@
             "sentinel_discovery_enabled": "Povolit zjišťování (vyžaduje upozornění na anomálie)",
             "sentinel_discovery_interval_seconds": "Interval zjišťování (sekundy)",
             "sentinel_discovery_max_records": "Max. počet uchovávaných záznamů zjišťování",
-            "sentinel_response_language": "Jazyk textů zjišťování/triáže (volitelné)",
+            "sentinel_response_language": "Jazyk vysvětlení nálezu (volitelné)",
             "sentinel_baseline_enabled": "Povolit sběr základní úrovně (vyžaduje upozornění na anomálie)",
             "sentinel_baseline_update_interval_minutes": "Interval aktualizace základní úrovně (minuty)",
             "sentinel_baseline_freshness_threshold_seconds": "Práh aktuálnosti základní úrovně (sekundy)",
@@ -210,7 +210,7 @@
             "notify_service": "Sentinel oznamovací služba (volitelné)"
           },
           "data_description": {
-            "sentinel_response_language": "Jazyk, ve kterém LLM generuje název/shrnutí discovery kandidátů a shrnutí triáže, např. „Czech“. Ponechte prázdné pro angličtinu. Strojově zpracovávaná pole (candidate_id, pattern, decision, reason_code apod.) zůstávají vždy v původním tvaru."
+            "sentinel_response_language": "Jazyk, ve kterém LLM generuje vysvětlení nálezu zobrazované v oznámeních, např. „Czech“. Ponechte prázdné pro angličtinu. Název/shrnutí discovery kandidátů a rozhodnutí/reason_code/shrnutí triáže tím nejsou ovlivněny -- ta jsou strojově zpracovávána a vždy zůstávají v angličtině."
           }
         }
       }

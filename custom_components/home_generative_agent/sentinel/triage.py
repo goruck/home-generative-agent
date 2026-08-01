@@ -100,15 +100,6 @@ Rules:
 - If you are uncertain, default to "notify".
 - Return only the JSON object. Do not explain your reasoning."""
 
-# Appended to _SYSTEM_PROMPT when CONF_SENTINEL_RESPONSE_LANGUAGE is set.
-# "reason_code" is machine-matched (see TRIAGE_REASON_* constants) and must
-# never be translated -- only "summary" is free text.
-_LANGUAGE_INSTRUCTION_TEMPLATE = (
-    '\n\nWrite the "summary" field in {language}. The "decision" and '
-    '"reason_code" fields MUST stay exactly as defined above (English '
-    "tokens) -- they are matched by code, not read by a person."
-)
-
 _USER_PROMPT_TEMPLATE = """\
 Security alert to triage:
   type: {type}
@@ -146,14 +137,12 @@ class SentinelTriageService:
         timeout_seconds: int = 10,
         deployment: str = "edge",
         health_stats: dict[str, Any] | None = None,
-        response_language: str = "",
     ) -> None:
         """Initialise with a LangChain-compatible model."""
         self._model = model
         self._timeout_seconds = timeout_seconds
         self._deployment = deployment
         self._health_stats = health_stats
-        self._response_language = response_language
         self._log_limiter = RepeatingLogLimiter(LOGGER)
 
     async def triage(
@@ -178,14 +167,8 @@ class SentinelTriageService:
         prompt = _build_prompt(finding, snapshot)
         start = time.monotonic()
 
-        system_prompt = _SYSTEM_PROMPT
-        if self._response_language:
-            system_prompt += _LANGUAGE_INSTRUCTION_TEMPLATE.format(
-                language=self._response_language
-            )
-
         messages = [
-            SystemMessage(content=system_prompt),
+            SystemMessage(content=_SYSTEM_PROMPT),
             HumanMessage(content=prompt),
         ]
         try:

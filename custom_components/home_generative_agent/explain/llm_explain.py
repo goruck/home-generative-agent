@@ -16,7 +16,7 @@ from custom_components.home_generative_agent.core.utils import (
     run_sentinel_model_call,
 )
 
-from .prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
+from .prompts import LANGUAGE_INSTRUCTION_TEMPLATE, SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
 
 if TYPE_CHECKING:
     from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
@@ -35,11 +35,13 @@ class LLMExplainer:
         *,
         deployment: str = "edge",
         health_stats: dict[str, Any] | None = None,
+        response_language: str = "",
     ) -> None:
         """Initialize the explainer with an optional LLM model."""
         self._model = model
         self._deployment = deployment
         self._health_stats = health_stats
+        self._response_language = response_language
 
     async def async_explain(self, finding: AnomalyFinding) -> str | None:  # noqa: PLR0911
         """Return explanation text or None on failure."""
@@ -52,7 +54,15 @@ class LLMExplainer:
             evidence=_relativize_timestamps(finding.evidence),
             suggested_actions=finding.suggested_actions,
         )
-        messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
+        system_prompt = SYSTEM_PROMPT
+        if self._response_language:
+            system_prompt += LANGUAGE_INSTRUCTION_TEMPLATE.format(
+                language=self._response_language
+            )
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=prompt),
+        ]
 
         try:
             result = await run_sentinel_model_call(

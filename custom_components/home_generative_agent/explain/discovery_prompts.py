@@ -50,19 +50,3 @@ USER_PROMPT_TEMPLATE = (
     "(e.g. entities[entity_ids contains lock.front_door].state). "
     "Omit the candidate entirely if no concrete entity_id can be cited."
 )
-
-
-# Appended to USER_PROMPT_TEMPLATE when CONF_SENTINEL_RESPONSE_LANGUAGE is set.
-# Kept separate from the schema-critical instructions above so the allowlist
-# of required/forbidden keys and JSON-only contract are never diluted by the
-# language instruction. Mirrors agent/tools.analyze_image's VLM language
-# override (see CONF_VLM_RESPONSE_LANGUAGE) -- candidate_id, pattern, and all
-# other non-prose keys must stay in their defined machine-readable form;
-# only "title" and "summary" are free text and should be translated.
-LANGUAGE_INSTRUCTION_TEMPLATE = (
-    '\nWrite the "title" and "summary" fields in {language}. All other '
-    "fields (candidate_id, pattern, evidence_paths, suggested_type, "
-    "schema_version, generated_at, model, confidence_hint) MUST stay in "
-    "their defined machine-readable form -- do not translate keys, IDs, "
-    "or snapshot paths."
-)

@@ -258,7 +258,6 @@ def _default_payload() -> dict[str, Any]:
             RECOMMENDED_SENTINEL_DISCOVERY_INTERVAL_SECONDS
         ),
         CONF_SENTINEL_DISCOVERY_MAX_RECORDS: RECOMMENDED_SENTINEL_DISCOVERY_MAX_RECORDS,
-        CONF_SENTINEL_RESPONSE_LANGUAGE: RECOMMENDED_SENTINEL_RESPONSE_LANGUAGE,
         CONF_SENTINEL_BASELINE_ENABLED: RECOMMENDED_SENTINEL_BASELINE_ENABLED,
         CONF_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES: (
             RECOMMENDED_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES
@@ -277,6 +276,8 @@ def _default_payload() -> dict[str, Any]:
             RECOMMENDED_SENTINEL_APPLIANCE_DURATION_MIN
         ),
         CONF_EXPLAIN_ENABLED: RECOMMENDED_EXPLAIN_ENABLED,
+        # See const.py: language override for the explainer's finding text.
+        CONF_SENTINEL_RESPONSE_LANGUAGE: RECOMMENDED_SENTINEL_RESPONSE_LANGUAGE,
         CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: (
             RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE
         ),
@@ -374,16 +375,6 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                     )
                 ),
             ): NumberSelector(NumberSelectorConfig(min=10, max=1000, step=10)),
-            vol.Optional(
-                CONF_SENTINEL_RESPONSE_LANGUAGE,
-                description={
-                    "suggested_value": payload.get(
-                        CONF_SENTINEL_RESPONSE_LANGUAGE,
-                        RECOMMENDED_SENTINEL_RESPONSE_LANGUAGE,
-                    )
-                },
-                default=RECOMMENDED_SENTINEL_RESPONSE_LANGUAGE,
-            ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             vol.Required(
                 CONF_SENTINEL_BASELINE_ENABLED,
                 default=bool(
@@ -471,6 +462,16 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                     payload.get(CONF_EXPLAIN_ENABLED, RECOMMENDED_EXPLAIN_ENABLED)
                 ),
             ): BooleanSelector(),
+            vol.Optional(
+                CONF_SENTINEL_RESPONSE_LANGUAGE,
+                description={
+                    "suggested_value": payload.get(
+                        CONF_SENTINEL_RESPONSE_LANGUAGE,
+                        RECOMMENDED_SENTINEL_RESPONSE_LANGUAGE,
+                    )
+                },
+                default=RECOMMENDED_SENTINEL_RESPONSE_LANGUAGE,
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             vol.Required(
                 CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
                 default=bool(

@@ -2866,6 +2866,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             chat_model,
             deployment=chat_deployment,
             health_stats=sentinel_run_stats,
+            response_language=options.get(CONF_SENTINEL_RESPONSE_LANGUAGE, ""),
         )
 
     # Issue #262: optional LLM triage service.
@@ -2882,7 +2883,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             timeout_seconds=triage_timeout,
             deployment=chat_deployment,
             health_stats=sentinel_run_stats,
-            response_language=options.get(CONF_SENTINEL_RESPONSE_LANGUAGE, ""),
         )
         LOGGER.info("Sentinel LLM triage enabled (timeout=%ds).", triage_timeout)
     # Issue #265: optional baseline updater (requires PostgreSQL pool).

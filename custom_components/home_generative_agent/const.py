@@ -142,11 +142,14 @@ CONF_EXPLAIN_ENABLED = "explain_enabled"
 CONF_SENTINEL_DISCOVERY_ENABLED = "sentinel_discovery_enabled"
 CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS = "sentinel_discovery_interval_seconds"
 CONF_SENTINEL_DISCOVERY_MAX_RECORDS = "sentinel_discovery_max_records"
-# Optional language override for LLM-authored Sentinel text (discovery
-# candidate title/summary, triage summary). Empty string means "let the
-# model use its default (English)" -- mirrors CONF_VLM_RESPONSE_LANGUAGE's
-# convention. Machine-readable fields (candidate_id, pattern, reason_code,
-# evidence_paths, etc.) are never translated regardless of this setting.
+# Optional language override for the LLM-authored Sentinel finding
+# explanation (explain/llm_explain.LLMExplainer -- the text shown in mobile
+# and persistent notifications). Empty string means "let the model use its
+# default (English)" -- mirrors CONF_VLM_RESPONSE_LANGUAGE's convention.
+# Deliberately scoped to the explainer only: discovery candidate title/
+# summary and Sentinel Triage decision/reason_code/summary are parsed by
+# code downstream (normalization, dedup, evidence-mismatch matching) and
+# must not be translated. See #523/#524 discussion.
 CONF_SENTINEL_RESPONSE_LANGUAGE = "sentinel_response_language"
 RECOMMENDED_SENTINEL_RESPONSE_LANGUAGE = ""
 RECOMMENDED_SENTINEL_ENABLED = True
