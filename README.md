@@ -157,7 +157,7 @@ actions:
 
 Dashboard recipes shared by users. Have one of your own? Post it in [Discussions](https://github.com/goruck/home-generative-agent/discussions) and it may get featured here.
 
-The recipes below were shared by [@hruba202](https://github.com/hruba202) in [discussion #513](https://github.com/goruck/home-generative-agent/discussions/513) and use the excellent [flex-table-card](https://github.com/custom-cards/flex-table-card) (installable from HACS). Replace the example entity IDs with your own; the column names are in Czech from the original install — rename them to taste. The `grid_options` sizing assumes the newer sections dashboard layout with wide sections — trim the `columns:` values to fit your grid (standard sections are 12 columns wide; the older masonry layout ignores `grid_options` entirely).
+The recipes below were shared by [@hruba202](https://github.com/hruba202) in [discussion #513](https://github.com/goruck/home-generative-agent/discussions/513). The first two use the excellent [flex-table-card](https://github.com/custom-cards/flex-table-card); the third combines [vertical-stack-in-card](https://github.com/ofekashery/vertical-stack-in-card), [entity-attributes-card](https://github.com/custom-cards/entity-attributes-card), and [card-mod](https://github.com/thomasloven/lovelace-card-mod) (all installable from HACS). Replace the example entity IDs with your own; the column names and labels are in Czech from the original install — rename them to taste. The `grid_options` sizing in the flex-table recipes assumes the newer sections dashboard layout with wide sections — trim the `columns:` values to fit your grid (standard sections are 12 columns wide; the older masonry layout ignores `grid_options` entirely).
 
 ### Recognized people across cameras
 
@@ -264,6 +264,56 @@ columns: 1
 ```
 
 > **Tip:** `findings_count_by_severity` is a dictionary attribute (keys `low`/`medium`/`high`), so it renders as `[object Object]` by default. Use the column's `modify` option (same two gotchas as above) to pull out one severity per column, `modify: "Array.isArray(x) || x == null ? '—' : (x.high ?? 0)"`, or render the whole dictionary compactly with `modify: "Array.isArray(x) || x == null ? '—' : JSON.stringify(x)"`.
+
+### Per-camera event card
+
+A single-camera card stacking the recognized-people sensor, the last-event image, and the sensor's attributes, with `card_mod` styling on top.
+
+![Per-camera event card](./assets/community-camera-event-card.png)
+
+```yaml
+type: custom:vertical-stack-in-card
+cards:
+  - type: entities
+    entities:
+      - entity: sensor.kamera_obyvak_2_recognized_people
+    show_header_toggle: false
+    state_color: true
+  - type: picture-entity
+    entity: image.kamera_obyvak_2_last_event
+    show_name: false
+    show_state: false
+    tap_action:
+      action: none
+    hold_action:
+      action: none
+  - type: custom:entity-attributes-card
+    heading_name: []
+    heading_state: []
+    filter:
+      include:
+        - key: sensor.kamera_obyvak_2_recognized_people.recognized_people
+          name: rozpoznana osoba
+        - key: sensor.kamera_obyvak_2_recognized_people.count
+          name: počet
+        - key: sensor.kamera_obyvak_2_recognized_people.last_event
+          name: posledni událost
+        - key: sensor.kamera_obyvak_2_recognized_people.summary
+          name: shrnutí
+card_mod:
+  prepend: true
+  style: |
+    ha-card {
+      background: brown;
+      --ha-card-background: maroon;
+      color: var(--primary-color);
+    }
+    :host {
+      --card-mod-icon: mdi:cctv;
+    }
+```
+
+> **Tip:** the recognized-people sensor exposes exactly six attributes: `recognized_people`, `count`, `summary`, `last_event`, `latest_path`, and `camera_id`. `entity-attributes-card` silently omits any row whose key doesn't exist, so misspelled keys just disappear from the card. (The version above corrects three rows from the original post accordingly — see the discussion thread. The screenshot predates the correction, so your card will show one more row than pictured: the summary.)
 
 ## Contributions are welcome
 
