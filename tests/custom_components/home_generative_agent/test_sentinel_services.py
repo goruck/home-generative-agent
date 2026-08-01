@@ -1006,3 +1006,244 @@ async def test_approve_rule_proposal_all_of_template_not_superset_covered(hass) 
     # Precise expectation: candidate registers its own rule.
     assert response["status"] == "ok"
     assert rule_registry.added_rules
+
+
+def _locale_battery_proposal_record(entity_id: str) -> dict[str, Any]:
+    return {
+        "candidate_id": "zamek_vrata_baterie_low_battery",
+        "candidate": {
+            "candidate_id": "zamek_vrata_baterie_low_battery",
+            "title": "Nízká baterie zámku dveří",
+            "summary": (
+                f"Baterie senzoru {entity_id} klesla pod nastavenou "
+                "hranici kritické kapacity."
+            ),
+            "pattern": "threshold_breach",
+            "confidence_hint": 0.7,
+            "evidence_paths": [f"entities[{entity_id}].state"],
+        },
+        "notes": "",
+        "status": "draft",
+    }
+
+
+@pytest.mark.asyncio
+async def test_approve_rule_proposal_rejects_unresolved_battery_sensor(hass) -> None:
+    """
+    A fallback-promoted battery sensor that resolves to no entity blocks approval.
+
+    The issue #522 locale fallback promotes an unnamed sensor.* evidence ID
+    on text signals alone; a hallucinated ID would register a
+    low_battery_sensors rule whose all-of numeric evaluator silently never
+    fires while its semantic key suppresses re-proposals — the same
+    permanent-monitoring-gap class the #518 motion validation closes.
+    """
+    proposal_store = ProposalStore(hass)
+    await proposal_store.async_append(
+        _locale_battery_proposal_record("sensor.zamek_vrata_bateria_typo")
+    )
+    rule_registry = DummyRuleRegistry()
+    entry = _make_entry(
+        proposal_store=proposal_store,
+        rule_registry=rule_registry,
+        sentinel=SimpleNamespace(async_run_now=AsyncMock(return_value=True)),
+    )
+    response = await _hga_component._approve_rule_proposal(
+        entry,
+        hass=hass,
+        candidate_id="zamek_vrata_baterie_low_battery",
+    )
+
+    assert response["status"] == "unsupported"
+    assert response["reason_code"] == "entities_unresolved"
+    assert response["details"]["unresolved_entity_ids"] == [
+        "sensor.zamek_vrata_bateria_typo"
+    ]
+    assert rule_registry.added_rules == []
+
+
+@pytest.mark.asyncio
+async def test_approve_rule_proposal_rejects_non_battery_sensor(hass) -> None:
+    """
+    An existing but non-battery sensor blocks approval with a distinct reason.
+
+    The English-only kind-token filter cannot classify a locale temperature
+    sensor; registering it would false-fire the percent-threshold evaluator
+    every cycle (21 °C <= 40). The live state carries the discriminating
+    attributes, so approval is the authoritative gate (issue #522 red-team
+    review).
+    """
+    hass.states.async_set(
+        "sensor.zamek_vrata_baterie",
+        "21.5",
+        {"device_class": "temperature", "unit_of_measurement": "°C"},
+    )
+    proposal_store = ProposalStore(hass)
+    await proposal_store.async_append(
+        _locale_battery_proposal_record("sensor.zamek_vrata_baterie")
+    )
+    rule_registry = DummyRuleRegistry()
+    entry = _make_entry(
+        proposal_store=proposal_store,
+        rule_registry=rule_registry,
+        sentinel=SimpleNamespace(async_run_now=AsyncMock(return_value=True)),
+    )
+    response = await _hga_component._approve_rule_proposal(
+        entry,
+        hass=hass,
+        candidate_id="zamek_vrata_baterie_low_battery",
+    )
+
+    assert response["status"] == "unsupported"
+    assert response["reason_code"] == "not_battery_sensor"
+    assert rule_registry.added_rules == []
+
+
+@pytest.mark.asyncio
+async def test_approve_rule_proposal_rejects_percent_sensor_of_other_class(
+    hass,
+) -> None:
+    """A humidity sensor's % unit does not make it battery-plausible."""
+    hass.states.async_set(
+        "sensor.chodba_vlhkost",
+        "45",
+        {"device_class": "humidity", "unit_of_measurement": "%"},
+    )
+    record = _locale_battery_proposal_record("sensor.chodba_vlhkost")
+    proposal_store = ProposalStore(hass)
+    await proposal_store.async_append(record)
+    rule_registry = DummyRuleRegistry()
+    entry = _make_entry(
+        proposal_store=proposal_store,
+        rule_registry=rule_registry,
+        sentinel=SimpleNamespace(async_run_now=AsyncMock(return_value=True)),
+    )
+    response = await _hga_component._approve_rule_proposal(
+        entry,
+        hass=hass,
+        candidate_id="zamek_vrata_baterie_low_battery",
+    )
+
+    assert response["status"] == "unsupported"
+    assert response["reason_code"] == "not_battery_sensor"
+    assert rule_registry.added_rules == []
+
+
+@pytest.mark.asyncio
+async def test_approve_rule_proposal_accepts_existing_battery_sensor(hass) -> None:
+    """The exact issue #522 candidate approves when its sensor is battery-like."""
+    hass.states.async_set(
+        "sensor.zamek_vrata_baterie",
+        "74",
+        {"device_class": "battery", "unit_of_measurement": "%"},
+    )
+    proposal_store = ProposalStore(hass)
+    await proposal_store.async_append(
+        _locale_battery_proposal_record("sensor.zamek_vrata_baterie")
+    )
+    rule_registry = DummyRuleRegistry()
+    entry = _make_entry(
+        proposal_store=proposal_store,
+        rule_registry=rule_registry,
+        sentinel=SimpleNamespace(async_run_now=AsyncMock(return_value=True)),
+    )
+    response = await _hga_component._approve_rule_proposal(
+        entry,
+        hass=hass,
+        candidate_id="zamek_vrata_baterie_low_battery",
+    )
+
+    assert response["status"] == "ok"
+    assert rule_registry.added_rules
+    rule = rule_registry.added_rules[0]
+    assert rule["template_id"] == "low_battery_sensors"
+    assert rule["params"]["sensor_entity_ids"] == ["sensor.zamek_vrata_baterie"]
+
+
+@pytest.mark.asyncio
+async def test_approve_rule_proposal_rejects_battery_id_with_voltage_class(
+    hass,
+) -> None:
+    """
+    A battery-named ID with contradicting metadata is not battery-like.
+
+    sensor.front_door_battery_voltage (device_class voltage, unit V, state
+    3.1) would permanently satisfy the percent evaluator; the ID token must
+    not override declared metadata (issue #522 Codex verification round).
+    """
+    hass.states.async_set(
+        "sensor.front_door_battery_voltage",
+        "3.1",
+        {"device_class": "voltage", "unit_of_measurement": "V"},
+    )
+    record = _locale_battery_proposal_record("sensor.front_door_battery_voltage")
+    record["candidate"]["title"] = "Front door battery voltage low"
+    record["candidate"]["summary"] = (
+        "The battery of sensor.front_door_battery_voltage is low."
+    )
+    proposal_store = ProposalStore(hass)
+    await proposal_store.async_append(record)
+    rule_registry = DummyRuleRegistry()
+    entry = _make_entry(
+        proposal_store=proposal_store,
+        rule_registry=rule_registry,
+        sentinel=SimpleNamespace(async_run_now=AsyncMock(return_value=True)),
+    )
+    response = await _hga_component._approve_rule_proposal(
+        entry,
+        hass=hass,
+        candidate_id="zamek_vrata_baterie_low_battery",
+    )
+
+    assert response["status"] == "unsupported"
+    assert response["reason_code"] == "not_battery_sensor"
+    assert rule_registry.added_rules == []
+
+
+@pytest.mark.asyncio
+async def test_approve_rule_proposal_resolves_domainless_battery_id(hass) -> None:
+    """
+    Legacy domainless battery IDs resolve like the evaluator does.
+
+    A draft storing "battery_level" without a domain registers against
+    sensor.battery_level at runtime, so approval must try the same
+    sensor/binary_sensor qualification instead of refusing a
+    previously-supported candidate (issue #522 Codex verification round).
+    """
+    hass.states.async_set(
+        "sensor.battery_level",
+        "55",
+        {"device_class": "battery", "unit_of_measurement": "%"},
+    )
+    record = {
+        "candidate_id": "hall_battery_low",
+        "candidate": {
+            "candidate_id": "hall_battery_low",
+            "title": "Hall sensor battery low",
+            "summary": "The hall battery level sensor is below 40%.",
+            "pattern": "threshold_breach",
+            "confidence_hint": 0.6,
+            "evidence_paths": ["entities[entity_id=battery_level].state"],
+        },
+        "notes": "",
+        "status": "draft",
+    }
+    proposal_store = ProposalStore(hass)
+    await proposal_store.async_append(record)
+    rule_registry = DummyRuleRegistry()
+    entry = _make_entry(
+        proposal_store=proposal_store,
+        rule_registry=rule_registry,
+        sentinel=SimpleNamespace(async_run_now=AsyncMock(return_value=True)),
+    )
+    response = await _hga_component._approve_rule_proposal(
+        entry,
+        hass=hass,
+        candidate_id="hall_battery_low",
+    )
+
+    assert response["status"] == "ok"
+    assert rule_registry.added_rules
+    assert rule_registry.added_rules[0]["params"]["sensor_entity_ids"] == [
+        "battery_level"
+    ]
