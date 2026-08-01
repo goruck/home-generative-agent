@@ -1,0 +1,348 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Home Generative Agent",
+        "description": "Varsayılan özellikler oluşturuluyor. Sonraki adımda **Kurulum** ile özellikleri ve veritabanını yapılandırın, ardından bir **Model Sağlayıcı** ekleyin."
+      }
+    },
+    "error": {
+      "cannot_connect": "Servise ulaşılamıyor. Anahtarları/URL'leri kontrol edip tekrar deneyin.",
+      "invalid_auth": "Geçersiz API anahtarı.",
+      "invalid_pin": "PIN 4-10 rakam olmalıdır.",
+      "unknown": "Beklenmeyen hata."
+    }
+  },
+  "config_subentries": {
+    "database": {
+      "entry_type": "service",
+      "abort": {
+        "reconfigure_successful": "Veritabanı yapılandırması başarıyla güncellendi."
+      },
+      "initiate_flow": {
+        "reconfigure": "Veritabanını yeniden yapılandır",
+        "user": "Veritabanını kur"
+      },
+      "step": {
+        "set_options": {
+          "title": "Veritabanı kurulumu",
+          "description": "Veritabanı için gerekli parametreleri girin.",
+          "data": {
+            "username": "Veritabanı kullanıcı adı",
+            "password": "Veritabanı parolası",
+            "host": "Veritabanı ana makinesi",
+            "port": "Veritabanı bağlantı noktası (isteğe bağlı)",
+            "db_name": "Veritabanı adı",
+            "db_params": "Veritabanı bağlantı parametreleri (isteğe bağlı)"
+          }
+        }
+      },
+      "error": {
+        "cannot_connect": "Veritabanına bağlanılamadı. Ayarları kontrol edip tekrar deneyin.",
+        "invalid_auth": "Geçersiz yetkilendirme.",
+        "invalid_uri": "URI oluşturulamadı.",
+        "unknown": "Beklenmeyen hata."
+      }
+    },
+    "model_provider": {
+      "entry_type": "service",
+      "abort": {
+        "reconfigure_successful": "Model sağlayıcı güncellendi."
+      },
+      "initiate_flow": {
+        "reconfigure": "Model sağlayıcıyı yeniden yapılandır",
+        "user": "Model sağlayıcı ekle"
+      },
+      "step": {
+        "deployment": {
+          "title": "Dağıtım",
+          "description": "Bu sağlayıcının nerede çalışacağını seçin.",
+          "data": {
+            "deployment": "Dağıtım"
+          }
+        },
+        "provider": {
+          "title": "Sağlayıcı",
+          "description": "Sağlayıcı türünü ve adını seçin.",
+          "data": {
+            "provider_type": "Sağlayıcı",
+            "name": "Sağlayıcı adı"
+          }
+        },
+        "settings": {
+          "title": "Sağlayıcı ayarları",
+          "description": "Sağlayıcı uç noktası veya kimlik bilgilerini yapılandırın.",
+          "data": {
+            "base_url": "Temel URL",
+            "api_key": "API anahtarı",
+            "gemini_api_key": "Gemini API anahtarı",
+            "anthropic_api_key": "Anthropic API anahtarı"
+          },
+          "data_description": {
+            "api_key": "OpenAI için zorunludur. OpenAI Uyumlu sağlayıcılarda, uç nokta kimlik doğrulaması gerektirmiyorsa boş bırakın veya 'none' girin."
+          }
+        }
+      },
+      "error": {
+        "cannot_connect": "Sağlayıcıya erişilemiyor.",
+        "invalid_auth": "Geçersiz kimlik bilgileri.",
+        "unknown": "Beklenmeyen hata."
+      }
+    },
+    "stt_provider": {
+      "entry_type": "service",
+      "abort": {
+        "reconfigure_successful": "STT sağlayıcı güncellendi."
+      },
+      "initiate_flow": {
+        "reconfigure": "STT sağlayıcıyı yeniden yapılandır",
+        "user": "STT sağlayıcı ekle"
+      },
+      "step": {
+        "provider": {
+          "title": "Konuşmadan Metne Sağlayıcı",
+          "description": "Sağlayıcı türünü ve adını seçin.",
+          "data": {
+            "provider_type": "Sağlayıcı",
+            "name": "Sağlayıcı adı"
+          }
+        },
+        "credentials": {
+          "title": "Kimlik bilgileri",
+          "description": "STT sağlayıcısı için kimlik doğrulama seçin.",
+          "data": {
+            "openai_provider_subentry_id": "OpenAI model sağlayıcıyı yeniden kullan",
+            "api_key": "OpenAI API anahtarı"
+          }
+        },
+        "model": {
+          "title": "Model ve gelişmiş seçenekler",
+          "description": "Bir model seçin ve isteğe bağlı gelişmiş ayarları yapılandırın.",
+          "data": {
+            "model_name": "Model",
+            "language": "Dil (isteğe bağlı)",
+            "prompt": "İstem (isteğe bağlı)",
+            "temperature": "Sıcaklık (isteğe bağlı)",
+            "translate": "İngilizceye çevir",
+            "response_format": "Yanıt biçimi"
+          }
+        }
+      },
+      "error": {
+        "cannot_connect": "Sağlayıcıya erişilemiyor.",
+        "invalid_auth": "Geçersiz kimlik bilgileri.",
+        "invalid_model": "Geçerli bir model seçin.",
+        "not_supported": "Sağlayıcı henüz desteklenmiyor.",
+        "unknown": "Beklenmeyen hata."
+      }
+    },
+    "sentinel": {
+      "entry_type": "service",
+      "abort": {
+        "reconfigure_successful": "Sentinel yapılandırması güncellendi."
+      },
+      "initiate_flow": {
+        "reconfigure": "Sentinel yeniden yapılandır",
+        "user": "Sentinel yapılandır"
+      },
+      "step": {
+        "settings": {
+          "title": "Sentinel",
+          "description": "Proaktif Sentinel izleme ve keşif ayarlarını yapılandırın.",
+          "data": {
+            "sentinel_enabled": "Anomali uyarılarını etkinleştir",
+            "sentinel_interval_seconds": "Sentinel aralığı (saniye)",
+            "sentinel_cooldown_minutes": "Sentinel tür başına bekleme (dakika)",
+            "sentinel_entity_cooldown_minutes": "Sentinel varlık başına bekleme (dakika)",
+            "sentinel_pending_prompt_ttl_minutes": "Bekleyen istem TTL (dakika)",
+            "sentinel_discovery_enabled": "Keşfi etkinleştir (anomali uyarıları gerektirir)",
+            "sentinel_discovery_interval_seconds": "Keşif aralığı (saniye)",
+            "sentinel_discovery_max_records": "Saklanacak maksimum keşif kaydı",
+            "sentinel_baseline_enabled": "Temel veri toplamayı etkinleştir (anomali uyarıları gerektirir)",
+            "sentinel_baseline_update_interval_minutes": "Temel güncelleme aralığı (dakika)",
+            "sentinel_baseline_freshness_threshold_seconds": "Temel tazelik eşiği (saniye)",
+            "explain_enabled": "Sentinel bulguları için LLM açıklamaları",
+            "sentinel_require_pin_for_level_increase": "Özerklik düzeyi artışları için PIN iste",
+            "sentinel_daily_digest_enabled": "Günlük özet bildirimini etkinleştir",
+            "sentinel_daily_digest_time": "Günlük özet saati (SS:DD:SN)",
+            "sentinel_quiet_hours_start": "Sessiz saatler başlangıcı (seçili önem düzeylerini bastırır)",
+            "sentinel_quiet_hours_end": "Sessiz saatler bitişi",
+            "sentinel_quiet_hours_severities": "Sessiz saatlerde bastırılan önem düzeyleri",
+            "sentinel_camera_entry_links": "Kamera giriş bağlantıları (JSON, isteğe bağlı)",
+            "sentinel_rule_entity_exclusions": "Kural varlık hariç tutmaları (JSON, isteğe bağlı)",
+            "critical_action_pin": "Sentinel düzey artırma PIN'i (isteğe bağlı)",
+            "notify_service": "Sentinel Bildirim Servisi (isteğe bağlı)",
+            "sentinel_baseline_weekly_patterns": "Haftanın günü temellerini etkinleştir (hafta sonu yanlış pozitiflerini azaltır)",
+            "sentinel_baseline_dow_min_samples": "HGG temel minimum örnek sayısı (slot başına veri haftası)",
+            "sentinel_baseline_min_samples": "Sapma uyarıları tetiklenmeden önce gereken minimum örnek sayısı",
+            "sentinel_baseline_sustained_minutes": "Döngüsel yük kapısı: Uyarı vermeden önce eşiğin üzerinde geçen dakika (0 = devre dışı)",
+            "sentinel_appliance_power_threshold_w": "Cihaz güç kuralı: güç eşiği (W)",
+            "sentinel_appliance_duration_min": "Cihaz güç kuralı: uyarıdan önceki süre (dakika)"
+          }
+        },
+        "setup_mode": {
+          "title": "Sentinel Kurulumu",
+          "description": "Sentinel izlemeyi nasıl yapılandıracağınızı seçin.{overwrite_warning}",
+          "data": {
+            "setup_mode": "Kurulum türü"
+          }
+        },
+        "basic_settings": {
+          "title": "Sentinel",
+          "description": "Temel Sentinel ayarlarını yapılandırın. Diğer tüm seçenekler önerilen varsayılanları kullanır.",
+          "data": {
+            "sentinel_enabled": "Anomali uyarılarını etkinleştir",
+            "sentinel_daily_digest_enabled": "Günlük özet bildirimini etkinleştir",
+            "sentinel_daily_digest_time": "Günlük özet saati (SS:DD:SN)",
+            "notify_service": "Bildirim servisi (isteğe bağlı)",
+            "critical_action_pin": "Düzey artırma PIN'i (isteğe bağlı, 4-10 rakam)"
+          }
+        }
+      },
+      "error": {
+        "invalid_camera_entry_links": "Kamera varlık kimliklerini giriş varlık kimliklerinin listesiyle eşleştiren bir JSON nesnesi olmalıdır, ör. {{\"camera.driveway\": [\"lock.front_door\"]}}.",
+        "invalid_pin": "PIN 4-10 rakam olmalıdır.",
+        "quiet_hours_incomplete": "Sessiz saatler için başlangıç ve bitişin ikisini de ayarlayın (veya ikisini de devre dışı bırakın).",
+        "invalid_quiet_hours": "Sessiz saatler 0 ile 23 arasında yerel saat olmalıdır.",
+        "invalid_rule_entity_exclusions": "Bir anomali türünü (veya tüm türler için \"*\") her biri nokta ve en az bir sabit karakter içeren varlık kimliği veya glob deseni (yalnızca * ve ? joker karakterleri, küçük harfli varlık kimliği karakterleri) listeleriyle eşleştiren bir JSON nesnesi olmalıdır, ör. {{\"appliance_power_duration\": [\"sensor.ac_power\"], \"camera_entry_unsecured\": [\"camera.map_*\"]}}. \"*\" veya \"*.*\" gibi tümüyle eşleşen girdilere izin verilmez — bunun yerine \"*\" tür anahtarını kullanın."
+      }
+    },
+    "feature": {
+      "entry_type": "service",
+      "abort": {
+        "reconfigure_successful": "Özellik güncellendi.",
+        "setup_complete": "Kurulum tamamlandı.",
+        "no_provider_for_basic_setup": "Model sağlayıcı yapılandırılmamış. Önce bir **Model Sağlayıcı** ekleyin, sonra kurulumu tekrar deneyin."
+      },
+      "error": {
+        "no_providers": "Hiç model sağlayıcı yapılandırılmamış.",
+        "cannot_connect": "Veritabanına bağlanılamadı. Ayarları kontrol edip tekrar deneyin.",
+        "invalid_auth": "Geçersiz yetkilendirme.",
+        "invalid_uri": "URI oluşturulamadı.",
+        "unknown": "Beklenmeyen hata."
+      },
+      "initiate_flow": {
+        "reconfigure": "Özelliği yeniden yapılandır",
+        "user": "Kurulum"
+      },
+      "step": {
+        "feature_enable": {
+          "title": "Özellik kurulumu",
+          "description": "İsteğe bağlı özellikleri etkinleştirin veya devre dışı bırakın.",
+          "data": {
+            "camera_image_analysis": "Kamera Görüntü Analizi",
+            "conversation_summary": "Sohbet Özeti",
+            "embedding": "Gömme (Embeddings)"
+          }
+        },
+        "feature_provider": {
+          "title": "Model sağlayıcı seçin",
+          "description": "{feature_name} için bir model sağlayıcı seçin.",
+          "data": {
+            "model_provider_id": "Model sağlayıcı"
+          }
+        },
+        "feature_model": {
+          "title": "{feature_name}",
+          "description": "Bu özellik için model ayarlarını yapılandırın. {provider_notice}",
+          "data": {
+            "model_name": "Model",
+            "fallback_provider_ids": "Yedek sağlayıcılar",
+            "temperature": "Sıcaklık",
+            "keepalive_s": "Ollama keepalive (saniye veya Asla boşaltma (-1))",
+            "context_size": "Ollama bağlam boyutu (token)",
+            "reasoning": "Ollama akıl yürütme"
+          },
+          "data_description": {
+            "fallback_provider_ids": "Sıralı yedek sağlayıcı listesi. Birincil sağlayıcı başarısız olursa ilk kullanılabilir sağlayıcı kullanılır."
+          }
+        },
+        "database": {
+          "title": "Veritabanı kurulumu",
+          "description": "Veritabanı için gerekli parametreleri girin.",
+          "data": {
+            "username": "Veritabanı kullanıcı adı",
+            "password": "Veritabanı parolası",
+            "host": "Veritabanı ana makinesi",
+            "port": "Veritabanı bağlantı noktası (isteğe bağlı)",
+            "db_name": "Veritabanı adı",
+            "db_params": "Veritabanı bağlantı parametreleri (isteğe bağlı)"
+          }
+        },
+        "instructions": {
+          "title": "Model sağlayıcı ekleyin",
+          "description": "Henüz bir model sağlayıcı yok. **Model Sağlayıcı** bölümünden bir tane ekleyin."
+        },
+        "setup_mode": {
+          "title": "Kurulum",
+          "description": "Kurulum türünü seçin. Temel kurulum tüm özellikleri önerilen varsayılanlarla etkinleştirir. Gelişmiş kurulum her özellik üzerinde tam kontrol sağlar.{overwrite_warning}",
+          "data": {
+            "setup_mode": "Kurulum türü"
+          }
+        },
+        "setup_status": {
+          "title": "Kurulum tamamlandı",
+          "description": "Kurulum tamamlandı.\n\n**Etkinleştirilen özellikler:** {features_enabled}{skipped_section}\n\n**Veritabanı:** {database_status}\n\n**Sonraki adımlar:**\n- Anomali izlemeyi etkinleştirmek için **Sentinel Yapılandır**'ı çalıştırın.\n- Sesli giriş için bir **STT Sağlayıcı** ekleyin.\n- Home Generative Agent'ı sesli asistanınız olarak eklemek için **Ayarlar → Sesli Asistanlar**'a gidin."
+        }
+      }
+    }
+  },
+  "selector": {
+    "db_params": {
+      "fields": {
+        "key": {
+          "name": "Anahtar",
+          "description": "Bağlantı parametresi adı (ör. sslmode, connect_timeout)"
+        },
+        "value": {
+          "name": "Değer",
+          "description": "Bağlantı parametresi değeri (ör. disable, 30)"
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "invalid_config_entry": {
+      "message": "Geçersiz yapılandırma girişi sağlandı. Alınan: {config_entry}"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Home Generative Agent Seçenekleri",
+        "description": "Genel davranış ve komutları yapılandırın.",
+        "data": {
+          "face_api_url": "Yüz tanıma API URL'si (isteğe bağlı)",
+          "prompt": "Talimatlar",
+          "vlm_response_language": "Kamera açıklama dili (isteğe bağlı)",
+          "vlm_prompt_extra": "Ek kamera analizi talimatları (isteğe bağlı)",
+          "llm_hass_api": "Home Assistant'ı kontrol et",
+          "video_analyzer_mode": "Video analizci modu",
+          "notify_service": "Video Analizci Bildirim Servisi (isteğe bağlı)",
+          "face_recognition": "Yüz tanımayı etkinleştir",
+          "manage_context_with_tokens": "Bağlam yönetim yöntemi",
+          "max_tokens_in_context": "Sohbet bağlamındaki maksimum token sayısı",
+          "max_messages_in_context": "Sohbet bağlamındaki maksimum mesaj sayısı",
+          "critical_action_pin_enabled": "Kritik eylemler için PIN zorunlu",
+          "critical_action_pin": "Kritik eylem PIN’i (kilit açma/kurma/açma için gerekli)",
+          "schema_first_yaml": "YAML istekleri için şema-öncelikli JSON",
+          "stt_filters_section": "Konuşma girişi filtreleri",
+          "stt_hallucination_patterns": "Yok sayılan STT alt dizeleri",
+          "stt_hallucination_exact_patterns": "Yok sayılan tam STT ifadeleri",
+          "tool_relevance_threshold": "Araç ilgi eşiği",
+          "tool_retrieval_limit": "Araç getirme limiti"
+        },
+        "data_description": {
+          "prompt": "LLM'in nasıl yanıt vermesi gerektiğini belirtin. Bu bir şablon olabilir.",
+          "vlm_response_language": "VLM kamera görüntüsü açıklamalarının dili, örn. 'Czech'. İngilizce için boş bırakın. Dahili 'Scene unchanged.' yanıtı her zaman İngilizce kalır.",
+          "vlm_prompt_extra": "VLM kamera analizi istemine eklenen ek talimatlar, örn. 'Garaj yolundaki arabaları yok say'. Yerleşik kuralların yerini almazlar.",
+          "schema_first_yaml": "Etkinleştirildiğinde, YAML istekleri YAML'ye çevrilecek sıkı JSON ile yanıtlanır.",
+          "stt_hallucination_patterns": "Her satıra bir alt dize yazın. STT metni herhangi bir girdiyi içerirse LLM çalışmadan önce yok sayılır. Eşleşme büyük/küçük harfe duyarsızdır.",
+          "stt_hallucination_exact_patterns": "Her satıra bir ifade yazın. STT metninin tamamı herhangi bir girdiye eşitse LLM çalışmadan önce yok sayılır. Eşleşme büyük/küçük harfe duyarsızdır.",
+          "tool_relevance_threshold": "Bir aracın getirilmesi için gereken minimum anlamsal benzerlik puanı (0,0 ile 1,0 arasında).",
+          "tool_retrieval_limit": "Kullanıcının sorgusuna anlamsal benzerliğe göre getirilecek maksimum araç sayısı."
+        }
+      }
+    }
+  }
+}

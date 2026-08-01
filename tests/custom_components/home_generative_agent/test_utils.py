@@ -1,0 +1,506 @@
+# ruff: noqa: S101
+"""Unit tests for core/utils.py — openai_compatible validation helpers."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+import httpx
+import pytest
+
+from custom_components.home_generative_agent.core.utils import (
+    CannotConnectError,
+    InvalidAuthError,
+    anthropic_healthy,
+    extract_final,
+    normalize_openai_compatible_base_url,
+    openai_compatible_healthy,
+    reasoning_field,
+    validate_anthropic_key,
+    validate_openai_compatible_url,
+)
+
+if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
+
+# ---------------------------------------------------------------------------
+# extract_final tests
+# ---------------------------------------------------------------------------
+
+
+def test_extract_final_strips_think_block() -> None:
+    assert extract_final("<think>reasoning</think>answer") == "answer"
+
+
+def test_extract_final_no_max_chars_returns_full() -> None:
+    text = "word " * 50
+    assert extract_final(text.strip()) == text.strip()
+
+
+def test_extract_final_max_chars_fits_exactly() -> None:
+    assert extract_final("hello world", max_chars=11) == "hello world"
+
+
+def test_extract_final_max_chars_truncates_at_word_boundary() -> None:
+    # 20 chars would cut mid-word in "boundary"
+    result = extract_final("truncate at word boundary here", max_chars=20)
+    assert result == "truncate at word"
+    assert len(result) <= 20
+
+
+def test_extract_final_max_chars_no_space_falls_back_to_hard_cut() -> None:
+    result = extract_final("superlongwordwithoutspaces", max_chars=10)
+    assert len(result) <= 10
+
+
+def test_extract_final_list_of_text_blocks_joins_text() -> None:
+    blocks: list[Any] = [
+        {"type": "text", "text": "hello"},
+        {"type": "text", "text": "world"},
+    ]
+    assert extract_final(blocks) == "hello world"
+
+
+def test_extract_final_list_filters_non_text_entries() -> None:
+    blocks: list[Any] = [
+        {"type": "tool_use", "id": "abc"},
+        {"type": "text", "text": "answer"},
+        "bare string",
+        42,
+    ]
+    assert extract_final(blocks) == "answer"
+
+
+def test_extract_final_empty_list_returns_empty_string() -> None:
+    assert extract_final([]) == ""
+
+
+# ---------------------------------------------------------------------------
+# Fake HTTP helpers
+# ---------------------------------------------------------------------------
+
+HTTP_OK = 200
+HTTP_UNAUTHORIZED = 401
+HTTP_SERVER_ERROR = 503
+
+
+class _FakeResponse:
+    """Minimal httpx.Response stand-in."""
+
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+
+
+class _FakeClient:
+    """Async HTTP client that records calls and returns a canned response."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int = HTTP_OK,
+        exc: Exception | None = None,
+    ) -> None:
+        self.status_code = status_code
+        self.exc = exc
+        self.last_url: str | None = None
+        self.last_headers: dict[str, str] = {}
+
+    async def get(
+        self, url: str, headers: dict[str, str] | None = None, **_: Any
+    ) -> _FakeResponse:
+        self.last_url = url
+        self.last_headers = dict(headers or {})
+        if self.exc is not None:
+            raise self.exc
+        return _FakeResponse(self.status_code)
+
+
+# ---------------------------------------------------------------------------
+# normalize_openai_compatible_base_url tests
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_base_url_appends_v1() -> None:
+    """A bare host:port URL gains the /v1 prefix the OpenAI SDK expects."""
+    result = normalize_openai_compatible_base_url("http://localhost:8080")
+    assert result == "http://localhost:8080/v1"
+
+
+def test_normalize_base_url_keeps_existing_v1() -> None:
+    """A URL already ending in /v1 is not doubled."""
+    result = normalize_openai_compatible_base_url("http://localhost:8080/v1")
+    assert result == "http://localhost:8080/v1"
+
+
+def test_normalize_base_url_strips_trailing_slash() -> None:
+    """Trailing slashes are removed before appending /v1."""
+    result = normalize_openai_compatible_base_url("http://localhost:8080/")
+    assert result == "http://localhost:8080/v1"
+    result = normalize_openai_compatible_base_url("http://localhost:8080/v1/")
+    assert result == "http://localhost:8080/v1"
+
+
+def test_normalize_base_url_adds_scheme() -> None:
+    """A URL without a scheme gains http://."""
+    result = normalize_openai_compatible_base_url("localhost:8080")
+    assert result == "http://localhost:8080/v1"
+
+
+def test_normalize_base_url_preserves_path_prefix() -> None:
+    """A reverse-proxy path prefix is preserved with /v1 appended."""
+    result = normalize_openai_compatible_base_url("http://myhost/llm")
+    assert result == "http://myhost/llm/v1"
+
+
+# ---------------------------------------------------------------------------
+# validate_openai_compatible_url tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_validate_openai_compatible_url_empty_raises(hass: HomeAssistant) -> None:
+    """Empty base_url immediately raises CannotConnectError without any network call."""
+    with pytest.raises(CannotConnectError):
+        await validate_openai_compatible_url(hass, "")
+
+
+@pytest.mark.asyncio
+async def test_validate_openai_compatible_url_success_no_key(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """200 response with no api_key succeeds and omits Authorization header."""
+    client = _FakeClient(status_code=HTTP_OK)
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+
+    await validate_openai_compatible_url(hass, "http://localhost:8000")
+
+    assert client.last_url == "http://localhost:8000/v1/models"
+    assert "Authorization" not in client.last_headers
+
+
+@pytest.mark.asyncio
+async def test_validate_openai_compatible_url_accepts_v1_suffix(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A base URL entered with /v1 probes /v1/models, not /v1/v1/models."""
+    client = _FakeClient(status_code=HTTP_OK)
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+
+    await validate_openai_compatible_url(hass, "http://localhost:8000/v1")
+
+    assert client.last_url == "http://localhost:8000/v1/models"
+
+
+@pytest.mark.asyncio
+async def test_validate_openai_compatible_url_sends_bearer_token(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When api_key is provided the Authorization header is included."""
+    client = _FakeClient(status_code=HTTP_OK)
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+
+    await validate_openai_compatible_url(hass, "http://localhost:8000/", "sk-test")
+
+    assert client.last_headers.get("Authorization") == "Bearer sk-test"
+
+
+@pytest.mark.asyncio
+async def test_validate_openai_compatible_url_none_key_omits_header(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """api_key='none' (the sentinel default) must not send an Authorization header."""
+    client = _FakeClient(status_code=HTTP_OK)
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+
+    await validate_openai_compatible_url(hass, "http://localhost:8000", "none")
+
+    assert "Authorization" not in client.last_headers
+
+
+@pytest.mark.asyncio
+async def test_validate_openai_compatible_url_network_error(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """httpx.RequestError is re-raised as CannotConnectError."""
+    request = httpx.Request("GET", "http://localhost:8000/v1/models")
+    client = _FakeClient(exc=httpx.ConnectError("refused", request=request))
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+
+    with pytest.raises(CannotConnectError):
+        await validate_openai_compatible_url(hass, "http://localhost:8000")
+
+
+@pytest.mark.asyncio
+async def test_validate_openai_compatible_url_401_raises_invalid_auth(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HTTP 401 is mapped to InvalidAuthError."""
+    client = _FakeClient(status_code=HTTP_UNAUTHORIZED)
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+
+    with pytest.raises(InvalidAuthError):
+        await validate_openai_compatible_url(hass, "http://localhost:8000", "bad-key")
+
+
+@pytest.mark.asyncio
+async def test_validate_openai_compatible_url_5xx_raises_cannot_connect(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HTTP 5xx is mapped to CannotConnectError."""
+    client = _FakeClient(status_code=HTTP_SERVER_ERROR)
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+
+    with pytest.raises(CannotConnectError):
+        await validate_openai_compatible_url(hass, "http://localhost:8000")
+
+
+# ---------------------------------------------------------------------------
+# openai_compatible_healthy tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_healthy_no_url_returns_false(
+    hass: HomeAssistant,
+) -> None:
+    """Missing base_url returns False immediately without any network call."""
+    result = await openai_compatible_healthy(hass, None)
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_healthy_empty_url_returns_false(
+    hass: HomeAssistant,
+) -> None:
+    """Empty string base_url returns False immediately."""
+    result = await openai_compatible_healthy(hass, "")
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_healthy_returns_true_on_success(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reachable endpoint returns True."""
+    client = _FakeClient(status_code=HTTP_OK)
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+
+    result = await openai_compatible_healthy(hass, "http://localhost:8000")
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_healthy_returns_false_on_connect_error(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Network error returns False instead of propagating the exception."""
+    request = httpx.Request("GET", "http://localhost:8000/v1/models")
+    client = _FakeClient(exc=httpx.ConnectError("refused", request=request))
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+
+    result = await openai_compatible_healthy(hass, "http://localhost:8000")
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_healthy_returns_false_on_auth_error(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HTTP 401 (InvalidAuthError) returns False instead of propagating."""
+    client = _FakeClient(status_code=HTTP_UNAUTHORIZED)
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+
+    result = await openai_compatible_healthy(hass, "http://localhost:8000", "bad-key")
+    assert result is False
+
+
+# ---------------------------------------------------------------------------
+# reasoning_field tests
+# ---------------------------------------------------------------------------
+
+
+def test_reasoning_field_unsupported_model_returns_empty() -> None:
+    """Non-thinking models always return {} regardless of enabled flag."""
+    assert reasoning_field(model="llama3:8b", enabled=True) == {}
+    assert reasoning_field(model="llama3:8b", enabled=False) == {}
+
+
+def test_reasoning_field_qwen3_enabled_returns_true() -> None:
+    """Qwen3-family models return {'reasoning': True} when enabled."""
+    result = reasoning_field(model="qwen3:32b", enabled=True)
+    assert result == {"reasoning": True}
+
+
+def test_reasoning_field_qwen3_disabled_returns_false() -> None:
+    """Qwen3-family models return {'reasoning': False} when disabled."""
+    result = reasoning_field(model="qwen3.5:35b", enabled=False)
+    assert result == {"reasoning": False}
+
+
+def test_reasoning_field_gpt_oss_disabled_returns_false() -> None:
+    """gpt-oss models return {'reasoning': False} when disabled."""
+    result = reasoning_field(model="gpt-oss", enabled=False)
+    assert result == {"reasoning": False}
+
+
+def test_reasoning_field_qwen3_disabled_returns_false_registry_url() -> None:
+    """Registry-prefixed model names are stripped before matching."""
+    result = reasoning_field(
+        model="registry.ollama.ai/library/qwen3.5:35b", enabled=False
+    )
+    assert result == {"reasoning": False}
+
+
+# ---------------------------------------------------------------------------
+# validate_anthropic_key tests
+# ---------------------------------------------------------------------------
+
+ANTHROPIC_MODELS_URL = "https://api.anthropic.com/v1/models"
+
+
+@pytest.mark.asyncio
+async def test_validate_anthropic_key_success(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HTTP 200 from Anthropic /v1/models does not raise."""
+    client = _FakeClient(status_code=HTTP_OK)
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+    await validate_anthropic_key(hass, "sk-ant-valid")
+    assert client.last_url == ANTHROPIC_MODELS_URL
+    assert client.last_headers.get("x-api-key") == "sk-ant-valid"
+    assert "anthropic-version" in client.last_headers
+
+
+@pytest.mark.asyncio
+async def test_validate_anthropic_key_401_raises_invalid_auth(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HTTP 401 raises InvalidAuthError."""
+    client = _FakeClient(status_code=HTTP_UNAUTHORIZED)
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+    with pytest.raises(InvalidAuthError):
+        await validate_anthropic_key(hass, "sk-ant-bad")
+
+
+@pytest.mark.asyncio
+async def test_validate_anthropic_key_network_error_raises_cannot_connect(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Network failure raises CannotConnectError."""
+    request = httpx.Request("GET", ANTHROPIC_MODELS_URL)
+    client = _FakeClient(exc=httpx.ConnectError("refused", request=request))
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+    with pytest.raises(CannotConnectError):
+        await validate_anthropic_key(hass, "sk-ant-any")
+
+
+@pytest.mark.asyncio
+async def test_validate_anthropic_key_server_error_raises_cannot_connect(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HTTP 5xx raises CannotConnectError."""
+    client = _FakeClient(status_code=HTTP_SERVER_ERROR)
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+    with pytest.raises(CannotConnectError):
+        await validate_anthropic_key(hass, "sk-ant-any")
+
+
+@pytest.mark.asyncio
+async def test_validate_anthropic_key_empty_key_returns_without_error(
+    hass: HomeAssistant,
+) -> None:
+    """Empty api_key returns immediately without making any network call."""
+    await validate_anthropic_key(hass, "")
+
+
+# ---------------------------------------------------------------------------
+# anthropic_healthy tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_anthropic_healthy_no_key_returns_false(hass: HomeAssistant) -> None:
+    """Missing api_key returns False immediately."""
+    assert await anthropic_healthy(hass, None) is False
+
+
+@pytest.mark.asyncio
+async def test_anthropic_healthy_returns_true_on_success(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reachable Anthropic endpoint returns True."""
+    client = _FakeClient(status_code=HTTP_OK)
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+    assert await anthropic_healthy(hass, "sk-ant-valid") is True
+
+
+@pytest.mark.asyncio
+async def test_anthropic_healthy_returns_false_on_connect_error(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Network failure returns False instead of propagating."""
+    request = httpx.Request("GET", ANTHROPIC_MODELS_URL)
+    client = _FakeClient(exc=httpx.ConnectError("refused", request=request))
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+    assert await anthropic_healthy(hass, "sk-ant-any") is False
+
+
+@pytest.mark.asyncio
+async def test_anthropic_healthy_returns_false_on_auth_error(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HTTP 401 returns False instead of propagating."""
+    client = _FakeClient(status_code=HTTP_UNAUTHORIZED)
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+    assert await anthropic_healthy(hass, "sk-ant-bad") is False

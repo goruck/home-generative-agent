@@ -1,0 +1,500 @@
+# ruff: noqa: S101
+"""
+Unit tests for conversation.py helpers (MultiLLMAPI, _run_tool_index_background).
+
+hassil is not installed in the test venv, so this module stubs the entire
+homeassistant.components.conversation import chain before importing conversation.py.
+"""
+
+from __future__ import annotations
+
+import sys
+import types
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+from homeassistant.exceptions import HomeAssistantError
+
+
+def _stub_ha_conversation() -> None:
+    """
+    Stub homeassistant.components.conversation before conversation.py loads it.
+
+    hassil and home_assistant_intents are not installed in the test venv.
+    We mock the HA conversation module with just enough surface area for
+    conversation.py to import cleanly and for MultiLLMAPI / _run_tool_index_background
+    to be accessible.
+    """
+    if "homeassistant.components.conversation" in sys.modules:
+        return
+
+    # Build real (empty) base classes so class inheritance works.
+    class _ConversationEntity:
+        pass
+
+    class _AbstractConversationAgent:
+        pass
+
+    class _ConversationResult:
+        pass
+
+    class _UserContent:
+        pass
+
+    class _AssistantContent:
+        pass
+
+    # conversation module
+    conv_mod: Any = types.ModuleType("homeassistant.components.conversation")
+    conv_mod.ConversationEntity = _ConversationEntity
+    conv_mod.AbstractConversationAgent = _AbstractConversationAgent
+    conv_mod.ConversationResult = _ConversationResult
+    conv_mod.UserContent = _UserContent
+    conv_mod.AssistantContent = _AssistantContent
+    conv_mod.AssistantContentDeltaDict = dict
+    conv_mod.ToolResultContentDeltaDict = dict
+    conv_mod.DOMAIN = "conversation"
+    conv_mod.async_set_agent = MagicMock()
+    conv_mod.trace = MagicMock()
+
+    # conversation.models submodule
+    models_mod: Any = types.ModuleType("homeassistant.components.conversation.models")
+    models_mod.AbstractConversationAgent = _AbstractConversationAgent
+    conv_mod.models = models_mod
+
+    sys.modules["homeassistant.components.conversation"] = conv_mod
+    sys.modules["homeassistant.components.conversation.models"] = models_mod
+
+
+def _ensure_content_classes() -> None:
+    """
+    Guarantee AssistantContent/UserContent exist on the loaded module.
+
+    Suite ordering decides whether the real HA conversation module or another
+    test file's import stub is in sys.modules; leaner stubs (e.g. the one in
+    test_conversation_stream.py) omit the content classes. The integration
+    resolves them at runtime through the module object, so adding them here
+    keeps isinstance checks and test construction consistent.
+    """
+    conv: Any = sys.modules["homeassistant.components.conversation"]
+    if not hasattr(conv, "AssistantContent"):
+
+        class _StubAssistantContent:
+            pass
+
+        conv.AssistantContent = _StubAssistantContent
+    if not hasattr(conv, "UserContent"):
+
+        class _StubUserContent:
+            pass
+
+        conv.UserContent = _StubUserContent
+
+
+_stub_ha_conversation()
+_ensure_content_classes()
+
+# These imports must come AFTER the stub so conversation.py loads cleanly.
+from homeassistant.components import conversation as ha_conversation  # noqa: E402
+
+from custom_components.home_generative_agent.conversation import (  # noqa: E402
+    _STREAM_ERROR_REASON_MAX_CHARS,
+    MultiLLMAPI,
+    _get_stt_hallucination_exact_patterns,
+    _get_stt_hallucination_patterns,
+    _is_stt_hallucination,
+    _recommit_final_assistant_content,
+    _run_tool_index_background,
+    _streaming_failure_content,
+)
+
+# ---------------------------------------------------------------------------
+# MultiLLMAPI: empty routing_map fallback
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_multi_llm_api_empty_routing_map_iterates_apis() -> None:
+    """With no routing entry, async_call_tool falls back to iterating all APIs."""
+    api1 = MagicMock()
+    api1.async_call_tool = AsyncMock(side_effect=HomeAssistantError("not mine"))
+    api2 = MagicMock()
+    api2.async_call_tool = AsyncMock(return_value={"result": "ok"})
+
+    multi = MultiLLMAPI({"api1": api1, "api2": api2}, routing_map={})
+
+    tool_input = MagicMock()
+    tool_input.tool_name = "mystery_tool"
+
+    result = await multi.async_call_tool(tool_input)
+
+    assert result == {"result": "ok"}
+    api1.async_call_tool.assert_called_once_with(tool_input)
+    api2.async_call_tool.assert_called_once_with(tool_input)
+
+
+@pytest.mark.asyncio
+async def test_multi_llm_api_empty_routing_map_all_fail_raises() -> None:
+    """With no routing entry and all APIs failing, HomeAssistantError is raised."""
+    api1 = MagicMock()
+    api1.async_call_tool = AsyncMock(side_effect=HomeAssistantError("nope"))
+
+    multi = MultiLLMAPI({"api1": api1}, routing_map={})
+
+    tool_input = MagicMock()
+    tool_input.tool_name = "mystery_tool"
+
+    with pytest.raises(HomeAssistantError, match="No routing target"):
+        await multi.async_call_tool(tool_input)
+
+
+@pytest.mark.asyncio
+async def test_multi_llm_api_routes_to_correct_api() -> None:
+    """With a populated routing_map, calls go directly to the mapped API."""
+    api1 = MagicMock()
+    api1.async_call_tool = AsyncMock(return_value="from_api1")
+    api2 = MagicMock()
+    api2.async_call_tool = AsyncMock(return_value="from_api2")
+
+    multi = MultiLLMAPI(
+        {"api1": api1, "api2": api2},
+        routing_map={"tool_a": "api2"},
+    )
+
+    tool_input = MagicMock()
+    tool_input.tool_name = "tool_a"
+
+    result = await multi.async_call_tool(tool_input)
+
+    assert result == "from_api2"
+    api1.async_call_tool.assert_not_called()
+    api2.async_call_tool.assert_called_once_with(tool_input)
+
+
+# ---------------------------------------------------------------------------
+# _run_tool_index_background failure path
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_tool_index_background_failure_sets_flag() -> None:
+    """Indexing failure sets tool_index_failed=True and resets tool_indexing_in_progress."""
+    rd = MagicMock()
+    rd.tool_index_ready = False
+    rd.tool_indexing_in_progress = True
+    rd.tool_index_failed = False
+    rd.tool_content_hashes = {}
+
+    hass = MagicMock()
+
+    with patch(
+        "custom_components.home_generative_agent.conversation.gather_store_puts_in_chunks",
+        new=AsyncMock(side_effect=RuntimeError("embedding provider down")),
+    ):
+        await _run_tool_index_background(
+            index_tasks=[AsyncMock()],
+            tool_hashes={"key": "hash"},
+            rd=rd,
+            hass=hass,
+        )
+
+    assert rd.tool_index_failed is True
+    assert rd.tool_index_ready is False
+    assert rd.tool_indexing_in_progress is False
+
+
+@pytest.mark.asyncio
+async def test_run_tool_index_background_success_clears_flags() -> None:
+    """Successful indexing sets tool_index_ready=True and resets in_progress."""
+    rd = MagicMock()
+    rd.tool_index_ready = False
+    rd.tool_indexing_in_progress = True
+    rd.tool_index_failed = False
+    rd.tool_content_hashes = {}
+
+    hass = MagicMock()
+
+    with patch(
+        "custom_components.home_generative_agent.conversation.gather_store_puts_in_chunks",
+        new=AsyncMock(return_value=None),
+    ):
+        await _run_tool_index_background(
+            index_tasks=[AsyncMock()],
+            tool_hashes={"key": "hash"},
+            rd=rd,
+            hass=hass,
+        )
+
+    assert rd.tool_index_ready is True
+    assert rd.tool_index_failed is False
+    assert rd.tool_indexing_in_progress is False
+    assert rd.tool_content_hashes == {"key": "hash"}
+
+
+# ---------------------------------------------------------------------------
+# STT hallucination filter helpers
+# ---------------------------------------------------------------------------
+
+
+def test_get_stt_hallucination_patterns_empty() -> None:
+    """Empty option returns an empty tuple."""
+    assert _get_stt_hallucination_patterns({}) == ()
+    assert _get_stt_hallucination_patterns({"stt_hallucination_patterns": []}) == ()
+    assert _get_stt_hallucination_patterns({"stt_hallucination_patterns": ""}) == ()
+
+
+def test_get_stt_hallucination_patterns_list() -> None:
+    """List input is normalised to lower-case tuple."""
+    patterns = _get_stt_hallucination_patterns(
+        {"stt_hallucination_patterns": ["Foo", " BAR ", "baz"]}
+    )
+    assert patterns == ("foo", "bar", "baz")
+
+
+def test_get_stt_hallucination_patterns_legacy_string() -> None:
+    """Legacy comma-separated string still works."""
+    patterns = _get_stt_hallucination_patterns(
+        {"stt_hallucination_patterns": "Foo, BAR,  baz "}
+    )
+    assert patterns == ("foo", "bar", "baz")
+
+
+def test_get_stt_hallucination_patterns_multiline_string() -> None:
+    """Legacy newline-separated string also works."""
+    patterns = _get_stt_hallucination_patterns(
+        {"stt_hallucination_patterns": "Foo\nBAR\nbaz"}
+    )
+    assert patterns == ("foo", "bar", "baz")
+
+
+def test_get_stt_hallucination_patterns_extra_whitespace() -> None:
+    """Extra whitespace around commas and empty segments are ignored."""
+    patterns = _get_stt_hallucination_patterns(
+        {"stt_hallucination_patterns": " a , , b ,c"}
+    )
+    assert patterns == ("a", "b", "c")
+
+
+def test_get_stt_hallucination_exact_patterns_empty() -> None:
+    """Empty exact option returns an empty tuple."""
+    assert _get_stt_hallucination_exact_patterns({}) == ()
+    assert (
+        _get_stt_hallucination_exact_patterns({"stt_hallucination_exact_patterns": []})
+        == ()
+    )
+
+
+def test_get_stt_hallucination_exact_patterns_list() -> None:
+    """List input is normalised to lower-case tuple."""
+    patterns = _get_stt_hallucination_exact_patterns(
+        {"stt_hallucination_exact_patterns": ["Foo", " BAR ", "baz"]}
+    )
+    assert patterns == ("foo", "bar", "baz")
+
+
+def test_is_stt_hallucination_empty() -> None:
+    """None/empty text never matches, even with non-empty patterns."""
+    assert _is_stt_hallucination(None, ("foo",), ()) is False
+    assert _is_stt_hallucination("", ("foo",), ()) is False
+
+
+def test_is_stt_hallucination_no_patterns() -> None:
+    """With empty patterns nothing ever matches."""
+    assert _is_stt_hallucination("foo", (), ()) is False
+    assert _is_stt_hallucination("subtitles", (), ()) is False
+
+
+def test_is_stt_hallucination_substring_match() -> None:
+    """Matching substring returns True (case-insensitive)."""
+    sub_patterns = ("subtitles", "dimatorzok")
+    assert _is_stt_hallucination("Subtitles by", sub_patterns, ()) is True
+    assert _is_stt_hallucination("some dimatorzok noise", sub_patterns, ()) is True
+
+
+def test_is_stt_hallucination_exact_match() -> None:
+    """Exact match returns True only for full text equality (case-insensitive)."""
+    exact_patterns = ("to be continued", "the end")
+    assert _is_stt_hallucination("To Be Continued", (), exact_patterns) is True
+    assert _is_stt_hallucination("The End", (), exact_patterns) is True
+    assert _is_stt_hallucination("the end.", (), exact_patterns) is False  # not exact
+    assert (
+        _is_stt_hallucination("To be continued now", (), exact_patterns) is False
+    )  # not exact
+
+
+def test_is_stt_hallucination_combined() -> None:
+    """Both substring and exact patterns work together."""
+    sub_patterns = ("sub",)
+    exact_patterns = ("the end",)
+    assert _is_stt_hallucination("subtitles", sub_patterns, exact_patterns) is True
+    assert _is_stt_hallucination("The End", sub_patterns, exact_patterns) is True
+    assert _is_stt_hallucination("nothing", sub_patterns, exact_patterns) is False
+
+
+def test_is_stt_hallucination_no_match() -> None:
+    """Non-matching text returns False."""
+    assert _is_stt_hallucination("turn on the light", ("subtitles",), ()) is False
+    assert (
+        _is_stt_hallucination("subtitle", ("subtitles",), ()) is False
+    )  # partial, not full
+
+
+# ---------------------------------------------------------------------------
+# _streaming_failure_content: user-visible failure message (issue #502)
+# ---------------------------------------------------------------------------
+
+
+def test_streaming_failure_content_without_error() -> None:
+    """No captured stream error yields the generic try-again message."""
+    assert (
+        _streaming_failure_content(None)
+        == "I'm sorry, I was unable to respond in time. Please try again."
+    )
+
+
+def test_streaming_failure_content_includes_error_reason() -> None:
+    """The captured stream error's message is surfaced in the chat reply."""
+    err = HomeAssistantError("temperature does not support 0.2 with this model")
+    result = _streaming_failure_content(err)
+    assert result == (
+        "I'm sorry, I was unable to respond: "
+        "temperature does not support 0.2 with this model"
+    )
+
+
+def test_streaming_failure_content_uses_type_name_for_empty_message() -> None:
+    """A HomeAssistantError with an empty str() falls back to the class name."""
+    result = _streaming_failure_content(HomeAssistantError())
+    assert result == "I'm sorry, I was unable to respond: HomeAssistantError"
+
+
+def test_streaming_failure_content_hides_non_ha_error_details() -> None:
+    """
+    Arbitrary exceptions surface only their class name, never their message.
+
+    Non-HomeAssistantError text can carry internals (DSNs, paths, request
+    IDs) and is rendered in chat, spoken by voice pipelines, and persisted
+    into the model's future context — so the message must stay in the log.
+    """
+    result = _streaming_failure_content(
+        RuntimeError("internal-detail-that-must-not-leak /var/lib/private/path")
+    )
+    assert "internal-detail" not in result
+    assert "/var/lib" not in result
+    assert (
+        result == "I'm sorry, I was unable to respond (RuntimeError). Please try again."
+    )
+
+
+def test_streaming_failure_content_truncates_long_reason() -> None:
+    """Reasons longer than the cap are truncated with an ellipsis marker."""
+    long_reason = "x" * (_STREAM_ERROR_REASON_MAX_CHARS + 100)
+    result = _streaming_failure_content(HomeAssistantError(long_reason))
+    reason = result.removeprefix("I'm sorry, I was unable to respond: ")
+    assert len(reason) == _STREAM_ERROR_REASON_MAX_CHARS + 1
+    assert reason.endswith("…")
+    assert reason[:-1] == "x" * _STREAM_ERROR_REASON_MAX_CHARS
+
+
+# ---------------------------------------------------------------------------
+# _recommit_final_assistant_content: CONTENT_ADDED re-fire after stream failure
+# ---------------------------------------------------------------------------
+
+
+class _FakeChatLog:
+    """Minimal ChatLog stand-in tracking recommitted assistant content."""
+
+    def __init__(self, content: list[Any]) -> None:
+        self.content = content
+        self.recommitted: list[Any] = []
+
+    def async_add_assistant_content_without_tools(self, item: Any) -> None:
+        self.recommitted.append(item)
+        self.content.append(item)
+
+
+def _assistant_content(text: str, tool_calls: Any = None) -> Any:
+    """
+    Build an AssistantContent instance with the given payload.
+
+    Works against both the import stub (no-arg class) and the real HA
+    dataclass (required kwargs), since suite ordering decides which one
+    is loaded when this module runs.
+    """
+    try:
+        item: Any = ha_conversation.AssistantContent(
+            agent_id="conversation.test", content=text
+        )
+    except TypeError:
+        stub_cls: Any = ha_conversation.AssistantContent
+        item = stub_cls()
+        item.content = text
+    item.tool_calls = tool_calls
+    return item
+
+
+def _user_content() -> Any:
+    """Build a UserContent instance against either the stub or the real class."""
+    try:
+        return ha_conversation.UserContent(content="hi")
+    except TypeError:
+        stub_cls: Any = ha_conversation.UserContent
+        return stub_cls()
+
+
+def test_recommit_refires_final_assistant_content() -> None:
+    """
+    The final tool-free AssistantContent is popped and re-added.
+
+    Re-adding fires CONTENT_ADDED so the frontend streaming UI shows the
+    final text in the main chat area.
+    """
+    final = _assistant_content("Here is your answer.")
+    chat_log = _FakeChatLog([_user_content(), final])
+
+    _recommit_final_assistant_content(chat_log)  # type: ignore[arg-type]
+
+    assert chat_log.recommitted == [final]
+    assert chat_log.content[-1] is final
+    assert len(chat_log.content) == 2
+
+
+def test_recommit_skips_empty_chat_log() -> None:
+    """An empty chat log is left untouched."""
+    chat_log = _FakeChatLog([])
+    _recommit_final_assistant_content(chat_log)  # type: ignore[arg-type]
+    assert chat_log.recommitted == []
+
+
+def test_recommit_skips_content_with_tool_calls() -> None:
+    """AssistantContent carrying tool calls must not be recommitted."""
+    final = _assistant_content("calling tool", tool_calls=[MagicMock()])
+    chat_log = _FakeChatLog([final])
+
+    _recommit_final_assistant_content(chat_log)  # type: ignore[arg-type]
+
+    assert chat_log.recommitted == []
+    assert chat_log.content == [final]
+
+
+def test_recommit_skips_empty_assistant_text() -> None:
+    """AssistantContent with empty text must not be recommitted."""
+    final = _assistant_content("")
+    chat_log = _FakeChatLog([final])
+
+    _recommit_final_assistant_content(chat_log)  # type: ignore[arg-type]
+
+    assert chat_log.recommitted == []
+    assert chat_log.content == [final]
+
+
+def test_recommit_skips_non_assistant_final_content() -> None:
+    """A trailing non-assistant entry (e.g. UserContent) is left in place."""
+    user_item = _user_content()
+    chat_log = _FakeChatLog([user_item])
+
+    _recommit_final_assistant_content(chat_log)  # type: ignore[arg-type]
+
+    assert chat_log.recommitted == []
+    assert chat_log.content == [user_item]

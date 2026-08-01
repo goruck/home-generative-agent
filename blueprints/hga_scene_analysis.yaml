@@ -1,0 +1,99 @@
+blueprint:
+  name: Home Generative Agent Scene Analyzer
+  author: goruck
+  description: >
+    Periodically prompt the Home Generative Agent to analyze a camera scene.
+    If the model does not say "no", optionally send a persistent notification and/or mobile push.
+  domain: automation
+  source_url: https://github.com/goruck/home-generative-agent
+
+  input:
+    time_pattern:
+      name: Time Pattern
+      description: cron-like time pattern (e.g., /30 for every 30 mins)
+      selector:
+        text:
+          multiline: false
+    message:
+      name: Prompt
+      description: What the agent should evaluate in the image.
+      default: Check the front porch camera for one or more boxes.
+      selector:
+        text:
+          multiline: false
+    agent_id:
+      name: Agent ID
+      description: ID of the assistant agent to query.
+      default: conversation.home_generative_agent
+      selector:
+        text:
+          multiline: false
+    conversation_id:
+      name: Conversation ID
+      description: Identifier for the chat session.
+      default: hga_scene_analysis
+      selector:
+        text:
+          multiline: false
+    mobile_push_service:
+      name: Mobile Push Notify Service (Optional)
+      description: Exact mobile_app notify service (e.g., notify.mobile_app_evas_iphone)
+      default: ""
+      selector:
+        text:
+          multiline: false
+    send_persistent:
+      name: Send persistent notification?
+      default: true
+      selector:
+        boolean: {}
+
+variables:
+  v_push: !input mobile_push_service
+  v_persist: !input send_persistent
+
+trigger:
+  - platform: time_pattern
+    minutes: !input time_pattern
+
+# time_pattern triggers fire at the specified interval and at the “zero point” (top of the hour, day, etc.)
+# Filter so it won't fire at the top of the hour
+condition:
+  - condition: template
+    value_template: >
+      {{ now().minute != 0 }}
+
+action:
+  - service: conversation.process
+    data:
+      agent_id: !input agent_id
+      text: !input message
+      conversation_id: !input conversation_id
+    response_variable: hga_scene_analysis_output
+
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ 'no' not in (hga_scene_analysis_output['response']['speech']['plain']['speech'] | lower) }}
+        sequence:
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ v_persist }}"
+                sequence:
+                  - service: persistent_notification.create
+                    data:
+                      title: HGA Scene Analysis
+                      message: "{{ hga_scene_analysis_output['response']['speech']['plain']['speech'] }}"
+
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ v_push != '' }}"
+                sequence:
+                  - service: "{{ v_push }}"
+                    data:
+                      title: HGA Scene Analysis
+                      message: "{{ hga_scene_analysis_output['response']['speech']['plain']['speech'] }}"
+mode: single

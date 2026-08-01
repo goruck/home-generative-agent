@@ -1,0 +1,1097 @@
+"""Deterministic evaluation for generated rules."""
+
+from __future__ import annotations
+
+import logging
+from datetime import timedelta
+from typing import TYPE_CHECKING, Any, cast
+
+from homeassistant.util import dt as dt_util
+
+from custom_components.home_generative_agent.const import (
+    RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
+    RECOMMENDED_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT,
+    SENTINEL_OCCUPANCY_ARMED_STATES,
+)
+
+from .baseline import evaluate_baseline_deviation, evaluate_time_of_day_anomaly
+from .models import AnomalyFinding, Severity, build_anomaly_id
+from .proposal_templates import SUPPORTED_TEMPLATES
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Mapping
+
+    from custom_components.home_generative_agent.snapshot.schema import (
+        CameraActivity,
+        FullStateSnapshot,
+        SnapshotEntity,
+    )
+
+LOGGER = logging.getLogger(__name__)
+
+_SEVERITIES = {"low", "medium", "high"}
+# HA covers report "open"/"closed" rather than binary_sensor's "on"/"off";
+# both count as an open entry (issue #504 adversarial review).
+_OPEN_ENTRY_STATES = frozenset({"on", "open"})
+
+
+def evaluate_dynamic_rules(  # noqa: PLR0913
+    snapshot: FullStateSnapshot,
+    rules: Iterable[dict[str, Any]],
+    baselines: dict[str, dict[str, float]] | None = None,
+    dow_data: dict[str, dict[str, tuple[float, int]]] | None = None,
+    dow_min_samples: int = RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
+    global_drift_pct: float = RECOMMENDED_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT,
+) -> list[AnomalyFinding]:
+    """
+    Evaluate generated rules deterministically.
+
+    *baselines* is an optional mapping ``{entity_id: {metric: float}}``
+    populated by ``SentinelBaselineUpdater``.  When ``None``, baseline-driven
+    templates (``baseline_deviation``, ``time_of_day_anomaly``) return empty
+    lists silently.
+
+    *dow_data* is an optional mapping ``{entity_id: {metric_key: (value, count)}}``
+    for DOW (day-of-week) per-slot baselines.  When provided, ``time_of_day_anomaly``
+    rules use a weighted blend of the DOW mean and the global hourly mean.
+    """
+    _baselines: dict[str, dict[str, float]] = baselines or {}
+    entity_map = {entity["entity_id"]: entity for entity in snapshot["entities"]}
+    camera_map = {
+        activity["camera_entity_id"]: activity
+        for activity in snapshot["camera_activity"]
+    }
+    template_evaluators = {
+        "alarm_disarmed_open_entry": lambda rule: _eval_alarm_disarmed_open_entry(
+            snapshot, rule, entity_map
+        ),
+        "low_battery_sensors": lambda rule: _eval_low_battery_sensors(rule, entity_map),
+        "motion_detected_at_night_while_alarm_disarmed": (
+            lambda rule: _eval_motion_detected_at_night_while_alarm_disarmed(
+                snapshot, rule, entity_map
+            )
+        ),
+        "motion_detected_at_night_while_away": (
+            lambda rule: _eval_motion_while_away_common(
+                snapshot, rule, entity_map, require_night=True
+            )
+        ),
+        "motion_detected_while_away": (
+            lambda rule: _eval_motion_while_away_common(
+                snapshot, rule, entity_map, require_night=False
+            )
+        ),
+        "motion_while_alarm_disarmed_and_home_present": (
+            lambda rule: _eval_motion_while_alarm_disarmed_and_home_present(
+                snapshot, rule, entity_map
+            )
+        ),
+        "open_any_window_at_night_while_away": (
+            lambda rule: _eval_open_any_window_at_night_while_away(
+                snapshot, rule, entity_map
+            )
+        ),
+        "unlocked_lock_when_home": lambda rule: _eval_unlocked_lock_when_home(
+            snapshot, rule, entity_map
+        ),
+        "open_entry_when_home": lambda rule: _eval_open_entry_with_context(
+            snapshot,
+            rule,
+            entity_map,
+            require_home=True,
+            require_away=False,
+            require_night=False,
+        ),
+        "open_entry_while_away": lambda rule: _eval_open_entry_with_context(
+            snapshot,
+            rule,
+            entity_map,
+            require_home=False,
+            require_away=True,
+            require_night=False,
+        ),
+        "open_entry_at_night_when_home": lambda rule: _eval_open_entry_with_context(
+            snapshot,
+            rule,
+            entity_map,
+            require_home=True,
+            require_away=False,
+            require_night=True,
+        ),
+        "open_entry_at_night_while_away": lambda rule: _eval_open_entry_with_context(
+            snapshot,
+            rule,
+            entity_map,
+            require_home=False,
+            require_away=True,
+            require_night=True,
+        ),
+        # Presence-agnostic night template (issue #504): fires whenever an
+        # entry is open at night, regardless of occupancy.
+        "open_entry_at_night": lambda rule: _eval_open_entry_with_context(
+            snapshot,
+            rule,
+            entity_map,
+            require_home=False,
+            require_away=False,
+            require_night=True,
+        ),
+        "motion_without_camera_activity": (
+            lambda rule: _eval_motion_without_camera_activity(
+                snapshot, rule, entity_map, camera_map
+            )
+        ),
+        "unknown_person_camera_no_home": (
+            lambda rule: _eval_unknown_person_camera_no_home(snapshot, rule, camera_map)
+        ),
+        "unknown_person_camera_when_home": (
+            lambda rule: _eval_unknown_person_camera_when_home(
+                snapshot, rule, camera_map
+            )
+        ),
+        "unavailable_sensors_while_home": (
+            lambda rule: _eval_unavailable_sensors_while_home(
+                snapshot, rule, entity_map
+            )
+        ),
+        "unavailable_sensors": lambda rule: _eval_unavailable_sensors(
+            snapshot, rule, entity_map
+        ),
+        # Issue #265 — baseline-driven detectors
+        "baseline_deviation": (
+            lambda rule: evaluate_baseline_deviation(snapshot, rule, _baselines)
+        ),
+        "time_of_day_anomaly": (
+            lambda rule: evaluate_time_of_day_anomaly(
+                snapshot,
+                rule,
+                _baselines,
+                dow_data=dow_data,
+                dow_min_samples=dow_min_samples,
+                global_drift_pct=global_drift_pct,
+            )
+        ),
+        # Flexible templates
+        "unlocked_lock_while_away": lambda rule: _eval_unlocked_lock_while_away(
+            snapshot, rule, entity_map
+        ),
+        "alarm_state_mismatch": lambda rule: _eval_alarm_state_mismatch(
+            snapshot, rule, entity_map
+        ),
+        "entity_state_duration": lambda rule: _eval_entity_state_duration(
+            snapshot, rule, entity_map
+        ),
+        "sensor_threshold_condition": lambda rule: _eval_sensor_threshold_condition(
+            snapshot, rule, entity_map
+        ),
+        "entity_staleness": lambda rule: _eval_entity_staleness(
+            snapshot, rule, entity_map
+        ),
+        "multiple_entries_open_count": lambda rule: _eval_multiple_entries_open_count(
+            snapshot, rule, entity_map
+        ),
+    }
+
+    findings: list[AnomalyFinding] = []
+    for rule in rules:
+        template_id = str(rule.get("template_id", ""))
+        if template_id not in SUPPORTED_TEMPLATES:
+            LOGGER.debug("Skipping unsupported dynamic template: %s", template_id)
+            continue
+        evaluator = template_evaluators.get(template_id)
+        if evaluator is None:
+            continue
+        findings.extend(evaluator(rule))
+    # Overlapping night + day away-motion rules on the same sensors emit two
+    # findings for a night motion event. Deduplicating HERE was tried and
+    # reverted (issue #518 verification round 5): the evaluator runs before
+    # snooze/exclusion/pending-prompt suppression, so dropping the day
+    # finding while the night rule is snoozed silently loses the alert
+    # entirely. Dispatch-level dedup is tracked in TODOS.md; until then the
+    # docs advise replacing the night rule when approving the day-agnostic
+    # sibling over the same sensors.
+    return findings
+
+
+def evaluate_dynamic_rule(
+    snapshot: FullStateSnapshot,
+    rule: dict[str, Any],
+    baselines: dict[str, dict[str, float]] | None = None,
+) -> list[AnomalyFinding]:
+    """Evaluate a single generated rule deterministically."""
+    return evaluate_dynamic_rules(snapshot, [rule], baselines=baselines)
+
+
+def _eval_alarm_disarmed_open_entry(
+    _snapshot: FullStateSnapshot,
+    rule: dict[str, Any],
+    entity_map: Mapping[str, SnapshotEntity],
+) -> list[AnomalyFinding]:
+    params = _rule_params(rule)
+    alarm_id = params.get("alarm_entity_id")
+    entry_ids = params.get("entry_entity_ids")
+    if not alarm_id or not isinstance(entry_ids, list):
+        return []
+    alarm = entity_map.get(alarm_id)
+    if not alarm or alarm.get("state") != "disarmed":
+        return []
+
+    findings: list[AnomalyFinding] = []
+    for entry_id in entry_ids:
+        entry = entity_map.get(entry_id)
+        if not entry or entry.get("state") not in _OPEN_ENTRY_STATES:
+            continue
+        evidence = {
+            "rule_id": rule.get("rule_id"),
+            "template_id": rule.get("template_id"),
+            "alarm_entity_id": alarm_id,
+            "entry_entity_id": entry_id,
+            "entry_state": entry.get("state"),
+            "alarm_state": alarm.get("state"),
+            "entry_last_changed": entry.get("last_changed"),
+            "alarm_last_changed": alarm.get("last_changed") or None,
+        }
+        findings.append(_build_finding(rule, [alarm_id, entry_id], evidence))
+    return findings
+
+
+def _eval_motion_while_alarm_disarmed_and_home_present(
+    _snapshot: FullStateSnapshot,
+    rule: dict[str, Any],
+    entity_map: Mapping[str, SnapshotEntity],
+) -> list[AnomalyFinding]:
+    params = _rule_params(rule)
+    alarm_id = params.get("alarm_entity_id")
+    motion_ids = params.get("motion_entity_ids")
+    home_ids = params.get("home_entity_ids")
+    if (
+        not alarm_id
+        or not isinstance(motion_ids, list)
+        or not motion_ids
+        or not isinstance(home_ids, list)
+        or not home_ids
+    ):
+        return []
+
+    alarm = entity_map.get(alarm_id)
+    if alarm is None or alarm.get("state") != "disarmed":
+        return []
+
+    motion_entities = _resolve_required_entities(motion_ids, entity_map)
+    home_entities = _resolve_required_entities(home_ids, entity_map)
+    if motion_entities is None or home_entities is None:
+        return []
+
+    if any(motion.get("state") != "on" for motion in motion_entities):
+        return []
+
+    if any(home_entity.get("state") != "home" for home_entity in home_entities):
+        return []
+
+    evidence = {
+        "rule_id": rule.get("rule_id"),
+        "template_id": rule.get("template_id"),
+        "alarm_entity_id": alarm_id,
+        "alarm_state": alarm.get("state"),
+        "motion_entity_ids": list(motion_ids),
+        "motion_states": {
+            motion_id: motion.get("state")
+            for motion_id, motion in zip(motion_ids, motion_entities, strict=False)
+        },
+        "home_entity_ids": list(home_ids),
+        "home_states": {
+            home_id: home_entity.get("state")
+            for home_id, home_entity in zip(home_ids, home_entities, strict=False)
+        },
+    }
+    return [_build_finding(rule, [alarm_id, *motion_ids, *home_ids], evidence)]
+
+
+def _eval_motion_detected_at_night_while_alarm_disarmed(
+    snapshot: FullStateSnapshot,
+    rule: dict[str, Any],
+    entity_map: Mapping[str, SnapshotEntity],
+) -> list[AnomalyFinding]:
+    params = _rule_params(rule)
+    alarm_id = params.get("alarm_entity_id")
+    motion_ids = params.get("motion_entity_ids")
+    required_ids = params.get("required_entity_ids", [])
+    if (
+        not alarm_id
+        or not isinstance(motion_ids, list)
+        or not motion_ids
+        or not isinstance(required_ids, list)
+    ):
+        return []
+
+    if not snapshot["derived"]["is_night"]:
+        return []
+
+    alarm = entity_map.get(alarm_id)
+    if alarm is None or alarm.get("state") != "disarmed":
+        return []
+
+    motion_entities = _resolve_required_entities(motion_ids, entity_map)
+    required_entities = _resolve_required_entities(required_ids, entity_map)
+    if motion_entities is None or required_entities is None:
+        return []
+
+    if not any(motion.get("state") == "on" for motion in motion_entities):
+        return []
+
+    evidence = {
+        "rule_id": rule.get("rule_id"),
+        "template_id": rule.get("template_id"),
+        "is_night": snapshot["derived"]["is_night"],
+        "alarm_entity_id": alarm_id,
+        "alarm_state": alarm.get("state"),
+        "motion_entity_ids": list(motion_ids),
+        "motion_states": {
+            motion_id: motion.get("state")
+            for motion_id, motion in zip(motion_ids, motion_entities, strict=False)
+        },
+        "required_entity_ids": list(required_ids),
+        "required_states": {
+            required_id: required_entity.get("state")
+            for required_id, required_entity in zip(
+                required_ids, required_entities, strict=False
+            )
+        },
+    }
+    return [_build_finding(rule, [alarm_id, *motion_ids, *required_ids], evidence)]
+
+
+def _eval_motion_while_away_common(
+    snapshot: FullStateSnapshot,
+    rule: dict[str, Any],
+    entity_map: Mapping[str, SnapshotEntity],
+    *,
+    require_night: bool,
+) -> list[AnomalyFinding]:
+    """
+    Motion while nobody is home, optionally gated to night hours.
+
+    Shared by ``motion_detected_at_night_while_away`` (issue #516,
+    ``require_night=True``) and ``motion_detected_while_away`` (issue #518,
+    ``require_night=False``). The day-agnostic variant omits ``is_night``
+    from the evidence so a finding that persists across the night boundary
+    keeps a stable anomaly ID.
+    """
+    params = _rule_params(rule)
+    motion_ids = params.get("motion_entity_ids")
+    if not isinstance(motion_ids, list) or not motion_ids:
+        return []
+
+    if require_night and not snapshot["derived"]["is_night"]:
+        return []
+    if snapshot["derived"]["anyone_home"]:
+        return []
+
+    # Any-of semantics: resolve per entity rather than all-or-nothing — a
+    # renamed or removed sensor must not silently disable the remaining
+    # sensors (issue #516 cross-model review). Fails closed only when no
+    # configured sensor resolves in the snapshot.
+    resolved: dict[str, SnapshotEntity] = {}
+    unresolved: list[str] = []
+    for motion_id in motion_ids:
+        entity = entity_map.get(motion_id) if isinstance(motion_id, str) else None
+        if entity is None:
+            unresolved.append(str(motion_id))
+        else:
+            resolved[motion_id] = entity
+    if not resolved:
+        return []
+
+    # Only sensors actually reporting motion are triggering entities: the
+    # engine's exclusion filter drops a finding when ANY triggering entity
+    # is user-excluded, so listing an idle sensor would let its exclusion
+    # silently kill a genuine alert from the sensor that fired — and
+    # notifications name triggering_entities[0] (issue #518 Codex P1;
+    # applies to the night template too).
+    triggering = [
+        motion_id
+        for motion_id, motion in resolved.items()
+        if motion.get("state") == "on"
+    ]
+    if not triggering:
+        return []
+
+    evidence: dict[str, Any] = {
+        "rule_id": rule.get("rule_id"),
+        "template_id": rule.get("template_id"),
+    }
+    if require_night:
+        # Keyed in this position so existing night-template findings keep
+        # their anomaly IDs (build_anomaly_id hashes evidence in insertion
+        # order).
+        evidence["is_night"] = snapshot["derived"]["is_night"]
+    evidence.update(
+        {
+            "anyone_home": snapshot["derived"]["anyone_home"],
+            "motion_entity_ids": [str(motion_id) for motion_id in motion_ids],
+            "motion_states": {
+                motion_id: motion.get("state") for motion_id, motion in resolved.items()
+            },
+            "unresolved_entity_ids": unresolved,
+        }
+    )
+    if (
+        not require_night
+        and snapshot["derived"]["is_night"]
+        and str(rule.get("severity") or "low") == "low"
+    ):
+        # Night motion while away carries at least the night template's
+        # severity judgment: the recommended quiet-hours config suppresses
+        # "low" overnight, which would otherwise mute the flagship 2am
+        # intrusion signal for users whose only motion coverage is this
+        # day-agnostic rule (issue #518 red-team review). A floor, not an
+        # override — a user-configured "high" is preserved. Severity is not
+        # hashed into the anomaly ID, so finding identity stays stable
+        # across the night boundary.
+        rule = {**rule, "severity": "medium"}
+    return [_build_finding(rule, triggering, evidence)]
+
+
+def _eval_unlocked_lock_when_home(
+    snapshot: FullStateSnapshot,
+    rule: dict[str, Any],
+    entity_map: Mapping[str, SnapshotEntity],
+) -> list[AnomalyFinding]:
+    if not snapshot["derived"]["anyone_home"]:
+        return []
+    params = _rule_params(rule)
+    lock_id = params.get("lock_entity_id")
+    if not lock_id:
+        return []
+    lock = entity_map.get(lock_id)
+    if not lock or lock.get("state") != "unlocked":
+        return []
+    evidence = {
+        "rule_id": rule.get("rule_id"),
+        "template_id": rule.get("template_id"),
+        "lock_entity_id": lock_id,
+        "lock_state": lock.get("state"),
+        "anyone_home": snapshot["derived"]["anyone_home"],
+        "last_changed": lock.get("last_changed") or None,
+    }
+    return [_build_finding(rule, [lock_id], evidence)]
+
+
+def _eval_motion_without_camera_activity(
+    _snapshot: FullStateSnapshot,
+    rule: dict[str, Any],
+    entity_map: Mapping[str, SnapshotEntity],
+    camera_map: Mapping[str, CameraActivity],
+) -> list[AnomalyFinding]:
+    params = _rule_params(rule)
+    motion_ids = params.get("motion_entity_ids")
+    camera_id = params.get("camera_entity_id")
+    if not camera_id or not isinstance(motion_ids, list):
+        return []
+    camera = camera_map.get(camera_id)
+    if not camera or camera.get("last_activity"):
+        return []
+
+    findings: list[AnomalyFinding] = []
+    for motion_id in motion_ids:
+        motion = entity_map.get(motion_id)
+        if not motion or motion.get("state") != "on":
+            continue
+        evidence = {
+            "rule_id": rule.get("rule_id"),
+            "template_id": rule.get("template_id"),
+            "motion_entity_id": motion_id,
+            "motion_state": motion.get("state"),
+            "camera_entity_id": camera_id,
+            "camera_last_activity": camera.get("last_activity"),
+            "last_changed": motion.get("last_changed"),
+        }
+        findings.append(_build_finding(rule, [motion_id, camera_id], evidence))
+    return findings
+
+
+def _eval_unknown_person_camera_no_home(
+    snapshot: FullStateSnapshot,
+    rule: dict[str, Any],
+    camera_map: Mapping[str, CameraActivity],
+) -> list[AnomalyFinding]:
+    if snapshot["derived"]["anyone_home"]:
+        return []
+    params = _rule_params(rule)
+    findings: list[AnomalyFinding] = []
+    for camera_id, camera in _iter_target_cameras(params, camera_map):
+        if not camera.get("last_activity"):
+            continue
+        if not camera.get("motion_entities") and not camera.get("vmd_entities"):
+            continue
+        if camera.get("recognized_people"):
+            continue
+        evidence = {
+            "rule_id": rule.get("rule_id"),
+            "template_id": rule.get("template_id"),
+            "camera_entity_id": camera_id,
+            "camera_selector": params.get("camera_selector"),
+            "area": camera.get("area"),
+            "last_activity": camera.get("last_activity"),
+            "recognized_people": camera.get("recognized_people", []),
+            "motion_entities": camera.get("motion_entities", []),
+            "vmd_entities": camera.get("vmd_entities", []),
+            "anyone_home": snapshot["derived"]["anyone_home"],
+            "is_night": snapshot["derived"]["is_night"],
+        }
+        findings.append(_build_finding(rule, [camera_id], evidence))
+    return findings
+
+
+def _eval_unknown_person_camera_when_home(
+    snapshot: FullStateSnapshot,
+    rule: dict[str, Any],
+    camera_map: Mapping[str, CameraActivity],
+) -> list[AnomalyFinding]:
+    if not snapshot["derived"]["anyone_home"]:
+        return []
+    params = _rule_params(rule)
+    findings: list[AnomalyFinding] = []
+    for camera_id, camera in _iter_target_cameras(params, camera_map):
+        if not camera.get("last_activity"):
+            continue
+        if not camera.get("motion_entities") and not camera.get("vmd_entities"):
+            continue
+        if camera.get("recognized_people"):
+            continue
+        evidence = {
+            "rule_id": rule.get("rule_id"),
+            "template_id": rule.get("template_id"),
+            "camera_entity_id": camera_id,
+            "camera_selector": params.get("camera_selector"),
+            "area": camera.get("area"),
+            "last_activity": camera.get("last_activity"),
+            "recognized_people": camera.get("recognized_people", []),
+            "motion_entities": camera.get("motion_entities", []),
+            "vmd_entities": camera.get("vmd_entities", []),
+            "anyone_home": snapshot["derived"]["anyone_home"],
+            "is_night": snapshot["derived"]["is_night"],
+        }
+        findings.append(_build_finding(rule, [camera_id], evidence))
+    return findings
+
+
+def _iter_target_cameras(
+    params: dict[str, Any],
+    camera_map: Mapping[str, CameraActivity],
+) -> list[tuple[str, CameraActivity]]:
+    camera_id = params.get("camera_entity_id")
+    if isinstance(camera_id, str) and camera_id:
+        camera = camera_map.get(camera_id)
+        if camera is None:
+            return []
+        return [(camera_id, camera)]
+    if params.get("camera_selector") == "any":
+        return list(camera_map.items())
+    return []
+
+
+def _eval_unavailable_sensors_while_home(
+    snapshot: FullStateSnapshot,
+    rule: dict[str, Any],
+    entity_map: Mapping[str, SnapshotEntity],
+) -> list[AnomalyFinding]:
+    if not snapshot["derived"]["anyone_home"]:
+        return []
+    params = _rule_params(rule)
+    sensor_ids = params.get("sensor_entity_ids")
+    if not isinstance(sensor_ids, list):
+        return []
+
+    required_entities: list[SnapshotEntity] = []
+    resolved_sensor_ids: list[str] = []
+    for sensor_id in sensor_ids:
+        resolved_sensor_id = _resolve_sensor_entity_id(sensor_id, entity_map)
+        if resolved_sensor_id is None:
+            return []
+        entity = entity_map.get(resolved_sensor_id)
+        if entity is None:
+            return []
+        resolved_sensor_ids.append(resolved_sensor_id)
+        required_entities.append(entity)
+
+    findings: list[AnomalyFinding] = []
+    for sensor_id, sensor in zip(resolved_sensor_ids, required_entities, strict=False):
+        if sensor.get("state") != "unavailable":
+            continue
+        evidence = {
+            "rule_id": rule.get("rule_id"),
+            "template_id": rule.get("template_id"),
+            "sensor_entity_id": sensor_id,
+            "sensor_state": sensor.get("state"),
+            "anyone_home": snapshot["derived"]["anyone_home"],
+            "last_changed": sensor.get("last_changed"),
+        }
+        findings.append(_build_finding(rule, [sensor_id], evidence))
+    return findings
+
+
+def _eval_unavailable_sensors(
+    snapshot: FullStateSnapshot,
+    rule: dict[str, Any],
+    entity_map: Mapping[str, SnapshotEntity],
+) -> list[AnomalyFinding]:
+    params = _rule_params(rule)
+    sensor_ids = params.get("sensor_entity_ids")
+    if not isinstance(sensor_ids, list):
+        return []
+
+    required_entities: list[SnapshotEntity] = []
+    resolved_sensor_ids: list[str] = []
+    for sensor_id in sensor_ids:
+        resolved_sensor_id = _resolve_sensor_entity_id(sensor_id, entity_map)
+        if resolved_sensor_id is None:
+            return []
+        entity = entity_map.get(resolved_sensor_id)
+        if entity is None:
+            return []
+        resolved_sensor_ids.append(resolved_sensor_id)
+        required_entities.append(entity)
+
+    if not required_entities:
+        return []
+    if any(entity.get("state") != "unavailable" for entity in required_entities):
+        return []
+
+    evidence = {
+        "rule_id": rule.get("rule_id"),
+        "template_id": rule.get("template_id"),
+        "sensor_entity_ids": resolved_sensor_ids,
+        "sensor_states": {
+            sensor_id: entity.get("state")
+            for sensor_id, entity in zip(
+                resolved_sensor_ids, required_entities, strict=False
+            )
+        },
+        "anyone_home": snapshot["derived"]["anyone_home"],
+    }
+    return [_build_finding(rule, resolved_sensor_ids, evidence)]
+
+
+def _eval_low_battery_sensors(
+    rule: dict[str, Any],
+    entity_map: Mapping[str, SnapshotEntity],
+) -> list[AnomalyFinding]:
+    params = _rule_params(rule)
+    sensor_ids = params.get("sensor_entity_ids")
+    if not isinstance(sensor_ids, list) or not sensor_ids:
+        return []
+
+    threshold = _coerce_float(params.get("threshold"), default=40.0)
+    resolved_ids: list[str] = []
+    readings: dict[str, float] = {}
+    states: dict[str, Any] = {}
+    for sensor_id in sensor_ids:
+        resolved_sensor_id = _resolve_sensor_entity_id(sensor_id, entity_map)
+        if resolved_sensor_id is None:
+            return []
+        entity = entity_map.get(resolved_sensor_id)
+        if entity is None:
+            return []
+        value = _coerce_optional_float(entity.get("state"))
+        if value is None:
+            return []
+        resolved_ids.append(resolved_sensor_id)
+        readings[resolved_sensor_id] = value
+        states[resolved_sensor_id] = entity.get("state")
+
+    triggering_ids = [
+        sensor_id for sensor_id, value in readings.items() if value <= threshold
+    ]
+    if not triggering_ids:
+        return []
+
+    evidence = {
+        "rule_id": rule.get("rule_id"),
+        "template_id": rule.get("template_id"),
+        "sensor_entity_ids": resolved_ids,
+        "sensor_states": states,
+        "sensor_levels": readings,
+        "threshold": threshold,
+    }
+    return [_build_finding(rule, triggering_ids, evidence)]
+
+
+def _resolve_sensor_entity_id(
+    sensor_id: Any, entity_map: Mapping[str, SnapshotEntity]
+) -> str | None:
+    if not isinstance(sensor_id, str) or not sensor_id:
+        return None
+    if sensor_id in entity_map:
+        return sensor_id
+    if "." in sensor_id:
+        return None
+    for candidate in (f"sensor.{sensor_id}", f"binary_sensor.{sensor_id}"):
+        if candidate in entity_map:
+            return candidate
+    return None
+
+
+def _resolve_required_entities(
+    entity_ids: list[str], entity_map: Mapping[str, SnapshotEntity]
+) -> list[SnapshotEntity] | None:
+    entities: list[SnapshotEntity] = []
+    for entity_id in entity_ids:
+        entity = entity_map.get(entity_id)
+        if entity is None:
+            return None
+        entities.append(entity)
+    return entities
+
+
+def _eval_open_entry_with_context(  # noqa: PLR0913
+    snapshot: FullStateSnapshot,
+    rule: dict[str, Any],
+    entity_map: Mapping[str, SnapshotEntity],
+    *,
+    require_home: bool,
+    require_away: bool,
+    require_night: bool,
+) -> list[AnomalyFinding]:
+    anyone_home = bool(snapshot["derived"]["anyone_home"])
+    is_night = bool(snapshot["derived"]["is_night"])
+    if require_home and not anyone_home:
+        return []
+    if require_away and anyone_home:
+        return []
+    if require_night and not is_night:
+        return []
+
+    params = _rule_params(rule)
+    entry_ids = params.get("entry_entity_ids")
+    if not isinstance(entry_ids, list):
+        return []
+
+    findings: list[AnomalyFinding] = []
+    for entry_id in entry_ids:
+        entry = entity_map.get(entry_id)
+        if not entry or entry.get("state") not in _OPEN_ENTRY_STATES:
+            continue
+        evidence = {
+            "rule_id": rule.get("rule_id"),
+            "template_id": rule.get("template_id"),
+            "entry_entity_id": entry_id,
+            "entry_state": entry.get("state"),
+            "anyone_home": anyone_home,
+            "is_night": is_night,
+            "last_changed": entry.get("last_changed"),
+        }
+        findings.append(_build_finding(rule, [entry_id], evidence))
+    return findings
+
+
+def _eval_open_any_window_at_night_while_away(
+    snapshot: FullStateSnapshot,
+    rule: dict[str, Any],
+    entity_map: Mapping[str, SnapshotEntity],
+) -> list[AnomalyFinding]:
+    if snapshot["derived"]["anyone_home"]:
+        return []
+    if not snapshot["derived"]["is_night"]:
+        return []
+    window_ids = _find_open_window_entity_ids(entity_map)
+    findings: list[AnomalyFinding] = []
+    for window_id in window_ids:
+        window = entity_map.get(window_id)
+        if window is None:
+            continue
+        evidence = {
+            "rule_id": rule.get("rule_id"),
+            "template_id": rule.get("template_id"),
+            "entry_selector": "window",
+            "entry_entity_id": window_id,
+            "entry_state": window.get("state"),
+            "anyone_home": snapshot["derived"]["anyone_home"],
+            "is_night": snapshot["derived"]["is_night"],
+            "last_changed": window.get("last_changed"),
+        }
+        findings.append(_build_finding(rule, [window_id], evidence))
+    return findings
+
+
+def _find_open_window_entity_ids(
+    entity_map: Mapping[str, SnapshotEntity],
+) -> list[str]:
+    window_ids: list[str] = []
+    for entity_id, entity in entity_map.items():
+        if entity.get("state") != "on":
+            continue
+        domain = entity.get("domain")
+        if domain not in {"binary_sensor", "sensor"}:
+            continue
+        device_class = str(entity.get("attributes", {}).get("device_class", ""))
+        if device_class == "window" or "window" in entity_id:
+            window_ids.append(entity_id)
+    return sorted(set(window_ids))
+
+
+def _eval_unlocked_lock_while_away(
+    snapshot: FullStateSnapshot,
+    rule: dict[str, Any],
+    entity_map: Mapping[str, SnapshotEntity],
+) -> list[AnomalyFinding]:
+    if snapshot["derived"]["anyone_home"]:
+        return []
+    params = _rule_params(rule)
+    lock_id = params.get("lock_entity_id")
+    if not lock_id:
+        return []
+    lock = entity_map.get(lock_id)
+    if not lock or lock.get("state") != "unlocked":
+        return []
+    evidence = {
+        "rule_id": rule.get("rule_id"),
+        "template_id": rule.get("template_id"),
+        "lock_entity_id": lock_id,
+        "lock_state": lock.get("state"),
+        "anyone_home": snapshot["derived"]["anyone_home"],
+        "last_changed": lock.get("last_changed") or None,
+    }
+    return [_build_finding(rule, [lock_id], evidence)]
+
+
+def _eval_alarm_state_mismatch(
+    snapshot: FullStateSnapshot,
+    rule: dict[str, Any],
+    entity_map: Mapping[str, SnapshotEntity],
+) -> list[AnomalyFinding]:
+    params = _rule_params(rule)
+    alarm_id = params.get("alarm_entity_id")
+    alarm_state = params.get("alarm_state")
+    expected_presence = params.get("expected_presence")
+    if not alarm_id or not alarm_state or not expected_presence:
+        return []
+    # armed_home / armed_night are designed for occupancy — never anomalous when
+    # expected_presence is "home", since that is their intended operating condition.
+    if alarm_state in SENTINEL_OCCUPANCY_ARMED_STATES and expected_presence == "home":
+        return []
+    anyone_home = snapshot["derived"]["anyone_home"]
+    if expected_presence == "away" and anyone_home:
+        return []
+    if expected_presence == "home" and not anyone_home:
+        return []
+    alarm = entity_map.get(alarm_id)
+    if not alarm or alarm.get("state") != alarm_state:
+        return []
+    evidence = {
+        "rule_id": rule.get("rule_id"),
+        "template_id": rule.get("template_id"),
+        "alarm_entity_id": alarm_id,
+        "alarm_state": alarm.get("state"),
+        "expected_presence": expected_presence,
+        "anyone_home": anyone_home,
+    }
+    return [_build_finding(rule, [alarm_id], evidence)]
+
+
+def _eval_entity_state_duration(
+    snapshot: FullStateSnapshot,
+    rule: dict[str, Any],
+    entity_map: Mapping[str, SnapshotEntity],
+) -> list[AnomalyFinding]:
+    params = _rule_params(rule)
+    entity_id = params.get("entity_id")
+    target_state = params.get("target_state")
+    threshold_hours = _coerce_float(params.get("threshold_hours"), default=2.0)
+    if not entity_id or not target_state:
+        return []
+    entity = entity_map.get(entity_id)
+    if not entity:
+        return []
+    state = entity.get("state")
+    # Target "on" also matches covers, which report "open" for the same
+    # physical condition (issue #504 Codex review).
+    if state != target_state and not (
+        target_state == "on" and state in _OPEN_ENTRY_STATES
+    ):
+        return []
+    now = dt_util.parse_datetime(snapshot["derived"]["now"]) or dt_util.utcnow()
+    last_changed = dt_util.parse_datetime(str(entity.get("last_changed") or ""))
+    if last_changed is None:
+        return []
+    if (now - last_changed) < timedelta(hours=threshold_hours):
+        return []
+    evidence = {
+        "rule_id": rule.get("rule_id"),
+        "template_id": rule.get("template_id"),
+        "entity_id": entity_id,
+        "state": entity.get("state"),
+        "target_state": target_state,
+        "threshold_hours": threshold_hours,
+        "duration_hours": (now - last_changed).total_seconds() / 3600,
+        "last_changed": entity.get("last_changed"),
+    }
+    return [_build_finding(rule, [entity_id], evidence)]
+
+
+def _eval_sensor_threshold_condition(  # noqa: PLR0911
+    snapshot: FullStateSnapshot,
+    rule: dict[str, Any],
+    entity_map: Mapping[str, SnapshotEntity],
+) -> list[AnomalyFinding]:
+    params = _rule_params(rule)
+    sensor_id = params.get("sensor_entity_id")
+    threshold = _coerce_float(params.get("threshold"), default=0.0)
+    require_night = bool(params.get("require_night", False))
+    require_away = bool(params.get("require_away", False))
+    require_home = bool(params.get("require_home", False))
+    if not sensor_id:
+        return []
+    if require_night and not snapshot["derived"]["is_night"]:
+        return []
+    anyone_home = snapshot["derived"]["anyone_home"]
+    if require_away and anyone_home:
+        return []
+    if require_home and not anyone_home:
+        return []
+    sensor = entity_map.get(sensor_id)
+    if not sensor:
+        return []
+    value = _coerce_optional_float(sensor.get("state"))
+    if value is None or value <= threshold:
+        return []
+    evidence = {
+        "rule_id": rule.get("rule_id"),
+        "template_id": rule.get("template_id"),
+        "sensor_entity_id": sensor_id,
+        "sensor_value": value,
+        "threshold": threshold,
+        "require_night": require_night,
+        "require_away": require_away,
+        "require_home": require_home,
+        "anyone_home": anyone_home,
+        "is_night": snapshot["derived"]["is_night"],
+    }
+    return [_build_finding(rule, [sensor_id], evidence)]
+
+
+def _eval_entity_staleness(
+    snapshot: FullStateSnapshot,
+    rule: dict[str, Any],
+    entity_map: Mapping[str, SnapshotEntity],
+) -> list[AnomalyFinding]:
+    params = _rule_params(rule)
+    entity_id = params.get("entity_id")
+    max_stale_hours = _coerce_float(params.get("max_stale_hours"), default=24.0)
+    if not entity_id:
+        return []
+    entity = entity_map.get(entity_id)
+    if not entity:
+        return []
+    now = dt_util.parse_datetime(snapshot["derived"]["now"]) or dt_util.utcnow()
+    last_changed = dt_util.parse_datetime(str(entity.get("last_changed") or ""))
+    if last_changed is None:
+        return []
+    age_hours = (now - last_changed).total_seconds() / 3600
+    if age_hours <= max_stale_hours:
+        return []
+    evidence = {
+        "rule_id": rule.get("rule_id"),
+        "template_id": rule.get("template_id"),
+        "entity_id": entity_id,
+        "friendly_name": entity.get("friendly_name") or None,
+        "state": entity.get("state"),
+        "max_stale_hours": max_stale_hours,
+        "age_hours": age_hours,
+        "last_changed": entity.get("last_changed"),
+    }
+    return [_build_finding(rule, [entity_id], evidence)]
+
+
+def _eval_multiple_entries_open_count(
+    snapshot: FullStateSnapshot,
+    rule: dict[str, Any],
+    entity_map: Mapping[str, SnapshotEntity],
+) -> list[AnomalyFinding]:
+    params = _rule_params(rule)
+    entry_ids = params.get("entry_entity_ids")
+    min_count = int(_coerce_float(params.get("min_count"), default=2.0))
+    require_home = bool(params.get("require_home", False))
+    require_away = bool(params.get("require_away", False))
+    if not isinstance(entry_ids, list) or not entry_ids:
+        return []
+    anyone_home = snapshot["derived"]["anyone_home"]
+    if require_home and not anyone_home:
+        return []
+    if require_away and anyone_home:
+        return []
+    triggering: list[str] = []
+    states: dict[str, Any] = {}
+    for entry_id in entry_ids:
+        entity = entity_map.get(entry_id)
+        if not entity:
+            continue
+        states[entry_id] = entity.get("state")
+        if entity.get("state") in _OPEN_ENTRY_STATES:
+            triggering.append(entry_id)
+    if len(triggering) < min_count:
+        return []
+    evidence = {
+        "rule_id": rule.get("rule_id"),
+        "template_id": rule.get("template_id"),
+        "entry_entity_ids": list(entry_ids),
+        "triggering_entity_ids": triggering,
+        "open_count": len(triggering),
+        "min_count": min_count,
+        "entry_states": states,
+        "anyone_home": anyone_home,
+    }
+    return [_build_finding(rule, triggering, evidence)]
+
+
+def _build_finding(
+    rule: dict[str, Any],
+    triggering_entities: list[str],
+    evidence: dict[str, Any],
+) -> AnomalyFinding:
+    rule_id = str(rule.get("rule_id") or "dynamic_rule")
+    severity_value = str(rule.get("severity") or "low")
+    severity: Severity
+    if severity_value in _SEVERITIES:
+        severity = cast("Severity", severity_value)
+    else:
+        severity = "low"
+    confidence = _coerce_float(rule.get("confidence"), default=0.5)
+    suggested_actions = rule.get("suggested_actions") or []
+    if not isinstance(suggested_actions, list):
+        suggested_actions = []
+    is_sensitive = bool(rule.get("is_sensitive", False))
+    _hash_evidence = {k: v for k, v in evidence.items() if k != "friendly_name"}
+    anomaly_id = build_anomaly_id(rule_id, triggering_entities, _hash_evidence)
+    return AnomalyFinding(
+        anomaly_id=anomaly_id,
+        type=rule_id,
+        severity=severity,
+        confidence=confidence,
+        triggering_entities=list(triggering_entities),
+        evidence=evidence,
+        suggested_actions=list(suggested_actions),
+        is_sensitive=is_sensitive,
+    )
+
+
+def _coerce_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_optional_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _rule_params(rule: dict[str, Any]) -> dict[str, Any]:
+    """Return normalized params from a dynamic rule payload."""
+    params = rule.get("params")
+    if isinstance(params, dict):
+        return params
+    return {}

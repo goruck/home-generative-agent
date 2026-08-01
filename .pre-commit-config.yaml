@@ -1,0 +1,16 @@
+repos:
+  - repo: local
+    hooks:
+      - id: gen-manifest-reqs
+        name: Regenerate requirements_runtime_manifest.txt from manifest.json
+        entry: python3.13 scripts/gen_manifest_requirements.py
+        language: system
+        pass_filenames: false
+        files: ^custom_components/home_generative_agent/manifest\.json$
+
+      - id: verify-manifest-reqs-clean
+        name: Verify requirements_runtime_manifest.txt is up to date
+        entry: bash -lc 'git diff --exit-code -- requirements_runtime_manifest.txt'
+        language: system
+        pass_filenames: false
+        files: ^custom_components/home_generative_agent/manifest\.json$

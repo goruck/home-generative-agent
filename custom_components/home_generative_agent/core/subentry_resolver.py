@@ -1,0 +1,984 @@
+"""Helpers for resolving configuration subentries and legacy options."""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
+
+from homeassistant.const import (
+    CONF_API_KEY,
+    CONF_HOST,
+    CONF_PASSWORD,
+    CONF_PORT,
+    CONF_USERNAME,
+)
+
+from ..const import (  # noqa: TID252
+    CONF_ANTHROPIC_API_KEY,
+    CONF_CHAT_MODEL_PROVIDER,
+    CONF_DB_NAME,
+    CONF_DB_PARAMS,
+    CONF_DB_URI,
+    CONF_EMBEDDING_MODEL_PROVIDER,
+    CONF_EXPLAIN_ENABLED,
+    CONF_FEATURE_FALLBACK_PROVIDER_IDS,
+    CONF_FEATURE_MODEL,
+    CONF_FEATURE_MODEL_CONTEXT_SIZE,
+    CONF_FEATURE_MODEL_KEEPALIVE,
+    CONF_FEATURE_MODEL_NAME,
+    CONF_FEATURE_MODEL_REASONING,
+    CONF_FEATURE_MODEL_TEMPERATURE,
+    CONF_GEMINI_API_KEY,
+    CONF_GEMINI_CHAT_MODEL,
+    CONF_GEMINI_EMBEDDING_MODEL,
+    CONF_GEMINI_SUMMARIZATION_MODEL,
+    CONF_GEMINI_VLM,
+    CONF_NOTIFY_SERVICE,
+    CONF_OLLAMA_CHAT_CONTEXT_SIZE,
+    CONF_OLLAMA_CHAT_KEEPALIVE,
+    CONF_OLLAMA_CHAT_MODEL,
+    CONF_OLLAMA_CHAT_URL,
+    CONF_OLLAMA_EMBEDDING_MODEL,
+    CONF_OLLAMA_EMBEDDING_URL,
+    CONF_OLLAMA_REASONING,
+    CONF_OLLAMA_SUMMARIZATION_CONTEXT_SIZE,
+    CONF_OLLAMA_SUMMARIZATION_KEEPALIVE,
+    CONF_OLLAMA_SUMMARIZATION_MODEL,
+    CONF_OLLAMA_SUMMARIZATION_URL,
+    CONF_OLLAMA_URL,
+    CONF_OLLAMA_VLM,
+    CONF_OLLAMA_VLM_CONTEXT_SIZE,
+    CONF_OLLAMA_VLM_KEEPALIVE,
+    CONF_OLLAMA_VLM_URL,
+    CONF_OPENAI_CHAT_MODEL,
+    CONF_OPENAI_COMPATIBLE_API_KEY,
+    CONF_OPENAI_COMPATIBLE_BASE_URL,
+    CONF_OPENAI_COMPATIBLE_EMBEDDING_API_KEY,
+    CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
+    CONF_OPENAI_COMPATIBLE_EMBEDDING_URL,
+    CONF_OPENAI_EMBEDDING_MODEL,
+    CONF_OPENAI_SUMMARIZATION_MODEL,
+    CONF_OPENAI_VLM,
+    CONF_SENTINEL_APPLIANCE_DURATION_MIN,
+    CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
+    CONF_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
+    CONF_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT,
+    CONF_SENTINEL_BASELINE_ENABLED,
+    CONF_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS,
+    CONF_SENTINEL_BASELINE_MAX_SAMPLES,
+    CONF_SENTINEL_BASELINE_MIN_SAMPLES,
+    CONF_SENTINEL_BASELINE_SUSTAINED_MINUTES,
+    CONF_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES,
+    CONF_SENTINEL_BASELINE_WEEKLY_PATTERNS,
+    CONF_SENTINEL_CAMERA_ENTRY_LINKS,
+    CONF_SENTINEL_COOLDOWN_MINUTES,
+    CONF_SENTINEL_DAILY_DIGEST_ENABLED,
+    CONF_SENTINEL_DAILY_DIGEST_TIME,
+    CONF_SENTINEL_DISCOVERY_ENABLED,
+    CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS,
+    CONF_SENTINEL_DISCOVERY_MAX_RECORDS,
+    CONF_SENTINEL_ENABLED,
+    CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES,
+    CONF_SENTINEL_INTERVAL_SECONDS,
+    CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH,
+    CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT,
+    CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
+    CONF_SENTINEL_QUIET_HOURS_END,
+    CONF_SENTINEL_QUIET_HOURS_SEVERITIES,
+    CONF_SENTINEL_QUIET_HOURS_START,
+    CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
+    CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS,
+    CONF_SUMMARIZATION_MODEL_PROVIDER,
+    CONF_VLM_PROVIDER,
+    FEATURE_CATEGORY_MAP,
+    MODEL_CATEGORY_SPECS,
+    RECOMMENDED_DB_HOST,
+    RECOMMENDED_DB_NAME,
+    RECOMMENDED_DB_PARAMS,
+    RECOMMENDED_DB_PASSWORD,
+    RECOMMENDED_DB_PORT,
+    RECOMMENDED_DB_USERNAME,
+    RECOMMENDED_EXPLAIN_ENABLED,
+    RECOMMENDED_GEMINI_CHAT_MODEL,
+    RECOMMENDED_GEMINI_EMBEDDING_MODEL,
+    RECOMMENDED_GEMINI_SUMMARIZATION_MODEL,
+    RECOMMENDED_GEMINI_VLM,
+    RECOMMENDED_OLLAMA_CHAT_KEEPALIVE,
+    RECOMMENDED_OLLAMA_CHAT_MODEL,
+    RECOMMENDED_OLLAMA_CONTEXT_SIZE,
+    RECOMMENDED_OLLAMA_EMBEDDING_MODEL,
+    RECOMMENDED_OLLAMA_SUMMARIZATION_KEEPALIVE,
+    RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL,
+    RECOMMENDED_OLLAMA_URL,
+    RECOMMENDED_OLLAMA_VLM,
+    RECOMMENDED_OLLAMA_VLM_KEEPALIVE,
+    RECOMMENDED_OLLAMA_VLM_URL,
+    RECOMMENDED_OPENAI_CHAT_MODEL,
+    RECOMMENDED_OPENAI_EMBEDDING_MODEL,
+    RECOMMENDED_OPENAI_SUMMARIZATION_MODEL,
+    RECOMMENDED_OPENAI_VLM,
+    RECOMMENDED_SENTINEL_APPLIANCE_DURATION_MIN,
+    RECOMMENDED_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
+    RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
+    RECOMMENDED_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT,
+    RECOMMENDED_SENTINEL_BASELINE_ENABLED,
+    RECOMMENDED_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS,
+    RECOMMENDED_SENTINEL_BASELINE_MAX_SAMPLES,
+    RECOMMENDED_SENTINEL_BASELINE_MIN_SAMPLES,
+    RECOMMENDED_SENTINEL_BASELINE_SUSTAINED_MINUTES,
+    RECOMMENDED_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES,
+    RECOMMENDED_SENTINEL_BASELINE_WEEKLY_PATTERNS,
+    RECOMMENDED_SENTINEL_CAMERA_ENTRY_LINKS,
+    RECOMMENDED_SENTINEL_COOLDOWN_MINUTES,
+    RECOMMENDED_SENTINEL_DAILY_DIGEST_ENABLED,
+    RECOMMENDED_SENTINEL_DAILY_DIGEST_TIME,
+    RECOMMENDED_SENTINEL_DISCOVERY_ENABLED,
+    RECOMMENDED_SENTINEL_DISCOVERY_INTERVAL_SECONDS,
+    RECOMMENDED_SENTINEL_DISCOVERY_MAX_RECORDS,
+    RECOMMENDED_SENTINEL_ENABLED,
+    RECOMMENDED_SENTINEL_ENTITY_COOLDOWN_MINUTES,
+    RECOMMENDED_SENTINEL_INTERVAL_SECONDS,
+    RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
+    RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES,
+    RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
+    RECOMMENDED_SENTINEL_RULE_ENTITY_EXCLUSIONS,
+    SUBENTRY_TYPE_DATABASE,
+    SUBENTRY_TYPE_FEATURE,
+    SUBENTRY_TYPE_MODEL_PROVIDER,
+    SUBENTRY_TYPE_SENTINEL,
+)
+from .db_utils import build_postgres_uri
+from .subentry_types import FeatureConfig, ModelProviderConfig, ProviderType
+
+if TYPE_CHECKING:
+    from homeassistant.config_entries import ConfigEntry, ConfigSubentry
+
+LOGGER = logging.getLogger(__name__)
+
+# Deployment defaults by provider type.
+# openai_compatible defaults to "edge" because it is currently only exposed
+# under the Edge path in the config flow and is commonly used for LM Studio,
+# vLLM, or other locally hosted servers.
+_DEPLOYMENT_DEFAULTS: dict[str, str] = {
+    "ollama": "edge",
+    "openai": "cloud",
+    "gemini": "cloud",
+    "openai_compatible": "edge",
+    "anthropic": "cloud",
+    "triton": "edge",
+    "docker_runner": "edge",
+}
+
+
+def _deployment_for(provider_type: str, data: dict[str, Any]) -> str:
+    """Return deployment value, preferring explicit data over provider-type default."""
+    stored = data.get("deployment")
+    if isinstance(stored, str) and stored in ("edge", "cloud"):
+        return stored
+    return _DEPLOYMENT_DEFAULTS.get(provider_type, "edge")
+
+
+def _options_for(entry: ConfigEntry) -> dict[str, Any]:
+    """Merge entry data + options for convenience."""
+    return {**entry.data, **entry.options}
+
+
+def _model_key_for(cat: str, provider: str) -> str | None:
+    """Return the model option key for a category/provider pair."""
+    spec = MODEL_CATEGORY_SPECS.get(cat)
+    if not spec:
+        return None
+    return spec.get("model_keys", {}).get(provider)
+
+
+def _coerce_capabilities(raw: Any) -> set[str]:
+    """Safely coerce stored capabilities to a set of strings."""
+    if not raw:
+        return set()
+    try:
+        return {str(c) for c in raw}
+    except (TypeError, ValueError):
+        return set()
+
+
+def get_database_subentry(
+    _hass: Any, config_entry: ConfigEntry
+) -> ConfigSubentry | None:
+    """Return the database subentry if present."""
+    for subentry in config_entry.subentries.values():
+        if subentry.subentry_type == SUBENTRY_TYPE_DATABASE:
+            return subentry
+    return None
+
+
+def build_database_uri_from_entry(entry: ConfigEntry) -> str | None:
+    """
+    Return the configured database URI.
+
+    Prefers the database subentry, then falls back to legacy CONF_DB_URI or
+    discrete database fields.
+    """
+    opts = _options_for(entry)
+    db_subentry = get_database_subentry(None, entry)
+    if db_subentry:
+        return build_postgres_uri(dict(db_subentry.data))
+
+    if uri := opts.get(CONF_DB_URI):
+        return str(uri)
+
+    required = (CONF_DB_NAME, CONF_USERNAME, CONF_PASSWORD, CONF_HOST, CONF_PORT)
+    if any(k not in opts for k in required):
+        return None
+
+    return build_postgres_uri(
+        {
+            CONF_USERNAME: opts.get(CONF_USERNAME, RECOMMENDED_DB_USERNAME),
+            CONF_PASSWORD: opts.get(CONF_PASSWORD, RECOMMENDED_DB_PASSWORD),
+            CONF_HOST: opts.get(CONF_HOST, RECOMMENDED_DB_HOST),
+            CONF_PORT: opts.get(CONF_PORT, RECOMMENDED_DB_PORT),
+            CONF_DB_NAME: opts.get(CONF_DB_NAME, RECOMMENDED_DB_NAME),
+            CONF_DB_PARAMS: opts.get(CONF_DB_PARAMS, RECOMMENDED_DB_PARAMS),
+        }
+    )
+
+
+def get_sentinel_subentry(
+    _hass: Any, config_entry: ConfigEntry
+) -> ConfigSubentry | None:
+    """Return the sentinel subentry if present."""
+    for subentry in config_entry.subentries.values():
+        if subentry.subentry_type == SUBENTRY_TYPE_SENTINEL:
+            return subentry
+    return None
+
+
+def _apply_sentinel_options(
+    options: dict[str, Any], sentinel_subentry: ConfigSubentry | None
+) -> None:
+    """Overlay sentinel options from subentry data with deterministic defaults."""
+    sentinel_defaults: dict[str, Any] = {
+        CONF_SENTINEL_ENABLED: RECOMMENDED_SENTINEL_ENABLED,
+        CONF_SENTINEL_INTERVAL_SECONDS: RECOMMENDED_SENTINEL_INTERVAL_SECONDS,
+        CONF_SENTINEL_COOLDOWN_MINUTES: RECOMMENDED_SENTINEL_COOLDOWN_MINUTES,
+        CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES: (
+            RECOMMENDED_SENTINEL_ENTITY_COOLDOWN_MINUTES
+        ),
+        CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES: (
+            RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES
+        ),
+        CONF_SENTINEL_DISCOVERY_ENABLED: RECOMMENDED_SENTINEL_DISCOVERY_ENABLED,
+        CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS: (
+            RECOMMENDED_SENTINEL_DISCOVERY_INTERVAL_SECONDS
+        ),
+        CONF_SENTINEL_DISCOVERY_MAX_RECORDS: RECOMMENDED_SENTINEL_DISCOVERY_MAX_RECORDS,
+        CONF_EXPLAIN_ENABLED: RECOMMENDED_EXPLAIN_ENABLED,
+        CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: (
+            RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE
+        ),
+        CONF_SENTINEL_BASELINE_ENABLED: RECOMMENDED_SENTINEL_BASELINE_ENABLED,
+        CONF_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES: (
+            RECOMMENDED_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES
+        ),
+        CONF_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS: (
+            RECOMMENDED_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS
+        ),
+        CONF_SENTINEL_BASELINE_MIN_SAMPLES: RECOMMENDED_SENTINEL_BASELINE_MIN_SAMPLES,
+        CONF_SENTINEL_BASELINE_MAX_SAMPLES: RECOMMENDED_SENTINEL_BASELINE_MAX_SAMPLES,
+        CONF_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT: (
+            RECOMMENDED_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT
+        ),
+        CONF_SENTINEL_BASELINE_SUSTAINED_MINUTES: (
+            RECOMMENDED_SENTINEL_BASELINE_SUSTAINED_MINUTES
+        ),
+        CONF_SENTINEL_BASELINE_WEEKLY_PATTERNS: (
+            RECOMMENDED_SENTINEL_BASELINE_WEEKLY_PATTERNS
+        ),
+        CONF_SENTINEL_BASELINE_DOW_MIN_SAMPLES: (
+            RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES
+        ),
+        CONF_SENTINEL_CAMERA_ENTRY_LINKS: RECOMMENDED_SENTINEL_CAMERA_ENTRY_LINKS,
+        CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: (
+            RECOMMENDED_SENTINEL_RULE_ENTITY_EXCLUSIONS
+        ),
+        CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W: (
+            RECOMMENDED_SENTINEL_APPLIANCE_POWER_THRESHOLD_W
+        ),
+        CONF_SENTINEL_APPLIANCE_DURATION_MIN: (
+            RECOMMENDED_SENTINEL_APPLIANCE_DURATION_MIN
+        ),
+        CONF_SENTINEL_DAILY_DIGEST_ENABLED: RECOMMENDED_SENTINEL_DAILY_DIGEST_ENABLED,
+        CONF_SENTINEL_DAILY_DIGEST_TIME: RECOMMENDED_SENTINEL_DAILY_DIGEST_TIME,
+        # None = quiet hours disabled (the engine treats absent start/end as off).
+        CONF_SENTINEL_QUIET_HOURS_START: None,
+        CONF_SENTINEL_QUIET_HOURS_END: None,
+        CONF_SENTINEL_QUIET_HOURS_SEVERITIES: list(
+            RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES
+        ),
+    }
+
+    if sentinel_subentry is None:
+        for key, value in sentinel_defaults.items():
+            options.setdefault(key, value)
+        # No subentry → Sentinel is not configured; force disabled so that tasks
+        # are not restarted after the subentry is deleted and the entry reloads.
+        options[CONF_SENTINEL_ENABLED] = False
+        return
+
+    data = dict(sentinel_subentry.data)
+    for key, value in sentinel_defaults.items():
+        options[key] = data.get(key, value)
+
+    for key in (
+        CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH,
+        CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT,
+    ):
+        if data.get(key):
+            options[key] = data[key]
+        else:
+            options.pop(key, None)
+
+    # Sentinel notify service takes precedence when set; otherwise keep global value.
+    sentinel_notify = str(data.get(CONF_NOTIFY_SERVICE, "") or "").strip()
+    if sentinel_notify:
+        options[CONF_NOTIFY_SERVICE] = sentinel_notify
+
+
+def _provider_capabilities_from_settings(settings: Mapping[str, Any]) -> set[str]:
+    """Derive capability categories from settings keys."""
+    caps: set[str] = set()
+    for cat in ("chat", "vlm", "summarization", "embedding"):
+        if settings.get(f"{cat}_model") or settings.get(cat):
+            caps.add(cat)
+    return caps or {"chat"}
+
+
+def _model_provider_from_subentry(subentry: ConfigSubentry) -> ModelProviderConfig:
+    """Convert a stored model provider subentry into a dataclass."""
+    data = dict(subentry.data)
+    settings = data.get("settings", {})
+    if not isinstance(settings, Mapping):
+        settings = {}
+    provider_type: ProviderType = data.get("provider_type", "ollama")
+    name = data.get("name") or subentry.title or provider_type
+    caps = _coerce_capabilities(data.get("capabilities"))
+    if not caps:
+        caps = _provider_capabilities_from_settings(settings)
+    return ModelProviderConfig(
+        entry_id=subentry.subentry_id,
+        name=name,
+        provider_type=provider_type,
+        capabilities=caps,
+        data={"settings": dict(settings), "name": name},
+        deployment=_deployment_for(provider_type, data),
+    )
+
+
+def get_model_provider_subentries(
+    _hass: Any, config_entry: ConfigEntry
+) -> dict[str, ModelProviderConfig]:
+    """Return all configured model provider subentries."""
+    providers: dict[str, ModelProviderConfig] = {}
+    for subentry in config_entry.subentries.values():
+        if subentry.subentry_type != SUBENTRY_TYPE_MODEL_PROVIDER:
+            continue
+        provider = _model_provider_from_subentry(subentry)
+        providers[provider.entry_id] = provider
+    return providers
+
+
+def _legacy_provider_id(entry: ConfigEntry, provider: str) -> str:
+    """Generate a stable pseudo-ID for legacy providers."""
+    return f"{entry.entry_id}_{provider}_legacy"
+
+
+def _legacy_ollama_urls(options: Mapping[str, Any]) -> dict[str, str]:
+    """Return resolved legacy Ollama URLs by category."""
+    base_url = str(options.get(CONF_OLLAMA_URL) or RECOMMENDED_OLLAMA_URL)
+    return {
+        "base": base_url,
+        "chat": str(options.get(CONF_OLLAMA_CHAT_URL) or base_url),
+        "vlm": str(
+            options.get(CONF_OLLAMA_VLM_URL, RECOMMENDED_OLLAMA_VLM_URL) or base_url
+        ),
+        "summarization": str(options.get(CONF_OLLAMA_SUMMARIZATION_URL) or base_url),
+    }
+
+
+def _ollama_legacy_provider_settings(
+    options: Mapping[str, Any],
+    name: str,
+    base_url: str,
+    categories: set[str],
+) -> dict[str, Any]:
+    """Build settings for a legacy Ollama provider."""
+    settings: dict[str, Any] = {
+        "name": name,
+        "provider_type": "ollama",
+        "base_url": base_url,
+    }
+
+    if "chat" in categories:
+        settings.update(
+            {
+                "chat_url": base_url,
+                "chat_model": options.get(
+                    CONF_OLLAMA_CHAT_MODEL, RECOMMENDED_OLLAMA_CHAT_MODEL
+                ),
+                "chat_keepalive": options.get(
+                    CONF_OLLAMA_CHAT_KEEPALIVE, RECOMMENDED_OLLAMA_CHAT_KEEPALIVE
+                ),
+                "chat_context": options.get(
+                    CONF_OLLAMA_CHAT_CONTEXT_SIZE, RECOMMENDED_OLLAMA_CONTEXT_SIZE
+                ),
+                "reasoning": options.get(CONF_OLLAMA_REASONING),
+            }
+        )
+
+    if "vlm" in categories:
+        settings.update(
+            {
+                "vlm_url": base_url,
+                "vlm_model": options.get(CONF_OLLAMA_VLM, RECOMMENDED_OLLAMA_VLM),
+                "vlm_keepalive": options.get(
+                    CONF_OLLAMA_VLM_KEEPALIVE, RECOMMENDED_OLLAMA_VLM_KEEPALIVE
+                ),
+                "vlm_context": options.get(
+                    CONF_OLLAMA_VLM_CONTEXT_SIZE, RECOMMENDED_OLLAMA_CONTEXT_SIZE
+                ),
+            }
+        )
+
+    if "summarization" in categories:
+        settings.update(
+            {
+                "summarization_url": base_url,
+                "summarization_model": options.get(
+                    CONF_OLLAMA_SUMMARIZATION_MODEL,
+                    RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL,
+                ),
+                "summarization_keepalive": options.get(
+                    CONF_OLLAMA_SUMMARIZATION_KEEPALIVE,
+                    RECOMMENDED_OLLAMA_SUMMARIZATION_KEEPALIVE,
+                ),
+                "summarization_context": options.get(
+                    CONF_OLLAMA_SUMMARIZATION_CONTEXT_SIZE,
+                    RECOMMENDED_OLLAMA_CONTEXT_SIZE,
+                ),
+            }
+        )
+
+    if "embedding" in categories:
+        settings["embedding_model"] = options.get(
+            CONF_OLLAMA_EMBEDDING_MODEL, RECOMMENDED_OLLAMA_EMBEDDING_MODEL
+        )
+
+    return settings
+
+
+def _build_ollama_legacy_providers(
+    entry: ConfigEntry, options: Mapping[str, Any]
+) -> dict[str, ModelProviderConfig]:
+    """Create legacy Ollama provider configs from options."""
+    urls = _legacy_ollama_urls(options)
+    category_urls = {
+        "chat": urls["chat"],
+        "vlm": urls["vlm"],
+        "summarization": urls["summarization"],
+        "embedding": urls["chat"],
+    }
+
+    url_groups: dict[str, set[str]] = {}
+    for category, url in category_urls.items():
+        url_groups.setdefault(url, set()).add(category)
+
+    providers: dict[str, ModelProviderConfig] = {}
+    multi_provider = len(url_groups) > 1
+    label_map = {
+        "chat": "Chat",
+        "vlm": "VLM",
+        "summarization": "Summarization",
+        "embedding": "Embedding",
+    }
+    for url, categories in url_groups.items():
+        label_categories = sorted(
+            cat for cat in categories if cat != "embedding"
+        ) or sorted(categories)
+        label = ", ".join(label_map.get(cat, cat.title()) for cat in label_categories)
+        name = "Primary Ollama" if not multi_provider else f"Ollama ({label})"
+        settings = _ollama_legacy_provider_settings(options, name, url, categories)
+        provider_id = _legacy_provider_id(
+            entry, f"ollama_{'_'.join(sorted(categories))}"
+        )
+        providers[provider_id] = ModelProviderConfig(
+            entry_id=provider_id,
+            name=settings["name"],
+            provider_type="ollama",
+            capabilities=categories,
+            data={"settings": settings},
+            deployment=_DEPLOYMENT_DEFAULTS.get("ollama", "edge"),
+        )
+
+    return providers
+
+
+def _build_openai_legacy_provider(
+    entry: ConfigEntry, options: Mapping[str, Any]
+) -> ModelProviderConfig | None:
+    """Create a legacy OpenAI provider if configured."""
+    api_key = options.get(CONF_API_KEY)
+    if not api_key:
+        return None
+    settings = {
+        "name": "Cloud LLM - OpenAI",
+        "provider_type": "openai",
+        "api_key": api_key,
+        "chat_model": options.get(
+            CONF_OPENAI_CHAT_MODEL, RECOMMENDED_OPENAI_CHAT_MODEL
+        ),
+        "vlm_model": options.get(CONF_OPENAI_VLM, RECOMMENDED_OPENAI_VLM),
+        "summarization_model": options.get(
+            CONF_OPENAI_SUMMARIZATION_MODEL, RECOMMENDED_OPENAI_SUMMARIZATION_MODEL
+        ),
+        "embedding_model": options.get(
+            CONF_OPENAI_EMBEDDING_MODEL, RECOMMENDED_OPENAI_EMBEDDING_MODEL
+        ),
+    }
+    return ModelProviderConfig(
+        entry_id=_legacy_provider_id(entry, "openai"),
+        name=settings["name"],
+        provider_type="openai",
+        capabilities={"chat", "vlm", "summarization", "embedding"},
+        data={"settings": settings},
+        deployment=_DEPLOYMENT_DEFAULTS.get("openai", "cloud"),
+    )
+
+
+def _build_gemini_legacy_provider(
+    entry: ConfigEntry, options: Mapping[str, Any]
+) -> ModelProviderConfig | None:
+    """Create a legacy Gemini provider if configured."""
+    api_key = options.get(CONF_GEMINI_API_KEY)
+    if not api_key:
+        return None
+    settings = {
+        "name": "Cloud LLM - Gemini",
+        "provider_type": "gemini",
+        "api_key": api_key,
+        "chat_model": options.get(
+            CONF_GEMINI_CHAT_MODEL, RECOMMENDED_GEMINI_CHAT_MODEL
+        ),
+        "vlm_model": options.get(CONF_GEMINI_VLM, RECOMMENDED_GEMINI_VLM),
+        "summarization_model": options.get(
+            CONF_GEMINI_SUMMARIZATION_MODEL, RECOMMENDED_GEMINI_SUMMARIZATION_MODEL
+        ),
+        "embedding_model": options.get(
+            CONF_GEMINI_EMBEDDING_MODEL, RECOMMENDED_GEMINI_EMBEDDING_MODEL
+        ),
+    }
+    return ModelProviderConfig(
+        entry_id=_legacy_provider_id(entry, "gemini"),
+        name=settings["name"],
+        provider_type="gemini",
+        capabilities={"chat", "vlm", "summarization", "embedding"},
+        data={"settings": settings},
+        deployment=_DEPLOYMENT_DEFAULTS.get("gemini", "cloud"),
+    )
+
+
+def legacy_model_provider_configs(
+    entry: ConfigEntry, options: Mapping[str, Any]
+) -> dict[str, ModelProviderConfig]:
+    """Build pseudo provider configs from legacy options."""
+    providers: dict[str, ModelProviderConfig] = {}
+    providers.update(_build_ollama_legacy_providers(entry, options))
+    for builder in (_build_openai_legacy_provider, _build_gemini_legacy_provider):
+        provider = builder(entry, options)
+        if provider:
+            providers[provider.entry_id] = provider
+    return providers
+
+
+def resolve_model_provider_configs(
+    entry: ConfigEntry, options: Mapping[str, Any]
+) -> dict[str, ModelProviderConfig]:
+    """Return explicit provider subentries or legacy fallbacks."""
+    providers = get_model_provider_subentries(None, entry)
+    if providers:
+        return providers
+    return legacy_model_provider_configs(entry, options)
+
+
+def _feature_from_subentry(subentry: ConfigSubentry) -> FeatureConfig:
+    """Convert a stored feature subentry to a dataclass."""
+    data = dict(subentry.data)
+    fallback_ids = data.get(CONF_FEATURE_FALLBACK_PROVIDER_IDS)
+    if fallback_ids and isinstance(fallback_ids, list):
+        fallback_provider_ids = [str(fid) for fid in fallback_ids]
+    else:
+        fallback_provider_ids = None
+
+    return FeatureConfig(
+        entry_id=subentry.subentry_id,
+        name=data.get("name") or subentry.title,
+        feature_type=data.get("feature_type", ""),
+        model_provider_id=data.get("model_provider_id"),
+        model=dict(data.get(CONF_FEATURE_MODEL, {})),
+        config=dict(data.get("config", {})),
+        fallback_provider_ids=fallback_provider_ids,
+    )
+
+
+def get_feature_subentries(
+    _hass: Any, config_entry: ConfigEntry
+) -> dict[str, FeatureConfig]:
+    """Return explicit feature subentries."""
+    features: dict[str, FeatureConfig] = {}
+    for subentry in config_entry.subentries.values():
+        if subentry.subentry_type != SUBENTRY_TYPE_FEATURE:
+            continue
+        feature = _feature_from_subentry(subentry)
+        features[feature.entry_id] = feature
+    return features
+
+
+def legacy_feature_configs(
+    entry: ConfigEntry,
+    providers: Mapping[str, ModelProviderConfig],
+    options: Mapping[str, Any],
+) -> dict[str, FeatureConfig]:
+    """Infer feature configs from legacy options."""
+    providers_by_type: dict[str, list[ModelProviderConfig]] = {}
+    providers_by_type_category: dict[str, dict[str, ModelProviderConfig]] = {}
+    for provider in providers.values():
+        providers_by_type.setdefault(provider.provider_type, []).append(provider)
+        for capability in provider.capabilities:
+            providers_by_type_category.setdefault(provider.provider_type, {})[
+                capability
+            ] = provider
+
+    def _legacy_model_data(
+        category: str | None, provider_type: str, opts: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        if not category:
+            return {}
+        spec = MODEL_CATEGORY_SPECS.get(category, {})
+        model_key = _model_key_for(category, provider_type)
+        model_name = (
+            opts.get(model_key)
+            if model_key
+            else spec.get("recommended_models", {}).get(provider_type)
+        )
+        model_data: dict[str, Any] = {}
+        if model_name:
+            model_data[CONF_FEATURE_MODEL_NAME] = model_name
+        temp_key = spec.get("temperature_key")
+        if temp_key and opts.get(temp_key) is not None:
+            model_data[CONF_FEATURE_MODEL_TEMPERATURE] = opts.get(temp_key)
+
+        if provider_type == "ollama":
+            keepalive_map = {
+                "chat": CONF_OLLAMA_CHAT_KEEPALIVE,
+                "vlm": CONF_OLLAMA_VLM_KEEPALIVE,
+                "summarization": CONF_OLLAMA_SUMMARIZATION_KEEPALIVE,
+            }
+            context_map = {
+                "chat": CONF_OLLAMA_CHAT_CONTEXT_SIZE,
+                "vlm": CONF_OLLAMA_VLM_CONTEXT_SIZE,
+                "summarization": CONF_OLLAMA_SUMMARIZATION_CONTEXT_SIZE,
+            }
+            keepalive_key = keepalive_map.get(category)
+            if keepalive_key and opts.get(keepalive_key) is not None:
+                model_data[CONF_FEATURE_MODEL_KEEPALIVE] = opts.get(keepalive_key)
+            context_key = context_map.get(category)
+            if context_key and opts.get(context_key) is not None:
+                model_data[CONF_FEATURE_MODEL_CONTEXT_SIZE] = opts.get(context_key)
+            if category == "chat" and opts.get(CONF_OLLAMA_REASONING) is not None:
+                model_data[CONF_FEATURE_MODEL_REASONING] = opts.get(
+                    CONF_OLLAMA_REASONING
+                )
+
+        return model_data
+
+    def _feature(
+        feature_type: str, provider_type_opt: str, default_provider: str
+    ) -> FeatureConfig | None:
+        provider_type = str(options.get(provider_type_opt, default_provider))
+        category = FEATURE_CATEGORY_MAP.get(feature_type)
+        provider = providers_by_type_category.get(provider_type, {}).get(category or "")
+        if not provider:
+            provider_list = providers_by_type.get(provider_type, [])
+            provider = provider_list[0] if provider_list else None
+        if not provider:
+            return None
+        model_data = _legacy_model_data(category, provider.provider_type, options)
+        return FeatureConfig(
+            entry_id=f"{entry.entry_id}_{feature_type}_legacy",
+            name=feature_type.replace("_", " ").title(),
+            feature_type=feature_type,
+            model_provider_id=provider.entry_id,
+            model=model_data,
+            config={},
+        )
+
+    features: dict[str, FeatureConfig] = {}
+    mapping = [
+        ("conversation", CONF_CHAT_MODEL_PROVIDER, "ollama"),
+        ("camera_image_analysis", CONF_VLM_PROVIDER, "ollama"),
+        ("conversation_summary", CONF_SUMMARIZATION_MODEL_PROVIDER, "ollama"),
+    ]
+    for feat_type, opt_key, default in mapping:
+        feature = _feature(feat_type, opt_key, default)
+        if feature:
+            features[feature.entry_id] = feature
+    return features
+
+
+def resolve_feature_configs(
+    entry: ConfigEntry,
+    providers: Mapping[str, ModelProviderConfig],
+    options: Mapping[str, Any],
+) -> dict[str, FeatureConfig]:
+    """Return explicit feature configs or inferred legacy defaults."""
+    features = get_feature_subentries(None, entry)
+    if features:
+        return features
+    return legacy_feature_configs(entry, providers, options)
+
+
+def _apply_openai_compatible_to_category(
+    options: dict[str, Any], category: str, settings: Mapping[str, Any]
+) -> None:
+    """Overlay OpenAI-compatible provider settings for a model category."""
+    if category == "embedding":
+        # Embedding-specific keys so a dedicated embedding server does not
+        # clobber the chat provider's base URL (and vice versa).
+        if base_url := settings.get("base_url"):
+            options[CONF_OPENAI_COMPATIBLE_EMBEDDING_URL] = base_url
+        options[CONF_OPENAI_COMPATIBLE_EMBEDDING_API_KEY] = settings.get(
+            "api_key", "none"
+        )
+        if (dims := settings.get(CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS)) is not None:
+            options[CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS] = dims
+    else:
+        if base_url := settings.get("base_url"):
+            options[CONF_OPENAI_COMPATIBLE_BASE_URL] = base_url
+        options[CONF_OPENAI_COMPATIBLE_API_KEY] = settings.get("api_key", "none")
+
+
+def _apply_provider_to_category(
+    options: dict[str, Any], category: str, provider: ModelProviderConfig
+) -> None:
+    """Overlay provider settings for a model category onto options."""
+    settings = provider.data.get("settings", {})
+    spec = MODEL_CATEGORY_SPECS.get(category, {})
+    provider_key = spec.get("provider_key")
+    if provider_key:
+        options[provider_key] = provider.provider_type
+
+    if provider.provider_type == "ollama":
+        base_url = settings.get("base_url", RECOMMENDED_OLLAMA_URL)
+        options.setdefault(CONF_OLLAMA_URL, base_url)
+        if category == "chat":
+            options[CONF_OLLAMA_CHAT_URL] = base_url
+        if category == "vlm":
+            options[CONF_OLLAMA_VLM_URL] = base_url
+        if category == "summarization":
+            options[CONF_OLLAMA_SUMMARIZATION_URL] = base_url
+        if category == "embedding":
+            options[CONF_OLLAMA_EMBEDDING_URL] = base_url
+
+    if provider.provider_type == "openai" and (api_key := settings.get("api_key")):
+        options[CONF_API_KEY] = api_key
+
+    if provider.provider_type == "openai_compatible":
+        _apply_openai_compatible_to_category(options, category, settings)
+
+    if provider.provider_type == "gemini" and (api_key := settings.get("api_key")):
+        options[CONF_GEMINI_API_KEY] = api_key
+
+    if provider.provider_type == "anthropic" and (api_key := settings.get("api_key")):
+        options[CONF_ANTHROPIC_API_KEY] = api_key
+
+    if category == "embedding":
+        options[CONF_EMBEDDING_MODEL_PROVIDER] = provider.provider_type
+
+
+def _apply_feature_model_to_options(
+    options: dict[str, Any],
+    category: str,
+    provider_type: str,
+    model_data: Mapping[str, Any],
+) -> None:
+    spec = MODEL_CATEGORY_SPECS.get(category, {})
+    model_key = _model_key_for(category, provider_type)
+    model_name = model_data.get(CONF_FEATURE_MODEL_NAME) or spec.get(
+        "recommended_models", {}
+    ).get(provider_type)
+    if model_key and model_name:
+        options[model_key] = model_name
+
+    temp_key = spec.get("temperature_key")
+    temp_value = model_data.get(CONF_FEATURE_MODEL_TEMPERATURE)
+    if temp_value is None:
+        temp_value = spec.get("recommended_temperature")
+    if temp_key and temp_value is not None:
+        options[temp_key] = temp_value
+
+    if provider_type == "ollama":
+        keepalive_map = {
+            "chat": CONF_OLLAMA_CHAT_KEEPALIVE,
+            "vlm": CONF_OLLAMA_VLM_KEEPALIVE,
+            "summarization": CONF_OLLAMA_SUMMARIZATION_KEEPALIVE,
+        }
+        context_map = {
+            "chat": CONF_OLLAMA_CHAT_CONTEXT_SIZE,
+            "vlm": CONF_OLLAMA_VLM_CONTEXT_SIZE,
+            "summarization": CONF_OLLAMA_SUMMARIZATION_CONTEXT_SIZE,
+        }
+        keepalive_key = keepalive_map.get(category)
+        keepalive_val = model_data.get(CONF_FEATURE_MODEL_KEEPALIVE)
+        if keepalive_key and keepalive_val is not None:
+            options[keepalive_key] = keepalive_val
+        context_key = context_map.get(category)
+        context_val = model_data.get(CONF_FEATURE_MODEL_CONTEXT_SIZE)
+        if context_key and context_val is not None:
+            options[context_key] = context_val
+        if (
+            category == "chat"
+            and model_data.get(CONF_FEATURE_MODEL_REASONING) is not None
+        ):
+            options[CONF_OLLAMA_REASONING] = model_data.get(
+                CONF_FEATURE_MODEL_REASONING
+            )
+
+
+def build_model_deployments(
+    entry: ConfigEntry,
+    providers: Mapping[str, ModelProviderConfig],
+    options: Mapping[str, Any],
+) -> dict[str, str]:
+    """
+    Return {category: deployment} for all model categories.
+
+    Uses the feature→provider mapping when subentries are present, then falls
+    back to provider capabilities for any uncovered category.
+    """
+    features = resolve_feature_configs(entry, providers, options)
+    providers_by_id = dict(providers)
+
+    category_provider: dict[str, ModelProviderConfig] = {}
+    for feature in features.values():
+        cat = FEATURE_CATEGORY_MAP.get(feature.feature_type)
+        if not cat:
+            continue
+        provider = providers_by_id.get(feature.model_provider_id or "")
+        if provider:
+            category_provider.setdefault(cat, provider)
+
+    for cat in ("chat", "vlm", "summarization", "embedding"):
+        if cat in category_provider:
+            continue
+        for provider in providers_by_id.values():
+            if cat in provider.capabilities:
+                category_provider[cat] = provider
+                break
+
+    return {cat: p.deployment for cat, p in category_provider.items()}
+
+
+def resolve_runtime_options(entry: ConfigEntry) -> dict[str, Any]:
+    """
+    Return effective options merging subentries with legacy values.
+
+    This keeps global flags intact while allowing model/feature selection to
+    flow through subentries.
+    """
+    base_options = _options_for(entry)
+    providers = resolve_model_provider_configs(entry, base_options)
+    features = resolve_feature_configs(entry, providers, base_options)
+
+    options = dict(base_options)
+    sentinel_subentry = get_sentinel_subentry(None, entry)
+    _apply_sentinel_options(options, sentinel_subentry)
+    providers_by_id = dict(providers)
+
+    category_provider: dict[str, ModelProviderConfig] = {}
+    for feature in features.values():
+        cat = FEATURE_CATEGORY_MAP.get(feature.feature_type)
+        if not cat:
+            continue
+        provider = providers_by_id.get(feature.model_provider_id or "")
+        if provider:
+            category_provider.setdefault(cat, provider)
+
+    for cat in ("chat", "vlm", "summarization", "embedding"):
+        if cat in category_provider:
+            continue
+        if cat == "embedding" and "chat" in category_provider:
+            chat_provider = category_provider["chat"]
+            if "embedding" in chat_provider.capabilities:
+                category_provider[cat] = chat_provider
+                continue
+        for provider in providers_by_id.values():
+            if cat in provider.capabilities:
+                category_provider[cat] = provider
+                break
+
+    for cat, provider in category_provider.items():
+        _apply_provider_to_category(options, cat, provider)
+        for feature in features.values():
+            if FEATURE_CATEGORY_MAP.get(feature.feature_type) != cat:
+                continue
+            _apply_feature_model_to_options(
+                options, cat, provider.provider_type, feature.model
+            )
+
+    return options
+
+
+def resolve_fallback_chains(
+    entry: ConfigEntry,
+    providers: Mapping[str, ModelProviderConfig],
+    options: Mapping[str, Any],
+) -> dict[str, list[ModelProviderConfig]]:
+    """
+    Return {category: [primary, fallback1, ...]} for each model category.
+
+    Uses explicit fallback_provider_ids from feature subentries when available,
+    otherwise builds an automatic chain from remaining capable providers.
+    """
+    features = resolve_feature_configs(entry, providers, options)
+    providers_by_id = dict(providers)
+
+    chains: dict[str, list[ModelProviderConfig]] = {}
+
+    for feature in features.values():
+        cat = FEATURE_CATEGORY_MAP.get(feature.feature_type)
+        if not cat:
+            continue
+        primary = providers_by_id.get(feature.model_provider_id or "")
+        if not primary:
+            continue
+        chain = [primary]
+        for fb_id in feature.fallback_provider_ids or []:
+            fb = providers_by_id.get(fb_id)
+            if fb and fb.entry_id != primary.entry_id and cat in fb.capabilities:
+                chain.append(fb)
+        chains[cat] = chain
+
+    # Auto-build for legacy configs or categories without explicit fallbacks
+    for cat in ("chat", "vlm", "summarization", "embedding"):
+        if cat in chains:
+            continue
+        primary: ModelProviderConfig | None = None
+        for provider in providers_by_id.values():
+            if cat in provider.capabilities:
+                if primary is None:
+                    primary = provider
+                elif provider.entry_id != primary.entry_id:
+                    chains.setdefault(cat, [primary]).append(provider)
+        if cat not in chains and primary is not None:
+            chains[cat] = [primary]
+
+    return chains

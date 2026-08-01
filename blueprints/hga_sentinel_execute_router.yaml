@@ -1,0 +1,153 @@
+blueprint:
+  name: Home Generative Agent Sentinel Execute Router
+  author: goruck
+  description: >
+    Routes Sentinel execute events to scripts based on suggested action labels.
+    Triggered by hga_sentinel_execute_requested.
+  domain: automation
+  source_url: https://github.com/goruck/home-generative-agent
+
+  input:
+    check_appliance_script:
+      name: Script for check_appliance (Optional)
+      description: Script entity_id called when suggested_actions includes check_appliance.
+      default: ""
+      selector:
+        text:
+          multiline: false
+
+    check_camera_script:
+      name: Script for check_camera (Optional)
+      description: Script entity_id called when suggested_actions includes check_camera.
+      default: ""
+      selector:
+        text:
+          multiline: false
+
+    check_sensor_script:
+      name: Script for check_sensor (Optional)
+      description: Script entity_id called when suggested_actions includes check_sensor.
+      default: ""
+      selector:
+        text:
+          multiline: false
+
+    close_entry_script:
+      name: Script for close_entry (Optional)
+      description: Script entity_id called when suggested_actions includes close_entry.
+      default: ""
+      selector:
+        text:
+          multiline: false
+
+    lock_entity_script:
+      name: Script for lock_entity (Optional)
+      description: Script entity_id called when suggested_actions includes lock_entity.
+      default: ""
+      selector:
+        text:
+          multiline: false
+
+    default_script:
+      name: Default script fallback (Optional)
+      description: Script entity_id called if no action-specific script is configured.
+      default: ""
+      selector:
+        text:
+          multiline: false
+
+    notify_service:
+      name: Notify service for unmatched routes (Optional)
+      description: notify service (for example notify.mobile_app_phone)
+      default: ""
+      selector:
+        text:
+          multiline: false
+
+variables:
+  v_check_appliance_script: !input check_appliance_script
+  v_check_camera_script: !input check_camera_script
+  v_check_sensor_script: !input check_sensor_script
+  v_close_entry_script: !input close_entry_script
+  v_lock_entity_script: !input lock_entity_script
+  v_default_script: !input default_script
+  v_notify_service: !input notify_service
+
+trigger:
+  - platform: event
+    event_type: hga_sentinel_execute_requested
+
+action:
+  - variables:
+      v_suggested_actions: "{{ trigger.event.data.suggested_actions | default([], true) }}"
+
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ 'check_appliance' in v_suggested_actions and v_check_appliance_script != '' }}
+        sequence:
+          - service: "{{ v_check_appliance_script }}"
+            data:
+              sentinel_event: "{{ trigger.event.data }}"
+
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ 'check_camera' in v_suggested_actions and v_check_camera_script != '' }}
+        sequence:
+          - service: "{{ v_check_camera_script }}"
+            data:
+              sentinel_event: "{{ trigger.event.data }}"
+
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ 'check_sensor' in v_suggested_actions and v_check_sensor_script != '' }}
+        sequence:
+          - service: "{{ v_check_sensor_script }}"
+            data:
+              sentinel_event: "{{ trigger.event.data }}"
+
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ 'close_entry' in v_suggested_actions and v_close_entry_script != '' }}
+        sequence:
+          - service: "{{ v_close_entry_script }}"
+            data:
+              sentinel_event: "{{ trigger.event.data }}"
+
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ 'lock_entity' in v_suggested_actions and v_lock_entity_script != '' }}
+        sequence:
+          - service: "{{ v_lock_entity_script }}"
+            data:
+              sentinel_event: "{{ trigger.event.data }}"
+
+      - conditions:
+          - condition: template
+            value_template: "{{ v_default_script != '' }}"
+        sequence:
+          - service: "{{ v_default_script }}"
+            data:
+              sentinel_event: "{{ trigger.event.data }}"
+
+    default:
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ v_notify_service != '' }}"
+            sequence:
+              - service: "{{ v_notify_service }}"
+                data:
+                  title: "HGA Sentinel Execute (Unrouted)"
+                  message: >
+                    Type={{ trigger.event.data.type | default('unknown') }},
+                    severity={{ trigger.event.data.severity | default('unknown') }},
+                    actions={{ v_suggested_actions | join(', ') if v_suggested_actions else 'none' }}
+
+mode: queued
+max: 10

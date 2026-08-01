@@ -1,0 +1,40 @@
+# The contents of this file is based on https://github.com/home-assistant/core/blob/dev/pyproject.toml
+
+target-version = "py313"
+
+[lint]
+select = [
+    "ALL",
+]
+
+ignore = [
+    "ANN401", # Dynamically typed expressions (typing.Any) are disallowed
+    "CPY001", # Project does not use per-file copyright notices
+    "D203", # no-blank-line-before-class (incompatible with formatter)
+    "D212", # multi-line-summary-first-line (incompatible with formatter)
+    "COM812", # incompatible with formatter
+    "ISC001", # incompatible with formatter
+    "PLR0917", # Allow positional arguments beyond the default cap
+]
+
+[lint.per-file-ignores]
+"tests/**/*.py" = [
+    "ANN001", # Allow untyped pytest fixture args
+    "ANN201", # Allow untyped pytest fixture return types
+    "ARG002", # Allow unused args in test doubles
+    "D102",   # Test helper methods do not require docstrings
+    "D103",   # Test functions do not require docstrings
+    "D107",   # Test helper initializers do not require docstrings
+    "E501",   # Allow long assertion/import lines in tests
+    "PLR2004", # Magic values in assertions are acceptable in tests
+    "SLF001", # Tests can access private members for white-box behavior checks
+]
+
+[lint.flake8-pytest-style]
+fixture-parentheses = false
+
+[lint.pyupgrade]
+keep-runtime-typing = true
+
+[lint.mccabe]
+max-complexity = 25

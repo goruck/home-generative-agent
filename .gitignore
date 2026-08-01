@@ -1,0 +1,23 @@
+# artifacts
+__pycache__
+.pytest*
+*.egg-info
+*/build/*
+*/dist/*
+*.pyc
+
+
+# misc
+.coverage
+.claude/settings.local.json
+.claude/settings.json
+.vscode/settings.json
+coverage.xml
+.ruff_cache
+visualize_graph.py
+
+
+# Home Assistant configuration
+config/*
+#!config/configuration.yaml
+.gstack/

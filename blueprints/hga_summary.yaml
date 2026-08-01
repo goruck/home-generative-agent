@@ -1,0 +1,106 @@
+blueprint:
+  name: Home Generative Agent State of the Home
+  author: goruck
+  description: >
+    Periodically ask the Home Generative Agent for a house-state summary.
+    If the model responds, optionally send a persistent notification and/or mobile push.
+  domain: automation
+  source_url: https://github.com/goruck/home-generative-agent
+
+  input:
+    time_pattern:
+      name: Time Pattern
+      description: cron-like time pattern (e.g., /30 for every 30 mins)
+      selector:
+        text:
+          multiline: false
+
+    message:
+      name: Prompt
+      description: Model prompt to create the summary.
+      default: >
+        Provide the latest summary of the house's state and an analysis of the camera images.
+        Draw conclusions from this data including presence of people and animals inside and outside the house.
+      selector:
+        text:
+          multiline: true
+
+    agent_id:
+      name: Agent ID
+      description: ID of the assistant agent to query.
+      default: conversation.home_generative_agent
+      selector:
+        text:
+          multiline: false
+
+    conversation_id:
+      name: Conversation ID
+      description: Identifier for the chat session.
+      default: hga_automation_summary
+      selector:
+        text:
+          multiline: false
+
+    mobile_push_service:
+      name: Mobile Push Notify Service (Optional)
+      description: Exact notify service for your phone (e.g., notify.mobile_app_evas_iphone)
+      default: ""
+      selector:
+        text:
+          multiline: false
+
+    send_persistent:
+      name: Send persistent notification?
+      default: true
+      selector:
+        boolean: {}
+
+variables:
+  v_push: !input mobile_push_service
+  v_persist: !input send_persistent
+
+trigger:
+  - platform: time_pattern
+    minutes: !input time_pattern
+
+# time_pattern triggers fire at the specified interval and at the “zero point” (top of the hour, day, etc.)
+# Filter so it won't fire at the top of the hour
+condition:
+  - condition: template
+    value_template: >
+      {{ now().minute != 0 }}
+
+action:
+  - service: conversation.process
+    data:
+      agent_id: !input agent_id
+      text: !input message
+      conversation_id: !input conversation_id
+    response_variable: hga_automation_summary_output
+
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ (hga_automation_summary_output['response']['speech']['plain']['speech'] | string) | length > 0 }}
+        sequence:
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ v_persist }}"
+                sequence:
+                  - service: persistent_notification.create
+                    data:
+                      title: HGA Automation Summary
+                      message: "{{ hga_automation_summary_output['response']['speech']['plain']['speech'] }}"
+
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ v_push != '' }}"
+                sequence:
+                  - service: "{{ v_push }}"
+                    data:
+                      title: HGA Automation Summary
+                      message: "{{ hga_automation_summary_output['response']['speech']['plain']['speech'] }}"
+mode: single

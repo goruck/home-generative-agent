@@ -1,0 +1,500 @@
+# ruff: noqa: S101
+"""Tests for suppression logic."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+
+from homeassistant.util import dt as dt_util
+
+from custom_components.home_generative_agent.const import (
+    CONF_SENTINEL_QUIET_HOURS_END,
+    CONF_SENTINEL_QUIET_HOURS_SEVERITIES,
+    CONF_SENTINEL_QUIET_HOURS_START,
+)
+from custom_components.home_generative_agent.sentinel.engine import (
+    _build_suppress_kwargs,
+    _coerce_quiet_hour,
+    _coerce_quiet_severities,
+)
+from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
+from custom_components.home_generative_agent.sentinel.suppression import (
+    MAX_COOLDOWN_MULTIPLIER,
+    PENDING_PROMPT_DEFAULT_TTL,
+    SUPPRESSION_REASON_ENTITY_COOLDOWN,
+    SUPPRESSION_REASON_NOT_SUPPRESSED,
+    SUPPRESSION_REASON_PENDING_PROMPT,
+    SUPPRESSION_REASON_PRESENCE_GRACE,
+    SUPPRESSION_REASON_TYPE_COOLDOWN,
+    SuppressionState,
+    _is_quiet_hours,
+    _migrate_suppression_state,
+    purge_expired_prompts,
+    record_cooldown_feedback,
+    register_finding,
+    register_prompt,
+    resolve_prompt,
+    should_suppress,
+)
+
+
+def _finding() -> AnomalyFinding:
+    return AnomalyFinding(
+        anomaly_id="a1",
+        type="rule",
+        severity="low",
+        confidence=0.5,
+        triggering_entities=["lock.front"],
+        evidence={"entity_id": "lock.front"},
+        suggested_actions=[],
+        is_sensitive=True,
+    )
+
+
+def test_cooldown_suppresses() -> None:
+    state = SuppressionState()
+    finding = _finding()
+    now = dt_util.utcnow()
+    register_finding(state, finding, now)
+
+    decision = should_suppress(
+        state,
+        finding,
+        now + timedelta(minutes=1),
+        cooldown_type=timedelta(minutes=10),
+        cooldown_entity=timedelta(minutes=5),
+    )
+    assert decision.suppress
+    assert decision.reason_code == SUPPRESSION_REASON_TYPE_COOLDOWN
+    assert decision.context["type"] == finding.type
+
+
+def test_prompt_suppresses_until_resolved() -> None:
+    state = SuppressionState()
+    finding = _finding()
+    now = dt_util.utcnow()
+    register_prompt(state, finding, now)
+
+    decision = should_suppress(
+        state,
+        finding,
+        now,
+        cooldown_type=timedelta(minutes=0),
+        cooldown_entity=timedelta(minutes=0),
+    )
+    assert decision.suppress
+    assert decision.reason_code == SUPPRESSION_REASON_PENDING_PROMPT
+
+    resolve_prompt(state, finding.anomaly_id)
+    decision = should_suppress(
+        state,
+        finding,
+        now,
+        cooldown_type=timedelta(minutes=0),
+        cooldown_entity=timedelta(minutes=0),
+    )
+    assert not decision.suppress
+    assert decision.reason_code == SUPPRESSION_REASON_NOT_SUPPRESSED
+
+
+def test_prompt_suppresses_within_ttl() -> None:
+    state = SuppressionState()
+    finding = _finding()
+    now = dt_util.utcnow()
+    register_prompt(state, finding, now)
+
+    decision = should_suppress(
+        state,
+        finding,
+        now + timedelta(hours=1),
+        cooldown_type=timedelta(minutes=0),
+        cooldown_entity=timedelta(minutes=0),
+    )
+    assert decision.suppress
+    assert decision.reason_code == SUPPRESSION_REASON_PENDING_PROMPT
+
+
+def test_prompt_expires_at_ttl_boundary() -> None:
+    state = SuppressionState()
+    finding = _finding()
+    now = dt_util.utcnow()
+    register_prompt(state, finding, now)
+
+    decision = should_suppress(
+        state,
+        finding,
+        now + PENDING_PROMPT_DEFAULT_TTL,
+        cooldown_type=timedelta(minutes=0),
+        cooldown_entity=timedelta(minutes=0),
+    )
+    assert not decision.suppress
+    assert decision.reason_code == SUPPRESSION_REASON_NOT_SUPPRESSED
+    assert finding.anomaly_id not in state.pending_prompts
+
+
+def test_prompt_with_invalid_timestamp_treated_as_expired() -> None:
+    state = SuppressionState(pending_prompts={"a1": "not-a-datetime"})
+    finding = _finding()
+    now = dt_util.utcnow()
+
+    decision = should_suppress(
+        state,
+        finding,
+        now,
+        cooldown_type=timedelta(minutes=0),
+        cooldown_entity=timedelta(minutes=0),
+    )
+    assert not decision.suppress
+    assert decision.reason_code == SUPPRESSION_REASON_NOT_SUPPRESSED
+    assert finding.anomaly_id not in state.pending_prompts
+
+
+def test_purge_expired_prompts_removes_only_expired() -> None:
+    now = dt_util.utcnow()
+    state = SuppressionState(
+        pending_prompts={
+            "expired": dt_util.as_utc(now - timedelta(hours=6)).isoformat(),
+            "fresh": dt_util.as_utc(now - timedelta(minutes=30)).isoformat(),
+            "invalid": "bad-timestamp",
+        }
+    )
+
+    changed = purge_expired_prompts(
+        state,
+        now,
+        pending_prompt_ttl=PENDING_PROMPT_DEFAULT_TTL,
+    )
+
+    assert changed == 2
+    assert "expired" not in state.pending_prompts
+    assert "invalid" not in state.pending_prompts
+    assert "fresh" in state.pending_prompts
+
+
+def test_entity_cooldown_suppresses() -> None:
+    now = dt_util.utcnow()
+    state = SuppressionState(
+        last_by_entity={"lock.front": {"rule": dt_util.as_utc(now).isoformat()}}
+    )
+    finding = _finding()
+
+    decision = should_suppress(
+        state,
+        finding,
+        now + timedelta(minutes=1),
+        cooldown_type=timedelta(minutes=0),
+        cooldown_entity=timedelta(minutes=5),
+    )
+    assert decision.suppress
+    assert decision.reason_code == SUPPRESSION_REASON_ENTITY_COOLDOWN
+    assert decision.context["entity_id"] == "lock.front"
+
+
+# ---------------------------------------------------------------------------
+# Learned cooldown multipliers (v4)
+# ---------------------------------------------------------------------------
+
+
+def test_record_cooldown_feedback_increments_multiplier() -> None:
+    state = SuppressionState()
+    new_val = record_cooldown_feedback(state, "lock.front", "rule")
+    assert new_val == 2
+    assert state.learned_cooldown_multipliers["rule:lock.front"] == 2
+
+
+def test_record_cooldown_feedback_caps_at_max() -> None:
+    state = SuppressionState(
+        learned_cooldown_multipliers={"rule:lock.front": MAX_COOLDOWN_MULTIPLIER}
+    )
+    new_val = record_cooldown_feedback(state, "lock.front", "rule")
+    assert new_val == MAX_COOLDOWN_MULTIPLIER
+    assert (
+        state.learned_cooldown_multipliers["rule:lock.front"] == MAX_COOLDOWN_MULTIPLIER
+    )
+
+
+def test_entity_cooldown_respects_learned_multiplier() -> None:
+    """Multiplier=2 doubles the effective cooldown window."""
+    now = dt_util.utcnow()
+    # key scheme: "{rule_type}:{entity_id}" — finding type is "rule" (from _finding())
+    state = SuppressionState(
+        last_by_entity={"lock.front": {"rule": dt_util.as_utc(now).isoformat()}},
+        learned_cooldown_multipliers={"rule:lock.front": 2},
+    )
+    finding = _finding()
+    base_cooldown = timedelta(minutes=5)
+
+    # At 1x + 1 min (6 min after last) -> still within 2x window (10 min) -> suppressed.
+    decision = should_suppress(
+        state,
+        finding,
+        now + timedelta(minutes=6),
+        cooldown_type=timedelta(minutes=0),
+        cooldown_entity=base_cooldown,
+    )
+    assert decision.suppress
+    assert decision.reason_code == SUPPRESSION_REASON_ENTITY_COOLDOWN
+    assert decision.context["multiplier"] == 2
+
+    # At 2x + 1 min (11 min after last) -> outside 2x window -> not suppressed.
+    decision2 = should_suppress(
+        state,
+        finding,
+        now + timedelta(minutes=11),
+        cooldown_type=timedelta(minutes=0),
+        cooldown_entity=base_cooldown,
+    )
+    assert not decision2.suppress
+
+
+def test_entity_cooldown_multiplier_context_field() -> None:
+    """SuppressionDecision.context always carries the 'multiplier' key."""
+    now = dt_util.utcnow()
+    state = SuppressionState(
+        last_by_entity={"lock.front": {"rule": dt_util.as_utc(now).isoformat()}}
+    )
+    finding = _finding()
+
+    decision = should_suppress(
+        state,
+        finding,
+        now + timedelta(minutes=1),
+        cooldown_type=timedelta(minutes=0),
+        cooldown_entity=timedelta(minutes=5),
+    )
+    assert decision.suppress
+    assert "multiplier" in decision.context
+    assert decision.context["multiplier"] == 1  # no feedback -> default 1x
+
+
+def test_migration_v3_to_v4_to_v5_adds_empty_multipliers() -> None:
+    """v3 state migrates through v4 and ends at v5 with empty multipliers."""
+    v3_data: dict = {
+        "version": 3,
+        "last_by_type": {},
+        "last_by_entity": {},
+        "pending_prompts": {},
+        "snoozed_until": {},
+        "presence_grace": {},
+        "quiet_hours": None,
+    }
+    migrated = _migrate_suppression_state(v3_data)
+    assert migrated["version"] == 5
+    assert migrated["learned_cooldown_multipliers"] == {}
+
+
+def test_migration_v4_to_v5_discards_bare_entity_id_keys() -> None:
+    """v4→v5 migration discards bare entity_id keys (wrong key scheme)."""
+    v4_data: dict = {
+        "version": 4,
+        "last_by_type": {},
+        "last_by_entity": {},
+        "pending_prompts": {},
+        "snoozed_until": {},
+        "presence_grace_until": {},
+        # Bare entity_id keys (old scheme) — should be discarded.
+        "learned_cooldown_multipliers": {"lock.front": 3, "sensor.motion": 2},
+    }
+    migrated = _migrate_suppression_state(v4_data)
+    assert migrated["version"] == 5
+    # Bare keys without ":" separator must be removed.
+    assert migrated["learned_cooldown_multipliers"] == {}
+
+
+def test_migration_v5_already_skipped() -> None:
+    """State already at v5 is returned unchanged."""
+    v5_data: dict = {
+        "version": 5,
+        "last_by_type": {},
+        "last_by_entity": {},
+        "pending_prompts": {},
+        "snoozed_until": {},
+        "presence_grace_until": {},
+        "learned_cooldown_multipliers": {"unlocked_lock_at_night:lock.front": 2},
+    }
+    migrated = _migrate_suppression_state(v5_data)
+    assert migrated["version"] == 5
+    assert migrated["learned_cooldown_multipliers"] == {
+        "unlocked_lock_at_night:lock.front": 2
+    }
+
+
+def test_from_dict_round_trip_preserves_multipliers() -> None:
+    """as_dict / from_dict round-trip keeps learned_cooldown_multipliers intact."""
+    state = SuppressionState(
+        learned_cooldown_multipliers={
+            "unlocked_lock_at_night:lock.front": 3,
+            "camera_entry_unsecured:sensor.motion": 1,
+        }
+    )
+    restored = SuppressionState.from_dict(state.as_dict())
+    assert restored.learned_cooldown_multipliers == {
+        "unlocked_lock_at_night:lock.front": 3,
+        "camera_entry_unsecured:sensor.motion": 1,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Quiet hours
+# ---------------------------------------------------------------------------
+
+
+def test_is_quiet_hours_window_and_severity_filter() -> None:
+    """Quiet hours honors midnight-wrapping windows and severity filtering."""
+    now = datetime(2026, 7, 14, 23, 0, tzinfo=UTC)
+
+    assert _is_quiet_hours(
+        now,
+        start_hour=22,
+        end_hour=7,
+        timezone="UTC",
+        severity="low",
+        quiet_severities=["low"],
+    )
+    # Severity outside the configured list is never suppressed.
+    assert not _is_quiet_hours(
+        now,
+        start_hour=22,
+        end_hour=7,
+        timezone="UTC",
+        severity="high",
+        quiet_severities=["low"],
+    )
+    # Absent config disables the feature.
+    assert not _is_quiet_hours(
+        now,
+        start_hour=None,
+        end_hour=None,
+        timezone="UTC",
+        severity="low",
+        quiet_severities=["low"],
+    )
+    # start == end means a full 24-hour window.
+    assert _is_quiet_hours(
+        now,
+        start_hour=12,
+        end_hour=12,
+        timezone="UTC",
+        severity="low",
+        quiet_severities=["low"],
+    )
+
+
+def test_is_quiet_hours_invalid_timezone_falls_back_to_utc() -> None:
+    """A malformed timezone key falls back to UTC instead of raising."""
+    now = datetime(2026, 7, 14, 23, 0, tzinfo=UTC)
+    assert _is_quiet_hours(
+        now,
+        start_hour=22,
+        end_hour=7,
+        timezone="Not/A..Zone",
+        severity="low",
+        quiet_severities=["low"],
+    )
+
+
+def test_coerce_quiet_hour_rejects_corrupt_values() -> None:
+    """Corrupt stored quiet-hours values degrade to None instead of raising."""
+    assert _coerce_quiet_hour(22) == 22
+    assert _coerce_quiet_hour("7") == 7
+    assert _coerce_quiet_hour(0) == 0
+    assert _coerce_quiet_hour(None) is None
+    assert _coerce_quiet_hour("") is None
+    assert _coerce_quiet_hour("disabled") is None
+    assert _coerce_quiet_hour("22:00") is None
+    assert _coerce_quiet_hour(99) is None
+    assert _coerce_quiet_hour(-1) is None
+    assert _coerce_quiet_hour(True) is None  # noqa: FBT003
+    assert _coerce_quiet_hour(["22"]) is None
+
+
+def test_coerce_quiet_severities_rejects_corrupt_values() -> None:
+    """Corrupt stored severity lists degrade safely instead of raising."""
+    assert _coerce_quiet_severities(["low", "high"]) == ["low", "high"]
+    # A scalar string must not be iterated character-by-character; non-list
+    # values fall back to the recommended default.
+    assert _coerce_quiet_severities("high") == ["low"]
+    assert _coerce_quiet_severities(None) == ["low"]
+    assert _coerce_quiet_severities(["Low", "critical", 3]) == []
+
+
+def test_build_suppress_kwargs_survives_corrupt_options() -> None:
+    """Corrupt stored quiet-hours options never raise inside the Sentinel loop."""
+    options = {
+        CONF_SENTINEL_QUIET_HOURS_START: "disabled",
+        CONF_SENTINEL_QUIET_HOURS_END: 999,
+        CONF_SENTINEL_QUIET_HOURS_SEVERITIES: None,
+    }
+    snapshot: dict = {"derived": {"timezone": "UTC"}}
+    kwargs = _build_suppress_kwargs(options, snapshot)  # type: ignore[arg-type]
+    assert kwargs["quiet_hours_start"] is None
+    assert kwargs["quiet_hours_end"] is None
+    assert kwargs["quiet_hours_severities"] == ["low"]
+
+
+def _grace_state(now: datetime) -> SuppressionState:
+    state = SuppressionState()
+    state.presence_grace_until = {
+        "person.lindo": (now + timedelta(minutes=5)).isoformat()
+    }
+    return state
+
+
+def _dynamic_motion_finding(template_id: str) -> AnomalyFinding:
+    return AnomalyFinding(
+        anomaly_id="a-grace",
+        type="v1_subject_motion_sensor_candidate_slug",
+        severity="medium",
+        confidence=0.8,
+        triggering_entities=["binary_sensor.hall_motion"],
+        evidence={"template_id": template_id},
+        suggested_actions=[],
+        is_sensitive=False,
+    )
+
+
+def test_presence_grace_matches_dynamic_template_id() -> None:
+    """Dynamic rules carry per-candidate rule IDs; grace matches template_id."""
+    now = dt_util.utcnow()
+    state = _grace_state(now)
+    finding = _dynamic_motion_finding("motion_detected_at_night_while_away")
+    decision = should_suppress(
+        state,
+        finding,
+        now,
+        cooldown_type=timedelta(minutes=10),
+        cooldown_entity=timedelta(minutes=5),
+    )
+    assert decision.suppress
+    assert decision.reason_code == SUPPRESSION_REASON_PRESENCE_GRACE
+
+
+def test_presence_grace_ignores_non_sensitive_dynamic_template() -> None:
+    """Templates outside the presence-sensitive set are unaffected by grace."""
+    now = dt_util.utcnow()
+    state = _grace_state(now)
+    finding = _dynamic_motion_finding("open_entry_at_night")
+    decision = should_suppress(
+        state,
+        finding,
+        now,
+        cooldown_type=timedelta(minutes=10),
+        cooldown_entity=timedelta(minutes=5),
+    )
+    assert decision.reason_code != SUPPRESSION_REASON_PRESENCE_GRACE
+
+
+def test_presence_grace_matches_motion_while_away_template() -> None:
+    """Issue #518: the day-agnostic away-motion template is presence-sensitive."""
+    now = dt_util.utcnow()
+    state = _grace_state(now)
+    finding = _dynamic_motion_finding("motion_detected_while_away")
+    decision = should_suppress(
+        state,
+        finding,
+        now,
+        cooldown_type=timedelta(minutes=10),
+        cooldown_entity=timedelta(minutes=5),
+    )
+    assert decision.suppress
+    assert decision.reason_code == SUPPRESSION_REASON_PRESENCE_GRACE

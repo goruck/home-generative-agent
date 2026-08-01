@@ -1,0 +1,97 @@
+blueprint:
+  name: Home Generative Agent Sentinel Execute Escalate High
+  author: goruck
+  description: >
+    Escalates high-severity Sentinel execute events with optional mobile notify,
+    persistent notification, and TTS.
+    Triggered by hga_sentinel_execute_requested.
+  domain: automation
+  source_url: https://github.com/goruck/home-generative-agent
+
+  input:
+    mobile_push_service:
+      name: Mobile push notify service (Optional)
+      description: notify service (for example notify.mobile_app_phone)
+      default: ""
+      selector:
+        text:
+          multiline: false
+
+    send_persistent:
+      name: Send persistent notification?
+      default: true
+      selector:
+        boolean: {}
+
+    tts_service:
+      name: TTS service (Optional)
+      description: TTS action service (for example tts.speak)
+      default: ""
+      selector:
+        text:
+          multiline: false
+
+    tts_target_media_player:
+      name: TTS media player entity_id (Optional)
+      description: Target media player for speech output.
+      default: ""
+      selector:
+        text:
+          multiline: false
+
+variables:
+  v_push: !input mobile_push_service
+  v_persist: !input send_persistent
+  v_tts_service: !input tts_service
+  v_tts_target: !input tts_target_media_player
+  v_type: "{{ trigger.event.data.type | default('unknown') }}"
+  v_severity: "{{ trigger.event.data.severity | default('unknown') }}"
+  v_entities: "{{ trigger.event.data.triggering_entities | default([], true) }}"
+  v_actions: "{{ trigger.event.data.suggested_actions | default([], true) }}"
+  v_message: >
+    Sentinel execute requested for {{ v_type }} (severity {{ v_severity }}).
+    Entities: {{ v_entities | join(', ') if v_entities else 'none' }}.
+    Suggested actions: {{ v_actions | join(', ') if v_actions else 'none' }}.
+
+trigger:
+  - platform: event
+    event_type: hga_sentinel_execute_requested
+
+condition:
+  - condition: template
+    value_template: "{{ v_severity == 'high' }}"
+
+action:
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ v_persist }}"
+        sequence:
+          - service: persistent_notification.create
+            data:
+              title: "HGA Sentinel High Severity"
+              message: "{{ v_message }}"
+
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ v_push != '' }}"
+        sequence:
+          - service: "{{ v_push }}"
+            data:
+              title: "HGA Sentinel High Severity"
+              message: "{{ v_message }}"
+
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ v_tts_service != '' and v_tts_target != '' }}"
+        sequence:
+          - service: "{{ v_tts_service }}"
+            data:
+              media_player_entity_id: "{{ v_tts_target }}"
+              message: >
+                High severity Sentinel event for {{ v_type }}.
+                Please review now.
+
+mode: single

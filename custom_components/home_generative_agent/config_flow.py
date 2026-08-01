@@ -1,0 +1,565 @@
+"""Config flow for Home Generative Agent integration."""
+
+from __future__ import annotations
+
+import logging
+from typing import TYPE_CHECKING, Any
+
+import voluptuous as vol
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigFlow,
+    ConfigFlowResult,
+    ConfigSubentryFlow,
+    OptionsFlow,
+    OptionsFlowWithReload,
+)
+from homeassistant.const import (
+    CONF_LLM_HASS_API,
+)
+from homeassistant.core import callback
+from homeassistant.helpers import llm
+from homeassistant.helpers.selector import (
+    BooleanSelector,
+    ConstantSelector,
+    ConstantSelectorConfig,
+    NumberSelector,
+    NumberSelectorConfig,
+    SelectOptionDict,
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+    TemplateSelector,
+    TextSelector,
+    TextSelectorConfig,
+    TextSelectorType,
+)
+
+from .const import (
+    CONF_CRITICAL_ACTION_PIN,
+    CONF_CRITICAL_ACTION_PIN_ENABLED,
+    CONF_CRITICAL_ACTION_PIN_HASH,
+    CONF_CRITICAL_ACTION_PIN_SALT,
+    CONF_FACE_API_URL,
+    CONF_FACE_RECOGNITION,
+    CONF_MANAGE_CONTEXT_WITH_TOKENS,
+    CONF_MAX_MESSAGES_IN_CONTEXT,
+    CONF_MAX_TOKENS_IN_CONTEXT,
+    CONF_NOTIFY_SERVICE,
+    CONF_PROMPT,
+    CONF_SCHEMA_FIRST_YAML,
+    CONF_STT_HALLUCINATION_EXACT_PATTERNS,
+    CONF_STT_HALLUCINATION_PATTERNS,
+    CONF_TOOL_RELEVANCE_THRESHOLD,
+    CONF_TOOL_RETRIEVAL_LIMIT,
+    CONF_VIDEO_ANALYZER_MODE,
+    CONF_VIDEO_ANALYZER_MOTION_CAMERA_MAP,
+    CONF_VIDEO_ANALYZER_UNIQUENESS_ENABLED,
+    CONF_VLM_PROMPT_EXTRA,
+    CONF_VLM_RESPONSE_LANGUAGE,
+    CONFIG_ENTRY_VERSION,
+    CRITICAL_PIN_MAX_LEN,
+    CRITICAL_PIN_MIN_LEN,
+    DOMAIN,
+    RECOMMENDED_FACE_RECOGNITION,
+    RECOMMENDED_MANAGE_CONTEXT_WITH_TOKENS,
+    RECOMMENDED_MAX_MESSAGES_IN_CONTEXT,
+    RECOMMENDED_MAX_TOKENS_IN_CONTEXT,
+    RECOMMENDED_TOOL_RELEVANCE_THRESHOLD,
+    RECOMMENDED_TOOL_RETRIEVAL_LIMIT,
+    RECOMMENDED_VIDEO_ANALYZER_MODE,
+    RECOMMENDED_VIDEO_ANALYZER_UNIQUENESS_ENABLED,
+    RECOMMENDED_VLM_PROMPT_EXTRA,
+    RECOMMENDED_VLM_RESPONSE_LANGUAGE,
+    SUBENTRY_TYPE_FEATURE,
+    SUBENTRY_TYPE_MODEL_PROVIDER,
+    SUBENTRY_TYPE_SENTINEL,
+    SUBENTRY_TYPE_STT_PROVIDER,
+    VIDEO_ANALYZER_MODE_ALWAYS_NOTIFY,
+    VIDEO_ANALYZER_MODE_DISABLE,
+    VIDEO_ANALYZER_MODE_NOTIFY_ON_ANOMALY,
+)
+from .core.utils import (
+    CannotConnectError,
+    ensure_http_url,
+    hash_pin,
+    list_mobile_notify_services,
+    validate_face_api_url,
+)
+from .flows.feature_subentry_flow import FeatureSubentryFlow
+from .flows.model_provider_subentry_flow import ModelProviderSubentryFlow
+from .flows.sentinel_subentry_flow import SentinelSubentryFlow
+from .flows.stt_provider_subentry_flow import SttProviderSubentryFlow
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from homeassistant.core import HomeAssistant
+    from homeassistant.helpers.typing import VolDictType
+
+LOGGER = logging.getLogger(__name__)
+
+_CONF_STT_FILTERS_SECTION = "stt_filters_section"
+
+DEFAULT_OPTIONS = {
+    CONF_LLM_HASS_API: [llm.LLM_API_ASSIST],
+    CONF_PROMPT: llm.DEFAULT_INSTRUCTIONS_PROMPT,
+    CONF_SCHEMA_FIRST_YAML: False,
+    CONF_CRITICAL_ACTION_PIN_ENABLED: False,
+    CONF_VIDEO_ANALYZER_MODE: RECOMMENDED_VIDEO_ANALYZER_MODE,
+    CONF_VIDEO_ANALYZER_UNIQUENESS_ENABLED: (
+        RECOMMENDED_VIDEO_ANALYZER_UNIQUENESS_ENABLED
+    ),
+    CONF_FACE_RECOGNITION: RECOMMENDED_FACE_RECOGNITION,
+    CONF_MANAGE_CONTEXT_WITH_TOKENS: RECOMMENDED_MANAGE_CONTEXT_WITH_TOKENS,
+    CONF_MAX_TOKENS_IN_CONTEXT: RECOMMENDED_MAX_TOKENS_IN_CONTEXT,
+    CONF_MAX_MESSAGES_IN_CONTEXT: RECOMMENDED_MAX_MESSAGES_IN_CONTEXT,
+    CONF_TOOL_RETRIEVAL_LIMIT: RECOMMENDED_TOOL_RETRIEVAL_LIMIT,
+    CONF_TOOL_RELEVANCE_THRESHOLD: RECOMMENDED_TOOL_RELEVANCE_THRESHOLD,
+}
+
+# ---------------------------
+# Helpers
+# ---------------------------
+
+
+def _get_str(src: Mapping[str, Any], key: str) -> str:
+    """Get a trimmed string from a mapping (missing -> '')."""
+    return str(src.get(key, "") or "").strip()
+
+
+def _patterns_as_text(raw: Any) -> str:
+    """Render list/string pattern options as one pattern per line."""
+    if isinstance(raw, list):
+        return "\n".join(str(item).strip() for item in raw if str(item).strip())
+    if isinstance(raw, str):
+        return raw
+    return ""
+
+
+def _map_as_text(raw: Any) -> str:
+    """Render a dict as 'key: value' lines for display in a text area."""
+    if isinstance(raw, dict):
+        return "\n".join(f"{k}: {v}" for k, v in raw.items() if k and v)
+    if isinstance(raw, str):
+        return raw
+    return ""
+
+
+def _text_as_map(text: str) -> dict[str, str]:
+    """Parse 'key: value' lines into a dict; silently skips malformed lines."""
+    result: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        stripped = raw_line.strip()
+        if not stripped or ":" not in stripped:
+            continue
+        key, _, value = stripped.partition(":")
+        key = key.strip()
+        value = value.strip()
+        if key and value:
+            result[key] = value
+    return result
+
+
+async def _schema_for_options(
+    hass: HomeAssistant, opts: Mapping[str, Any]
+) -> VolDictType:
+    """Generate the options schema for non-provider settings."""
+    hass_apis = [
+        SelectOptionDict(label=api.name, value=api.id)
+        for api in llm.async_get_apis(hass)
+    ]
+
+    video_analyzer_mode_opts: list[SelectOptionDict] = [
+        SelectOptionDict(label="Disable", value=VIDEO_ANALYZER_MODE_DISABLE),
+        SelectOptionDict(
+            label="Notify on anomaly", value=VIDEO_ANALYZER_MODE_NOTIFY_ON_ANOMALY
+        ),
+        SelectOptionDict(
+            label="Always notify", value=VIDEO_ANALYZER_MODE_ALWAYS_NOTIFY
+        ),
+    ]
+
+    context_mgmt_modes = [
+        SelectOptionDict(label="Use tokens", value="true"),
+        SelectOptionDict(label="Use messages", value="false"),
+    ]
+
+    schema: VolDictType = {
+        vol.Optional(
+            CONF_PROMPT,
+            description={"suggested_value": opts.get(CONF_PROMPT)},
+            default=llm.DEFAULT_INSTRUCTIONS_PROMPT,
+        ): TemplateSelector(),
+        vol.Optional(
+            CONF_VLM_RESPONSE_LANGUAGE,
+            description={
+                "suggested_value": opts.get(
+                    CONF_VLM_RESPONSE_LANGUAGE, RECOMMENDED_VLM_RESPONSE_LANGUAGE
+                )
+            },
+            default=RECOMMENDED_VLM_RESPONSE_LANGUAGE,
+        ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+        vol.Optional(
+            CONF_VLM_PROMPT_EXTRA,
+            description={
+                "suggested_value": opts.get(
+                    CONF_VLM_PROMPT_EXTRA, RECOMMENDED_VLM_PROMPT_EXTRA
+                )
+            },
+            default=RECOMMENDED_VLM_PROMPT_EXTRA,
+        ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT, multiline=True)),
+        vol.Optional(
+            CONF_LLM_HASS_API,
+            description={"suggested_value": opts.get(CONF_LLM_HASS_API, [])},
+            default=[],
+        ): SelectSelector(SelectSelectorConfig(options=hass_apis, multiple=True)),
+        vol.Required(
+            CONF_TOOL_RETRIEVAL_LIMIT,
+            default=opts.get(
+                CONF_TOOL_RETRIEVAL_LIMIT, RECOMMENDED_TOOL_RETRIEVAL_LIMIT
+            ),
+        ): NumberSelector(NumberSelectorConfig(min=1, max=20, step=1)),
+        vol.Required(
+            CONF_TOOL_RELEVANCE_THRESHOLD,
+            default=opts.get(
+                CONF_TOOL_RELEVANCE_THRESHOLD, RECOMMENDED_TOOL_RELEVANCE_THRESHOLD
+            ),
+        ): NumberSelector(NumberSelectorConfig(min=0.0, max=1.0, step=0.01)),
+        vol.Optional(
+            CONF_VIDEO_ANALYZER_MODE,
+            description={"suggested_value": opts.get(CONF_VIDEO_ANALYZER_MODE)},
+            default=RECOMMENDED_VIDEO_ANALYZER_MODE,
+        ): SelectSelector(SelectSelectorConfig(options=video_analyzer_mode_opts)),
+        vol.Optional(
+            CONF_VIDEO_ANALYZER_UNIQUENESS_ENABLED,
+            description={
+                "suggested_value": opts.get(
+                    CONF_VIDEO_ANALYZER_UNIQUENESS_ENABLED,
+                    RECOMMENDED_VIDEO_ANALYZER_UNIQUENESS_ENABLED,
+                )
+            },
+            default=opts.get(
+                CONF_VIDEO_ANALYZER_UNIQUENESS_ENABLED,
+                RECOMMENDED_VIDEO_ANALYZER_UNIQUENESS_ENABLED,
+            ),
+        ): BooleanSelector(),
+        vol.Optional(
+            CONF_VIDEO_ANALYZER_MOTION_CAMERA_MAP,
+            default=_map_as_text(opts.get(CONF_VIDEO_ANALYZER_MOTION_CAMERA_MAP, {})),
+        ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT, multiline=True)),
+        vol.Optional(
+            CONF_FACE_API_URL,
+            description={"suggested_value": opts.get(CONF_FACE_API_URL)},
+        ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+        vol.Optional(
+            CONF_MANAGE_CONTEXT_WITH_TOKENS,
+            description={
+                "suggested_value": opts.get(CONF_MANAGE_CONTEXT_WITH_TOKENS, "true")
+            },
+            default=RECOMMENDED_MANAGE_CONTEXT_WITH_TOKENS,
+        ): SelectSelector(
+            SelectSelectorConfig(
+                options=context_mgmt_modes,
+                mode=SelectSelectorMode.DROPDOWN,
+                sort=False,
+                custom_value=False,
+            )
+        ),
+        vol.Optional(
+            CONF_MAX_TOKENS_IN_CONTEXT,
+            description={"suggested_value": opts.get(CONF_MAX_TOKENS_IN_CONTEXT)},
+            default=RECOMMENDED_MAX_TOKENS_IN_CONTEXT,
+        ): NumberSelector(NumberSelectorConfig(min=64, max=65536, step=1)),
+        vol.Optional(
+            CONF_MAX_MESSAGES_IN_CONTEXT,
+            description={"suggested_value": opts.get(CONF_MAX_MESSAGES_IN_CONTEXT)},
+            default=RECOMMENDED_MAX_MESSAGES_IN_CONTEXT,
+        ): NumberSelector(NumberSelectorConfig(min=15, max=240, step=1)),
+        vol.Optional(
+            CONF_CRITICAL_ACTION_PIN_ENABLED,
+            description={
+                "suggested_value": opts.get(CONF_CRITICAL_ACTION_PIN_ENABLED, False)
+            },
+            default=opts.get(CONF_CRITICAL_ACTION_PIN_ENABLED, False),
+        ): BooleanSelector(),
+    }
+
+    if opts.get(CONF_CRITICAL_ACTION_PIN_ENABLED, False):
+        schema[
+            vol.Optional(
+                CONF_CRITICAL_ACTION_PIN,
+                description={
+                    "suggested_value": "",
+                    "placeholder": "Set/replace PIN for critical actions",
+                },
+            )
+        ] = TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
+
+    schema[
+        vol.Optional(
+            CONF_SCHEMA_FIRST_YAML,
+            description={"suggested_value": opts.get(CONF_SCHEMA_FIRST_YAML, False)},
+            default=opts.get(CONF_SCHEMA_FIRST_YAML, False),
+        )
+    ] = BooleanSelector()
+
+    video_analyzer_mode = opts.get(
+        CONF_VIDEO_ANALYZER_MODE, RECOMMENDED_VIDEO_ANALYZER_MODE
+    )
+    if video_analyzer_mode != VIDEO_ANALYZER_MODE_DISABLE:
+        schema[
+            vol.Optional(
+                CONF_FACE_RECOGNITION,
+                description={"suggested_value": opts.get(CONF_FACE_RECOGNITION)},
+                default=RECOMMENDED_FACE_RECOGNITION,
+            )
+        ] = BooleanSelector()
+
+    if video_analyzer_mode != VIDEO_ANALYZER_MODE_DISABLE:
+        mobile_opts = list_mobile_notify_services(hass)
+        if mobile_opts:
+            schema[
+                vol.Optional(
+                    CONF_NOTIFY_SERVICE,
+                    description={"suggested_value": opts.get(CONF_NOTIFY_SERVICE)},
+                    default=opts.get(CONF_NOTIFY_SERVICE, mobile_opts[0]),
+                )
+            ] = SelectSelector(
+                SelectSelectorConfig(
+                    options=[
+                        SelectOptionDict(label=s.replace("notify.", ""), value=s)
+                        for s in mobile_opts
+                    ],
+                    mode=SelectSelectorMode.DROPDOWN,
+                    sort=False,
+                    custom_value=False,
+                )
+            )
+
+    schema.update(
+        {
+            vol.Optional(
+                _CONF_STT_FILTERS_SECTION,
+                default="speech_input_filters",
+            ): ConstantSelector(
+                ConstantSelectorConfig(
+                    label="Speech input filters",
+                    value="speech_input_filters",
+                )
+            ),
+            vol.Optional(
+                CONF_STT_HALLUCINATION_PATTERNS,
+                default=_patterns_as_text(
+                    opts.get(CONF_STT_HALLUCINATION_PATTERNS, [])
+                ),
+            ): TextSelector(
+                TextSelectorConfig(type=TextSelectorType.TEXT, multiline=True)
+            ),
+            vol.Optional(
+                CONF_STT_HALLUCINATION_EXACT_PATTERNS,
+                default=_patterns_as_text(
+                    opts.get(CONF_STT_HALLUCINATION_EXACT_PATTERNS, [])
+                ),
+            ): TextSelector(
+                TextSelectorConfig(type=TextSelectorType.TEXT, multiline=True)
+            ),
+        }
+    )
+
+    return schema
+
+
+# ---------------------------
+# Config Flow
+# ---------------------------
+
+
+class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
+    """Handle a config flow for Home Generative Agent."""
+
+    VERSION = CONFIG_ENTRY_VERSION
+
+    async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Handle the initial step."""
+        if user_input is None:
+            return self.async_show_form(step_id="user", data_schema=vol.Schema({}))
+
+        return self.async_create_entry(
+            title="Home Generative Agent",
+            data={},
+            options=dict(DEFAULT_OPTIONS),
+        )
+
+    @staticmethod
+    def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
+        """Create the options flow."""
+        _ = config_entry
+        return HomeGenerativeAgentOptionsFlow()
+
+    @classmethod
+    @callback
+    def async_get_supported_subentry_types(
+        cls, config_entry: ConfigEntry
+    ) -> dict[str, type[ConfigSubentryFlow]]:
+        """Return supported subentry flow handlers."""
+        _ = config_entry
+        return {
+            SUBENTRY_TYPE_MODEL_PROVIDER: ModelProviderSubentryFlow,
+            SUBENTRY_TYPE_FEATURE: FeatureSubentryFlow,
+            SUBENTRY_TYPE_STT_PROVIDER: SttProviderSubentryFlow,
+            SUBENTRY_TYPE_SENTINEL: SentinelSubentryFlow,
+        }
+
+
+# ---------------------------
+# Options Flow
+# ---------------------------
+
+
+class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
+    """Handle options flow for Home Generative Agent."""
+
+    # ---- helpers ----
+
+    def _base_options(self) -> dict[str, Any]:
+        options = dict(DEFAULT_OPTIONS)
+        options.update(self.config_entry.options)
+        return options
+
+    async def _maybe_edit_face_recognition_url(
+        self,
+        options: dict[str, Any],
+        user_input: Mapping[str, Any] | None,
+    ) -> str | None:
+        """Validate/apply face recog URL when present; return error code or None."""
+        if user_input is None or CONF_FACE_API_URL not in user_input:
+            return None
+
+        raw = _get_str(user_input, CONF_FACE_API_URL)
+        if not raw:
+            options.pop(CONF_FACE_API_URL, None)
+            return None
+
+        try:
+            await validate_face_api_url(self.hass, raw)
+        except CannotConnectError:
+            return "cannot_connect"
+        except Exception:
+            LOGGER.exception("Unexpected exception validating face recognition api URL")
+            return "unknown"
+
+        options[CONF_FACE_API_URL] = ensure_http_url(raw)
+        return None
+
+    def _maybe_edit_pin(
+        self, options: dict[str, Any], user_input: Mapping[str, Any] | None
+    ) -> str | None:
+        """Hash and store the critical-action PIN if provided."""
+        if user_input is None:
+            return None
+
+        pin_enabled = user_input.get(
+            CONF_CRITICAL_ACTION_PIN_ENABLED,
+            options.get(CONF_CRITICAL_ACTION_PIN_ENABLED, False),
+        )
+        options[CONF_CRITICAL_ACTION_PIN_ENABLED] = pin_enabled
+
+        if not pin_enabled:
+            options.pop(CONF_CRITICAL_ACTION_PIN, None)
+            options.pop(CONF_CRITICAL_ACTION_PIN_HASH, None)
+            options.pop(CONF_CRITICAL_ACTION_PIN_SALT, None)
+            return None
+
+        if CONF_CRITICAL_ACTION_PIN not in user_input:
+            return None
+
+        raw = _get_str(user_input, CONF_CRITICAL_ACTION_PIN)
+        options.pop(CONF_CRITICAL_ACTION_PIN, None)
+        if not raw:
+            options.pop(CONF_CRITICAL_ACTION_PIN_HASH, None)
+            options.pop(CONF_CRITICAL_ACTION_PIN_SALT, None)
+            return None
+
+        if (
+            not raw.isdigit()
+            or not CRITICAL_PIN_MIN_LEN <= len(raw) <= CRITICAL_PIN_MAX_LEN
+        ):
+            return "invalid_pin"
+
+        hashed, salt = hash_pin(raw)
+        options[CONF_CRITICAL_ACTION_PIN_HASH] = hashed
+        options[CONF_CRITICAL_ACTION_PIN_SALT] = salt
+        return None
+
+    def _drop_empty_fields(self, final_options: dict[str, Any]) -> None:
+        """Remove empty strings for fields to avoid storing empties."""
+        for k in (
+            CONF_FACE_API_URL,
+            CONF_NOTIFY_SERVICE,
+            CONF_VLM_RESPONSE_LANGUAGE,
+            CONF_VLM_PROMPT_EXTRA,
+        ):
+            if not _get_str(final_options, k):
+                final_options.pop(k, None)
+
+    def _cleanup_none_llm_api(self, options: dict[str, Any]) -> None:
+        """Remove the key when no APIs are selected so options stay clean."""
+        if not options.get(CONF_LLM_HASS_API):
+            options.pop(CONF_LLM_HASS_API, None)
+
+    def _cleanup_ui_only_options(self, options: dict[str, Any]) -> None:
+        """Remove schema-only fields before storing options."""
+        options.pop(_CONF_STT_FILTERS_SECTION, None)
+
+    def _parse_motion_camera_map(self, options: dict[str, Any]) -> None:
+        """Convert the motion camera map text area to a dict before storing."""
+        raw = options.get(CONF_VIDEO_ANALYZER_MOTION_CAMERA_MAP, "")
+        if isinstance(raw, str):
+            parsed = _text_as_map(raw)
+            if parsed:
+                options[CONF_VIDEO_ANALYZER_MOTION_CAMERA_MAP] = parsed
+            else:
+                options.pop(CONF_VIDEO_ANALYZER_MOTION_CAMERA_MAP, None)
+
+    # ---- main step ----
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Handle the options flow init step."""
+        options = self._base_options()
+
+        # First render
+        if user_input is None:
+            return self.async_show_form(
+                step_id="init",
+                data_schema=vol.Schema(await _schema_for_options(self.hass, options)),
+            )
+
+        # Merge new input for non-validated fields
+        options.update(user_input or {})
+        errors: dict[str, str] = {}
+
+        # Field-specific edits with validation/normalization
+        err = await self._maybe_edit_face_recognition_url(options, user_input)
+        if not err:
+            err = self._maybe_edit_pin(options, user_input)
+        if err:
+            errors["base"] = err
+
+        if errors:
+            # Re-render with the same options and show errors
+            return self.async_show_form(
+                step_id="init",
+                data_schema=vol.Schema(await _schema_for_options(self.hass, options)),
+                errors=errors,
+            )
+
+        self._cleanup_none_llm_api(options)
+        self._cleanup_ui_only_options(options)
+        self._drop_empty_fields(options)
+        self._parse_motion_camera_map(options)
+        return self.async_create_entry(title="", data=options)

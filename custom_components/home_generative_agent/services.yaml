@@ -1,0 +1,285 @@
+enroll_person:
+  name: Enroll Person
+  description: Enroll a new person into the face database from an image file.
+  fields:
+    name:
+      name: Person name
+      description: Display name for the person to enroll
+      required: true
+      example: "Eva"
+      selector:
+        text:
+    file_path:
+      name: File path
+      description: Path to image file inside Home Assistant /media
+      required: true
+      example: "/media/faces/eva_face.jpg"
+      selector:
+        text:
+confirm_enroll:
+  name: Confirm Enroll
+  description: Confirm and assign a name to a previously detected unknown face.
+  fields:
+    uid:
+      name: UID
+      description: Identifier for the unknown face
+      required: true
+      example: "unk_deadbeef"
+      selector:
+        text:
+    name:
+      name: Person name
+      description: Name to assign to the person
+      required: true
+      example: "Eva"
+      selector:
+        text:
+
+save_and_analyze_snapshot:
+  name: Save & analyze snapshot
+  description: Capture a snapshot, run AI analysis, and publish the latest event for the selected cameras.
+  target:
+    entity:
+      domain: camera
+  fields:
+    protect_minutes:
+      name: Protect minutes
+      description: Protect the published latest file from pruning for this many minutes (if your analyzer respects this).
+      default: 30
+      selector:
+        number:
+          min: 0
+          max: 180
+          step: 1
+          unit_of_measurement: min
+          mode: box
+
+get_audit_records:
+  name: Get audit records
+  description: Return the latest sentinel audit records (read-only).
+  fields:
+    limit:
+      name: Limit
+      description: Maximum number of records to return.
+      default: 20
+      selector:
+        number:
+          min: 1
+          max: 200
+          step: 1
+          mode: box
+
+get_discovery_records:
+  name: Get discovery records
+  description: Return the latest sentinel discovery records (read-only).
+  fields:
+    limit:
+      name: Limit
+      description: Maximum number of records to return.
+      default: 20
+      selector:
+        number:
+          min: 1
+          max: 200
+          step: 1
+          mode: box
+
+trigger_sentinel_discovery:
+  name: Trigger sentinel discovery
+  description: Run one Sentinel discovery cycle immediately using the current snapshot.
+
+promote_discovery_candidate:
+  name: Promote discovery candidate
+  description: Promote a discovery candidate into a proposal draft.
+  fields:
+    candidate_id:
+      name: Candidate ID
+      description: Candidate ID from discovery output.
+      required: true
+      example: "c1"
+      selector:
+        text:
+    notes:
+      name: Notes
+      description: Optional notes to attach to the draft.
+      required: false
+      selector:
+        text:
+
+get_proposal_drafts:
+  name: Get proposal drafts
+  description: Return the latest proposal drafts (read-only).
+  fields:
+    limit:
+      name: Limit
+      description: Maximum number of records to return.
+      default: 50
+      selector:
+        number:
+          min: 1
+          max: 200
+          step: 1
+          mode: box
+
+preview_rule_proposal:
+  name: Preview rule proposal
+  description: Evaluate a proposal draft against the current snapshot without registering the rule.
+  fields:
+    candidate_id:
+      name: Candidate ID
+      description: Candidate ID from a stored proposal draft.
+      required: true
+      example: "c1"
+      selector:
+        text:
+
+approve_rule_proposal:
+  name: Approve rule proposal
+  description: Approve a proposal draft by candidate ID and register a deterministic rule if supported.
+  fields:
+    candidate_id:
+      name: Candidate ID
+      description: Candidate ID from discovery output.
+      required: true
+      example: "c1"
+      selector:
+        text:
+    notes:
+      name: Notes
+      description: Optional approval notes.
+      required: false
+      selector:
+        text:
+
+reject_rule_proposal:
+  name: Reject rule proposal
+  description: Reject a proposal draft by candidate ID.
+  fields:
+    candidate_id:
+      name: Candidate ID
+      description: Candidate ID from discovery output.
+      required: true
+      example: "c1"
+      selector:
+        text:
+    notes:
+      name: Notes
+      description: Optional rejection notes.
+      required: false
+      selector:
+        text:
+
+get_dynamic_rules:
+  name: Get dynamic rules
+  description: Return dynamic rule registry records including enabled/disabled state.
+  fields:
+    limit:
+      name: Limit
+      description: Maximum number of records to return.
+      default: 200
+      selector:
+        number:
+          min: 1
+          max: 500
+          step: 1
+          mode: box
+
+deactivate_dynamic_rule:
+  name: Deactivate dynamic rule
+  description: Disable a dynamic deterministic rule without removing it.
+  fields:
+    rule_id:
+      name: Rule ID
+      description: Rule ID to deactivate.
+      required: true
+      example: "open_entry_at_night_while_away_window"
+      selector:
+        text:
+
+reactivate_dynamic_rule:
+  name: Reactivate dynamic rule
+  description: Re-enable a previously deactivated dynamic deterministic rule.
+  fields:
+    rule_id:
+      name: Rule ID
+      description: Rule ID to reactivate.
+      required: true
+      example: "open_entry_at_night_while_away_window"
+      selector:
+        text:
+
+patch_dynamic_rule:
+  name: Patch dynamic rule params
+  description: >
+    Merge a partial params dict into an existing dynamic rule.
+    Only the supplied keys are updated; omitted keys are left unchanged.
+    Use this to correct Discovery hallucinations (wrong entity, bad threshold, etc.)
+    without removing and re-approving the rule.
+  fields:
+    rule_id:
+      name: Rule ID
+      description: ID of the rule to patch.
+      required: true
+      example: "washing_machine_phantom_load_away"
+      selector:
+        text:
+    params:
+      name: Params patch
+      description: Key/value pairs to merge into the rule's params field.
+      required: true
+      example: '{"threshold": 5}'
+      selector:
+        object:
+
+sentinel_set_autonomy_level:
+  name: Set sentinel autonomy level
+  description: >
+    Set the runtime autonomy level for the sentinel engine (admin-only, TTL-bounded).
+    Level 0 = fully passive; 1 = notify only; 2 = suggest; 3 = act autonomously.
+    The override reverts to the config default when the TTL expires.
+  fields:
+    level:
+      name: Autonomy level
+      description: "New autonomy level: 0 (passive), 1 (notify), 2 (suggest), 3 (act)."
+      required: true
+      example: 1
+      selector:
+        number:
+          min: 0
+          max: 3
+          step: 1
+          mode: box
+    pin:
+      name: PIN
+      description: PIN required when increasing the level and require_pin_for_level_increase is enabled.
+      required: false
+      selector:
+        text:
+
+sentinel_get_baselines:
+  name: Get sentinel baselines
+  description: >
+    Return raw baseline statistics for all tracked entities regardless of sample
+    count. Includes entities still in the build-up phase. Returns entity_id →
+    metric → {value, sample_count, updated_at, freshness} mapping.
+  fields: {}
+
+sentinel_reset_baseline:
+  name: Reset sentinel baseline
+  description: >
+    Delete baseline data for one entity or all entities. Use after a device
+    replacement, firmware update, or any event that makes historical baseline
+    data invalid. A confirmation notification is fired after deletion.
+  fields:
+    entity_id:
+      name: Entity ID
+      description: >
+        Entity to reset (e.g. sensor.hvac_power). Omit to reset all entities.
+      required: false
+      example: "sensor.hvac_power"
+      selector:
+        entity:
+          domain:
+            - sensor
+            - number
+            - input_number
