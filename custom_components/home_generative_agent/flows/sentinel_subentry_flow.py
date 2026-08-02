@@ -57,6 +57,7 @@ from ..const import (  # noqa: TID252
     CONF_SENTINEL_QUIET_HOURS_SEVERITIES,
     CONF_SENTINEL_QUIET_HOURS_START,
     CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
+    CONF_SENTINEL_RESPONSE_LANGUAGE,
     CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS,
     CRITICAL_PIN_MAX_LEN,
     CRITICAL_PIN_MIN_LEN,
@@ -83,6 +84,7 @@ from ..const import (  # noqa: TID252
     RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
     RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES,
     RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
+    RECOMMENDED_SENTINEL_RESPONSE_LANGUAGE,
     RECOMMENDED_SENTINEL_RULE_ENTITY_EXCLUSIONS,
     SENTINEL_SEVERITIES,
     SUBENTRY_TYPE_SENTINEL,
@@ -274,6 +276,8 @@ def _default_payload() -> dict[str, Any]:
             RECOMMENDED_SENTINEL_APPLIANCE_DURATION_MIN
         ),
         CONF_EXPLAIN_ENABLED: RECOMMENDED_EXPLAIN_ENABLED,
+        # See const.py: language override for the explainer's finding text.
+        CONF_SENTINEL_RESPONSE_LANGUAGE: RECOMMENDED_SENTINEL_RESPONSE_LANGUAGE,
         CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: (
             RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE
         ),
@@ -458,6 +462,16 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                     payload.get(CONF_EXPLAIN_ENABLED, RECOMMENDED_EXPLAIN_ENABLED)
                 ),
             ): BooleanSelector(),
+            vol.Optional(
+                CONF_SENTINEL_RESPONSE_LANGUAGE,
+                description={
+                    "suggested_value": payload.get(
+                        CONF_SENTINEL_RESPONSE_LANGUAGE,
+                        RECOMMENDED_SENTINEL_RESPONSE_LANGUAGE,
+                    )
+                },
+                default=RECOMMENDED_SENTINEL_RESPONSE_LANGUAGE,
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             vol.Required(
                 CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
                 default=bool(

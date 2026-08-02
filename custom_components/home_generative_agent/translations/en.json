@@ -187,6 +187,7 @@
             "sentinel_discovery_enabled": "Enable discovery (requires anomaly alerting)",
             "sentinel_discovery_interval_seconds": "Discovery interval (seconds)",
             "sentinel_discovery_max_records": "Max discovery records to retain",
+            "sentinel_response_language": "Finding explanation language (optional)",
             "sentinel_baseline_enabled": "Enable baseline collection (requires anomaly alerting)",
             "sentinel_baseline_update_interval_minutes": "Baseline update interval (minutes)",
             "sentinel_baseline_freshness_threshold_seconds": "Baseline freshness threshold (seconds)",
@@ -207,6 +208,9 @@
             "sentinel_rule_entity_exclusions": "Rule entity exclusions (JSON, optional)",
             "critical_action_pin": "Sentinel level-increase PIN (optional)",
             "notify_service": "Sentinel Notify Service (optional)"
+          },
+          "data_description": {
+            "sentinel_response_language": "Language for the LLM-authored finding explanation shown in notifications, e.g. 'Czech'. Leave empty for English. Discovery candidate title/summary and triage decision/reason_code/summary are unaffected -- those are parsed by code and always stay in English."
           }
         }
       }
