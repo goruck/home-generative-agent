@@ -83,9 +83,15 @@ USER_PROMPT_TEMPLATE = (
 # decline names by grammatical case -- e.g. nominative "Petra" becomes
 # accusative/dative "Petru" -- so a translated explanation could contain an
 # inflected name that no longer matches the stored nominative form and slips
-# through redaction unredacted. Instructing the model to keep names in their
-# given (nominative) form, uninflected, closes that gap. See
-# test_llm_explain.py for a regression test with an inflected name.
+# through redaction unredacted.
+#
+# This instruction is defense in depth, NOT the privacy boundary: prompt
+# compliance is never guaranteed, so for sensitive findings the explainer
+# redacts recognized names from the evidence structure before the prompt is
+# rendered (llm_explain._redact_person_names) whenever a response language
+# is set.
+# The instruction still keeps names natural-looking in non-sensitive
+# findings, where names legitimately appear. See test_llm_explain.py.
 LANGUAGE_INSTRUCTION_TEMPLATE = (
     "\n\nWrite your explanation in {language}. If it mentions a person by "
     "name, keep that name exactly as given, in its base (nominative, "

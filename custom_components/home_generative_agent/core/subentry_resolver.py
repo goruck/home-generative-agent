@@ -317,8 +317,9 @@ def _apply_sentinel_options(
         CONF_SENTINEL_QUIET_HOURS_SEVERITIES: list(
             RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES
         ),
-        # See const.py: optional LLM response-language override for
-        # discovery candidate title/summary and triage summary text.
+        # See const.py: optional LLM response-language override for the
+        # finding explainer only (explain/llm_explain.LLMExplainer).
+        # Discovery and triage text is machine-parsed and never translated.
         CONF_SENTINEL_RESPONSE_LANGUAGE: RECOMMENDED_SENTINEL_RESPONSE_LANGUAGE,
     }
 

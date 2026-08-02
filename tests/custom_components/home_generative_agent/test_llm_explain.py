@@ -16,6 +16,7 @@ from custom_components.home_generative_agent.explain.llm_explain import (
     _display_type,
     _friendly_type,
     _iso_to_relative,
+    _redact_person_names,
     _relativize_timestamps,
 )
 from custom_components.home_generative_agent.explain.prompts import (
@@ -386,14 +387,15 @@ async def test_redaction_succeeds_when_model_keeps_nominative_name() -> None:
 
 def test_redaction_misses_inflected_name_documents_the_gap() -> None:
     """
-    Documents why the nominative-form instruction is required (not a bug fix here).
+    Documents the exact-match gap that motivates prompt-input pre-redaction.
 
-    If a model ignored the instruction and declined the name per normal Czech
-    grammar ("Petra" -> accusative "Petru"), exact-match redaction would not
-    catch it. This test documents that _redact_if_sensitive itself does no
-    linguistic normalization -- the burden is entirely on the prompt
-    instruction asserted above, which is why that instruction is a hard
-    requirement of this feature rather than a nice-to-have.
+    If an explanation contained a name declined per normal Czech grammar
+    ("Petra" -> accusative "Petru"), exact-match redaction would not catch
+    it. _redact_if_sensitive does no linguistic normalization -- which is
+    why, when a response language is set, the explainer removes recognized
+    names from the model's input entirely (_redact_person_names) so no
+    inflection can ever be produced. The nominative-form prompt instruction
+    is defense in depth on top of that deterministic boundary.
     """
     finding = _sensitive_finding_with_person("Petra")
     explanation = "Kamera zaznamenala Petru u předních dveří v neobvyklou dobu."
@@ -401,3 +403,178 @@ def test_redaction_misses_inflected_name_documents_the_gap() -> None:
     assert redacted is not None
     assert "Petru" in redacted  # not redacted -- exact-match only, by design
     assert "a recognised person" not in redacted
+
+
+@pytest.mark.asyncio
+async def test_translated_sensitive_finding_names_never_reach_model() -> None:
+    """
+    Deterministic privacy boundary: names are stripped from the prompt input.
+
+    With a response language set and a sensitive finding, the recognized
+    name must not appear anywhere in the messages sent to the model -- the
+    model cannot inflect a name it never saw, so the exact-match gap
+    documented above becomes unreachable.
+    """
+    model = CapturingModel("...")
+    explainer = LLMExplainer(model, response_language="Czech")
+    await explainer.async_explain(_sensitive_finding_with_person("Petra"))
+
+    assert model.messages is not None
+    human = cast("str", model.messages[1].content)
+    assert "Petra" not in human
+    assert "a recognised person" in human
+
+
+@pytest.mark.asyncio
+async def test_translated_sensitive_caption_embedded_name_redacted() -> None:
+    """Names embedded in free-text evidence (e.g. captions) are also stripped."""
+    finding = _sensitive_finding_with_person("Petra")
+    finding.evidence["caption"] = "Petra standing at the front door."
+    model = CapturingModel("...")
+    explainer = LLMExplainer(model, response_language="Czech")
+    await explainer.async_explain(finding)
+
+    assert model.messages is not None
+    human = cast("str", model.messages[1].content)
+    assert "Petra" not in human
+    assert "a recognised person standing at the front door." in human
+
+
+@pytest.mark.asyncio
+async def test_translated_non_sensitive_finding_keeps_names() -> None:
+    """Non-sensitive findings are never redacted, translated or not."""
+    finding = AnomalyFinding(
+        anomaly_id="a4",
+        type="camera_entry_unsecured",
+        severity="medium",
+        confidence=0.7,
+        triggering_entities=["camera.front_door"],
+        evidence={
+            "camera_entity_id": "camera.front_door",
+            "recognized_people": ["Petra"],
+        },
+        suggested_actions=["check_entry"],
+        is_sensitive=False,
+    )
+    model = CapturingModel("...")
+    explainer = LLMExplainer(model, response_language="Czech")
+    await explainer.async_explain(finding)
+
+    assert model.messages is not None
+    assert "Petra" in cast("str", model.messages[1].content)
+
+
+@pytest.mark.asyncio
+async def test_english_sensitive_finding_prompt_unchanged() -> None:
+    """
+    Without a response language the prompt input is not pre-redacted.
+
+    English explanations keep today's behavior: the name reaches the model
+    and notifier._redact_if_sensitive redacts the exact (uninflected) form
+    before notification dispatch.
+    """
+    model = CapturingModel("...")
+    explainer = LLMExplainer(model)
+    await explainer.async_explain(_sensitive_finding_with_person("Petra"))
+
+    assert model.messages is not None
+    assert "Petra" in cast("str", model.messages[1].content)
+
+
+def test_redact_person_names_covers_all_structural_positions() -> None:
+    """Structural redaction catches names in values, keys, and containers."""
+    evidence: dict[str, Any] = {
+        "recognized_people": ["Petra"],
+        "caption": "Petra at the door. Note: petra again.",
+        "Petra": "seen",
+        "nested": {"people": ("Petra", "unknown"), "tags": {"petra"}},
+    }
+    redacted = _redact_person_names(evidence)
+    rendered = repr(redacted)
+    assert "Petra" not in rendered
+    assert "petra" not in rendered
+    assert redacted["caption"] == (
+        "a recognised person at the door. Note: a recognised person again."
+    )
+    assert redacted["a recognised person"] == "seen"
+    assert redacted["nested"]["people"] == ("a recognised person", "unknown")
+    assert redacted["nested"]["tags"] == {"a recognised person"}
+
+
+def test_redact_person_names_does_not_mutate_original() -> None:
+    """The original evidence dict (and nesting) must never be mutated."""
+    evidence: dict[str, Any] = {
+        "recognized_people": ["Petra"],
+        "caption": "Petra at the door.",
+        "nested": {"ids": ["Petra", 3]},
+    }
+    redacted = _redact_person_names(evidence)
+    assert evidence["caption"] == "Petra at the door."
+    assert evidence["recognized_people"] == ["Petra"]
+    assert evidence["nested"]["ids"] == ["Petra", 3]
+    assert redacted["recognized_people"] == ["a recognised person"]
+    assert redacted["nested"]["ids"] == ["a recognised person", 3]
+
+
+def test_redact_person_names_overlapping_names_longest_first() -> None:
+    """
+    Overlapping names must never leave a partial name behind.
+
+    A shortest-first alternation would turn "Alexander" into
+    "a recognised personander" -- the "ander" residue still identifies the
+    person. Longest-first ordering makes the whole name match first.
+    """
+    evidence: dict[str, Any] = {
+        "recognized_people": ["Alex", "Alexander"],
+        "caption": "Alexander and Alex arrived.",
+    }
+    redacted = _redact_person_names(evidence)
+    assert "Alexander" not in repr(redacted)
+    assert "Alex" not in repr(redacted)
+    assert redacted["caption"] == (
+        "a recognised person and a recognised person arrived."
+    )
+
+
+@pytest.mark.asyncio
+async def test_translated_sensitive_name_with_quotes_never_reaches_model() -> None:
+    """
+    Names containing quotes must be redacted despite repr escaping.
+
+    Redaction happens on the evidence structure before the prompt is
+    rendered. A post-render approach would miss names like this one: repr
+    turns an embedded apostrophe into an escaped form the raw-name pattern
+    no longer matches.
+    """
+    finding = _sensitive_finding_with_person('D\'Angelo "Junior"')
+    finding.evidence["caption"] = 'D\'Angelo "Junior" stood at the front door.'
+    model = CapturingModel("...")
+    explainer = LLMExplainer(model, response_language="Czech")
+    await explainer.async_explain(finding)
+
+    assert model.messages is not None
+    human = cast("str", model.messages[1].content)
+    assert "D'Angelo" not in human
+    assert "Angelo" not in human
+    assert "Junior" not in human
+
+
+@pytest.mark.asyncio
+async def test_translated_sensitive_short_name_keeps_template_text() -> None:
+    """
+    Redaction must never touch the prompt template's own instruction text.
+
+    A recognized person named "Max" must not corrupt the template's
+    "Max 2 short sentences." output rule -- only evidence content is
+    redacted, because redaction runs before the template is rendered.
+    """
+    finding = _sensitive_finding_with_person("Max")
+    finding.evidence["caption"] = "Max stood at the front door."
+    model = CapturingModel("...")
+    explainer = LLMExplainer(model, response_language="Czech")
+    await explainer.async_explain(finding)
+
+    assert model.messages is not None
+    human = cast("str", model.messages[1].content)
+    assert "Max 2 short sentences." in human
+    assert "a recognised person stood at the front door." in human

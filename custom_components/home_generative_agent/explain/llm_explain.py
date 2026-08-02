@@ -48,10 +48,26 @@ class LLMExplainer:
         if self._model is None:
             return None
 
+        evidence = finding.evidence
+        if self._response_language and finding.is_sensitive:
+            # Deterministic privacy boundary for translated explanations:
+            # notifier._redact_if_sensitive matches recognized_people names
+            # with an exact (case-insensitive) string match, but inflected
+            # languages decline names ("Petra" -> "Petru"), so a translated
+            # explanation could carry a form that redaction never matches.
+            # Redacting the evidence structure BEFORE rendering (rather than
+            # the rendered prompt string) matters twice over: repr-escaping
+            # would hide names containing quotes from a post-render match,
+            # and a post-render match on a short name like "Max" would
+            # corrupt the template's own instruction text ("Max 2 short
+            # sentences."). A name the model never sees cannot be emitted in
+            # any inflection; the prompt's nominative instruction remains
+            # only as defense in depth.
+            evidence = _redact_person_names(evidence)
         prompt = USER_PROMPT_TEMPLATE.format(
             anomaly_type=_display_type(finding),
             severity=finding.severity,
-            evidence=_relativize_timestamps(finding.evidence),
+            evidence=_relativize_timestamps(evidence),
             suggested_actions=finding.suggested_actions,
         )
         system_prompt = SYSTEM_PROMPT
@@ -194,6 +210,49 @@ def _iso_to_relative(value: str) -> str:
         return value
     else:
         return f"about {hours} hour{'s' if hours != 1 else ''} ago"
+
+
+_REDACTED_NAME = "a recognised person"
+
+
+def _redact_person_names(evidence: dict[str, Any]) -> dict[str, Any]:
+    """
+    Return a deep copy of evidence with recognized person names replaced.
+
+    Walks every string in the structure -- values, dict keys, and members of
+    lists, tuples, sets, and frozensets -- so a name is caught no matter
+    where the evidence carried it (e.g. embedded in a camera caption).
+    Redacting before rendering matters: Python's repr escapes quotes, so a
+    name like ``D'Angelo`` could fail to match its rendered form after the
+    prompt is built. Uses the same generic phrase and case-insensitive
+    matching as notifier._redact_if_sensitive. Names are matched
+    longest-first so an overlapping pair like "Alex"/"Alexander" cannot
+    leave a partial name behind. Builds new containers throughout -- the
+    original evidence dict is never mutated (its key order feeds anomaly-id
+    derivation elsewhere).
+    """
+    names = [
+        person
+        for person in evidence.get("recognized_people", [])
+        if isinstance(person, str) and person
+    ]
+    if not names:
+        return evidence
+    pattern = re.compile(
+        "|".join(re.escape(name) for name in sorted(set(names), key=len, reverse=True)),
+        flags=re.IGNORECASE,
+    )
+
+    def _walk(value: Any) -> Any:
+        if isinstance(value, str):
+            return pattern.sub(_REDACTED_NAME, value)
+        if isinstance(value, dict):
+            return {_walk(key): _walk(item) for key, item in value.items()}
+        if isinstance(value, list | tuple | set | frozenset):
+            return type(value)(_walk(item) for item in value)
+        return value
+
+    return _walk(evidence)
 
 
 # Regex matching full ISO-8601 timestamps (e.g. 2025-01-15T20:09:00+00:00)
