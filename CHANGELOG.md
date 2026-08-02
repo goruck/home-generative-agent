@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.24.0] - 2026-08-02
+
+### Added
+
+- **Sentinel finding explanations can now be written in your language** — a new optional `sentinel_response_language` setting in the Sentinel subentry (next to the explanation toggle), contributed by [@hruba202](https://github.com/hruba202) ([#523](https://github.com/goruck/home-generative-agent/pull/523)). Set it to e.g. `Czech` and the LLM-authored explanation shown in mobile and persistent notifications is generated in that language; leave it empty (the default) for English. The option is deliberately scoped to the explainer only: discovery candidate titles/summaries and triage decisions are parsed by code downstream (normalization, dedup, evidence matching) and always stay in English — [#524](https://github.com/goruck/home-generative-agent/issues/524) tracks making discovery prose translatable safely. Mirrors `vlm_response_language`'s convention.
+- **Privacy redaction stays deterministic under translation** — inflected languages decline names by grammatical case ("Petra" becomes "Petru"), which would let a translated explanation slip a recognized person's name past the notifier's exact-match redaction. For sensitive findings with a response language set, recognized names are now removed from the model's input before the explanation is generated — walking the entire evidence structure (values, keys, captions, nested containers), matching longest-first so overlapping names like "Alex"/"Alexander" can't leave a partial name behind. A name the model never sees cannot be emitted in any inflection; the prompt's keep-names-nominative instruction remains as defense in depth. English behavior is unchanged. Found and iterated through cross-model adversarial review.
+
 ## [3.23.1] - 2026-08-01
 
 ### Fixed
