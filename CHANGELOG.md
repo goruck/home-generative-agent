@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.25.0] - 2026-08-02
+
+### Changed
+
+- **Discovery now understands home/away/night context structurally, not by English keywords** ([#524](https://github.com/goruck/home-generative-agent/issues/524)). Away/home/night context for Sentinel discovery candidates resolves primarily from the structured evidence paths the model cites (`derived.anyone_home`, `not derived.anyone_home`, `derived.is_night`) through a new shared resolver used identically by rule normalization, dedup keys, and the proposals card — the English keyword matching remains only as a legacy fallback. A candidate whose title/summary carries no English direction words (the exact situation a future translated-discovery feature creates, and one the model can produce today) previously inverted silently: a "window open while someone is home" idea became a while-away rule, its dedup key never matched the activated rule so the same idea was re-proposed every cycle, and the card's away badge and severity never fired. All spelling variants the model emits now canonicalize to the same signal — `NOT`/`!` prefixes, `== false`/`off`/`no` comparisons (including the `is` idiom), quote-wrapped paths, stacked negations, bare `anyone_home`/`is_night` without the `derived.` prefix, and an explicit `derived.is_night == false` now correctly blocks the night fallback instead of triggering it. The discovery prompt tells the model to cite these paths whenever a candidate depends on occupancy or nighttime — and to omit them when it doesn't, so an over-cited path can't silently narrow an occupancy-agnostic rule.
+- **A threshold or entry rule citing `derived.anyone_home` with no other occupancy signal now scopes to occupied hours** instead of defaulting to while-away semantics — the structured path is trusted as the model's stated intent (proposals still require your approval before any rule activates). English away wording still overrides a bare positive path, so existing English candidates keep their meaning.
+- **An always-on unavailable-sensors rule now covers its while-home variant in dedup** — without this, the structured keying would re-propose the occupancy-scoped version of a rule you already approved, and approving the duplicate would double-alert on every occupied-hours outage. Coverage is deliberately limited to the unavailable family: templates whose firing condition lives outside the dedup key (motion-without-camera, alarm-disarmed entry) are never treated as supersets, so genuinely distinct night/away ideas still surface. Some previously seen candidates may be re-proposed once after upgrading while their stored dedup keys migrate to the structured form; they dedup normally afterwards.
+
+### Fixed
+
+- **Proposals card severity now recognizes structured away candidates** — the severity heuristic only matched English prose, so a candidate citing `not derived.anyone_home` with no English wording under-reported as medium while the server registered the higher-value away rule. The card's context detection, rule-id preview, and GitHub issue prefill now share the same canonicalized evidence handling as the server (including identical whitespace and quoting behavior; canonicalization test vectors pin the server resolver's behavior the JS mirror is written against).
+
 ## [3.24.0] - 2026-08-02
 
 ### Added

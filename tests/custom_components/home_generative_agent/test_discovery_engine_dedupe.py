@@ -1212,3 +1212,176 @@ def test_entity_ids_from_evidence_paths_bare_bracket_format() -> None:
         "sensor.quoted_battery",
         "sensor.doublequoted_battery",
     }
+
+
+# ---------------------------------------------------------------------------
+# Issue #524: canonicalized derived-only filter + guard scope documentation
+# ---------------------------------------------------------------------------
+
+
+def test_filter_novel_candidates_drops_negated_derived_only_paths() -> None:
+    """
+    A lone negated derived path is derived-only and never promotable.
+
+    Before #524 the filter checked startswith("derived."), so a candidate
+    whose only path was "not derived.anyone_home" slipped past and died
+    later with a less useful reason.
+    """
+    engine = SentinelDiscoveryEngine(
+        hass=cast("HomeAssistant", object()),
+        options={},
+        model=None,
+        store=cast("DiscoveryStore", _DummyStore()),
+    )
+    candidates = [
+        {
+            "candidate_id": "away_context_only",
+            "title": "Activity while away",
+            "summary": "Something happens while nobody is home.",
+            "pattern": "not derived.anyone_home",
+            "suggested_type": "security",
+            "confidence_hint": 0.5,
+            "evidence_paths": ["not derived.anyone_home"],
+        }
+    ]
+    filtered, dropped = engine._filter_novel_candidates(candidates, set())
+    assert filtered == []
+    assert len(dropped) == 1
+    assert dropped[0]["dedupe_reason"] == "derived_only_paths"
+
+
+def test_filter_novel_candidates_non_english_prose_passes_mismatch_guard() -> None:
+    """
+    Translated prose passes the entity-text mismatch guard untouched.
+
+    Documents the guard's current no-op for non-English text (descriptor
+    tokens come from English object-ids, so the subset match cannot fire):
+    the translation follow-up to issue #524 must revisit it. Prose stays
+    English in production for now.
+
+    The Czech prose deliberately NAMES the non-evidence garage entity
+    ("pohyb v garáži") — an English candidate with the equivalent prose
+    would be dropped as entity_text_mismatch (see the English test above),
+    so this pair actually pins the English-only limitation rather than
+    passing under any guard implementation (#524 testing review).
+    """
+    engine = SentinelDiscoveryEngine(
+        hass=cast("HomeAssistant", object()),
+        options={},
+        model=None,
+        store=cast("DiscoveryStore", _DummyStore()),
+    )
+    candidates = [
+        {
+            "candidate_id": "pohyb_v_kuchyni_pryc",
+            "title": "Neočekávaný pohyb v kuchyni",
+            "summary": (
+                "Detekuje pohyb v kuchyni, když nikdo není doma, "
+                "zatímco pohyb v garáži je běžný."
+            ),
+            "pattern": "binary_sensor.kitchen_motion == on",
+            "suggested_type": "security",
+            "confidence_hint": 0.6,
+            "evidence_paths": [
+                "entities[entity_id=binary_sensor.kitchen_motion].state",
+                "not derived.anyone_home",
+            ],
+        }
+    ]
+    filtered, dropped = engine._filter_novel_candidates(
+        candidates,
+        set(),
+        ["binary_sensor.kitchen_motion", "binary_sensor.garage_motion"],
+    )
+    assert len(filtered) == 1
+    assert dropped == []
+
+
+def test_filter_novel_candidates_english_prose_naming_entity_is_dropped() -> None:
+    """
+    English control for the Czech pass-through test above.
+
+    The same candidate shape with English prose naming the garage entity IS
+    dropped — together the pair pins that the guard's protection is
+    English-only (#524 testing review).
+    """
+    engine = SentinelDiscoveryEngine(
+        hass=cast("HomeAssistant", object()),
+        options={},
+        model=None,
+        store=cast("DiscoveryStore", _DummyStore()),
+    )
+    candidates = [
+        {
+            "candidate_id": "kitchen_motion_while_away",
+            "title": "Unexpected kitchen motion",
+            "summary": (
+                "Detects motion in the kitchen while nobody is home, "
+                "whereas garage motion is routine."
+            ),
+            "pattern": "binary_sensor.kitchen_motion == on",
+            "suggested_type": "security",
+            "confidence_hint": 0.6,
+            "evidence_paths": [
+                "entities[entity_id=binary_sensor.kitchen_motion].state",
+                "not derived.anyone_home",
+            ],
+        }
+    ]
+    filtered, dropped = engine._filter_novel_candidates(
+        candidates,
+        set(),
+        ["binary_sensor.kitchen_motion", "binary_sensor.garage_motion"],
+    )
+    assert filtered == []
+    assert len(dropped) == 1
+    assert dropped[0]["dedupe_reason"] == "entity_text_mismatch"
+
+
+def test_filter_novel_candidates_junk_plus_derived_only_is_dropped() -> None:
+    """Non-string junk elements do not count as concrete evidence."""
+    engine = SentinelDiscoveryEngine(
+        hass=cast("HomeAssistant", object()),
+        options={},
+        model=None,
+        store=cast("DiscoveryStore", _DummyStore()),
+    )
+    candidates = [
+        {
+            "candidate_id": "junk_evidence",
+            "title": "Activity while away",
+            "summary": "Something happens while nobody is home.",
+            "pattern": "not derived.anyone_home",
+            "suggested_type": "security",
+            "confidence_hint": 0.5,
+            "evidence_paths": [123, "not derived.anyone_home"],
+        }
+    ]
+    filtered, dropped = engine._filter_novel_candidates(candidates, set())
+    assert filtered == []
+    assert len(dropped) == 1
+    assert dropped[0]["dedupe_reason"] == "derived_only_paths"
+
+
+def test_filter_novel_candidates_junk_plus_concrete_path_passes_gate() -> None:
+    """A concrete string path still satisfies the gate alongside junk."""
+    engine = SentinelDiscoveryEngine(
+        hass=cast("HomeAssistant", object()),
+        options={},
+        model=None,
+        store=cast("DiscoveryStore", _DummyStore()),
+    )
+    candidates = [
+        {
+            "candidate_id": "mixed_evidence",
+            "title": "Front door unlocked while home",
+            "summary": "Lock left unlocked with occupant home.",
+            "pattern": "unlocked lock while home",
+            "suggested_type": "security",
+            "confidence_hint": 0.8,
+            "evidence_paths": [123, "entities[entity_id=lock.front_door].state"],
+        }
+    ]
+    filtered, dropped = engine._filter_novel_candidates(candidates, set())
+    assert len(filtered) == 1
+    assert dropped == []

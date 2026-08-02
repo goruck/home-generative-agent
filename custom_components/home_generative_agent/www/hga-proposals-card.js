@@ -267,6 +267,7 @@ class HgaProposalsCard extends HTMLElement {
       .join(" ")
       .toLowerCase();
     const evidencePaths = candidate?.evidence_paths || [];
+    const canonicalPaths = this._canonicalEvidencePaths(candidate);
     const entityIds = this._extractEntityIds(evidencePaths);
     // Word-bounded so "indoor"/"outdoor"/"doorbell" don't read as entries;
     // mirrors _ENTRY_TEXT_PATTERN in proposal_templates.py.
@@ -379,23 +380,20 @@ class HgaProposalsCard extends HTMLElement {
         ? this._sanitizeRuleName(candidate?.candidate_id) || "low_battery_sensors"
         : null;
     }
-    const hasNight =
-      evidencePaths.includes("derived.is_night") || text.includes("night");
-    // Word-bounded to mirror _AWAY_TERMS_PATTERN/_HOME_TERMS_PATTERN in
-    // proposal_templates.py — "present" must not match "presence" and "home"
-    // must not match "anyone_home"/"armed_home" (issue #514).
-    const isAway =
-      evidencePaths.includes("not derived.anyone_home") ||
-      /\b(?:away|no(?:body|\s+one)\s+(?:is\s+)?(?:at\s+)?home|empty|unoccupied|no occupants|without occupants)\b/.test(
-        text
-      );
-    const isHome =
-      /\b(?:someone home|occupied|home|present|occupants|residents)\b/.test(
-        text
-      ) || evidencePaths.includes("derived.anyone_home");
+    const hasNight = this._nightSignal(canonicalPaths, text);
+    // Occupancy resolves through the shared evidence-first signal — mirrors
+    // evidence_paths.presence_signal via _presenceSignal (issue #524). A
+    // single direction value preserves the old isAway-before-isHome branch
+    // order below.
+    const presence = this._presenceSignal(canonicalPaths, text);
+    const isAway = presence === "away";
+    const isHome = presence === "home";
     if (entryIds.length > 0) {
       // Text-derived kind only for text-derived entry IDs — mirrors the
-      // registry-stability gating in proposal_templates.py.
+      // registry-stability gating in proposal_templates.py. Still
+      // English-text-driven: there is no structured derived.* source for
+      // window-vs-door kind, so locale-named IDs with non-English prose
+      // degrade to the generic "entry" kind (issue #524 scope).
       const entryKind = entryIds.some((entityId) => entityId.includes("window"))
         ? "window"
         : entryIds.some((entityId) => entityId.includes("door"))
@@ -580,6 +578,120 @@ class HgaProposalsCard extends HTMLElement {
     return null;
   }
 
+  _canonicalEvidencePaths(candidate) {
+    // Mirrors sentinel/evidence_paths.canonicalize_evidence_path (issue
+    // #524): lowercase, collapse whitespace, rewrite "!x" to "not x", and
+    // fold a trailing boolean comparison into the negation ("x == false"
+    // negates, "x == true" is the bare path, double negation resolves
+    // positive). Consumers were literal string membership checks, so any
+    // spelling variant silently fell through to the English-prose fallback.
+    return (Array.isArray(candidate?.evidence_paths)
+      ? candidate.evidence_paths
+      : []
+    )
+      .filter((path) => typeof path === "string")
+      .map((path) => {
+        // Whitespace class is the union of JS and Python \s (U+FEFF plus
+        // U+0085/U+001C-U+001F) so both mirrors canonicalize identically.
+        let canonical = path
+          .toLowerCase()
+          .replace(/[\s\u0085\u001c-\u001f]+/g, " ")
+          .trim();
+        // LLMs sometimes quote the whole path (the discovery prompt itself
+        // renders 'not derived.anyone_home' in quotes) — strip wrapping
+        // quote characters before prefix/suffix handling.
+        canonical = canonical.replace(/^['"`]+|['"`]+$/g, "").trim();
+        let negated = false;
+        // Loop so stacked prefixes fold by parity ("!!x", "not not x");
+        // re-strip quotes each round — inner-quoted variants
+        // ("not 'derived.x'") keep a wrapping quote after the prefix.
+        let prefix;
+        while ((prefix = canonical.match(/^(?:not\s+|!\s*)/)) !== null) {
+          negated = !negated;
+          canonical = canonical
+            .slice(prefix[0].length)
+            .replace(/^['"`]+|['"`]+$/g, "")
+            .trim();
+        }
+        // Boolean vocabulary includes the HA state idiom (off/no, on/yes)
+        // and the "is" spelling alongside JSON booleans — mirrors
+        // evidence_paths.py.
+        const falseSuffix = /\s*(?:==?\s*|\bis\s+)['"`]?(?:false|0|off|no)['"`]?$/;
+        const trueSuffix = /\s*(?:==?\s*|\bis\s+)['"`]?(?:true|1|on|yes)['"`]?$/;
+        if (falseSuffix.test(canonical)) {
+          negated = !negated;
+          canonical = canonical.replace(falseSuffix, "");
+        } else {
+          canonical = canonical.replace(trueSuffix, "");
+        }
+        canonical = canonical.replace(/^['"`]+|['"`]+$/g, "").trim();
+        // Bare derived-key spellings alias to the canonical paths —
+        // mirrors _DERIVED_ALIASES in evidence_paths.py.
+        if (canonical === "anyone_home") {
+          canonical = "derived.anyone_home";
+        } else if (canonical === "is_night") {
+          canonical = "derived.is_night";
+        }
+        return negated ? `not ${canonical}` : canonical;
+      });
+  }
+
+  _nightSignal(canonicalPaths, text) {
+    // Mirrors sentinel/evidence_paths.night_signal (issue #524): structured
+    // derived.is_night evidence first; an explicit negated path blocks the
+    // "night" substring fallback (which also covers "nighttime"/
+    // "overnight").
+    if (canonicalPaths.includes("derived.is_night")) {
+      return true;
+    }
+    if (canonicalPaths.includes("not derived.is_night")) {
+      return false;
+    }
+    return text.includes("night");
+  }
+
+  _presenceSignal(canonicalPaths, text) {
+    // Mirrors sentinel/evidence_paths.presence_signal (issue #524):
+    // structured negation, then anyone_home boolean expressions, then the
+    // legacy English terms, then the bare positive path. The bare positive
+    // path ranks BELOW the away terms — the LLM historically cites
+    // derived.anyone_home while the prose says "while nobody is home", and
+    // evidence-first there would invert such candidates to home rules.
+    if (canonicalPaths.includes("not derived.anyone_home")) {
+      return "away";
+    }
+    if (
+      /anyone_home\s*(?:==?\s*|\bis\s+)(?:false|0)\b/i.test(text) ||
+      /(?:\bnot\s+|!)\s*derived\.anyone_home/.test(text)
+    ) {
+      return "away";
+    }
+    if (/anyone_home\s*(?:==?\s*|\bis\s+)(?:true|1)\b/i.test(text)) {
+      return "home";
+    }
+    // Word-bounded to mirror AWAY_TERMS_PATTERN/HOME_TERMS_PATTERN in
+    // sentinel/evidence_paths.py — "present" must not match "presence" and
+    // "home" must not match "anyone_home"/"armed_home" (issue #514).
+    if (
+      /\b(?:away|no(?:body|\s+one)\s+(?:is\s+)?(?:at\s+)?home|empty|unoccupied|no occupants|without occupants)\b/.test(
+        text
+      )
+    ) {
+      return "away";
+    }
+    if (
+      /\b(?:someone home|occupied|home|present|occupants|residents)\b/.test(
+        text
+      )
+    ) {
+      return "home";
+    }
+    if (canonicalPaths.includes("derived.anyone_home")) {
+      return "home";
+    }
+    return "any";
+  }
+
   _lowBatteryContext(candidate, text) {
     // candidate_id is often the only English surface when the discovery LLM
     // writes prose in the home's locale — mirrors battery_text in
@@ -622,17 +734,12 @@ class HgaProposalsCard extends HTMLElement {
     ]
       .join(" ")
       .toLowerCase();
-    const hasNight =
-      (Array.isArray(candidate?.evidence_paths)
-        ? candidate.evidence_paths
-        : []
-      ).includes("derived.is_night") || text.includes("night");
-    const isAway =
-      text.includes("away") ||
-      text.includes("no one home") ||
-      text.includes("nobody home") ||
-      text.includes("empty") ||
-      text.includes("unoccupied");
+    const canonicalPaths = this._canonicalEvidencePaths(candidate);
+    const hasNight = this._nightSignal(canonicalPaths, text);
+    // Evidence-first occupancy (issue #524): the old text-only substring
+    // check never fired for structured away candidates, understating their
+    // severity. No isHome — no severity branch consumes presence "home".
+    const isAway = this._presenceSignal(canonicalPaths, text) === "away";
     // Low-battery candidates register at severity "low" server-side
     // regardless of night/away wording (issue #522) — checked before the
     // night/away branch so it doesn't inflate the issue-prefill severity.
