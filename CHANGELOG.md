@@ -12,7 +12,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
-- **Proposals card severity now recognizes structured away candidates** — the severity heuristic only matched English prose, so a candidate citing `not derived.anyone_home` with no English wording under-reported as medium while the server registered the higher-value away rule. The card's context detection, rule-id preview, and GitHub issue prefill now share the same canonicalized evidence handling as the server (including identical whitespace and quoting behavior, pinned by parity test vectors).
+- **Proposals card severity now recognizes structured away candidates** — the severity heuristic only matched English prose, so a candidate citing `not derived.anyone_home` with no English wording under-reported as medium while the server registered the higher-value away rule. The card's context detection, rule-id preview, and GitHub issue prefill now share the same canonicalized evidence handling as the server (including identical whitespace and quoting behavior; canonicalization test vectors pin the server resolver's behavior the JS mirror is written against).
 
 ## [3.24.0] - 2026-08-02
 
