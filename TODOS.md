@@ -393,6 +393,32 @@
 
 ## Discovery
 
+### Mirror server per-template severities in the proposals card instead of the isAway/hasNight heuristic
+
+**What:** `_severityForCandidate` (hga-proposals-card.js) rates `isAway || hasNight` as "high" before the motion+camera "low" leg, while the server registers several away-scoped templates low (`motion_detected_while_away`, `motion_without_camera_activity`, `entity_staleness`). With #524's structured away detection, path-only staleness/power/motion candidates now prefill GitHub rule-request issues as severity high where the server would register low — but the same English prose already produced "high" pre-#524, so this is a widened pre-existing mismatch, not a regression.
+
+**Why:** Red-team finding during the #524 ship (2026-08-02). Deferred by user decision: reordering the severity legs would also change severity for existing English away+motion+camera candidates in the same PR; the full fix is per-class severity mirroring of the server templates, which deserves its own change.
+
+**How to apply:** Derive the card's severity from the inferred rule-id/template (the card already computes it in `_inferRuleIdFromCandidate`) and a template→severity map mirroring proposal_templates.py, falling back to the current heuristic for unmapped candidates.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** issue-524-structured-occupancy-evidence
+
+---
+
+### Represent daytime-only (negated night) discovery constraints
+
+**What:** `night_signal` returns the same `False` for an explicit `not derived.is_night` / `derived.is_night == false` as for no night condition at all, so a daytime-only candidate normalizes to an all-hours template, keys `night=any`, and the card previews the broadened rule — the explicit daytime constraint is silently dropped (visible at approval, and a superset of the stated window, but not what the candidate said).
+
+**Why:** Codex structured-review P2 during the #524 ship (2026-08-02). Deliberate for now: no daytime-only template exists in SUPPORTED_TEMPLATES, and broadening beats the pre-#524 behavior (the "night" substring in the negating text inverted the candidate to a night rule). Needs a `require_day`-style template param or a day-scoped template family to represent properly.
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** issue-524-structured-occupancy-evidence
+
+---
+
 ### Bucket volatile readings out of the low_battery_sensors anomaly-id hash
 
 **What:** `_eval_low_battery_sensors` (dynamic_rules.py) puts float `sensor_levels` into finding evidence, and `build_anomaly_id` hashes evidence — so every reading change mints a new anomaly_id, and the notifier's per-finding cooldown (keyed by anomaly_id) never suppresses repeats as a draining battery drifts through the threshold (39, 38, 37 → three distinct anomaly ids). The suppression layer's per-type cooldown limits real-world impact for slow percent drift, but a jittering promoted sensor would notify every cycle.
