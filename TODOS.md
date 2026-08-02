@@ -524,6 +524,8 @@ Entity-backed evidence path instruction added to `USER_PROMPT_TEMPLATE` in `expl
 
 **How to apply:** Mirror the per-template severity table from `proposal_templates.py` into the card, or include the normalized severity in the proposal record and display that.
 
+**Superseded by:** "Mirror server per-template severities in the proposals card instead of the isAway/hasNight heuristic" (P2, 2026-08-02, Discovery section) — same fix; #524's structured away detection widened the mismatch and raised the priority.
+
 **Effort:** S
 **Priority:** P3
 **Depends on:** v3.22.0
