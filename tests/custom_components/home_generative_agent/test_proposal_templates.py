@@ -1746,9 +1746,31 @@ def test_presence_signal_not_derived_anyone_home_path() -> None:
     assert _presence_signal(["not derived.anyone_home"], "") == "away"
 
 
-def test_presence_signal_derived_anyone_home_path_alone_returns_any() -> None:
-    """'derived.anyone_home' without text signals returns 'any', not 'home'."""
-    assert _presence_signal(["derived.anyone_home"], "") == "any"
+def test_presence_signal_derived_anyone_home_path_alone_returns_home() -> None:
+    """
+    'derived.anyone_home' without any text direction signal returns 'home'.
+
+    Reversal of the pre-#524 pin (the path alone returned 'any'): with
+    non-English prose the structured path is the only occupancy signal, and
+    'any' silently routed entry candidates to the away template. Away text
+    still overrides the bare positive path — see the ordering test below.
+    """
+    assert _presence_signal(["derived.anyone_home"], "") == "home"
+
+
+def test_presence_signal_away_text_beats_bare_positive_path() -> None:
+    """
+    English away wording overrides a bare 'derived.anyone_home' path.
+
+    Citing the path does not assert it is true — the LLM historically cites
+    derived.anyone_home while the prose says "while nobody is home". The
+    bare positive path must stay BELOW the away term tier or such legacy
+    English candidates would invert to home rules (issue #524).
+    """
+    assert (
+        _presence_signal(["derived.anyone_home"], "motion while nobody is home")
+        == "away"
+    )
 
 
 def test_presence_signal_not_derived_anyone_home_takes_priority_over_text() -> None:
@@ -3216,3 +3238,304 @@ def test_threshold_prose_percent_beats_slug_number() -> None:
     normalized = normalize_candidate(candidate)
     assert normalized is not None
     assert normalized.params["threshold"] == 25.0
+
+
+# ---------------------------------------------------------------------------
+# Issue #524: structured occupancy evidence (evidence-first presence signal)
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_candidate_non_english_prose_home_entry_template() -> None:
+    """
+    Czech prose + derived.anyone_home routes to the when_home template.
+
+    The headline #524 fix: without English direction words the presence
+    signal used to resolve "any", which the entry branch defaults to the
+    away template — silently inverting a home-scoped candidate.
+    """
+    candidate = {
+        "candidate_id": "okno_otevrene_doma",
+        "title": "Otevřené okno, když je někdo doma",
+        "summary": "Okno v herně je otevřené, zatímco je někdo doma.",
+        "pattern": "binary_sensor.playroom_window == on",
+        "suggested_type": "security_state",
+        "confidence_hint": 0.7,
+        "evidence_paths": [
+            "entities[entity_id=binary_sensor.playroom_window].state",
+            "derived.anyone_home",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "open_entry_when_home"
+    assert normalized.rule_id == "open_entry_when_home_window"
+
+
+def test_normalize_candidate_non_english_prose_night_home_entry_template() -> None:
+    """Czech prose + is_night + anyone_home routes to at_night_when_home."""
+    candidate = {
+        "candidate_id": "okno_otevrene_v_noci_doma",
+        "title": "Otevřené okno v noci, když je někdo doma",
+        "summary": "Okno v herně zůstalo otevřené přes noc, zatímco je někdo doma.",
+        "pattern": "binary_sensor.playroom_window == on",
+        "suggested_type": "security_state",
+        "confidence_hint": 0.7,
+        "evidence_paths": [
+            "entities[entity_id=binary_sensor.playroom_window].state",
+            "derived.is_night",
+            "derived.anyone_home",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "open_entry_at_night_when_home"
+    assert normalized.rule_id == "open_entry_at_night_when_home_window"
+
+
+def test_normalize_candidate_non_english_prose_night_away_entry_template() -> None:
+    """Czech prose + is_night + negated occupancy routes to at_night_while_away."""
+    candidate = {
+        "candidate_id": "okno_otevrene_v_noci_pryc",
+        "title": "Otevřené okno v noci, když nikdo není doma",
+        "summary": "Okno v herně je otevřené v noci, zatímco nikdo není doma.",
+        "pattern": "binary_sensor.playroom_window == on",
+        "suggested_type": "security_risk",
+        "confidence_hint": 0.7,
+        "evidence_paths": [
+            "entities[entity_id=binary_sensor.playroom_window].state",
+            "derived.is_night",
+            "not derived.anyone_home",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "open_entry_at_night_while_away"
+    assert normalized.rule_id == "open_entry_at_night_while_away_window"
+
+
+def test_normalize_candidate_away_prose_beats_bare_positive_path() -> None:
+    """
+    English away wording still wins over a bare derived.anyone_home path.
+
+    Citing the path does not assert it is true — the LLM historically cites
+    derived.anyone_home while the prose says "while nobody is home" — so
+    the evidence-first flip must not invert legacy English candidates
+    (issue #524 ordering guarantee).
+    """
+    candidate = {
+        "candidate_id": "window_open_away_conflict",
+        "title": "Window open while nobody is home",
+        "summary": "The playroom window is open while nobody is home.",
+        "pattern": "binary_sensor.playroom_window == on",
+        "suggested_type": "security_risk",
+        "confidence_hint": 0.7,
+        "evidence_paths": [
+            "entities[entity_id=binary_sensor.playroom_window].state",
+            "derived.anyone_home",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "open_entry_while_away"
+
+
+def test_normalize_candidate_negation_spelling_variant_routes_away() -> None:
+    """
+    'NOT derived.anyone_home' (spelling variant) counts as structured away.
+
+    Before #524 the check was literal string membership, so any variant
+    silently fell through to the English-prose fallback.
+    """
+    candidate = {
+        "candidate_id": "okno_otevrene_pryc",
+        "title": "Otevřené okno, když nikdo není doma",
+        "summary": "Okno v herně je otevřené, zatímco nikdo není doma.",
+        "pattern": "binary_sensor.playroom_window == on",
+        "suggested_type": "security_risk",
+        "confidence_hint": 0.7,
+        "evidence_paths": [
+            "entities[entity_id=binary_sensor.playroom_window].state",
+            "NOT derived.anyone_home",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "open_entry_while_away"
+
+
+def test_normalize_candidate_multiple_entries_positive_path_requires_home() -> None:
+    """multiple_entries with derived.anyone_home and no direction words scopes home."""
+    candidate = {
+        "candidate_id": "multiple_windows_open_home",
+        "title": "Multiple Windows Open Simultaneously",
+        "summary": "Several windows are open at the same time.",
+        "pattern": "multiple binary_sensor windows == on simultaneously",
+        "suggested_type": "security",
+        "confidence_hint": 0.75,
+        "evidence_paths": [
+            "binary_sensor.window_living_room",
+            "binary_sensor.window_bedroom",
+            "derived.anyone_home",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "multiple_entries_open_count"
+    assert normalized.params["require_home"] is True
+    assert normalized.params["require_away"] is False
+
+
+def test_normalize_candidate_unavailable_negation_variant_blocks_while_home() -> None:
+    """
+    A negated-occupancy spelling variant blocks the while_home split.
+
+    _has_explicit_home_occupancy_signal must canonicalize paths: the
+    while_home evaluator is silent exactly when nobody is home, so a
+    candidate citing absence (in any spelling) must not scope the outage
+    rule to occupied hours (issue #514 rationale, #524 canonicalization).
+    """
+    candidate = {
+        "candidate_id": "sensor_unavailable_away",
+        "title": "Unavailable sensors while someone is home",
+        "summary": "Detects any sensor reporting unavailable while someone is home.",
+        "pattern": "sensor state unavailable",
+        "suggested_type": "availability",
+        "confidence_hint": 0.8,
+        "evidence_paths": [
+            "NOT derived.anyone_home",
+            "entities[entity_id=sensor.backyard_vmd3_0].state",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "unavailable_sensors"
+
+
+def test_normalize_candidate_unavailable_true_expression_scopes_while_home() -> None:
+    """
+    An anyone_home == true expression alone scopes the while_home split.
+
+    Pins the ANYONE_HOME_TRUE_PATTERN text branch of
+    _has_explicit_home_occupancy_signal — previously untested (found by the
+    #524 ship coverage audit): no derived path, no explicit home prose, the
+    boolean expression in the pattern is the only occupancy signal.
+    """
+    candidate = {
+        "candidate_id": "sensor_unavailable_expr",
+        "title": "Unavailable sensors",
+        "summary": "Detects a sensor reporting unavailable.",
+        "pattern": "anyone_home == true AND sensor state unavailable",
+        "suggested_type": "availability",
+        "confidence_hint": 0.8,
+        "evidence_paths": [
+            "entities[entity_id=sensor.backyard_vmd3_0].state",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "unavailable_sensors_while_home"
+
+
+def test_normalize_candidate_threshold_bare_positive_path_requires_home() -> None:
+    """
+    A bare derived.anyone_home path scopes a threshold rule to occupied hours.
+
+    Deliberate #524 cascade (red-team surfaced, maintainer-approved): every
+    branch treats presence uniformly, and the prompt's CONTEXT REQUIREMENT
+    counter-instruction tells the model not to cite occupancy paths for
+    occupancy-agnostic candidates. Pre-#524 the bare path resolved "any"
+    and the rule fired regardless of occupancy.
+    """
+    candidate = {
+        "candidate_id": "vysoky_prikon_mikrovlnky_doma",
+        "title": "Vysoký příkon mikrovlnné trouby, když je někdo doma",
+        "summary": "Příkon mikrovlnné trouby překračuje 1000 W, když je někdo doma.",
+        "pattern": "sensor.microwave_switch_0_power > 1000",
+        "suggested_type": "energy",
+        "confidence_hint": 0.7,
+        "evidence_paths": [
+            "entities[entity_id=sensor.microwave_switch_0_power].state",
+            "derived.anyone_home",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "sensor_threshold_condition"
+    assert normalized.params["require_home"] is True
+    assert normalized.params["require_away"] is False
+
+
+def test_normalize_candidate_camera_when_home_bare_positive_path() -> None:
+    """
+    Czech unknown-person camera candidate reaches the when_home template.
+
+    The presence flip's camera-branch consumer, previously tested only via
+    English home prose (#524 testing review): the bare structured path is
+    the only occupancy signal; unknown-person/camera tokens come from the
+    machine pattern.
+    """
+    candidate = {
+        "candidate_id": "neznama_osoba_kamera_doma",
+        "title": "Neznámá osoba na kameře, když je někdo doma",
+        "summary": "Kamera hlásí neznámou osobu, zatímco je někdo doma.",
+        "pattern": "camera_activity recognized_people contains 'Indeterminate'",
+        "suggested_type": "security",
+        "confidence_hint": 0.7,
+        "evidence_paths": [
+            "camera_activity[entity_id=camera.backyard].recognized_people",
+            "derived.anyone_home",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "unknown_person_camera_when_home"
+    assert normalized.params == {"camera_entity_id": "camera.backyard"}
+
+
+def test_normalize_candidate_true_expression_beats_away_prose_for_while_home() -> None:
+    """
+    anyone_home == true in the pattern outranks away wording in prose.
+
+    Machine syntax outranks prose terms — mirrors presence_signal's tier
+    order. The pre-#524 order (away terms first) keyed the candidate home=1
+    while routing skipped the while_home split, so the activated rule could
+    never dedup it (issue #524 red-team).
+    """
+    candidate = {
+        "candidate_id": "sensor_unavailable_mixed",
+        "title": "Unavailable sensors",
+        "summary": "Detects unavailable sensors even while away.",
+        "pattern": "anyone_home == true AND sensor state unavailable",
+        "suggested_type": "availability",
+        "confidence_hint": 0.8,
+        "evidence_paths": [
+            "entities[entity_id=sensor.backyard_vmd3_0].state",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "unavailable_sensors_while_home"
+
+
+def test_normalize_candidate_negated_text_variant_blocks_while_home() -> None:
+    """
+    A '!derived.anyone_home' spelling in the pattern text blocks while_home.
+
+    The text leg matches the same spelling variants as the canonicalized
+    path legs (issue #524 review) — absence cited in any form must not
+    scope an outage rule to occupied hours.
+    """
+    candidate = {
+        "candidate_id": "sensor_unavailable_negated_text",
+        "title": "Unavailable sensors while someone is home",
+        "summary": "Detects any sensor reporting unavailable while someone is home.",
+        "pattern": "!derived.anyone_home AND sensor state unavailable",
+        "suggested_type": "availability",
+        "confidence_hint": 0.8,
+        "evidence_paths": [
+            "entities[entity_id=sensor.backyard_vmd3_0].state",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "unavailable_sensors"

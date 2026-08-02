@@ -5,6 +5,16 @@ from __future__ import annotations
 import re
 from typing import Any
 
+# Away/home/night context resolves through evidence_paths.presence_signal /
+# night_signal — the same functions the normalizer delegates to — so the
+# candidate key provably matches the normalizer's routing. The former local
+# regex mirrors are gone: this module's decoupling convention was about not
+# importing the normalization module, and a shared leaf module is the fix
+# for the drift hazard the mirrors created (issue #518 review noted an
+# asymmetric pair keys a candidate home=1 while its activated rule keys
+# home=0, breaking dedup in both directions; issue #524).
+from .evidence_paths import night_signal, presence_signal
+
 _SEMANTIC_KEY_CONTEXT_RE = re.compile(r"\|(?:template|night|home|scope)=[^|]+")
 # Quote characters the discovery LLM sometimes wraps around entity IDs in
 # evidence paths. Mirrors proposal_templates._EVIDENCE_QUOTE_CHARS; kept local
@@ -52,19 +62,6 @@ _BARE_BRACKET_DOMAINS = frozenset(
         "switch",
         "vacuum",
     }
-)
-# Away/home occupancy wording. Word-bounded mirrors of
-# proposal_templates._AWAY_TERMS_PATTERN / _HOME_TERMS_PATTERN — the
-# normalizer accepts "no one at home"/"without occupants" as away, and a
-# substring "home" match here would key those candidates home=1 while their
-# activated rule keys home=0, breaking dedup (issue #518 Codex structured
-# review, empirically reproduced).
-_AWAY_TERMS_RE = re.compile(
-    r"\b(?:away|no(?:body|\s+one)\s+(?:is\s+)?(?:at\s+)?home|empty|unoccupied"
-    r"|no occupants|without occupants)\b"
-)
-_HOME_TERMS_RE = re.compile(
-    r"\b(?:someone home|occupied|home|present|occupants|residents)\b"
 )
 # Mirrors proposal_templates._LOW_BATTERY_QUALIFIERS — an asymmetric list
 # breaks dedup in both directions (issue #522 adversarial review).
@@ -149,7 +146,7 @@ def _battery_sensor_entity_ids(entity_ids: list[str]) -> list[str]:
     return []
 
 
-def candidate_semantic_key(  # noqa: C901, PLR0912, PLR0915
+def candidate_semantic_key(  # noqa: PLR0912, PLR0915
     candidate: dict[str, Any],
 ) -> str | None:
     """Build a stable semantic key for a discovery candidate."""
@@ -337,20 +334,15 @@ def candidate_semantic_key(  # noqa: C901, PLR0912, PLR0915
         subject = "sensor"
         entities = sensor_ids
 
-    night = "any"
-    if "night" in text or "derived.is_night" in evidence_paths:
-        night = "1"
+    night = "1" if night_signal(evidence_paths, text) else "any"
 
-    home = "any"
-    # "not derived.anyone_home" is the LLM's canonical absence-of-occupancy
-    # path; without this, an evidence-only away candidate keys home=any and
-    # never dedups against its activated home=0 rule (issue #516 review).
-    if "not derived.anyone_home" in evidence_paths or _AWAY_TERMS_RE.search(text):
-        home = "0"
-    elif _HOME_TERMS_RE.search(text):
-        home = "1"
-    if "derived.anyone_home" in evidence_paths and home == "any":
-        home = "1"
+    # Occupancy resolves through the shared evidence-first signal (issue
+    # #524): without the structured paths, an evidence-only away candidate
+    # keys home=any and never dedups against its activated home=0 rule
+    # (issue #516 review).
+    home = {"away": "0", "home": "1", "any": "any"}[
+        presence_signal(evidence_paths, text)
+    ]
     if predicate == "low_battery":
         # The normalizer's battery templates ignore night/occupancy context
         # entirely, and rule_semantic_key hardcodes night=any|home=any for
@@ -517,14 +509,65 @@ def rule_key_covers_candidate_key(rule_key: str, candidate_key: str) -> bool:
     candidate_semantic_key always emits those context fields. When |template=|
     is present in the rule key, normalize both to subject+predicate+entities
     before comparing.
+
+    For superset-safe predicates, a rule keyed night=any / home=any also
+    covers a candidate keying the specific value: the rule fires in a
+    superset of the candidate's conditions. Without this, a pre-#524
+    approved unavailable_sensors rule (home=any) stops covering the same
+    idea once structured evidence keys the candidate home=1 — the candidate
+    is re-proposed as a new while_home rule and approving it double-alerts
+    on every occupied-hours outage (issue #524 red-team). The converse is
+    NOT coverage: a home=1 rule is silent while away and cannot cover a
+    home=any candidate.
     """
     if rule_key == candidate_key:
         return True
-    if "|template=" not in rule_key:
+    if "|template=" in rule_key:
+        return _SEMANTIC_KEY_CONTEXT_RE.sub(
+            "", rule_key
+        ) == _SEMANTIC_KEY_CONTEXT_RE.sub("", candidate_key)
+    return _key_fields_covered(rule_key, candidate_key)
+
+
+# Predicates whose rule templates carry no firing qualifier OUTSIDE the
+# semantic key, so night=any|home=any truly means "fires unconditionally".
+# NOT safe (issue #524 adversarial review, empirically reproduced):
+# predicate=active — motion_without_camera_activity keys any/any but fires
+# only while cameras are idle; predicate=open — alarm_disarmed_open_entry
+# keys any/any but fires only while the alarm is disarmed. Generalized
+# any-covers-specific for those falsely reports distinct night/away
+# candidates as already covered (promote flow returns "already_active").
+_SUPERSET_SAFE_PREDICATES = frozenset({"unavailable"})
+
+
+def _key_fields_covered(rule_key: str, candidate_key: str) -> bool:
+    """Field-wise coverage: rule night/home 'any' covers a specific value."""
+    rule_fields = rule_key.split("|")
+    candidate_fields = candidate_key.split("|")
+    if len(rule_fields) != len(candidate_fields):
         return False
-    return _SEMANTIC_KEY_CONTEXT_RE.sub("", rule_key) == _SEMANTIC_KEY_CONTEXT_RE.sub(
-        "", candidate_key
+    predicate = next(
+        (
+            field.removeprefix("predicate=")
+            for field in rule_fields
+            if field.startswith("predicate=")
+        ),
+        "",
     )
+    if predicate not in _SUPERSET_SAFE_PREDICATES:
+        return False
+    for rule_field, candidate_field in zip(rule_fields, candidate_fields, strict=True):
+        if rule_field == candidate_field:
+            continue
+        prefix, _, rule_value = rule_field.partition("=")
+        candidate_prefix, _, _candidate_value = candidate_field.partition("=")
+        if (
+            prefix != candidate_prefix
+            or prefix not in ("night", "home")
+            or rule_value != "any"
+        ):
+            return False
+    return True
 
 
 def _extract_camera_ids(evidence_paths: list[str]) -> list[str]:

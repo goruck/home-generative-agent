@@ -52,3 +52,30 @@ def test_discovery_schema_invalid() -> None:
     }
     with pytest.raises(vol.Invalid):
         DISCOVERY_OUTPUT_SCHEMA(payload)
+
+
+def test_schema_rejects_non_string_evidence_paths() -> None:
+    """
+    evidence_paths entries must be strings.
+
+    The derived-only hard filter and the canonicalizer assume string paths;
+    schema validation upstream is what makes non-string entries unreachable
+    there (issue #524 testing review pin).
+    """
+    payload = {
+        "schema_version": 1,
+        "generated_at": "2026-08-02T00:00:00+00:00",
+        "model": "test",
+        "candidates": [
+            {
+                "candidate_id": "bad_paths",
+                "title": "Bad paths",
+                "summary": "Candidate with a non-string evidence path.",
+                "evidence_paths": [1, "derived.is_night"],
+                "pattern": "x",
+                "confidence_hint": 0.5,
+            }
+        ],
+    }
+    with pytest.raises(vol.Invalid):
+        DISCOVERY_OUTPUT_SCHEMA(payload)

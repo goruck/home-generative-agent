@@ -11,6 +11,19 @@ from custom_components.home_generative_agent.const import (
     SENTINEL_OCCUPANCY_ARMED_STATES,
 )
 
+from .evidence_paths import (
+    ANYONE_HOME_FALSE_PATTERN,
+    ANYONE_HOME_PATH,
+    ANYONE_HOME_TRUE_PATTERN,
+    AWAY_TERMS_PATTERN,
+    NOT_ANYONE_HOME_PATH,
+    NOT_ANYONE_HOME_TEXT_PATTERN,
+    PresenceSignal,
+    has_derived_path,
+    night_signal,
+    presence_signal,
+)
+
 SUPPORTED_TEMPLATES = {
     "alarm_disarmed_open_entry",
     "low_battery_sensors",
@@ -44,14 +57,8 @@ SUPPORTED_TEMPLATES = {
     "multiple_entries_open_count",
 }
 
-# Matches anyone_home == false / anyone_home = 0 / anyone_home=False etc.
-# Must be checked before _HOME_TERMS to avoid "home" substring false-positive.
-_ANYONE_HOME_FALSE_PATTERN = re.compile(
-    r"anyone_home\s*(?:==?)\s*(?:false|0)\b", re.IGNORECASE
-)
-_ANYONE_HOME_TRUE_PATTERN = re.compile(
-    r"anyone_home\s*(?:==?)\s*(?:true|1)\b", re.IGNORECASE
-)
+# The anyone_home boolean-expression and away/home term patterns live in
+# evidence_paths.py (issue #524) — one copy shared with the semantic keys.
 # Comma decimals cover locale prose (issue #522 red-team review: Czech
 # "klesla pod 20,5 %" would otherwise match the bare "5 %" and silently
 # register a 4x-lower threshold).
@@ -151,19 +158,6 @@ _PERSON_TERMS = (
 )
 _CAMERA_TERMS = ("camera", "cam")
 _MIN_CAMERA_TOKEN_LEN = 3
-# Word-bounded so "present" doesn't match "presence" (an availability
-# candidate about presence sensors is not a someone-is-home condition) and
-# "home" doesn't match "anyone_home"/"armed_home" (issue #514 adversarial
-# review). "nobody/no one (is) (at) home" is matched with optional filler
-# words — bare "nobody home" missed the flagship phrasing "nobody is home"
-# (issue #516 adversarial review).
-_AWAY_TERMS_PATTERN = re.compile(
-    r"\b(?:away|no(?:body|\s+one)\s+(?:is\s+)?(?:at\s+)?home|empty|unoccupied"
-    r"|no occupants|without occupants)\b"
-)
-_HOME_TERMS_PATTERN = re.compile(
-    r"\b(?:someone home|occupied|home|present|occupants|residents)\b"
-)
 # Explicit someone-is-home phrasing. Availability prose routinely contains
 # incidental home wording ("sensors around the home"), which must not scope
 # an outage rule to occupied hours — the while_home evaluator is silent
@@ -1491,29 +1485,17 @@ def _extract_threshold_percent(text: str, *, default: float) -> float:
 
 
 def _has_night_signal(evidence_paths: list[str], text: str) -> bool:
-    if "derived.is_night" in evidence_paths:
-        return True
-    return _contains_any(text, ("night", "nighttime", "overnight"))
+    return night_signal(evidence_paths, text)
 
 
-def _presence_signal(evidence_paths: list[str], text: str) -> str:
-    # Explicit evidence-path expressions take absolute priority.
-    # "not derived.anyone_home" is the LLM's canonical absence-of-occupancy path.
-    if "not derived.anyone_home" in evidence_paths:
-        return "away"
-    # Explicit boolean expressions resolve next — unambiguous and must precede
-    # term matching, which can misfire on substrings like "home" inside "armed_home".
-    if _ANYONE_HOME_FALSE_PATTERN.search(text):
-        return "away"
-    if _ANYONE_HOME_TRUE_PATTERN.search(text):
-        return "home"
-    if _AWAY_TERMS_PATTERN.search(text):
-        return "away"
-    if _HOME_TERMS_PATTERN.search(text):
-        return "home"
-    # "derived.anyone_home" alone (without direction signals) means occupancy matters
-    # but direction is unknown — return "any" rather than guessing "home".
-    return "any"
+def _presence_signal(evidence_paths: list[str], text: str) -> PresenceSignal:
+    # Priority order documented in evidence_paths.presence_signal: structured
+    # negation, anyone_home boolean expressions, English terms, then the bare
+    # positive path resolving "home". The path alone used to return "any" —
+    # which the entry branch defaults to the away template — silently
+    # inverting home candidates whose prose carries no English direction
+    # words (issue #524).
+    return presence_signal(evidence_paths, text)
 
 
 # The evaluator fires only on the literal HA "unavailable" state
@@ -1616,21 +1598,25 @@ def _has_explicit_home_occupancy_signal(evidence_paths: list[str], text: str) ->
     nobody is home, the highest-value moment for an availability alert
     (issue #514 adversarial review).
     """
-    if "not derived.anyone_home" in evidence_paths:
+    if has_derived_path(evidence_paths, NOT_ANYONE_HOME_PATH):
         return False
     # Explicit absence signals override the bare evidence path — the
     # candidate cites occupancy to require absence, not presence: an
-    # anyone_home == false expression, a negated path in the pattern text,
-    # or away wording ("nobody home", "while away") in the prose.
-    if (
-        _ANYONE_HOME_FALSE_PATTERN.search(text)
-        or "not derived.anyone_home" in text
-        or _AWAY_TERMS_PATTERN.search(text)
+    # anyone_home == false expression or a negated path spelled in the
+    # pattern text (any variant spelling the canonicalizer accepts).
+    if ANYONE_HOME_FALSE_PATTERN.search(text) or NOT_ANYONE_HOME_TEXT_PATTERN.search(
+        text
     ):
         return False
-    if "derived.anyone_home" in evidence_paths:
+    # Machine syntax outranks prose terms — same tier order as
+    # presence_signal. Checking away terms first keyed home=1 in the
+    # semantic key while routing skipped the while_home split, so the
+    # activated rule could never dedup the candidate (issue #524 red-team).
+    if ANYONE_HOME_TRUE_PATTERN.search(text):
         return True
-    if _ANYONE_HOME_TRUE_PATTERN.search(text):
+    if AWAY_TERMS_PATTERN.search(text):
+        return False
+    if has_derived_path(evidence_paths, ANYONE_HOME_PATH):
         return True
     return _EXPLICIT_HOME_OCCUPANCY_PATTERN.search(text) is not None
 

@@ -369,7 +369,13 @@ def test_rule_key_covers_candidate_key_baseline_deviation_vs_candidate() -> None
 
 
 def test_rule_key_covers_candidate_key_non_template_no_cross_match() -> None:
-    """A rule key without |template=| must not match a structurally different candidate key."""
+    """
+    A rule key without |template=| must not match a structurally different key.
+
+    power_anomaly is not a superset-safe predicate, so night/home
+    any-vs-specific is NOT coverage here — only the unavailable family
+    opts in (see test_rule_key_night_home_any_covers_scoped_candidate).
+    """
     rule_key = (
         "v1|subject=sensor|predicate=power_anomaly"
         "|night=any|home=any|scope=any|entities=sensor.fridge_switch_0_power"
@@ -379,6 +385,57 @@ def test_rule_key_covers_candidate_key_non_template_no_cross_match() -> None:
         "|night=1|home=1|scope=any|entities=sensor.fridge_switch_0_power"
     )
     assert not rule_key_covers_candidate_key(rule_key, candidate_key)
+
+
+def test_rule_key_night_home_any_covers_scoped_candidate() -> None:
+    """
+    An any/any unavailable rule key covers its night/home-scoped variant.
+
+    The unavailable family is the superset-safe predicate: the
+    unconditional evaluator differs from while_home only by the occupancy
+    gate, so the any/any rule genuinely fires in a superset of the scoped
+    candidate's conditions (issue #524 red-team).
+    """
+    rule_key = (
+        "v1|subject=sensor|predicate=unavailable"
+        "|night=any|home=any|scope=any|entities=sensor.backyard_vmd3_0"
+    )
+    candidate_key = (
+        "v1|subject=sensor|predicate=unavailable"
+        "|night=any|home=1|scope=any|entities=sensor.backyard_vmd3_0"
+    )
+    assert rule_key_covers_candidate_key(rule_key, candidate_key)
+
+
+def test_rule_key_qualified_template_predicates_never_superset_cover() -> None:
+    """
+    Predicates with extra-key firing qualifiers never any-cover.
+
+    motion_without_camera_activity keys predicate=active|night=any|home=any
+    but fires only while cameras are idle; alarm_disarmed_open_entry keys
+    predicate=open but fires only while the alarm is disarmed. Treating
+    those as supersets falsely reports distinct night/away candidates as
+    already covered — the promote service would return "already_active"
+    (issue #524 adversarial review, empirically reproduced).
+    """
+    motion_rule_key = (
+        "v1|subject=motion|predicate=active"
+        "|night=any|home=any|scope=any|entities=binary_sensor.hall_motion"
+    )
+    motion_candidate_key = (
+        "v1|subject=motion|predicate=active"
+        "|night=1|home=0|scope=any|entities=binary_sensor.hall_motion"
+    )
+    assert not rule_key_covers_candidate_key(motion_rule_key, motion_candidate_key)
+    entry_rule_key = (
+        "v1|subject=entry_door|predicate=open"
+        "|night=any|home=any|scope=any|entities=binary_sensor.front_door"
+    )
+    entry_candidate_key = (
+        "v1|subject=entry_door|predicate=open"
+        "|night=1|home=0|scope=any|entities=binary_sensor.front_door"
+    )
+    assert not rule_key_covers_candidate_key(entry_rule_key, entry_candidate_key)
 
 
 def test_candidate_semantic_key_strips_quoted_entity_ids() -> None:
@@ -1203,3 +1260,249 @@ def test_unavailable_lock_battery_keeps_availability_predicate() -> None:
     key = candidate_semantic_key(candidate)
     assert key is not None
     assert "predicate=unavailable" in key
+
+
+# ---------------------------------------------------------------------------
+# Issue #524: structured occupancy evidence in candidate keys
+# ---------------------------------------------------------------------------
+
+
+def test_candidate_semantic_key_anyone_home_false_expression_keys_away() -> None:
+    """
+    An anyone_home == false expression in the pattern keys home=0.
+
+    Intentional key change (issue #524): this class previously keyed
+    home=any while the normalizer already routed it to a home=0 template
+    via the same expression, so the candidate never deduped against its
+    activated rule. A candidate stored under the old key may be re-proposed
+    once, then dedups under the new key.
+    """
+    candidate = {
+        "candidate_id": "motion_away_expression",
+        "title": "Pohyb, když nikdo není doma",
+        "summary": "Detekuje pohyb v kuchyni, když nikdo není doma.",
+        "pattern": ("binary_sensor.kitchen_motion == on AND anyone_home == false"),
+        "suggested_type": "security",
+        "evidence_paths": [
+            "entities[entity_id=binary_sensor.kitchen_motion].state",
+        ],
+    }
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert "home=0" in key
+
+
+def test_candidate_semantic_key_negation_variant_keys_away() -> None:
+    """A 'NOT derived.anyone_home' spelling variant keys home=0."""
+    candidate = {
+        "candidate_id": "motion_away_variant",
+        "title": "Pohyb, když nikdo není doma",
+        "summary": "Detekuje pohyb v kuchyni, když nikdo není doma.",
+        "pattern": "binary_sensor.kitchen_motion == on",
+        "suggested_type": "security",
+        "evidence_paths": [
+            "entities[entity_id=binary_sensor.kitchen_motion].state",
+            "NOT derived.anyone_home",
+        ],
+    }
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert "home=0" in key
+
+
+def test_candidate_semantic_key_non_english_positive_path_keys_home() -> None:
+    """Czech prose + derived.anyone_home keys home=1 via the structured path."""
+    candidate = {
+        "candidate_id": "senzor_nedostupny_doma",
+        "title": "Nedostupné senzory, když je někdo doma",
+        "summary": "Detekuje senzor hlásící nedostupnost, když je někdo doma.",
+        "pattern": "sensor.backyard_vmd3_0 == 'unavailable'",
+        "suggested_type": "availability",
+        "evidence_paths": [
+            "derived.anyone_home",
+            "entities[entity_id=sensor.backyard_vmd3_0].state",
+        ],
+    }
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert "home=1" in key
+
+
+def test_candidate_semantic_key_non_english_night_variant() -> None:
+    """A canonicalization variant of derived.is_night keys night=1."""
+    candidate = {
+        "candidate_id": "okno_v_noci",
+        "title": "Otevřené okno v noci",
+        "summary": "Okno v herně je otevřené v noci.",
+        "pattern": "binary_sensor.playroom_window == on",
+        "suggested_type": "security",
+        "evidence_paths": [
+            "entities[entity_id=binary_sensor.playroom_window].state",
+            "Derived.Is_Night",
+        ],
+    }
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert "night=1" in key
+
+
+def test_motion_while_away_rule_covers_non_english_candidate() -> None:
+    """
+    A Czech away-motion candidate dedups against its activated rule.
+
+    The #524 goal end-to-end: with no English prose, the structured
+    'not derived.anyone_home' path keys home=0, matching the
+    motion_detected_while_away rule key. (Subject/predicate resolve from
+    the machine pattern — the entity ID carries the 'motion' token.)
+    """
+    candidate = {
+        "candidate_id": "pohyb_v_kuchyni_pryc",
+        "title": "Neočekávaný pohyb v kuchyni, když nikdo není doma",
+        "summary": "Detekuje pohyb v kuchyni, když nikdo není doma.",
+        "pattern": "binary_sensor.kitchen_motion == on",
+        "suggested_type": "security",
+        "evidence_paths": [
+            "entities[entity_id=binary_sensor.kitchen_motion].state",
+            "not derived.anyone_home",
+        ],
+    }
+    rule = {
+        "rule_id": "motion_kitchen_while_away",
+        "template_id": "motion_detected_while_away",
+        "params": {"motion_entity_ids": ["binary_sensor.kitchen_motion"]},
+    }
+    candidate_key = candidate_semantic_key(candidate)
+    rule_key = rule_semantic_key(rule)
+    assert candidate_key is not None
+    assert rule_key is not None
+    assert rule_key_covers_candidate_key(rule_key, candidate_key)
+
+
+def test_unavailable_while_home_rule_covers_non_english_candidate() -> None:
+    """
+    A Czech home-unavailable candidate dedups against its activated rule.
+
+    Exercises the new positive-path tier: home=1 comes solely from the
+    bare derived.anyone_home evidence path (issue #524).
+    """
+    candidate = {
+        "candidate_id": "senzor_nedostupny_doma",
+        "title": "Nedostupné senzory, když je někdo doma",
+        "summary": "Detekuje senzor hlásící nedostupnost, když je někdo doma.",
+        "pattern": "sensor.backyard_vmd3_0 == 'unavailable'",
+        "suggested_type": "availability",
+        "evidence_paths": [
+            "derived.anyone_home",
+            "entities[entity_id=sensor.backyard_vmd3_0].state",
+        ],
+    }
+    rule = {
+        "rule_id": "unavailable_sensors_while_home",
+        "template_id": "unavailable_sensors_while_home",
+        "params": {"sensor_entity_ids": ["sensor.backyard_vmd3_0"]},
+    }
+    candidate_key = candidate_semantic_key(candidate)
+    rule_key = rule_semantic_key(rule)
+    assert candidate_key is not None
+    assert rule_key is not None
+    assert rule_key_covers_candidate_key(rule_key, candidate_key)
+
+
+def test_rule_key_home_any_covers_specific_home_candidate() -> None:
+    """
+    A home=any rule covers a home=1 candidate for the same idea.
+
+    A pre-#524 approved unavailable_sensors rule keys home=any; structured
+    evidence now keys the same idea home=1. Without superset coverage the
+    candidate is re-proposed as a new while_home rule and approving it
+    double-alerts on every occupied-hours outage (issue #524 red-team).
+    """
+    rule = {
+        "rule_id": "unavailable_sensors",
+        "template_id": "unavailable_sensors",
+        "params": {"sensor_entity_ids": ["sensor.backyard_vmd3_0"]},
+    }
+    candidate = {
+        "candidate_id": "senzor_nedostupny_doma",
+        "title": "Nedostupné senzory, když je někdo doma",
+        "summary": "Detekuje senzor hlásící nedostupnost, když je někdo doma.",
+        "pattern": "sensor.backyard_vmd3_0 == 'unavailable'",
+        "suggested_type": "availability",
+        "evidence_paths": [
+            "derived.anyone_home",
+            "entities[entity_id=sensor.backyard_vmd3_0].state",
+        ],
+    }
+    rule_key = rule_semantic_key(rule)
+    candidate_key = candidate_semantic_key(candidate)
+    assert rule_key is not None
+    assert candidate_key is not None
+    assert "home=any" in rule_key
+    assert "home=1" in candidate_key
+    assert rule_key_covers_candidate_key(rule_key, candidate_key)
+
+
+def test_rule_key_specific_home_does_not_cover_any_candidate() -> None:
+    """The converse is not coverage: a while_home rule is silent while away."""
+    rule = {
+        "rule_id": "unavailable_sensors_while_home",
+        "template_id": "unavailable_sensors_while_home",
+        "params": {"sensor_entity_ids": ["sensor.backyard_vmd3_0"]},
+    }
+    candidate = {
+        "candidate_id": "sensor_unavailable_any",
+        "title": "Unavailable sensors",
+        "summary": "Detects a sensor reporting unavailable.",
+        "pattern": "sensor.backyard_vmd3_0 == 'unavailable'",
+        "suggested_type": "availability",
+        "evidence_paths": [
+            "entities[entity_id=sensor.backyard_vmd3_0].state",
+        ],
+    }
+    rule_key = rule_semantic_key(rule)
+    candidate_key = candidate_semantic_key(candidate)
+    assert rule_key is not None
+    assert candidate_key is not None
+    assert not rule_key_covers_candidate_key(rule_key, candidate_key)
+
+
+def test_rule_key_home_any_does_not_cover_different_entities() -> None:
+    """Superset coverage never crosses entity or predicate boundaries."""
+    rule = {
+        "rule_id": "unavailable_sensors",
+        "template_id": "unavailable_sensors",
+        "params": {"sensor_entity_ids": ["sensor.other_sensor"]},
+    }
+    candidate = {
+        "candidate_id": "senzor_nedostupny_doma",
+        "title": "Nedostupné senzory, když je někdo doma",
+        "summary": "Detekuje senzor hlásící nedostupnost, když je někdo doma.",
+        "pattern": "sensor.backyard_vmd3_0 == 'unavailable'",
+        "suggested_type": "availability",
+        "evidence_paths": [
+            "derived.anyone_home",
+            "entities[entity_id=sensor.backyard_vmd3_0].state",
+        ],
+    }
+    rule_key = rule_semantic_key(rule)
+    candidate_key = candidate_semantic_key(candidate)
+    assert rule_key is not None
+    assert candidate_key is not None
+    assert not rule_key_covers_candidate_key(rule_key, candidate_key)
+
+
+def test_candidate_semantic_key_negated_text_in_pattern_keys_away() -> None:
+    """'not derived.anyone_home' inside the pattern text keys home=0."""
+    candidate = {
+        "candidate_id": "pohyb_pryc_text",
+        "title": "Pohyb, když nikdo není doma",
+        "summary": "Detekuje pohyb v kuchyni, když nikdo není doma.",
+        "pattern": "binary_sensor.kitchen_motion == on AND not derived.anyone_home",
+        "suggested_type": "security",
+        "evidence_paths": [
+            "entities[entity_id=binary_sensor.kitchen_motion].state",
+        ],
+    }
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert "home=0" in key
