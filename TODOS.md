@@ -704,33 +704,54 @@ windows: compare the snapshot `timestamp` against the event that opened the
 window, which is exact rather than a heuristic.
 
 **Why:** Raised by @andymcmanus in #466 field testing (2026-07-18 comment,
-n=12 events: frame staleness at event open ranged 3–54 min, mean 21 min).
+n=12 events: frame staleness at event open ranged 3–54 min, mean 21 min,
+with 2/12 over the 30-min budget — so 10/12 passed it and were analyzed).
 The guard already only applies to ring-mqtt `event_select` cameras, so
 reading ring-mqtt's own interval entity adds no new integration coupling.
 
-**How to apply:** In `_retained_frame_is_stale`, resolve
-`number.<base>_snapshot_interval` via the same sibling/device-registry
-lookup as `_has_event_select_sibling`; budget = 3× that value, falling back
-to 1800 s when absent. For loops the `event_select` path owns, prefer
-comparing against the window-opening event's timestamp. The two halves are
-NOT interchangeable: interval scaling only tightens the wired case — in
-Auto/Motion mode on battery the real cadence is *never* (ring-mqtt#1103),
-which no scaled budget can detect; only the event-timestamp comparison
-covers it. Worse, `number.<base>_snapshot_interval` cannot be trusted as
-evidence that *any* refresh is scheduled: ring-mqtt defaults it in the
-camera constructor (`devices/camera.js:58-60`, v5.9.3) to 600 on battery /
-30 on wired and publishes it whenever any snapshot mode is active, while
-`Auto` separately disables the interval path for battery devices
-(`:415-417`). A battery camera in the default mode therefore advertises 600
-with a true cadence of never — so scaling off it yields a 1800 s budget on
-exactly the cameras that need the tightest check. Treat the entity as an
-upper bound for wired cameras only. The event-timestamp comparison also
-governs the common case today: with mean staleness of 21 min at event
-open (n=12), the previous event's frame usually passes the 30-min budget
-and is analyzed as if current (misattributed imagery), and with the
-take_snapshot automation installed, quiet cameras (>30 min gaps) log one
-expected snapshot-failure WARNING per event that a window-scoped check
-could suppress.
+**How to apply:** Two candidate checks, NOT interchangeable, each with a
+precondition that must be solved first.
+
+*Interval scaling (tightens wired cameras only).* In
+`_retained_frame_is_stale`, resolve `number.<base>_snapshot_interval` via
+the same sibling/device-registry lookup as `_has_event_select_sibling`;
+budget = 3× that value, falling back to 1800 s when absent. Do NOT apply
+this unconditionally: the entity is a configured timer period, not a bound
+on frame age, and it is published even when nothing is scheduled to honour
+it. ring-mqtt defaults it in the camera constructor
+(`devices/camera.js:58-60`, v5.9.3) to 600 on battery / 30 on wired and
+publishes it whenever any snapshot mode is active, while `Auto` separately
+disables the *interval* path for battery devices (`:415-417`). A battery
+camera in the default mode therefore advertises 600 while no interval
+refresh is scheduled at all — only the motion path remains, and that fires
+only when Ring's push carries an image UUID (`:758-769`), which #1103
+reports never happening on the two battery models tested. Scaling off the
+entity there yields an 1800 s budget on exactly the cameras needing the
+tightest check. Even on wired cameras it is a nominal cadence rather than a
+ceiling: scheduled refreshes are skipped while offline or while a motion
+ding is active (`:735`), and requests can fail, so real age can exceed it.
+**Precondition:** `_has_event_select_sibling` carries no power-source or
+snapshot-mode signal, so there is currently no way to enforce the
+wired-only restriction. Gate on a resolved mode/power signal (or on the
+camera's `type` attribute reading `interval`) before using this leg at all.
+
+*Event-timestamp comparison (the only check that works in Auto/Motion).*
+For loops the `event_select` path owns, compare the snapshot `timestamp`
+against the event that opened the window. **Precondition:**
+`_handle_event_select_change` sees only an HA state change carrying
+`eventId`/`recordingUrl`, and ring-mqtt discovers new events on a ~1-minute
+poll cycle and publishes `eventId` only after fetching the recording URL
+(`:439-448`). That state-change time is therefore *detection* time, not
+Ring capture time, and a strict comparison would reject a genuinely current
+frame published before the delayed `eventId`. Propagate the real Ring event
+timestamp, or allow a documented skew.
+
+This comparison also governs the common case today: at a mean staleness of
+21 min at event open (10/12 events under the 30-min budget), the previous
+event's frame usually passes and is analyzed as if current (misattributed
+imagery). With the take_snapshot automation installed, quiet cameras (>30
+min gaps) log one expected snapshot-failure WARNING per event that a
+window-scoped check could suppress.
 
 **Effort:** M
 **Priority:** P2
