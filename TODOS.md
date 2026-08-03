@@ -716,12 +716,21 @@ comparing against the window-opening event's timestamp. The two halves are
 NOT interchangeable: interval scaling only tightens the wired case — in
 Auto/Motion mode on battery the real cadence is *never* (ring-mqtt#1103),
 which no scaled budget can detect; only the event-timestamp comparison
-covers it. The event-timestamp comparison also governs the common case
-today: with mean staleness of 21 min at event open (n=12), the previous
-event's frame usually passes the 30-min budget and is analyzed as if
-current (misattributed imagery), and with the take_snapshot automation
-installed, quiet cameras (>30 min gaps) log one expected snapshot-failure
-WARNING per event that a window-scoped check could suppress.
+covers it. Worse, `number.<base>_snapshot_interval` cannot be trusted as
+evidence that *any* refresh is scheduled: ring-mqtt defaults it in the
+camera constructor (`devices/camera.js:58-60`, v5.9.3) to 600 on battery /
+30 on wired and publishes it whenever any snapshot mode is active, while
+`Auto` separately disables the interval path for battery devices
+(`:415-417`). A battery camera in the default mode therefore advertises 600
+with a true cadence of never — so scaling off it yields a 1800 s budget on
+exactly the cameras that need the tightest check. Treat the entity as an
+upper bound for wired cameras only. The event-timestamp comparison also
+governs the common case today: with mean staleness of 21 min at event
+open (n=12), the previous event's frame usually passes the 30-min budget
+and is analyzed as if current (misattributed imagery), and with the
+take_snapshot automation installed, quiet cameras (>30 min gaps) log one
+expected snapshot-failure WARNING per event that a window-scoped check
+could suppress.
 
 **Effort:** M
 **Priority:** P2
