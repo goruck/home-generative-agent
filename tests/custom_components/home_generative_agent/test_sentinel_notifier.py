@@ -1906,3 +1906,36 @@ async def test_async_notify_keeps_deterministic_copy_without_response_language()
     message = hass.services.calls[0]["data"]["message"]
     assert message.startswith("Washer ")
     assert "An appliance" not in message
+
+
+@pytest.mark.asyncio
+async def test_held_batch_stores_redacted_explanation() -> None:
+    """Buffered findings must hold the redacted text, never the raw explanation."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, _hass, _suppression, _action_handler = _make_notifier(options)
+    snapshot = _minimal_snapshot()
+
+    def _fake_async_call_later(_hass: Any, _delay: float, _cb: Any) -> Any:
+        return lambda: None
+
+    original = _notifier_mod.async_call_later
+    _notifier_mod.async_call_later = _fake_async_call_later  # type: ignore[assignment]
+    try:
+        # Fill the rate-limit window so the next finding is buffered, not sent.
+        for i in range(3):
+            await notifier.async_notify(_finding(anomaly_id=f"warm{i}"), snapshot, None)  # type: ignore[arg-type]
+
+        sensitive = _finding(
+            anomaly_id="held-sens", is_sensitive=True, recognized_people=["John Doe"]
+        )
+        await notifier.async_notify(  # type: ignore[arg-type]
+            sensitive, snapshot, "John Doe was seen near the front door."
+        )
+    finally:
+        _notifier_mod.async_call_later = original  # type: ignore[assignment]
+
+    assert len(notifier._held_batch) == 1
+    held_explanation = notifier._held_batch[0][1]
+    assert held_explanation is not None
+    assert "John Doe" not in held_explanation
+    assert "a recognised person" in held_explanation

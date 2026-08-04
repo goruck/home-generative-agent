@@ -271,8 +271,11 @@ class SentinelNotifier:
                 t for t in self._notification_times if t >= cutoff
             ]
             if len(self._notification_times) >= _BATCH_RATE_LIMIT:
-                # Rate limit exceeded — buffer this finding.
-                self._held_batch.append((finding, explanation, target_service))
+                # Rate limit exceeded — buffer this finding.  Hold the redacted
+                # explanation, never the raw one: the flush discards it today,
+                # but storing the unredacted text would silently bypass
+                # _redact_if_sensitive the moment anyone renders it.
+                self._held_batch.append((finding, clean_explanation, target_service))
                 if self._batch_cancel is None:
                     self._batch_cancel = async_call_later(
                         self._hass,
