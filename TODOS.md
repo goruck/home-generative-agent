@@ -724,8 +724,8 @@ publishes it whenever any snapshot mode is active, while `Auto` separately
 disables the *interval* path for battery devices (`:415-417`). A battery
 camera in the default mode therefore advertises 600 while no interval
 refresh is scheduled at all — only the motion path remains, and that fires
-only when Ring's push carries an image UUID (`:758-769`), which #1103
-reports never happening on the two battery models tested. Scaling off the
+only when Ring's push carries an image UUID (`:758-769`), which #466 field
+testing reports never happening on the two battery models tested. Scaling off the
 entity there yields an 1800 s budget on exactly the cameras needing the
 tightest check. Even on wired cameras it is a nominal cadence rather than a
 ceiling: scheduled refreshes are skipped while offline or while a motion

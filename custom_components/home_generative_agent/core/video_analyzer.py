@@ -151,7 +151,7 @@ _SNAPSHOT_FAILURE_ESCALATION: Final[int] = 3  # consecutive failures before ERRO
 # ring-mqtt snapshot cameras expose a `timestamp` attribute (epoch seconds of
 # the last published frame). On battery cameras the frame can stop refreshing —
 # the interval snapshot can silently freeze, or the Auto/Motion snapshot modes
-# never request battery snapshots at all (ring-mqtt#1103) — leaving MQTT
+# never request battery snapshots at all (issue #466) — leaving MQTT
 # serving a days-old retained frame; capturing it would send stale imagery to
 # the VLM with no visible failure. The threshold is 3x the slowest known
 # ring-mqtt Interval-mode refresh (600 s on battery power).
@@ -1859,10 +1859,10 @@ class VideoAnalyzer:
         attribute on the snapshot camera. On battery cameras the frame can
         stop refreshing (issue #490) — either because the interval snapshot
         silently stalls, or because ring-mqtt's Auto/Motion snapshot modes
-        never request snapshots from battery devices at all (upstream
-        tsightler/ring-mqtt#1103) — after which MQTT serves the retained
-        frame indefinitely; capturing it would analyze days-old imagery as
-        if it were current.
+        never request snapshots from battery devices at all (field data in
+        issue #466) — after which MQTT serves the retained frame
+        indefinitely; capturing it would analyze days-old imagery as if it
+        were current.
 
         The guard only applies to cameras with a ring-mqtt event_select
         sibling — other integrations may publish an epoch `timestamp` with
@@ -1905,7 +1905,7 @@ class VideoAnalyzer:
                 f"(limit {_SNAPSHOT_STALE_MAX_AGE_SEC} s); ring-mqtt has not "
                 f"published a fresh frame (issue #490). On battery cameras "
                 f"the Auto and Motion snapshot modes never refresh the frame "
-                f"(ring-mqtt#1103) — use snapshot mode 'Interval' or a "
+                f"(issue #466) — use snapshot mode 'Interval' or a "
                 f"take_snapshot-on-event automation (see docs/camera-entities"
                 f".md in the home-generative-agent repo); if Interval mode "
                 f"was working and stopped, restarting the ring-mqtt add-on "

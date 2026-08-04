@@ -2655,10 +2655,14 @@ def test_stale_reason_names_snapshot_mode_cause(
     """
     The stale-frame failure reason must point at the snapshot-mode cause.
 
-    Field data (#466, upstream tsightler/ring-mqtt#1103) showed ring-mqtt's
-    Auto/Motion modes never snapshot battery cameras — nothing "freezes", so
-    the reason must name the mode remedy instead of implying a crash that an
-    add-on restart would fix.
+    Field data in issue #466 showed ring-mqtt's Auto/Motion modes never
+    snapshot battery cameras — nothing "freezes", so the reason must name the
+    mode remedy instead of implying a crash that an add-on restart would fix.
+
+    The reason cites #466 rather than the upstream ring-mqtt issue the field
+    data was also filed to: that issue was deleted upstream (HTTP 410) on
+    2026-08-03, so a user following the citation would hit a dead link. #466
+    carries the same evidence and is under our control.
     """
     now = datetime.now(dt.UTC)
     hass.states.get.return_value = _state_with_ts(now.timestamp() - 5 * 86400)
@@ -2666,9 +2670,10 @@ def test_stale_reason_names_snapshot_mode_cause(
     va._record_snapshot_failure = recorder  # type: ignore[method-assign]
     assert va._retained_frame_is_stale("camera.front_door", now) is True  # type: ignore[attr-defined]
     reason = recorder.call_args.args[1]
-    assert "ring-mqtt#1103" in reason
+    assert "#466" in reason
     assert "Interval" in reason
     assert "appears frozen" not in reason
+    assert "1103" not in reason
 
 
 def test_stale_threshold_boundary(hass: MagicMock, va: VideoAnalyzer) -> None:
