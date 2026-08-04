@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.25.1] - 2026-08-03
+
+### Fixed
+
+- **`sentinel_response_language` now reaches the mobile push for every finding type**, reported by [@hruba202](https://github.com/hruba202) from field testing of [#523](https://github.com/goruck/home-generative-agent/pull/523). Six finding types render their mobile message from a deterministic English formatter that quotes exact figures and entity names — `alarm_disarmed_during_external_threat`, `appliance_power_duration`, `alarm_disarmed_open_entry`, `baseline_deviation`, `time_of_day_anomaly`, and `entity_staleness` — and that formatter was consulted *before* the translated explanation, so a Czech install still got "hfoun: 1.0W vs usual X.XW (below normal). Check appliance." on the phone. Worse, the persistent notification already preferred the explanation, so the same finding arrived in two different languages depending on where you read it. When a response language is set, the mobile push now prefers the translated explanation, matching the persistent notification. With no language set (the default) the deterministic copy still wins, so English installs keep their exact-figure wording unchanged; and when no usable translation exists — explainer disabled, empty explanation, or one longer than the 220-character mobile cap — the deterministic string is used rather than the generic fallback, since accurate English beats vague English. Notification titles and subtitles are fixed strings and remain English.
+
 ## [3.25.0] - 2026-08-02
 
 ### Changed

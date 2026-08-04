@@ -398,7 +398,7 @@ This document covers the named constants that affect integration behaviour, orga
 | `RECOMMENDED_SENTINEL_DISCOVERY_ENABLED` | `sentinel_discovery_enabled` | `False` | Enable LLM-based rule candidate discovery |
 | `RECOMMENDED_SENTINEL_DISCOVERY_INTERVAL_SECONDS` | `sentinel_discovery_interval_seconds` | `3600` (1 h) | How often a discovery cycle runs |
 | `RECOMMENDED_SENTINEL_DISCOVERY_MAX_RECORDS` | `sentinel_discovery_max_records` | `200` | Maximum stored discovery records (older records are pruned) |
-| `RECOMMENDED_SENTINEL_RESPONSE_LANGUAGE` | `sentinel_response_language` | `""` (English) | Optional language override for the LLM-authored finding explanation shown in notifications (`explain/llm_explain.LLMExplainer`). Discovery candidate `title`/`summary` and Sentinel Triage `decision`/`reason_code`/`summary` are unaffected and still stay in English; away/home/night context resolves from structured `derived.*` evidence paths rather than English wording (#524). |
+| `RECOMMENDED_SENTINEL_RESPONSE_LANGUAGE` | `sentinel_response_language` | `""` (English) | Optional language override for the LLM-authored finding explanation shown in notifications (`explain/llm_explain.LLMExplainer`). Also read by `sentinel/notifier.py` so that finding types with deterministic English mobile formatters defer to the translated explanation instead of overriding it. Notification titles and subtitles stay English. Discovery candidate `title`/`summary` and Sentinel Triage `decision`/`reason_code`/`summary` are unaffected and still stay in English; away/home/night context resolves from structured `derived.*` evidence paths rather than English wording (#524). |
 
 ---
 

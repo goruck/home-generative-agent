@@ -17,6 +17,7 @@ from custom_components.home_generative_agent.const import (
     ACTION_PREFIX,
     CONF_NOTIFY_SERVICE,
     CONF_SENTINEL_AREA_NOTIFY_MAP,
+    CONF_SENTINEL_RESPONSE_LANGUAGE,
     SNOOZE_PERMANENT,
 )
 from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
@@ -1811,3 +1812,97 @@ def test_friendly_type_motion_while_away() -> None:
         is_sensitive=False,
     )
     assert _display_type(finding) == "Motion while away"
+
+
+# ---------------------------------------------------------------------------
+# response_language vs deterministic mobile formatters (PR #523 field report)
+# ---------------------------------------------------------------------------
+
+
+def test_deterministic_mobile_message_wins_without_response_language() -> None:
+    """Default behaviour is unchanged: deterministic English copy still wins."""
+    finding = _open_entry_finding()
+    msg = _mobile_message("The alarm is disarmed and the window is open.", finding)
+    assert "window is open" not in msg
+    assert "Family Room Right Window" in msg
+
+
+def test_response_language_lets_translated_explanation_win_template_id() -> None:
+    """A configured response language routes template_id findings to the explanation."""
+    finding = _open_entry_finding()
+    explanation = "Alarm je vypnutý a okno v obývacím pokoji je otevřené."
+    msg = _mobile_message(explanation, finding, "Czech")
+    assert msg == explanation
+
+
+def test_response_language_lets_translated_explanation_win_finding_type() -> None:
+    """Type-dispatched formatters (no template_id) honour the language too."""
+    finding = _appliance_finding()
+    explanation = "Pračka v prádelně běží už 633 minut. Zkontrolujte spotřebič."
+    msg = _mobile_message(explanation, finding, "Czech")
+    assert msg == explanation
+    assert not msg.startswith("Washer ")
+
+
+def test_response_language_falls_back_to_deterministic_when_no_explanation() -> None:
+    """No translation available → accurate English, not the generic fallback."""
+    finding = _staleness_finding()
+    msg = _mobile_message(None, finding, "Czech")
+    assert "Lindo St Angel" in msg
+    assert "data has been outdated" in msg or "location tracking" in msg
+
+
+def test_response_language_falls_back_to_deterministic_when_explanation_too_long() -> (
+    None
+):
+    """Over-cap translations fall back to the deterministic string, not _fallback_message."""
+    finding = _staleness_finding()
+    long_explanation = "Č" * (MAX_MOBILE_MESSAGE_CHARS + 1)
+    msg = _mobile_message(long_explanation, finding, "Czech")
+    assert long_explanation not in msg
+    assert "Lindo St Angel" in msg
+    assert len(msg) <= MAX_MOBILE_MESSAGE_CHARS
+
+
+def test_untemplated_finding_still_falls_back_to_generic_message() -> None:
+    """Findings with no deterministic formatter keep the generic English fallback."""
+    finding = _finding(anomaly_id="nofmt")
+    msg = _mobile_message(None, finding, "Czech")
+    assert (
+        msg
+        == _notifier_mod._fallback_message(finding)[:MAX_MOBILE_MESSAGE_CHARS].rstrip()
+    )
+
+
+@pytest.mark.asyncio
+async def test_async_notify_mobile_and_persistent_agree_under_response_language() -> (
+    None
+):
+    """The mobile push must not be English while the persistent text is translated."""
+    options = {
+        CONF_NOTIFY_SERVICE: "notify.mobile_app_phone",
+        CONF_SENTINEL_RESPONSE_LANGUAGE: "Czech",
+    }
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    explanation = "Pračka v prádelně běží už 633 minut. Zkontrolujte spotřebič."
+
+    await notifier.async_notify(_appliance_finding(), _minimal_snapshot(), explanation)  # type: ignore[arg-type]
+
+    assert len(hass.services.calls) == 1
+    assert hass.services.calls[0]["data"]["message"] == explanation
+
+
+@pytest.mark.asyncio
+async def test_async_notify_keeps_deterministic_copy_without_response_language() -> (
+    None
+):
+    """Unset language keeps the exact-figure English copy on the mobile push."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    explanation = "An appliance in Laundry recently drew about 296 W."
+
+    await notifier.async_notify(_appliance_finding(), _minimal_snapshot(), explanation)  # type: ignore[arg-type]
+
+    message = hass.services.calls[0]["data"]["message"]
+    assert message.startswith("Washer ")
+    assert "An appliance" not in message

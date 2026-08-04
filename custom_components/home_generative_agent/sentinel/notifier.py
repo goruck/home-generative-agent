@@ -41,6 +41,7 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_AREA_NOTIFY_MAP,
     CONF_SENTINEL_DAILY_DIGEST_ENABLED,
     CONF_SENTINEL_DAILY_DIGEST_TIME,
+    CONF_SENTINEL_RESPONSE_LANGUAGE,
     RECOMMENDED_SENTINEL_DAILY_DIGEST_ENABLED,
     RECOMMENDED_SENTINEL_DAILY_DIGEST_TIME,
     SNOOZE_24H,
@@ -226,7 +227,11 @@ class SentinelNotifier:
         title = _SEVERITY_TITLE.get(severity, "Home Alert")
         interrupt_level = _SEVERITY_INTERRUPT_LEVEL.get(severity, "active")
         subtitle = _build_subtitle(finding)
-        mobile_msg = _mobile_message(clean_explanation, finding)
+        mobile_msg = _mobile_message(
+            clean_explanation,
+            finding,
+            str(self._options.get(CONF_SENTINEL_RESPONSE_LANGUAGE, "") or ""),
+        )
         persistent_msg = _persistent_message(clean_explanation, finding)
         actions = _build_actions(finding)
 
@@ -986,7 +991,14 @@ _TEMPLATE_MOBILE_FORMATTERS: dict[
 }
 
 
-def _mobile_message(explanation: str | None, finding: AnomalyFinding) -> str:
+def _deterministic_mobile_message(finding: AnomalyFinding) -> str | None:
+    """
+    Return the hardcoded-English template message for *finding*, or ``None``.
+
+    These formatters render exact figures, units, and entity names that an LLM
+    paraphrase can blur, so they are preferred whenever the notification is
+    meant to be English.
+    """
     if finding.type == "alarm_disarmed_during_external_threat":
         return _alarm_disarmed_mobile_message(finding)
     if finding.type == "appliance_power_duration":
@@ -996,10 +1008,37 @@ def _mobile_message(explanation: str | None, finding: AnomalyFinding) -> str:
     )
     if formatter:
         return formatter(finding)
+    return None
+
+
+def _mobile_message(
+    explanation: str | None,
+    finding: AnomalyFinding,
+    response_language: str = "",
+) -> str:
+    """
+    Return the mobile push body for *finding*.
+
+    Deterministic per-template formatters win by default.  When a response
+    language is configured the translated *explanation* wins instead: the
+    deterministic strings are English-only, so they would otherwise be the one
+    part of the notification that ignores the setting — and because
+    ``_persistent_message`` already prefers the explanation, the mobile push
+    and the persistent notification would disagree for the same finding.
+
+    Falls back to the deterministic string when no translation is usable
+    (explainer disabled, empty explanation, or one that exceeds the mobile
+    character cap): accurate English beats a generic English fallback.
+    """
+    deterministic = _deterministic_mobile_message(finding)
+    if deterministic is not None and not response_language:
+        return deterministic
     if explanation:
         text = _normalize_text(explanation)
         if text and len(text) <= MAX_MOBILE_MESSAGE_CHARS:
             return text
+    if deterministic is not None:
+        return deterministic
     return _fallback_message(finding)[:MAX_MOBILE_MESSAGE_CHARS].rstrip()
 
 
