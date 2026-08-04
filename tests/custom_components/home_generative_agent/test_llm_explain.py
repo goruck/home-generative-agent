@@ -578,3 +578,34 @@ async def test_translated_sensitive_short_name_keeps_template_text() -> None:
     human = cast("str", model.messages[1].content)
     assert "Max 2 short sentences." in human
     assert "a recognised person stood at the front door." in human
+
+
+@pytest.mark.asyncio
+async def test_over_length_returns_none_under_response_language() -> None:
+    """
+    The English compact fallback is not a translation — report failure instead.
+
+    Returning it would let vague English ("Open entry at night: Front Door.
+    Urgent: ...") outrank the notifier's precise deterministic copy, since it
+    fits comfortably inside the 220-character mobile cap.
+    """
+    explainer = LLMExplainer(
+        DummyModel("velmi dlouhé vysvětlení " * 30), response_language="Czech"
+    )
+    assert await explainer.async_explain(_finding()) is None
+
+
+@pytest.mark.asyncio
+async def test_empty_output_returns_none_under_response_language() -> None:
+    """Same for empty model output when a language is configured."""
+    explainer = LLMExplainer(DummyModel("   "), response_language="Czech")
+    assert await explainer.async_explain(_finding()) is None
+
+
+@pytest.mark.asyncio
+async def test_english_still_gets_compact_fallback() -> None:
+    """English behaviour is unchanged: the compact fallback still applies."""
+    explainer = LLMExplainer(DummyModel("very long explanation " * 30))
+    result = await explainer.async_explain(_finding())
+    assert result is not None
+    assert "Urgent:" in result

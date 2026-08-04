@@ -41,6 +41,7 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_AREA_NOTIFY_MAP,
     CONF_SENTINEL_DAILY_DIGEST_ENABLED,
     CONF_SENTINEL_DAILY_DIGEST_TIME,
+    CONF_SENTINEL_RESPONSE_LANGUAGE,
     RECOMMENDED_SENTINEL_DAILY_DIGEST_ENABLED,
     RECOMMENDED_SENTINEL_DAILY_DIGEST_TIME,
     SNOOZE_24H,
@@ -226,7 +227,11 @@ class SentinelNotifier:
         title = _SEVERITY_TITLE.get(severity, "Home Alert")
         interrupt_level = _SEVERITY_INTERRUPT_LEVEL.get(severity, "active")
         subtitle = _build_subtitle(finding)
-        mobile_msg = _mobile_message(clean_explanation, finding)
+        mobile_msg = _mobile_message(
+            clean_explanation,
+            finding,
+            str(self._options.get(CONF_SENTINEL_RESPONSE_LANGUAGE, "") or ""),
+        )
         persistent_msg = _persistent_message(clean_explanation, finding)
         actions = _build_actions(finding)
 
@@ -266,8 +271,11 @@ class SentinelNotifier:
                 t for t in self._notification_times if t >= cutoff
             ]
             if len(self._notification_times) >= _BATCH_RATE_LIMIT:
-                # Rate limit exceeded — buffer this finding.
-                self._held_batch.append((finding, explanation, target_service))
+                # Rate limit exceeded — buffer this finding.  Hold the redacted
+                # explanation, never the raw one: the flush discards it today,
+                # but storing the unredacted text would silently bypass
+                # _redact_if_sensitive the moment anyone renders it.
+                self._held_batch.append((finding, clean_explanation, target_service))
                 if self._batch_cancel is None:
                     self._batch_cancel = async_call_later(
                         self._hass,
@@ -986,7 +994,33 @@ _TEMPLATE_MOBILE_FORMATTERS: dict[
 }
 
 
-def _mobile_message(explanation: str | None, finding: AnomalyFinding) -> str:
+# Deterministic copy that carries security actuation detail — which camera,
+# which entry, when the alarm was disarmed, and what to do about it. An LLM
+# paraphrase blurs those or asserts things the evidence does not support
+# ("someone is still inside"), so these never defer to a translated
+# explanation, even when a response language is configured. Translating them
+# needs real string templates, not model prose.
+_SECURITY_MESSAGE_TYPES = frozenset({"alarm_disarmed_during_external_threat"})
+_SECURITY_MESSAGE_TEMPLATE_IDS = frozenset({"alarm_disarmed_open_entry"})
+
+
+def _is_security_copy(finding: AnomalyFinding) -> bool:
+    """Return True when *finding*'s deterministic copy must never be paraphrased."""
+    return (
+        finding.type in _SECURITY_MESSAGE_TYPES
+        or str(finding.evidence.get("template_id") or "")
+        in _SECURITY_MESSAGE_TEMPLATE_IDS
+    )
+
+
+def _deterministic_mobile_message(finding: AnomalyFinding) -> str | None:
+    """
+    Return the hardcoded-English template message for *finding*, or ``None``.
+
+    These formatters render exact figures, units, and entity names that an LLM
+    paraphrase can blur, so they are preferred whenever the notification is
+    meant to be English.
+    """
     if finding.type == "alarm_disarmed_during_external_threat":
         return _alarm_disarmed_mobile_message(finding)
     if finding.type == "appliance_power_duration":
@@ -996,10 +1030,44 @@ def _mobile_message(explanation: str | None, finding: AnomalyFinding) -> str:
     )
     if formatter:
         return formatter(finding)
+    return None
+
+
+def _mobile_message(
+    explanation: str | None,
+    finding: AnomalyFinding,
+    response_language: str = "",
+) -> str:
+    """
+    Return the mobile push body for *finding*.
+
+    Deterministic per-template formatters win by default.  When a response
+    language is configured the translated *explanation* wins instead for
+    informational findings: the deterministic strings are English-only, so
+    they would otherwise be the one part of the notification that ignores the
+    setting — and because ``_persistent_message`` already prefers the
+    explanation, the mobile push and the persistent notification would
+    disagree for the same finding.
+
+    Security copy (see ``_is_security_copy``) is exempt and stays
+    deterministic in every case: losing the camera, the entry, the disarm
+    time, or the call to action matters more than the language it is in.
+
+    Falls back to the deterministic string when no translation is usable
+    (explainer disabled or empty explanation): accurate English beats a
+    generic English fallback.
+    """
+    deterministic = _deterministic_mobile_message(finding)
+    if deterministic is not None and (
+        not response_language or _is_security_copy(finding)
+    ):
+        return deterministic
     if explanation:
         text = _normalize_text(explanation)
         if text and len(text) <= MAX_MOBILE_MESSAGE_CHARS:
             return text
+    if deterministic is not None:
+        return deterministic
     return _fallback_message(finding)[:MAX_MOBILE_MESSAGE_CHARS].rstrip()
 
 

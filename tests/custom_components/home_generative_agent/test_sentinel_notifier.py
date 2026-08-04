@@ -17,6 +17,7 @@ from custom_components.home_generative_agent.const import (
     ACTION_PREFIX,
     CONF_NOTIFY_SERVICE,
     CONF_SENTINEL_AREA_NOTIFY_MAP,
+    CONF_SENTINEL_RESPONSE_LANGUAGE,
     SNOOZE_PERMANENT,
 )
 from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
@@ -1811,3 +1812,160 @@ def test_friendly_type_motion_while_away() -> None:
         is_sensitive=False,
     )
     assert _display_type(finding) == "Motion while away"
+
+
+# ---------------------------------------------------------------------------
+# response_language vs deterministic mobile formatters (PR #523 field report)
+# ---------------------------------------------------------------------------
+
+
+def test_deterministic_mobile_message_wins_without_response_language() -> None:
+    """Default behaviour is unchanged: deterministic English copy still wins."""
+    finding = _open_entry_finding()
+    msg = _mobile_message("The alarm is disarmed and the window is open.", finding)
+    assert "window is open" not in msg
+    assert "Family Room Right Window" in msg
+
+
+def test_response_language_lets_translated_explanation_win_template_id() -> None:
+    """A configured response language routes template_id findings to the explanation."""
+    finding = _staleness_finding()
+    explanation = "Sledování polohy je zastaralé už 42 hodin."
+    msg = _mobile_message(explanation, finding, "Czech")
+    assert msg == explanation
+
+
+def test_security_copy_never_defers_to_translation_finding_type() -> None:
+    """Security copy keeps camera, disarm time, and CTA even under a language."""
+    finding = _alarm_finding(
+        evidence={
+            "camera_friendly_name": "Backyard",
+            "camera_activity_age_minutes": 2.0,
+            "alarm_last_changed": None,
+        }
+    )
+    explanation = "Alarm byl vypnut, zatímco je někdo stále uvnitř."
+    msg = _mobile_message(explanation, finding, "Czech")
+    assert msg != explanation
+    assert "Backyard" in msg
+    assert "stále uvnitř" not in msg
+
+
+def test_security_copy_never_defers_to_translation_template_id() -> None:
+    """The alarm_disarmed_open_entry template is security copy too."""
+    finding = _open_entry_finding()
+    explanation = "Alarm je vypnutý a okno v obývacím pokoji je otevřené."
+    msg = _mobile_message(explanation, finding, "Czech")
+    assert msg != explanation
+    assert "Family Room Right Window" in msg
+
+
+def test_response_language_lets_translated_explanation_win_finding_type() -> None:
+    """Type-dispatched formatters (no template_id) honour the language too."""
+    finding = _appliance_finding()
+    explanation = "Pračka v prádelně běží už 633 minut. Zkontrolujte spotřebič."
+    msg = _mobile_message(explanation, finding, "Czech")
+    assert msg == explanation
+    assert not msg.startswith("Washer ")
+
+
+def test_response_language_falls_back_to_deterministic_when_no_explanation() -> None:
+    """No translation available → accurate English, not the generic fallback."""
+    finding = _staleness_finding()
+    msg = _mobile_message(None, finding, "Czech")
+    assert "Lindo St Angel" in msg
+    assert "data has been outdated" in msg or "location tracking" in msg
+
+
+def test_response_language_falls_back_to_deterministic_when_explanation_too_long() -> (
+    None
+):
+    """
+    Over-cap text falls back to the deterministic string, not _fallback_message.
+
+    In production LLMExplainer caps output at the same 220 characters and
+    returns None rather than an English compact fallback when a language is
+    set, so this is the notifier's own belt-and-braces guard.
+    """
+    finding = _staleness_finding()
+    long_explanation = "Č" * (MAX_MOBILE_MESSAGE_CHARS + 1)
+    msg = _mobile_message(long_explanation, finding, "Czech")
+    assert long_explanation not in msg
+    assert "Lindo St Angel" in msg
+    assert len(msg) <= MAX_MOBILE_MESSAGE_CHARS
+
+
+def test_untemplated_finding_still_falls_back_to_generic_message() -> None:
+    """Findings with no deterministic formatter keep the generic English fallback."""
+    finding = _finding(anomaly_id="nofmt")
+    msg = _mobile_message(None, finding, "Czech")
+    assert (
+        msg
+        == _notifier_mod._fallback_message(finding)[:MAX_MOBILE_MESSAGE_CHARS].rstrip()
+    )
+
+
+@pytest.mark.asyncio
+async def test_async_notify_mobile_and_persistent_agree_under_response_language() -> (
+    None
+):
+    """The mobile push must not be English while the persistent text is translated."""
+    options = {
+        CONF_NOTIFY_SERVICE: "notify.mobile_app_phone",
+        CONF_SENTINEL_RESPONSE_LANGUAGE: "Czech",
+    }
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    explanation = "Pračka v prádelně běží už 633 minut. Zkontrolujte spotřebič."
+
+    await notifier.async_notify(_appliance_finding(), _minimal_snapshot(), explanation)  # type: ignore[arg-type]
+
+    assert len(hass.services.calls) == 1
+    assert hass.services.calls[0]["data"]["message"] == explanation
+
+
+@pytest.mark.asyncio
+async def test_async_notify_keeps_deterministic_copy_without_response_language() -> (
+    None
+):
+    """Unset language keeps the exact-figure English copy on the mobile push."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    explanation = "An appliance in Laundry recently drew about 296 W."
+
+    await notifier.async_notify(_appliance_finding(), _minimal_snapshot(), explanation)  # type: ignore[arg-type]
+
+    message = hass.services.calls[0]["data"]["message"]
+    assert message.startswith("Washer ")
+    assert "An appliance" not in message
+
+
+@pytest.mark.asyncio
+async def test_held_batch_stores_redacted_explanation() -> None:
+    """Buffered findings must hold the redacted text, never the raw explanation."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, _hass, _suppression, _action_handler = _make_notifier(options)
+    snapshot = _minimal_snapshot()
+
+    def _fake_async_call_later(_hass: Any, _delay: float, _cb: Any) -> Any:
+        return lambda: None
+
+    original = _notifier_mod.async_call_later
+    _notifier_mod.async_call_later = _fake_async_call_later  # type: ignore[assignment]
+    try:
+        # Fill the rate-limit window so the next finding is buffered, not sent.
+        for i in range(3):
+            await notifier.async_notify(_finding(anomaly_id=f"warm{i}"), snapshot, None)  # type: ignore[arg-type]
+
+        sensitive = _finding(
+            anomaly_id="held-sens", is_sensitive=True, recognized_people=["John Doe"]
+        )
+        explanation = "John Doe was seen near the front door."
+        await notifier.async_notify(sensitive, snapshot, explanation)  # type: ignore[arg-type]
+    finally:
+        _notifier_mod.async_call_later = original  # type: ignore[assignment]
+
+    assert len(notifier._held_batch) == 1
+    held_explanation = notifier._held_batch[0][1]
+    assert held_explanation is not None
+    assert "John Doe" not in held_explanation
+    assert "a recognised person" in held_explanation

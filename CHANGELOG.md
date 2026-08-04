@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.25.1] - 2026-08-03
+
+### Fixed
+
+- **`sentinel_response_language` now reaches the mobile push for informational findings**, reported by [@hruba202](https://github.com/hruba202) from field testing of [#523](https://github.com/goruck/home-generative-agent/pull/523). Six finding types render their mobile message from a deterministic English formatter that quotes exact figures and entity names, and that formatter was consulted *before* the translated explanation, so a Czech install still got "hfoun: 1.0W vs usual X.XW (below normal). Check appliance." on the phone. Worse, the persistent notification already preferred the explanation, so the same finding arrived in two different languages depending on where you read it. The four informational types (`appliance_power_duration`, `baseline_deviation`, `time_of_day_anomaly`, `entity_staleness`) now prefer the translated explanation when a language is set, matching the persistent notification. The two security types (`alarm_disarmed_during_external_threat`, `alarm_disarmed_open_entry`) are deliberately exempt and stay English: their copy carries the camera or entry, the disarm time, and the call to action, and a paraphrase can drop those or assert things the evidence does not support — losing that detail matters more than the language it is in. With no language set the deterministic copy still wins everywhere, so English installs are unchanged.
+- **A too-long or empty translated explanation no longer degrades to vague English.** The explainer capped output at 220 characters and substituted an English compact fallback ("Open entry at night: Front Door. Urgent: check and secure it now."), which fits the mobile cap and so outranked the notifier's far more precise deterministic copy. With a response language set the explainer now reports the failure honestly instead, letting the notifier fall back to its exact-figure string.
+- **The notification batch buffer now holds the redacted explanation.** `_held_batch` stored the raw text while the redacted copy went to the message builders. The flush discards that slot today so nothing leaked, but storing the unredacted variant would have silently bypassed sensitive-finding redaction the moment anyone rendered it.
+
+  Three surfaces remain English regardless of the setting, because they are fixed strings built from counts and finding-type labels rather than model output: notification titles and subtitles, the burst-batch summary (more than three non-high-severity notifications within 60 seconds collapse into one `"N home updates: …"` push), and the daily digest.
+
 ## [3.25.0] - 2026-08-02
 
 ### Changed
