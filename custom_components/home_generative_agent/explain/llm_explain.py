@@ -110,9 +110,13 @@ class LLMExplainer:
         if not content:
             return None
         text = extract_final(content).replace("**", "").replace("`", "")
-        if not text:
-            return _compact_fallback(finding)
-        if len(text) > MAX_EXPLANATION_CHARS:
+        if not text or len(text) > MAX_EXPLANATION_CHARS:
+            # _compact_fallback is English. When a response language is set it
+            # is not a translation, and returning it would let vague English
+            # outrank the notifier's precise deterministic copy. Report the
+            # failure honestly instead and let the notifier choose.
+            if self._response_language:
+                return None
             return _compact_fallback(finding)
         return text
 

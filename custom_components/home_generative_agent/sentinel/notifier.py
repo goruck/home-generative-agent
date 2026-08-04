@@ -994,6 +994,25 @@ _TEMPLATE_MOBILE_FORMATTERS: dict[
 }
 
 
+# Deterministic copy that carries security actuation detail — which camera,
+# which entry, when the alarm was disarmed, and what to do about it. An LLM
+# paraphrase blurs those or asserts things the evidence does not support
+# ("someone is still inside"), so these never defer to a translated
+# explanation, even when a response language is configured. Translating them
+# needs real string templates, not model prose.
+_SECURITY_MESSAGE_TYPES = frozenset({"alarm_disarmed_during_external_threat"})
+_SECURITY_MESSAGE_TEMPLATE_IDS = frozenset({"alarm_disarmed_open_entry"})
+
+
+def _is_security_copy(finding: AnomalyFinding) -> bool:
+    """Return True when *finding*'s deterministic copy must never be paraphrased."""
+    return (
+        finding.type in _SECURITY_MESSAGE_TYPES
+        or str(finding.evidence.get("template_id") or "")
+        in _SECURITY_MESSAGE_TEMPLATE_IDS
+    )
+
+
 def _deterministic_mobile_message(finding: AnomalyFinding) -> str | None:
     """
     Return the hardcoded-English template message for *finding*, or ``None``.
@@ -1023,18 +1042,25 @@ def _mobile_message(
     Return the mobile push body for *finding*.
 
     Deterministic per-template formatters win by default.  When a response
-    language is configured the translated *explanation* wins instead: the
-    deterministic strings are English-only, so they would otherwise be the one
-    part of the notification that ignores the setting — and because
-    ``_persistent_message`` already prefers the explanation, the mobile push
-    and the persistent notification would disagree for the same finding.
+    language is configured the translated *explanation* wins instead for
+    informational findings: the deterministic strings are English-only, so
+    they would otherwise be the one part of the notification that ignores the
+    setting — and because ``_persistent_message`` already prefers the
+    explanation, the mobile push and the persistent notification would
+    disagree for the same finding.
+
+    Security copy (see ``_is_security_copy``) is exempt and stays
+    deterministic in every case: losing the camera, the entry, the disarm
+    time, or the call to action matters more than the language it is in.
 
     Falls back to the deterministic string when no translation is usable
-    (explainer disabled, empty explanation, or one that exceeds the mobile
-    character cap): accurate English beats a generic English fallback.
+    (explainer disabled or empty explanation): accurate English beats a
+    generic English fallback.
     """
     deterministic = _deterministic_mobile_message(finding)
-    if deterministic is not None and not response_language:
+    if deterministic is not None and (
+        not response_language or _is_security_copy(finding)
+    ):
         return deterministic
     if explanation:
         text = _normalize_text(explanation)

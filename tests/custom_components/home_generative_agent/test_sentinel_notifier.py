@@ -1829,10 +1829,35 @@ def test_deterministic_mobile_message_wins_without_response_language() -> None:
 
 def test_response_language_lets_translated_explanation_win_template_id() -> None:
     """A configured response language routes template_id findings to the explanation."""
+    finding = _staleness_finding()
+    explanation = "Sledování polohy je zastaralé už 42 hodin."
+    msg = _mobile_message(explanation, finding, "Czech")
+    assert msg == explanation
+
+
+def test_security_copy_never_defers_to_translation_finding_type() -> None:
+    """Security copy keeps camera, disarm time, and CTA even under a language."""
+    finding = _alarm_finding(
+        evidence={
+            "camera_friendly_name": "Backyard",
+            "camera_activity_age_minutes": 2.0,
+            "alarm_last_changed": None,
+        }
+    )
+    explanation = "Alarm byl vypnut, zatímco je někdo stále uvnitř."
+    msg = _mobile_message(explanation, finding, "Czech")
+    assert msg != explanation
+    assert "Backyard" in msg
+    assert "stále uvnitř" not in msg
+
+
+def test_security_copy_never_defers_to_translation_template_id() -> None:
+    """The alarm_disarmed_open_entry template is security copy too."""
     finding = _open_entry_finding()
     explanation = "Alarm je vypnutý a okno v obývacím pokoji je otevřené."
     msg = _mobile_message(explanation, finding, "Czech")
-    assert msg == explanation
+    assert msg != explanation
+    assert "Family Room Right Window" in msg
 
 
 def test_response_language_lets_translated_explanation_win_finding_type() -> None:
@@ -1855,7 +1880,13 @@ def test_response_language_falls_back_to_deterministic_when_no_explanation() -> 
 def test_response_language_falls_back_to_deterministic_when_explanation_too_long() -> (
     None
 ):
-    """Over-cap translations fall back to the deterministic string, not _fallback_message."""
+    """
+    Over-cap text falls back to the deterministic string, not _fallback_message.
+
+    In production LLMExplainer caps output at the same 220 characters and
+    returns None rather than an English compact fallback when a language is
+    set, so this is the notifier's own belt-and-braces guard.
+    """
     finding = _staleness_finding()
     long_explanation = "Č" * (MAX_MOBILE_MESSAGE_CHARS + 1)
     msg = _mobile_message(long_explanation, finding, "Czech")
@@ -1928,9 +1959,8 @@ async def test_held_batch_stores_redacted_explanation() -> None:
         sensitive = _finding(
             anomaly_id="held-sens", is_sensitive=True, recognized_people=["John Doe"]
         )
-        await notifier.async_notify(  # type: ignore[arg-type]
-            sensitive, snapshot, "John Doe was seen near the front door."
-        )
+        explanation = "John Doe was seen near the front door."
+        await notifier.async_notify(sensitive, snapshot, explanation)  # type: ignore[arg-type]
     finally:
         _notifier_mod.async_call_later = original  # type: ignore[assignment]
 
