@@ -201,7 +201,7 @@ Alarm control panels use their own alarm code, which is separate from the critic
 Screening classifies each step with Home Assistant's own action taxonomy and lets it through only when it is provably harmless. A service call is not the only way an automation can unlock a door, so these are protected too:
 
 - **Device actions** (`device_id` + `domain` + `type`), which carry no service name but still call `lock.unlock`. A device action's `type` is not the service it runs — each integration maps it in its own code — so *any* device action on a guarded domain asks for the PIN, including harmless ones like locking a lock or closing a cover.
-- **`scene.apply` / `scene.create`**, which set entity states inline — Home Assistant reproduces an `unlocked` lock state by calling `lock.unlock`.
+- **`scene.apply`**, which sets entity states inline — Home Assistant reproduces an `unlocked` lock state by calling `lock.unlock`. `scene.create` only snapshots current state, but the scene it stores can be activated later, so it is screened the same way.
 - **`homeassistant.turn_on` / `turn_off` / `toggle`**, screened against each target entity's own domain.
 
 Screening also **fails closed** — it asks for the PIN rather than guessing — when it cannot see what a step will do:
@@ -216,7 +216,7 @@ Screening also **fails closed** — it asks for the PIN rather than guessing —
 
 **Blueprint automations are attested at approval time only.** A blueprint-based automation is stored in `automations.yaml` as a `use_blueprint:` reference, and Home Assistant re-substitutes the blueprint on every reload. Screening reads the substituted actions, so the PIN confirms what the blueprint did *when you approved it*. Editing that blueprint file afterwards changes what the approved automation runs, without a fresh prompt. For plain YAML automations the config that is written is the one that was screened.
 
-**Flow:** When you request a protected action, the agent queues the request and asks for the PIN. Reply with the digits to complete the action. After five bad attempts or 10 minutes, the queued action expires and you must ask again. Only the user who made the request can confirm it. If the guard is toggled on but no PIN has been set, the agent logs a warning and allows the action — set a PIN in Options for the guard to take effect.
+**Flow:** When you request a protected action, the agent queues the request and asks for the PIN. Reply with the digits to complete the action. After five bad attempts or 10 minutes, the queued action expires and you must ask again. Only the user who made the request can confirm it. If the guard is toggled on but no PIN has been set, a direct command logs a warning and proceeds, while an automation is refused outright — an automation persists and keeps firing, so there is no safe way to let it through unconfirmed. Set a PIN in Options for the guard to take effect.
 
 ---
 

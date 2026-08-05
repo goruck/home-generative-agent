@@ -977,3 +977,47 @@ def test_indirection_target_in_data_template_is_gated() -> None:
             }
         ]
     )
+
+
+# ----- verification round 5 -----
+
+
+@pytest.mark.parametrize(
+    "domain",
+    ["button", "input_button", "script", "automation"],
+    ids=["button", "input-button", "script", "automation"],
+)
+def test_device_action_form_of_indirection_is_gated(domain: str) -> None:
+    """
+    Every indirection domain has a device-action spelling too.
+
+    `{device_id, domain: button, type: press}` reaches the same template button
+    whose `press` field is a full script as the `button.press` service call
+    does, but device actions are dispatched before the service-call screen ever
+    sees them.
+    """
+    assert _scan_validated(
+        [
+            {
+                "device_id": "d1",
+                "domain": domain,
+                "entity_id": f"{domain}.unlock_front",
+                "type": "press",
+            }
+        ]
+    )
+
+
+def test_scene_create_snapshotting_a_lock_is_screened() -> None:
+    """A stored scene can be activated later, so its entities are screened."""
+    assert _scan_validated(
+        [
+            {
+                "action": "scene.create",
+                "data": {
+                    "scene_id": "tmp",
+                    "snapshot_entities": ["lock.front_door"],
+                },
+            }
+        ]
+    )

@@ -24,9 +24,11 @@ Everything else is reported:
   integration maps it in its own Python, and ``cover`` turns ``set_position``
   into ``cover.set_cover_position`` — so a device action on a domain any rule
   guards is reported whenever its type does not match a rule outright.
-* **State reproduction** (``scene.apply`` / ``scene.create``) carries the
-  target states inline in ``data``, and ``lock/reproduce_state.py`` maps the
-  state ``unlocked`` to ``lock.unlock``. Screened per referenced entity.
+* **State reproduction** (``scene.apply``) carries the target states inline in
+  ``data``, and ``lock/reproduce_state.py`` maps the state ``unlocked`` to
+  ``lock.unlock``. Screened per referenced entity. ``scene.create`` only
+  snapshots current state rather than applying it, but the scene it stores can
+  be activated later, so its entities are screened the same way.
 * **Indirection** — activating a scene, calling a script, triggering another
   automation, firing an event — reaches actions this module cannot see without
   resolving other config. Gated rather than guessed.
@@ -522,6 +524,19 @@ def _screen_device_action(
             _unverifiable(
                 "<device action>",
                 "the automation runs a device action that cannot be identified",
+            )
+        ]
+
+    if domain in _INDIRECTION_DOMAINS:
+        # Every indirection domain has a device-action spelling too: a
+        # `{device_id, domain: button, type: press}` step reaches the same
+        # template button whose press field is a full script as the
+        # `button.press` service call does.
+        return [
+            _unverifiable(
+                f"{domain}.{action_kind}",
+                "the automation runs another scene, script, or automation whose "
+                "actions cannot be checked here",
             )
         ]
 
