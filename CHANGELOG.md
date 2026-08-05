@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.26.0] - 2026-08-05
+
+### Security
+
+- **Creating an automation that performs a critical action now requires the PIN.** `add_automation` wrote automation YAML and reloaded Home Assistant without ever passing the critical-action gate: `_is_critical_action` inspects a tool call's `domain`/`service` arguments, and this tool's payload is opaque `automation_yaml`. "Unlock the front door whenever I get home" therefore installed a `lock.unlock` automation with no PIN, while the direct command "unlock the front door" was gated — a durable bypass rather than a one-off action, since the installed automation keeps firing. Both adversarial reviewers converged on this independently during the v3.20.2 ship, where the automation-intent force-binding made the tool reliably reachable from everyday phrasings. With the PIN configured, a critical automation is now held as a pending action and the model is asked for the PIN exactly as it is for a direct unlock. Nothing touches `automations.yaml` or triggers a reload until the PIN is confirmed. Installs without a PIN are unaffected.
+- **Screening is an allowlist over Home Assistant's own action taxonomy, not a list of blocked service names.** A service call is not the only way an automation can unlock a door, and the first version of this gate — which only understood `action:`/`service:` steps — was defeated by four verified bypasses during pre-landing review, each confirmed against a real Home Assistant install by two independent reviewers. Every step is now classified with `cv.determine_script_action` and waved through only when it is provably inert or resolves to something no rule matches. Newly covered: **device actions** (`device_id` + `domain` + `type`), which carry no service name at all yet map straight to `lock.unlock`; **`scene.apply` / `scene.create`**, which carry target states inline and reproduce an `unlocked` lock by calling `lock.unlock`; and **`homeassistant.turn_on` / `turn_off` / `toggle`**, now screened against each target entity's own domain. An action type a future Home Assistant release adds is gated rather than skipped, so the screen degrades to over-prompting instead of to a hole.
+- **Screening fails closed on anything it cannot resolve** — a templated service name; a target that is an area, device, label, floor, **group**, or **entity registry ID** (both of which look like ordinary strings but resolve to entities named nowhere in the config); `entity_id: all`; and indirection through a scene, script, another automation, or a fired event. Expect a PIN prompt when an automation calls a script or activates a scene, even a harmless one: what those do lives in configuration this check cannot see, and guessing is what the gate exists to avoid. Screening runs after Home Assistant validates the automation, so blueprints are substituted and both `service:`/`action:` spellings normalized, and every nested branch is walked at any depth. Notification action labels nested in a step's `data` are still not mistaken for service calls.
+- **`cover.toggle` and `cover.set_cover_position` now count as opening a door.** The recommended critical actions listed only `open_cover` and `open`, but toggling a *closed* garage door opens it just as surely. `lock.toggle` and `garage_door.toggle` were added for the same reason. This closes the hole for direct commands as well as automations, so a household with the PIN enabled may now see a prompt for a phrasing that previously went through silently.
+- **An automation cannot be installed while the PIN is enabled but unset.** The direct-command guard allows a call in that state with a logged warning; this path refuses instead and tells the user to set a PIN, because an automation persists and keeps firing rather than acting once.
+- The rule-matching semantics behind both gates live in one shared helper so the direct-command guard and the automation screen cannot drift apart. The test that pins them now asserts an absolute expected verdict on each side rather than merely that the two agree — the earlier version stayed green with the shared matcher stubbed out entirely.
+
+### Fixed
+
+- **A confirmed automation is claimed before it is written**, so two confirmations of the same action in one concurrent tool batch cannot install it twice.
+- **Abandoned PIN challenges no longer accumulate.** Expired confirmations were only ever dropped when that exact action was later confirmed, so a challenge the model never resolved was retained for the life of the config entry — and once more than one piled up, the single-pending-action convenience path stopped resolving. Registering a confirmation now sweeps expired entries and caps the store.
+- **Documentation corrected:** the Critical Action PIN section stated that enabling the guard without setting a PIN causes the agent to reject requests. For direct commands it does not — it logs a warning and allows the action. The docs now describe the actual behavior of each path.
+
+### Known limitation
+
+- A blueprint-based automation is stored as a `use_blueprint:` reference and re-substituted by Home Assistant on every reload, so the PIN attests to what the blueprint did **at approval time**. Editing that blueprint file afterwards changes what the approved automation runs without a fresh prompt. Plain YAML automations are written exactly as screened.
+
 ## [3.25.1] - 2026-08-03
 
 ### Fixed
