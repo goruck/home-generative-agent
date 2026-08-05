@@ -48,10 +48,6 @@ from custom_components.home_generative_agent.const import (
     AUTOMATION_TRIGGER_CLAUSE_REGEX,
     CONF_ANTHROPIC_CHAT_MODEL,
     CONF_CHAT_MODEL_PROVIDER,
-    CONF_CRITICAL_ACTION_PIN_ENABLED,
-    CONF_CRITICAL_ACTION_PIN_HASH,
-    CONF_CRITICAL_ACTION_PIN_SALT,
-    CONF_CRITICAL_ACTIONS,
     CONF_GEMINI_CHAT_MODEL,
     CONF_MANAGE_CONTEXT_WITH_TOKENS,
     CONF_MAX_MESSAGES_IN_CONTEXT,
@@ -67,7 +63,6 @@ from custom_components.home_generative_agent.const import (
     OPEN_AS_STATE_REGEX,
     OPEN_COMMAND_CLAUSE_REGEX,
     READ_ONLY_STATE_QUERY_REGEX,
-    RECOMMENDED_CRITICAL_ACTIONS,
     SUMMARIZATION_INITIAL_PROMPT,
     SUMMARIZATION_PROMPT_TEMPLATE,
     SUMMARIZATION_SYSTEM_PROMPT,
@@ -84,9 +79,11 @@ from ..core.utils import extract_final  # noqa: TID252
 from .helpers import (
     format_tool,
     is_actuation_tool,
+    matches_critical_rule,
     maybe_fill_lock_entity,
     normalize_intent_for_alarm,
     normalize_intent_for_lock,
+    resolve_critical_action_policy,
     sanitize_tool_args,
 )
 from .token_counter import count_tokens_cross_provider
@@ -1985,19 +1982,12 @@ def _is_critical_action(
     if not domain or not service:
         return False
 
-    for rule in critical_actions:
-        rule_domain = rule.get("domain", "").lower()
-        rule_service = rule.get("service", "").lower()
-        entity_match = rule.get("entity_match", "").lower()
-
-        if rule_domain and rule_domain != domain:
-            continue
-        if rule_service and rule_service != service:
-            continue
-        if entity_match and not any(entity_match in e for e in entities):
-            continue
-        return True
-    return False
+    return matches_critical_rule(
+        domain=domain,
+        service=service,
+        entity_ids=entities,
+        critical_actions=critical_actions,
+    )
 
 
 def _minimal_payload_for_domain(tool_args: dict[str, Any]) -> dict[str, Any]:
@@ -2052,16 +2042,11 @@ async def _call_tools(
     ha_llm_api = config["configurable"]["ha_llm_api"]
     options = config["configurable"]["options"]
     hass = config["configurable"]["hass"]
-    critical_actions: list[dict[str, str]] = (
-        options.get(CONF_CRITICAL_ACTIONS) or RECOMMENDED_CRITICAL_ACTIONS
-    )
-    pin_hash = options.get(CONF_CRITICAL_ACTION_PIN_HASH)
-    pin_salt = options.get(CONF_CRITICAL_ACTION_PIN_SALT)
-    pin_configured = bool(pin_hash and pin_salt)
-    # Always respect a configured PIN, even if the toggle somehow reads False.
-    pin_enabled = bool(
-        options.get(CONF_CRITICAL_ACTION_PIN_ENABLED, False) or pin_configured
-    )
+    policy = resolve_critical_action_policy(options)
+    critical_actions: list[dict[str, str]] = policy.critical_actions
+    pin_hash = policy.pin_hash
+    pin_salt = policy.pin_salt
+    pin_enabled = policy.enabled
     pending_actions = config["configurable"].get("pending_actions", {})
 
     # Expect tool calls in the last AIMessage.

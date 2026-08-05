@@ -68,12 +68,15 @@ from ..const import (  # noqa: TID252
 from ..core.conversation_helpers import _resolve_entity_id  # noqa: TID252
 from ..core.fallback import ainvoke_dropping_unsupported_params  # noqa: TID252
 from ..core.utils import extract_final, verify_pin  # noqa: TID252
+from .automation_pin import find_critical_automation_calls
 from .camera_activity import get_camera_last_events_from_states
 from .helpers import (
     ConfigurableData,
     maybe_fill_lock_entity,
     normalize_intent_for_alarm,
     normalize_intent_for_lock,
+    register_pending_action,
+    resolve_critical_action_policy,
     sanitize_tool_args,
 )
 
@@ -701,7 +704,7 @@ async def add_automation(  # noqa: D417
         ha_automation_config.update(automation_parsed)
 
     try:
-        await _async_validate_config_item(
+        validated_config = await _async_validate_config_item(
             hass=hass,
             config=ha_automation_config,
             raise_on_errors=True,
@@ -710,6 +713,86 @@ async def add_automation(  # noqa: D417
     except (HomeAssistantError, MultipleInvalid) as err:
         return f"Invalid automation configuration {err}"
 
+    pin_challenge = _maybe_require_pin_for_automation(
+        cfg=cast("ConfigurableData", config["configurable"]),
+        validated_config=validated_config,
+        ha_automation_config=ha_automation_config,
+    )
+    if pin_challenge:
+        return pin_challenge
+
+    return await _async_write_automation(hass, ha_automation_config)
+
+
+def _maybe_require_pin_for_automation(
+    *,
+    cfg: ConfigurableData,
+    validated_config: Mapping[str, Any],
+    ha_automation_config: dict[str, Any],
+) -> str | None:
+    """
+    Register a pending PIN confirmation when an automation is critical.
+
+    Returns the ``requires_pin`` payload the model must resolve with
+    ``confirm_sensitive_action``, or None when the automation may be written
+    immediately.
+    """
+    policy = resolve_critical_action_policy(cfg.get("options", {}))
+    if not policy.enabled:
+        return None
+
+    critical_calls = find_critical_automation_calls(
+        validated_config, policy.critical_actions
+    )
+    if not critical_calls:
+        return None
+
+    if not policy.enforceable:
+        # Unlike a direct tool call, which the guard lets through with a
+        # warning, an automation is durable — it keeps firing. Refuse instead.
+        LOGGER.warning(
+            "Critical action PIN is enabled but no PIN is configured. "
+            "Refusing to install an automation containing %s. "
+            "Set a PIN in the integration options to enforce confirmation.",
+            ", ".join(call.describe() for call in critical_calls),
+        )
+        return (
+            "This automation performs a critical action, but the critical-action "
+            "PIN is enabled without a PIN being set, so it cannot be confirmed. "
+            "Set a PIN in the integration options and try again."
+        )
+
+    pending_actions = cfg.get("pending_actions")
+    if pending_actions is None:
+        LOGGER.error("Cannot gate critical automation: no pending action store.")
+        return "Unable to confirm this automation right now; please try again."
+
+    action_id = register_pending_action(
+        pending_actions,
+        {
+            "tool_name": "add_automation",
+            "tool_args": {},
+            "automation_config": ha_automation_config,
+            "user": cfg.get("user_id"),
+        },
+    )
+    return json.dumps(
+        {
+            "status": "requires_pin",
+            "action_id": action_id,
+            "reason": (
+                "This automation requires PIN confirmation because "
+                f"{critical_calls[0].reason}: "
+                f"{', '.join(call.describe() for call in critical_calls)}."
+            ),
+        }
+    )
+
+
+async def _async_write_automation(
+    hass: HomeAssistant, ha_automation_config: dict[str, Any]
+) -> str:
+    """Append a validated automation to automations.yaml and reload."""
     async with aiofiles.open(
         Path(hass.config.config_dir) / AUTOMATION_CONFIG_PATH, encoding="utf-8"
     ) as f:
@@ -790,7 +873,7 @@ async def write_yaml_file(  # noqa: D417
 
 
 @tool(parse_docstring=True)
-async def confirm_sensitive_action(  # noqa: D417, PLR0911
+async def confirm_sensitive_action(  # noqa: D417
     action_id: str,
     pin: str,
     *,
@@ -840,13 +923,7 @@ async def confirm_sensitive_action(  # noqa: D417, PLR0911
     if pin_err:
         return pin_err
 
-    ha_llm_api, api_err = _ensure_api(cfg)
-    if api_err or ha_llm_api is None:
-        return api_err or "Home Assistant LLM API unavailable."
-
-    result, exec_err = await _execute_pending_action(
-        resolved_action_id, action, ha_llm_api, cfg
-    )
+    result, exec_err = await _execute_pending_action(resolved_action_id, action, cfg)
     return result or exec_err or "Unable to process the confirmation."
 
 
@@ -921,7 +998,6 @@ def _is_wrong_user(cfg: Mapping[str, Any], action: Mapping[str, Any]) -> bool:
 async def _execute_pending_action(
     resolved_action_id: str,
     action: dict[str, Any],
-    ha_llm_api: Any,
     cfg: Mapping[str, Any],
 ) -> tuple[str | None, str | None]:
     """Normalize args, execute the pending action, and clear it."""
@@ -929,6 +1005,14 @@ async def _execute_pending_action(
     if not isinstance(raw_tool_name, str) or not raw_tool_name:
         return None, "Pending action is invalid; missing tool name."
     tool_name = raw_tool_name
+
+    if tool_name == "add_automation":
+        return await _execute_pending_automation(resolved_action_id, action, cfg)
+
+    ha_llm_api, api_err = _ensure_api(cfg)
+    if api_err or ha_llm_api is None:
+        return None, api_err or "Home Assistant LLM API unavailable."
+
     tool_args = action.get("tool_args") or {}
     tool_args = normalize_intent_for_alarm(tool_name, tool_args)
     tool_args = normalize_intent_for_lock(tool_name, tool_args)
@@ -944,6 +1028,38 @@ async def _execute_pending_action(
     pending_actions.pop(resolved_action_id, None)
     return json.dumps(
         {"status": "completed", "action_id": resolved_action_id, "result": response}
+    ), None
+
+
+async def _execute_pending_automation(
+    resolved_action_id: str,
+    action: dict[str, Any],
+    cfg: Mapping[str, Any],
+) -> tuple[str | None, str | None]:
+    """Write a PIN-confirmed automation and clear the pending action."""
+    hass = cfg.get("hass")
+    automation_config = action.get("automation_config")
+    if hass is None or not isinstance(automation_config, dict):
+        return None, "Pending automation is invalid; please re-run the request."
+
+    # Claim the action before writing. Tool calls in one model batch run under
+    # asyncio.gather, so two confirmations of the same action_id would both
+    # pass PIN verification and both append the automation if the entry were
+    # only removed afterwards.
+    pending_actions = cfg.get("pending_actions", {})
+    if pending_actions.pop(resolved_action_id, None) is None:
+        return None, "Pending action not found or expired."
+
+    try:
+        result = await _async_write_automation(hass, automation_config)
+    except (HomeAssistantError, OSError, yaml.YAMLError) as err:
+        return None, (
+            f"Failed to install the automation: {err!r}. "
+            "The confirmation was used up; please request the automation again."
+        )
+
+    return json.dumps(
+        {"status": "completed", "action_id": resolved_action_id, "result": result}
     ), None
 
 
