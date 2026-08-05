@@ -200,7 +200,7 @@ Alarm control panels use their own alarm code, which is separate from the critic
 
 Screening classifies each step with Home Assistant's own action taxonomy and lets it through only when it is provably harmless. A service call is not the only way an automation can unlock a door, so these are protected too:
 
-- **Device actions** (`device_id` + `domain` + `type`), which carry no service name but still call `lock.unlock`.
+- **Device actions** (`device_id` + `domain` + `type`), which carry no service name but still call `lock.unlock`. A device action's `type` is not the service it runs — each integration maps it in its own code — so *any* device action on a guarded domain asks for the PIN, including harmless ones like locking a lock or closing a cover.
 - **`scene.apply` / `scene.create`**, which set entity states inline — Home Assistant reproduces an `unlocked` lock state by calling `lock.unlock`.
 - **`homeassistant.turn_on` / `turn_off` / `toggle`**, screened against each target entity's own domain.
 

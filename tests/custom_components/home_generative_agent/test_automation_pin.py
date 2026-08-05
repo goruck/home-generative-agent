@@ -835,3 +835,96 @@ def test_generic_area_call_for_a_guarded_service_is_gated() -> None:
     assert _scan_validated(
         [{"action": "homeassistant.toggle", "target": {"area_id": "garage"}}]
     )
+
+
+def test_unresolvable_sibling_still_gates_a_non_matching_entity() -> None:
+    """
+    An entity that misses the substring cannot mask an unresolvable sibling.
+
+    The per-entity leg screens `cover.left_bay` against the `garage` substring
+    and finds no match, which is correct for that entity alone. The area beside
+    it is what the fail-closed leg is for.
+    """
+    assert _scan_validated(
+        [
+            {
+                "action": "homeassistant.toggle",
+                "target": {"entity_id": "cover.left_bay", "area_id": "garage"},
+            }
+        ]
+    ) == ["homeassistant.toggle"]
+
+
+@pytest.mark.parametrize("action_kind", ["lock", "close", "stop"])
+def test_benign_device_actions_on_guarded_domains_over_gate(action_kind: str) -> None:
+    """
+    Fail-closed on device actions costs a prompt for harmless ones.
+
+    Locking a lock or closing a cover is not a critical action, but a device
+    action's type cannot be mapped to a service without integration-specific
+    knowledge, so a guarded domain gates regardless. Pinned so the trade-off is
+    a deliberate, visible choice rather than a surprise.
+    """
+    domain = "lock" if action_kind == "lock" else "cover"
+    entity = "lock.front_door" if domain == "lock" else "cover.garage_door"
+    assert _scan_validated(
+        [
+            {
+                "device_id": "d1",
+                "domain": domain,
+                "entity_id": entity,
+                "type": action_kind,
+            }
+        ]
+    )
+
+
+# ----- verification round 3 -----
+#
+# `homeassistant.turn_on` aimed at a script forwards to `script.turn_on` and
+# runs it. `script.*` targets are reported as merely *unresolved*, which is the
+# right answer for a group but too weak here: the generic-domain leg gated
+# unresolved targets only when the service name was itself guarded, and no rule
+# names `turn_on`, so the generic alias walked past the indirection boundary
+# that the direct `script.turn_on` call is stopped by.
+
+
+@pytest.mark.parametrize(
+    "entity_id",
+    [
+        pytest.param("script.unlock_front_door", id="script"),
+        pytest.param("scene.open_everything", id="scene"),
+        pytest.param("automation.nightly", id="automation"),
+    ],
+)
+def test_generic_call_at_an_indirection_target_is_gated(entity_id: str) -> None:
+    """Aiming the generic domain at stored config is indirection, whatever the service."""
+    assert _scan_validated(
+        [{"action": "homeassistant.turn_on", "target": {"entity_id": entity_id}}]
+    ) == ["homeassistant.turn_on"]
+
+
+def test_generic_call_gates_when_only_one_target_is_indirection() -> None:
+    """A harmless sibling target does not excuse the script beside it."""
+    assert _scan_validated(
+        [
+            {
+                "action": "homeassistant.turn_on",
+                "target": {"entity_id": ["light.kitchen", "script.unlock_front_door"]},
+            }
+        ]
+    ) == ["homeassistant.turn_on"]
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        pytest.param({"entity_id": "light.kitchen"}, id="entity"),
+        pytest.param({"area_id": "lounge"}, id="area"),
+    ],
+)
+def test_generic_call_at_ordinary_targets_still_passes(target: dict[str, Any]) -> None:
+    """Gating indirection must not turn every generic call into a prompt."""
+    assert (
+        _scan_validated([{"action": "homeassistant.turn_on", "target": target}]) == []
+    )

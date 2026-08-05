@@ -105,6 +105,11 @@ _ENTITY_ID_RE = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
 # Entity domains that expand to *other* entities when the call runs.
 _EXPANDING_DOMAINS = frozenset({"group", "scene", "script", "automation"})
 
+# Entity domains whose targets run stored configuration of their own. Aiming a
+# generic call at one of these is indirection just as much as calling
+# `script.turn_on` directly, and must be gated whatever the service name is.
+_INDIRECT_ENTITY_DOMAINS = frozenset({"automation", "scene", "script"})
+
 _ENTITY_ID_WILDCARD = "all"
 _ENTITY_ID_NONE = "none"
 
@@ -228,6 +233,31 @@ def _collect_entity_ids(value: Any) -> tuple[list[str], bool]:
         # Template or unexpected type: the real targets are unknown.
         return [], True
     return _collect_one_entity_id(value)
+
+
+def _targets_include_indirection(step: Mapping[str, Any]) -> bool:
+    """
+    Return True if any target names a script, scene, or automation entity.
+
+    ``_collect_entity_ids`` reports these as merely unresolved, which is the
+    right answer for a group but too weak here: the target runs configuration
+    of its own, so it has to be gated regardless of the service name.
+    """
+    containers: list[Any] = [step]
+    containers.extend(step[key] for key in _TARGET_CONTAINER_KEYS if key in step)
+
+    for container in containers:
+        if not isinstance(container, dict):
+            continue
+        value = container.get("entity_id")
+        candidates = value if isinstance(value, (list, tuple)) else [value]
+        for candidate in candidates:
+            if not isinstance(candidate, str):
+                continue
+            domain, _, object_id = candidate.strip().lower().partition(".")
+            if object_id and domain in _INDIRECT_ENTITY_DOMAINS:
+                return True
+    return False
 
 
 def _step_targets(step: Mapping[str, Any]) -> tuple[list[str], bool]:
@@ -407,6 +437,18 @@ def _screen_special_domain(
             )
         ]
     if domain == _GENERIC_DOMAIN:
+        if _targets_include_indirection(step):
+            # `homeassistant.turn_on` aimed at `script.x` forwards to
+            # `script.turn_on` and runs the script. Gating only the explicitly
+            # named `script.`/`scene.` domains above would let the generic
+            # alias walk straight past that boundary.
+            return [
+                _unverifiable(
+                    f"{domain}.{service}",
+                    "the automation runs another scene, script, or automation whose "
+                    "actions cannot be checked here",
+                )
+            ]
         entities, unresolved = _step_targets(step)
         return _screen_generic_domain(service, entities, unresolved, rules)
     return None
