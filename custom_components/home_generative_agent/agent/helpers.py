@@ -151,13 +151,21 @@ def register_pending_action(
     for key, existing in list(pending_actions.items()):
         created_at = existing.get("created_at")
         if not isinstance(created_at, str):
+            # A record with no usable timestamp can never expire, so skipping
+            # it would make it immortal and let the cap evict live entries
+            # around it. `_load_pending_action` rejects it anyway.
+            pending_actions.pop(key, None)
             continue
         try:
             created = datetime.fromisoformat(created_at)
-        except ValueError:
+            expired = now - created > PENDING_ACTION_TTL
+        except (ValueError, TypeError):
+            # TypeError covers a timezone-naive stored timestamp, which cannot
+            # be compared against the aware `now`. One malformed record must
+            # not break every later registration.
             pending_actions.pop(key, None)
             continue
-        if now - created > PENDING_ACTION_TTL:
+        if expired:
             pending_actions.pop(key, None)
 
     while len(pending_actions) >= MAX_PENDING_ACTIONS:

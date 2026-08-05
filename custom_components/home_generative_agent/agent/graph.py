@@ -26,7 +26,6 @@ from homeassistant.const import (
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import llm
 from homeassistant.util import dt as dt_util
-from homeassistant.util import ulid
 from langchain_core.messages import (
     AIMessage,
     AnyMessage,
@@ -83,6 +82,7 @@ from .helpers import (
     maybe_fill_lock_entity,
     normalize_intent_for_alarm,
     normalize_intent_for_lock,
+    register_pending_action,
     resolve_critical_action_policy,
     sanitize_tool_args,
 )
@@ -385,14 +385,14 @@ def _critical_action_guard(
         )
         return None
 
-    action_id = ulid.ulid_now()
-    ctx.pending_actions[action_id] = {
-        "tool_name": tool_name,
-        "tool_args": tool_args,
-        "created_at": dt_util.utcnow().isoformat(),
-        "user": ctx.config.get("configurable", {}).get("user_id"),
-        "attempts": 0,
-    }
+    action_id = register_pending_action(
+        ctx.pending_actions,
+        {
+            "tool_name": tool_name,
+            "tool_args": tool_args,
+            "user": ctx.config.get("configurable", {}).get("user_id"),
+        },
+    )
     return ToolMessage(
         content=json.dumps(
             {

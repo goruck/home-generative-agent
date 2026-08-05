@@ -599,3 +599,31 @@ async def test_expired_challenges_are_swept_when_a_new_one_registers(
 
     assert "stale" not in pending
     assert len(pending) == 1
+
+
+@pytest.mark.asyncio
+async def test_malformed_pending_record_does_not_break_registration(
+    tmp_path: Path,
+) -> None:
+    """
+    A record with an unusable timestamp is dropped, not stepped over.
+
+    A timezone-naive timestamp cannot be compared against an aware `now`, and
+    a record with no timestamp can never expire. Either one left in place
+    would be immortal and would push live confirmations out of the cap.
+    """
+    hass = _fake_hass(tmp_path)
+    config = _config(hass, _pin_options())
+    pending = config["configurable"]["pending_actions"]
+    pending["naive"] = {
+        "tool_name": "add_automation",
+        "created_at": "2026-08-05T10:00:00",
+    }
+    pending["missing"] = {"tool_name": "add_automation"}
+
+    result = await add_automation_tool(automation_yaml=UNLOCK_YAML, config=config)
+
+    assert json.loads(result)["status"] == "requires_pin"
+    assert "naive" not in pending
+    assert "missing" not in pending
+    assert len(pending) == 1

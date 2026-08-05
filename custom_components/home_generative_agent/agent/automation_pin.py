@@ -20,7 +20,10 @@ Everything else is reported:
 
 * **Device actions** (``{device_id, domain, type}``) carry no ``action:`` key at
   all, yet ``lock/device_action.py`` maps ``type: unlock`` straight to
-  ``lock.unlock``. They are screened on their own ``domain``/``type``.
+  ``lock.unlock``. Their ``type`` is *not* reliably a service name — each
+  integration maps it in its own Python, and ``cover`` turns ``set_position``
+  into ``cover.set_cover_position`` — so a device action on a domain any rule
+  guards is reported whenever its type does not match a rule outright.
 * **State reproduction** (``scene.apply`` / ``scene.create``) carries the
   target states inline in ``data``, and ``lock/reproduce_state.py`` maps the
   state ``unlocked`` to ``lock.unlock``. Screened per referenced entity.
@@ -279,6 +282,15 @@ def _domain_is_guarded(domain: str, rules: Iterable[Mapping[str, str]]) -> bool:
     )
 
 
+def _service_is_guarded(service: str, rules: Iterable[Mapping[str, str]]) -> bool:
+    """Return True if any critical rule could apply to this service name."""
+    return any(
+        not (rule.get("service") or "")
+        or (rule.get("service") or "").lower() == service
+        for rule in rules
+    )
+
+
 def _screen_state_reproduction(
     step: Mapping[str, Any], rules: Sequence[Mapping[str, str]]
 ) -> list[CriticalAutomationCall]:
@@ -407,15 +419,7 @@ def _screen_generic_domain(
     rules: Sequence[Mapping[str, str]],
 ) -> list[CriticalAutomationCall]:
     """Screen `homeassistant.*`, which forwards to each target's own domain."""
-    if not entities:
-        return [
-            _unverifiable(
-                f"{_GENERIC_DOMAIN}.{service}",
-                "the automation uses a generic service call whose targets "
-                "cannot be resolved here",
-            )
-        ]
-    return [
+    found = [
         CriticalAutomationCall(
             service=f"{entity.split('.', 1)[0]}.{service}",
             entity_ids=(entity,),
@@ -427,9 +431,23 @@ def _screen_generic_domain(
             service=service,
             entity_ids=[entity],
             critical_actions=rules,
-            unresolved_target=unresolved,
         )
     ]
+
+    # Targets can be part concrete and part unresolvable (an area alongside a
+    # named entity, say). The named ones are screened above; the rest still
+    # need their own verdict, and it can only be a conservative one — but only
+    # when the forwarded service is one some rule actually guards, or every
+    # area-scoped `homeassistant.turn_on` would prompt.
+    if unresolved and _service_is_guarded(service, rules):
+        found.append(
+            _unverifiable(
+                f"{_GENERIC_DOMAIN}.{service}",
+                "the automation uses a generic service call whose targets "
+                "cannot all be resolved here",
+            )
+        )
+    return found
 
 
 def _screen_device_action(
@@ -447,21 +465,39 @@ def _screen_device_action(
         ]
 
     entities, unresolved = _step_targets(step)
-    if not matches_critical_rule(
+    if matches_critical_rule(
         domain=domain,
         service=action_kind,
         entity_ids=entities,
         critical_actions=rules,
         unresolved_target=unresolved,
     ):
-        return []
-    return [
-        CriticalAutomationCall(
-            service=f"{domain}.{action_kind}",
-            entity_ids=tuple(entities),
-            reason="the automation performs a critical action on a device",
-        )
-    ]
+        return [
+            CriticalAutomationCall(
+                service=f"{domain}.{action_kind}",
+                entity_ids=tuple(entities),
+                reason="the automation performs a critical action on a device",
+            )
+        ]
+
+    # A device action's `type` is not the service name. Each integration maps
+    # it in its own Python (cover turns `set_position` into
+    # `cover.set_cover_position`, `open` into `cover.open_cover`), and that
+    # mapping cannot be introspected. Matching the raw type is therefore only
+    # sound when it happens to match; when it does not, any rule on the domain
+    # still has to count.
+    if _domain_is_guarded(domain, rules):
+        return [
+            CriticalAutomationCall(
+                service=f"{domain}.{action_kind}",
+                entity_ids=tuple(entities),
+                reason=(
+                    "the automation runs a device action on a guarded domain, "
+                    "and the service it maps to cannot be resolved here"
+                ),
+            )
+        ]
+    return []
 
 
 def _screen_step(

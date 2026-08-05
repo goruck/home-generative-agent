@@ -950,10 +950,12 @@ def _load_pending_action(
     if created_at:
         try:
             ts = datetime.fromisoformat(created_at)
-        except ValueError:
+            expired = dt_util.utcnow() - ts > timedelta(minutes=10)
+        except (ValueError, TypeError):
+            # TypeError covers a timezone-naive stored timestamp.
             pending_actions.pop(resolved_action_id, None)
             return None, "Pending action is invalid; please try again."
-        if dt_util.utcnow() - ts > timedelta(minutes=10):
+        if expired:
             pending_actions.pop(resolved_action_id, None)
             return None, "Pending action expired; please re-run the request."
 

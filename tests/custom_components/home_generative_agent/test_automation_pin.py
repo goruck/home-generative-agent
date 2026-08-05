@@ -727,3 +727,111 @@ def test_unvalidated_target_text_is_not_echoed_into_the_pin_prompt() -> None:
     rendered = " ".join(call.describe() for call in calls)
     assert "status" not in rendered
     assert "completed" not in rendered
+
+
+# ----- verification round 2 regressions -----
+#
+# A device action's `type` is not the service it calls. Each integration maps it
+# in its own Python: `lock` happens to be identity (unlock -> lock.unlock), but
+# `cover` is not (set_position -> cover.set_cover_position). Screening the raw
+# type therefore only worked by accident for locks, and left every cover device
+# action open. Found by both round-2 reviewers independently.
+
+
+@pytest.mark.parametrize(
+    ("action_kind", "extra"),
+    [
+        pytest.param("set_position", {"position": 100}, id="set-position"),
+        pytest.param("open", {}, id="open"),
+        pytest.param("close", {}, id="close"),
+    ],
+)
+def test_cover_device_actions_are_gated_despite_type_name_mismatch(
+    action_kind: str, extra: dict[str, Any]
+) -> None:
+    """A cover device action is gated even when its type is not a service name."""
+    assert _scan_validated(
+        [
+            {
+                "device_id": "d1",
+                "domain": "cover",
+                "entity_id": "cover.garage_door",
+                "type": action_kind,
+                **extra,
+            }
+        ]
+    )
+
+
+def test_device_actions_on_unguarded_domains_still_pass() -> None:
+    """Failing closed is scoped to domains that carry a rule."""
+    assert (
+        _scan_validated(
+            [
+                {
+                    "device_id": "d1",
+                    "domain": "light",
+                    "entity_id": "light.kitchen",
+                    "type": "turn_on",
+                }
+            ]
+        )
+        == []
+    )
+
+
+def test_device_action_on_a_custom_guarded_domain_is_gated() -> None:
+    """The same protection applies to user-configured rules, not just defaults."""
+    calls = find_critical_automation_calls(
+        {
+            "actions": cv.SCRIPT_SCHEMA(
+                [
+                    {
+                        "device_id": "d1",
+                        "domain": "alarm_control_panel",
+                        "entity_id": "alarm_control_panel.house",
+                        "type": "disarm",
+                    }
+                ]
+            )
+        },
+        [{"domain": "alarm_control_panel", "service": "alarm_disarm"}],
+    )
+    assert calls
+
+
+def test_generic_call_with_partly_unresolvable_targets_is_gated() -> None:
+    """A resolvable target must not mask an unresolvable one beside it."""
+    assert _scan_validated(
+        [
+            {
+                "action": "homeassistant.toggle",
+                "target": {
+                    "entity_id": ["light.kitchen", "0123456789abcdef0123456789abcdef"]
+                },
+            }
+        ]
+    )
+
+
+@pytest.mark.parametrize("service", ["turn_on", "turn_off"])
+def test_generic_area_call_for_an_unguarded_service_is_not_gated(service: str) -> None:
+    """
+    Failing closed on unresolvable targets is scoped by service.
+
+    `homeassistant.turn_on` over an area is an everyday automation shape and no
+    rule guards `turn_on`, so prompting for it would be pure noise.
+    """
+    assert (
+        _scan_validated(
+            [{"action": f"homeassistant.{service}", "target": {"area_id": "lounge"}}]
+        )
+        == []
+    )
+
+
+def test_generic_area_call_for_a_guarded_service_is_gated() -> None:
+    """`toggle` is guarded for covers, so an area-scoped toggle must prompt."""
+    assert _scan_validated(
+        [{"action": "homeassistant.toggle", "target": {"area_id": "garage"}}]
+    )
