@@ -34,9 +34,20 @@ Everything else is reported:
   against each target entity's own domain.
 * Unresolvable pieces — a templated service name, a target that is an area,
   device, label, floor, registry ID, group, or ``entity_id: all`` — are treated
-  as matching any otherwise-applicable rule.
+  as matching any otherwise-applicable rule, and any unresolvable target of a
+  generic-domain call is gated outright.
 * An **unknown action type** (one Home Assistant adds after this was written)
   is gated, so the screen degrades to over-prompting rather than to a hole.
+
+**What this cannot see.** The screen has no ``hass``, so it cannot resolve a
+registry ID, expand a group or an area, or learn that a given ``switch.x`` is a
+template switch whose ``turn_on`` runs a stored script. That is why an
+unresolvable generic-domain target is gated rather than reasoned about. It also
+matches on service names, so a *transport* service that reaches a lock without
+naming the lock domain — ``mqtt.publish`` to a lock command topic is the
+realistic one — is invisible to it. Both residuals are documented for users in
+``docs/configuration.md``; closing them needs registry resolution at screen
+time, tracked in TODOS.md.
 """
 
 from __future__ import annotations
@@ -86,11 +97,25 @@ _SEQUENCE_KEYS = ("sequence", "then", "else", "default")
 # Step keys that scope a call to something other than an explicit entity ID.
 _NON_ENTITY_TARGET_KEYS = ("device_id", "area_id", "label_id", "floor_id")
 
-# Containers within a service step that can carry targets.
-_TARGET_CONTAINER_KEYS = ("target", "data")
+# Containers within a service step that can carry targets. `data_template` is
+# deprecated but still accepted by HA's SERVICE_SCHEMA and still rendered.
+_TARGET_CONTAINER_KEYS = ("target", "data", "data_template", "service_data")
 
-# Service domains that run configuration this module cannot see.
-_INDIRECTION_DOMAINS = frozenset({"script", "automation"})
+# Service domains that run configuration this module cannot see. `python_script`
+# executes a user Python file whose sandbox permits `hass.services.call`;
+# `shell_command` and `rest_command` run user-defined commands; a template
+# `button`'s press field is a full script.
+_INDIRECTION_DOMAINS = frozenset(
+    {
+        "automation",
+        "button",
+        "input_button",
+        "python_script",
+        "rest_command",
+        "script",
+        "shell_command",
+    }
+)
 
 # scene services that reproduce caller-supplied entity states.
 _SCENE_REPRODUCE_SERVICES = frozenset({"apply", "create"})
@@ -108,7 +133,9 @@ _EXPANDING_DOMAINS = frozenset({"group", "scene", "script", "automation"})
 # Entity domains whose targets run stored configuration of their own. Aiming a
 # generic call at one of these is indirection just as much as calling
 # `script.turn_on` directly, and must be gated whatever the service name is.
-_INDIRECT_ENTITY_DOMAINS = frozenset({"automation", "scene", "script"})
+_INDIRECT_ENTITY_DOMAINS = frozenset(
+    {"automation", "button", "input_button", "scene", "script"}
+)
 
 _ENTITY_ID_WILDCARD = "all"
 _ENTITY_ID_NONE = "none"
@@ -312,15 +339,6 @@ def _domain_is_guarded(domain: str, rules: Iterable[Mapping[str, str]]) -> bool:
     )
 
 
-def _service_is_guarded(service: str, rules: Iterable[Mapping[str, str]]) -> bool:
-    """Return True if any critical rule could apply to this service name."""
-    return any(
-        not (rule.get("service") or "")
-        or (rule.get("service") or "").lower() == service
-        for rule in rules
-    )
-
-
 def _screen_state_reproduction(
     step: Mapping[str, Any], rules: Sequence[Mapping[str, str]]
 ) -> list[CriticalAutomationCall]:
@@ -477,11 +495,12 @@ def _screen_generic_domain(
     ]
 
     # Targets can be part concrete and part unresolvable (an area alongside a
-    # named entity, say). The named ones are screened above; the rest still
-    # need their own verdict, and it can only be a conservative one — but only
-    # when the forwarded service is one some rule actually guards, or every
-    # area-scoped `homeassistant.turn_on` would prompt.
-    if unresolved and _service_is_guarded(service, rules):
+    # named entity, say). The named ones are screened above; the rest cannot be
+    # screened at all. Scoping this by service name was tried and was unsound:
+    # an area, group, registry ID, or template can resolve to a script or to a
+    # template entity whose `turn_on` runs a stored script, and no rule names
+    # `turn_on`. Without the entity registry the only honest answer is to ask.
+    if unresolved:
         found.append(
             _unverifiable(
                 f"{_GENERIC_DOMAIN}.{service}",

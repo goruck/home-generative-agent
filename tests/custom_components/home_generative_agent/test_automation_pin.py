@@ -814,20 +814,20 @@ def test_generic_call_with_partly_unresolvable_targets_is_gated() -> None:
     )
 
 
-@pytest.mark.parametrize("service", ["turn_on", "turn_off"])
-def test_generic_area_call_for_an_unguarded_service_is_not_gated(service: str) -> None:
+@pytest.mark.parametrize("service", ["turn_on", "turn_off", "toggle"])
+def test_generic_call_with_an_unresolvable_target_is_gated(service: str) -> None:
     """
-    Failing closed on unresolvable targets is scoped by service.
+    An unresolvable target of a generic call is always gated.
 
-    `homeassistant.turn_on` over an area is an everyday automation shape and no
-    rule guards `turn_on`, so prompting for it would be pure noise.
+    Scoping this by service name was tried and proved unsound: `homeassistant.
+    turn_on` forwards by resolved domain, and an area, group, or registry ID
+    can resolve to a script, or to a template entity whose `turn_on` runs a
+    stored script. No rule names `turn_on`, so a service-scoped check waved
+    both through. Without the entity registry the only honest answer is to ask.
     """
-    assert (
-        _scan_validated(
-            [{"action": f"homeassistant.{service}", "target": {"area_id": "lounge"}}]
-        )
-        == []
-    )
+    assert _scan_validated(
+        [{"action": f"homeassistant.{service}", "target": {"area_id": "lounge"}}]
+    ) == [f"homeassistant.{service}"]
 
 
 def test_generic_area_call_for_a_guarded_service_is_gated() -> None:
@@ -920,11 +920,60 @@ def test_generic_call_gates_when_only_one_target_is_indirection() -> None:
     "target",
     [
         pytest.param({"entity_id": "light.kitchen"}, id="entity"),
-        pytest.param({"area_id": "lounge"}, id="area"),
+        pytest.param({"entity_id": ["light.kitchen", "switch.fan"]}, id="entity-list"),
     ],
 )
-def test_generic_call_at_ordinary_targets_still_passes(target: dict[str, Any]) -> None:
-    """Gating indirection must not turn every generic call into a prompt."""
+def test_generic_call_at_named_entities_still_passes(target: dict[str, Any]) -> None:
+    """A generic call whose targets are all named and benign does not prompt."""
     assert (
         _scan_validated([{"action": "homeassistant.turn_on", "target": target}]) == []
+    )
+
+
+# ----- verification round 4 -----
+#
+# Stored-configuration executors and target forms the screen could not see.
+
+
+@pytest.mark.parametrize(
+    "steps",
+    [
+        pytest.param([{"action": "python_script.evil"}], id="python-script"),
+        pytest.param([{"action": "shell_command.evil"}], id="shell-command"),
+        pytest.param([{"action": "rest_command.evil"}], id="rest-command"),
+        pytest.param(
+            [{"action": "button.press", "target": {"entity_id": "button.unlock"}}],
+            id="button-press",
+        ),
+        pytest.param(
+            [
+                {
+                    "action": "input_button.press",
+                    "target": {"entity_id": "input_button.x"},
+                }
+            ],
+            id="input-button-press",
+        ),
+    ],
+)
+def test_stored_configuration_executors_are_gated(steps: Any) -> None:
+    """
+    Services that run user-authored configuration are indirection.
+
+    `python_script` executes a Python file whose sandbox permits
+    `hass.services.call`; `shell_command` and `rest_command` run user-defined
+    commands; a template button's `press` field is a full script.
+    """
+    assert _scan_validated(steps)
+
+
+def test_indirection_target_in_data_template_is_gated() -> None:
+    """`data_template` is deprecated but HA still accepts and renders it."""
+    assert _scan_validated(
+        [
+            {
+                "action": "homeassistant.turn_on",
+                "data_template": {"entity_id": "script.unlock_front_door"},
+            }
+        ]
     )
