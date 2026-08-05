@@ -190,12 +190,30 @@ Protects sensitive actions (unlocking doors, opening covers) behind a second ver
 
 **Protected actions:**
 - Unlocking or opening locks
-- Opening covers whose `entity_id` includes `door`, `gate`, or `garage`
+- Opening covers whose `entity_id` includes `door`, `gate`, or `garage` — via `open_cover`, `open`, `toggle`, or `set_cover_position`, since all four open a closed door
 - Using HA intent tools on locks
+- **Creating an automation that performs any of the above** — "unlock the front door whenever I get home" is held for the PIN just like the direct command
 
 Alarm control panels use their own alarm code, which is separate from the critical-action PIN.
 
-**Flow:** When you request a protected action, the agent queues the request and asks for the PIN. Reply with the digits to complete the action. After five bad attempts or 10 minutes, the queued action expires and you must ask again. If the guard is enabled but no PIN is configured, the agent rejects requests until you set one in Options.
+**Automation screening.** Automations are screened after Home Assistant validates them, so blueprint inputs are resolved and every nested branch (`choose`, `if`/`then`/`else`, `repeat`, `parallel`, `sequence`) is inspected. Nothing is written to `automations.yaml` and no reload happens until the PIN is confirmed.
+
+Screening classifies each step with Home Assistant's own action taxonomy and lets it through only when it is provably harmless. A service call is not the only way an automation can unlock a door, so these are protected too:
+
+- **Device actions** (`device_id` + `domain` + `type`), which carry no service name but still call `lock.unlock`.
+- **`scene.apply` / `scene.create`**, which set entity states inline — Home Assistant reproduces an `unlocked` lock state by calling `lock.unlock`.
+- **`homeassistant.turn_on` / `turn_off` / `toggle`**, screened against each target entity's own domain.
+
+Screening also **fails closed** — it asks for the PIN rather than guessing — when it cannot see what a step will do:
+
+- A service name built from a template.
+- A target that is an area, device, label, floor, group, entity registry ID, or `entity_id: all`, because the entities it resolves to are not known at write time.
+- Activating a scene, calling a script, triggering another automation, or firing an event: those run configuration stored elsewhere. Expect a PIN prompt for these even when the target is harmless.
+- A step type this integration does not recognize, including one a future Home Assistant release introduces.
+
+**Blueprint automations are attested at approval time only.** A blueprint-based automation is stored in `automations.yaml` as a `use_blueprint:` reference, and Home Assistant re-substitutes the blueprint on every reload. Screening reads the substituted actions, so the PIN confirms what the blueprint did *when you approved it*. Editing that blueprint file afterwards changes what the approved automation runs, without a fresh prompt. For plain YAML automations the config that is written is the one that was screened.
+
+**Flow:** When you request a protected action, the agent queues the request and asks for the PIN. Reply with the digits to complete the action. After five bad attempts or 10 minutes, the queued action expires and you must ask again. Only the user who made the request can confirm it. If the guard is toggled on but no PIN has been set, the agent logs a warning and allows the action — set a PIN in Options for the guard to take effect.
 
 ---
 

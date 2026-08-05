@@ -126,7 +126,7 @@ The agent has access to HA LLM API tools and the following custom LangChain tool
 |---|---|
 | `get_and_analyze_camera_image` | Run scene analysis on the image from a camera. Free-form camera names are resolved to real `camera.*` entities — spaces, capitalization, and diacritics are normalized (e.g. "kamera obývák 2" → `camera.kamera_obyvak_2`), and an unknown name returns the list of available cameras so the agent can self-correct |
 | `upsert_memory` | Add or update a memory |
-| `add_automation` | Create and register a HA automation (available when Schema-first YAML mode is disabled) |
+| `add_automation` | Create and register a HA automation (available when Schema-first YAML mode is disabled). An automation whose actions reach a critical service is held for PIN confirmation before it is written — see [Critical Action PIN](configuration.md#critical-action-pin) |
 | `write_yaml_file` | Write YAML to `/config/www/` and return a `/local/...` URL |
 | `confirm_sensitive_action` | Confirm and execute a pending critical action with a PIN |
 | `alarm_control` | Arm or disarm an alarm control panel with the alarm code |

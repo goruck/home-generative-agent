@@ -411,7 +411,9 @@ This document covers the named constants that affect integration behaviour, orga
 | `CRITICAL_PIN_MIN_LEN` | `4` | Minimum PIN length (digits) |
 | `CRITICAL_PIN_MAX_LEN` | `10` | Maximum PIN length (digits) |
 
-The `RECOMMENDED_CRITICAL_ACTIONS` list defines which HA service calls require PIN confirmation. By default this covers `lock.unlock`, `lock.open`, and `cover.open_cover` / `cover.open` for entities whose `entity_id` contains `door`, `gate`, or `garage`.
+The `RECOMMENDED_CRITICAL_ACTIONS` list defines which actions require PIN confirmation. By default this covers `lock.unlock`, `lock.open`, `lock.toggle`, and every cover service that opens a closed door — `open_cover`, `open`, `toggle`, and `set_cover_position` — for entities whose `entity_id` contains `door`, `gate`, or `garage`.
+
+The same rules screen two surfaces: direct tool calls from the conversation agent, and the *contents* of automations the agent writes with `add_automation` (see [Critical Action PIN](configuration.md#critical-action-pin)). In the automation path an `entity_match` rule also fires when the call's real targets cannot be resolved at write time — an area, device, label, floor, group, entity registry ID, or template — because the substring cannot be checked against entities that are only resolved when the automation runs.
 
 ---
 
