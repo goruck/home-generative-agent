@@ -106,11 +106,14 @@ _TARGET_CONTAINER_KEYS = ("target", "data", "data_template", "service_data")
 # Service domains that run configuration this module cannot see. `python_script`
 # executes a user Python file whose sandbox permits `hass.services.call`;
 # `shell_command` and `rest_command` run user-defined commands; a template
-# `button`'s press field is a full script.
+# `button`'s press field is a full script; and `conversation.process` hands
+# free text to an agent that dispatches intents, so an `intent_script` whose
+# action unlocks a door is reachable by sentence.
 _INDIRECTION_DOMAINS = frozenset(
     {
         "automation",
         "button",
+        "conversation",
         "input_button",
         "python_script",
         "rest_command",

@@ -1021,3 +1021,16 @@ def test_scene_create_snapshotting_a_lock_is_screened() -> None:
             }
         ]
     )
+
+
+def test_conversation_process_is_gated() -> None:
+    """
+    Free text handed to a conversation agent can dispatch an unlock intent.
+
+    `conversation.process` sends its text to an agent, the default agent
+    dispatches a matched intent, and an `intent_script` runs its stored action
+    script — so a custom sentence can reach `lock.unlock` by name alone.
+    """
+    assert _scan_validated(
+        [{"action": "conversation.process", "data": {"text": "run my unlock intent"}}]
+    ) == ["conversation.process"]
