@@ -7,6 +7,7 @@ from custom_components.home_generative_agent.agent.graph import (
     _determine_model_name,
     _ensure_array_items,
     _format_and_dedupe_tools,
+    _sanitize_any_of_required,
 )
 from custom_components.home_generative_agent.const import CONF_ANTHROPIC_CHAT_MODEL
 
@@ -174,6 +175,144 @@ def test_format_and_dedupe_tools_gemini_array_items_injected() -> None:
     domain_schema = selected[0]["function"]["parameters"]["properties"]["domain"]
     assert "items" in domain_schema, "Gemini requires items on array-type properties"
     assert domain_schema["items"] == {"type": "string"}
+
+
+def test_sanitize_any_of_required_strips_required_from_non_object_variant() -> None:
+    """
+    'required' on a non-OBJECT anyOf branch is stripped.
+
+    Gemini rejects declarations where an anyOf variant carries 'required'
+    but is not itself type:object, e.g.
+    ``{"anyOf": [{"required": ["x"]}, {"type": "array", "items": {...}}]}``.
+    """
+    schema = {
+        "anyOf": [
+            {"required": ["x"]},
+            {"type": "array", "items": {"type": "string"}},
+        ]
+    }
+    result = _sanitize_any_of_required(schema)
+    assert "required" not in result["anyOf"][0]
+    assert result["anyOf"][1] == {"type": "array", "items": {"type": "string"}}
+
+
+def test_sanitize_any_of_required_strips_undefined_property_from_object_variant() -> (
+    None
+):
+    """'required' entries not present in that branch's properties are dropped."""
+    schema = {
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name", "missing_prop"],
+            },
+            {"type": "string"},
+        ]
+    }
+    result = _sanitize_any_of_required(schema)
+    assert result["anyOf"][0]["required"] == ["name"]
+
+
+def test_sanitize_any_of_required_drops_required_key_when_empty_after_filtering() -> (
+    None
+):
+    """If every required property is undefined, the 'required' key is removed."""
+    schema = {
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["missing_prop"],
+            }
+        ]
+    }
+    result = _sanitize_any_of_required(schema)
+    assert "required" not in result["anyOf"][0]
+
+
+def test_sanitize_any_of_required_valid_object_variant_unchanged() -> None:
+    """A well-formed OBJECT anyOf variant with valid 'required' is left alone."""
+    schema = {
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+            }
+        ]
+    }
+    result = _sanitize_any_of_required(schema)
+    assert result["anyOf"][0]["required"] == ["name"]
+
+
+def test_sanitize_any_of_required_recurses_into_properties() -> None:
+    """Nested object properties containing anyOf/required are also sanitized."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "target": {
+                "anyOf": [
+                    {"required": ["x"]},
+                    {"type": "string"},
+                ]
+            }
+        },
+    }
+    result = _sanitize_any_of_required(schema)
+    assert "required" not in result["properties"]["target"]["anyOf"][0]
+
+
+def test_sanitize_any_of_required_recurses_into_items() -> None:
+    """Array items containing anyOf/required are also sanitized."""
+    schema = {
+        "type": "array",
+        "items": {"anyOf": [{"required": ["x"]}, {"type": "string"}]},
+    }
+    result = _sanitize_any_of_required(schema)
+    assert "required" not in result["items"]["anyOf"][0]
+
+
+def test_sanitize_any_of_required_no_any_of_unchanged() -> None:
+    """Schemas without anyOf are returned unchanged."""
+    schema = {"type": "object", "properties": {}, "required": ["x"]}
+    result = _sanitize_any_of_required(schema)
+    assert result == schema
+
+
+def test_format_and_dedupe_tools_strips_invalid_any_of_required() -> None:
+    """
+    End-to-end: a 3-branch anyOf with mismatched 'required' is sanitized.
+
+    Reproduces the reported Gemini 400 error:
+    ``GenerateContentRequest.tools[0].function_declarations[1].parameters
+    .any_of[N].required: only allowed for OBJECT type`` /
+    ``any_of[N].required[0]: property is not defined``.
+    """
+    raw: list = [
+        {
+            "name": "flaky_union_tool",
+            "api_id": "test",
+            "description": "Tool with a 3-way union parameter",
+            "parameters": (
+                '{"type": "object", "properties": {"target": {"anyOf": ['
+                '{"required": ["entity_id"]},'
+                '{"type": "object", "properties": {"area_id": {"type": "string"}},'
+                ' "required": ["area_id", "entity_id"]},'
+                '{"type": "array", "items": {"type": "string"}, '
+                '"required": ["entity_id"]}'
+                "]}}}"
+            ),
+            "is_actuation": False,
+        }
+    ]
+    selected, _ = _format_and_dedupe_tools(raw)
+    variants = selected[0]["function"]["parameters"]["properties"]["target"]["anyOf"]
+    assert "required" not in variants[0], "non-object variant must lose 'required'"
+    assert variants[1]["required"] == ["area_id"], (
+        "object variant keeps only required props it actually defines"
+    )
+    assert "required" not in variants[2], "array variant must lose 'required'"
 
 
 def test_determine_model_name_anthropic_returns_configured_model() -> None:
