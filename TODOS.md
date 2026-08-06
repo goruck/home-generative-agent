@@ -37,6 +37,20 @@ Also: unknown action types fail closed (a future HA construct over-prompts rathe
 
 ---
 
+### Raw protocol writes are not screened
+
+**What:** Automation screening (`agent/automation_pin.py`) matches Home Assistant domains and services, so a service that addresses a device *beneath* the entity layer is invisible to it: `mqtt.publish` to a lock's command topic, `zwave_js.set_value` writing a Door Lock command class (as a service call or a device action), `zha.issue_zigbee_cluster_command`. Each can unlock a door without the automation naming the `lock` domain.
+
+**Why:** Not gated by default — these are routine tools on their respective stacks, and gating them would prompt on ordinary MQTT/Z-Wave/Zigbee automations for the many users on those integrations. Documented in `docs/configuration.md` with per-transport opt-in rules users can add to `critical_actions`. Found by verification rounds 5 and 7 during the v3.26.0 ship.
+
+**How to apply:** Needs a way to tell "this MQTT topic / Z-Wave command class targets a lock" from any other write, which means resolving the device behind the topic or node. Alternatively ship the transport rules as opt-in presets in the Sentinel/options UI so users can enable them without hand-editing `critical_actions`. Decide whether the prompt cost is acceptable before defaulting any of them on.
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** v3.26.0
+
+---
+
 ### Re-screen blueprint automations on reload, or pin the expansion
 
 **What:** A blueprint automation is persisted as a `use_blueprint:` reference and re-substituted by HA on every reload, so the PIN attests to the blueprint's contents at approval time only. Editing the blueprint file afterwards changes what the approved automation runs with no fresh prompt. Documented as a known limitation in v3.26.0's CHANGELOG and `docs/configuration.md`.

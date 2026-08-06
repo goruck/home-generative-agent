@@ -47,9 +47,13 @@ template switch whose ``turn_on`` runs a stored script. That is why an
 unresolvable generic-domain target is gated rather than reasoned about. It also
 matches on service names, so a *transport* service that reaches a lock without
 naming the lock domain — ``mqtt.publish`` to a lock command topic is the
-realistic one — is invisible to it. Both residuals are documented for users in
-``docs/configuration.md``; closing them needs registry resolution at screen
-time, tracked in TODOS.md.
+realistic one — is invisible to it, as is any raw protocol write that addresses
+a device beneath the entity layer (``zwave_js.set_value``,
+``zha.issue_zigbee_cluster_command``), in either its service or device-action
+spelling. These are two separate residuals with two separate fixes: the first
+needs entity-registry resolution at screen time, the second needs a rule naming
+the transport service (users can add one; see ``docs/configuration.md``).
+Both are tracked in TODOS.md.
 """
 
 from __future__ import annotations

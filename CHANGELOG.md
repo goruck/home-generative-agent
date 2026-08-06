@@ -24,8 +24,10 @@ All notable changes to this project will be documented in this file.
 - **Abandoned PIN challenges no longer accumulate.** Expired confirmations were only ever dropped when that exact action was later confirmed, so a challenge the model never resolved was retained for the life of the config entry — and once more than one piled up, the single-pending-action convenience path stopped resolving. Registering a confirmation now sweeps expired entries and caps the store.
 - **Documentation corrected:** the Critical Action PIN section stated that enabling the guard without setting a PIN causes the agent to reject requests. For direct commands it does not — it logs a warning and allows the action. The docs now describe the actual behavior of each path.
 
-### Known limitation
+### Known limitations
 
+- **Raw protocol writes are not screened.** Screening matches domains and services, so a call that addresses a device beneath the entity layer — `mqtt.publish` to a lock's command topic, `zwave_js.set_value` writing a Door Lock command class, `zha.issue_zigbee_cluster_command` — can reach a lock without naming the `lock` domain. These are deliberately not gated by default because they are routine on those stacks; `docs/configuration.md` documents a per-transport rule you can add to `critical_actions` if you run locks on one of them.
+- **Targets that resolve at run time cannot be inspected.** Screening happens before the automation is written and has no entity registry, so a group, area, or registry ID cannot be expanded and a template entity cannot be told apart from an ordinary one. Unresolvable targets are gated rather than reasoned about, which is why some automations prompt more than a human reader would expect.
 - A blueprint-based automation is stored as a `use_blueprint:` reference and re-substituted by Home Assistant on every reload, so the PIN attests to what the blueprint did **at approval time**. Editing that blueprint file afterwards changes what the approved automation runs without a fresh prompt. Plain YAML automations are written exactly as screened.
 
 ## [3.25.1] - 2026-08-03
