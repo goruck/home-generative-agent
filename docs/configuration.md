@@ -190,12 +190,35 @@ Protects sensitive actions (unlocking doors, opening covers) behind a second ver
 
 **Protected actions:**
 - Unlocking or opening locks
-- Opening covers whose `entity_id` includes `door`, `gate`, or `garage`
+- Opening covers whose `entity_id` includes `door`, `gate`, or `garage` — via `open_cover`, `open`, `toggle`, or `set_cover_position`, since all four open a closed door
 - Using HA intent tools on locks
+- **Creating an automation that performs any of the above** — "unlock the front door whenever I get home" is held for the PIN just like the direct command
 
 Alarm control panels use their own alarm code, which is separate from the critical-action PIN.
 
-**Flow:** When you request a protected action, the agent queues the request and asks for the PIN. Reply with the digits to complete the action. After five bad attempts or 10 minutes, the queued action expires and you must ask again. If the guard is enabled but no PIN is configured, the agent rejects requests until you set one in Options.
+**Automation screening.** Automations are screened after Home Assistant validates them, so blueprint inputs are resolved and every nested branch (`choose`, `if`/`then`/`else`, `repeat`, `parallel`, `sequence`) is inspected. Nothing is written to `automations.yaml` and no reload happens until the PIN is confirmed.
+
+Screening classifies each step with Home Assistant's own action taxonomy and lets it through only when it is provably harmless. A service call is not the only way an automation can unlock a door, so these are protected too:
+
+- **Device actions** (`device_id` + `domain` + `type`), which carry no service name but still call `lock.unlock`. A device action's `type` is not the service it runs — each integration maps it in its own code — so *any* device action on a guarded domain asks for the PIN, including harmless ones like locking a lock or closing a cover.
+- **`scene.apply`**, which sets entity states inline — Home Assistant reproduces an `unlocked` lock state by calling `lock.unlock`. `scene.create` only snapshots current state, but the scene it stores can be activated later, so it is screened the same way.
+- **`homeassistant.turn_on` / `turn_off` / `toggle`**, screened against each target entity's own domain.
+
+Screening also **fails closed** — it asks for the PIN rather than guessing — when it cannot see what a step will do:
+
+- A service name built from a template.
+- A target that is an area, device, label, floor, group, entity registry ID, or `entity_id: all`, *when the call's domain and service otherwise match a protected rule*. The entities such a target resolves to are not known at write time, so an `entity_id` substring rule cannot be checked against them and is treated as matching. An ordinary `light.turn_on` over an area is unaffected.
+- Activating a scene, calling a script, triggering another automation, firing an event, pressing a button (a template button's press field is a full script, and the check cannot tell a template button from a plain one, so all of them prompt), calling `python_script` / `shell_command` / `rest_command`, or handing text to `conversation.process` (which can dispatch an intent whose `intent_script` unlocks a door): those all run configuration stored elsewhere. Expect a PIN prompt for these even when the target is harmless.
+- **Any generic `homeassistant.*` call whose targets are not all named entities** — this one gates unconditionally, whatever the service. `homeassistant.turn_on` forwards by resolved domain, and an area, group, or entity registry ID can resolve to a script, or to a template entity whose `turn_on` runs one. The integration cannot resolve those before the automation is written, so it asks.
+- A step type this integration does not recognize, including one a future Home Assistant release introduces.
+
+**What screening cannot see.** Screening runs before the automation is written and has no access to Home Assistant's entity registry, so it cannot expand a group or an area, resolve a registry ID, or tell that a given `switch.x` is a template switch whose `turn_on` runs a stored script. That is why unresolvable targets are gated rather than reasoned about. Separately, the check matches domains and services, so a *transport* service that reaches a lock without naming the lock domain is invisible to it. The realistic case is `mqtt.publish` to a lock's command topic — an MQTT-backed lock (Zigbee2MQTT, ring-mqtt) can be opened by publishing to its topic, and no service-name rule can distinguish that from any other MQTT message. The same is true of any **raw protocol write** that addresses a device beneath the entity layer: `zwave_js.set_value` can write a Door Lock command class directly (as a service call or as a device action), and `zha.issue_zigbee_cluster_command` is equivalent for Zigbee. These are not gated by default because they are ordinary tools on those stacks and gating them would prompt on routine automations.
+
+If you run locks on one of these transports and want them covered, add the relevant entry to the critical actions — `{"domain": "mqtt", "service": "publish"}`, `{"domain": "zwave_js", "service": "set_value"}`, or `{"domain": "zha", "service": "issue_zigbee_cluster_command"}` — accepting that every automation using that transport will then ask for the PIN.
+
+**Blueprint automations are attested at approval time only.** A blueprint-based automation is stored in `automations.yaml` as a `use_blueprint:` reference, and Home Assistant re-substitutes the blueprint on every reload. Screening reads the substituted actions, so the PIN confirms what the blueprint did *when you approved it*. Editing that blueprint file afterwards changes what the approved automation runs, without a fresh prompt. For plain YAML automations the config that is written is the one that was screened.
+
+**Flow:** When you request a protected action, the agent queues the request and asks for the PIN. Reply with the digits to complete the action. After five bad attempts or 10 minutes, the queued action expires and you must ask again. Only the user who made the request can confirm it. If the guard is toggled on but no PIN has been set, a direct command logs a warning and proceeds, while an automation is refused outright — an automation persists and keeps firing, so there is no safe way to let it through unconfirmed. Set a PIN in Options for the guard to take effect.
 
 ---
 

@@ -28,17 +28,33 @@ CONF_CRITICAL_ACTION_PIN = "critical_action_pin"
 CONF_CRITICAL_ACTION_PIN_HASH = "critical_action_pin_hash"
 CONF_CRITICAL_ACTION_PIN_SALT = "critical_action_pin_salt"
 CONF_CRITICAL_ACTIONS = "critical_actions"
+# Matched by `matches_critical_rule` (agent/helpers.py) for both direct tool
+# calls and the contents of LLM-authored automations. An `entity_match` rule
+# also fires when the call's real targets cannot be resolved at check time
+# (an area, device, label, floor, group, registry ID, or template) — see
+# `agent/automation_pin.py`.
 RECOMMENDED_CRITICAL_ACTIONS: list[dict[str, str]] = [
     {"domain": "lock", "service": "unlock"},
     {"domain": "lock", "service": "open"},
-    # Covers: guard only doors/gates/garages, not windows/shades
+    # `toggle` on a locked lock unlocks it.
+    {"domain": "lock", "service": "toggle"},
+    # Covers: guard only doors/gates/garages, not windows/shades.
+    # `toggle` and `set_cover_position` open a closed door just as `open_cover`
+    # does, so every opening service needs the same guard.
     {"domain": "cover", "service": "open_cover", "entity_match": "door"},
     {"domain": "cover", "service": "open_cover", "entity_match": "gate"},
     {"domain": "cover", "service": "open_cover", "entity_match": "garage"},
     {"domain": "cover", "service": "open", "entity_match": "door"},
     {"domain": "cover", "service": "open", "entity_match": "gate"},
     {"domain": "cover", "service": "open", "entity_match": "garage"},
+    {"domain": "cover", "service": "toggle", "entity_match": "door"},
+    {"domain": "cover", "service": "toggle", "entity_match": "gate"},
+    {"domain": "cover", "service": "toggle", "entity_match": "garage"},
+    {"domain": "cover", "service": "set_cover_position", "entity_match": "door"},
+    {"domain": "cover", "service": "set_cover_position", "entity_match": "gate"},
+    {"domain": "cover", "service": "set_cover_position", "entity_match": "garage"},
     {"domain": "garage_door", "service": "open"},
+    {"domain": "garage_door", "service": "toggle"},
 ]
 CRITICAL_PIN_MIN_LEN = 4
 CRITICAL_PIN_MAX_LEN = 10

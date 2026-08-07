@@ -3,18 +3,26 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Any, TypedDict
+from datetime import datetime, timedelta
+from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict
 
+import homeassistant.util.dt as dt_util
 import voluptuous as vol
+from homeassistant.util import ulid
 from voluptuous_openapi import UNSUPPORTED, convert
 
 from custom_components.home_generative_agent.const import (
     ACTUATION_LANGCHAIN_TOOLS,
     ACTUATION_TOOL_PREFIXES,
+    CONF_CRITICAL_ACTION_PIN_ENABLED,
+    CONF_CRITICAL_ACTION_PIN_HASH,
+    CONF_CRITICAL_ACTION_PIN_SALT,
+    CONF_CRITICAL_ACTIONS,
+    RECOMMENDED_CRITICAL_ACTIONS,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Iterable, Mapping, Sequence
 
     from homeassistant.core import HomeAssistant
     from homeassistant.helpers import llm
@@ -80,6 +88,138 @@ class ConfigurableData(TypedDict, total=False):
     hass: HomeAssistant
     user_id: str
     ha_llm_api: Any
+
+
+# How long a pending PIN confirmation stays valid. Mirrors the expiry check in
+# `_load_pending_action`, which is lazy and only ever inspects the one action
+# being confirmed.
+PENDING_ACTION_TTL = timedelta(minutes=10)
+
+# Hard cap on concurrently pending confirmations, so an unconfirmed challenge
+# loop cannot grow the store without bound.
+MAX_PENDING_ACTIONS = 16
+
+
+class CriticalActionPolicy(NamedTuple):
+    """Resolved critical-action PIN policy for a config entry."""
+
+    enabled: bool
+    pin_hash: str
+    pin_salt: str
+    critical_actions: list[dict[str, str]]
+
+    @property
+    def enforceable(self) -> bool:
+        """Return True when the PIN is enabled *and* actually configured."""
+        return self.enabled and bool(self.pin_hash and self.pin_salt)
+
+
+def resolve_critical_action_policy(options: Mapping[str, Any]) -> CriticalActionPolicy:
+    """Resolve the critical-action PIN policy from integration options."""
+    pin_hash = options.get(CONF_CRITICAL_ACTION_PIN_HASH) or ""
+    pin_salt = options.get(CONF_CRITICAL_ACTION_PIN_SALT) or ""
+    return CriticalActionPolicy(
+        # Always respect a configured PIN, even if the toggle somehow reads False.
+        enabled=bool(
+            options.get(CONF_CRITICAL_ACTION_PIN_ENABLED, False)
+            or (pin_hash and pin_salt)
+        ),
+        pin_hash=pin_hash,
+        pin_salt=pin_salt,
+        # Copy: the default is a module-level list handed to every config
+        # entry, so an in-place edit anywhere would corrupt it process-wide.
+        critical_actions=list(
+            options.get(CONF_CRITICAL_ACTIONS) or RECOMMENDED_CRITICAL_ACTIONS
+        ),
+    )
+
+
+def register_pending_action(
+    pending_actions: dict[str, dict[str, Any]],
+    action: dict[str, Any],
+) -> str:
+    """
+    Store a pending PIN-confirmation action and return its action ID.
+
+    Sweeps expired entries and caps the store on every registration. Without
+    this the dict only ever shrinks when a specific action ID is confirmed, so
+    every challenge the model abandons is retained for the life of the config
+    entry — and once more than one entry accumulates, the single-pending-action
+    convenience path in ``_resolve_action_id`` stops resolving.
+    """
+    now = dt_util.utcnow()
+    for key, existing in list(pending_actions.items()):
+        created_at = existing.get("created_at")
+        if not isinstance(created_at, str):
+            # A record with no usable timestamp can never expire, so skipping
+            # it would make it immortal and let the cap evict live entries
+            # around it. `_load_pending_action` rejects it anyway.
+            pending_actions.pop(key, None)
+            continue
+        try:
+            created = datetime.fromisoformat(created_at)
+            expired = now - created > PENDING_ACTION_TTL
+        except (ValueError, TypeError):
+            # TypeError covers a timezone-naive stored timestamp, which cannot
+            # be compared against the aware `now`. One malformed record must
+            # not break every later registration.
+            pending_actions.pop(key, None)
+            continue
+        if expired:
+            pending_actions.pop(key, None)
+
+    while len(pending_actions) >= MAX_PENDING_ACTIONS:
+        pending_actions.pop(next(iter(pending_actions)), None)
+
+    action_id = ulid.ulid_now()
+    pending_actions[action_id] = {
+        **action,
+        "created_at": now.isoformat(),
+        "attempts": 0,
+    }
+    return action_id
+
+
+def matches_critical_rule(
+    *,
+    domain: str,
+    service: str,
+    entity_ids: Sequence[str],
+    critical_actions: Iterable[Mapping[str, str]],
+    unresolved_target: bool = False,
+) -> bool:
+    """
+    Return True when a domain/service call matches a critical-action rule.
+
+    Shared by the conversation-tool guard (``_is_critical_action``) and the
+    automation-content guard (``automation_pin``) so both enforce identical
+    rule semantics.
+
+    ``unresolved_target`` fails closed for ``entity_match`` rules: when a call
+    targets an area, device, label, or template, the entity IDs it will hit are
+    unknown at check time, so an otherwise-matching rule is treated as a match.
+    """
+    domain = domain.lower()
+    service = service.lower()
+    entities = [e.lower() for e in entity_ids]
+
+    for rule in critical_actions:
+        rule_domain = (rule.get("domain") or "").lower()
+        rule_service = (rule.get("service") or "").lower()
+        entity_match = (rule.get("entity_match") or "").lower()
+
+        if rule_domain and rule_domain != domain:
+            continue
+        if rule_service and rule_service != service:
+            continue
+        if (
+            entity_match
+            and not any(entity_match in e for e in entities)
+            and not unresolved_target
+        ):
+            continue
+        return True
+    return False
 
 
 def sanitize_tool_args(tool_args: dict[str, Any]) -> dict[str, Any]:

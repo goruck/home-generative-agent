@@ -10,9 +10,82 @@
 
 **How to apply:** After `_async_validate_config_item` in `add_automation` (tools.py) — or in a langchain-branch guard in `_call_tools` (graph.py) — walk the parsed automation config's `action` list (including `choose`/`repeat`/`wait_for_trigger` nesting), extract each `service`/`action` call, and run it through `_is_critical_action` with the configured critical actions. If any matches and PIN is enabled, return the existing `requires_pin` ToolMessage flow (register in `pending_actions`) instead of writing the automation. Mind the prior pitfall: `confirm_sensitive_action` ToolMessages with `status=error` must not count as resolved.
 
+**Resolution:** Gated in `add_automation` itself. `_async_validate_config_item`'s *return value* is now used (it was discarded): it is the normalized, blueprint-substituted config, so screening sees the actions HA will really run rather than the model's prose. New `agent/automation_pin.py` classifies every step with `cv.determine_script_action` and screens it — an **allowlist over HA's own action taxonomy**, not a blocklist of service names. Rule matching moved to `matches_critical_rule` in `agent/helpers.py`, shared with `_is_critical_action`.
+
+The first draft blocklisted `action:`/`service:` steps only and was defeated by four bypasses found during pre-landing review, each verified against a real HA install by two independent reviewers: **device actions** (`device_id`+`domain`+`type`, no service key, maps to `lock.unlock`), **`scene.apply`** (target states inline, reproduced as `lock.unlock`), **indirection** (`script.turn_on`, bare `scene:`, `automation.trigger`, `event:`), and **group / entity-registry-ID targets** (ordinary-looking strings that resolve to entities named nowhere in the config, so `entity_match` substrings can't see them). A fifth, independent finding was a *rules* gap rather than a screening one: `cover.toggle` and `cover.set_cover_position` open a closed garage door and were not in `RECOMMENDED_CRITICAL_ACTIONS` — that hole applied to the direct-command gate too and is now closed.
+
+Also: unknown action types fail closed (a future HA construct over-prompts rather than slipping through); `homeassistant.*` is re-screened against each target's own domain; the automation path refuses when the PIN is enabled-but-unset (unlike the one-off tool path, an automation persists); pending actions are claimed before the write and the store is swept and capped on registration. The parity test asserts absolute verdicts on both sides — the first version stayed green with the shared matcher stubbed to `return False`.
+
 **Effort:** M
 **Priority:** P1
 **Depends on:** v3.20.2 (fix/tool-rag-automation-intent)
+**Completed:** v3.26.0 (2026-08-05)
+
+---
+
+### Resolve script/scene indirection instead of gating it wholesale
+
+**What:** `find_critical_automation_calls` (agent/automation_pin.py) fails closed on indirection: activating a scene, calling a script, triggering another automation, or firing an event all require the PIN, because the actions they run live in configuration the screen does not open. That is safe but blunt — an automation that calls a harmless script still prompts.
+
+**Why:** v3.26.0 shipped the conservative half. An earlier draft *deferred* indirection entirely on the theory that it needs a pre-existing critical script; pre-landing review disproved that for `scene.apply` (which carries target states inline and needs no pre-existing artifact) and for device actions, so indirection moved from "deferred" to "gated". Resolving it properly would remove the over-prompting.
+
+**How to apply:** Resolve `script.*` / `scene.*` targets against the live registries at screen time and recurse with a visited set and a depth cap; keep fail-closed for anything unresolvable. Decide first whether a re-screen is needed when the target script is later edited — the PIN would otherwise attest to something that has since changed, the same caveat that already applies to blueprint automations.
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** v3.26.0
+
+---
+
+### Raw protocol writes are not screened
+
+**What:** Automation screening (`agent/automation_pin.py`) matches Home Assistant domains and services, so a service that addresses a device *beneath* the entity layer is invisible to it: `mqtt.publish` to a lock's command topic, `zwave_js.set_value` writing a Door Lock command class (as a service call or a device action), `zha.issue_zigbee_cluster_command`. Each can unlock a door without the automation naming the `lock` domain.
+
+**Why:** Not gated by default — these are routine tools on their respective stacks, and gating them would prompt on ordinary MQTT/Z-Wave/Zigbee automations for the many users on those integrations. Documented in `docs/configuration.md` with per-transport opt-in rules users can add to `critical_actions`. Found by verification rounds 5 and 7 during the v3.26.0 ship.
+
+**How to apply:** Needs a way to tell "this MQTT topic / Z-Wave command class targets a lock" from any other write, which means resolving the device behind the topic or node. Alternatively ship the transport rules as opt-in presets in the Sentinel/options UI so users can enable them without hand-editing `critical_actions`. Decide whether the prompt cost is acceptable before defaulting any of them on.
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** v3.26.0
+
+---
+
+### Re-screen blueprint automations on reload, or pin the expansion
+
+**What:** A blueprint automation is persisted as a `use_blueprint:` reference and re-substituted by HA on every reload, so the PIN attests to the blueprint's contents at approval time only. Editing the blueprint file afterwards changes what the approved automation runs with no fresh prompt. Documented as a known limitation in v3.26.0's CHANGELOG and `docs/configuration.md`.
+
+**Why:** Found by Codex during the v3.26.0 pre-landing review, which also caught the docs claiming the written config always equals the screened one. Persisting the expansion instead would fix the attestation but discards the blueprint indirection users chose, and re-screening on reload needs a hook this integration does not currently own.
+
+**How to apply:** Either record a hash of the substituted config alongside the automation and re-screen on `automation.reload`, or persist the expansion with a comment pointing back at the source blueprint. Needs a product call on which surprises the user less.
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** v3.26.0
+
+---
+
+### Tie the screener's action-type lists to Home Assistant's schema
+
+**What:** `automation_pin.py` classifies steps with `cv.determine_script_action` and then dispatches on `_CONTAINER_ACTION_TYPES` / `_INERT_ACTION_TYPES`, which are hand-maintained mirrors of HA's script taxonomy. An unknown type already fails closed, so a new HA construct causes over-prompting rather than a hole — but nothing tells a maintainer that HA grew a construct worth classifying properly.
+
+**How to apply:** Add a drift test asserting `set(cv.ACTION_TYPE_SCHEMAS)` equals a locally-declared frozenset of reviewed action types, so an HA upgrade that adds one fails CI and forces a decision.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** v3.26.0
+
+---
+
+### Alarm carve-out is asymmetric between direct calls and automations
+
+**What:** `_is_critical_action` (graph.py) short-circuits `alarm_control_panel` to False — panels enforce their own code, not the critical-action PIN. The automation screen calls the shared `matches_critical_rule` directly and has no such carve-out, so a user who adds an `alarm_control_panel` rule to `critical_actions` gets an automation containing `alarm_disarm` gated while the direct disarm command is not.
+
+**Why:** No effect on default installs (`RECOMMENDED_CRITICAL_ACTIONS` contains no alarm rule) and the asymmetry errs toward gating, which is the safe direction. But the rationale for the direct-call carve-out is weaker inside an automation, where the alarm code is embedded in the YAML and never re-entered by a human — arguably automations *should* be gated and the asymmetry is correct. Needs a deliberate decision rather than being an accident of where the carve-out sits.
+
+**Effort:** S
+**Priority:** P4
+**Depends on:** v3.26.0
 
 ---
 

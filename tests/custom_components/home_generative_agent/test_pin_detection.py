@@ -81,3 +81,40 @@ class TestHasPendingPinConfirmation:
             _confirm_msg("Incorrect PIN. Action not executed."),
         ]
         assert _has_pending_pin_confirmation(msgs) is True
+
+
+class TestAddAutomationChallenge:
+    """
+    The add_automation gate depends on this tool-name-agnostic scan.
+
+    `add_automation` is a LangChain tool, not an HA actuation tool, so it is
+    absent from ACTUATION_LANGCHAIN_TOOLS and the degraded-flow fallback never
+    applies to it. If the requires_pin scan ever started filtering by tool
+    name, a held automation would become unconfirmable — the model would never
+    get `confirm_sensitive_action` force-injected on the next turn.
+    """
+
+    @staticmethod
+    def _automation_challenge() -> ToolMessage:
+        return ToolMessage(
+            content=json.dumps({"status": "requires_pin", "action_id": "auto1"}),
+            tool_call_id="tc9",
+            name="add_automation",
+        )
+
+    def test_add_automation_challenge_keeps_the_flow_pending(self) -> None:
+        assert _has_pending_pin_confirmation([self._automation_challenge()]) is True
+
+    def test_add_automation_challenge_resolves_on_completion(self) -> None:
+        msgs = [
+            self._automation_challenge(),
+            _confirm_msg(json.dumps({"status": "completed", "action_id": "auto1"})),
+        ]
+        assert _has_pending_pin_confirmation(msgs) is False
+
+    def test_add_automation_challenge_survives_a_wrong_pin(self) -> None:
+        msgs = [
+            self._automation_challenge(),
+            _confirm_msg("Incorrect PIN. Action not executed."),
+        ]
+        assert _has_pending_pin_confirmation(msgs) is True
