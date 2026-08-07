@@ -3,7 +3,7 @@
 # System tools (install separately):
 #   gh (GitHub CLI) -- https://cli.github.com/
 #   Ubuntu: add GitHub apt repo then: sudo apt install gh
-ruff==0.16.0
+ruff==0.16.1
 colorlog==6.12.0
 pre-commit>=4.6.1
 pyright==1.1.*
