@@ -123,7 +123,7 @@ class SentinelNotifier:
     ``stop()`` lifecycle methods.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         hass: HomeAssistant,
         options: dict[str, Any],
@@ -864,9 +864,7 @@ async def _build_subtitle(
             raw_name = _friendly_entity(finding.triggering_entities[0])
         appliance = _strip_power_suffix(raw_name).title()
         if appliance:
-            return templates["subtitle_appliance_finished"].format(
-                appliance=appliance
-            )
+            return templates["subtitle_appliance_finished"].format(appliance=appliance)
         return templates["subtitle_appliance_cycle_complete"]
     if finding.evidence.get("template_id") == "alarm_disarmed_open_entry":
         entry_id = str(finding.evidence.get("entry_entity_id") or "")
@@ -881,7 +879,9 @@ async def _build_subtitle(
             raw_name = _friendly_entity(finding.triggering_entities[0])
         appliance = _strip_power_suffix(raw_name).title() or "Sensor"
         direction = str(finding.evidence.get("deviation_direction") or "")
-        direction_key = "direction_lower" if direction == "below" else "direction_higher"
+        direction_key = (
+            "direction_lower" if direction == "below" else "direction_higher"
+        )
         direction_word = templates[direction_key]
         return templates["subtitle_power_deviation"].format(
             appliance=appliance, direction_word=direction_word

@@ -124,7 +124,7 @@ class TemplateTranslator:
         # they can't ride along in the single async_get() batch call).
         self._label_cache: dict[tuple[str, str], str] = {}
 
-    async def async_get(self, language: str) -> dict[str, str]:
+    async def async_get(self, language: str) -> dict[str, str]:  # noqa: PLR0911
         """Return the (possibly-translated) template map for *language*."""
         if not language or self._model is None:
             return ENGLISH_TEMPLATES
@@ -167,7 +167,7 @@ class TemplateTranslator:
         self._cache[language] = translated
         return translated
 
-    async def async_translate_label(self, text: str, language: str) -> str:
+    async def async_translate_label(self, text: str, language: str) -> str:  # noqa: PLR0911
         """
         Translate a single short, dynamic label into *language*.
 
@@ -205,9 +205,7 @@ class TemplateTranslator:
                 health_stats=self._health_stats,
             )
         except SentinelLLMDeferredError as err:
-            LOGGER.debug(
-                "Sentinel label translation to %s deferred: %s", language, err
-            )
+            LOGGER.debug("Sentinel label translation to %s deferred: %s", language, err)
             return text
         except TimeoutError:
             LOGGER.warning(
@@ -217,9 +215,7 @@ class TemplateTranslator:
             )
             return text
         except Exception:
-            LOGGER.exception(
-                "Unexpected error translating label to %s.", language
-            )
+            LOGGER.exception("Unexpected error translating label to %s.", language)
             return text
 
         content = getattr(result, "content", None)
