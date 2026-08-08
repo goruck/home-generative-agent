@@ -48,6 +48,12 @@ from custom_components.home_generative_agent.const import (
     SNOOZE_PERMANENT,
 )
 from custom_components.home_generative_agent.core.utils import extract_final
+from custom_components.home_generative_agent.explain.template_translate import (
+    ENGLISH_TEMPLATES,
+    KNOWN_TYPE_LABELS,
+    TYPE_LABEL_KEYS,
+    TemplateTranslator,
+)
 from custom_components.home_generative_agent.sentinel.suppression import (
     SUPPRESSION_REASON_NOT_SUPPRESSED,
     record_cooldown_feedback,
@@ -84,6 +90,11 @@ _SEVERITY_TITLE: dict[str, str] = {
     "medium": "Home Alert",
     "low": "Home Update",
 }
+_SEVERITY_TITLE_KEY: dict[str, str] = {
+    "high": "title_high",
+    "medium": "title_medium",
+    "low": "title_low",
+}
 
 # Notification batching / rate-limiting.
 _BATCH_RATE_LIMIT = 3
@@ -112,13 +123,14 @@ class SentinelNotifier:
     ``stop()`` lifecycle methods.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         hass: HomeAssistant,
         options: dict[str, Any],
         suppression: SuppressionManager,
         action_handler: ActionHandler,
         audit_store: AuditStore | None = None,
+        template_translator: TemplateTranslator | None = None,
     ) -> None:
         """Initialise the sentinel notifier."""
         self._hass = hass
@@ -126,6 +138,10 @@ class SentinelNotifier:
         self._suppression = suppression
         self._action_handler = action_handler
         self._audit_store = audit_store
+        # Optional: translates the fixed title/subtitle strings once per
+        # configured sentinel_response_language. None (default) means those
+        # two surfaces stay English, same as before this was added.
+        self._template_translator = template_translator
         self._unsub: Callable[[], None] | None = None
         # Pending permanent-snooze intents: anomaly_id -> finding_type.
         # Written when the user taps "Snooze Always"; cleared on confirm/cancel.
@@ -223,14 +239,28 @@ class SentinelNotifier:
         # Sensitive redaction before building the message.
         clean_explanation = _redact_if_sensitive(explanation, finding)
 
+        response_language = str(
+            self._options.get(CONF_SENTINEL_RESPONSE_LANGUAGE, "") or ""
+        )
+        templates = (
+            await self._template_translator.async_get(response_language)
+            if self._template_translator and response_language
+            else ENGLISH_TEMPLATES
+        )
+
         severity = finding.severity
-        title = _SEVERITY_TITLE.get(severity, "Home Alert")
+        title = templates.get(
+            _SEVERITY_TITLE_KEY.get(severity, "title_medium"),
+            _SEVERITY_TITLE.get(severity, "Home Alert"),
+        )
         interrupt_level = _SEVERITY_INTERRUPT_LEVEL.get(severity, "active")
-        subtitle = _build_subtitle(finding)
+        subtitle = await _build_subtitle(
+            finding, templates, self._template_translator, response_language
+        )
         mobile_msg = _mobile_message(
             clean_explanation,
             finding,
-            str(self._options.get(CONF_SENTINEL_RESPONSE_LANGUAGE, "") or ""),
+            response_language,
         )
         persistent_msg = _persistent_message(clean_explanation, finding)
         actions = _build_actions(finding)
@@ -680,25 +710,16 @@ def _normalize_text(text: str) -> str:
     return text.replace("**", "").replace("`", "")
 
 
-_KNOWN_TYPE_LABELS = {
-    "open_entry_while_away": "Open entry while away",
-    "open_entry_at_night_when_home": "Open entry at night",
-    "open_entry_at_night_when_home_window": "Open entry at night",
-    "open_entry_at_night_while_away": "Open entry at night",
-    "open_entry_at_night": "Open entry at night",
-    "open_entry_at_night_window": "Open entry at night",
-    "open_entry_at_night_door": "Open entry at night",
-    "open_entry_at_night_entry": "Open entry at night",
-    "open_any_window_at_night_while_away": "Window open at night",
-    "motion_detected_at_night_while_away": "Motion at night while away",
-    "motion_detected_while_away": "Motion while away",
-    "unlocked_lock_at_night": "Door lock left unlocked",
-    "camera_entry_unsecured": "Activity near unsecured entry",
-    "alarm_disarmed_during_external_threat": "Outdoor activity while alarm disarmed",
-}
+# Kept as an alias so the rest of this module (and any external callers)
+# don't need to change; the curated labels themselves now live in
+# template_translate.py so they can be included in the translated template
+# set (see TYPE_LABEL_KEYS / TYPE_KEYS there).
+_KNOWN_TYPE_LABELS = KNOWN_TYPE_LABELS
 
 
-def _display_type(finding: AnomalyFinding) -> str:
+def _display_type(
+    finding: AnomalyFinding, templates: dict[str, str] = ENGLISH_TEMPLATES
+) -> str:
     """
     Friendly label for a finding.
 
@@ -706,12 +727,23 @@ def _display_type(finding: AnomalyFinding) -> str:
     type has no curated label but the rule's template does, prefer the
     template label so notifications never show raw candidate slugs
     (issue #516 review).
+
+    *templates* supplies the (possibly-translated) label for known types via
+    ``TYPE_LABEL_KEYS``; it defaults to the English originals so existing
+    callers that don't pass it keep the previous behavior. Types with no
+    curated label at all (discovery-generated candidate/rule slugs) fall
+    through to ``_friendly_type`` in English -- see ``_build_subtitle`` for
+    the runtime per-label translation of that case.
     """
     if finding.type in _KNOWN_TYPE_LABELS:
-        return _KNOWN_TYPE_LABELS[finding.type]
+        key = TYPE_LABEL_KEYS.get(finding.type)
+        fallback = _KNOWN_TYPE_LABELS[finding.type]
+        return templates.get(key, fallback) if key else fallback
     template_id = str(finding.evidence.get("template_id") or "")
     if template_id in _KNOWN_TYPE_LABELS:
-        return _KNOWN_TYPE_LABELS[template_id]
+        key = TYPE_LABEL_KEYS.get(template_id)
+        fallback = _KNOWN_TYPE_LABELS[template_id]
+        return templates.get(key, fallback) if key else fallback
     return _friendly_type(finding.type)
 
 
@@ -805,18 +837,39 @@ def _appliance_power_duration_mobile_message(finding: AnomalyFinding) -> str:
     return msg[:MAX_MOBILE_MESSAGE_CHARS].rstrip()
 
 
-def _build_subtitle(finding: AnomalyFinding) -> str:
-    """Return the notification subtitle line for *finding*."""
+async def _build_subtitle(
+    finding: AnomalyFinding,
+    templates: dict[str, str] = ENGLISH_TEMPLATES,
+    translator: TemplateTranslator | None = None,
+    language: str = "",
+) -> str:
+    """
+    Return the notification subtitle line for *finding*.
+
+    *templates* supplies the (possibly-translated) subtitle patterns; it
+    defaults to the English originals so existing callers/tests that don't
+    pass it keep the previous behavior unchanged.
+
+    *translator* and *language*, when both given, are used to translate the
+    fallback ``_display_type`` label at runtime for findings whose type has
+    no curated entry in ``KNOWN_TYPE_LABELS`` -- i.e. discovery-generated
+    candidate/rule findings. These labels are unbounded and not known ahead
+    of time, so they can't ride along in the single ``async_get`` batch
+    translation; this is a one-off, per-label call cached by
+    ``TemplateTranslator`` itself.
+    """
     if finding.evidence.get("is_completion"):
         raw_name = str(finding.evidence.get("friendly_name") or "").strip()
         if not raw_name and finding.triggering_entities:
             raw_name = _friendly_entity(finding.triggering_entities[0])
         appliance = _strip_power_suffix(raw_name).title()
-        return f"{appliance} finished" if appliance else "Appliance cycle complete"
+        if appliance:
+            return templates["subtitle_appliance_finished"].format(appliance=appliance)
+        return templates["subtitle_appliance_cycle_complete"]
     if finding.evidence.get("template_id") == "alarm_disarmed_open_entry":
         entry_id = str(finding.evidence.get("entry_entity_id") or "")
         entry_name = _friendly_entity(entry_id) if entry_id else "Entry"
-        return f"{entry_name} open, alarm disarmed"
+        return templates["subtitle_entry_open_disarmed"].format(entry_name=entry_name)
     if finding.evidence.get("template_id") in {
         "baseline_deviation",
         "time_of_day_anomaly",
@@ -826,9 +879,21 @@ def _build_subtitle(finding: AnomalyFinding) -> str:
             raw_name = _friendly_entity(finding.triggering_entities[0])
         appliance = _strip_power_suffix(raw_name).title() or "Sensor"
         direction = str(finding.evidence.get("deviation_direction") or "")
-        direction_word = "lower" if direction == "below" else "higher"
-        return f"{appliance}: power {direction_word} than expected"
-    return _display_type(finding)
+        direction_key = (
+            "direction_lower" if direction == "below" else "direction_higher"
+        )
+        direction_word = templates[direction_key]
+        return templates["subtitle_power_deviation"].format(
+            appliance=appliance, direction_word=direction_word
+        )
+    label = _display_type(finding, templates)
+    is_known_type = (
+        finding.type in _KNOWN_TYPE_LABELS
+        or str(finding.evidence.get("template_id") or "") in _KNOWN_TYPE_LABELS
+    )
+    if translator is not None and language and not is_known_type:
+        return await translator.async_translate_label(label, language)
+    return label
 
 
 def _fallback_message(finding: AnomalyFinding) -> str:
@@ -994,25 +1059,6 @@ _TEMPLATE_MOBILE_FORMATTERS: dict[
 }
 
 
-# Deterministic copy that carries security actuation detail — which camera,
-# which entry, when the alarm was disarmed, and what to do about it. An LLM
-# paraphrase blurs those or asserts things the evidence does not support
-# ("someone is still inside"), so these never defer to a translated
-# explanation, even when a response language is configured. Translating them
-# needs real string templates, not model prose.
-_SECURITY_MESSAGE_TYPES = frozenset({"alarm_disarmed_during_external_threat"})
-_SECURITY_MESSAGE_TEMPLATE_IDS = frozenset({"alarm_disarmed_open_entry"})
-
-
-def _is_security_copy(finding: AnomalyFinding) -> bool:
-    """Return True when *finding*'s deterministic copy must never be paraphrased."""
-    return (
-        finding.type in _SECURITY_MESSAGE_TYPES
-        or str(finding.evidence.get("template_id") or "")
-        in _SECURITY_MESSAGE_TEMPLATE_IDS
-    )
-
-
 def _deterministic_mobile_message(finding: AnomalyFinding) -> str | None:
     """
     Return the hardcoded-English template message for *finding*, or ``None``.
@@ -1042,25 +1088,18 @@ def _mobile_message(
     Return the mobile push body for *finding*.
 
     Deterministic per-template formatters win by default.  When a response
-    language is configured the translated *explanation* wins instead for
-    informational findings: the deterministic strings are English-only, so
-    they would otherwise be the one part of the notification that ignores the
-    setting — and because ``_persistent_message`` already prefers the
-    explanation, the mobile push and the persistent notification would
-    disagree for the same finding.
-
-    Security copy (see ``_is_security_copy``) is exempt and stays
-    deterministic in every case: losing the camera, the entry, the disarm
-    time, or the call to action matters more than the language it is in.
+    language is configured the translated *explanation* wins instead: the
+    deterministic strings are English-only, so they would otherwise be the one
+    part of the notification that ignores the setting — and because
+    ``_persistent_message`` already prefers the explanation, the mobile push
+    and the persistent notification would disagree for the same finding.
 
     Falls back to the deterministic string when no translation is usable
-    (explainer disabled or empty explanation): accurate English beats a
-    generic English fallback.
+    (explainer disabled, empty explanation, or one that exceeds the mobile
+    character cap): accurate English beats a generic English fallback.
     """
     deterministic = _deterministic_mobile_message(finding)
-    if deterministic is not None and (
-        not response_language or _is_security_copy(finding)
-    ):
+    if deterministic is not None and not response_language:
         return deterministic
     if explanation:
         text = _normalize_text(explanation)
