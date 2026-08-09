@@ -7,6 +7,7 @@ from custom_components.home_generative_agent.agent.graph import (
     _determine_model_name,
     _ensure_array_items,
     _format_and_dedupe_tools,
+    _sanitize_any_of_required,
 )
 from custom_components.home_generative_agent.const import CONF_ANTHROPIC_CHAT_MODEL
 
@@ -174,6 +175,333 @@ def test_format_and_dedupe_tools_gemini_array_items_injected() -> None:
     domain_schema = selected[0]["function"]["parameters"]["properties"]["domain"]
     assert "items" in domain_schema, "Gemini requires items on array-type properties"
     assert domain_schema["items"] == {"type": "string"}
+
+
+# The shape voluptuous_openapi emits for Home Assistant's "at least one target"
+# pattern, vol.Required(vol.Any("name", "area", "floor")): parent-level
+# properties plus bare-'required' anyOf variants. Valid JSON Schema; only
+# Gemini's protobuf validation rejects it.
+_HA_TARGET_SCHEMA = (
+    '{"type": "object", "properties": {"name": {"type": "string"}, '
+    '"area": {"type": "string"}, "floor": {"type": "string"}}, '
+    '"required": [], "anyOf": [{"required": ["name"]}, '
+    '{"required": ["area"]}, {"required": ["floor"]}]}'
+)
+
+
+def _target_tool(name: str = "HassTurnOn") -> list:
+    """Build a raw tool carrying the HA at-least-one-target schema."""
+    return [
+        {
+            "name": name,
+            "api_id": "test",
+            "description": "Turns on a device",
+            "parameters": _HA_TARGET_SCHEMA,
+            "is_actuation": True,
+        }
+    ]
+
+
+def test_sanitize_any_of_required_strips_required_from_non_object_variant() -> None:
+    """
+    'required' on a non-OBJECT anyOf branch is stripped.
+
+    Gemini rejects declarations where an anyOf variant carries 'required'
+    but is not itself type:object.
+    """
+    schema = {
+        "anyOf": [
+            {"type": "array", "items": {"type": "string"}, "required": ["x"]},
+            {"type": "string"},
+        ]
+    }
+    result = _sanitize_any_of_required(schema)
+    assert "required" not in result["anyOf"][0]
+    assert result["anyOf"][0] == {"type": "array", "items": {"type": "string"}}
+
+
+def test_sanitize_any_of_required_strips_undefined_property_from_object_variant() -> (
+    None
+):
+    """'required' entries not present in that branch's properties are dropped."""
+    schema = {
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name", "missing_prop"],
+            },
+            {"type": "string"},
+        ]
+    }
+    result = _sanitize_any_of_required(schema)
+    assert result["anyOf"][0]["required"] == ["name"]
+
+
+def test_sanitize_any_of_required_drops_required_key_when_empty_after_filtering() -> (
+    None
+):
+    """If every required property is undefined, the 'required' key is removed."""
+    schema = {
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["missing_prop"],
+            }
+        ]
+    }
+    result = _sanitize_any_of_required(schema)
+    assert "required" not in result["anyOf"][0]
+
+
+def test_sanitize_any_of_required_valid_object_variant_unchanged() -> None:
+    """A well-formed OBJECT anyOf variant with valid 'required' is left alone."""
+    schema = {
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+            }
+        ]
+    }
+    result = _sanitize_any_of_required(schema)
+    assert result["anyOf"][0]["required"] == ["name"]
+
+
+def test_sanitize_any_of_required_implicit_object_variant_is_filtered() -> None:
+    """A variant with properties but no explicit type keeps its valid required."""
+    schema = {
+        "anyOf": [
+            {
+                "properties": {"name": {"type": "string"}},
+                "required": ["name", "missing_prop"],
+            }
+        ]
+    }
+    result = _sanitize_any_of_required(schema)
+    assert result["anyOf"][0]["required"] == ["name"], (
+        "implicit object must be filtered, not stripped wholesale"
+    )
+
+
+def test_sanitize_any_of_required_drops_emptied_variants() -> None:
+    """Variants left empty by the strip are removed rather than sent as {}."""
+    schema = {
+        "properties": {"name": {"type": "string"}, "area": {"type": "string"}},
+        "anyOf": [{"required": ["name"]}, {"required": ["area"]}],
+    }
+    result = _sanitize_any_of_required(schema)
+    assert "anyOf" not in result, "a fully emptied anyOf must not reach the proto"
+
+
+def test_sanitize_any_of_required_keeps_surviving_variants() -> None:
+    """An emptied variant is dropped while a non-empty sibling survives."""
+    schema = {
+        "properties": {"name": {"type": "string"}},
+        "anyOf": [{"required": ["name"]}, {"type": "string"}],
+    }
+    result = _sanitize_any_of_required(schema)
+    assert result["anyOf"] == [{"type": "string"}]
+
+
+def test_sanitize_any_of_required_records_dropped_constraint_in_description() -> None:
+    """A stripped constraint is restated in the description for the model."""
+    schema = {
+        "properties": {
+            "name": {"type": "string"},
+            "area": {"type": "string"},
+            "floor": {"type": "string"},
+        },
+        "anyOf": [
+            {"required": ["name"]},
+            {"required": ["area"]},
+            {"required": ["floor"]},
+        ],
+    }
+    result = _sanitize_any_of_required(schema)
+    assert result["description"] == "At least one of: name, area, floor is required."
+
+
+def test_sanitize_any_of_required_appends_hint_to_existing_description() -> None:
+    """An existing description is preserved and the hint appended."""
+    schema = {
+        "description": "Turns on a device.",
+        "properties": {"name": {"type": "string"}},
+        "anyOf": [{"required": ["name"]}],
+    }
+    result = _sanitize_any_of_required(schema)
+    assert result["description"] == (
+        "Turns on a device. At least one of: name is required."
+    )
+
+
+def test_sanitize_any_of_required_multi_property_groups_in_hint() -> None:
+    """Multi-property branches are rendered as groups in the hint."""
+    schema = {
+        "properties": {"name": {"type": "string"}, "area": {"type": "string"}},
+        "anyOf": [{"required": ["name", "area"]}, {"required": ["name"]}],
+    }
+    result = _sanitize_any_of_required(schema)
+    assert result["description"] == (
+        "At least one of these property groups is required: (name, area); (name)."
+    )
+
+
+def test_sanitize_any_of_required_recurses_into_properties() -> None:
+    """Nested object properties containing anyOf/required are also sanitized."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "target": {
+                "anyOf": [
+                    {"type": "array", "items": {"type": "string"}, "required": ["x"]},
+                    {"type": "string"},
+                ]
+            }
+        },
+    }
+    result = _sanitize_any_of_required(schema)
+    assert "required" not in result["properties"]["target"]["anyOf"][0]
+
+
+def test_sanitize_any_of_required_recurses_into_items() -> None:
+    """Array items containing anyOf/required are also sanitized."""
+    schema = {
+        "type": "array",
+        "items": {
+            "anyOf": [
+                {"type": "array", "items": {"type": "string"}, "required": ["x"]},
+                {"type": "string"},
+            ]
+        },
+    }
+    result = _sanitize_any_of_required(schema)
+    assert "required" not in result["items"]["anyOf"][0]
+
+
+def test_sanitize_any_of_required_recurses_into_nested_any_of() -> None:
+    """An anyOf nested inside an anyOf variant is sanitized too."""
+    schema = {
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {"inner": {"type": "string"}},
+                "anyOf": [
+                    {"type": "array", "items": {"type": "string"}, "required": ["x"]}
+                ],
+            }
+        ]
+    }
+    result = _sanitize_any_of_required(schema)
+    assert "required" not in result["anyOf"][0]["anyOf"][0]
+
+
+def test_sanitize_any_of_required_non_dict_variant_passes_through() -> None:
+    """Non-dict anyOf entries are left untouched rather than crashing."""
+    schema = {"anyOf": ["not_a_dict", {"type": "string"}]}
+    result = _sanitize_any_of_required(schema)
+    assert result["anyOf"] == ["not_a_dict", {"type": "string"}]
+
+
+def test_sanitize_any_of_required_malformed_required_does_not_raise() -> None:
+    """A null or non-list 'required' is ignored instead of raising TypeError."""
+    schema = {
+        "anyOf": [
+            {"type": "object", "properties": {}, "required": None},
+            {"type": "object", "properties": {}, "required": "name"},
+            {"type": "object", "properties": {"a": {}}, "required": ["a", 3, None]},
+        ]
+    }
+    result = _sanitize_any_of_required(schema)
+    assert result["anyOf"][0]["required"] is None, "non-list required left as-is"
+    assert result["anyOf"][1]["required"] == "name"
+    assert result["anyOf"][2]["required"] == ["a"], "non-str entries filtered out"
+
+
+def test_sanitize_any_of_required_non_list_any_of_unchanged() -> None:
+    """A malformed non-list anyOf is left alone instead of being iterated."""
+    schema = {"anyOf": "bogus"}
+    assert _sanitize_any_of_required(schema) == schema
+
+
+def test_sanitize_any_of_required_no_any_of_unchanged() -> None:
+    """Schemas without anyOf are returned unchanged."""
+    schema = {"type": "object", "properties": {}, "required": ["x"]}
+    result = _sanitize_any_of_required(schema)
+    assert result == schema
+
+
+def test_format_and_dedupe_tools_gemini_strips_invalid_any_of_required() -> None:
+    """
+    End-to-end: a 3-branch anyOf with mismatched 'required' is sanitized.
+
+    Reproduces the reported Gemini 400 error:
+    ``GenerateContentRequest.tools[0].function_declarations[1].parameters
+    .any_of[N].required: only allowed for OBJECT type`` /
+    ``any_of[N].required[0]: property is not defined``.
+    """
+    raw: list = [
+        {
+            "name": "flaky_union_tool",
+            "api_id": "test",
+            "description": "Tool with a 3-way union parameter",
+            "parameters": (
+                '{"type": "object", "properties": {"target": {"anyOf": ['
+                '{"required": ["entity_id"]},'
+                '{"type": "object", "properties": {"area_id": {"type": "string"}},'
+                ' "required": ["area_id", "entity_id"]},'
+                '{"type": "array", "items": {"type": "string"}, '
+                '"required": ["entity_id"]}'
+                "]}}}"
+            ),
+            "is_actuation": False,
+        }
+    ]
+    selected, _ = _format_and_dedupe_tools(raw, "gemini")
+    target = selected[0]["function"]["parameters"]["properties"]["target"]
+    variants = target["anyOf"]
+    assert len(variants) == 2, "the bare-required variant is dropped once emptied"
+    assert variants[0]["required"] == ["area_id"], (
+        "object variant keeps only required props it actually defines"
+    )
+    assert "required" not in variants[1], "array variant must lose 'required'"
+    assert "entity_id" in target["description"], (
+        "the dropped constraint must survive as description guidance"
+    )
+
+
+def test_format_and_dedupe_tools_gemini_rewrites_ha_target_constraint() -> None:
+    """The real HA at-least-one-target schema is made Gemini-safe."""
+    selected, _ = _format_and_dedupe_tools(_target_tool(), "gemini")
+    params = selected[0]["function"]["parameters"]
+    assert "anyOf" not in params, "bare-required branches must not reach Gemini"
+    assert params["description"] == (
+        "At least one of: name, area, floor is required."
+    ), "constraint must be preserved as guidance"
+    assert set(params["properties"]) == {"name", "area", "floor"}
+
+
+def test_format_and_dedupe_tools_non_gemini_keeps_any_of_required() -> None:
+    """
+    Non-Gemini providers keep HA's at-least-one-target constraint intact.
+
+    The sanitizer is subtractive: running it unconditionally would hand
+    OpenAI/Anthropic/Ollama a vacuous schema, letting the model emit a
+    targetless call that HA's own voluptuous validation then rejects.
+    """
+    for provider in ("openai", "openai_compatible", "anthropic", "ollama", None):
+        selected, _ = _format_and_dedupe_tools(_target_tool(), provider)
+        params = selected[0]["function"]["parameters"]
+        assert params["anyOf"] == [
+            {"required": ["name"]},
+            {"required": ["area"]},
+            {"required": ["floor"]},
+        ], f"provider {provider!r} must keep the at-least-one-target constraint"
+        assert "description" not in params, (
+            f"provider {provider!r} needs no description workaround"
+        )
 
 
 def test_determine_model_name_anthropic_returns_configured_model() -> None:
