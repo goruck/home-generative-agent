@@ -86,6 +86,7 @@ from .helpers import (
     resolve_critical_action_policy,
     sanitize_tool_args,
 )
+from .pin_messages import pin_msg
 from .token_counter import count_tokens_cross_provider
 
 if TYPE_CHECKING:
@@ -398,7 +399,7 @@ def _critical_action_guard(
             {
                 "status": "requires_pin",
                 "action_id": action_id,
-                "reason": "Critical action requires PIN confirmation.",
+                "reason": pin_msg(ctx.hass, "direct_requires_pin_reason"),
             }
         ),
         tool_call_id=tool_call.get("id"),
