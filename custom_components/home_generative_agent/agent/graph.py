@@ -1335,6 +1335,41 @@ def _sanitize_any_of_required(schema: dict[str, Any]) -> dict[str, Any]:
     return schema
 
 
+_TOP_LEVEL_UNION_KEYS = ("oneOf", "anyOf", "allOf")
+
+
+def _flatten_top_level_union(schema: dict[str, Any]) -> dict[str, Any]:
+    """
+    Flatten a top-level oneOf/anyOf/allOf into a single object schema.
+
+    OpenAI's function-calling validator rejects oneOf/anyOf/allOf/enum/
+    const/not at the top level of ``parameters`` ("schema must have type
+    'object' and not have 'oneOf'/'anyOf'/'allOf'/'enum'/'const'/'not' at
+    the top level"). HA's voluptuous->JSON-schema conversion emits exactly
+    this shape for services with multiple parameter forms, e.g.
+    HassStartTimer's ``duration``, which accepts either a plain string or
+    a structured hours/minutes/seconds object.
+
+    Union the ``properties`` from every variant into one permissive object
+    schema so OpenAI accepts it. Required fields are dropped since they
+    differ per variant and the union is inherently optional-only.
+    """
+    union_key = next((k for k in _TOP_LEVEL_UNION_KEYS if k in schema), None)
+    if union_key is None:
+        return schema
+    variants = schema[union_key]
+    if not isinstance(variants, list):
+        return schema
+    merged_properties: dict[str, Any] = {}
+    for variant in variants:
+        if isinstance(variant, dict):
+            merged_properties.update(variant.get("properties", {}))
+    schema = {k: v for k, v in schema.items() if k not in _TOP_LEVEL_UNION_KEYS}
+    schema["type"] = "object"
+    schema["properties"] = {**merged_properties, **schema.get("properties", {})}
+    return schema
+
+
 def _format_and_dedupe_tools(
     raw_tools: list[RawTool],
     provider: str | None = None,
@@ -1352,8 +1387,12 @@ def _format_and_dedupe_tools(
         parameters = json.loads(tool["parameters"])
         if not isinstance(parameters, dict):
             parameters = {"type": "object", "properties": {}}
-        elif not parameters.get("type"):
-            parameters["type"] = "object"
+        else:
+            # OpenAI rejects oneOf/anyOf/allOf at the top level of
+            # `parameters` (e.g. HassStartTimer's duration union).
+            parameters = _flatten_top_level_union(parameters)
+            if not parameters.get("type"):
+                parameters["type"] = "object"
         # OpenAI requires 'properties' on all type:object schemas.
         if parameters.get("type") == "object" and "properties" not in parameters:
             parameters["properties"] = {}

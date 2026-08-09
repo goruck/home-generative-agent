@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+import json
+
 from custom_components.home_generative_agent.agent.graph import (
     _determine_model_name,
     _ensure_array_items,
+    _flatten_top_level_union,
     _format_and_dedupe_tools,
     _sanitize_any_of_required,
 )
@@ -513,3 +516,104 @@ def test_determine_model_name_anthropic_returns_configured_model() -> None:
 def test_determine_model_name_anthropic_missing_key_returns_empty() -> None:
     """Anthropic provider with no key in opts returns empty string."""
     assert _determine_model_name("anthropic", {}) == ""
+
+
+def test_flatten_top_level_union_merges_any_of_properties() -> None:
+    """
+    A top-level anyOf is flattened to a single object schema.
+
+    Mirrors HassStartTimer's ``duration`` parameter shape, which
+    voluptuous_openapi emits as a top-level anyOf between a plain string
+    and a structured hours/minutes/seconds object. OpenAI rejects any of
+    oneOf/anyOf/allOf/enum/const/not at the top level of ``parameters``.
+    """
+    schema = {
+        "anyOf": [
+            {"type": "object", "properties": {"duration": {"type": "string"}}},
+            {
+                "type": "object",
+                "properties": {
+                    "hours": {"type": "integer"},
+                    "minutes": {"type": "integer"},
+                },
+            },
+        ]
+    }
+    result = _flatten_top_level_union(schema)
+    assert result["type"] == "object"
+    assert "anyOf" not in result
+    assert set(result["properties"]) == {"duration", "hours", "minutes"}
+
+
+def test_flatten_top_level_union_handles_one_of_and_all_of() -> None:
+    """oneOf and allOf are flattened the same way as anyOf."""
+    for key in ("oneOf", "allOf"):
+        schema = {
+            key: [
+                {"properties": {"a": {"type": "string"}}},
+                {"properties": {"b": {"type": "string"}}},
+            ]
+        }
+        result = _flatten_top_level_union(schema)
+        assert result["type"] == "object"
+        assert key not in result
+        assert set(result["properties"]) == {"a", "b"}
+
+
+def test_flatten_top_level_union_no_union_key_unchanged() -> None:
+    """Schemas without a top-level union key pass through untouched."""
+    schema = {"type": "object", "properties": {"x": {"type": "string"}}}
+    assert _flatten_top_level_union(schema) == schema
+
+
+def test_flatten_top_level_union_preserves_existing_properties() -> None:
+    """Pre-existing top-level properties win over merged variant properties."""
+    schema = {
+        "anyOf": [{"properties": {"a": {"type": "string"}}}],
+        "properties": {"a": {"type": "integer"}},
+    }
+    result = _flatten_top_level_union(schema)
+    assert result["properties"]["a"] == {"type": "integer"}
+
+
+def test_format_and_dedupe_tools_flattens_hass_start_timer_any_of() -> None:
+    """
+    End-to-end: a HassStartTimer-shaped schema no longer has a top-level anyOf.
+
+    Regression test for openai.BadRequestError: "Invalid schema for function
+    'HassStartTimer': schema must have type 'object' and not have
+    'oneOf'/'anyOf'/'allOf'/'enum'/'const'/'not' at the top level."
+    """
+    raw: list = [
+        {
+            "name": "HassStartTimer",
+            "api_id": "assist",
+            "description": "Start a timer",
+            "parameters": json.dumps(
+                {
+                    "anyOf": [
+                        {
+                            "type": "object",
+                            "properties": {"duration": {"type": "string"}},
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "hours": {"type": "integer"},
+                                "minutes": {"type": "integer"},
+                                "seconds": {"type": "integer"},
+                            },
+                        },
+                    ]
+                }
+            ),
+            "is_actuation": True,
+        }
+    ]
+    selected, _ = _format_and_dedupe_tools(raw)
+    params = selected[0]["function"]["parameters"]
+    assert params["type"] == "object"
+    assert "anyOf" not in params
+    assert "oneOf" not in params
+    assert "allOf" not in params
+    assert set(params["properties"]) == {"duration", "hours", "minutes", "seconds"}
