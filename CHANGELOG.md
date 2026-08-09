@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.26.1] - 2026-08-09
+
+### Fixed
+
+- **Gemini no longer rejects the tool schemas Home Assistant's own intents produce**, reported with a root-cause analysis, patch and repro tests by [@hruba202](https://github.com/hruba202) in [#527](https://github.com/goruck/home-generative-agent/pull/527). Gemini validates function declarations through protobuf and refuses an `anyOf` branch that carries `required` without being `type: object`, or one whose `required` names a property that branch does not define (`any_of[N].required: only allowed for OBJECT type`). `voluptuous_openapi` emits exactly that shape for the "at least one target" pattern behind `HassTurnOn` and its siblings — `vol.Required(vol.Any("name", "area", "floor"))` becomes parent-level properties plus bare-`required` variants — so a Gemini install could fail on any turn where those tools were offered. Those branches are now stripped before the declaration is sent, variants emptied by the strip are dropped (and a fully emptied `anyOf` removed) so no `TYPE_UNSPECIFIED` entry reaches the proto, and what the strip drops is restated in the schema description — "At least one of: name, area, floor is required." — so the model still reads the constraint it can no longer be made to validate. `_ensure_array_items()` ([#430](https://github.com/goruck/home-generative-agent/pull/430)) already normalized the neighbouring `items`/`anyOf` problem but never touched `required`.
+- **The strip is gated on Gemini and applied to no other provider.** Those branches are valid JSON Schema, and OpenAI, Anthropic and Ollama all honour them; running the pass unconditionally would advertise a schema permitting a targetless `HassTurnOn`, which the model would duly emit and Home Assistant's own voluptuous validation would then reject at run time — trading a provider-specific error for a silent capability loss everywhere else. A variant carrying `properties` but no explicit type is treated as an object rather than stripped wholesale, and a malformed `anyOf` or `required` from a custom tool serializer is skipped rather than raised, so one bad schema cannot take down tool selection for the whole turn.
+
 ## [3.26.0] - 2026-08-05
 
 ### Security
