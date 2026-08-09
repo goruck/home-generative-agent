@@ -37,21 +37,16 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "This automation performs a critical action, but the "
             "critical-action PIN is enabled without a PIN being set, so "
             "it cannot be confirmed. Set a PIN in the integration "
-            "options and try again."
+        "options and try again."
         ),
         "automation_requires_pin_reason": (
             "This automation requires PIN confirmation because {reason}: {calls}."
         ),
-        "pending_action_wrong_user": (
-            "Pending action belongs to a different user; please re-run the request."
-        ),
-
         "direct_requires_pin_reason": "Critical action requires PIN confirmation.",
         "pending_action_not_found_or_expired": "Pending action not found or expired.",
         "pending_action_not_found": "Pending action not found.",
         "pending_action_wrong_user": (
-            "Pending action belongs to a different user; please "
-            "re-run the request."
+            "Pending action belongs to a different user; please re-run the request."
         ),
         "pending_action_invalid": "Pending action is invalid; please try again.",
         "pending_action_expired": "Pending action expired; please re-run the request.",
