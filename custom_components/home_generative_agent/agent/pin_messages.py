@@ -37,7 +37,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "This automation performs a critical action, but the "
             "critical-action PIN is enabled without a PIN being set, so "
             "it cannot be confirmed. Set a PIN in the integration "
-        "options and try again."
+            "options and try again."
         ),
         "automation_requires_pin_reason": (
             "This automation requires PIN confirmation because {reason}: {calls}."
