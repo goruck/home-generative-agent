@@ -622,6 +622,89 @@ def test_camera_entry_unsecured_triggers() -> None:
     }
 
 
+def test_camera_entry_unsecured_excludes_entity_same_area() -> None:
+    """
+    A same-area entity excluded via ``is_entity_excluded`` never becomes evidence.
+
+    Regression test: unlike most rules, this rule's ``triggering_entities``
+    only ever contains the camera, so the engine's post-hoc
+    ``sentinel_rule_entity_exclusions`` filter (which inspects
+    ``triggering_entities``) can never suppress a finding whose *evidence*
+    entity is excluded (e.g. an ESPHome touch-panel's template lock that
+    mirrors a real lock elsewhere). The rule must apply the exclusion
+    itself, before the entity is added to ``unsecured_by_area``.
+    """
+    snapshot = _base_snapshot()
+    snapshot["derived"]["now"] = "2025-01-01T00:05:00+00:00"
+    snapshot["entities"] = [
+        {
+            "entity_id": "lock.front_door",
+            "domain": "lock",
+            "state": "unlocked",
+            "friendly_name": "Front Door",
+            "area": "Front",
+            "attributes": {},
+            "last_changed": "2025-01-01T00:00:00+00:00",
+            "last_updated": "2025-01-01T00:00:00+00:00",
+        }
+    ]
+    snapshot["camera_activity"] = [
+        {
+            "camera_entity_id": "camera.front",
+            "area": "Front",
+            "last_activity": "2025-01-01T00:04:00+00:00",
+            "motion_entities": [],
+            "vmd_entities": [],
+            "snapshot_summary": None,
+            "recognized_people": [],
+            "latest_path": None,
+        }
+    ]
+
+    rule = CameraEntryUnsecuredRule(
+        is_entity_excluded=lambda entity_id, _rule_id: entity_id == "lock.front_door"
+    )
+    findings = rule.evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_camera_entry_links_excludes_linked_entity() -> None:
+    """A cross-area linked entity excluded via ``is_entity_excluded`` is skipped too."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["now"] = "2025-01-01T00:05:00+00:00"
+    snapshot["entities"] = [
+        {
+            "entity_id": "lock.front_door",
+            "domain": "lock",
+            "state": "unlocked",
+            "friendly_name": "Front Door",
+            "area": "Front",
+            "attributes": {},
+            "last_changed": "2025-01-01T00:00:00+00:00",
+            "last_updated": "2025-01-01T00:00:00+00:00",
+        }
+    ]
+    snapshot["camera_activity"] = [
+        {
+            "camera_entity_id": "camera.driveway",
+            "area": "Driveway",
+            "last_activity": "2025-01-01T00:04:00+00:00",
+            "motion_entities": [],
+            "vmd_entities": [],
+            "snapshot_summary": None,
+            "recognized_people": [],
+            "latest_path": None,
+        }
+    ]
+
+    rule = CameraEntryUnsecuredRule(
+        camera_entry_links={"camera.driveway": ["lock.front_door"]},
+        is_entity_excluded=lambda entity_id, _rule_id: entity_id == "lock.front_door",
+    )
+    findings = rule.evaluate(snapshot)
+    assert len(findings) == 0
+
+
 def test_camera_entry_unsecured_vmd_last_changed_fallback() -> None:
     """When camera has no last_activity, use linked VMD sensor last_changed."""
     snapshot = _base_snapshot()

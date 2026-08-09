@@ -251,6 +251,7 @@ class SentinelEngine:
                     "dict[str, list[str]]",
                     options.get(CONF_SENTINEL_CAMERA_ENTRY_LINKS) or {},
                 ),
+                is_entity_excluded=self._entity_excluded_for_type,
             ),
             UnknownPersonCameraNoHomeRule(),
             UnknownPersonAtNightWhileHomeRule(),

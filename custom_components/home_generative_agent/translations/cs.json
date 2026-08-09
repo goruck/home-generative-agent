@@ -205,12 +205,15 @@
             "sentinel_quiet_hours_end": "Konec nočního klidu",
             "sentinel_quiet_hours_severities": "Závažnosti potlačené během nočního klidu",
             "sentinel_camera_entry_links": "Odkazy na vstupy kamer (JSON, volitelné)",
-            "sentinel_rule_entity_exclusions": "Vyloučení entit z pravidel (JSON, volitelné)",
+            "sentinel_rule_entity_exclusions_all": "Vyloučit entity ze všech pravidel Sentinelu (volitelné)",
+            "sentinel_rule_entity_exclusions": "Pokročilé: vyloučení entit po jednotlivých pravidlech (JSON, volitelné)",
             "critical_action_pin": "Sentinel PIN pro zvýšení úrovně (volitelné)",
             "notify_service": "Sentinel oznamovací služba (volitelné)"
           },
           "data_description": {
-            "sentinel_response_language": "Jazyk, ve kterém LLM generuje vysvětlení nálezu zobrazované v oznámeních, např. „Czech“. Ponechte prázdné pro angličtinu. Název/shrnutí discovery kandidátů a rozhodnutí/reason_code/shrnutí triáže tím nejsou ovlivněny -- ta jsou strojově zpracovávána a vždy zůstávají v angličtině."
+            "sentinel_response_language": "Jazyk, ve kterém LLM generuje vysvětlení nálezu zobrazované v oznámeních, např. „Czech“. Ponechte prázdné pro angličtinu. Název/shrnutí discovery kandidátů a rozhodnutí/reason_code/shrnutí triáže tím nejsou ovlivněny -- ta jsou strojově zpracovávána a vždy zůstávají v angličtině.",
+            "sentinel_rule_entity_exclusions_all": "Vyberte entity, které se nikdy nemají brát jako skutečný zámek/dveře/okno u žádného pravidla Sentinelu -- např. šablonový zámek na dotykovém panelu, který jen zrcadlí stav jiné entity.",
+            "sentinel_rule_entity_exclusions": "Pro vyloučení entity jen z jednoho konkrétního pravidla (ne ze všech). Formát: {\"id_pravidla\": [\"entita.id\", ...]}. Většina lidí tohle nepotřebuje -- použijte výběr entit výše."
           }
         }
       }

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from homeassistant.util import dt as dt_util
 
@@ -33,9 +33,30 @@ class CameraEntryUnsecuredRule:
     def __init__(
         self,
         camera_entry_links: dict[str, list[str]] | None = None,
+        is_entity_excluded: Callable[[str, str], bool] | None = None,
     ) -> None:
-        """Initialise rule with optional cross-area camera→entry links."""
+        """
+        Initialise rule with optional cross-area camera→entry links.
+
+        ``is_entity_excluded(entity_id, rule_id)`` mirrors the engine's
+        ``sentinel_rule_entity_exclusions`` check (Issue #462). Unlike most
+        rules, this one's ``AnomalyFinding.triggering_entities`` only ever
+        contains the camera — the unsecured lock/door entity lives in
+        ``evidence`` — so the engine's post-hoc
+        ``_filter_excluded_findings`` (which only inspects
+        ``triggering_entities``) can never suppress it. Excluding a phantom
+        entry entity (e.g. an ESPHome touch-panel's template lock that
+        mirrors a real lock elsewhere) therefore has to happen here, before
+        it is ever added to ``unsecured_by_area``.
+        """
         self._camera_entry_links: dict[str, list[str]] = camera_entry_links or {}
+        self._is_entity_excluded = is_entity_excluded
+
+    def _excluded(self, entity_id: str) -> bool:
+        """Return True when *entity_id* is user-excluded for this rule."""
+        return bool(
+            self._is_entity_excluded and self._is_entity_excluded(entity_id, self.rule_id)
+        )
 
     def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:  # noqa: PLR0912, PLR0915
         """Return findings for recent camera activity near unsecured entries."""
@@ -47,6 +68,8 @@ class CameraEntryUnsecuredRule:
         for entity in snapshot["entities"]:
             area = entity.get("area")
             if not area:
+                continue
+            if self._excluded(entity["entity_id"]):
                 continue
             if entity["domain"] == "lock" and entity["state"] == "unlocked":
                 unsecured_by_area.setdefault(area, []).append(entity["entity_id"])
@@ -136,6 +159,8 @@ class CameraEntryUnsecuredRule:
             # (e.g. driveway camera → front door in "Front" area).
             unsecured_linked: list[str] = []
             for linked_eid in self._camera_entry_links.get(cam, []):
+                if self._excluded(linked_eid):
+                    continue
                 entity = entity_by_id.get(linked_eid)
                 if entity is None:
                     skip_counts["missing_linked_entry"] += 1

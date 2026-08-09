@@ -210,7 +210,9 @@
             "notify_service": "Sentinel Notify Service (optional)"
           },
           "data_description": {
-            "sentinel_response_language": "Language for the LLM-authored finding explanation shown in notifications, e.g. 'Czech'. Leave empty for English. Discovery candidate title/summary and triage decision/reason_code/summary are unaffected -- those are parsed by code and always stay in English."
+            "sentinel_response_language": "Language for the LLM-authored finding explanation shown in notifications, e.g. 'Czech'. Leave empty for English. Discovery candidate title/summary and triage decision/reason_code/summary are unaffected -- those are parsed by code and always stay in English.",
+            "sentinel_rule_entity_exclusions_all": "Pick entities that should never be treated as a real lock/door/window by any Sentinel rule -- e.g. a touch panel's template lock that only mirrors another entity's state.",
+            "sentinel_rule_entity_exclusions": "For excluding an entity from one specific rule only (not all of them). Format: {\"rule_id\": [\"entity.id\", ...]}. Most people won't need this -- use the picker above instead."
           }
         }
       }
