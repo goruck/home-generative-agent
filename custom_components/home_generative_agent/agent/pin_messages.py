@@ -39,6 +39,9 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "it cannot be confirmed. Set a PIN in the integration "
             "options and try again."
         ),
+        "automation_pending_store_unavailable": (
+            "Unable to confirm this automation right now; please try again."
+        ),
         "automation_requires_pin_reason": (
             "This automation requires PIN confirmation because {reason}: {calls}."
         ),
@@ -57,6 +60,18 @@ _MESSAGES: dict[str, dict[str, str]] = {
         ),
         "pin_incorrect": "Incorrect PIN. Action not executed.",
         "confirmation_unable_to_process": "Unable to process the confirmation.",
+        "pending_action_missing_tool_name": (
+            "Pending action is invalid; missing tool name."
+        ),
+        "ha_llm_api_unavailable": "Home Assistant LLM API unavailable.",
+        "action_execute_failed": "Failed to execute action: {err}",
+        "pending_automation_invalid": (
+            "Pending automation is invalid; please re-run the request."
+        ),
+        "automation_install_failed": (
+            "Failed to install the automation: {err}. "
+            "The confirmation was used up; please request the automation again."
+        ),
     },
     "cs": {
         "automation_pin_unset": (
@@ -90,6 +105,18 @@ _MESSAGES: dict[str, dict[str, str]] = {
         ),
         "pin_incorrect": "Nesprávný PIN. Akce nebyla provedena.",
         "confirmation_unable_to_process": "Potvrzení se nepodařilo zpracovat.",
+        "pending_action_missing_tool_name": (
+            "Čekající akce je neplatná; chybí název nástroje."
+        ),
+        "ha_llm_api_unavailable": "LLM API Home Assistantu není k dispozici.",
+        "action_execute_failed": "Akci se nepodařilo provést: {err}",
+        "pending_automation_invalid": (
+            "Čekající automatizace je neplatná; zopakujte prosím požadavek."
+        ),
+        "automation_install_failed": (
+            "Automatizaci se nepodařilo nainstalovat: {err}. "
+            "Potvrzení bylo použito; požádejte prosím o automatizaci znovu."
+        ),
     },
 }
 

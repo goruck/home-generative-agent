@@ -1017,7 +1017,7 @@ async def _execute_pending_action(
     """Normalize args, execute the pending action, and clear it."""
     raw_tool_name = action.get("tool_name")
     if not isinstance(raw_tool_name, str) or not raw_tool_name:
-        return None, "Pending action is invalid; missing tool name."
+        return None, pin_msg(cfg.get("hass"), "pending_action_missing_tool_name")
     tool_name = raw_tool_name
 
     if tool_name == "add_automation":
@@ -1025,7 +1025,7 @@ async def _execute_pending_action(
 
     ha_llm_api, api_err = _ensure_api(cfg)
     if api_err or ha_llm_api is None:
-        return None, api_err or "Home Assistant LLM API unavailable."
+        return None, pin_msg(cfg.get("hass"), "ha_llm_api_unavailable")
 
     tool_args = action.get("tool_args") or {}
     tool_args = normalize_intent_for_alarm(tool_name, tool_args)
@@ -1036,7 +1036,7 @@ async def _execute_pending_action(
         tool_input = llm.ToolInput(tool_name=tool_name, tool_args=tool_args)
         response = await ha_llm_api.async_call_tool(tool_input)
     except (HomeAssistantError, vol.Invalid) as err:
-        return None, f"Failed to execute action: {err!r}"
+        return None, pin_msg(cfg.get("hass"), "action_execute_failed", err=repr(err))
 
     pending_actions = cfg.get("pending_actions", {})
     pending_actions.pop(resolved_action_id, None)
@@ -1054,7 +1054,7 @@ async def _execute_pending_automation(
     hass = cfg.get("hass")
     automation_config = action.get("automation_config")
     if hass is None or not isinstance(automation_config, dict):
-        return None, "Pending automation is invalid; please re-run the request."
+        return None, pin_msg(hass, "pending_automation_invalid")
 
     # Claim the action before writing. Tool calls in one model batch run under
     # asyncio.gather, so two confirmations of the same action_id would both
@@ -1062,15 +1062,12 @@ async def _execute_pending_automation(
     # only removed afterwards.
     pending_actions = cfg.get("pending_actions", {})
     if pending_actions.pop(resolved_action_id, None) is None:
-        return None, "Pending action not found or expired."
+        return None, pin_msg(hass, "pending_action_not_found_or_expired")
 
     try:
         result = await _async_write_automation(hass, automation_config)
     except (HomeAssistantError, OSError, yaml.YAMLError) as err:
-        return None, (
-            f"Failed to install the automation: {err!r}. "
-            "The confirmation was used up; please request the automation again."
-        )
+        return None, pin_msg(hass, "automation_install_failed", err=repr(err))
 
     return json.dumps(
         {"status": "completed", "action_id": resolved_action_id, "result": result}
