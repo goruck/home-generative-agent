@@ -1232,8 +1232,112 @@ def _ensure_array_items(schema: dict[str, Any]) -> dict[str, Any]:
     return schema
 
 
+def _filter_variant_required(
+    variant: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    """
+    Drop the ``required`` entries Gemini rejects, returning what was lost.
+
+    A variant carrying ``properties`` but no explicit ``type`` is treated as an
+    object: both current producers emit the type, but the filter leg is the
+    correct one for an implicit object.
+    """
+    required = [r for r in variant["required"] if isinstance(r, str)]
+    is_object = variant.get("type") == "object" or "properties" in variant
+    kept = (
+        [r for r in required if r in variant.get("properties", {})] if is_object else []
+    )
+    cleaned = {k: v for k, v in variant.items() if k != "required"}
+    if kept:
+        cleaned["required"] = kept
+    return cleaned, [r for r in required if r not in kept]
+
+
+def _append_requirement_hint(
+    schema: dict[str, Any], dropped: list[list[str]]
+) -> dict[str, Any]:
+    """
+    Restate a dropped ``anyOf`` constraint in the schema description.
+
+    Gemini cannot validate the constraint, but it does read descriptions, so
+    surfacing it here keeps the model from emitting a call that the stripped
+    schema permits and Home Assistant's own validation then rejects.
+    """
+    if all(len(group) == 1 for group in dropped):
+        names = list(dict.fromkeys(group[0] for group in dropped))
+        hint = f"At least one of: {', '.join(names)} is required."
+    else:
+        groups = "; ".join(f"({', '.join(group)})" for group in dropped)
+        hint = f"At least one of these property groups is required: {groups}."
+    existing = schema.get("description")
+    return {
+        **schema,
+        "description": f"{existing} {hint}" if existing else hint,
+    }
+
+
+def _sanitize_any_of_required(schema: dict[str, Any]) -> dict[str, Any]:
+    """
+    Recursively strip ``required`` entries that Gemini's validation rejects.
+
+    Gemini rejects ``required`` on a non-OBJECT ``anyOf`` variant, and rejects
+    entries naming a property that variant does not itself define::
+
+        parameters.any_of[0].required: only allowed for OBJECT type
+        parameters.any_of[0].required[0]: property is not defined
+
+    voluptuous_openapi emits exactly that shape for Home Assistant's
+    "at least one target" pattern — ``vol.Required(vol.Any("name", "area",
+    "floor"))`` becomes parent-level ``properties`` plus bare-``required``
+    variants::
+
+        {"anyOf": [{"required": ["name"]}, {"required": ["area"]}]}
+
+    Those variants are valid JSON Schema, and every other provider honours
+    them, so unlike the purely additive ``_ensure_array_items()`` this
+    subtractive pass is scoped to Gemini by ``_format_and_dedupe_tools()``.
+    Whatever it has to drop is restated in the description so the constraint
+    survives as guidance even though it cannot survive in the proto schema.
+    """
+    if isinstance(schema.get("anyOf"), list):
+        variants: list[Any] = []
+        dropped: list[list[str]] = []
+        for raw_variant in schema["anyOf"]:
+            if not isinstance(raw_variant, dict):
+                variants.append(raw_variant)
+                continue
+            variant = _sanitize_any_of_required(raw_variant)
+            if isinstance(variant.get("required"), list):
+                variant, lost = _filter_variant_required(variant)
+                if lost:
+                    dropped.append(lost)
+            # A variant emptied by the strip carries no constraint at all;
+            # langchain_google_genai passes anyOf straight to the gapic proto,
+            # so leaving {} behind would reach Gemini as TYPE_UNSPECIFIED.
+            if variant:
+                variants.append(variant)
+        schema = (
+            {**schema, "anyOf": variants}
+            if variants
+            else {k: v for k, v in schema.items() if k != "anyOf"}
+        )
+        if dropped:
+            schema = _append_requirement_hint(schema, dropped)
+    if "properties" in schema:
+        schema = {
+            **schema,
+            "properties": {
+                k: _sanitize_any_of_required(v) for k, v in schema["properties"].items()
+            },
+        }
+    if isinstance(schema.get("items"), dict):
+        schema = {**schema, "items": _sanitize_any_of_required(schema["items"])}
+    return schema
+
+
 def _format_and_dedupe_tools(
     raw_tools: list[RawTool],
+    provider: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, str]]:
     """Convert raw tools to output format and deduplicate (first-seen wins)."""
     selected_tools: list[dict[str, Any]] = []
@@ -1255,6 +1359,11 @@ def _format_and_dedupe_tools(
             parameters["properties"] = {}
         # Gemini requires 'items' on all type:array properties.
         parameters = _ensure_array_items(parameters)
+        # Gemini alone rejects 'required' inside anyOf branches. This pass is
+        # subtractive — it would delete HA's "at least one target" constraint
+        # for providers that can honour it — so it is gated on the provider.
+        if provider == "gemini":
+            parameters = _sanitize_any_of_required(parameters)
         selected_tools.append(
             {
                 "type": "function",
@@ -1572,8 +1681,12 @@ async def _retrieve_tools(
                 "tool index or fallback; skipping force-injection"
             )
 
-    # 4. Format and deduplicate
-    selected_tools, routing_map = _format_and_dedupe_tools(all_candidates)
+    # 4. Format and deduplicate. The provider drives Gemini-only schema
+    # normalisation (see _sanitize_any_of_required).
+    provider_raw = opts.get(CONF_CHAT_MODEL_PROVIDER)
+    selected_tools, routing_map = _format_and_dedupe_tools(
+        all_candidates, str(provider_raw) if provider_raw else None
+    )
 
     LOGGER.debug(
         "Tool retrieval: limit=%d eff=%d rag=%d safety=%d/%d pin=%d merged=%d tools=%s",
