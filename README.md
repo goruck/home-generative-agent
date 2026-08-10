@@ -157,7 +157,7 @@ actions:
 
 Dashboard recipes shared by users. Have one of your own? Post it in [Discussions](https://github.com/goruck/home-generative-agent/discussions) and it may get featured here.
 
-The recipes below were shared by [@hruba202](https://github.com/hruba202) in [discussion #513](https://github.com/goruck/home-generative-agent/discussions/513). The first two use the excellent [flex-table-card](https://github.com/custom-cards/flex-table-card); the third combines [vertical-stack-in-card](https://github.com/ofekashery/vertical-stack-in-card), [entity-attributes-card](https://github.com/custom-cards/entity-attributes-card), and [card-mod](https://github.com/thomasloven/lovelace-card-mod) (all installable from HACS). Replace the example entity IDs with your own; the column names and labels are in Czech from the original install — rename them to taste. The `grid_options` sizing in the flex-table recipes assumes the newer sections dashboard layout with wide sections — trim the `columns:` values to fit your grid (standard sections are 12 columns wide; the older masonry layout ignores `grid_options` entirely).
+The recipes below were shared by [@hruba202](https://github.com/hruba202) in [discussion #513](https://github.com/goruck/home-generative-agent/discussions/513) and [issue #538](https://github.com/goruck/home-generative-agent/issues/538). The first two use the excellent [flex-table-card](https://github.com/custom-cards/flex-table-card) (the second also has a compact [entity-attributes-card](https://github.com/custom-cards/entity-attributes-card) variant); the third combines [vertical-stack-in-card](https://github.com/ofekashery/vertical-stack-in-card), entity-attributes-card, and [card-mod](https://github.com/thomasloven/lovelace-card-mod) (all installable from HACS). Replace the example entity IDs with your own; the column names and labels are in Czech from the original install — rename them to taste. The `grid_options` sizing in the flex-table recipes assumes the newer sections dashboard layout with wide sections — trim the `columns:` values to fit your grid (standard sections are 12 columns wide; the older masonry layout ignores `grid_options` entirely).
 
 ### Recognized people across cameras
 
@@ -264,6 +264,36 @@ columns: 1
 ```
 
 > **Tip:** `findings_count_by_severity` is a dictionary attribute (keys `low`/`medium`/`high`), so it renders as `[object Object]` by default. Use the column's `modify` option (same two gotchas as above) to pull out one severity per column, `modify: "Array.isArray(x) || x == null ? '—' : (x.high ?? 0)"`, or render the whole dictionary compactly with `modify: "Array.isArray(x) || x == null ? '—' : JSON.stringify(x)"`.
+
+#### Compact variant
+
+A tighter single-card alternative (shared in [issue #538](https://github.com/goruck/home-generative-agent/issues/538)) that lists a hand-picked subset of the health sensor's attributes — plus `triggers_excluded`, which the flex-table grid above doesn't show — as label/value rows via `entity-attributes-card`:
+
+```yaml
+type: custom:entity-attributes-card
+heading_name: Sentinel
+heading_state: ok
+filter:
+  include:
+    - key: sensor.sentinel_health.triggers_excluded
+      name: vyloučená spuštění
+    - key: sensor.sentinel_health.baseline_rules_waiting
+      name: čekajici pr.
+    - key: sensor.sentinel_health.last_run_start
+      name: poslední běh
+    - key: sensor.sentinel_health.run_duration_ms
+      name: doba běhu
+    - key: sensor.sentinel_health.active_rule_count
+      name: aktivní pravidla
+    - key: sensor.sentinel_health.triggers_dropped_incoming
+      name: zahozené příchozí t.
+    - key: sensor.sentinel_health.triggers_ttl_expired
+      name: triggers_ttl_expired
+    - key: sensor.sentinel_health.triggers_dropped_queued
+      name: zahazované/zařazené tr.
+```
+
+> **Tip:** `heading_name` and `heading_state` are static column-header text, not live entity state — the `ok` above stays "ok" even when the health sensor reports `degraded`. `entity-attributes-card` renders attributes only; to show the actual sensor state, keep the flex-table variant's `data: state` column or pair this card with an `entities` row for `sensor.sentinel_health`, as in the per-camera recipe below. Two more quirks: the three `triggers_*` scheduler rows only exist after the first Sentinel run completes, so a fresh install shows five rows until then — warm-up, not dead keys. And the card renders values raw: `last_run_start` appears as a full ISO-8601 timestamp and not-yet-populated attributes as the literal text `None` (the original post's `autoformat: true` is not an `entity-attributes-card` option and is omitted here).
 
 ### Per-camera event card
 
