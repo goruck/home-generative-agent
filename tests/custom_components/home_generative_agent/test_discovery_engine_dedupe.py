@@ -28,6 +28,15 @@ if TYPE_CHECKING:
     )
 
 
+def _monitoring_gaps_from_prompt(human_content: str) -> list[str]:
+    """Parse the MONITORING GAPS JSON array out of a captured discovery prompt."""
+    gaps_start = human_content.find("MONITORING GAPS: [")
+    assert gaps_start != -1, "Prompt missing MONITORING GAPS section"
+    array_start = human_content.index("[", gaps_start)
+    array_end = human_content.index("]", array_start) + 1
+    return json.loads(human_content[array_start:array_end])
+
+
 class _DummyStore:
     async def async_get_latest(self, _limit: int) -> list[dict[str, Any]]:
         return []
@@ -690,7 +699,19 @@ async def test_monitoring_gap_ignores_non_baseline_hint_keys(
             "custom_components.home_generative_agent.sentinel.discovery_engine.async_build_full_state_snapshot",
             new_callable=AsyncMock,
             return_value={
-                "entities": [],
+                # The reducer drops baseline_ready_entities absent from the
+                # reduced snapshot, so the fridge must exist as an entity —
+                # with an empty entity list the gaps array is always [] and
+                # the assertion below would pass vacuously via the semantic
+                # keys section of the prompt.
+                "entities": [
+                    {
+                        "entity_id": "sensor.fridge_switch_0_power",
+                        "domain": "sensor",
+                        "state": "120",
+                        "attributes": {"device_class": "power"},
+                    },
+                ],
                 "camera_activity": [],
                 "derived": {
                     "is_night": False,
@@ -709,9 +730,10 @@ async def test_monitoring_gap_ignores_non_baseline_hint_keys(
 
     assert captured_prompts, "Model was never invoked"
     human_content = captured_prompts[-1]
-    # The fridge must appear in the MONITORING GAPS section even though it
+    # The fridge must appear in the MONITORING GAPS array even though it
     # appears in an unavailability hint key.
-    assert "sensor.fridge_switch_0_power" in human_content, (
+    gaps_in_prompt = _monitoring_gaps_from_prompt(human_content)
+    assert gaps_in_prompt == ["sensor.fridge_switch_0_power"], (
         "Fridge must be in MONITORING GAPS when only covered by unavailability key"
     )
 
@@ -771,7 +793,17 @@ async def test_monitoring_gap_suppressed_by_power_anomaly_key(
             "custom_components.home_generative_agent.sentinel.discovery_engine.async_build_full_state_snapshot",
             new_callable=AsyncMock,
             return_value={
-                "entities": [],
+                # Fridge present as an entity so the reducer keeps it in
+                # baseline_ready_entities — suppression must come from the
+                # power_anomaly key, not from the reducer trimming it away.
+                "entities": [
+                    {
+                        "entity_id": "sensor.fridge_switch_0_power",
+                        "domain": "sensor",
+                        "state": "120",
+                        "attributes": {"device_class": "power"},
+                    },
+                ],
                 "camera_activity": [],
                 "derived": {
                     "is_night": False,
@@ -790,11 +822,9 @@ async def test_monitoring_gap_suppressed_by_power_anomaly_key(
 
     assert captured_prompts, "Model was never invoked"
     human_content = captured_prompts[-1]
-    gaps_start = human_content.find("MONITORING GAPS:")
-    assert gaps_start != -1
-    gaps_section = human_content[gaps_start : gaps_start + 200]
+    gaps_in_prompt = _monitoring_gaps_from_prompt(human_content)
     # Fridge is already baseline-monitored; it must NOT appear in MONITORING GAPS.
-    assert "sensor.fridge_switch_0_power" not in gaps_section, (
+    assert gaps_in_prompt == [], (
         "Fridge must not be in MONITORING GAPS when covered by power_anomaly key"
     )
 
@@ -1385,3 +1415,219 @@ def test_filter_novel_candidates_junk_plus_concrete_path_passes_gate() -> None:
     filtered, dropped = engine._filter_novel_candidates(candidates, set())
     assert len(filtered) == 1
     assert dropped == []
+
+
+@pytest.mark.asyncio
+async def test_monitoring_gap_excludes_battery_level_sensors(
+    hass: HomeAssistant,
+) -> None:
+    """
+    Battery-level sensors never appear in MONITORING GAPS.
+
+    Battery percentage declines monotonically, so a rolling-average baseline
+    on it is only a laggy low-battery detector — and gap-hinting battery
+    sensors makes the LLM propose confusing occupancy/night-conditioned
+    battery candidates. A battery-named power stream (sensor.battery_power on
+    a home battery) is a real measurement and must stay gap-eligible.
+    """
+    captured_prompts: list[str] = []
+
+    class _CapturingModel:
+        async def ainvoke(self, messages: list[Any]) -> Any:
+            captured_prompts.extend(
+                str(msg.content) for msg in messages if hasattr(msg, "content")
+            )
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "schema_version": 1,
+                        "generated_at": "2026-01-01T00:00:00Z",
+                        "model": "test",
+                        "candidates": [],
+                    }
+                )
+            )
+
+    class _FullDummyStore:
+        async def async_get_latest(self, _limit: int) -> list[dict[str, Any]]:
+            return []
+
+        async def async_append(self, _payload: Any) -> None:
+            pass
+
+    engine = SentinelDiscoveryEngine(
+        hass=hass,
+        options={},
+        model=_CapturingModel(),
+        store=_FullDummyStore(),  # type: ignore[arg-type]
+    )
+
+    async def _fake_run(model: Any, messages: Any, **_kw: Any) -> Any:
+        return await model.ainvoke(messages)
+
+    with (
+        patch.object(
+            engine,
+            "_existing_semantic_context",
+            new_callable=AsyncMock,
+            return_value=(set(), set(), set()),
+        ),
+        patch(
+            "custom_components.home_generative_agent.sentinel.discovery_engine.async_build_full_state_snapshot",
+            new_callable=AsyncMock,
+            return_value={
+                # The reducer drops baseline_ready_entities absent from the
+                # reduced snapshot, so the sensors must exist as entities.
+                "entities": [
+                    {
+                        "entity_id": "sensor.garage_temp_sensor_battery",
+                        "domain": "sensor",
+                        "state": "87",
+                        "attributes": {"device_class": "battery"},
+                    },
+                    {
+                        "entity_id": "sensor.fridge_switch_0_power",
+                        "domain": "sensor",
+                        "state": "120",
+                        "attributes": {"device_class": "power"},
+                    },
+                    {
+                        "entity_id": "sensor.battery_power",
+                        "domain": "sensor",
+                        "state": "300",
+                        "attributes": {"device_class": "power"},
+                    },
+                ],
+                "camera_activity": [],
+                "derived": {
+                    "is_night": False,
+                    "now": "2026-01-01T00:00:00Z",
+                    "baseline_ready_entities": [
+                        "sensor.garage_temp_sensor_battery",
+                        "sensor.fridge_switch_0_power",
+                        "sensor.battery_power",
+                    ],
+                },
+                "generated_at": "2026-01-01T00:00:00Z",
+            },
+        ),
+        patch(
+            "custom_components.home_generative_agent.sentinel.discovery_engine.run_sentinel_model_call",
+            side_effect=_fake_run,
+        ),
+    ):
+        await engine._run_once()
+
+    assert captured_prompts, "Model was never invoked"
+    human_content = captured_prompts[-1]
+    gaps_in_prompt = _monitoring_gaps_from_prompt(human_content)
+    assert "sensor.garage_temp_sensor_battery" not in gaps_in_prompt, (
+        "Battery-level sensor must not be hinted as a statistical monitoring gap"
+    )
+    assert gaps_in_prompt == [
+        "sensor.fridge_switch_0_power",
+        "sensor.battery_power",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_monitoring_gap_battery_exclusion_uses_state_metadata(
+    hass: HomeAssistant,
+) -> None:
+    """
+    Live state metadata beats the English name heuristic in the gap filter.
+
+    A locale-named battery sensor (sensor.zamek_vrata_baterie, device_class
+    battery) must be excluded even though its name never says "battery", and
+    a battery-NAMED telemetry stream with an unlisted suffix
+    (sensor.ev_battery_charging_rate, device_class power) must stay
+    gap-eligible (Codex review rounds).
+    """
+    hass.states.async_set(
+        "sensor.zamek_vrata_baterie", "87", {"device_class": "battery"}
+    )
+    hass.states.async_set(
+        "sensor.ev_battery_charging_rate", "7.4", {"device_class": "power"}
+    )
+    captured_prompts: list[str] = []
+
+    class _CapturingModel:
+        async def ainvoke(self, messages: list[Any]) -> Any:
+            captured_prompts.extend(
+                str(msg.content) for msg in messages if hasattr(msg, "content")
+            )
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "schema_version": 1,
+                        "generated_at": "2026-01-01T00:00:00Z",
+                        "model": "test",
+                        "candidates": [],
+                    }
+                )
+            )
+
+    class _FullDummyStore:
+        async def async_get_latest(self, _limit: int) -> list[dict[str, Any]]:
+            return []
+
+        async def async_append(self, _payload: Any) -> None:
+            pass
+
+    engine = SentinelDiscoveryEngine(
+        hass=hass,
+        options={},
+        model=_CapturingModel(),
+        store=_FullDummyStore(),  # type: ignore[arg-type]
+    )
+
+    async def _fake_run(model: Any, messages: Any, **_kw: Any) -> Any:
+        return await model.ainvoke(messages)
+
+    with (
+        patch.object(
+            engine,
+            "_existing_semantic_context",
+            new_callable=AsyncMock,
+            return_value=(set(), set(), set()),
+        ),
+        patch(
+            "custom_components.home_generative_agent.sentinel.discovery_engine.async_build_full_state_snapshot",
+            new_callable=AsyncMock,
+            return_value={
+                "entities": [
+                    {
+                        "entity_id": "sensor.zamek_vrata_baterie",
+                        "domain": "sensor",
+                        "state": "87",
+                        "attributes": {"device_class": "battery"},
+                    },
+                    {
+                        "entity_id": "sensor.ev_battery_charging_rate",
+                        "domain": "sensor",
+                        "state": "7.4",
+                        "attributes": {"device_class": "power"},
+                    },
+                ],
+                "camera_activity": [],
+                "derived": {
+                    "is_night": False,
+                    "now": "2026-01-01T00:00:00Z",
+                    "baseline_ready_entities": [
+                        "sensor.zamek_vrata_baterie",
+                        "sensor.ev_battery_charging_rate",
+                    ],
+                },
+                "generated_at": "2026-01-01T00:00:00Z",
+            },
+        ),
+        patch(
+            "custom_components.home_generative_agent.sentinel.discovery_engine.run_sentinel_model_call",
+            side_effect=_fake_run,
+        ),
+    ):
+        await engine._run_once()
+
+    assert captured_prompts, "Model was never invoked"
+    gaps_in_prompt = _monitoring_gaps_from_prompt(captured_prompts[-1])
+    assert gaps_in_prompt == ["sensor.ev_battery_charging_rate"]

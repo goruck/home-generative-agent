@@ -116,6 +116,72 @@ _NON_BATTERY_ID_TOKENS = (
 )
 
 
+# Measurement-kind tokens that mark a battery-NAMED sensor as a real
+# measurement stream rather than a charge level, but only when they appear
+# AFTER the "battery" token: sensor.battery_power / sensor.battery_temperature
+# are home-battery telemetry, while sensor.garage_temperature_sensor_battery /
+# sensor.front_door_battery are charge levels of the named device.
+# Deliberately narrower than _NON_BATTERY_ID_TOKENS: that list also carries
+# device-type tokens (door, motion, window, smoke, leak) used to disqualify
+# UNNAMED locale-fallback candidates — applying it to battery-named IDs would
+# misclassify the canonical HA device-battery names and keep them gap-hinted,
+# which is exactly the confusing-candidate behavior being suppressed
+# (pre-landing review, adversarial round).
+_BATTERY_MEASUREMENT_STREAM_TOKENS = (
+    "power",
+    "energy",
+    "watt",
+    "voltage",
+    "current",
+    "temperature",
+    "humidity",
+    "illuminance",
+    "lux",
+    "pressure",
+    "co2",
+    "signal",
+    "rssi",
+    "linkquality",
+)
+
+
+def is_battery_level_entity_id(entity_id: str) -> bool:
+    """
+    Classify battery-level ``sensor.*`` IDs for baseline-eligibility gating.
+
+    Battery percentage declines monotonically, so a rolling-average deviation
+    on it is only a laggy low-battery detector — threshold rules are the right
+    tool, and the discovery gap hint must not push battery sensors at the LLM
+    as statistical-anomaly material. A measurement-kind token AFTER the
+    battery token (``sensor.battery_power`` on a home battery) marks a real
+    measurement stream that stays baseline-eligible; device-named battery
+    levels (``sensor.front_door_battery``,
+    ``sensor.garage_temperature_sensor_battery``) are charge levels and are
+    excluded. Lowercased defensively — registry IDs are canonically
+    lowercase, but this also takes DB-sourced baseline IDs.
+    """
+    entity_id = entity_id.lower()
+    if not entity_id.startswith("sensor."):
+        return False
+    object_id = entity_id.split(".", 1)[1]
+    battery_pos = object_id.rfind("battery")
+    if battery_pos == -1:
+        return False
+    tail = object_id[battery_pos + len("battery") :]
+    return not any(token in tail for token in _BATTERY_MEASUREMENT_STREAM_TOKENS)
+
+
+def _named_battery_sensor_entity_ids(entity_ids: list[str]) -> list[str]:
+    """Battery-named ``sensor.*`` IDs — the normalizer's primary collection."""
+    return sorted(
+        {
+            entity_id
+            for entity_id in entity_ids
+            if entity_id.startswith("sensor.") and "battery" in entity_id
+        }
+    )
+
+
 def _battery_sensor_entity_ids(entity_ids: list[str]) -> list[str]:
     """
     Mirror of the normalizer's battery-sensor collection for key entities.
@@ -124,13 +190,7 @@ def _battery_sensor_entity_ids(entity_ids: list[str]) -> list[str]:
     non-excluded ``sensor.*`` survivor (the issue #522 locale fallback).
     Returns [] when the normalizer would also resolve nothing.
     """
-    named = sorted(
-        {
-            entity_id
-            for entity_id in entity_ids
-            if entity_id.startswith("sensor.") and "battery" in entity_id
-        }
-    )
+    named = _named_battery_sensor_entity_ids(entity_ids)
     if named:
         return named
     fallback = sorted(
@@ -232,6 +292,7 @@ def candidate_semantic_key(  # noqa: PLR0912, PLR0915
         entities = sensor_ids
 
     predicate = "unknown"
+    named_battery_ids = _named_battery_sensor_entity_ids(entity_ids)
     lock_battery_targets = (
         _battery_sensor_entity_ids(entity_ids)
         if lock_ids
@@ -295,7 +356,43 @@ def candidate_semantic_key(  # noqa: PLR0912, PLR0915
         subject = "camera"
         predicate = "unknown_person"
         entities = camera_ids
-    elif _has_low_battery_signal(text, slug_text):
+    elif _has_low_battery_signal(text, slug_text) or (
+        # Second arm mirrors the normalizer's disjunctive battery branch:
+        # battery-named sensor evidence plus battery/low/below prose routes
+        # to low_battery_sensors even WITHOUT a low-battery qualifier — a
+        # "battery baseline deviation" candidate normalizes to the threshold
+        # template, so keying it predicate=power_anomaly (with night/home
+        # context preserved) would let context variants pile up as distinct
+        # novel candidates and the activated rule never dedup re-proposals.
+        # Named IDs only: the normalizer invokes its locale fallback solely
+        # on the conjunctive signal, so the fallback must not widen this arm.
+        named_battery_ids
+        and _contains_any(text, ("battery", "low", "below"))
+        # Sensor-only-evidence gate (pre-landing adversarial review,
+        # empirically reproduced regression): the normalizer's battery
+        # branch sits AFTER its alarm/motion/camera/entry branches, and the
+        # key chain does not mirror all of them — a motion+camera candidate
+        # that incidentally cites a battery sensor with bare "low" prose
+        # ("camera activity stays low") must keep its motion/camera keying,
+        # or an activated low_battery rule on that sensor silently swallows
+        # the unrelated proposal and the activated motion rule never dedups
+        # it. The arm therefore fires only when battery sensors are the
+        # ONLY subject evidence. Window/door/motion-named ids that are
+        # themselves battery-named (sensor.front_door_battery,
+        # sensor.hallway_motion_battery) do not block: the normalizer's
+        # _NON_ENTRY_ID_TOKENS contains "battery" and its away-motion
+        # branches guard on battery_sensor_ids, so such ids are never
+        # entries or motion subjects there and its battery branch handles
+        # them (Codex structured review). Mixed motion+battery shapes keep
+        # their (pre-existing, base-parity) keying rather than gaining a
+        # new mismatch.
+        and not camera_ids
+        and not lock_ids
+        and not alarm_ids
+        and all(
+            eid in named_battery_ids for eid in (*window_ids, *door_ids, *motion_ids)
+        )
+    ):
         predicate = "low_battery"
         # Mirror the normalizer's battery routing (issue #522 adversarial
         # review): it always registers subject=sensor rules on the

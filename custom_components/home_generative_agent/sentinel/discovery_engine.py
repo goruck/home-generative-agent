@@ -36,7 +36,11 @@ from custom_components.home_generative_agent.snapshot.discovery_reducer import (
 )
 
 from .discovery_schema import DISCOVERY_OUTPUT_SCHEMA, DISCOVERY_SCHEMA_VERSION
-from .discovery_semantic import candidate_semantic_key, rule_semantic_key
+from .discovery_semantic import (
+    candidate_semantic_key,
+    is_battery_level_entity_id,
+    rule_semantic_key,
+)
 from .evidence_paths import is_derived_path
 from .logging_utils import RepeatingLogLimiter
 
@@ -113,6 +117,30 @@ def _is_cumulative_energy_entity(entity_id: str) -> bool:
     """
     local = entity_id.split(".", 1)[-1] if "." in entity_id else entity_id
     return local.endswith("_energy") or local == "energy"
+
+
+def _is_battery_level_entity(hass: HomeAssistant, entity_id: str) -> bool:
+    """
+    Metadata-first battery-level check for the monitoring-gap exclusion.
+
+    Live state metadata is locale-independent and authoritative where
+    present: a ``device_class: battery`` sensor is a charge level whatever
+    its object id says (``sensor.zamek_vrata_baterie``), and any other
+    declared device_class or a non-percent unit marks a telemetry stream
+    (``sensor.ev_battery_charging_rate``) that must stay baseline-eligible
+    even though its name contains "battery" (Codex review rounds). Only
+    when metadata is absent does the English name heuristic decide.
+    """
+    state = hass.states.get(entity_id)
+    if state is not None:
+        attributes = getattr(state, "attributes", {}) or {}
+        device_class = attributes.get("device_class")
+        if device_class is not None:
+            return device_class == "battery"
+        unit = attributes.get("unit_of_measurement")
+        if unit is not None and unit != "%":
+            return False
+    return is_battery_level_entity_id(entity_id)
 
 
 def _entity_ids_from_key(key: str) -> set[str]:
@@ -313,10 +341,17 @@ class SentinelDiscoveryEngine:
         covered_entity_ids: set[str] = set()
         for key in baseline_hint_keys:
             covered_entity_ids.update(_entity_ids_from_key(key))
+        # Battery-level sensors are excluded like cumulative energy counters:
+        # a battery percentage declines monotonically, so baseline deviation
+        # on it is only a laggy low-battery detector — and gap-hinting them
+        # makes the LLM propose confusing occupancy/night-conditioned battery
+        # candidates the threshold template never evaluates.
         unmonitored = [
             eid
             for eid in baseline_ready
-            if eid not in covered_entity_ids and not _is_cumulative_energy_entity(eid)
+            if eid not in covered_entity_ids
+            and not _is_cumulative_energy_entity(eid)
+            and not _is_battery_level_entity(self._hass, eid)
         ]
         if LOGGER.isEnabledFor(logging.DEBUG):
             for eid in baseline_ready:

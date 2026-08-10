@@ -466,6 +466,48 @@ Also: unknown action types fail closed (a future HA construct over-prompts rathe
 
 ## Discovery
 
+### Domainless legacy battery object-IDs register rules the candidate key never covers
+
+**What:** `_find_battery_sensor_entity_ids` (proposal_templates.py) accepts domainless legacy object IDs containing "battery" (`entities[entity_id=zamek_baterie_battery]`), so the normalizer registers a `low_battery_sensors` rule keyed `entities=zamek_baterie_battery` — but `candidate_semantic_key`'s extraction regexes require `domain.object` shapes, so the candidate keys `None` and dedups only by identity hash. The activated rule can never cover re-proposals of the same idea worded differently.
+
+**Why:** Adversarial finding during the battery-context ship (2026-08-10), empirically confirmed; pre-existing (conjunctive prose had the same hole) and low-frequency (legacy drafts only). Fixing extraction to accept domainless tokens risks minting pseudo-entities from snapshot paths; needs the same shape-gating care as the #522 bare-bracket work.
+
+**How to apply:** Accept domainless battery-named IDs in `discovery_semantic._named_battery_sensor_entity_ids` AND extend `_extract_entity_ids` (or a battery-leg-scoped sidecar) to surface domainless `entity_id=` tokens, gated to the battery leg so no other subject leg keys pseudo-entities. Pin with a key==rule-key test for a domainless battery candidate.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** —
+
+---
+
+### Consider deriving candidate keys from the normalizer's actual routing instead of the hand-maintained mirror
+
+**What:** `candidate_semantic_key` hand-mirrors `normalize_candidate`'s branch order, and the battery-context ship (2026-08-10) was roughly the sixth mirror-asymmetry fix recorded in the module's own comments (#516, #518, #522, #524 rounds). The adversarial reviewer's structural suggestion: when normalization succeeds, derive the candidate's coverage key from the normalized rule itself (`rule_semantic_key(normalized)`), falling back to the textual key only for unsupported candidates — the whole branch-order drift class disappears. Two pre-existing mismatch shapes confirmed by Codex during that ship (both base-parity, deliberately NOT patched into the mirror): (1) the conjunctive battery leg fires before any mirror of the normalizer's text-derived entry branches, so a locale-named entry sensor plus an incidental battery sensor with "battery … below" prose keys `low_battery` while normalization registers `open_entry_while_away` — an existing hub-battery rule then silently suppresses the unrelated security candidate; (2) battery evidence plus incidental camera/motion evidence with pure battery prose keys `power_anomaly` (the sensor-only gate blocks the battery arm) while normalization still registers `low_battery_sensors`, so those candidates re-propose after approval.
+
+**Why:** Each new template or branch reorder currently requires a matching key-chain edit, and misses surface as silent dedup breakage (infinite re-proposal or cross-suppression). The decoupling convention exists to avoid importing the normalization module into the key module; inverting the dependency (engine calls normalize first, keys from its result) respects that boundary.
+
+**How to apply:** In the discovery engine's novelty filter and semantic-context builders, attempt `explain_normalize_candidate(candidate)`; on success key via `rule_semantic_key` of the would-be rule, else fall back to `candidate_semantic_key`. Keep the textual key for history-record hashing so stored keys stay comparable. Requires re-verifying every dedup test and the coverage semantics for unsupported candidates.
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** —
+
+---
+
+### Route battery-named measurement streams (sensor.battery_power) away from the low_battery_sensors template
+
+**What:** A gap-hinted baseline candidate for a battery-named measurement stream (e.g. `sensor.battery_power` on a home battery, Watts) normalizes to `low_battery_sensors` with the 40% default threshold: `_find_battery_sensor_entity_ids` matches any `sensor.*` containing "battery" with no measurement-token exclusion, and baseline prose inevitably contains the word "battery". The rule never registers — `_is_battery_like_state` rejects it at approval (`device_class: power`, unit W → `not_battery_sensor`) — so the user sees an honestly-unsupported proposal instead of a false-firing rule, but the candidate can never become the baseline/threshold-power rule it should be.
+
+**Why:** Testing-specialist finding during the battery-context ship (2026-08-10), empirically reproduced; pre-existing (#522 code), not introduced by that diff. Fixing it means excluding measurement-stream-token battery IDs from the normalizer's battery collection AND mirroring that in `candidate_semantic_key`'s battery arm plus the card's `_lowBatteryContext` — a three-surface #522-hardened change that deserves its own review cycle.
+
+**How to apply:** In `proposal_templates._find_battery_sensor_entity_ids`, skip IDs matching `_BATTERY_MEASUREMENT_STREAM_TOKENS` (the tuple now in `discovery_semantic.py`); mirror the same exclusion in `discovery_semantic._named_battery_sensor_entity_ids` and verify the non-battery power branch then routes such candidates to `sensor_threshold_condition`/`baseline_deviation`. Pin with a `normalize_candidate` test asserting the chosen template for a `sensor.battery_power` baseline candidate.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** —
+
+---
+
 ### Mirror server per-template severities in the proposals card instead of the isAway/hasNight heuristic
 
 **What:** `_severityForCandidate` (hga-proposals-card.js) rates `isAway || hasNight` as "high" before the motion+camera "low" leg, while the server registers several away-scoped templates low (`motion_detected_while_away`, `motion_without_camera_activity`, `entity_staleness`). With #524's structured away detection, path-only staleness/power/motion candidates now prefill GitHub rule-request issues as severity high where the server would register low — but the same English prose already produced "high" pre-#524, so this is a widened pre-existing mismatch, not a regression.

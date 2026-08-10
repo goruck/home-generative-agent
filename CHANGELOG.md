@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.27.1] - 2026-08-10
+
+### Fixed
+
+- **Sentinel discovery no longer proposes battery anomalies conditioned on who is home or the time of day.** The discovery card could fill with near-duplicate candidates like "Garage Temp Sensor Battery Anomaly During Night While Home" — battery health is a physical quantity that does not depend on occupancy or the hour, and the conditions were doubly misleading because promoting such a candidate always produced a plain low-battery threshold rule that never evaluated them. Three layers conspired: baseline-ready battery sensors were fed to the discovery model as "monitoring gaps", inviting statistical candidates for a monotonically declining percentage; the prompt taught occupancy/night conditioning with no exemption for device health; and each context variant counted as a distinct novel candidate because the dedup key preserved the conditioning. Battery-level sensors are now excluded from the monitoring-gap hint, the prompt states that battery candidates must never carry occupancy or nighttime context, and battery candidates share one context-free dedup key — so new context variants stop appearing, and clearing the existing pile requires rejecting only one of them.
+- **A battery candidate's dedup key now matches the rule its promotion registers even without "low battery" wording.** A "battery baseline deviation" candidate keyed as a power anomaly while Promote to Draft registered a low-battery threshold rule, so the activated rule never covered re-proposals and the same idea returned every discovery cycle. The battery keying now mirrors the promotion routing for battery-named sensor evidence, guarded so that mixed candidates — a motion or camera proposal that merely cites a battery sensor with "low" somewhere in its prose — keep their original keying instead of being swallowed by an unrelated battery rule.
+- **Device-named battery sensors classify correctly on both surfaces.** The canonical Home Assistant device-battery names — `sensor.front_door_battery`, `sensor.smoke_detector_battery`, `sensor.garage_temperature_sensor_battery` — are charge levels and are kept out of the monitoring-gap hint, while a measurement token after the battery token (`sensor.battery_power`, `sensor.battery_temperature` on a home battery) marks real telemetry that stays eligible for baseline monitoring.
+
 ## [3.27.0] - 2026-08-09
 
 ### Added
