@@ -196,6 +196,8 @@ Protects sensitive actions (unlocking doors, opening covers) behind a second ver
 
 Alarm control panels use their own alarm code, which is separate from the critical-action PIN.
 
+**Language.** The PIN prompts and confirmation messages the agent returns in chat are fixed strings, not model output. They follow the Home Assistant server language (**Settings → System → General**) and are currently available in English and Czech; any other language falls back to English. Diagnostic log lines stay in English.
+
 **Automation screening.** Automations are screened after Home Assistant validates them, so blueprint inputs are resolved and every nested branch (`choose`, `if`/`then`/`else`, `repeat`, `parallel`, `sequence`) is inspected. Nothing is written to `automations.yaml` and no reload happens until the PIN is confirmed.
 
 Screening classifies each step with Home Assistant's own action taxonomy and lets it through only when it is provably harmless. A service call is not the only way an automation can unlock a door, so these are protected too:

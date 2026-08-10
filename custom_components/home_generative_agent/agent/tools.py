@@ -79,6 +79,7 @@ from .helpers import (
     resolve_critical_action_policy,
     sanitize_tool_args,
 )
+from .pin_messages import pin_msg
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Mapping
@@ -756,16 +757,12 @@ def _maybe_require_pin_for_automation(
             "Set a PIN in the integration options to enforce confirmation.",
             ", ".join(call.describe() for call in critical_calls),
         )
-        return (
-            "This automation performs a critical action, but the critical-action "
-            "PIN is enabled without a PIN being set, so it cannot be confirmed. "
-            "Set a PIN in the integration options and try again."
-        )
+        return pin_msg(cfg.get("hass"), "automation_pin_unset")
 
     pending_actions = cfg.get("pending_actions")
     if pending_actions is None:
         LOGGER.error("Cannot gate critical automation: no pending action store.")
-        return "Unable to confirm this automation right now; please try again."
+        return pin_msg(cfg.get("hass"), "automation_pending_store_unavailable")
 
     action_id = register_pending_action(
         pending_actions,
@@ -780,10 +777,11 @@ def _maybe_require_pin_for_automation(
         {
             "status": "requires_pin",
             "action_id": action_id,
-            "reason": (
-                "This automation requires PIN confirmation because "
-                f"{critical_calls[0].reason}: "
-                f"{', '.join(call.describe() for call in critical_calls)}."
+            "reason": pin_msg(
+                cfg.get("hass"),
+                "automation_requires_pin_reason",
+                reason=critical_calls[0].reason,
+                calls=", ".join(call.describe() for call in critical_calls),
             ),
         }
     )
@@ -896,6 +894,7 @@ async def confirm_sensitive_action(  # noqa: D417
         return "Configuration not found. Please check your setup."
 
     cfg = cast("ConfigurableData", config.get("configurable", {}))
+    hass = cfg.get("hass")
     opts = cfg.get("options", {})
     pin_hash = opts.get(CONF_CRITICAL_ACTION_PIN_HASH, "")
     salt = opts.get(CONF_CRITICAL_ACTION_PIN_SALT, "")
@@ -905,26 +904,27 @@ async def confirm_sensitive_action(  # noqa: D417
 
     resolved_action_id = _resolve_action_id(pending_actions, requested_action_id)
     if resolved_action_id is None:
-        return "Pending action not found or expired."
+        return pin_msg(hass, "pending_action_not_found_or_expired")
 
-    action, action_err = _load_pending_action(pending_actions, resolved_action_id)
+    action, action_err = _load_pending_action(pending_actions, resolved_action_id, hass)
     if action_err or not action:
-        return action_err or "Pending action not found."
+        return action_err or pin_msg(hass, "pending_action_not_found")
 
     if _is_wrong_user(cfg, action):
-        return "Pending action belongs to a different user; please re-run the request."
+        return pin_msg(hass, "pending_action_wrong_user")
 
     pin_err = _validate_pin_for_action(
         provided_pin=provided_pin,
         pin_hash=pin_hash,
         salt=salt,
         action=action,
+        hass=hass,
     )
     if pin_err:
         return pin_err
 
     result, exec_err = await _execute_pending_action(resolved_action_id, action, cfg)
-    return result or exec_err or "Unable to process the confirmation."
+    return result or exec_err or pin_msg(hass, "confirmation_unable_to_process")
 
 
 def _resolve_action_id(
@@ -939,12 +939,14 @@ def _resolve_action_id(
 
 
 def _load_pending_action(
-    pending_actions: dict[str, dict[str, Any]], resolved_action_id: str
+    pending_actions: dict[str, dict[str, Any]],
+    resolved_action_id: str,
+    hass: HomeAssistant | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Validate and return a pending action."""
     action = pending_actions.get(resolved_action_id)
     if not action:
-        return None, "Pending action not found or expired."
+        return None, pin_msg(hass, "pending_action_not_found_or_expired")
 
     created_at = action.get("created_at")
     if created_at:
@@ -954,32 +956,42 @@ def _load_pending_action(
         except (ValueError, TypeError):
             # TypeError covers a timezone-naive stored timestamp.
             pending_actions.pop(resolved_action_id, None)
-            return None, "Pending action is invalid; please try again."
+            return None, pin_msg(hass, "pending_action_invalid")
         if expired:
             pending_actions.pop(resolved_action_id, None)
-            return None, "Pending action expired; please re-run the request."
+            return None, pin_msg(hass, "pending_action_expired")
 
     action.setdefault("attempts", 0)
     return action, None
 
 
 def _validate_pin_for_action(
-    *, provided_pin: str, pin_hash: str, salt: str, action: dict[str, Any]
+    *,
+    provided_pin: str,
+    pin_hash: str,
+    salt: str,
+    action: dict[str, Any],
+    hass: HomeAssistant | None = None,
 ) -> str | None:
     """Validate PIN format and value against stored hash/salt."""
     max_pin_attempts = 5
     if not pin_hash or not salt:
-        return "No PIN configured; cannot confirm the action."
+        return pin_msg(hass, "pin_not_configured")
     if not provided_pin.isdigit() or not (
         CRITICAL_PIN_MIN_LEN <= len(provided_pin) <= CRITICAL_PIN_MAX_LEN
     ):
-        return f"Invalid PIN. Use {CRITICAL_PIN_MIN_LEN}-{CRITICAL_PIN_MAX_LEN} digits."
+        return pin_msg(
+            hass,
+            "pin_invalid_format",
+            min_len=CRITICAL_PIN_MIN_LEN,
+            max_len=CRITICAL_PIN_MAX_LEN,
+        )
     attempts = int(action.get("attempts", 0) or 0)
     if attempts >= max_pin_attempts:
-        return "Too many incorrect attempts; please re-run the request."
+        return pin_msg(hass, "pin_too_many_attempts")
     if not verify_pin(provided_pin, hashed=pin_hash, salt=salt):
         action["attempts"] = attempts + 1
-        return "Incorrect PIN. Action not executed."
+        return pin_msg(hass, "pin_incorrect")
     return None
 
 
@@ -1005,7 +1017,7 @@ async def _execute_pending_action(
     """Normalize args, execute the pending action, and clear it."""
     raw_tool_name = action.get("tool_name")
     if not isinstance(raw_tool_name, str) or not raw_tool_name:
-        return None, "Pending action is invalid; missing tool name."
+        return None, pin_msg(cfg.get("hass"), "pending_action_missing_tool_name")
     tool_name = raw_tool_name
 
     if tool_name == "add_automation":
@@ -1013,7 +1025,7 @@ async def _execute_pending_action(
 
     ha_llm_api, api_err = _ensure_api(cfg)
     if api_err or ha_llm_api is None:
-        return None, api_err or "Home Assistant LLM API unavailable."
+        return None, pin_msg(cfg.get("hass"), "ha_llm_api_unavailable")
 
     tool_args = action.get("tool_args") or {}
     tool_args = normalize_intent_for_alarm(tool_name, tool_args)
@@ -1024,7 +1036,7 @@ async def _execute_pending_action(
         tool_input = llm.ToolInput(tool_name=tool_name, tool_args=tool_args)
         response = await ha_llm_api.async_call_tool(tool_input)
     except (HomeAssistantError, vol.Invalid) as err:
-        return None, f"Failed to execute action: {err!r}"
+        return None, pin_msg(cfg.get("hass"), "action_execute_failed", err=repr(err))
 
     pending_actions = cfg.get("pending_actions", {})
     pending_actions.pop(resolved_action_id, None)
@@ -1042,7 +1054,7 @@ async def _execute_pending_automation(
     hass = cfg.get("hass")
     automation_config = action.get("automation_config")
     if hass is None or not isinstance(automation_config, dict):
-        return None, "Pending automation is invalid; please re-run the request."
+        return None, pin_msg(hass, "pending_automation_invalid")
 
     # Claim the action before writing. Tool calls in one model batch run under
     # asyncio.gather, so two confirmations of the same action_id would both
@@ -1050,15 +1062,12 @@ async def _execute_pending_automation(
     # only removed afterwards.
     pending_actions = cfg.get("pending_actions", {})
     if pending_actions.pop(resolved_action_id, None) is None:
-        return None, "Pending action not found or expired."
+        return None, pin_msg(hass, "pending_action_not_found_or_expired")
 
     try:
         result = await _async_write_automation(hass, automation_config)
     except (HomeAssistantError, OSError, yaml.YAMLError) as err:
-        return None, (
-            f"Failed to install the automation: {err!r}. "
-            "The confirmation was used up; please request the automation again."
-        )
+        return None, pin_msg(hass, "automation_install_failed", err=repr(err))
 
     return json.dumps(
         {"status": "completed", "action_id": resolved_action_id, "result": result}
