@@ -3539,3 +3539,40 @@ def test_normalize_candidate_negated_text_variant_blocks_while_home() -> None:
     normalized = normalize_candidate(candidate)
     assert normalized is not None
     assert normalized.template_id == "unavailable_sensors"
+
+
+def test_normalize_candidate_battery_baseline_deviation_routes_to_low_battery() -> None:
+    """
+    A battery baseline-deviation candidate routes to low_battery_sensors.
+
+    Discovery decorates battery candidates with occupancy/night conditioning
+    and a statistical framing, but battery percentage declines monotonically —
+    the threshold template is the only battery tool, and it carries no
+    occupancy or time-of-day conditions. This anchors the normalizer side of
+    the candidate_semantic_key battery mirror.
+    """
+    candidate = {
+        "candidate_id": (
+            "candidate_garage_temp_sensor_battery_baseline_deviation_home_night"
+        ),
+        "title": "Garage Temp Sensor Battery Anomaly During Night While Home",
+        "summary": (
+            "Detects statistical deviation in the battery level of the garage "
+            "temperature and humidity sensor during nighttime hours while "
+            "someone is home, indicating potential sensor degradation."
+        ),
+        "pattern": "statistical_baseline_deviation",
+        "confidence_hint": 0.6,
+        "evidence_paths": [
+            "entities[sensor.garage_temp_sensor_battery].state",
+            "derived.is_night",
+            "derived.anyone_home",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "low_battery_sensors"
+    assert normalized.params["sensor_entity_ids"] == [
+        "sensor.garage_temp_sensor_battery"
+    ]
+    assert normalized.params["threshold"] == 40.0

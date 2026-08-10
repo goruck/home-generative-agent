@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from custom_components.home_generative_agent.sentinel.discovery_semantic import (
     candidate_semantic_key,
+    is_battery_level_entity_id,
     rule_key_covers_candidate_key,
     rule_semantic_key,
 )
@@ -1506,3 +1507,371 @@ def test_candidate_semantic_key_negated_text_in_pattern_keys_away() -> None:
     key = candidate_semantic_key(candidate)
     assert key is not None
     assert "home=0" in key
+
+
+def test_is_battery_level_entity_id_classification() -> None:
+    """
+    Battery-level classification gates baseline eligibility.
+
+    Battery-named sensor.* IDs are charge levels unless they carry a
+    measurement token (sensor.battery_power on a home battery is a real
+    power stream); non-sensor domains never qualify.
+    """
+    assert is_battery_level_entity_id("sensor.garage_temp_sensor_battery")
+    assert is_battery_level_entity_id("sensor.playroom_attic_sensor_battery")
+    assert is_battery_level_entity_id("sensor.hall_battery")
+    # Device-named battery levels: device-type tokens (door/motion/smoke)
+    # and measurement tokens BEFORE the battery token name the device, not
+    # the reading — they must not disqualify the charge level (pre-landing
+    # review + adversarial round; canonical HA device-battery naming).
+    assert is_battery_level_entity_id("sensor.front_door_battery")
+    assert is_battery_level_entity_id("sensor.hallway_motion_battery")
+    assert is_battery_level_entity_id("sensor.bedroom_window_battery")
+    assert is_battery_level_entity_id("sensor.smoke_detector_battery")
+    assert is_battery_level_entity_id("sensor.water_leak_battery")
+    assert is_battery_level_entity_id("sensor.garage_temperature_sensor_battery")
+    # Measurement tokens AFTER the battery token are telemetry streams of a
+    # home battery, not charge levels — they stay baseline-eligible.
+    assert not is_battery_level_entity_id("sensor.battery_power")
+    assert not is_battery_level_entity_id("sensor.battery_voltage")
+    assert not is_battery_level_entity_id("sensor.battery_temperature")
+    assert not is_battery_level_entity_id("sensor.battery_monitor_rssi")
+    assert not is_battery_level_entity_id("sensor.garage_temperature")
+    assert not is_battery_level_entity_id("binary_sensor.hall_battery_low")
+    assert not is_battery_level_entity_id("lock.front_door")
+
+
+def test_battery_baseline_candidate_keys_low_battery_context_free() -> None:
+    """
+    A battery baseline-deviation candidate keys low_battery with no context.
+
+    The discovery LLM decorates battery candidates with occupancy/night
+    conditioning ("Battery Anomaly During Night While Home") even though
+    battery health is occupancy-independent, and its baseline prose carries
+    no low-battery qualifier. The key must mirror the normalizer, which
+    routes battery-named evidence plus battery prose to low_battery_sensors
+    (night=any|home=any) — otherwise the candidate keys power_anomaly with
+    context preserved and the activated rule never dedups re-proposals.
+    """
+    candidate = {
+        "candidate_id": (
+            "candidate_garage_temp_sensor_battery_baseline_deviation_home_night"
+        ),
+        "title": "Garage Temp Sensor Battery Anomaly During Night While Home",
+        "summary": (
+            "Detects statistical deviation in the battery level of the garage "
+            "temperature and humidity sensor during nighttime hours while "
+            "someone is home, indicating potential sensor degradation."
+        ),
+        "pattern": "statistical_baseline_deviation",
+        "evidence_paths": [
+            "entities[sensor.garage_temp_sensor_battery].state",
+            "derived.is_night",
+            "derived.anyone_home",
+        ],
+    }
+    rule = {
+        "rule_id": "garage_temp_sensor_battery_low",
+        "template_id": "low_battery_sensors",
+        "params": {
+            "sensor_entity_ids": ["sensor.garage_temp_sensor_battery"],
+            "threshold": 40.0,
+        },
+    }
+    expected_key = (
+        "v1|subject=sensor|predicate=low_battery|night=any|home=any|scope=any|"
+        "entities=sensor.garage_temp_sensor_battery"
+    )
+    # Both sides asserted against the explicit literal so a shared-helper
+    # mutation cannot silently turn this into f(x) == f(x).
+    assert candidate_semantic_key(candidate) == expected_key
+    assert rule_semantic_key(rule) == expected_key
+    assert rule_key_covers_candidate_key(expected_key, expected_key)
+
+
+def test_battery_baseline_context_variants_collapse_to_one_key() -> None:
+    """
+    Home/away/night battery baseline variants all produce one identical key.
+
+    Without battery context canonicalization each occupancy/night decoration
+    is a distinct semantic key, so near-duplicate battery candidates pile up
+    in the discovery card instead of deduplicating.
+    """
+    home_night = {
+        "candidate_id": (
+            "candidate_garage_temp_sensor_battery_baseline_deviation_home_night"
+        ),
+        "title": "Garage Temp Sensor Battery Anomaly During Night While Home",
+        "summary": (
+            "Detects statistical deviation in the battery level of the garage "
+            "temperature and humidity sensor during nighttime hours while "
+            "someone is home."
+        ),
+        "pattern": "statistical_baseline_deviation",
+        "evidence_paths": [
+            "entities[sensor.garage_temp_sensor_battery].state",
+            "derived.is_night",
+            "derived.anyone_home",
+        ],
+    }
+    away_night = {
+        "candidate_id": (
+            "candidate_garage_temp_humidity_battery_baseline_deviation_away_night"
+        ),
+        "title": (
+            "Garage Temp/Humidity Sensor Battery Baseline Deviation While Away at Night"
+        ),
+        "summary": (
+            "Detects statistical deviation in the garage temperature and "
+            "humidity sensor battery level from its normal baseline while "
+            "no one is home during nighttime hours."
+        ),
+        "pattern": "statistical_anomaly",
+        "evidence_paths": [
+            "entities[sensor.garage_temp_sensor_battery].state",
+            "not derived.anyone_home",
+            "derived.is_night",
+        ],
+    }
+    night_only = {
+        "candidate_id": "candidate_garage_temp_battery_time_of_day_anomaly_night",
+        "title": "Garage Temp Sensor Battery Anomaly at Night",
+        "summary": (
+            "Detects statistical deviation in the battery level of the garage "
+            "temperature sensor during nighttime hours when usage patterns "
+            "typically stabilize."
+        ),
+        "pattern": "statistical_baseline",
+        "evidence_paths": [
+            "entities[sensor.garage_temp_sensor_battery].state",
+            "derived.is_night",
+        ],
+    }
+    keys = {
+        candidate_semantic_key(home_night),
+        candidate_semantic_key(away_night),
+        candidate_semantic_key(night_only),
+    }
+    assert keys == {
+        (
+            "v1|subject=sensor|predicate=low_battery|night=any|home=any|scope=any|"
+            "entities=sensor.garage_temp_sensor_battery"
+        )
+    }
+
+
+def test_battery_arm_alternate_needles_key_low_battery() -> None:
+    """
+    "below"/"low" prose without the word "battery" still keys the battery arm.
+
+    The disjunctive arm's needle tuple is (battery, low, below); every other
+    battery test carries "battery" in prose, so without this test a mutation
+    dropping the low/below needles passes the suite (pre-landing review).
+    """
+    candidate = {
+        "candidate_id": "candidate_garage_sensor_cell_dropping",
+        "title": "Garage sensor cell level dropping below its usual range",
+        # No "battery" anywhere in prose or slug: the conjunctive signal must
+        # stay silent so this test pins the arm's "below"/"low" needles alone.
+        "summary": (
+            "Detects when the charge level of the garage climate sensor "
+            "drifts below its usual range."
+        ),
+        "pattern": "statistical_baseline_deviation",
+        "evidence_paths": ["entities[sensor.garage_temp_sensor_battery].state"],
+    }
+    key = candidate_semantic_key(candidate)
+    assert key == (
+        "v1|subject=sensor|predicate=low_battery|night=any|home=any|scope=any|"
+        "entities=sensor.garage_temp_sensor_battery"
+    )
+
+
+def test_battery_arm_requires_battery_low_below_prose_token() -> None:
+    """
+    Battery-named evidence with token-free prose must not key low_battery.
+
+    The arm's prose guard mirrors the normalizer's disjunctive condition;
+    without any of battery/low/below in text the candidate keeps the power
+    leg's keying, so a mutation forcing the guard true is caught here
+    (pre-landing review).
+    """
+    candidate = {
+        "candidate_id": "candidate_garage_sensor_baseline",
+        "title": "Garage sensor baseline deviation",
+        "summary": (
+            "Detects statistical deviation from the normal baseline for this sensor."
+        ),
+        "pattern": "statistical_baseline_deviation",
+        "evidence_paths": ["entities[sensor.garage_battery].state"],
+    }
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert "predicate=power_anomaly" in key
+    assert "predicate=low_battery" not in key
+
+
+def test_battery_arm_locale_fallback_does_not_widen_disjunctive_leg() -> None:
+    """
+    Named IDs only: a lone locale-named sensor + "low" prose keys power_anomaly.
+
+    The normalizer promotes its locale fallback solely on the conjunctive
+    low-battery signal, so the disjunctive arm must not fire on fallback IDs —
+    a mutation swapping _named_battery_sensor_entity_ids for the
+    fallback-inclusive collection passes every other test (pre-landing
+    review; issue #522 locale-fallback contract).
+    """
+    candidate = {
+        "candidate_id": "candidate_zamek_vrata_low_reading",
+        "title": "Sensor reading unusually low",
+        "summary": (
+            "Detects when sensor.zamek_vrata reads low compared to its normal baseline."
+        ),
+        "pattern": "statistical_baseline_deviation",
+        "evidence_paths": ["entities[sensor.zamek_vrata].state"],
+    }
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert "predicate=power_anomaly" in key
+    assert "predicate=low_battery" not in key
+
+
+def test_battery_arm_does_not_steal_motion_camera_candidate() -> None:
+    """
+    Mixed motion+camera evidence with incidental battery keeps motion keying.
+
+    Adversarial round (pre-landing, empirically reproduced regression): the
+    normalizer's motion_without_camera_activity branch precedes its battery
+    branch, so a candidate citing motion + camera + a battery sensor with
+    bare "low" prose ("camera activity stays low") must NOT key low_battery —
+    that would let an activated low_battery rule on the incidental sensor
+    silently swallow the unrelated motion proposal, and the activated motion
+    rule would never dedup it.
+    """
+    candidate = {
+        "candidate_id": "candidate_hall_motion_without_camera_activity",
+        "title": "Motion with low camera activity",
+        # No "battery" in prose: with it, the PRE-EXISTING conjunctive arm
+        # would fire (battery + "low"), which is not the regression under
+        # test — the disjunctive arm alone must not steal this candidate.
+        "summary": (
+            "Detects hallway motion events while camera activity stays low; "
+            "the hub charge sensor is cited for device context."
+        ),
+        "pattern": "motion_without_camera_activity",
+        "evidence_paths": [
+            "entities[binary_sensor.hall_motion].state",
+            "entities[camera.hallway].state",
+            "entities[sensor.hub_battery].state",
+        ],
+    }
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert "predicate=low_battery" not in key
+    assert "subject=motion" in key or "subject=camera" in key
+
+
+def test_battery_arm_does_not_steal_alarm_motion_candidate() -> None:
+    """
+    Alarm+motion evidence with "below" prose keeps its motion keying.
+
+    Second reproduced shape from the adversarial round: "readings below
+    normal" plus an incidental battery sensor must not re-key an alarm-motion
+    candidate as low_battery (infinite re-proposal + cross-suppression).
+    """
+    candidate = {
+        "candidate_id": "candidate_night_motion_alarm_inactive",
+        "title": "Motion at night while alarm inactive",
+        # No "battery" in prose — see the motion+camera test above; this
+        # pins the disjunctive arm's "below" needle against evidence-only
+        # battery citation.
+        "summary": (
+            "Detects motion at night while the alarm is not armed and sensor "
+            "readings stay below normal; cites the hub charge sensor."
+        ),
+        "pattern": "motion_at_night",
+        "evidence_paths": [
+            "entities[alarm_control_panel.home_alarm].state",
+            "entities[binary_sensor.hall_motion].state",
+            "entities[sensor.hub_battery].state",
+            "derived.is_night",
+        ],
+    }
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert "predicate=low_battery" not in key
+    assert "subject=motion" in key
+    assert "predicate=active" in key
+
+
+def test_device_named_battery_candidate_keys_low_battery() -> None:
+    """
+    A door-named battery sensor candidate keys low_battery, matching its rule.
+
+    sensor.front_door_battery resolves into the key chain's door_ids (the
+    "door" substring), but the normalizer's _NON_ENTRY_ID_TOKENS contains
+    "battery" so it is never an entry there — its battery branch registers
+    low_battery_sensors. The battery arm's sensor-only gate must therefore
+    let battery-named window/door ids through (adversarial round).
+    """
+    candidate = {
+        "candidate_id": "candidate_front_door_battery_baseline_deviation",
+        "title": "Front Door Sensor Battery Baseline Deviation",
+        "summary": (
+            "Detects statistical deviation in the battery level of the front "
+            "door contact sensor."
+        ),
+        "pattern": "statistical_baseline_deviation",
+        "evidence_paths": ["entities[sensor.front_door_battery].state"],
+    }
+    rule = {
+        "rule_id": "front_door_battery_low",
+        "template_id": "low_battery_sensors",
+        "params": {
+            "sensor_entity_ids": ["sensor.front_door_battery"],
+            "threshold": 40.0,
+        },
+    }
+    expected_key = (
+        "v1|subject=sensor|predicate=low_battery|night=any|home=any|scope=any|"
+        "entities=sensor.front_door_battery"
+    )
+    assert candidate_semantic_key(candidate) == expected_key
+    assert rule_semantic_key(rule) == expected_key
+
+
+def test_motion_named_battery_candidate_keys_low_battery() -> None:
+    """
+    A motion-named battery sensor as sole evidence keys low_battery.
+
+    sensor.hallway_motion_battery is motion-named, so it lands in the key
+    chain's motion_ids — but the normalizer's away-motion branches guard on
+    battery_sensor_ids and its battery branch registers low_battery_sensors,
+    so the battery arm's sensor-only gate must let battery-named motion ids
+    through, exactly like door/window-named battery ids (Codex structured
+    review, empirically reproduced mismatch).
+    """
+    candidate = {
+        "candidate_id": "candidate_hallway_motion_battery_baseline_deviation",
+        "title": "Hallway Motion Sensor Battery Baseline Deviation",
+        "summary": (
+            "Detects statistical deviation in the battery level of the "
+            "hallway motion sensor."
+        ),
+        "pattern": "statistical_baseline_deviation",
+        "evidence_paths": ["entities[sensor.hallway_motion_battery].state"],
+    }
+    rule = {
+        "rule_id": "hallway_motion_battery_low",
+        "template_id": "low_battery_sensors",
+        "params": {
+            "sensor_entity_ids": ["sensor.hallway_motion_battery"],
+            "threshold": 40.0,
+        },
+    }
+    expected_key = (
+        "v1|subject=sensor|predicate=low_battery|night=any|home=any|scope=any|"
+        "entities=sensor.hallway_motion_battery"
+    )
+    assert candidate_semantic_key(candidate) == expected_key
+    assert rule_semantic_key(rule) == expected_key
