@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.27.0] - 2026-08-09
+
+### Added
+
+- **Critical-action PIN prompts and confirmation messages now follow the Home Assistant server language**, contributed by [@hruba202](https://github.com/hruba202) ([#537](https://github.com/goruck/home-generative-agent/pull/537)). The PIN flow added in v3.26.0 returns its user-facing text — confirmation prompts, PIN validation errors, pending-action expiry notices — as fixed strings straight from Python, so it never passes through Home Assistant's translation files and a Czech-configured instance saw the whole flow in English. These strings are deterministic security copy, not model output, so they are translated by a static English/Czech lookup table (`agent/pin_messages.py`) resolved from the server language (**Settings → System → General**; region suffixes like `cs-CZ` resolve to their base language). Any other language falls back to English, and diagnostic log lines stay English deliberately. Maintainer hardening on top of the contribution restored a missing English string (one error path replied with its raw message id instead of a sentence), routed the remaining PIN-flow error messages through the same table, and added parity tests so every language must carry the complete key set with matching placeholders — adding a language is a single new table entry.
+
 ## [3.26.0] - 2026-08-05
 
 ### Security
