@@ -695,6 +695,76 @@ Entity-backed evidence path instruction added to `USER_PROMPT_TEMPLATE` in `expl
 
 ---
 
+### sensor_threshold_condition rule keys never cover their candidates
+
+**What:** `rule_semantic_key` for `sensor_threshold_condition` emits a 4-field key (`predicate=power_threshold`, no night/home/template fields) while candidates key 7 fields with `predicate=power_anomaly` plus preserved context — `rule_key_covers_candidate_key` is structurally always False (equality fails, no `|template=` strip, field-count mismatch). After approval the LLM hint gap reopens and only the 200-record history filter backstops re-proposals; context variants ("above 1000 at night" vs "while nobody is home") also mint distinct candidate keys and can pile up as pending cards.
+
+**Why:** Pre-existing shape shared with power thresholds (accepted base parity in the #540/#541 ships), but the #541 environmental prompt explicitly encourages threshold candidates for dangerous extremes, materially increasing incidence. Confirmed by ship red-team review (2026-08-11, reproduced); docs/sentinel.md discloses the residual.
+
+**How to apply:** Emit a `power_threshold` candidate predicate when the statistical leg detects threshold prose, and teach `rule_key_covers_candidate_key` to strip context for `power_threshold` rule keys the way it does for `|template=` keys — with a re-proposal-expectation note for existing pending threshold candidates whose keys migrate.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** v3.28.0
+
+---
+
+### Low-side ("drops below") thresholds silently degrade to baseline rules
+
+**What:** `_NUMERIC_THRESHOLD_PATTERN` matches only high-side wording (above/exceeds/over/more than) and rejects zero/negative values, so "crawlspace temperature drops below 3" registers a generic `baseline_deviation` instead of a low-side threshold rule — the approved card's semantics (freeze warning) do not match the registered rule, silently.
+
+**Why:** Low-side thresholds are the primary environmental safety case (freeze, low humidity), newly reachable via #541. Fixing it needs `sensor_threshold_condition` to grow a direction/comparator param — an evaluator change the #541 scope decision ("no new evaluator templates") deliberately excluded. Found by ship adversarial review (2026-08-11, reproduced).
+
+**How to apply:** Add a `below: bool` (or `comparator`) param to `sensor_threshold_condition`'s evaluator, extend the threshold extraction with a low-side pattern (mirroring `_RELATIVE_THRESHOLD_PATTERN`'s vocabulary), route low-side prose accordingly, and mirror whatever the candidate keys do per the threshold-coverage TODO above.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** v3.28.0
+
+---
+
+### Percent-deviation baseline physics are wrong for interval-scale environmental quantities
+
+**What:** `evaluate_baseline_deviation` computes `|cur−base|/|base|·100` with `base==0 → any non-zero = 100%`. Celsius temperatures near zero make tiny absolute swings read as huge percentages (a 0.0 °C baseline fires on every non-zero reading — winter alert spam), and atmospheric pressure (~1000 hPa) can never move 50%, so an approved pressure rule is permanently inert monitoring presented as coverage.
+
+**Why:** Pre-existing evaluator behavior, explicitly deferred by #541's scope ("separate issue if it bites"), but #541 is what steers these quantities into the evaluator. Illuminance — the third pathological class — was mitigated in-ship by routing to `time_of_day_anomaly`. Flagged by both ship adversarial passes (2026-08-11).
+
+**How to apply:** Make the deviation class/unit-aware: absolute-delta or stddev-based thresholds for interval-scale units (°C/°F, hPa), keeping pct deviation for ratio-scale quantities (W, lx, ppm). Applies to both `evaluate_baseline_deviation` and the baseline updater's drift logic; needs unit metadata from the snapshot or baseline store.
+
+**Effort:** L
+**Priority:** P2
+**Depends on:** v3.28.0
+
+---
+
+### Per-device-class budget for the discovery snapshot entity cap
+
+**What:** The reduced snapshot's `_MAX_ENTITIES=100` cap has no per-class slices. v3.28.0 stops environmental sensors from systematically outranking idle security entities (their recency bonus is zeroed), but score ties still evict alphabetically — a large enough env/power fleet can still push closed doors and locked locks out of the snapshot, and with them out of `baseline_ready_entities` gap analysis.
+
+**Why:** Ship red-team review (2026-08-11) reproduced eviction with a synthetic 110-entity home; the recency fix removes the systematic bias but not the tie-break residual. The #541 scope decision deferred score redesign pending field reports.
+
+**How to apply:** Reserve per-domain/device-class budget slices before the global cap (e.g. security binary_sensors/locks/covers first, then measurement classes), or add a deterministic round-robin across classes for tied scores. Verify the budget-trim passes still fit `_TOKEN_BUDGET_CHARS`.
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** v3.28.0
+
+---
+
+### Mixed motion+environmental candidates key subject=motion while promotion registers subject=sensor
+
+**What:** A candidate citing `binary_sensor.attic_motion` plus `sensor.attic_temperature` with environmental-only prose keys `subject=motion|entities=binary_sensor.attic_motion` (the #541 env leg is subject-gated off to protect motion rules), but when no motion branch claims it the normalizer's statistical branch registers `baseline_deviation` on the temperature sensor — the rule key (`subject=sensor`) never covers the candidate key, so context variants of that mixed shape can re-propose after approval.
+
+**Why:** Residual accepted during the #541 ship: the subject gate exists to prevent the worse steal (motion candidates keyed power_anomaly, breaking motion-rule dedup — the #540 lesson), and gap-hint candidates are prompted to cite only their gap entity, so mixed shapes are uncommon. Same class as the pre-existing mixed battery shapes recorded in the derive-keys-from-routing TODO above, which is the structural fix.
+
+**How to apply:** Covered by "Consider deriving candidate keys from the normalizer's actual routing" — keying from the normalized rule eliminates the whole class. No separate mirror patch recommended.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** v3.28.0
+
+---
+
 ## Video Analyzer
 
 ### Caption novelty: per-analysis notification-status metadata
