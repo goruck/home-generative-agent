@@ -2332,6 +2332,7 @@ def test_environmental_door_substring_entity_keeps_sensor_keying(
     )
     candidate_key = candidate_semantic_key(candidate)
     assert rule_key is not None
+    assert candidate_key is not None
     assert candidate_key == (
         "v1|subject=sensor|predicate=power_anomaly|night=any|home=any|scope=any|"
         f"entities={entity_id}"

@@ -751,6 +751,20 @@ Entity-backed evidence path instruction added to `USER_PROMPT_TEMPLATE` in `expl
 
 ---
 
+### Locale-named environmental candidates stay unsupported
+
+**What:** The environmental routing signal is English-token-only (prose or entity ID), so a home where both the entity ID and the generated prose are localized (`sensor.podkrovi_teplota` + Czech prose) returns `unsupported_pattern` even though the reducer admitted the entity via `device_class: temperature`.
+
+**Why:** Codex structured review during the #541 ship (2026-08-11). Same class as the locale-named motion/entry/battery fallbacks; the clean fix is locale-independent metadata (device_class from the snapshot) reaching the normalizer, which is currently a pure text function — a design change shared with the approval-time-validation TODO above.
+
+**How to apply:** Either thread snapshot device_class metadata into normalization (candidate-enrichment at the engine layer, keeping the normalizer pure), or accept the structured `pattern` field (`statistical_baseline_deviation` / `time_of_day_anomaly` are English machine tokens even in locale homes) as a routing signal when sensor evidence exists — mirror whatever the keying side needs for parity.
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** v3.28.0
+
+---
+
 ### Expose unit_of_measurement to the discovery model for threshold proposals
 
 **What:** The reduced snapshot exposes device_class and the rounded state but drops `unit_of_measurement`, while the #541 prompt encourages absolute environmental thresholds ("above 95") — the model cannot distinguish °C from °F or hPa from inHg, and the evaluator compares the proposed number directly against the raw state without conversion. Unit-blind threshold proposals are approval-gated (the card shows the threshold and entity), but the model is guessing.

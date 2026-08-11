@@ -1036,8 +1036,16 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
         # uses a variance-aware threshold (max(2*stddev, drift%)) that tolerates it.
         # Diurnal environmental signals (illuminance) get the same treatment:
         # a rolling average over a hard day/night cycle false-fires at every
-        # dawn and dusk (issue #541 ship adversarial review).
-        if _is_cyclical_load(sensor_id) or _has_diurnal_env_signal(text, sensor_id):
+        # dawn and dusk (issue #541 ship adversarial review). An explicit
+        # time-of-day pattern in the candidate (the prompt teaches
+        # "pattern: time_of_day_anomaly") is honored too — silently
+        # registering a rolling baseline for a requested per-hour comparison
+        # changes the approved proposal (Codex structured review).
+        if (
+            _is_cyclical_load(sensor_id)
+            or _has_diurnal_env_signal(text, sensor_id)
+            or _contains_any(text, ("time_of_day", "time-of-day", "time of day"))
+        ):
             default_rule_id = f"sensor_tod_{sensor_id.replace('.', '_')}"
             return NormalizationResult(
                 normalized=NormalizedRule(

@@ -3870,3 +3870,27 @@ def test_normalize_candidate_prefers_signal_bearing_sensor() -> None:
     assert normalized is not None
     assert normalized.template_id == "baseline_deviation"
     assert normalized.params == {"entity_id": "sensor.z_attic_temperature"}
+
+
+def test_normalize_candidate_explicit_time_of_day_pattern_honored() -> None:
+    """
+    "pattern: time_of_day_anomaly" registers the requested template.
+
+    The prompt teaches time-of-day comparisons; silently registering a
+    rolling baseline for a requested per-hour comparison changes the
+    approved proposal (Codex structured review).
+    """
+    candidate = {
+        "candidate_id": "candidate_attic_temperature_tod",
+        "title": "Attic temperature daily-cycle anomaly",
+        "summary": (
+            "Compares the attic temperature against its typical value for the hour."
+        ),
+        "pattern": "time_of_day_anomaly",
+        "confidence_hint": 0.6,
+        "evidence_paths": ["entities[sensor.attic_temperature].state"],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "time_of_day_anomaly"
+    assert normalized.params == {"entity_id": "sensor.attic_temperature"}
