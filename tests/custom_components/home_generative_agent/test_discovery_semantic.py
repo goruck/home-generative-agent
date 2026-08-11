@@ -2476,3 +2476,66 @@ def test_entry_evidence_open_prose_keeps_open_predicate() -> None:
     assert key is not None
     assert "subject=entry_door" in key
     assert "predicate=open" in key
+
+
+def test_environmental_availability_prose_not_rewritten_to_power_anomaly() -> None:
+    """
+    Outage candidates must not be covered by unrelated baseline rules.
+
+    "unavailable; unable to open its connection" keys predicate=open (the
+    open leg precedes the unavailable leg); rewriting it to power_anomaly
+    would let an active baseline rule on the same sensor falsely cover the
+    outage proposal the normalizer's availability branch registers (Codex
+    adversarial review, reproduced). The override must leave the base key.
+    """
+    candidate = _env_statistical_candidate(
+        candidate_id="candidate_attic_temperature_offline",
+        title="Attic temperature sensor unavailable",
+        summary=(
+            "The attic temperature sensor is unavailable; Home Assistant is "
+            "unable to open its connection."
+        ),
+        pattern="availability_watch",
+        evidence_paths=["entities[sensor.attic_temperature].state"],
+    )
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id in {
+        "unavailable_sensors",
+        "unavailable_sensors_while_home",
+    }
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert "predicate=power_anomaly" not in key
+    baseline_rule_key = (
+        "v1|subject=sensor|predicate=power_anomaly"
+        "|template=baseline_deviation|entities=sensor.attic_temperature"
+    )
+    assert not rule_key_covers_candidate_key(baseline_rule_key, key)
+
+
+def test_comma_threshold_prose_keeps_context_in_key() -> None:
+    """
+    "exceeds 1,000" is a threshold on both surfaces (Codex review).
+
+    The keying mirror must parse comma thousands like the normalizer, or a
+    threshold candidate would collapse its context while the registered
+    rule keeps require_night — the mirror-drift class the tuple pin guards.
+    """
+    candidate = _env_statistical_candidate(
+        candidate_id="candidate_living_room_co2_threshold",
+        title="CO2 threshold at night",
+        summary="Alert when living room CO2 exceeds 1,000 ppm at night.",
+        pattern="sensor_threshold",
+        evidence_paths=[
+            "entities[sensor.living_room_co2].state",
+            "derived.is_night",
+        ],
+    )
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "sensor_threshold_condition"
+    assert normalized.params["threshold"] == 1000.0
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert "night=1" in key

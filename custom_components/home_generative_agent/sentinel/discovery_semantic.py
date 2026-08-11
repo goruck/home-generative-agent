@@ -96,7 +96,9 @@ _ENVIRONMENTAL_SIGNAL_TERMS = (
 # the context-free statistical templates, so the key's context collapse must
 # flip on the same detector.
 _NUMERIC_THRESHOLD_RE = re.compile(
-    r"(?:>|above|exceeds?|over|more than|greater than)\s*(\d+(?:\.\d+)?)"
+    r"(?:>|above|exceeds?|over|more than|greater than)\s*"
+    r"(\d{1,3}(?:,\d{3})+|\d+,\d{1,2}|\d+(?:\.\d+)?)"
+    r"(?!\s*(?:hour|hr|minute|min)s?\b)(?![\d,.])"
 )
 
 
@@ -116,8 +118,13 @@ def _has_numeric_threshold(text: str) -> bool:
     match = _NUMERIC_THRESHOLD_RE.search(text)
     if not match:
         return False
+    raw = match.group(1)
+    if re.fullmatch(r"\d{1,3}(?:,\d{3})+", raw):
+        raw = raw.replace(",", "")
+    else:
+        raw = raw.replace(",", ".")
     try:
-        value = float(match.group(1))
+        value = float(raw)
     except ValueError:
         return False
     return value > 0
@@ -208,6 +215,7 @@ def _has_power_anomaly_signal(text: str, *, environmental: bool) -> bool:
 
 
 def _override_env_prose_steal(
+    text: str,
     predicate: str,
     entities: list[str],
     sensor_ids: list[str],
@@ -227,8 +235,20 @@ def _override_env_prose_steal(
     lock, or alarm evidence never reach this override; unavailable, camera,
     and battery predicates are deliberately not listed — their normalizer
     branches run before the statistical branch and fire on prose alone.
+
+    Availability wording blocks the override entirely (Codex adversarial
+    review, reproduced): "unavailable; unable to open its connection" keys
+    predicate=open (the open leg precedes the unavailable leg), and
+    rewriting it to power_anomaly would let an active baseline rule on the
+    same sensor falsely cover the OUTAGE proposal the normalizer's
+    availability branch actually registers. Keeping the base key restores
+    the pre-#541 no-cover/no-suppress behavior.
     """
-    if environmental and predicate in ("unlocked", "open", "disarmed"):
+    if (
+        environmental
+        and predicate in ("unlocked", "open", "disarmed")
+        and not _contains_any(text, ("unavailable", "offline", "unreachable"))
+    ):
         predicate = "power_anomaly"
         if not entities and sensor_ids:
             entities = sensor_ids
@@ -678,7 +698,7 @@ def candidate_semantic_key(  # noqa: PLR0912, PLR0915
         subject = "sensor"
         entities = sensor_ids
     predicate, entities = _override_env_prose_steal(
-        predicate, entities, sensor_ids, environmental=has_environmental_signal
+        text, predicate, entities, sensor_ids, environmental=has_environmental_signal
     )
 
     night, home = _resolve_night_home(

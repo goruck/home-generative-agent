@@ -93,8 +93,18 @@ _HOURS_THRESHOLD_PATTERN = re.compile(
 # detector must flip on the same threshold detection as this module's
 # sensor_threshold_condition routing, including _extract_threshold_numeric's
 # value > 0 gate. Change both sides together.
+# Comma-grouped thousands ("CO2 exceeds 1,000 ppm") capture whole — the bare
+# \d+ arm alone read them as threshold=1, an always-on rule (Codex
+# adversarial review, reproduced). Comma decimals ("above 20,5") are the
+# 1-2-digit-tail arm, disjoint from the 3-digit thousands groups (#522
+# locale lesson). A trailing duration unit disqualifies the match ("high
+# for over 2 hours" previously registered threshold=2), and the trailing
+# digit/comma/dot lookahead stops backtracking from shaving a blocked
+# number down to its first digits ("above 30 minutes" must not read 3).
 _NUMERIC_THRESHOLD_PATTERN = re.compile(
-    r"(?:>|above|exceeds?|over|more than|greater than)\s*(\d+(?:\.\d+)?)"
+    r"(?:>|above|exceeds?|over|more than|greater than)\s*"
+    r"(\d{1,3}(?:,\d{3})+|\d+,\d{1,2}|\d+(?:\.\d+)?)"
+    r"(?!\s*(?:hour|hr|minute|min)s?\b)(?![\d,.])"
 )
 _MAX_PERCENT = 100.0
 _DEFAULT_DURATION_HOURS = 2.0
@@ -972,7 +982,20 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
         or _environmental_statistical_signal(text, non_battery_sensor_ids)
     ):
         threshold = _extract_threshold_numeric(text)
-        sensor_id = non_battery_sensor_ids[0]
+        # Prefer the sensor that carries the routing signal in its ID: a
+        # candidate bundling a contextual sensor with the measurement sensor
+        # (sensor.a_uptime + sensor.z_attic_temperature) would otherwise
+        # register the rule on the alphabetically-first UNRELATED entity
+        # (Codex adversarial review, reproduced; also fixes the same shape
+        # for power candidates). Stable sort keeps the alphabetical order
+        # within each group.
+        preferred_sensor_ids = sorted(
+            non_battery_sensor_ids,
+            key=lambda s: (
+                not (_has_power_energy_signal(s) or _has_environmental_signal(s))
+            ),
+        )
+        sensor_id = preferred_sensor_ids[0]
         if threshold is not None:
             default_rule_id = f"sensor_threshold_{sensor_id.replace('.', '_')}"
             return NormalizationResult(
@@ -997,7 +1020,7 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
         # *_power and *_energy variants), pick the first non-cumulative one so
         # that energy counters don't silently discard the whole candidate.
         instantaneous_id = next(
-            (s for s in non_battery_sensor_ids if not _is_cumulative_energy_sensor(s)),
+            (s for s in preferred_sensor_ids if not _is_cumulative_energy_sensor(s)),
             None,
         )
         if instantaneous_id is None:
@@ -1750,8 +1773,16 @@ def _extract_threshold_numeric(text: str) -> float | None:
     match = _NUMERIC_THRESHOLD_PATTERN.search(text)
     if not match:
         return None
+    raw = match.group(1)
+    # Comma role is decided by the pattern's disjoint arms: 3-digit groups
+    # are English thousands ("1,000" -> 1000), a 1-2-digit tail is a locale
+    # decimal ("20,5" -> 20.5).
+    if re.fullmatch(r"\d{1,3}(?:,\d{3})+", raw):
+        raw = raw.replace(",", "")
+    else:
+        raw = raw.replace(",", ".")
     try:
-        value = float(match.group(1))
+        value = float(raw)
     except ValueError:
         return None
     return value if value > 0 else None

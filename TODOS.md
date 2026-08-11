@@ -751,6 +751,34 @@ Entity-backed evidence path instruction added to `USER_PROMPT_TEMPLATE` in `expl
 
 ---
 
+### Expose unit_of_measurement to the discovery model for threshold proposals
+
+**What:** The reduced snapshot exposes device_class and the rounded state but drops `unit_of_measurement`, while the #541 prompt encourages absolute environmental thresholds ("above 95") — the model cannot distinguish °C from °F or hPa from inHg, and the evaluator compares the proposed number directly against the raw state without conversion. Unit-blind threshold proposals are approval-gated (the card shows the threshold and entity), but the model is guessing.
+
+**Why:** Codex adversarial review during the #541 ship (2026-08-11). Adding a `unit` field to reduced env entities is cheap in tokens but touches the snapshot contract, grouping semantics, and budget tests — deferred rather than slipped into the ship.
+
+**How to apply:** Include `unit` (from `attributes.unit_of_measurement`) on reduced entities for measurement device classes, teach the prompt to cite it, and consider including the unit in the grouping key so mixed-unit same-area sensors don't share a group.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** v3.28.0
+
+---
+
+### Approval-time validation for statistical/threshold rule targets
+
+**What:** Battery approvals validate each cited sensor against live state (`_is_battery_like_state`) and motion approvals resolve prose IDs against the registry, but promoting a baseline_deviation / time_of_day_anomaly / sensor_threshold_condition candidate registers whatever `sensor.*` ID the LLM cited — a hallucinated ID becomes a permanently silent rule, and a real-but-unrelated numeric sensor becomes a wrong rule.
+
+**Why:** Codex adversarial review during the #541 ship (2026-08-11). Advisory-only impact (no actuation), and the signal-preferring target selection shipped in v3.28.0 reduces the wrong-sensor shape, but inert monitoring presented as coverage is the same honesty problem the dead-unavailable-rules TODO tracks.
+
+**How to apply:** In the promote flow's approval path, resolve the target entity against live states and require a numeric reading (and, when metadata exists, a measurement-class device_class/unit) before registering; refuse with `entities_unresolved`/`not_numeric_sensor` reason codes mirroring the battery gate's shape.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** v3.28.0
+
+---
+
 ### Mixed motion+environmental candidates key subject=motion while promotion registers subject=sensor
 
 **What:** A candidate citing `binary_sensor.attic_motion` plus `sensor.attic_temperature` with environmental-only prose keys `subject=motion|entities=binary_sensor.attic_motion` (the #541 env leg is subject-gated off to protect motion rules), but when no motion branch claims it the normalizer's statistical branch registers `baseline_deviation` on the temperature sensor — the rule key (`subject=sensor`) never covers the candidate key, so context variants of that mixed shape can re-propose after approval.

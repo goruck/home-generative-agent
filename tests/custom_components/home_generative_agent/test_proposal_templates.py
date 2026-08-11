@@ -3829,3 +3829,44 @@ def test_normalize_candidate_domainless_env_evidence_stays_unsupported() -> None
         "evidence_paths": ["entities[entity_id=attic_temperature].state"],
     }
     assert normalize_candidate(candidate) is None
+
+
+def test_extract_threshold_numeric_comma_and_duration() -> None:
+    """
+    Comma thousands parse whole; duration phrases are not thresholds.
+
+    "CO2 exceeds 1,000 ppm" previously registered threshold=1 — an
+    always-on rule — and "high for over 2 hours" registered threshold=2
+    (Codex adversarial review, both reproduced).
+    """
+    assert _extract_threshold_numeric("co2 exceeds 1,000 ppm") == 1000.0
+    assert _extract_threshold_numeric("power above 1,500 w") == 1500.0
+    assert _extract_threshold_numeric("temperature rises above 95") == 95.0
+    assert _extract_threshold_numeric("stays high for over 2 hours") is None
+    assert _extract_threshold_numeric("above 30 minutes of runtime") is None
+
+
+def test_normalize_candidate_prefers_signal_bearing_sensor() -> None:
+    """
+    The rule registers on the sensor that carries the signal (Codex review).
+
+    A candidate bundling a contextual sensor with the measurement sensor
+    must not register the rule on the alphabetically-first unrelated entity.
+    """
+    candidate = {
+        "candidate_id": "candidate_attic_temperature_mixed",
+        "title": "Attic temperature anomaly",
+        "summary": (
+            "Detects statistical deviation from the normal attic temperature reading."
+        ),
+        "pattern": "statistical_baseline_deviation",
+        "confidence_hint": 0.6,
+        "evidence_paths": [
+            "entities[sensor.a_uptime].state",
+            "entities[sensor.z_attic_temperature].state",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "baseline_deviation"
+    assert normalized.params == {"entity_id": "sensor.z_attic_temperature"}
