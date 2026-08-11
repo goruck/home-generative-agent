@@ -7,12 +7,14 @@ import json
 from typing import Any
 
 from custom_components.home_generative_agent.snapshot.discovery_reducer import (
+    _ENVIRONMENTAL_SENSOR_DEVICE_CLASSES,
     _MAX_BASELINE_ENTITIES,
     _MAX_ENTITIES,
     _MAX_RECOGNIZED_PEOPLE,
     _MAX_SUMMARY_CHARS,
     _SECOND_PASS_SUMMARY_CHARS,
     _TOKEN_BUDGET_CHARS,
+    _anomaly_score,
     _apply_budget_trim,
     _truncate_iso,
     reduce_snapshot_for_discovery,
@@ -144,15 +146,216 @@ def test_sensor_without_allowed_device_class_excluded() -> None:
     snapshot = _make_snapshot(
         entities=[
             _make_entity(
-                "sensor.temperature",
+                "sensor.wifi_signal",
                 "sensor",
-                "22.5",
-                device_class="temperature",
+                "-62",
+                device_class="signal_strength",
             ),
         ],
     )
     reduced = reduce_snapshot_for_discovery(snapshot)
     assert len(reduced["entities"]) == 0
+
+
+# --- Environmental sensors (issue #541) ---
+
+
+def test_environmental_device_class_allowlist_is_pinned() -> None:
+    """
+    The documented environmental allowlist cannot silently lose a class.
+
+    The admission test below iterates the production constant, so a dropped
+    class would shrink its loop and pass vacuously (ship testing-specialist
+    review); this pin matches the set docs/sentinel.md promises users.
+    """
+    assert {
+        "temperature",
+        "humidity",
+        "pressure",
+        "atmospheric_pressure",
+        "carbon_dioxide",
+        "carbon_monoxide",
+        "pm25",
+        "pm10",
+        "aqi",
+        "moisture",
+        "illuminance",
+    } == _ENVIRONMENTAL_SENSOR_DEVICE_CLASSES
+
+
+def test_environmental_sensor_device_classes_admitted() -> None:
+    """Every environmental device class in the allowlist survives filtering."""
+    entities = [
+        _make_entity(
+            f"sensor.env_{device_class}",
+            "sensor",
+            "42",
+            device_class=device_class,
+        )
+        for device_class in sorted(_ENVIRONMENTAL_SENSOR_DEVICE_CLASSES)
+    ]
+    snapshot = _make_snapshot(entities=entities)
+    reduced = reduce_snapshot_for_discovery(snapshot)
+    all_ids: list[str] = []
+    for group in reduced["entities"]:
+        all_ids.extend(group["entity_ids"])
+    for device_class in _ENVIRONMENTAL_SENSOR_DEVICE_CLASSES:
+        assert f"sensor.env_{device_class}" in all_ids
+
+
+def test_environmental_state_rounded_to_integer() -> None:
+    """Environmental states are integer-rounded at reduction time."""
+    snapshot = _make_snapshot(
+        entities=[
+            _make_entity(
+                "sensor.attic_temperature",
+                "sensor",
+                "83.66",
+                device_class="temperature",
+            ),
+            _make_entity(
+                "sensor.outdoor_temperature",
+                "sensor",
+                "-5.6",
+                device_class="temperature",
+            ),
+        ],
+    )
+    reduced = reduce_snapshot_for_discovery(snapshot)
+    states = {
+        entity_id: group["state"]
+        for group in reduced["entities"]
+        for entity_id in group["entity_ids"]
+    }
+    assert states["sensor.attic_temperature"] == "84"
+    assert states["sensor.outdoor_temperature"] == "-6"
+
+
+def test_environmental_non_numeric_state_unmodified() -> None:
+    """Non-numeric and non-finite environmental states pass through untouched."""
+    snapshot = _make_snapshot(
+        entities=[
+            _make_entity(
+                "sensor.attic_humidity",
+                "sensor",
+                "unavailable",
+                device_class="humidity",
+            ),
+            _make_entity(
+                "sensor.broken_temperature",
+                "sensor",
+                "inf",
+                device_class="temperature",
+            ),
+            _make_entity(
+                "sensor.nan_temperature",
+                "sensor",
+                "nan",
+                device_class="temperature",
+            ),
+        ],
+    )
+    reduced = reduce_snapshot_for_discovery(snapshot)
+    states = {
+        entity_id: group["state"]
+        for group in reduced["entities"]
+        for entity_id in group["entity_ids"]
+    }
+    assert states["sensor.attic_humidity"] == "unavailable"
+    assert states["sensor.broken_temperature"] == "inf"
+    assert states["sensor.nan_temperature"] == "nan"
+
+
+def test_non_environmental_states_never_rounded() -> None:
+    """
+    Power/energy/battery states keep full precision.
+
+    The rounding surface is environmental-only, so a snapshot without
+    environmental sensors reduces byte-identically to the pre-#541 output.
+    """
+    snapshot = _make_snapshot(
+        entities=[
+            _make_entity(
+                "sensor.washer_power",
+                "sensor",
+                "250.5",
+                device_class="power",
+            ),
+            _make_entity(
+                "sensor.house_energy",
+                "sensor",
+                "1234.567",
+                device_class="energy",
+            ),
+            _make_entity(
+                "sensor.front_door_battery",
+                "sensor",
+                "97.5",
+                device_class="battery",
+            ),
+        ],
+    )
+    reduced = reduce_snapshot_for_discovery(snapshot)
+    states = {
+        entity_id: group["state"]
+        for group in reduced["entities"]
+        for entity_id in group["entity_ids"]
+    }
+    assert states["sensor.washer_power"] == "250.5"
+    assert states["sensor.house_energy"] == "1234.567"
+    assert states["sensor.front_door_battery"] == "97.5"
+
+
+def test_environmental_rounding_groups_same_area_sensors() -> None:
+    """Fraction-apart same-area readings collapse into one group after rounding."""
+    snapshot = _make_snapshot(
+        entities=[
+            _make_entity(
+                "sensor.attic_temp_1",
+                "sensor",
+                "83.66",
+                area="Attic",
+                device_class="temperature",
+            ),
+            _make_entity(
+                "sensor.attic_temp_2",
+                "sensor",
+                "84.44",
+                area="Attic",
+                device_class="temperature",
+            ),
+        ],
+    )
+    reduced = reduce_snapshot_for_discovery(snapshot)
+    assert len(reduced["entities"]) == 1
+    group = reduced["entities"][0]
+    assert group["state"] == "84"
+    assert group["entity_ids"] == ["sensor.attic_temp_1", "sensor.attic_temp_2"]
+
+
+def test_environmental_fixture_stays_within_token_budget() -> None:
+    """A 10-environmental-sensor home reduces well under the character budget."""
+    entities = [
+        _make_entity(
+            f"sensor.room_{i}_temperature",
+            "sensor",
+            f"{70 + i}.{i}3",
+            area=f"Room {i}",
+            device_class="temperature" if i % 2 else "humidity",
+        )
+        for i in range(10)
+    ]
+    snapshot = _make_snapshot(entities=entities)
+    reduced = reduce_snapshot_for_discovery(snapshot)
+    # The bound must be measured over output that provably contains the
+    # environmental entities — a regression that dropped them would shrink
+    # the output and pass vacuously (ship testing-specialist review).
+    surviving_ids = {
+        entity_id for group in reduced["entities"] for entity_id in group["entity_ids"]
+    }
+    assert surviving_ids == {f"sensor.room_{i}_temperature" for i in range(10)}
+    compact = json.dumps(reduced, default=str, separators=(",", ":"))
+    assert len(compact) < _TOKEN_BUDGET_CHARS
 
 
 def test_binary_sensor_without_allowed_device_class_excluded() -> None:
@@ -613,3 +816,51 @@ def test_fourth_pass_caps_recognized_people_when_still_over_budget() -> None:
     for cam in trimmed["camera_activity"]:
         people = cam.get("recognized_people", [])
         assert len(people) <= _MAX_RECOGNIZED_PEOPLE
+
+
+def test_environmental_absurd_magnitude_state_unmodified() -> None:
+    """States beyond the roundable bound pass through compactly ("1e300")."""
+    snapshot = _make_snapshot(
+        entities=[
+            _make_entity(
+                "sensor.broken_pressure",
+                "sensor",
+                "1e300",
+                device_class="pressure",
+            ),
+        ],
+    )
+    reduced = reduce_snapshot_for_discovery(snapshot)
+    states = {
+        entity_id: group["state"]
+        for group in reduced["entities"]
+        for entity_id in group["entity_ids"]
+    }
+    assert states["sensor.broken_pressure"] == "1e300"
+
+
+def test_environmental_entities_get_no_recency_bonus() -> None:
+    """
+    Continuously-reporting env sensors must not outrank idle security (#541).
+
+    A fleet of temperature sensors that changed minutes ago would otherwise
+    all carry the +60 recency bonus and evict closed doors and locked locks
+    at the _MAX_ENTITIES cap (red-team review, reproduced): the recency
+    bonus carries no anomaly signal for a class that re-reports constantly.
+    """
+    generated_at = "2025-01-01T12:00:00+00:00"
+    recent = "2025-01-01T11:55:00+00:00"
+    env_entity = {
+        "entity_id": "sensor.attic_temperature",
+        "state": "84",
+        "device_class": "temperature",
+        "last_changed": recent,
+    }
+    door_entity = {
+        "entity_id": "binary_sensor.front_door",
+        "state": "off",
+        "device_class": "door",
+        "last_changed": recent,
+    }
+    assert _anomaly_score(env_entity, generated_at) == 0
+    assert _anomaly_score(door_entity, generated_at) == 60
