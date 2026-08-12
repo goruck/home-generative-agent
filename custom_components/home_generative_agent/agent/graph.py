@@ -1257,11 +1257,13 @@ def _append_requirement_hint(
     schema: dict[str, Any], dropped: list[list[str]]
 ) -> dict[str, Any]:
     """
-    Restate a dropped ``anyOf`` constraint in the schema description.
+    Restate a dropped union (anyOf/oneOf) constraint in the description.
 
-    Gemini cannot validate the constraint, but it does read descriptions, so
-    surfacing it here keeps the model from emitting a call that the stripped
-    schema permits and Home Assistant's own validation then rejects.
+    Used by both the Gemini sanitizer and the OpenAI top-level-union
+    flattener: the provider cannot validate the constraint, but the model
+    does read descriptions, so surfacing it here keeps the model from
+    emitting a call that the stripped schema permits and Home Assistant's
+    own validation then rejects.
     """
     if all(len(group) == 1 for group in dropped):
         names = list(dict.fromkeys(group[0] for group in dropped))
@@ -1293,9 +1295,11 @@ def _sanitize_any_of_required(schema: dict[str, Any]) -> dict[str, Any]:
 
         {"anyOf": [{"required": ["name"]}, {"required": ["area"]}]}
 
-    Those variants are valid JSON Schema, and every other provider honours
-    them, so unlike the purely additive ``_ensure_array_items()`` this
-    subtractive pass is scoped to Gemini by ``_format_and_dedupe_tools()``.
+    Those variants are valid JSON Schema honoured by Anthropic and Ollama
+    (OpenAI rejects them only at the top level of ``parameters`` — see
+    ``_flatten_top_level_union()``), so unlike the purely additive
+    ``_ensure_array_items()`` this subtractive pass is scoped to Gemini by
+    ``_format_and_dedupe_tools()``.
     Whatever it has to drop is restated in the description so the constraint
     survives as guidance even though it cannot survive in the proto schema.
     """
@@ -1335,6 +1339,110 @@ def _sanitize_any_of_required(schema: dict[str, Any]) -> dict[str, Any]:
     return schema
 
 
+_TOP_LEVEL_UNION_KEYS = ("oneOf", "anyOf", "allOf")
+
+# Providers whose function-calling validator rejects oneOf/anyOf/allOf at the
+# top level of `parameters`. openai_compatible is included because those
+# endpoints proxy or emulate OpenAI's validation; the schema loss is recovered
+# via the description hint either way.
+_FLATTEN_UNION_PROVIDERS = ("openai", "openai_compatible")
+
+
+def _merge_conjunctive_required(
+    schema: dict[str, Any], conjunctive_required: list[str]
+) -> dict[str, Any]:
+    """
+    Merge allOf-derived ``required`` names into the top-level ``required``.
+
+    Entries naming a property the merged schema does not define are dropped;
+    non-list or non-string pre-existing entries are ignored rather than
+    raised.
+    """
+    raw_existing = schema.get("required")
+    existing = (
+        [r for r in raw_existing if isinstance(r, str)]
+        if isinstance(raw_existing, list)
+        else []
+    )
+    merged = dict.fromkeys(existing + conjunctive_required)
+    filtered = [r for r in merged if r in schema["properties"]]
+    if filtered:
+        schema["required"] = filtered
+    return schema
+
+
+def _flatten_top_level_union(schema: dict[str, Any]) -> dict[str, Any]:
+    """
+    Flatten a top-level oneOf/anyOf/allOf into a single object schema.
+
+    OpenAI's function-calling validator rejects oneOf/anyOf/allOf/enum/
+    const/not at the top level of ``parameters`` ("schema must have type
+    'object' and not have 'oneOf'/'anyOf'/'allOf'/'enum'/'const'/'not' at
+    the top level"). On HA 2026.8.1 exactly two assist tools carry that
+    shape — HassStartTimer and HassDecreaseTimer, whose
+    ``vol.Required(vol.Any("hours", "minutes", "seconds"))`` slot converts
+    to a top-level ``anyOf`` of bare ``{"required": [...]}`` variants — and
+    both are exposed only for timer-capable satellite devices, so the 400
+    surfaces only on voice requests from such a device.
+
+    Every variant's ``properties`` are unioned into one object schema
+    (pre-existing top-level properties win).  ``anyOf``/``oneOf`` variant
+    ``required`` entries cannot survive flattening — the arms differ — so
+    they are restated in the description via ``_append_requirement_hint()``,
+    the same recovery the Gemini sanitizer uses.  ``allOf`` variants are
+    conjunctive, so their ``required`` entries merge into the top-level
+    ``required`` instead (entries naming a property no variant defines are
+    dropped).  Malformed variant fields (non-dict ``properties``, non-list
+    ``required``) are ignored rather than raised — one bad tool schema must
+    not fail the whole tool-retrieval pass.
+
+    This pass is subtractive (it deletes union structure other providers
+    honour), so ``_format_and_dedupe_tools()`` gates it to
+    ``_FLATTEN_UNION_PROVIDERS``.
+
+    Scope: only the union keywords are handled, and only variant
+    ``properties``/``required`` survive the merge. voluptuous_openapi always
+    wraps tool schemas in a top-level object, so OpenAI's other forbidden
+    top-level keywords (enum/const/not) and richer variant keywords
+    (additionalProperties, dependentRequired, discriminator const, ...)
+    never occur in this pipeline's input and are deliberately not handled.
+    """
+    merged_keys = [k for k in _TOP_LEVEL_UNION_KEYS if isinstance(schema.get(k), list)]
+    if not merged_keys:
+        return schema
+    merged_properties: dict[str, Any] = {}
+    conjunctive_required: list[str] = []
+    dropped: list[list[str]] = []
+    for key in merged_keys:
+        for variant in schema[key]:
+            if not isinstance(variant, dict):
+                continue
+            variant_properties = variant.get("properties")
+            if isinstance(variant_properties, dict):
+                merged_properties.update(variant_properties)
+            raw_required = variant.get("required")
+            if not isinstance(raw_required, list):
+                continue
+            required = [r for r in raw_required if isinstance(r, str)]
+            if not required:
+                continue
+            if key == "allOf":
+                conjunctive_required.extend(required)
+            else:
+                dropped.append(required)
+    schema = {k: v for k, v in schema.items() if k not in merged_keys}
+    schema["type"] = "object"
+    existing_properties = schema.get("properties")
+    if not isinstance(existing_properties, dict):
+        existing_properties = {}
+    schema["properties"] = {**merged_properties, **existing_properties}
+    if conjunctive_required:
+        schema = _merge_conjunctive_required(schema, conjunctive_required)
+    if dropped:
+        schema = _append_requirement_hint(schema, dropped)
+    return schema
+
+
 def _format_and_dedupe_tools(
     raw_tools: list[RawTool],
     provider: str | None = None,
@@ -1352,8 +1460,22 @@ def _format_and_dedupe_tools(
         parameters = json.loads(tool["parameters"])
         if not isinstance(parameters, dict):
             parameters = {"type": "object", "properties": {}}
-        elif not parameters.get("type"):
-            parameters["type"] = "object"
+        else:
+            # OpenAI rejects oneOf/anyOf/allOf at the top level of
+            # `parameters` (HassStartTimer / HassDecreaseTimer). Subtractive,
+            # so gated — Anthropic/Ollama honour the union and keep it, and
+            # the Gemini pass below needs the anyOf intact to restate it.
+            if provider in _FLATTEN_UNION_PROVIDERS:
+                flattened = _flatten_top_level_union(parameters)
+                if flattened is not parameters:
+                    LOGGER.debug(
+                        "Flattened top-level union in %s tool schema for %s",
+                        name,
+                        provider,
+                    )
+                parameters = flattened
+            if not parameters.get("type"):
+                parameters["type"] = "object"
         # OpenAI requires 'properties' on all type:object schemas.
         if parameters.get("type") == "object" and "properties" not in parameters:
             parameters["properties"] = {}
@@ -1681,8 +1803,10 @@ async def _retrieve_tools(
                 "tool index or fallback; skipping force-injection"
             )
 
-    # 4. Format and deduplicate. The provider drives Gemini-only schema
-    # normalisation (see _sanitize_any_of_required).
+    # 4. Format and deduplicate. The provider drives the subtractive schema
+    # normalisation passes: the OpenAI top-level-union flatten
+    # (_flatten_top_level_union) and the Gemini anyOf-required sanitizer
+    # (_sanitize_any_of_required).
     provider_raw = opts.get(CONF_CHAT_MODEL_PROVIDER)
     selected_tools, routing_map = _format_and_dedupe_tools(
         all_candidates, str(provider_raw) if provider_raw else None
