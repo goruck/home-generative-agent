@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 
 from custom_components.home_generative_agent.agent.graph import (
@@ -585,10 +586,11 @@ def test_flatten_top_level_union_bare_required_variants_become_hint() -> None:
     nothing to merge — the at-least-one constraint must survive in the
     description instead of vanishing.
     """
-    result = _flatten_top_level_union(dict(_HASS_START_TIMER_SCHEMA))
+    expected_properties = copy.deepcopy(_HASS_START_TIMER_SCHEMA["properties"])
+    result = _flatten_top_level_union(copy.deepcopy(_HASS_START_TIMER_SCHEMA))
     assert "anyOf" not in result
     assert result["type"] == "object"
-    assert result["properties"] == _HASS_START_TIMER_SCHEMA["properties"], (
+    assert result["properties"] == expected_properties, (
         "property schemas must survive the flatten byte-for-byte"
     )
     assert result["description"] == (
@@ -676,14 +678,60 @@ def test_flatten_top_level_union_merges_every_union_key_present() -> None:
 
 def test_flatten_top_level_union_no_union_key_unchanged() -> None:
     """Schemas without a top-level union key pass through untouched."""
-    schema = {"type": "object", "properties": {"x": {"type": "string"}}}
-    assert _flatten_top_level_union(schema) == schema
+    expected = {"type": "object", "properties": {"x": {"type": "string"}}}
+    schema = copy.deepcopy(expected)
+    result = _flatten_top_level_union(schema)
+    assert result == expected
+    assert schema == expected, "input schema must not be mutated"
 
 
 def test_flatten_top_level_union_non_list_union_value_unchanged() -> None:
     """A union key whose value is not a list is left in place, untouched."""
-    schema = {"anyOf": {"type": "string"}}
-    assert _flatten_top_level_union(schema) == schema
+    expected = {"anyOf": {"type": "string"}}
+    schema = copy.deepcopy(expected)
+    result = _flatten_top_level_union(schema)
+    assert result == expected
+    assert schema == expected, "input schema must not be mutated"
+
+
+def test_flatten_top_level_union_non_dict_variant_properties_ignored() -> None:
+    """
+    A variant whose ``properties`` is not a dict is skipped, not raised.
+
+    A malformed third-party or store-persisted tool schema must not crash
+    the tool-retrieval pass for OpenAI-provider users.
+    """
+    schema = {
+        "anyOf": [
+            {"properties": ["a", "b"]},
+            {"properties": {"c": {"type": "string"}}},
+        ]
+    }
+    result = _flatten_top_level_union(schema)
+    assert result["properties"] == {"c": {"type": "string"}}
+
+
+def test_flatten_top_level_union_string_required_ignored() -> None:
+    """
+    A variant whose ``required`` is a string is ignored, not char-split.
+
+    Iterating a string yields its characters — without the list guard the
+    hint would read "At least one of: h, o, u, r, s is required.".
+    """
+    schema = {"anyOf": [{"required": "hours"}]}
+    result = _flatten_top_level_union(schema)
+    assert "description" not in result
+    assert result == {"type": "object", "properties": {}}
+
+
+def test_flatten_top_level_union_non_dict_top_level_properties() -> None:
+    """A non-dict pre-existing ``properties`` is replaced, not raised."""
+    schema = {
+        "anyOf": [{"properties": {"a": {"type": "string"}}}],
+        "properties": "bogus",
+    }
+    result = _flatten_top_level_union(schema)
+    assert result["properties"] == {"a": {"type": "string"}}
 
 
 def test_flatten_top_level_union_empty_variants_list() -> None:
@@ -700,6 +748,100 @@ def test_flatten_top_level_union_preserves_existing_properties() -> None:
     }
     result = _flatten_top_level_union(schema)
     assert result["properties"]["a"] == {"type": "integer"}
+
+
+def test_flatten_top_level_union_non_dict_variant_skipped() -> None:
+    """Non-dict variants are skipped without raising; dict variants still merge."""
+    schema = {
+        "anyOf": [
+            "not-a-dict",
+            {"properties": {"a": {"type": "string"}}, "required": ["a"]},
+        ]
+    }
+    result = _flatten_top_level_union(schema)
+    assert "anyOf" not in result
+    assert set(result["properties"]) == {"a"}
+    assert result["description"] == "At least one of: a is required."
+
+
+def test_flatten_top_level_union_malformed_required_does_not_raise() -> None:
+    """Non-string ``required`` entries are dropped; string entries still hint."""
+    schema = {
+        "anyOf": [
+            {"required": [None, 5, "a"]},
+            {"required": [{"nested": "junk"}]},
+        ],
+        "properties": {"a": {"type": "string"}},
+    }
+    result = _flatten_top_level_union(schema)
+    assert "anyOf" not in result
+    assert result["description"] == "At least one of: a is required.", (
+        "only the string entry may survive into the hint"
+    )
+
+
+def test_flatten_top_level_union_all_of_merges_with_existing_required() -> None:
+    """AllOf ``required`` unions with pre-existing top-level required, deduped."""
+    schema = {
+        "type": "object",
+        "properties": {"x": {"type": "string"}},
+        "required": ["x", 5],
+        "allOf": [
+            {"properties": {"a": {"type": "string"}}, "required": ["a", "x"]},
+        ],
+    }
+    result = _flatten_top_level_union(schema)
+    assert "allOf" not in result
+    assert result["required"] == ["x", "a"], (
+        "existing entries come first, duplicates and non-strings are dropped"
+    )
+
+
+def test_flatten_top_level_union_multi_property_group_hint() -> None:
+    """A variant requiring several properties gets the group-form hint."""
+    schema = {
+        "anyOf": [
+            {"required": ["a", "b"]},
+            {"required": ["c"]},
+        ],
+        "properties": {
+            "a": {"type": "string"},
+            "b": {"type": "string"},
+            "c": {"type": "string"},
+        },
+    }
+    result = _flatten_top_level_union(schema)
+    assert result["description"] == (
+        "At least one of these property groups is required: (a, b); (c)."
+    )
+
+
+def test_format_and_dedupe_tools_openai_flatten_then_array_items() -> None:
+    """
+    Pass ordering: properties hoisted by the flatten still get array items.
+
+    ``_ensure_array_items()`` runs after the flatten, so an array property
+    that only existed inside a union variant must still receive the
+    ``items`` key Gemini/OpenAI strict schemas expect.
+    """
+    raw: list = [
+        {
+            "name": "union_array_tool",
+            "api_id": "test",
+            "description": "Union variant carrying an itemless array",
+            "parameters": json.dumps(
+                {"anyOf": [{"properties": {"targets": {"type": "array"}}}]}
+            ),
+            "is_actuation": False,
+        }
+    ]
+    selected, _ = _format_and_dedupe_tools(raw, "openai")
+    params = selected[0]["function"]["parameters"]
+    assert "anyOf" not in params
+    assert params["properties"]["targets"] == {
+        "type": "array",
+        "items": {"type": "string"},
+    }
 
 
 def test_format_and_dedupe_tools_openai_flattens_hass_start_timer() -> None:
@@ -752,3 +894,68 @@ def test_format_and_dedupe_tools_gemini_rewrites_hass_start_timer() -> None:
         "At least one of: hours, minutes, seconds is required."
     )
     assert params["properties"] == _HASS_START_TIMER_SCHEMA["properties"]
+
+
+def test_format_and_dedupe_tools_openai_keeps_nested_union() -> None:
+    """
+    OpenAI flatten is top-level only: property-level unions must survive.
+
+    OpenAI rejects oneOf/anyOf/allOf only at the top level of
+    ``parameters``; nested unions (e.g. selector shapes) are valid and
+    carry real typing the model needs. A future recursive rewrite of
+    ``_flatten_top_level_union`` must fail this test.
+    """
+    schema = {
+        "type": "object",
+        "properties": {
+            "color": {
+                "anyOf": [
+                    {"type": "string"},
+                    {"type": "array", "items": {"type": "integer"}},
+                ]
+            }
+        },
+    }
+    raw: list = [
+        {
+            "name": "nested_union_tool",
+            "api_id": "test",
+            "description": "d",
+            "parameters": json.dumps(schema),
+            "is_actuation": False,
+        }
+    ]
+    selected, _ = _format_and_dedupe_tools(raw, "openai")
+    color = selected[0]["function"]["parameters"]["properties"]["color"]
+    # _ensure_array_items additionally hoists items from the array variant
+    # (Gemini workaround, provider-independent) — the union itself must be
+    # byte-for-byte intact.
+    assert color["anyOf"] == schema["properties"]["color"]["anyOf"]
+
+
+def test_format_and_dedupe_tools_openai_plain_schema_untouched() -> None:
+    """
+    The common case: a no-union schema passes through OpenAI unmodified.
+
+    The overwhelming majority of HA tool schemas have no top-level union;
+    the gated flatten branch must be a no-op for them.
+    """
+    schema = {
+        "type": "object",
+        "properties": {"name": {"type": "string"}},
+        "required": ["name"],
+    }
+    for provider in ("openai", "openai_compatible"):
+        raw: list = [
+            {
+                "name": "plain_tool",
+                "api_id": "test",
+                "description": "d",
+                "parameters": json.dumps(schema),
+                "is_actuation": False,
+            }
+        ]
+        selected, _ = _format_and_dedupe_tools(raw, provider)
+        assert selected[0]["function"]["parameters"] == schema, (
+            f"provider {provider!r} must not modify a plain object schema"
+        )

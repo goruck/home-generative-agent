@@ -1257,7 +1257,7 @@ def _append_requirement_hint(
     schema: dict[str, Any], dropped: list[list[str]]
 ) -> dict[str, Any]:
     """
-    Restate a dropped ``anyOf`` constraint in the schema description.
+    Restate a dropped union (anyOf/oneOf) constraint in the description.
 
     Used by both the Gemini sanitizer and the OpenAI top-level-union
     flattener: the provider cannot validate the constraint, but the model
@@ -1348,6 +1348,29 @@ _TOP_LEVEL_UNION_KEYS = ("oneOf", "anyOf", "allOf")
 _FLATTEN_UNION_PROVIDERS = ("openai", "openai_compatible")
 
 
+def _merge_conjunctive_required(
+    schema: dict[str, Any], conjunctive_required: list[str]
+) -> dict[str, Any]:
+    """
+    Merge allOf-derived ``required`` names into the top-level ``required``.
+
+    Entries naming a property the merged schema does not define are dropped;
+    non-list or non-string pre-existing entries are ignored rather than
+    raised.
+    """
+    raw_existing = schema.get("required")
+    existing = (
+        [r for r in raw_existing if isinstance(r, str)]
+        if isinstance(raw_existing, list)
+        else []
+    )
+    merged = dict.fromkeys(existing + conjunctive_required)
+    filtered = [r for r in merged if r in schema["properties"]]
+    if filtered:
+        schema["required"] = filtered
+    return schema
+
+
 def _flatten_top_level_union(schema: dict[str, Any]) -> dict[str, Any]:
     """
     Flatten a top-level oneOf/anyOf/allOf into a single object schema.
@@ -1368,7 +1391,10 @@ def _flatten_top_level_union(schema: dict[str, Any]) -> dict[str, Any]:
     they are restated in the description via ``_append_requirement_hint()``,
     the same recovery the Gemini sanitizer uses.  ``allOf`` variants are
     conjunctive, so their ``required`` entries merge into the top-level
-    ``required`` instead.
+    ``required`` instead (entries naming a property no variant defines are
+    dropped).  Malformed variant fields (non-dict ``properties``, non-list
+    ``required``) are ignored rather than raised — one bad tool schema must
+    not fail the whole tool-retrieval pass.
 
     This pass is subtractive (it deletes union structure other providers
     honour), so ``_format_and_dedupe_tools()`` gates it to
@@ -1391,8 +1417,13 @@ def _flatten_top_level_union(schema: dict[str, Any]) -> dict[str, Any]:
         for variant in schema[key]:
             if not isinstance(variant, dict):
                 continue
-            merged_properties.update(variant.get("properties", {}))
-            required = [r for r in variant.get("required", []) if isinstance(r, str)]
+            variant_properties = variant.get("properties")
+            if isinstance(variant_properties, dict):
+                merged_properties.update(variant_properties)
+            raw_required = variant.get("required")
+            if not isinstance(raw_required, list):
+                continue
+            required = [r for r in raw_required if isinstance(r, str)]
             if not required:
                 continue
             if key == "allOf":
@@ -1401,11 +1432,12 @@ def _flatten_top_level_union(schema: dict[str, Any]) -> dict[str, Any]:
                 dropped.append(required)
     schema = {k: v for k, v in schema.items() if k not in merged_keys}
     schema["type"] = "object"
-    schema["properties"] = {**merged_properties, **schema.get("properties", {})}
+    existing_properties = schema.get("properties")
+    if not isinstance(existing_properties, dict):
+        existing_properties = {}
+    schema["properties"] = {**merged_properties, **existing_properties}
     if conjunctive_required:
-        existing = [r for r in schema.get("required", []) if isinstance(r, str)]
-        merged_required = dict.fromkeys(existing + conjunctive_required)
-        schema["required"] = [r for r in merged_required if r in schema["properties"]]
+        schema = _merge_conjunctive_required(schema, conjunctive_required)
     if dropped:
         schema = _append_requirement_hint(schema, dropped)
     return schema
@@ -1434,7 +1466,14 @@ def _format_and_dedupe_tools(
             # so gated — Anthropic/Ollama honour the union and keep it, and
             # the Gemini pass below needs the anyOf intact to restate it.
             if provider in _FLATTEN_UNION_PROVIDERS:
-                parameters = _flatten_top_level_union(parameters)
+                flattened = _flatten_top_level_union(parameters)
+                if flattened is not parameters:
+                    LOGGER.debug(
+                        "Flattened top-level union in %s tool schema for %s",
+                        name,
+                        provider,
+                    )
+                parameters = flattened
             if not parameters.get("type"):
                 parameters["type"] = "object"
         # OpenAI requires 'properties' on all type:object schemas.
@@ -1764,8 +1803,10 @@ async def _retrieve_tools(
                 "tool index or fallback; skipping force-injection"
             )
 
-    # 4. Format and deduplicate. The provider drives Gemini-only schema
-    # normalisation (see _sanitize_any_of_required).
+    # 4. Format and deduplicate. The provider drives the subtractive schema
+    # normalisation passes: the OpenAI top-level-union flatten
+    # (_flatten_top_level_union) and the Gemini anyOf-required sanitizer
+    # (_sanitize_any_of_required).
     provider_raw = opts.get(CONF_CHAT_MODEL_PROVIDER)
     selected_tools, routing_map = _format_and_dedupe_tools(
         all_candidates, str(provider_raw) if provider_raw else None
