@@ -546,7 +546,7 @@ def test_flatten_top_level_union_merges_any_of_properties() -> None:
 
 
 def test_flatten_top_level_union_handles_one_of_and_all_of() -> None:
-    """oneOf and allOf are flattened the same way as anyOf."""
+    """OneOf and allOf are flattened the same way as anyOf."""
     for key in ("oneOf", "allOf"):
         schema = {
             key: [
