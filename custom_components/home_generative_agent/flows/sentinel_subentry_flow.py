@@ -206,7 +206,9 @@ def _merge_rule_entity_exclusions(
     errors: dict[str, str],
 ) -> None:
     """
-    Merge the entity-picker ("*") and advanced-JSON (per-rule) exclusion
+    Merge the picker and advanced-JSON exclusion fields into one dict.
+
+    Merges the entity-picker ("*") and advanced-JSON (per-rule) exclusion
     fields in ``data`` into a single ``CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS``
     dict, mirroring the shape the engine expects.
 

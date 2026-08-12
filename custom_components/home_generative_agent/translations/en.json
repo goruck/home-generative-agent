@@ -205,7 +205,8 @@
             "sentinel_quiet_hours_end": "Quiet hours end",
             "sentinel_quiet_hours_severities": "Quiet hours suppressed severities",
             "sentinel_camera_entry_links": "Camera entry links (JSON, optional)",
-            "sentinel_rule_entity_exclusions": "Rule entity exclusions (JSON, optional)",
+            "sentinel_rule_entity_exclusions_all": "Exclude entities from all Sentinel rules (optional)",
+            "sentinel_rule_entity_exclusions": "Advanced: per-rule entity exclusions (JSON, optional)",
             "critical_action_pin": "Sentinel level-increase PIN (optional)",
             "notify_service": "Sentinel Notify Service (optional)"
           },

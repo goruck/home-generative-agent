@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 from homeassistant.util import dt as dt_util
 
@@ -16,6 +16,8 @@ from custom_components.home_generative_agent.sentinel.models import (
 LOGGER = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from custom_components.home_generative_agent.snapshot.schema import (
         FullStateSnapshot,
         SnapshotEntity,
@@ -55,7 +57,8 @@ class CameraEntryUnsecuredRule:
     def _excluded(self, entity_id: str) -> bool:
         """Return True when *entity_id* is user-excluded for this rule."""
         return bool(
-            self._is_entity_excluded and self._is_entity_excluded(entity_id, self.rule_id)
+            self._is_entity_excluded
+            and self._is_entity_excluded(entity_id, self.rule_id)
         )
 
     def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:  # noqa: PLR0912, PLR0915
