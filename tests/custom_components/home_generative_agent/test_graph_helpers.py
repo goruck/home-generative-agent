@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+import json
+
 from custom_components.home_generative_agent.agent.graph import (
     _determine_model_name,
     _ensure_array_items,
+    _flatten_top_level_union,
     _format_and_dedupe_tools,
     _sanitize_any_of_required,
 )
@@ -483,15 +486,16 @@ def test_format_and_dedupe_tools_gemini_rewrites_ha_target_constraint() -> None:
     assert set(params["properties"]) == {"name", "area", "floor"}
 
 
-def test_format_and_dedupe_tools_non_gemini_keeps_any_of_required() -> None:
+def test_format_and_dedupe_tools_union_capable_keeps_any_of_required() -> None:
     """
-    Non-Gemini providers keep HA's at-least-one-target constraint intact.
+    Union-capable providers keep HA's at-least-one-target constraint intact.
 
-    The sanitizer is subtractive: running it unconditionally would hand
-    OpenAI/Anthropic/Ollama a vacuous schema, letting the model emit a
+    Both sanitizers are subtractive: running either unconditionally would
+    hand Anthropic/Ollama a vacuous schema, letting the model emit a
     targetless call that HA's own voluptuous validation then rejects.
+    Unknown/unset providers (None) also keep the schema untouched.
     """
-    for provider in ("openai", "openai_compatible", "anthropic", "ollama", None):
+    for provider in ("anthropic", "ollama", None):
         selected, _ = _format_and_dedupe_tools(_target_tool(), provider)
         params = selected[0]["function"]["parameters"]
         assert params["anyOf"] == [
@@ -504,6 +508,28 @@ def test_format_and_dedupe_tools_non_gemini_keeps_any_of_required() -> None:
         )
 
 
+def test_format_and_dedupe_tools_openai_flattens_any_of_with_hint() -> None:
+    """
+    OpenAI-family providers get the top-level anyOf flattened with a hint.
+
+    OpenAI's validator rejects any top-level anyOf in ``parameters``
+    ("schema must have type 'object' and not have 'oneOf'/'anyOf'/'allOf'/
+    'enum'/'const'/'not' at the top level"), so the union is removed — but
+    the constraint must survive as description guidance, exactly like the
+    Gemini path.
+    """
+    for provider in ("openai", "openai_compatible"):
+        selected, _ = _format_and_dedupe_tools(_target_tool(), provider)
+        params = selected[0]["function"]["parameters"]
+        assert "anyOf" not in params, (
+            f"provider {provider!r} must not receive a top-level anyOf"
+        )
+        assert set(params["properties"]) == {"name", "area", "floor"}
+        assert params["description"] == (
+            "At least one of: name, area, floor is required."
+        ), "constraint must be preserved as guidance"
+
+
 def test_determine_model_name_anthropic_returns_configured_model() -> None:
     """Anthropic provider reads CONF_ANTHROPIC_CHAT_MODEL from opts."""
     opts = {CONF_ANTHROPIC_CHAT_MODEL: "claude-sonnet-4-5"}
@@ -513,3 +539,216 @@ def test_determine_model_name_anthropic_returns_configured_model() -> None:
 def test_determine_model_name_anthropic_missing_key_returns_empty() -> None:
     """Anthropic provider with no key in opts returns empty string."""
     assert _determine_model_name("anthropic", {}) == ""
+
+
+# The parameters schema HA 2026.8.1 emits for HassStartTimer (and, with two
+# extra slots, HassDecreaseTimer): ``vol.Required(vol.Any("hours", "minutes",
+# "seconds"))`` converts to a top-level anyOf of bare-required variants.
+# Verified against voluptuous_openapi.convert with llm.selector_serializer.
+_HASS_START_TIMER_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "hours": {"type": "integer", "minimum": 0},
+        "minutes": {"type": "integer", "minimum": 0},
+        "seconds": {"type": "integer", "minimum": 0},
+        "name": {"type": "string"},
+        "conversation_command": {"type": "string"},
+    },
+    "required": [],
+    "anyOf": [
+        {"required": ["hours"]},
+        {"required": ["minutes"]},
+        {"required": ["seconds"]},
+    ],
+}
+
+
+def _timer_tool() -> list:
+    """Build a raw tool carrying the real HassStartTimer schema."""
+    return [
+        {
+            "name": "HassStartTimer",
+            "api_id": "assist",
+            "description": "Starts a new timer",
+            "parameters": json.dumps(_HASS_START_TIMER_SCHEMA),
+            "is_actuation": True,
+        }
+    ]
+
+
+def test_flatten_top_level_union_bare_required_variants_become_hint() -> None:
+    """
+    Bare-required anyOf variants are dropped but restated as a hint.
+
+    This is the shape production actually emits (HassStartTimer /
+    HassDecreaseTimer): the variants carry no ``properties``, so there is
+    nothing to merge — the at-least-one constraint must survive in the
+    description instead of vanishing.
+    """
+    result = _flatten_top_level_union(dict(_HASS_START_TIMER_SCHEMA))
+    assert "anyOf" not in result
+    assert result["type"] == "object"
+    assert result["properties"] == _HASS_START_TIMER_SCHEMA["properties"], (
+        "property schemas must survive the flatten byte-for-byte"
+    )
+    assert result["description"] == (
+        "At least one of: hours, minutes, seconds is required."
+    )
+
+
+def test_flatten_top_level_union_merges_any_of_properties() -> None:
+    """
+    Full-object anyOf variants are merged into one permissive schema.
+
+    Hypothetical union shape (per-variant properties): each arm's
+    properties are unioned and the arms' mutual exclusivity is dropped.
+    """
+    schema = {
+        "anyOf": [
+            {"type": "object", "properties": {"duration": {"type": "string"}}},
+            {
+                "type": "object",
+                "properties": {
+                    "hours": {"type": "integer"},
+                    "minutes": {"type": "integer"},
+                },
+            },
+        ]
+    }
+    result = _flatten_top_level_union(schema)
+    assert result["type"] == "object"
+    assert "anyOf" not in result
+    assert set(result["properties"]) == {"duration", "hours", "minutes"}
+
+
+def test_flatten_top_level_union_one_of_required_becomes_hint() -> None:
+    """OneOf variant ``required`` entries are restated, not silently lost."""
+    schema = {
+        "oneOf": [
+            {"properties": {"a": {"type": "string"}}, "required": ["a"]},
+            {"properties": {"b": {"type": "string"}}, "required": ["b"]},
+        ]
+    }
+    result = _flatten_top_level_union(schema)
+    assert "oneOf" not in result
+    assert set(result["properties"]) == {"a", "b"}
+    assert result["description"] == "At least one of: a, b is required."
+
+
+def test_flatten_top_level_union_all_of_merges_required() -> None:
+    """
+    AllOf variants are conjunctive: their ``required`` entries all apply.
+
+    Unlike anyOf/oneOf, flattening allOf must union the ``required`` lists
+    into the top level instead of demoting them to a description hint.
+    """
+    schema = {
+        "allOf": [
+            {"properties": {"a": {"type": "string"}}, "required": ["a"]},
+            {"properties": {"b": {"type": "string"}}, "required": ["b", "ghost"]},
+        ]
+    }
+    result = _flatten_top_level_union(schema)
+    assert "allOf" not in result
+    assert set(result["properties"]) == {"a", "b"}
+    assert result["required"] == ["a", "b"], (
+        "conjunctive required survives; entries without a property are dropped"
+    )
+    assert "description" not in result
+
+
+def test_flatten_top_level_union_merges_every_union_key_present() -> None:
+    """
+    All union keys present are merged, not just the first one found.
+
+    Stripping a key whose variants were never merged would silently delete
+    that union's properties.
+    """
+    schema = {
+        "oneOf": [{"properties": {"a": {"type": "string"}}}],
+        "anyOf": [{"properties": {"b": {"type": "string"}}}],
+    }
+    result = _flatten_top_level_union(schema)
+    assert "oneOf" not in result
+    assert "anyOf" not in result
+    assert set(result["properties"]) == {"a", "b"}
+
+
+def test_flatten_top_level_union_no_union_key_unchanged() -> None:
+    """Schemas without a top-level union key pass through untouched."""
+    schema = {"type": "object", "properties": {"x": {"type": "string"}}}
+    assert _flatten_top_level_union(schema) == schema
+
+
+def test_flatten_top_level_union_non_list_union_value_unchanged() -> None:
+    """A union key whose value is not a list is left in place, untouched."""
+    schema = {"anyOf": {"type": "string"}}
+    assert _flatten_top_level_union(schema) == schema
+
+
+def test_flatten_top_level_union_empty_variants_list() -> None:
+    """An empty variants list flattens to a bare object schema, no hint."""
+    result = _flatten_top_level_union({"anyOf": []})
+    assert result == {"type": "object", "properties": {}}
+
+
+def test_flatten_top_level_union_preserves_existing_properties() -> None:
+    """Pre-existing top-level properties win over merged variant properties."""
+    schema = {
+        "anyOf": [{"properties": {"a": {"type": "string"}}}],
+        "properties": {"a": {"type": "integer"}},
+    }
+    result = _flatten_top_level_union(schema)
+    assert result["properties"]["a"] == {"type": "integer"}
+
+
+def test_format_and_dedupe_tools_openai_flattens_hass_start_timer() -> None:
+    """
+    End-to-end regression: HassStartTimer no longer 400s on OpenAI.
+
+    Reproduces openai.BadRequestError: "Invalid schema for function
+    'HassStartTimer': schema must have type 'object' and not have
+    'oneOf'/'anyOf'/'allOf'/'enum'/'const'/'not' at the top level", using
+    the schema HA 2026.8.1 actually emits (timer tools are only exposed
+    for timer-capable satellite devices, hence voice-request-only 400s).
+    """
+    for provider in ("openai", "openai_compatible"):
+        selected, _ = _format_and_dedupe_tools(_timer_tool(), provider)
+        params = selected[0]["function"]["parameters"]
+        assert params["type"] == "object"
+        assert "anyOf" not in params
+        assert "oneOf" not in params
+        assert "allOf" not in params
+        assert params["properties"] == _HASS_START_TIMER_SCHEMA["properties"], (
+            f"provider {provider!r} must keep every property schema intact"
+        )
+        assert params["description"] == (
+            "At least one of: hours, minutes, seconds is required."
+        ), f"provider {provider!r} must keep the constraint as guidance"
+
+
+def test_format_and_dedupe_tools_union_capable_keeps_hass_start_timer() -> None:
+    """Anthropic/Ollama/unset keep the timer union schema fully intact."""
+    for provider in ("anthropic", "ollama", None):
+        selected, _ = _format_and_dedupe_tools(_timer_tool(), provider)
+        params = selected[0]["function"]["parameters"]
+        assert params == _HASS_START_TIMER_SCHEMA, (
+            f"provider {provider!r} must receive the schema completely untouched"
+        )
+
+
+def test_format_and_dedupe_tools_gemini_rewrites_hass_start_timer() -> None:
+    """
+    Gemini still sees the timer anyOf and restates it via the sanitizer.
+
+    Guards the pass ordering: the OpenAI flatten must not run for Gemini,
+    or _sanitize_any_of_required would never see the top-level anyOf and
+    the description hint would be lost.
+    """
+    selected, _ = _format_and_dedupe_tools(_timer_tool(), "gemini")
+    params = selected[0]["function"]["parameters"]
+    assert "anyOf" not in params
+    assert params["description"] == (
+        "At least one of: hours, minutes, seconds is required."
+    )
+    assert params["properties"] == _HASS_START_TIMER_SCHEMA["properties"]
