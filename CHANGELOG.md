@@ -2,7 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
-## [3.28.0] - 2026-08-11
+## [3.28.1] - 2026-08-12
+
+### Fixed
+
+- **Voice timers work again on OpenAI** ([#545](https://github.com/goruck/home-generative-agent/pull/545)). Speaking to an OpenAI-powered assistant from a timer-capable voice satellite failed every request with `Invalid schema for function 'HassStartTimer': schema must have type 'object' and not have 'oneOf'/'anyOf'/'allOf'/... at the top level`. Home Assistant's timer intents (`HassStartTimer`, `HassDecreaseTimer`) declare "give at least one of hours, minutes, seconds" as a top-level `anyOf` that OpenAI's function-calling validator rejects — and since those tools only join the tool list for requests coming from a device that can ring a timer, the failure hit voice interactions while the chat box kept working, making it look intermittent. The schema is now flattened for OpenAI-family providers only, with the at-least-one constraint restated in the tool description so the model still knows not to send an empty timer call. Anthropic and Ollama keep the original schema untouched, and Gemini keeps its own existing rewrite. Credit to @hruba202 for finding and diagnosing the failure (his PR #545 is superseded by this release — his version removed the constraint for every provider).
+- **One malformed tool schema can no longer break OpenAI conversations.** Hardening from pre-release adversarial review: tool schemas arriving with a non-dict `properties` or a string-valued `required` (possible from third-party LLM APIs or stale store entries) are now skipped gracefully during the new flattening instead of raising mid-conversation, and flattening events are debug-logged so field reports of odd tool-calling on OpenAI-compatible backends are diagnosable.
 
 ### Added
 
