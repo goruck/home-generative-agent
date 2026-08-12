@@ -1631,3 +1631,231 @@ async def test_monitoring_gap_battery_exclusion_uses_state_metadata(
     assert captured_prompts, "Model was never invoked"
     gaps_in_prompt = _monitoring_gaps_from_prompt(captured_prompts[-1])
     assert gaps_in_prompt == ["sensor.ev_battery_charging_rate"]
+
+
+# ---------------------------------------------------------------------------
+# Environmental sensors reach discovery end-to-end (issue #541)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_monitoring_gap_includes_environmental_entity(
+    hass: HomeAssistant,
+) -> None:
+    """
+    A baseline-ready temperature sensor survives reduction and is gap-hinted.
+
+    Pre-#541 the reducer dropped environmental device classes, so the
+    baseline-ready trim erased the entity before the gap analysis ever saw it.
+    """
+    captured_prompts: list[str] = []
+
+    class _CapturingModel:
+        async def ainvoke(self, messages: list[Any]) -> Any:
+            captured_prompts.extend(
+                str(msg.content) for msg in messages if hasattr(msg, "content")
+            )
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "schema_version": 1,
+                        "generated_at": "2026-01-01T00:00:00Z",
+                        "model": "test",
+                        "candidates": [],
+                    }
+                )
+            )
+
+    class _FullDummyStore:
+        async def async_get_latest(self, _limit: int) -> list[dict[str, Any]]:
+            return []
+
+        async def async_append(self, _payload: Any) -> None:
+            pass
+
+    engine = SentinelDiscoveryEngine(
+        hass=hass,
+        options={},
+        model=_CapturingModel(),
+        store=_FullDummyStore(),  # type: ignore[arg-type]
+    )
+
+    async def _fake_run(model: Any, messages: Any, **_kw: Any) -> Any:
+        return await model.ainvoke(messages)
+
+    with (
+        patch.object(
+            engine,
+            "_existing_semantic_context",
+            new_callable=AsyncMock,
+            return_value=(set(), set(), set()),
+        ),
+        patch(
+            "custom_components.home_generative_agent.sentinel.discovery_engine.async_build_full_state_snapshot",
+            new_callable=AsyncMock,
+            return_value={
+                "entities": [
+                    {
+                        "entity_id": "sensor.attic_temperature",
+                        "domain": "sensor",
+                        "state": "83.66",
+                        "attributes": {"device_class": "temperature"},
+                    },
+                ],
+                "camera_activity": [],
+                "derived": {
+                    "is_night": False,
+                    "now": "2026-01-01T00:00:00Z",
+                    "baseline_ready_entities": ["sensor.attic_temperature"],
+                },
+                "generated_at": "2026-01-01T00:00:00Z",
+            },
+        ),
+        patch(
+            "custom_components.home_generative_agent.sentinel.discovery_engine.run_sentinel_model_call",
+            side_effect=_fake_run,
+        ),
+    ):
+        await engine._run_once()
+
+    assert captured_prompts, "Model was never invoked"
+    human_content = captured_prompts[-1]
+    gaps_in_prompt = _monitoring_gaps_from_prompt(human_content)
+    assert gaps_in_prompt == ["sensor.attic_temperature"]
+    # The entity reaches the prompt snapshot with its integer-rounded state.
+    assert "sensor.attic_temperature" in human_content
+    assert '"state":"84"' in human_content
+    # The environmental guidance block ships with the prompt (issue #541).
+    assert "ENVIRONMENTAL SENSOR RULE" in human_content
+    assert "BATTERY SENSOR RULE" in human_content
+
+
+@pytest.mark.asyncio
+async def test_promoted_environmental_rule_dedupes_reproposal(
+    hass: HomeAssistant,
+) -> None:
+    """
+    An active baseline rule on a temperature sensor suppresses re-proposals.
+
+    The rule's |template=| key removes the entity from MONITORING GAPS, and a
+    context-variant re-proposal collapses to the pending candidate's
+    context-free key and is dropped as existing_semantic_key — the #540
+    pile-up shape, now for environmental sensors.
+    """
+    rule_key = (
+        "v1|subject=sensor|predicate=power_anomaly"
+        "|template=baseline_deviation|entities=sensor.attic_temperature"
+    )
+    pending_candidate_key = (
+        "v1|subject=sensor|predicate=power_anomaly|night=any|home=any|scope=any|"
+        "entities=sensor.attic_temperature"
+    )
+    captured_prompts: list[str] = []
+    appended: list[dict[str, Any]] = []
+
+    class _CapturingModel:
+        async def ainvoke(self, messages: list[Any]) -> Any:
+            captured_prompts.extend(
+                str(msg.content) for msg in messages if hasattr(msg, "content")
+            )
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "schema_version": 1,
+                        "generated_at": "2026-01-01T00:00:00Z",
+                        "model": "test",
+                        "candidates": [
+                            {
+                                "candidate_id": (
+                                    "candidate_attic_temperature_baseline_night_home"
+                                ),
+                                "title": (
+                                    "Attic Temperature Anomaly During Night While Home"
+                                ),
+                                "summary": (
+                                    "Detects statistical deviation from the normal "
+                                    "attic temperature reading during nighttime "
+                                    "hours while someone is home."
+                                ),
+                                "pattern": "statistical_baseline_deviation",
+                                "confidence_hint": 0.6,
+                                "evidence_paths": [
+                                    "entities[sensor.attic_temperature].state",
+                                    "derived.is_night",
+                                    "derived.anyone_home",
+                                ],
+                            }
+                        ],
+                    }
+                )
+            )
+
+    class _FullDummyStore:
+        async def async_get_latest(self, _limit: int) -> list[dict[str, Any]]:
+            return []
+
+        async def async_append(self, payload: Any) -> None:
+            appended.append(payload)
+
+    engine = SentinelDiscoveryEngine(
+        hass=hass,
+        options={},
+        model=_CapturingModel(),
+        store=_FullDummyStore(),  # type: ignore[arg-type]
+    )
+
+    async def _fake_run(model: Any, messages: Any, **_kw: Any) -> Any:
+        return await model.ainvoke(messages)
+
+    with (
+        patch.object(
+            engine,
+            "_existing_semantic_context",
+            new_callable=AsyncMock,
+            return_value=(
+                set(),
+                {rule_key, pending_candidate_key},
+                {rule_key, pending_candidate_key},
+            ),
+        ),
+        patch(
+            "custom_components.home_generative_agent.sentinel.discovery_engine.async_build_full_state_snapshot",
+            new_callable=AsyncMock,
+            return_value={
+                "entities": [
+                    {
+                        "entity_id": "sensor.attic_temperature",
+                        "domain": "sensor",
+                        "state": "83.66",
+                        "attributes": {"device_class": "temperature"},
+                    },
+                ],
+                "camera_activity": [],
+                "derived": {
+                    "is_night": True,
+                    "anyone_home": True,
+                    "now": "2026-01-01T00:00:00Z",
+                    "baseline_ready_entities": ["sensor.attic_temperature"],
+                },
+                "generated_at": "2026-01-01T00:00:00Z",
+            },
+        ),
+        patch(
+            "custom_components.home_generative_agent.sentinel.discovery_engine.run_sentinel_model_call",
+            side_effect=_fake_run,
+        ),
+    ):
+        await engine._run_once()
+
+    assert captured_prompts, "Model was never invoked"
+    gaps_in_prompt = _monitoring_gaps_from_prompt(captured_prompts[-1])
+    assert gaps_in_prompt == [], (
+        "Baseline-rule-covered temperature sensor must not be gap-hinted"
+    )
+    assert len(appended) == 1
+    payload = appended[0]
+    assert payload["candidates"] == []
+    assert len(payload["filtered_candidates"]) == 1
+    dropped = payload["filtered_candidates"][0]
+    assert dropped["dedupe_reason"] == "existing_semantic_key"
+    assert dropped["semantic_key"] == pending_candidate_key

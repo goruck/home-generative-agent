@@ -3,11 +3,16 @@
 
 from __future__ import annotations
 
+import pytest
+
 from custom_components.home_generative_agent.sentinel.discovery_semantic import (
     candidate_semantic_key,
     is_battery_level_entity_id,
     rule_key_covers_candidate_key,
     rule_semantic_key,
+)
+from custom_components.home_generative_agent.sentinel.proposal_templates import (
+    normalize_candidate,
 )
 
 
@@ -1875,3 +1880,663 @@ def test_motion_named_battery_candidate_keys_low_battery() -> None:
     )
     assert candidate_semantic_key(candidate) == expected_key
     assert rule_semantic_key(rule) == expected_key
+
+
+# ---------------------------------------------------------------------------
+# Environmental sensor keying (issue #541)
+# ---------------------------------------------------------------------------
+
+
+def _env_statistical_candidate(**overrides: object) -> dict[str, object]:
+    candidate: dict[str, object] = {
+        "candidate_id": "candidate_attic_temperature_baseline_deviation",
+        "title": "Attic Temperature Anomaly",
+        "summary": (
+            "Detects statistical deviation from the normal attic temperature "
+            "reading, indicating overheating or ventilation failure."
+        ),
+        "pattern": "statistical_baseline_deviation",
+        "confidence_hint": 0.6,
+        "evidence_paths": ["entities[sensor.attic_temperature].state"],
+    }
+    candidate.update(overrides)
+    return candidate
+
+
+def test_environmental_statistical_key_collapses_context_variants() -> None:
+    """
+    Occupancy/night variants of a statistical env candidate share one key.
+
+    The #540 battery pile-up lesson: the normalizer registers the same
+    context-free baseline_deviation rule for every variant, so distinct
+    context-carrying keys would let near-duplicate pending cards accumulate.
+    """
+    base = _env_statistical_candidate()
+    night_home = _env_statistical_candidate(
+        candidate_id="candidate_attic_temperature_baseline_night_home",
+        title="Attic Temperature Anomaly During Night While Home",
+        summary=(
+            "Detects statistical deviation from the normal attic temperature "
+            "reading during nighttime hours while someone is home."
+        ),
+        evidence_paths=[
+            "entities[sensor.attic_temperature].state",
+            "derived.is_night",
+            "derived.anyone_home",
+        ],
+    )
+    away = _env_statistical_candidate(
+        candidate_id="candidate_attic_temperature_baseline_away",
+        title="Attic Temperature Anomaly While Away",
+        summary=(
+            "Detects statistical deviation from the normal attic temperature "
+            "reading while nobody is home."
+        ),
+        evidence_paths=[
+            "entities[sensor.attic_temperature].state",
+            "not derived.anyone_home",
+        ],
+    )
+    expected_key = (
+        "v1|subject=sensor|predicate=power_anomaly|night=any|home=any|scope=any|"
+        "entities=sensor.attic_temperature"
+    )
+    assert candidate_semantic_key(base) == expected_key
+    assert candidate_semantic_key(night_home) == expected_key
+    assert candidate_semantic_key(away) == expected_key
+
+
+def test_environmental_statistical_key_matches_baseline_rule_key() -> None:
+    """A statistical env candidate's key is covered by its registered rule."""
+    candidate_key = candidate_semantic_key(_env_statistical_candidate())
+    assert candidate_key is not None
+    rule = {
+        "rule_id": "sensor_baseline_sensor_attic_temperature",
+        "template_id": "baseline_deviation",
+        "params": {"entity_id": "sensor.attic_temperature"},
+    }
+    rule_key = rule_semantic_key(rule)
+    assert rule_key is not None
+    assert rule_key_covers_candidate_key(rule_key, candidate_key)
+
+
+def test_environmental_cyclical_key_matches_time_of_day_rule_key() -> None:
+    """A fridge-temperature candidate's key is covered by its tod rule."""
+    candidate = _env_statistical_candidate(
+        candidate_id="candidate_fridge_temperature_baseline",
+        title="Fridge temperature anomaly",
+        summary="Detects deviation from the normal fridge temperature.",
+        evidence_paths=["entities[sensor.fridge_temperature].state"],
+    )
+    candidate_key = candidate_semantic_key(candidate)
+    assert candidate_key is not None
+    rule = {
+        "rule_id": "sensor_tod_sensor_fridge_temperature",
+        "template_id": "time_of_day_anomaly",
+        "params": {"entity_id": "sensor.fridge_temperature"},
+    }
+    rule_key = rule_semantic_key(rule)
+    assert rule_key is not None
+    assert rule_key_covers_candidate_key(rule_key, candidate_key)
+
+
+def test_environmental_threshold_candidate_keeps_context() -> None:
+    """
+    Threshold-prose env candidates keep night/home context in the key.
+
+    sensor_threshold_condition params carry require_night/require_away/
+    require_home, so context variants are genuinely different rules and must
+    NOT collapse.
+    """
+    night = _env_statistical_candidate(
+        candidate_id="candidate_attic_temperature_threshold_night",
+        title="Attic overheating at night",
+        summary="Alert when attic temperature rises above 95 at night.",
+        evidence_paths=[
+            "entities[sensor.attic_temperature].state",
+            "derived.is_night",
+        ],
+    )
+    any_hour = _env_statistical_candidate(
+        candidate_id="candidate_attic_temperature_threshold",
+        title="Attic overheating",
+        summary="Alert when attic temperature rises above 95.",
+    )
+    night_key = candidate_semantic_key(night)
+    any_key = candidate_semantic_key(any_hour)
+    assert night_key is not None
+    assert any_key is not None
+    assert "predicate=power_anomaly" in night_key
+    assert "night=1" in night_key
+    assert "night=any" in any_key
+    assert night_key != any_key
+
+
+def test_environmental_slug_only_does_not_key_power_anomaly() -> None:
+    """
+    The candidate_id slug alone must not fire the environmental leg.
+
+    Mirrors the normalizer's #522 posture: locale prose plus a locale-named
+    sensor with English "temperature" only in the slug stays unsupported
+    there, so keying it power_anomaly would break the mirror.
+    """
+    candidate = _env_statistical_candidate(
+        candidate_id="candidate_attic_temperature_anomaly",
+        title="Odchylka v podkroví",
+        summary="Sleduje neobvyklé hodnoty čidla v podkroví.",
+        pattern="statisticka_odchylka",
+        evidence_paths=["entities[sensor.podkrovi_cidlo].state"],
+    )
+    # Absolute verdict (ship testing-specialist review): pin what the
+    # candidate actually keys to, not merely "not power_anomaly".
+    assert candidate_semantic_key(candidate) == (
+        "v1|subject=sensor|predicate=unknown|night=any|home=any|scope=any|"
+        "entities=sensor.podkrovi_cidlo"
+    )
+
+
+def test_environmental_entity_id_signal_only_keys_context_free() -> None:
+    """
+    An environmental token in the entity ID alone fires the leg (#541).
+
+    Mirrors the normalizer's locale test (issue #522 shape): locale prose
+    leaves sensor.attic_temp as the only English surface, and the normalizer
+    still routes to baseline_deviation — so the key must reach
+    predicate=power_anomaly through the entity-id arm and collapse the
+    night context, or the registered rule never dedups re-proposals.
+    """
+    candidate = _env_statistical_candidate(
+        candidate_id="candidate_podkrovi_odchylka",
+        title="Odchylka v podkroví",
+        summary="Sleduje neobvyklé hodnoty čidla v podkroví.",
+        pattern="statisticka_odchylka",
+        evidence_paths=[
+            "entities[sensor.attic_temp].state",
+            "derived.is_night",
+        ],
+    )
+    expected_key = (
+        "v1|subject=sensor|predicate=power_anomaly|night=any|home=any|scope=any|"
+        "entities=sensor.attic_temp"
+    )
+    assert candidate_semantic_key(candidate) == expected_key
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "baseline_deviation"
+    rule_key = rule_semantic_key(
+        {
+            "rule_id": normalized.rule_id,
+            "template_id": normalized.template_id,
+            "params": normalized.params,
+        }
+    )
+    assert rule_key is not None
+    assert rule_key_covers_candidate_key(rule_key, expected_key)
+
+
+def test_environmental_signal_does_not_strip_context_from_unavailable() -> None:
+    """
+    The env leg never strips context a non-power predicate claimed (#541).
+
+    An unavailable temperature sensor keys predicate=unavailable with its
+    occupancy context intact: _environmental_context_collapses is scoped to
+    predicate=power_anomaly, so the environmental signal in prose and the
+    entity ID must not collapse home=1 to home=any.
+    """
+    candidate = _env_statistical_candidate(
+        candidate_id="candidate_attic_temperature_unavailable",
+        title="Attic temperature sensor unavailable while home",
+        summary=(
+            "Detects the attic temperature sensor reporting unavailable "
+            "while someone is home."
+        ),
+        pattern="availability_watch",
+        evidence_paths=[
+            "entities[sensor.attic_temperature].state",
+            "derived.anyone_home",
+        ],
+    )
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert "predicate=unavailable" in key
+    assert "home=1" in key
+
+
+def test_environmental_zero_threshold_treated_as_statistical() -> None:
+    """
+    "above 0" prose is not a threshold; the context still collapses (#541).
+
+    Mirrors _extract_threshold_numeric's value>0 gate: the normalizer treats
+    a zero threshold as no-threshold and registers the context-free
+    baseline_deviation rule, so the key's collapse must fire despite the
+    threshold-shaped wording.
+    """
+    candidate = _env_statistical_candidate(
+        candidate_id="candidate_attic_temperature_above_zero_night",
+        title="Attic temperature above 0 at night",
+        summary="Alert when the attic temperature reading rises above 0 at night.",
+        pattern="sensor_threshold",
+        evidence_paths=[
+            "entities[sensor.attic_temperature].state",
+            "derived.is_night",
+        ],
+    )
+    expected_key = (
+        "v1|subject=sensor|predicate=power_anomaly|night=any|home=any|scope=any|"
+        "entities=sensor.attic_temperature"
+    )
+    assert candidate_semantic_key(candidate) == expected_key
+
+
+def test_environmental_prose_word_boundary_no_steal() -> None:
+    """Prose "attempt" must not fire the temp token and collapse context."""
+    candidate = _env_statistical_candidate(
+        candidate_id="candidate_keypad_attempts",
+        title="Repeated unlock attempts at night",
+        summary=(
+            "Multiple failed unlock attempts recorded by the keypad counter "
+            "during nighttime hours."
+        ),
+        pattern="counter_watch",
+        evidence_paths=[
+            "entities[sensor.keypad_attempt_counter].state",
+            "derived.is_night",
+        ],
+    )
+    # Absolute verdict (ship testing-specialist review): the candidate keys
+    # subject=sensor|predicate=unknown with its night context intact.
+    assert candidate_semantic_key(candidate) == (
+        "v1|subject=sensor|predicate=unknown|night=1|home=any|scope=any|"
+        "entities=sensor.keypad_attempt_counter"
+    )
+
+
+def test_battery_named_env_telemetry_keeps_base_keying() -> None:
+    """
+    sensor.battery_temperature keeps its pre-#541 context-carrying keying.
+
+    Battery-NAMED ids are excluded from the environmental leg's sensor set,
+    so the context collapse must not fire — the normalizer leaves this
+    candidate unsupported and its keying stays at base parity.
+    """
+    candidate = _env_statistical_candidate(
+        candidate_id="candidate_home_battery_temp_deviation_night",
+        title="Deviation in reading at night",
+        summary=("Detects deviation from the normal reading during nighttime hours."),
+        evidence_paths=[
+            "entities[sensor.battery_temperature].state",
+            "derived.is_night",
+        ],
+    )
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert "predicate=power_anomaly" in key
+    assert "night=1" in key
+
+
+def test_environmental_behavior_parity_normalizer_to_rule_key() -> None:
+    """
+    Behavior-level parity (issue #541): key covers the rule promotion registers.
+
+    Runs the real normalizer on statistical env candidates and asserts each
+    candidate's own key is covered by the rule_semantic_key of the exact rule
+    its promotion would register — the hard #540/#522 parity requirement,
+    without hand-built rule dicts that could drift from the normalizer.
+    """
+    candidates = [
+        _env_statistical_candidate(),
+        _env_statistical_candidate(
+            candidate_id="candidate_fridge_temperature_baseline",
+            title="Fridge temperature anomaly",
+            summary="Detects deviation from the normal fridge temperature.",
+            evidence_paths=["entities[sensor.fridge_temperature].state"],
+        ),
+        _env_statistical_candidate(
+            candidate_id="candidate_attic_temperature_baseline_night_home",
+            title="Attic Temperature Anomaly During Night While Home",
+            summary=(
+                "Detects statistical deviation from the normal attic "
+                "temperature reading during nighttime hours while someone "
+                "is home."
+            ),
+            evidence_paths=[
+                "entities[sensor.attic_temperature].state",
+                "derived.is_night",
+                "derived.anyone_home",
+            ],
+        ),
+    ]
+    for candidate in candidates:
+        normalized = normalize_candidate(candidate)
+        assert normalized is not None, candidate["candidate_id"]
+        assert normalized.template_id in {"baseline_deviation", "time_of_day_anomaly"}
+        rule = {
+            "rule_id": normalized.rule_id,
+            "template_id": normalized.template_id,
+            "params": normalized.params,
+        }
+        rule_key = rule_semantic_key(rule)
+        candidate_key = candidate_semantic_key(candidate)
+        assert rule_key is not None, candidate["candidate_id"]
+        assert candidate_key is not None, candidate["candidate_id"]
+        assert rule_key_covers_candidate_key(rule_key, candidate_key), (
+            candidate["candidate_id"],
+            rule_key,
+            candidate_key,
+        )
+
+
+def test_environmental_leg_does_not_steal_motion_candidate() -> None:
+    """
+    A motion candidate citing a temperature sensor keeps motion keying.
+
+    The #540 battery-arm lesson applied to the env leg: the normalizer's
+    away-motion branch runs BEFORE its statistical branch and registers a
+    motion rule for this candidate, so an environmental predicate steal
+    (power_anomaly + context collapse) would leave the activated rule unable
+    to dedup its own candidate. Behavior-level: run the real normalizer and
+    assert the registered motion rule's key covers the candidate key.
+    """
+    candidate = _env_statistical_candidate(
+        candidate_id="candidate_attic_motion_while_away",
+        title="Motion in attic while away",
+        summary=(
+            "Motion detected in the attic near the temperature sensor while "
+            "nobody is home."
+        ),
+        pattern="motion_while_away",
+        evidence_paths=[
+            "entities[binary_sensor.attic_motion].state",
+            "entities[sensor.attic_temperature].state",
+            "not derived.anyone_home",
+        ],
+    )
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "motion_detected_while_away"
+    rule = {
+        "rule_id": normalized.rule_id,
+        "template_id": normalized.template_id,
+        "params": normalized.params,
+    }
+    rule_key = rule_semantic_key(rule)
+    candidate_key = candidate_semantic_key(candidate)
+    assert rule_key is not None
+    assert candidate_key is not None
+    assert "subject=motion" in candidate_key
+    assert "predicate=active" in candidate_key
+    assert "home=0" in candidate_key
+    assert rule_key_covers_candidate_key(rule_key, candidate_key)
+
+
+def test_environmental_mirror_constants_stay_symmetric() -> None:
+    """
+    The env vocabulary and threshold detector must match across modules.
+
+    discovery_semantic mirrors proposal_templates by convention instead of
+    importing it; an asymmetric mirror breaks dedup in both directions
+    (issue #522 adversarial review). Pin the tuples and the regex pattern so
+    a token added on one side without the other fails loudly.
+    """
+    from custom_components.home_generative_agent.sentinel import (  # noqa: PLC0415
+        discovery_semantic,
+        proposal_templates,
+    )
+
+    assert (
+        discovery_semantic._ENVIRONMENTAL_SIGNAL_TERMS
+        == proposal_templates._ENVIRONMENTAL_SIGNAL_TERMS
+    )
+    assert (
+        discovery_semantic._NUMERIC_THRESHOLD_RE.pattern
+        == proposal_templates._NUMERIC_THRESHOLD_PATTERN.pattern
+    )
+
+
+@pytest.mark.parametrize(
+    "entity_id",
+    [
+        "sensor.outdoor_temperature",
+        "sensor.window_temperature",
+        "sensor.entryway_humidity",
+    ],
+)
+def test_environmental_door_substring_entity_keeps_sensor_keying(
+    entity_id: str,
+) -> None:
+    """
+    outdoor/window-named env sensors must dedup against their baseline rule.
+
+    "door"/"window"/"entry" substrings in common environmental entity names
+    (sensor.outdoor_temperature!) must not key subject=entry_* — the
+    normalizer's _find_entry_entity_ids domain-gates entries to
+    binary_sensor/cover, so the registered rule is a subject=sensor baseline
+    rule and an entry-subject key would never dedup its own re-proposals
+    (ship testing-specialist review, reproduced pre-fix).
+    """
+    candidate = _env_statistical_candidate(
+        candidate_id=f"candidate_{entity_id.split('.')[1]}_baseline",
+        title="Reading anomaly",
+        summary="Detects statistical deviation from the normal reading.",
+        evidence_paths=[f"entities[{entity_id}].state"],
+    )
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "baseline_deviation"
+    rule_key = rule_semantic_key(
+        {
+            "rule_id": normalized.rule_id,
+            "template_id": normalized.template_id,
+            "params": normalized.params,
+        }
+    )
+    candidate_key = candidate_semantic_key(candidate)
+    assert rule_key is not None
+    assert candidate_key is not None
+    assert candidate_key == (
+        "v1|subject=sensor|predicate=power_anomaly|night=any|home=any|scope=any|"
+        f"entities={entity_id}"
+    )
+    assert rule_key_covers_candidate_key(rule_key, candidate_key)
+
+
+@pytest.mark.parametrize(
+    ("term", "entity_id"),
+    [
+        ("humidity", "sensor.bathroom_humidity"),
+        ("pressure", "sensor.basement_pressure"),
+        ("co2", "sensor.living_room_co2"),
+        ("carbon dioxide", "sensor.den_carbon_dioxide"),
+        ("pm2.5", "sensor.bedroom_pm2_5"),
+        ("pm10", "sensor.bedroom_pm10"),
+        ("aqi", "sensor.living_room_aqi"),
+        ("air quality", "sensor.living_room_air_quality"),
+        ("moisture", "sensor.garden_moisture"),
+        ("illuminance", "sensor.hallway_illuminance"),
+        ("lux", "sensor.hallway_lux"),
+        ("carbon monoxide", "sensor.garage_carbon_monoxide"),
+    ],
+)
+def test_environmental_term_routes_and_dedupes(term: str, entity_id: str) -> None:
+    """
+    Every vocabulary term routes and dedups through the public entry points.
+
+    The mirror test pins cross-module tuple equality, but a tokenization
+    regression (multi-token spellings like "pm2.5"/"air quality" depend on
+    the non-alphanumeric split producing adjacent tokens) would pass it and
+    every single-term behavior test (ship testing-specialist review).
+    """
+    candidate = _env_statistical_candidate(
+        candidate_id="candidate_env_term",
+        title=f"{term} anomaly",
+        summary=f"Detects statistical deviation from the normal {term} reading.",
+        evidence_paths=[f"entities[{entity_id}].state"],
+    )
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None, term
+    assert normalized.template_id in {"baseline_deviation", "time_of_day_anomaly"}
+    candidate_key = candidate_semantic_key(candidate)
+    rule_key = rule_semantic_key(
+        {
+            "rule_id": normalized.rule_id,
+            "template_id": normalized.template_id,
+            "params": normalized.params,
+        }
+    )
+    assert candidate_key is not None, term
+    assert rule_key is not None, term
+    assert "night=any|home=any" in candidate_key, term
+    assert rule_key_covers_candidate_key(rule_key, candidate_key), term
+
+
+def test_environmental_staleness_candidate_keys_staleness() -> None:
+    """
+    Staleness-worded env candidates keep predicate=staleness (#541 red team).
+
+    Mirrors the normalizer's staleness gate on its env arm: the candidate
+    registers entity_staleness, so the env leg must not claim the key.
+    """
+    candidate = _env_statistical_candidate(
+        candidate_id="candidate_attic_temperature_stale",
+        title="Attic temperature sensor stale",
+        summary=(
+            "sensor.attic_temperature has not updated in over 12 hours; the "
+            "temperature reading may be stale."
+        ),
+        pattern="entity_staleness",
+        evidence_paths=["entities[entity_id=sensor.attic_temperature].state"],
+    )
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "entity_staleness"
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert "predicate=staleness" in key
+    assert "predicate=power_anomaly" not in key
+
+
+def test_environmental_incidental_open_prose_keys_power_anomaly() -> None:
+    """
+    "May mean a window was left open" must not steal the predicate (#541).
+
+    A sensor-only env candidate registers baseline_deviation regardless of
+    incidental entry prose (the normalizer's entry branches need entity
+    evidence), so the key must reach predicate=power_anomaly context-free
+    and be covered by the registered rule (red-team review, reproduced).
+    """
+    candidate = _env_statistical_candidate(
+        candidate_id="candidate_attic_temperature_drop",
+        title="Attic temperature drop anomaly",
+        summary=(
+            "sensor.attic_temperature drops sharply from its normal range, "
+            "which may mean a window was left open."
+        ),
+        evidence_paths=[
+            "entities[sensor.attic_temperature].state",
+            "derived.is_night",
+        ],
+    )
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "baseline_deviation"
+    rule_key = rule_semantic_key(
+        {
+            "rule_id": normalized.rule_id,
+            "template_id": normalized.template_id,
+            "params": normalized.params,
+        }
+    )
+    candidate_key = candidate_semantic_key(candidate)
+    assert rule_key is not None
+    assert candidate_key == (
+        "v1|subject=sensor|predicate=power_anomaly|night=any|home=any|scope=any|"
+        "entities=sensor.attic_temperature"
+    )
+    assert rule_key_covers_candidate_key(rule_key, candidate_key)
+
+
+def test_entry_evidence_open_prose_keeps_open_predicate() -> None:
+    """
+    Real entry evidence keeps predicate=open despite env prose (#541).
+
+    The override is subject-gated: cover/binary_sensor entry evidence makes
+    subject=entry_door, the env verdict stays off, and the open leg keeps
+    the candidate — mutation guard for _override_env_prose_steal.
+    """
+    candidate = _env_statistical_candidate(
+        candidate_id="candidate_garage_co2_door",
+        title="CO2 rises when the garage door opens",
+        summary=("Garage CO2 rises when the garage door is left open for long."),
+        pattern="entry_watch",
+        evidence_paths=[
+            "entities[cover.garage_door].state",
+            "entities[sensor.garage_co2].state",
+        ],
+    )
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert "subject=entry_door" in key
+    assert "predicate=open" in key
+
+
+def test_environmental_availability_prose_not_rewritten_to_power_anomaly() -> None:
+    """
+    Outage candidates must not be covered by unrelated baseline rules.
+
+    "unavailable; unable to open its connection" keys predicate=open (the
+    open leg precedes the unavailable leg); rewriting it to power_anomaly
+    would let an active baseline rule on the same sensor falsely cover the
+    outage proposal the normalizer's availability branch registers (Codex
+    adversarial review, reproduced). The override must leave the base key.
+    """
+    candidate = _env_statistical_candidate(
+        candidate_id="candidate_attic_temperature_offline",
+        title="Attic temperature sensor unavailable",
+        summary=(
+            "The attic temperature sensor is unavailable; Home Assistant is "
+            "unable to open its connection."
+        ),
+        pattern="availability_watch",
+        evidence_paths=["entities[sensor.attic_temperature].state"],
+    )
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id in {
+        "unavailable_sensors",
+        "unavailable_sensors_while_home",
+    }
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert "predicate=power_anomaly" not in key
+    baseline_rule_key = (
+        "v1|subject=sensor|predicate=power_anomaly"
+        "|template=baseline_deviation|entities=sensor.attic_temperature"
+    )
+    assert not rule_key_covers_candidate_key(baseline_rule_key, key)
+
+
+def test_comma_threshold_prose_keeps_context_in_key() -> None:
+    """
+    "exceeds 1,000" is a threshold on both surfaces (Codex review).
+
+    The keying mirror must parse comma thousands like the normalizer, or a
+    threshold candidate would collapse its context while the registered
+    rule keeps require_night — the mirror-drift class the tuple pin guards.
+    """
+    candidate = _env_statistical_candidate(
+        candidate_id="candidate_living_room_co2_threshold",
+        title="CO2 threshold at night",
+        summary="Alert when living room CO2 exceeds 1,000 ppm at night.",
+        pattern="sensor_threshold",
+        evidence_paths=[
+            "entities[sensor.living_room_co2].state",
+            "derived.is_night",
+        ],
+    )
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "sensor_threshold_condition"
+    assert normalized.params["threshold"] == 1000.0
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert "night=1" in key

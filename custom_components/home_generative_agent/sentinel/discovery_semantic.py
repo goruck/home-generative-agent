@@ -67,6 +67,257 @@ _BARE_BRACKET_DOMAINS = frozenset(
 # breaks dedup in both directions (issue #522 adversarial review).
 _LOW_BATTERY_QUALIFIERS = ("low", "below", "under", "weak")
 _SLUG_TOKEN_SPLIT_RE = re.compile(r"[^a-z0-9]+")
+# Mirrors proposal_templates._ENVIRONMENTAL_SIGNAL_TERMS (issue #541); kept
+# local per this module's decoupling convention. An asymmetric vocabulary
+# breaks dedup in both directions: a term only the normalizer knows registers
+# a statistical rule whose key the candidate never matches, and a term only
+# this module knows collapses context on a candidate that stays unsupported.
+_ENVIRONMENTAL_SIGNAL_TERMS = (
+    "temperature",
+    "temp",
+    "humidity",
+    "pressure",
+    "co2",
+    "co",
+    "carbon dioxide",
+    "carbon monoxide",
+    "pm25",
+    "pm2 5",
+    "pm10",
+    "aqi",
+    "air quality",
+    "moisture",
+    "illuminance",
+    "lux",
+)
+# Mirrors proposal_templates._NUMERIC_THRESHOLD_PATTERN: the normalizer
+# routes an environmental candidate with positive-numeric-threshold prose to
+# sensor_threshold_condition (context-carrying params) and everything else to
+# the context-free statistical templates, so the key's context collapse must
+# flip on the same detector.
+_NUMERIC_THRESHOLD_RE = re.compile(
+    r"(?:>|above|exceeds?|over|more than|greater than)\s*"
+    r"(\d{1,3}(?:,\d{3})+|\d+,\d{1,2}|\d+(?:\.\d+)?)"
+    r"(?!\s*(?:hour|hr|minute|min)s?\b)(?![\d,.])"
+)
+
+
+def _has_environmental_signal(text_or_entity_id: str) -> bool:
+    """
+    Mirror of proposal_templates._has_environmental_signal (issue #541).
+
+    Whole-token matching over a non-alphanumeric split; never fed the
+    candidate_id slug (issue #522 posture — no slug-only routing).
+    """
+    normalized = f" {_SLUG_TOKEN_SPLIT_RE.sub(' ', text_or_entity_id.lower())} "
+    return any(f" {term} " in normalized for term in _ENVIRONMENTAL_SIGNAL_TERMS)
+
+
+def _has_numeric_threshold(text: str) -> bool:
+    """Mirror of proposal_templates._extract_threshold_numeric's success path."""
+    match = _NUMERIC_THRESHOLD_RE.search(text)
+    if not match:
+        return False
+    raw = match.group(1)
+    if re.fullmatch(r"\d{1,3}(?:,\d{3})+", raw):
+        raw = raw.replace(",", "")
+    else:
+        raw = raw.replace(",", ".")
+    try:
+        value = float(raw)
+    except ValueError:
+        return False
+    return value > 0
+
+
+# Mirrors proposal_templates._STALENESS_TERMS for the environmental leg's
+# staleness gate ONLY (issue #541 ship red-team review); kept local per this
+# module's decoupling convention. The pre-existing staleness predicate leg
+# below keeps its own narrower tuple — this mirror exists so the env verdict
+# flips on exactly the signal that makes the normalizer's env arm defer to
+# its entity_staleness branch.
+_ENV_STALENESS_GATE_TERMS = (
+    "stale",
+    "not updated",
+    "tracking",
+    "staleness",
+    "last seen",
+    "last updated",
+    "gps",
+)
+
+
+def _has_environmental_candidate_signal(
+    text: str, entity_ids: list[str], named_battery_ids: list[str], subject: str
+) -> bool:
+    """
+    Environmental leg verdict (issue #541), mirroring the normalizer's guard.
+
+    Non-battery ``sensor.*`` evidence must be present (the statistical branch
+    cannot register a rule without it), and the signal reads from prose or an
+    evidence entity ID — never the candidate_id slug (issue #522 posture).
+    Battery-NAMED ids are excluded so home-battery telemetry like
+    ``sensor.battery_temperature`` keeps its base treatment.
+
+    The ``subject == "sensor"`` gate is the #540 battery-arm lesson applied
+    to this leg: the key chain's earlier subject classes (entry, lock,
+    motion, alarm) mirror normalizer branches that run BEFORE its statistical
+    branch, so a motion candidate that incidentally cites a temperature
+    sensor ("motion in the attic near the temperature sensor while away")
+    must keep its subject=motion|predicate=active keying — the normalizer
+    registers a motion rule for it, and an environmental predicate steal
+    would leave that rule unable to dedup its own candidate. Sensor-only
+    evidence is exactly ``subject == "sensor"`` here, because the subject
+    chain assigns "sensor" only when no earlier class matched.
+    """
+    if subject != "sensor":
+        return False
+    # Staleness gate (ship red-team review): the normalizer's env arm defers
+    # staleness-worded candidates to its entity_staleness branch, so the key
+    # must fall through to the staleness predicate leg for the same prose or
+    # the mirror breaks in both directions.
+    if _contains_any(text, _ENV_STALENESS_GATE_TERMS):
+        return False
+    non_battery_sensor_ids = [
+        entity_id
+        for entity_id in entity_ids
+        if entity_id.startswith("sensor.") and entity_id not in named_battery_ids
+    ]
+    if not non_battery_sensor_ids:
+        return False
+    return _has_environmental_signal(text) or any(
+        _has_environmental_signal(entity_id) for entity_id in non_battery_sensor_ids
+    )
+
+
+# Prose wording that keys a candidate predicate=power_anomaly. Baseline /
+# deviation wording is included because statistical candidates describe their
+# pattern that way regardless of the measured quantity. Near-mirror of
+# proposal_templates._POWER_ENERGY_TERMS with two pre-existing, intentional
+# deltas: "baseline"/"deviation" exist only here (keying-side statistical
+# wording), and "usage" exists only on the normalizer side (a usage-only-prose
+# candidate keys via other legs; closing that residual would rekey existing
+# pending proposals, so it stays documented rather than fixed).
+_POWER_ANOMALY_TERMS = (
+    "power",
+    "energy",
+    "watt",
+    "consumption",
+    "kilowatt",
+    "baseline",
+    "deviation",
+)
+
+
+def _has_power_anomaly_signal(text: str, *, environmental: bool) -> bool:
+    """Power/baseline prose wording, or the environmental leg (issue #541)."""
+    return environmental or _contains_any(text, _POWER_ANOMALY_TERMS)
+
+
+def _override_env_prose_steal(
+    text: str,
+    predicate: str,
+    entities: list[str],
+    sensor_ids: list[str],
+    *,
+    environmental: bool,
+) -> tuple[str, list[str]]:
+    """
+    Re-key environmental candidates whose prose grazed an entry/lock/alarm leg.
+
+    "Temperature drops sharply, which may mean a window was left open" keys
+    predicate=open via the bare-substring leg, but the normalizer's entry,
+    lock, and alarm branches all require matching entity evidence while its
+    statistical branch does not — so this sensor-only candidate registers
+    baseline_deviation and an open/unlocked/disarmed key would never dedup
+    against it (ship red-team review, reproduced). The environmental verdict
+    is subject-gated to sensor-only evidence, so candidates with real entry,
+    lock, or alarm evidence never reach this override; unavailable, camera,
+    and battery predicates are deliberately not listed — their normalizer
+    branches run before the statistical branch and fire on prose alone.
+
+    Availability wording blocks the override entirely (Codex adversarial
+    review, reproduced): "unavailable; unable to open its connection" keys
+    predicate=open (the open leg precedes the unavailable leg), and
+    rewriting it to power_anomaly would let an active baseline rule on the
+    same sensor falsely cover the OUTAGE proposal the normalizer's
+    availability branch actually registers. Keeping the base key restores
+    the pre-#541 no-cover/no-suppress behavior.
+    """
+    if (
+        environmental
+        and predicate in ("unlocked", "open", "disarmed")
+        and not _contains_any(text, ("unavailable", "offline", "unreachable"))
+    ):
+        predicate = "power_anomaly"
+        if not entities and sensor_ids:
+            entities = sensor_ids
+    return predicate, entities
+
+
+def _resolve_night_home(
+    evidence_paths: list[str],
+    text: str,
+    predicate: str,
+    *,
+    environmental: bool,
+) -> tuple[str, str]:
+    """
+    Resolve the key's night/home fields, applying context-free overrides.
+
+    Occupancy resolves through the shared evidence-first signal (issue
+    #524): without the structured paths, an evidence-only away candidate
+    keys home=any and never dedups against its activated home=0 rule
+    (issue #516 review).
+
+    low_battery override: the normalizer's battery templates ignore
+    night/occupancy context entirely, and rule_semantic_key hardcodes
+    night=any|home=any for low_battery_sensors — a battery candidate
+    carrying night or occupancy wording would otherwise never dedup against
+    its own activated rule and be re-proposed indefinitely (issue #522
+    red-team review).
+
+    Environmental override: see _environmental_context_collapses —
+    statistical environmental candidates collapse to the context-free key
+    their registered rule carries; threshold-prose candidates keep context
+    (issue #541).
+    """
+    night = "1" if night_signal(evidence_paths, text) else "any"
+    home = {"away": "0", "home": "1", "any": "any"}[
+        presence_signal(evidence_paths, text)
+    ]
+    if predicate == "low_battery" or _environmental_context_collapses(
+        text, predicate=predicate, environmental=environmental
+    ):
+        night = "any"
+        home = "any"
+    return night, home
+
+
+def _environmental_context_collapses(
+    text: str,
+    *,
+    predicate: str,
+    environmental: bool,
+) -> bool:
+    """
+    Return True when an env candidate's night/home context must collapse.
+
+    Statistical environmental candidates key context-free (issue #541): the
+    normalizer routes them to baseline_deviation / time_of_day_anomaly, whose
+    params and rule keys carry no occupancy/night context, so context
+    variants must collapse to one key — the #540 battery pile-up lesson.
+    Threshold-prose candidates keep context, mirroring
+    sensor_threshold_condition's require_night/require_away/require_home
+    params. ``environmental`` is the subject-gated
+    _has_environmental_candidate_signal verdict, and the predicate gate
+    keeps the collapse off candidates an earlier keying leg claimed.
+    """
+    return (
+        predicate == "power_anomaly"
+        and environmental
+        and not _has_numeric_threshold(text)
+    )
 
 
 def _has_low_battery_signal(text: str, slug_text: str) -> bool:
@@ -236,16 +487,28 @@ def candidate_semantic_key(  # noqa: PLR0912, PLR0915
     # *_doorbell_motion) are motion sensors, not entries — without this the
     # candidate keys subject=entry_door while its activated motion rule keys
     # subject=motion and dedup never fires (#516 mirror, issue #518 review).
+    # sensor.-domain IDs are excluded outright, mirroring the normalizer's
+    # _find_entry_entity_ids domain gate ({binary_sensor, cover}): a
+    # sensor.* entity can never register an entry rule there, and #541 makes
+    # the divergence bite — sensor.outdoor_temperature would key
+    # subject=entry_door via the "door" substring while its promotion
+    # registers a subject=sensor baseline rule that then never dedups its
+    # own re-proposals (ship testing-specialist review, reproduced).
+    # Domainless legacy IDs keep the tolerant substring behavior, matching
+    # the normalizer's domainless leg.
     window_ids = sorted(
         entity_id
         for entity_id in entity_ids
-        if "window" in entity_id and not _is_motion_named(entity_id)
+        if "window" in entity_id
+        and not _is_motion_named(entity_id)
+        and not entity_id.startswith("sensor.")
     )
     door_ids = sorted(
         entity_id
         for entity_id in entity_ids
         if ("door" in entity_id or "entry" in entity_id)
         and not _is_motion_named(entity_id)
+        and not entity_id.startswith("sensor.")
     )
     motion_ids = sorted(
         entity_id for entity_id in entity_ids if _is_motion_named(entity_id)
@@ -293,6 +556,13 @@ def candidate_semantic_key(  # noqa: PLR0912, PLR0915
 
     predicate = "unknown"
     named_battery_ids = _named_battery_sensor_entity_ids(entity_ids)
+    # Environmental leg (issue #541): mirrors the normalizer's widened
+    # statistical branch, subject-gated per the #540 battery-arm lesson.
+    # Computed once so the power_anomaly leg below and the context collapse
+    # in _resolve_night_home share one verdict.
+    has_environmental_signal = _has_environmental_candidate_signal(
+        text, entity_ids, named_battery_ids, subject
+    )
     lock_battery_targets = (
         _battery_sensor_entity_ids(entity_ids)
         if lock_ids
@@ -405,10 +675,7 @@ def candidate_semantic_key(  # noqa: PLR0912, PLR0915
         if battery_entity_ids:
             subject = "sensor"
             entities = battery_entity_ids
-    elif _contains_any(
-        text,
-        ("power", "energy", "watt", "consumption", "kilowatt", "baseline", "deviation"),
-    ):
+    elif _has_power_anomaly_signal(text, environmental=has_environmental_signal):
         predicate = "power_anomaly"
         if not entities and sensor_ids:
             entities = sensor_ids
@@ -430,25 +697,13 @@ def candidate_semantic_key(  # noqa: PLR0912, PLR0915
     if predicate == "unavailable" and sensor_ids:
         subject = "sensor"
         entities = sensor_ids
+    predicate, entities = _override_env_prose_steal(
+        text, predicate, entities, sensor_ids, environmental=has_environmental_signal
+    )
 
-    night = "1" if night_signal(evidence_paths, text) else "any"
-
-    # Occupancy resolves through the shared evidence-first signal (issue
-    # #524): without the structured paths, an evidence-only away candidate
-    # keys home=any and never dedups against its activated home=0 rule
-    # (issue #516 review).
-    home = {"away": "0", "home": "1", "any": "any"}[
-        presence_signal(evidence_paths, text)
-    ]
-    if predicate == "low_battery":
-        # The normalizer's battery templates ignore night/occupancy context
-        # entirely, and rule_semantic_key hardcodes night=any|home=any for
-        # low_battery_sensors — a battery candidate carrying night or
-        # occupancy wording would otherwise never dedup against its own
-        # activated rule and be re-proposed indefinitely (issue #522
-        # red-team review).
-        night = "any"
-        home = "any"
+    night, home = _resolve_night_home(
+        evidence_paths, text, predicate, environmental=has_environmental_signal
+    )
     if subject == "unknown" and _contains_any(text, ("window", "windows")):
         subject = "entry_window"
     if predicate == "unknown" and "open" in text:

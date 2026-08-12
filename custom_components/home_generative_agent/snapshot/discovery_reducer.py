@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections import defaultdict
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -20,7 +21,28 @@ _ALLOWED_DOMAINS = {
     "sensor",
 }
 
-_ALLOWED_SENSOR_DEVICE_CLASSES = {"power", "energy", "battery"}
+# Environmental readings follow weather/HVAC cycles rather than occupancy;
+# discovery needs to see them to propose baseline/threshold candidates
+# (issue #541 — without these, the LLM could only reach an environmental
+# device through its battery entity and produced physically-wrong cards).
+_ENVIRONMENTAL_SENSOR_DEVICE_CLASSES = {
+    "temperature",
+    "humidity",
+    "pressure",
+    "atmospheric_pressure",
+    "carbon_dioxide",
+    "carbon_monoxide",
+    "pm25",
+    "pm10",
+    "aqi",
+    "moisture",
+    "illuminance",
+}
+_ALLOWED_SENSOR_DEVICE_CLASSES = {
+    "power",
+    "energy",
+    "battery",
+} | _ENVIRONMENTAL_SENSOR_DEVICE_CLASSES
 _ALLOWED_BINARY_CLASSES = {"door", "window", "opening", "motion", "occupancy"}
 _MAX_ENTITIES = 100
 _MAX_CAMERA_ACTIVITY = 20
@@ -69,6 +91,14 @@ def _anomaly_score(entity: dict[str, Any], generated_at: str) -> int:
         except (ValueError, TypeError):
             pass
 
+    # Environmental sensors re-report continuously, so a recency bonus for
+    # them carries no anomaly signal — it would just let a fleet of
+    # temperature sensors systematically outrank idle security entities
+    # (closed doors, locked locks) at the _MAX_ENTITIES cap (issue #541
+    # ship red-team review, reproduced with a synthetic 110-entity home).
+    if device_class in _ENVIRONMENTAL_SENSOR_DEVICE_CLASSES:
+        return score
+
     last_changed = entity.get("last_changed", "")
     if last_changed and generated_at:
         score += _recency_bonus(last_changed, generated_at)
@@ -96,6 +126,31 @@ def _recency_bonus(last_changed: str, generated_at: str) -> int:
     return 0
 
 
+# Numeric states beyond this magnitude pass through unrounded: expanding a
+# garbage reading like "1e300" to a 301-digit integer string would inflate
+# the compressed snapshot instead of shrinking it (ship adversarial review).
+# No physical environmental quantity exceeds this bound.
+_MAX_ROUNDABLE_STATE = 1e9
+
+
+def _round_environmental_state(state: str) -> str:
+    """
+    Round a numeric environmental state to an integer string ("83.66" → "84").
+
+    Token control plus grouping: the LLM only needs magnitude, and identical-
+    area sensors that differ by fractions of a degree get a chance to share a
+    group. Non-numeric, non-finite, and absurd-magnitude states pass through
+    unmodified; the full snapshot keeps full precision for rule evaluation.
+    """
+    try:
+        value = float(state)
+    except (TypeError, ValueError):
+        return state
+    if not math.isfinite(value) or abs(value) > _MAX_ROUNDABLE_STATE:
+        return state
+    return str(round(value))
+
+
 def _filter_entities(snapshot: FullStateSnapshot) -> list[dict[str, Any]]:
     """Filter snapshot entities to security/safety-relevant domains."""
     filtered: list[dict[str, Any]] = []
@@ -109,11 +164,14 @@ def _filter_entities(snapshot: FullStateSnapshot) -> list[dict[str, Any]]:
             continue
         if domain == "binary_sensor" and device_class not in _ALLOWED_BINARY_CLASSES:
             continue
+        state = entity["state"]
+        if device_class in _ENVIRONMENTAL_SENSOR_DEVICE_CLASSES:
+            state = _round_environmental_state(state)
         filtered.append(
             {
                 "entity_id": entity["entity_id"],
                 "domain": domain,
-                "state": entity["state"],
+                "state": state,
                 "area": entity.get("area"),
                 "device_class": device_class,
                 "last_changed": entity.get("last_changed"),

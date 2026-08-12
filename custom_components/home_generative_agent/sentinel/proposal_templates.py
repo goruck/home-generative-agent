@@ -88,8 +88,23 @@ _HOURS_THRESHOLD_PATTERN = re.compile(
     r"(\d+(?:\.\d+)?)\s*(?:hour|hr)s?",
     re.IGNORECASE,
 )
+# Mirrored by discovery_semantic._NUMERIC_THRESHOLD_RE / _has_numeric_threshold
+# (hard parity requirement, issue #541): the keying module's context-collapse
+# detector must flip on the same threshold detection as this module's
+# sensor_threshold_condition routing, including _extract_threshold_numeric's
+# value > 0 gate. Change both sides together.
+# Comma-grouped thousands ("CO2 exceeds 1,000 ppm") capture whole — the bare
+# \d+ arm alone read them as threshold=1, an always-on rule (Codex
+# adversarial review, reproduced). Comma decimals ("above 20,5") are the
+# 1-2-digit-tail arm, disjoint from the 3-digit thousands groups (#522
+# locale lesson). A trailing duration unit disqualifies the match ("high
+# for over 2 hours" previously registered threshold=2), and the trailing
+# digit/comma/dot lookahead stops backtracking from shaving a blocked
+# number down to its first digits ("above 30 minutes" must not read 3).
 _NUMERIC_THRESHOLD_PATTERN = re.compile(
-    r"(?:>|above|exceeds?|over|more than|greater than)\s*(\d+(?:\.\d+)?)"
+    r"(?:>|above|exceeds?|over|more than|greater than)\s*"
+    r"(\d{1,3}(?:,\d{3})+|\d+,\d{1,2}|\d+(?:\.\d+)?)"
+    r"(?!\s*(?:hour|hr|minute|min)s?\b)(?![\d,.])"
 )
 _MAX_PERCENT = 100.0
 _DEFAULT_DURATION_HOURS = 2.0
@@ -131,6 +146,32 @@ _POWER_ENERGY_TERMS = (
     "usage",
     "kilowatt",
 )
+# Environmental measurement vocabulary (issue #541) — the single
+# authoritative token set behind _has_environmental_signal: the reducer's
+# environmental device classes plus common entity-id / prose spellings.
+# Matched on whole tokens after splitting on non-alphanumerics, so "temp"
+# fires on sensor.attic_temp but never on "attempt"/"template", and "lux"
+# never fires on "deluxe". "pm2 5" is the tokenized spelling of "pm2.5" /
+# sensor.*_pm2_5. Mirrored in discovery_semantic._ENVIRONMENTAL_SIGNAL_TERMS
+# (hard parity requirement — issues #540/#522).
+_ENVIRONMENTAL_SIGNAL_TERMS = (
+    "temperature",
+    "temp",
+    "humidity",
+    "pressure",
+    "co2",
+    "co",
+    "carbon dioxide",
+    "carbon monoxide",
+    "pm25",
+    "pm2 5",
+    "pm10",
+    "aqi",
+    "air quality",
+    "moisture",
+    "illuminance",
+    "lux",
+)
 # Entity-name tokens that identify loads whose compressor/motor cycles continuously.
 # These sensors have a bimodal power distribution (on vs. standby) that makes a
 # rolling average a poor baseline — time_of_day_anomaly is used instead, because
@@ -139,6 +180,13 @@ _POWER_ENERGY_TERMS = (
 _CYCLICAL_LOAD_TOKENS: frozenset[str] = frozenset(
     {"fridge", "refrigerator", "freezer", "compressor"}
 )
+# Environmental signals with a hard day/night cycle (issue #541 ship
+# adversarial review): illuminance swings 0 ↔ tens of thousands of lux every
+# dawn and dusk, so a rolling-average baseline mixes day and night readings
+# and false-fires twice daily — the same bimodality documented for cyclical
+# loads above. Routed to time_of_day_anomaly, whose per-hour baselines model
+# the cycle. Whole-token matched like _ENVIRONMENTAL_SIGNAL_TERMS.
+_DIURNAL_ENV_TOKENS = ("illuminance", "lux")
 _ALARM_STATES = ("armed_home", "armed_away", "armed_night", "disarmed", "triggered")
 _UNKNOWN_TERMS = (
     "unknown",
@@ -923,13 +971,31 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
     # Also check entity IDs for power/energy keywords — the LLM may describe an
     # appliance as "active" or "running" rather than mentioning "power" or "watt",
     # but the entity ID (e.g. sensor.washing_machine_switch_0_power) is unambiguous.
+    # Environmental signals (issue #541) route through the same branch: numeric
+    # threshold prose → sensor_threshold_condition, otherwise the statistical
+    # detectors — without this leg a promoted temperature/humidity candidate
+    # would land unsupported.
     non_battery_sensor_ids = [s for s in sensor_ids if s not in battery_sensor_ids]
     if non_battery_sensor_ids and (
         _has_power_energy_signal(text)
         or any(_has_power_energy_signal(eid) for eid in non_battery_sensor_ids)
+        or _environmental_statistical_signal(text, non_battery_sensor_ids)
     ):
         threshold = _extract_threshold_numeric(text)
-        sensor_id = non_battery_sensor_ids[0]
+        # Prefer the sensor that carries the routing signal in its ID: a
+        # candidate bundling a contextual sensor with the measurement sensor
+        # (sensor.a_uptime + sensor.z_attic_temperature) would otherwise
+        # register the rule on the alphabetically-first UNRELATED entity
+        # (Codex adversarial review, reproduced; also fixes the same shape
+        # for power candidates). Stable sort keeps the alphabetical order
+        # within each group.
+        preferred_sensor_ids = sorted(
+            non_battery_sensor_ids,
+            key=lambda s: (
+                not (_has_power_energy_signal(s) or _has_environmental_signal(s))
+            ),
+        )
+        sensor_id = preferred_sensor_ids[0]
         if threshold is not None:
             default_rule_id = f"sensor_threshold_{sensor_id.replace('.', '_')}"
             return NormalizationResult(
@@ -954,7 +1020,7 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
         # *_power and *_energy variants), pick the first non-cumulative one so
         # that energy counters don't silently discard the whole candidate.
         instantaneous_id = next(
-            (s for s in non_battery_sensor_ids if not _is_cumulative_energy_sensor(s)),
+            (s for s in preferred_sensor_ids if not _is_cumulative_energy_sensor(s)),
             None,
         )
         if instantaneous_id is None:
@@ -968,7 +1034,18 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
         # distribution — rolling-average baselines mix on/off states and produce
         # systematic false positives on every normal off-cycle.  time_of_day_anomaly
         # uses a variance-aware threshold (max(2*stddev, drift%)) that tolerates it.
-        if _is_cyclical_load(sensor_id):
+        # Diurnal environmental signals (illuminance) get the same treatment:
+        # a rolling average over a hard day/night cycle false-fires at every
+        # dawn and dusk (issue #541 ship adversarial review). An explicit
+        # time-of-day pattern in the candidate (the prompt teaches
+        # "pattern: time_of_day_anomaly") is honored too — silently
+        # registering a rolling baseline for a requested per-hour comparison
+        # changes the approved proposal (Codex structured review).
+        if (
+            _is_cyclical_load(sensor_id)
+            or _has_diurnal_env_signal(text, sensor_id)
+            or _contains_any(text, ("time_of_day", "time-of-day", "time of day"))
+        ):
             default_rule_id = f"sensor_tod_{sensor_id.replace('.', '_')}"
             return NormalizationResult(
                 normalized=NormalizedRule(
@@ -1704,8 +1781,16 @@ def _extract_threshold_numeric(text: str) -> float | None:
     match = _NUMERIC_THRESHOLD_PATTERN.search(text)
     if not match:
         return None
+    raw = match.group(1)
+    # Comma role is decided by the pattern's disjoint arms: 3-digit groups
+    # are English thousands ("1,000" -> 1000), a 1-2-digit tail is a locale
+    # decimal ("20,5" -> 20.5).
+    if re.fullmatch(r"\d{1,3}(?:,\d{3})+", raw):
+        raw = raw.replace(",", "")
+    else:
+        raw = raw.replace(",", ".")
     try:
-        value = float(match.group(1))
+        value = float(raw)
     except ValueError:
         return None
     return value if value > 0 else None
@@ -1739,6 +1824,58 @@ def _has_multiple_signal(text: str) -> bool:
 
 def _has_power_energy_signal(text: str) -> bool:
     return _contains_any(text, _POWER_ENERGY_TERMS)
+
+
+def _has_environmental_signal(text_or_entity_id: str) -> bool:
+    """
+    Environmental-measurement signal from prose or an entity ID (issue #541).
+
+    Whole-token matching over a non-alphanumeric split: prose word boundaries
+    and entity-id underscores both become separators, so "temp" matches
+    sensor.attic_temp and "temp." but not "attempt". Callers pass prose or a
+    single entity ID — never the candidate_id slug, which must not route on
+    its own (issue #522 posture).
+    """
+    normalized = f" {_SLUG_TOKEN_SPLIT_RE.sub(' ', text_or_entity_id.lower())} "
+    return any(f" {term} " in normalized for term in _ENVIRONMENTAL_SIGNAL_TERMS)
+
+
+def _has_diurnal_env_signal(text: str, entity_id: str) -> bool:
+    """Illuminance signal in prose or the entity ID — see _DIURNAL_ENV_TOKENS."""
+    for surface in (text, entity_id):
+        normalized = f" {_SLUG_TOKEN_SPLIT_RE.sub(' ', surface.lower())} "
+        if any(f" {term} " in normalized for term in _DIURNAL_ENV_TOKENS):
+            return True
+    return False
+
+
+def _environmental_statistical_signal(
+    text: str, non_battery_sensor_ids: list[str]
+) -> bool:
+    """
+    Environmental arm of the statistical-branch guard (issue #541).
+
+    Two gates beyond the plain vocabulary match (ship red-team review, both
+    reproduced):
+
+    - Staleness wording defers to the entity_staleness branch below: without
+      this, "sensor.attic_temperature has not updated in over 12 hours"
+      reads "over 12" as a VALUE threshold and registers a rule that fires
+      whenever the attic exceeds 12 degrees — dead-sensor detection
+      silently replaced by a wrong rule. The power arm keeps its historical
+      behavior; only the env widening gets the gate.
+    - Dot-notation ``sensor.*`` evidence only: the tolerant collector also
+      accepts domainless legacy object IDs, but the keying module's env leg
+      is ``sensor.``-prefixed, so a domainless env candidate would register
+      a rule whose key its candidate never matches. Both sides now stay
+      unsupported for domainless env evidence, matching pre-#541 behavior.
+    """
+    dotted_ids = [s for s in non_battery_sensor_ids if s.startswith("sensor.")]
+    if not dotted_ids or _has_staleness_signal(text):
+        return False
+    return _has_environmental_signal(text) or any(
+        _has_environmental_signal(entity_id) for entity_id in dotted_ids
+    )
 
 
 def _is_cumulative_energy_sensor(entity_id: str) -> bool:

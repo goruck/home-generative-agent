@@ -3576,3 +3576,321 @@ def test_normalize_candidate_battery_baseline_deviation_routes_to_low_battery() 
         "sensor.garage_temp_sensor_battery"
     ]
     assert normalized.params["threshold"] == 40.0
+
+
+# ---------------------------------------------------------------------------
+# Environmental sensor routing (issue #541)
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_candidate_environmental_statistical_routes_to_baseline() -> None:
+    """A temperature candidate with statistical prose is promotable (#541)."""
+    candidate = {
+        "candidate_id": "candidate_attic_temperature_baseline_deviation",
+        "title": "Attic Temperature Anomaly",
+        "summary": (
+            "Detects statistical deviation from the normal attic temperature "
+            "reading, indicating overheating or ventilation failure."
+        ),
+        "pattern": "statistical_baseline_deviation",
+        "confidence_hint": 0.6,
+        "evidence_paths": ["entities[sensor.attic_temperature].state"],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "baseline_deviation"
+    assert normalized.params == {"entity_id": "sensor.attic_temperature"}
+
+
+def test_normalize_candidate_environmental_threshold_keeps_context() -> None:
+    """Numeric-threshold environmental prose routes to sensor_threshold_condition."""
+    candidate = {
+        "candidate_id": "candidate_attic_temperature_threshold_night",
+        "title": "Attic overheating at night",
+        "summary": "Alert when attic temperature rises above 95 at night.",
+        "pattern": "sensor_threshold",
+        "confidence_hint": 0.7,
+        "evidence_paths": [
+            "entities[sensor.attic_temperature].state",
+            "derived.is_night",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "sensor_threshold_condition"
+    assert normalized.params["sensor_entity_id"] == "sensor.attic_temperature"
+    assert normalized.params["threshold"] == 95.0
+    assert normalized.params["require_night"] is True
+    assert normalized.params["require_away"] is False
+    assert normalized.params["require_home"] is False
+
+
+def test_normalize_candidate_environmental_entity_id_signal_only() -> None:
+    """
+    An environmental token in the entity ID routes without English prose.
+
+    Mirrors the power-branch id fallback: locale prose (issue #522) leaves the
+    entity ID as the only English surface, and sensor.podkroví→attic_temp is
+    unambiguous.
+    """
+    candidate = {
+        "candidate_id": "candidate_podkrovi_odchylka",
+        "title": "Odchylka v podkroví",
+        "summary": "Sleduje neobvyklé hodnoty čidla v podkroví.",
+        "pattern": "statisticka_odchylka",
+        "confidence_hint": 0.6,
+        "evidence_paths": ["entities[sensor.attic_temp].state"],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "baseline_deviation"
+    assert normalized.params == {"entity_id": "sensor.attic_temp"}
+
+
+def test_normalize_candidate_environmental_slug_only_does_not_route() -> None:
+    """
+    The candidate_id slug alone must never carry the environmental signal.
+
+    Issue #522 posture: locale prose plus a locale-named sensor with an
+    English "temperature" only in the slug stays honestly unsupported rather
+    than slug-routing to a statistical rule.
+    """
+    candidate = {
+        "candidate_id": "candidate_attic_temperature_anomaly",
+        "title": "Odchylka v podkroví",
+        "summary": "Sleduje neobvyklé hodnoty čidla v podkroví.",
+        "pattern": "statisticka_odchylka",
+        "confidence_hint": 0.6,
+        "evidence_paths": ["entities[sensor.podkrovi_cidlo].state"],
+    }
+    assert normalize_candidate(candidate) is None
+
+
+def test_normalize_candidate_environmental_prose_word_boundary() -> None:
+    """
+    "attempt"/"template" prose must not fire the temp token.
+
+    Token discipline: the environmental vocabulary matches whole tokens, so a
+    lock-attempt candidate citing a generic sensor stays on its own routing
+    instead of minting a baseline rule.
+    """
+    candidate = {
+        "candidate_id": "candidate_lock_attempt_counter",
+        "title": "Repeated unlock attempts",
+        "summary": "Multiple failed unlock attempts recorded by the keypad counter.",
+        "pattern": "counter_watch",
+        "confidence_hint": 0.5,
+        "evidence_paths": ["entities[sensor.keypad_attempt_counter].state"],
+    }
+    # Absolute verdict (ship testing-specialist review): the candidate stays
+    # honestly unsupported — no branch claims it.
+    assert normalize_candidate(candidate) is None
+
+
+def test_normalize_candidate_cyclical_environmental_routes_to_time_of_day() -> None:
+    """Fridge-named environmental sensors use the variance-aware template."""
+    candidate = {
+        "candidate_id": "candidate_fridge_temperature_baseline",
+        "title": "Fridge temperature anomaly",
+        "summary": "Detects deviation from the normal fridge temperature.",
+        "pattern": "statistical_baseline_deviation",
+        "confidence_hint": 0.6,
+        "evidence_paths": ["entities[sensor.fridge_temperature].state"],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "time_of_day_anomaly"
+    assert normalized.params == {"entity_id": "sensor.fridge_temperature"}
+
+
+def test_normalize_candidate_battery_named_env_telemetry_keeps_treatment() -> None:
+    """
+    sensor.battery_temperature keeps its pre-#541 treatment.
+
+    Home-battery telemetry is battery-NAMED, so the sensor collector excludes
+    it from the statistical branch (battery_sensor_ids) and prose without a
+    battery/low signal reaches no branch — the #541 widening must not
+    silently claim it.
+    """
+    candidate = {
+        "candidate_id": "candidate_home_battery_temperature",
+        "title": "Deviation in reading",
+        "summary": "Detects deviation from the normal reading.",
+        "pattern": "statistical_baseline_deviation",
+        "confidence_hint": 0.6,
+        "evidence_paths": ["entities[sensor.battery_temperature].state"],
+    }
+    assert normalize_candidate(candidate) is None
+
+
+def test_normalize_candidate_moisture_binary_sensor_not_statistical() -> None:
+    """
+    A leak candidate citing only binary_sensor evidence never turns statistical.
+
+    "moisture" is in the environmental vocabulary, but the statistical branch
+    requires sensor.* evidence — a binary leak detector cannot back a
+    baseline_deviation rule.
+    """
+    candidate = {
+        "candidate_id": "candidate_laundry_moisture",
+        "title": "Moisture detected in laundry room",
+        "summary": "Alert when the laundry leak detector reports moisture.",
+        "pattern": "leak_watch",
+        "confidence_hint": 0.6,
+        "evidence_paths": ["entities[binary_sensor.laundry_moisture].state"],
+    }
+    # Absolute verdict (ship testing-specialist review): the candidate stays
+    # honestly unsupported — the statistical branch requires sensor.*
+    # evidence and no other branch claims a leak detector.
+    assert normalize_candidate(candidate) is None
+
+
+def test_normalize_candidate_illuminance_routes_to_time_of_day() -> None:
+    """
+    Illuminance candidates use the variance-aware per-hour template.
+
+    Illuminance swings 0 to tens of thousands of lux at every dawn and dusk,
+    so a rolling-average baseline false-fires twice daily (ship adversarial
+    review) — the same bimodality treatment as cyclical loads.
+    """
+    for entity_id in ("sensor.hallway_illuminance", "sensor.hallway_lux"):
+        candidate = {
+            "candidate_id": f"candidate_{entity_id.split('.')[1]}_baseline",
+            "title": "Light level anomaly",
+            "summary": "Detects statistical deviation from the normal reading.",
+            "pattern": "statistical_baseline_deviation",
+            "confidence_hint": 0.6,
+            "evidence_paths": [f"entities[{entity_id}].state"],
+        }
+        normalized = normalize_candidate(candidate)
+        assert normalized is not None, entity_id
+        assert normalized.template_id == "time_of_day_anomaly", entity_id
+        assert normalized.params == {"entity_id": entity_id}
+
+
+def test_normalize_candidate_co_token_routes() -> None:
+    """A bare CO sensor (sensor.garage_co) routes statistically (#541 review)."""
+    candidate = {
+        "candidate_id": "candidate_garage_co_baseline",
+        "title": "Garage CO anomaly",
+        "summary": "Detects statistical deviation from the normal CO reading.",
+        "pattern": "statistical_baseline_deviation",
+        "confidence_hint": 0.6,
+        "evidence_paths": ["entities[sensor.garage_co].state"],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "baseline_deviation"
+    assert normalized.params == {"entity_id": "sensor.garage_co"}
+
+
+def test_normalize_candidate_env_staleness_keeps_entity_staleness() -> None:
+    """
+    Staleness-worded env candidates stay dead-sensor rules (#541 red team).
+
+    Without the staleness gate, "has not updated in over 12 hours" read
+    "over 12" as a VALUE threshold and registered a rule firing whenever the
+    attic exceeds 12 degrees — dead-sensor detection silently replaced.
+    """
+    candidate = {
+        "candidate_id": "candidate_attic_temperature_stale",
+        "title": "Attic temperature sensor stale",
+        "summary": (
+            "sensor.attic_temperature has not updated in over 12 hours; the "
+            "temperature reading may be stale."
+        ),
+        "pattern": "entity_staleness",
+        "confidence_hint": 0.7,
+        "evidence_paths": ["entities[entity_id=sensor.attic_temperature].state"],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "entity_staleness"
+    assert normalized.params == {
+        "entity_id": "sensor.attic_temperature",
+        "max_stale_hours": 12.0,
+    }
+
+
+def test_normalize_candidate_domainless_env_evidence_stays_unsupported() -> None:
+    """
+    Domainless legacy env evidence stays unsupported on both sides (#541).
+
+    The tolerant collector accepts "entities[entity_id=attic_temperature]",
+    but the keying module's env leg is sensor.-prefixed — registering a rule
+    here would mint a key its candidate never matches (red-team review).
+    """
+    candidate = {
+        "candidate_id": "candidate_attic_temperature_legacy",
+        "title": "Temperature anomaly",
+        "summary": "Temperature shows unusual deviation from normal.",
+        "pattern": "statistical_baseline_deviation",
+        "confidence_hint": 0.6,
+        "evidence_paths": ["entities[entity_id=attic_temperature].state"],
+    }
+    assert normalize_candidate(candidate) is None
+
+
+def test_extract_threshold_numeric_comma_and_duration() -> None:
+    """
+    Comma thousands parse whole; duration phrases are not thresholds.
+
+    "CO2 exceeds 1,000 ppm" previously registered threshold=1 — an
+    always-on rule — and "high for over 2 hours" registered threshold=2
+    (Codex adversarial review, both reproduced).
+    """
+    assert _extract_threshold_numeric("co2 exceeds 1,000 ppm") == 1000.0
+    assert _extract_threshold_numeric("power above 1,500 w") == 1500.0
+    assert _extract_threshold_numeric("temperature rises above 95") == 95.0
+    assert _extract_threshold_numeric("stays high for over 2 hours") is None
+    assert _extract_threshold_numeric("above 30 minutes of runtime") is None
+
+
+def test_normalize_candidate_prefers_signal_bearing_sensor() -> None:
+    """
+    The rule registers on the sensor that carries the signal (Codex review).
+
+    A candidate bundling a contextual sensor with the measurement sensor
+    must not register the rule on the alphabetically-first unrelated entity.
+    """
+    candidate = {
+        "candidate_id": "candidate_attic_temperature_mixed",
+        "title": "Attic temperature anomaly",
+        "summary": (
+            "Detects statistical deviation from the normal attic temperature reading."
+        ),
+        "pattern": "statistical_baseline_deviation",
+        "confidence_hint": 0.6,
+        "evidence_paths": [
+            "entities[sensor.a_uptime].state",
+            "entities[sensor.z_attic_temperature].state",
+        ],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "baseline_deviation"
+    assert normalized.params == {"entity_id": "sensor.z_attic_temperature"}
+
+
+def test_normalize_candidate_explicit_time_of_day_pattern_honored() -> None:
+    """
+    "pattern: time_of_day_anomaly" registers the requested template.
+
+    The prompt teaches time-of-day comparisons; silently registering a
+    rolling baseline for a requested per-hour comparison changes the
+    approved proposal (Codex structured review).
+    """
+    candidate = {
+        "candidate_id": "candidate_attic_temperature_tod",
+        "title": "Attic temperature daily-cycle anomaly",
+        "summary": (
+            "Compares the attic temperature against its typical value for the hour."
+        ),
+        "pattern": "time_of_day_anomaly",
+        "confidence_hint": 0.6,
+        "evidence_paths": ["entities[sensor.attic_temperature].state"],
+    }
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "time_of_day_anomaly"
+    assert normalized.params == {"entity_id": "sensor.attic_temperature"}

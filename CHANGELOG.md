@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.28.0] - 2026-08-11
+
+### Added
+
+- **Sentinel discovery now sees environmental sensors** ([#541](https://github.com/goruck/home-generative-agent/issues/541)). Temperature, humidity, pressure, CO₂, CO, particulate/air-quality, soil-moisture, and illuminance readings were invisible to the discovery model — wanting to monitor an attic sensor, it could only reach the device's battery entity and produced physically-wrong "power consumption anomaly" cards. Environmental sensors now appear in the discovery snapshot (with readings rounded to whole numbers to save prompt tokens; rules still evaluate full precision), baseline-ready ones are surfaced as monitoring gaps, and their candidates promote to real rules: statistical prose registers a baseline-deviation rule, an explicit numeric threshold ("above 95") registers a threshold rule that keeps its night/occupancy conditions, and illuminance uses the per-hour time-of-day template so routine dawn and dusk swings don't trip rolling-average alerts. Because environmental readings follow weather and HVAC rather than occupancy, the prompt bans conditioning them on who is home, and statistical variants share one context-free dedup key that matches the promoted rule — the same anti-pile-up discipline applied to battery candidates in v3.27.1.
+
+### Fixed
+
+- **Environmental candidates cannot hijack or be hijacked by neighboring rule shapes.** Adversarial review of the new routing surfaced and closed four edges before release: a stale-sensor candidate ("has not updated in over 12 hours") keeps registering a dead-sensor staleness rule instead of misreading "over 12" as a 12-degree threshold; common names like `sensor.outdoor_temperature` no longer key as door candidates (which made an approved rule unable to suppress re-proposals of itself); incidental prose like "may mean a window was left open" no longer breaks that same dedup; and a fleet of frequently-reporting environmental sensors can no longer systematically crowd idle door contacts and locks out of the discovery snapshot. Two of the hardening fixes reach beyond environmental sensors: numeric-threshold parsing (comma thousands like "1,000", locale decimals like "20,5", and duration phrases like "over 2 hours" that must never read as value thresholds) and signal-bearing target selection (the rule registers on the sensor that carries the power or environmental signal, not the alphabetically-first cited entity) apply to power candidates too.
+
 ## [3.27.1] - 2026-08-10
 
 ### Fixed
