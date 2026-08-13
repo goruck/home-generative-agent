@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.30.0] - 2026-08-13
+
+### Added
+
+- **One person no longer becomes two in camera notifications.** When someone walks through a camera's view, face recognition can identify them in some frames and return "Unknown Person" in others (face turned, motion blur, distance) — so summaries reported things like "Nico walks toward the entrance while an unknown person is present nearby" when only Nico was there. The video analyzer now consolidates identities within each batch: an "Unknown Person" face is renamed to the batch's known person, but only under strict conditions — exactly one known person appears in the batch, no frame shows two or more faces (a real companion always blocks the merge, including frames whose scene analysis failed after recognition succeeded), and the known person is the face's *nearest* enrolled match within a cosine distance of 0.85 (`VIDEO_ANALYZER_FACE_MERGE_THRESHOLD`). Anything short of all three keeps both identities. The merged result flows to summaries, notifications, `sensor.*_recognized_people`, and Sentinel evidence; Sentinel's unknown-person rules are unaffected by design, since they fire only when nobody is recognized. Documented in Camera Entities → Face Recognition, including a note for automations that key on the literal `"Unknown Person"` string.
+- **Merge decisions are observable and tunable.** Five per-camera counters in the hourly video-analyzer metrics report (`unknown_merged` plus four refusal reasons: same-frame co-occurrence, distance/nearest-match, multiple known names, and no-usable-lookup), with DEBUG logs carrying the measured distances. Face debug crops keep raw pre-merge names, so the threshold can be tuned from real data.
+
+### Fixed
+
+- **Face-recognition evidence now survives scene-analysis failures.** Frames whose VLM call timed out or was dropped by model-contention gates used to lose their face-recognition results entirely; the merge's companion guard now still sees them, so a two-person frame that failed scene analysis blocks the merge instead of blinding it.
+- **A malformed face-API response no longer discards a whole camera batch.** A face entry with a missing, wrong-sized, or non-finite embedding now degrades to "Indeterminate" for that face with a warning, instead of failing every frame in the batch.
+- **Reserved identity labels can no longer be enrolled as person names.** Enrolling someone as "Unknown Person", "Indeterminate", "None", or an empty name (in any casing) is refused, and gallery rows that already carry such names from older versions are never treated as a mergeable identity.
+
+### Changed
+
+- Identity-merge database lookups are bounded: five seconds per lookup and fifteen seconds per batch, degrading to a refusal instead of stalling the camera worker when the database is slow; after a database failure the remaining lookups in the batch are skipped.
+- The face-recognition match threshold (0.7) is now the named constant `FACE_RECOGNITION_THRESHOLD` in `person_gallery.py`.
+
 ## [3.29.1] - 2026-08-13
 
 ### Fixed

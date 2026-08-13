@@ -849,6 +849,44 @@ Entity-backed evidence path instruction added to `USER_PROMPT_TEMPLATE` in `expl
 
 ## Video Analyzer
 
+### Identity merge: temporal-adjacency guard for gray-zone faces
+
+**What:** Add a fourth refusal condition to `_merge_unknown_faces` (core/video_analyzer.py): only merge an "Unknown Person" face when its frame is within N seconds (e.g. 30) of a frame where the known person was directly recognized. Today the batch is the only temporal boundary, so on a long event-select flush a gray-zone stranger appearing minutes after the resident left can still merge.
+
+**Why:** All three adversarial reviewers on the v3.30.0 ship converged on the cross-frame gray-zone residual (a stranger within 0.7–0.85 cosine of the resident, never co-framed). The shipped guards (nearest-gallery-match requirement, companion guard incl. VLM-dropped frames, strict one-known rule) close the demonstrated exploits; temporal adjacency closes most of the remaining tailgater window. Deferred by user decision (2026-08-13, ship D3): field-validate the shipped guards first via the `unknown_merge_*` counters and debug crops, add this only if misattribution shows up.
+
+**How to apply:** Thread each frame's capture timestamp (already available as `ts` in `_process_batch`'s `ordered` loop) into the per-frame hit bookkeeping, record the timestamps of frames whose hits contain the known name, and refuse (new counter, e.g. `unknown_merge_refused_temporal`) when an unknown face's frame is farther than the window from every known-name frame. Also consider the caption-based refusal for face-recognition-timeout frames whose VLM caption affirmatively mentions a person (`_caption_mentions_person`) — same review thread, same deferral.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** v3.30.0
+
+---
+
+### Identity merge: batch the gallery lookups
+
+**What:** `_merge_unknown_faces` awaits `PersonGalleryDAO.nearest_match` once per unknown face, re-sending a ~10 KB 512-float vector literal per call. Fetch the batch's gallery rows once (or add a DAO method taking a list of embeddings) and compute cosine distances client-side with numpy — gallery rows are already L2-normalized, so distance is `1 - dot`.
+
+**Why:** Performance-specialist finding on the v3.30.0 ship. Bounded today (batch cap, per-call 5 s timeout, 15 s batch budget, short-circuit after first failure), so it's an efficiency cleanup, not a correctness issue.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** v3.30.0
+
+---
+
+### Sentinel unknown-person rules are suppressed by any non-empty recognized list
+
+**What:** `unknown_person_camera_night_home` (and the dynamic no-home/when-home variants) skip whenever `recognized_people` is truthy — but the raw list dispatched to the image entity and Sentinel snapshot contains the literal `"Unknown Person"` and `"Indeterminate"` strings, so with face recognition enabled, a detected-but-unrecognized visitor *suppresses* the unknown-person rules rather than firing them. Decide whether the rules should filter negative identities before the emptiness check, or whether the snapshot layer should strip them.
+
+**Why:** Pre-existing behavior surfaced by the v3.30.0 adversarial review (the merge provably cannot change rule firing, but the rules' emptiness check is only vacuously aligned with their name). Changing it changes alerting behavior, so it needs its own focused decision, docs, and field validation — not a drive-by fix.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** v3.30.0
+
+---
+
 ### Caption novelty: per-analysis notification-status metadata
 
 **What:** Store whether each video analysis triggered a notification alongside the
