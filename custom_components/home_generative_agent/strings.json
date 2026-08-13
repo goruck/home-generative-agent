@@ -205,12 +205,15 @@
             "sentinel_quiet_hours_end": "Quiet hours end",
             "sentinel_quiet_hours_severities": "Quiet hours suppressed severities",
             "sentinel_camera_entry_links": "Camera entry links (JSON, optional)",
-            "sentinel_rule_entity_exclusions": "Rule entity exclusions (JSON, optional)",
+            "sentinel_rule_entity_exclusions_all": "Exclude entities from all Sentinel rules (optional)",
+            "sentinel_rule_entity_exclusions": "Advanced: per-rule entity exclusions (JSON, optional)",
             "critical_action_pin": "Sentinel level-increase PIN (optional)",
             "notify_service": "Sentinel Notify Service (optional)"
           },
           "data_description": {
-            "sentinel_response_language": "Language for the LLM-authored finding explanation shown in notifications, e.g. 'Czech'. Leave empty for English. Discovery candidate title/summary and triage decision/reason_code/summary are unaffected -- those are parsed by code and always stay in English."
+            "sentinel_response_language": "Language for the LLM-authored finding explanation shown in notifications, e.g. 'Czech'. Leave empty for English. Discovery candidate title/summary and triage decision/reason_code/summary are unaffected -- those are parsed by code and always stay in English.",
+            "sentinel_rule_entity_exclusions_all": "Pick entities Sentinel should ignore everywhere -- e.g. a touch panel's template lock that only mirrors another entity's state. Excluded entities are dropped from every rule's findings and no longer wake Sentinel, so a real anomaly involving them is only caught on the next poll (default 5 minutes). Don't exclude a camera, lock, or alarm panel you still want instant alerts from.",
+            "sentinel_rule_entity_exclusions": "For excluding an entity from one specific rule only (not all of them), and for glob patterns such as camera.map_*, which the picker above cannot hold. Format: {{\"rule_id\": [\"entity.id\", ...]}}; the \"*\" key means all rules. Most people won't need this -- use the picker above instead."
           }
         }
       }

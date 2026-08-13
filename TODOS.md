@@ -208,6 +208,32 @@ Also: unknown action types fail closed (a future HA construct over-prompts rathe
 
 ---
 
+### Generalize evidence-entity exclusion instead of per-rule constructor injection
+
+**What:** `CameraEntryUnsecuredRule` takes an `is_entity_excluded` callback so it can honor `sentinel_rule_entity_exclusions` for entities that live only in `evidence`. `_filter_excluded_findings` inspects `triggering_entities` only, so any other rule with the same shape has the same gap. `alarm_disarmed_external_threat.py` already does: it puts `alarm_entity_ids` (all disarmed panels) in evidence while `triggering_entities` carries only the primary panel and the camera, so a secondary excluded phantom panel still reaches the notification and the audit record.
+
+**Why:** Red-team finding on PR #544. The constructor-injection pattern does not generalize — every new rule with entity-bearing evidence has to remember to opt in, and the UI copy promises exclusion applies everywhere. A shared post-rule pass would make new rules inherit the behavior.
+
+**How to apply:** Add a scrub step in the engine between rule evaluation and `_filter_excluded_findings` that walks a registry of known entity-ID-bearing evidence keys (`unsecured_entities`, `unsecured_entity_areas`, `alarm_entity_ids`), drops excluded entities, and drops the whole finding when scrubbing empties the set. Then remove the per-rule callback. Watch the anomaly-id hash: `camera_entry_unsecured` hashes `unsecured_same_area`, so scrubbing at a different layer changes ids unless the hash input is taken pre-scrub.
+
+**Effort:** M
+**Priority:** P2
+
+---
+
+### Basic setup silently wipes Sentinel entity exclusions and camera entry links
+
+**What:** `async_step_basic_settings` does `data = _default_payload()` and its schema exposes only four fields, so re-running Basic setup resets `sentinel_rule_entity_exclusions` and `sentinel_camera_entry_links` to `{}`. The overwrite warning says settings will be overwritten with recommended defaults but does not name these two.
+
+**Why:** Pre-existing, but PR #544 changed the exposure: exclusions used to be an advanced-only JSON field, so the population that configured them and the population that runs Basic setup did not overlap. A friendly entity picker is exactly what a Basic-setup user will configure and then destroy, and the symptom — phantom alerts returning with no visible cause — is hard to attribute.
+
+**How to apply:** Carry `CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS` and `CONF_SENTINEL_CAMERA_ENTRY_LINKS` over from `current.data` in the basic path, or name them explicitly in the `sentinel_overwrite_warning` string.
+
+**Effort:** S
+**Priority:** P2
+
+---
+
 ## Explain / Prompts
 
 ### Sanitize area/entity strings before injecting into LLM prompts

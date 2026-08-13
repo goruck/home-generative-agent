@@ -622,6 +622,215 @@ def test_camera_entry_unsecured_triggers() -> None:
     }
 
 
+def test_camera_entry_unsecured_excludes_entity_same_area() -> None:
+    """
+    A same-area entity excluded via ``is_entity_excluded`` never becomes evidence.
+
+    Regression test: unlike most rules, this rule's ``triggering_entities``
+    only ever contains the camera, so the engine's post-hoc
+    ``sentinel_rule_entity_exclusions`` filter (which inspects
+    ``triggering_entities``) can never suppress a finding whose *evidence*
+    entity is excluded (e.g. an ESPHome touch-panel's template lock that
+    mirrors a real lock elsewhere). The rule must apply the exclusion
+    itself, before the entity is added to ``unsecured_by_area``.
+    """
+    snapshot = _base_snapshot()
+    snapshot["derived"]["now"] = "2025-01-01T00:05:00+00:00"
+    snapshot["entities"] = [
+        {
+            "entity_id": "lock.front_door",
+            "domain": "lock",
+            "state": "unlocked",
+            "friendly_name": "Front Door",
+            "area": "Front",
+            "attributes": {},
+            "last_changed": "2025-01-01T00:00:00+00:00",
+            "last_updated": "2025-01-01T00:00:00+00:00",
+        }
+    ]
+    snapshot["camera_activity"] = [
+        {
+            "camera_entity_id": "camera.front",
+            "area": "Front",
+            "last_activity": "2025-01-01T00:04:00+00:00",
+            "motion_entities": [],
+            "vmd_entities": [],
+            "snapshot_summary": None,
+            "recognized_people": [],
+            "latest_path": None,
+        }
+    ]
+
+    # Positive control on the *same* snapshot object, so the zero-findings
+    # assertion below can never rot into vacuity (a stale timestamp or a
+    # renamed area would otherwise make it pass for the wrong reason).
+    assert len(CameraEntryUnsecuredRule().evaluate(snapshot)) == 1
+
+    rule = CameraEntryUnsecuredRule(
+        is_entity_excluded=lambda entity_id, _rule_id: entity_id == "lock.front_door"
+    )
+    findings = rule.evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_camera_entry_unsecured_excludes_only_the_phantom_entity() -> None:
+    """
+    An excluded phantom must not suppress a co-located REAL unsecured entry.
+
+    The narrow case the exclusion is for: a touch-panel template lock sitting
+    in the same area as a genuinely unlocked door.  A fix that dropped the
+    whole finding whenever any excluded entity was present would pass the
+    two total-suppression tests either side of this one while silencing a
+    real open front door.
+    """
+    snapshot = _base_snapshot()
+    snapshot["derived"]["now"] = "2025-01-01T00:05:00+00:00"
+    snapshot["entities"] = [
+        {
+            "entity_id": "lock.front_door",
+            "domain": "lock",
+            "state": "unlocked",
+            "friendly_name": "Front Door",
+            "area": "Front",
+            "attributes": {},
+            "last_changed": "2025-01-01T00:00:00+00:00",
+            "last_updated": "2025-01-01T00:00:00+00:00",
+        },
+        {
+            "entity_id": "lock.panel_phantom",
+            "domain": "lock",
+            "state": "unlocked",
+            "friendly_name": "Panel Phantom",
+            "area": "Front",
+            "attributes": {},
+            "last_changed": "2025-01-01T00:00:00+00:00",
+            "last_updated": "2025-01-01T00:00:00+00:00",
+        },
+    ]
+    snapshot["camera_activity"] = [
+        {
+            "camera_entity_id": "camera.front",
+            "area": "Front",
+            "last_activity": "2025-01-01T00:04:00+00:00",
+            "motion_entities": [],
+            "vmd_entities": [],
+            "snapshot_summary": None,
+            "recognized_people": [],
+            "latest_path": None,
+        }
+    ]
+
+    rule = CameraEntryUnsecuredRule(
+        is_entity_excluded=lambda entity_id, _rule_id: entity_id == "lock.panel_phantom"
+    )
+    findings = rule.evaluate(snapshot)
+
+    assert len(findings) == 1
+    assert findings[0].evidence["unsecured_entities"] == ["lock.front_door"]
+    assert "lock.panel_phantom" not in findings[0].evidence["unsecured_entity_areas"]
+
+
+def test_camera_entry_unsecured_excluded_entity_cannot_supply_activity() -> None:
+    """
+    An excluded entity must not stand in as the camera's activity timestamp.
+
+    When a camera advertises no ``last_activity`` the rule falls back to the
+    most recent ``last_changed`` among same-area binary sensors.  Without an
+    exclusion check there, a chatty phantom sensor the user silenced keeps
+    the camera looking permanently active and so keeps driving the very
+    high-severity alerts the exclusion was meant to stop.
+    """
+    snapshot = _base_snapshot()
+    snapshot["derived"]["now"] = "2025-01-01T00:05:00+00:00"
+    snapshot["entities"] = [
+        {
+            "entity_id": "lock.front_door",
+            "domain": "lock",
+            "state": "unlocked",
+            "friendly_name": "Front Door",
+            "area": "Front",
+            "attributes": {},
+            # Unlocked since yesterday: only the phantom's chatter is recent.
+            "last_changed": "2024-12-31T00:00:00+00:00",
+            "last_updated": "2024-12-31T00:00:00+00:00",
+        },
+        {
+            "entity_id": "binary_sensor.panel_mirror",
+            "domain": "binary_sensor",
+            "state": "on",
+            "friendly_name": "Panel Mirror",
+            "area": "Front",
+            "attributes": {"device_class": "door"},
+            "last_changed": "2025-01-01T00:04:30+00:00",
+            "last_updated": "2025-01-01T00:04:30+00:00",
+        },
+    ]
+    snapshot["camera_activity"] = [
+        {
+            "camera_entity_id": "camera.front",
+            "area": "Front",
+            "last_activity": None,
+            "motion_entities": [],
+            "vmd_entities": [],
+            "snapshot_summary": None,
+            "recognized_people": [],
+            "latest_path": None,
+        }
+    ]
+
+    assert len(CameraEntryUnsecuredRule().evaluate(snapshot)) == 1
+
+    rule = CameraEntryUnsecuredRule(
+        is_entity_excluded=lambda entity_id, _rule_id: (
+            entity_id == "binary_sensor.panel_mirror"
+        )
+    )
+    assert rule.evaluate(snapshot) == []
+
+
+def test_camera_entry_links_excludes_linked_entity() -> None:
+    """A cross-area linked entity excluded via ``is_entity_excluded`` is skipped too."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["now"] = "2025-01-01T00:05:00+00:00"
+    snapshot["entities"] = [
+        {
+            "entity_id": "lock.front_door",
+            "domain": "lock",
+            "state": "unlocked",
+            "friendly_name": "Front Door",
+            "area": "Front",
+            "attributes": {},
+            "last_changed": "2025-01-01T00:00:00+00:00",
+            "last_updated": "2025-01-01T00:00:00+00:00",
+        }
+    ]
+    snapshot["camera_activity"] = [
+        {
+            "camera_entity_id": "camera.driveway",
+            "area": "Driveway",
+            "last_activity": "2025-01-01T00:04:00+00:00",
+            "motion_entities": [],
+            "vmd_entities": [],
+            "snapshot_summary": None,
+            "recognized_people": [],
+            "latest_path": None,
+        }
+    ]
+
+    links = {"camera.driveway": ["lock.front_door"]}
+    # Positive control on the same snapshot — see the same-area test above.
+    assert (
+        len(CameraEntryUnsecuredRule(camera_entry_links=links).evaluate(snapshot)) == 1
+    )
+
+    rule = CameraEntryUnsecuredRule(
+        camera_entry_links=links,
+        is_entity_excluded=lambda entity_id, _rule_id: entity_id == "lock.front_door",
+    )
+    findings = rule.evaluate(snapshot)
+    assert len(findings) == 0
+
+
 def test_camera_entry_unsecured_vmd_last_changed_fallback() -> None:
     """When camera has no last_activity, use linked VMD sensor last_changed."""
     snapshot = _base_snapshot()

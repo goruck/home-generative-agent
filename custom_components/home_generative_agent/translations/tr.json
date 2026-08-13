@@ -169,7 +169,6 @@
             "sentinel_quiet_hours_end": "Sessiz saatler bitişi",
             "sentinel_quiet_hours_severities": "Sessiz saatlerde bastırılan önem düzeyleri",
             "sentinel_camera_entry_links": "Kamera giriş bağlantıları (JSON, isteğe bağlı)",
-            "sentinel_rule_entity_exclusions": "Kural varlık hariç tutmaları (JSON, isteğe bağlı)",
             "critical_action_pin": "Sentinel düzey artırma PIN'i (isteğe bağlı)",
             "notify_service": "Sentinel Bildirim Servisi (isteğe bağlı)",
             "sentinel_baseline_weekly_patterns": "Haftanın günü temellerini etkinleştir (hafta sonu yanlış pozitiflerini azaltır)",

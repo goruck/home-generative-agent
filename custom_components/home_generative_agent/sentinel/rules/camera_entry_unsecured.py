@@ -16,6 +16,8 @@ from custom_components.home_generative_agent.sentinel.models import (
 LOGGER = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from custom_components.home_generative_agent.snapshot.schema import (
         FullStateSnapshot,
         SnapshotEntity,
@@ -33,9 +35,37 @@ class CameraEntryUnsecuredRule:
     def __init__(
         self,
         camera_entry_links: dict[str, list[str]] | None = None,
+        is_entity_excluded: Callable[[str, str], bool] | None = None,
     ) -> None:
-        """Initialise rule with optional cross-area camera→entry links."""
+        """
+        Initialise rule with optional cross-area camera→entry links.
+
+        ``is_entity_excluded(entity_id, anomaly_type)`` mirrors the engine's
+        ``sentinel_rule_entity_exclusions`` check (Issue #462); this rule
+        passes its own ``rule_id``, which is also the ``type`` it stamps on
+        every finding. Unlike most rules, this one's
+        ``AnomalyFinding.triggering_entities`` only ever contains the camera
+        — the unsecured lock/door entity lives in ``evidence`` — so the
+        engine's post-hoc ``_filter_excluded_findings`` (which only inspects
+        ``triggering_entities``) can never suppress it. Excluding a phantom
+        entry entity (e.g. an ESPHome touch-panel's template lock that
+        mirrors a real lock elsewhere) therefore has to happen here, before
+        it is ever added to ``unsecured_by_area``.
+
+        The exclusion applies to the activity-timestamp fallback too, not
+        just to evidence: a chatty phantom sensor that is excluded must not
+        be able to keep a camera looking permanently "active" and so drive
+        the very alerts the user silenced it to stop.
+        """
         self._camera_entry_links: dict[str, list[str]] = camera_entry_links or {}
+        self._is_entity_excluded = is_entity_excluded
+
+    def _excluded(self, entity_id: str) -> bool:
+        """Return True when *entity_id* is user-excluded for this rule."""
+        return bool(
+            self._is_entity_excluded
+            and self._is_entity_excluded(entity_id, self.rule_id)
+        )
 
     def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:  # noqa: PLR0912, PLR0915
         """Return findings for recent camera activity near unsecured entries."""
@@ -43,10 +73,27 @@ class CameraEntryUnsecuredRule:
         now = dt_util.parse_datetime(snapshot["derived"]["now"]) or dt_util.utcnow()
         window = timedelta(minutes=ACTIVITY_WINDOW_MIN)
 
+        skip_counts = {
+            "no_area": 0,
+            "no_activity": 0,
+            "parse_error": 0,
+            "outside_window": 0,
+            "missing_linked_entry": 0,
+            # Suppressing a high-severity security finding must never be
+            # silent — every other exclusion path in the engine is counted
+            # or logged (``_filter_excluded_findings``, ``triggers_excluded``).
+            "excluded_evidence_entry": 0,
+            "excluded_activity_source": 0,
+            "excluded_linked_entry": 0,
+        }
+
         unsecured_by_area: dict[str, list[str]] = {}
         for entity in snapshot["entities"]:
             area = entity.get("area")
             if not area:
+                continue
+            if self._excluded(entity["entity_id"]):
+                skip_counts["excluded_evidence_entry"] += 1
                 continue
             if entity["domain"] == "lock" and entity["state"] == "unlocked":
                 unsecured_by_area.setdefault(area, []).append(entity["entity_id"])
@@ -77,13 +124,6 @@ class CameraEntryUnsecuredRule:
             e["entity_id"]: e["last_changed"] for e in snapshot["entities"]
         }
 
-        skip_counts = {
-            "no_area": 0,
-            "no_activity": 0,
-            "parse_error": 0,
-            "outside_window": 0,
-            "missing_linked_entry": 0,
-        }
         fallback_sensor_candidates = 0
         for activity in snapshot["camera_activity"]:
             cam = activity["camera_entity_id"]
@@ -95,13 +135,18 @@ class CameraEntryUnsecuredRule:
             if not last_activity:
                 # Camera has no activity timestamp attribute; use the most
                 # recent last_changed of its associated VMD/motion sensors.
+                # Excluded entities are skipped here too, not just as
+                # evidence: a chatty phantom sensor the user silenced must
+                # not be able to stand in as proof the camera saw something
+                # and so keep firing the alerts they excluded it to stop.
                 sensor_ids = activity.get("vmd_entities", []) + activity.get(
                     "motion_entities", []
                 )
+                excluded_sources = sum(1 for sid in sensor_ids if self._excluded(sid))
                 candidates = [
                     last_changed_by_id[sid]
                     for sid in sensor_ids
-                    if sid in last_changed_by_id
+                    if sid in last_changed_by_id and not self._excluded(sid)
                 ]
                 if not candidates:
                     # No linked sensors in camera_activity (camera doesn't
@@ -110,12 +155,16 @@ class CameraEntryUnsecuredRule:
                     # checked because VMD sensors vary by manufacturer and
                     # often have no device_class; the area constraint is
                     # sufficient.
-                    candidates = [
-                        e["last_changed"]
-                        for e in snapshot["entities"]
-                        if e.get("area") == area and e["domain"] == "binary_sensor"
-                    ]
+                    candidates = []
+                    for e in snapshot["entities"]:
+                        if e.get("area") != area or e["domain"] != "binary_sensor":
+                            continue
+                        if self._excluded(e["entity_id"]):
+                            excluded_sources += 1
+                            continue
+                        candidates.append(e["last_changed"])
                     fallback_sensor_candidates += len(candidates)
+                skip_counts["excluded_activity_source"] += excluded_sources
                 last_activity = max(candidates) if candidates else None
             if not last_activity:
                 skip_counts["no_activity"] += 1
@@ -136,6 +185,9 @@ class CameraEntryUnsecuredRule:
             # (e.g. driveway camera → front door in "Front" area).
             unsecured_linked: list[str] = []
             for linked_eid in self._camera_entry_links.get(cam, []):
+                if self._excluded(linked_eid):
+                    skip_counts["excluded_linked_entry"] += 1
+                    continue
                 entity = entity_by_id.get(linked_eid)
                 if entity is None:
                     skip_counts["missing_linked_entry"] += 1

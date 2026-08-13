@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from string import Formatter
 from typing import Any
 
 import pytest
@@ -23,6 +24,11 @@ COMPONENT_DIR = (
 TRANSLATIONS_DIR = COMPONENT_DIR / "translations"
 
 _PLACEHOLDER_RE = re.compile(r"{\w+}")
+
+# Hassfest requires every `{...}` in a translation value to name a valid
+# Python identifier, because Home Assistant renders these through
+# ``str.format``.  A literal brace must be doubled (``{{`` / ``}}``).
+_IDENTIFIER_RE = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*")
 
 
 def _flatten(data: dict[str, Any], prefix: str = "") -> dict[str, str]:
@@ -46,6 +52,31 @@ def _translation_files() -> list[Path]:
     files = sorted(TRANSLATIONS_DIR.glob("*.json"))
     assert files, "no translation files found"
     return files
+
+
+def _hassfest_validated_files() -> list[Path]:
+    """Every file hassfest runs its translation checks over."""
+    return [COMPONENT_DIR / "strings.json", *_translation_files()]
+
+
+def _invalid_placeholders(value: str) -> list[str]:
+    """
+    Return the ``{...}`` fields in *value* that hassfest would reject.
+
+    Mirrors ``str.format`` semantics via ``string.Formatter``, so doubled
+    braces are correctly read as escaped literals rather than placeholders.
+    A value that will not parse at all (a stray unmatched brace) is reported
+    too — hassfest rejects those as well.
+    """
+    try:
+        fields = [
+            field
+            for _literal, field, _spec, _conv in Formatter().parse(value)
+            if field is not None
+        ]
+    except ValueError as err:  # unmatched or malformed brace
+        return [f"<unparseable: {err}>"]
+    return [f for f in fields if not _IDENTIFIER_RE.fullmatch(f)]
 
 
 def test_en_json_matches_strings_json() -> None:
@@ -84,6 +115,65 @@ def test_translation_values_have_no_surrounding_whitespace(path: Path) -> None:
         if isinstance(value, str) and value != value.strip()
     )
     assert not bad, f"{path.name} values with surrounding whitespace: {bad}"
+
+
+@pytest.mark.parametrize("path", _hassfest_validated_files(), ids=lambda p: p.name)
+def test_translation_placeholders_are_valid_identifiers(path: Path) -> None:
+    """
+    Every ``{...}`` must name an identifier — literal braces must be doubled.
+
+    Hassfest enforces this and only runs in CI, so an unescaped JSON example
+    in a help string turns the whole integration invalid with a green
+    ``make lint`` and a green ``make test``.  That is exactly how it reached
+    the branch for PR #544: ``Format: {"rule_id": ["entity.id", ...]}`` in the
+    advanced-exclusions ``data_description``, while the sibling error string
+    in the same file already used the doubled-brace escape.
+    """
+    bad = {
+        key: invalid
+        for key, value in _load(path).items()
+        if isinstance(value, str) and (invalid := _invalid_placeholders(value))
+    }
+    assert not bad, (
+        f"{path.name} has braces hassfest will reject (double them to escape "
+        f"a literal brace): {bad}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        # The literal string that turned hassfest red on PR #544.
+        ('Format: {"rule_id": ["entity.id", ...]}', ['"rule_id"']),
+        ("{not-an-identifier}", ["not-an-identifier"]),
+        ("{}", [""]),
+        ("{0}", ["0"]),
+    ],
+)
+def test_invalid_placeholders_rejects(value: str, expected: list[str]) -> None:
+    """Pin the guard itself, so it cannot rot into always-passing."""
+    assert _invalid_placeholders(value) == expected
+
+
+def test_invalid_placeholders_reports_unparseable_braces() -> None:
+    """A stray brace is reported rather than crashing the test run."""
+    assert _invalid_placeholders("stray closing brace }")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        # The fixed form of the PR #544 string, matching the sibling error
+        # string in the same file.
+        'Format: {{"rule_id": ["entity.id", ...]}}',
+        "no braces at all",
+        "a real {placeholder} is fine",
+        "{{escaped}} beside a real {placeholder}",
+    ],
+)
+def test_invalid_placeholders_accepts(value: str) -> None:
+    """Escaped literals and real placeholders must not be flagged."""
+    assert _invalid_placeholders(value) == []
 
 
 @pytest.mark.parametrize("path", _translation_files(), ids=lambda p: p.name)

@@ -13,8 +13,11 @@ from homeassistant.config_entries import (
     ConfigSubentryFlow,
     SubentryFlowResult,
 )
+from homeassistant.core import valid_entity_id
 from homeassistant.helpers.selector import (
     BooleanSelector,
+    EntitySelector,
+    EntitySelectorConfig,
     NumberSelector,
     NumberSelectorConfig,
     SelectOptionDict,
@@ -150,15 +153,138 @@ def _parse_json_entity_map(
     data[key] = parsed
 
 
-def _rule_entity_exclusions_json(payload: dict[str, Any]) -> str:
-    """Serialize sentinel_rule_entity_exclusions from payload to a JSON string."""
+# UI-only field: not itself a persisted config key. An entity picker for the
+# common case (exclude an entity from *every* Sentinel rule, e.g. an ESPHome
+# touch-panel's template lock that mirrors a real lock elsewhere) so most
+# people never need to touch the advanced JSON field below. Merged into
+# CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS[_ALL_RULES_KEY] on submit.
+_FIELD_EXCLUDE_ALL_ENTITIES = "sentinel_rule_entity_exclusions_all"
+
+# The all-rules key of the stored exclusions map.  The storage shape is
+# unchanged by the picker split -- one map, "*" for "every rule" -- so
+# hand-edited storage and the docs' JSON examples stay valid.
+_ALL_RULES_KEY = "*"
+
+
+def _exclusions_map(payload: dict[str, Any]) -> dict[str, list[str]]:
+    """Return the stored exclusions map, normalized to ``dict[str, list[str]]``."""
     value = payload.get(
         CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS,
         RECOMMENDED_SENTINEL_RULE_ENTITY_EXCLUSIONS,
     )
     if not isinstance(value, dict):
-        value = {}
-    return json.dumps(value)
+        return {}
+    return {
+        k: [e for e in v if isinstance(e, str)]
+        for k, v in value.items()
+        if isinstance(k, str) and isinstance(v, list)
+    }
+
+
+def _rule_entity_exclusions_all_list(payload: dict[str, Any]) -> list[str]:
+    """
+    Return the all-rules entries an ``EntitySelector`` can actually represent.
+
+    Split on entry *shape*, not on the map key.  ``valid_exclusion_entry``
+    permits glob patterns (``camera.map_*``) and docs/sentinel.md recommends
+    them under ``"*"``, but HA's ``EntitySelector`` validates through
+    ``cv.entity_id_or_uuid`` and rejects anything that is not a literal
+    entity ID -- and voluptuous validates a field's ``default`` even when the
+    field is absent from the submission.  Feeding a glob to the picker would
+    therefore make the whole settings form unsubmittable, with no way to
+    reach the offending value from the UI.  Globs stay in the advanced JSON
+    field (see ``_rule_entity_exclusions_advanced_json``), which round-trips
+    them losslessly.
+    """
+    return [
+        e
+        for e in _exclusions_map(payload).get(_ALL_RULES_KEY, [])
+        if valid_entity_id(e)
+    ]
+
+
+def _rule_entity_exclusions_all_globs(payload: dict[str, Any]) -> list[str]:
+    """Return the all-rules entries the picker cannot represent (glob patterns)."""
+    return [
+        e
+        for e in _exclusions_map(payload).get(_ALL_RULES_KEY, [])
+        if not valid_entity_id(e)
+    ]
+
+
+def _rule_entity_exclusions_advanced_json(payload: dict[str, Any]) -> str:
+    """
+    Serialize the half of the exclusions map the picker cannot hold.
+
+    That is every per-rule key, plus any all-rules entries that are glob
+    patterns rather than literal entity IDs.  Literal all-rules entity IDs
+    live in the ``_FIELD_EXCLUDE_ALL_ENTITIES`` picker instead, so they are
+    omitted here and never appear in both fields at once.
+    """
+    rest: dict[str, list[str]] = {
+        k: v for k, v in _exclusions_map(payload).items() if k != _ALL_RULES_KEY
+    }
+    globs = _rule_entity_exclusions_all_globs(payload)
+    if globs:
+        rest[_ALL_RULES_KEY] = globs
+    return json.dumps(rest)
+
+
+def _merge_rule_entity_exclusions(
+    data: dict[str, Any],
+    errors: dict[str, str],
+) -> list[str]:
+    """
+    Merge the picker and advanced-JSON exclusion fields into one dict.
+
+    Merges the entity-picker (all-rules) and advanced-JSON (per-rule, plus
+    all-rules globs) exclusion fields in ``data`` into a single
+    ``CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS`` dict, mirroring the shape the
+    engine expects.  The union under ``_ALL_RULES_KEY`` is what makes the
+    split lossless: whichever half an entry came from, it lands back in the
+    same map.
+
+    Must run *instead of* a plain ``_parse_json_entity_map`` call on
+    ``CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS`` -- this function parses that
+    field itself (as the "advanced" half) and then folds in the picker's
+    entities.
+
+    Returns the raw picker value it popped, so the caller can restore the
+    field on the validation-error re-show without depending on statement
+    order around the pop.
+    """
+    raw = data.pop(_FIELD_EXCLUDE_ALL_ENTITIES, None)
+    picked = raw if isinstance(raw, list) else []
+    all_entities = sorted({e for e in picked if isinstance(e, str) and e})
+
+    # The picker is a UI convenience over the same stored map, so it must
+    # enforce the same entry rules as the JSON field.  Without this an entry
+    # the engine will silently drop at load (a bare entity-registry UUID has
+    # no dot) is persisted with no feedback, and the user's exclusion just
+    # never takes effect.
+    if any(not valid_exclusion_entry(e) for e in all_entities):
+        errors.setdefault("base", "invalid_rule_entity_exclusions")
+
+    _parse_json_entity_map(
+        data,
+        CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS,
+        errors,
+        "invalid_rule_entity_exclusions",
+        validate_exclusion_entries=True,
+    )
+    if errors:
+        return picked
+
+    merged = dict(data.get(CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS) or {})
+    combined = sorted({*merged.get(_ALL_RULES_KEY, []), *all_entities})
+    if combined:
+        merged[_ALL_RULES_KEY] = combined
+    else:
+        # Never persist a dangling empty "*" -- clearing the picker must
+        # actually remove the all-rules exclusion, not leave {"*": []}.
+        merged.pop(_ALL_RULES_KEY, None)
+    data[CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS] = merged
+    return picked
 
 
 _QUIET_HOUR_MAX = 23
@@ -288,9 +414,12 @@ def _default_payload() -> dict[str, Any]:
             RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES
         ),
         CONF_SENTINEL_CAMERA_ENTRY_LINKS: RECOMMENDED_SENTINEL_CAMERA_ENTRY_LINKS,
-        CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: (
-            RECOMMENDED_SENTINEL_RULE_ENTITY_EXCLUSIONS
-        ),
+        # Copy, don't alias: this payload is persisted verbatim by the basic
+        # setup path, and the nested lists would otherwise be shared with the
+        # module-level default across every config entry.
+        CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: {
+            k: list(v) for k, v in RECOMMENDED_SENTINEL_RULE_ENTITY_EXCLUSIONS.items()
+        },
     }
 
 
@@ -532,11 +661,18 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                 default=_camera_entry_links_json(payload),
             ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             vol.Optional(
+                _FIELD_EXCLUDE_ALL_ENTITIES,
+                description={
+                    "suggested_value": _rule_entity_exclusions_all_list(payload),
+                },
+                default=_rule_entity_exclusions_all_list(payload),
+            ): EntitySelector(EntitySelectorConfig(multiple=True)),
+            vol.Optional(
                 CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS,
                 description={
-                    "suggested_value": _rule_entity_exclusions_json(payload),
+                    "suggested_value": _rule_entity_exclusions_advanced_json(payload),
                 },
-                default=_rule_entity_exclusions_json(payload),
+                default=_rule_entity_exclusions_advanced_json(payload),
             ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             vol.Optional(
                 CONF_CRITICAL_ACTION_PIN,
@@ -801,8 +937,11 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
             suggested[CONF_SENTINEL_CAMERA_ENTRY_LINKS] = _camera_entry_links_json(
                 payload
             )
+            suggested[_FIELD_EXCLUDE_ALL_ENTITIES] = _rule_entity_exclusions_all_list(
+                payload
+            )
             suggested[CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS] = (
-                _rule_entity_exclusions_json(payload)
+                _rule_entity_exclusions_advanced_json(payload)
             )
             for key in (CONF_SENTINEL_QUIET_HOURS_START, CONF_SENTINEL_QUIET_HOURS_END):
                 suggested[key] = _quiet_hour_str(payload, key)
@@ -876,13 +1015,7 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
             errors,
             "invalid_camera_entry_links",
         )
-        _parse_json_entity_map(
-            data,
-            CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS,
-            errors,
-            "invalid_rule_entity_exclusions",
-            validate_exclusion_entries=True,
-        )
+        raw_exclude_all = _merge_rule_entity_exclusions(data, errors)
 
         if errors:
             # Strip any raw (non-dict) value for camera_entry_links so the schema
@@ -903,8 +1036,9 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
             error_suggested[CONF_SENTINEL_CAMERA_ENTRY_LINKS] = (
                 _camera_entry_links_json(error_payload)
             )
+            error_suggested[_FIELD_EXCLUDE_ALL_ENTITIES] = raw_exclude_all
             error_suggested[CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS] = (
-                _rule_entity_exclusions_json(error_payload)
+                _rule_entity_exclusions_advanced_json(error_payload)
             )
             for key in (CONF_SENTINEL_QUIET_HOURS_START, CONF_SENTINEL_QUIET_HOURS_END):
                 error_suggested[key] = _quiet_hour_str(error_payload, key)
