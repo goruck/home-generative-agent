@@ -19,6 +19,12 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 Embedding = Sequence[float]
 FACE_EMBEDDING_DIMS = 512
+# Max cosine distance for a gallery row to count as a positive identification.
+FACE_RECOGNITION_THRESHOLD = 0.7
+# Identity labels the recognition pipeline reserves for non-matches; enrolling
+# a person under one of these would silently corrupt the identity-merge
+# conditions (issue #543), so enrollment refuses them.
+RESERVED_IDENTITY_LABELS = frozenset({"unknown person", "indeterminate", "none", ""})
 
 
 class PersonGalleryDAO:
@@ -53,6 +59,9 @@ class PersonGalleryDAO:
         self, face_api_url: str, name: str, image_bytes: bytes
     ) -> bool:
         """Detect face in image, extract embedding, and add to gallery."""
+        if name.strip().lower() in RESERVED_IDENTITY_LABELS:
+            LOGGER.warning("Refusing to enroll reserved identity label %r", name)
+            return False
         resp = await self._client.post(
             urljoin(face_api_url.rstrip("/") + "/", "analyze"),
             files={"file": ("snapshot.jpg", image_bytes, "image/jpeg")},
@@ -90,7 +99,7 @@ class PersonGalleryDAO:
             LOGGER.debug("Inserted %s into person_gallery", name)
 
     async def recognize_person(
-        self, embedding: Embedding, threshold: float = 0.7
+        self, embedding: Embedding, threshold: float = FACE_RECOGNITION_THRESHOLD
     ) -> str:
         """Return best cosine match or 'Unknown Person'."""
         normed = self._normalize(embedding)
@@ -116,6 +125,36 @@ class PersonGalleryDAO:
             dist = float(row["distance"])
             LOGGER.debug("Closest match=%s cosine_distance=%.6f", row["name"], dist)
             return row["name"] if dist < threshold else "Unknown Person"
+
+    async def nearest_match(self, embedding: Embedding) -> tuple[str, float] | None:
+        """
+        Return the globally nearest gallery (name, cosine distance) pair.
+
+        Unlike a per-person distance lookup, this cannot misattribute a face
+        that is actually closer to a DIFFERENT enrolled person: the caller can
+        require the nearest name to equal its expected identity (issue #543).
+        Returns None when the gallery is empty. Dimension-validation errors
+        propagate, matching the recognize_person contract.
+        """
+        normed = self._normalize(embedding)
+        vec_str = self._as_pgvector(normed)
+
+        sql = """
+            SELECT name, embedding <=> %s::vector(512) AS distance
+            FROM public.person_gallery
+            ORDER BY distance
+            LIMIT 1
+        """
+        async with (
+            self.pool.connection() as conn,
+            conn.cursor(row_factory=dict_row) as cur,
+        ):
+            await cur.execute(sql, (vec_str,))
+            row = await cur.fetchone()
+
+            if not row or row["distance"] is None:
+                return None
+            return (str(row["name"]), float(row["distance"]))
 
     async def list_people(self) -> list[str]:
         """Return list of distinct enrolled person names."""

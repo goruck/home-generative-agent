@@ -1454,8 +1454,8 @@ def _register_services(hass: HomeAssistant, entry: HGAConfigEntry) -> None:
                 msg = f"VLM analysis failed for {camera_id}: {err}"
                 raise HomeAssistantError(msg) from err
 
-            people: list[str] = []
-            people = await video_analyzer.recognize_faces(img_bytes, camera_id)
+            face_hits = await video_analyzer.recognize_faces(img_bytes, camera_id)
+            people: list[str] = [hit.name for hit in face_hits]
 
             # 6) Publish to _latest atomically
             await publish_latest_atomic(hass, tmp_path, dst)

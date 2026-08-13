@@ -74,6 +74,7 @@ from custom_components.home_generative_agent.const import (
 )
 from custom_components.home_generative_agent.core.video_analyzer import (
     _VIDEO_QUEUE_BACKLOG_THRESHOLD,
+    FaceHit,
     VideoAnalyzer,
     _SnapshotItem,
 )
@@ -320,7 +321,7 @@ async def test_get_batch_single_item_no_backlog(va: VideoAnalyzer) -> None:
 
 @pytest.mark.asyncio
 async def test_stale_frame_skips_semaphore(va: VideoAnalyzer) -> None:
-    """Stale frame returns {} immediately without calling semaphore.acquire."""
+    """Stale frame returns ({}, []) immediately without calling semaphore.acquire."""
     # Use a mock semaphore so we can assert acquire was never called
     mock_sem = MagicMock()
     mock_sem.acquire = AsyncMock()
@@ -330,7 +331,7 @@ async def test_stale_frame_skips_semaphore(va: VideoAnalyzer) -> None:
     # Invalid path name → epoch_from_path raises ValueError → epoch=0 → stale
     result = await va._process_snapshot(Path("not_a_snapshot.jpg"), "camera.test")  # type: ignore[attr-defined]
 
-    assert result == {}
+    assert result == ({}, [])
     assert va._metrics["camera.test"].dropped_stale == 1  # type: ignore[attr-defined]
     mock_sem.acquire.assert_not_called()
 
@@ -356,7 +357,7 @@ async def test_semaphore_timeout_causes_frame_drop(
     va: VideoAnalyzer,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Semaphore acquisition timeout causes _process_snapshot to return {}."""
+    """Semaphore acquisition timeout causes _process_snapshot to drop the frame."""
     # 0-permit semaphore → any acquire blocks
     va._video_model_sem = asyncio.Semaphore(0)  # type: ignore[attr-defined]
     _model_deployment_get(va).return_value = "edge"
@@ -373,7 +374,7 @@ async def test_semaphore_timeout_causes_frame_drop(
             Path("snapshot_20250101_120000.jpg"), "camera.test"
         )
 
-    assert result == {}
+    assert result == ({}, [])
 
 
 @pytest.mark.asyncio
@@ -592,7 +593,89 @@ async def test_vlm_null_chat_with_config_does_not_raise(
             Path("snapshot_20250101_120000.jpg"), "camera.test"
         )
 
-    assert isinstance(result, dict)
+    frame_desc, hits = result
+    assert isinstance(frame_desc, dict)
+    assert hits == []
+
+
+@pytest.mark.asyncio
+async def test_face_timeout_yields_empty_hits(
+    va: VideoAnalyzer,
+) -> None:
+    """Face-recognition timeout drops the hits but keeps the frame caption."""
+    _model_deployment_get(va).return_value = "cloud"
+    va.recognize_faces = AsyncMock(side_effect=TimeoutError)  # type: ignore[method-assign]
+
+    with (
+        patch(
+            "custom_components.home_generative_agent.core.video_analyzer.epoch_from_path",
+            return_value=int(time.time()),
+        ),
+        patch("aiofiles.open", return_value=_FakeImageFile()),
+        patch(
+            "custom_components.home_generative_agent.core.video_analyzer.analyze_image",
+            new=AsyncMock(return_value="desc"),
+        ),
+    ):
+        result = await va._process_snapshot(  # type: ignore[attr-defined]
+            Path("snapshot_20250101_120000.jpg"), "camera.test"
+        )
+
+    assert result == ({"desc": []}, [])
+
+
+@pytest.mark.asyncio
+async def test_vlm_timeout_returns_empty_tuple(
+    va: VideoAnalyzer,
+) -> None:
+    """A VLM TimeoutError drops the frame with the tuple shape and counter."""
+    _model_deployment_get(va).return_value = "cloud"
+    va.recognize_faces = AsyncMock(return_value=[])  # type: ignore[method-assign]
+
+    with (
+        patch(
+            "custom_components.home_generative_agent.core.video_analyzer.epoch_from_path",
+            return_value=int(time.time()),
+        ),
+        patch("aiofiles.open", return_value=_FakeImageFile()),
+        patch(
+            "custom_components.home_generative_agent.core.video_analyzer.analyze_image",
+            new=AsyncMock(side_effect=TimeoutError),
+        ),
+    ):
+        result = await va._process_snapshot(  # type: ignore[attr-defined]
+            Path("snapshot_20250101_120000.jpg"), "camera.test"
+        )
+
+    assert result == ({}, [])
+    assert va._metrics["camera.test"].timeouts == 1  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_success_pairs_caption_names_with_hits(
+    va: VideoAnalyzer,
+) -> None:
+    """The success path derives the caption's name list from the hits."""
+    _model_deployment_get(va).return_value = "cloud"
+    hit = FaceHit(name="Nico", embedding=[0.5, 0.25])
+    va.recognize_faces = AsyncMock(return_value=[hit])  # type: ignore[method-assign]
+
+    with (
+        patch(
+            "custom_components.home_generative_agent.core.video_analyzer.epoch_from_path",
+            return_value=int(time.time()),
+        ),
+        patch("aiofiles.open", return_value=_FakeImageFile()),
+        patch(
+            "custom_components.home_generative_agent.core.video_analyzer.analyze_image",
+            new=AsyncMock(return_value="desc"),
+        ),
+    ):
+        result = await va._process_snapshot(  # type: ignore[attr-defined]
+            Path("snapshot_20250101_120000.jpg"), "camera.test"
+        )
+
+    assert result == ({"desc": ["Nico"]}, [hit])
 
 
 @pytest.mark.asyncio
@@ -1203,7 +1286,7 @@ async def test_process_snapshot_swallows_ollama_response_error(
             Path("snapshot_20250101_120000.jpg"), "camera.test"
         )
 
-    assert result == {}
+    assert result == ({}, [])
 
 
 # ---------------------------------------------------------------------------
@@ -2144,7 +2227,7 @@ async def test_abandoned_batch_files_still_enter_retention_deque(
             captured.append(expected)
 
     # Analysis aborts before _finalize (every frame errors out).
-    va._process_snapshot = AsyncMock(return_value={})  # type: ignore[method-assign]
+    va._process_snapshot = AsyncMock(return_value=({}, []))  # type: ignore[method-assign]
     ordered = [(p, 1000 + 3 * i) for i, p in enumerate(captured)]
     await va._analyze_and_finalize(camera_id, ordered)  # type: ignore[attr-defined]
 
