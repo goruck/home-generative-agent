@@ -245,12 +245,15 @@ This document covers the named constants that affect integration behaviour, orga
 | `VIDEO_ANALYZER_EVENT_SELECT_WINDOW` | `const.py` | `30` (s) | Snapshot-loop window after a ring-mqtt `event_select` eventId change; each new eventId extends it |
 | `VIDEO_ANALYZER_EVENT_SELECT_MAX_WINDOW` | `const.py` | `300` (s) | Cap on total event_select window length across extensions; hitting it flushes the batch |
 | `VIDEO_ANALYZER_FACE_CROP` | `const.py` | `False` | Crop detected faces before sending to face recognition |
+| `VIDEO_ANALYZER_FACE_MERGE_THRESHOLD` | `const.py` | `0.85` | Max cosine distance for merging a batch-local "Unknown Person" face into the batch's single known identity (issue #543). Deliberately looser than `FACE_RECOGNITION_THRESHOLD` because the merge also requires exactly one known person in the batch and no frame with two or more faces — see [Batch Identity Consolidation](camera-entities.md#batch-identity-consolidation) |
 | `VIDEO_ANALYZER_SAVE_LATEST` | `const.py` | `True` | Publish a stable `_latest/latest.jpg` alongside each snapshot |
 | `_MAX_BATCH` | `core/video_analyzer.py` | `5` | Frames pulled per batch by the live analysis worker; a motion/`event_select` window flush processes the entire held buffer as one batch |
 | `_QUEUE_MAXSIZE` | `core/video_analyzer.py` | `50` | Per-camera frame backlog capacity before drops |
 | `_FRAME_DEADLINE_SEC` | `core/video_analyzer.py` | `600` (s) | Skip frames older than this; prevents stale results from backlog buildup |
 | `_SUMMARY_TIMEOUT_SEC` | `core/video_analyzer.py` | `60` (s) | Timeout for the summarization model call during batch synthesis |
 | `_FACE_TIMEOUT_SEC` | `core/video_analyzer.py` | `10` (s) | Timeout for a face-recognition request |
+| `_MERGE_DB_TIMEOUT_SEC` | `core/video_analyzer.py` | `5` (s) | Per-lookup timeout for identity-merge gallery queries; a timeout refuses that face's merge instead of stalling the camera worker |
+| `_MERGE_DB_BUDGET_SEC` | `core/video_analyzer.py` | `15` (s) | Total identity-merge database budget per batch; when exhausted — or after the first database failure — remaining lookups are skipped and those faces keep their "Unknown Person" label |
 | `_VISION_TIMEOUT_SEC` | `core/video_analyzer.py` | `90` (s) | Timeout for a VLM frame-description call |
 | `_VIDEO_MODEL_SEMAPHORE_WAIT_SEC` | `core/video_analyzer.py` | `30` (s) | Max wait for the video semaphore before dropping the frame |
 | `_VIDEO_QUEUE_BACKLOG_THRESHOLD` | `core/video_analyzer.py` | `2` | Drop stale queued frames when the backlog exceeds this count |
@@ -426,6 +429,13 @@ The same rules screen two surfaces: direct tool calls from the conversation agen
 | `RECOMMENDED_FACE_RECOGNITION` | `face_recognition` | `False` | Enable face recognition in camera analysis |
 | `RECOMMENDED_FACE_API_URL` | `face_api_url` | `http://face-recog-server.local:8000` | Base URL of the [face-service](https://github.com/goruck/face-service) instance |
 
+**Code-only:**
+
+| Constant | File | Value | Purpose |
+|---|---|---|---|
+| `FACE_RECOGNITION_THRESHOLD` | `core/person_gallery.py` | `0.7` | Max cosine distance for a gallery row to count as a positive identification |
+| `RESERVED_IDENTITY_LABELS` | `core/person_gallery.py` | `unknown person`, `indeterminate`, `none`, empty | Identity labels the recognition pipeline reserves for non-matches. Enrollment refuses them (any casing), and gallery rows already carrying such names are never treated as a mergeable identity |
+
 ---
 
 ## Speech-to-Text (STT)
@@ -477,6 +487,13 @@ These constants live outside `const.py` in individual modules. They affect runti
 |---|---|---|
 | `_STREAM_ERROR_REASON_MAX_CHARS` | `280` | Maximum characters of the failure reason appended to the fallback chat message when a streaming turn fails (only `HomeAssistantError` messages are shown verbatim; other exceptions surface their class name only). |
 
+### `core/person_gallery.py`
+
+| Constant | Value | Purpose |
+|---|---|---|
+| `FACE_RECOGNITION_THRESHOLD` | `0.7` | Max cosine distance for a positive identification in `recognize_person` |
+| `RESERVED_IDENTITY_LABELS` | `unknown person`, `indeterminate`, `none`, empty | Names refused at enrollment (any casing) and excluded from identity-merge candidacy |
+
 ### `core/video_analyzer.py`
 
 | Constant | Value | Purpose |
@@ -486,6 +503,8 @@ These constants live outside `const.py` in individual modules. They affect runti
 | `_FRAME_DEADLINE_SEC` | `600` (s) | Frames older than this are skipped to avoid processing stale data |
 | `_SUMMARY_TIMEOUT_SEC` | `60` (s) | Timeout for the summarization model call in a video batch |
 | `_FACE_TIMEOUT_SEC` | `10` (s) | Timeout for a face-recognition API call |
+| `_MERGE_DB_TIMEOUT_SEC` | `5` (s) | Per-lookup timeout for identity-merge gallery queries |
+| `_MERGE_DB_BUDGET_SEC` | `15` (s) | Total identity-merge DB budget per batch; exhaustion or a DB failure skips the remaining lookups |
 | `_VISION_TIMEOUT_SEC` | `90` (s) | Timeout for a VLM frame description call |
 | `_VIDEO_MODEL_SEMAPHORE_WAIT_SEC` | `30` (s) | Max time a video frame waits for the concurrency semaphore before being dropped |
 | `_VIDEO_QUEUE_BACKLOG_THRESHOLD` | `2` | Drop oldest queued frames when the backlog exceeds this depth |

@@ -459,6 +459,8 @@ endpoint: /api/home_generative_agent/enroll
 
 Use the file picker or drag-and-drop to upload one or more images. The card enrolls images that contain a detectable face and skips those that do not.
 
+Both enrollment paths refuse reserved identity labels — "Unknown Person", "Indeterminate", "None", or an empty name, in any casing — because the recognition pipeline uses those labels for non-matches (see Batch Identity Consolidation below).
+
 ### Batch Identity Consolidation
 
 Face recognition runs per frame, so one person walking through a camera's view can be recognized in some frames and come back as "Unknown Person" in others (face turned, motion blur, distance). Without correction, the batch would carry two identities for one human and the summary could report a phantom second person ("Nico walks toward the entrance while an unknown person is present nearby").
