@@ -27,14 +27,14 @@ For each configured camera the integration registers:
 | Entity | ID pattern | Description |
 |---|---|---|
 | Image | `image.<camera_slug>_last_event` | Most recent snapshot published by the analyzer |
-| Sensor | `sensor.<camera_slug>_recognized_people` | People recognized in the last frame |
+| Sensor | `sensor.<camera_slug>_recognized_people` | People recognized in the last analyzed event (aggregated across the batch's frames) |
 
 **Sensor attributes:**
 
 | Attribute | Description |
 |---|---|
 | `recognized_people` | Names from face recognition |
-| `summary` | AI description of the last frame |
+| `summary` | AI description of the last event (single frame or batch summary) |
 | `latest_path` | Filesystem path of the published image |
 | `count` | Number of recognized people |
 | `last_event` | Timestamp of the last event |
@@ -228,7 +228,7 @@ Safeguards:
 
 - The previous frame's **full description** always remains the comparison anchor — a sentinel never becomes context for later frames, so a slow real change (a package appearing, a car leaving) is still caught against actual scene content.
 - If face recognition detects a person ("Unknown Person" or a known name), the frame is kept regardless of the sentinel, so a visitor the VLM missed can never be suppressed.
-- A VLM reply that comes back as an error or empty caption is skipped rather than injected into summaries, notifications, or the vector store; if face recognition saw a person on that frame, the frame is kept under a neutral caption ("A person is present; scene analysis unavailable.") so the detection survives the failed analysis. (Frames whose VLM call times out or raises are skipped entirely, as before.)
+- A VLM reply that comes back as an error or empty caption is skipped rather than injected into summaries, notifications, or the vector store; if face recognition saw a person on that frame, the frame is kept under a neutral caption ("A person is present; scene analysis unavailable.") so the detection survives the failed analysis. (Frames whose VLM call times out or raises are still excluded from summaries and notifications, but their face-recognition results are kept as evidence for the identity-merge companion guard — see [Batch Identity Consolidation](#batch-identity-consolidation).)
 
 Independently of the sentinel, consecutive frames whose descriptions are identical after normalization (timestamp prefix, case, and whitespace stripped) are merged before summarization in every mode, with face identities from dropped duplicates preserved on the kept frame.
 
@@ -471,4 +471,4 @@ To prevent this, the video analyzer consolidates identities within each batch be
 - No single frame contains two or more detected faces — a known person and an unknown in the *same* frame is treated as a genuine companion and is never merged.
 - That known person is the unknown face's *nearest* enrolled match in the gallery, at a cosine distance under 0.85 (`VIDEO_ANALYZER_FACE_MERGE_THRESHOLD` in `const.py`). The bound is deliberately looser than the recognition threshold (`FACE_RECOGNITION_THRESHOLD`, 0.7 by default), since the merge only applies when the person is already confirmed present in the batch — but a face that is actually closer to a *different* enrolled person never merges.
 
-If any condition fails, both identities are preserved unchanged. The merged result flows to the summary, notifications, `sensor.*_recognized_people`, and Sentinel evidence. Sentinel's unknown-person rules are unaffected by design: they trigger only when *no* people are recognized, and a merge can only occur when a known name is present. Note for custom automations: if you trigger on the literal `"Unknown Person"` string in `sensor.*_recognized_people`, a merged gray-zone face will now appear under the known person's name instead — only faces that fail the strict conditions above keep the `"Unknown Person"` label. Saved face debug crops keep the raw per-frame names so the threshold can be tuned from real data.
+If any condition fails, both identities are preserved unchanged. The merged result flows to the summary, notifications, `sensor.*_recognized_people`, and Sentinel evidence. Sentinel's unknown-person rules are unaffected by design: they fire only when the camera's recognized list is empty, and a merge — which requires a known name already in the list — renames an entry without ever emptying or filling the list. Note for custom automations: if you trigger on the literal `"Unknown Person"` string in `sensor.*_recognized_people`, a merged gray-zone face will now appear under the known person's name instead — only faces that fail the strict conditions above keep the `"Unknown Person"` label. Saved face debug crops keep the raw per-frame names so the threshold can be tuned from real data.
