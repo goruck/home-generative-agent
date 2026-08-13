@@ -213,7 +213,7 @@
           "data_description": {
             "sentinel_response_language": "Jazyk, ve kterém LLM generuje vysvětlení nálezu zobrazované v oznámeních, např. „Czech“. Ponechte prázdné pro angličtinu. Název/shrnutí discovery kandidátů a rozhodnutí/reason_code/shrnutí triáže tím nejsou ovlivněny -- ta jsou strojově zpracovávána a vždy zůstávají v angličtině.",
             "sentinel_rule_entity_exclusions_all": "Vyberte entity, které má Sentinel všude ignorovat -- např. šablonový zámek na dotykovém panelu, který jen zrcadlí stav jiné entity. Vyloučené entity se vyřadí z nálezů všech pravidel a už Sentinel neprobouzejí, takže skutečná anomálie, která se jich týká, se zachytí až při dalším cyklu (výchozí 5 minut). Nevylučujte kameru, zámek ani alarm, u kterých chcete okamžitá upozornění.",
-            "sentinel_rule_entity_exclusions": "Pro vyloučení entity jen z jednoho konkrétního pravidla (ne ze všech) a pro vzory se zástupnými znaky, např. camera.map_*, které výběr entit výše neumí uložit. Formát: {\"id_pravidla\": [\"entita.id\", ...]}; klíč \"*\" znamená všechna pravidla. Většina lidí tohle nepotřebuje -- použijte výběr entit výše."
+            "sentinel_rule_entity_exclusions": "Pro vyloučení entity jen z jednoho konkrétního pravidla (ne ze všech) a pro vzory se zástupnými znaky, např. camera.map_*, které výběr entit výše neumí uložit. Formát: {{\"id_pravidla\": [\"entita.id\", ...]}}; klíč \"*\" znamená všechna pravidla. Většina lidí tohle nepotřebuje -- použijte výběr entit výše."
           }
         }
       }
