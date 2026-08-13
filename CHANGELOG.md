@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **An entity picker for the common "ignore this everywhere" exclusion.** Excluding a phantom entry point — an ESPHome touch panel's template lock that only mirrors a real lock elsewhere — previously meant hand-typing raw JSON (`{"*": ["lock.x"]}`) into a single-line text field. The Sentinel settings form now has an **Exclude entities from all Sentinel rules** picker for that case, and the JSON field is relabelled **Advanced** for what the picker cannot express: per-rule keys and glob patterns. Both write to the same stored map with the same shape, so hand-edited storage and the documented JSON examples keep working. The picker's help text now also states the consequence the docs already carried: an excluded entity stops waking Sentinel, so anomalies involving it are caught on the next poll rather than instantly.
+
+### Fixed
+
+- **`camera_entry_unsecured` now honors entity exclusions for the unsecured lock or door.** That rule names only the camera in its triggering entities and carries the unsecured entity in its evidence, so the engine's generic exclusion filter — which inspects triggering entities — could never suppress it, and excluding a phantom lock had no effect no matter how it was configured. The rule now applies the exclusion itself, before the entity becomes evidence, for both same-area entities and cross-area `camera_entry_links` entities. A co-located *real* unsecured entry still alerts; only the excluded entity is dropped.
+- **An excluded entity can no longer serve as a camera's activity timestamp.** When a camera advertises no `last_activity`, the rule falls back to the most recent `last_changed` among nearby sensors. That fallback ignored exclusions, so a chatty phantom sensor kept the camera looking permanently active and kept firing the alerts it was excluded to stop — the exclusion appeared to do nothing. Exclusions now apply to the fallback too, and every in-rule suppression is counted in the rule's debug skip tally rather than happening silently.
+- **A glob exclusion under `"*"` no longer makes the Sentinel settings form unsubmittable.** Home Assistant's entity picker rejects anything that is not a literal entity ID, and voluptuous validates a field's default even when the field is untouched, so a stored `{"*": ["camera.map_*"]}` — a configuration `docs/sentinel.md` recommends — would have rejected every submission of the whole form, with the offending value invisible in both fields. The form now splits the stored map on entry shape rather than on the map key: literal entity IDs go to the picker, globs stay in the advanced JSON field where they can still be edited.
+- **Picker entries are validated the same way JSON entries are.** The picker accepts a bare entity-registry UUID, which the engine silently discards at load because it has no dot. Such entries are now rejected by the form instead of being persisted as an exclusion that never takes effect.
 ## [3.28.1] - 2026-08-12
 
 ### Fixed

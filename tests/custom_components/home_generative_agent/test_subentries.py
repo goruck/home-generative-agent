@@ -16,6 +16,7 @@ from homeassistant.const import (
     CONF_USERNAME,
 )
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.selector import EntitySelector
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 import custom_components.home_generative_agent as hga_component
@@ -94,9 +95,13 @@ from custom_components.home_generative_agent.flows.model_provider_subentry_flow 
     ModelProviderSubentryFlow,
 )
 from custom_components.home_generative_agent.flows.sentinel_subentry_flow import (
+    _FIELD_EXCLUDE_ALL_ENTITIES,
     SentinelSubentryFlow,
     _default_payload,
+    _merge_rule_entity_exclusions,
     _quiet_hour_str,
+    _rule_entity_exclusions_advanced_json,
+    _rule_entity_exclusions_all_list,
 )
 from custom_components.home_generative_agent.flows.stt_provider_subentry_flow import (
     SttProviderSubentryFlow,
@@ -105,6 +110,7 @@ from custom_components.home_generative_agent.flows.stt_provider_subentry_flow im
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    import voluptuous as vol
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
 
@@ -1137,6 +1143,243 @@ async def test_sentinel_flow_rule_entity_exclusions_valid_json(hass: Any) -> Non
         "appliance_power_duration": ["sensor.ac_power"],
         "*": ["sensor.test_bench"],
     }
+
+
+def _settings_input(**overrides: Any) -> dict[str, Any]:
+    """Minimal valid settings-step submission, with per-test overrides."""
+    return {
+        CONF_SENTINEL_ENABLED: True,
+        CONF_SENTINEL_INTERVAL_SECONDS: 300,
+        CONF_EXPLAIN_ENABLED: False,
+        CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+        **overrides,
+    }
+
+
+def test_exclusion_helpers_split_on_entry_shape_not_map_key() -> None:
+    """
+    Literal all-rules IDs go to the picker; globs stay in the advanced JSON.
+
+    HA's ``EntitySelector`` validates through ``cv.entity_id_or_uuid`` and
+    rejects glob patterns, and voluptuous validates a field's ``default``
+    even when the field is absent from the submission.  So routing a stored
+    ``{"*": ["camera.map_*"]}`` -- which docs/sentinel.md recommends -- into
+    the picker would make the settings form unsubmittable, with the offending
+    value invisible in both fields.  The split is on entry shape for that
+    reason; pin it.
+    """
+    payload = {
+        CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: {
+            "*": ["camera.map_*", "lock.a"],
+            "appliance_power_duration": ["sensor.ac"],
+        }
+    }
+    assert _rule_entity_exclusions_all_list(payload) == ["lock.a"]
+    assert json.loads(_rule_entity_exclusions_advanced_json(payload)) == {
+        "appliance_power_duration": ["sensor.ac"],
+        "*": ["camera.map_*"],
+    }
+
+
+@pytest.mark.parametrize(
+    "stored", ["not-a-dict", None, 7, {"*": "lock.a"}, {"*": [1, "lock.a"]}]
+)
+def test_exclusion_helpers_tolerate_malformed_stored_values(stored: Any) -> None:
+    """Hand-edited or corrupt storage must not break form rendering."""
+    payload = {CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: stored}
+    assert isinstance(_rule_entity_exclusions_all_list(payload), list)
+    assert isinstance(json.loads(_rule_entity_exclusions_advanced_json(payload)), dict)
+
+
+def test_sentinel_schema_contains_exclude_all_entity_picker(hass: Any) -> None:
+    """_schema() exposes the all-rules picker as a multi-select EntitySelector."""
+    flow = SentinelSubentryFlow()
+    flow.hass = hass
+    by_name = {str(k): v for k, v in flow._schema(_default_payload()).schema.items()}
+    assert _FIELD_EXCLUDE_ALL_ENTITIES in by_name
+    selector = by_name[_FIELD_EXCLUDE_ALL_ENTITIES]
+    assert isinstance(selector, EntitySelector)
+    # multiple=True is what makes the submitted value a list; a single-entity
+    # selector would hand the merge a bare string and be silently discarded.
+    assert selector.config["multiple"] is True
+
+
+def test_sentinel_schema_with_stored_glob_still_validates(hass: Any) -> None:
+    """
+    A stored all-rules glob must not brick the settings form.
+
+    Regression test for the config-flow lockout: voluptuous validates the
+    ``default`` of an Optional field even when that field is absent from the
+    submission, so a glob reaching the picker rejects *every* submission of
+    the whole form, not just that field.
+    """
+    flow = SentinelSubentryFlow()
+    flow.hass = hass
+    payload = {
+        **_default_payload(),
+        CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: {"*": ["camera.map_*"]},
+    }
+    # Must not raise vol.Invalid.
+    flow._schema(payload)(
+        {CONF_SENTINEL_ENABLED: True, CONF_SENTINEL_INTERVAL_SECONDS: 300}
+    )
+
+
+def test_merge_rule_entity_exclusions_round_trips_losslessly() -> None:
+    """Rendering the split fields and resubmitting them unchanged is a no-op."""
+    stored = {
+        "*": ["camera.map_*", "lock.a"],
+        "appliance_power_duration": ["sensor.ac"],
+    }
+    payload = {CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: stored}
+    data = {
+        _FIELD_EXCLUDE_ALL_ENTITIES: _rule_entity_exclusions_all_list(payload),
+        CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: (
+            _rule_entity_exclusions_advanced_json(payload)
+        ),
+    }
+    errors: dict[str, str] = {}
+    _merge_rule_entity_exclusions(data, errors)
+    assert errors == {}
+    assert data[CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS] == stored
+    assert _FIELD_EXCLUDE_ALL_ENTITIES not in data
+
+
+@pytest.mark.parametrize(
+    ("picker", "advanced", "expected"),
+    [
+        # Picker-only: entities land under the all-rules key.
+        (["lock.b", "lock.a"], "{}", {"*": ["lock.a", "lock.b"]}),
+        # Union with a manually typed "*", sorted and deduplicated.
+        (["lock.b", "lock.a"], '{"*": ["lock.a"]}', {"*": ["lock.a", "lock.b"]}),
+        # Shrinking the picker removes an entry but keeps the JSON half.
+        (
+            ["lock.a"],
+            '{"rule_x": ["sensor.c"]}',
+            {"*": ["lock.a"], "rule_x": ["sensor.c"]},
+        ),
+        # Clearing the picker drops the key entirely -- no dangling {"*": []}.
+        ([], '{"rule_x": ["sensor.c"]}', {"rule_x": ["sensor.c"]}),
+        ([], "{}", {}),
+        # Globs typed into the advanced field survive an unrelated picker edit.
+        (["lock.a"], '{"*": ["camera.map_*"]}', {"*": ["camera.map_*", "lock.a"]}),
+        # A non-list picker value is coerced, not crashed on.
+        ("lock.oops", "{}", {}),
+    ],
+)
+def test_merge_rule_entity_exclusions_cases(
+    picker: Any, advanced: str, expected: dict[str, list[str]]
+) -> None:
+    """The picker and advanced halves recombine into one map."""
+    data = {
+        _FIELD_EXCLUDE_ALL_ENTITIES: picker,
+        CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: advanced,
+    }
+    errors: dict[str, str] = {}
+    _merge_rule_entity_exclusions(data, errors)
+    assert errors == {}
+    assert data[CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS] == expected
+    # UI-only field: it must never reach persisted subentry data.
+    assert _FIELD_EXCLUDE_ALL_ENTITIES not in data
+
+
+@pytest.mark.parametrize("bad", ["nodots", "a" * 32, "lock." + "x" * 300])
+def test_merge_rejects_picker_entries_the_engine_would_drop(bad: str) -> None:
+    """
+    The picker enforces the same entry rules as the JSON field.
+
+    ``EntitySelector`` accepts a bare entity-registry UUID, which has no dot
+    and so is discarded by the engine's parser at load with only a log
+    warning.  Rejecting it here keeps the form and the engine in lockstep
+    instead of silently persisting an exclusion that never takes effect.
+    """
+    data = {
+        _FIELD_EXCLUDE_ALL_ENTITIES: [bad, "lock.good"],
+        CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: "{}",
+    }
+    errors: dict[str, str] = {}
+    _merge_rule_entity_exclusions(data, errors)
+    assert errors.get("base") == "invalid_rule_entity_exclusions"
+
+
+def test_merge_returns_raw_picker_value_for_error_reshow() -> None:
+    """
+    The merge hands back what it popped, so the caller cannot lose it.
+
+    The error re-show needs the submitted picker list, but the merge pops
+    that key.  Returning it removes the statement-order coupling that would
+    otherwise silently wipe the user's selection whenever some unrelated
+    field failed validation.
+    """
+    data = {
+        _FIELD_EXCLUDE_ALL_ENTITIES: ["lock.a"],
+        CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: "not valid json {{",
+    }
+    errors: dict[str, str] = {}
+    assert _merge_rule_entity_exclusions(data, errors) == ["lock.a"]
+    assert errors.get("base") == "invalid_rule_entity_exclusions"
+
+
+@pytest.mark.asyncio
+async def test_sentinel_flow_exclude_all_picker_merges_into_star(hass: Any) -> None:
+    """End to end: picker entities are stored under the all-rules key."""
+    flow, _entry = _quiet_hours_flow(hass)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        _settings_input(
+            **{
+                _FIELD_EXCLUDE_ALL_ENTITIES: ["lock.panel_phantom", "lock.a"],
+                CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: (
+                    '{"appliance_power_duration": ["sensor.ac"]}'
+                ),
+            }
+        )
+    )
+
+    assert result.get("type") == "create_entry"
+    data = result.get("data")
+    assert data is not None
+    assert data[CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS] == {
+        "appliance_power_duration": ["sensor.ac"],
+        "*": ["lock.a", "lock.panel_phantom"],
+    }
+    assert _FIELD_EXCLUDE_ALL_ENTITIES not in data
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("bad_field", "expected_error"),
+    [
+        (
+            {CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: "not json {{"},
+            "invalid_rule_entity_exclusions",
+        ),
+        ({CONF_CRITICAL_ACTION_PIN: "abc"}, "invalid_pin"),
+    ],
+)
+async def test_sentinel_flow_error_reshow_restores_picker(
+    hass: Any, bad_field: dict[str, Any], expected_error: str
+) -> None:
+    """An error re-show must not silently drop the submitted picker entities."""
+    flow, _entry = _quiet_hours_flow(hass)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        _settings_input(
+            **{_FIELD_EXCLUDE_ALL_ENTITIES: ["lock.panel_phantom"]}, **bad_field
+        )
+    )
+
+    assert result.get("type") == "form"
+    assert (result.get("errors") or {}).get("base") == expected_error
+    schema = cast("vol.Schema", result.get("data_schema"))
+    suggested = {
+        str(k): k.description.get("suggested_value")
+        for k in schema.schema
+        if getattr(k, "description", None)
+    }
+    assert suggested[_FIELD_EXCLUDE_ALL_ENTITIES] == ["lock.panel_phantom"]
 
 
 @pytest.mark.asyncio

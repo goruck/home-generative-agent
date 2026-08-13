@@ -314,6 +314,80 @@ async def test_engine_wildcard_exclusion_applies_to_all_types(
     assert notifier.calls == []
 
 
+def _camera_entry_snapshot() -> FullStateSnapshot:
+    """Camera with recent activity beside an unlocked lock in the same area."""
+    return validate_snapshot(
+        {
+            "schema_version": 1,
+            "generated_at": "2025-01-01T00:05:00+00:00",
+            "entities": [
+                {
+                    "entity_id": "lock.panel_phantom",
+                    "domain": "lock",
+                    "state": "unlocked",
+                    "friendly_name": "Panel Phantom",
+                    "area": "Front",
+                    "attributes": {},
+                    "last_changed": "2025-01-01T00:00:00+00:00",
+                    "last_updated": "2025-01-01T00:00:00+00:00",
+                }
+            ],
+            "camera_activity": [
+                {
+                    "camera_entity_id": "camera.front",
+                    "area": "Front",
+                    "last_activity": "2025-01-01T00:04:00+00:00",
+                    "motion_entities": [],
+                    "vmd_entities": [],
+                    "snapshot_summary": None,
+                    "recognized_people": [],
+                    "latest_path": None,
+                }
+            ],
+            "derived": {
+                "now": "2025-01-01T00:05:00+00:00",
+                "timezone": "UTC",
+                "is_night": False,
+                "anyone_home": False,
+                "people_home": [],
+                "people_away": [],
+                "last_motion_by_area": {},
+            },
+        }
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("type_key", ["*", "camera_entry_unsecured"])
+async def test_engine_wires_exclusions_into_camera_entry_rule(
+    monkeypatch: pytest.MonkeyPatch, type_key: str
+) -> None:
+    """
+    The engine passes its exclusion predicate into CameraEntryUnsecuredRule.
+
+    ``camera_entry_unsecured`` names only the camera in
+    ``triggering_entities`` and carries the unsecured lock/door in
+    ``evidence``, so ``_filter_excluded_findings`` cannot suppress it and the
+    rule has to check exclusions itself.  That only works if the engine
+    actually injects ``is_entity_excluded``; without this test, dropping that
+    one keyword argument leaves the whole suite green.  Parametrized over
+    both key spellings so the rule_id the rule passes is pinned too.
+    """
+    _patch_snapshot(monkeypatch, _camera_entry_snapshot())
+    engine = _make_engine({})
+    await engine._run_once()
+    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+    assert notifier.calls, "positive control: the finding must fire unexcluded"
+
+    _patch_snapshot(monkeypatch, _camera_entry_snapshot())
+    engine = _make_engine(
+        {CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: {type_key: ["lock.panel_phantom"]}}
+    )
+    await engine._run_once()
+    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+    assert notifier.calls == []
+
+
 @pytest.mark.asyncio
 async def test_engine_drops_finding_for_glob_excluded_entity(
     monkeypatch: pytest.MonkeyPatch,

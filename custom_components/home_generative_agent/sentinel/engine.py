@@ -709,6 +709,12 @@ class SentinelEngine:
         deviations) before correlation, so exclusions are generic across rules
         rather than per-rule logic.  Shares ``_entity_excluded_for_type`` with
         the event-trigger suppression path so both stay in lockstep.
+
+        This pass only inspects ``triggering_entities``, so it cannot see an
+        excluded entity that a rule carries in ``evidence`` alone.  Such rules
+        must apply ``_entity_excluded_for_type`` themselves — see
+        ``CameraEntryUnsecuredRule``, which is injected with it for exactly
+        that reason.
         """
         kept: list[AnomalyFinding] = []
         for finding in findings:

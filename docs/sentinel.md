@@ -29,7 +29,7 @@ Sentinel is a singleton service per Home Generative Agent config entry. Configur
 2. Click **+ Sentinel**.
 3. Choose a setup mode:
    - **Basic** — enables anomaly alerting with recommended defaults. Configure only the essentials: notify service, daily digest toggle and time, and an optional level-increase PIN.
-   - **Advanced** — exposes all options: detection interval, cooldowns, quiet hours, triage, baseline, discovery, and camera entry links. All fields pre-populate with current values when reconfiguring.
+   - **Advanced** — exposes all options: detection interval, cooldowns, quiet hours, triage, baseline, discovery, camera entry links, and entity exclusions. All fields pre-populate with current values when reconfiguring.
 4. Optionally enable Discovery, Triage, and Baseline via **Advanced** setup or by reconfiguring later (see sections below).
 5. Save. Sentinel starts automatically — no HA restart required.
 
@@ -108,7 +108,12 @@ Static rules are registered automatically at startup. They cannot be deactivated
 
 ### Per-entity rule exclusions
 
-`sentinel_rule_entity_exclusions` (Sentinel subentry, Advanced setup) excludes specific entities from specific rules without silencing the rule for everything else. It is a JSON object mapping an anomaly type to a list of entity IDs or glob patterns (`*` and `?` wildcards only); the key `"*"` excludes the listed entities from every rule:
+Exclusions stop specific entities from tripping Sentinel, without silencing a rule for everything else. Two fields in the Sentinel subentry (Advanced setup) write to the same stored map:
+
+- **Exclude entities from all Sentinel rules** — an entity picker, and the field most people want. Whatever you pick is excluded from *every* rule. This is the place for a phantom entry point such as an ESPHome touch panel's template lock that only mirrors a real lock elsewhere.
+- **Advanced: per-rule entity exclusions** — a JSON field for the two things the picker cannot express: excluding an entity from one named rule only, and glob patterns such as `camera.map_*`.
+
+The stored representation is one JSON object mapping an anomaly type to a list of entity IDs or glob patterns (`*` and `?` wildcards only), with the key `"*"` meaning every rule. The form just splits that map across the two fields on render — literal all-rules entity IDs into the picker, everything else into the JSON field — and recombines it on save, so the examples below remain accurate for hand-edited storage and you can still type a `"*"` key yourself (its literal entity IDs simply move into the picker next time you open the form):
 
 ```json
 {
@@ -120,12 +125,14 @@ Static rules are registered automatically at startup. They cannot be deactivated
 
 Exclusions are applied generically by the engine to every finding source — built-in static rules, approved dynamic rules, and baseline deviations — before correlation and dispatch. A finding is dropped when any of its triggering entities matches an entry (exact ID or glob) for its type. This is the supported way to stop, for example, HVAC power sensors from tripping `appliance_power_duration` during long compressor runs while keeping the rule active for ovens, irons, and other appliances.
 
+One rule checks exclusions itself in addition to that generic pass. `camera_entry_unsecured` names only the camera in its triggering entities and carries the unsecured lock/door in its evidence, so the generic filter cannot see the entity you excluded. It therefore drops excluded entities before they become evidence, and also refuses to use them as the camera's activity timestamp — otherwise a chatty phantom sensor you silenced would keep the camera looking active and keep firing the alert. Rules that carry other entities only in evidence do not yet do this; if you hit one, open an issue.
+
 Exclusions also suppress **event-driven triggering** when the entity is excluded for its domain-mapped anomaly type or under `"*"` (an exclusion under any other type still filters findings but does not suppress triggers): a state change from a trigger-excluded entity no longer wakes the engine or occupies a slot in the bounded trigger queue. This matters for non-security uses of the `camera` and `person` domains — for example, the `person_location` platform exposes map snapshots as `camera.*` entities whose state flips on every GPS update; without an exclusion these flood the trigger queue with security-critical `camera_entry_unsecured` triggers and crowd out real events. Excluding them with a glob like `{"camera_entry_unsecured": ["camera.map_*"]}` (or under `"*"`) stops both the findings and the trigger noise.
 
 Three things to know before excluding entities:
 
 - **Type keys are exact; only the entries are globs.** `{"camera_entry*": [...]}` matches no anomaly type and is inert (the engine logs a startup warning) — write the full type name, or use the `"*"` key.
-- **Every entry must contain a dot, at least one literal character, and be at most 256 characters** (entity IDs are `domain.object`). Match-everything spellings such as `"*"` or `"*.*"` are rejected by the settings form and ignored (with a log warning) if hand-edited into storage — for a security engine, one typo'd pattern must not silently disable all monitoring. To exclude an entity from every rule, put it under the `"*"` *type key* instead.
+- **Every entry must contain a dot, at least one literal character, and be at most 256 characters** (entity IDs are `domain.object`). Match-everything spellings such as `"*"` or `"*.*"` are rejected by the settings form and ignored (with a log warning) if hand-edited into storage — for a security engine, one typo'd pattern must not silently disable all monitoring. To exclude an entity from every rule, use the **Exclude entities from all Sentinel rules** picker (or, for a glob, the `"*"` *type key* in the advanced JSON field).
 - **Trigger suppression is entity-level, not per-rule.** A Sentinel wake-up evaluates every rule, so excluding an entity for its domain-mapped type (camera → `camera_entry_unsecured`; person → `open_entry_while_away`; lock → `unlocked_lock_at_night`; alarm_control_panel → `alarm_disarmed_during_external_threat`; door/window/gate/motion/occupancy binary sensors → their mapped types) stops that entity's state changes from waking Sentinel at all. Findings of *other* anomaly types involving that entity are still produced — but on the polling cadence (`sentinel_interval_seconds`, default 300 s) or when some other entity triggers a wake-up, not instantly from the excluded entity itself. Don't per-type-exclude a real security camera you still want low-latency alerts from; exclusions are for entities that should not drive Sentinel wake-ups at all (map snapshots, template cameras, chatty presence entities). Suppressed triggers are counted in the `triggers_excluded` attribute of the Sentinel health sensor (updated at the end of each run) and logged at debug level.
 
 ---
