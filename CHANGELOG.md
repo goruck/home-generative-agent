@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.29.1] - 2026-08-13
+
+### Fixed
+
+- **Sentinel settings no longer shows "Translation error: MALFORMED_ARGUMENT" under the advanced exclusions field.** Two different template engines read the integration's translation strings and disagree about braces: hassfest validates them with `str.format` semantics, where a literal brace is doubled (`{{`), while the Home Assistant frontend renders the same strings through ICU MessageFormat, where `{{` is not an escape at all but a malformed argument. The advanced-exclusions help text carried a literal JSON example, so it could satisfy one engine or the other but never both — v3.29.0 shipped the spelling that passes CI and fails to render. The JSON examples are now written as prose, which both engines accept. The same defect is fixed in the two "must be a JSON object..." validation errors for camera entry links and rule entity exclusions, which have carried it longer and would have replaced the message explaining a bad entry with the same render error. A test now rejects literal braces in any translation value, in either spelling, across `strings.json` and all four translation files.
+
 ## [3.29.0] - 2026-08-12
 
 ### Added

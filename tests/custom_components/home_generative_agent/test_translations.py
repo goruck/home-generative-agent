@@ -13,7 +13,6 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from string import Formatter
 from typing import Any
 
 import pytest
@@ -25,10 +24,21 @@ TRANSLATIONS_DIR = COMPONENT_DIR / "translations"
 
 _PLACEHOLDER_RE = re.compile(r"{\w+}")
 
-# Hassfest requires every `{...}` in a translation value to name a valid
-# Python identifier, because Home Assistant renders these through
-# ``str.format``.  A literal brace must be doubled (``{{`` / ``}}``).
+# Two engines read these strings, and they disagree about braces:
+#
+#   * Hassfest validates with ``str.format`` semantics — every ``{x}`` must
+#     name a valid identifier, and a literal brace is doubled (``{{``).
+#   * The HA *frontend* renders the same strings through ICU MessageFormat
+#     (``intl-messageformat``), where ``{{`` is not an escape at all — it is
+#     a malformed argument, and the field shows
+#     "Translation error: MALFORMED_ARGUMENT" instead of the help text.
+#
+# So no brace spelling satisfies both: single braces fail hassfest, doubled
+# braces fail the frontend, and ICU's own apostrophe escape (``'{'``) would
+# fail hassfest in turn.  The only safe text is text with no literal braces —
+# write the JSON example as prose.  Square brackets are fine in both.
 _IDENTIFIER_RE = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*")
+_BRACED_RE = re.compile(r"\{([^{}]*)\}")
 
 
 def _flatten(data: dict[str, Any], prefix: str = "") -> dict[str, str]:
@@ -61,22 +71,23 @@ def _hassfest_validated_files() -> list[Path]:
 
 def _invalid_placeholders(value: str) -> list[str]:
     """
-    Return the ``{...}`` fields in *value* that hassfest would reject.
+    Return the brace usages in *value* that hassfest or the frontend rejects.
 
-    Mirrors ``str.format`` semantics via ``string.Formatter``, so doubled
-    braces are correctly read as escaped literals rather than placeholders.
-    A value that will not parse at all (a stray unmatched brace) is reported
-    too — hassfest rejects those as well.
+    Enforces the intersection of both engines (see the module-level note):
+    a literal brace is never allowed in either spelling, and every remaining
+    ``{...}`` must name a valid identifier so it is a real placeholder.
     """
-    try:
-        fields = [
-            field
-            for _literal, field, _spec, _conv in Formatter().parse(value)
-            if field is not None
-        ]
-    except ValueError as err:  # unmatched or malformed brace
-        return [f"<unparseable: {err}>"]
-    return [f for f in fields if not _IDENTIFIER_RE.fullmatch(f)]
+    problems: list[str] = []
+    if "{{" in value or "}}" in value:
+        problems.append("{{ or }} — escaped for hassfest, MALFORMED_ARGUMENT in the UI")
+    problems += [
+        f"{{{m.group(1)}}}"
+        for m in _BRACED_RE.finditer(value)
+        if not _IDENTIFIER_RE.fullmatch(m.group(1))
+    ]
+    if value.count("{") != value.count("}"):
+        problems.append("unbalanced braces")
+    return problems
 
 
 def test_en_json_matches_strings_json() -> None:
@@ -120,14 +131,18 @@ def test_translation_values_have_no_surrounding_whitespace(path: Path) -> None:
 @pytest.mark.parametrize("path", _hassfest_validated_files(), ids=lambda p: p.name)
 def test_translation_placeholders_are_valid_identifiers(path: Path) -> None:
     """
-    Every ``{...}`` must name an identifier — literal braces must be doubled.
+    Only real ``{identifier}`` placeholders — never a literal brace.
 
-    Hassfest enforces this and only runs in CI, so an unescaped JSON example
-    in a help string turns the whole integration invalid with a green
-    ``make lint`` and a green ``make test``.  That is exactly how it reached
-    the branch for PR #544: ``Format: {"rule_id": ["entity.id", ...]}`` in the
-    advanced-exclusions ``data_description``, while the sibling error string
-    in the same file already used the doubled-brace escape.
+    Both failure modes have shipped, one after the other, on PR #544:
+
+    * ``Format: {"rule_id": ["entity.id", ...]}`` turned hassfest red, which
+      only runs in CI, so ``make lint`` and ``make test`` stayed green.
+    * Doubling the braces to satisfy hassfest then rendered the field as
+      "Translation error: MALFORMED_ARGUMENT" in the UI, because the frontend
+      parses ICU MessageFormat, where ``{{`` is not an escape.
+
+    Neither spelling works, so neither is allowed: write the JSON example as
+    prose instead.
     """
     bad = {
         key: invalid
@@ -135,19 +150,32 @@ def test_translation_placeholders_are_valid_identifiers(path: Path) -> None:
         if isinstance(value, str) and (invalid := _invalid_placeholders(value))
     }
     assert not bad, (
-        f"{path.name} has braces hassfest will reject (double them to escape "
-        f"a literal brace): {bad}"
+        f"{path.name} has brace usage one of the two engines rejects — write "
+        f"the example as prose rather than literal JSON: {bad}"
     )
 
 
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
-        # The literal string that turned hassfest red on PR #544.
-        ('Format: {"rule_id": ["entity.id", ...]}', ['"rule_id"']),
-        ("{not-an-identifier}", ["not-an-identifier"]),
-        ("{}", [""]),
-        ("{0}", ["0"]),
+        # The string that turned hassfest red on PR #544...
+        (
+            'Format: {"rule_id": ["entity.id", ...]}',
+            ['{"rule_id": ["entity.id", ...]}'],
+        ),
+        # ...and the doubled-brace "fix" that satisfied hassfest but rendered
+        # as MALFORMED_ARGUMENT in the UI. Both must be rejected.
+        (
+            'Format: {{"rule_id": ["entity.id", ...]}}',
+            [
+                "{{ or }} — escaped for hassfest, MALFORMED_ARGUMENT in the UI",
+                '{"rule_id": ["entity.id", ...]}',
+            ],
+        ),
+        ("{not-an-identifier}", ["{not-an-identifier}"]),
+        ("{}", ["{}"]),
+        ("{0}", ["{0}"]),
+        ("stray closing brace }", ["unbalanced braces"]),
     ],
 )
 def test_invalid_placeholders_rejects(value: str, expected: list[str]) -> None:
@@ -155,24 +183,19 @@ def test_invalid_placeholders_rejects(value: str, expected: list[str]) -> None:
     assert _invalid_placeholders(value) == expected
 
 
-def test_invalid_placeholders_reports_unparseable_braces() -> None:
-    """A stray brace is reported rather than crashing the test run."""
-    assert _invalid_placeholders("stray closing brace }")
-
-
 @pytest.mark.parametrize(
     "value",
     [
-        # The fixed form of the PR #544 string, matching the sibling error
-        # string in the same file.
-        'Format: {{"rule_id": ["entity.id", ...]}}',
+        # The shipped fix: the same example written as prose. Square brackets
+        # are literal in both engines, so only the braces had to go.
+        'an "appliance_power_duration" key with the value ["sensor.ac_power"]',
         "no braces at all",
         "a real {placeholder} is fine",
-        "{{escaped}} beside a real {placeholder}",
+        "two {placeholders} in {one} string",
     ],
 )
 def test_invalid_placeholders_accepts(value: str) -> None:
-    """Escaped literals and real placeholders must not be flagged."""
+    """Real placeholders and brace-free prose must not be flagged."""
     assert _invalid_placeholders(value) == []
 
 

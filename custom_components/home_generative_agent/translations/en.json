@@ -146,11 +146,11 @@
         "reconfigure_successful": "Sentinel configuration updated."
       },
       "error": {
-        "invalid_camera_entry_links": "Must be a JSON object mapping camera entity IDs to lists of entry entity IDs, e.g. {{\"camera.driveway\": [\"lock.front_door\"]}}.",
+        "invalid_camera_entry_links": "Must be a JSON object mapping camera entity IDs to lists of entry entity IDs, e.g. a \"camera.driveway\" key with the value [\"lock.front_door\"].",
         "invalid_pin": "PIN must be 4-10 digits.",
         "quiet_hours_incomplete": "Set both quiet hours start and end (or set both to Disabled).",
         "invalid_quiet_hours": "Quiet hours must be local hours between 0 and 23.",
-        "invalid_rule_entity_exclusions": "Must be a JSON object mapping an anomaly type (or \"*\" for all types) to lists of entity IDs or glob patterns (* and ? wildcards only, lowercase entity-ID characters), each containing a dot and at least one literal character, e.g. {{\"appliance_power_duration\": [\"sensor.ac_power\"], \"camera_entry_unsecured\": [\"camera.map_*\"]}}. Match-all entries such as \"*\" or \"*.*\" are not allowed — use the \"*\" type key instead."
+        "invalid_rule_entity_exclusions": "Must be a JSON object mapping an anomaly type (or \"*\" for all types) to lists of entity IDs or glob patterns (* and ? wildcards only, lowercase entity-ID characters), each containing a dot and at least one literal character, e.g. an \"appliance_power_duration\" key with the value [\"sensor.ac_power\"], or a \"camera_entry_unsecured\" key with the value [\"camera.map_*\"]. Match-all entries such as \"*\" or \"*.*\" are not allowed — use the \"*\" type key instead."
       },
       "initiate_flow": {
         "reconfigure": "Reconfigure Sentinel",
@@ -213,7 +213,7 @@
           "data_description": {
             "sentinel_response_language": "Language for the LLM-authored finding explanation shown in notifications, e.g. 'Czech'. Leave empty for English. Discovery candidate title/summary and triage decision/reason_code/summary are unaffected -- those are parsed by code and always stay in English.",
             "sentinel_rule_entity_exclusions_all": "Pick entities Sentinel should ignore everywhere -- e.g. a touch panel's template lock that only mirrors another entity's state. Excluded entities are dropped from every rule's findings and no longer wake Sentinel, so a real anomaly involving them is only caught on the next poll (default 5 minutes). Don't exclude a camera, lock, or alarm panel you still want instant alerts from.",
-            "sentinel_rule_entity_exclusions": "For excluding an entity from one specific rule only (not all of them), and for glob patterns such as camera.map_*, which the picker above cannot hold. Format: {{\"rule_id\": [\"entity.id\", ...]}}; the \"*\" key means all rules. Most people won't need this -- use the picker above instead."
+            "sentinel_rule_entity_exclusions": "For excluding an entity from one specific rule only (not all of them), and for glob patterns such as camera.map_*, which the picker above cannot hold. Expects a JSON object whose keys are anomaly types and whose values are lists of entity IDs; the \"*\" key means all rules. See the Sentinel docs for examples. Most people won't need this -- use the picker above instead."
           }
         }
       }
