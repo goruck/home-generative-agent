@@ -458,3 +458,15 @@ endpoint: /api/home_generative_agent/enroll
 ```
 
 Use the file picker or drag-and-drop to upload one or more images. The card enrolls images that contain a detectable face and skips those that do not.
+
+### Batch Identity Consolidation
+
+Face recognition runs per frame, so one person walking through a camera's view can be recognized in some frames and come back as "Unknown Person" in others (face turned, motion blur, distance). Without correction, the batch would carry two identities for one human and the summary could report a phantom second person ("Nico walks toward the entrance while an unknown person is present nearby").
+
+To prevent this, the video analyzer consolidates identities within each batch before summarization. An "Unknown Person" detection is renamed to the batch's known name only when **all** of the following hold:
+
+- Exactly one known (enrolled) name appears in the batch.
+- No single frame contains two or more detected faces — a known person and an unknown in the *same* frame is treated as a genuine companion and is never merged.
+- That known person is the unknown face's *nearest* enrolled match in the gallery, at a cosine distance under 0.85 (`VIDEO_ANALYZER_FACE_MERGE_THRESHOLD` in `const.py`). The bound is deliberately looser than the recognition threshold (`FACE_RECOGNITION_THRESHOLD`, 0.7 by default), since the merge only applies when the person is already confirmed present in the batch — but a face that is actually closer to a *different* enrolled person never merges.
+
+If any condition fails, both identities are preserved unchanged. The merged result flows to the summary, notifications, `sensor.*_recognized_people`, and Sentinel evidence. Sentinel's unknown-person rules are unaffected by design: they trigger only when *no* people are recognized, and a merge can only occur when a known name is present. Note for custom automations: if you trigger on the literal `"Unknown Person"` string in `sensor.*_recognized_people`, a merged gray-zone face will now appear under the known person's name instead — only faces that fail the strict conditions above keep the `"Unknown Person"` label. Saved face debug crops keep the raw per-frame names so the threshold can be tuned from real data.
