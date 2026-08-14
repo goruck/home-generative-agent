@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.30.1] - 2026-08-14
+
+### Fixed
+
+- **One person no longer becomes two in the summary itself.** v3.30.0's identity merge fixed the identity-tag side of the phantom-person bug, but field validation caught the caption side: frames where no face was detectable (back turned, looking down at a phone) still got narrated as a second actor — "a person stands in an open doorway, then Lindo appears." When a batch's full face evidence proves exactly one enrolled person, the summary request now states that fact to the summarizer outright, overriding the prompt rule that previously turned faceless person-mentioning frames into an extra actor.
+- The single-person statement is deliberately hard to earn. It is decided over the batch's complete evidence — including frames whose scene analysis failed after face recognition succeeded, and frames beyond the summary's frame cap — and is withheld whenever anything suggests a second person: any unknown or second known face anywhere in the batch, any frame with two detected face boxes even when one embedding was unreadable, or any caption that affirmatively mentions multiple people (the camera's caption is the only sensor that can see a face-averted companion, so it always wins). Person names that fail a strict character grammar are never interpolated into the summarizer instruction.
+
 ## [3.30.0] - 2026-08-13
 
 ### Added
