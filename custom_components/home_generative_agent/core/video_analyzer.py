@@ -356,19 +356,39 @@ _COOCCURRENT_FACES: Final = 2
 # Plural / second-person caption evidence. Face recognition proves presence,
 # never absence — a caption is the only sensor that can see a face-averted
 # companion, so plural wording must veto any single-person claim.
+_SINGULAR_HUMAN: Final = (
+    r"(?:person|man|woman|boy|girl|child|individual|figure|kid|lady|guy)"
+)
 _PLURAL_HUMAN_RE: Final = re.compile(
     r"\b(?:people|persons|men|women|boys|girls|children|couple|crowd|both|"
     r"(?:two|three|four|five|six|several|multiple)\s+"
     r"(?:person|persons|people|man|men|woman|women|boy|boys|girl|girls|"
     r"child|children|individual|individuals|figure|figures)|"
-    r"(?:another|second|other)\s+(?:person|man|woman|individual|figure))\b"
+    rf"(?:another|second|other)\s+{_SINGULAR_HUMAN}|"
+    # Singular conjunctions: "a man and a woman", "a person is beside a
+    # child". Up to three intervening words, article required before the
+    # second term to keep false positives rare (veto direction is safe).
+    rf"{_SINGULAR_HUMAN}(?:\s+\w+){{0,3}}\s+"
+    r"(?:and|with|beside|alongside|near|behind|next\s+to|toward|towards)\s+"
+    rf"(?:a|an|another|the)\s+{_SINGULAR_HUMAN})\b"
 )
 
 # Names allowed inside the single-person constraint block. The block is an
 # authoritative instruction to the summarizer, so a name that could carry
-# markup or instructions (angle brackets, newlines, unbounded length)
-# suppresses the constraint instead of being interpolated.
-_SAFE_CONSTRAINT_NAME_RE: Final = re.compile(r"[\w .,'\-]{1,64}")
+# markup, newlines, unbounded length, or sentence-shaped instruction text
+# suppresses the constraint instead of being interpolated. The word cap is
+# the instruction-shape guard: real display names are a few words, while
+# imperative payloads need a clause.
+_SAFE_CONSTRAINT_NAME_RE: Final = re.compile(r"[\w.,'\-]+(?: [\w.,'\-]+){0,3}")
+_SAFE_CONSTRAINT_NAME_MAX_LEN: Final = 64
+
+
+def _is_safe_constraint_name(name: str) -> bool:
+    """Return True when a name is safe to interpolate into instructions."""
+    return (
+        len(name) <= _SAFE_CONSTRAINT_NAME_MAX_LEN
+        and _SAFE_CONSTRAINT_NAME_RE.fullmatch(name) is not None
+    )
 
 
 def _is_enrolled_name(name: str) -> bool:
@@ -425,8 +445,10 @@ def _single_person_constraint(
     frames whose face recognition returned "Indeterminate" but whose caption
     mentions a person get narrated as a second actor ("a person stands ...
     then Lindo appears"). sole_person is the batch-level verdict from
-    _verified_sole_person (full pre-cap evidence). Two prompt-time vetoes
-    remain: a caption that affirmatively mentions multiple humans (the VLM
+    _verified_sole_person, already caption-vetoed over the FULL pre-cap
+    batch in _process_batch. The vetoes are re-applied here over whatever
+    frame_descriptions this call received — cheap defense for direct
+    callers: a caption that affirmatively mentions multiple humans (the VLM
     saw someone recognition could not), and a name that fails the safe
     interpolation grammar. Either yields None — pre-constraint behavior.
     """
@@ -438,7 +460,7 @@ def _single_person_constraint(
         for caption in d
     ):
         return None
-    if _SAFE_CONSTRAINT_NAME_RE.fullmatch(sole_person) is None:
+    if not _is_safe_constraint_name(sole_person):
         return None
     return (
         "\n<single person constraint>\n"
@@ -875,11 +897,20 @@ class VideoAnalyzer:
         # Single-person verdict for the summarizer (issue #543, caption-side
         # phantom). Decided HERE, over the same full evidence the merge saw —
         # post-merge kept identities plus VLM-dropped frames' hits, before
-        # dedupe and the summary cap can slice contrary evidence away.
+        # dedupe and the summary cap can slice contrary evidence away. The
+        # plural-caption veto must scan the full pre-cap captions for the
+        # same reason: an early "two people" frame sliced off by the summary
+        # cap still disproves the single-person claim.
         sole_person = _verified_sole_person(
             [next(iter(d.values()), []) for d in frame_descriptions]
             + [[h.name for h in hits] for hits in dropped_hits]
         )
+        if sole_person is not None and any(
+            _caption_mentions_plural_humans(caption)
+            for d in frame_descriptions
+            for caption in d
+        ):
+            sole_person = None
 
         # dedupe near-identical, then cap to the newest frames; both lists get
         # the same cap so descs/paths stay index-aligned for _pick_notify_frame.
@@ -1271,6 +1302,17 @@ class VideoAnalyzer:
 
             subject = format_subject(identities, text)
             had_known_name = bool(subject and subject != "a person")
+            # The batch verdict can name a person the surviving frame could
+            # not (its face evidence lived in a VLM-dropped frame): upgrade
+            # the generic subject to the verified name (issue #543).
+            if (
+                not had_known_name
+                and subject == "a person"
+                and sole_person is not None
+                and _is_safe_constraint_name(sole_person)
+            ):
+                subject = sole_person
+                had_known_name = True
 
             if subject:
                 # If we have a subject, try to weave it in naturally.
