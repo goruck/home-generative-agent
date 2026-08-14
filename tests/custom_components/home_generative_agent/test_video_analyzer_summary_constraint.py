@@ -99,7 +99,7 @@ def test_constraint_text_names_the_person() -> None:
     )
 
     assert constraint is not None
-    assert "exactly one person, Lindo," in constraint
+    assert "Lindo is the only person" in constraint
     assert "<single person constraint>" in constraint
 
 
@@ -186,7 +186,7 @@ async def test_prompt_carries_constraint_for_single_known() -> None:
 
     messages = ainvoke.call_args.args[0]
     prompt = messages[1].content
-    assert "exactly one person, Lindo," in prompt
+    assert "Lindo is the only person" in prompt
     # Identity tags themselves are unchanged: the system rules key on the
     # literal "Indeterminate" string.
     assert "<person identity>\nIndeterminate\n</person identity>" in prompt

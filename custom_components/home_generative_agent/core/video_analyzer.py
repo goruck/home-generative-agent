@@ -487,12 +487,21 @@ def _single_person_constraint(
         return None
     if not _is_safe_constraint_name(sole_person):
         return None
+    # Attribution license, NOT a denial: the block identifies single-person
+    # frames without forbidding plurality, so a caption that genuinely
+    # describes two people — in any wording or language the veto regexes
+    # don't know — remains narratable under the base rules. The worst case
+    # of an over-broad emission is a mislabeled name, never an erased
+    # companion.
     return (
         "\n<single person constraint>\n"
-        f"Face recognition verified that exactly one person, {sole_person}, "
-        "appears in this footage. Every human mentioned in any frame "
-        f"description is {sole_person}. Never mention another, additional, "
-        "or unknown person.\n"
+        f"Face recognition verified that {sole_person} is the only person "
+        "whose face appears anywhere in this footage. Treat every frame "
+        f"description that mentions a single person as describing "
+        f"{sole_person}; do not narrate those frames as different people or "
+        f"add an unknown person alongside {sole_person}. Only mention "
+        "additional people if a single frame description itself clearly "
+        "describes two or more people at once.\n"
         "</single person constraint>"
     )
 
