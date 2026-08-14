@@ -347,6 +347,50 @@ def _has_detected_person(faces: list[str]) -> bool:
     return any(_is_detected_name(p) for p in faces)
 
 
+def _single_person_constraint(
+    frame_descriptions: list[dict[str, list[str]]],
+) -> str | None:
+    """
+    Return a summarizer constraint when evidence proves one known person.
+
+    The system prompt's single-actor bias fails in the field (issue #543):
+    frames whose face recognition returned "Indeterminate" but whose caption
+    mentions a person get narrated as a second actor ("a person stands ...
+    then Lindo appears"). When the batch's post-merge identities contain
+    exactly one distinct detected name, that name is a real enrolled identity
+    (not a reserved label such as "Unknown Person"), and no frame carries two
+    or more detected faces, every human the captions mention is that person —
+    so the summarizer is told so outright, from verified evidence.
+
+    Returns None whenever a second person could exist per the evidence; the
+    constraint must never be emitted for a batch that still carries an
+    unknown face or a second known name.
+    """
+    names_per_frame = [
+        [n for n in names if _is_detected_name(n)]
+        for d in frame_descriptions
+        for names in d.values()
+    ]
+    detected = [n for names in names_per_frame for n in names]
+    if not detected:
+        return None
+    if any(len(names) >= 2 for names in names_per_frame):  # noqa: PLR2004
+        return None
+    unique = set(detected)
+    if len(unique) != 1:
+        return None
+    name = next(iter(unique))
+    if name.strip().lower() in RESERVED_IDENTITY_LABELS:
+        return None
+    return (
+        "\n<single person constraint>\n"
+        f"Face recognition verified that exactly one person, {name}, appears "
+        "in this footage. Every human mentioned in any frame description is "
+        f"{name}. Never mention another, additional, or unknown person.\n"
+        "</single person constraint>"
+    )
+
+
 def _pick_notify_frame(
     descs: list[dict[str, list[str]]], paths: list[Path]
 ) -> Path | None:
@@ -1182,8 +1226,13 @@ class VideoAnalyzer:
         # ---------- LLM path for multiple frames ----------
         ftag = "\n<frame description>\n{}\n</frame description>"
         ptag = "\n<person identity>\n{}\n</person identity>"
+        # Deterministic backstop for the caption-side phantom (issue #543):
+        # when recognition proved a single known person, say so explicitly —
+        # the system prompt's single-actor bias alone is not reliably obeyed.
+        constraint = _single_person_constraint(frame_descriptions)
         prompt = " ".join(
             [VIDEO_ANALYZER_PROMPT]
+            + ([constraint] if constraint else [])
             + [
                 ftag.format(frame) + "".join([ptag.format(p) for p in people])
                 for entry in frame_descriptions
