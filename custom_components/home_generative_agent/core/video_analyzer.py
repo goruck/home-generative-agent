@@ -360,20 +360,25 @@ _COOCCURRENT_FACES: Final = 2
 # never absence — a caption is the only sensor that can see a face-averted
 # companion, so plural wording must veto any single-person claim.
 _SINGULAR_HUMAN: Final = (
-    r"(?:person|man|woman|boy|girl|child|individual|figure|kid|lady|guy)"
+    r"(?:person|man|woman|boy|girl|child|individual|figure|kid|lady|guy|"
+    r"adult|baby|toddler|teenager|teen|infant)"
+)
+_PLURAL_HUMAN_NOUNS: Final = (
+    r"(?:people|persons|men|women|boys|girls|children|kids|adults|babies|"
+    r"toddlers|teenagers|teens|infants|individuals|figures|ladies|guys)"
 )
 _PLURAL_HUMAN_RE: Final = re.compile(
-    r"\b(?:people|persons|men|women|boys|girls|children|couple|crowd|both|"
-    r"(?:two|three|four|five|six|several|multiple)\s+"
-    r"(?:person|persons|people|man|men|woman|women|boy|boys|girl|girls|"
-    r"child|children|individual|individuals|figure|figures)|"
+    rf"\b(?:{_PLURAL_HUMAN_NOUNS}|couple|crowd|both|"
+    rf"(?:two|three|four|five|six|several|multiple)\s+"
+    rf"(?:{_SINGULAR_HUMAN}|{_PLURAL_HUMAN_NOUNS})|"
     rf"(?:another|second|other)\s+{_SINGULAR_HUMAN}|"
-    # Singular conjunctions: "a man and a woman", "a person is beside a
-    # child". Up to three intervening words, article required before the
-    # second term to keep false positives rare (veto direction is safe).
+    # Singular conjunctions: "a man and a woman", "a man and woman", "a
+    # person is beside a child". Up to three intervening words; the article
+    # before the second term is optional (VLM captions often share one).
     rf"{_SINGULAR_HUMAN}(?:\s+\w+){{0,3}}\s+"
-    r"(?:and|with|beside|alongside|near|behind|next\s+to|toward|towards)\s+"
-    rf"(?:a|an|another|the)\s+{_SINGULAR_HUMAN})\b"
+    r"(?:and|with|beside|alongside|near|behind|next\s+to|toward|towards|"
+    r"carrying|holding|carries|holds)\s+"
+    rf"(?:(?:a|an|another|the|his|her|their)\s+)?{_SINGULAR_HUMAN})\b"
 )
 
 # Names allowed inside the single-person constraint block. The block is an
@@ -854,8 +859,9 @@ class VideoAnalyzer:
                 path, camera_id, prev_text=prev_text
             )
             if not fd:
-                if hits:
-                    dropped_hits.append(hits)
+                # Empty hit lists are harmless to both consumers (no names,
+                # zero face count), so append unconditionally.
+                dropped_hits.append(hits)
                 continue
             frame_desc, faces = next(iter(fd.items()))
             if not frame_desc or frame_desc == VLM_ERROR_CAPTION:
@@ -874,6 +880,11 @@ class VideoAnalyzer:
                     )
                     frame_hits.append(hits)
                     frame_paths.append(path)
+                else:
+                    # No detected NAME, but face boxes may have existed (two
+                    # Indeterminate slots): keep the count evidence for the
+                    # single-person verdict.
+                    dropped_hits.append(hits)
                 continue
             entry = {f"t+{ts - t0}s. {frame_desc}": faces}
             is_sentinel = is_no_change_reply(frame_desc)
@@ -889,6 +900,9 @@ class VideoAnalyzer:
                     frame_hits.append(hits)
                     frame_paths.append(path)
                 else:
+                    # Face-box count evidence survives the sentinel drop
+                    # for the single-person verdict.
+                    dropped_hits.append(hits)
                     self._m_inc(camera_id, "sentinel_dropped")
                     LOGGER.debug(
                         "[%s] Sentinel frame dropped: %r (anchor: %.80r)",

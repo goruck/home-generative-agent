@@ -24,6 +24,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from custom_components.home_generative_agent.agent.tools import VLM_ERROR_CAPTION
 from custom_components.home_generative_agent.core.video_analyzer import (
     FaceHit,
     VideoAnalyzer,
@@ -525,3 +526,92 @@ async def test_single_frame_heuristic_names_child_subject() -> None:
 
     assert ainvoke.await_count == 0
     assert _KNOWN in result
+
+
+# ---------------------------------------------------------------------------
+# Round-4 hardening: shared articles, vocab gaps, modifiers, error frames
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "caption",
+    [
+        "A man and woman stand at the door.",
+        "Two kids play in the yard.",
+        "Two adults wait on the porch.",
+        "A woman carries a baby inside.",
+        "A woman carrying an infant walks up.",
+    ],
+)
+def test_constraint_vetoed_by_round4_caption_shapes(caption: str) -> None:
+    """Shared-article pairs and kid/adult/baby vocabulary veto too."""
+    assert (
+        _single_person_constraint(
+            _KNOWN, [{caption: ["Indeterminate"]}, {"c2": [_KNOWN]}]
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_single_frame_heuristic_names_modified_subject() -> None:
+    """'An elderly woman waits' gets the verified name through modifiers."""
+    va, ainvoke = _va_with_summary_capture()
+
+    result = await va._generate_summary(
+        [{"An elderly woman waits by the door.": ["Indeterminate"]}],
+        sole_person=_KNOWN,
+    )
+
+    assert ainvoke.await_count == 0
+    assert _KNOWN in result
+
+
+@pytest.mark.asyncio
+async def test_two_indeterminate_boxes_in_error_frame_veto_verdict(
+    va: VideoAnalyzer, entry: MagicMock
+) -> None:
+    """
+    A VLM-error frame with two face boxes (both unreadable) vetoes.
+
+    Neither hit is a detected name, so the frame is dropped from the
+    summary — but the two-box count is co-occurrence evidence and must
+    reach the single-person verdict.
+    """
+    entry.runtime_data.person_gallery = _dao(0.4)
+    _stub_snapshots(
+        va,
+        [
+            _frame("Lindo walks toward the entrance.", [FaceHit(_KNOWN, _EMB)]),
+            (
+                {VLM_ERROR_CAPTION: ["Indeterminate", "Indeterminate"]},
+                [FaceHit("Indeterminate"), FaceHit("Indeterminate")],
+            ),
+        ],
+    )
+
+    _descs, _recognized, _, sole = await va._process_batch(_CAMERA, _ordered(2))
+
+    assert sole is None
+
+
+@pytest.mark.asyncio
+async def test_lone_indeterminate_error_frame_keeps_verdict(
+    va: VideoAnalyzer, entry: MagicMock
+) -> None:
+    """A single no-face sentinel in a dropped error frame must NOT veto."""
+    entry.runtime_data.person_gallery = _dao(0.4)
+    _stub_snapshots(
+        va,
+        [
+            _frame("Lindo walks toward the entrance.", [FaceHit(_KNOWN, _EMB)]),
+            (
+                {VLM_ERROR_CAPTION: ["Indeterminate"]},
+                [FaceHit("Indeterminate")],
+            ),
+        ],
+    )
+
+    _descs, _recognized, _, sole = await va._process_batch(_CAMERA, _ordered(2))
+
+    assert sole == _KNOWN
