@@ -254,6 +254,8 @@ This document covers the named constants that affect integration behaviour, orga
 | `_FACE_TIMEOUT_SEC` | `core/video_analyzer.py` | `10` (s) | Timeout for a face-recognition request |
 | `_MERGE_DB_TIMEOUT_SEC` | `core/video_analyzer.py` | `5` (s) | Per-lookup timeout for identity-merge gallery queries; a timeout refuses that face's merge instead of stalling the camera worker |
 | `_MERGE_DB_BUDGET_SEC` | `core/video_analyzer.py` | `15` (s) | Total identity-merge database budget per batch; when exhausted — or after the first database failure — remaining lookups are skipped and those faces keep their "Unknown Person" label |
+| `_COOCCURRENT_FACES` | `core/video_analyzer.py` | `2` | Shared two-faces-in-one-frame threshold with two consumers that count differently: the unknown-face merge refuses a frame with this many *detected* names (Indeterminate placeholders don't count, so a known face plus an Indeterminate one still merges), while the single-person summary verdict refuses on this many *raw* identity entries — the no-face sentinel is only ever a lone entry, so two entries mean a second real face box even when its embedding degraded to Indeterminate (issue #543) |
+| `_SAFE_CONSTRAINT_NAME_MAX_LEN` | `core/video_analyzer.py` | `64` (chars) | Max person-name length allowed into the single-person summarizer constraint. Longer names — or names failing the strict character grammar (`_SAFE_CONSTRAINT_NAME_RE`) — suppress the constraint instead of being interpolated; a passing name is still quoted as data inside the verified-name tag, never spliced into instruction prose |
 | `_VISION_TIMEOUT_SEC` | `core/video_analyzer.py` | `90` (s) | Timeout for a VLM frame-description call |
 | `_VIDEO_MODEL_SEMAPHORE_WAIT_SEC` | `core/video_analyzer.py` | `30` (s) | Max wait for the video semaphore before dropping the frame |
 | `_VIDEO_QUEUE_BACKLOG_THRESHOLD` | `core/video_analyzer.py` | `2` | Drop stale queued frames when the backlog exceeds this count |
@@ -505,6 +507,8 @@ These constants live outside `const.py` in individual modules. They affect runti
 | `_FACE_TIMEOUT_SEC` | `10` (s) | Timeout for a face-recognition API call |
 | `_MERGE_DB_TIMEOUT_SEC` | `5` (s) | Per-lookup timeout for identity-merge gallery queries |
 | `_MERGE_DB_BUDGET_SEC` | `15` (s) | Total identity-merge DB budget per batch; exhaustion or a DB failure skips the remaining lookups |
+| `_COOCCURRENT_FACES` | `2` | Two-faces-in-one-frame threshold; the unknown-face merge counts detected names only, while the single-person summary verdict counts raw identity entries |
+| `_SAFE_CONSTRAINT_NAME_MAX_LEN` | `64` (chars) | Max person-name length allowed into the single-person summarizer constraint; longer or grammar-failing names suppress the constraint |
 | `_VISION_TIMEOUT_SEC` | `90` (s) | Timeout for a VLM frame description call |
 | `_VIDEO_MODEL_SEMAPHORE_WAIT_SEC` | `30` (s) | Max time a video frame waits for the concurrency semaphore before being dropped |
 | `_VIDEO_QUEUE_BACKLOG_THRESHOLD` | `2` | Drop oldest queued frames when the backlog exceeds this depth |

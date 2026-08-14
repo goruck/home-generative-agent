@@ -319,9 +319,12 @@ _HUMAN_TERMS_WORDS: Final = (
 )
 _HUMAN_TERM_RE: Final = re.compile(rf"\b(?:{_HUMAN_TERMS_WORDS})\b")
 # Any "no <human term>" span, regardless of trailing wording — broader than
-# _NEGATED_HUMAN_RE, which only covers "no ... visible" phrasings.
+# _NEGATED_HUMAN_RE, which only covers "no ... visible" phrasings. The
+# optional modifier covers "no other person" / "no additional people".
 _NEGATED_PERSON_RE: Final = re.compile(
-    rf"\bno\s+(?:{_HUMAN_TERMS_WORDS}|one|body|humans?)\b"
+    rf"\bno\s+(?:(?:other|additional|second|more)\s+)?"
+    rf"(?:{_HUMAN_TERMS_WORDS}|one|body|humans?|"
+    r"individuals?|figures?|kids?|ladies|lady|guys?)\b"
 )
 
 
@@ -345,6 +348,172 @@ def _is_detected_name(name: str) -> bool:
 def _has_detected_person(faces: list[str]) -> bool:
     """Return True when face recognition saw an actual person in the frame."""
     return any(_is_detected_name(p) for p in faces)
+
+
+# Two identity entries in one frame = two detected face boxes: the no-face
+# sentinel is only ever emitted as a LONE "Indeterminate" entry, so a
+# two-element list always means two real detections even when one embedding
+# degraded to Indeterminate.
+_COOCCURRENT_FACES: Final = 2
+
+# Plural / second-person caption evidence. Face recognition proves presence,
+# never absence — a caption is the only sensor that can see a face-averted
+# companion, so plural wording must veto any single-person claim.
+_SINGULAR_HUMAN: Final = (
+    r"(?:person|man|woman|boy|girl|child|individual|figure|kid|lady|guy|"
+    r"adult|baby|toddler|teenager|teen|infant|stranger|visitor|neighbor|"
+    r"newcomer)"
+)
+_PLURAL_HUMAN_NOUNS: Final = (
+    r"(?:people|persons|men|women|boys|girls|children|kids|adults|babies|"
+    r"toddlers|teenagers|teens|infants|individuals|figures|ladies|guys|"
+    r"strangers|visitors|neighbors|newcomers)"
+)
+_PLURAL_HUMAN_RE: Final = re.compile(
+    rf"\b(?:{_PLURAL_HUMAN_NOUNS}|couple|crowd|both|"
+    rf"(?:two|three|four|five|six|several|multiple)\s+"
+    rf"(?:{_SINGULAR_HUMAN}|{_PLURAL_HUMAN_NOUNS})|"
+    # Explicit contrast markers assert a DISTINCT person even across frames.
+    rf"(?:another|second|other|different|new|unfamiliar|separate)\s+"
+    rf"{_SINGULAR_HUMAN}|"
+    # Nouns that inherently assert someone other than the resident.
+    r"strangers?|intruders?|trespassers?|"
+    # Singular conjunctions: "a man and a woman", "a man and woman", "a
+    # person is beside a child". Up to three intervening words; the article
+    # before the second term is optional (VLM captions often share one).
+    rf"{_SINGULAR_HUMAN}(?:\s+\w+){{0,3}}\s+"
+    r"(?:and|with|beside|alongside|near|behind|next\s+to|toward|towards|"
+    r"carrying|holding|carries|holds)\s+"
+    rf"(?:(?:a|an|another|the|his|her|their)\s+)?{_SINGULAR_HUMAN})\b"
+)
+
+# Names allowed inside the single-person constraint block. The block is an
+# authoritative instruction to the summarizer, so a name that could carry
+# markup, newlines, unbounded length, or sentence-shaped instruction text
+# suppresses the constraint instead of being interpolated. The word cap is
+# the instruction-shape guard: real display names are a few words, while
+# imperative payloads need a clause.
+_SAFE_CONSTRAINT_NAME_RE: Final = re.compile(r"[\w.,'\-]+(?: [\w.,'\-]+){0,3}")
+_SAFE_CONSTRAINT_NAME_MAX_LEN: Final = 64
+
+
+def _is_safe_constraint_name(name: str) -> bool:
+    """Return True when a name is safe to interpolate into instructions."""
+    return (
+        len(name) <= _SAFE_CONSTRAINT_NAME_MAX_LEN
+        and _SAFE_CONSTRAINT_NAME_RE.fullmatch(name) is not None
+    )
+
+
+def _is_enrolled_name(name: str) -> bool:
+    """Return True for a detected name that is a real enrolled identity."""
+    return (
+        _is_detected_name(name) and name.strip().lower() not in RESERVED_IDENTITY_LABELS
+    )
+
+
+# Article-led singular human mention, e.g. "a man", "the young woman".
+_ARTICLE_HUMAN_RE: Final = re.compile(
+    rf"\b(?:a|an|another|the)\s+(?:\w+\s+){{0,2}}?({_SINGULAR_HUMAN})\b"
+)
+
+
+def _caption_mentions_plural_humans(caption: str) -> bool:
+    """
+    Return True if the caption affirmatively mentions multiple humans.
+
+    Beyond plural nouns, counts, and conjunction pairs, two article-led
+    singular mentions with DIFFERENT human terms ("a man talks to a woman",
+    "the man holds a child") count as two people regardless of the verb
+    between them — relation verbs are unenumerable. Same-term re-reference
+    ("a man ... the man") stays singular, since captions re-reference one
+    person with the same noun.
+    """
+    scrubbed = _NEGATED_PERSON_RE.sub(" ", _normalize_caption(caption))
+    if _PLURAL_HUMAN_RE.search(scrubbed):
+        return True
+    return len(set(_ARTICLE_HUMAN_RE.findall(scrubbed))) >= _COOCCURRENT_FACES
+
+
+def _verified_sole_person(name_lists: list[list[str]]) -> str | None:
+    """
+    Return the batch's verified sole person, or None.
+
+    name_lists must carry the FULL batch evidence: post-merge identity lists
+    of every kept frame plus the hit names of frames dropped on the VLM side
+    — computed before dedupe and the summary frame cap, so evidence sliced
+    from the summary cannot be sliced from this decision (the same
+    full-evidence rule _merge_unknown_faces follows).
+
+    Verified means: at least one detected face, no frame with two or more
+    identity entries (raw count — a degraded second face still counts), and
+    exactly one distinct detected name that is a real enrolled identity.
+    Anything short of that returns None; missing or failed recognition is
+    never treated as proof of absence.
+    """
+    detected = [n for names in name_lists for n in names if _is_detected_name(n)]
+    if not detected:
+        return None
+    if any(len(names) >= _COOCCURRENT_FACES for names in name_lists):
+        return None
+    unique = set(detected)
+    if len(unique) != 1:
+        return None
+    name = next(iter(unique))
+    if not _is_enrolled_name(name):
+        return None
+    return name
+
+
+def _single_person_constraint(
+    sole_person: str | None,
+    frame_descriptions: list[dict[str, list[str]]],
+) -> str | None:
+    """
+    Render the single-person summarizer constraint, or None.
+
+    The system prompt's single-actor bias fails in the field (issue #543):
+    frames whose face recognition returned "Indeterminate" but whose caption
+    mentions a person get narrated as a second actor ("a person stands ...
+    then Lindo appears"). sole_person is the batch-level verdict from
+    _verified_sole_person, already caption-vetoed over the FULL pre-cap
+    batch in _process_batch. The vetoes are re-applied here over whatever
+    frame_descriptions this call received — cheap defense for direct
+    callers: a caption that affirmatively mentions multiple humans (the VLM
+    saw someone recognition could not), and a name that fails the safe
+    interpolation grammar. Either yields None — pre-constraint behavior.
+    """
+    if sole_person is None:
+        return None
+    if any(
+        _caption_mentions_plural_humans(caption)
+        for d in frame_descriptions
+        for caption in d
+    ):
+        return None
+    if not _is_safe_constraint_name(sole_person):
+        return None
+    # Attribution license, NOT a denial: the block identifies single-person
+    # frames without forbidding plurality, so a caption that genuinely
+    # describes two people — in any wording or language the veto regexes
+    # don't know — remains narratable under the base rules. The worst case
+    # of an over-broad emission is a mislabeled name, never an erased
+    # companion. The name itself is data inside the verified-name tag; the
+    # instruction prose is fully static, so a name that smuggles imperative
+    # wording past the grammar gate is quoted, never instructed.
+    return (
+        "\n<single person constraint>\n"
+        f"<verified name>{sole_person}</verified name>\n"
+        "Face recognition verified that the person named in the verified "
+        "name tag above is the only person whose face appears anywhere in "
+        "this footage. Treat every frame description that mentions a single "
+        "person as describing that named person; do not narrate those "
+        "frames as different people or add an unknown person alongside "
+        "them. Only mention additional people if a frame description "
+        "clearly describes two or more people at once, or explicitly "
+        "describes a different or additional person.\n"
+        "</single person constraint>"
+    )
 
 
 def _pick_notify_frame(
@@ -686,9 +855,9 @@ class VideoAnalyzer:
         self,
         camera_id: str,
         ordered: list[tuple[Path, int]],
-    ) -> tuple[list[dict[str, list[str]]], list[str], Path | None]:
+    ) -> tuple[list[dict[str, list[str]]], list[str], Path | None, str | None]:
         if not ordered:
-            return [], [], None
+            return [], [], None, None
 
         t0: int = ordered[0][1]
         frame_descriptions: list[dict[str, list[str]]] = []
@@ -709,8 +878,9 @@ class VideoAnalyzer:
                 path, camera_id, prev_text=prev_text
             )
             if not fd:
-                if hits:
-                    dropped_hits.append(hits)
+                # Empty hit lists are harmless to both consumers (no names,
+                # zero face count), so append unconditionally.
+                dropped_hits.append(hits)
                 continue
             frame_desc, faces = next(iter(fd.items()))
             if not frame_desc or frame_desc == VLM_ERROR_CAPTION:
@@ -729,6 +899,11 @@ class VideoAnalyzer:
                     )
                     frame_hits.append(hits)
                     frame_paths.append(path)
+                else:
+                    # No detected NAME, but face boxes may have existed (two
+                    # Indeterminate slots): keep the count evidence for the
+                    # single-person verdict.
+                    dropped_hits.append(hits)
                 continue
             entry = {f"t+{ts - t0}s. {frame_desc}": faces}
             is_sentinel = is_no_change_reply(frame_desc)
@@ -744,6 +919,9 @@ class VideoAnalyzer:
                     frame_hits.append(hits)
                     frame_paths.append(path)
                 else:
+                    # Face-box count evidence survives the sentinel drop
+                    # for the single-person verdict.
+                    dropped_hits.append(hits)
                     self._m_inc(camera_id, "sentinel_dropped")
                     LOGGER.debug(
                         "[%s] Sentinel frame dropped: %r (anchor: %.80r)",
@@ -768,6 +946,24 @@ class VideoAnalyzer:
         await self._merge_unknown_faces(
             camera_id, frame_descriptions, frame_hits, dropped_hits
         )
+
+        # Single-person verdict for the summarizer (issue #543, caption-side
+        # phantom). Decided HERE, over the same full evidence the merge saw —
+        # post-merge kept identities plus VLM-dropped frames' hits, before
+        # dedupe and the summary cap can slice contrary evidence away. The
+        # plural-caption veto must scan the full pre-cap captions for the
+        # same reason: an early "two people" frame sliced off by the summary
+        # cap still disproves the single-person claim.
+        sole_person = _verified_sole_person(
+            [next(iter(d.values()), []) for d in frame_descriptions]
+            + [[h.name for h in hits] for hits in dropped_hits]
+        )
+        if sole_person is not None and any(
+            _caption_mentions_plural_humans(caption)
+            for d in frame_descriptions
+            for caption in d
+        ):
+            sole_person = None
 
         # dedupe near-identical, then cap to the newest frames; both lists get
         # the same cap so descs/paths stay index-aligned for _pick_notify_frame.
@@ -798,7 +994,7 @@ class VideoAnalyzer:
                 camera_id,
             )
             notify_frame = None
-        return frame_descriptions, recognized, notify_frame
+        return frame_descriptions, recognized, notify_frame, sole_person
 
     async def _merge_unknown_faces(  # noqa: PLR0912
         self,
@@ -853,16 +1049,11 @@ class VideoAnalyzer:
 
         dropped_name_lists = [[h.name for h in hits] for hits in (dropped_hits or [])]
         evidence_lists = name_lists + dropped_name_lists
-        # Normalized reserved-label exclusion: gallery rows enrolled before
-        # the reserved-name guard may carry variants like "unknown person" or
-        # " Indeterminate " — those must never count as a mergeable identity.
-        known = {
-            n
-            for names in evidence_lists
-            for n in names
-            if _is_detected_name(n)
-            and n.strip().lower() not in RESERVED_IDENTITY_LABELS
-        }
+        # Normalized reserved-label exclusion (_is_enrolled_name): gallery
+        # rows enrolled before the reserved-name guard may carry variants
+        # like "unknown person" or " Indeterminate " — those must never
+        # count as a mergeable identity.
+        known = {n for names in evidence_lists for n in names if _is_enrolled_name(n)}
         if not known:
             # An unknown-only batch has no merge target; nothing was refused,
             # so nothing is counted (stranger-only batches are the common
@@ -881,7 +1072,7 @@ class VideoAnalyzer:
         detected_per_frame = (
             sum(1 for n in names if _is_detected_name(n)) for names in evidence_lists
         )
-        if any(count >= 2 for count in detected_per_frame):  # noqa: PLR2004
+        if any(count >= _COOCCURRENT_FACES for count in detected_per_frame):
             self._m_inc(camera_id, "unknown_merge_refused_cooccurrence")
             LOGGER.debug(
                 "[%s] Unknown-face merge refused: frame with multiple faces",
@@ -959,7 +1150,10 @@ class VideoAnalyzer:
                     )
 
     async def _summarize(  # noqa: PLR0911
-        self, camera_id: str, frame_descriptions: list[dict[str, list[str]]]
+        self,
+        camera_id: str,
+        frame_descriptions: list[dict[str, list[str]]],
+        sole_person: str | None = None,
     ) -> str | None:
         if not frame_descriptions:
             return None
@@ -1002,7 +1196,7 @@ class VideoAnalyzer:
                     try:
                         async with asyncio.timeout(_SUMMARY_TIMEOUT_SEC):
                             summary_text: str = await self._generate_summary(
-                                frame_descriptions
+                                frame_descriptions, sole_person
                             )
                     except TimeoutError as exc:
                         LOGGER.warning("[%s] Summary timed out: %s", camera_id, exc)
@@ -1019,7 +1213,9 @@ class VideoAnalyzer:
         else:
             try:
                 async with asyncio.timeout(_SUMMARY_TIMEOUT_SEC):
-                    summary_text = await self._generate_summary(frame_descriptions)
+                    summary_text = await self._generate_summary(
+                        frame_descriptions, sole_person
+                    )
             except TimeoutError as exc:
                 LOGGER.warning("[%s] Summary timed out: %s", camera_id, exc)
                 return None
@@ -1046,13 +1242,13 @@ class VideoAnalyzer:
     async def _analyze_and_finalize(
         self, camera_id: str, ordered: list[tuple[Path, int]]
     ) -> None:
-        frame_descs, recognized, notify_frame = await self._process_batch(
+        frame_descs, recognized, notify_frame, sole_person = await self._process_batch(
             camera_id, ordered
         )
         if not frame_descs:
             return
         self._last_recognized[camera_id] = recognized
-        msg = await self._summarize(camera_id, frame_descs)
+        msg = await self._summarize(camera_id, frame_descs, sole_person)
         if not msg:
             return
         await self._finalize(camera_id, [p for p, _ in ordered], msg, notify_frame)
@@ -1134,7 +1330,9 @@ class VideoAnalyzer:
         )
 
     async def _generate_summary(
-        self, frame_descriptions: list[dict[str, list[str]]]
+        self,
+        frame_descriptions: list[dict[str, list[str]]],
+        sole_person: str | None = None,
     ) -> str:
         await asyncio.sleep(0)  # yield control
         if not frame_descriptions:
@@ -1157,6 +1355,17 @@ class VideoAnalyzer:
 
             subject = format_subject(identities, text)
             had_known_name = bool(subject and subject != "a person")
+            # The batch verdict can name a person the surviving frame could
+            # not (its face evidence lived in a VLM-dropped frame): upgrade
+            # the generic subject to the verified name (issue #543).
+            if (
+                not had_known_name
+                and subject == "a person"
+                and sole_person is not None
+                and _is_safe_constraint_name(sole_person)
+            ):
+                subject = sole_person
+                had_known_name = True
 
             if subject:
                 # If we have a subject, try to weave it in naturally.
@@ -1182,8 +1391,15 @@ class VideoAnalyzer:
         # ---------- LLM path for multiple frames ----------
         ftag = "\n<frame description>\n{}\n</frame description>"
         ptag = "\n<person identity>\n{}\n</person identity>"
+        # Deterministic backstop for the caption-side phantom (issue #543):
+        # when recognition proved a single known person, say so explicitly —
+        # the system prompt's single-actor bias alone is not reliably obeyed.
+        # sole_person was decided in _process_batch over the full pre-cap
+        # evidence; prompt-time vetoes (plural captions, unsafe name) remain.
+        constraint = _single_person_constraint(sole_person, frame_descriptions)
         prompt = " ".join(
             [VIDEO_ANALYZER_PROMPT]
+            + ([constraint] if constraint else [])
             + [
                 ftag.format(frame) + "".join([ptag.format(p) for p in people])
                 for entry in frame_descriptions

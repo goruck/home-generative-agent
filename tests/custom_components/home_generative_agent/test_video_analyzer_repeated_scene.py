@@ -111,7 +111,7 @@ async def test_sentinel_frames_dropped_and_prev_text_stays_anchored(
         ],
     )
 
-    descs, recognized, _ = await va._process_batch(_CAMERA, _ordered(3))
+    descs, recognized, _, _sole = await va._process_batch(_CAMERA, _ordered(3))
 
     assert descs == [{f"t+0s. {_FULL_DESC}": ["Indeterminate"]}]
     # Pre-existing behavior: only "None" is filtered here; "Indeterminate"
@@ -135,7 +135,7 @@ async def test_full_description_after_sentinel_reanchors(va: VideoAnalyzer) -> N
         ],
     )
 
-    descs, _, _ = await va._process_batch(_CAMERA, _ordered(4))
+    descs, _, _, _sole = await va._process_batch(_CAMERA, _ordered(4))
 
     assert descs == [
         {f"t+0s. {_FULL_DESC}": ["Indeterminate"]},
@@ -158,7 +158,7 @@ async def test_sentinel_frame_with_detected_person_is_kept(
         ],
     )
 
-    descs, recognized, _ = await va._process_batch(_CAMERA, _ordered(2))
+    descs, recognized, _, _sole = await va._process_batch(_CAMERA, _ordered(2))
 
     # Frame kept so the detected identity survives, but the sentinel text
     # still must not become the prev_text anchor.
@@ -183,7 +183,7 @@ async def test_error_caption_never_becomes_anchor(va: VideoAnalyzer) -> None:
         ],
     )
 
-    descs, _, _ = await va._process_batch(_CAMERA, _ordered(3))
+    descs, _, _, _sole = await va._process_batch(_CAMERA, _ordered(3))
 
     # The error caption is skipped entirely (like the return-{} error paths)
     # and the sentinel on frame 3 is validated against the real description.
@@ -205,7 +205,7 @@ async def test_error_caption_with_detected_person_is_kept(
         ],
     )
 
-    descs, recognized, _ = await va._process_batch(_CAMERA, _ordered(2))
+    descs, recognized, _, _sole = await va._process_batch(_CAMERA, _ordered(2))
 
     # The frame survives with a neutral caption — the raw error text must not
     # leak into summaries/notifications, and the identity must be preserved.
@@ -231,7 +231,7 @@ async def test_empty_caption_is_skipped(va: VideoAnalyzer) -> None:
         ],
     )
 
-    descs, _, _ = await va._process_batch(_CAMERA, _ordered(3))
+    descs, _, _, _sole = await va._process_batch(_CAMERA, _ordered(3))
 
     assert descs == [{f"t+0s. {_FULL_DESC}": ["Indeterminate"]}]
     assert prev_texts == [None, _FULL_DESC, _FULL_DESC]
@@ -256,7 +256,7 @@ async def test_sentinel_reply_on_first_frame_is_a_description(
         ],
     )
 
-    descs, _, _ = await va._process_batch(_CAMERA, _ordered(2))
+    descs, _, _, _sole = await va._process_batch(_CAMERA, _ordered(2))
 
     assert descs == [
         {"t+0s. Scene unchanged.": ["Indeterminate"]},
@@ -297,7 +297,7 @@ async def test_process_batch_notify_frame_prefers_person_frames(
         ],
     )
 
-    _descs, _, notify_frame = await va._process_batch(_CAMERA, _ordered(7))
+    _descs, _, notify_frame, _sole = await va._process_batch(_CAMERA, _ordered(7))
 
     # Person frames are snap_1/snap_2 (middle of the person pool is snap_2).
     # The raw batch middle, snap_3, is a dropped sentinel frame.
@@ -322,7 +322,7 @@ async def test_process_batch_notify_frame_falls_back_to_middle_kept_frame(
         ],
     )
 
-    _descs, _, notify_frame = await va._process_batch(_CAMERA, _ordered(7))
+    _descs, _, notify_frame, _sole = await va._process_batch(_CAMERA, _ordered(7))
 
     # Kept frames are snap_0..snap_2; middle is snap_1. Batch middle (snap_3)
     # is a sentinel frame and must never be chosen.
@@ -343,7 +343,7 @@ async def test_process_batch_notify_frame_counts_recognized_faces(
         ],
     )
 
-    _descs, _, notify_frame = await va._process_batch(_CAMERA, _ordered(3))
+    _descs, _, notify_frame, _sole = await va._process_batch(_CAMERA, _ordered(3))
 
     assert notify_frame == Path("snap_1.jpg")
 
@@ -352,7 +352,7 @@ async def test_process_batch_notify_frame_counts_recognized_faces(
 async def test_process_batch_empty_batch_has_no_notify_frame(
     va: VideoAnalyzer,
 ) -> None:
-    descs, recognized, notify_frame = await va._process_batch(_CAMERA, [])
+    descs, recognized, notify_frame, _sole = await va._process_batch(_CAMERA, [])
 
     assert descs == []
     assert recognized == []
@@ -422,7 +422,9 @@ async def test_process_batch_all_frames_dropped_yields_no_notify_frame(
     """When every frame errors out, there is nothing to attach to a notification."""
     _stub_snapshots(va, [None, None, None])
 
-    descs, recognized, notify_frame = await va._process_batch(_CAMERA, _ordered(3))
+    descs, recognized, notify_frame, _sole = await va._process_batch(
+        _CAMERA, _ordered(3)
+    )
 
     assert descs == []
     assert recognized == []
@@ -443,7 +445,7 @@ async def test_process_batch_person_fallback_frame_can_be_notify_frame(
         ],
     )
 
-    _descs, _, notify_frame = await va._process_batch(_CAMERA, _ordered(2))
+    _descs, _, notify_frame, _sole = await va._process_batch(_CAMERA, _ordered(2))
 
     # snap_1 survives with the neutral person caption; it is the only person
     # frame, so it must be the notification reference image.
@@ -463,7 +465,7 @@ async def test_process_batch_notify_frame_respects_last_8_cap(
         ],
     )
 
-    descs, _, notify_frame = await va._process_batch(_CAMERA, _ordered(10))
+    descs, _, notify_frame, _sole = await va._process_batch(_CAMERA, _ordered(10))
 
     # All 10 captions are distinct and non-human; the cap keeps snap_2..snap_9
     # and the fallback picks the middle kept frame: index 4 of 8 -> snap_6.
@@ -523,7 +525,7 @@ async def test_negated_person_caption_does_not_pollute_person_pool(
         ],
     )
 
-    _descs, _, notify_frame = await va._process_batch(_CAMERA, _ordered(3))
+    _descs, _, notify_frame, _sole = await va._process_batch(_CAMERA, _ordered(3))
 
     assert notify_frame == Path("snap_1.jpg")
 
@@ -542,7 +544,7 @@ async def test_substring_human_terms_do_not_count_as_person(
         ],
     )
 
-    _descs, _, notify_frame = await va._process_batch(_CAMERA, _ordered(3))
+    _descs, _, notify_frame, _sole = await va._process_batch(_CAMERA, _ordered(3))
 
     # No person frames at all: fall back to the middle kept frame.
     assert notify_frame == Path("snap_1.jpg")
@@ -567,7 +569,9 @@ async def test_duplicate_run_keeps_path_of_recognized_face_frame(
         ],
     )
 
-    _descs, recognized, notify_frame = await va._process_batch(_CAMERA, _ordered(2))
+    _descs, recognized, notify_frame, _sole = await va._process_batch(
+        _CAMERA, _ordered(2)
+    )
 
     assert "Alice" in recognized
     assert notify_frame == Path("snap_1.jpg")
@@ -606,7 +610,7 @@ async def test_pick_notify_frame_failure_degrades_to_batch_middle_fallback(
         "_pick_notify_frame",
         side_effect=ValueError("misaligned"),
     ):
-        descs, _, notify_frame = await va._process_batch(_CAMERA, _ordered(1))
+        descs, _, notify_frame, _sole = await va._process_batch(_CAMERA, _ordered(1))
 
     # Descriptions survive so the alert still goes out; frame falls back.
     assert descs == [{f"t+0s. {_WALK_DESC}": ["Indeterminate"]}]
