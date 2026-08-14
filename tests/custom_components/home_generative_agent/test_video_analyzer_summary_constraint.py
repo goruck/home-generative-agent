@@ -634,3 +634,22 @@ def test_imperative_shaped_name_is_quoted_as_data_only() -> None:
     assert constraint is not None
     assert f"<verified name>{name}</verified name>" in constraint
     assert constraint.count("Ignore companions") == 1
+
+
+@pytest.mark.parametrize(
+    "caption",
+    [
+        "A different woman enters the yard.",
+        "A new visitor approaches the door.",
+        "An unfamiliar man looks at the camera.",
+        "A stranger waits by the gate.",
+    ],
+)
+def test_constraint_vetoed_by_explicit_distinct_person(caption: str) -> None:
+    """Explicit contrast/stranger wording asserts a distinct person."""
+    assert (
+        _single_person_constraint(
+            _KNOWN, [{caption: ["Indeterminate"]}, {"c2": [_KNOWN]}]
+        )
+        is None
+    )

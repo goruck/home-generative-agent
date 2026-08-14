@@ -361,17 +361,23 @@ _COOCCURRENT_FACES: Final = 2
 # companion, so plural wording must veto any single-person claim.
 _SINGULAR_HUMAN: Final = (
     r"(?:person|man|woman|boy|girl|child|individual|figure|kid|lady|guy|"
-    r"adult|baby|toddler|teenager|teen|infant)"
+    r"adult|baby|toddler|teenager|teen|infant|stranger|visitor|neighbor|"
+    r"newcomer)"
 )
 _PLURAL_HUMAN_NOUNS: Final = (
     r"(?:people|persons|men|women|boys|girls|children|kids|adults|babies|"
-    r"toddlers|teenagers|teens|infants|individuals|figures|ladies|guys)"
+    r"toddlers|teenagers|teens|infants|individuals|figures|ladies|guys|"
+    r"strangers|visitors|neighbors|newcomers)"
 )
 _PLURAL_HUMAN_RE: Final = re.compile(
     rf"\b(?:{_PLURAL_HUMAN_NOUNS}|couple|crowd|both|"
     rf"(?:two|three|four|five|six|several|multiple)\s+"
     rf"(?:{_SINGULAR_HUMAN}|{_PLURAL_HUMAN_NOUNS})|"
-    rf"(?:another|second|other)\s+{_SINGULAR_HUMAN}|"
+    # Explicit contrast markers assert a DISTINCT person even across frames.
+    rf"(?:another|second|other|different|new|unfamiliar|separate)\s+"
+    rf"{_SINGULAR_HUMAN}|"
+    # Nouns that inherently assert someone other than the resident.
+    r"strangers?|intruders?|trespassers?|"
     # Singular conjunctions: "a man and a woman", "a man and woman", "a
     # person is beside a child". Up to three intervening words; the article
     # before the second term is optional (VLM captions often share one).
@@ -503,8 +509,9 @@ def _single_person_constraint(
         "this footage. Treat every frame description that mentions a single "
         "person as describing that named person; do not narrate those "
         "frames as different people or add an unknown person alongside "
-        "them. Only mention additional people if a single frame description "
-        "itself clearly describes two or more people at once.\n"
+        "them. Only mention additional people if a frame description "
+        "clearly describes two or more people at once, or explicitly "
+        "describes a different or additional person.\n"
         "</single person constraint>"
     )
 
