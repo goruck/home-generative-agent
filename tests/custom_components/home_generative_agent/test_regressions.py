@@ -254,7 +254,8 @@ async def test_video_analyzer_recognize_faces_without_gallery(
     analyzer._httpx_client = _FakeClient()  # type: ignore[assignment]
 
     recognized = await analyzer.recognize_faces(b"not-an-image", "camera.test")
-    assert recognized == ["Indeterminate"]
+    assert [hit.name for hit in recognized] == ["Indeterminate"]
+    assert recognized[0].embedding is None
 
 
 def test_agent_tools_uses_direct_tool_node_injected_store_import() -> None:

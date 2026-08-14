@@ -760,6 +760,12 @@ VIDEO_ANALYZER_EVENT_SELECT_MAX_WINDOW = 300
 VIDEO_ANALYZER_MOTION_CAMERA_MAP: dict = {}
 CONF_VIDEO_ANALYZER_MOTION_CAMERA_MAP = "video_analyzer_motion_camera_map"
 VIDEO_ANALYZER_FACE_CROP = False
+# Max cosine distance for merging a batch-local "Unknown Person" face into the
+# batch's single known identity (issue #543). Deliberately looser than
+# person_gallery.FACE_RECOGNITION_THRESHOLD: the merge only runs when exactly
+# one known person is in the batch and no frame shows two people, so a weaker
+# match suffices.
+VIDEO_ANALYZER_FACE_MERGE_THRESHOLD = 0.85
 CONF_VIDEO_ANALYZER_UNIQUENESS_ENABLED = "video_analyzer_uniqueness_enabled"
 RECOMMENDED_VIDEO_ANALYZER_UNIQUENESS_ENABLED = False
 

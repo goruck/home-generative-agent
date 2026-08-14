@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from custom_components.home_generative_agent.core.video_analyzer import (
+    FaceHit,
     VideoAnalyzer,
     _caption_mentions_person,
 )
@@ -74,9 +75,15 @@ def _stub_snapshots(
         path: Path,  # noqa: ARG001
         camera_id: str,  # noqa: ARG001
         prev_text: str | None = None,
-    ) -> dict[str, list[str]] | None:
+    ) -> tuple[dict[str, list[str]], list[FaceHit]]:
         prev_texts.append(prev_text)
-        return next(reply_iter)
+        fd = next(reply_iter)
+        if not fd:
+            return {}, []
+        # Embedding-less hits mirroring the names, as recognize_faces would
+        # produce when no merge-relevant embedding exists.
+        faces = next(iter(fd.values()))
+        return fd, [FaceHit(name=n) for n in faces]
 
     va._process_snapshot = AsyncMock(side_effect=fake_process)  # type: ignore[method-assign]
     return prev_texts
