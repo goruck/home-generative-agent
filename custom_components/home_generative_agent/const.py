@@ -718,6 +718,9 @@ Counts:
 - Default to ONE unknown person across separate frames.
 - Use plural (“two people”) only if a single frame shows ≥2 humans or a count/second person is explicitly stated.
 
+Verified facts:
+- If a <single person constraint> block is present, it overrides the Presence and Counts rules: every human mention is that person.
+
 Animals:
 - Mention only if explicitly named (cat, dog, bird, deer, raccoon, fox, coyote, squirrel).
 
