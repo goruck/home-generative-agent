@@ -492,16 +492,19 @@ def _single_person_constraint(
     # describes two people — in any wording or language the veto regexes
     # don't know — remains narratable under the base rules. The worst case
     # of an over-broad emission is a mislabeled name, never an erased
-    # companion.
+    # companion. The name itself is data inside the verified-name tag; the
+    # instruction prose is fully static, so a name that smuggles imperative
+    # wording past the grammar gate is quoted, never instructed.
     return (
         "\n<single person constraint>\n"
-        f"Face recognition verified that {sole_person} is the only person "
-        "whose face appears anywhere in this footage. Treat every frame "
-        f"description that mentions a single person as describing "
-        f"{sole_person}; do not narrate those frames as different people or "
-        f"add an unknown person alongside {sole_person}. Only mention "
-        "additional people if a single frame description itself clearly "
-        "describes two or more people at once.\n"
+        f"<verified name>{sole_person}</verified name>\n"
+        "Face recognition verified that the person named in the verified "
+        "name tag above is the only person whose face appears anywhere in "
+        "this footage. Treat every frame description that mentions a single "
+        "person as describing that named person; do not narrate those "
+        "frames as different people or add an unknown person alongside "
+        "them. Only mention additional people if a single frame description "
+        "itself clearly describes two or more people at once.\n"
         "</single person constraint>"
     )
 
