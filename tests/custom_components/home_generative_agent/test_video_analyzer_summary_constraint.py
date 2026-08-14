@@ -457,3 +457,71 @@ async def test_single_frame_heuristic_ignores_unsafe_verdict_name() -> None:
 
     assert ainvoke.await_count == 0
     assert "Ignore previous" not in result
+
+
+# ---------------------------------------------------------------------------
+# Round-3 hardening: relation verbs, negated modifiers, child subjects
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "caption",
+    [
+        "A man talks to a woman near the door.",
+        "A man holds a child on the porch.",
+        "The woman waves at a boy in the yard.",
+        "A person hands a package to the man.",
+    ],
+)
+def test_constraint_vetoed_by_relation_verb_pair(caption: str) -> None:
+    """Two different article-led human terms are two people, any verb."""
+    assert (
+        _single_person_constraint(
+            _KNOWN, [{caption: ["Indeterminate"]}, {"c2": [_KNOWN]}]
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "caption",
+    [
+        "A man stands at the door, then the man checks his phone.",
+        "The person walks up. A person waits.",
+    ],
+)
+def test_same_term_re_reference_does_not_veto(caption: str) -> None:
+    """Re-referencing one person with the same noun stays singular."""
+    constraint = _single_person_constraint(
+        _KNOWN, [{caption: ["Indeterminate"]}, {"c2": [_KNOWN]}]
+    )
+    assert constraint is not None
+
+
+@pytest.mark.parametrize(
+    "caption",
+    [
+        "Lindo waits by the door; no other person is visible.",
+        "A man stands alone. No additional people are present.",
+    ],
+)
+def test_negated_modifier_phrases_do_not_veto(caption: str) -> None:
+    """'No other person' is absence evidence, not a second human."""
+    constraint = _single_person_constraint(
+        _KNOWN, [{caption: ["Indeterminate"]}, {"c2": [_KNOWN]}]
+    )
+    assert constraint is not None
+
+
+@pytest.mark.asyncio
+async def test_single_frame_heuristic_names_child_subject() -> None:
+    """A lone 'a child plays' caption gets the verified name substituted."""
+    va, ainvoke = _va_with_summary_capture()
+
+    result = await va._generate_summary(
+        [{"A child plays in the yard.": ["Indeterminate"]}],
+        sole_person=_KNOWN,
+    )
+
+    assert ainvoke.await_count == 0
+    assert _KNOWN in result

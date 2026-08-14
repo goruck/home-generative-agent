@@ -319,9 +319,12 @@ _HUMAN_TERMS_WORDS: Final = (
 )
 _HUMAN_TERM_RE: Final = re.compile(rf"\b(?:{_HUMAN_TERMS_WORDS})\b")
 # Any "no <human term>" span, regardless of trailing wording — broader than
-# _NEGATED_HUMAN_RE, which only covers "no ... visible" phrasings.
+# _NEGATED_HUMAN_RE, which only covers "no ... visible" phrasings. The
+# optional modifier covers "no other person" / "no additional people".
 _NEGATED_PERSON_RE: Final = re.compile(
-    rf"\bno\s+(?:{_HUMAN_TERMS_WORDS}|one|body|humans?)\b"
+    rf"\bno\s+(?:(?:other|additional|second|more)\s+)?"
+    rf"(?:{_HUMAN_TERMS_WORDS}|one|body|humans?|"
+    r"individuals?|figures?|kids?|ladies|lady|guys?)\b"
 )
 
 
@@ -398,10 +401,27 @@ def _is_enrolled_name(name: str) -> bool:
     )
 
 
+# Article-led singular human mention, e.g. "a man", "the young woman".
+_ARTICLE_HUMAN_RE: Final = re.compile(
+    rf"\b(?:a|an|another|the)\s+(?:\w+\s+){{0,2}}?({_SINGULAR_HUMAN})\b"
+)
+
+
 def _caption_mentions_plural_humans(caption: str) -> bool:
-    """Return True if the caption affirmatively mentions multiple humans."""
+    """
+    Return True if the caption affirmatively mentions multiple humans.
+
+    Beyond plural nouns, counts, and conjunction pairs, two article-led
+    singular mentions with DIFFERENT human terms ("a man talks to a woman",
+    "the man holds a child") count as two people regardless of the verb
+    between them — relation verbs are unenumerable. Same-term re-reference
+    ("a man ... the man") stays singular, since captions re-reference one
+    person with the same noun.
+    """
     scrubbed = _NEGATED_PERSON_RE.sub(" ", _normalize_caption(caption))
-    return bool(_PLURAL_HUMAN_RE.search(scrubbed))
+    if _PLURAL_HUMAN_RE.search(scrubbed):
+        return True
+    return len(set(_ARTICLE_HUMAN_RE.findall(scrubbed))) >= _COOCCURRENT_FACES
 
 
 def _verified_sole_person(name_lists: list[list[str]]) -> str | None:

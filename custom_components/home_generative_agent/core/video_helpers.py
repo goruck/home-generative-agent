@@ -402,9 +402,9 @@ def format_subject(identities: Iterable[str], text: str) -> str | None:
 
 
 def apply_name_substitution(text: str, subject: str, *, had_known_name: bool) -> str:
-    """Swap generic 'the/a person/man/woman' with the known name when possible."""
+    """Swap the first generic human mention with the known name when possible."""
     if not had_known_name:
         return text
     # Replace only the first generic mention to keep phrasing natural
-    pattern = r"\b(?:the|a)\s+(?:person|man|woman)\b"
+    pattern = r"\b(?:the|a)\s+(?:person|man|woman|boy|girl|child|kid|lady|guy)\b"
     return re.sub(pattern, subject, text, count=1, flags=re.IGNORECASE)
