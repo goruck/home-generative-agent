@@ -40,6 +40,7 @@ from .discovery_semantic import (
     candidate_semantic_key,
     is_battery_level_entity_id,
     rule_semantic_key,
+    sanitize_environmental_candidate,
 )
 from .evidence_paths import is_derived_path
 from .logging_utils import RepeatingLogLimiter
@@ -568,11 +569,6 @@ class SentinelDiscoveryEngine:
         dropped: list[dict[str, str]] = []
         entity_descriptor_index = _build_entity_descriptor_index(known_entity_ids or [])
         for candidate in candidates:
-            key = candidate_semantic_key(candidate)
-            # Bug 2 fix: null-key candidates (unknown subject/predicate) fall
-            # back to a title+summary hash so they are still deduplicated.
-            identity_key = key or _candidate_identity_hash(candidate)
-
             # Hard filter: candidates whose every evidence_path is a
             # 'derived.*' context path have no concrete entity evidence and
             # can never be promoted to a rule.  Gate BEFORE the dedup check
@@ -615,6 +611,23 @@ class SentinelDiscoveryEngine:
                     }
                 )
                 continue
+
+            # Deterministic enforcement of the prompt's ENVIRONMENTAL SENSOR
+            # RULE (issue #541): the LLM keeps decorating environmental
+            # statistical candidates with occupancy/night context the
+            # activated rule never has, so strip it before keying/storage —
+            # the approval card must describe the rule that Approve creates.
+            # Runs AFTER the derived-only and entity-text-mismatch guards so
+            # those judge the LLM's actual output, not the rewritten copy
+            # (red-team review: a hallucinated entity named only inside a
+            # stripped clause must still drop the candidate).
+            sanitized = sanitize_environmental_candidate(candidate)
+            if sanitized is not None:
+                candidate = sanitized  # noqa: PLW2901
+            key = candidate_semantic_key(candidate)
+            # Bug 2 fix: null-key candidates (unknown subject/predicate) fall
+            # back to a title+summary hash so they are still deduplicated.
+            identity_key = key or _candidate_identity_hash(candidate)
 
             dedupe_reason: str | None = None
             if identity_key in existing_keys:

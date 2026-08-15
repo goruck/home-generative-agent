@@ -24,6 +24,10 @@ DISCOVERY_OUTPUT_SCHEMA = vol.Schema(
                 vol.Optional("suggested_type"): str,
                 vol.Optional("semantic_key"): str,
                 vol.Optional("dedupe_reason"): str,
+                # Set by sanitize_environmental_candidate at ingestion;
+                # declared so a stored payload round-tripped through this
+                # PREVENT_EXTRA schema is not rejected (red-team review).
+                vol.Optional("environmental_context_stripped"): bool,
             }
         ],
         vol.Optional("filtered_candidates"): [

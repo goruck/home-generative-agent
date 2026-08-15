@@ -506,6 +506,20 @@ Also: unknown action types fail closed (a future HA construct over-prompts rathe
 
 ## Discovery
 
+### Sanitized candidate IDs can collide across distinct sensors
+
+**What:** `_strip_env_context_id_tokens` (discovery_semantic.py) folds occupancy/time-of-day tail tokens off environmental candidate IDs — not just `*_away`/`*_day`/`*_night` but the full `_ENV_CONTEXT_ID_TOKENS` set (`home`, `daytime`, `nighttime`, `occupied`, `unoccupied`, `overnight`, `present`, …) plus dangling connectives, so e.g. `..._deviation_home` and `..._deviation_away` both collapse to `..._deviation` — so two candidates with different sensors (distinct semantic keys, both stored) can converge on one `candidate_id`; `discovery_store.find_candidate` returns the newest match and `proposal_store` lookups are ID-keyed, so promoting one card could resolve to the other candidate or report a false existing-rule collision (Codex adversarial, env-context-sanitizer ship 2026-08-15).
+
+**Why:** Pre-existing hazard class — the LLM itself reuses generic IDs across cycles (a stored draft literally carries `candidate_id: "c1"`) — and `find_candidate`'s newest-first order resolves to the card the user most recently saw, so the sanitizer only widens the window slightly. Not worth blocking the ship; worth closing structurally.
+
+**How to apply:** Batch-level guard in `_filter_novel_candidates` (revert the ID strip when the sanitized ID would collide with a different semantic key in the same batch), plus make `find_candidate`/promote verify the semantic key when both a candidate_id and key are known.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** —
+
+---
+
 ### Domainless legacy battery object-IDs register rules the candidate key never covers
 
 **What:** `_find_battery_sensor_entity_ids` (proposal_templates.py) accepts domainless legacy object IDs containing "battery" (`entities[entity_id=zamek_baterie_battery]`), so the normalizer registers a `low_battery_sensors` rule keyed `entities=zamek_baterie_battery` — but `candidate_semantic_key`'s extraction regexes require `domain.object` shapes, so the candidate keys `None` and dedups only by identity hash. The activated rule can never cover re-proposals of the same idea worded differently.

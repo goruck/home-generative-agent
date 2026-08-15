@@ -13,7 +13,7 @@ from typing import Any
 # for the drift hazard the mirrors created (issue #518 review noted an
 # asymmetric pair keys a candidate home=1 while its activated rule keys
 # home=0, breaking dedup in both directions; issue #524).
-from .evidence_paths import night_signal, presence_signal
+from .evidence_paths import canonicalize_evidence_path, night_signal, presence_signal
 
 _SEMANTIC_KEY_CONTEXT_RE = re.compile(r"\|(?:template|night|home|scope)=[^|]+")
 # Quote characters the discovery LLM sometimes wraps around entity IDs in
@@ -462,14 +462,7 @@ def candidate_semantic_key(  # noqa: PLR0912, PLR0915
 ) -> str | None:
     """Build a stable semantic key for a discovery candidate."""
     evidence_paths = _string_list(candidate.get("evidence_paths"))
-    text = " ".join(
-        [
-            str(candidate.get("title", "")),
-            str(candidate.get("summary", "")),
-            str(candidate.get("pattern", "")),
-            str(candidate.get("suggested_type", "")),
-        ]
-    ).lower()
+    text = _candidate_text_blob(candidate)
     # Mirrors the normalizer's slug_text (issue #522): candidate_id is
     # often the only English surface when the discovery LLM writes prose in
     # the home's locale, and the normalizer routes such candidates to
@@ -989,3 +982,350 @@ def _string_list(value: Any) -> list[str]:
 
 def _contains_any(text: str, needles: tuple[str, ...]) -> bool:
     return any(needle in text for needle in needles)
+
+
+# --- Environmental occupancy-context sanitizer (issue #541 field data) ---
+#
+# The discovery prompt's ENVIRONMENTAL SENSOR RULE forbids conditioning
+# environmental candidates on occupancy, but the LLM violates it every cycle,
+# storing draft cards that promise conditioning ("While Away During Day") the
+# activated context-free rule never has. This section is the deterministic
+# enforcement layer. Design constraints proven by adversarial review:
+#
+# - Path recognition delegates to evidence_paths.canonicalize_evidence_path —
+#   the local-regex version missed quoted, "!"-negated, "is false", and
+#   bare-alias spellings that keying itself counts as context.
+# - A prose clause is removed only when its content is ENTIRELY context
+#   vocabulary plus glue words ("pure decoration"): first-trigger-wins
+#   removal gutted "alert when <core> while nobody is home" to "alert.",
+#   and bare-word vocabulary matched "home temperature", "Home Assistant",
+#   and "7-day average" (cross-model adversarial, reproduced).
+# - Threshold-prose candidates are excluded outright: a day-only threshold
+#   keys night=any|home=any, and clause removal swallowed "exceeds 1000 ppm
+#   during the day", silently rewriting an approvable threshold rule into a
+#   baseline rule (cross-model adversarial, reproduced).
+# - Per-field length cap: the removal loop is quadratic in the worst case
+#   and DISCOVERY_OUTPUT_SCHEMA does not bound prose length — an 80 KB
+#   hostile field measurably stalled the event loop for ~50 s.
+# - The sanitized candidate must key identically to the original; when the
+#   only environmental signal lives inside a removed clause the predicate
+#   flips to unknown and the candidate becomes unpromotable, so any key
+#   drift reverts the whole sanitize (adversarial review, reproduced).
+
+_ENV_CONTEXT_CANONICAL_PATHS = frozenset(
+    {
+        "derived.anyone_home",
+        "derived.people_home",
+        "derived.is_night",
+    }
+)
+
+# Clause openers. "at night", "if away", and "with nobody home" decorate
+# candidates without the while/when spellings (red-team review), so the
+# trigger set is broad — safety comes from the pure-decoration residue
+# check, not from trigger rarity.
+_ENV_CONTEXT_CLAUSE_TRIGGER_RE = re.compile(
+    r"\b(while|whilst|when|during|at|if|with)\b",
+    re.IGNORECASE,
+)
+# A "." bounds a clause only when it is not part of a dotted token
+# ("derived.anyone_home", "pm2.5") — otherwise the machine-syntax clause
+# "while not derived.anyone_home" truncates at "derived" and is never
+# recognized as pure decoration.
+_ENV_CLAUSE_BREAK_RE = re.compile(r"[,;:]|\.(?!\w)")
+# Context vocabulary, matched per whole token after a non-alphanumeric
+# split (so machine spellings like "derived.anyone_home" decompose into
+# vocabulary tokens too).
+_ENV_CONTEXT_TOKEN_RE = re.compile(
+    r"^(?:home|away|night(?:time)?|overnight|day(?:time)?|occupan\w*|occupied|"
+    r"unoccupied|presen(?:t|ce)|nobody|noone|anyone|someone|everyone|people)$",
+    re.IGNORECASE,
+)
+# Connective/filler tokens that may appear inside a pure-decoration clause
+# without making it substantive ("while it is daytime and someone is home").
+_ENV_CLAUSE_GLUE_TOKENS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "at",
+        "currently",
+        "derived",
+        "during",
+        "false",
+        "hour",
+        "hours",
+        "if",
+        "in",
+        "is",
+        "it",
+        "no",
+        "not",
+        "of",
+        "one",
+        "only",
+        "or",
+        "still",
+        "the",
+        "true",
+        "was",
+        "were",
+        "when",
+        "while",
+        "whilst",
+        "with",
+    }
+)
+_ENV_PARENTHETICAL_RE = re.compile(r"\s*\(([^()]{0,120})\)")
+_ENV_TOKEN_SPLIT_RE = re.compile(r"[^a-z0-9]+")
+# Fields longer than this skip prose stripping entirely (structural strips
+# still apply): the clause-removal loop re-scans after each removal, and
+# schema-valid hostile prose has no length bound.
+_MAX_PROSE_STRIP_LEN = 2000
+_MAX_CLAUSE_STRIP_PASSES = 10
+_MIN_STRIPPED_PROSE_LEN = 8
+
+# candidate_id tokens popped from the tail (garage_temp_baseline_deviation_
+# away_day -> garage_temp_baseline_deviation). Trailing-only so mid-slug
+# tokens stay untouched.
+_ENV_CONTEXT_ID_TOKENS = frozenset(
+    {
+        "away",
+        "day",
+        "daytime",
+        "home",
+        "night",
+        "nighttime",
+        "occupied",
+        "overnight",
+        "present",
+        "unoccupied",
+    }
+)
+# Connectives left dangling once a context token is popped
+# ("co2_while_away" -> "co2_while" -> "co2"); popped only AFTER a context
+# pop so legitimate slugs never lose these tokens.
+_ENV_ID_CONNECTIVE_TOKENS = frozenset(
+    {"and", "at", "during", "if", "in", "no", "not", "when", "while", "whilst", "with"}
+)
+
+
+def _is_env_context_path(path: str) -> bool:
+    """Report whether a path canonicalizes to an occupancy/night derived path."""
+    canonical = canonicalize_evidence_path(path)
+    return canonical.removeprefix("not ").strip() in _ENV_CONTEXT_CANONICAL_PATHS
+
+
+def _is_pure_context_clause(clause: str) -> bool:
+    """
+    Report whether the clause is entirely context vocabulary plus glue.
+
+    Any substantive token ("temperature", "assistant", "7", "average")
+    disqualifies the clause, so "when the home temperature deviates",
+    "when Home Assistant restarts", and "the 7-day average" all survive
+    while "while it is daytime and someone is home" is removed.
+    """
+    saw_vocab = False
+    for token in _ENV_TOKEN_SPLIT_RE.split(clause.lower()):
+        if not token:
+            continue
+        if _ENV_CONTEXT_TOKEN_RE.match(token):
+            saw_vocab = True
+            continue
+        if token not in _ENV_CLAUSE_GLUE_TOKENS:
+            return False
+    return saw_vocab
+
+
+def _strip_env_context_clauses(text: str) -> str:
+    """
+    Remove pure-decoration occupancy/time clauses from candidate prose.
+
+    A clause runs from a trigger word to the next punctuation break (or end
+    of string) and is removed only when _is_pure_context_clause holds.
+    Parenthetical decoration ("(Away, Daytime)") is removed by the same
+    residue test. Falls back to the original text when the remainder is too
+    short to stand as prose; oversized fields are returned untouched (see
+    _MAX_PROSE_STRIP_LEN).
+    """
+    if len(text) > _MAX_PROSE_STRIP_LEN:
+        return text
+    removed_any = False
+    result = text
+    # Bounded re-scan: spans shift after each removal, and every pass
+    # removes at least one trigger word, so the pass cap is a formality.
+    for _ in range(_MAX_CLAUSE_STRIP_PASSES):
+        match = None
+        for candidate_match in _ENV_CONTEXT_CLAUSE_TRIGGER_RE.finditer(result):
+            break_match = _ENV_CLAUSE_BREAK_RE.search(result, candidate_match.end())
+            end = break_match.start() if break_match else len(result)
+            clause = result[candidate_match.start() : end]
+            if _is_pure_context_clause(clause):
+                match = (candidate_match.start(), end)
+                break
+        if match is None:
+            break
+        start, end = match
+        # Eat the whitespace before the trigger so no double space remains.
+        while start > 0 and result[start - 1].isspace():
+            start -= 1
+        result = result[:start] + result[end:]
+        removed_any = True
+
+    def _drop_pure_parenthetical(paren_match: re.Match[str]) -> str:
+        if _is_pure_context_clause(paren_match.group(1)):
+            return ""
+        return paren_match.group(0)
+
+    without_parens = _ENV_PARENTHETICAL_RE.sub(_drop_pure_parenthetical, result)
+    if without_parens != result:
+        result = without_parens
+        removed_any = True
+    if not removed_any:
+        return text
+    # Cleanup: separators left dangling where a clause was cut out.
+    result = re.sub(r"\s+([.,;:])", r"\1", result)
+    result = re.sub(r"([.,;:]){2,}", r"\1", result)
+    result = re.sub(r"\s{2,}", " ", result).strip(" ,;:")
+    if len(result.strip()) < _MIN_STRIPPED_PROSE_LEN:
+        return text
+    return result
+
+
+def _strip_env_context_id_tokens(candidate_id: str) -> str:
+    """Pop trailing context tokens (and then-dangling connectives) from a slug."""
+    tokens = candidate_id.split("_")
+    popped_context = False
+    while len(tokens) > 1:
+        tail = tokens[-1].lower()
+        if tail in _ENV_CONTEXT_ID_TOKENS:
+            # Protect the time_of_day template slug: popping its "day"
+            # would corrupt attic_temp_time_of_day_anomaly-style ids.
+            if tail == "day" and [t.lower() for t in tokens[-3:]] == [
+                "time",
+                "of",
+                "day",
+            ]:
+                break
+            tokens.pop()
+            popped_context = True
+            continue
+        if popped_context and tail in _ENV_ID_CONNECTIVE_TOKENS:
+            tokens.pop()
+            continue
+        break
+    return "_".join(tokens)
+
+
+def _candidate_text_blob(candidate: dict[str, Any]) -> str:
+    """Lowercased prose blob shared by keying and the sanitizer gate."""
+    return " ".join(
+        [
+            str(candidate.get("title", "")),
+            str(candidate.get("summary", "")),
+            str(candidate.get("pattern", "")),
+            str(candidate.get("suggested_type", "")),
+        ]
+    ).lower()
+
+
+def _env_sanitizer_gate_passes(key: str, candidate: dict[str, Any]) -> bool:
+    """
+    Gate the sanitizer to collapsed-key environmental statistical candidates.
+
+    Only that shape may be touched: the key must read subject=sensor,
+    predicate=power_anomaly, night=any, home=any; threshold prose and
+    non-environmental candidates are excluded.
+    """
+    fields = dict(part.split("=", 1) for part in key.split("|")[1:] if "=" in part)
+    if (
+        fields.get("subject") != "sensor"
+        or fields.get("predicate") != "power_anomaly"
+        or fields.get("night") != "any"
+        or fields.get("home") != "any"
+    ):
+        return False
+    text = _candidate_text_blob(candidate)
+    # Threshold prose routes to sensor_threshold_condition; clause removal
+    # would swallow the threshold phrase and silently reroute the rule
+    # (cross-model adversarial, reproduced) — thresholds pass untouched.
+    if _has_numeric_threshold(text):
+        return False
+    evidence_paths = _string_list(candidate.get("evidence_paths"))
+    entity_ids = _extract_entity_ids(evidence_paths)
+    named_battery_ids = _named_battery_sensor_entity_ids(entity_ids)
+    return _has_environmental_candidate_signal(
+        text, entity_ids, named_battery_ids, "sensor"
+    )
+
+
+def sanitize_environmental_candidate(
+    candidate: dict[str, Any],
+) -> dict[str, Any] | None:
+    """
+    Strip occupancy/night decoration from an environmental statistical candidate.
+
+    Deterministic enforcement of the discovery prompt's ENVIRONMENTAL SENSOR
+    RULE (issue #541): drops occupancy/night derived evidence paths (every
+    spelling canonicalize_evidence_path recognizes), pure-decoration prose
+    clauses, and trailing context tokens from the candidate_id (which seeds
+    the rule ID) BEFORE the candidate is keyed and stored, so the approval
+    card describes the context-free rule that Approve actually creates.
+
+    Gated on the candidate's own collapsed key (subject=sensor,
+    predicate=power_anomaly, night=any, home=any), the absence of numeric
+    threshold prose, and the shared environmental verdict — threshold
+    candidates (whose sensor_threshold_condition params legitimately keep
+    require_night/require_away/require_home), availability candidates, and
+    every non-environmental leg pass through untouched. The sanitized copy
+    must derive the SAME semantic key as the original; any drift reverts the
+    sanitize entirely. Returns the sanitized copy, or None when the
+    candidate is out of scope, nothing needed stripping, or the key-drift
+    guard fired. The environmental_context_stripped marker means decoration
+    was removed; prose stripping is best-effort, so residual decoration
+    (e.g. a leading "Nighttime" adjective) may survive in rare shapes.
+    """
+    key = candidate_semantic_key(candidate)
+    if not key or not _env_sanitizer_gate_passes(key, candidate):
+        return None
+
+    changed = False
+    sanitized: dict[str, Any] = dict(candidate)
+
+    raw_paths = candidate.get("evidence_paths")
+    if isinstance(raw_paths, list):
+        kept_paths = [
+            path
+            for path in raw_paths
+            if not (isinstance(path, str) and _is_env_context_path(path))
+        ]
+        if len(kept_paths) != len(raw_paths):
+            sanitized["evidence_paths"] = kept_paths
+            changed = True
+
+    for field in ("title", "summary", "pattern"):
+        value = candidate.get(field)
+        if isinstance(value, str) and value:
+            stripped = _strip_env_context_clauses(value)
+            if stripped != value:
+                sanitized[field] = stripped
+                changed = True
+
+    candidate_id = candidate.get("candidate_id")
+    if isinstance(candidate_id, str) and candidate_id:
+        stripped_id = _strip_env_context_id_tokens(candidate_id)
+        if stripped_id != candidate_id:
+            sanitized["candidate_id"] = stripped_id
+            changed = True
+
+    if not changed:
+        return None
+    # Key-invariance guard: when the only environmental signal lived inside
+    # a removed clause, the sanitized candidate would key predicate=unknown
+    # and become unpromotable — revert rather than corrupt (adversarial
+    # review, reproduced).
+    if candidate_semantic_key(sanitized) != key:
+        return None
+    sanitized["environmental_context_stripped"] = True
+    return sanitized
