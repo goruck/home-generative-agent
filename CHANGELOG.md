@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.30.4] - 2026-08-15
+
+### Fixed
+
+- **Voice satellites can set timers now.** "Set a timer for two minutes" used to make the agent cancel zero timers and then claim it cannot set timers at all — on every timer-capable satellite (HA Voice PE, ESPHome satellites), on the very first try. Home Assistant exposes the seven real timer tools (`HassStartTimer`, `HassCancelTimer`, …) only to requests from timer-capable devices, but the retrieval index was built once at startup with no device, so those tools could never enter it and never be retrieved — the model saw exactly one timer-shaped tool, the unconditionally exposed `HassCancelAllTimers`, and used it. The index now reconciles with the live tool set every turn: a cheap key comparison detects live tools the index has never seen, and any gap is discovered and indexed inline before retrieval runs, so the triggering turn itself — the user's actual "set a timer" — already binds `HassStartTimer`. Turns where nothing is missing cost one set comparison, no discovery calls, no store writes. (#554)
+- **Tools of a configured-but-failed LLM API are no longer offered to the model.** The same reconciliation gap had a mirror image: when an MCP server failed to load for a turn, its tools were still retrieved from the index and bound, and every call died at dispatch with "API not available". Retrieval candidates — including the `GetLiveContext` and `add_automation` force-injections — are now filtered against the tools actually loaded this turn, which also keeps device-gated tools indexed by one device (satellite timer tools) from binding in another context that doesn't have them (browser chat). PIN-confirmation injection is deliberately exempt. (#554)
+
 ## [3.30.3] - 2026-08-15
 
 ### Fixed

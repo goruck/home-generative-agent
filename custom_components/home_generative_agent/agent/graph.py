@@ -719,6 +719,33 @@ def _get_allowed_api_ids(config: RunnableConfig) -> set[str]:
     return set(active_api_ids) | {"hga_local"}
 
 
+def _get_live_tool_ids(config: RunnableConfig) -> set[tuple[str, str]] | None:
+    """
+    Return the (api_id, tool_name) pairs live for this conversation turn.
+
+    The retrieval index is global and cumulative: it can hold tools that do not
+    exist for the current request — device-gated Assist tools indexed from a
+    satellite turn (timer intents), or tools of a configured API that failed to
+    load this turn. Only tools present in the loaded ``ha_llm_api`` (plus local
+    LangChain tools) are callable, so candidates are filtered against this set.
+
+    Returns None to fail open when ``ha_llm_api`` is absent or has no ``apis``
+    attribute, preserving pre-filter behavior for tests and robot runs.
+    """
+    configurable = config.get("configurable", {})
+    ha_llm_api = configurable.get("ha_llm_api")
+    if ha_llm_api is None or not hasattr(ha_llm_api, "apis"):
+        return None
+    live: set[tuple[str, str]] = {
+        (api_id, tool.name)
+        for api_id, api in ha_llm_api.apis.items()
+        for tool in api.tools
+    }
+    langchain_tools = configurable.get("langchain_tools") or {}
+    live |= {("hga_local", name) for name in langchain_tools}
+    return live
+
+
 _INTENT_SPLIT_RE = re.compile(
     r"(?<=[.!?])\s+|,\s*|\band\b\s+|\bthen\b\s+|\balso\b\s+",
     re.IGNORECASE,
@@ -1623,6 +1650,7 @@ async def _get_tool_by_name(
     config: RunnableConfig,
     name: str,
     allowed_api_ids: set[str],
+    live_tool_ids: set[tuple[str, str]] | None = None,
 ) -> RawTool | None:
     """Fetch a specific tool by name from the index, falling back to config tools."""
     for api_id in sorted(allowed_api_ids):
@@ -1647,6 +1675,12 @@ async def _get_tool_by_name(
         if val.get("name") != name or val.get("api_id") not in allowed_api_ids:
             continue
 
+        if (
+            live_tool_ids is not None
+            and (val["api_id"], val["name"]) not in live_tool_ids
+        ):
+            continue
+
         return RawTool(
             name=val["name"],
             api_id=val["api_id"],
@@ -1662,7 +1696,7 @@ async def _get_tool_by_name(
     return None
 
 
-async def _retrieve_tools(
+async def _retrieve_tools(  # noqa: PLR0915
     state: State,
     config: RunnableConfig,
     *,
@@ -1681,6 +1715,16 @@ async def _retrieve_tools(
         _get_actuation_safety_tools(store, config, query, allowed_api_ids),
         _get_pending_pin_tools(state["messages"], store),
     )
+
+    # 1b. Drop index candidates that are not live this turn (device-gated tools
+    # indexed from another device's turn, tools of a failed API) before the
+    # merge, so dead candidates never consume merge slots. None = fail open.
+    live_tool_ids = _get_live_tool_ids(config)
+    if live_tool_ids is not None:
+        rag_tools = [t for t in rag_tools if (t["api_id"], t["name"]) in live_tool_ids]
+        safety_tools = [
+            t for t in safety_tools if (t["api_id"], t["name"]) in live_tool_ids
+        ]
 
     # 2. Merge: safety tools take priority; RAG fills remaining slots.
     #
@@ -1754,7 +1798,7 @@ async def _retrieve_tools(
         ]
         if not any(t["name"] == "GetLiveContext" for t in all_candidates):
             fetched_live_ctx = await _get_tool_by_name(
-                store, config, "GetLiveContext", allowed_api_ids
+                store, config, "GetLiveContext", allowed_api_ids, live_tool_ids
             )
             if fetched_live_ctx is not None:
                 all_candidates = [fetched_live_ctx, *all_candidates]
@@ -1768,7 +1812,7 @@ async def _retrieve_tools(
     # read-only open-state queries, so the deduplication check prevents doubling.
     if not any(t["name"] == "GetLiveContext" for t in all_candidates):
         fetched_live_ctx = await _get_tool_by_name(
-            store, config, "GetLiveContext", allowed_api_ids
+            store, config, "GetLiveContext", allowed_api_ids, live_tool_ids
         )
         if fetched_live_ctx is not None:
             all_candidates = [*all_candidates, fetched_live_ctx]
@@ -1793,7 +1837,7 @@ async def _retrieve_tools(
         and not any(t["name"] == "add_automation" for t in all_candidates)
     ):
         fetched_add_automation = await _get_tool_by_name(
-            store, config, "add_automation", allowed_api_ids
+            store, config, "add_automation", allowed_api_ids, live_tool_ids
         )
         if fetched_add_automation is not None:
             all_candidates = [*all_candidates, fetched_add_automation]

@@ -1191,8 +1191,11 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 response=intent_response, conversation_id=conversation_id
             )
 
-        # --- Global Tool Indexing (Background) ---
-        await self._async_index_tools(llm_context, runtime_data)
+        # --- Global Tool Indexing ---
+        # Passing llm_api enables the per-turn top-up: live tools missing from
+        # the index (device-gated Assist tools) are discovered and indexed
+        # inline before retrieval runs for this turn.
+        await self._async_index_tools(llm_context, runtime_data, llm_api)
 
         if not options.get(CONF_SCHEMA_FIRST_YAML, False) and _is_dashboard_request(
             user_input.text
@@ -1483,19 +1486,25 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 _LOGGER.warning("Failed to index local tool %s: %s", t_name, err)
 
     async def _async_index_tools(
-        self, llm_context: llm.LLMContext, runtime_data: HGAData
+        self,
+        llm_context: llm.LLMContext,
+        runtime_data: HGAData,
+        llm_api: MultiLLMAPI | None = None,
     ) -> None:
         """
-        Discover and index tools in the background vector store.
+        Discover and index tools in the vector store.
 
         Called at startup (async_added_to_hass) so the index is ready before the
-        first user query. Also called per-turn as a no-op guard once ready.
+        first user query. Also called per-turn with the loaded ``llm_api``: once
+        the index is ready, a set comparison of live tool keys against the cached
+        hashes detects tools that exist this turn but were never indexed —
+        device-gated Assist tools (e.g. the timer intents, exposed only when a
+        timer-capable satellite is the requester) can never appear in the
+        device-less startup pass. Any missing key triggers a rediscovery whose
+        index write is awaited inline, so the triggering turn already retrieves
+        from the topped-up index.
         """
-        if (
-            runtime_data.tool_index_ready
-            or runtime_data.tool_indexing_in_progress
-            or runtime_data.tool_index_failed
-        ):
+        if runtime_data.tool_indexing_in_progress or runtime_data.tool_index_failed:
             _LOGGER.debug(
                 "Tool index guard skipped indexing: ready=%s indexing=%s "
                 "failed=%s cached_hashes=%d.",
@@ -1505,6 +1514,24 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 len(runtime_data.tool_content_hashes),
             )
             return
+        inline_delta = False
+        if runtime_data.tool_index_ready:
+            if llm_api is None:
+                return
+            live_keys = {
+                f"{api_id}::{tool.name}"
+                for api_id, api in llm_api.apis.items()
+                for tool in api.tools
+            }
+            missing_keys = live_keys - runtime_data.tool_content_hashes.keys()
+            if not missing_keys:
+                return
+            inline_delta = True
+            _LOGGER.info(
+                "Tool index top-up: %d live tool(s) not in index: %s.",
+                len(missing_keys),
+                sorted(missing_keys),
+            )
         runtime_data.tool_indexing_in_progress = True
         async_dispatcher_send(self.hass, SIGNAL_TOOL_INDEX_UPDATED, "indexing", 0)
 
@@ -1525,16 +1552,29 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 "Tool index starting: %d tool(s) queued for indexing/update.",
                 len(new_hashes),
             )
-            self.hass.async_create_task(
-                _run_tool_index_background(
+            if inline_delta:
+                # Await the write so this very turn (the one whose device
+                # exposed the new tools) retrieves from the updated index.
+                # Failure semantics are identical to the background path:
+                # tool_index_failed is set and the turn proceeds on fallback.
+                await _run_tool_index_background(
                     index_tasks=index_tasks,
                     tool_hashes=new_hashes,
                     rd=runtime_data,
                     hass=self.hass,
                 )
-            )
+            else:
+                self.hass.async_create_task(
+                    _run_tool_index_background(
+                        index_tasks=index_tasks,
+                        tool_hashes=new_hashes,
+                        rd=runtime_data,
+                        hass=self.hass,
+                    )
+                )
         else:
             runtime_data.tool_index_ready = True
+            runtime_data.tool_indexing_in_progress = False
             _LOGGER.info(
                 "Tool index ready: no tool changes detected (%d cached hash(es)).",
                 len(runtime_data.tool_content_hashes),

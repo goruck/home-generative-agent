@@ -100,6 +100,7 @@ from homeassistant.components import conversation as ha_conversation  # noqa: E4
 
 from custom_components.home_generative_agent.conversation import (  # noqa: E402
     _STREAM_ERROR_REASON_MAX_CHARS,
+    HGAConversationEntity,
     MultiLLMAPI,
     _get_stt_hallucination_exact_patterns,
     _get_stt_hallucination_patterns,
@@ -498,3 +499,249 @@ def test_recommit_skips_non_assistant_final_content() -> None:
 
     assert chat_log.recommitted == []
     assert chat_log.content == [user_item]
+
+
+# ---------------------------------------------------------------------------
+# _async_index_tools: per-turn top-up guard (issue #554)
+# ---------------------------------------------------------------------------
+
+_CONV = "custom_components.home_generative_agent.conversation"
+
+
+def _index_entity() -> Any:
+    """Build a bare entity: _async_index_tools only touches self.hass."""
+    entity = HGAConversationEntity.__new__(HGAConversationEntity)
+    entity.hass = MagicMock()
+    # Close coroutines handed to async_create_task so un-run background
+    # indexing never triggers "coroutine was never awaited" warnings.
+    entity.hass.async_create_task = MagicMock(side_effect=lambda coro: coro.close())
+    return entity
+
+
+def _index_runtime_data(**overrides: Any) -> Any:
+    rd = types.SimpleNamespace(
+        tool_index_ready=True,
+        tool_indexing_in_progress=False,
+        tool_index_failed=False,
+        tool_content_hashes={},
+        store=MagicMock(),
+    )
+    for key, value in overrides.items():
+        setattr(rd, key, value)
+    return rd
+
+
+def _loaded_llm_api(*tool_names: str) -> MultiLLMAPI:
+    """MultiLLMAPI whose assist API exposes the given tools live."""
+    api: Any = types.SimpleNamespace(
+        tools=[types.SimpleNamespace(name=name) for name in tool_names]
+    )
+    return MultiLLMAPI({"assist": api}, routing_map={})
+
+
+@pytest.mark.asyncio
+async def test_index_tools_fast_path_all_live_keys_hashed() -> None:
+    """All live tool keys already hashed: zero discovery, zero store writes."""
+    entity = _index_entity()
+    rd = _index_runtime_data(tool_content_hashes={"assist::HassCancelAllTimers": "h1"})
+
+    with (
+        patch.object(
+            entity, "_async_discover_provider_tools", new=AsyncMock()
+        ) as provider_mock,
+        patch.object(
+            entity, "_async_discover_local_tools", new=AsyncMock()
+        ) as local_mock,
+    ):
+        await entity._async_index_tools(
+            MagicMock(), rd, _loaded_llm_api("HassCancelAllTimers")
+        )
+
+    provider_mock.assert_not_called()
+    local_mock.assert_not_called()
+    entity.hass.async_create_task.assert_not_called()
+    assert rd.tool_indexing_in_progress is False
+
+
+@pytest.mark.asyncio
+async def test_index_tools_delta_missing_key_indexes_inline() -> None:
+    """A live tool missing from the index triggers inline (awaited) indexing."""
+    entity = _index_entity()
+    rd = _index_runtime_data(tool_content_hashes={"assist::HassCancelAllTimers": "h1"})
+
+    async def fake_provider_discovery(
+        _llm_context: Any,
+        _runtime_data: Any,
+        _api_ids: Any,
+        index_tasks: list[Any],
+        new_hashes: dict[str, str],
+    ) -> None:
+        index_tasks.append(MagicMock())
+        new_hashes["assist::HassStartTimer"] = "h2"
+
+    with (
+        patch.object(
+            entity,
+            "_async_discover_provider_tools",
+            new=AsyncMock(side_effect=fake_provider_discovery),
+        ),
+        patch.object(entity, "_async_discover_local_tools", new=AsyncMock()),
+        patch(f"{_CONV}.llm.async_get_apis", return_value=[]),
+        patch(f"{_CONV}.async_dispatcher_send"),
+        patch(f"{_CONV}.gather_store_puts_in_chunks", new=AsyncMock()) as gather_mock,
+    ):
+        await entity._async_index_tools(
+            MagicMock(),
+            rd,
+            _loaded_llm_api("HassCancelAllTimers", "HassStartTimer"),
+        )
+
+    # Inline await: the write ran before returning, not via a background task,
+    # so the triggering turn already retrieves from the topped-up index.
+    gather_mock.assert_awaited_once()
+    entity.hass.async_create_task.assert_not_called()
+    assert rd.tool_content_hashes["assist::HassStartTimer"] == "h2"
+    assert rd.tool_index_ready is True
+    assert rd.tool_indexing_in_progress is False
+
+
+@pytest.mark.asyncio
+async def test_index_tools_delta_failure_matches_background_semantics() -> None:
+    """An inline index-write failure sets tool_index_failed without raising."""
+    entity = _index_entity()
+    rd = _index_runtime_data(tool_content_hashes={})
+
+    async def fake_provider_discovery(
+        _llm_context: Any,
+        _runtime_data: Any,
+        _api_ids: Any,
+        index_tasks: list[Any],
+        new_hashes: dict[str, str],
+    ) -> None:
+        index_tasks.append(MagicMock())
+        new_hashes["assist::HassStartTimer"] = "h2"
+
+    with (
+        patch.object(
+            entity,
+            "_async_discover_provider_tools",
+            new=AsyncMock(side_effect=fake_provider_discovery),
+        ),
+        patch.object(entity, "_async_discover_local_tools", new=AsyncMock()),
+        patch(f"{_CONV}.llm.async_get_apis", return_value=[]),
+        patch(f"{_CONV}.async_dispatcher_send"),
+        patch(
+            f"{_CONV}.gather_store_puts_in_chunks",
+            new=AsyncMock(side_effect=RuntimeError("embedding provider down")),
+        ),
+    ):
+        await entity._async_index_tools(
+            MagicMock(), rd, _loaded_llm_api("HassStartTimer")
+        )
+
+    assert rd.tool_index_failed is True
+    assert rd.tool_indexing_in_progress is False
+    assert "assist::HassStartTimer" not in rd.tool_content_hashes
+
+
+@pytest.mark.asyncio
+async def test_index_tools_ready_without_llm_api_is_noop() -> None:
+    """The startup-style call (no llm_api) stays a no-op once ready."""
+    entity = _index_entity()
+    rd = _index_runtime_data(tool_content_hashes={})
+
+    with (
+        patch.object(
+            entity, "_async_discover_provider_tools", new=AsyncMock()
+        ) as provider_mock,
+        patch.object(entity, "_async_discover_local_tools", new=AsyncMock()),
+    ):
+        await entity._async_index_tools(MagicMock(), rd)
+
+    provider_mock.assert_not_called()
+    entity.hass.async_create_task.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_index_tools_in_progress_short_circuits_delta() -> None:
+    """tool_indexing_in_progress blocks the top-up even with missing keys."""
+    entity = _index_entity()
+    rd = _index_runtime_data(tool_indexing_in_progress=True, tool_content_hashes={})
+
+    with patch.object(
+        entity, "_async_discover_provider_tools", new=AsyncMock()
+    ) as provider_mock:
+        await entity._async_index_tools(
+            MagicMock(), rd, _loaded_llm_api("HassStartTimer")
+        )
+
+    provider_mock.assert_not_called()
+    assert rd.tool_indexing_in_progress is True
+
+
+@pytest.mark.asyncio
+async def test_index_tools_failed_short_circuits_delta() -> None:
+    """tool_index_failed blocks the top-up even with missing keys."""
+    entity = _index_entity()
+    rd = _index_runtime_data(tool_index_failed=True, tool_content_hashes={})
+
+    with patch.object(
+        entity, "_async_discover_provider_tools", new=AsyncMock()
+    ) as provider_mock:
+        await entity._async_index_tools(
+            MagicMock(), rd, _loaded_llm_api("HassStartTimer")
+        )
+
+    provider_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_index_tools_startup_path_still_backgrounds() -> None:
+    """The initial (not-ready) indexing pass still runs as a background task."""
+    entity = _index_entity()
+    rd = _index_runtime_data(tool_index_ready=False, tool_content_hashes={})
+
+    async def fake_provider_discovery(
+        _llm_context: Any,
+        _runtime_data: Any,
+        _api_ids: Any,
+        index_tasks: list[Any],
+        new_hashes: dict[str, str],
+    ) -> None:
+        index_tasks.append(MagicMock())
+        new_hashes["assist::HassTurnOn"] = "h1"
+
+    with (
+        patch.object(
+            entity,
+            "_async_discover_provider_tools",
+            new=AsyncMock(side_effect=fake_provider_discovery),
+        ),
+        patch.object(entity, "_async_discover_local_tools", new=AsyncMock()),
+        patch(f"{_CONV}.llm.async_get_apis", return_value=[]),
+        patch(f"{_CONV}.async_dispatcher_send"),
+    ):
+        await entity._async_index_tools(MagicMock(), rd)
+
+    entity.hass.async_create_task.assert_called_once()
+    # The background task was not executed, so hashes are still pending.
+    assert rd.tool_content_hashes == {}
+
+
+@pytest.mark.asyncio
+async def test_index_tools_no_changes_resets_in_progress() -> None:
+    """A pass that queues no writes marks ready and clears in_progress."""
+    entity = _index_entity()
+    rd = _index_runtime_data(tool_index_ready=False, tool_content_hashes={})
+
+    with (
+        patch.object(entity, "_async_discover_provider_tools", new=AsyncMock()),
+        patch.object(entity, "_async_discover_local_tools", new=AsyncMock()),
+        patch(f"{_CONV}.llm.async_get_apis", return_value=[]),
+        patch(f"{_CONV}.async_dispatcher_send"),
+    ):
+        await entity._async_index_tools(MagicMock(), rd)
+
+    assert rd.tool_index_ready is True
+    assert rd.tool_indexing_in_progress is False
+    entity.hass.async_create_task.assert_not_called()
