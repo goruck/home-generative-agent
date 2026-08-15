@@ -454,6 +454,7 @@ Discovery records include:
 - `semantic_key` — canonical normalized key
 - `dedupe_reason` — `novel`, `existing_semantic_key`, `existing_identity_hash`, or `batch_duplicate`
 - `filtered_candidates` — candidates removed before or during dedupe with their reason, including `derived_only_paths` (every evidence path is `derived.*` context with no concrete entity, so the candidate can never be promoted) and `entity_text_mismatch` (candidate prose names known entities that its evidence paths do not cite)
+- `environmental_context_stripped` — `true` on an environmental statistical candidate whose occupancy/night decoration was removed by the deterministic sanitizer described above; absent otherwise
 
 ### Structured occupancy and night context
 
