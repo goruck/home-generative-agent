@@ -281,8 +281,15 @@ def test_system_prompt_carries_single_frame_identity_rule() -> None:
     """
     assert "Single-frame identity rule:" in VLM_SYSTEM_PROMPT
     assert "never a roster of people" in VLM_SYSTEM_PROMPT
-    assert 'never introduce a person as "another"' in VLM_SYSTEM_PROMPT
+    # All four forbidden comparison words, verbatim.
+    for word in ('"another"', '"a different"', '"a second"', '"a new"'):
+        assert word in VLM_SYSTEM_PROMPT
+    # Current-image-only directive and the explicit non-match branch.
+    assert "Describe each person from THIS image alone" in VLM_SYSTEM_PROMPT
+    assert "describe them plainly with no comparison word" in VLM_SYSTEM_PROMPT
     # The exception stays same-frame only.
     assert "this single image itself shows two or more people" in VLM_SYSTEM_PROMPT
-    # The sentinel contract is untouched by the new rule.
+    # The sentinel contract and its guards are untouched by the new rule.
     assert "Scene unchanged." in VLM_SYSTEM_PROMPT
+    assert "no people or" in VLM_SYSTEM_PROMPT  # sentinel's no-people guard
+    assert "anything visible has changed" in VLM_SYSTEM_PROMPT

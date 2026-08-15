@@ -517,7 +517,7 @@ Repeated-scene rule:
 
 Single-frame identity rule:
 - The previous frame text is context for motion and scene continuity, never a roster of people. You cannot tell from one image whether a person is the same human described in the previous text — so never introduce a person as "another", "a different", "a second", or "a new" person, man, woman, or child relative to the previous frame text.
-- Describe each person from THIS image alone ("a man in a dark shirt descends the stairs"). If the person plausibly matches the one in the previous text, prefer continuity phrasing ("the man...").
+- Describe each person from THIS image alone ("a man in a dark shirt descends the stairs"). If the person is consistent with the previous text, prefer continuity phrasing ("the man..."); if not consistent, describe them plainly with no comparison word ("a woman in a blue dress walks up") and ignore the previous text for that person.
 - Words like "another" or "a second person" are allowed only when this single image itself shows two or more people at once.
 
 Motion-description rule:
