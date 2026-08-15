@@ -291,6 +291,7 @@ from .sentinel.discovery_semantic import (
     candidate_semantic_key,
     rule_key_covers_candidate_key,
     rule_semantic_key,
+    sanitize_environmental_candidate,
 )
 from .sentinel.discovery_store import DiscoveryStore
 from .sentinel.dynamic_rules import evaluate_dynamic_rule
@@ -590,7 +591,7 @@ async def _trigger_sentinel_discovery(entry: HGAConfigEntry) -> dict[str, Any]:
     return {"status": "ok" if started else "busy"}
 
 
-async def _promote_discovery_candidate(  # noqa: PLR0911
+async def _promote_discovery_candidate(  # noqa: PLR0911, PLR0912
     hass: HomeAssistant,
     entry: HGAConfigEntry,
     *,
@@ -606,6 +607,14 @@ async def _promote_discovery_candidate(  # noqa: PLR0911
     candidate = discovery_store.find_candidate(candidate_id)
     if candidate is None:
         return {"status": "not_found"}
+
+    # Environmental candidates stored before the ingestion sanitizer shipped
+    # (or promoted straight from discovery history) still carry occupancy
+    # decoration — sanitize at promote time too, so a pre-fix stored
+    # candidate can never mint a new decorated draft (red-team review).
+    sanitized = sanitize_environmental_candidate(candidate)
+    if sanitized is not None:
+        candidate = sanitized
 
     covered = _covered_rule_for_candidate(entry, candidate)
     if covered is not None:
@@ -851,6 +860,14 @@ async def _approve_rule_proposal(  # noqa: PLR0911, PLR0912, PLR0915
     candidate = record.get("candidate") if record else None
     if not candidate:
         return {"status": "not_found", "candidate_id": candidate_id}
+
+    # Drafts persisted before the environmental sanitizer shipped still
+    # carry occupancy decoration; sanitize at this boundary too so an old
+    # card cannot activate (or preview) a rule whose ID and prose advertise
+    # conditioning the rule never has (Codex structured review P1).
+    sanitized_candidate = sanitize_environmental_candidate(candidate)
+    if sanitized_candidate is not None:
+        candidate = sanitized_candidate
 
     normalization = explain_normalize_candidate(candidate)
     normalized = normalization.normalized
@@ -1118,6 +1135,14 @@ async def _preview_rule_proposal(
     candidate = record.get("candidate") if record else None
     if not candidate:
         return {"status": "not_found", "candidate_id": candidate_id}
+
+    # Drafts persisted before the environmental sanitizer shipped still
+    # carry occupancy decoration; sanitize at this boundary too so an old
+    # card cannot activate (or preview) a rule whose ID and prose advertise
+    # conditioning the rule never has (Codex structured review P1).
+    sanitized_candidate = sanitize_environmental_candidate(candidate)
+    if sanitized_candidate is not None:
+        candidate = sanitized_candidate
 
     normalization = explain_normalize_candidate(candidate)
     normalized = normalization.normalized
