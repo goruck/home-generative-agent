@@ -653,3 +653,72 @@ def test_constraint_vetoed_by_explicit_distinct_person(caption: str) -> None:
         )
         is None
     )
+
+
+# ---------------------------------------------------------------------------
+# Cross-frame demographic conflict (v3.30.2, captioner-rule compensation)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("cap1", "cap2"),
+    [
+        ("A man walks toward the door.", "A woman in a blue dress walks up."),
+        ("A man carries a box inside.", "A child runs across the yard."),
+        ("An adult stands by the gate.", "A child plays on the steps."),
+    ],
+)
+def test_constraint_vetoed_by_cross_frame_demographic_conflict(
+    cap1: str, cap2: str
+) -> None:
+    """
+    Disjoint demographic terms across frames prove two people.
+
+    With the v3.30.2 captioner rule, a sequential visitor's caption can no
+    longer say "a different woman" — but "a man" then "a woman" cannot be
+    one person, and the veto must see that without contrast wording.
+    """
+    assert (
+        _single_person_constraint(
+            _KNOWN,
+            [{cap1: [_KNOWN]}, {cap2: ["Indeterminate"]}],
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("cap1", "cap2"),
+    [
+        ("A man walks toward the door.", "The man checks his phone."),
+        ("A man walks toward the door.", "A person stands on the porch."),
+        ("A man carries a box.", "A boy descends the stairs."),
+        ("A person waits.", "A visitor approaches."),
+    ],
+)
+def test_compatible_or_neutral_terms_do_not_veto(cap1: str, cap2: str) -> None:
+    """Same-class or neutral human terms stay mergeable — no over-refusal."""
+    constraint = _single_person_constraint(
+        _KNOWN,
+        [{cap1: [_KNOWN]}, {cap2: ["Indeterminate"]}],
+    )
+    assert constraint is not None
+
+
+@pytest.mark.asyncio
+async def test_batch_verdict_vetoed_by_demographic_conflict(
+    va: VideoAnalyzer, entry: MagicMock
+) -> None:
+    """The cross-frame conflict veto applies at the batch verdict too."""
+    entry.runtime_data.person_gallery = _dao(0.4)
+    _stub_snapshots(
+        va,
+        [
+            _frame("A man walks toward the door.", [FaceHit(_KNOWN, _EMB)]),
+            _frame("A woman in a blue dress walks up.", [FaceHit("Indeterminate")]),
+        ],
+    )
+
+    _descs, _recognized, _, sole = await va._process_batch(_CAMERA, _ordered(2))
+
+    assert sole is None

@@ -417,6 +417,55 @@ _ARTICLE_HUMAN_RE: Final = re.compile(
     rf"\b(?:a|an|another|the)\s+(?:\w+\s+){{0,2}}?({_SINGULAR_HUMAN})\b"
 )
 
+# Demographic (sex, age) axes for cross-frame caption comparison. Two
+# captions whose human terms differ on either axis ("a man" then "a woman";
+# "an adult" then "a child") describe people who cannot be the same person,
+# so they veto the single-person claim even though each caption is singular.
+# Neutral terms (person, figure, visitor, ...) are absent and never
+# conflict; boy/girl/teen carry no age (a VLM can flip man<->boy for the
+# same teenager by size and distance, but it does not flip sex).
+_HUMAN_TERM_AXES: Final[dict[str, tuple[str | None, str | None]]] = {
+    "man": ("male", "adult"),
+    "guy": ("male", "adult"),
+    "woman": ("female", "adult"),
+    "lady": ("female", "adult"),
+    "adult": (None, "adult"),
+    "boy": ("male", None),
+    "girl": ("female", None),
+    "teen": (None, None),
+    "teenager": (None, None),
+    "child": (None, "child"),
+    "kid": (None, "child"),
+    "toddler": (None, "child"),
+    "baby": (None, "child"),
+    "infant": (None, "child"),
+}
+
+
+def _captions_conflict_on_humans(captions: list[str]) -> bool:
+    """
+    Return True when two captions describe demographically disjoint people.
+
+    A sequential real visitor ("a man ..." in one frame, "a woman ..." in a
+    later frame) never co-occurs and uses no contrast wording, so the
+    per-caption vetoes cannot see them. The demographic axes can: two human
+    terms that disagree on sex or on age cannot be one person, so the batch
+    provably contains two different people.
+    """
+    axes: list[tuple[str | None, str | None]] = [
+        _HUMAN_TERM_AXES[term]
+        for caption in captions
+        for term in _ARTICLE_HUMAN_RE.findall(
+            _NEGATED_PERSON_RE.sub(" ", _normalize_caption(caption))
+        )
+        if term in _HUMAN_TERM_AXES
+    ]
+    return any(
+        (a[0] and b[0] and a[0] != b[0]) or (a[1] and b[1] and a[1] != b[1])
+        for i, a in enumerate(axes)
+        for b in axes[i + 1 :]
+    )
+
 
 def _caption_mentions_plural_humans(caption: str) -> bool:
     """
@@ -433,6 +482,33 @@ def _caption_mentions_plural_humans(caption: str) -> bool:
     if _PLURAL_HUMAN_RE.search(scrubbed):
         return True
     return len(set(_ARTICLE_HUMAN_RE.findall(scrubbed))) >= _COOCCURRENT_FACES
+
+
+def _decide_sole_person(
+    frame_descriptions: list[dict[str, list[str]]],
+    dropped_hits: list[list[FaceHit]],
+) -> str | None:
+    """
+    Batch-level single-person verdict with caption vetoes, or None.
+
+    Runs in _process_batch over the FULL pre-cap evidence — kept frames'
+    post-merge identities plus dropped frames' raw hits — so evidence later
+    sliced by dedupe or the summary cap still counts. Caption vetoes (plural
+    mentions, cross-frame demographic conflicts) scan every kept caption for
+    the same reason.
+    """
+    sole = _verified_sole_person(
+        [next(iter(d.values()), []) for d in frame_descriptions]
+        + [[h.name for h in hits] for hits in dropped_hits]
+    )
+    if sole is None:
+        return None
+    captions = [caption for d in frame_descriptions for caption in d]
+    if any(_caption_mentions_plural_humans(caption) for caption in captions):
+        return None
+    if _captions_conflict_on_humans(captions):
+        return None
+    return sole
 
 
 def _verified_sole_person(name_lists: list[list[str]]) -> str | None:
@@ -485,11 +561,10 @@ def _single_person_constraint(
     """
     if sole_person is None:
         return None
-    if any(
-        _caption_mentions_plural_humans(caption)
-        for d in frame_descriptions
-        for caption in d
-    ):
+    captions = [caption for d in frame_descriptions for caption in d]
+    if any(_caption_mentions_plural_humans(caption) for caption in captions):
+        return None
+    if _captions_conflict_on_humans(captions):
         return None
     if not _is_safe_constraint_name(sole_person):
         return None
@@ -948,22 +1023,8 @@ class VideoAnalyzer:
         )
 
         # Single-person verdict for the summarizer (issue #543, caption-side
-        # phantom). Decided HERE, over the same full evidence the merge saw —
-        # post-merge kept identities plus VLM-dropped frames' hits, before
-        # dedupe and the summary cap can slice contrary evidence away. The
-        # plural-caption veto must scan the full pre-cap captions for the
-        # same reason: an early "two people" frame sliced off by the summary
-        # cap still disproves the single-person claim.
-        sole_person = _verified_sole_person(
-            [next(iter(d.values()), []) for d in frame_descriptions]
-            + [[h.name for h in hits] for hits in dropped_hits]
-        )
-        if sole_person is not None and any(
-            _caption_mentions_plural_humans(caption)
-            for d in frame_descriptions
-            for caption in d
-        ):
-            sole_person = None
+        # phantom), decided over the same full pre-cap evidence the merge saw.
+        sole_person = _decide_sole_person(frame_descriptions, dropped_hits)
 
         # dedupe near-identical, then cap to the newest frames; both lists get
         # the same cap so descs/paths stay index-aligned for _pick_notify_frame.

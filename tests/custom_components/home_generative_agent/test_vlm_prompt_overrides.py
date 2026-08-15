@@ -267,3 +267,29 @@ def test_drop_empty_fields_keeps_populated_vlm_overrides() -> None:
     flow._drop_empty_fields(options)
     assert options[CONF_VLM_RESPONSE_LANGUAGE] == "Czech"
     assert options[CONF_VLM_PROMPT_EXTRA] == "Ignore cars in the driveway."
+
+
+def test_system_prompt_carries_single_frame_identity_rule() -> None:
+    """
+    The frame captioner must never invent cross-frame distinctness.
+
+    Field failure (issue #543, v3.30.1 residual): with prev-frame text as
+    context, the captioner described the same person as "another man",
+    poisoning the summary and falsely tripping the summary constraint's
+    contrast-cue veto. Pin the rule's load-bearing phrases so a prompt
+    edit cannot silently drop it.
+    """
+    assert "Single-frame identity rule:" in VLM_SYSTEM_PROMPT
+    assert "never a roster of people" in VLM_SYSTEM_PROMPT
+    # All four forbidden comparison words, verbatim.
+    for word in ('"another"', '"a different"', '"a second"', '"a new"'):
+        assert word in VLM_SYSTEM_PROMPT
+    # Current-image-only directive and the explicit non-match branch.
+    assert "Describe each person from THIS image alone" in VLM_SYSTEM_PROMPT
+    assert "describe them plainly with no comparison word" in VLM_SYSTEM_PROMPT
+    # The exception stays same-frame only.
+    assert "this single image itself shows two or more people" in VLM_SYSTEM_PROMPT
+    # The sentinel contract and its guards are untouched by the new rule.
+    assert "Scene unchanged." in VLM_SYSTEM_PROMPT
+    assert "no people or" in VLM_SYSTEM_PROMPT  # sentinel's no-people guard
+    assert "anything visible has changed" in VLM_SYSTEM_PROMPT
