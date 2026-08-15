@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.30.2] - 2026-08-14
+
+### Fixed
+
+- **Frame captions can no longer invent a second person from the previous frame's text.** Field validation of v3.30.1 caught the last phantom-person channel: each frame's caption request includes the previous frame's description as motion context, and the captioner could describe the current frame's person as "another man ..." relative to that text — inventing a cross-frame distinction no single image can actually show. The batch summarizer then faithfully narrated two people ("A person stands on a porch ... while another man in dark shirt and light pants descends"), and the invented "another" also falsely tripped the single-person statement's contrast-cue veto, withholding the v3.30.1 fix exactly when it was needed. The captioner now describes each person from the current image alone, using the previous text for motion and continuity only; "another person" wording is reserved for a single image that itself shows two or more people at once.
+
 ## [3.30.1] - 2026-08-14
 
 ### Fixed
