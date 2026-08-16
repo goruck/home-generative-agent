@@ -217,6 +217,7 @@ This document covers the named constants that affect integration behaviour, orga
 | `_MAX_INTENT_SCAN_CHARS` | `agent/graph.py` | `20000` | Cap on message characters scanned by the intent regexes so a pathologically long chat message cannot stall the event loop. |
 | `_AUTOMATION_CONTEXT_HUMAN_TURNS` | `agent/graph.py` | `3` | Trailing human turns checked for automation-creation context, so short follow-ups ("yes") keep `add_automation` bound. |
 | `_LC_TOOL_TIMEOUT_S` | `agent/graph.py` | `30.0` (s) | Per-tool execution timeout. Tools that do not return within this window are cancelled and the agent receives an error. Affects VLM and any slow external tool. |
+| `_TOOL_INDEX_DELTA_TIMEOUT_S` | `conversation.py` | `30.0` (s) | Timeout on the per-turn tool-index top-up write (newly discovered device-gated or MCP tools). A stalled store write gives up instead of hanging the voice turn; the existing index keeps serving and the next turn retries. |
 
 ---
 
@@ -488,6 +489,7 @@ These constants live outside `const.py` in individual modules. They affect runti
 | Constant | Value | Purpose |
 |---|---|---|
 | `_STREAM_ERROR_REASON_MAX_CHARS` | `280` | Maximum characters of the failure reason appended to the fallback chat message when a streaming turn fails (only `HomeAssistantError` messages are shown verbatim; other exceptions surface their class name only). |
+| `_TOOL_INDEX_DELTA_TIMEOUT_S` | `30.0` (s) | Timeout on the per-turn tool-index top-up write (newly discovered device-gated or MCP tools). A stalled store write gives up instead of hanging the voice turn; the existing index keeps serving and the next turn retries. |
 
 ### `core/person_gallery.py`
 

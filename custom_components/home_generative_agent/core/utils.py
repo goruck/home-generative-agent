@@ -966,16 +966,42 @@ def extract_final(raw: str | list[Any], max_chars: int | None = None) -> str:
     return segment.rstrip(" ,;")
 
 
+def _close_pending_coroutines(tasks: list[Any]) -> None:
+    """Close never-awaited coroutines so abandoned writes cannot leak warnings."""
+    for task in tasks:
+        close_fn = getattr(task, "close", None)
+        if callable(close_fn):
+            with contextlib.suppress(Exception):
+                close_fn()
+
+
 async def gather_store_puts_in_chunks(
     tasks: list[Any],
     *,
     chunk_size: int = 4,
     sleep_s: float = 0.01,
 ) -> None:
-    """Await store.aput coroutines in sequential chunks (embedding provider limits)."""
+    """
+    Await store.aput coroutines in sequential chunks (embedding provider limits).
+
+    On failure the remaining never-scheduled coroutines are closed before the
+    first failure re-raises, so no chunk is left detached or un-awaited.
+    CancelledError propagates (never swallowed as a result).
+    """
     if not tasks:
         return
     n = len(tasks)
     for i in range(0, n, chunk_size):
-        await asyncio.gather(*tasks[i : i + chunk_size])
+        try:
+            results = await asyncio.gather(
+                *tasks[i : i + chunk_size], return_exceptions=True
+            )
+        except BaseException:
+            # The gather itself was cancelled; it cleans up its own chunk.
+            _close_pending_coroutines(tasks[i + chunk_size :])
+            raise
+        failure = next((r for r in results if isinstance(r, BaseException)), None)
+        if failure is not None:
+            _close_pending_coroutines(tasks[i + chunk_size :])
+            raise failure
         await asyncio.sleep(sleep_s)

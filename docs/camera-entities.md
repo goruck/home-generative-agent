@@ -46,10 +46,12 @@ For each configured camera the integration registers:
 
 | State | Meaning |
 |---|---|
-| `indexing` | First-run embedding in progress |
+| `indexing` | Embedding in progress — the first full run at startup, or a mid-turn top-up adding newly discovered tools |
 | `ready` | Index built; tools retrieved per-turn by semantic search |
-| `failed` | Embedding provider unreachable; agent falls back to all tools |
+| `failed` | Embedding provider unreachable; agent falls back to a keyword-filtered tool list capped at the retrieval limit |
 | `unknown` | Index state not yet reported |
+
+The `tools_indexed` attribute reports the cumulative number of tools in the index (not the last batch size); `last_updated` records the last successful index update.
 
 > HA needs write access to your snapshots location (default: `/media/snapshots`) and your camera entities must exist in HA (`camera.*`).
 

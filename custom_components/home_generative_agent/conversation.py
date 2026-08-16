@@ -41,7 +41,12 @@ from langchain_core.messages import (
 from pydantic import PydanticInvalidForJsonSchema
 
 from .agent.graph import workflow
-from .agent.helpers import format_tool, is_actuation_tool, safe_convert
+from .agent.helpers import (
+    format_tool,
+    is_actuation_tool,
+    safe_convert,
+    tool_index_key,
+)
 from .agent.rag_embedding_text import (
     strip_for_embedding,
     truncate_for_embedding_index,
@@ -102,6 +107,11 @@ _LOGGER = logging.getLogger(__name__)
 
 # Cap on the error detail appended to the user-visible fallback chat message.
 _STREAM_ERROR_REASON_MAX_CHARS = 280
+
+# Time budget for the inline tool-index delta write; it runs on the
+# conversational turn's critical path, so a hung embedding provider must
+# degrade to the retry-next-turn path instead of stalling the voice turn.
+_TOOL_INDEX_DELTA_TIMEOUT_S = 30.0
 
 
 def _recommit_final_assistant_content(chat_log: conversation.ChatLog) -> None:
@@ -695,6 +705,23 @@ class MultiLLMAPI:
         return await api.async_call_tool(tool_input)
 
 
+def _format_tool_keys_for_log(keys: set[str], limit: int = 10) -> str:
+    """
+    Sanitize and truncate tool index keys for log output.
+
+    Tool names can originate from remote MCP servers; strip non-printable
+    characters (log-line forgery) and cap the rendered list (log spam).
+    """
+    safe = [
+        "".join(ch if ch.isprintable() else "?" for ch in key)[:120]
+        for key in sorted(keys)[:limit]
+    ]
+    rendered = ", ".join(safe)
+    if len(keys) > limit:
+        rendered += f", … (+{len(keys) - limit} more)"
+    return rendered
+
+
 async def _run_tool_index_background(
     *,
     index_tasks: list[Any],
@@ -712,8 +739,9 @@ async def _run_tool_index_background(
             "Tool index ready: %d tool(s) indexed/updated.",
             len(tool_hashes),
         )
+        # The sensor reports the total indexed count, not the batch size.
         async_dispatcher_send(
-            hass, SIGNAL_TOOL_INDEX_UPDATED, "ready", len(tool_hashes)
+            hass, SIGNAL_TOOL_INDEX_UPDATED, "ready", len(rd.tool_content_hashes)
         )
     except Exception:
         _LOGGER.exception("Global tool index background task failed")
@@ -1191,9 +1219,6 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 response=intent_response, conversation_id=conversation_id
             )
 
-        # --- Global Tool Indexing (Background) ---
-        await self._async_index_tools(llm_context, runtime_data)
-
         if not options.get(CONF_SCHEMA_FIRST_YAML, False) and _is_dashboard_request(
             user_input.text
         ):
@@ -1213,6 +1238,13 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             return conversation.ConversationResult(
                 response=intent_response, conversation_id=conversation_id
             )
+
+        # --- Global Tool Indexing ---
+        # Passing llm_api enables the per-turn top-up: live tools missing from
+        # the index (device-gated Assist tools) are indexed inline before
+        # retrieval runs for this turn. Runs after the dashboard/noise early
+        # returns so phantom STT turns never pay for index writes.
+        await self._async_index_tools(llm_context, runtime_data, llm_api)
 
         tools, langchain_tools = self._async_get_all_tools(llm_api.apis)
 
@@ -1349,48 +1381,74 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             try:
                 # Isolate each provider discovery
                 api_instance = await llm.async_get_api(self.hass, api_id, llm_context)
-                for tool in api_instance.tools:
-                    # Composite hash: api_id + name + description + schema
-                    schema_json = json.dumps(
-                        safe_convert(
-                            tool.parameters,
-                            custom_serializer=api_instance.custom_serializer,
-                        ),
-                        sort_keys=True,
-                    )
-                    is_actuation = is_actuation_tool(tool.name)
-                    raw_content = (
-                        f"provider:{api_id}\nname:{tool.name}\n"
-                        f"description:{tool.description}\nparameters:{schema_json}\n"
-                        f"actuation:{is_actuation}"
-                    )
-                    content_hash = hashlib.sha256(raw_content.encode()).hexdigest()
-
-                    tool_key = f"{api_id}::{tool.name}"
-                    if runtime_data.tool_content_hashes.get(tool_key) != content_hash:
-                        # Prep for embedding
-                        embedding_text = strip_for_embedding(
-                            f"{tool.name}: {tool.description}"
-                        )
-                        index_tasks.append(
-                            runtime_data.store.aput(
-                                ("system", "tools"),
-                                key=tool_key,
-                                value={
-                                    "content": truncate_for_embedding_index(
-                                        embedding_text
-                                    ),
-                                    "name": tool.name,
-                                    "api_id": api_id,
-                                    "description": tool.description,
-                                    "parameters": schema_json,
-                                    "is_actuation": is_actuation,
-                                },
-                            )
-                        )
-                        new_hashes[tool_key] = content_hash
+                self._queue_api_instance_tools(
+                    api_id, api_instance, runtime_data, index_tasks, new_hashes
+                )
             except Exception as err:  # noqa: BLE001
                 _LOGGER.warning("Failed to index tool provider %s: %s", api_id, err)
+
+    def _queue_api_instance_tools(
+        self,
+        api_id: str,
+        api_instance: llm.APIInstance,
+        runtime_data: HGAData,
+        index_tasks: list[Any],
+        new_hashes: dict[str, str],
+    ) -> None:
+        """
+        Queue index writes for an API instance's new or changed tools.
+
+        Failures are isolated per tool: one unserializable schema must not
+        starve every later tool of its API (which would reproduce the very
+        missing-tool bug the top-up exists to fix, and re-fire the top-up
+        every turn for the healthy neighbors too).
+        """
+        for tool in api_instance.tools:
+            try:
+                # Composite hash: api_id + name + description + schema
+                schema_json = json.dumps(
+                    safe_convert(
+                        tool.parameters,
+                        custom_serializer=api_instance.custom_serializer,
+                    ),
+                    sort_keys=True,
+                )
+                is_actuation = is_actuation_tool(tool.name)
+                raw_content = (
+                    f"provider:{api_id}\nname:{tool.name}\n"
+                    f"description:{tool.description}\nparameters:{schema_json}\n"
+                    f"actuation:{is_actuation}"
+                )
+                content_hash = hashlib.sha256(raw_content.encode()).hexdigest()
+
+                tool_key = tool_index_key(api_id, tool.name)
+                if runtime_data.tool_content_hashes.get(tool_key) != content_hash:
+                    # Prep for embedding
+                    embedding_text = strip_for_embedding(
+                        f"{tool.name}: {tool.description}"
+                    )
+                    index_tasks.append(
+                        runtime_data.store.aput(
+                            ("system", "tools"),
+                            key=tool_key,
+                            value={
+                                "content": truncate_for_embedding_index(embedding_text),
+                                "name": tool.name,
+                                "api_id": api_id,
+                                "description": tool.description,
+                                "parameters": schema_json,
+                                "is_actuation": is_actuation,
+                            },
+                        )
+                    )
+                    new_hashes[tool_key] = content_hash
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.warning(
+                    "Failed to queue tool %s of API %s for indexing: %s",
+                    _format_tool_keys_for_log({str(getattr(tool, "name", "?"))}),
+                    api_id,
+                    err,
+                )
 
     async def _async_discover_local_tools(
         self,
@@ -1458,7 +1516,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                     f"actuation:{is_actuation}"
                 )
                 content_hash = hashlib.sha256(raw_content.encode()).hexdigest()
-                tool_key = f"hga_local::{t_name}"
+                tool_key = tool_index_key("hga_local", t_name)
                 if runtime_data.tool_content_hashes.get(tool_key) != content_hash:
                     embedding_text = strip_for_embedding(
                         f"{t_name}: {t_func.description}"
@@ -1482,20 +1540,26 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             except Exception as err:  # noqa: BLE001
                 _LOGGER.warning("Failed to index local tool %s: %s", t_name, err)
 
-    async def _async_index_tools(
-        self, llm_context: llm.LLMContext, runtime_data: HGAData
+    async def _async_index_tools(  # noqa: PLR0912
+        self,
+        llm_context: llm.LLMContext,
+        runtime_data: HGAData,
+        llm_api: MultiLLMAPI | None = None,
     ) -> None:
         """
-        Discover and index tools in the background vector store.
+        Discover and index tools in the vector store.
 
         Called at startup (async_added_to_hass) so the index is ready before the
-        first user query. Also called per-turn as a no-op guard once ready.
+        first user query. Also called per-turn with the loaded ``llm_api``: once
+        the index is ready, a set comparison of live tool keys against the cached
+        hashes detects tools that exist this turn but were never indexed —
+        device-gated Assist tools (e.g. the timer intents, exposed only when a
+        timer-capable satellite is the requester) can never appear in the
+        device-less startup pass. Any missing key triggers an inline top-up
+        sourced from the already-loaded API instances, so the new tools are
+        retrievable on the triggering turn.
         """
-        if (
-            runtime_data.tool_index_ready
-            or runtime_data.tool_indexing_in_progress
-            or runtime_data.tool_index_failed
-        ):
+        if runtime_data.tool_indexing_in_progress or runtime_data.tool_index_failed:
             _LOGGER.debug(
                 "Tool index guard skipped indexing: ready=%s indexing=%s "
                 "failed=%s cached_hashes=%d.",
@@ -1505,43 +1569,170 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 len(runtime_data.tool_content_hashes),
             )
             return
+        inline_delta = False
+        missing_keys: set[str] = set()
+        if runtime_data.tool_index_ready:
+            if llm_api is None:
+                return
+            live_keys = {
+                tool_index_key(api_id, tool.name)
+                for api_id, api in llm_api.apis.items()
+                for tool in api.tools
+            }
+            missing_keys = live_keys - runtime_data.tool_content_hashes.keys()
+            if not missing_keys:
+                return
+            inline_delta = True
+            _LOGGER.info(
+                "Tool index top-up: %d live tool(s) not in index: %s.",
+                len(missing_keys),
+                _format_tool_keys_for_log(missing_keys),
+            )
         runtime_data.tool_indexing_in_progress = True
         async_dispatcher_send(self.hass, SIGNAL_TOOL_INDEX_UPDATED, "indexing", 0)
 
-        all_available_api_ids = [api.id for api in llm.async_get_apis(self.hass)]
         index_tasks: list[Any] = []
         new_hashes: dict[str, str] = {}
-
-        # 1. Index Providers
-        await self._async_discover_provider_tools(
-            llm_context, runtime_data, all_available_api_ids, index_tasks, new_hashes
-        )
-
-        # 2. Index Local LangChain Tools (provider: hga_local)
-        await self._async_discover_local_tools(runtime_data, index_tasks, new_hashes)
-
-        if index_tasks:
-            _LOGGER.info(
-                "Tool index starting: %d tool(s) queued for indexing/update.",
-                len(new_hashes),
-            )
-            self.hass.async_create_task(
-                _run_tool_index_background(
-                    index_tasks=index_tasks,
-                    tool_hashes=new_hashes,
-                    rd=runtime_data,
-                    hass=self.hass,
+        handed_off = False
+        try:
+            if inline_delta and llm_api is not None:
+                # Source definitions from the APIs already loaded for this turn:
+                # the tools are in hand, so no second llm.async_get_api round
+                # trip (whose failure would leave the key unindexed and re-fire
+                # discovery every turn). Local tools cannot be missing here —
+                # they are not device-gated and were indexed at startup.
+                for api_id, api_instance in llm_api.apis.items():
+                    try:
+                        self._queue_api_instance_tools(
+                            api_id, api_instance, runtime_data, index_tasks, new_hashes
+                        )
+                    except Exception as err:  # noqa: BLE001
+                        _LOGGER.warning(
+                            "Failed to queue tools of loaded API %s: %s", api_id, err
+                        )
+            else:
+                all_available_api_ids = [
+                    api.id for api in llm.async_get_apis(self.hass)
+                ]
+                # 1. Index Providers
+                await self._async_discover_provider_tools(
+                    llm_context,
+                    runtime_data,
+                    all_available_api_ids,
+                    index_tasks,
+                    new_hashes,
                 )
-            )
-        else:
-            runtime_data.tool_index_ready = True
-            _LOGGER.info(
-                "Tool index ready: no tool changes detected (%d cached hash(es)).",
+                # 2. Index Local LangChain Tools (provider: hga_local)
+                await self._async_discover_local_tools(
+                    runtime_data, index_tasks, new_hashes
+                )
+
+            if index_tasks:
+                _LOGGER.info(
+                    "Tool index starting: %d tool(s) queued for indexing/update.",
+                    len(new_hashes),
+                )
+                if inline_delta:
+                    # Await the write so this very turn (the one whose device
+                    # exposed the new tools) retrieves from the updated index.
+                    await self._async_write_tool_index_delta(
+                        runtime_data, index_tasks, new_hashes
+                    )
+                else:
+                    self.hass.async_create_task(
+                        _run_tool_index_background(
+                            index_tasks=index_tasks,
+                            tool_hashes=new_hashes,
+                            rd=runtime_data,
+                            hass=self.hass,
+                        )
+                    )
+                    handed_off = True
+            elif inline_delta:
+                # The missing live keys produced no writes (e.g. a tool whose
+                # schema fails to serialize). The index stays valid but
+                # incomplete; the next turn recomputes the same keys and
+                # retries, so warn rather than claim success.
+                _LOGGER.warning(
+                    "Tool index top-up queued no writes; still missing: %s.",
+                    _format_tool_keys_for_log(missing_keys),
+                )
+                async_dispatcher_send(
+                    self.hass,
+                    SIGNAL_TOOL_INDEX_UPDATED,
+                    "ready",
+                    len(runtime_data.tool_content_hashes),
+                )
+            else:
+                runtime_data.tool_index_ready = True
+                _LOGGER.info(
+                    "Tool index ready: no tool changes detected (%d cached hash(es)).",
+                    len(runtime_data.tool_content_hashes),
+                )
+                async_dispatcher_send(
+                    self.hass,
+                    SIGNAL_TOOL_INDEX_UPDATED,
+                    "ready",
+                    len(runtime_data.tool_content_hashes),
+                )
+        finally:
+            if not handed_off:
+                # Reset here — not in the write helpers — so a cancelled turn
+                # (assist pipelines are routinely cancelled mid-await) cannot
+                # latch the in-progress guard and block all future indexing.
+                runtime_data.tool_indexing_in_progress = False
+                # Close never-awaited store.aput coroutines from interrupted
+                # paths; close() on a consumed coroutine is a no-op.
+                for task in index_tasks:
+                    close_fn = getattr(task, "close", None)
+                    if callable(close_fn):
+                        with contextlib.suppress(Exception):
+                            close_fn()
+
+    async def _async_write_tool_index_delta(
+        self,
+        runtime_data: HGAData,
+        index_tasks: list[Any],
+        new_hashes: dict[str, str],
+    ) -> None:
+        """
+        Write a per-turn index delta inline and record its hashes.
+
+        Unlike the startup path, a failure here must not latch
+        ``tool_index_failed``: the existing index is still valid and keeps
+        serving retrieval (``tool_index_ready`` remains True) — only the delta
+        is missing. The next turn recomputes the same missing keys and retries
+        cheaply from the already-loaded API instances, so a transient store or
+        embedding-provider blip recovers on its own.
+        """
+        try:
+            # Time budget: this write sits on the user-facing turn's critical
+            # path; a hung embedding provider must not stall the voice turn.
+            async with asyncio.timeout(_TOOL_INDEX_DELTA_TIMEOUT_S):
+                await gather_store_puts_in_chunks(index_tasks)
+        except Exception:
+            _LOGGER.exception("Tool index top-up write failed; retrying next turn")
+            # Terminal sensor signal: retrieval still serves the pre-delta
+            # index, so the state is "ready", not a stuck "indexing".
+            async_dispatcher_send(
+                self.hass,
+                SIGNAL_TOOL_INDEX_UPDATED,
+                "ready",
                 len(runtime_data.tool_content_hashes),
             )
-            async_dispatcher_send(
-                self.hass, SIGNAL_TOOL_INDEX_UPDATED, "ready", len(new_hashes)
-            )
+            return
+        runtime_data.tool_content_hashes.update(new_hashes)
+        _LOGGER.info(
+            "Tool index top-up complete: %d tool(s) indexed (%d total).",
+            len(new_hashes),
+            len(runtime_data.tool_content_hashes),
+        )
+        async_dispatcher_send(
+            self.hass,
+            SIGNAL_TOOL_INDEX_UPDATED,
+            "ready",
+            len(runtime_data.tool_content_hashes),
+        )
 
     async def _async_entry_update_listener(
         self, hass: HomeAssistant, entry: ConfigEntry

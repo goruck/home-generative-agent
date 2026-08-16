@@ -109,7 +109,9 @@ Global options such as system prompt, face recognition URL, context management p
 
 On startup the integration indexes all available tools as vector embeddings in PostgreSQL. Each turn, only the most relevant tools for the user's message are loaded into the agent's prompt — keeping context short and tool selection accurate.
 
-A few tools bypass similarity ranking: `GetLiveContext` is always available, and `add_automation` is guaranteed to be available whenever your message signals automation-creation intent — explicit wording ("automate...", "remind me every 30 minutes") or an action verb plus a when/if trigger clause ("turn on the porch light when motion is detected"). Read-only state questions ("check if the garage door is open") do not trigger it. These are appended on top of the retrieval limit, so they never crowd out ranked tools. Intent detection is English-only for now; see [Architecture](architecture.md#tools) for details.
+The tool universe is per-request: Home Assistant exposes some Assist tools only for certain devices (the timer intents — `HassStartTimer` and friends — exist only when the requesting device supports timers), and MCP tools exist only while their server is reachable. The index reconciles tool *presence* with this automatically in both directions (a tool whose description or schema changes without renaming keeps its stored definition until the next indexing pass, as before). When a turn's device exposes tools the index has never seen, they are indexed inline before retrieval runs, so the very first "set a timer for two minutes" from a voice satellite already has `HassStartTimer` available for retrieval — no restart or repeat needed (selection still follows normal relevance ranking). Conversely, indexed tools that don't exist for the current turn (timer tools in a browser chat, tools of an MCP server that failed to load) are never bound.
+
+A few tools bypass similarity ranking: `GetLiveContext` is always available (whenever the Assist API that provides it is loaded for the turn), and `add_automation` is guaranteed to be available whenever your message signals automation-creation intent — explicit wording ("automate...", "remind me every 30 minutes") or an action verb plus a when/if trigger clause ("turn on the porch light when motion is detected"). Read-only state questions ("check if the garage door is open") do not trigger it. These are appended on top of the retrieval limit, so they never crowd out ranked tools. Intent detection is English-only for now; see [Architecture](architecture.md#tools) for details.
 
 Two options in the **Options** flow control this:
 
@@ -120,10 +122,12 @@ A **Tool Index Status** diagnostic sensor (`sensor.tool_index_status`) shows the
 
 | State | Meaning |
 |---|---|
-| `indexing` | First-run embedding in progress |
+| `indexing` | Embedding in progress — the first full run at startup, or a mid-turn top-up adding newly discovered tools |
 | `ready` | Index available; tools retrieved per-turn by semantic search |
-| `failed` | Embedding provider unreachable; agent falls back to all tools |
+| `failed` | Embedding provider unreachable; agent falls back to a keyword-filtered tool list capped at the retrieval limit |
 | `unknown` | Index state not yet reported |
+
+The sensor's `tools_indexed` attribute reports the cumulative number of tools in the index — not the size of the last indexing batch — and `last_updated` records the time of the last successful index update.
 
 Subsequent restarts skip unchanged tools using SHA-256 content hashing, so re-indexing is fast.
 
