@@ -1676,6 +1676,20 @@ async def _get_pending_pin_tools(
         return []
 
     val = item.value
+    # Validate the stored row before binding it into the security-critical
+    # PIN flow: a colliding composite key (or an API registering as
+    # hga_local) must not swap the confirmation tool's schema/description.
+    if (
+        val.get("name") != "confirm_sensitive_action"
+        or val.get("api_id") != "hga_local"
+    ):
+        LOGGER.warning(
+            "PIN injection skipped: stored confirm_sensitive_action row "
+            "failed validation (name=%r api_id=%r)",
+            val.get("name"),
+            val.get("api_id"),
+        )
+        return []
     LOGGER.debug("PIN flow active: force-injecting confirm_sensitive_action")
     return [
         RawTool(

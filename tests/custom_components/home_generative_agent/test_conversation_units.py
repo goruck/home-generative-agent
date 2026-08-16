@@ -839,3 +839,54 @@ async def test_gather_store_puts_closes_remaining_on_failure() -> None:
     assert ran == ["first"]
     # ...and the never-scheduled trailing coroutine was closed, not leaked.
     assert later.cr_frame is None
+
+
+@pytest.mark.asyncio
+async def test_index_tools_poisoned_tool_does_not_starve_neighbors() -> None:
+    """
+    One unserializable tool must not block indexing of its API's other tools.
+
+    Without per-tool isolation, a poisoned schema aborts the whole API's
+    queue pass — the healthy neighbor's key stays missing forever and the
+    top-up re-fires every turn (the very bug the top-up exists to fix).
+    """
+    entity = _index_entity()
+    rd = _index_runtime_data(tool_content_hashes={})
+
+    llm_api = _loaded_llm_api("HassStartTimer", "HassPauseTimer")
+    # Poison the first tool: json.dumps cannot serialize an object() schema.
+    llm_api.apis["assist"].tools[0].parameters = {"bad": object()}
+
+    with (
+        patch(f"{_CONV}.async_dispatcher_send"),
+        patch(f"{_CONV}.gather_store_puts_in_chunks", new=AsyncMock()),
+    ):
+        await entity._async_index_tools(MagicMock(), rd, llm_api)
+
+    assert "assist::HassStartTimer" not in rd.tool_content_hashes
+    assert "assist::HassPauseTimer" in rd.tool_content_hashes
+    assert rd.tool_indexing_in_progress is False
+
+
+@pytest.mark.asyncio
+async def test_delta_write_failure_sends_terminal_ready_signal() -> None:
+    """A failed delta write must not leave the sensor stuck on 'indexing'."""
+    entity = _index_entity()
+    rd = _index_runtime_data(tool_content_hashes={"assist::HassCancelAllTimers": "h1"})
+
+    with (
+        patch(f"{_CONV}.async_dispatcher_send") as dispatch_mock,
+        patch(
+            f"{_CONV}.gather_store_puts_in_chunks",
+            new=AsyncMock(side_effect=RuntimeError("embedding provider down")),
+        ),
+    ):
+        await entity._async_index_tools(
+            MagicMock(), rd, _loaded_llm_api("HassStartTimer")
+        )
+
+    # Retrieval still serves the pre-delta index, so the terminal state is
+    # "ready" with the cumulative count — never a stuck "indexing".
+    state, count = dispatch_mock.call_args_list[-1].args[2:4]
+    assert state == "ready"
+    assert count == len(rd.tool_content_hashes)

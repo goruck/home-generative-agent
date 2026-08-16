@@ -108,6 +108,11 @@ _LOGGER = logging.getLogger(__name__)
 # Cap on the error detail appended to the user-visible fallback chat message.
 _STREAM_ERROR_REASON_MAX_CHARS = 280
 
+# Time budget for the inline tool-index delta write; it runs on the
+# conversational turn's critical path, so a hung embedding provider must
+# degrade to the retry-next-turn path instead of stalling the voice turn.
+_TOOL_INDEX_DELTA_TIMEOUT_S = 30.0
+
 
 def _recommit_final_assistant_content(chat_log: conversation.ChatLog) -> None:
     """
@@ -1214,12 +1219,6 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 response=intent_response, conversation_id=conversation_id
             )
 
-        # --- Global Tool Indexing ---
-        # Passing llm_api enables the per-turn top-up: live tools missing from
-        # the index (device-gated Assist tools) are discovered and indexed
-        # inline before retrieval runs for this turn.
-        await self._async_index_tools(llm_context, runtime_data, llm_api)
-
         if not options.get(CONF_SCHEMA_FIRST_YAML, False) and _is_dashboard_request(
             user_input.text
         ):
@@ -1239,6 +1238,13 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             return conversation.ConversationResult(
                 response=intent_response, conversation_id=conversation_id
             )
+
+        # --- Global Tool Indexing ---
+        # Passing llm_api enables the per-turn top-up: live tools missing from
+        # the index (device-gated Assist tools) are indexed inline before
+        # retrieval runs for this turn. Runs after the dashboard/noise early
+        # returns so phantom STT turns never pay for index writes.
+        await self._async_index_tools(llm_context, runtime_data, llm_api)
 
         tools, langchain_tools = self._async_get_all_tools(llm_api.apis)
 
@@ -1389,43 +1395,60 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         index_tasks: list[Any],
         new_hashes: dict[str, str],
     ) -> None:
-        """Queue index writes for an API instance's new or changed tools."""
-        for tool in api_instance.tools:
-            # Composite hash: api_id + name + description + schema
-            schema_json = json.dumps(
-                safe_convert(
-                    tool.parameters,
-                    custom_serializer=api_instance.custom_serializer,
-                ),
-                sort_keys=True,
-            )
-            is_actuation = is_actuation_tool(tool.name)
-            raw_content = (
-                f"provider:{api_id}\nname:{tool.name}\n"
-                f"description:{tool.description}\nparameters:{schema_json}\n"
-                f"actuation:{is_actuation}"
-            )
-            content_hash = hashlib.sha256(raw_content.encode()).hexdigest()
+        """
+        Queue index writes for an API instance's new or changed tools.
 
-            tool_key = tool_index_key(api_id, tool.name)
-            if runtime_data.tool_content_hashes.get(tool_key) != content_hash:
-                # Prep for embedding
-                embedding_text = strip_for_embedding(f"{tool.name}: {tool.description}")
-                index_tasks.append(
-                    runtime_data.store.aput(
-                        ("system", "tools"),
-                        key=tool_key,
-                        value={
-                            "content": truncate_for_embedding_index(embedding_text),
-                            "name": tool.name,
-                            "api_id": api_id,
-                            "description": tool.description,
-                            "parameters": schema_json,
-                            "is_actuation": is_actuation,
-                        },
-                    )
+        Failures are isolated per tool: one unserializable schema must not
+        starve every later tool of its API (which would reproduce the very
+        missing-tool bug the top-up exists to fix, and re-fire the top-up
+        every turn for the healthy neighbors too).
+        """
+        for tool in api_instance.tools:
+            try:
+                # Composite hash: api_id + name + description + schema
+                schema_json = json.dumps(
+                    safe_convert(
+                        tool.parameters,
+                        custom_serializer=api_instance.custom_serializer,
+                    ),
+                    sort_keys=True,
                 )
-                new_hashes[tool_key] = content_hash
+                is_actuation = is_actuation_tool(tool.name)
+                raw_content = (
+                    f"provider:{api_id}\nname:{tool.name}\n"
+                    f"description:{tool.description}\nparameters:{schema_json}\n"
+                    f"actuation:{is_actuation}"
+                )
+                content_hash = hashlib.sha256(raw_content.encode()).hexdigest()
+
+                tool_key = tool_index_key(api_id, tool.name)
+                if runtime_data.tool_content_hashes.get(tool_key) != content_hash:
+                    # Prep for embedding
+                    embedding_text = strip_for_embedding(
+                        f"{tool.name}: {tool.description}"
+                    )
+                    index_tasks.append(
+                        runtime_data.store.aput(
+                            ("system", "tools"),
+                            key=tool_key,
+                            value={
+                                "content": truncate_for_embedding_index(embedding_text),
+                                "name": tool.name,
+                                "api_id": api_id,
+                                "description": tool.description,
+                                "parameters": schema_json,
+                                "is_actuation": is_actuation,
+                            },
+                        )
+                    )
+                    new_hashes[tool_key] = content_hash
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.warning(
+                    "Failed to queue tool %s of API %s for indexing: %s",
+                    _format_tool_keys_for_log({str(getattr(tool, "name", "?"))}),
+                    api_id,
+                    err,
+                )
 
     async def _async_discover_local_tools(
         self,
@@ -1683,9 +1706,20 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         embedding-provider blip recovers on its own.
         """
         try:
-            await gather_store_puts_in_chunks(index_tasks)
+            # Time budget: this write sits on the user-facing turn's critical
+            # path; a hung embedding provider must not stall the voice turn.
+            async with asyncio.timeout(_TOOL_INDEX_DELTA_TIMEOUT_S):
+                await gather_store_puts_in_chunks(index_tasks)
         except Exception:
             _LOGGER.exception("Tool index top-up write failed; retrying next turn")
+            # Terminal sensor signal: retrieval still serves the pre-delta
+            # index, so the state is "ready", not a stuck "indexing".
+            async_dispatcher_send(
+                self.hass,
+                SIGNAL_TOOL_INDEX_UPDATED,
+                "ready",
+                len(runtime_data.tool_content_hashes),
+            )
             return
         runtime_data.tool_content_hashes.update(new_hashes)
         _LOGGER.info(

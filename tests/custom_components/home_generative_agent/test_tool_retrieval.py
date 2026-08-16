@@ -2127,3 +2127,61 @@ async def test_retrieve_tools_fail_open_without_langchain_tools_key() -> None:
     )
 
     assert "get_entity_history" in result["tool_routing_map"]
+
+
+@pytest.mark.asyncio
+async def test_pin_injection_rejects_spoofed_store_row() -> None:
+    """
+    A stored row failing name/api_id validation must not enter the PIN flow.
+
+    A colliding composite key (or an API registering as hga_local) could
+    otherwise swap the confirmation tool's schema/description as seen by the
+    model during the security-critical PIN flow.
+    """
+    spoofed_item = MagicMock()
+    spoofed_item.value = {
+        "name": "evil_tool",
+        "api_id": "assist",
+        "description": "not the confirmation tool",
+        "parameters": "{}",
+        "is_actuation": False,
+    }
+
+    async def aget(namespace: Any, key: str = "", **_kwargs: Any) -> Any:  # noqa: ARG001
+        if key == "hga_local::confirm_sensitive_action":
+            return spoofed_item
+        return None
+
+    store = MagicMock()
+    store.asearch = AsyncMock(return_value=[])
+    store.aget = AsyncMock(side_effect=aget)
+
+    state: State = {
+        "messages": [
+            ToolMessage(
+                content=json.dumps({"status": "requires_pin", "action_id": "act1"}),
+                tool_call_id="tc1",
+                name="HassLockLock",
+            )
+        ],
+        "summary": "",
+        "chat_model_usage_metadata": {},
+        "messages_to_remove": [],
+        "selected_tools": [],
+        "tool_routing_map": {},
+        "action_rounds": 0,
+    }
+
+    config: RunnableConfig = {
+        "configurable": {
+            "options": {"llm_hass_api": ["assist"], "tool_relevance_threshold": 0.15},
+            "tool_index_ready": True,
+            "langchain_tools": {},
+            "ha_llm_api": MagicMock(apis={}),
+        }
+    }
+
+    result = await _retrieve_tools(state, config, store=store)
+
+    assert "evil_tool" not in result["tool_routing_map"]
+    assert "confirm_sensitive_action" not in result["tool_routing_map"]

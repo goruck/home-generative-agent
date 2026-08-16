@@ -109,6 +109,10 @@ Also: unknown action types fail closed (a future HA construct over-prompts rathe
 
 **How to apply:** Per-api_id top-up cooldown (skip delta if last top-up for that api was < N minutes ago and produced no new hashes); negative cache of keys that repeatedly fail to index, with a retry deadline; periodic eviction sweep deleting store rows whose keys have not been live for N days; delimiter-safe key encoding (escape `::` or hash the pair).
 
+Two adjacent gaps from the same review, same disposition (document + defer): (5) concurrent turns — while turn A's inline delta is writing, turn B from a *different* device-class short-circuits on `tool_indexing_in_progress` and proceeds without its own gated tools for that one turn (pre-fix behavior; self-heals on B's next turn); fixing needs per-key coordination or awaiting the active delta then recomputing. (6) a transient failure during the *startup* index run latches `tool_index_failed` until reload, which now also disables per-turn top-ups — startup deserves a retry/backoff instead of a one-shot latch.
+
+And two writer-consistency gaps: (7) `_mark_tool_index_stale` (embedding-provider switch) clears hashes with no generation/epoch guard, so an in-flight index write that completes after the switch marks old-provider rows current (and the background leg re-latches `tool_index_ready`), silently mixing embedding spaces until restart — pre-existing on the startup leg, window widened by the per-turn delta writer; fix wants a generation counter checked before `update()`/`ready=True`. (8) a partially-failed delta write commits zero hashes, so already-written chunks are re-embedded next turn — converges, but a per-chunk `(task, key)` commit would stop burning embedding quota under a flaky provider.
+
 **Effort:** M
 **Priority:** P3
 **Depends on:** v3.30.4
