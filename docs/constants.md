@@ -449,6 +449,12 @@ The same rules screen two surfaces: direct tool calls from the conversation agen
 |---|---|---|---|
 | `RECOMMENDED_OPENAI_STT_MODEL` | `model_name` | `gpt-4o-mini-transcribe` | Default OpenAI Whisper model for the STT provider. Supported values: `whisper-1`, `gpt-4o-transcribe`, `gpt-4o-mini-transcribe`. |
 
+**Code-only:**
+
+| Constant | File | Value | Purpose |
+|---|---|---|---|
+| `STT_REQUEST_TIMEOUT_S` | `stt.py` | `120.0` (s) | Timeout for a transcription or translation request (connect timeout 5 s). Matches the chat provider timeout in `__init__.py`. Pinned on the OpenAI client rather than inherited from Home Assistant's shared httpx client, so a future HA change to that client cannot silently retime transcription. |
+
 ---
 
 ## HTTP Endpoint
@@ -490,6 +496,12 @@ These constants live outside `const.py` in individual modules. They affect runti
 |---|---|---|
 | `_STREAM_ERROR_REASON_MAX_CHARS` | `280` | Maximum characters of the failure reason appended to the fallback chat message when a streaming turn fails (only `HomeAssistantError` messages are shown verbatim; other exceptions surface their class name only). |
 | `_TOOL_INDEX_DELTA_TIMEOUT_S` | `30.0` (s) | Timeout on the per-turn tool-index top-up write (newly discovered device-gated or MCP tools). A stalled store write gives up instead of hanging the voice turn; the existing index keeps serving and the next turn retries. |
+
+### `stt.py`
+
+| Constant | Value | Purpose |
+|---|---|---|
+| `STT_REQUEST_TIMEOUT_S` | `120.0` (s) | Transcription/translation request timeout (connect timeout 5 s). Each STT entity caches one OpenAI client built on Home Assistant's shared httpx client, so this timeout is pinned on the SDK client instead of inherited from the shared one. |
 
 ### `core/person_gallery.py`
 
