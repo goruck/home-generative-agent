@@ -1171,6 +1171,34 @@ window-scoped check could suppress.
 
 ---
 
+## Speech-to-Text
+
+### SDK client defaults given up by using HA's shared httpx client
+
+**What:** `_get_client` (stt.py) builds the OpenAI client on Home Assistant's shared httpx client. That is what removes the per-stream SSL-context build (#556), but it also means the SDK's own client defaults no longer apply. Two are currently accepted and documented rather than restored: `follow_redirects` (openai's own client sets `True`; HA leaves httpx's `False`, so a 3xx from an egress proxy or a future endpoint move surfaces as an error instead of being followed), and the SDK's connection limits (HA's pool expires keepalive at 15s, which is what bounds the connection-reuse win to back-to-back utterances). The request timeout was the third and *is* pinned.
+
+**Why:** Found independently by the Claude adversarial and red-team passes on the #556 ship (2026-08-16), both citing `openai/_base_client.py` `_DefaultAsyncHttpxClient(follow_redirects=True)` versus HA's `HassHttpXAsyncClient`. Not fixed in that branch because api.openai.com does not redirect today, and the clean mitigation is not a one-liner: the redirect default lives on the httpx client, which we must not mutate — it belongs to every other integration.
+
+**How to apply:** If a redirect ever needs following, do it per-request rather than on the shared client — the SDK only overrides when `options.follow_redirects is not None`, and the audio resources never set it, so it needs a request-option path (e.g. `with_options`). Add a MockTransport test returning a 307 and assert the request is followed. Do not set it on the client returned by `get_async_client`.
+
+**Effort:** S
+**Priority:** P3
+
+---
+
+### Shutdown-time transcription logs a full traceback
+
+**What:** Home Assistant closes its shared httpx client on `EVENT_HOMEASSISTANT_CLOSE`, and `get_async_client` never revalidates the cached entry — it returns the same closed client forever. A transcription attempted after that raises `httpx.RuntimeError("Cannot send a request, as the client has been closed")`, which is neither `AuthenticationError` nor `OpenAIError`, so it lands in the bare `except Exception` and dumps a traceback into the shutdown log. The returned `SpeechResult` is correctly `ERROR`.
+
+**Why:** Surfaced by both adversarial passes on the #556 ship (2026-08-16). Cosmetic — CLOSE is the last event before process exit, so it is not reachable in a normal supervised run. Recorded because "is the cached client still usable?" is the obvious question a reader of the new cache will ask, and because the obvious fix is a placebo: rebuilding on a closed client changes nothing, since `get_async_client` hands back the identical closed object.
+
+**How to apply:** Catch that specific `RuntimeError` in `async_process_audio_stream` and log it at warning level with a "Home Assistant is shutting down" message, instead of letting it reach `LOGGER.exception`.
+
+**Effort:** S
+**Priority:** P3
+
+---
+
 ## Completed
 
 ### Lovelace health card example for baseline attrs
