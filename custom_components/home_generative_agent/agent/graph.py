@@ -85,6 +85,7 @@ from .helpers import (
     register_pending_action,
     resolve_critical_action_policy,
     sanitize_tool_args,
+    tool_index_key,
 )
 from .pin_messages import pin_msg
 from .token_counter import count_tokens_cross_provider
@@ -729,12 +730,23 @@ def _get_live_tool_ids(config: RunnableConfig) -> set[tuple[str, str]] | None:
     load this turn. Only tools present in the loaded ``ha_llm_api`` (plus local
     LangChain tools) are callable, so candidates are filtered against this set.
 
-    Returns None to fail open when ``ha_llm_api`` is absent or has no ``apis``
-    attribute, preserving pre-filter behavior for tests and robot runs.
+    Fail-open contract (None = filtering disabled): ``ha_llm_api`` absent or
+    lacking ``.apis``, or the ``langchain_tools`` key absent entirely — a caller
+    that wired neither surface gets pre-filter behavior (tests, robot runs). A
+    present ``ha_llm_api`` with an *empty* ``langchain_tools`` dict is a real
+    state (no local tools this turn) and filters normally; treating it as
+    fail-open would let stale local candidates bind, and treating an absent key
+    as live-empty would silently drop every local tool for such a caller.
     """
     configurable = config.get("configurable", {})
     ha_llm_api = configurable.get("ha_llm_api")
     if ha_llm_api is None or not hasattr(ha_llm_api, "apis"):
+        LOGGER.debug("Live-tool filter disabled: no ha_llm_api in config (fail open)")
+        return None
+    if "langchain_tools" not in configurable:
+        LOGGER.debug(
+            "Live-tool filter disabled: no langchain_tools in config (fail open)"
+        )
         return None
     live: set[tuple[str, str]] = {
         (api_id, tool.name)
@@ -744,6 +756,37 @@ def _get_live_tool_ids(config: RunnableConfig) -> set[tuple[str, str]] | None:
     langchain_tools = configurable.get("langchain_tools") or {}
     live |= {("hga_local", name) for name in langchain_tools}
     return live
+
+
+def _filter_live_candidates(
+    config: RunnableConfig,
+    rag_tools: list[RawTool],
+    safety_tools: list[RawTool],
+) -> tuple[list[RawTool], list[RawTool], set[tuple[str, str]] | None, int]:
+    """
+    Drop index candidates that are not live this turn.
+
+    Dead candidates (device-gated tools indexed from another device's turn,
+    tools of a configured API that failed to load) are removed before the merge
+    so they never consume merge slots. Returns the filtered lists, the live set
+    (None = filtering disabled, fail open), and the dropped count.
+    """
+    live_tool_ids = _get_live_tool_ids(config)
+    if live_tool_ids is None:
+        return rag_tools, safety_tools, None, 0
+    kept_rag = [t for t in rag_tools if (t["api_id"], t["name"]) in live_tool_ids]
+    kept_safety = [t for t in safety_tools if (t["api_id"], t["name"]) in live_tool_ids]
+    dropped = (len(rag_tools) - len(kept_rag)) + (len(safety_tools) - len(kept_safety))
+    if dropped:
+        LOGGER.debug(
+            "Live-tool filter dropped %d candidate(s): %s",
+            dropped,
+            sorted(
+                {(t["api_id"], t["name"]) for t in rag_tools + safety_tools}
+                - live_tool_ids
+            ),
+        )
+    return kept_rag, kept_safety, live_tool_ids, dropped
 
 
 _INTENT_SPLIT_RE = re.compile(
@@ -1655,7 +1698,9 @@ async def _get_tool_by_name(
     """Fetch a specific tool by name from the index, falling back to config tools."""
     for api_id in sorted(allowed_api_ids):
         try:
-            item = await store.aget(("system", "tools"), key=f"{api_id}::{name}")
+            item = await store.aget(
+                ("system", "tools"), key=tool_index_key(api_id, name)
+            )
         except (
             InvalidNamespaceError,
             psycopg.OperationalError,
@@ -1718,13 +1763,10 @@ async def _retrieve_tools(  # noqa: PLR0915
 
     # 1b. Drop index candidates that are not live this turn (device-gated tools
     # indexed from another device's turn, tools of a failed API) before the
-    # merge, so dead candidates never consume merge slots. None = fail open.
-    live_tool_ids = _get_live_tool_ids(config)
-    if live_tool_ids is not None:
-        rag_tools = [t for t in rag_tools if (t["api_id"], t["name"]) in live_tool_ids]
-        safety_tools = [
-            t for t in safety_tools if (t["api_id"], t["name"]) in live_tool_ids
-        ]
+    # merge, so dead candidates never consume merge slots.
+    rag_tools, safety_tools, live_tool_ids, live_filter_dropped = (
+        _filter_live_candidates(config, rag_tools, safety_tools)
+    )
 
     # 2. Merge: safety tools take priority; RAG fills remaining slots.
     #
@@ -1763,6 +1805,12 @@ async def _retrieve_tools(  # noqa: PLR0915
             tool_indexing_in_progress,
             tool_index_failed,
         ) = _tool_retrieval_fallback_reason(store=store, config=config)
+        if live_filter_dropped:
+            # Without this, the reason claims the vector search returned
+            # nothing usable when it did — the live-tool filter removed it.
+            fallback_reason += (
+                f"; live-tool filter dropped {live_filter_dropped} candidate(s)"
+            )
         LOGGER.warning(
             "Tool retrieval using keyword-filtered fallback: %s "
             "(limit=%d, total=%d, ready=%s, indexing=%s, failed=%s).",

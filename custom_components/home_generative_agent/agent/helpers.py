@@ -344,6 +344,18 @@ def normalize_intent_for_lock(
     return normalized
 
 
+def tool_index_key(api_id: str, name: str) -> str:
+    """
+    Composite tool-index store key.
+
+    Single definition on purpose: the per-turn top-up compares live keys
+    against cached hashes, so any drift between the key spelling used for
+    discovery writes and the one used for the live-set comparison would make
+    a key permanently "missing" and re-fire the top-up every turn.
+    """
+    return f"{api_id}::{name}"
+
+
 def format_tool(
     tool: llm.Tool, custom_serializer: Callable[[Any], Any] | None
 ) -> dict[str, Any]:

@@ -101,6 +101,20 @@ Also: unknown action types fail closed (a future HA construct over-prompts rathe
 
 ---
 
+### Tool index hygiene: top-up cooldown, negative cache, stale-key eviction, delimiter-safe keys
+
+**What:** The per-turn index top-up (#554, v3.30.4) trusts configured LLM APIs. Four hygiene gaps deferred from that ship's review: (1) a hostile or buggy MCP server that rotates tool names forces embedding writes and index growth on every turn — no per-api cooldown or per-turn cap; (2) a live key that persistently fails to index (schema that can't serialize) retries every turn — cheap in-memory since the top-up sources from loaded API instances, but there is no negative cache; (3) index rows for removed APIs and renamed tools are inert (the bind-time live filter excludes them) but never evicted, so the store and `tool_content_hashes` grow monotonically; (4) composite index keys `f"{api_id}::{name}"` don't escape `::`, so `a` + `b::c` collides with `a::b` + `c` — retrieval re-validates the stored `name`/`api_id` fields against the live set, so a collision can shadow a legitimate row but not spoof one.
+
+**Why:** Security specialist + red team findings during the #554 ship review (2026-08-15). User decision: configured LLM APIs are inside the trust boundary (they already inject tool descriptions into the model context), so cap/cooldown machinery was deliberately deferred rather than added to the per-turn hot path.
+
+**How to apply:** Per-api_id top-up cooldown (skip delta if last top-up for that api was < N minutes ago and produced no new hashes); negative cache of keys that repeatedly fail to index, with a retry deadline; periodic eviction sweep deleting store rows whose keys have not been live for N days; delimiter-safe key encoding (escape `::` or hash the pair).
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** v3.30.4
+
+---
+
 ### Provider-gated schema normalisation vs mixed-provider fallback chains
 
 **What:** `_format_and_dedupe_tools` gates its subtractive schema passes (OpenAI top-level-union flatten, Gemini anyOf-required sanitizer) on the statically configured primary provider, but `FallbackChatModel.bind_tools` (`core/fallback.py`) binds the same formatted tool list to every model in the chain. In a mixed-provider chain (e.g. Ollama primary with an OpenAI fallback), runtime failover hands the un-flattened top-level `anyOf` to OpenAI and reproduces the `HassStartTimer` schema 400 — and `_is_retryable` does not classify schema 400s as chain-advance errors, so the turn hard-fails instead of falling through. Symmetric mild case: an OpenAI primary that fails over hands the lossy flattened schema to a union-capable fallback.

@@ -1993,3 +1993,137 @@ async def test_browser_context_excludes_timer_tools() -> None:
     selected_names = [t["function"]["name"] for t in result["selected_tools"]]
     assert "HassStartTimer" not in selected_names
     assert "HassCancelAllTimers" in selected_names
+
+
+@pytest.mark.asyncio
+async def test_retrieve_tools_live_filter_drops_stale_safety_candidate() -> None:
+    """A non-live actuation candidate must not survive via the safety net."""
+    query = "turn on the kitchen lights"
+    assert _query_needs_actuation_safety(query)
+
+    store = MagicMock()
+    # Both the RAG call and the safety-net call see the same candidates; if
+    # either leg skipped the live filter, the stale actuation tool would bind
+    # (safety tools take merge priority), so the assertion pins both legs.
+    store.asearch = AsyncMock(
+        return_value=[
+            _make_search_item("HassTurnOn", score=0.9, is_actuation=True),
+            _make_search_item("HassVacuumStart", score=0.8, is_actuation=True),
+        ]
+    )
+    store.aget = AsyncMock(return_value=None)
+
+    config: RunnableConfig = {
+        "configurable": {
+            "options": {"llm_hass_api": ["assist"], "tool_relevance_threshold": 0.15},
+            "tool_index_ready": True,
+            "langchain_tools": {},
+            # HassVacuumStart was indexed once but is not exposed this turn.
+            "ha_llm_api": _live_llm_api("HassTurnOn"),
+        }
+    }
+
+    result = await _retrieve_tools(_query_state(query), config, store=store)
+
+    assert "HassTurnOn" in result["tool_routing_map"]
+    assert "HassVacuumStart" not in result["tool_routing_map"]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_tools_read_only_query_gates_live_context_injection() -> None:
+    """The read-only open-state injection (3b) also honors the live filter."""
+    live_ctx_item = MagicMock()
+    live_ctx_item.value = {
+        "name": "GetLiveContext",
+        "api_id": "assist",
+        "description": "Get live home state",
+        "parameters": "{}",
+        "is_actuation": False,
+    }
+
+    store = MagicMock()
+    store.asearch = AsyncMock(
+        return_value=[_make_search_item("get_entity_history", score=0.7)]
+    )
+    # The index still holds GetLiveContext, but it is not live this turn.
+    store.aget = AsyncMock(return_value=live_ctx_item)
+
+    config: RunnableConfig = {
+        "configurable": {
+            "options": {"llm_hass_api": ["assist"], "tool_relevance_threshold": 0.15},
+            "tool_index_ready": True,
+            "langchain_tools": {},
+            "ha_llm_api": _live_llm_api("get_entity_history"),
+        }
+    }
+
+    result = await _retrieve_tools(
+        _query_state("list the open doors in my house"), config, store=store
+    )
+
+    assert "get_entity_history" in result["tool_routing_map"]
+    assert "GetLiveContext" not in result["tool_routing_map"]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_tools_all_candidates_stale_falls_back_to_live_tools(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Filter empties RAG/safety: keyword fallback binds only live tools."""
+    store = MagicMock()
+    # Every retrieved candidate is stale (not live this turn).
+    store.asearch = AsyncMock(
+        return_value=[_make_search_item("HassStartTimer", score=0.9)]
+    )
+    store.aget = AsyncMock(return_value=None)
+
+    config: RunnableConfig = {
+        "configurable": {
+            "options": {"llm_hass_api": ["assist"], "tool_relevance_threshold": 0.15},
+            "tool_index_ready": True,
+            "langchain_tools": {},
+            "ha_llm_api": _live_llm_api("HassCancelAllTimers"),
+        }
+    }
+
+    result = await _retrieve_tools(
+        _query_state("timer status please"), config, store=store
+    )
+
+    # The stale tool cannot re-enter via the fallback (it is live-derived);
+    # live tools still bind instead of the turn ending with zero tools.
+    assert "HassStartTimer" not in result["tool_routing_map"]
+    assert "HassCancelAllTimers" in result["tool_routing_map"]
+    # The fallback reason names the live filter, not a vector-search miss.
+    assert "live-tool filter dropped 1 candidate(s)" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_retrieve_tools_fail_open_without_langchain_tools_key() -> None:
+    """
+    An absent langchain_tools key fails open, like an absent ha_llm_api.
+
+    A caller wiring ha_llm_api but not langchain_tools must not silently lose
+    every hga_local tool to an empty live set — filtering is skipped entirely.
+    """
+    store = MagicMock()
+    store.asearch = AsyncMock(
+        return_value=[
+            _make_search_item("get_entity_history", score=0.9, api_id="hga_local")
+        ]
+    )
+    store.aget = AsyncMock(return_value=None)
+
+    config: RunnableConfig = {
+        "configurable": {
+            "options": {"llm_hass_api": ["assist"], "tool_relevance_threshold": 0.15},
+            "tool_index_ready": True,
+            "ha_llm_api": _live_llm_api("HassCancelAllTimers"),
+        }
+    }
+
+    result = await _retrieve_tools(
+        _query_state("history of the kitchen sensor"), config, store=store
+    )
+
+    assert "get_entity_history" in result["tool_routing_map"]

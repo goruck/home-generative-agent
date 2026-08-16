@@ -8,6 +8,9 @@ homeassistant.components.conversation import chain before importing conversation
 
 from __future__ import annotations
 
+import asyncio
+import inspect
+import re
 import sys
 import types
 from typing import Any
@@ -15,6 +18,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from homeassistant.exceptions import HomeAssistantError
+
+from custom_components.home_generative_agent.core.utils import (
+    gather_store_puts_in_chunks,
+)
 
 
 def _stub_ha_conversation() -> None:
@@ -532,9 +539,22 @@ def _index_runtime_data(**overrides: Any) -> Any:
 
 
 def _loaded_llm_api(*tool_names: str) -> MultiLLMAPI:
-    """MultiLLMAPI whose assist API exposes the given tools live."""
+    """
+    MultiLLMAPI whose assist API exposes the given tools live.
+
+    Tools carry a description and schema because the inline delta path hashes
+    them for real via _queue_api_instance_tools.
+    """
     api: Any = types.SimpleNamespace(
-        tools=[types.SimpleNamespace(name=name) for name in tool_names]
+        tools=[
+            types.SimpleNamespace(
+                name=name,
+                description=f"{name} live",
+                parameters={"type": "object", "properties": {}},
+            )
+            for name in tool_names
+        ],
+        custom_serializer=None,
     )
     return MultiLLMAPI({"assist": api}, routing_map={})
 
@@ -565,29 +585,15 @@ async def test_index_tools_fast_path_all_live_keys_hashed() -> None:
 
 @pytest.mark.asyncio
 async def test_index_tools_delta_missing_key_indexes_inline() -> None:
-    """A live tool missing from the index triggers inline (awaited) indexing."""
+    """A live tool missing from the index is indexed inline from loaded APIs."""
     entity = _index_entity()
     rd = _index_runtime_data(tool_content_hashes={"assist::HassCancelAllTimers": "h1"})
 
-    async def fake_provider_discovery(
-        _llm_context: Any,
-        _runtime_data: Any,
-        _api_ids: Any,
-        index_tasks: list[Any],
-        new_hashes: dict[str, str],
-    ) -> None:
-        index_tasks.append(MagicMock())
-        new_hashes["assist::HassStartTimer"] = "h2"
-
     with (
         patch.object(
-            entity,
-            "_async_discover_provider_tools",
-            new=AsyncMock(side_effect=fake_provider_discovery),
-        ),
-        patch.object(entity, "_async_discover_local_tools", new=AsyncMock()),
-        patch(f"{_CONV}.llm.async_get_apis", return_value=[]),
-        patch(f"{_CONV}.async_dispatcher_send"),
+            entity, "_async_discover_provider_tools", new=AsyncMock()
+        ) as provider_mock,
+        patch(f"{_CONV}.async_dispatcher_send") as dispatch_mock,
         patch(f"{_CONV}.gather_store_puts_in_chunks", new=AsyncMock()) as gather_mock,
     ):
         await entity._async_index_tools(
@@ -596,39 +602,35 @@ async def test_index_tools_delta_missing_key_indexes_inline() -> None:
             _loaded_llm_api("HassCancelAllTimers", "HassStartTimer"),
         )
 
-    # Inline await: the write ran before returning, not via a background task,
-    # so the triggering turn already retrieves from the topped-up index.
+    # Inline await: the write ran before returning, sourced from the loaded
+    # API instances — no rediscovery via llm.async_get_api (whose failure
+    # would leave the key unindexed and re-fire discovery every turn).
+    provider_mock.assert_not_called()
     gather_mock.assert_awaited_once()
     entity.hass.async_create_task.assert_not_called()
-    assert rd.tool_content_hashes["assist::HassStartTimer"] == "h2"
+    assert "assist::HassStartTimer" in rd.tool_content_hashes
     assert rd.tool_index_ready is True
     assert rd.tool_indexing_in_progress is False
+    # The sensor gets the cumulative indexed count, not the delta size.
+    state, count = dispatch_mock.call_args_list[-1].args[2:4]
+    assert state == "ready"
+    assert count == len(rd.tool_content_hashes)
 
 
 @pytest.mark.asyncio
-async def test_index_tools_delta_failure_matches_background_semantics() -> None:
-    """An inline index-write failure sets tool_index_failed without raising."""
+async def test_index_tools_delta_write_failure_does_not_latch_failed() -> None:
+    """
+    An inline delta-write failure must not latch tool_index_failed.
+
+    The pre-delta index is still valid and keeps serving retrieval; the next
+    turn recomputes the same missing keys and retries. Latching the failed
+    flag here would permanently disable top-ups after one transient store or
+    embedding-provider blip.
+    """
     entity = _index_entity()
     rd = _index_runtime_data(tool_content_hashes={})
 
-    async def fake_provider_discovery(
-        _llm_context: Any,
-        _runtime_data: Any,
-        _api_ids: Any,
-        index_tasks: list[Any],
-        new_hashes: dict[str, str],
-    ) -> None:
-        index_tasks.append(MagicMock())
-        new_hashes["assist::HassStartTimer"] = "h2"
-
     with (
-        patch.object(
-            entity,
-            "_async_discover_provider_tools",
-            new=AsyncMock(side_effect=fake_provider_discovery),
-        ),
-        patch.object(entity, "_async_discover_local_tools", new=AsyncMock()),
-        patch(f"{_CONV}.llm.async_get_apis", return_value=[]),
         patch(f"{_CONV}.async_dispatcher_send"),
         patch(
             f"{_CONV}.gather_store_puts_in_chunks",
@@ -639,9 +641,37 @@ async def test_index_tools_delta_failure_matches_background_semantics() -> None:
             MagicMock(), rd, _loaded_llm_api("HassStartTimer")
         )
 
-    assert rd.tool_index_failed is True
+    assert rd.tool_index_failed is False
+    assert rd.tool_index_ready is True
     assert rd.tool_indexing_in_progress is False
     assert "assist::HassStartTimer" not in rd.tool_content_hashes
+
+
+@pytest.mark.asyncio
+async def test_index_tools_delta_cancelled_resets_in_progress() -> None:
+    """
+    A cancelled turn mid-write cannot latch the in-progress guard.
+
+    Assist pipeline runs are routinely cancelled (client disconnect, pipeline
+    timeout); a latched flag would silently block all future indexing.
+    """
+    entity = _index_entity()
+    rd = _index_runtime_data(tool_content_hashes={})
+
+    with (
+        patch(f"{_CONV}.async_dispatcher_send"),
+        patch(
+            f"{_CONV}.gather_store_puts_in_chunks",
+            new=AsyncMock(side_effect=asyncio.CancelledError),
+        ),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await entity._async_index_tools(
+            MagicMock(), rd, _loaded_llm_api("HassStartTimer")
+        )
+
+    assert rd.tool_indexing_in_progress is False
+    assert rd.tool_index_failed is False
 
 
 @pytest.mark.asyncio
@@ -745,3 +775,67 @@ async def test_index_tools_no_changes_resets_in_progress() -> None:
     assert rd.tool_index_ready is True
     assert rd.tool_indexing_in_progress is False
     entity.hass.async_create_task.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_index_tools_delta_without_new_writes_resets_in_progress() -> None:
+    """
+    A delta pass that queues no writes must clear in_progress and warn.
+
+    Regression guard for the top-up path: a live key can be missing from the
+    hash cache while queueing still produces nothing (e.g. a tool schema that
+    fails to serialize). Without the reset, the stuck tool_indexing_in_progress
+    flag would short-circuit every future turn.
+    """
+    entity = _index_entity()
+    rd = _index_runtime_data(tool_content_hashes={})
+
+    with (
+        patch.object(entity, "_queue_api_instance_tools") as queue_mock,
+        patch(f"{_CONV}.async_dispatcher_send"),
+    ):
+        await entity._async_index_tools(
+            MagicMock(), rd, _loaded_llm_api("HassStartTimer")
+        )
+
+    queue_mock.assert_called_once()
+    assert rd.tool_index_ready is True
+    assert rd.tool_indexing_in_progress is False
+    entity.hass.async_create_task.assert_not_called()
+
+
+def test_per_turn_call_site_passes_llm_api() -> None:
+    """
+    Pin the call-site wiring: llm_api must reach _async_index_tools.
+
+    A regression dropping the third argument would silently disable the
+    issue-#554 top-up (llm_api=None makes the ready guard a no-op) with no
+    test failure and no visible error. The full turn cannot be driven in this
+    venv (the HA conversation stack is stubbed), so pin the source instead.
+    """
+    src = inspect.getsource(HGAConversationEntity._async_handle_message_active)
+    assert re.search(
+        r"_async_index_tools\(\s*llm_context,\s*runtime_data,\s*llm_api\s*\)", src
+    )
+
+
+@pytest.mark.asyncio
+async def test_gather_store_puts_closes_remaining_on_failure() -> None:
+    """A failing chunk closes later never-scheduled coroutines and re-raises."""
+    ran: list[str] = []
+
+    async def ok(tag: str) -> None:
+        ran.append(tag)
+
+    async def boom() -> None:
+        msg = "store down"
+        raise RuntimeError(msg)
+
+    later = ok("later")
+    with pytest.raises(RuntimeError, match="store down"):
+        await gather_store_puts_in_chunks([ok("first"), boom(), later], chunk_size=2)
+
+    # The failing chunk's sibling still completed (no detached tasks)...
+    assert ran == ["first"]
+    # ...and the never-scheduled trailing coroutine was closed, not leaked.
+    assert later.cr_frame is None
