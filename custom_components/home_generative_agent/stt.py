@@ -10,12 +10,14 @@ import wave
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
+import httpx
 from homeassistant.components import stt
 from homeassistant.components.stt import (
     SpeechMetadata,
     SpeechResult,
     SpeechToTextEntity,
 )
+from homeassistant.helpers.httpx_client import get_async_client
 from openai import AsyncOpenAI, AuthenticationError, OpenAIError
 
 from .const import (
@@ -39,6 +41,10 @@ if TYPE_CHECKING:
     from .core.runtime import HGAConfigEntry
 
 LOGGER = logging.getLogger(__name__)
+
+# Pinned so the effective timeout never depends on what HA's shared httpx
+# client happens to carry. Matches the chat provider timeout in __init__.py.
+STT_REQUEST_TIMEOUT_S = 120.0
 
 _FORMAT_EXTENSIONS = {
     "wav": "wav",
@@ -191,6 +197,8 @@ class HGASttEntity(SpeechToTextEntity):
         self._subentry = entry.subentries[subentry_id]
         self._attr_unique_id = f"{entry.entry_id}_{subentry_id}"
         self._attr_name = self._subentry.title or "STT"
+        self._openai_client: AsyncOpenAI | None = None
+        self._openai_client_api_key: str | None = None
 
     @property
     def supported_languages(self) -> list[str]:
@@ -245,9 +253,58 @@ class HGASttEntity(SpeechToTextEntity):
             if provider and provider.subentry_type == SUBENTRY_TYPE_MODEL_PROVIDER:
                 provider_settings = provider.data.get("settings", {})
                 if isinstance(provider_settings, Mapping):
-                    return dict(provider_settings).get("api_key")
+                    # A linked provider is authoritative: never fall back to the
+                    # STT-level key, which the flow blanks out when linking.
+                    provider_key = dict(provider_settings).get("api_key")
+                    if isinstance(provider_key, str) and provider_key:
+                        return provider_key
+                    return None
         api_key = settings.get("api_key")
         return api_key if isinstance(api_key, str) and api_key else None
+
+    def _get_client(self, api_key: str) -> AsyncOpenAI:
+        """
+        Return a cached OpenAI client for the resolved API key.
+
+        The client is built on Home Assistant's shared httpx client so the SDK
+        never creates its own SSL context — a blocking read of the certifi
+        bundle — on the event loop, and so back-to-back utterances can reuse a
+        pooled connection instead of repeating the TLS handshake. The cache is
+        keyed on the API key so reconfiguring the STT subentry or its linked
+        model provider takes effect on the next stream.
+
+        The httpx client belongs to Home Assistant. Do not close it from here.
+        HA also blocks that mistake — it swaps in a warn-only ``aclose`` and only
+        its own shutdown listener holds the real one — so a stray close would
+        warn rather than tear down the shared pool. Dropping a superseded cached
+        client is safe for the same reason the fix works: the SDK installs its
+        close-on-GC finalizer only on a client it built itself, never on one we
+        supply. The old per-stream client did carry that finalizer.
+
+        The timeout is pinned rather than inherited. The SDK adopts a supplied
+        client's timeout only when it differs from the httpx default, so leaving
+        it off would silently retime every transcription if a future Home
+        Assistant release ever set one on the shared client. Two other SDK
+        defaults are deliberately given up with the swap and left as HA has
+        them: ``follow_redirects`` (HA leaves httpx's ``False``, so a 3xx from a
+        proxy surfaces as an error rather than being followed) and the SDK's
+        connection limits (HA's pool keeps connections alive for 15s, which is
+        what bounds the reuse win above to back-to-back utterances).
+
+        ``api_key`` is the whole cache key because it is the only configurable
+        input to the client: the STT flow admits ``openai`` providers only, so
+        there is no per-subentry ``base_url``. Adding one means keying on it too.
+        """
+        if self._openai_client is not None and self._openai_client_api_key == api_key:
+            return self._openai_client
+        client = AsyncOpenAI(
+            api_key=api_key,
+            http_client=get_async_client(self.hass),
+            timeout=httpx.Timeout(STT_REQUEST_TIMEOUT_S, connect=5.0),
+        )
+        self._openai_client = client
+        self._openai_client_api_key = api_key
+        return client
 
     async def async_process_audio_stream(  # noqa: PLR0912
         self, metadata: SpeechMetadata, stream: Any
@@ -282,7 +339,6 @@ class HGASttEntity(SpeechToTextEntity):
         audio_file = io.BytesIO(audio_bytes)
         audio_file.name = f"audio.{ext}"
 
-        client = AsyncOpenAI(api_key=api_key)
         request = _build_openai_request(
             model_name,
             audio_file,
@@ -292,7 +348,11 @@ class HGASttEntity(SpeechToTextEntity):
             response_format,
         )
 
+        # Building the client is inside the try: it now touches hass.data and
+        # the SDK constructor, and a failure there should fail this utterance,
+        # not raise out into the assist pipeline.
         try:
+            client = self._get_client(api_key)
             if translate and model_name == "whisper-1":
                 response = await client.audio.translations.create(**request)
             else:

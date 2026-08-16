@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.30.5] - 2026-08-16
+
+### Fixed
+
+- **Voice transcription no longer blocks Home Assistant at the start of every utterance.** OpenAI speech-to-text built a brand-new API client for each audio stream, and building one reads the bundled certificate-authority file from disk — synchronous file I/O landing on the event loop at the most latency-sensitive moment of a voice interaction, between the end of the recording and the start of transcription. Home Assistant's blocking-call detector reported it on every voice command (`Detected blocking call to load_verify_locations ... stt.py, line 285`). The integration now hands the OpenAI SDK the shared HTTP client Home Assistant has already built off the event loop, so no certificate context is created during a voice turn at all, and it keeps one client per speech-to-text entity instead of one per utterance — so utterances close together reuse a pooled connection instead of repeating the TLS handshake, and the per-utterance client objects (each of which carried its own close-on-garbage-collection finalizer) are gone. Re-entering the API key still takes effect on the next utterance without a restart, whether that key lives on the speech-to-text entry itself or on a linked model provider. The request timeout is now pinned at 120 seconds, matching the chat provider, rather than inherited from Home Assistant's shared client where a future Home Assistant change could have silently retimed transcription; a failure while building the client now fails that one utterance instead of raising into the assist pipeline. Translation, response formats, error handling and the empty-audio guard are unchanged. (#556)
+
 ## [3.30.4] - 2026-08-15
 
 ### Fixed

@@ -167,6 +167,8 @@ HGA provides a built-in STT engine using the OpenAI Whisper API — no separate 
    - `translate`: only supported by `whisper-1`; other models fall back to transcription
 6. Go to **Settings → Voice assistants → Assist pipelines** and select **STT - OpenAI** (or your chosen name) for Speech-to-text.
 
+**Credential changes take effect on the next utterance.** Each STT entity keeps one OpenAI client, built on Home Assistant's shared HTTP client, and rebuilds it when the resolved API key changes — no restart or integration reload needed. If the entry is linked to a Model Provider subentry, that provider's key is the only one used: linking blanks the separate STT key, so a linked provider without a usable key fails the utterance with an `OpenAI STT API key missing` warning in the log rather than falling back to a stale key.
+
 ---
 
 ## Schema-first YAML Mode
