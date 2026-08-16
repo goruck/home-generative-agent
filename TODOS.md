@@ -95,9 +95,12 @@ Also: unknown action types fail closed (a future HA construct over-prompts rathe
 
 **How to apply:** On entry setup with `CONF_SCHEMA_FIRST_YAML` true, `adelete` the `hga_local::add_automation` store key and drop its content hash; or filter `add_automation` out of RAG results when schema-first is active.
 
+**Resolution:** The second option shipped structurally with #554's bind-time live-tool filter: in schema-first mode `add_automation` is excluded from `langchain_tools`, so `(hga_local, add_automation)` is not in the live set and the stale index row can never bind through RAG, safety, or the force-injection legs. The row itself still exists in the store (inert); physical deletion is folded into the "Tool index hygiene" eviction TODO.
+
 **Effort:** S
 **Priority:** P3
 **Depends on:** v3.20.2
+**Completed:** v3.30.4 (2026-08-15)
 
 ---
 
