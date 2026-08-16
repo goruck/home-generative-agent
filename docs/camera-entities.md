@@ -46,7 +46,7 @@ For each configured camera the integration registers:
 
 | State | Meaning |
 |---|---|
-| `indexing` | First-run embedding in progress |
+| `indexing` | Embedding in progress — the first full run at startup, or a mid-turn top-up adding newly discovered tools |
 | `ready` | Index built; tools retrieved per-turn by semantic search |
 | `failed` | Embedding provider unreachable; agent falls back to all tools |
 | `unknown` | Index state not yet reported |

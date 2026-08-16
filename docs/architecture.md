@@ -57,7 +57,7 @@ The main workflow nodes each modify shared agent state. Solid edges are uncondit
 | Node | Role |
 |---|---|
 | `__start__` | Graph entry point |
-| `retrieve_tools` | Queries the vector index to select tools most relevant to the current message (see [Tool Retrieval](configuration.md#tool-retrieval-rag)). `GetLiveContext` is always included unconditionally so the agent can verify entity state before acting or answer any conditional query regardless of phrasing. |
+| `retrieve_tools` | Queries the vector index to select tools most relevant to the current message (see [Tool Retrieval](configuration.md#tool-retrieval-rag)); candidates that don't exist for the current turn are filtered out before binding (see [Tools](#tools)). `GetLiveContext` is always included unconditionally so the agent can verify entity state before acting or answer any conditional query regardless of phrasing. |
 | `agent` | Runs the primary LLM with only the retrieved tools bound to its context |
 | `action` | Executes tool calls; returns control to `agent`. Multiple tool calls within a single turn execute concurrently via `asyncio.gather` with a 30 s per-tool timeout |
 | `tool_loop_guard` | Intercepts if the agent requests more tool calls than the safety limit (3 rounds per turn) and returns a friendly message asking you to rephrase or break the request into smaller steps |
