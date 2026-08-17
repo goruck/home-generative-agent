@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.30.6] - 2026-08-17
+
+### Fixed
+
+- **Caption deduplication can no longer invent a second person out of one flapping face.** Field validation caught a phantom that survived every earlier fix: "A person walks across a paved walkway, then Nico stands near a green bush outside the house" — one person in frame, narrated as two. Neither the summarizer nor face recognition was at fault. The camera captured the same human twice in a row with byte-identical captions; recognition named him on the first frame and, one frame later at a hard angle, returned "Unknown Person" whose nearest gallery match was a different enrolled person just past the merge bound, so the identity merge correctly refused to consolidate them. Deduplication then collapsed the two identical captions into one frame and merged their identity lists, handing the summarizer a single frame carrying two identities — which is precisely the evidence its single-actor bias and the verified-single-person constraint both stand down for, since a frame that really shows two people must be allowed to say so. The two-actor summary was faithful to a prompt that had been given a fact no frame ever contained. Identities merged across a run of duplicate frames are now capped at the largest number of faces any single contributing frame actually held, so a temporal union can no longer masquerade as people standing together. Excess entries are dropped weakest-evidence first (empty, then "None", then "Indeterminate", then "Unknown Person", matched in every legacy gallery spelling), and a second real name is never dropped — two enrolled people across a run stay ambiguous between one flapping human and a genuine pair, and erasing someone who is present is a worse failure than naming them imprecisely. A frame that genuinely recorded two faces keeps both, and recognized-people lists can only get more precise, never emptier, so no Sentinel rule changes its firing. (#543)
+
 ## [3.30.5] - 2026-08-16
 
 ### Fixed

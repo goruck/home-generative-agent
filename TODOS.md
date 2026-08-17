@@ -898,6 +898,20 @@ Entity-backed evidence path instruction added to `USER_PROMPT_TEMPLATE` in `expl
 
 ---
 
+### Single-person constraint is withheld from exactly the batches that flap
+
+**What:** `_verified_sole_person` (core/video_analyzer.py) requires exactly one distinct detected name across the full pre-cap batch, so a surviving "Unknown Person" — the residue of a merge the distance bound correctly refused — makes `sole_person` None and withholds the `<single person constraint>` block. Refused-merge batches therefore fall back to the summarizer's prompt-level single-actor bias alone, which is the guidance v3.30.1 shipped the deterministic block *because* it could not rely on.
+
+**Why:** Root-caused during the v3.30.6 field investigation (2026-08-16 14:34, camera.playroomdoor). v3.30.6 removed the fabricated co-occurrence that was actively defeating the bias, so the bias now gets a truthful prompt — but it is still the only protection on that path. Deliberately not widened in v3.30.6: the refused unknown's nearest match was a *different* enrolled identity at 0.863, which is genuinely ambiguous, and asserting "the only person in this footage" there would be a false claim. Any fix must preserve that honesty rather than relax the verdict.
+
+**How to apply:** Consider a weaker second-tier constraint for the refused-merge case that states what is actually known ("recognition matched exactly one enrolled person in this footage; other faces were seen but not identified") instead of the strong sole-person claim, and let the summarizer keep normal Counts rules. Gate it on: exactly one enrolled name, every other detected entry a reserved placeholder, and no frame with genuine co-occurrence. Field-validate against sequential-visitor batches before shipping — the failure mode to avoid is collapsing a real second visitor into the named resident.
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** v3.30.6
+
+---
+
 ### Identity merge: batch the gallery lookups
 
 **What:** `_merge_unknown_faces` awaits `PersonGalleryDAO.nearest_match` once per unknown face, re-sending a ~10 KB 512-float vector literal per call. Fetch the batch's gallery rows once (or add a DAO method taking a list of embeddings) and compute cosine distances client-side with numpy — gallery rows are already L2-normalized, so distance is `1 - dot`.
