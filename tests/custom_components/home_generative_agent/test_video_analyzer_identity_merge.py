@@ -204,6 +204,44 @@ async def test_refused_when_distance_beyond_bound(
 
 
 @pytest.mark.asyncio
+async def test_refused_merge_does_not_dedupe_into_a_phantom_frame(
+    va: VideoAnalyzer, entry: MagicMock
+) -> None:
+    """
+    A refused merge must not become a two-person frame via caption dedupe.
+
+    Field regression (2026-08-16, camera.playroomdoor): one human recognized
+    as "Nico" on one frame and, one frame later at a hard angle, as "Unknown
+    Person" whose nearest gallery match was a DIFFERENT enrolled identity at
+    0.863 — over the bound, so the merge correctly refused. Both frames drew
+    the same caption, so dedupe collapsed them and unioned the identity
+    lists, handing the summarizer a single frame carrying two identities.
+    That is the exact signal its single-actor bias (and the <single person
+    constraint> block) stands down for, and it narrated a phantom: "A person
+    walks across a paved walkway, then Nico stands near a green bush outside
+    the house."
+    """
+    entry.runtime_data.person_gallery = _dao(("Lindo", 0.863350))
+    caption = "A man in a dark shirt stands on a paved walkway."
+    _stub_snapshots(
+        va,
+        [
+            _frame(caption, [_known_hit()]),
+            _frame(caption, [_unknown_hit()]),
+        ],
+    )
+
+    descs, recognized, _, _sole = await va._process_batch(_CAMERA, _ordered(2))
+
+    # The merge still refuses — the identity question stays open.
+    assert va._metrics[_CAMERA].unknown_merged == 0
+    assert va._metrics[_CAMERA].unknown_merge_refused_distance == 1
+    # But no surviving frame may claim two faces it never held at once.
+    assert _identities(descs) == [[_KNOWN]]
+    assert recognized == [_KNOWN]
+
+
+@pytest.mark.asyncio
 async def test_refused_on_same_frame_cooccurrence(
     va: VideoAnalyzer, entry: MagicMock
 ) -> None:

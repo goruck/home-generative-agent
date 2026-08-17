@@ -37,6 +37,23 @@ _UNIQUENESS_HASH_SIZE: Final[int] = 8  # dHash grid size (8 -> 64-bit)
 # Single-frame heuristic helpers
 _HUMAN_TERMS = {"person", "people", "man", "woman", "boy", "girl", "child", "children"}
 _NEG_IDENTS = {"Indeterminate", "Unknown Person", ""}
+# Drop order (weakest evidence first) for placeholder identities when a
+# duplicate-run merge would otherwise claim more faces in one frame than any
+# contributing frame actually had (see _trim_merged_identities). Named
+# identities are absent from this tuple and are never dropped.
+#
+# Entries are normalized (stripped, lowercased) and compared that way, because
+# gallery rows enrolled before the reserved-name guard can come back as
+# "Unknown person" or " Indeterminate " — an exact-match drop would read those
+# as real names and let the phantom through. The SET must stay equal to
+# person_gallery.RESERVED_IDENTITY_LABELS; only the order is local. A test
+# pins that equality so the two cannot drift.
+_PLACEHOLDER_DROP_ORDER: Final[tuple[str, ...]] = (
+    "",
+    "none",
+    "indeterminate",
+    "unknown person",
+)
 _MAX_SENTENCES = 2
 _MAX_CHARS = 300
 _MAX_NAMES = 2
@@ -105,6 +122,43 @@ def dedupe_desc(descs: list[dict[str, list[str]]]) -> list[dict[str, list[str]]]
     return deduped
 
 
+def _trim_merged_identities(merged: list[str], run_max_faces: int) -> list[str]:
+    """
+    Drop placeholder identities that a duplicate-run merge over-counted.
+
+    Identity lists merged across a run of duplicate frames are a TEMPORAL
+    union, but the summarizer reads a frame carrying two identities as one
+    frame showing two humans — the exact signal its single-actor bias and the
+    <single person constraint> block both stand down for. A batch where one
+    frame recognized "Nico" and the next (identical caption, same human, face
+    turned) recognized "Unknown Person" therefore narrated a phantom second
+    actor: "A person walks across a paved walkway, then Nico stands ..."
+    (field report 2026-08-16, camera.playroomdoor; issue #543 family).
+
+    So the merged list may never claim more faces than the largest single
+    contributing frame held. Excess entries are dropped weakest-evidence
+    first, and only from _PLACEHOLDER_DROP_ORDER: a second REAL name is
+    ambiguous between one flapping human and two people, and erasing a
+    present person is a worse failure than naming one imprecisely.
+
+    Matching is normalized so legacy gallery spellings ("Unknown person",
+    " Indeterminate ") drop as the placeholders they are; survivors keep
+    their original text.
+    """
+    for placeholder in _PLACEHOLDER_DROP_ORDER:
+        if len(merged) <= run_max_faces:
+            break
+        while len(merged) > run_max_faces:
+            idx = next(
+                (i for i, n in enumerate(merged) if n.strip().lower() == placeholder),
+                None,
+            )
+            if idx is None:
+                break
+            merged.pop(idx)
+    return merged
+
+
 def dedupe_desc_tagged[T](
     descs: list[dict[str, list[str]]],
     tags: Sequence[T],
@@ -121,11 +175,17 @@ def dedupe_desc_tagged[T](
     the kept one. Merged identities would otherwise let the kept entry name a
     person recognized only on a dropped duplicate, attaching an image where
     that person is not actually identifiable.
+
+    Identities merged across a run are capped at the largest per-frame face
+    count seen in that run, so the union cannot fabricate a two-person frame
+    out of one human whose recognition flapped — see
+    _trim_merged_identities.
     """
     out: list[dict[str, list[str]]] = []
     out_tags: list[T] = []
     last_norm: str | None = None
     kept_has_person = False
+    run_max_faces = 0
     for d, tag in zip(descs, tags, strict=True):
         # dict has single key
         text, faces = next(iter(d.items()))
@@ -138,8 +198,9 @@ def dedupe_desc_tagged[T](
             # duplicate frame is not lost. Rebuild the kept entry instead of
             # extending in place — out[-1] may alias a caller-owned dict.
             kept_text, kept_faces = next(iter(out[-1].items()))
+            run_max_faces = max(run_max_faces, len(faces))
             merged = kept_faces + [p for p in faces if p not in kept_faces]
-            out[-1] = {kept_text: merged}
+            out[-1] = {kept_text: _trim_merged_identities(merged, run_max_faces)}
             if (
                 tag_person_check is not None
                 and not kept_has_person
@@ -151,6 +212,7 @@ def dedupe_desc_tagged[T](
         out.append(d)
         out_tags.append(tag)
         last_norm = norm
+        run_max_faces = len(faces)
         kept_has_person = (
             tag_person_check(faces) if tag_person_check is not None else False
         )
