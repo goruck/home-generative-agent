@@ -312,11 +312,31 @@ _PERSON_FALLBACK_CAPTION = "A person is present; scene analysis unavailable."
 # erased, but "Scene unchanged." is a control reply, not scene content: handed
 # to the summarizer as a frame description it produced "A man in a gray shirt
 # walks out of an open door onto the porch, then stands still as Lindo"
-# (field report 2026-08-17, camera.playroomdoor). This asserts only what
-# recognition actually established — a person is there — and makes no claim
-# about motion or continuity, since the sentinel means the VLM saw no change
-# and it may simply have missed the person entirely.
-_PERSON_SENTINEL_CAPTION = "A person is present."
+# (field report 2026-08-17, camera.playroomdoor).
+#
+# The caption must CONTINUE the subject, never introduce one. The first
+# stand-in here read "A person is present." — an indefinite introduction — and
+# the summarizer, obliged by the Chronology rule to narrate every frame in
+# order, read a bare presence assertion arriving after an earlier frame as
+# somebody new turning up: "A man in a dark shirt stands on the porch at dusk,
+# then remains there as a person becomes visible nearby" (field report
+# 2026-08-18, camera.backyard, one human in frame). Same failure family as the
+# sentinel leak itself — evidence in the prompt that no frame ever held — and
+# the summary prompt's introduce-once rule cannot undo it, because that rule
+# governs the model's OUTPUT while this text is its INPUT.
+#
+# So the wording is load-bearing on three counts, each measured against the
+# live summarizer (temperature 0.2, n=10, real prompts):
+#   * "the same person" continues the subject, so no second actor appears
+#     (2/10 clean before, 10/10 after);
+#   * it still ASSERTS presence, so the detection survives when the VLM missed
+#     the person entirely — a scene-only phrasing ("The same scene continues.")
+#     dropped the person from the summary 3/10 when recognition had no name,
+#     which is the erasure this whole branch exists to prevent;
+#   * it keeps a word _HUMAN_TERM_RE matches, so _pick_notify_frame can still
+#     choose this frame's snapshot as the notification image.
+# It claims no motion, since the sentinel means the VLM reported no change.
+_PERSON_SENTINEL_CAPTION = "The same person remains in view."
 
 # Word-bounded human terms (singular + plural) for notify-frame selection.
 # has_human_terms does bare substring matching ("man" hits "manicured lawn")
