@@ -718,6 +718,7 @@ Names & continuity:
 - Known names = any identity not equal to "Indeterminate" or "Unknown Person".
 - If ≥1 known name appears, include up to two verbatim; otherwise say “a person”.
 - Single-actor bias: if exactly one known name appears in the batch and no frame clearly shows ≥2 humans or states a count, assume all human mentions are that same individual; do not say “another person”.
+- One subject, one introduction: when the frames describe a single individual (single-actor bias, the <single person constraint> block, or the ONE-unknown-person default below), introduce that person ONCE at their first mention — the known name if there is one, otherwise the most specific description any frame gives (“a man in shorts”) — and refer to that same subject afterwards with a pronoun, “the man”/“the woman”/“the person”, or just the next verb. Two separate introductions (“a person … a man in shorts”, “a person … Nico”) read as two people even without the word “two”, so later mentions continue the subject rather than re-introducing it.
 
 Counts:
 - Default to ONE unknown person across separate frames.
@@ -744,6 +745,17 @@ Input:
 
 Output (≤150 chars):
 Lindo St. Angel steps onto the porch, then leans on the railing.
+END_EXAMPLE
+
+BEGIN_EXAMPLE
+Input:
+<frame description>t+0s. A person walks on a paved path near a house entrance.</frame description>
+<person identity>Indeterminate</person identity>
+<frame description>t+11s. A man in shorts stands at an open doorway while a black cat stands nearby.</frame description>
+<person identity>Indeterminate</person identity>
+
+Output (≤150 chars):
+A man in shorts walks to the house entrance, then stands at the open doorway with a black cat nearby.
 END_EXAMPLE
 """  # noqa: E501
 VIDEO_ANALYZER_PROMPT = """
