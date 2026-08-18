@@ -307,6 +307,17 @@ def _has_real_subject(normalized: str, recognized_names: list[str]) -> bool:
 # pipeline without leaking the raw error text into user-facing output.
 _PERSON_FALLBACK_CAPTION = "A person is present; scene analysis unavailable."
 
+# Neutral stand-in caption for a repeated-scene sentinel frame that face
+# recognition proved holds a person. The frame is kept so the detection is not
+# erased, but "Scene unchanged." is a control reply, not scene content: handed
+# to the summarizer as a frame description it produced "A man in a gray shirt
+# walks out of an open door onto the porch, then stands still as Lindo"
+# (field report 2026-08-17, camera.playroomdoor). This asserts only what
+# recognition actually established — a person is there — and makes no claim
+# about motion or continuity, since the sentinel means the VLM saw no change
+# and it may simply have missed the person entirely.
+_PERSON_SENTINEL_CAPTION = "A person is present."
+
 # Word-bounded human terms (singular + plural) for notify-frame selection.
 # has_human_terms does bare substring matching ("man" hits "manicured lawn")
 # and counts negated phrases ("no people visible") — good enough for subject
@@ -988,9 +999,17 @@ class VideoAnalyzer:
                 # that full description — a sentinel carries no scene content
                 # for later frames to be compared against — and drop the
                 # frame from the summary input, unless face recognition
-                # caught an actual person the VLM missed.
+                # caught an actual person the VLM missed. Keep that frame
+                # under a neutral caption, never the sentinel text: "Scene
+                # unchanged." is a control reply carrying no scene content,
+                # and the summarizer must narrate the person it is told is
+                # there — given the sentinel verbatim it wrote "then stands
+                # still as Lindo" (field report 2026-08-17). Same reason the
+                # empty/error path above substitutes a caption.
                 if _has_detected_person(faces):
-                    frame_descriptions.append(entry)
+                    frame_descriptions.append(
+                        {f"t+{ts - t0}s. {_PERSON_SENTINEL_CAPTION}": faces}
+                    )
                     frame_hits.append(hits)
                     frame_paths.append(path)
                 else:

@@ -13,6 +13,7 @@ scenes. The analyzer must:
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -23,6 +24,9 @@ from custom_components.home_generative_agent.core.video_analyzer import (
     FaceHit,
     VideoAnalyzer,
     _caption_mentions_person,
+)
+from custom_components.home_generative_agent.core.video_helpers import (
+    is_no_change_reply,
 )
 
 if TYPE_CHECKING:
@@ -160,14 +164,53 @@ async def test_sentinel_frame_with_detected_person_is_kept(
 
     descs, recognized, _, _sole = await va._process_batch(_CAMERA, _ordered(2))
 
-    # Frame kept so the detected identity survives, but the sentinel text
-    # still must not become the prev_text anchor.
+    # Frame kept so the detected identity survives, under a neutral caption
+    # rather than the sentinel control reply, and the sentinel text still must
+    # not become the prev_text anchor.
     assert descs == [
         {f"t+0s. {_FULL_DESC}": ["Indeterminate"]},
-        {"t+8s. Scene unchanged.": [identity]},
+        {"t+8s. A person is present.": [identity]},
     ]
     assert identity in recognized
     assert prev_texts == [None, _FULL_DESC]
+
+
+@pytest.mark.asyncio
+async def test_sentinel_text_never_reaches_the_summarizer(va: VideoAnalyzer) -> None:
+    """
+    "Scene unchanged." must never be handed over as a frame description.
+
+    Field regression (2026-08-17, camera.playroomdoor): the sentinel frame was
+    kept verbatim because recognition found Lindo in it, so the summarizer got
+    a frame whose description was the control reply and whose identity was a
+    name. It narrated "A man in a gray shirt walks out of an open door onto
+    the porch, then stands still as Lindo." The frame must still be kept — the
+    detection is the whole point of the branch — but the caption it carries
+    has to be scene content the summarizer can actually narrate.
+    """
+    _stub_snapshots(
+        va,
+        [
+            {_FULL_DESC: ["Indeterminate"]},
+            {"Scene unchanged.": ["Lindo"]},
+            {"No change.": ["Lindo"]},
+        ],
+    )
+
+    descs, recognized, _, _sole = await va._process_batch(_CAMERA, _ordered(3))
+
+    captions = [re.sub(r"^t\+\d+s\.\s*", "", caption) for d in descs for caption in d]
+    assert not any(is_no_change_reply(c) for c in captions)
+    # Both sentinel spellings collapse to the same neutral caption, so dedupe
+    # folds them into one frame — and the identity cap keeps that single frame
+    # from claiming two people.
+    assert descs == [
+        {f"t+0s. {_FULL_DESC}": ["Indeterminate"]},
+        {"t+8s. A person is present.": ["Lindo"]},
+    ]
+    # ("Indeterminate" also rides along from frame 1 — pre-existing, tracked
+    # separately as the negative-identities-in-recognized_people TODO.)
+    assert "Lindo" in recognized
 
 
 @pytest.mark.asyncio
