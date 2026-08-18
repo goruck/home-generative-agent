@@ -3023,8 +3023,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         if hass.is_running:
             video_analyzer.start()
         else:
+            video_analyzer_listener_fired = False
 
             def _start_video_analyzer(_event: object) -> None:
+                nonlocal video_analyzer_listener_fired
+                video_analyzer_listener_fired = True
                 hass.loop.call_soon_threadsafe(video_analyzer.start)
 
             # Cancel on unload: if the entry reloads before HA finishes
@@ -3032,11 +3035,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             # instance alongside the new one — duplicate capture loops, and
             # (since retention now deletes at capture/seed time) an
             # independent deque with deletion power over live files.
-            entry.async_on_unload(
-                hass.bus.async_listen_once(
-                    EVENT_HOMEASSISTANT_STARTED, _start_video_analyzer
-                )
+            #
+            # async_listen_once already self-unsubscribes once it fires, so
+            # calling the same remove function again on unload would try to
+            # remove an already-removed listener and log a spurious
+            # "Unable to remove unknown job listener" warning. Only call it
+            # if the event hasn't fired yet.
+            remove_video_analyzer_listener = hass.bus.async_listen_once(
+                EVENT_HOMEASSISTANT_STARTED, _start_video_analyzer
             )
+
+            def _cancel_video_analyzer_listener() -> None:
+                if not video_analyzer_listener_fired:
+                    remove_video_analyzer_listener()
+
+            entry.async_on_unload(_cancel_video_analyzer_listener)
     if options.get(CONF_SENTINEL_ENABLED, RECOMMENDED_SENTINEL_ENABLED):
         if hass.is_running:
             sentinel.start()
