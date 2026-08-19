@@ -13,6 +13,7 @@ scenes. The analyzer must:
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -20,9 +21,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from custom_components.home_generative_agent.core.video_analyzer import (
+    _HUMAN_TERM_RE,
+    _PERSON_SENTINEL_CAPTION,
     FaceHit,
     VideoAnalyzer,
     _caption_mentions_person,
+)
+from custom_components.home_generative_agent.core.video_helpers import (
+    is_no_change_reply,
 )
 
 if TYPE_CHECKING:
@@ -160,14 +166,128 @@ async def test_sentinel_frame_with_detected_person_is_kept(
 
     descs, recognized, _, _sole = await va._process_batch(_CAMERA, _ordered(2))
 
-    # Frame kept so the detected identity survives, but the sentinel text
-    # still must not become the prev_text anchor.
+    # Frame kept so the detected identity survives, under a neutral caption
+    # rather than the sentinel control reply, and the sentinel text still must
+    # not become the prev_text anchor.
     assert descs == [
         {f"t+0s. {_FULL_DESC}": ["Indeterminate"]},
-        {"t+8s. Scene unchanged.": [identity]},
+        {f"t+8s. {_PERSON_SENTINEL_CAPTION}": [identity]},
     ]
     assert identity in recognized
     assert prev_texts == [None, _FULL_DESC]
+
+
+@pytest.mark.asyncio
+async def test_sentinel_text_never_reaches_the_summarizer(va: VideoAnalyzer) -> None:
+    """
+    "Scene unchanged." must never be handed over as a frame description.
+
+    Field regression (2026-08-17, camera.playroomdoor): the sentinel frame was
+    kept verbatim because recognition found Lindo in it, so the summarizer got
+    a frame whose description was the control reply and whose identity was a
+    name. It narrated "A man in a gray shirt walks out of an open door onto
+    the porch, then stands still as Lindo." The frame must still be kept — the
+    detection is the whole point of the branch — but the caption it carries
+    has to be scene content the summarizer can actually narrate.
+    """
+    _stub_snapshots(
+        va,
+        [
+            {_FULL_DESC: ["Indeterminate"]},
+            {"Scene unchanged.": ["Lindo"]},
+            {"No change.": ["Lindo"]},
+        ],
+    )
+
+    descs, recognized, _, _sole = await va._process_batch(_CAMERA, _ordered(3))
+
+    captions = [re.sub(r"^t\+\d+s\.\s*", "", caption) for d in descs for caption in d]
+    assert not any(is_no_change_reply(c) for c in captions)
+    # Both sentinel spellings collapse to the same neutral caption, so dedupe
+    # folds them into one frame — and the identity cap keeps that single frame
+    # from claiming two people.
+    assert descs == [
+        {f"t+0s. {_FULL_DESC}": ["Indeterminate"]},
+        {f"t+8s. {_PERSON_SENTINEL_CAPTION}": ["Lindo"]},
+    ]
+    # ("Indeterminate" also rides along from frame 1 — pre-existing, tracked
+    # separately as the negative-identities-in-recognized_people TODO.)
+    assert "Lindo" in recognized
+
+
+# A determiner immediately in front of a human noun introduces a NEW actor.
+# Two introductions read as two people with no plural for the summary prompt's
+# counting rules to catch (issue #543, the count-rules-vs-reference gap).
+_INTRODUCES_A_PERSON = re.compile(
+    r"\b(?:a|an|another|one|some)\s+(?:\w+\s+){0,3}?"
+    r"(?:person|man|woman|boy|girl|child|individual|figure|someone)\b",
+    re.IGNORECASE,
+)
+
+
+def test_sentinel_caption_continues_the_subject_and_never_introduces_one() -> None:
+    """
+    Pin the three properties the sentinel stand-in caption has to hold at once.
+
+    Field regression (2026-08-18, camera.backyard): the caption was "A person
+    is present." — an indefinite introduction. Placed after a frame that had
+    already introduced the same human, the summarizer (obliged to narrate
+    frames in order) read it as somebody arriving and emitted "A man in a dark
+    shirt stands on the porch at dusk, then remains there as a person becomes
+    visible nearby" for a batch with one human in it. The summary prompt's
+    introduce-once rule cannot undo this: that rule governs the model's output,
+    while this caption is its input.
+
+    Fixing it by describing only the scene would break the other two
+    properties, so all three are pinned together:
+    """
+    # 1. Never introduces an actor — the field regression itself.
+    assert not _INTRODUCES_A_PERSON.search(_PERSON_SENTINEL_CAPTION)
+    # 2. Still asserts a human is present, so the detection this branch exists
+    #    to preserve survives into the summary even when the VLM missed the
+    #    person entirely. Also what lets _pick_notify_frame choose this frame's
+    #    snapshot as the notification image.
+    assert _HUMAN_TERM_RE.search(_PERSON_SENTINEL_CAPTION)
+    # 3. Is scene content, not another control reply smuggled back in.
+    assert not is_no_change_reply(_PERSON_SENTINEL_CAPTION)
+
+
+@pytest.mark.asyncio
+async def test_sentinel_caption_does_not_add_an_actor_to_the_summary_prompt(
+    va: VideoAnalyzer,
+) -> None:
+    """
+    Replay the camera.backyard field batch: one human, six frames.
+
+    Frame 1 describes the man; frame 2 is a sentinel that recognition proved
+    holds a person (so it is kept); frames 3-6 are sentinels with nobody in
+    them (so they drop). The two surviving captions must between them
+    introduce exactly ONE person.
+    """
+    man = (
+        "A man in a dark shirt stands on a porch with white railings next to a "
+        "house at dusk."
+    )
+    _stub_snapshots(
+        va,
+        [
+            {man: ["Indeterminate"]},
+            {"Scene unchanged.": ["Unknown Person"]},
+            *[{"Scene unchanged.": ["Indeterminate"]}] * 4,
+        ],
+    )
+
+    descs, recognized, _, _sole = await va._process_batch(_CAMERA, _ordered(6))
+
+    captions = [re.sub(r"^t\+\d+s\.\s*", "", caption) for d in descs for caption in d]
+    assert len(captions) == 2
+    introductions = sum(len(_INTRODUCES_A_PERSON.findall(c)) for c in captions)
+    assert introductions == 1, (
+        f"{introductions} introductions across {captions!r} — the summarizer "
+        "reads each one as a separate actor"
+    )
+    # The detection still has to reach the summary, sensor and notification.
+    assert "Unknown Person" in recognized
 
 
 @pytest.mark.asyncio

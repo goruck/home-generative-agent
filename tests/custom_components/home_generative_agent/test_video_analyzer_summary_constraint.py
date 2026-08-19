@@ -25,6 +25,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from custom_components.home_generative_agent.agent.tools import VLM_ERROR_CAPTION
+from custom_components.home_generative_agent.const import (
+    VIDEO_ANALYZER_SYSTEM_MESSAGE,
+)
 from custom_components.home_generative_agent.core.video_analyzer import (
     FaceHit,
     VideoAnalyzer,
@@ -103,6 +106,54 @@ def test_constraint_text_names_the_person() -> None:
     # The instruction prose is static: the name appears ONLY as tag data.
     assert constraint.count(_KNOWN) == 1
     assert "<single person constraint>" in constraint
+
+
+def test_constraint_directs_a_single_introduction() -> None:
+    """
+    The block must say HOW to refer, not only WHO the person is.
+
+    Telling the model the frames are one named person still let it write
+    "A person walks across a paved walkway, then Nico stands near a green
+    bush" — a second indefinite introduction reads as two actors without
+    ever using a plural. Measured against the live qwen3.5:9b summarizer,
+    the block without this sentence produced that phrasing in 5 of 8 runs
+    and with it in 0 of 8, while a genuine two-person frame stayed plural
+    under both.
+    """
+    constraint = _single_person_constraint(
+        _KNOWN, [{"A person stands in a doorway.": ["Indeterminate"]}]
+    )
+
+    assert constraint is not None
+    assert "first mention" in constraint
+    assert "continue with the same subject" in constraint
+    # Still a licence, not a denial: plurality stays narratable.
+    assert "Only mention additional people" in constraint
+
+
+def test_system_message_directs_a_single_introduction() -> None:
+    """
+    The batch summarizer rules must cover reference, not only counting.
+
+    When recognition identifies nobody — night IR, subject facing away —
+    there is no verdict and no constraint block, so the summarizer's own
+    rules are the only protection. They defaulted to ONE unknown person
+    for COUNTING but said nothing about how to REFER, so independently
+    captioned frames of one human ("a person" / "a man in shorts") were
+    stitched into "A person walks near the house entrance, then later a
+    man in shorts stands at an open doorway" — two actors to any reader,
+    with no plural to catch (field report 2026-08-18 04:44,
+    camera.playroomdoor).
+    """
+    assert "One subject, one introduction" in VIDEO_ANALYZER_SYSTEM_MESSAGE
+    # Worked example for the no-known-name case, which the named example
+    # above it does not cover.
+    assert (
+        "A man in shorts walks to the house entrance, then stands at the "
+        "open doorway with a black cat nearby."
+    ) in VIDEO_ANALYZER_SYSTEM_MESSAGE
+    # Counting rules stay: a genuine pair must remain narratable as two.
+    assert "Use plural (“two people”)" in VIDEO_ANALYZER_SYSTEM_MESSAGE
 
 
 def test_constraint_none_without_verdict() -> None:

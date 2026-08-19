@@ -5,7 +5,11 @@ from __future__ import annotations
 
 import pytest
 
+from custom_components.home_generative_agent.core.person_gallery import (
+    RESERVED_IDENTITY_LABELS,
+)
 from custom_components.home_generative_agent.core.video_helpers import (
+    _PLACEHOLDER_DROP_ORDER,
     dedupe_desc,
     dedupe_desc_tagged,
     is_no_change_reply,
@@ -188,8 +192,10 @@ def test_dedupe_desc_merges_faces_from_dropped_duplicates() -> None:
     ]
     out = dedupe_desc(descs)
     assert len(out) == 1
-    # "Alice" seen on two dropped frames must not be double-appended.
-    assert next(iter(out[0].values())) == ["None", "Alice"]
+    # "Alice" seen on two dropped frames must not be double-appended, and the
+    # "None" placeholder is dropped rather than inflating the kept entry to a
+    # two-face frame (every contributing frame held exactly one identity).
+    assert next(iter(out[0].values())) == ["Alice"]
 
 
 def test_dedupe_desc_empty_input() -> None:
@@ -218,7 +224,7 @@ def test_dedupe_desc_tagged_keeps_first_tag_of_duplicate_run() -> None:
     assert len(out) == len(tags) == 2
     assert tags == ["p0", "p2"]
     # Identity from the dropped duplicate still merged into the kept entry.
-    assert next(iter(out[0].values())) == ["None", "Alice"]
+    assert next(iter(out[0].values())) == ["Alice"]
 
 
 def test_dedupe_desc_tagged_length_mismatch_raises() -> None:
@@ -243,7 +249,9 @@ def test_dedupe_desc_tagged_upgrades_tag_to_recognized_face_frame() -> None:
     assert len(out) == 1
     # First person-bearing frame in the run wins; later ones don't re-upgrade.
     assert tags == ["p1"]
-    assert next(iter(out[0].values())) == ["Indeterminate", "Alice", "Bob"]
+    # Both real names survive — erasing a present person is worse than naming
+    # one imprecisely — but the "Indeterminate" placeholder is trimmed.
+    assert next(iter(out[0].values())) == ["Alice", "Bob"]
 
 
 def test_dedupe_desc_tagged_keeps_first_tag_when_run_starts_with_person() -> None:
@@ -255,3 +263,111 @@ def test_dedupe_desc_tagged_keeps_first_tag_when_run_starts_with_person() -> Non
         descs, ["p0", "p1"], tag_person_check=_fake_person_check
     )
     assert tags == ["p0"]
+
+
+def test_dedupe_desc_does_not_fabricate_a_two_person_frame() -> None:
+    """
+    A name plus a flapping "Unknown Person" must collapse to the name.
+
+    Field regression (2026-08-16, camera.playroomdoor): one human whose face
+    recognized as "Nico" on one frame and "Unknown Person" on the next
+    (identical caption) produced a kept entry carrying both. The summarizer
+    reads two identities on one frame as two humans, stands its single-actor
+    bias down, and narrates a phantom: "A person walks across a paved
+    walkway, then Nico stands near a green bush outside the house."
+    """
+    descs = [
+        {"t+0s. A man in a dark shirt stands on a paved walkway.": ["Nico"]},
+        {"t+3s. A man in a dark shirt stands on a paved walkway.": ["Unknown Person"]},
+    ]
+    out = dedupe_desc(descs)
+    assert len(out) == 1
+    assert next(iter(out[0].values())) == ["Nico"]
+
+
+def test_dedupe_desc_preserves_a_genuine_two_face_frame() -> None:
+    """A frame that really held two faces keeps both through a merge."""
+    descs = [
+        {"t+0s. Two people stand at the door.": ["Alice", "Unknown Person"]},
+        {"t+8s. Two people stand at the door.": ["Alice"]},
+    ]
+    out = dedupe_desc(descs)
+    assert len(out) == 1
+    assert next(iter(out[0].values())) == ["Alice", "Unknown Person"]
+
+
+def test_dedupe_desc_never_drops_a_second_real_name() -> None:
+    """Two enrolled names across a run are ambiguous — keep both."""
+    descs = [
+        {"t+0s. A person stands at the door.": ["Alice"]},
+        {"t+8s. A person stands at the door.": ["Bob"]},
+    ]
+    out = dedupe_desc(descs)
+    assert next(iter(out[0].values())) == ["Alice", "Bob"]
+
+
+def test_dedupe_desc_drops_indeterminate_before_unknown_person() -> None:
+    """A seen-but-unrecognized face outranks a no-face-found placeholder."""
+    descs = [
+        {"t+0s. A person stands at the door.": ["Indeterminate"]},
+        {"t+8s. A person stands at the door.": ["Unknown Person"]},
+    ]
+    out = dedupe_desc(descs)
+    assert next(iter(out[0].values())) == ["Unknown Person"]
+
+
+def test_placeholder_drop_order_matches_the_reserved_labels() -> None:
+    """
+    The drop order must cover exactly the reserved identity labels.
+
+    A label reserved by the gallery but missing from the drop order would be
+    treated as a real name and never trimmed, letting the phantom through.
+    A drop-order entry that is NOT reserved could erase a real person.
+    """
+    assert set(_PLACEHOLDER_DROP_ORDER) == RESERVED_IDENTITY_LABELS
+    # Normalized entries only — matching lowercases and strips.
+    assert all(p == p.strip().lower() for p in _PLACEHOLDER_DROP_ORDER)
+
+
+def test_dedupe_desc_drops_legacy_spelled_placeholders() -> None:
+    """Legacy gallery casing must not read as a real name."""
+    descs = [
+        {"t+0s. A man stands at the door.": ["Nico"]},
+        {"t+8s. A man stands at the door.": [" Unknown person "]},
+    ]
+    out = dedupe_desc(descs)
+    assert next(iter(out[0].values())) == ["Nico"]
+
+
+def test_dedupe_desc_drops_the_empty_identity_first() -> None:
+    """An empty identity string is the weakest evidence in the drop order."""
+    descs = [
+        {"t+0s. A person stands at the door.": [""]},
+        {"t+8s. A person stands at the door.": ["Indeterminate"]},
+    ]
+    out = dedupe_desc(descs)
+    assert next(iter(out[0].values())) == ["Indeterminate"]
+
+
+def test_dedupe_desc_face_cap_uses_the_run_maximum() -> None:
+    """The cap is the largest per-frame face count anywhere in the run."""
+    descs = [
+        {"t+0s. People at the door.": ["Indeterminate"]},
+        {"t+8s. People at the door.": ["Nico", "Unknown Person"]},
+        {"t+16s. People at the door.": ["Indeterminate"]},
+    ]
+    out = dedupe_desc(descs)
+    assert next(iter(out[0].values())) == ["Nico", "Unknown Person"]
+
+
+def test_dedupe_desc_face_cap_resets_between_runs() -> None:
+    """A two-face run must not license a two-face merge in the next run."""
+    descs = [
+        {"t+0s. Two people at the door.": ["Alice", "Unknown Person"]},
+        {"t+8s. A person on the porch.": ["Nico"]},
+        {"t+16s. A person on the porch.": ["Unknown Person"]},
+    ]
+    out = dedupe_desc(descs)
+    assert len(out) == 2
+    assert next(iter(out[0].values())) == ["Alice", "Unknown Person"]
+    assert next(iter(out[1].values())) == ["Nico"]
