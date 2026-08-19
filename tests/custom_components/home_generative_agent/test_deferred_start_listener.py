@@ -35,6 +35,7 @@ from custom_components.home_generative_agent.const import (
     DOMAIN,
     VIDEO_ANALYZER_MODE_NOTIFY_ON_ANOMALY,
 )
+from custom_components.home_generative_agent.core.video_analyzer import VideoAnalyzer
 
 from .test_fallback_setup import _fallback_setup_data, _patch_setup_dependencies
 
@@ -121,6 +122,37 @@ async def test_unload_after_start_does_not_remove_a_consumed_listener(
         await entry._async_process_on_unload(hass)
 
     assert REMOVE_LISTENER_ERROR not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_stop_latches_the_analyzer_against_a_later_deferred_start(
+    hass: Any,
+) -> None:
+    """
+    A stopped analyzer must refuse to start, however late the start lands.
+
+    The listener cancel cannot cover this on its own. ``async_unload_entry``
+    calls ``stop()`` and then awaits several more times before Home Assistant
+    runs the entry's on-unload callbacks, so ``EVENT_HOMEASSISTANT_STARTED``
+    firing in one of those windows starts the analyzer and *correctly* leaves
+    the cancel with nothing to do. HA then deletes ``runtime_data`` around a
+    live capture loop whose retention deque can delete the replacement
+    entry's snapshot files. The latch is checked in ``start()``, which is
+    the one place downstream of every ordering.
+    """
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    analyzer = VideoAnalyzer(hass, entry)
+
+    await analyzer.stop()
+
+    # Without the latch this raises AttributeError, because start() reads
+    # self.entry.runtime_data.options for the video-model semaphore and an
+    # unloaded entry no longer has runtime_data. That crash is the production
+    # symptom; the latch returns before touching it.
+    analyzer.start()
+
+    assert not hasattr(analyzer, "_cancel_track"), "stopped analyzer started anyway"
 
 
 @pytest.mark.asyncio
