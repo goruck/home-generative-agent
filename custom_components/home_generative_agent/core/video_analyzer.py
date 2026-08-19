@@ -724,6 +724,10 @@ class VideoAnalyzer:
         self.entry = entry
         self._snapshot_queues: dict[str, asyncio.Queue[_SnapshotItem]] = {}
         self._retention_deques: dict[str, deque[Path]] = {}
+        # One-way latch set by stop(). An instance belongs to exactly one
+        # config-entry setup, so once it has been stopped it must never run
+        # again - see the note in start().
+        self._stopped = False
         # One-shot startup task that folds pre-restart files into retention.
         self._retention_seed_task: asyncio.Task[None] | None = None
         self._active_queue_tasks: dict[str, asyncio.Task[Any]] = {}
@@ -2878,6 +2882,19 @@ class VideoAnalyzer:
 
     def start(self) -> None:
         """Start the video analyzer."""
+        # A deferred start can still be in flight when the entry unloads.
+        # async_unload_entry() calls stop() and then awaits several more
+        # times, and Home Assistant runs the entry's on-unload callbacks
+        # only after it returns - so EVENT_HOMEASSISTANT_STARTED landing in
+        # one of those windows would resurrect this instance moments before
+        # HA deletes its runtime_data, leaving a live capture loop and a
+        # retention deque with deletion power over the replacement entry's
+        # snapshot files. The listener cancel cannot close that window; the
+        # latch can, because it is checked here rather than at dispatch.
+        if self._stopped:
+            LOGGER.debug("VideoAnalyzer stopped; refusing to start.")
+            return
+
         if hasattr(self, "_cancel_track"):
             LOGGER.warning("VideoAnalyzer already started.")
             return
@@ -2947,6 +2964,11 @@ class VideoAnalyzer:
 
     async def stop(self) -> None:
         """Stop the video analyzer."""
+        # Latch before the not-started early return, not after: the entry
+        # that never started is exactly the one whose deferred start is
+        # still armed.
+        self._stopped = True
+
         if not hasattr(self, "_cancel_track"):
             LOGGER.warning("VideoAnalyzer not started.")
             return

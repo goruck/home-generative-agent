@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.30.7] - 2026-08-19
+
+### Fixed
+
+- **Reloading the integration after Home Assistant has finished starting no longer dumps a listener traceback into the log.** When the integration set up before Home Assistant finished starting, it deferred the video analyzer's start to the `homeassistant_started` event and registered a cancel so a reload could not leave an orphaned analyzer armed. A one-time event listener already unsubscribes itself when it fires, though, so on any later reload that cancel ran against a listener that was no longer there and Home Assistant logged `Unable to remove unknown job listener` with a full traceback. The cancel now runs only while the listener is still armed. (#559)
+- **An entry that unloads while Home Assistant is still starting can no longer leave a second video analyzer running.** Two orderings could resurrect the analyzer belonging to the entry that was going away. The deferred start ran on a worker thread rather than the event loop, so it could land after the entry had been torn down and its runtime data deleted — the analyzer would come up with no configuration to read, and where it did come up it brought its own capture loop and its own retention deque, which deletes snapshot files. And because Home Assistant runs an entry's cancel callbacks only after the unload itself returns, the start event could fire during the unload and beat the cancel to it. The start now runs on the event loop in the same step that consumes the listener, and stopping an analyzer permanently retires it, so a start arriving from any direction after the entry is gone is refused rather than honored. Users on a busy or slow-starting system are the ones who would have seen this, as duplicate camera analysis and snapshots disappearing earlier than the retention setting should allow. (#559)
+
 ## [3.30.6] - 2026-08-17
 
 ### Fixed

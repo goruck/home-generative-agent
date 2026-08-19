@@ -1215,6 +1215,52 @@ window-scoped check could suppress.
 
 ---
 
+## Config Entry Lifecycle
+
+### Sentinel / discovery / baseline start listeners survive unload
+
+**What:** `_start_sentinel`, `_start_discovery`, and `_start_baseline` (`__init__.py:3075`, `:3087`, `:3097`) register `EVENT_HOMEASSISTANT_STARTED` listeners that are never wired into `entry.async_on_unload`. If the entry unloads, reloads, is disabled, or fails setup before HA finishes starting, the closures stay registered and later start the *obsolete* engines — with stale options — alongside the replacement entry. Their tasks are HA-owned rather than entry-owned, so nothing reaps them: duplicate anomaly evaluation, duplicate notifications and actions, duplicate discovery proposals, duplicate baseline writes. Like the video-analyzer listener before `@callback`, these are plain sync functions, so `HassJob` infers `Executor` and the bodies run on a worker thread.
+
+**Why:** This is exactly the hazard `be3f85c` fixed for the video analyzer ("a leaked listener would start the ORPHANED instance alongside the new one"), and the three siblings in the same code block were left behind. Surfaced during the #559 review (2026-08-18) by both the maintainer pass and the Codex adversarial pass, which rated it P1 independently. Deferred out of #559 by user decision so the contributor's focused fix could land on its own.
+
+**How to apply:** Give each of the three the same shape #559 landed for the analyzer: `@callback` on the listener (so the body runs in the same loop tick as `_OneTimeListener`'s unsubscribe, not on an executor thread), a `fired` flag, and a `@callback` cancel closure wrapped in `entry.async_on_unload`. The repetition across four sites is the argument for a small local helper — something like `_defer_start_until_hass_started(hass, entry, start_fn)` returning nothing — rather than a fourth copy.
+
+The listener cancel is necessary but **not sufficient**, and copying it alone copies #559's remaining hole to all three engines. `async_unload_entry` calls each engine's `stop()` and then awaits several more times before Home Assistant runs the on-unload callbacks, so `EVENT_HOMEASSISTANT_STARTED` landing in one of those windows starts the engine and correctly leaves the cancel with nothing to do. #559 closed that for the analyzer with a one-way latch (`_stopped` set at the top of `VideoAnalyzer.stop()`, checked first in `start()`) because the latch sits downstream of every ordering. `SentinelEngine`, `SentinelDiscoveryEngine`, and the baseline updater each need the same latch — an instance belongs to exactly one setup, so none of them has a legitimate stop-then-start cycle. Extend `tests/custom_components/home_generative_agent/test_deferred_start_listener.py`, which already has both harnesses: assert unload-before-STARTED cancels each engine's start, that firing STARTED runs the body on the main thread, and that a stopped engine refuses a later start.
+
+**Effort:** S
+**Priority:** P1
+**Depends on:** #559
+
+---
+
+### EVENT_HOMEASSISTANT_STOP listener leaks one closure per reload
+
+**What:** `hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _stop_background_tasks)` (`__init__.py:3106`) is registered unconditionally on every `async_setup_entry` and never removed. Each reload adds another closure capturing that generation's `sentinel`, `discovery_engine`, `baseline_updater`, and `openai_http_client`. After N reloads, HA shutdown fires N+1 of them, each calling `.stop()` on long-dead objects, and every stale generation's object graph stays reachable until the process exits.
+
+**Why:** Found by the Codex adversarial pass during the #559 review (2026-08-18). Unlike the STARTED listeners this one leaks on *every* reload, not just reloads that beat HA's startup — so it accumulates during ordinary option edits.
+
+**How to apply:** Wrap it in `entry.async_on_unload(...)`. Unlike the STARTED listeners there is no fired-flag subtlety here: STOP fires once at shutdown, at which point nothing reloads, so the plain wrap is correct. Check first whether `_stop_background_tasks` still needs to be a STOP listener at all now that `async_unload_entry` stops the same three engines — if it does not, the duplicate stop path can go away instead.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** #559
+
+---
+
+### async_unload_entry never closes the synchronous OpenAI HTTP client
+
+**What:** `openai_http_client` is a `httpx.Client` built fresh on every setup (`__init__.py:1874`) and handed to the OpenAI provider instances. `async_unload_entry` closes the pool but not this client; its only close is inside `_stop_background_tasks`, which is reachable only via the leaked STOP listener above. A reload storm therefore retains one client, its connection pool, and its sockets per generation.
+
+**Why:** Found by the Codex adversarial pass during the #559 review (2026-08-18). It compounds with the STOP-listener leak — the leak is what makes the close unreachable at unload time.
+
+**How to apply:** Close it in `async_unload_entry` alongside `pool.close()`, via `hass.async_add_executor_job(openai_http_client.close)` (it is a sync client, so closing it on the loop would block). That means holding it on `runtime_data` rather than only in the setup closure. Once unload owns the close, drop it from `_stop_background_tasks` so shutdown does not double-close.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** #559
+
+---
+
 ## Completed
 
 ### Lovelace health card example for baseline attrs

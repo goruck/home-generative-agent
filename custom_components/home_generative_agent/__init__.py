@@ -3023,20 +3023,47 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         if hass.is_running:
             video_analyzer.start()
         else:
+            video_analyzer_listener_fired = False
 
+            # @callback is load-bearing, not decoration. Without it HassJob
+            # infers Executor for this plain sync function and dispatches the
+            # body to a worker THREAD, while _OneTimeListener has already
+            # unsubscribed on the loop thread. That leaves a window where the
+            # listener is gone but the flag below is still False — unload
+            # (loop thread) then calls the stale remover anyway and logs the
+            # very warning this guard exists to prevent. Worse, start() would
+            # be queued from that thread and could land after
+            # async_unload_entry has already stopped the analyzer and HA has
+            # deleted entry.runtime_data. As a @callback the whole body runs
+            # in the same loop tick as the unsubscribe, so the flag and the
+            # start are both ordered against unload.
+            @callback
             def _start_video_analyzer(_event: object) -> None:
-                hass.loop.call_soon_threadsafe(video_analyzer.start)
+                nonlocal video_analyzer_listener_fired
+                video_analyzer_listener_fired = True
+                video_analyzer.start()
 
             # Cancel on unload: if the entry reloads before HA finishes
             # starting, a leaked listener would start the ORPHANED analyzer
             # instance alongside the new one — duplicate capture loops, and
             # (since retention now deletes at capture/seed time) an
             # independent deque with deletion power over live files.
-            entry.async_on_unload(
-                hass.bus.async_listen_once(
-                    EVENT_HOMEASSISTANT_STARTED, _start_video_analyzer
-                )
+            #
+            # async_listen_once already self-unsubscribes once it fires, so
+            # calling the same remove function again on unload would try to
+            # remove an already-removed listener and log a spurious
+            # "Unable to remove unknown job listener" error. Only call it
+            # if the event hasn't fired yet.
+            remove_video_analyzer_listener = hass.bus.async_listen_once(
+                EVENT_HOMEASSISTANT_STARTED, _start_video_analyzer
             )
+
+            @callback
+            def _cancel_video_analyzer_listener() -> None:
+                if not video_analyzer_listener_fired:
+                    remove_video_analyzer_listener()
+
+            entry.async_on_unload(_cancel_video_analyzer_listener)
     if options.get(CONF_SENTINEL_ENABLED, RECOMMENDED_SENTINEL_ENABLED):
         if hass.is_running:
             sentinel.start()
