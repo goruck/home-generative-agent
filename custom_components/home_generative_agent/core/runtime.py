@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    import httpx
     from homeassistant.config_entries import ConfigEntry
     from psycopg import AsyncConnection
     from psycopg.rows import DictRow
@@ -68,6 +69,11 @@ class HGAData:
     proposal_store: ProposalStore | None
     rule_registry: RuleRegistry | None
     baseline_updater: SentinelBaselineUpdater | None = None
+    # Synchronous httpx client handed to the OpenAI provider instances. Held
+    # here so async_unload_entry can close it: a fresh one is built on every
+    # setup, so without an unload-time close a reload storm retains one client,
+    # its connection pool, and its sockets per generation.
+    openai_http_client: httpx.Client | None = None
     model_deployments: dict[str, str] = field(default_factory=dict)
     tool_content_hashes: dict[str, str] = field(default_factory=dict)
     tool_index_ready: bool = False
