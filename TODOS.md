@@ -1275,7 +1275,7 @@ window-scoped check could suppress.
 
 **Why:** Found by the security pass during the lifecycle-leak ship (2026-08-19). Not a security-boundary break — Sentinel triage fails open, so an aborted triage call cannot suppress an alert. The impact is reload-time errors and "Future exception was never retrieved" noise. Moving the close after `async_unload_platforms` (done in that ship) fixes the *entity* half of the problem but not the executor-thread half.
 
-**How to apply:** Expose a helper in `core/utils.py` that awaits the tracked sentinel LLM tasks with a bounded timeout before the transport is closed, or gate the executor bodies on a per-entry closed flag. Note the pre-existing sibling: `pool.close()` still runs before `async_unload_platforms`, so the DB transport has the same shape — consider moving platform unload to the top of `async_unload_entry` and handling both at once.
+**How to apply:** Expose a helper in `core/utils.py` that awaits the tracked sentinel LLM tasks with a bounded timeout before the transport is closed, or gate the executor bodies on a per-entry closed flag. Note that the entity half of this is already handled — `async_unload_entry` now unloads platforms before any teardown — so what remains is specifically the executor thread, which no entity teardown can interrupt.
 
 **Effort:** M
 **Priority:** P3
@@ -1314,7 +1314,7 @@ window-scoped check could suppress.
 
 **Why:** Found by the coverage audit and testing pass (2026-08-19). Point (3) is the one with teeth, and the adversarial pass sharpened it into an asymmetry worth naming: `SentinelEngine.stop()` sets its own latch *before* the `if self._task is None: return`, but stops the shared baseline updater *after* it. So whether the shared updater survives `sentinel.stop()` depends on whether sentinel had ever started — a never-started engine latches only itself, a started one kills the updater that two other objects still hold. No comment states this and no test exercises it. Harmless today only because `_on_entry_changed`, the sole stop-without-unload caller, redundantly stops all three explicitly.
 
-**How to apply:** The new `test_failed_db_setup_closes_the_client_and_the_pool` shows the recipe for a pool-bearing harness — patch `build_database_uri_from_entry` to a URI and `AsyncConnectionPool` to a stand-in. Reuse it to reach the baseline site and to drive `_on_entry_changed` through a real stop-then-reload.
+**How to apply:** The new `test_a_failed_setup_closes_the_openai_http_client` shows the recipe for a pool-bearing harness — patch `build_database_uri_from_entry` to a URI and `AsyncConnectionPool` to a stand-in (and stub the langgraph stores, whose real versions spawn background batch tasks the failure path never reaps). Reuse it to reach the baseline site and to drive `_on_entry_changed` through a real stop-then-reload.
 
 **Effort:** M
 **Priority:** P3

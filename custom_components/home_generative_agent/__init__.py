@@ -3656,8 +3656,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool
     # to unload in place. Doing the teardown first would therefore strand live
     # entities on dead resources with no way back short of a restart.
     #
-    # Unloading first also keeps the conversation, STT, and image entities from
-    # outliving the pool and the OpenAI transport they borrow.
+    # Unloading first also keeps the conversation entity from outliving what it
+    # borrows: runtime_data.chat_model, which may be built on the OpenAI client
+    # closed by the on-unload hook, and the store/checkpointer backed by the
+    # pool closed below. (The STT entity is not affected — stt.py uses Home
+    # Assistant's shared async client, not this one.)
     if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         return False
 
