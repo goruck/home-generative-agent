@@ -198,9 +198,26 @@ class SentinelDiscoveryEngine:
         self._run_lock = asyncio.Lock()
         self._discovery_cycle_stats: dict[str, int] = {}
         self._log_limiter = RepeatingLogLimiter(LOGGER)
+        # One-way latch set by stop(). An engine belongs to exactly one
+        # config-entry setup, so once it has been stopped it must never run
+        # again — see the note in start().
+        self._stopped = False
 
     def start(self) -> None:
         """Start the discovery loop."""
+        # A deferred start can still be in flight when the entry unloads.
+        # async_unload_entry() calls stop() and then awaits several more times,
+        # and Home Assistant runs the entry's on-unload callbacks only after it
+        # returns — so EVENT_HOMEASSISTANT_STARTED landing in one of those
+        # windows would resurrect this instance moments before HA deletes its
+        # runtime_data, leaving an orphaned discovery loop with stale options
+        # proposing candidates alongside the replacement entry. The listener
+        # cancel cannot close that window; the latch can, because it is checked
+        # here rather than at dispatch.
+        if self._stopped:
+            LOGGER.debug("SentinelDiscoveryEngine stopped; refusing to start.")
+            return
+
         if self._task is not None:
             return
         self._stop_event.clear()
@@ -208,6 +225,10 @@ class SentinelDiscoveryEngine:
 
     async def stop(self) -> None:
         """Stop the discovery loop."""
+        # Latch before the not-started early return, not after: the entry that
+        # never started is exactly the one whose deferred start is still armed.
+        self._stopped = True
+
         if self._task is None:
             return
         self._stop_event.set()
