@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.30.9] - 2026-08-20
+
+### Fixed
+
+- **The critical-action PIN now actually guards spoken and typed commands when "Prefer handling commands locally" is switched on.** The integration was not telling Home Assistant that it controls entities, and Home Assistant takes that as permission to answer commands itself. "Lock the garage door" and "unlock the garage door" were carried out by Home Assistant's own built-in handler, so the agent never saw them and the PIN was never asked for — on a setup where the PIN was configured and appeared to be active. Anyone within earshot of a voice satellite could unlock a door this way. The integration now declares entity control whenever a model API is configured, and, separately, whenever a PIN is set at all, which also covers upgraded installations that ended up with no model API recorded. Home Assistant then narrows what it answers by itself to reading entity state and playing media, and every lock, cover, and alarm command reaches the agent and its PIN prompt.
+- **A follow-up command like "unlock it" no longer replies "Unlocking" without unlocking anything.** When Home Assistant answered the earlier commands itself, it recorded only the spoken reply in the shared conversation history and dropped the actions that produced it. The agent read that history back as several examples of answering a lock request with words alone, and copied the pattern on the next turn — describing the action instead of performing it. With commands routed to the agent again, the history keeps the actions and the behaviour stops.
+
+### Changed
+
+- The **Critical Action PIN** documentation no longer tells you to switch off "Prefer handling commands locally". That advice pre-dated the Home Assistant behaviour described above and is no longer correct. It now explains what genuinely is not covered by the PIN: media search-and-play, which Home Assistant still starts locally, and sentence triggers you write yourself, which Home Assistant runs before any conversation agent.
+
 ## [3.30.8] - 2026-08-19
 
 ### Fixed
