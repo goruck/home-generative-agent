@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict
 
 import homeassistant.util.dt as dt_util
 import voluptuous as vol
+from homeassistant.const import CONF_LLM_HASS_API
+from homeassistant.helpers import llm
 from homeassistant.util import ulid
 from voluptuous_openapi import UNSUPPORTED, convert
 
@@ -25,7 +27,30 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
 
     from homeassistant.core import HomeAssistant
-    from homeassistant.helpers import llm
+
+
+def active_llm_api_ids(options: Mapping[str, Any]) -> list[str]:
+    """
+    Return the LLM API ids to expose, defaulting to Assist when unset.
+
+    Single definition on purpose.  The options flow *deletes* the key when no
+    API is selected (``_cleanup_none_llm_api`` in ``config_flow.py``), so an
+    absent key is a normal state meaning "the recommended default", not "no
+    APIs at all".  Every reader must apply that same default, because they are
+    not independent: ``conversation.py`` derives
+    ``ConversationEntityFeature.CONTROL`` from this, and Home Assistant reads
+    that feature flag to decide whether its built-in intent handler may take
+    control commands *before* the agent ever sees them
+    (``assist_pipeline/pipeline.py`` installs a local-intent allowlist only for
+    agents that advertise CONTROL).  A reader that treats the absent key as
+    "no APIs" therefore drops the flag and silently routes lock/unlock around
+    the critical-action PIN while the rest of the integration still runs the
+    Assist API.
+    """
+    active = options.get(CONF_LLM_HASS_API, [llm.LLM_API_ASSIST])
+    if isinstance(active, str):
+        active = [active]
+    return list(active)
 
 
 def safe_convert(

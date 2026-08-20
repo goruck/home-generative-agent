@@ -23,7 +23,7 @@ from homeassistant.components.conversation import (
     trace,
 )
 from homeassistant.components.conversation.models import AbstractConversationAgent
-from homeassistant.const import CONF_LLM_HASS_API, MATCH_ALL
+from homeassistant.const import MATCH_ALL
 from homeassistant.exceptions import HomeAssistantError, TemplateError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import intent, llm, template
@@ -42,6 +42,7 @@ from pydantic import PydanticInvalidForJsonSchema
 
 from .agent.graph import workflow
 from .agent.helpers import (
+    active_llm_api_ids,
     format_tool,
     is_actuation_tool,
     safe_convert,
@@ -781,7 +782,13 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         )
         self.message_history_len = 0
 
-        if self.entry.runtime_data.options.get(CONF_LLM_HASS_API):
+        # Home Assistant reads this feature flag to decide whether its built-in
+        # intent handler may take control commands before this agent sees them
+        # (assist_pipeline installs a local-intent allowlist only for agents
+        # that advertise CONTROL).  It must use the same "absent means Assist"
+        # default as every other reader, or lock/unlock is handled locally and
+        # never reaches the critical-action PIN gate.
+        if active_llm_api_ids(self.entry.runtime_data.options):
             self._attr_supported_features = (
                 conversation.ConversationEntityFeature.CONTROL
             )
@@ -846,9 +853,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         hass = self.hass
         options = self.entry.runtime_data.options
 
-        active_api_ids = options.get(CONF_LLM_HASS_API, [llm.LLM_API_ASSIST])
-        if isinstance(active_api_ids, str):
-            active_api_ids = [active_api_ids]
+        active_api_ids = active_llm_api_ids(options)
 
         active_apis: dict[str, llm.APIInstance] = {}
         failed_apis: list[str] = []
