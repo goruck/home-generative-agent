@@ -4,14 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [3.30.9] - 2026-08-20
 
-### Fixed
+### Added
 
-- **The critical-action PIN now actually guards spoken and typed commands when "Prefer handling commands locally" is switched on.** The integration was not telling Home Assistant that it controls entities, and Home Assistant takes that as permission to answer commands itself. "Lock the garage door" and "unlock the garage door" were carried out by Home Assistant's own built-in handler, so the agent never saw them and the PIN was never asked for — on a setup where the PIN was configured and appeared to be active. Anyone within earshot of a voice satellite could unlock a door this way. The integration now declares entity control whenever a model API is configured, and, separately, whenever a PIN is set at all, which also covers upgraded installations that ended up with no model API recorded. Home Assistant then narrows what it answers by itself to reading entity state and playing media, and every lock, cover, and alarm command reaches the agent and its PIN prompt.
-- **A follow-up command like "unlock it" no longer replies "Unlocking" without unlocking anything.** When Home Assistant answered the earlier commands itself, it recorded only the spoken reply in the shared conversation history and dropped the actions that produced it. The agent read that history back as several examples of answering a lock request with words alone, and copied the pattern on the next turn — describing the action instead of performing it. With commands routed to the agent again, the history keeps the actions and the behaviour stops.
+- **A warning when your critical-action PIN is not actually protecting anything.** If you have the PIN switched on while a voice assistant that uses this integration also has **Prefer handling commands locally** switched on, the two settings contradict each other: Home Assistant matches simple commands against its own built-in sentences and carries them out itself — unlocking a lock included — before the agent is ever asked. The agent never sees the command, so it cannot hold it for a PIN. Nothing indicated this; the PIN simply appeared to be on. A repair notice now appears under **Settings → System → Repairs**, names the affected voice assistants, and tells you which setting to turn off. This is a warning, not a fix: no integration can intercept commands Home Assistant answers by itself.
 
 ### Changed
 
-- The **Critical Action PIN** documentation no longer tells you to switch off "Prefer handling commands locally". That advice pre-dated the Home Assistant behaviour described above and is no longer correct. It now explains what genuinely is not covered by the PIN: media search-and-play, which Home Assistant still starts locally, and sentence triggers you write yourself, which Home Assistant runs before any conversation agent.
+- The **Critical Action PIN** documentation is much clearer about what the PIN does and does not cover. It still tells you to turn off "Prefer handling commands locally" — that instruction was correct — but now explains why, and adds the two other paths that bypass the PIN no matter what you do with that setting: sentence triggers you write yourself, which Home Assistant runs before any conversation agent, and anything that is not the conversation agent at all, such as dashboard buttons and scripts. If a lock or cover should never be voice-operable, the reliable control is to stop exposing it to Assist rather than to rely on the PIN.
+
+### Fixed
+
+- **The integration no longer under-reports what it can do when no model API is explicitly selected.** Deselecting every model API stores no setting at all, which the rest of the integration reads as "use the recommended default" — so the Assist API stayed active while the conversation agent told Home Assistant it had no entity control. The practical effect was small (Home Assistant answered "is the door locked?" from its own sentence matcher instead of asking the agent, which has live state access and answers better), but the two disagreed, and one shared definition now settles it for every part of the integration that reads the setting.
 
 ## [3.30.8] - 2026-08-19
 

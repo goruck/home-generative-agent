@@ -368,5 +368,11 @@
         }
       }
     }
+  },
+  "issues": {
+    "pin_bypassed_by_local_intents": {
+      "title": "Critical action PIN is not protecting spoken commands",
+      "description": "Affected voice assistant pipelines: {pipelines}.\n\nThese use Home Generative Agent as their conversation agent and have **Prefer handling commands locally** enabled. Home Assistant then matches simple commands against its own built-in sentences and runs them itself, unlocking a lock included, before the agent is ever called. The agent never sees the command, so the critical action PIN cannot hold it for confirmation.\n\nTo fix it, open **Settings → Voice assistants**, edit each pipeline listed above and turn **Prefer handling commands locally** off.\n\nIf a lock or cover should never be voice-operable at all, also stop exposing it under **Settings → Voice assistants → Expose**. That is the only control that covers sentence triggers and non-agent paths as well."
+    }
   }
 }

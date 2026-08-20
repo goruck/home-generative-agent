@@ -23,8 +23,6 @@ from homeassistant.exceptions import HomeAssistantError
 
 from custom_components.home_generative_agent.const import (
     CONF_CRITICAL_ACTION_PIN_ENABLED,
-    CONF_CRITICAL_ACTION_PIN_HASH,
-    CONF_CRITICAL_ACTION_PIN_SALT,
 )
 from custom_components.home_generative_agent.core.utils import (
     gather_store_puts_in_chunks,
@@ -937,12 +935,14 @@ def test_control_feature_set_when_llm_api_key_absent() -> None:
     """
     An absent CONF_LLM_HASS_API must still advertise CONTROL.
 
-    Regression: the options flow deletes the key when no API is selected, and
-    the rest of the integration reads that absence as "default to Assist". When
-    __init__ read it as falsy instead, the entity published no CONTROL flag, so
-    assist_pipeline skipped its local-intent allowlist and answered
-    "lock/unlock the garage door" in Home Assistant's own default agent. The
-    agent never ran, so the critical-action PIN never ran either.
+    The options flow deletes the key when no API is selected, and the rest of
+    the integration reads that absence as "default to Assist"; __init__ read it
+    as falsy, so the entity's capability disagreed with the tools it actually
+    had.
+
+    CONTROL is NOT a security control -- its only consumer routes state
+    questions and media search to the agent. This test pins capability/tool
+    agreement, nothing about the PIN.
     """
     control = ha_conversation.ConversationEntityFeature.CONTROL
     assert _supported_features(_entity_with_options({})) & control
@@ -955,32 +955,21 @@ def test_control_feature_set_when_llm_api_configured() -> None:
     assert _supported_features(entity) & control
 
 
-def test_control_feature_absent_when_empty_list_and_no_pin() -> None:
+def test_control_feature_absent_when_stored_api_list_is_empty() -> None:
     """
-    A stored empty list with no PIN configured must NOT advertise CONTROL.
+    A stored empty list must NOT advertise CONTROL.
 
-    With no APIs the agent has no entity-control tools, and with no PIN there
-    is nothing to gate, so letting Home Assistant handle intents locally is
-    correct and preserves existing behavior for these installs.
-    """
-    control = ha_conversation.ConversationEntityFeature.CONTROL
-    entity = _entity_with_options({CONF_LLM_HASS_API: []})
-    assert not _supported_features(entity) & control
+    With no APIs the agent has no entity-control tools and no GetLiveContext,
+    so it has nothing better to offer than Home Assistant's own sentence
+    matcher and should not claim the capability. The v5 -> v6 migration writes
+    [] for an absent key, so this state is reachable on upgraded installs.
 
-
-def test_control_feature_set_when_empty_list_but_pin_enabled() -> None:
-    """
-    A stored empty list WITH a PIN configured must still advertise CONTROL.
-
-    The v5 -> v6 migration writes [] for an absent key (__init__.py), so this
-    is production-reachable on upgraded installs, and it is the state the
-    API-only check missed: no APIs meant no CONTROL, no CONTROL meant Home
-    Assistant installed no local-intent filter, and "unlock the front door" was
-    executed by Home Assistant's own agent while the user believed the
-    critical-action PIN was guarding it.
-
-    Claiming CONTROL here routes the command to the agent, which has no unlock
-    tool and therefore fails closed rather than actuating silently.
+    A PIN does not change this. An earlier revision of this branch also set
+    CONTROL whenever a PIN was configured, on the belief that it would force
+    lock commands through the agent. It does not: the filter CONTROL installs
+    is a reject list matching only HassGetState and media search, so control
+    commands stay local either way. The PIN/pipeline conflict is surfaced as a
+    repair issue instead -- see test_pipeline_guard.py.
     """
     control = ha_conversation.ConversationEntityFeature.CONTROL
     entity = _entity_with_options(
@@ -989,24 +978,4 @@ def test_control_feature_set_when_empty_list_but_pin_enabled() -> None:
             CONF_CRITICAL_ACTION_PIN_ENABLED: True,
         }
     )
-    assert _supported_features(entity) & control
-
-
-def test_control_feature_set_when_empty_list_but_pin_hash_present() -> None:
-    """
-    A stored PIN hash counts even when the enable toggle reads False.
-
-    resolve_critical_action_policy deliberately treats a stored hash+salt as
-    enabled so a desynced toggle cannot silently drop the guard; the CONTROL
-    flag must inherit that same fail-safe rather than trusting the toggle.
-    """
-    control = ha_conversation.ConversationEntityFeature.CONTROL
-    entity = _entity_with_options(
-        {
-            CONF_LLM_HASS_API: [],
-            CONF_CRITICAL_ACTION_PIN_ENABLED: False,
-            CONF_CRITICAL_ACTION_PIN_HASH: "deadbeef",
-            CONF_CRITICAL_ACTION_PIN_SALT: "cafe",
-        }
-    )
-    assert _supported_features(entity) & control
+    assert not _supported_features(entity) & control

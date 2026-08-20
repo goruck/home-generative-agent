@@ -86,6 +86,7 @@ from .core.conversation_helpers import (
     _is_dashboard_request,
     _maybe_fix_dashboard_entities,
 )
+from .core.pipeline_guard import async_check_pin_pipeline_conflict
 from .core.utils import gather_store_puts_in_chunks, local_chat_session
 
 if TYPE_CHECKING:
@@ -783,25 +784,22 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         )
         self.message_history_len = 0
 
-        # Home Assistant reads this feature flag to decide whether its built-in
-        # intent handler may take control commands before this agent sees them
-        # (assist_pipeline installs a local-intent allowlist only for agents
-        # that advertise CONTROL).  It must use the same "absent means Assist"
-        # default as every other reader, or lock/unlock is handled locally and
-        # never reaches the critical-action PIN gate.
+        # CONTROL tells Home Assistant this agent controls entities.  Its only
+        # consumer is assist_pipeline, which uses it to route *state questions*
+        # and media search to the agent instead of answering them locally --
+        # this agent has GetLiveContext, so it gives better answers than the
+        # built-in sentence matcher.
         #
-        # The PIN clause covers the other reachable no-APIs state: the v5 -> v6
-        # migration stores [] for an absent key, and with [] there are no
-        # control tools, so the API check alone would leave the flag off and let
-        # Home Assistant unlock a door locally while the user believes a PIN
-        # guards it.  Claiming CONTROL whenever a PIN is configured routes those
-        # commands through the agent, which then fails closed (it has no unlock
-        # tool to call) instead of silently actuating.
-        options = self.entry.runtime_data.options
-        if (
-            active_llm_api_ids(options)
-            or resolve_critical_action_policy(options).enabled
-        ):
+        # It is NOT a security control.  The filter it installs is a reject
+        # list, so every other intent -- including HassTurnOn/HassTurnOff on a
+        # lock -- is still handled locally when "Prefer handling commands
+        # locally" is on, whatever this flag says.  Guarding that combination
+        # is the repair issue raised in async_added_to_hass, not this line.
+        #
+        # The default matters because the options flow deletes the key when no
+        # API is selected, so an absent key means "use Assist" to every other
+        # reader; active_llm_api_ids is the single definition of that.
+        if active_llm_api_ids(self.entry.runtime_data.options):
             self._attr_supported_features = (
                 conversation.ConversationEntityFeature.CONTROL
             )
@@ -812,6 +810,25 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         """When entity is added to Home Assistant."""
         await super().async_added_to_hass()
         conversation.async_set_agent(self.hass, self.entry, self)
+        # Warn if a pipeline routing to this agent has "Prefer handling
+        # commands locally" on while a critical-action PIN is configured: Home
+        # Assistant then executes lock/unlock itself and this agent's PIN gate
+        # never runs.  Runs here rather than in __init__ because it needs
+        # self.entity_id, which only exists once the entity is registered.
+        #
+        # Re-evaluated on every setup and reload.  Changing the pipeline
+        # setting alone does not reload this entry, so the issue clears on the
+        # next reload or restart rather than instantly -- acceptable for a
+        # warning, and it never reports a conflict that has stopped existing
+        # without the user having touched something.
+        async_check_pin_pipeline_conflict(
+            self.hass,
+            self.entry.entry_id,
+            self.entity_id,
+            pin_enabled=resolve_critical_action_policy(
+                self.entry.runtime_data.options
+            ).enabled,
+        )
         # Kick off tool indexing at startup so the index is ready before the first
         # user query. Construct a minimal LLMContext — no live ConversationInput needed
         # because async_get_apis / tool discovery only uses platform/assistant.
