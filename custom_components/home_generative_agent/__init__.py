@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
@@ -1581,6 +1581,65 @@ async def _log_ollama_server_info(
             )
 
 
+@callback
+def _defer_start_until_hass_started(
+    hass: HomeAssistant,
+    entry: HGAConfigEntry,
+    start: Callable[[], None],
+) -> None:
+    """
+    Run ``start`` when HA finishes starting, cancelling it if the entry unloads.
+
+    Background engines constructed during ``async_setup_entry`` cannot start
+    before Home Assistant has finished starting, so their start is deferred to
+    ``EVENT_HOMEASSISTANT_STARTED``. Three details make that safe, and all
+    three were regressions at some point:
+
+    * ``@callback`` is load-bearing, not decoration. Without it ``HassJob``
+      infers ``Executor`` for a plain sync function and dispatches the body to
+      a worker THREAD, while ``_OneTimeListener`` has already unsubscribed on
+      the loop thread. That leaves a window where the listener is gone but
+      ``fired`` is still False — unload (loop thread) then calls the stale
+      remover anyway and logs the very "Unable to remove unknown job listener"
+      error the guard exists to prevent. Worse, ``start`` would be queued from
+      that thread and could land after ``async_unload_entry`` has already
+      stopped the engine and HA has deleted ``entry.runtime_data``.
+    * The listener is cancelled on unload. If the entry reloads before HA
+      finishes starting, a leaked listener would start the ORPHANED engine
+      alongside its replacement — duplicate evaluation, notifications, and
+      writes, from an instance holding stale options.
+    * ``async_listen_once`` self-unsubscribes once it fires, so calling the
+      remove function again on unload would log that same spurious error.
+      Only call it if the event has not fired yet.
+
+    The cancel is necessary but NOT sufficient: ``async_unload_entry`` stops
+    each engine and then awaits several more times before HA runs the
+    on-unload callbacks, so ``EVENT_HOMEASSISTANT_STARTED`` landing in one of
+    those windows starts the engine and correctly leaves the cancel with
+    nothing to do. Each engine closes that window with a one-way ``_stopped``
+    latch checked in its own ``start()``, which is the one place downstream of
+    every ordering.
+    """
+    fired = False
+
+    @callback
+    def _run_start(_event: object) -> None:
+        nonlocal fired
+        fired = True
+        start()
+
+    remove_listener = hass.bus.async_listen_once(
+        EVENT_HOMEASSISTANT_STARTED, _run_start
+    )
+
+    @callback
+    def _cancel_listener() -> None:
+        if not fired:
+            remove_listener()
+
+    entry.async_on_unload(_cancel_listener)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:  # noqa: C901, PLR0912, PLR0915
     """Set up Home Generative Agent from a config entry."""
     hass.data.setdefault(DOMAIN, {})
@@ -1874,6 +1933,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     openai_http_client = await hass.async_add_executor_job(
         partial(httpx.Client, timeout=120)
     )
+
+    # Close registered here, at construction, rather than in
+    # async_unload_entry. Home Assistant runs an entry's on-unload callbacks on
+    # EVERY failed setup, not only when a loaded entry unloads —
+    # `finally: if not result and domain_is_integration:
+    # await self._async_process_on_unload(hass)` in ConfigEntry.async_setup —
+    # so one registration here covers every abort between this line and the end
+    # of setup: both database `return False`s, any uncaught raise out of model
+    # selection or platform forwarding, and ConfigEntryNotReady. Patching exit
+    # paths one at a time instead would miss the ten or so that are not
+    # `return False`, and those are the ones users hit repeatedly (reload until
+    # the database comes up), which is exactly the accumulation this is meant
+    # to stop.
+    #
+    # It also fixes the ordering for free: on a successful unload these
+    # callbacks run only after async_unload_entry returns, hence after
+    # async_unload_platforms, so no live entity is left holding a closed
+    # transport. Sentinel's LLM path is the sharp case — it prefers the SYNC
+    # invoke on an executor thread that cancellation cannot interrupt.
+    #
+    # Sync client, so closing it on the loop would block.
+    async def _close_openai_http_client() -> None:
+        await hass.async_add_executor_job(openai_http_client.close)
+
+    entry.async_on_unload(_close_openai_http_client)
 
     # Instantiate providers.
     openai_provider: RunnableSerializable[LanguageModelInput, BaseMessage] | None = None
@@ -2983,6 +3067,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         proposal_store=proposal_store,
         rule_registry=rule_registry,
         baseline_updater=baseline_updater,
+        openai_http_client=openai_http_client,
     )
 
     if not hass.data[DOMAIN].get("http_registered"):
@@ -3023,56 +3108,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         if hass.is_running:
             video_analyzer.start()
         else:
-            video_analyzer_listener_fired = False
-
-            # @callback is load-bearing, not decoration. Without it HassJob
-            # infers Executor for this plain sync function and dispatches the
-            # body to a worker THREAD, while _OneTimeListener has already
-            # unsubscribed on the loop thread. That leaves a window where the
-            # listener is gone but the flag below is still False — unload
-            # (loop thread) then calls the stale remover anyway and logs the
-            # very warning this guard exists to prevent. Worse, start() would
-            # be queued from that thread and could land after
-            # async_unload_entry has already stopped the analyzer and HA has
-            # deleted entry.runtime_data. As a @callback the whole body runs
-            # in the same loop tick as the unsubscribe, so the flag and the
-            # start are both ordered against unload.
-            @callback
-            def _start_video_analyzer(_event: object) -> None:
-                nonlocal video_analyzer_listener_fired
-                video_analyzer_listener_fired = True
-                video_analyzer.start()
-
-            # Cancel on unload: if the entry reloads before HA finishes
-            # starting, a leaked listener would start the ORPHANED analyzer
-            # instance alongside the new one — duplicate capture loops, and
-            # (since retention now deletes at capture/seed time) an
-            # independent deque with deletion power over live files.
-            #
-            # async_listen_once already self-unsubscribes once it fires, so
-            # calling the same remove function again on unload would try to
-            # remove an already-removed listener and log a spurious
-            # "Unable to remove unknown job listener" error. Only call it
-            # if the event hasn't fired yet.
-            remove_video_analyzer_listener = hass.bus.async_listen_once(
-                EVENT_HOMEASSISTANT_STARTED, _start_video_analyzer
-            )
-
-            @callback
-            def _cancel_video_analyzer_listener() -> None:
-                if not video_analyzer_listener_fired:
-                    remove_video_analyzer_listener()
-
-            entry.async_on_unload(_cancel_video_analyzer_listener)
+            _defer_start_until_hass_started(hass, entry, video_analyzer.start)
     if options.get(CONF_SENTINEL_ENABLED, RECOMMENDED_SENTINEL_ENABLED):
         if hass.is_running:
             sentinel.start()
         else:
-
-            def _start_sentinel(_event: object) -> None:
-                hass.loop.call_soon_threadsafe(sentinel.start)
-
-            hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _start_sentinel)
+            _defer_start_until_hass_started(hass, entry, sentinel.start)
     if options.get(CONF_SENTINEL_ENABLED, RECOMMENDED_SENTINEL_ENABLED) and options.get(
         CONF_SENTINEL_DISCOVERY_ENABLED,
         RECOMMENDED_SENTINEL_DISCOVERY_ENABLED,
@@ -3080,30 +3121,71 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         if hass.is_running:
             discovery_engine.start()
         else:
-
-            def _start_discovery(_event: object) -> None:
-                hass.loop.call_soon_threadsafe(discovery_engine.start)
-
-            hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _start_discovery)
+            _defer_start_until_hass_started(hass, entry, discovery_engine.start)
 
     if baseline_updater is not None:
         if hass.is_running:
             baseline_updater.start()
         else:
+            _defer_start_until_hass_started(hass, entry, baseline_updater.start)
 
-            def _start_baseline(_event: object) -> None:
-                hass.loop.call_soon_threadsafe(baseline_updater.start)  # type: ignore[union-attr]
+    # Home Assistant does not unload config entries at shutdown — its
+    # ConfigEntries._async_shutdown only calls entry.async_shutdown(), which
+    # cancels retry setup — so this stays the only stop path for a still-loaded
+    # entry. Note it is deliberately NARROWER than async_unload_entry: the
+    # video analyzer, the notifier, and the DB pool are not torn down here,
+    # because the process is exiting anyway.
+    #
+    # Wrapped in async_on_unload because it was previously registered
+    # unconditionally on every setup and never removed: each reload added
+    # another closure capturing that generation's engines and client, so
+    # shutdown after N reloads fired N+1 of them — stopping long-dead objects
+    # and keeping every stale generation's object graph reachable until the
+    # process exited.
+    stop_listener_fired = False
 
-            hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _start_baseline)
-
-    async def _stop_background_tasks(_event: object) -> None:
+    async def _stop_background_tasks() -> None:
         await sentinel.stop()
         await discovery_engine.stop()
         if baseline_updater is not None:
             await baseline_updater.stop()
         await hass.async_add_executor_job(openai_http_client.close)
 
-    hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _stop_background_tasks)
+    # @callback, so the flag is set inline in the same loop tick that
+    # _OneTimeListener unsubscribes. Setting it inside the coroutine instead
+    # would be correct only by accident: an async listener makes HassJob infer
+    # Coroutinefunction and dispatch through create_eager_task, which happens
+    # to run to the first suspension synchronously. Any await added above the
+    # assignment — or the loss of eager start — would reopen the window the
+    # flag exists to close.
+    @callback
+    def _on_hass_stop(_event: object) -> None:
+        nonlocal stop_listener_fired
+        stop_listener_fired = True
+        hass.async_create_task(_stop_background_tasks())
+
+    remove_stop_listener = hass.bus.async_listen_once(
+        EVENT_HOMEASSISTANT_STOP, _on_hass_stop
+    )
+
+    # The same fired-flag guard the deferred-start helper uses, and for the
+    # same reason: async_listen_once hands back the very remover its
+    # _OneTimeListener consumes when the event fires, so a second call reaches
+    # EventBus._async_remove_listener and logs "Unable to remove unknown job
+    # listener" with a traceback.
+    #
+    # This is NOT unreachable. entry.async_on_unload callbacks run only after
+    # async_unload_entry RETURNS, so the listener stays armed for that whole
+    # function — a shutdown landing during an in-flight reload runs both paths.
+    # Stopping twice is harmless (the engines latch, httpx.Client.close is
+    # state-guarded), but the second remove is not, and pytest teardown hits
+    # this ordering routinely.
+    @callback
+    def _cancel_stop_listener() -> None:
+        if not stop_listener_fired:
+            remove_stop_listener()
+
+    entry.async_on_unload(_cancel_stop_listener)
 
     msg = (
         "Home Generative Agent initialized with the following models: "
@@ -3566,6 +3648,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
 async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     """Unload the config entry."""
+    # Platforms come down FIRST, and a refusal aborts before anything is torn
+    # down. Every teardown below is irreversible — the engines set a one-way
+    # _stopped latch, and the pool cannot be reopened — while a False return
+    # puts the entry in FAILED_UNLOAD, which Home Assistant treats as
+    # non-recoverable and which leaves runtime_data and any entity that refused
+    # to unload in place. Doing the teardown first would therefore strand live
+    # entities on dead resources with no way back short of a restart.
+    #
+    # Unloading first also keeps the conversation entity from outliving what it
+    # borrows: runtime_data.chat_model, which may be built on the OpenAI client
+    # closed by the on-unload hook, and the store/checkpointer backed by the
+    # pool closed below. (The STT entity is not affected — stt.py uses Home
+    # Assistant's shared async client, not this one.)
+    if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
+        return False
+
     await entry.runtime_data.video_analyzer.stop()
     if entry.runtime_data.sentinel is not None:
         await entry.runtime_data.sentinel.stop()
@@ -3577,7 +3675,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool
         entry.runtime_data.notifier.stop()
     if entry.runtime_data.pool is not None:
         await entry.runtime_data.pool.close()
-    await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    # The OpenAI http client is NOT closed here — it is closed by the on-unload
+    # callback registered where it is built, which also covers failed setups.
+    # Home Assistant runs those callbacks only when this returns True, so the
+    # abort above correctly leaves the client open for the still-loaded entry.
     return True
 
 

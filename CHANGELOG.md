@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.30.8] - 2026-08-19
+
+### Fixed
+
+- **Reloading the integration no longer leaves pieces of the old copy running.** When Home Assistant was still starting up, the anomaly engine, the rule-discovery engine, and the baseline collector each waited for startup to finish before beginning work — but a reload during that window did not call off the wait. The old engines woke up later and ran alongside their replacements, with the settings they had been created with rather than the ones just saved: anomalies evaluated twice, duplicate notifications and actions, duplicate rule proposals, duplicate baseline writes, and nothing to shut any of it down short of restarting Home Assistant. All three now cancel cleanly, and an engine that has been shut down refuses to start again no matter how late the wake-up call arrives. The video analyzer was fixed this way in 3.30.7; these are the three that shared its code and were left behind.
+- **Editing settings repeatedly no longer accumulates dead copies of the integration in memory.** Every reload registered another shutdown handler and never removed the previous one, so each one held its generation's engines and its network connection alive until Home Assistant restarted. After ten settings changes, shutdown ran eleven handlers, ten of them against objects that had been dead for hours. Handlers are now tied to the copy that created them.
+- **A failed startup no longer leaks a network connection each time.** The integration opens a connection pool for OpenAI-compatible services early in setup. If setup then failed — most commonly waiting for a database that is not up yet — that pool was abandoned rather than closed, and retrying setup was exactly what users did. Cleanup is now registered the moment the pool is created, so it runs on every failure path as well as on normal shutdown.
+- **Reloading no longer disconnects a conversation that is still running.** The conversation entity borrows the integration's database connection for its memory and, on OpenAI setups, its connection to the model. Reloads closed both while a conversation could still be using them, which could surface as a reply failing part way through or a conversation losing its last memory write. Entities are now shut down first, and everything they borrow is released afterwards.
+- **A component that refuses to shut down no longer leaves the integration in a state only a restart can fix.** That refusal was previously reported as success, so Home Assistant kept the integration loaded while its engines and database pool had already been torn down — and because a stopped engine now refuses to restart, nothing short of restarting Home Assistant brought it back. The shutdown is now attempted first and aborted safely if any part declines, leaving everything running.
+
 ## [3.30.7] - 2026-08-19
 
 ### Fixed

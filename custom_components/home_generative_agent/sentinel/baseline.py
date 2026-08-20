@@ -325,6 +325,10 @@ class SentinelBaselineUpdater:
         self._options = options
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
+        # One-way latch set by stop(). An updater belongs to exactly one
+        # config-entry setup, so once it has been stopped it must never run
+        # again — see the note in start().
+        self._stopped = False
         # entity_ids that crossed MIN_SAMPLES (no re-notification on restart).
         self._established: set[str] = set()
         # In-memory Welford state for DOW slots: key = "entity_id:dow:hour",
@@ -420,6 +424,19 @@ class SentinelBaselineUpdater:
 
     def start(self) -> None:
         """Start the background update loop."""
+        # A deferred start can still be in flight when the entry unloads.
+        # async_unload_entry() calls stop() and then awaits several more times,
+        # and Home Assistant runs the entry's on-unload callbacks only after it
+        # returns — so EVENT_HOMEASSISTANT_STARTED landing in one of those
+        # windows would resurrect this instance moments before HA deletes its
+        # runtime_data, leaving an orphaned updater writing baselines through a
+        # pool the unload has already closed, alongside the replacement entry's
+        # own updater. The listener cancel cannot close that window; the latch
+        # can, because it is checked here rather than at dispatch.
+        if self._stopped:
+            LOGGER.debug("SentinelBaselineUpdater stopped; refusing to start.")
+            return
+
         if self._task is not None:
             return
         self._stop_event.clear()
@@ -427,6 +444,10 @@ class SentinelBaselineUpdater:
 
     async def stop(self) -> None:
         """Stop the background update loop."""
+        # Latch before the not-started early return, not after: the entry that
+        # never started is exactly the one whose deferred start is still armed.
+        self._stopped = True
+
         if self._task is None:
             return
         self._stop_event.set()

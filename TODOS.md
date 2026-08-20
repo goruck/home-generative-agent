@@ -1217,51 +1217,174 @@ window-scoped check could suppress.
 
 ## Config Entry Lifecycle
 
-### Sentinel / discovery / baseline start listeners survive unload
+### image.py and sensor.py still register unwrapped STARTED listeners
 
-**What:** `_start_sentinel`, `_start_discovery`, and `_start_baseline` (`__init__.py:3075`, `:3087`, `:3097`) register `EVENT_HOMEASSISTANT_STARTED` listeners that are never wired into `entry.async_on_unload`. If the entry unloads, reloads, is disabled, or fails setup before HA finishes starting, the closures stay registered and later start the *obsolete* engines — with stale options — alongside the replacement entry. Their tasks are HA-owned rather than entry-owned, so nothing reaps them: duplicate anomaly evaluation, duplicate notifications and actions, duplicate discovery proposals, duplicate baseline writes. Like the video-analyzer listener before `@callback`, these are plain sync functions, so `HassJob` infers `Executor` and the bodies run on a worker thread.
+**What:** `hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _on_started)` at `image.py:42` and `sensor.py:64` are not wrapped in `entry.async_on_unload`. Both call `async_add_entities(...)` for an entry that may already have unloaded — the same leak class the deferred-start work just closed for the four engines.
 
-**Why:** This is exactly the hazard `be3f85c` fixed for the video analyzer ("a leaked listener would start the ORPHANED instance alongside the new one"), and the three siblings in the same code block were left behind. Surfaced during the #559 review (2026-08-18) by both the maintainer pass and the Codex adversarial pass, which rated it P1 independently. Deferred out of #559 by user decision so the contributor's focused fix could land on its own.
+**Why:** Found by the maintainability pass during the lifecycle-leak ship (2026-08-19). Recorded explicitly so the "Completed" entry below does not read as "no listener leaks remain in the integration" — it closed the four `async_setup_entry` sites, not these two platform sites.
 
-**How to apply:** Give each of the three the same shape #559 landed for the analyzer: `@callback` on the listener (so the body runs in the same loop tick as `_OneTimeListener`'s unsubscribe, not on an executor thread), a `fired` flag, and a `@callback` cancel closure wrapped in `entry.async_on_unload`. The repetition across four sites is the argument for a small local helper — something like `_defer_start_until_hass_started(hass, entry, start_fn)` returning nothing — rather than a fourth copy.
-
-The listener cancel is necessary but **not sufficient**, and copying it alone copies #559's remaining hole to all three engines. `async_unload_entry` calls each engine's `stop()` and then awaits several more times before Home Assistant runs the on-unload callbacks, so `EVENT_HOMEASSISTANT_STARTED` landing in one of those windows starts the engine and correctly leaves the cancel with nothing to do. #559 closed that for the analyzer with a one-way latch (`_stopped` set at the top of `VideoAnalyzer.stop()`, checked first in `start()`) because the latch sits downstream of every ordering. `SentinelEngine`, `SentinelDiscoveryEngine`, and the baseline updater each need the same latch — an instance belongs to exactly one setup, so none of them has a legitimate stop-then-start cycle. Extend `tests/custom_components/home_generative_agent/test_deferred_start_listener.py`, which already has both harnesses: assert unload-before-STARTED cancels each engine's start, that firing STARTED runs the body on the main thread, and that a stopped engine refuses a later start.
-
-**Effort:** S
-**Priority:** P1
-**Depends on:** #559
-
----
-
-### EVENT_HOMEASSISTANT_STOP listener leaks one closure per reload
-
-**What:** `hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _stop_background_tasks)` (`__init__.py:3106`) is registered unconditionally on every `async_setup_entry` and never removed. Each reload adds another closure capturing that generation's `sentinel`, `discovery_engine`, `baseline_updater`, and `openai_http_client`. After N reloads, HA shutdown fires N+1 of them, each calling `.stop()` on long-dead objects, and every stale generation's object graph stays reachable until the process exits.
-
-**Why:** Found by the Codex adversarial pass during the #559 review (2026-08-18). Unlike the STARTED listeners this one leaks on *every* reload, not just reloads that beat HA's startup — so it accumulates during ordinary option edits.
-
-**How to apply:** Wrap it in `entry.async_on_unload(...)`. Unlike the STARTED listeners there is no fired-flag subtlety here: STOP fires once at shutdown, at which point nothing reloads, so the plain wrap is correct. Check first whether `_stop_background_tasks` still needs to be a STOP listener at all now that `async_unload_entry` stops the same three engines — if it does not, the duplicate stop path can go away instead.
+**How to apply:** Both platform setup functions have `entry` in scope, so the wrap is available. They cannot reuse `_defer_start_until_hass_started` as written — its `start` parameter is `Callable[[], None]` and these handlers are async and take the event — so either widen the helper or give each site the same fired-flag cancel inline. Adding an entity twice is louder than a duplicate background task, so confirm the actual failure mode before choosing.
 
 **Effort:** S
 **Priority:** P2
-**Depends on:** #559
 
 ---
 
-### async_unload_entry never closes the synchronous OpenAI HTTP client
+### async_unload_entry has no failure containment
 
-**What:** `openai_http_client` is a `httpx.Client` built fresh on every setup (`__init__.py:1874`) and handed to the OpenAI provider instances. `async_unload_entry` closes the pool but not this client; its only close is inside `_stop_background_tasks`, which is reachable only via the leaked STOP listener above. A reload storm therefore retains one client, its connection pool, and its sockets per generation.
+**What:** `async_unload_entry` is a run of bare awaits with no `try`. Home Assistant catches any exception out of it, sets `FAILED_UNLOAD` — declared non-recoverable at `config_entries.py:160` — and returns *without* running `_async_process_on_unload`. So one raise from, say, `video_analyzer.stop()` skips every remaining teardown AND every on-unload callback: the four `EVENT_HOMEASSISTANT_STARTED` cancels never run, the listeners stay armed, and the engines below the raising line are left un-stopped and un-latched. That is exactly the orphan-start this area was hardened to prevent, reachable by a single unexpected exception.
 
-**Why:** Found by the Codex adversarial pass during the #559 review (2026-08-18). It compounds with the STOP-listener leak — the leak is what makes the close unreachable at unload time.
+**Why:** Found by the Claude adversarial pass (2026-08-19), rated P1. Not fixed in that ship because containment needs a decision per step — some failures should abort the unload and some should not — and the branch was already carrying five review fixes. The platform-unload-first ordering landed there does reduce the blast radius, but does not close this.
 
-**How to apply:** Close it in `async_unload_entry` alongside `pool.close()`, via `hass.async_add_executor_job(openai_http_client.close)` (it is a sync client, so closing it on the loop would block). That means holding it on `runtime_data` rather than only in the setup closure. Once unload owns the close, drop it from `_stop_background_tasks` so shutdown does not double-close.
+**How to apply:** Wrap each teardown step so unload cannot raise (`contextlib.suppress` plus `LOGGER.exception`, or one `try/finally` that still returns True), keeping the platform-unload abort at the top as the only early return. The `_stopped` latch is only "downstream of every ordering" if unload actually reaches it.
 
 **Effort:** S
 **Priority:** P2
-**Depends on:** #559
+
+---
+
+### Setup registers services, views, and dispatchers that unload never removes
+
+**What:** Seventeen `hass.services.async_register` calls, the `EnrollPersonView`, and the `http_registered` flag are all created in `async_setup_entry` and never removed. `grep services.async_remove` returns nothing. Service handlers close over that generation's `baseline_updater`, `audit_store`, `proposal_store`, `rule_registry`, and `person_gallery`, so after an unload `hga.sentinel_get_baselines` is still callable and reaches a closed pool. Worse for the view: `http_registered` is never cleared, so a remove-and-re-add (which builds a *new* `ConfigEntry`, unlike a reload) leaves the original view alive dereferencing `runtime_data` on the deleted entry — `AttributeError` on every enroll POST until HA restarts.
+
+**Why:** Found by the Claude adversarial pass (2026-08-19). Re-registration by name means the services pin one generation rather than accumulating per reload, so this is a correctness and stale-reference problem rather than an unbounded leak — but it is a live API surface on an unloaded entry.
+
+**How to apply:** Wrap the registrations in `entry.async_on_unload` (services via `hass.services.async_remove`), and clear `hass.data[DOMAIN]["http_registered"]` on unload, or key the view off the current entry rather than the one that happened to register it.
+
+**Effort:** M
+**Priority:** P2
+
+---
+
+### The stop-latch is copy-pasted across four engines
+
+**What:** `_stopped` now exists in four classes with near-identical bodies and near-identical ~11-line rationale comments: `sentinel/engine.py`, `sentinel/discovery_engine.py`, `sentinel/baseline.py`, and `core/video_analyzer.py`. The three `stop()` sites are byte-identical; the only per-class variation is the class name in the debug string.
+
+**Why:** Found by the maintainability pass (2026-08-19). Deliberately not done in that ship: a mixin touches `video_analyzer.py`, which #559 had just landed, and the branch was already carrying four review fixes. The cost is that a fifth engine must re-derive the invariant from prose rather than inherit it.
+
+**How to apply:** Extract something like `StopLatchMixin` (`_stopped`, a `_refuse_start_if_stopped()` guard logging `type(self).__name__`, a `_latch_stopped()`), have all four use it, and keep the full rationale in one docstring the four sites point at in a single line. If a mixin is rejected, at minimum collapse the four prose blocks to a one-line pointer at `_defer_start_until_hass_started`, which already carries the canonical explanation.
+
+**Effort:** S
+**Priority:** P3
+
+---
+
+### Unload can close the OpenAI transport under an in-flight sync Sentinel call
+
+**What:** `run_sentinel_model_call` (`core/utils.py`) deliberately prefers the *sync* `invoke`, dispatched via `asyncio.to_thread`. Cancelling that task cancels the awaiting future but cannot interrupt the executor thread, which stays inside the blocking request for up to the 120 s client timeout. `async_unload_entry` then closes the client's connection pool underneath it.
+
+**Why:** Found by the security pass during the lifecycle-leak ship (2026-08-19). Not a security-boundary break — Sentinel triage fails open, so an aborted triage call cannot suppress an alert. The impact is reload-time errors and "Future exception was never retrieved" noise. Moving the close after `async_unload_platforms` (done in that ship) fixes the *entity* half of the problem but not the executor-thread half.
+
+**How to apply:** Expose a helper in `core/utils.py` that awaits the tracked sentinel LLM tasks with a bounded timeout before the transport is closed, or gate the executor bodies on a per-entry closed flag. Note that the entity half of this is already handled — `async_unload_entry` now unloads platforms before any teardown — so what remains is specifically the executor thread, which no entity teardown can interrupt.
+
+**Effort:** M
+**Priority:** P3
+
+---
+
+### The OpenAI http client is built even when no OpenAI provider is configured
+
+**What:** `openai_http_client = await hass.async_add_executor_job(partial(httpx.Client, timeout=120))` runs unconditionally, before any `if openai_ok:` / `if openai_compatible_ok:` check. An Ollama-only installation allocates one `httpx.Client` per setup that nothing ever uses.
+
+**Why:** Found by the Claude adversarial pass (2026-08-19). It means the leak fixed in that ship was being taken by users with no OpenAI configuration at all. Harmless now that the close is registered at construction, so this is tidiness rather than a leak.
+
+**How to apply:** Construct it lazily at the first provider that needs it, or guard it behind the same condition those providers use. Keep the `entry.async_on_unload` close registration adjacent to wherever it ends up.
+
+**Effort:** S
+**Priority:** P3
+
+---
+
+### hass.is_running is True while HA is still starting
+
+**What:** `hass.is_running` returns True for both `CoreState.starting` and `CoreState.running` (`core.py:448-450`), but the four deferred-start sites gate on it, and `_defer_start_until_hass_started`'s docstring asserts engines "cannot start before Home Assistant has finished starting." An entry added or reloaded during `CoreState.starting` starts all four inline instead of deferring, so the invariant the docstring states does not hold on that path.
+
+**Why:** Found by the Claude adversarial pass (2026-08-19). Pre-existing — the gate predates the helper — but the helper's docstring is what promotes it to a stated invariant.
+
+**How to apply:** Either change the four gates to `hass.state is CoreState.running`, which is the predicate matching the prose, or soften the docstring to say what the code does. Prefer the former only after checking that starting-state inline starts are not load-bearing for the restore path.
+
+**Effort:** S
+**Priority:** P3
+
+---
+
+### Lifecycle paths with no test coverage
+
+**What:** Three gaps the lifecycle-leak ship surfaced but did not close. (1) `_on_entry_changed` has zero coverage anywhere in the repo — it stops all three engines then schedules a reload, and is the one flow where a cross-generation latch leak would surface. (2) The baseline updater's deferred-start site is unreachable in every setup-level test, because the harness patches `build_database_uri_from_entry` to `None`, so `pool` is `None` and `baseline_updater` is never built; the same gap hides the `baseline_updater is not None` branches of `_stop_background_tasks` and `async_unload_entry`. (3) `SentinelEngine.stop()` on a *running* engine is untested, including the fact that it latches the **shared** `SentinelBaselineUpdater` that `SentinelDiscoveryEngine` and `HGAData` also hold.
+
+**Why:** Found by the coverage audit and testing pass (2026-08-19). Point (3) is the one with teeth, and the adversarial pass sharpened it into an asymmetry worth naming: `SentinelEngine.stop()` sets its own latch *before* the `if self._task is None: return`, but stops the shared baseline updater *after* it. So whether the shared updater survives `sentinel.stop()` depends on whether sentinel had ever started — a never-started engine latches only itself, a started one kills the updater that two other objects still hold. No comment states this and no test exercises it. Harmless today only because `_on_entry_changed`, the sole stop-without-unload caller, redundantly stops all three explicitly.
+
+**How to apply:** The new `test_a_failed_setup_closes_the_openai_http_client` shows the recipe for a pool-bearing harness — patch `build_database_uri_from_entry` to a URI and `AsyncConnectionPool` to a stand-in (and stub the langgraph stores, whose real versions spawn background batch tasks the failure path never reaps). Reuse it to reach the baseline site and to drive `_on_entry_changed` through a real stop-then-reload.
+
+**Effort:** M
+**Priority:** P3
 
 ---
 
 ## Completed
+
+### Config entry lifecycle leaks in the deferred-start block
+
+**What:** Three sibling leaks in the same `async_setup_entry` code block that
+#559 fixed for the video analyzer alone:
+
+1. `_start_sentinel`, `_start_discovery`, and `_start_baseline` registered
+   `EVENT_HOMEASSISTANT_STARTED` listeners that were never wired into
+   `entry.async_on_unload`, so an entry that unloaded, reloaded, was disabled,
+   or failed setup before HA finished starting later started the *obsolete*
+   engines — with stale options — alongside the replacement entry. As plain
+   sync functions `HassJob` inferred `Executor`, so the bodies ran on a worker
+   thread.
+2. The `EVENT_HOMEASSISTANT_STOP` listener was registered unconditionally on
+   every setup and never removed, so each reload added another closure
+   capturing that generation's engines and client.
+3. `async_unload_entry` never closed the synchronous `openai_http_client`; its
+   only close sat inside the leaked STOP handler.
+
+**Why:** Surfaced during the #559 review (2026-08-18) by both the maintainer
+pass and the Codex adversarial pass. Deferred out of #559 by user decision so
+the contributor's focused fix could land on its own.
+
+**Resolution:** The four deferred-start sites now share one
+`_defer_start_until_hass_started(hass, entry, start)` helper carrying #559's
+full shape — `@callback` listener, `fired` flag, `@callback` cancel wrapped in
+`entry.async_on_unload`. Because the cancel cannot close the window between
+`stop()` and HA running the on-unload callbacks, `SentinelEngine`,
+`SentinelDiscoveryEngine`, and `SentinelBaselineUpdater` each gained the same
+one-way `_stopped` latch #559 gave `VideoAnalyzer`: set at the top of `stop()`,
+checked first in `start()`. The STOP listener is wrapped in
+`entry.async_on_unload` — with the same fired-flag guard as the helper, set by
+a `@callback` shim rather than inside the coroutine, because on-unload
+callbacks run only after `async_unload_entry` returns and a shutdown racing an
+in-flight reload runs both paths. It stays a listener because HA does not
+unload config entries at shutdown, making it the only stop path for a
+still-loaded entry.
+
+`openai_http_client`'s close is registered with `entry.async_on_unload` at
+construction rather than written into `async_unload_entry`. Home Assistant runs
+those callbacks on *every* failed setup as well as on unload
+(`ConfigEntry.async_setup`: `finally: if not result … _async_process_on_unload`),
+so one hook covers every abort path — including the ten or so that are raises
+rather than `return False` — and, on the success path, lands after
+`async_unload_platforms` for free. `async_unload_entry` now unloads platforms
+FIRST and aborts on refusal, so no teardown is irreversible before Home
+Assistant has agreed the entry can go.
+
+Test count went 4 → 16 in `test_deferred_start_listener.py`, each new test
+verified to fail against the unfixed code. Review found five issues in the
+first cut, four of them multi-model confirmed: the client leaked on
+setup-failure paths, the STOP remover was unguarded, the close ran before
+platform unload, the removal test passed vacuously because nothing asserted the
+listener existed, and — from the adversarial pass — the `PoolTimeout` cleanup
+in the first draft was dead code, because psycopg-pool 3.3.0 defaults `open()`
+to `wait=False` and never raises there. The Codex structured pass then caught a
+P1 introduced by the fix itself: propagating a failed platform unload while the
+teardown had already run would strand a retained entry on stopped, latched
+engines.
+
+**Effort:** S
+**Priority:** P1
+**Completed:** (2026-08-19)
 
 ### Lovelace health card example for baseline attrs
 
