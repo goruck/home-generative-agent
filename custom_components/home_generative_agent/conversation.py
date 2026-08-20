@@ -45,6 +45,7 @@ from .agent.helpers import (
     active_llm_api_ids,
     format_tool,
     is_actuation_tool,
+    resolve_critical_action_policy,
     safe_convert,
     tool_index_key,
 )
@@ -788,7 +789,19 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         # that advertise CONTROL).  It must use the same "absent means Assist"
         # default as every other reader, or lock/unlock is handled locally and
         # never reaches the critical-action PIN gate.
-        if active_llm_api_ids(self.entry.runtime_data.options):
+        #
+        # The PIN clause covers the other reachable no-APIs state: the v5 -> v6
+        # migration stores [] for an absent key, and with [] there are no
+        # control tools, so the API check alone would leave the flag off and let
+        # Home Assistant unlock a door locally while the user believes a PIN
+        # guards it.  Claiming CONTROL whenever a PIN is configured routes those
+        # commands through the agent, which then fails closed (it has no unlock
+        # tool to call) instead of silently actuating.
+        options = self.entry.runtime_data.options
+        if (
+            active_llm_api_ids(options)
+            or resolve_critical_action_policy(options).enabled
+        ):
             self._attr_supported_features = (
                 conversation.ConversationEntityFeature.CONTROL
             )

@@ -192,7 +192,7 @@ Protects sensitive actions (unlocking doors, opening covers) behind a second ver
 
 **Setup:** Go to **Settings → Devices & Services → Home Generative Agent → Configure** and toggle **Require critical action PIN**. Enter a 4–10 digit PIN. The value is stored as a salted hash. Leaving the field blank while the toggle is on clears the stored PIN; turning the toggle off removes the guard entirely.
 
-> **Prefer handling commands locally** is safe to leave enabled. HGA advertises the `CONTROL` capability whenever an LLM API is configured, and Home Assistant responds by restricting its local intent handler to sentences that only *read* state — control commands always fall through to the agent, where the PIN gate runs. Sentence triggers are the exception: Home Assistant runs those ahead of any conversation agent, so a sentence trigger you author yourself that unlocks a door is not screened by this PIN.
+> **Prefer handling commands locally** is safe to leave enabled once the PIN is on. HGA advertises the `CONTROL` capability whenever an LLM API is configured *or* a critical-action PIN is set, and Home Assistant responds by restricting its local intent handler to sentences that only *read* state — control commands always fall through to the agent, where the PIN gate runs. Sentence triggers are the exception: Home Assistant runs those ahead of any conversation agent, so a sentence trigger you author yourself that unlocks a door is not screened by this PIN.
 
 **Protected actions:**
 - Unlocking or opening locks
