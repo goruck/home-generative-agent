@@ -7,7 +7,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 
 from aiohttp import multipart, web
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.helpers.http import HomeAssistantView
+
+from .const import DOMAIN
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -36,10 +39,25 @@ class EnrollPersonView(HomeAssistantView):
     name = "api:home_generative_agent:enroll_person"
     requires_auth = True
 
-    def __init__(self, hass: HomeAssistant, entry: HGAConfigEntry) -> None:
+    def __init__(self, hass: HomeAssistant) -> None:
         """Initialize enroll person view."""
         self._hass = hass
-        self._entry = entry
+
+    def _current_entry(self) -> HGAConfigEntry | None:
+        """
+        Return the currently loaded config entry, if any.
+
+        The view is registered once per Home Assistant run and cannot be
+        removed, so it must not pin the entry that happened to register it:
+        after a remove-and-re-add (which builds a NEW ConfigEntry object,
+        unlike a reload) a pinned entry's runtime_data is gone and every
+        enroll POST would raise until restart. Resolving per request always
+        reaches the live generation.
+        """
+        for entry in self._hass.config_entries.async_entries(DOMAIN):
+            if entry.state is ConfigEntryState.LOADED:
+                return cast("HGAConfigEntry", entry)
+        return None
 
     async def post(self, request: web.Request) -> web.Response:  # noqa: PLR0911, PLR0912
         """Handle POST request to enroll a person."""
@@ -106,17 +124,46 @@ class EnrollPersonView(HomeAssistantView):
                 status=400,
             )
 
-        dao = self._entry.runtime_data.person_gallery
+        entry = self._current_entry()
+        if entry is None:
+            return web.json_response(
+                {
+                    "status": "error",
+                    "message": "Home Generative Agent is not loaded.",
+                },
+                status=503,
+            )
+
+        # Hoisted once: a reload can tear the entry down between images, and
+        # Home Assistant deletes ``runtime_data`` on unload — a per-iteration
+        # re-read would raise AttributeError mid-loop.
+        runtime_data = entry.runtime_data
+        dao = runtime_data.person_gallery
+        face_api_url = runtime_data.face_api_url
         enrolled = 0
         skipped = 0
-        for img_bytes in images:
-            ok = await dao.enroll_from_image(
-                self._entry.runtime_data.face_api_url, name, img_bytes
+        try:
+            for img_bytes in images:
+                ok = await dao.enroll_from_image(face_api_url, name, img_bytes)
+                if not ok:
+                    skipped += 1
+                    continue
+                enrolled += 1
+        except Exception:
+            # A mid-upload teardown closes the DAO's pool under this request.
+            # Surface it as the same 503 as "not loaded" instead of letting
+            # aiohttp convert the raise into a 500 with a traceback.
+            LOGGER.exception("Enrollment failed mid-request")
+            return web.json_response(
+                {
+                    "status": "error",
+                    "message": (
+                        "Enrollment failed; Home Generative Agent may be"
+                        " reloading. Try again."
+                    ),
+                },
+                status=503,
             )
-            if not ok:
-                skipped += 1
-                continue
-            enrolled += 1
 
         if enrolled == 0:
             return web.json_response(
