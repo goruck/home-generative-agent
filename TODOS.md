@@ -2,6 +2,17 @@
 
 ## Agent
 
+### "No LLM APIs" is not an expressible choice, and its two spellings behave oppositely
+
+**What:** `CONF_LLM_HASS_API` has two distinct falsy storage states that mean the same thing to the user and opposite things to the code. Deselecting every API in the options flow hits `_cleanup_none_llm_api` (`config_flow.py:508`), which *pops* the key — and an absent key means "default to `[LLM_API_ASSIST]`" to every reader, so the Assist API is silently re-enabled and the user's choice is discarded. The v5 → v6 migration (`__init__.py:4042`) instead writes an explicit `[]` for the same intent, which really does disable everything. Same apparent user choice, opposite outcome, decided entirely by whether the entry predates v6. The options-flow form compounds it: `config_flow.py:213` suggests `[]` when the key is absent, so the UI shows "nothing selected" on installs that are actively running Assist.
+
+**Why:** Surfaced twice during the v3.30.9 ship — once by inspection, once independently by the Codex adversarial pass, which correctly rejected an earlier claim that `[]` was unreachable. v3.30.9 makes the *security* consequence moot (the CONTROL flag is now also set whenever a PIN is configured, so neither spelling can bypass the gate), but the configuration semantics remain incoherent and a user who genuinely wants no LLM API still cannot express it through the UI.
+
+**How to apply:** Pick one canonical spelling for "no APIs" and migrate the other to it. Storing `[]` is the better choice: it is explicit, it already round-trips through the migration, and it lets the form show the real state. That means deleting `_cleanup_none_llm_api`, adding a v6 → v7 migration that writes `[]` where the key is absent, and changing the readers' fallback from `[LLM_API_ASSIST]` to "only when the key was never present" — which, once the migration has run, is never. Note this is a user-visible behavior change: installs currently running Assist via an absent key would stop, so it needs a release note and probably a repair issue rather than a silent flip. `active_llm_api_ids()` (`agent/helpers.py`) is the single choke point for the read side.
+
+**Effort:** M
+**Priority:** P2
+
 ### PIN-gate add_automation for critical service calls
 
 **What:** `add_automation` writes arbitrary automation YAML and reloads HA without ever passing the critical-action PIN gate: `_is_critical_action` inspects `domain`/`service` tool args, and `add_automation`'s payload is opaque `automation_yaml`. "Unlock the front door whenever I get home" installs a `lock.unlock` automation with no PIN, while the direct command "unlock the front door" is gated.

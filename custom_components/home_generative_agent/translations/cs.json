@@ -368,5 +368,11 @@
         }
       }
     }
+  },
+  "issues": {
+    "pin_bypassed_by_local_intents": {
+      "title": "PIN pro kritické akce nechrání hlasové příkazy",
+      "description": "Dotčení hlasoví asistenti: {pipelines}.\n\nTito asistenti používají Home Generative Agent jako konverzačního agenta a mají zapnutou možnost **Preferovat místní zpracování příkazů** (v angličtině *Prefer handling commands locally*). Home Assistant pak jednoduché příkazy porovná s vlastními vestavěnými větami a provede je sám, včetně odemknutí zámku, dříve než je agent vůbec zavolán. Agent příkaz nikdy neuvidí, takže jej PIN pro kritické akce nemůže pozdržet k potvrzení.\n\nOpravíte to v **Nastavení → Hlasoví asistenti** (*Settings → Voice assistants*): upravte každého výše uvedeného asistenta a tuto možnost vypněte.\n\nPokud zámek nebo kryt nemá být hlasem ovladatelný vůbec, přestaňte jej také zpřístupňovat asistentovi (*Expose*). To je jediné nastavení, které pokrývá i větné spouštěče a cesty mimo agenta."
+    }
   }
 }

@@ -192,7 +192,18 @@ Protects sensitive actions (unlocking doors, opening covers) behind a second ver
 
 **Setup:** Go to **Settings → Devices & Services → Home Generative Agent → Configure** and toggle **Require critical action PIN**. Enter a 4–10 digit PIN. The value is stored as a salted hash. Leaving the field blank while the toggle is on clears the stored PIN; turning the toggle off removes the guard entirely.
 
-> In the conversation agent settings for HGA, disable **Prefer handling commands locally** for the PIN protection to work correctly.
+> **You must turn off "Prefer handling commands locally"** in your voice assistant pipeline for this PIN to protect anything.
+>
+> The PIN can only guard commands the agent actually receives. With that option enabled, Home Assistant matches simple commands against its own built-in sentences and executes them itself — "unlock the front door" included — before the conversation agent is ever called. HGA never sees the turn, so it cannot hold it for a PIN. This is Home Assistant's designed behavior and no integration can intercept it. (The related `CONTROL` capability flag does not help here: it only diverts *state questions* and media search to the agent, never control commands.)
+>
+> Since 3.30.9 HGA detects this combination and raises a repair issue under **Settings → System → Repairs** naming the affected pipeline, so the gap cannot sit there silently.
+>
+> Two other paths also bypass the PIN, and turning the option off does not close them:
+>
+> - **Sentence triggers.** Home Assistant runs those ahead of any conversation agent, so a sentence trigger you author yourself that unlocks a door is never screened.
+> - **Anything that is not the conversation agent** — dashboard buttons, scripts, other automations. The PIN guards what the agent is asked to do, not the underlying service call.
+>
+> If a lock or cover must never be voice-operable at all, the reliable control is to stop exposing it to Assist (**Settings → Voice assistants → Expose**) rather than relying on the PIN.
 
 **Protected actions:**
 - Unlocking or opening locks

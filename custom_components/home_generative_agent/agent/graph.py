@@ -20,9 +20,6 @@ from typing import (
 
 import psycopg
 import voluptuous as vol
-from homeassistant.const import (
-    CONF_LLM_HASS_API,
-)
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import llm
 from homeassistant.util import dt as dt_util
@@ -76,6 +73,7 @@ from ..core.fallback import (  # noqa: TID252
 )
 from ..core.utils import extract_final  # noqa: TID252
 from .helpers import (
+    active_llm_api_ids,
     format_tool,
     is_actuation_tool,
     matches_critical_rule,
@@ -714,10 +712,7 @@ class RawTool(TypedDict):
 def _get_allowed_api_ids(config: RunnableConfig) -> set[str]:
     """Determine which API IDs are allowed based on configuration."""
     opts = config.get("configurable", {}).get("options", {})
-    active_api_ids = opts.get(CONF_LLM_HASS_API, [llm.LLM_API_ASSIST])
-    if isinstance(active_api_ids, str):
-        active_api_ids = [active_api_ids]
-    return set(active_api_ids) | {"hga_local"}
+    return set(active_llm_api_ids(opts)) | {"hga_local"}
 
 
 def _get_live_tool_ids(config: RunnableConfig) -> set[tuple[str, str]] | None:

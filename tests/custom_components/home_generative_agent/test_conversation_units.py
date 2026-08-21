@@ -13,12 +13,17 @@ import inspect
 import re
 import sys
 import types
+from enum import IntFlag
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from homeassistant.const import CONF_LLM_HASS_API
 from homeassistant.exceptions import HomeAssistantError
 
+from custom_components.home_generative_agent.const import (
+    CONF_CRITICAL_ACTION_PIN_ENABLED,
+)
 from custom_components.home_generative_agent.core.utils import (
     gather_store_puts_in_chunks,
 )
@@ -99,8 +104,27 @@ def _ensure_content_classes() -> None:
         conv.UserContent = _StubUserContent
 
 
+def _ensure_conversation_entity_feature() -> None:
+    """
+    Guarantee ConversationEntityFeature exists on the loaded module.
+
+    Same suite-ordering concern as _ensure_content_classes: whichever stub won
+    the import race may omit the feature enum. HGAConversationEntity.__init__
+    reads CONTROL off it to decide whether Home Assistant is allowed to handle
+    control commands in its own intent handler before the agent sees them.
+    """
+    conv: Any = sys.modules["homeassistant.components.conversation"]
+    if not hasattr(conv, "ConversationEntityFeature"):
+
+        class _StubConversationEntityFeature(IntFlag):
+            CONTROL = 1
+
+        conv.ConversationEntityFeature = _StubConversationEntityFeature
+
+
 _stub_ha_conversation()
 _ensure_content_classes()
+_ensure_conversation_entity_feature()
 
 # These imports must come AFTER the stub so conversation.py loads cleanly.
 from homeassistant.components import conversation as ha_conversation  # noqa: E402
@@ -890,3 +914,68 @@ async def test_delta_write_failure_sends_terminal_ready_signal() -> None:
     state, count = dispatch_mock.call_args_list[-1].args[2:4]
     assert state == "ready"
     assert count == len(rd.tool_content_hashes)
+
+
+def _entity_with_options(options: dict[str, Any]) -> Any:
+    """Construct the entity through its real __init__ with the given options."""
+    entry: Any = types.SimpleNamespace(
+        entry_id="test-entry-id",
+        title="Home Generative Agent",
+        runtime_data=types.SimpleNamespace(options=options),
+    )
+    return HGAConversationEntity(entry)
+
+
+def _supported_features(entity: Any) -> int:
+    """Read the feature flag without assuming the attribute was ever set."""
+    return int(getattr(entity, "_attr_supported_features", 0) or 0)
+
+
+def test_control_feature_set_when_llm_api_key_absent() -> None:
+    """
+    An absent CONF_LLM_HASS_API must still advertise CONTROL.
+
+    The options flow deletes the key when no API is selected, and the rest of
+    the integration reads that absence as "default to Assist"; __init__ read it
+    as falsy, so the entity's capability disagreed with the tools it actually
+    had.
+
+    CONTROL is NOT a security control -- its only consumer routes state
+    questions and media search to the agent. This test pins capability/tool
+    agreement, nothing about the PIN.
+    """
+    control = ha_conversation.ConversationEntityFeature.CONTROL
+    assert _supported_features(_entity_with_options({})) & control
+
+
+def test_control_feature_set_when_llm_api_configured() -> None:
+    """An explicitly configured API advertises CONTROL, as it always did."""
+    control = ha_conversation.ConversationEntityFeature.CONTROL
+    entity = _entity_with_options({CONF_LLM_HASS_API: ["assist"]})
+    assert _supported_features(entity) & control
+
+
+def test_control_feature_absent_when_stored_api_list_is_empty() -> None:
+    """
+    A stored empty list must NOT advertise CONTROL.
+
+    With no APIs the agent has no entity-control tools and no GetLiveContext,
+    so it has nothing better to offer than Home Assistant's own sentence
+    matcher and should not claim the capability. The v5 -> v6 migration writes
+    [] for an absent key, so this state is reachable on upgraded installs.
+
+    A PIN does not change this. An earlier revision of this branch also set
+    CONTROL whenever a PIN was configured, on the belief that it would force
+    lock commands through the agent. It does not: the filter CONTROL installs
+    is a reject list matching only HassGetState and media search, so control
+    commands stay local either way. The PIN/pipeline conflict is surfaced as a
+    repair issue instead -- see test_pipeline_guard.py.
+    """
+    control = ha_conversation.ConversationEntityFeature.CONTROL
+    entity = _entity_with_options(
+        {
+            CONF_LLM_HASS_API: [],
+            CONF_CRITICAL_ACTION_PIN_ENABLED: True,
+        }
+    )
+    assert not _supported_features(entity) & control

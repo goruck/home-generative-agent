@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.30.9] - 2026-08-20
+
+### Added
+
+- **A warning when your critical-action PIN is not actually protecting anything.** If you have the PIN switched on while a voice assistant that uses this integration also has **Prefer handling commands locally** switched on, the two settings contradict each other: Home Assistant matches simple commands against its own built-in sentences and carries them out itself — unlocking a lock included — before the agent is ever asked. The agent never sees the command, so it cannot hold it for a PIN. Nothing indicated this; the PIN simply appeared to be on. A repair notice now appears under **Settings → System → Repairs**, names the affected voice assistants, and tells you which setting to turn off. This is a warning, not a fix: no integration can intercept commands Home Assistant answers by itself.
+
+### Changed
+
+- The **Critical Action PIN** documentation is much clearer about what the PIN does and does not cover. It still tells you to turn off "Prefer handling commands locally" — that instruction was correct — but now explains why, and adds the two other paths that bypass the PIN no matter what you do with that setting: sentence triggers you write yourself, which Home Assistant runs before any conversation agent, and anything that is not the conversation agent at all, such as dashboard buttons and scripts. If a lock or cover should never be voice-operable, the reliable control is to stop exposing it to Assist rather than to rely on the PIN.
+
+### Fixed
+
+- **The integration no longer under-reports what it can do when no model API is explicitly selected.** Deselecting every model API stores no setting at all, which the rest of the integration reads as "use the recommended default" — so the Assist API stayed active while the conversation agent told Home Assistant it had no entity control. The practical effect was small (Home Assistant answered "is the door locked?" from its own sentence matcher instead of asking the agent, which has live state access and answers better), but the two disagreed, and one shared definition now settles it for every part of the integration that reads the setting.
+
 ## [3.30.8] - 2026-08-19
 
 ### Fixed

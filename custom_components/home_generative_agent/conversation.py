@@ -23,7 +23,7 @@ from homeassistant.components.conversation import (
     trace,
 )
 from homeassistant.components.conversation.models import AbstractConversationAgent
-from homeassistant.const import CONF_LLM_HASS_API, MATCH_ALL
+from homeassistant.const import MATCH_ALL
 from homeassistant.exceptions import HomeAssistantError, TemplateError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import intent, llm, template
@@ -42,8 +42,10 @@ from pydantic import PydanticInvalidForJsonSchema
 
 from .agent.graph import workflow
 from .agent.helpers import (
+    active_llm_api_ids,
     format_tool,
     is_actuation_tool,
+    resolve_critical_action_policy,
     safe_convert,
     tool_index_key,
 )
@@ -84,6 +86,7 @@ from .core.conversation_helpers import (
     _is_dashboard_request,
     _maybe_fix_dashboard_entities,
 )
+from .core.pipeline_guard import async_check_pin_pipeline_conflict
 from .core.utils import gather_store_puts_in_chunks, local_chat_session
 
 if TYPE_CHECKING:
@@ -781,7 +784,22 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         )
         self.message_history_len = 0
 
-        if self.entry.runtime_data.options.get(CONF_LLM_HASS_API):
+        # CONTROL tells Home Assistant this agent controls entities.  Its only
+        # consumer is assist_pipeline, which uses it to route *state questions*
+        # and media search to the agent instead of answering them locally --
+        # this agent has GetLiveContext, so it gives better answers than the
+        # built-in sentence matcher.
+        #
+        # It is NOT a security control.  The filter it installs is a reject
+        # list, so every other intent -- including HassTurnOn/HassTurnOff on a
+        # lock -- is still handled locally when "Prefer handling commands
+        # locally" is on, whatever this flag says.  Guarding that combination
+        # is the repair issue raised in async_added_to_hass, not this line.
+        #
+        # The default matters because the options flow deletes the key when no
+        # API is selected, so an absent key means "use Assist" to every other
+        # reader; active_llm_api_ids is the single definition of that.
+        if active_llm_api_ids(self.entry.runtime_data.options):
             self._attr_supported_features = (
                 conversation.ConversationEntityFeature.CONTROL
             )
@@ -792,6 +810,25 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         """When entity is added to Home Assistant."""
         await super().async_added_to_hass()
         conversation.async_set_agent(self.hass, self.entry, self)
+        # Warn if a pipeline routing to this agent has "Prefer handling
+        # commands locally" on while a critical-action PIN is configured: Home
+        # Assistant then executes lock/unlock itself and this agent's PIN gate
+        # never runs.  Runs here rather than in __init__ because it needs
+        # self.entity_id, which only exists once the entity is registered.
+        #
+        # Re-evaluated on every setup and reload.  Changing the pipeline
+        # setting alone does not reload this entry, so the issue clears on the
+        # next reload or restart rather than instantly -- acceptable for a
+        # warning, and it never reports a conflict that has stopped existing
+        # without the user having touched something.
+        async_check_pin_pipeline_conflict(
+            self.hass,
+            self.entry.entry_id,
+            self.entity_id,
+            pin_enabled=resolve_critical_action_policy(
+                self.entry.runtime_data.options
+            ).enabled,
+        )
         # Kick off tool indexing at startup so the index is ready before the first
         # user query. Construct a minimal LLMContext — no live ConversationInput needed
         # because async_get_apis / tool discovery only uses platform/assistant.
@@ -846,9 +883,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         hass = self.hass
         options = self.entry.runtime_data.options
 
-        active_api_ids = options.get(CONF_LLM_HASS_API, [llm.LLM_API_ASSIST])
-        if isinstance(active_api_ids, str):
-            active_api_ids = [active_api_ids]
+        active_api_ids = active_llm_api_ids(options)
 
         active_apis: dict[str, llm.APIInstance] = {}
         failed_apis: list[str] = []
