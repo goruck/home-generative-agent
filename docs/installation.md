@@ -36,6 +36,8 @@ It is available in the default HACS repository, or click the button below to ope
 - Click **Add Integration** and search for **Home Generative Agent**.
 - Complete the initial instruction-only setup screen.
 
+> Only one Home Generative Agent entry is supported — its services, database, and Sentinel are one-per-home. Home Assistant will not offer the integration a second time once an entry exists.
+
 > If you previously used the legacy single-entry flow, your settings are automatically migrated to the new subentry UI.
 
 **5. Open the integration page and click Setup.**

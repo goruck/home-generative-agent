@@ -465,7 +465,7 @@ Use the file picker or drag-and-drop to upload one or more images. The card enro
 
 Both enrollment paths refuse reserved identity labels — "Unknown Person", "Indeterminate", "None", or an empty name, in any casing — because the recognition pipeline uses those labels for non-matches (see Batch Identity Consolidation below).
 
-If the integration is not currently loaded (for example mid-reload, or removed without a Home Assistant restart), the upload endpoint responds with HTTP 503 and "Home Generative Agent is not loaded." Load the integration and retry.
+If the integration is not currently loaded (for example mid-reload, or removed without a Home Assistant restart), the upload endpoint responds with HTTP 503 and "Home Generative Agent is not loaded." Load the integration and retry. A reload that lands in the middle of an upload is answered the same way — HTTP 503 with "Enrollment failed; Home Generative Agent may be reloading. Try again."
 
 ### Batch Identity Consolidation
 
