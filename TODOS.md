@@ -1276,6 +1276,20 @@ window-scoped check could suppress.
 
 ---
 
+### services.yaml advertises confirm_enroll but nothing registers it
+
+**What:** `services.yaml:19` defines `confirm_enroll`, but no `async_register` call for it exists anywhere in the integration — 18 services advertised, 17 registered. The Developer Tools services page shows a service that errors with "Unable to find service" when called.
+
+**Why:** Pre-existing metadata staleness surfaced by the cross-model doc review during the v3.30.10 ship (the ship's service-deregistration sweep enumerated the real 17). Docs-only scope kept it out of that PR.
+
+**How to apply:** Either delete the `confirm_enroll` block from `services.yaml` (if the confirm flow it referenced is gone for good) or register the handler it was meant to describe. Check translations for a matching `services.confirm_enroll` key and remove it in the same change.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** —
+
+---
+
 ### Decide whether face enrollment should be admin-only
 
 **What:** `EnrollPersonView` (`http.py`) has `requires_auth = True` but no admin check, and the `hga.enroll_person` service is likewise callable by any user context — so any authenticated HA user (or a leaked limited-scope long-lived token) can enroll faces into the gallery that feeds security-relevant recognition (Sentinel unknown-person rules, recognized-people sensors). Poisoning shape: enroll an arbitrary face under a trusted resident's name and the phantom becomes "recognized". Reserved-label refusal still applies; this is about *who*, not *what*.
