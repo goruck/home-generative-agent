@@ -2454,6 +2454,7 @@ def test_alarm_disarmed_external_threat_triggers() -> None:
         _camera_activity(
             "camera.backyard",
             snapshot_summary="Unknown person in backyard.",
+            recognized_people=["Unknown Person"],
         )
     ]
     findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
@@ -2472,6 +2473,7 @@ def test_alarm_disarmed_external_threat_no_trigger_when_armed() -> None:
         _camera_activity(
             "camera.backyard",
             snapshot_summary="Unknown person in backyard.",
+            recognized_people=["Unknown Person"],
         )
     ]
     findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
@@ -2479,14 +2481,44 @@ def test_alarm_disarmed_external_threat_no_trigger_when_armed() -> None:
 
 
 def test_alarm_disarmed_external_threat_no_trigger_when_recognized() -> None:
-    """No finding when detected person is recognized."""
+    """No finding when only an enrolled person was recognized."""
     snapshot = _base_snapshot()
     snapshot["entities"] = [_alarm_entity("disarmed")]
     snapshot["camera_activity"] = [
         _camera_activity(
             "camera.backyard",
             snapshot_summary="Lindo in backyard.",
-            recognized_people=["person.lindo_st_angel"],
+            recognized_people=["Lindo"],
+        )
+    ]
+    findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_alarm_disarmed_external_threat_no_trigger_when_accompanied() -> None:
+    """A stranger alongside an enrolled person is a companion, not a threat."""
+    snapshot = _base_snapshot()
+    snapshot["entities"] = [_alarm_entity("disarmed")]
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.backyard",
+            snapshot_summary="Lindo and a visitor in backyard.",
+            recognized_people=["Lindo", "Unknown Person"],
+        )
+    ]
+    findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_alarm_disarmed_external_threat_no_trigger_indeterminate_only() -> None:
+    """Indeterminate alone (no face identified) must not fire the rule."""
+    snapshot = _base_snapshot()
+    snapshot["entities"] = [_alarm_entity("disarmed")]
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.backyard",
+            snapshot_summary="A cat crosses the backyard.",
+            recognized_people=["Indeterminate"],
         )
     ]
     findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
@@ -2543,6 +2575,7 @@ def test_alarm_disarmed_non_standard_entity_name_triggers() -> None:
         _camera_activity(
             "camera.front_porch",
             snapshot_summary="Unknown person at front porch.",
+            recognized_people=["Unknown Person"],
         )
     ]
     findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
@@ -2585,6 +2618,7 @@ def test_alarm_disarmed_multiple_panels_one_disarmed_triggers() -> None:
         _camera_activity(
             "camera.driveway",
             snapshot_summary="Unknown person near driveway.",
+            recognized_people=["Unknown Person"],
         )
     ]
     findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
@@ -2618,6 +2652,7 @@ def test_alarm_disarmed_stale_activity_no_trigger() -> None:
             # 16 minutes before generated_at — beyond the 10-minute threshold.
             last_activity="2025-01-01T00:04:00+00:00",
             snapshot_summary="Unknown person in backyard.",
+            recognized_people=["Unknown Person"],
         )
     ]
     findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
@@ -2635,6 +2670,7 @@ def test_alarm_disarmed_fresh_activity_triggers_with_age() -> None:
             # 4 minutes before generated_at — within the 10-minute threshold.
             last_activity="2025-01-01T00:04:00+00:00",
             snapshot_summary="Unknown person in backyard.",
+            recognized_people=["Unknown Person"],
         )
     ]
     findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
@@ -2644,25 +2680,8 @@ def test_alarm_disarmed_fresh_activity_triggers_with_age() -> None:
     assert 3.9 < age < 4.1
 
 
-def test_alarm_disarmed_unparseable_timestamp_no_other_evidence_no_trigger() -> None:
-    """Unparseable last_activity with no other evidence must not fire the rule."""
-    snapshot = _base_snapshot()
-    snapshot["entities"] = [_alarm_entity("disarmed")]
-    snapshot["camera_activity"] = [
-        _camera_activity(
-            "camera.backyard",
-            last_activity="not-a-valid-timestamp",
-            motion_entities=[],
-            vmd_entities=[],
-            snapshot_summary=None,
-        )
-    ]
-    findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
-    assert len(findings) == 0
-
-
-def test_alarm_disarmed_unparseable_timestamp_with_other_evidence_triggers() -> None:
-    """Unparseable last_activity is allowed when snapshot_summary is present."""
+def test_alarm_disarmed_unparseable_timestamp_no_trigger() -> None:
+    """An unparseable last_activity cannot prove freshness — must not fire."""
     snapshot = _base_snapshot()
     snapshot["entities"] = [_alarm_entity("disarmed")]
     snapshot["camera_activity"] = [
@@ -2670,15 +2689,15 @@ def test_alarm_disarmed_unparseable_timestamp_with_other_evidence_triggers() -> 
             "camera.backyard",
             last_activity="not-a-valid-timestamp",
             snapshot_summary="Unknown person detected.",
+            recognized_people=["Unknown Person"],
         )
     ]
     findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
-    assert len(findings) == 1
-    assert findings[0].evidence["camera_activity_age_minutes"] is None
+    assert len(findings) == 0
 
 
-def test_alarm_disarmed_no_timestamp_but_motion_triggers_with_no_age() -> None:
-    """Missing last_activity but present motion_entities allows finding without an age."""
+def test_alarm_disarmed_no_timestamp_no_trigger() -> None:
+    """Missing last_activity cannot prove freshness — must not fire."""
     snapshot = _base_snapshot()
     snapshot["entities"] = [_alarm_entity("disarmed")]
     snapshot["camera_activity"] = [
@@ -2686,12 +2705,12 @@ def test_alarm_disarmed_no_timestamp_but_motion_triggers_with_no_age() -> None:
             "camera.backyard",
             last_activity=None,
             motion_entities=["binary_sensor.backyard_motion"],
-            snapshot_summary=None,
+            snapshot_summary="Unknown person detected.",
+            recognized_people=["Unknown Person"],
         )
     ]
     findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
-    assert len(findings) == 1
-    assert findings[0].evidence["camera_activity_age_minutes"] is None
+    assert len(findings) == 0
 
 
 def test_alarm_disarmed_anomaly_id_stable_across_cycles() -> None:
@@ -2703,6 +2722,7 @@ def test_alarm_disarmed_anomaly_id_stable_across_cycles() -> None:
             "camera.backyard",
             last_activity="2025-01-01T00:04:00+00:00",
             snapshot_summary="Unknown person.",
+            recognized_people=["Unknown Person"],
         )
     ]
 
@@ -2730,6 +2750,7 @@ def test_alarm_disarmed_indoor_occupancy_signal_is_null() -> None:
         _camera_activity(
             "camera.backyard",
             snapshot_summary="Unknown person.",
+            recognized_people=["Unknown Person"],
         )
     ]
     findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
@@ -2758,6 +2779,7 @@ def test_alarm_disarmed_evidence_includes_computed_durations() -> None:
             "camera.backyard",
             last_activity="2025-01-01T00:05:00+00:00",  # 5 min ago
             snapshot_summary="Unknown person.",
+            recognized_people=["Unknown Person"],
         )
     ]
     findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)

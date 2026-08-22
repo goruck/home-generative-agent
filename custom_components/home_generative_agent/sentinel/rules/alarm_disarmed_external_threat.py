@@ -10,6 +10,8 @@ from custom_components.home_generative_agent.const import (
 from custom_components.home_generative_agent.sentinel.models import (
     AnomalyFinding,
     build_anomaly_id,
+    enrolled_people,
+    has_unknown_person,
     minutes_between,
 )
 
@@ -22,12 +24,12 @@ _DISARMED_STATE = "disarmed"
 
 
 class AlarmDisarmedDuringExternalThreatRule:
-    """Detect alarm disarmed while unrecognized outdoor camera activity is present."""
+    """Detect alarm disarmed while an unknown person is seen on a camera."""
 
     rule_id = "alarm_disarmed_during_external_threat"
 
     def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:
-        """Return a finding for disarmed alarm with unrecognized camera activity."""
+        """Return a finding for a disarmed alarm with a fresh stranger sighting."""
         disarmed_panels = [
             e
             for e in snapshot["entities"]
@@ -45,32 +47,29 @@ class AlarmDisarmedDuringExternalThreatRule:
 
         findings: list[AnomalyFinding] = []
         for activity in snapshot["camera_activity"]:
-            has_other_evidence = bool(
-                activity.get("motion_entities")
-                or activity.get("vmd_entities")
-                or activity.get("snapshot_summary")
+            people = activity.get("recognized_people") or []
+            # Fire only on a positive stranger sighting. The raw list mixes in
+            # reserved labels ("Indeterminate" on every analyzed event), so
+            # truthiness would suppress the rule forever on face-recognition
+            # installs — and a real stranger writes "Unknown Person", which
+            # must fire the rule, not veto it.
+            if not has_unknown_person(people):
+                continue
+            # A stranger alongside an enrolled person is the genuine-companion
+            # signal (a resident with a guest), not an external threat.
+            if enrolled_people(people):
+                continue
+            # Staleness gate: recognized_people persists on the image entity
+            # until the next analyzed event, so require the sighting itself to
+            # be recent. A missing/unparseable timestamp cannot prove
+            # freshness and is skipped.
+            camera_activity_age_minutes = minutes_between(
+                activity.get("last_activity"), generated_at
             )
-            if activity.get("recognized_people"):
-                continue
-
-            # Compute activity age. An unparseable timestamp is treated the same as
-            # absent — the gate falls through to has_other_evidence.
-            camera_activity_age_minutes: float | None = None
-            if activity.get("last_activity"):
-                camera_activity_age_minutes = minutes_between(
-                    activity["last_activity"], generated_at
-                )
-
-            last_activity_reliable = camera_activity_age_minutes is not None
-            if not last_activity_reliable and not has_other_evidence:
-                continue
-
-            # Staleness gate: skip when reliable age exceeds the threshold.
-            threshold = SENTINEL_CAMERA_ACTIVITY_STALENESS_MINUTES
             if (
-                last_activity_reliable
-                and camera_activity_age_minutes is not None
-                and camera_activity_age_minutes > threshold
+                camera_activity_age_minutes is None
+                or camera_activity_age_minutes
+                > SENTINEL_CAMERA_ACTIVITY_STALENESS_MINUTES
             ):
                 continue
 

@@ -82,7 +82,7 @@ These rules run on every detection cycle without any configuration or approval.
 | `camera_entry_unsecured` | Camera activity detected near an unsecured entry point. Same-area entries detected automatically; cameras that overlook entries in a different area can be linked via `sentinel_camera_entry_links` |
 | `unknown_person_camera_no_home` | Face recognition reports an "Unknown Person" on any camera while no one is home. Fires only on a fresh sighting (within 10 minutes of the snapshot) and is suppressed when an enrolled person is recognized alongside the stranger (treated as an accompanied guest) |
 | `unknown_person_camera_night_home` | Face recognition reports an "Unknown Person" on any camera at night while someone is home. Requires a snapshot summary; same freshness and accompanied-guest suppression as above |
-| `alarm_disarmed_during_external_threat` | Security alarm disarmed while an unrecognized person is detected on an outdoor camera |
+| `alarm_disarmed_during_external_threat` | Security alarm disarmed while face recognition reports an "Unknown Person" on a camera. Same freshness and accompanied-guest suppression as the unknown-person rules |
 
 **Appliances / sensors**
 
