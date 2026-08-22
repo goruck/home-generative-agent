@@ -430,7 +430,7 @@ Internal dispatcher signals (most users will not need these directly — platfor
 | Signal | Updates |
 |---|---|
 | `SIGNAL_HGA_NEW_LATEST` | `image.*_last_event` |
-| `SIGNAL_HGA_RECOGNIZED` | `sensor.*_recognized_people` |
+| `SIGNAL_HGA_RECOGNIZED` | `sensor.*_recognized_people`, `image.*_last_event` |
 
 ---
 

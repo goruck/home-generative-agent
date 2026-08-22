@@ -967,18 +967,6 @@ Entity-backed evidence path instruction added to `USER_PROMPT_TEMPLATE` in `expl
 
 ---
 
-### Sentinel unknown-person rules are suppressed by any non-empty recognized list
-
-**What:** `unknown_person_camera_night_home` (and the dynamic no-home/when-home variants) skip whenever `recognized_people` is truthy — but the raw list dispatched to the image entity and Sentinel snapshot contains the literal `"Unknown Person"` and `"Indeterminate"` strings, so with face recognition enabled, a detected-but-unrecognized visitor *suppresses* the unknown-person rules rather than firing them. Decide whether the rules should filter negative identities before the emptiness check, or whether the snapshot layer should strip them.
-
-**Why:** Pre-existing behavior surfaced by the v3.30.0 adversarial review (the merge provably cannot change rule firing, but the rules' emptiness check is only vacuously aligned with their name). Changing it changes alerting behavior, so it needs its own focused decision, docs, and field validation — not a drive-by fix.
-
-**Effort:** M
-**Priority:** P2
-**Depends on:** v3.30.0
-
----
-
 ### Caption novelty: per-analysis notification-status metadata
 
 **What:** Store whether each video analysis triggered a notification alongside the
@@ -1428,6 +1416,22 @@ window-scoped check could suppress.
 ---
 
 ## Completed
+
+### Sentinel unknown-person rules are suppressed by any non-empty recognized list
+
+**What:** `unknown_person_camera_night_home` (and the dynamic no-home/when-home variants) skip whenever `recognized_people` is truthy — but the raw list dispatched to the image entity and Sentinel snapshot contains the literal `"Unknown Person"` and `"Indeterminate"` strings, so with face recognition enabled, a detected-but-unrecognized visitor *suppresses* the unknown-person rules rather than firing them. Decide whether the rules should filter negative identities before the emptiness check, or whether the snapshot layer should strip them.
+
+**Why:** Pre-existing behavior surfaced by the v3.30.0 adversarial review (the merge provably cannot change rule firing, but the rules' emptiness check is only vacuously aligned with their name). Changing it changes alerting behavior, so it needs its own focused decision, docs, and field validation — not a drive-by fix.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** v3.30.0
+
+**Resolution:** Fixed in the unknown-person rules overhaul: the rules now fire on a positive "Unknown Person" label (normalized), enrolled names suppress as accompanied-guest, and a 10-minute freshness gate keyed to the recognition event prevents stale re-fires. See the three new Sentinel Rules follow-up items for the deliberately deferred edges.
+
+**Completed:** v3.30.11 (2026-08-22)
+
+---
 
 ### Config entry lifecycle leaks in the deferred-start block
 

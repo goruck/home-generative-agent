@@ -64,7 +64,7 @@ Most AI conversation integrations are prompt passthroughs: they forward your wor
 | PostgreSQL with pgvector | Provided as a bundled HA app (step 1 below) |
 | Model provider | At least one of: OpenAI, Gemini, Anthropic, Ollama, or any OpenAI-compatible server |
 | Edge GPU server *(optional)* | Ollama, vLLM, llama.cpp, or LiteLLM for local model serving |
-| face-service *(optional)* | An external service for face recognition in camera analysis. Also powers Sentinel's unknown-person rules, which never fire without it |
+| face-service *(optional)* | An external service for face recognition in camera analysis. Also powers Sentinel's unknown-person rules, which never fire unless face recognition is enabled (the `face_recognition` option, off by default) with this service configured |
 
 ## Quick Start
 
