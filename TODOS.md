@@ -328,6 +328,36 @@ And two writer-consistency gaps: (7) `_mark_tool_index_stale` (embedding-provide
 
 ## Sentinel Rules
 
+### Unknown-person rules are inert on installs without face recognition
+
+**What:** The stranger-present predicate (unknown-person rules fix, 2026-08-22) makes `unknown_person_camera_no_home`, `unknown_person_camera_night_home`, `alarm_disarmed_during_external_threat`, and the two dynamic unknown-person templates fire only on a positive `"Unknown Person"` label — which only the face-recognition pipeline produces. On installs without a configured face service these five rules never fire, and `alarm_disarmed_during_external_threat` previously fell back to motion/VMD/summary evidence, so an upgrade silently narrows real coverage there. Docs note it, but nothing at runtime does. Same family, narrower trigger (Codex structured review): the snapshot sources `recognized_people` solely from the `image.*_last_event` entities, so a user who disables that entity in the entity registry (it vanishes from `hass.states`) silently makes the rules inert even WITH face recognition running. Surfaced independently by the security specialist and both Codex passes during the ship of the fix.
+
+**How to apply:** Detect at engine start whether face recognition is configured (face-service URL option); if not, raise a one-time repair issue (or rate-limited log) saying these rules are inert and pointing at the `motion_detected_*` discovery templates as the replacement. Alternatively carry a `face_recognition_enabled` flag in the snapshot and let the rules fall back to a motion-evidence predicate when it is false. For the disabled-entity sub-case, source recognition metadata from an always-on runtime cache (e.g. VideoAnalyzer._last_recognized via runtime_data) instead of the optional UI entity — that also removes the image-entity round-trip entirely.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** unknown-person rules fix (2026-08-22)
+
+### Companion suppression works on the event-level identity union, not frame co-occurrence
+
+**What:** The accompanied-guest gate suppresses an `"Unknown Person"` sighting whenever an enrolled name appears anywhere in the same analyzed event's `recognized_people` union — including an intruder presenting a photo of a resident in one frame, or a resident passing through the clip window minutes before the stranger. Kept deliberately for now: recognition flapping on one person produces exactly the `[known, "Unknown Person"]` refused-merge shape, and firing on it would re-create the #543 phantom-stranger alerts. Surfaced by both the security specialist and the Codex adversarial pass.
+
+**How to apply:** Carry frame-level co-occurrence evidence into the snapshot (e.g. a `companion_confirmed` flag set only when a known name and an unknown share a single frame, which `_merge_unknown_faces` already computes as its condition-2 check) and suppress only on confirmed co-occurrence; or fire a low-severity variant instead of full suppression when both labels are present. Needs live tuning against #543-style flapping before changing the default.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** unknown-person rules fix (2026-08-22)
+
+### Legacy gallery rows with near-reserved names defeat label classification
+
+**What:** `RESERVED_IDENTITY_LABELS` matching is exact strip+lowercase. Gallery rows enrolled before the reserved-name guard (or via direct DB insert) under variants like `"unknown-person"`, internal double spaces, or homoglyphs are classified as enrolled identities — a face-API match to such a row suppresses the unknown-person rules via the accompanied-guest gate; conversely a legacy row literally named `"Unknown Person"` makes an enrolled resident fire stranger alerts on every fresh sighting. Surfaced by the security specialist during the ship of the unknown-person rules fix.
+
+**How to apply:** Add a startup/migration sweep over `person_gallery` that flags (or renames with user confirmation) rows whose collapsed-whitespace lowercased name is in — or one edit away from — `RESERVED_IDENTITY_LABELS`; optionally normalize with internal-whitespace collapse on both the enrollment guard and the Sentinel matchers so both ends agree.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** unknown-person rules fix (2026-08-22)
+
 ### Dynamic `sensor_threshold_condition` rules don't normalize units
 
 **What:** Discovery's `sensor_threshold_condition` template (`sentinel/proposal_templates.py`) compares an LLM-extracted numeric threshold against the sensor's native state with no unit normalization — the #461 bug class: a rule meaning "over 100 watts" against a kW sensor never fires (the template only extracts above-thresholds today; a below-variant would invert the failure — always firing). Arguably the user's threshold is native-unit by intent, but nothing disambiguates. Surfaced by adversarial review during the v3.21.3 ship.
@@ -937,18 +967,6 @@ Entity-backed evidence path instruction added to `USER_PROMPT_TEMPLATE` in `expl
 
 ---
 
-### Sentinel unknown-person rules are suppressed by any non-empty recognized list
-
-**What:** `unknown_person_camera_night_home` (and the dynamic no-home/when-home variants) skip whenever `recognized_people` is truthy — but the raw list dispatched to the image entity and Sentinel snapshot contains the literal `"Unknown Person"` and `"Indeterminate"` strings, so with face recognition enabled, a detected-but-unrecognized visitor *suppresses* the unknown-person rules rather than firing them. Decide whether the rules should filter negative identities before the emptiness check, or whether the snapshot layer should strip them.
-
-**Why:** Pre-existing behavior surfaced by the v3.30.0 adversarial review (the merge provably cannot change rule firing, but the rules' emptiness check is only vacuously aligned with their name). Changing it changes alerting behavior, so it needs its own focused decision, docs, and field validation — not a drive-by fix.
-
-**Effort:** M
-**Priority:** P2
-**Depends on:** v3.30.0
-
----
-
 ### Caption novelty: per-analysis notification-status metadata
 
 **What:** Store whether each video analysis triggered a notification alongside the
@@ -1398,6 +1416,22 @@ window-scoped check could suppress.
 ---
 
 ## Completed
+
+### Sentinel unknown-person rules are suppressed by any non-empty recognized list
+
+**What:** `unknown_person_camera_night_home` (and the dynamic no-home/when-home variants) skip whenever `recognized_people` is truthy — but the raw list dispatched to the image entity and Sentinel snapshot contains the literal `"Unknown Person"` and `"Indeterminate"` strings, so with face recognition enabled, a detected-but-unrecognized visitor *suppresses* the unknown-person rules rather than firing them. Decide whether the rules should filter negative identities before the emptiness check, or whether the snapshot layer should strip them.
+
+**Why:** Pre-existing behavior surfaced by the v3.30.0 adversarial review (the merge provably cannot change rule firing, but the rules' emptiness check is only vacuously aligned with their name). Changing it changes alerting behavior, so it needs its own focused decision, docs, and field validation — not a drive-by fix.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** v3.30.0
+
+**Resolution:** Fixed in the unknown-person rules overhaul: the rules now fire on a positive "Unknown Person" label (normalized), enrolled names suppress as accompanied-guest, and a 10-minute freshness gate keyed to the recognition event prevents stale re-fires. See the three new Sentinel Rules follow-up items for the deliberately deferred edges.
+
+**Completed:** v3.30.11 (2026-08-22)
+
+---
 
 ### Config entry lifecycle leaks in the deferred-start block
 

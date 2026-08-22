@@ -6,6 +6,9 @@ from __future__ import annotations
 import pytest
 import voluptuous as vol
 
+from custom_components.home_generative_agent.snapshot.camera_activity import (
+    extract_camera_activity,
+)
 from custom_components.home_generative_agent.snapshot.schema import (
     SNAPSHOT_SCHEMA_VERSION,
     validate_snapshot,
@@ -77,3 +80,84 @@ def test_validate_snapshot_missing_people_away_rejected() -> None:
     derived.pop("people_away")
     with pytest.raises(vol.Invalid):
         validate_snapshot(snapshot)  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# Camera-activity extraction: recognition_last_event
+# ---------------------------------------------------------------------------
+
+
+def _fake_state(entity_id: str, attributes: dict) -> object:
+    class _State:
+        def __init__(self) -> None:
+            self.entity_id = entity_id
+            self.attributes = attributes
+
+    return _State()
+
+
+def test_extract_camera_activity_carries_recognition_last_event() -> None:
+    """
+    The image entity's last_event lands in recognition_last_event.
+
+    It must survive independently of last_activity so the unknown-person
+    freshness gate keys on the sighting itself, not on camera motion
+    attributes a pet can refresh.
+    """
+    camera = _fake_state(
+        "camera.backyard",
+        {"last_motion": "2026-02-01T12:59:00+00:00"},
+    )
+    image = _fake_state(
+        "image.backyard_last_event",
+        {
+            "camera_id": "camera.backyard",
+            "last_event": "2026-02-01T12:00:00+00:00",
+            "recognized_people": ["Unknown Person"],
+        },
+    )
+    activity = extract_camera_activity(camera, "Backyard", image)  # type: ignore[arg-type]
+    # Camera attribute wins the generic last_activity slot...
+    assert activity["last_activity"] == "2026-02-01T12:59:00+00:00"
+    # ...but the sighting timestamp is preserved separately.
+    assert activity["recognition_last_event"] == "2026-02-01T12:00:00+00:00"
+    assert activity["recognized_people"] == ["Unknown Person"]
+
+
+def test_extract_camera_activity_last_event_fallback_fills_last_activity() -> None:
+    """Without camera activity attributes, last_event fills both fields."""
+    camera = _fake_state("camera.backyard", {})
+    image = _fake_state(
+        "image.backyard_last_event",
+        {
+            "camera_id": "camera.backyard",
+            "last_event": "2026-02-01T12:00:00+00:00",
+            "recognized_people": ["Unknown Person"],
+        },
+    )
+    activity = extract_camera_activity(camera, None, image)  # type: ignore[arg-type]
+    assert activity["last_activity"] == "2026-02-01T12:00:00+00:00"
+    assert activity["recognition_last_event"] == "2026-02-01T12:00:00+00:00"
+
+
+def test_validate_snapshot_accepts_recognition_last_event() -> None:
+    """The optional recognition_last_event key passes schema validation."""
+    snapshot = _base_snapshot()
+    snapshot["camera_activity"] = [
+        {
+            "camera_entity_id": "camera.backyard",
+            "area": None,
+            "last_activity": "2026-02-01T12:00:00+00:00",
+            "motion_entities": [],
+            "vmd_entities": [],
+            "snapshot_summary": None,
+            "recognized_people": ["Unknown Person"],
+            "latest_path": None,
+            "recognition_last_event": "2026-02-01T12:00:00+00:00",
+        }
+    ]
+    validated = validate_snapshot(snapshot)
+    assert (
+        validated["camera_activity"][0]["recognition_last_event"]
+        == "2026-02-01T12:00:00+00:00"
+    )

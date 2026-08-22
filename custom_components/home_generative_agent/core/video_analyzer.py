@@ -48,6 +48,7 @@ from ..const import (  # noqa: TID252
     RECOMMENDED_VIDEO_MODEL_SEMAPHORE,
     RECOMMENDED_VLM_PROMPT_EXTRA,
     RECOMMENDED_VLM_RESPONSE_LANGUAGE,
+    RESERVED_IDENTITY_LABELS,
     SIGNAL_HGA_NEW_LATEST,
     SIGNAL_HGA_RECOGNIZED,
     VIDEO_ANALYZER_CAPTION_DEDUPE_WINDOW_SEC,
@@ -71,7 +72,7 @@ from ..const import (  # noqa: TID252
     VIDEO_VLM_NUM_PREDICT,
 )
 from .fallback import ainvoke_dropping_unsupported_params
-from .person_gallery import FACE_EMBEDDING_DIMS, RESERVED_IDENTITY_LABELS
+from .person_gallery import FACE_EMBEDDING_DIMS
 from .utils import (
     discover_mobile_notify_service,
     dispatch_on_loop,
@@ -1134,8 +1135,9 @@ class VideoAnalyzer:
         Mutates the identity lists inside frame_descriptions in place.
         Best-effort: a DAO failure keeps "Unknown Person" for that face and
         never fails the batch. Cannot change Sentinel rule firing — the
-        unknown-person rules key on recognized_people being EMPTY, and a merge
-        only happens when a known name is present.
+        unknown-person rules fire on "Unknown Person" present with no
+        enrolled name alongside, and a merge only happens when a known name
+        is present, which already suppresses those rules on its own.
         """
         name_lists = [next(iter(d.values()), []) for d in frame_descriptions]
         if len(name_lists) != len(frame_hits) or any(

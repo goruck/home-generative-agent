@@ -85,7 +85,9 @@ Install the Blueprints from the `blueprints/` directory to create automations th
 **Face recognition**
 
 - Install [face-service](https://github.com/goruck/face-service) on your edge device.
+- Enable the `face_recognition` option (off by default) and set the face-service URL in the integration's options.
 - Enroll people via **Developer Tools → Actions → Enroll Person** in the HA UI.
+- Note: Sentinel's unknown-person rules key on face recognition and never fire while it is disabled.
 - To add the enrollment dashboard card, register the Lovelace resource:
   - **Settings → Dashboards → Resources → Add**
   - URL: `/hga-card/hga-enroll-card.js`

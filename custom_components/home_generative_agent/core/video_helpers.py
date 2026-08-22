@@ -46,8 +46,8 @@ _NEG_IDENTS = {"Indeterminate", "Unknown Person", ""}
 # gallery rows enrolled before the reserved-name guard can come back as
 # "Unknown person" or " Indeterminate " — an exact-match drop would read those
 # as real names and let the phantom through. The SET must stay equal to
-# person_gallery.RESERVED_IDENTITY_LABELS; only the order is local. A test
-# pins that equality so the two cannot drift.
+# const.RESERVED_IDENTITY_LABELS (the authoritative source); only the order is
+# local. A test pins that equality so the two cannot drift.
 _PLACEHOLDER_DROP_ORDER: Final[tuple[str, ...]] = (
     "",
     "none",
