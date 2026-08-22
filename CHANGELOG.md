@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.30.11] - 2026-08-22
+
+### Fixed
+
+- **Sentinel's unknown-person rules now actually alert on strangers.** `unknown_person_camera_no_home`, `unknown_person_camera_night_home`, `alarm_disarmed_during_external_threat`, and the two dynamic unknown-person templates had never fired on face-recognition installs: they treated any non-empty recognition list as "a known person is here", but face recognition always leaves labels in that list — including "Unknown Person" itself, so a real stranger suppressed the very alert meant to catch them. The rules now fire on a positive "Unknown Person" sighting.
+- **A misconfigured camera can no longer silently disable Sentinel.** A timezone-naive timestamp from a third-party camera attribute could crash the evaluation loop until the integration was reloaded; timestamps are now normalized safely, and a timestamp claiming to be from the future no longer counts as a fresh sighting.
+- **Stranger notifications say what was seen.** The alarm-disarmed alert now reads "saw an unrecognized person" instead of the vague "detected unrecognized outdoor activity", and privacy redaction no longer rewrites "an unknown person was seen" into "a recognised person was seen" — only enrolled residents' names are redacted.
+
+### Changed
+
+- **Unknown-person alerts require the face-service.** These rules key on face recognition's "Unknown Person" label; without a configured face-service they do not fire — use the `motion_detected_*` discovery templates for motion-based intrusion alerts instead (see docs/sentinel.md).
+- **Alerts fire only on fresh, unaccompanied sightings.** A sighting must be within 10 minutes of the detection cycle (so one old sighting can't re-alert for hours), freshness is judged by the recognition event itself rather than camera motion a pet can refresh, and a stranger recognized alongside an enrolled resident is treated as an accompanied guest rather than an intruder.
+
+### Added
+
+- **Recognition results wake Sentinel immediately.** A completed face-recognition analysis now triggers an evaluation cycle, so a stranger sighting is checked while it is still fresh even on installs with a long polling interval.
+
 ## [3.30.10] - 2026-08-21
 
 ### Changed
