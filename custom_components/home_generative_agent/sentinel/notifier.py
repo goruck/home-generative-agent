@@ -83,6 +83,14 @@ _SEVERITY_INTERRUPT_LEVEL: dict[str, str] = {
     "low": "passive",
 }
 # Severity title strings now live in notifier_messages.py (localized).
+# Localized severity words (digest summary, persistent fallback). Unknown
+# severities must NOT be routed through notif_msg as keys: stored audit data
+# could collide with an unrelated message id and surface its copy.
+_SEVERITY_WORD_KEYS: dict[str, str] = {
+    "high": "severity_word_high",
+    "medium": "severity_word_medium",
+    "low": "severity_word_low",
+}
 
 # Notification batching / rate-limiting.
 _BATCH_RATE_LIMIT = 3
@@ -487,15 +495,17 @@ class SentinelNotifier:
 
         severity_counts: dict[str, int] = {}
         for r in notified:
-            sev = r.get("finding", {}).get("severity", "unknown")
+            # Stored records are untrusted shapes: "finding" may be null or
+            # a non-dict, and severity may be None/non-string. None of that
+            # may break sorted() below or kill the digest task.
+            finding_rec = r.get("finding")
+            sev_raw = (
+                finding_rec.get("severity") if isinstance(finding_rec, dict) else None
+            )
+            sev = str(sev_raw or "unknown")
             severity_counts[sev] = severity_counts.get(sev, 0) + 1
-        severity_word_keys = {
-            "high": "severity_word_high",
-            "medium": "severity_word_medium",
-            "low": "severity_word_low",
-        }
         sev_summary = ", ".join(
-            f"{v} {notif_msg(self._hass, severity_word_keys.get(k, k))}"
+            f"{v} {notif_msg(self._hass, _SEVERITY_WORD_KEYS[k]) if k in _SEVERITY_WORD_KEYS else k}"  # noqa: E501
             for k, v in sorted(severity_counts.items())
         )
         digest_title = notif_msg(self._hass, "digest_title")
@@ -845,7 +855,11 @@ def _build_subtitle(finding: AnomalyFinding, hass: HomeAssistant | None = None) 
         return notif_msg(hass, "subtitle_appliance_cycle_complete")
     if finding.evidence.get("template_id") == "alarm_disarmed_open_entry":
         entry_id = str(finding.evidence.get("entry_entity_id") or "")
-        entry_name = _friendly_entity(entry_id) if entry_id else "Entry"
+        entry_name = (
+            _friendly_entity(entry_id)
+            if entry_id
+            else notif_msg(hass, "fallback_entry")
+        )
         return notif_msg(
             hass, "subtitle_entry_open_alarm_disarmed", entry_name=entry_name
         )
@@ -856,7 +870,9 @@ def _build_subtitle(finding: AnomalyFinding, hass: HomeAssistant | None = None) 
         raw_name = str(finding.evidence.get("friendly_name") or "").strip()
         if not raw_name and finding.triggering_entities:
             raw_name = _friendly_entity(finding.triggering_entities[0])
-        appliance = _strip_power_suffix(raw_name).title() or "Sensor"
+        appliance = _strip_power_suffix(raw_name).title() or notif_msg(
+            hass, "fallback_sensor"
+        )
         deviation = str(finding.evidence.get("deviation_direction") or "")
         direction_key = (
             "direction_lower" if deviation == "below" else "direction_higher"
@@ -875,7 +891,7 @@ def _fallback_message(
     entity = (
         _friendly_entity(finding.triggering_entities[0])
         if finding.triggering_entities
-        else "Unknown entity"
+        else notif_msg(hass, "fallback_unknown_entity")
     )
     return notif_msg(
         hass,
@@ -1133,12 +1149,14 @@ def _persistent_message(
     entities = ", ".join(
         _friendly_entity(entity) for entity in finding.triggering_entities
     )
-    entities = entities or "Unknown entity"
+    entities = entities or notif_msg(hass, "fallback_unknown_entity")
+    severity_key = _SEVERITY_WORD_KEYS.get(finding.severity)
+    severity_word = notif_msg(hass, severity_key) if severity_key else finding.severity
     return notif_msg(
         hass,
         "persistent_fallback",
         summary=_display_type(finding, hass),
-        severity=finding.severity,
+        severity=severity_word,
         entities=entities,
         hint=_severity_action_hint(finding.severity, hass),
     )

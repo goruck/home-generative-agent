@@ -60,6 +60,9 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "subtitle_power_deviation": "{appliance}: power {direction} than expected",
         "direction_lower": "lower",
         "direction_higher": "higher",
+        "fallback_entry": "Entry",
+        "fallback_sensor": "Sensor",
+        "fallback_unknown_entity": "Unknown entity",
         "fallback_message": "{summary}: {entity}. {action_hint}",
         "persistent_fallback": "{summary} (severity {severity}) for {entities}. {hint}",
         "batch_title": "Home Update",
@@ -101,6 +104,9 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "subtitle_power_deviation": "{appliance}: odběr {direction}, než se čekalo",
         "direction_lower": "nižší",
         "direction_higher": "vyšší",
+        "fallback_entry": "Vstup",
+        "fallback_sensor": "Senzor",
+        "fallback_unknown_entity": "Neznámá entita",
         "fallback_message": "{summary}: {entity}. {action_hint}",
         "persistent_fallback": (
             "{summary} (závažnost {severity}) pro {entities}. {hint}"
@@ -132,7 +138,11 @@ def _resolve_language(hass: HomeAssistant | None) -> str:
     """Resolve the message language from the HA instance's configured language."""
     if hass is None:
         return _DEFAULT_LANGUAGE
-    language = getattr(hass.config, "language", None) or _DEFAULT_LANGUAGE
+    # Guard the config attribute itself, not just language: notification
+    # dispatch must never crash on language resolution, and lightweight
+    # test doubles may not carry a config object at all.
+    config = getattr(hass, "config", None)
+    language = getattr(config, "language", None) or _DEFAULT_LANGUAGE
     base = language.split("-", 1)[0].lower()
     return base if base in _MESSAGES else _DEFAULT_LANGUAGE
 
@@ -144,8 +154,27 @@ def notif_msg(hass: HomeAssistant | None, key: str, /, **kwargs: Any) -> str:
     Falls back to the English string if the resolved language is
     missing the key, and to the key itself if English is missing it
     too (so a bug here shows up as an odd sentence, not a crash).
+    That promise also covers formatting: this runs on the last hop of
+    the notification pipeline, so a template whose placeholders drift
+    from what the call site supplies degrades to the English (then
+    unformatted) string instead of raising and losing the alert.
     """
     language = _resolve_language(hass)
     table = _MESSAGES.get(language, _MESSAGES[_DEFAULT_LANGUAGE])
-    template = table.get(key) or _MESSAGES[_DEFAULT_LANGUAGE].get(key) or key
-    return template.format(**kwargs) if kwargs else template
+    english = _MESSAGES[_DEFAULT_LANGUAGE].get(key)
+    template = table.get(key) or english
+    if template is None:
+        # Unknown message id: return it verbatim and never treat it as a
+        # format template — the id may be data-derived (e.g. a stored
+        # severity word in the daily digest).
+        return key
+    if not kwargs:
+        return template
+    for candidate in (template, english):
+        if candidate is None:
+            continue
+        try:
+            return candidate.format(**kwargs)
+        except (KeyError, IndexError, ValueError):
+            continue
+    return template
