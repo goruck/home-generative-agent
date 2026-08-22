@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.30.10] - 2026-08-21
+
+### Changed
+
+- **Home Assistant now refuses a second copy of the integration.** The integration has always been designed around a single config entry — its services, database, and Sentinel are one-per-home — but nothing stopped adding a second entry, and a second copy would have silently competed for the same service names and face-gallery uploads. The manifest now declares `single_config_entry`, so the UI simply won't offer a second one. No existing installation is affected.
+
+### Fixed
+
+- **Reloading before Home Assistant finishes starting can no longer resurrect camera entities belonging to the removed copy.** When no cameras exist yet at setup, the camera image entities and recognized-people sensors wait for startup to finish and then discover cameras — but unloading the integration during that window did not call off the wait, so the old copy's entities were added anyway, tied to configuration that no longer existed. This is the same leak fixed for the background engines in 3.30.8; these two platform listeners were the sites that release explicitly documented as still open. Both now cancel on unload, and a discovery that lands while the entry is mid-teardown is refused rather than honored.
+- **One failing shutdown step can no longer leave the rest of the integration running with no way back.** Unloading tears down the video analyzer, the anomaly engines, the notifier, and the database pool in sequence, and an unexpected error in any one of them abandoned everything after it: Home Assistant marked the entry as failed-to-unload — a state only a restart clears — and skipped the cleanup callbacks, leaving startup listeners armed and engines running. Exactly the orphaned-copy problem the 3.30.7 and 3.30.8 fixes closed, reachable again through a single exception. Each step is now contained: a failure is logged and the remaining teardown still runs to completion.
+- **The integration's services no longer outlive it.** All seventeen `home_generative_agent.*` services (enroll a person, query the audit trail, approve rule proposals, reset baselines, and so on) stayed registered after the integration unloaded, still wired to the removed copy — calling one reached a closed database pool or a stopped engine and failed with a confusing internal error instead of "this service does not exist." Every service is now removed when the entry unloads and comes back on the next load.
+- **The person-enrollment upload endpoint now survives removing and re-adding the integration.** The web endpoint behind the enrollment card was permanently bound to whichever copy of the integration first registered it. A reload kept that copy's identity, but removing the integration and adding it back creates a new one — after which every upload failed with an internal error until Home Assistant restarted. The endpoint now looks up the currently loaded integration on every request, and reports "Home Generative Agent is not loaded" (HTTP 503) if none is, instead of crashing. A reload that lands in the middle of a multi-image upload is caught the same way — the request answers 503 "try again" rather than an internal error.
+
 ## [3.30.9] - 2026-08-20
 
 ### Added

@@ -47,7 +47,7 @@ After changing `manifest.json`: run `make runtimedeps` (or `python scripts/gen_m
 - **`sentinel/`** — Anomaly detection engine: rules evaluation, LLM-based triage & discovery, baseline statistics, notifications, audit trail
 - **`snapshot/`** — Authoritative JSON representation of home state (entities + derived context + camera activity); consumed by Sentinel and explain flows
 - **`explain/`** — LLM-backed explanation generation and discovery prompt templates
-- **`core/`** — Video analysis, DB utilities, schema migrations, face recognition helpers, config subentry resolution
+- **`core/`** — Video analysis, DB utilities, schema migrations, face recognition helpers, config subentry resolution, config-entry lifecycle helpers (startup-deferred engine start and camera discovery)
 - **`flows/`** — Home Assistant config flow subentries (model providers, features, database, STT, Sentinel)
 - **`notify/`** — Mobile push + persistent notification dispatch with snooze/action buttons
 

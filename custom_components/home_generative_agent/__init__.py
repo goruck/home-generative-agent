@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
@@ -31,7 +32,6 @@ from homeassistant.const import (
     CONF_PASSWORD,
     CONF_PORT,
     CONF_USERNAME,
-    EVENT_HOMEASSISTANT_STARTED,
     EVENT_HOMEASSISTANT_STOP,
     Platform,
 )
@@ -254,6 +254,7 @@ from .core.fallback import (
     FallbackVLM,
     _safe_err_summary,
 )
+from .core.lifecycle import defer_start_until_hass_started
 from .core.migrations import migrate_person_gallery
 from .core.person_gallery import PersonGalleryDAO
 from .core.runtime import HGAConfigEntry, HGAData
@@ -1400,6 +1401,35 @@ def _ollama_httpx_client_kwargs() -> dict[str, Any]:
     return {"verify": client_context(alpn_protocols=SSL_ALPN_HTTP11)}
 
 
+def _register_entry_service(  # noqa: PLR0913
+    hass: HomeAssistant,
+    entry: HGAConfigEntry,
+    service: str,
+    handler: Callable[[ServiceCall], Any],
+    *,
+    schema: vol.Schema | None = None,
+    supports_response: SupportsResponse = SupportsResponse.NONE,
+) -> None:
+    """
+    Register a domain service and remove it when this entry unloads.
+
+    Service handlers close over this entry's ``runtime_data``, so leaving them
+    registered after unload keeps a live API surface (`hga.*` service calls)
+    reaching closed pools and stopped engines. Home Assistant also runs
+    on-unload callbacks after a FAILED setup, so registering the removal here
+    — immediately after the registration itself — covers every abort path and
+    guarantees the remove always has a matching register.
+    """
+    hass.services.async_register(
+        DOMAIN,
+        service,
+        handler,
+        schema=schema,
+        supports_response=supports_response,
+    )
+    entry.async_on_unload(partial(hass.services.async_remove, DOMAIN, service))
+
+
 def _register_services(hass: HomeAssistant, entry: HGAConfigEntry) -> None:
     """Register integration services."""
 
@@ -1516,8 +1546,8 @@ def _register_services(hass: HomeAssistant, entry: HGAConfigEntry) -> None:
             video_analyzer.protect_notify_image(dst, ttl_sec=protect_minutes * 60)
 
     # Register the service
-    hass.services.async_register(
-        DOMAIN, "save_and_analyze_snapshot", _handle_save_and_analyze_snapshot
+    _register_entry_service(
+        hass, entry, "save_and_analyze_snapshot", _handle_save_and_analyze_snapshot
     )
 
 
@@ -1579,65 +1609,6 @@ async def _log_ollama_server_info(
                 len(cats),
                 ",".join(sorted(cats)),
             )
-
-
-@callback
-def _defer_start_until_hass_started(
-    hass: HomeAssistant,
-    entry: HGAConfigEntry,
-    start: Callable[[], None],
-) -> None:
-    """
-    Run ``start`` when HA finishes starting, cancelling it if the entry unloads.
-
-    Background engines constructed during ``async_setup_entry`` cannot start
-    before Home Assistant has finished starting, so their start is deferred to
-    ``EVENT_HOMEASSISTANT_STARTED``. Three details make that safe, and all
-    three were regressions at some point:
-
-    * ``@callback`` is load-bearing, not decoration. Without it ``HassJob``
-      infers ``Executor`` for a plain sync function and dispatches the body to
-      a worker THREAD, while ``_OneTimeListener`` has already unsubscribed on
-      the loop thread. That leaves a window where the listener is gone but
-      ``fired`` is still False — unload (loop thread) then calls the stale
-      remover anyway and logs the very "Unable to remove unknown job listener"
-      error the guard exists to prevent. Worse, ``start`` would be queued from
-      that thread and could land after ``async_unload_entry`` has already
-      stopped the engine and HA has deleted ``entry.runtime_data``.
-    * The listener is cancelled on unload. If the entry reloads before HA
-      finishes starting, a leaked listener would start the ORPHANED engine
-      alongside its replacement — duplicate evaluation, notifications, and
-      writes, from an instance holding stale options.
-    * ``async_listen_once`` self-unsubscribes once it fires, so calling the
-      remove function again on unload would log that same spurious error.
-      Only call it if the event has not fired yet.
-
-    The cancel is necessary but NOT sufficient: ``async_unload_entry`` stops
-    each engine and then awaits several more times before HA runs the
-    on-unload callbacks, so ``EVENT_HOMEASSISTANT_STARTED`` landing in one of
-    those windows starts the engine and correctly leaves the cancel with
-    nothing to do. Each engine closes that window with a one-way ``_stopped``
-    latch checked in its own ``start()``, which is the one place downstream of
-    every ordering.
-    """
-    fired = False
-
-    @callback
-    def _run_start(_event: object) -> None:
-        nonlocal fired
-        fired = True
-        start()
-
-    remove_listener = hass.bus.async_listen_once(
-        EVENT_HOMEASSISTANT_STARTED, _run_start
-    )
-
-    @callback
-    def _cancel_listener() -> None:
-        if not fired:
-            remove_listener()
-
-    entry.async_on_unload(_cancel_listener)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:  # noqa: C901, PLR0912, PLR0915
@@ -3070,8 +3041,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         openai_http_client=openai_http_client,
     )
 
+    # Registered once per Home Assistant run: aiohttp routes cannot be removed,
+    # so the view resolves the currently loaded entry per request instead of
+    # pinning the one that happened to register it (see EnrollPersonView).
     if not hass.data[DOMAIN].get("http_registered"):
-        hass.http.register_view(EnrollPersonView(hass, entry))
+        hass.http.register_view(EnrollPersonView(hass))
         www_dir = await hass.async_add_executor_job(_resolve_www_dir)
         if www_dir is not None:
             await hass.http.async_register_static_paths(
@@ -3108,12 +3082,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         if hass.is_running:
             video_analyzer.start()
         else:
-            _defer_start_until_hass_started(hass, entry, video_analyzer.start)
+            defer_start_until_hass_started(hass, entry, video_analyzer.start)
     if options.get(CONF_SENTINEL_ENABLED, RECOMMENDED_SENTINEL_ENABLED):
         if hass.is_running:
             sentinel.start()
         else:
-            _defer_start_until_hass_started(hass, entry, sentinel.start)
+            defer_start_until_hass_started(hass, entry, sentinel.start)
     if options.get(CONF_SENTINEL_ENABLED, RECOMMENDED_SENTINEL_ENABLED) and options.get(
         CONF_SENTINEL_DISCOVERY_ENABLED,
         RECOMMENDED_SENTINEL_DISCOVERY_ENABLED,
@@ -3121,13 +3095,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         if hass.is_running:
             discovery_engine.start()
         else:
-            _defer_start_until_hass_started(hass, entry, discovery_engine.start)
+            defer_start_until_hass_started(hass, entry, discovery_engine.start)
 
     if baseline_updater is not None:
         if hass.is_running:
             baseline_updater.start()
         else:
-            _defer_start_until_hass_started(hass, entry, baseline_updater.start)
+            defer_start_until_hass_started(hass, entry, baseline_updater.start)
 
     # Home Assistant does not unload config entries at shutdown — its
     # ConfigEntries._async_shutdown only calls entry.async_shutdown(), which
@@ -3227,8 +3201,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             msg = f"No face found in image for {name}"
             raise HomeAssistantError(msg)
 
-    hass.services.async_register(
-        DOMAIN,
+    _register_entry_service(
+        hass,
+        entry,
         SERVICE_ENROLL_PERSON,
         _handle_enroll_person,
         schema=ENROLL_SCHEMA,
@@ -3243,8 +3218,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         records = await audit_store.async_get_latest(limit)
         return {"records": records}
 
-    hass.services.async_register(
-        DOMAIN,
+    _register_entry_service(
+        hass,
+        entry,
         SERVICE_GET_AUDIT_RECORDS,
         _handle_get_audit,
         schema=GET_AUDIT_SCHEMA,
@@ -3260,8 +3236,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         records = await discovery_store.async_get_latest(limit)
         return {"records": records}
 
-    hass.services.async_register(
-        DOMAIN,
+    _register_entry_service(
+        hass,
+        entry,
         SERVICE_GET_DISCOVERY_RECORDS,
         _handle_get_discovery,
         schema=GET_DISCOVERY_SCHEMA,
@@ -3271,8 +3248,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     async def _handle_trigger_discovery(_call: ServiceCall) -> dict[str, Any]:
         return await _trigger_sentinel_discovery(entry)
 
-    hass.services.async_register(
-        DOMAIN,
+    _register_entry_service(
+        hass,
+        entry,
         SERVICE_TRIGGER_SENTINEL_DISCOVERY,
         _handle_trigger_discovery,
         schema=TRIGGER_DISCOVERY_SCHEMA,
@@ -3361,8 +3339,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             notes=notes,
         )
 
-    hass.services.async_register(
-        DOMAIN,
+    _register_entry_service(
+        hass,
+        entry,
         SERVICE_PROMOTE_DISCOVERY_CANDIDATE,
         _handle_promote_discovery,
         schema=PROMOTE_DISCOVERY_SCHEMA,
@@ -3378,8 +3357,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         records = await proposal_store.async_get_latest(limit)
         return {"records": records}
 
-    hass.services.async_register(
-        DOMAIN,
+    _register_entry_service(
+        hass,
+        entry,
         SERVICE_GET_PROPOSAL_DRAFTS,
         _handle_get_proposals,
         schema=GET_PROPOSAL_SCHEMA,
@@ -3396,8 +3376,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             candidate_id=candidate_id,
         )
 
-    hass.services.async_register(
-        DOMAIN,
+    _register_entry_service(
+        hass,
+        entry,
         SERVICE_PREVIEW_RULE_PROPOSAL,
         _handle_preview_proposal,
         schema=PREVIEW_PROPOSAL_SCHEMA,
@@ -3413,8 +3394,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         records = rule_registry.list_rules(include_disabled=True)
         return {"records": records[:limit]}
 
-    hass.services.async_register(
-        DOMAIN,
+    _register_entry_service(
+        hass,
+        entry,
         SERVICE_GET_DYNAMIC_RULES,
         _handle_get_dynamic_rules,
         schema=GET_DYNAMIC_RULES_SCHEMA,
@@ -3433,8 +3415,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             notes=notes,
         )
 
-    hass.services.async_register(
-        DOMAIN,
+    _register_entry_service(
+        hass,
+        entry,
         SERVICE_APPROVE_RULE_PROPOSAL,
         _handle_approve_proposal,
         schema=REVIEW_PROPOSAL_SCHEMA,
@@ -3450,8 +3433,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         ok = await proposal_store.async_update_status(candidate_id, "rejected", notes)
         return {"status": "ok" if ok else "not_found", "candidate_id": candidate_id}
 
-    hass.services.async_register(
-        DOMAIN,
+    _register_entry_service(
+        hass,
+        entry,
         SERVICE_REJECT_RULE_PROPOSAL,
         _handle_reject_proposal,
         schema=REVIEW_PROPOSAL_SCHEMA,
@@ -3466,8 +3450,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         ok = await rule_registry.async_set_rule_enabled(rule_id, enabled=False)
         return {"status": "ok" if ok else "not_found", "rule_id": rule_id}
 
-    hass.services.async_register(
-        DOMAIN,
+    _register_entry_service(
+        hass,
+        entry,
         SERVICE_DEACTIVATE_DYNAMIC_RULE,
         _handle_deactivate_dynamic_rule,
         schema=TOGGLE_DYNAMIC_RULE_SCHEMA,
@@ -3482,8 +3467,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         ok = await rule_registry.async_set_rule_enabled(rule_id, enabled=True)
         return {"status": "ok" if ok else "not_found", "rule_id": rule_id}
 
-    hass.services.async_register(
-        DOMAIN,
+    _register_entry_service(
+        hass,
+        entry,
         SERVICE_REACTIVATE_DYNAMIC_RULE,
         _handle_reactivate_dynamic_rule,
         schema=TOGGLE_DYNAMIC_RULE_SCHEMA,
@@ -3499,8 +3485,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         ok = await rule_registry.async_patch_rule_params(rule_id, params_patch)
         return {"status": "ok" if ok else "not_found", "rule_id": rule_id}
 
-    hass.services.async_register(
-        DOMAIN,
+    _register_entry_service(
+        hass,
+        entry,
         SERVICE_PATCH_DYNAMIC_RULE,
         _handle_patch_dynamic_rule,
         schema=PATCH_DYNAMIC_RULE_SCHEMA,
@@ -3528,8 +3515,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         sentinel.set_autonomy_level(entry.entry_id, level, pin=pin)
         return {"status": "ok", "entry_id": entry.entry_id, "level": level}
 
-    hass.services.async_register(
-        DOMAIN,
+    _register_entry_service(
+        hass,
+        entry,
         SERVICE_SENTINEL_SET_AUTONOMY_LEVEL,
         _handle_sentinel_set_autonomy_level,
         schema=SET_AUTONOMY_LEVEL_SCHEMA,
@@ -3549,8 +3537,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             }
         return {"status": "ok", "baselines": baselines}
 
-    hass.services.async_register(
-        DOMAIN,
+    _register_entry_service(
+        hass,
+        entry,
         SERVICE_SENTINEL_GET_BASELINES,
         _handle_sentinel_get_baselines,
         schema=SENTINEL_GET_BASELINES_SCHEMA,
@@ -3583,8 +3572,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         )
         return {"status": "ok", "entity_id": entity_id, "deleted": deleted}
 
-    hass.services.async_register(
-        DOMAIN,
+    _register_entry_service(
+        hass,
+        entry,
         SERVICE_SENTINEL_RESET_BASELINE,
         _handle_sentinel_reset_baseline,
         schema=SENTINEL_RESET_BASELINE_SCHEMA,
@@ -3664,17 +3654,35 @@ async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool
     if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         return False
 
-    await entry.runtime_data.video_analyzer.stop()
-    if entry.runtime_data.sentinel is not None:
-        await entry.runtime_data.sentinel.stop()
-    if entry.runtime_data.discovery_engine is not None:
-        await entry.runtime_data.discovery_engine.stop()
-    if entry.runtime_data.baseline_updater is not None:
-        await entry.runtime_data.baseline_updater.stop()
-    if entry.runtime_data.notifier is not None:
-        entry.runtime_data.notifier.stop()
-    if entry.runtime_data.pool is not None:
-        await entry.runtime_data.pool.close()
+    # Every teardown step below is contained: one raising step must not skip
+    # the remaining stops, and it must not escape this function. Home Assistant
+    # catches an exception out of async_unload_entry, sets FAILED_UNLOAD —
+    # declared non-recoverable — and returns WITHOUT running the on-unload
+    # callbacks, so an uncontained raise would leave every deferred-start
+    # listener armed and every engine below the raising line un-stopped and
+    # un-latched: exactly the orphan-start this teardown exists to prevent.
+    async def _teardown(step: str, run: Callable[[], Awaitable[object] | None]) -> None:
+        try:
+            result = run()
+            # isawaitable, not a None-check: a future sync step that returns
+            # a value must not be awaited (TypeError misread as step failure).
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            LOGGER.exception("Unload step %s failed; continuing teardown", step)
+
+    rd = entry.runtime_data
+    await _teardown("video_analyzer.stop", rd.video_analyzer.stop)
+    if rd.sentinel is not None:
+        await _teardown("sentinel.stop", rd.sentinel.stop)
+    if rd.discovery_engine is not None:
+        await _teardown("discovery_engine.stop", rd.discovery_engine.stop)
+    if rd.baseline_updater is not None:
+        await _teardown("baseline_updater.stop", rd.baseline_updater.stop)
+    if rd.notifier is not None:
+        await _teardown("notifier.stop", rd.notifier.stop)
+    if rd.pool is not None:
+        await _teardown("pool.close", rd.pool.close)
     # The OpenAI http client is NOT closed here — it is closed by the on-unload
     # callback registered where it is built, which also covers failed setups.
     # Home Assistant runs those callbacks only when this returns True, so the

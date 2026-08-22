@@ -465,6 +465,8 @@ Use the file picker or drag-and-drop to upload one or more images. The card enro
 
 Both enrollment paths refuse reserved identity labels — "Unknown Person", "Indeterminate", "None", or an empty name, in any casing — because the recognition pipeline uses those labels for non-matches (see Batch Identity Consolidation below).
 
+If the integration is not currently loaded (for example mid-reload, or removed without a Home Assistant restart), the upload endpoint responds with HTTP 503 and "Home Generative Agent is not loaded." Load the integration and retry. A reload that lands in the middle of an upload is answered the same way — HTTP 503 with "Enrollment failed; Home Generative Agent may be reloading. Try again."
+
 ### Batch Identity Consolidation
 
 Face recognition runs per frame, so one person walking through a camera's view can be recognized in some frames and come back as "Unknown Person" in others (face turned, motion blur, distance). Without correction, the batch would carry two identities for one human and the summary could report a phantom second person ("Nico walks toward the entrance while an unknown person is present nearby").
