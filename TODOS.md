@@ -1127,6 +1127,34 @@ window-scoped check could suppress.
 
 ## Notifier / Observability
 
+### Unify the duplicated localized-message machinery (pin_messages / notifier_messages)
+
+**What:** `sentinel/notifier_messages.py` (PR #565) is a second copy of `agent/pin_messages.py`'s `_resolve_language` + fallback-chain machinery, and the copies have already drifted inside the PR that created the second one: notifier_messages guards `getattr(hass, "config", None)` (config-less test doubles / degraded runtime states) and degrades gracefully on a bad `.format` placeholder, while pin_messages dereferences `hass.config` directly and formats unguarded. Neither normalizes underscore locales (`cs_CZ` resolves to silent English; real HA stores hyphenated codes, so low likelihood).
+
+**Why:** Surfaced during the PR #565 review (2026-08-21) — the maintainability specialist flagged the triple-copy pattern and the adversarial pass confirmed the hardening drift. Every robustness fix now has to land twice or the tables behave differently under the same failure.
+
+**How to apply:** Extract a shared `localized_message(table, hass, key, **kwargs)` helper (e.g. `core/localized_messages.py`) holding `_resolve_language` (with the config getattr guard, `str(language).replace("_", "-")` normalization, and the guarded-format fallback chain); `pin_messages` and `notifier_messages` keep only their `_MESSAGES` tables and thin `pin_msg`/`notif_msg` wrappers. Port the contract tests (key parity, placeholder subset, call-site kwargs) to cover both tables.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+---
+
+### llm_explain's type-label table now drifts from the notifier's
+
+**What:** `explain/llm_explain.py:124` keeps its own `_KNOWN_TYPE_LABELS` (type → English text) plus duplicate `_display_type`/`_friendly_type`/`_severity_action_hint`, while `sentinel/notifier.py` switched to `_KNOWN_TYPE_LABEL_KEYS` (type → message id) in PR #565 — differently shaped tables with no test forcing agreement. #565 added `appliance_power_duration` to the notifier copy only; output coincides today purely because the slug-prettify fallback (`"appliance_power_duration".replace("_", " ").capitalize()`) happens to equal the curated label, so the next label edit in one file gives the explanation prompt and the notification different names for the same finding.
+
+**Why:** Found during the PR #565 review (2026-08-21) by the Enum & Value Completeness pass (consumers outside the diff) and independently by two review agents.
+
+**How to apply:** Either have `llm_explain` derive its English labels from `notif_msg(None, key)` via the notifier's key table, or add a cross-file parity test asserting `llm_explain._KNOWN_TYPE_LABELS[t] == notif_msg(None, _KNOWN_TYPE_LABEL_KEYS[t])` for every shared type and that the key sets match (deliberate exclusions asserted explicitly). The prompt side must stay English (LLM input), so this is label-source unification, not localization.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+---
+
 ### Baseline-deviation notifications guess the display unit from the entity_id
 
 **What:** `_baseline_deviation_mobile_message` (`sentinel/notifier.py:904`) picks the display unit with `"W" if "power" in entity_id else "kWh" if "energy" in entity_id else ""`. A kW-denominated sensor renders as e.g. "0.4W vs usual 0.3W", and a power sensor without "power" in its entity_id gets no unit at all. Surfaced during the #461 unit-normalization review (v3.21.3).
