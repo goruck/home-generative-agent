@@ -63,17 +63,23 @@ class AlarmDisarmedDuringExternalThreatRule:
             )
             alarm_friendly_name: str | None = primary_alarm.get("friendly_name")
 
+            # A far-future alarm last_changed (panel clock skew) yields None
+            # here rather than the old clamp-to-0 — consumers render the
+            # phrase without a duration in that case.
             disarm_duration_minutes = minutes_between(
                 primary_alarm["last_changed"], generated_at
             )
 
             # Stable identity fields — used for the anomaly ID and cooldown key.
             # Must not include volatile display fields like age-in-minutes.
+            # Anchored on the sighting timestamp the rule fires on, so an
+            # unrelated motion refresh of last_activity cannot mint a new
+            # anomaly id for the same sighting.
             id_evidence = {
                 "camera_entity_id": cam,
                 "alarm_entity_id": primary_alarm_id,
                 "alarm_state": _DISARMED_STATE,
-                "last_activity": activity.get("last_activity"),
+                "sighting_last_event": sighting_timestamp(activity),
                 "alarm_last_changed": primary_alarm["last_changed"] or None,
             }
             anomaly_id = build_anomaly_id(
