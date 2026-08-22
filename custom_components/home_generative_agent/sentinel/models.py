@@ -6,11 +6,59 @@ import hashlib
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from homeassistant.util import dt as dt_util
 
+from custom_components.home_generative_agent.const import (
+    RESERVED_IDENTITY_LABELS,
+    UNKNOWN_PERSON_LABEL,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
 Severity = Literal["low", "medium", "high"]
+
+_UNKNOWN_PERSON_NORMALIZED = UNKNOWN_PERSON_LABEL.lower()
+
+
+def has_unknown_person(names: Iterable[str]) -> bool:
+    """
+    Return True when face recognition saw a person it could not identify.
+
+    The snapshot's recognized_people list mixes enrolled names with reserved
+    pipeline labels; "Unknown Person" is the positive stranger signal.
+    Matching is normalized (strip + casefold) because legacy gallery rows may
+    carry variants like "unknown person".
+    """
+    return any(str(n).strip().lower() == _UNKNOWN_PERSON_NORMALIZED for n in names)
+
+
+def enrolled_people(names: Iterable[str]) -> list[str]:
+    """
+    Return only the names that denote enrolled identities.
+
+    Filters the reserved pipeline labels ("Unknown Person", "Indeterminate",
+    legacy "None", empty) that the recognition pipeline emits alongside real
+    enrolled names. Rules that mean "a known person was recognized" must use
+    this instead of truthiness of recognized_people — the raw list is
+    effectively never empty on a face-recognition install.
+    """
+    return [
+        str(n) for n in names if str(n).strip().lower() not in RESERVED_IDENTITY_LABELS
+    ]
+
+
+def minutes_between(earlier_iso: str | None, later_iso: str | None) -> float | None:
+    """Return elapsed minutes from *earlier_iso* to *later_iso*, or None."""
+    if not earlier_iso or not later_iso:
+        return None
+    t_earlier = dt_util.parse_datetime(earlier_iso)
+    t_later = dt_util.parse_datetime(later_iso)
+    if t_earlier is None or t_later is None:
+        return None
+    return max(0.0, (t_later - t_earlier).total_seconds() / 60.0)
 
 
 def _as_iso(value: datetime) -> str:

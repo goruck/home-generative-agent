@@ -4,14 +4,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from homeassistant.util import dt as dt_util
-
 from custom_components.home_generative_agent.const import (
     SENTINEL_CAMERA_ACTIVITY_STALENESS_MINUTES,
 )
 from custom_components.home_generative_agent.sentinel.models import (
     AnomalyFinding,
     build_anomaly_id,
+    minutes_between,
 )
 
 if TYPE_CHECKING:
@@ -20,17 +19,6 @@ if TYPE_CHECKING:
     )
 
 _DISARMED_STATE = "disarmed"
-
-
-def _minutes_between(earlier_iso: str | None, later_iso: str | None) -> float | None:
-    """Return elapsed minutes from *earlier_iso* to *later_iso*, or None."""
-    if not earlier_iso or not later_iso:
-        return None
-    t_earlier = dt_util.parse_datetime(earlier_iso)
-    t_later = dt_util.parse_datetime(later_iso)
-    if t_earlier is None or t_later is None:
-        return None
-    return max(0.0, (t_later - t_earlier).total_seconds() / 60.0)
 
 
 class AlarmDisarmedDuringExternalThreatRule:
@@ -69,7 +57,7 @@ class AlarmDisarmedDuringExternalThreatRule:
             # absent — the gate falls through to has_other_evidence.
             camera_activity_age_minutes: float | None = None
             if activity.get("last_activity"):
-                camera_activity_age_minutes = _minutes_between(
+                camera_activity_age_minutes = minutes_between(
                     activity["last_activity"], generated_at
                 )
 
@@ -94,7 +82,7 @@ class AlarmDisarmedDuringExternalThreatRule:
             )
             alarm_friendly_name: str | None = primary_alarm.get("friendly_name")
 
-            disarm_duration_minutes = _minutes_between(
+            disarm_duration_minutes = minutes_between(
                 primary_alarm["last_changed"], generated_at
             )
 

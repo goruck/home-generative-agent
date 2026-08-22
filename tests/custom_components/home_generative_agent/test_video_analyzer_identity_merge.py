@@ -542,7 +542,8 @@ def _sentinel_snapshot(
 @pytest.mark.parametrize(
     ("recognized_people", "fires"),
     [
-        ([], True),
+        (["Unknown Person"], True),  # stranger-only: no merge target, fires
+        ([], False),  # no detection at all
         ([_KNOWN], False),  # post-merge shape
         ([_KNOWN, "Unknown Person"], False),  # refused-merge shape
     ],
@@ -561,7 +562,8 @@ def test_builtin_unknown_person_rule_firing_unchanged(
 @pytest.mark.parametrize(
     ("recognized_people", "fires"),
     [
-        ([], True),
+        (["Unknown Person"], True),  # stranger-only: no merge target, fires
+        ([], False),  # no detection at all
         ([_KNOWN], False),  # post-merge shape
         ([_KNOWN, "Unknown Person"], False),  # refused-merge shape
     ],

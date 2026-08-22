@@ -1134,8 +1134,9 @@ class VideoAnalyzer:
         Mutates the identity lists inside frame_descriptions in place.
         Best-effort: a DAO failure keeps "Unknown Person" for that face and
         never fails the batch. Cannot change Sentinel rule firing — the
-        unknown-person rules key on recognized_people being EMPTY, and a merge
-        only happens when a known name is present.
+        unknown-person rules fire on "Unknown Person" present with no
+        enrolled name alongside, and a merge only happens when a known name
+        is present, which already suppresses those rules on its own.
         """
         name_lists = [next(iter(d.values()), []) for d in frame_descriptions]
         if len(name_lists) != len(frame_hits) or any(
