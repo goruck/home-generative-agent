@@ -135,6 +135,12 @@ _DOMAIN_TO_ANOMALY_TYPE: dict[str, str] = {
     "camera": "camera_entry_unsecured",
     "person": "open_entry_while_away",
     "alarm_control_panel": "alarm_disarmed_during_external_threat",
+    # This integration's image entities update when a face-recognition result
+    # lands — minutes after the motion event that started the analysis. The
+    # unknown-person rules gate on a 10-minute sighting freshness window, so
+    # without this wake-up a sighting could expire between polls on installs
+    # with a long sentinel_interval_seconds.
+    "image": "unknown_person_camera_no_home",
 }
 
 # Binary-sensor device classes mapped to anomaly types.

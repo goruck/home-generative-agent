@@ -328,6 +328,36 @@ And two writer-consistency gaps: (7) `_mark_tool_index_stale` (embedding-provide
 
 ## Sentinel Rules
 
+### Unknown-person rules are inert on installs without face recognition
+
+**What:** The stranger-present predicate (unknown-person rules fix, 2026-08-22) makes `unknown_person_camera_no_home`, `unknown_person_camera_night_home`, `alarm_disarmed_during_external_threat`, and the two dynamic unknown-person templates fire only on a positive `"Unknown Person"` label — which only the face-recognition pipeline produces. On installs without a configured face service these five rules never fire, and `alarm_disarmed_during_external_threat` previously fell back to motion/VMD/summary evidence, so an upgrade silently narrows real coverage there. Docs note it, but nothing at runtime does. Surfaced independently by the security specialist and the Codex adversarial pass during the ship of the fix.
+
+**How to apply:** Detect at engine start whether face recognition is configured (face-service URL option); if not, raise a one-time repair issue (or rate-limited log) saying these rules are inert and pointing at the `motion_detected_*` discovery templates as the replacement. Alternatively carry a `face_recognition_enabled` flag in the snapshot and let the rules fall back to a motion-evidence predicate when it is false.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** unknown-person rules fix (2026-08-22)
+
+### Companion suppression works on the event-level identity union, not frame co-occurrence
+
+**What:** The accompanied-guest gate suppresses an `"Unknown Person"` sighting whenever an enrolled name appears anywhere in the same analyzed event's `recognized_people` union — including an intruder presenting a photo of a resident in one frame, or a resident passing through the clip window minutes before the stranger. Kept deliberately for now: recognition flapping on one person produces exactly the `[known, "Unknown Person"]` refused-merge shape, and firing on it would re-create the #543 phantom-stranger alerts. Surfaced by both the security specialist and the Codex adversarial pass.
+
+**How to apply:** Carry frame-level co-occurrence evidence into the snapshot (e.g. a `companion_confirmed` flag set only when a known name and an unknown share a single frame, which `_merge_unknown_faces` already computes as its condition-2 check) and suppress only on confirmed co-occurrence; or fire a low-severity variant instead of full suppression when both labels are present. Needs live tuning against #543-style flapping before changing the default.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** unknown-person rules fix (2026-08-22)
+
+### Legacy gallery rows with near-reserved names defeat label classification
+
+**What:** `RESERVED_IDENTITY_LABELS` matching is exact strip+lowercase. Gallery rows enrolled before the reserved-name guard (or via direct DB insert) under variants like `"unknown-person"`, internal double spaces, or homoglyphs are classified as enrolled identities — a face-API match to such a row suppresses the unknown-person rules via the accompanied-guest gate; conversely a legacy row literally named `"Unknown Person"` makes an enrolled resident fire stranger alerts on every fresh sighting. Surfaced by the security specialist during the ship of the unknown-person rules fix.
+
+**How to apply:** Add a startup/migration sweep over `person_gallery` that flags (or renames with user confirmation) rows whose collapsed-whitespace lowercased name is in — or one edit away from — `RESERVED_IDENTITY_LABELS`; optionally normalize with internal-whitespace collapse on both the enrollment guard and the Sentinel matchers so both ends agree.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** unknown-person rules fix (2026-08-22)
+
 ### Dynamic `sensor_threshold_condition` rules don't normalize units
 
 **What:** Discovery's `sensor_threshold_condition` template (`sentinel/proposal_templates.py`) compares an LLM-extracted numeric threshold against the sensor's native state with no unit normalization — the #461 bug class: a rule meaning "over 100 watts" against a kW sensor never fires (the template only extracts above-thresholds today; a below-variant would invert the failure — always firing). Arguably the user's threshold is native-unit by intent, but nothing disambiguates. Surfaced by adversarial review during the v3.21.3 ship.

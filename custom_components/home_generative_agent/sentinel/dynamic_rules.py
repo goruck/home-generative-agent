@@ -11,7 +11,6 @@ from homeassistant.util import dt as dt_util
 from custom_components.home_generative_agent.const import (
     RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
     RECOMMENDED_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT,
-    SENTINEL_CAMERA_ACTIVITY_STALENESS_MINUTES,
     SENTINEL_OCCUPANCY_ARMED_STATES,
 )
 
@@ -20,9 +19,7 @@ from .models import (
     AnomalyFinding,
     Severity,
     build_anomaly_id,
-    enrolled_people,
-    has_unknown_person,
-    minutes_between,
+    unknown_person_sighting_is_actionable,
 )
 from .proposal_templates import SUPPORTED_TEMPLATES
 
@@ -518,31 +515,27 @@ def _eval_motion_without_camera_activity(
     return findings
 
 
-def _unknown_person_sighting_is_actionable(
-    camera: CameraActivity, generated_at: str
-) -> bool:
-    """
-    Return True for a fresh, unaccompanied stranger sighting.
-
-    Fire only on a positive "Unknown Person" label. The raw recognized_people
-    list mixes in reserved labels ("Indeterminate" on every analyzed event),
-    so truthiness would suppress unknown-person rules forever on
-    face-recognition installs — and a real stranger writes "Unknown Person",
-    which must fire the rule, not veto it. A stranger alongside an enrolled
-    name is the genuine-companion signal (a resident with a guest). The
-    staleness gate is needed because recognized_people persists on the image
-    entity until the next analyzed event.
-    """
-    people = camera.get("recognized_people") or []
-    if not has_unknown_person(people):
-        return False
-    if enrolled_people(people):
-        return False
-    age_minutes = minutes_between(camera.get("last_activity"), generated_at)
-    return (
-        age_minutes is not None
-        and age_minutes <= SENTINEL_CAMERA_ACTIVITY_STALENESS_MINUTES
-    )
+def _unknown_person_camera_evidence(
+    snapshot: FullStateSnapshot,
+    rule: dict[str, Any],
+    params: dict[str, Any],
+    camera_id: str,
+    camera: CameraActivity,
+) -> dict[str, Any]:
+    return {
+        "rule_id": rule.get("rule_id"),
+        "template_id": rule.get("template_id"),
+        "camera_entity_id": camera_id,
+        "camera_selector": params.get("camera_selector"),
+        "area": camera.get("area"),
+        "last_activity": camera.get("last_activity"),
+        "recognition_last_event": camera.get("recognition_last_event"),
+        "recognized_people": list(camera.get("recognized_people") or []),
+        "motion_entities": camera.get("motion_entities", []),
+        "vmd_entities": camera.get("vmd_entities", []),
+        "anyone_home": snapshot["derived"]["anyone_home"],
+        "is_night": snapshot["derived"]["is_night"],
+    }
 
 
 def _eval_unknown_person_camera_no_home(
@@ -556,21 +549,13 @@ def _eval_unknown_person_camera_no_home(
     generated_at = snapshot["generated_at"]
     findings: list[AnomalyFinding] = []
     for camera_id, camera in _iter_target_cameras(params, camera_map):
-        if not _unknown_person_sighting_is_actionable(camera, generated_at):
+        # Fresh, unaccompanied stranger sighting — see the models helper for
+        # the full predicate rationale.
+        if not unknown_person_sighting_is_actionable(camera, generated_at):
             continue
-        evidence = {
-            "rule_id": rule.get("rule_id"),
-            "template_id": rule.get("template_id"),
-            "camera_entity_id": camera_id,
-            "camera_selector": params.get("camera_selector"),
-            "area": camera.get("area"),
-            "last_activity": camera.get("last_activity"),
-            "recognized_people": camera.get("recognized_people", []),
-            "motion_entities": camera.get("motion_entities", []),
-            "vmd_entities": camera.get("vmd_entities", []),
-            "anyone_home": snapshot["derived"]["anyone_home"],
-            "is_night": snapshot["derived"]["is_night"],
-        }
+        evidence = _unknown_person_camera_evidence(
+            snapshot, rule, params, camera_id, camera
+        )
         findings.append(_build_finding(rule, [camera_id], evidence))
     return findings
 
@@ -586,21 +571,13 @@ def _eval_unknown_person_camera_when_home(
     generated_at = snapshot["generated_at"]
     findings: list[AnomalyFinding] = []
     for camera_id, camera in _iter_target_cameras(params, camera_map):
-        if not _unknown_person_sighting_is_actionable(camera, generated_at):
+        # Fresh, unaccompanied stranger sighting — see the models helper for
+        # the full predicate rationale.
+        if not unknown_person_sighting_is_actionable(camera, generated_at):
             continue
-        evidence = {
-            "rule_id": rule.get("rule_id"),
-            "template_id": rule.get("template_id"),
-            "camera_entity_id": camera_id,
-            "camera_selector": params.get("camera_selector"),
-            "area": camera.get("area"),
-            "last_activity": camera.get("last_activity"),
-            "recognized_people": camera.get("recognized_people", []),
-            "motion_entities": camera.get("motion_entities", []),
-            "vmd_entities": camera.get("vmd_entities", []),
-            "anyone_home": snapshot["derived"]["anyone_home"],
-            "is_night": snapshot["derived"]["is_night"],
-        }
+        evidence = _unknown_person_camera_evidence(
+            snapshot, rule, params, camera_id, camera
+        )
         findings.append(_build_finding(rule, [camera_id], evidence))
     return findings
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -12,15 +13,24 @@ from homeassistant.util import dt as dt_util
 
 from custom_components.home_generative_agent.const import (
     RESERVED_IDENTITY_LABELS,
+    SENTINEL_CAMERA_ACTIVITY_STALENESS_MINUTES,
     UNKNOWN_PERSON_LABEL,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Mapping
+
+LOGGER = logging.getLogger(__name__)
 
 Severity = Literal["low", "medium", "high"]
 
 _UNKNOWN_PERSON_NORMALIZED = UNKNOWN_PERSON_LABEL.lower()
+
+# A sighting timestamp this far in the future is a clock-skew or spoofed
+# value, not freshness evidence: without this bound a camera publishing a
+# far-future timestamp would keep its persisted sighting "fresh" until wall
+# time caught up (adversarial review). Small skew is tolerated.
+_FUTURE_SKEW_TOLERANCE_MINUTES = 2.0
 
 
 def has_unknown_person(names: Iterable[str]) -> bool:
@@ -29,8 +39,8 @@ def has_unknown_person(names: Iterable[str]) -> bool:
 
     The snapshot's recognized_people list mixes enrolled names with reserved
     pipeline labels; "Unknown Person" is the positive stranger signal.
-    Matching is normalized (strip + casefold) because legacy gallery rows may
-    carry variants like "unknown person".
+    Matching is normalized (strip + lowercase) because legacy gallery rows
+    may carry variants like "unknown person".
     """
     return any(str(n).strip().lower() == _UNKNOWN_PERSON_NORMALIZED for n in names)
 
@@ -51,14 +61,83 @@ def enrolled_people(names: Iterable[str]) -> list[str]:
 
 
 def minutes_between(earlier_iso: str | None, later_iso: str | None) -> float | None:
-    """Return elapsed minutes from *earlier_iso* to *later_iso*, or None."""
+    """
+    Return elapsed minutes from *earlier_iso* to *later_iso*, or None.
+
+    Both values are normalized to aware UTC before subtraction — a tz-naive
+    string from a third-party camera attribute is interpreted as local time
+    (HA convention) instead of raising TypeError, which on the dynamic-rule
+    path would escape every exception boundary and kill the Sentinel run
+    loop. A timestamp more than a small skew tolerance in the FUTURE returns
+    None (freshness cannot be proven from a clock ahead of the snapshot);
+    small negative deltas clamp to 0.
+    """
     if not earlier_iso or not later_iso:
         return None
     t_earlier = dt_util.parse_datetime(earlier_iso)
     t_later = dt_util.parse_datetime(later_iso)
     if t_earlier is None or t_later is None:
         return None
-    return max(0.0, (t_later - t_earlier).total_seconds() / 60.0)
+    delta_minutes = (
+        dt_util.as_utc(t_later) - dt_util.as_utc(t_earlier)
+    ).total_seconds() / 60.0
+    if delta_minutes < -_FUTURE_SKEW_TOLERANCE_MINUTES:
+        return None
+    return max(0.0, delta_minutes)
+
+
+def sighting_timestamp(activity: Mapping[str, Any]) -> str | None:
+    """
+    Return the timestamp of the camera's face-recognition sighting.
+
+    recognition_last_event is stamped by this integration's image entity from
+    the same signal that carries recognized_people, so it dates the sighting
+    itself. last_activity is only a fallback: on integrations that expose
+    motion attributes it dates the latest MOTION, which pets or wind can
+    refresh long after the recognized_people labels went stale.
+    """
+    return activity.get("recognition_last_event") or activity.get("last_activity")
+
+
+def unknown_person_sighting_is_actionable(
+    activity: Mapping[str, Any], generated_at: str
+) -> bool:
+    """
+    Return True for a fresh, unaccompanied stranger sighting.
+
+    Fire only on a positive "Unknown Person" label: the raw recognized_people
+    list mixes in reserved labels ("Indeterminate" on every analyzed event),
+    so truthiness would suppress unknown-person rules forever on
+    face-recognition installs — and a real stranger writes "Unknown Person",
+    which must fire the rule, not veto it.
+
+    A stranger alongside an enrolled name is treated as the genuine-companion
+    signal (a resident with a guest) and suppressed. Note the list is a
+    batch-level union, not per-frame co-occurrence, so an identity-merge
+    refusal (the same face flapping between a known name and "Unknown
+    Person", issue #543) also lands here — suppressing it is deliberate,
+    because firing on refused merges would re-create the phantom-stranger
+    alerts that #543 eliminated.
+
+    The staleness gate exists because recognized_people persists on the image
+    entity until the next analyzed event; without it one sighting would
+    re-fire for hours. A missing or unparseable timestamp cannot prove
+    freshness and is skipped (logged at debug so the drop is observable).
+    """
+    people = activity.get("recognized_people") or []
+    if not has_unknown_person(people):
+        return False
+    if enrolled_people(people):
+        return False
+    age_minutes = minutes_between(sighting_timestamp(activity), generated_at)
+    if age_minutes is None:
+        LOGGER.debug(
+            "Unknown-person sighting on %s dropped: no provable freshness "
+            "(sighting timestamp missing, unparseable, or in the future).",
+            activity.get("camera_entity_id"),
+        )
+        return False
+    return age_minutes <= SENTINEL_CAMERA_ACTIVITY_STALENESS_MINUTES
 
 
 def _as_iso(value: datetime) -> str:

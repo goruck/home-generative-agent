@@ -48,6 +48,7 @@ from ..const import (  # noqa: TID252
     RECOMMENDED_VIDEO_MODEL_SEMAPHORE,
     RECOMMENDED_VLM_PROMPT_EXTRA,
     RECOMMENDED_VLM_RESPONSE_LANGUAGE,
+    RESERVED_IDENTITY_LABELS,
     SIGNAL_HGA_NEW_LATEST,
     SIGNAL_HGA_RECOGNIZED,
     VIDEO_ANALYZER_CAPTION_DEDUPE_WINDOW_SEC,
@@ -71,7 +72,7 @@ from ..const import (  # noqa: TID252
     VIDEO_VLM_NUM_PREDICT,
 )
 from .fallback import ainvoke_dropping_unsupported_params
-from .person_gallery import FACE_EMBEDDING_DIMS, RESERVED_IDENTITY_LABELS
+from .person_gallery import FACE_EMBEDDING_DIMS
 from .utils import (
     discover_mobile_notify_service,
     dispatch_on_loop,

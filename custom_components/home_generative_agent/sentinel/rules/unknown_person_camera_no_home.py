@@ -4,15 +4,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from custom_components.home_generative_agent.const import (
-    SENTINEL_CAMERA_ACTIVITY_STALENESS_MINUTES,
-)
 from custom_components.home_generative_agent.sentinel.models import (
     AnomalyFinding,
     build_anomaly_id,
-    enrolled_people,
-    has_unknown_person,
-    minutes_between,
+    unknown_person_sighting_is_actionable,
 )
 
 if TYPE_CHECKING:
@@ -34,34 +29,18 @@ class UnknownPersonCameraNoHomeRule:
         generated_at = snapshot["generated_at"]
         findings: list[AnomalyFinding] = []
         for activity in snapshot["camera_activity"]:
-            people = activity.get("recognized_people") or []
-            # Fire only on a positive stranger sighting. The raw list mixes in
-            # reserved labels ("Indeterminate" on every analyzed event), so
-            # truthiness would suppress the rule forever on face-recognition
-            # installs — and a real stranger writes "Unknown Person", which
-            # must fire the rule, not veto it.
-            if not has_unknown_person(people):
-                continue
-            # A stranger alongside an enrolled person is the genuine-companion
-            # signal (a resident with a guest), not an intrusion.
-            if enrolled_people(people):
-                continue
-            # Staleness gate: recognized_people persists on the image entity
-            # until the next analyzed event, so require the sighting itself to
-            # be recent. A missing/unparseable timestamp cannot prove
-            # freshness and is skipped.
-            age_minutes = minutes_between(activity.get("last_activity"), generated_at)
-            if (
-                age_minutes is None
-                or age_minutes > SENTINEL_CAMERA_ACTIVITY_STALENESS_MINUTES
-            ):
+            # Fresh, unaccompanied stranger sighting — see the helper for the
+            # full predicate rationale (reserved labels, companion
+            # suppression, staleness).
+            if not unknown_person_sighting_is_actionable(activity, generated_at):
                 continue
 
             evidence = {
                 "camera_entity_id": activity["camera_entity_id"],
                 "area": activity.get("area"),
-                "last_activity": activity["last_activity"],
-                "recognized_people": list(people),
+                "last_activity": activity.get("last_activity"),
+                "recognition_last_event": activity.get("recognition_last_event"),
+                "recognized_people": list(activity.get("recognized_people") or []),
                 "motion_entities": activity.get("motion_entities", []),
                 "vmd_entities": activity.get("vmd_entities", []),
                 "anyone_home": snapshot["derived"]["anyone_home"],

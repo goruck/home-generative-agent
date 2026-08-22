@@ -250,6 +250,52 @@ def test_dynamic_rule_unknown_person_camera_when_home_no_trigger_no_stranger() -
     assert findings == []
 
 
+def test_dynamic_rule_unknown_person_naive_timestamp_does_not_raise() -> None:
+    """
+    A tz-naive last_activity from a third-party camera must not abort.
+
+    Regression: naive minus aware raises TypeError, and evaluate_dynamic_rules
+    has no per-rule exception boundary — the error would kill the Sentinel run
+    loop until reload. The naive value is interpreted as local time instead.
+    """
+    snapshot = _snapshot(
+        [],
+        [
+            {
+                "camera_entity_id": "camera.frontgate",
+                "area": "Front Gate",
+                "last_activity": "2026-02-01T00:00:00",  # naive — passed verbatim
+                "motion_entities": [],
+                "vmd_entities": [],
+                "snapshot_summary": None,
+                "recognized_people": ["Unknown Person"],
+                "latest_path": None,
+            }
+        ],
+        {
+            "now": "2026-02-01T00:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": True,
+            "anyone_home": False,
+            "people_home": [],
+            "people_away": [],
+            "last_motion_by_area": {},
+        },
+    )
+    rules = [
+        {
+            "rule_id": "unknown_person_camera_no_home",
+            "template_id": "unknown_person_camera_no_home",
+            "params": {"camera_selector": "any"},
+            "severity": "low",
+            "confidence": 0.85,
+            "is_sensitive": True,
+            "suggested_actions": ["close_entry"],
+        }
+    ]
+    evaluate_dynamic_rules(snapshot, rules)  # must not raise
+
+
 def test_dynamic_rule_unknown_person_camera_when_home_no_trigger_stale() -> None:
     """A sighting older than the staleness budget must not keep firing."""
     snapshot = _snapshot(

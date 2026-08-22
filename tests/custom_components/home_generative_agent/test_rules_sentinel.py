@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from custom_components.home_generative_agent.const import UNKNOWN_PERSON_LABEL
 from custom_components.home_generative_agent.explain.prompts import SYSTEM_PROMPT
 from custom_components.home_generative_agent.sentinel.dynamic_rules import (
     evaluate_dynamic_rule,
@@ -64,7 +65,11 @@ def _base_snapshot() -> FullStateSnapshot:
     return validate_snapshot(
         {
             "schema_version": 1,
-            "generated_at": "2025-01-01T00:00:00+00:00",
+            # One minute after the _camera_activity/_no_home_camera_activity
+            # default last_activity (00:04) so default sightings read as
+            # 1 minute old — the future-skew guard rejects timestamps ahead
+            # of the snapshot.
+            "generated_at": "2025-01-01T00:05:00+00:00",
             "entities": [],
             "camera_activity": [],
             "derived": {
@@ -3265,10 +3270,23 @@ def test_minutes_between_unparseable_later_returns_none() -> None:
     assert minutes_between("2025-01-01T00:04:00+00:00", "not-a-timestamp") is None
 
 
-def test_minutes_between_clamps_negative_to_zero() -> None:
-    """A sighting timestamped after generated_at clamps to 0.0, not negative."""
+def test_minutes_between_small_future_skew_clamps_to_zero() -> None:
+    """A sighting slightly ahead of generated_at (clock skew) clamps to 0.0."""
     assert (
-        minutes_between("2025-01-01T00:10:00+00:00", "2025-01-01T00:00:00+00:00") == 0.0
+        minutes_between("2025-01-01T00:01:00+00:00", "2025-01-01T00:00:00+00:00") == 0.0
+    )
+
+
+def test_minutes_between_far_future_timestamp_returns_none() -> None:
+    """
+    A timestamp well ahead of the snapshot cannot prove freshness.
+
+    Without this a clock-skewed or spoofed camera timestamp hours in the
+    future would keep a persisted sighting "fresh" until wall time caught up.
+    """
+    assert (
+        minutes_between("2025-01-01T00:10:00+00:00", "2025-01-01T00:00:00+00:00")
+        is None
     )
 
 
@@ -3276,3 +3294,69 @@ def test_minutes_between_normal_elapsed_minutes() -> None:
     assert (
         minutes_between("2025-01-01T00:04:00+00:00", "2025-01-01T00:08:00+00:00") == 4.0
     )
+
+
+def test_minutes_between_naive_timestamp_does_not_raise() -> None:
+    """
+    A tz-naive camera-attribute timestamp must not crash rule evaluation.
+
+    Regression: naive minus aware raises TypeError, which on the dynamic-rule
+    path had no exception boundary and would kill the Sentinel run loop.
+    The naive value is interpreted as local time (HA convention).
+    """
+    result = minutes_between("2025-01-01T00:04:00", "2025-01-01T00:08:00+00:00")
+    assert result is not None
+
+
+def test_unknown_person_camera_no_home_fires_at_exact_staleness_boundary() -> None:
+    """Age exactly equal to the 10-minute budget is still fresh (inclusive)."""
+    snapshot = _base_snapshot()
+    snapshot["generated_at"] = "2025-01-01T00:14:00+00:00"
+    snapshot["derived"]["anyone_home"] = False
+    snapshot["camera_activity"] = [
+        _no_home_camera_activity(
+            ["Unknown Person"], last_activity="2025-01-01T00:04:00+00:00"
+        )
+    ]
+    findings = UnknownPersonCameraNoHomeRule().evaluate(snapshot)
+    assert len(findings) == 1
+
+
+def test_unknown_person_camera_no_home_gates_on_recognition_timestamp() -> None:
+    """
+    Freshness is judged by the recognition sighting, not camera motion.
+
+    A pet or tree refreshing the camera's last_activity attribute must not
+    resurrect a stale "Unknown Person" label — and a fresh recognition must
+    fire even when the camera's own activity attribute is stale.
+    """
+    snapshot = _base_snapshot()
+    snapshot["generated_at"] = "2025-01-01T02:00:00+00:00"
+    snapshot["derived"]["anyone_home"] = False
+    stale_sighting = _no_home_camera_activity(
+        ["Unknown Person"],
+        # Motion refreshed just now, but the sighting is two hours old.
+        last_activity="2025-01-01T01:59:00+00:00",
+    )
+    stale_sighting["recognition_last_event"] = "2025-01-01T00:00:00+00:00"
+    snapshot["camera_activity"] = [stale_sighting]
+    assert UnknownPersonCameraNoHomeRule().evaluate(snapshot) == []
+
+    fresh_sighting = _no_home_camera_activity(
+        ["Unknown Person"],
+        # Camera activity attribute stale, but the sighting itself is fresh.
+        last_activity="2025-01-01T00:00:00+00:00",
+    )
+    fresh_sighting["recognition_last_event"] = "2025-01-01T01:59:00+00:00"
+    snapshot["camera_activity"] = [fresh_sighting]
+    findings = UnknownPersonCameraNoHomeRule().evaluate(snapshot)
+    assert len(findings) == 1
+    assert findings[0].evidence["recognition_last_event"] == "2025-01-01T01:59:00+00:00"
+
+
+def test_pipeline_unknown_label_matches_sentinel_const() -> None:
+    """The gallery's non-match label must be the one the Sentinel rules key on."""
+    assert has_unknown_person([UNKNOWN_PERSON_LABEL]) is True
+    # Pin the wire value: image/sensor attributes and persisted evidence
+    # carry this exact string, so it cannot change silently.
+    assert UNKNOWN_PERSON_LABEL == "Unknown Person"

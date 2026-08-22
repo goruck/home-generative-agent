@@ -4,15 +4,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from custom_components.home_generative_agent.const import (
-    SENTINEL_CAMERA_ACTIVITY_STALENESS_MINUTES,
-)
 from custom_components.home_generative_agent.sentinel.models import (
     AnomalyFinding,
     build_anomaly_id,
-    enrolled_people,
-    has_unknown_person,
-    minutes_between,
+    unknown_person_sighting_is_actionable,
 )
 
 if TYPE_CHECKING:
@@ -41,36 +36,20 @@ class UnknownPersonAtNightWhileHomeRule:
             snapshot_summary = activity.get("snapshot_summary")
             if not snapshot_summary:
                 continue
-            people = activity.get("recognized_people") or []
-            # Fire only on a positive stranger sighting. The raw list mixes in
-            # reserved labels ("Indeterminate" on every analyzed event), so
-            # truthiness would suppress the rule forever on face-recognition
-            # installs — and a real stranger writes "Unknown Person", which
-            # must fire the rule, not veto it.
-            if not has_unknown_person(people):
-                continue
-            # A stranger alongside an enrolled person is the genuine-companion
-            # signal (a resident with a guest), not an intrusion.
-            if enrolled_people(people):
-                continue
-            # Staleness gate: recognized_people persists on the image entity
-            # until the next analyzed event, so require the sighting itself to
-            # be recent — a stranger seen in the afternoon must not re-fire as
-            # a night finding hours later. A missing/unparseable timestamp
-            # cannot prove freshness and is skipped.
-            age_minutes = minutes_between(activity.get("last_activity"), generated_at)
-            if (
-                age_minutes is None
-                or age_minutes > SENTINEL_CAMERA_ACTIVITY_STALENESS_MINUTES
-            ):
+            # Fresh, unaccompanied stranger sighting — see the helper for the
+            # full predicate rationale. The staleness gate also stops an
+            # afternoon sighting from re-firing as a night finding hours
+            # later.
+            if not unknown_person_sighting_is_actionable(activity, generated_at):
                 continue
 
             evidence = {
                 "camera_entity_id": activity["camera_entity_id"],
                 "area": activity.get("area"),
                 "snapshot_summary": snapshot_summary,
-                "recognized_people": list(people),
+                "recognized_people": list(activity.get("recognized_people") or []),
                 "last_activity": activity.get("last_activity"),
+                "recognition_last_event": activity.get("recognition_last_event"),
                 "is_night": snapshot["derived"]["is_night"],
                 "anyone_home": snapshot["derived"]["anyone_home"],
                 "people_home": snapshot["derived"]["people_home"],

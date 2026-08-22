@@ -403,6 +403,38 @@ def test_no_redaction_when_no_recognized_people() -> None:
     assert result == explanation
 
 
+def test_redact_if_sensitive_ignores_unknown_person_label() -> None:
+    """
+    The reserved 'Unknown Person' label must never be redacted.
+
+    Unknown-person findings now carry ['Unknown Person'] in evidence;
+    substituting it would rewrite 'an unknown person was seen' into
+    'a recognised person was seen', inverting the security meaning.
+    """
+    finding = _finding(is_sensitive=True, recognized_people=["Unknown Person"])
+    explanation = "An unknown person was seen in the backyard."
+
+    result = _redact_if_sensitive(explanation, finding)
+
+    assert result == explanation
+
+
+def test_redact_if_sensitive_ignores_reserved_labels_but_redacts_names() -> None:
+    """Reserved labels pass through while enrolled names are still redacted."""
+    finding = _finding(
+        is_sensitive=True,
+        recognized_people=["Indeterminate", "Unknown Person", "John Doe"],
+    )
+    explanation = "John Doe stood near an unknown person."
+
+    result = _redact_if_sensitive(explanation, finding)
+
+    assert result is not None
+    assert "John Doe" not in result
+    assert "unknown person" in result
+    assert "a recognised person" in result
+
+
 @pytest.mark.asyncio
 async def test_async_notify_redacts_sensitive_message() -> None:
     """async_notify sends a redacted message when finding.is_sensitive=True."""
@@ -1050,7 +1082,13 @@ def test_alarm_disarmed_mobile_message_full_evidence() -> None:
 
 
 def test_alarm_disarmed_mobile_message_missing_timestamps() -> None:
-    """Missing timestamps fall back to 'reported' verb and 'currently disarmed'."""
+    """
+    Missing timestamps drop the age phrase and say 'currently disarmed'.
+
+    Newly generated findings always carry a numeric age (the rule's freshness
+    gate guarantees it), but findings persisted before that gate existed can
+    still re-render through this branch.
+    """
     ev: dict[str, Any] = {
         "camera_friendly_name": "Front Door",
         "camera_entity_id": "camera.front_door",
@@ -1059,9 +1097,9 @@ def test_alarm_disarmed_mobile_message_missing_timestamps() -> None:
     }
     msg = _alarm_disarmed_mobile_message(_alarm_finding(evidence=ev))
     assert "Front Door" in msg
-    assert "reported" in msg
+    assert "unrecognized person" in msg
+    assert "min ago" not in msg
     assert "currently disarmed" in msg
-    assert "recently" not in msg
     assert len(msg) <= MAX_MOBILE_MESSAGE_CHARS
 
 

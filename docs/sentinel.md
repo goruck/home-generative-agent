@@ -84,6 +84,8 @@ These rules run on every detection cycle without any configuration or approval.
 | `unknown_person_camera_night_home` | Face recognition reports an "Unknown Person" on any camera at night while someone is home. Requires a snapshot summary; same freshness and accompanied-guest suppression as above |
 | `alarm_disarmed_during_external_threat` | Security alarm disarmed while face recognition reports an "Unknown Person" on a camera. Same freshness and accompanied-guest suppression as the unknown-person rules |
 
+> **These three rules require face recognition.** They fire only on a positive `"Unknown Person"` label from the face-recognition pipeline. Without a configured face service they never fire — use the `motion_detected_*` discovery templates for motion-based intrusion alerts instead. Two deliberate limitations to know about: a person whose face is never captured (mask, hood, back to camera) produces `"Indeterminate"` and does not fire these rules; and the accompanied-guest suppression works on the analyzed event's identity list as a whole, so a resident recognized anywhere in the same clip window as the stranger suppresses the alert (this is what keeps recognition flapping on a single person — issue #543 — from raising false stranger alerts).
+
 **Appliances / sensors**
 
 | Rule | Description |

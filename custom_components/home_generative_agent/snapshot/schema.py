@@ -33,6 +33,11 @@ class CameraActivity(TypedDict):
     snapshot_summary: str | None
     recognized_people: list[str]
     latest_path: str | None
+    # Timestamp of the face-recognition sighting itself (the image entity's
+    # last_event, stamped by the same signal that carries recognized_people).
+    # Distinct from last_activity, which camera attributes can refresh on any
+    # motion long after the recognition labels went stale.
+    recognition_last_event: NotRequired[str | None]
 
 
 class DerivedContext(TypedDict):
@@ -84,6 +89,7 @@ SNAPSHOT_SCHEMA = vol.Schema(
                 vol.Required("snapshot_summary"): vol.Any(str, None),
                 vol.Required("recognized_people"): [str],
                 vol.Required("latest_path"): vol.Any(str, None),
+                vol.Optional("recognition_last_event"): vol.Any(str, None),
             }
         ],
         vol.Required("derived"): {

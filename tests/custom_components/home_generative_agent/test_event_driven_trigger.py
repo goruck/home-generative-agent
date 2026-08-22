@@ -174,6 +174,20 @@ def test_binary_sensor_occupancy_maps_correctly() -> None:
     assert result == "unknown_person_camera_no_home"
 
 
+def test_image_domain_maps_to_unknown_person_rule() -> None:
+    """
+    Image entity updates (recognition results landing) must wake the engine.
+
+    The unknown-person rules gate on a 10-minute sighting freshness window;
+    the "Unknown Person" label arrives on the image entity minutes after the
+    motion event, so without this mapping a sighting could expire between
+    polls on installs with a long sentinel_interval_seconds.
+    """
+    state = _make_state("image.backyard_last_event", "image")
+    result = _anomaly_type_for_state("image.backyard_last_event", state)
+    assert result == "unknown_person_camera_no_home"
+
+
 def test_irrelevant_domain_returns_none() -> None:
     state = _make_state("sensor.temperature", "sensor")
     assert _anomaly_type_for_state("sensor.temperature", state) is None

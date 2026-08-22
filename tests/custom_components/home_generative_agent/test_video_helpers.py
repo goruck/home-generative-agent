@@ -5,9 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from custom_components.home_generative_agent.core.person_gallery import (
-    RESERVED_IDENTITY_LABELS,
-)
+from custom_components.home_generative_agent.const import RESERVED_IDENTITY_LABELS
 from custom_components.home_generative_agent.core.video_helpers import (
     _PLACEHOLDER_DROP_ORDER,
     dedupe_desc,

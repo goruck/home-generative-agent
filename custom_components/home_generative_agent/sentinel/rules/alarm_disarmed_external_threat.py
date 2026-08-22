@@ -4,15 +4,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from custom_components.home_generative_agent.const import (
-    SENTINEL_CAMERA_ACTIVITY_STALENESS_MINUTES,
-)
 from custom_components.home_generative_agent.sentinel.models import (
     AnomalyFinding,
     build_anomaly_id,
-    enrolled_people,
-    has_unknown_person,
     minutes_between,
+    sighting_timestamp,
+    unknown_person_sighting_is_actionable,
 )
 
 if TYPE_CHECKING:
@@ -47,31 +44,16 @@ class AlarmDisarmedDuringExternalThreatRule:
 
         findings: list[AnomalyFinding] = []
         for activity in snapshot["camera_activity"]:
-            people = activity.get("recognized_people") or []
-            # Fire only on a positive stranger sighting. The raw list mixes in
-            # reserved labels ("Indeterminate" on every analyzed event), so
-            # truthiness would suppress the rule forever on face-recognition
-            # installs — and a real stranger writes "Unknown Person", which
-            # must fire the rule, not veto it.
-            if not has_unknown_person(people):
+            # Fresh, unaccompanied stranger sighting — see the helper for the
+            # full predicate rationale (reserved labels, companion
+            # suppression, staleness).
+            if not unknown_person_sighting_is_actionable(activity, generated_at):
                 continue
-            # A stranger alongside an enrolled person is the genuine-companion
-            # signal (a resident with a guest), not an external threat.
-            if enrolled_people(people):
-                continue
-            # Staleness gate: recognized_people persists on the image entity
-            # until the next analyzed event, so require the sighting itself to
-            # be recent. A missing/unparseable timestamp cannot prove
-            # freshness and is skipped.
+            # Always a float here: the actionability gate above required a
+            # fresh, parseable sighting timestamp.
             camera_activity_age_minutes = minutes_between(
-                activity.get("last_activity"), generated_at
+                sighting_timestamp(activity), generated_at
             )
-            if (
-                camera_activity_age_minutes is None
-                or camera_activity_age_minutes
-                > SENTINEL_CAMERA_ACTIVITY_STALENESS_MINUTES
-            ):
-                continue
 
             cam = activity["camera_entity_id"]
 
@@ -105,7 +87,8 @@ class AlarmDisarmedDuringExternalThreatRule:
                 "alarm_entity_ids": disarmed_panel_ids,
                 "camera_friendly_name": camera_friendly_name,
                 "alarm_friendly_name": alarm_friendly_name,
-                "recognized_people": activity.get("recognized_people", []),
+                "recognized_people": list(activity.get("recognized_people") or []),
+                "recognition_last_event": activity.get("recognition_last_event"),
                 "snapshot_summary": activity.get("snapshot_summary"),
                 "camera_activity_age_minutes": camera_activity_age_minutes,
                 "disarm_duration_minutes": disarm_duration_minutes,

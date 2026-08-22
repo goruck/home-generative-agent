@@ -13,8 +13,10 @@ single known identity, strictly:
 
 Also covers: the nearest_match DAO method, the three-site
 frame_descriptions/frame_hits alignment, propagation of the merged list, and
-the Sentinel regression guarantee (unknown-person rules key on
-recognized_people being EMPTY, so the merge cannot change rule firing).
+the Sentinel regression guarantee (unknown-person rules fire on "Unknown
+Person" with no enrolled name alongside; a merge presupposes a known name in
+the list, which already suppresses the rules pre- and post-merge, so the
+merge cannot change rule firing).
 """
 
 from __future__ import annotations
@@ -500,7 +502,7 @@ async def test_merged_identities_reach_summary_and_last_recognized(
 
 
 # ---------------------------------------------------------------------------
-# Sentinel regression: rules key on recognized_people being EMPTY
+# Sentinel regression: merge output shapes cannot change rule firing
 # ---------------------------------------------------------------------------
 
 
