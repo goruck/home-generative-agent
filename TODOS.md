@@ -1145,6 +1145,18 @@ window-scoped check could suppress.
 
 ## Notifier / Observability
 
+### Compound notifications hide the unknown-person signal behind the alarm title
+
+**What:** When the correlator bundles same-cycle findings into a `CompoundFinding`, `_dispatch_compound` picks the representative for notification rendering by highest confidence (`engine.py`: `best = max(compound.constituent_findings, key=lambda f: f.confidence)`). `alarm_disarmed_during_external_threat` (confidence 0.9) therefore always outranks `unknown_person_camera_night_home` (0.7) and the dynamic `unknown_person_camera_when_home` rules, so a genuine stranger sighting renders under the title "Outdoor activity while alarm disarmed" and the alarm rule's mobile copy. Field-observed 2026-08-23 (first-ever `unknown_person_camera_night_home` firings, 11:51/11:52 UTC): the user saw only alarm-disarmed pushes and concluded the unknown-person rules were not firing — the stranger evidence was only visible in the audit store. A person-on-camera alert is also arguably the more actionable headline than the alarm state that merely contextualizes it.
+
+**How to apply:** Rank compound representatives by security salience before confidence — e.g. a small type-priority table (unknown-person types > alarm-disarmed types > entry/motion types) used as the primary sort key with confidence as tiebreak, or simply prefer any constituent whose evidence has `unknown_person_present`/a stranger label when choosing `best`. Alternatively keep `best` for execution policy but render the notification title/copy from the highest-salience constituent, and consider appending a one-line "+ N related findings" suffix so the compound's breadth is visible. Mind the localization boundary: security-critical copy stays deterministic English (`_is_security_copy`), and the existing per-type deterministic formatters must keep receiving the constituent they were written for.
+
+**Why:** The whole point of the v3.30.11 unknown-person fix was making stranger sightings visible; the confidence-ranked compound title re-hides them at the last hop. Surfaced during v3.30.11 field validation.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** v3.30.11
+
 ### Baseline-deviation notifications guess the display unit from the entity_id
 
 **What:** `_baseline_deviation_mobile_message` (`sentinel/notifier.py:904`) picks the display unit with `"W" if "power" in entity_id else "kWh" if "energy" in entity_id else ""`. A kW-denominated sensor renders as e.g. "0.4W vs usual 0.3W", and a power sensor without "power" in its entity_id gets no unit at all. Surfaced during the #461 unit-normalization review (v3.21.3).
