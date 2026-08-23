@@ -1145,6 +1145,20 @@ window-scoped check could suppress.
 
 ## Notifier / Observability
 
+### Remaining notification-localization gaps after PR #565 (buttons, cs plural, uncurated labels)
+
+**What:** Three gaps deliberately shipped with the v3.31.0 notification-chrome localization (PR #565), awaiting @hruba202's input (asked in the close-out comment, issuecomment-5386281819): (1) **action-button titles stay English** — "Confirm"/"Cancel" under the Czech permanent-snooze prompt guide a destructive action in the wrong language (cross-model review's top remaining finding), plus "Ask Agent"/"Arm Alarm"/"Snooze Always"; (2) **cs `batch_message` plural** — "{count} novinek" is grammatically wrong for counts 1–4, the common batch size (needs novinka/novinky/novinek forms or a count-agnostic phrasing); (3) **uncurated type labels** — `camera_missing_snapshot_night_home`, `unknown_person_camera_no_home`, `phone_battery_low_at_night_home`, `vehicle_detected_near_camera_home`, `pet_detected_at_night_no_occupancy` are absent from `_KNOWN_TYPE_LABEL_KEYS`, so they render as prettified English slugs on Czech installs.
+
+**Why:** Merged without waiting for the native-speaker answers (maintainer decision 2026-08-23); these need Czech wording from a native speaker, and (1) needs a scope decision on how button titles flow through the mobile-app notification payload.
+
+**How to apply:** (1) route the `actions[].title` strings through `notif_msg` with new keys; (2)+(3) add the corrected/new cs strings and label keys to `_MESSAGES` in `sentinel/notifier_messages.py` — parity tests will enforce key coverage.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** hruba202 wording input (PR #565 close-out)
+
+---
+
 ### Unify the duplicated localized-message machinery (pin_messages / notifier_messages)
 
 **What:** `sentinel/notifier_messages.py` (PR #565) is a second copy of `agent/pin_messages.py`'s `_resolve_language` + fallback-chain machinery, and the copies have already drifted inside the PR that created the second one: notifier_messages guards `getattr(hass, "config", None)` (config-less test doubles / degraded runtime states) and degrades gracefully on a bad `.format` placeholder, while pin_messages dereferences `hass.config` directly and formats unguarded. Neither normalizes underscore locales (`cs_CZ` resolves to silent English; real HA stores hyphenated codes, so low likelihood).
