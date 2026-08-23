@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.31.0] - 2026-08-23
+
+### Added
+
+- **Sentinel notifications now speak your Home Assistant language.** The fixed parts of every Sentinel notification — the title (`Security Alert` / `Home Alert` / `Home Update`), the subtitle, finding-type labels, the burst-batch summary, the daily digest, and the permanent-snooze confirmation prompt — now follow the Home Assistant server language (**Settings → System → General**), currently in English and Czech with automatic fallback to English. This is independent of the `sentinel_response_language` option, which only affects the LLM-written explanation text. The deterministic security message bodies deliberately stay English: they quote exact cameras, entries, and times that a translation could blur. Contributed by [@hruba202](https://github.com/hruba202) ([#565](https://github.com/goruck/home-generative-agent/pull/565)).
+
+### Fixed
+
+- **Notification delivery can no longer be broken by unexpected stored data.** The daily digest now tolerates malformed audit records and findings with a missing severity, and a bad placeholder in any localized string degrades gracefully to the English text instead of raising on the alert path.
+
 ## [3.30.11] - 2026-08-22
 
 ### Fixed
