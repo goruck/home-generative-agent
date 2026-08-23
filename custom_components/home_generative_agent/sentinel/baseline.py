@@ -51,7 +51,7 @@ from custom_components.home_generative_agent.const import (
     RECOMMENDED_SENTINEL_BASELINE_WEEKLY_PATTERNS,
 )
 
-from .models import AnomalyFinding, Severity, build_anomaly_id
+from .models import AnomalyFinding, Severity, build_anomaly_id, hashable_evidence
 from .power_units import is_power_unit, watts_per_unit
 
 if TYPE_CHECKING:
@@ -103,7 +103,6 @@ CYCLICAL_LOAD_HINTS: frozenset[str] = frozenset(
         "compressor",
     }
 )
-
 # Entity-name keywords that identify dedicated appliance circuits.  Only these
 # entities qualify for completion detection; generic power sensors (UPS, fridge,
 # whole-home, server rack) are intentionally excluded.
@@ -177,18 +176,32 @@ ADD COLUMN IF NOT EXISTS reference_at TIMESTAMPTZ
 # Params: (entity_id, metric, period, value, updated_at, max_samples x3).
 # The last three params are all MAX_SAMPLES (same value, used in LEAST expressions).
 # RETURNING sample_count eliminates a post-commit SELECT per entity.
+# A NaN/inf stored value (poison written before ingestion guarded non-finite
+# states) would otherwise propagate through the EMA forever; the CASE arms
+# restart the aggregate from the incoming finite sample instead.  In Postgres
+# NaN compares equal to NaN, so the equality test is a valid NaN detector.
 _UPSERT_SQL = """
 INSERT INTO sentinel_baselines
     (entity_id, metric, period, value, sample_count, updated_at)
 VALUES
     (%s, %s, %s, %s, 1, %s)
 ON CONFLICT (entity_id, metric, period) DO UPDATE SET
-    value = (
-        sentinel_baselines.value
-        * LEAST(sentinel_baselines.sample_count, %s - 1)
-        + EXCLUDED.value
-    ) / (LEAST(sentinel_baselines.sample_count, %s - 1) + 1),
-    sample_count = LEAST(sentinel_baselines.sample_count + 1, %s),
+    value = CASE
+        WHEN sentinel_baselines.value = 'NaN'::float8
+             OR abs(sentinel_baselines.value) = 'Infinity'::float8
+        THEN EXCLUDED.value
+        ELSE (
+            sentinel_baselines.value
+            * LEAST(sentinel_baselines.sample_count, %s - 1)
+            + EXCLUDED.value
+        ) / (LEAST(sentinel_baselines.sample_count, %s - 1) + 1)
+    END,
+    sample_count = CASE
+        WHEN sentinel_baselines.value = 'NaN'::float8
+             OR abs(sentinel_baselines.value) = 'Infinity'::float8
+        THEN 1
+        ELSE LEAST(sentinel_baselines.sample_count + 1, %s)
+    END,
     updated_at   = EXCLUDED.updated_at
 RETURNING sample_count
 """
@@ -203,12 +216,22 @@ INSERT INTO sentinel_baselines
 VALUES
     (%s, %s, %s, %s, 1, %s, %s, %s)
 ON CONFLICT (entity_id, metric, period) DO UPDATE SET
-    value = (
-        sentinel_baselines.value
-        * LEAST(sentinel_baselines.sample_count, %s - 1)
-        + EXCLUDED.value
-    ) / (LEAST(sentinel_baselines.sample_count, %s - 1) + 1),
-    sample_count    = LEAST(sentinel_baselines.sample_count + 1, %s),
+    value = CASE
+        WHEN sentinel_baselines.value = 'NaN'::float8
+             OR abs(sentinel_baselines.value) = 'Infinity'::float8
+        THEN EXCLUDED.value
+        ELSE (
+            sentinel_baselines.value
+            * LEAST(sentinel_baselines.sample_count, %s - 1)
+            + EXCLUDED.value
+        ) / (LEAST(sentinel_baselines.sample_count, %s - 1) + 1)
+    END,
+    sample_count = CASE
+        WHEN sentinel_baselines.value = 'NaN'::float8
+             OR abs(sentinel_baselines.value) = 'Infinity'::float8
+        THEN 1
+        ELSE LEAST(sentinel_baselines.sample_count + 1, %s)
+    END,
     updated_at      = EXCLUDED.updated_at,
     reference_value = EXCLUDED.reference_value,
     reference_at    = EXCLUDED.reference_at
@@ -386,6 +409,10 @@ class SentinelBaselineUpdater:
                         )
                     if not eid or not metric or val is None:
                         continue
+                    if not math.isfinite(float(val)):
+                        # Poisoned rows written before ingestion guarded
+                        # non-finite states must not re-enter Welford state.
+                        continue
                     if metric.startswith(METRIC_DOW_STD_PREFIX):
                         std_rows.setdefault(eid, {})[metric] = float(val)
                     elif metric.startswith(METRIC_DOW_AVG_PREFIX):
@@ -532,6 +559,11 @@ class SentinelBaselineUpdater:
                 value = float(str(entity.get("state", "")))
             except (TypeError, ValueError):
                 continue
+            if not math.isfinite(value):
+                # A single 'nan'/'inf' state string would poison the rolling
+                # averages permanently (NaN never compares, so downstream
+                # threshold checks stop suppressing and rendering crashes).
+                continue
             entity_values[entity_id] = value
 
         if not entity_values:
@@ -552,7 +584,7 @@ class SentinelBaselineUpdater:
                         rv = row.get("reference_value")
                     else:
                         eid, rv = row[0], row[1]
-                    if eid:
+                    if eid and (rv is None or math.isfinite(float(rv))):
                         refs[str(eid)] = rv
 
                 # Collect sample_count from RETURNING clause — eliminates N+1 SELECTs.
@@ -1128,7 +1160,9 @@ def evaluate_baseline_deviation(  # noqa: PLR0911, PLR0912, PLR0915
         return []
 
     baseline_value = (baselines.get(entity_id) or {}).get(metric)
-    if baseline_value is None:
+    if baseline_value is None or not math.isfinite(baseline_value):
+        # A poisoned (NaN/inf) stored baseline would defeat the threshold
+        # comparison below and crash rendering during dispatch.
         return []
 
     if baseline_value == 0.0:
@@ -1147,9 +1181,8 @@ def evaluate_baseline_deviation(  # noqa: PLR0911, PLR0912, PLR0915
     # standby guard and for completion detection below.
     _attrs: dict[str, Any] = (entity.get("attributes") or {}) if entity else {}
     _unit = str(_attrs.get("unit_of_measurement") or "")
-    is_power_entity = str(_attrs.get("device_class") or "") == "power" or is_power_unit(
-        _unit
-    )
+    _device_class = str(_attrs.get("device_class") or "")
+    is_power_entity = _device_class == "power" or is_power_unit(_unit)
     friendly_name = str(entity.get("friendly_name") or "").lower()
     is_appliance = is_power_entity and any(
         hint in entity_id.lower() or hint in friendly_name for hint in _APPLIANCE_HINTS
@@ -1175,6 +1208,8 @@ def evaluate_baseline_deviation(  # noqa: PLR0911, PLR0912, PLR0915
         "template_id": rule.get("template_id", "baseline_deviation"),
         "entity_id": entity_id,
         "friendly_name": entity.get("friendly_name") or "",
+        "unit_of_measurement": _unit,
+        "device_class": _device_class,
         "current_value": current_value,
         "baseline_value": baseline_value,
         "deviation_pct": round(deviation_pct, 2),
@@ -1230,8 +1265,7 @@ def evaluate_baseline_deviation(  # noqa: PLR0911, PLR0912, PLR0915
         suggested_actions = []
     # Exclude display-only fields from the hash so anomaly_id is stable even
     # when friendly_name is temporarily unavailable (returns "").
-    _hash_evidence = {k: v for k, v in evidence.items() if k != "friendly_name"}
-    anomaly_id = build_anomaly_id(rule_id, [entity_id], _hash_evidence)
+    anomaly_id = build_anomaly_id(rule_id, [entity_id], hashable_evidence(evidence))
 
     return [
         AnomalyFinding(
@@ -1391,17 +1425,26 @@ def _evaluate_dow_anomaly(  # noqa: PLR0913
     else:
         threshold = abs(expected) * (global_drift_pct / 100.0)
 
+    if not math.isfinite(expected) or not math.isfinite(threshold):
+        # Poisoned (NaN/inf) DOW or hourly baselines: NaN comparisons are
+        # always False, so the threshold gate below would never suppress and
+        # the non-finite deviation would crash rendering during dispatch.
+        return []
+
     deviation = abs(current_value - expected)
     if deviation <= threshold:
         return []
 
     rule_id = str(rule.get("rule_id") or "time_of_day_anomaly")
     deviation_pct = deviation / abs(expected) * 100.0 if expected != 0.0 else 100.0
+    attrs: dict[str, Any] = entity.get("attributes") or {}
     evidence = {
         "rule_id": rule_id,
         "template_id": rule.get("template_id", "time_of_day_anomaly"),
         "entity_id": entity_id,
         "friendly_name": entity.get("friendly_name") or "",
+        "unit_of_measurement": str(attrs.get("unit_of_measurement") or ""),
+        "device_class": str(attrs.get("device_class") or ""),
         "current_value": current_value,
         "expected_value": round(expected, 4),
         "dow_mean": dow_mean,
@@ -1423,8 +1466,7 @@ def _evaluate_dow_anomaly(  # noqa: PLR0913
         severity_raw if severity_raw in {"low", "medium", "high"} else "low"
     )
     confidence = _coerce_float(rule.get("confidence"), default=0.7)
-    _hash_evidence = {k: v for k, v in evidence.items() if k != "friendly_name"}
-    anomaly_id = build_anomaly_id(rule_id, [entity_id], _hash_evidence)
+    anomaly_id = build_anomaly_id(rule_id, [entity_id], hashable_evidence(evidence))
     suggested_actions = rule.get("suggested_actions") or []
 
     return [

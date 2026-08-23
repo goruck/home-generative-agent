@@ -144,6 +144,7 @@ _CALL_SITE_KWARGS: dict[str, set[str]] = {
     "subtitle_appliance_finished": {"appliance"},
     "subtitle_entry_open_alarm_disarmed": {"entry_name"},
     "subtitle_power_deviation": {"appliance", "direction"},
+    "subtitle_reading_deviation": {"appliance", "direction"},
     "fallback_message": {"summary", "entity", "action_hint"},
     "persistent_fallback": {"summary", "severity", "entities", "hint"},
     "batch_message": {"count", "plural", "type_summary"},

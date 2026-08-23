@@ -58,6 +58,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "subtitle_appliance_cycle_complete": "Appliance cycle complete",
         "subtitle_entry_open_alarm_disarmed": "{entry_name} open, alarm disarmed",
         "subtitle_power_deviation": "{appliance}: power {direction} than expected",
+        "subtitle_reading_deviation": "{appliance}: reading {direction} than expected",
         "direction_lower": "lower",
         "direction_higher": "higher",
         "fallback_entry": "Entry",
@@ -102,6 +103,9 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "subtitle_appliance_cycle_complete": "Cyklus spotřebiče dokončen",
         "subtitle_entry_open_alarm_disarmed": "{entry_name} otevřeno, alarm vypnutý",
         "subtitle_power_deviation": "{appliance}: odběr {direction}, než se čekalo",
+        "subtitle_reading_deviation": (
+            "{appliance}: hodnota {direction}, než se čekalo"
+        ),
         "direction_lower": "nižší",
         "direction_higher": "vyšší",
         "fallback_entry": "Vstup",

@@ -2341,3 +2341,281 @@ def test_gate_clock_skew_resets_clock() -> None:
     assert result == [], "clock skew must suppress (not fire) and reset the clock"
     # Clock should be reset to now, not left at the future timestamp.
     assert engine._cyclical_deviation_above_since["sensor.fridge_power"] == now
+
+
+# ---------------------------------------------------------------------------
+# Evidence presentation metadata — unit_of_measurement / device_class
+# ---------------------------------------------------------------------------
+
+
+def test_baseline_deviation_evidence_carries_unit_and_device_class() -> None:
+    """Evidence records the entity's unit and device_class for the notifier."""
+    entity = _power_entity(
+        "sensor.playroom_attic_humidity", "65", device_class="humidity", unit="%"
+    )
+    snapshot = _snapshot([entity])
+    baselines = {"sensor.playroom_attic_humidity": {METRIC_ROLLING_AVG: 49.2}}
+    rule = _rule(entity_id="sensor.playroom_attic_humidity", threshold_pct=20.0)
+
+    findings = evaluate_baseline_deviation(snapshot, rule, baselines)
+
+    assert len(findings) == 1
+    assert findings[0].evidence["unit_of_measurement"] == "%"
+    assert findings[0].evidence["device_class"] == "humidity"
+
+
+def test_baseline_deviation_anomaly_id_stable_across_unit_metadata() -> None:
+    """
+    Anomaly IDs survive the addition of unit/device_class metadata.
+
+    unit_of_measurement / device_class are display-only and excluded from the
+    anomaly-id hash, so snooze/suppression state stays stable.
+    """
+    pinned_ts = "2025-01-15T10:00:00+00:00"
+    with_attrs = _power_entity(
+        "sensor.attic_humidity",
+        "65",
+        device_class="humidity",
+        unit="%",
+        last_changed=pinned_ts,
+    )
+    without_attrs = dict(with_attrs)
+    without_attrs["attributes"] = {}
+
+    baselines = {"sensor.attic_humidity": {METRIC_ROLLING_AVG: 49.2}}
+    rule = _rule(entity_id="sensor.attic_humidity", threshold_pct=20.0)
+
+    findings_with = evaluate_baseline_deviation(
+        _snapshot([with_attrs]), rule, baselines
+    )
+    findings_without = evaluate_baseline_deviation(
+        _snapshot([without_attrs]), rule, baselines
+    )
+
+    assert len(findings_with) == 1
+    assert len(findings_without) == 1
+    assert findings_with[0].anomaly_id == findings_without[0].anomaly_id
+
+
+def test_dow_anomaly_evidence_carries_unit_and_device_class() -> None:
+    """The DOW-blended path records unit and device_class too."""
+    dow_min_samples = 4
+    entity_id = "sensor.attic_humidity"
+    dow, hour = 0, 14
+
+    snapshot = _dow_snapshot(entity_id, "65", hour=hour, dow=dow)
+    snapshot["entities"][0]["attributes"] = {
+        "device_class": "humidity",
+        "unit_of_measurement": "%",
+    }
+    dow_mean_key = f"{METRIC_DOW_AVG_PREFIX}{dow}_{hour}"
+    dow_std_key = f"{METRIC_DOW_STD_PREFIX}{dow}_{hour}"
+    baselines = {entity_id: {f"{METRIC_HOURLY_PREFIX}{hour}": 40.0}}
+    dow_data = {
+        entity_id: {
+            dow_mean_key: (40.0, dow_min_samples),
+            dow_std_key: (1.0, dow_min_samples),
+        }
+    }
+
+    findings = evaluate_time_of_day_anomaly(
+        snapshot,
+        rule=_dow_rule(entity_id),
+        baselines=baselines,
+        dow_data=dow_data,
+        dow_min_samples=dow_min_samples,
+    )
+
+    assert len(findings) == 1
+    assert findings[0].evidence["unit_of_measurement"] == "%"
+    assert findings[0].evidence["device_class"] == "humidity"
+    assert findings[0].evidence["expected_value"] == pytest.approx(40.0)
+
+
+def test_dow_anomaly_id_stable_across_unit_metadata() -> None:
+    """
+    DOW anomaly IDs survive the addition of unit/device_class metadata.
+
+    _evaluate_dow_anomaly excludes DISPLAY_ONLY_EVIDENCE_KEYS from the hash,
+    mirroring evaluate_baseline_deviation, so snooze state stays stable.
+    """
+    dow_min_samples = 4
+    entity_id = "sensor.attic_humidity"
+    dow, hour = 0, 14
+
+    dow_mean_key = f"{METRIC_DOW_AVG_PREFIX}{dow}_{hour}"
+    dow_std_key = f"{METRIC_DOW_STD_PREFIX}{dow}_{hour}"
+    baselines = {entity_id: {f"{METRIC_HOURLY_PREFIX}{hour}": 40.0}}
+    dow_data = {
+        entity_id: {
+            dow_mean_key: (40.0, dow_min_samples),
+            dow_std_key: (1.0, dow_min_samples),
+        }
+    }
+
+    snapshot_with = _dow_snapshot(entity_id, "65", hour=hour, dow=dow)
+    snapshot_with["entities"][0]["attributes"] = {
+        "device_class": "humidity",
+        "unit_of_measurement": "%",
+    }
+    snapshot_without = _dow_snapshot(entity_id, "65", hour=hour, dow=dow)
+
+    findings_with = evaluate_time_of_day_anomaly(
+        snapshot_with,
+        rule=_dow_rule(entity_id),
+        baselines=baselines,
+        dow_data=dow_data,
+        dow_min_samples=dow_min_samples,
+    )
+    findings_without = evaluate_time_of_day_anomaly(
+        snapshot_without,
+        rule=_dow_rule(entity_id),
+        baselines=baselines,
+        dow_data=dow_data,
+        dow_min_samples=dow_min_samples,
+    )
+
+    assert len(findings_with) == 1
+    assert len(findings_without) == 1
+    assert findings_with[0].anomaly_id == findings_without[0].anomaly_id
+
+
+def test_baseline_deviation_skips_non_finite_stored_baseline() -> None:
+    """A poisoned (NaN) stored baseline must not fire (and later crash dispatch)."""
+    snapshot = _snapshot([_entity("sensor.temperature", "30")])
+    for bad in (float("nan"), float("inf")):
+        baselines = {"sensor.temperature": {METRIC_ROLLING_AVG: bad}}
+        assert evaluate_baseline_deviation(snapshot, _rule(), baselines) == []
+
+
+def test_dow_anomaly_skips_non_finite_dow_mean() -> None:
+    """A poisoned DOW mean must not produce a finding with NaN deviation."""
+    entity_id = "sensor.temp"
+    dow, hour = 0, 14
+    snapshot = _dow_snapshot(entity_id, "25", hour=hour, dow=dow)
+    dow_data = {
+        entity_id: {
+            f"{METRIC_DOW_AVG_PREFIX}{dow}_{hour}": (float("nan"), 4),
+            f"{METRIC_DOW_STD_PREFIX}{dow}_{hour}": (1.0, 4),
+        }
+    }
+    findings = evaluate_time_of_day_anomaly(
+        snapshot,
+        rule=_dow_rule(entity_id),
+        baselines={entity_id: {f"{METRIC_HOURLY_PREFIX}{hour}": float("nan")}},
+        dow_data=dow_data,
+        dow_min_samples=4,
+    )
+    assert findings == []
+
+
+@pytest.mark.asyncio
+async def test_update_baselines_skips_non_finite_states() -> None:
+    """'nan'/'inf' state strings must never enter the stored baselines."""
+    mock_pool = MagicMock()
+    mock_pool.connection = MagicMock(side_effect=AssertionError("should not be called"))
+
+    updater = SentinelBaselineUpdater(MagicMock(), mock_pool, {})
+
+    snapshot = _snapshot(
+        [
+            _entity("sensor.poisoned", "nan"),
+            _entity("sensor.poisoned2", "inf"),
+            _entity("sensor.poisoned3", "1e999"),
+        ]
+    )
+
+    # All values are non-finite → entity_values empty → early return, no DB.
+    await updater._update_baselines(snapshot)
+
+
+def test_upsert_sql_self_heals_poisoned_value() -> None:
+    """
+    Both upserts restart the EMA when the stored value is NaN/inf.
+
+    A poisoned row written before ingestion guarded non-finite states would
+    otherwise propagate through the EMA forever (NaN blends into every
+    subsequent average), permanently blinding that entity's baseline.
+    """
+    from custom_components.home_generative_agent.sentinel import (  # noqa: PLC0415
+        baseline as bl,
+    )
+
+    for sql in (bl._UPSERT_SQL, bl._UPSERT_WITH_REF_SQL):
+        assert "'NaN'::float8" in sql
+        assert "'Infinity'::float8" in sql
+        assert "THEN EXCLUDED.value" in sql
+    # Parameter order/count must be unchanged — call sites pass the same
+    # tuples as before the self-heal CASE arms were added.
+    assert bl._UPSERT_SQL.count("%s") == 8
+    assert bl._UPSERT_WITH_REF_SQL.count("%s") == 10
+
+
+@pytest.mark.asyncio
+async def test_dow_restore_filters_poisoned_rows() -> None:
+    """NaN/inf rows persisted by older versions never re-enter Welford state."""
+    dow, hour = 2, 9
+    mean_metric = f"{METRIC_DOW_AVG_PREFIX}{dow}_{hour}"
+    std_metric = f"{METRIC_DOW_STD_PREFIX}{dow}_{hour}"
+    db_rows = [
+        {
+            "entity_id": "sensor.poisoned",
+            "metric": mean_metric,
+            "value": float("nan"),
+            "sample_count": 5,
+        },
+        {
+            "entity_id": "sensor.poisoned2",
+            "metric": std_metric,
+            "value": float("inf"),
+            "sample_count": 5,
+        },
+        {
+            "entity_id": "sensor.healthy",
+            "metric": mean_metric,
+            "value": 42.0,
+            "sample_count": 5,
+        },
+    ]
+
+    call_count = 0
+    mock_cursor = MagicMock()
+
+    async def _exec(_sql: str, *_args: Any) -> None:
+        pass
+
+    async def _fetchall() -> list[Any]:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return []
+        return db_rows
+
+    mock_cursor.execute = _exec
+    mock_cursor.fetchall = _fetchall
+    mock_cursor.fetchone = AsyncMock(return_value=None)
+
+    mock_conn = MagicMock()
+    mock_conn.commit = AsyncMock()
+    mock_conn.cursor = MagicMock(
+        return_value=MagicMock(
+            __aenter__=AsyncMock(return_value=mock_cursor),
+            __aexit__=AsyncMock(return_value=False),
+        )
+    )
+    mock_pool = MagicMock()
+    mock_pool.connection = MagicMock(
+        return_value=MagicMock(
+            __aenter__=AsyncMock(return_value=mock_conn),
+            __aexit__=AsyncMock(return_value=False),
+        )
+    )
+
+    updater = SentinelBaselineUpdater(MagicMock(), mock_pool, {})
+    await updater.async_initialize()
+
+    assert f"sensor.poisoned:{dow}:{hour}" not in updater._dow_state
+    assert f"sensor.poisoned2:{dow}:{hour}" not in updater._dow_state
+    healthy = updater._dow_state.get(f"sensor.healthy:{dow}:{hour}")
+    assert healthy is not None
+    assert healthy[0] == pytest.approx(42.0)

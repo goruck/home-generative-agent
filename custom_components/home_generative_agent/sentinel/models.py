@@ -158,6 +158,20 @@ def _jsonify(value: Any) -> Any:
     return str(value)
 
 
+# Display-only evidence fields excluded from the anomaly-id hash so IDs (and
+# therefore snooze/suppression state) stay stable when presentation metadata
+# is added or temporarily unavailable.  Single authority for every evaluator
+# that hashes evidence — do not fork this set per call site.
+DISPLAY_ONLY_EVIDENCE_KEYS: frozenset[str] = frozenset(
+    {"friendly_name", "unit_of_measurement", "device_class"}
+)
+
+
+def hashable_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
+    """Return *evidence* without the display-only fields, for anomaly-id hashing."""
+    return {k: v for k, v in evidence.items() if k not in DISPLAY_ONLY_EVIDENCE_KEYS}
+
+
 def build_anomaly_id(
     anomaly_type: str, triggering_entities: list[str], evidence: dict[str, Any]
 ) -> str:
