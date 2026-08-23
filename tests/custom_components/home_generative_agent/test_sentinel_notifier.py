@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -75,6 +76,10 @@ class DummyHass:
     def __init__(self) -> None:
         self.services = DummyServices()
         self.bus = DummyBus()
+        # Real HomeAssistant objects always carry a config with a language;
+        # model that here so notifier tests exercise the normal language
+        # resolution path (cs tests override .language after construction).
+        self.config = SimpleNamespace(language="en")
         self._pending_tasks: list[asyncio.Task[Any]] = []
 
     def async_create_task(self, coro: Any) -> asyncio.Task[Any]:
@@ -2007,3 +2012,213 @@ async def test_held_batch_stores_redacted_explanation() -> None:
     assert held_explanation is not None
     assert "John Doe" not in held_explanation
     assert "a recognised person" in held_explanation
+
+
+# ---------------------------------------------------------------------------
+# 22. Localized notification chrome (PR #565)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_async_notify_czech_title_and_subtitle() -> None:
+    """
+    A cs-configured hass produces Czech title and type-label subtitle.
+
+    This is the only test shape that fails if the hass threading is dropped
+    at a call site (every localized helper defaults hass=None → English).
+    """
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    hass.config.language = "cs"
+    snapshot = _minimal_snapshot()
+    finding = _finding_with_severity(
+        "high", anomaly_id="cs1", ftype="unlocked_lock_at_night"
+    )
+
+    await notifier.async_notify(finding, snapshot, None)  # type: ignore[arg-type]
+
+    assert len(hass.services.calls) == 1
+    call = hass.services.calls[0]
+    assert call["data"]["title"] == "Bezpečnostní výstraha"
+    assert call["data"]["data"]["subtitle"] == "Zámek ponechán odemčený"
+
+
+@pytest.mark.asyncio
+async def test_security_body_stays_english_under_czech_hass() -> None:
+    """
+    Deterministic security copy is never localized (PR #531 invariant).
+
+    Even against the new vector — hass itself Czech-configured — the body
+    stays English, while the chrome (title) around it IS Czech in the same
+    dispatch.
+    """
+    options = {
+        CONF_NOTIFY_SERVICE: "notify.mobile_app_phone",
+        CONF_SENTINEL_RESPONSE_LANGUAGE: "Czech",
+    }
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    hass.config.language = "cs"
+    snapshot = _minimal_snapshot()
+    finding = _alarm_finding(
+        anomaly_id="cssec1",
+        evidence={
+            "camera_friendly_name": "Backyard",
+            "camera_activity_age_minutes": 2.0,
+            "alarm_last_changed": None,
+        },
+    )
+    explanation = "Alarm byl vypnut, zatímco je někdo stále uvnitř."
+
+    await notifier.async_notify(finding, snapshot, explanation)  # type: ignore[arg-type]
+
+    assert len(hass.services.calls) == 1
+    call = hass.services.calls[0]
+    # Chrome is Czech (alarm finding is low severity → low title).
+    assert call["data"]["title"] == "Novinka z domova"
+    # Body keeps the exact English deterministic security copy.
+    body: str = call["data"]["message"]
+    assert body != explanation
+    assert "Backyard" in body
+    assert "stále uvnitř" not in body
+
+
+@pytest.mark.asyncio
+async def test_flush_batch_czech_title_and_type_label() -> None:
+    """Batch summary title and type labels localize under a cs hass."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    hass.config.language = "cs"
+    finding = _finding_with_severity(
+        "low", anomaly_id="csflush1", ftype="motion_detected_while_away"
+    )
+    notifier._held_batch.append((finding, "Some message", "notify.mobile_app_phone"))
+
+    notifier._async_flush_batch()
+    await hass.drain_tasks()
+
+    assert len(hass.services.calls) == 1
+    call = hass.services.calls[0]
+    assert call["data"]["title"] == "Novinka z domova"
+    assert "Pohyb v nepřítomnosti" in call["data"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_daily_digest_czech_title_and_severity_words() -> None:
+    """Digest title and severity words localize under a cs hass."""
+    from homeassistant.util import dt as dt_util
+
+    now_iso = dt_util.utcnow().isoformat()
+    records = [
+        _notified_record(now_iso, severity="high"),
+        _notified_record(now_iso, severity="low"),
+    ]
+    notifier, hass, _store = _make_digest_notifier(records=records)
+    hass.config.language = "cs"
+
+    await notifier._async_run_daily_digest()
+
+    assert len(hass.services.calls) == 1
+    call = hass.services.calls[0]
+    assert call["data"]["title"] == "Denní přehled Sentinelu"
+    msg: str = call["data"]["message"]
+    assert "vysoká" in msg
+    assert "nízká" in msg
+    assert "za posledních 24 h" in msg
+
+
+@pytest.mark.asyncio
+async def test_snooze_confirmation_czech() -> None:
+    """The permanent-snooze confirmation localizes title, message, and label."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, hass, _suppression, action_handler = _make_notifier(options)
+    hass.config.language = "cs"
+    finding = _finding(anomaly_id="cssnooze1")
+    action_handler.register_finding(finding)
+
+    await notifier._handle_snooze(ACT_SNOOZE_ALWAYS, "cssnooze1")
+
+    assert len(hass.services.calls) == 1
+    call = hass.services.calls[0]
+    assert call["data"]["title"] == "Potvrdit trvalé ztlumení"
+    # The friendly type label inside the message is Czech too.
+    assert "Otevřený vstup v nepřítomnosti" in call["data"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_severity_falls_back_to_medium_title() -> None:
+    """An unrecognized severity maps to the medium title in both languages."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    for language, expected in (("en", "Home Alert"), ("cs", "Upozornění z domova")):
+        notifier, hass, _suppression, _action_handler = _make_notifier(options)
+        hass.config.language = language
+        snapshot = _minimal_snapshot()
+        finding = _finding_with_severity("critical", anomaly_id=f"sevx-{language}")
+
+        await notifier.async_notify(finding, snapshot, "msg")  # type: ignore[arg-type]
+
+        assert hass.services.calls[0]["data"]["title"] == expected
+
+
+@pytest.mark.asyncio
+async def test_daily_digest_survives_malformed_records() -> None:
+    """A null/non-dict finding or None severity must not kill the digest."""
+    from homeassistant.util import dt as dt_util
+
+    now_iso = dt_util.utcnow().isoformat()
+    records = [
+        _notified_record(now_iso, severity="high"),
+        {
+            "suppression_reason_code": "not_suppressed",
+            "finding": None,
+            "notification": {"notified_at": now_iso},
+        },
+        {
+            "suppression_reason_code": "not_suppressed",
+            "finding": "corrupt",
+            "notification": {"notified_at": now_iso},
+        },
+        {
+            "suppression_reason_code": "not_suppressed",
+            "finding": {"severity": None},
+            "notification": {"notified_at": now_iso},
+        },
+    ]
+    notifier, hass, _store = _make_digest_notifier(records=records)
+
+    await notifier._async_run_daily_digest()
+
+    assert len(hass.services.calls) == 1
+    msg: str = hass.services.calls[0]["data"]["message"]
+    assert "4 alerts" in msg
+    assert "3 unknown" in msg
+
+
+@pytest.mark.asyncio
+async def test_daily_digest_never_treats_stored_severity_as_message_key() -> None:
+    """
+    A corrupted severity colliding with a message id must render verbatim.
+
+    Routing stored data through notif_msg as a key would surface unrelated
+    copy (e.g. the action-hint sentence) inside the digest summary.
+    """
+    from homeassistant.util import dt as dt_util
+
+    now_iso = dt_util.utcnow().isoformat()
+    records = [_notified_record(now_iso, severity="action_hint_high")]
+    notifier, hass, _store = _make_digest_notifier(records=records)
+
+    await notifier._async_run_daily_digest()
+
+    msg: str = hass.services.calls[0]["data"]["message"]
+    assert "1 action_hint_high" in msg
+    assert "Urgent" not in msg
+
+
+def test_persistent_fallback_localizes_severity_word() -> None:
+    """The persistent fallback renders the localized severity word, not raw."""
+    finding = _finding(anomaly_id="persloc1")  # medium severity
+    cs_hass = SimpleNamespace(config=SimpleNamespace(language="cs"))
+    msg = _notifier_mod._persistent_message(None, finding, cs_hass)  # type: ignore[arg-type]
+    assert "závažnost střední" in msg
+    en_msg = _notifier_mod._persistent_message(None, finding, None)
+    assert "(severity medium)" in en_msg
