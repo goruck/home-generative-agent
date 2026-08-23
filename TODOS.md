@@ -1145,6 +1145,20 @@ window-scoped check could suppress.
 
 ## Notifier / Observability
 
+### Sanitize friendly_name-derived text in notification copy like the unit string
+
+**What:** The v3.31.1 baseline-copy fix strips control/bidi characters and length-caps the untrusted `unit_of_measurement` before it reaches push text (`_baseline_deviation_mobile_message`), but the appliance/sensor display name (`friendly_name` → `_strip_power_suffix(...).title()`) is still embedded uncapped and unfiltered in the same messages, and camera names elsewhere use only a `[:30]` cap with no control-char strip. A crafted device name can carry the same bidi-reorder / instruction-text spoofing the unit fix closed (raised by both the Claude adversarial and Codex passes on v3.31.1; same class, pre-existing convention).
+
+**Why:** Notification copy is a trust boundary: entity names arrive from semi-trusted integrations (MQTT/ESPHome/template sensors over untrusted data).
+
+**How to apply:** Extract the unit sanitizer (category-C strip + whitespace collapse + cap) into a small helper and apply it to every evidence-derived display string in `sentinel/notifier.py` (appliance names, camera names, entry names), with a generous cap (e.g. 40) for names. One test per surface.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+---
+
 ### Remaining notification-localization gaps after PR #565 (buttons, cs plural, uncurated labels)
 
 **What:** Three gaps deliberately shipped with the v3.31.0 notification-chrome localization (PR #565), awaiting @hruba202's input (asked in the close-out comment, issuecomment-5386281819): (1) **action-button titles stay English** — "Confirm"/"Cancel" under the Czech permanent-snooze prompt guide a destructive action in the wrong language (cross-model review's top remaining finding), plus "Ask Agent"/"Arm Alarm"/"Snooze Always"; (2) **cs `batch_message` plural** — "{count} novinek" is grammatically wrong for counts 1–4, the common batch size (needs novinka/novinky/novinek forms or a count-agnostic phrasing); (3) **uncurated type labels** — `camera_missing_snapshot_night_home`, `unknown_person_camera_no_home`, `phone_battery_low_at_night_home`, `vehicle_detected_near_camera_home`, `pet_detected_at_night_no_occupancy` are absent from `_KNOWN_TYPE_LABEL_KEYS`, so they render as prettified English slugs on Czech installs.
