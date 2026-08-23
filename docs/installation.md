@@ -36,6 +36,8 @@ It is available in the default HACS repository, or click the button below to ope
 - Click **Add Integration** and search for **Home Generative Agent**.
 - Complete the initial instruction-only setup screen.
 
+> Only one Home Generative Agent entry is supported — its services, database, and Sentinel are one-per-home. Home Assistant will not offer the integration a second time once an entry exists.
+
 > If you previously used the legacy single-entry flow, your settings are automatically migrated to the new subentry UI.
 
 **5. Open the integration page and click Setup.**
@@ -83,7 +85,9 @@ Install the Blueprints from the `blueprints/` directory to create automations th
 **Face recognition**
 
 - Install [face-service](https://github.com/goruck/face-service) on your edge device.
+- Enable the `face_recognition` option (off by default) and set the face-service URL in the integration's options.
 - Enroll people via **Developer Tools → Actions → Enroll Person** in the HA UI.
+- Note: Sentinel's unknown-person rules key on face recognition and never fire while it is disabled.
 - To add the enrollment dashboard card, register the Lovelace resource:
   - **Settings → Dashboards → Resources → Add**
   - URL: `/hga-card/hga-enroll-card.js`

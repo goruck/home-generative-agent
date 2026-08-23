@@ -328,6 +328,36 @@ And two writer-consistency gaps: (7) `_mark_tool_index_stale` (embedding-provide
 
 ## Sentinel Rules
 
+### Unknown-person rules are inert on installs without face recognition
+
+**What:** The stranger-present predicate (unknown-person rules fix, 2026-08-22) makes `unknown_person_camera_no_home`, `unknown_person_camera_night_home`, `alarm_disarmed_during_external_threat`, and the two dynamic unknown-person templates fire only on a positive `"Unknown Person"` label — which only the face-recognition pipeline produces. On installs without a configured face service these five rules never fire, and `alarm_disarmed_during_external_threat` previously fell back to motion/VMD/summary evidence, so an upgrade silently narrows real coverage there. Docs note it, but nothing at runtime does. Same family, narrower trigger (Codex structured review): the snapshot sources `recognized_people` solely from the `image.*_last_event` entities, so a user who disables that entity in the entity registry (it vanishes from `hass.states`) silently makes the rules inert even WITH face recognition running. Surfaced independently by the security specialist and both Codex passes during the ship of the fix.
+
+**How to apply:** Detect at engine start whether face recognition is configured (face-service URL option); if not, raise a one-time repair issue (or rate-limited log) saying these rules are inert and pointing at the `motion_detected_*` discovery templates as the replacement. Alternatively carry a `face_recognition_enabled` flag in the snapshot and let the rules fall back to a motion-evidence predicate when it is false. For the disabled-entity sub-case, source recognition metadata from an always-on runtime cache (e.g. VideoAnalyzer._last_recognized via runtime_data) instead of the optional UI entity — that also removes the image-entity round-trip entirely.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** unknown-person rules fix (2026-08-22)
+
+### Companion suppression works on the event-level identity union, not frame co-occurrence
+
+**What:** The accompanied-guest gate suppresses an `"Unknown Person"` sighting whenever an enrolled name appears anywhere in the same analyzed event's `recognized_people` union — including an intruder presenting a photo of a resident in one frame, or a resident passing through the clip window minutes before the stranger. Kept deliberately for now: recognition flapping on one person produces exactly the `[known, "Unknown Person"]` refused-merge shape, and firing on it would re-create the #543 phantom-stranger alerts. Surfaced by both the security specialist and the Codex adversarial pass.
+
+**How to apply:** Carry frame-level co-occurrence evidence into the snapshot (e.g. a `companion_confirmed` flag set only when a known name and an unknown share a single frame, which `_merge_unknown_faces` already computes as its condition-2 check) and suppress only on confirmed co-occurrence; or fire a low-severity variant instead of full suppression when both labels are present. Needs live tuning against #543-style flapping before changing the default.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** unknown-person rules fix (2026-08-22)
+
+### Legacy gallery rows with near-reserved names defeat label classification
+
+**What:** `RESERVED_IDENTITY_LABELS` matching is exact strip+lowercase. Gallery rows enrolled before the reserved-name guard (or via direct DB insert) under variants like `"unknown-person"`, internal double spaces, or homoglyphs are classified as enrolled identities — a face-API match to such a row suppresses the unknown-person rules via the accompanied-guest gate; conversely a legacy row literally named `"Unknown Person"` makes an enrolled resident fire stranger alerts on every fresh sighting. Surfaced by the security specialist during the ship of the unknown-person rules fix.
+
+**How to apply:** Add a startup/migration sweep over `person_gallery` that flags (or renames with user confirmation) rows whose collapsed-whitespace lowercased name is in — or one edit away from — `RESERVED_IDENTITY_LABELS`; optionally normalize with internal-whitespace collapse on both the enrollment guard and the Sentinel matchers so both ends agree.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** unknown-person rules fix (2026-08-22)
+
 ### Dynamic `sensor_threshold_condition` rules don't normalize units
 
 **What:** Discovery's `sensor_threshold_condition` template (`sentinel/proposal_templates.py`) compares an LLM-extracted numeric threshold against the sensor's native state with no unit normalization — the #461 bug class: a rule meaning "over 100 watts" against a kW sensor never fires (the template only extracts above-thresholds today; a below-variant would invert the failure — always firing). Arguably the user's threshold is native-unit by intent, but nothing disambiguates. Surfaced by adversarial review during the v3.21.3 ship.
@@ -937,18 +967,6 @@ Entity-backed evidence path instruction added to `USER_PROMPT_TEMPLATE` in `expl
 
 ---
 
-### Sentinel unknown-person rules are suppressed by any non-empty recognized list
-
-**What:** `unknown_person_camera_night_home` (and the dynamic no-home/when-home variants) skip whenever `recognized_people` is truthy — but the raw list dispatched to the image entity and Sentinel snapshot contains the literal `"Unknown Person"` and `"Indeterminate"` strings, so with face recognition enabled, a detected-but-unrecognized visitor *suppresses* the unknown-person rules rather than firing them. Decide whether the rules should filter negative identities before the emptiness check, or whether the snapshot layer should strip them.
-
-**Why:** Pre-existing behavior surfaced by the v3.30.0 adversarial review (the merge provably cannot change rule firing, but the rules' emptiness check is only vacuously aligned with their name). Changing it changes alerting behavior, so it needs its own focused decision, docs, and field validation — not a drive-by fix.
-
-**Effort:** M
-**Priority:** P2
-**Depends on:** v3.30.0
-
----
-
 ### Caption novelty: per-analysis notification-status metadata
 
 **What:** Store whether each video analysis triggered a notification alongside the
@@ -1155,6 +1173,20 @@ window-scoped check could suppress.
 
 ---
 
+### Compound notifications hide the unknown-person signal behind the alarm title
+
+**What:** When the correlator bundles same-cycle findings into a `CompoundFinding`, `_dispatch_compound` picks the representative for notification rendering by highest confidence (`engine.py`: `best = max(compound.constituent_findings, key=lambda f: f.confidence)`). `alarm_disarmed_during_external_threat` (confidence 0.9) therefore always outranks `unknown_person_camera_night_home` (0.7) and the dynamic `unknown_person_camera_when_home` rules, so a genuine stranger sighting renders under the title "Outdoor activity while alarm disarmed" and the alarm rule's mobile copy. Field-observed 2026-08-23 (first-ever `unknown_person_camera_night_home` firings, 11:51/11:52 UTC): the user saw only alarm-disarmed pushes and concluded the unknown-person rules were not firing — the stranger evidence was only visible in the audit store. A person-on-camera alert is also arguably the more actionable headline than the alarm state that merely contextualizes it.
+
+**How to apply:** Rank compound representatives by security salience before confidence — e.g. a small type-priority table (unknown-person types > alarm-disarmed types > entry/motion types) used as the primary sort key with confidence as tiebreak, or simply prefer any constituent whose evidence has `unknown_person_present`/a stranger label when choosing `best`. Alternatively keep `best` for execution policy but render the notification title/copy from the highest-salience constituent, and consider appending a one-line "+ N related findings" suffix so the compound's breadth is visible. Mind the localization boundary: security-critical copy stays deterministic English (`_is_security_copy`), and the existing per-type deterministic formatters must keep receiving the constituent they were written for.
+
+**Why:** The whole point of the v3.30.11 unknown-person fix was making stranger sightings visible; the confidence-ranked compound title re-hides them at the last hop. Surfaced during v3.30.11 field validation.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** v3.30.11
+
+---
+
 ### Baseline-deviation notifications guess the display unit from the entity_id
 
 **What:** `_baseline_deviation_mobile_message` (`sentinel/notifier.py:904`) picks the display unit with `"W" if "power" in entity_id else "kWh" if "energy" in entity_id else ""`. A kW-denominated sensor renders as e.g. "0.4W vs usual 0.3W", and a power sensor without "power" in its entity_id gets no unit at all. Surfaced during the #461 unit-normalization review (v3.21.3).
@@ -1264,8 +1296,11 @@ window-scoped check could suppress.
 
 **How to apply:** Both platform setup functions have `entry` in scope, so the wrap is available. They cannot reuse `_defer_start_until_hass_started` as written — its `start` parameter is `Callable[[], None]` and these handlers are async and take the event — so either widen the helper or give each site the same fired-flag cancel inline. Adding an entity twice is louder than a duplicate background task, so confirm the actual failure mode before choosing.
 
+**Resolution:** The helper moved rather than widened: `_defer_start_until_hass_started` is now `core/lifecycle.py:defer_start_until_hass_started` (docstring intact — it is the canonical rationale other sites point at), importable by platforms without touching `__init__`. The handlers didn't need to be async — `async_add_entities` is a sync callback — so each platform passes a plain closure. Because platforms have no `_stopped` latch to close the residual window (unload starts → on-unload cancel runs only after `async_unload_entry` returns), the closures carry an entry-state guard instead: refuse unless `LOADED` or `SETUP_IN_PROGRESS` (the latter because a platform set up while HA is starting defers into exactly that state). Regression tests in `test_entry_lifecycle_containment.py`, each verified to fail against the unfixed code, with positive controls so deleting the deferred add outright can't stay green.
+
 **Effort:** S
 **Priority:** P2
+**Completed:** v3.30.10 (2026-08-21)
 
 ---
 
@@ -1277,8 +1312,11 @@ window-scoped check could suppress.
 
 **How to apply:** Wrap each teardown step so unload cannot raise (`contextlib.suppress` plus `LOGGER.exception`, or one `try/finally` that still returns True), keeping the platform-unload abort at the top as the only early return. The `_stopped` latch is only "downstream of every ordering" if unload actually reaches it.
 
+**Resolution:** A local `_teardown(step, run)` wrapper in `async_unload_entry` runs each of the six stops/closes under `try/except Exception` with `LOGGER.exception`, so one raising step skips nothing and the function always returns True past the platform-unload abort — which stays the only early return, and a test pins that the containment did not swallow it. Regression test makes the *first* step (`video_analyzer.stop`) raise and asserts the sentinel/discovery stops still ran, unload reported success, and the on-unload callbacks (client close, listener cancels) still fired — the exact chain FAILED_UNLOAD severs.
+
 **Effort:** S
 **Priority:** P2
+**Completed:** v3.30.10 (2026-08-21)
 
 ---
 
@@ -1290,8 +1328,67 @@ window-scoped check could suppress.
 
 **How to apply:** Wrap the registrations in `entry.async_on_unload` (services via `hass.services.async_remove`), and clear `hass.data[DOMAIN]["http_registered"]` on unload, or key the view off the current entry rather than the one that happened to register it.
 
+**Resolution:** Services: all seventeen registrations route through a new `_register_entry_service` helper that registers the service and immediately registers `hass.services.async_remove` via `entry.async_on_unload` — the adjacency guarantees every remove has a matching register even when setup aborts between service blocks, and on-unload running after failed setups covers every abort path. View: clearing `http_registered` would have been the wrong fix (aiohttp routes cannot be removed, so a re-registered view would sit behind the original) — instead `EnrollPersonView` no longer pins the registering entry and resolves the currently LOADED entry per request, returning 503 when none is (and a mid-upload teardown is caught and returned as the same 503 rather than a 500); `http_registered` keeps its now-correct register-once-per-run semantics. The remove-and-re-add regression (new `ConfigEntry`, dead pinned `runtime_data`) is test-pinned, as is service removal on unload. The `_on_entry_changed` dispatcher named in the title was already wrapped. The two-loaded-entries residual (unloading either would remove domain services for both, and the view could serve an arbitrary entry) was closed structurally in the same ship: `single_config_entry: true` in the manifest — the whole integration was already de-facto single-entry (domain-global services, one DB, one Sentinel), both adversarial passes converged on it, and the flag makes HA refuse a second entry at the source.
+
 **Effort:** M
 **Priority:** P2
+**Completed:** v3.30.10 (2026-08-21)
+
+---
+
+### services.yaml advertises confirm_enroll but nothing registers it
+
+**What:** `services.yaml:19` defines `confirm_enroll`, but no `async_register` call for it exists anywhere in the integration — 18 services advertised, 17 registered. The Developer Tools services page shows a service that errors with "Unable to find service" when called.
+
+**Why:** Pre-existing metadata staleness surfaced by the cross-model doc review during the v3.30.10 ship (the ship's service-deregistration sweep enumerated the real 17). Docs-only scope kept it out of that PR.
+
+**How to apply:** Either delete the `confirm_enroll` block from `services.yaml` (if the confirm flow it referenced is gone for good) or register the handler it was meant to describe. Check translations for a matching `services.confirm_enroll` key and remove it in the same change.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** —
+
+---
+
+### Decide whether face enrollment should be admin-only
+
+**What:** `EnrollPersonView` (`http.py`) has `requires_auth = True` but no admin check, and the `hga.enroll_person` service is likewise callable by any user context — so any authenticated HA user (or a leaked limited-scope long-lived token) can enroll faces into the gallery that feeds security-relevant recognition (Sentinel unknown-person rules, recognized-people sensors). Poisoning shape: enroll an arbitrary face under a trusted resident's name and the phantom becomes "recognized". Reserved-label refusal still applies; this is about *who*, not *what*.
+
+**Why:** Security-specialist finding during the v3.30.10 ship (confidence 5 — a deliberate-decision flag, not a demonstrated exploit). Pre-existing behavior, not introduced by that ship's view rewiring. Deferred by user decision (2026-08-21): gating changes which household members can use the enroll card, so it deserves its own PR, docs update, and release note rather than riding a lifecycle batch.
+
+**How to apply:** If admin-only: check `request[KEY_HASS_USER].is_admin` in `post()` (mirroring HA's admin-gated views) and require admin context in `_handle_enroll_person` for parity; update `docs/camera-entities.md` and the enroll card docs; release-note the behavior change. If open-by-design: document explicitly that any authenticated user may enroll.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** —
+
+---
+
+### Services stay callable during the unload teardown window
+
+**What:** Service removal is an on-unload callback, and HA runs those only after `async_unload_entry` returns — so for the whole teardown sequence (platform unload, six engine stops, pool close) every `hga.*` service is still registered and callable against the half-torn-down generation. A call landing in that window reaches a stopped engine or a closing pool and fails with an opaque internal error rather than "service does not exist". Narrowed by v3.30.10 (before it, the window was *forever*), not closed.
+
+**Why:** Converged on by the red-team and adversarial passes during the v3.30.10 ship (cross-model). Same accepted shape as the enroll-view mid-request race (which v3.30.10 downgraded from a crash to a 503); this is the service-surface sibling, recorded so the CHANGELOG's "removed on unload" reads with the right precision.
+
+**How to apply:** Cheap guard in the shared handler path: refuse with a deterministic message when `entry.state is not ConfigEntryState.LOADED` (services only matter on a loaded entry). Alternatively accept and document — the window is a few awaits wide.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** v3.30.10
+
+---
+
+### Zero-camera platform setup after HA has started arms a listener that never fires
+
+**What:** `image.py` and `sensor.py` defer camera discovery to `EVENT_HOMEASSISTANT_STARTED` whenever initial discovery finds zero cameras — with no `hass.is_running` branch, unlike the four engine call sites. An entry set up *after* HA finished starting (first install before any camera integration, or a reload while cameras are momentarily absent) arms a listener for an event that already fired: no camera entities are ever created until the next reload, and the listener sits dead until unload cancels it (v3.30.10; before that it leaked outright).
+
+**Why:** Pre-existing behavior surfaced by the red-team and adversarial passes during the v3.30.10 ship; the refactor makes it tidier but not better. Every current test runs under `CoreState.not_running`, so the already-running case is unpinned.
+
+**How to apply:** Either skip registration when `hass.is_running` (documenting discovery as a one-shot snapshot), or replace the STARTED listener with entity-registry/state-changed-driven camera discovery (the structural fix — cameras added later would get entities without a reload). Pin the chosen behavior with a `CoreState.running` test.
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** v3.30.10
 
 ---
 
@@ -1301,7 +1398,7 @@ window-scoped check could suppress.
 
 **Why:** Found by the maintainability pass (2026-08-19). Deliberately not done in that ship: a mixin touches `video_analyzer.py`, which #559 had just landed, and the branch was already carrying four review fixes. The cost is that a fifth engine must re-derive the invariant from prose rather than inherit it.
 
-**How to apply:** Extract something like `StopLatchMixin` (`_stopped`, a `_refuse_start_if_stopped()` guard logging `type(self).__name__`, a `_latch_stopped()`), have all four use it, and keep the full rationale in one docstring the four sites point at in a single line. If a mixin is rejected, at minimum collapse the four prose blocks to a one-line pointer at `_defer_start_until_hass_started`, which already carries the canonical explanation.
+**How to apply:** Extract something like `StopLatchMixin` (`_stopped`, a `_refuse_start_if_stopped()` guard logging `type(self).__name__`, a `_latch_stopped()`), have all four use it, and keep the full rationale in one docstring the four sites point at in a single line. If a mixin is rejected, at minimum collapse the four prose blocks to a one-line pointer at `core/lifecycle.py:defer_start_until_hass_started` (moved there in v3.30.10), which already carries the canonical explanation.
 
 **Effort:** S
 **Priority:** P3
@@ -1336,7 +1433,7 @@ window-scoped check could suppress.
 
 ### hass.is_running is True while HA is still starting
 
-**What:** `hass.is_running` returns True for both `CoreState.starting` and `CoreState.running` (`core.py:448-450`), but the four deferred-start sites gate on it, and `_defer_start_until_hass_started`'s docstring asserts engines "cannot start before Home Assistant has finished starting." An entry added or reloaded during `CoreState.starting` starts all four inline instead of deferring, so the invariant the docstring states does not hold on that path.
+**What:** `hass.is_running` returns True for both `CoreState.starting` and `CoreState.running` (`core.py:448-450`), but the four deferred-start sites gate on it, and `defer_start_until_hass_started`'s (`core/lifecycle.py`, since v3.30.10) docstring asserts engines "cannot start before Home Assistant has finished starting." An entry added or reloaded during `CoreState.starting` starts all four inline instead of deferring, so the invariant the docstring states does not hold on that path.
 
 **Why:** Found by the Claude adversarial pass (2026-08-19). Pre-existing — the gate predates the helper — but the helper's docstring is what promotes it to a stated invariant.
 
@@ -1361,6 +1458,22 @@ window-scoped check could suppress.
 ---
 
 ## Completed
+
+### Sentinel unknown-person rules are suppressed by any non-empty recognized list
+
+**What:** `unknown_person_camera_night_home` (and the dynamic no-home/when-home variants) skip whenever `recognized_people` is truthy — but the raw list dispatched to the image entity and Sentinel snapshot contains the literal `"Unknown Person"` and `"Indeterminate"` strings, so with face recognition enabled, a detected-but-unrecognized visitor *suppresses* the unknown-person rules rather than firing them. Decide whether the rules should filter negative identities before the emptiness check, or whether the snapshot layer should strip them.
+
+**Why:** Pre-existing behavior surfaced by the v3.30.0 adversarial review (the merge provably cannot change rule firing, but the rules' emptiness check is only vacuously aligned with their name). Changing it changes alerting behavior, so it needs its own focused decision, docs, and field validation — not a drive-by fix.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** v3.30.0
+
+**Resolution:** Fixed in the unknown-person rules overhaul: the rules now fire on a positive "Unknown Person" label (normalized), enrolled names suppress as accompanied-guest, and a 10-minute freshness gate keyed to the recognition event prevents stale re-fires. See the three new Sentinel Rules follow-up items for the deliberately deferred edges.
+
+**Completed:** v3.30.11 (2026-08-22)
+
+---
 
 ### Config entry lifecycle leaks in the deferred-start block
 

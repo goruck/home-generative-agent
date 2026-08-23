@@ -516,6 +516,35 @@ def test_redact_person_names_does_not_mutate_original() -> None:
     assert redacted["nested"]["ids"] == ["a recognised person", 3]
 
 
+def test_redact_person_names_ignores_unknown_person_label() -> None:
+    """
+    The reserved 'Unknown Person' label must survive redaction.
+
+    Unknown-person findings carry ['Unknown Person'] in evidence; redacting
+    it would rewrite the snapshot summary a stranger finding is built on
+    ("an unknown person at the door") into "a recognised person at the
+    door" before prompt rendering, inverting the explanation's meaning.
+    """
+    evidence: dict[str, Any] = {
+        "recognized_people": ["Unknown Person"],
+        "snapshot_summary": "An unknown person stands at the door.",
+    }
+    redacted = _redact_person_names(evidence)
+    assert redacted["snapshot_summary"] == "An unknown person stands at the door."
+    assert redacted["recognized_people"] == ["Unknown Person"]
+
+
+def test_redact_person_names_reserved_labels_alongside_enrolled_name() -> None:
+    """Reserved labels pass through while enrolled names are still redacted."""
+    evidence: dict[str, Any] = {
+        "recognized_people": ["Indeterminate", "Unknown Person", "Petra"],
+        "caption": "Petra stands near an unknown person.",
+    }
+    redacted = _redact_person_names(evidence)
+    assert "Petra" not in repr(redacted)
+    assert redacted["caption"] == ("a recognised person stands near an unknown person.")
+
+
 def test_redact_person_names_overlapping_names_longest_first() -> None:
     """
     Overlapping names must never leave a partial name behind.

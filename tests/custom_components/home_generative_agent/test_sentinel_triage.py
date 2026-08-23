@@ -143,6 +143,37 @@ def test_prompt_allowlist_excludes_person_names_replaces_with_count() -> None:
     assert "recognized_people_count: 2" in prompt
 
 
+def test_prompt_counts_enrolled_only_and_flags_unknown_person() -> None:
+    """
+    Reserved labels must not inflate the count the triage LLM reasons on.
+
+    An unknown-person finding always carries "Unknown Person" (often with
+    "Indeterminate"); counting those would read as "a known person was
+    recognized" and invite the LLM to suppress the stranger alert. The
+    stranger signal is surfaced explicitly instead.
+    """
+    evidence = {"recognized_people": ["Indeterminate", "Unknown Person"]}
+    finding = _finding(ftype="unknown_person_camera_no_home", evidence=evidence)
+    snapshot = _snapshot(is_night=True, anyone_home=False)
+
+    prompt = _build_prompt(finding, snapshot)
+
+    assert "recognized_people_count: 0" in prompt
+    assert "unknown_person_present: true" in prompt
+
+
+def test_prompt_no_unknown_person_flag_for_enrolled_only() -> None:
+    """The stranger flag appears only when the label is actually present."""
+    evidence = {"recognized_people": ["Alice"]}
+    finding = _finding(evidence=evidence)
+    snapshot = _snapshot(is_night=True, anyone_home=False)
+
+    prompt = _build_prompt(finding, snapshot)
+
+    assert "recognized_people_count: 1" in prompt
+    assert "unknown_person_present" not in prompt
+
+
 def test_prompt_allowlist_excludes_unlisted_evidence_keys() -> None:
     """Evidence keys not on the allowlist must never appear in the prompt."""
     evidence = {

@@ -158,6 +158,21 @@ def _anomaly_type_for_state(entity_id: str, new_state: State) -> str | None:
     if domain in _DOMAIN_TO_ANOMALY_TYPE:
         return _DOMAIN_TO_ANOMALY_TYPE[domain]
 
+    if domain == "image":
+        # This integration's Last Event image entities update when a
+        # face-recognition result lands — minutes after the motion event that
+        # started the analysis. The unknown-person rules gate on a 10-minute
+        # sighting freshness window, so without this wake-up a sighting could
+        # expire between polls on installs with a long
+        # sentinel_interval_seconds. Gate on the attributes only our
+        # LastEventImage entities carry: an unqualified image-domain match
+        # would let chatty third-party image entities (robot-vacuum maps,
+        # weather radar) drive near-continuous evaluations.
+        attrs = new_state.attributes
+        if "camera_id" in attrs and "recognized_people" in attrs:
+            return "unknown_person_camera_no_home"
+        return None
+
     if domain == "binary_sensor":
         device_class = new_state.attributes.get("device_class", "")
         return _DEVICE_CLASS_TO_ANOMALY_TYPE.get(device_class)
@@ -461,7 +476,18 @@ class SentinelEngine:
         if anomaly_type is None:
             return
 
-        if self._entity_excluded_for_type(entity_id, anomaly_type):
+        # Image-entity wake-ups arrive from image.<slug>_last_event, but users
+        # configure unknown-person exclusions against camera.* ids (#481
+        # contract: excluded entities must not wake the engine). Resolve the
+        # image entity to its camera so those exclusions keep working.
+        exclusion_ids = [entity_id]
+        camera_id = new_state.attributes.get("camera_id")
+        if isinstance(camera_id, str) and camera_id:
+            exclusion_ids.append(camera_id)
+        if any(
+            self._entity_excluded_for_type(excl_id, anomaly_type)
+            for excl_id in exclusion_ids
+        ):
             self._excluded_trigger_count += 1
             LOGGER.debug(
                 "Sentinel suppressed event trigger for %s (type=%s, user "

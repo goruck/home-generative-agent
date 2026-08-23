@@ -27,7 +27,7 @@ Most AI conversation integrations are prompt passthroughs: they forward your wor
 | **Conversational control** | Talk to your home in natural language. Turn things on, check status, ask questions. |
 | **Automation creation** | Describe what you want in chat and the agent writes and registers the HA automation. With the [Critical Action PIN](docs/configuration.md#critical-action-pin) enabled, an automation that would unlock a door or open a garage is held for PIN confirmation before it is installed — same as the direct command. |
 | **Camera & image analysis** | Ask the agent what it sees in any camera. Proactive motion-triggered analysis with anomaly detection. Works with Axis, Ring via ring-mqtt, Reolink, UniFi Protect, and any camera that exposes a motion entity or `recording` state in HA — see [Camera Entities](docs/camera-entities.md) for setup notes (battery Ring cameras need a [snapshot-mode tweak](docs/camera-entities.md#ring-cameras-via-ring-mqtt)). |
-| **Sentinel anomaly detection** | Deterministic rules watch for security and safety issues (unlocked locks, open entries, unknown people) and alert your phone. Optional LLM-powered triage and rule discovery — covering power, battery, and environmental sensors (temperature, humidity, CO₂, air quality, …). Approved discovery rules can be inspected, deactivated, reactivated, and surgically repaired via HA services. |
+| **Sentinel anomaly detection** | Deterministic rules watch for security and safety issues (unlocked locks, open entries, unknown people — the unknown-person rules require the face-service) and alert your phone. Optional LLM-powered triage and rule discovery — covering power, battery, and environmental sensors (temperature, humidity, CO₂, air quality, …). Approved discovery rules can be inspected, deactivated, reactivated, and surgically repaired via HA services. |
 | **Face recognition** | Identify people in camera frames and personalize alerts. |
 | **Long-term memory** | Semantic search over past conversations. The agent remembers your preferences and context. |
 | **Streaming responses** | First tokens appear word-by-word in the HA conversation UI — no waiting for the full response. |
@@ -64,7 +64,7 @@ Most AI conversation integrations are prompt passthroughs: they forward your wor
 | PostgreSQL with pgvector | Provided as a bundled HA app (step 1 below) |
 | Model provider | At least one of: OpenAI, Gemini, Anthropic, Ollama, or any OpenAI-compatible server |
 | Edge GPU server *(optional)* | Ollama, vLLM, llama.cpp, or LiteLLM for local model serving |
-| face-service *(optional)* | An external service required only for face recognition in camera analysis |
+| face-service *(optional)* | An external service for face recognition in camera analysis. Also powers Sentinel's unknown-person rules, which never fire unless face recognition is enabled (the `face_recognition` option, off by default) with this service configured |
 
 ## Quick Start
 

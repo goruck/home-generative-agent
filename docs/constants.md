@@ -291,7 +291,7 @@ This document covers the named constants that affect integration behaviour, orga
 
 | Constant | File | Value | Purpose |
 |---|---|---|---|
-| `SENTINEL_CAMERA_ACTIVITY_STALENESS_MINUTES` | `const.py` | `10` | Staleness gate for `alarm_disarmed_during_external_threat`. Camera activity must be within this window of the snapshot to fire the rule. |
+| `SENTINEL_CAMERA_ACTIVITY_STALENESS_MINUTES` | `const.py` | `10` | Staleness gate for the camera-evidence rules (`alarm_disarmed_during_external_threat` and the unknown-person rules). Camera evidence must be within this window of the snapshot to fire; for unknown-person sightings the window is measured against the face-recognition event itself, not camera motion that can refresh long after the labels went stale. |
 | `SENTINEL_OCCUPANCY_ARMED_STATES` | `const.py` | `{"armed_home", "armed_night"}` | Alarm states treated as occupancy-compatible. These states never trigger an `alarm_state_mismatch` finding when `expected_presence=home`. |
 | `_POWER_OFF_W` | `sentinel/power_enrichment.py` | `10.0` (W) | At or below this wattage a power sensor is treated as "appliance off" when walking recorder history for the last off→on transition. Only affects the enriched `last_changed` consumed downstream (dynamic rules, triage context, and the baseline cycle-completion recency window); the `appliance_power_duration` rule measures duration by direct observation and does not use it. |
 | `_LOOKBACK_DAYS` | `sentinel/power_enrichment.py` | `30` (days) | Recorder history window searched for a power sensor's last off→on transition. |
@@ -437,7 +437,8 @@ The same rules screen two surfaces: direct tool calls from the conversation agen
 | Constant | File | Value | Purpose |
 |---|---|---|---|
 | `FACE_RECOGNITION_THRESHOLD` | `core/person_gallery.py` | `0.7` | Max cosine distance for a gallery row to count as a positive identification |
-| `RESERVED_IDENTITY_LABELS` | `core/person_gallery.py` | `unknown person`, `indeterminate`, `none`, empty | Identity labels the recognition pipeline reserves for non-matches. Enrollment refuses them (any casing), and gallery rows already carrying such names are never treated as a mergeable identity |
+| `UNKNOWN_PERSON_LABEL` | `const.py` | `Unknown Person` | The label the recognition pipeline assigns to a face it saw but could not match to an enrolled person. Flows through the `recognized_people` attribute into snapshots, where Sentinel's unknown-person rules fire on its presence |
+| `RESERVED_IDENTITY_LABELS` | `const.py` | `unknown person`, `indeterminate`, `none`, empty | Identity labels the recognition pipeline reserves for non-matches (lowercase-normalized). Enrollment refuses them (any casing), gallery rows already carrying such names are never treated as a mergeable identity, and Sentinel filters them out wherever "an enrolled person was recognized" is meant |
 
 ---
 
@@ -508,7 +509,8 @@ These constants live outside `const.py` in individual modules. They affect runti
 | Constant | Value | Purpose |
 |---|---|---|
 | `FACE_RECOGNITION_THRESHOLD` | `0.7` | Max cosine distance for a positive identification in `recognize_person` |
-| `RESERVED_IDENTITY_LABELS` | `unknown person`, `indeterminate`, `none`, empty | Names refused at enrollment (any casing) and excluded from identity-merge candidacy |
+
+(`RESERVED_IDENTITY_LABELS` and `UNKNOWN_PERSON_LABEL` moved to `const.py` — see [Face Recognition](#face-recognition) above.)
 
 ### `core/video_analyzer.py`
 

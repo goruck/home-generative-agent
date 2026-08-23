@@ -48,6 +48,7 @@ from custom_components.home_generative_agent.const import (
     SNOOZE_PERMANENT,
 )
 from custom_components.home_generative_agent.core.utils import extract_final
+from custom_components.home_generative_agent.sentinel.models import enrolled_people
 from custom_components.home_generative_agent.sentinel.notifier_messages import (
     notif_msg,
 )
@@ -651,24 +652,31 @@ def _redact_if_sensitive(
     """
     Return *explanation* with recognised person names replaced.
 
-    When ``finding.is_sensitive`` is True, any string values in
+    When ``finding.is_sensitive`` is True, enrolled names in
     ``finding.evidence["recognized_people"]`` are replaced with the generic
-    phrase ``"a recognised person"``.  Returns the original string unchanged
-    when the finding is not sensitive or there are no names to redact.
+    phrase ``"a recognised person"``.  Reserved pipeline labels ("Unknown
+    Person", "Indeterminate") are never redacted — they are not private
+    identities, and substituting "Unknown Person" would rewrite "an unknown
+    person was seen" into "a recognised person was seen", inverting the
+    security meaning of the very findings that carry the label.  Returns the
+    original string unchanged when the finding is not sensitive or there are
+    no names to redact.
     """
     if not explanation or not finding.is_sensitive:
         return explanation
 
-    recognized: list[Any] = finding.evidence.get("recognized_people", [])
-    if not recognized:
+    recognized: list[Any] = finding.evidence.get("recognized_people", []) or []
+    names = enrolled_people(
+        person for person in recognized if isinstance(person, str) and person
+    )
+    if not names:
         return explanation
 
     redacted = explanation
-    for person in recognized:
-        if isinstance(person, str) and person:
-            redacted = re.sub(
-                re.escape(person), "a recognised person", redacted, flags=re.IGNORECASE
-            )
+    for person in names:
+        redacted = re.sub(
+            re.escape(person), "a recognised person", redacted, flags=re.IGNORECASE
+        )
     return redacted
 
 
@@ -934,11 +942,12 @@ def _alarm_disarmed_mobile_message(finding: AnomalyFinding) -> str:
     age = ev.get("camera_activity_age_minutes")
     if age is not None:
         age_mins = max(1, round(float(age)))
-        activity_phrase = (
-            f"{cam_name} detected unrecognized outdoor activity {age_mins} min ago."
-        )
+        activity_phrase = f"{cam_name} saw an unrecognized person {age_mins} min ago."
     else:
-        activity_phrase = f"{cam_name} reported unrecognized outdoor activity."
+        # Unreachable for newly generated findings — the rule's freshness
+        # gate guarantees a numeric age — but findings persisted before that
+        # gate existed can still re-render through this branch.
+        activity_phrase = f"{cam_name} saw an unrecognized person."
 
     last_changed = ev.get("alarm_last_changed")
     alarm_phrase = ""

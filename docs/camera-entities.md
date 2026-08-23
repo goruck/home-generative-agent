@@ -430,7 +430,7 @@ Internal dispatcher signals (most users will not need these directly — platfor
 | Signal | Updates |
 |---|---|
 | `SIGNAL_HGA_NEW_LATEST` | `image.*_last_event` |
-| `SIGNAL_HGA_RECOGNIZED` | `sensor.*_recognized_people` |
+| `SIGNAL_HGA_RECOGNIZED` | `sensor.*_recognized_people`, `image.*_last_event` |
 
 ---
 
@@ -465,6 +465,8 @@ Use the file picker or drag-and-drop to upload one or more images. The card enro
 
 Both enrollment paths refuse reserved identity labels — "Unknown Person", "Indeterminate", "None", or an empty name, in any casing — because the recognition pipeline uses those labels for non-matches (see Batch Identity Consolidation below).
 
+If the integration is not currently loaded (for example mid-reload, or removed without a Home Assistant restart), the upload endpoint responds with HTTP 503 and "Home Generative Agent is not loaded." Load the integration and retry. A reload that lands in the middle of an upload is answered the same way — HTTP 503 with "Enrollment failed; Home Generative Agent may be reloading. Try again."
+
 ### Batch Identity Consolidation
 
 Face recognition runs per frame, so one person walking through a camera's view can be recognized in some frames and come back as "Unknown Person" in others (face turned, motion blur, distance). Without correction, the batch would carry two identities for one human and the summary could report a phantom second person ("Nico walks toward the entrance while an unknown person is present nearby").
@@ -475,6 +477,6 @@ To prevent this, the video analyzer consolidates identities within each batch be
 - No single frame contains two or more detected faces — a known person and an unknown in the *same* frame is treated as a genuine companion and is never merged.
 - That known person is the unknown face's *nearest* enrolled match in the gallery, at a cosine distance under 0.85 (`VIDEO_ANALYZER_FACE_MERGE_THRESHOLD` in `const.py`). The bound is deliberately looser than the recognition threshold (`FACE_RECOGNITION_THRESHOLD`, 0.7 by default), since the merge only applies when the person is already confirmed present in the batch — but a face that is actually closer to a *different* enrolled person never merges.
 
-If any condition fails, both identities are preserved unchanged. The merged result flows to the summary, notifications, `sensor.*_recognized_people`, and Sentinel evidence. Sentinel's unknown-person rules are unaffected by design: they fire only when the camera's recognized list is empty, and a merge — which requires a known name already in the list — renames an entry without ever emptying or filling the list. Note for custom automations: if you trigger on the literal `"Unknown Person"` string in `sensor.*_recognized_people`, a merged gray-zone face will now appear under the known person's name instead — only faces that fail the strict conditions above keep the `"Unknown Person"` label. Saved face debug crops keep the raw per-frame names so the threshold can be tuned from real data.
+If any condition fails, both identities are preserved unchanged. The merged result flows to the summary, notifications, `sensor.*_recognized_people`, and Sentinel evidence. Sentinel's unknown-person rules are unaffected by design: they fire only on a fresh `"Unknown Person"` entry with no enrolled name alongside it, and a merge — which requires a known name already in the list — can only run on batches those rules already suppress as accompanied. Note for custom automations: if you trigger on the literal `"Unknown Person"` string in `sensor.*_recognized_people`, a merged gray-zone face will now appear under the known person's name instead — only faces that fail the strict conditions above keep the `"Unknown Person"` label. Saved face debug crops keep the raw per-frame names so the threshold can be tuned from real data.
 
 Separately from the merge, when the batch's **full** face evidence — every kept frame's post-merge identities plus the raw face hits of frames whose scene analysis failed after recognition succeeded, before any summary frame capping — proves exactly one enrolled person, the summary request tells the summarizer to attribute single-person frames to that person. This stops frames where no face was detectable (back turned, looking down at a phone) from being narrated as a second person alongside the recognized one. The instruction deliberately licenses attribution without denying plurality: a caption that genuinely describes two people — in any wording or language — remains narratable under the normal rules, so its worst-case failure is a mislabeled name, never an erased companion. It is also withheld outright whenever the evidence is short of proof: any unknown or second known face anywhere in the batch, any frame with two detected face boxes (even if one embedding was unreadable), or any frame caption that affirmatively mentions multiple people.

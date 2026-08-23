@@ -178,7 +178,7 @@ def test_dynamic_rule_unknown_person_camera_when_home() -> None:
                 "motion_entities": ["binary_sensor.backyard_motion"],
                 "vmd_entities": [],
                 "snapshot_summary": None,
-                "recognized_people": [],
+                "recognized_people": ["Unknown Person"],
                 "latest_path": None,
             }
         ],
@@ -209,6 +209,134 @@ def test_dynamic_rule_unknown_person_camera_when_home() -> None:
     assert findings[0].evidence["anyone_home"] is True
 
 
+def test_dynamic_rule_unknown_person_camera_when_home_no_trigger_no_stranger() -> None:
+    """Reserved labels alone (no 'Unknown Person') must not fire the rule."""
+    snapshot = _snapshot(
+        [],
+        [
+            {
+                "camera_entity_id": "camera.backyard",
+                "area": "Backyard",
+                "last_activity": "2026-02-01T00:00:00+00:00",
+                "motion_entities": ["binary_sensor.backyard_motion"],
+                "vmd_entities": [],
+                "snapshot_summary": None,
+                "recognized_people": ["Indeterminate"],
+                "latest_path": None,
+            }
+        ],
+        {
+            "now": "2026-02-01T00:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": False,
+            "anyone_home": True,
+            "people_home": [],
+            "people_away": [],
+            "last_motion_by_area": {},
+        },
+    )
+    rules = [
+        {
+            "rule_id": "unknown_person_camera_when_home",
+            "template_id": "unknown_person_camera_when_home",
+            "params": {"camera_entity_id": "camera.backyard"},
+            "severity": "low",
+            "confidence": 0.7,
+            "is_sensitive": False,
+            "suggested_actions": ["close_entry"],
+        }
+    ]
+    findings = evaluate_dynamic_rules(snapshot, rules)
+    assert findings == []
+
+
+def test_dynamic_rule_unknown_person_naive_timestamp_does_not_raise() -> None:
+    """
+    A tz-naive last_activity from a third-party camera must not abort.
+
+    Regression: naive minus aware raises TypeError, and evaluate_dynamic_rules
+    has no per-rule exception boundary — the error would kill the Sentinel run
+    loop until reload. The naive value is interpreted as local time instead.
+    """
+    snapshot = _snapshot(
+        [],
+        [
+            {
+                "camera_entity_id": "camera.frontgate",
+                "area": "Front Gate",
+                "last_activity": "2026-02-01T00:00:00",  # naive — passed verbatim
+                "motion_entities": [],
+                "vmd_entities": [],
+                "snapshot_summary": None,
+                "recognized_people": ["Unknown Person"],
+                "latest_path": None,
+            }
+        ],
+        {
+            "now": "2026-02-01T00:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": True,
+            "anyone_home": False,
+            "people_home": [],
+            "people_away": [],
+            "last_motion_by_area": {},
+        },
+    )
+    rules = [
+        {
+            "rule_id": "unknown_person_camera_no_home",
+            "template_id": "unknown_person_camera_no_home",
+            "params": {"camera_selector": "any"},
+            "severity": "low",
+            "confidence": 0.85,
+            "is_sensitive": True,
+            "suggested_actions": ["close_entry"],
+        }
+    ]
+    evaluate_dynamic_rules(snapshot, rules)  # must not raise
+
+
+def test_dynamic_rule_unknown_person_camera_when_home_no_trigger_stale() -> None:
+    """A sighting older than the staleness budget must not keep firing."""
+    snapshot = _snapshot(
+        [],
+        [
+            {
+                "camera_entity_id": "camera.backyard",
+                "area": "Backyard",
+                "last_activity": "2026-01-31T22:00:00+00:00",
+                "motion_entities": ["binary_sensor.backyard_motion"],
+                "vmd_entities": [],
+                "snapshot_summary": None,
+                "recognized_people": ["Unknown Person"],
+                "latest_path": None,
+            }
+        ],
+        {
+            "now": "2026-02-01T00:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": False,
+            "anyone_home": True,
+            "people_home": [],
+            "people_away": [],
+            "last_motion_by_area": {},
+        },
+    )
+    rules = [
+        {
+            "rule_id": "unknown_person_camera_when_home",
+            "template_id": "unknown_person_camera_when_home",
+            "params": {"camera_entity_id": "camera.backyard"},
+            "severity": "low",
+            "confidence": 0.7,
+            "is_sensitive": False,
+            "suggested_actions": ["close_entry"],
+        }
+    ]
+    findings = evaluate_dynamic_rules(snapshot, rules)
+    assert findings == []
+
+
 def test_dynamic_rule_unknown_person_camera_when_home_no_trigger_when_away() -> None:
     snapshot = _snapshot(
         [],
@@ -220,7 +348,7 @@ def test_dynamic_rule_unknown_person_camera_when_home_no_trigger_when_away() -> 
                 "motion_entities": ["binary_sensor.backyard_motion"],
                 "vmd_entities": [],
                 "snapshot_summary": None,
-                "recognized_people": [],
+                "recognized_people": ["Unknown Person"],
                 "latest_path": None,
             }
         ],
@@ -260,7 +388,7 @@ def test_dynamic_rule_unknown_person_camera_when_home_any_camera_selector() -> N
                 "motion_entities": ["binary_sensor.backyard_motion"],
                 "vmd_entities": [],
                 "snapshot_summary": None,
-                "recognized_people": [],
+                "recognized_people": ["Unknown Person"],
                 "latest_path": None,
             },
             {
@@ -312,7 +440,7 @@ def test_dynamic_rule_unknown_person_camera_no_home_any_camera_selector() -> Non
                 "motion_entities": ["binary_sensor.frontgate_motion"],
                 "vmd_entities": [],
                 "snapshot_summary": None,
-                "recognized_people": [],
+                "recognized_people": ["Unknown Person"],
                 "latest_path": None,
             }
         ],
@@ -340,6 +468,233 @@ def test_dynamic_rule_unknown_person_camera_no_home_any_camera_selector() -> Non
     findings = evaluate_dynamic_rules(snapshot, rules)
     assert len(findings) == 1
     assert findings[0].type == "unknown_person_camera_no_home_any_camera"
+    assert findings[0].evidence["camera_entity_id"] == "camera.frontgate"
+
+
+def test_dynamic_rule_unknown_person_camera_when_home_no_trigger_accompanied() -> None:
+    """A stranger alongside an enrolled person is a companion, not an intrusion."""
+    snapshot = _snapshot(
+        [],
+        [
+            {
+                "camera_entity_id": "camera.backyard",
+                "area": "Backyard",
+                "last_activity": "2026-02-01T00:00:00+00:00",
+                "motion_entities": ["binary_sensor.backyard_motion"],
+                "vmd_entities": [],
+                "snapshot_summary": None,
+                "recognized_people": ["Lindo", "Unknown Person"],
+                "latest_path": None,
+            }
+        ],
+        {
+            "now": "2026-02-01T00:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": False,
+            "anyone_home": True,
+            "people_home": [],
+            "people_away": [],
+            "last_motion_by_area": {},
+        },
+    )
+    rules = [
+        {
+            "rule_id": "unknown_person_camera_when_home",
+            "template_id": "unknown_person_camera_when_home",
+            "params": {"camera_entity_id": "camera.backyard"},
+            "severity": "low",
+            "confidence": 0.7,
+            "is_sensitive": False,
+            "suggested_actions": ["close_entry"],
+        }
+    ]
+    findings = evaluate_dynamic_rules(snapshot, rules)
+    assert findings == []
+
+
+def test_dynamic_rule_unknown_person_camera_when_home_no_trigger_no_timestamp() -> None:
+    """No last_activity means freshness cannot be proven — skip."""
+    snapshot = _snapshot(
+        [],
+        [
+            {
+                "camera_entity_id": "camera.backyard",
+                "area": "Backyard",
+                "last_activity": None,
+                "motion_entities": ["binary_sensor.backyard_motion"],
+                "vmd_entities": [],
+                "snapshot_summary": None,
+                "recognized_people": ["Unknown Person"],
+                "latest_path": None,
+            }
+        ],
+        {
+            "now": "2026-02-01T00:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": False,
+            "anyone_home": True,
+            "people_home": [],
+            "people_away": [],
+            "last_motion_by_area": {},
+        },
+    )
+    rules = [
+        {
+            "rule_id": "unknown_person_camera_when_home",
+            "template_id": "unknown_person_camera_when_home",
+            "params": {"camera_entity_id": "camera.backyard"},
+            "severity": "low",
+            "confidence": 0.7,
+            "is_sensitive": False,
+            "suggested_actions": ["close_entry"],
+        }
+    ]
+    findings = evaluate_dynamic_rules(snapshot, rules)
+    assert findings == []
+
+
+def test_dynamic_rule_unknown_person_camera_no_home_no_trigger_when_home() -> None:
+    """The away-only template must not fire while anyone is home."""
+    snapshot = _snapshot(
+        [],
+        [
+            {
+                "camera_entity_id": "camera.frontgate",
+                "area": "Front Gate",
+                "last_activity": "2026-02-01T00:00:00+00:00",
+                "motion_entities": ["binary_sensor.frontgate_motion"],
+                "vmd_entities": [],
+                "snapshot_summary": None,
+                "recognized_people": ["Unknown Person"],
+                "latest_path": None,
+            }
+        ],
+        {
+            "now": "2026-02-01T00:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": True,
+            "anyone_home": True,
+            "people_home": [],
+            "people_away": [],
+            "last_motion_by_area": {},
+        },
+    )
+    rules = [
+        {
+            "rule_id": "unknown_person_camera_no_home",
+            "template_id": "unknown_person_camera_no_home",
+            "params": {"camera_entity_id": "camera.frontgate"},
+            "severity": "low",
+            "confidence": 0.85,
+            "is_sensitive": True,
+            "suggested_actions": ["close_entry"],
+        }
+    ]
+    findings = evaluate_dynamic_rules(snapshot, rules)
+    assert findings == []
+
+
+def test_dynamic_rule_unknown_person_camera_no_home_specific_camera_triggers() -> None:
+    """The no_home template fires for an explicitly targeted camera."""
+    snapshot = _snapshot(
+        [],
+        [
+            {
+                "camera_entity_id": "camera.frontgate",
+                "area": "Front Gate",
+                "last_activity": "2026-02-01T00:00:00+00:00",
+                "motion_entities": [],
+                "vmd_entities": [],
+                "snapshot_summary": None,
+                "recognized_people": ["Unknown Person"],
+                "latest_path": None,
+            }
+        ],
+        {
+            "now": "2026-02-01T00:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": True,
+            "anyone_home": False,
+            "people_home": [],
+            "people_away": [],
+            "last_motion_by_area": {},
+        },
+    )
+    rules = [
+        {
+            "rule_id": "unknown_person_camera_no_home",
+            "template_id": "unknown_person_camera_no_home",
+            "params": {"camera_entity_id": "camera.frontgate"},
+            "severity": "low",
+            "confidence": 0.85,
+            "is_sensitive": True,
+            "suggested_actions": ["close_entry"],
+        }
+    ]
+    findings = evaluate_dynamic_rules(snapshot, rules)
+    assert len(findings) == 1
+    assert findings[0].evidence["camera_entity_id"] == "camera.frontgate"
+
+
+def test_dynamic_rule_unknown_person_camera_no_home_any_selector_mixed() -> None:
+    """With 'any' selector, only the actionable sighting fires among mixed cameras."""
+    snapshot = _snapshot(
+        [],
+        [
+            {
+                "camera_entity_id": "camera.backyard",
+                "area": "Backyard",
+                "last_activity": "2026-02-01T00:00:00+00:00",
+                "motion_entities": [],
+                "vmd_entities": [],
+                "snapshot_summary": None,
+                "recognized_people": ["Lindo", "Unknown Person"],
+                "latest_path": None,
+            },
+            {
+                "camera_entity_id": "camera.frontgate",
+                "area": "Front Gate",
+                "last_activity": "2026-02-01T00:00:00+00:00",
+                "motion_entities": [],
+                "vmd_entities": [],
+                "snapshot_summary": None,
+                "recognized_people": ["Unknown Person"],
+                "latest_path": None,
+            },
+            {
+                "camera_entity_id": "camera.driveway",
+                "area": "Driveway",
+                "last_activity": "2026-01-31T22:00:00+00:00",
+                "motion_entities": [],
+                "vmd_entities": [],
+                "snapshot_summary": None,
+                "recognized_people": ["Unknown Person"],
+                "latest_path": None,
+            },
+        ],
+        {
+            "now": "2026-02-01T00:00:00+00:00",
+            "timezone": "UTC",
+            "is_night": True,
+            "anyone_home": False,
+            "people_home": [],
+            "people_away": [],
+            "last_motion_by_area": {},
+        },
+    )
+    rules = [
+        {
+            "rule_id": "unknown_person_camera_no_home_any_camera",
+            "template_id": "unknown_person_camera_no_home",
+            "params": {"camera_selector": "any"},
+            "severity": "low",
+            "confidence": 0.85,
+            "is_sensitive": True,
+            "suggested_actions": ["close_entry"],
+        }
+    ]
+    findings = evaluate_dynamic_rules(snapshot, rules)
+    assert len(findings) == 1
     assert findings[0].evidence["camera_entity_id"] == "camera.frontgate"
 
 

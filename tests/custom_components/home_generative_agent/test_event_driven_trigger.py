@@ -13,6 +13,7 @@ import pytest
 from custom_components.home_generative_agent.sentinel.engine import (
     SentinelEngine,
     _anomaly_type_for_state,
+    _parse_rule_entity_exclusions,
 )
 from custom_components.home_generative_agent.sentinel.suppression import (
     SuppressionManager,
@@ -172,6 +173,63 @@ def test_binary_sensor_occupancy_maps_correctly() -> None:
     )
     result = _anomaly_type_for_state("binary_sensor.living_room_occ", state)
     assert result == "unknown_person_camera_no_home"
+
+
+def test_image_domain_maps_to_unknown_person_rule() -> None:
+    """
+    HGA image entity updates (recognition results landing) wake the engine.
+
+    The unknown-person rules gate on a 10-minute sighting freshness window;
+    the "Unknown Person" label arrives on the image entity minutes after the
+    motion event, so without this mapping a sighting could expire between
+    polls on installs with a long sentinel_interval_seconds.
+    """
+    state = _make_state("image.backyard_last_event", "image")
+    state.attributes = {
+        "camera_id": "camera.backyard",
+        "recognized_people": ["Unknown Person"],
+    }
+    result = _anomaly_type_for_state("image.backyard_last_event", state)
+    assert result == "unknown_person_camera_no_home"
+
+
+def test_third_party_image_entity_does_not_wake_engine() -> None:
+    """
+    Non-HGA image entities (vacuum maps, radar) must not enqueue triggers.
+
+    An unqualified image-domain match would let a chatty third-party image
+    entity drive near-continuous full sentinel evaluations.
+    """
+    state = _make_state("image.roborock_map", "image")
+    assert _anomaly_type_for_state("image.roborock_map", state) is None
+
+
+def test_image_trigger_respects_camera_exclusion() -> None:
+    """
+    An image wake-up is suppressed when its CAMERA is excluded.
+
+    Users configure unknown-person exclusions against camera.* ids; the
+    wake-up arrives from image.<slug>_last_event, so the engine must resolve
+    the image entity to its camera before the exclusion check (#481 contract:
+    excluded entities do not wake the engine).
+    """
+    hass = MagicMock()
+    engine = _make_engine(hass)
+    engine._rule_entity_exclusions = _parse_rule_entity_exclusions(
+        {"unknown_person_camera_no_home": ["camera.backyard"]}
+    )
+
+    image_state = _make_state("image.backyard_last_event", "image")
+    image_state.attributes = {
+        "camera_id": "camera.backyard",
+        "recognized_people": ["Unknown Person"],
+    }
+    event = MagicMock()
+    event.data = {"entity_id": "image.backyard_last_event", "new_state": image_state}
+
+    engine._on_state_changed(event)
+
+    assert engine._trigger_scheduler.queue_depth == 0
 
 
 def test_irrelevant_domain_returns_none() -> None:
