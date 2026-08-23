@@ -1215,18 +1215,6 @@ window-scoped check could suppress.
 
 ---
 
-### Baseline-deviation notifications guess the display unit from the entity_id
-
-**What:** `_baseline_deviation_mobile_message` (`sentinel/notifier.py:904`) picks the display unit with `"W" if "power" in entity_id else "kWh" if "energy" in entity_id else ""`. A kW-denominated sensor renders as e.g. "0.4W vs usual 0.3W", and a power sensor without "power" in its entity_id gets no unit at all. Surfaced during the #461 unit-normalization review (v3.21.3).
-
-**How to apply:** Plumb the sensor's `unit_of_measurement` into the baseline finding evidence in `sentinel/baseline.py` (alongside `current_value`/`baseline_value`, which stay native) and render it verbatim in the notifier, falling back to the current heuristic for old persisted findings.
-
-**Effort:** S
-**Priority:** P3
-**Depends on:** None
-
----
-
 ### Deduplicate the _friendly_type label maps
 
 **What:** `sentinel/notifier.py` and `explain/llm_explain.py` each carry a byte-identical `_friendly_type` `known` map (and matching prefix-stripping fallback). Every new anomaly type requires the same entries in both maps plus mirrored tests in `test_sentinel_notifier.py` and `test_llm_explain.py` — the v3.21.0 ship added the four `open_entry_at_night*` keys in four places. A missed side silently regresses user-visible labels to the title-cased fallback. The v3.22.0 ship widened the duplication: `_KNOWN_TYPE_LABELS` and a `_display_type` helper (template-label fallback for slugified dynamic-rule IDs) are now mirrored verbatim in both modules, so each new rule type needs two edits plus two mirrored tests. Re-flagged by the maintainability specialist during the v3.22.0 ship.
@@ -1486,6 +1474,21 @@ window-scoped check could suppress.
 ---
 
 ## Completed
+
+### Baseline-deviation notifications guess the display unit from the entity_id
+
+**What:** `_baseline_deviation_mobile_message` (`sentinel/notifier.py:904`) picks the display unit with `"W" if "power" in entity_id else "kWh" if "energy" in entity_id else ""`. A kW-denominated sensor renders as e.g. "0.4W vs usual 0.3W", and a power sensor without "power" in its entity_id gets no unit at all. Surfaced during the #461 unit-normalization review (v3.21.3).
+
+**How to apply:** Plumb the sensor's `unit_of_measurement` into the baseline finding evidence in `sentinel/baseline.py` (alongside `current_value`/`baseline_value`, which stay native) and render it verbatim in the notifier, falling back to the current heuristic for old persisted findings.
+
+**Resolution:** Shipped as prescribed in the metric-aware baseline-copy fix: `evaluate_baseline_deviation` and `_evaluate_dow_anomaly` capture `unit_of_measurement` and `device_class` into finding evidence, and `_baseline_deviation_mobile_message` renders the captured unit (sanitized — control/bidi characters stripped, length-capped). The entity_id heuristic survives only for legacy persisted findings whose evidence lacks the unit key; a present-but-empty unit means a genuinely unitless sensor and no unit is fabricated. Anomaly-id stability across the new evidence keys is preserved via `DISPLAY_ONLY_EVIDENCE_KEYS` / `hashable_evidence` in `sentinel/models.py`. Follow-up spoofing gap for `friendly_name`-derived text is tracked as its own P3 above.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+**Completed:** v3.31.1 (2026-08-23)
+
+---
 
 ### Sentinel unknown-person rules are suppressed by any non-empty recognized list
 
