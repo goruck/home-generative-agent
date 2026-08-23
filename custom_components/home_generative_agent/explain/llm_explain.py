@@ -15,6 +15,7 @@ from custom_components.home_generative_agent.core.utils import (
     extract_final,
     run_sentinel_model_call,
 )
+from custom_components.home_generative_agent.sentinel.models import enrolled_people
 
 from .prompts import LANGUAGE_INSTRUCTION_TEMPLATE, SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
 
@@ -235,11 +236,15 @@ def _redact_person_names(evidence: dict[str, Any]) -> dict[str, Any]:
     original evidence dict is never mutated (its key order feeds anomaly-id
     derivation elsewhere).
     """
-    names = [
+    # Only enrolled names are private. Reserved pipeline labels ("Unknown
+    # Person", "Indeterminate") must survive redaction — substituting
+    # "Unknown Person" would rewrite the evidence a stranger finding is
+    # built on into "a recognised person", inverting its meaning.
+    names = enrolled_people(
         person
-        for person in evidence.get("recognized_people", [])
+        for person in evidence.get("recognized_people", []) or []
         if isinstance(person, str) and person
-    ]
+    )
     if not names:
         return evidence
     pattern = re.compile(

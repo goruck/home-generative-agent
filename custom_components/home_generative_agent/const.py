@@ -198,9 +198,25 @@ RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: bool = False
 CONF_SENTINEL_STALENESS_THRESHOLD_SECONDS = "sentinel_staleness_threshold_seconds"
 RECOMMENDED_SENTINEL_STALENESS_THRESHOLD_SECONDS: int = 1800
 
-# Camera activity staleness gate for the alarm_disarmed_during_external_threat rule.
-# Only fire the rule when camera activity is within this many minutes of the snapshot.
+# Camera activity staleness gate for camera-evidence rules
+# (alarm_disarmed_during_external_threat and the unknown-person rules).
+# Only fire when camera activity is within this many minutes of the snapshot.
 SENTINEL_CAMERA_ACTIVITY_STALENESS_MINUTES: int = 10
+
+# ---- Face-recognition identity labels ----
+# The label the recognition pipeline assigns to a face it saw but could not
+# match to an enrolled person. Flows from the video analyzer through the
+# image-entity/sensor "recognized_people" attribute into snapshots, where the
+# unknown-person Sentinel rules key on its presence.
+UNKNOWN_PERSON_LABEL = "Unknown Person"
+# Identity labels reserved for non-matches (lowercase-normalized): the
+# recognition pipeline emits these alongside enrolled names, so any consumer
+# that means "an enrolled person was recognized" must filter them out.
+# "Unknown Person" = seen but unenrolled; "Indeterminate" = recognition ran
+# but found no identifiable face; "None"/"" = legacy placeholders. Enrolling
+# a person under one of these would corrupt identity-merge conditions and
+# unknown-person rule firing, so enrollment refuses them (person_gallery).
+RESERVED_IDENTITY_LABELS = frozenset({"unknown person", "indeterminate", "none", ""})
 
 # HA alarm modes that allow motion detection while occupants are present. These states
 # are the intended operating condition when expected_presence="home" — never anomalous.

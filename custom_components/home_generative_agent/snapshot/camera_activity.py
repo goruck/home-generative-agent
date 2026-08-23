@@ -82,6 +82,7 @@ def extract_camera_activity(  # noqa: PLR0912
     snapshot_summary: str | None = None
     recognized_people: list[str] = []
     latest_path: str | None = None
+    recognition_last_event: str | None = None
     for key in _SUMMARY_KEYS:
         if key in attrs:
             val = attrs.get(key)
@@ -92,8 +93,15 @@ def extract_camera_activity(  # noqa: PLR0912
         image_attrs = image_state.attributes
         if snapshot_summary is None and image_attrs.get("summary") is not None:
             snapshot_summary = str(image_attrs.get("summary"))
-        if last_activity is None and image_attrs.get("last_event") is not None:
-            last_activity = _coerce_iso(image_attrs.get("last_event"))
+        if image_attrs.get("last_event") is not None:
+            # Dates the recognition sighting itself — the image entity stamps
+            # last_event from the same signal that carries recognized_people,
+            # so unknown-person freshness gates key on this, not on
+            # last_activity (which camera motion attributes can refresh long
+            # after the recognition labels went stale).
+            recognition_last_event = _coerce_iso(image_attrs.get("last_event"))
+        if last_activity is None and recognition_last_event is not None:
+            last_activity = recognition_last_event
         if image_attrs.get("recognized_people") is not None:
             recognized_people = _normalize_entity_list(
                 image_attrs.get("recognized_people")
@@ -110,4 +118,5 @@ def extract_camera_activity(  # noqa: PLR0912
         "snapshot_summary": snapshot_summary,
         "recognized_people": sorted(set(recognized_people)),
         "latest_path": latest_path,
+        "recognition_last_event": recognition_last_event,
     }

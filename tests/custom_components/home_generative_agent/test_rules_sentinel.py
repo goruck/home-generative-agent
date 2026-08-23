@@ -7,9 +7,15 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from custom_components.home_generative_agent.const import UNKNOWN_PERSON_LABEL
 from custom_components.home_generative_agent.explain.prompts import SYSTEM_PROMPT
 from custom_components.home_generative_agent.sentinel.dynamic_rules import (
     evaluate_dynamic_rule,
+)
+from custom_components.home_generative_agent.sentinel.models import (
+    enrolled_people,
+    has_unknown_person,
+    minutes_between,
 )
 from custom_components.home_generative_agent.sentinel.rules.alarm_disarmed_external_threat import (
     AlarmDisarmedDuringExternalThreatRule,
@@ -59,7 +65,11 @@ def _base_snapshot() -> FullStateSnapshot:
     return validate_snapshot(
         {
             "schema_version": 1,
-            "generated_at": "2025-01-01T00:00:00+00:00",
+            # One minute after the _camera_activity/_no_home_camera_activity
+            # default last_activity (00:04) so default sightings read as
+            # 1 minute old — the future-skew guard rejects timestamps ahead
+            # of the snapshot.
+            "generated_at": "2025-01-01T00:05:00+00:00",
             "entities": [],
             "camera_activity": [],
             "derived": {
@@ -1299,22 +1309,33 @@ def test_camera_entry_links_empty_list_does_not_fire() -> None:
     assert len(findings) == 0
 
 
+def _no_home_camera_activity(
+    recognized_people: list[str],
+    *,
+    last_activity: str | None = "2025-01-01T00:04:00+00:00",
+    motion_entities: list[str] | None = None,
+) -> CameraActivity:
+    return CameraActivity(
+        camera_entity_id="camera.backyard",
+        area="Backyard",
+        last_activity=last_activity,
+        motion_entities=(
+            motion_entities
+            if motion_entities is not None
+            else ["binary_sensor.backyard_motion"]
+        ),
+        vmd_entities=[],
+        snapshot_summary=None,
+        recognized_people=recognized_people,
+        latest_path=None,
+    )
+
+
 def test_unknown_person_camera_no_home_triggers() -> None:
     """Unknown person on camera should trigger when no one is home."""
     snapshot = _base_snapshot()
     snapshot["derived"]["anyone_home"] = False
-    snapshot["camera_activity"] = [
-        {
-            "camera_entity_id": "camera.backyard",
-            "area": "Backyard",
-            "last_activity": "2025-01-01T00:04:00+00:00",
-            "motion_entities": ["binary_sensor.backyard_motion"],
-            "vmd_entities": [],
-            "snapshot_summary": None,
-            "recognized_people": [],
-            "latest_path": None,
-        }
-    ]
+    snapshot["camera_activity"] = [_no_home_camera_activity(["Unknown Person"])]
 
     findings = UnknownPersonCameraNoHomeRule().evaluate(snapshot)
     assert len(findings) == 1
@@ -1324,63 +1345,105 @@ def test_unknown_person_camera_no_home_triggers() -> None:
     assert "close_entry" in findings[0].suggested_actions
 
 
+def test_unknown_person_camera_no_home_triggers_without_motion_entities() -> None:
+    """
+    Motion/VMD camera attributes are optional — most integrations lack them.
+
+    Regression: the original predicate required them, which made the rule
+    unfireable on cameras (e.g. axis) that expose no motion attribute keys.
+    """
+    snapshot = _base_snapshot()
+    snapshot["derived"]["anyone_home"] = False
+    snapshot["camera_activity"] = [
+        _no_home_camera_activity(["Unknown Person"], motion_entities=[])
+    ]
+
+    findings = UnknownPersonCameraNoHomeRule().evaluate(snapshot)
+    assert len(findings) == 1
+
+
+def test_unknown_person_camera_no_home_triggers_alongside_indeterminate() -> None:
+    """An Indeterminate label from a no-face frame must not veto the stranger."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["anyone_home"] = False
+    snapshot["camera_activity"] = [
+        _no_home_camera_activity(["Indeterminate", "Unknown Person"])
+    ]
+
+    findings = UnknownPersonCameraNoHomeRule().evaluate(snapshot)
+    assert len(findings) == 1
+
+
+def test_unknown_person_camera_no_home_triggers_legacy_label_variant() -> None:
+    """Legacy lowercase 'unknown person' label variants still count."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["anyone_home"] = False
+    snapshot["camera_activity"] = [_no_home_camera_activity(["unknown person"])]
+
+    findings = UnknownPersonCameraNoHomeRule().evaluate(snapshot)
+    assert len(findings) == 1
+
+
 def test_unknown_person_camera_no_home_no_trigger_when_home() -> None:
     """No finding when someone is home, even if an unknown person is on camera."""
     snapshot = _base_snapshot()
     snapshot["derived"]["anyone_home"] = True
-    snapshot["camera_activity"] = [
-        {
-            "camera_entity_id": "camera.backyard",
-            "area": "Backyard",
-            "last_activity": "2025-01-01T00:04:00+00:00",
-            "motion_entities": ["binary_sensor.backyard_motion"],
-            "vmd_entities": [],
-            "snapshot_summary": None,
-            "recognized_people": [],
-            "latest_path": None,
-        }
-    ]
+    snapshot["camera_activity"] = [_no_home_camera_activity(["Unknown Person"])]
 
     findings = UnknownPersonCameraNoHomeRule().evaluate(snapshot)
     assert len(findings) == 0
 
 
 def test_unknown_person_camera_no_home_no_trigger_when_recognized() -> None:
-    """No finding when the detected person is recognized."""
+    """No finding when only an enrolled person was recognized."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["anyone_home"] = False
+    snapshot["camera_activity"] = [_no_home_camera_activity(["Jane"])]
+
+    findings = UnknownPersonCameraNoHomeRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_unknown_person_camera_no_home_no_trigger_when_accompanied() -> None:
+    """A stranger alongside an enrolled person is a companion, not an intrusion."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["anyone_home"] = False
+    snapshot["camera_activity"] = [_no_home_camera_activity(["Jane", "Unknown Person"])]
+
+    findings = UnknownPersonCameraNoHomeRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_unknown_person_camera_no_home_no_trigger_indeterminate_only() -> None:
+    """Indeterminate alone means no person was identified — nothing to report."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["anyone_home"] = False
+    snapshot["camera_activity"] = [_no_home_camera_activity(["Indeterminate"])]
+
+    findings = UnknownPersonCameraNoHomeRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_unknown_person_camera_no_home_no_trigger_when_stale() -> None:
+    """A sighting older than the staleness budget must not keep firing."""
     snapshot = _base_snapshot()
     snapshot["derived"]["anyone_home"] = False
     snapshot["camera_activity"] = [
-        {
-            "camera_entity_id": "camera.backyard",
-            "area": "Backyard",
-            "last_activity": "2025-01-01T00:04:00+00:00",
-            "motion_entities": ["binary_sensor.backyard_motion"],
-            "vmd_entities": [],
-            "snapshot_summary": None,
-            "recognized_people": ["person.jane"],
-            "latest_path": None,
-        }
+        _no_home_camera_activity(
+            ["Unknown Person"], last_activity="2024-12-31T23:00:00+00:00"
+        )
     ]
 
     findings = UnknownPersonCameraNoHomeRule().evaluate(snapshot)
     assert len(findings) == 0
 
 
-def test_unknown_person_camera_no_home_no_trigger_without_motion() -> None:
-    """No finding when camera has activity but no motion or VMD entities."""
+def test_unknown_person_camera_no_home_no_trigger_without_last_activity() -> None:
+    """No timestamp means freshness cannot be proven — skip."""
     snapshot = _base_snapshot()
     snapshot["derived"]["anyone_home"] = False
     snapshot["camera_activity"] = [
-        {
-            "camera_entity_id": "camera.backyard",
-            "area": "Backyard",
-            "last_activity": "2025-01-01T00:04:00+00:00",
-            "motion_entities": [],
-            "vmd_entities": [],
-            "snapshot_summary": None,
-            "recognized_people": [],
-            "latest_path": None,
-        }
+        _no_home_camera_activity(["Unknown Person"], last_activity=None)
     ]
 
     findings = UnknownPersonCameraNoHomeRule().evaluate(snapshot)
@@ -1989,6 +2052,7 @@ def test_unknown_person_at_night_while_home_triggers() -> None:
         _camera_activity(
             "camera.frontporch",
             snapshot_summary="Person holding a dark garment standing at door.",
+            recognized_people=["Unknown Person"],
         )
     ]
     findings = UnknownPersonAtNightWhileHomeRule().evaluate(snapshot)
@@ -1998,13 +2062,33 @@ def test_unknown_person_at_night_while_home_triggers() -> None:
     assert findings[0].confidence == 0.7
 
 
+def test_unknown_person_at_night_while_home_triggers_alongside_indeterminate() -> None:
+    """An Indeterminate label from a no-face frame must not veto the stranger."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = True
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.frontporch",
+            snapshot_summary="Person at door.",
+            recognized_people=["Indeterminate", "Unknown Person"],
+        )
+    ]
+    findings = UnknownPersonAtNightWhileHomeRule().evaluate(snapshot)
+    assert len(findings) == 1
+
+
 def test_unknown_person_at_night_while_home_no_trigger_when_day() -> None:
     """No finding during the day."""
     snapshot = _base_snapshot()
     snapshot["derived"]["is_night"] = False
     snapshot["derived"]["anyone_home"] = True
     snapshot["camera_activity"] = [
-        _camera_activity("camera.frontporch", snapshot_summary="Person at door.")
+        _camera_activity(
+            "camera.frontporch",
+            snapshot_summary="Person at door.",
+            recognized_people=["Unknown Person"],
+        )
     ]
     findings = UnknownPersonAtNightWhileHomeRule().evaluate(snapshot)
     assert len(findings) == 0
@@ -2016,14 +2100,18 @@ def test_unknown_person_at_night_while_home_no_trigger_when_away() -> None:
     snapshot["derived"]["is_night"] = True
     snapshot["derived"]["anyone_home"] = False
     snapshot["camera_activity"] = [
-        _camera_activity("camera.frontporch", snapshot_summary="Person at door.")
+        _camera_activity(
+            "camera.frontporch",
+            snapshot_summary="Person at door.",
+            recognized_people=["Unknown Person"],
+        )
     ]
     findings = UnknownPersonAtNightWhileHomeRule().evaluate(snapshot)
     assert len(findings) == 0
 
 
 def test_unknown_person_at_night_while_home_no_trigger_when_recognized() -> None:
-    """No finding when the person is recognized."""
+    """No finding when only an enrolled person was recognized."""
     snapshot = _base_snapshot()
     snapshot["derived"]["is_night"] = True
     snapshot["derived"]["anyone_home"] = True
@@ -2031,7 +2119,73 @@ def test_unknown_person_at_night_while_home_no_trigger_when_recognized() -> None
         _camera_activity(
             "camera.frontporch",
             snapshot_summary="Lindo at door.",
-            recognized_people=["person.lindo_st_angel"],
+            recognized_people=["Lindo"],
+        )
+    ]
+    findings = UnknownPersonAtNightWhileHomeRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_unknown_person_at_night_while_home_no_trigger_when_accompanied() -> None:
+    """A stranger alongside an enrolled person is a companion, not an intrusion."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = True
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.frontporch",
+            snapshot_summary="Lindo and a visitor at door.",
+            recognized_people=["Lindo", "Unknown Person"],
+        )
+    ]
+    findings = UnknownPersonAtNightWhileHomeRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_unknown_person_at_night_while_home_no_trigger_indeterminate_only() -> None:
+    """Indeterminate alone means no person was identified — nothing to report."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = True
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.frontporch",
+            snapshot_summary="Empty porch at night.",
+            recognized_people=["Indeterminate"],
+        )
+    ]
+    findings = UnknownPersonAtNightWhileHomeRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_unknown_person_at_night_while_home_no_trigger_when_stale() -> None:
+    """A daytime sighting must not re-fire as a night finding hours later."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = True
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.frontporch",
+            snapshot_summary="Person at door.",
+            recognized_people=["Unknown Person"],
+            last_activity="2024-12-31T14:00:00+00:00",
+        )
+    ]
+    findings = UnknownPersonAtNightWhileHomeRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_unknown_person_at_night_while_home_no_trigger_without_last_activity() -> None:
+    """No timestamp means freshness cannot be proven — skip."""
+    snapshot = _base_snapshot()
+    snapshot["derived"]["is_night"] = True
+    snapshot["derived"]["anyone_home"] = True
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.frontporch",
+            snapshot_summary="Person at door.",
+            recognized_people=["Unknown Person"],
+            last_activity=None,
         )
     ]
     findings = UnknownPersonAtNightWhileHomeRule().evaluate(snapshot)
@@ -2044,7 +2198,11 @@ def test_unknown_person_at_night_while_home_no_trigger_without_summary() -> None
     snapshot["derived"]["is_night"] = True
     snapshot["derived"]["anyone_home"] = True
     snapshot["camera_activity"] = [
-        _camera_activity("camera.frontporch", snapshot_summary=None)
+        _camera_activity(
+            "camera.frontporch",
+            snapshot_summary=None,
+            recognized_people=["Unknown Person"],
+        )
     ]
     findings = UnknownPersonAtNightWhileHomeRule().evaluate(snapshot)
     assert len(findings) == 0
@@ -2323,6 +2481,7 @@ def test_alarm_disarmed_external_threat_triggers() -> None:
         _camera_activity(
             "camera.backyard",
             snapshot_summary="Unknown person in backyard.",
+            recognized_people=["Unknown Person"],
         )
     ]
     findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
@@ -2341,6 +2500,7 @@ def test_alarm_disarmed_external_threat_no_trigger_when_armed() -> None:
         _camera_activity(
             "camera.backyard",
             snapshot_summary="Unknown person in backyard.",
+            recognized_people=["Unknown Person"],
         )
     ]
     findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
@@ -2348,14 +2508,44 @@ def test_alarm_disarmed_external_threat_no_trigger_when_armed() -> None:
 
 
 def test_alarm_disarmed_external_threat_no_trigger_when_recognized() -> None:
-    """No finding when detected person is recognized."""
+    """No finding when only an enrolled person was recognized."""
     snapshot = _base_snapshot()
     snapshot["entities"] = [_alarm_entity("disarmed")]
     snapshot["camera_activity"] = [
         _camera_activity(
             "camera.backyard",
             snapshot_summary="Lindo in backyard.",
-            recognized_people=["person.lindo_st_angel"],
+            recognized_people=["Lindo"],
+        )
+    ]
+    findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_alarm_disarmed_external_threat_no_trigger_when_accompanied() -> None:
+    """A stranger alongside an enrolled person is a companion, not a threat."""
+    snapshot = _base_snapshot()
+    snapshot["entities"] = [_alarm_entity("disarmed")]
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.backyard",
+            snapshot_summary="Lindo and a visitor in backyard.",
+            recognized_people=["Lindo", "Unknown Person"],
+        )
+    ]
+    findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
+    assert len(findings) == 0
+
+
+def test_alarm_disarmed_external_threat_no_trigger_indeterminate_only() -> None:
+    """Indeterminate alone (no face identified) must not fire the rule."""
+    snapshot = _base_snapshot()
+    snapshot["entities"] = [_alarm_entity("disarmed")]
+    snapshot["camera_activity"] = [
+        _camera_activity(
+            "camera.backyard",
+            snapshot_summary="A cat crosses the backyard.",
+            recognized_people=["Indeterminate"],
         )
     ]
     findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
@@ -2412,6 +2602,7 @@ def test_alarm_disarmed_non_standard_entity_name_triggers() -> None:
         _camera_activity(
             "camera.front_porch",
             snapshot_summary="Unknown person at front porch.",
+            recognized_people=["Unknown Person"],
         )
     ]
     findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
@@ -2454,6 +2645,7 @@ def test_alarm_disarmed_multiple_panels_one_disarmed_triggers() -> None:
         _camera_activity(
             "camera.driveway",
             snapshot_summary="Unknown person near driveway.",
+            recognized_people=["Unknown Person"],
         )
     ]
     findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
@@ -2487,6 +2679,7 @@ def test_alarm_disarmed_stale_activity_no_trigger() -> None:
             # 16 minutes before generated_at — beyond the 10-minute threshold.
             last_activity="2025-01-01T00:04:00+00:00",
             snapshot_summary="Unknown person in backyard.",
+            recognized_people=["Unknown Person"],
         )
     ]
     findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
@@ -2504,6 +2697,7 @@ def test_alarm_disarmed_fresh_activity_triggers_with_age() -> None:
             # 4 minutes before generated_at — within the 10-minute threshold.
             last_activity="2025-01-01T00:04:00+00:00",
             snapshot_summary="Unknown person in backyard.",
+            recognized_people=["Unknown Person"],
         )
     ]
     findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
@@ -2513,25 +2707,34 @@ def test_alarm_disarmed_fresh_activity_triggers_with_age() -> None:
     assert 3.9 < age < 4.1
 
 
-def test_alarm_disarmed_unparseable_timestamp_no_other_evidence_no_trigger() -> None:
-    """Unparseable last_activity with no other evidence must not fire the rule."""
+def test_alarm_disarmed_multiple_cameras_only_actionable_sighting_fires() -> None:
+    """With mixed cameras, only the stranger-only fresh sighting fires."""
     snapshot = _base_snapshot()
     snapshot["entities"] = [_alarm_entity("disarmed")]
     snapshot["camera_activity"] = [
         _camera_activity(
             "camera.backyard",
-            last_activity="not-a-valid-timestamp",
-            motion_entities=[],
-            vmd_entities=[],
-            snapshot_summary=None,
-        )
+            snapshot_summary="Lindo and a visitor in backyard.",
+            recognized_people=["Lindo", "Unknown Person"],
+        ),
+        _camera_activity(
+            "camera.driveway",
+            snapshot_summary="Unknown person near driveway.",
+            recognized_people=["Unknown Person"],
+        ),
+        _camera_activity(
+            "camera.side_gate",
+            snapshot_summary="A cat crosses the path.",
+            recognized_people=["Indeterminate"],
+        ),
     ]
     findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
-    assert len(findings) == 0
+    assert len(findings) == 1
+    assert findings[0].evidence["camera_entity_id"] == "camera.driveway"
 
 
-def test_alarm_disarmed_unparseable_timestamp_with_other_evidence_triggers() -> None:
-    """Unparseable last_activity is allowed when snapshot_summary is present."""
+def test_alarm_disarmed_unparseable_timestamp_no_trigger() -> None:
+    """An unparseable last_activity cannot prove freshness — must not fire."""
     snapshot = _base_snapshot()
     snapshot["entities"] = [_alarm_entity("disarmed")]
     snapshot["camera_activity"] = [
@@ -2539,15 +2742,15 @@ def test_alarm_disarmed_unparseable_timestamp_with_other_evidence_triggers() -> 
             "camera.backyard",
             last_activity="not-a-valid-timestamp",
             snapshot_summary="Unknown person detected.",
+            recognized_people=["Unknown Person"],
         )
     ]
     findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
-    assert len(findings) == 1
-    assert findings[0].evidence["camera_activity_age_minutes"] is None
+    assert len(findings) == 0
 
 
-def test_alarm_disarmed_no_timestamp_but_motion_triggers_with_no_age() -> None:
-    """Missing last_activity but present motion_entities allows finding without an age."""
+def test_alarm_disarmed_no_timestamp_no_trigger() -> None:
+    """Missing last_activity cannot prove freshness — must not fire."""
     snapshot = _base_snapshot()
     snapshot["entities"] = [_alarm_entity("disarmed")]
     snapshot["camera_activity"] = [
@@ -2555,12 +2758,12 @@ def test_alarm_disarmed_no_timestamp_but_motion_triggers_with_no_age() -> None:
             "camera.backyard",
             last_activity=None,
             motion_entities=["binary_sensor.backyard_motion"],
-            snapshot_summary=None,
+            snapshot_summary="Unknown person detected.",
+            recognized_people=["Unknown Person"],
         )
     ]
     findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
-    assert len(findings) == 1
-    assert findings[0].evidence["camera_activity_age_minutes"] is None
+    assert len(findings) == 0
 
 
 def test_alarm_disarmed_anomaly_id_stable_across_cycles() -> None:
@@ -2572,6 +2775,7 @@ def test_alarm_disarmed_anomaly_id_stable_across_cycles() -> None:
             "camera.backyard",
             last_activity="2025-01-01T00:04:00+00:00",
             snapshot_summary="Unknown person.",
+            recognized_people=["Unknown Person"],
         )
     ]
 
@@ -2599,6 +2803,7 @@ def test_alarm_disarmed_indoor_occupancy_signal_is_null() -> None:
         _camera_activity(
             "camera.backyard",
             snapshot_summary="Unknown person.",
+            recognized_people=["Unknown Person"],
         )
     ]
     findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
@@ -2627,6 +2832,7 @@ def test_alarm_disarmed_evidence_includes_computed_durations() -> None:
             "camera.backyard",
             last_activity="2025-01-01T00:05:00+00:00",  # 5 min ago
             snapshot_summary="Unknown person.",
+            recognized_people=["Unknown Person"],
         )
     ]
     findings = AlarmDisarmedDuringExternalThreatRule().evaluate(snapshot)
@@ -3014,3 +3220,143 @@ def test_pet_detected_at_night_no_occupancy_no_trigger_no_summary() -> None:
     ]
     findings = PetDetectedAtNightNoOccupancyRule().evaluate(snapshot)
     assert len(findings) == 0
+
+
+# ---- Identity-label / staleness helper units (sentinel.models) ----
+
+
+def test_has_unknown_person_normalizes_whitespace_and_case() -> None:
+    """Legacy gallery rows may carry padded or case-variant labels."""
+    assert has_unknown_person(["  UNKNOWN Person  "]) is True
+    assert has_unknown_person(["unknown person"]) is True
+    assert has_unknown_person(["Unknown Person"]) is True
+
+
+def test_has_unknown_person_false_without_stranger_label() -> None:
+    """Reserved non-stranger labels and enrolled names do not count."""
+    assert has_unknown_person([]) is False
+    assert has_unknown_person(["Indeterminate", "None", "", "Jane"]) is False
+
+
+def test_has_unknown_person_tolerates_non_string_entries() -> None:
+    """Malformed snapshot entries are coerced, not crashed on."""
+    assert has_unknown_person([None, 42, {"name": "x"}]) is False  # type: ignore[list-item]
+
+
+def test_enrolled_people_filters_reserved_labels() -> None:
+    """Only enrolled identities survive; reserved labels are stripped."""
+    names = ["Unknown Person", "Indeterminate", "None", "", "   ", "Jane", "Lindo"]
+    assert enrolled_people(names) == ["Jane", "Lindo"]
+
+
+def test_enrolled_people_coerces_non_string_entries() -> None:
+    """Non-string entries coerce via str(); None coerces to reserved 'None'."""
+    assert enrolled_people([None, 42, "Jane"]) == ["42", "Jane"]  # type: ignore[list-item]
+
+
+def test_minutes_between_missing_inputs_return_none() -> None:
+    """Absent or empty timestamps cannot yield an elapsed time."""
+    assert minutes_between(None, "2025-01-01T00:04:00+00:00") is None
+    assert minutes_between("2025-01-01T00:04:00+00:00", None) is None
+    assert minutes_between("", "2025-01-01T00:04:00+00:00") is None
+    assert minutes_between(None, None) is None
+
+
+def test_minutes_between_unparseable_earlier_returns_none() -> None:
+    assert minutes_between("not-a-timestamp", "2025-01-01T00:04:00+00:00") is None
+
+
+def test_minutes_between_unparseable_later_returns_none() -> None:
+    assert minutes_between("2025-01-01T00:04:00+00:00", "not-a-timestamp") is None
+
+
+def test_minutes_between_small_future_skew_clamps_to_zero() -> None:
+    """A sighting slightly ahead of generated_at (clock skew) clamps to 0.0."""
+    assert (
+        minutes_between("2025-01-01T00:01:00+00:00", "2025-01-01T00:00:00+00:00") == 0.0
+    )
+
+
+def test_minutes_between_far_future_timestamp_returns_none() -> None:
+    """
+    A timestamp well ahead of the snapshot cannot prove freshness.
+
+    Without this a clock-skewed or spoofed camera timestamp hours in the
+    future would keep a persisted sighting "fresh" until wall time caught up.
+    """
+    assert (
+        minutes_between("2025-01-01T00:10:00+00:00", "2025-01-01T00:00:00+00:00")
+        is None
+    )
+
+
+def test_minutes_between_normal_elapsed_minutes() -> None:
+    assert (
+        minutes_between("2025-01-01T00:04:00+00:00", "2025-01-01T00:08:00+00:00") == 4.0
+    )
+
+
+def test_minutes_between_naive_timestamp_does_not_raise() -> None:
+    """
+    A tz-naive camera-attribute timestamp must not crash rule evaluation.
+
+    Regression: naive minus aware raises TypeError, which on the dynamic-rule
+    path had no exception boundary and would kill the Sentinel run loop.
+    The naive value is interpreted as local time (HA convention).
+    """
+    result = minutes_between("2025-01-01T00:04:00", "2025-01-01T00:08:00+00:00")
+    assert result is not None
+
+
+def test_unknown_person_camera_no_home_fires_at_exact_staleness_boundary() -> None:
+    """Age exactly equal to the 10-minute budget is still fresh (inclusive)."""
+    snapshot = _base_snapshot()
+    snapshot["generated_at"] = "2025-01-01T00:14:00+00:00"
+    snapshot["derived"]["anyone_home"] = False
+    snapshot["camera_activity"] = [
+        _no_home_camera_activity(
+            ["Unknown Person"], last_activity="2025-01-01T00:04:00+00:00"
+        )
+    ]
+    findings = UnknownPersonCameraNoHomeRule().evaluate(snapshot)
+    assert len(findings) == 1
+
+
+def test_unknown_person_camera_no_home_gates_on_recognition_timestamp() -> None:
+    """
+    Freshness is judged by the recognition sighting, not camera motion.
+
+    A pet or tree refreshing the camera's last_activity attribute must not
+    resurrect a stale "Unknown Person" label — and a fresh recognition must
+    fire even when the camera's own activity attribute is stale.
+    """
+    snapshot = _base_snapshot()
+    snapshot["generated_at"] = "2025-01-01T02:00:00+00:00"
+    snapshot["derived"]["anyone_home"] = False
+    stale_sighting = _no_home_camera_activity(
+        ["Unknown Person"],
+        # Motion refreshed just now, but the sighting is two hours old.
+        last_activity="2025-01-01T01:59:00+00:00",
+    )
+    stale_sighting["recognition_last_event"] = "2025-01-01T00:00:00+00:00"
+    snapshot["camera_activity"] = [stale_sighting]
+    assert UnknownPersonCameraNoHomeRule().evaluate(snapshot) == []
+
+    fresh_sighting = _no_home_camera_activity(
+        ["Unknown Person"],
+        # Camera activity attribute stale, but the sighting itself is fresh.
+        last_activity="2025-01-01T00:00:00+00:00",
+    )
+    fresh_sighting["recognition_last_event"] = "2025-01-01T01:59:00+00:00"
+    snapshot["camera_activity"] = [fresh_sighting]
+    findings = UnknownPersonCameraNoHomeRule().evaluate(snapshot)
+    assert len(findings) == 1
+    assert findings[0].evidence["recognition_last_event"] == "2025-01-01T01:59:00+00:00"
+
+
+def test_pipeline_unknown_label_matches_sentinel_const() -> None:
+    """The gallery's non-match label must be the one the Sentinel rules key on."""
+    assert has_unknown_person([UNKNOWN_PERSON_LABEL]) is True
+    # Pin the wire value: image/sensor attributes and persisted evidence
+    # carry this exact string, so it cannot change silently.
+    assert UNKNOWN_PERSON_LABEL == "Unknown Person"

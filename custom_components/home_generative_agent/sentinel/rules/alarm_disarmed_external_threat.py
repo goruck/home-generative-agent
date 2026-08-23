@@ -4,14 +4,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from homeassistant.util import dt as dt_util
-
-from custom_components.home_generative_agent.const import (
-    SENTINEL_CAMERA_ACTIVITY_STALENESS_MINUTES,
-)
 from custom_components.home_generative_agent.sentinel.models import (
     AnomalyFinding,
     build_anomaly_id,
+    minutes_between,
+    sighting_timestamp,
+    unknown_person_sighting_is_actionable,
 )
 
 if TYPE_CHECKING:
@@ -22,24 +20,13 @@ if TYPE_CHECKING:
 _DISARMED_STATE = "disarmed"
 
 
-def _minutes_between(earlier_iso: str | None, later_iso: str | None) -> float | None:
-    """Return elapsed minutes from *earlier_iso* to *later_iso*, or None."""
-    if not earlier_iso or not later_iso:
-        return None
-    t_earlier = dt_util.parse_datetime(earlier_iso)
-    t_later = dt_util.parse_datetime(later_iso)
-    if t_earlier is None or t_later is None:
-        return None
-    return max(0.0, (t_later - t_earlier).total_seconds() / 60.0)
-
-
 class AlarmDisarmedDuringExternalThreatRule:
-    """Detect alarm disarmed while unrecognized outdoor camera activity is present."""
+    """Detect alarm disarmed while an unknown person is seen on a camera."""
 
     rule_id = "alarm_disarmed_during_external_threat"
 
     def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:
-        """Return a finding for disarmed alarm with unrecognized camera activity."""
+        """Return a finding for a disarmed alarm with a fresh stranger sighting."""
         disarmed_panels = [
             e
             for e in snapshot["entities"]
@@ -57,34 +44,16 @@ class AlarmDisarmedDuringExternalThreatRule:
 
         findings: list[AnomalyFinding] = []
         for activity in snapshot["camera_activity"]:
-            has_other_evidence = bool(
-                activity.get("motion_entities")
-                or activity.get("vmd_entities")
-                or activity.get("snapshot_summary")
+            # Fresh, unaccompanied stranger sighting — see the helper for the
+            # full predicate rationale (reserved labels, companion
+            # suppression, staleness).
+            if not unknown_person_sighting_is_actionable(activity, generated_at):
+                continue
+            # Always a float here: the actionability gate above required a
+            # fresh, parseable sighting timestamp.
+            camera_activity_age_minutes = minutes_between(
+                sighting_timestamp(activity), generated_at
             )
-            if activity.get("recognized_people"):
-                continue
-
-            # Compute activity age. An unparseable timestamp is treated the same as
-            # absent — the gate falls through to has_other_evidence.
-            camera_activity_age_minutes: float | None = None
-            if activity.get("last_activity"):
-                camera_activity_age_minutes = _minutes_between(
-                    activity["last_activity"], generated_at
-                )
-
-            last_activity_reliable = camera_activity_age_minutes is not None
-            if not last_activity_reliable and not has_other_evidence:
-                continue
-
-            # Staleness gate: skip when reliable age exceeds the threshold.
-            threshold = SENTINEL_CAMERA_ACTIVITY_STALENESS_MINUTES
-            if (
-                last_activity_reliable
-                and camera_activity_age_minutes is not None
-                and camera_activity_age_minutes > threshold
-            ):
-                continue
 
             cam = activity["camera_entity_id"]
 
@@ -94,17 +63,23 @@ class AlarmDisarmedDuringExternalThreatRule:
             )
             alarm_friendly_name: str | None = primary_alarm.get("friendly_name")
 
-            disarm_duration_minutes = _minutes_between(
+            # A far-future alarm last_changed (panel clock skew) yields None
+            # here rather than the old clamp-to-0 — consumers render the
+            # phrase without a duration in that case.
+            disarm_duration_minutes = minutes_between(
                 primary_alarm["last_changed"], generated_at
             )
 
             # Stable identity fields — used for the anomaly ID and cooldown key.
             # Must not include volatile display fields like age-in-minutes.
+            # Anchored on the sighting timestamp the rule fires on, so an
+            # unrelated motion refresh of last_activity cannot mint a new
+            # anomaly id for the same sighting.
             id_evidence = {
                 "camera_entity_id": cam,
                 "alarm_entity_id": primary_alarm_id,
                 "alarm_state": _DISARMED_STATE,
-                "last_activity": activity.get("last_activity"),
+                "sighting_last_event": sighting_timestamp(activity),
                 "alarm_last_changed": primary_alarm["last_changed"] or None,
             }
             anomaly_id = build_anomaly_id(
@@ -118,7 +93,8 @@ class AlarmDisarmedDuringExternalThreatRule:
                 "alarm_entity_ids": disarmed_panel_ids,
                 "camera_friendly_name": camera_friendly_name,
                 "alarm_friendly_name": alarm_friendly_name,
-                "recognized_people": activity.get("recognized_people", []),
+                "recognized_people": list(activity.get("recognized_people") or []),
+                "recognition_last_event": activity.get("recognition_last_event"),
                 "snapshot_summary": activity.get("snapshot_summary"),
                 "camera_activity_age_minutes": camera_activity_age_minutes,
                 "disarm_duration_minutes": disarm_duration_minutes,

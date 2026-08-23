@@ -11,6 +11,17 @@ import numpy as np
 from homeassistant.helpers.httpx_client import get_async_client
 from psycopg.rows import DictRow, dict_row
 
+# const.py is the authoritative source (also imported from here by existing
+# consumers). Enrolling a person under a reserved label would silently corrupt
+# the identity-merge conditions (issue #543), so enrollment refuses them.
+# UNKNOWN_PERSON_LABEL is the non-match label this DAO produces; the Sentinel
+# unknown-person rules key on exactly this value, so producer and consumer
+# must share the constant.
+from custom_components.home_generative_agent.const import (
+    RESERVED_IDENTITY_LABELS,
+    UNKNOWN_PERSON_LABEL,
+)
+
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
     from psycopg import AsyncConnection
@@ -21,10 +32,6 @@ Embedding = Sequence[float]
 FACE_EMBEDDING_DIMS = 512
 # Max cosine distance for a gallery row to count as a positive identification.
 FACE_RECOGNITION_THRESHOLD = 0.7
-# Identity labels the recognition pipeline reserves for non-matches; enrolling
-# a person under one of these would silently corrupt the identity-merge
-# conditions (issue #543), so enrollment refuses them.
-RESERVED_IDENTITY_LABELS = frozenset({"unknown person", "indeterminate", "none", ""})
 
 
 class PersonGalleryDAO:
@@ -120,11 +127,11 @@ class PersonGalleryDAO:
 
             if not row:
                 LOGGER.error("Recognition query returned no rows")
-                return "Unknown Person"
+                return UNKNOWN_PERSON_LABEL
 
             dist = float(row["distance"])
             LOGGER.debug("Closest match=%s cosine_distance=%.6f", row["name"], dist)
-            return row["name"] if dist < threshold else "Unknown Person"
+            return row["name"] if dist < threshold else UNKNOWN_PERSON_LABEL
 
     async def nearest_match(self, embedding: Embedding) -> tuple[str, float] | None:
         """

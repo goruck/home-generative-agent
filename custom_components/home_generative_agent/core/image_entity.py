@@ -237,11 +237,17 @@ class LastEventImage(ImageEntity):
         summary_any = data.get(BUS_KEY_SUMMARY)
         summary = str(summary_any) if summary_any is not None else None
 
+        # No last_event_iso here: this backstop carries no people, and
+        # Sentinel's unknown-person freshness gate treats last_event as the
+        # timestamp OF the recognized_people sighting. Stamping it without a
+        # people update would pair a stale "Unknown Person" label with a
+        # fresh timestamp — exactly the stale-sighting refresh the gate
+        # exists to prevent. The people-carrying dispatches stamp it.
         upd = UpdateBundle(
             latest_path=latest_path,
             summary=summary,
             people=None,
-            last_event_iso=dt_util.utcnow().isoformat(),
+            last_event_iso=None,
         )
         self._apply_update(upd)
         self.async_write_ha_state()
