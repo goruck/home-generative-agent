@@ -35,6 +35,7 @@ from homeassistant.helpers.selector import (
     TextSelectorType,
 )
 
+from .agent.helpers import normalize_llm_api_value
 from .const import (
     CONF_CRITICAL_ACTION_PIN,
     CONF_CRITICAL_ACTION_PIN_ENABLED,
@@ -170,21 +171,23 @@ async def _schema_for_options(
         for api in llm.async_get_apis(hass)
     ]
     valid_api_ids = {api["value"] for api in hass_apis}
-    stored_apis = opts.get(CONF_LLM_HASS_API, [])
-    if isinstance(stored_apis, str):
-        # Legacy single-string storage; "" would otherwise become [""].
-        stored_apis = [stored_apis] if stored_apis else []
-    elif not isinstance(stored_apis, list):
-        # e.g. an explicit None — iterating it would crash the form build.
-        stored_apis = []
-    # Drop API ids that no longer exist (e.g. a removed MCP server): a stale
-    # id pre-filled into the selector fails SelectSelector validation on
-    # submit, leaving the form permanently unsaveable (issue #568).
-    selected_apis = [api_id for api_id in stored_apis if api_id in valid_api_ids]
-    if stale := [api_id for api_id in stored_apis if api_id not in valid_api_ids]:
+    selected_apis = normalize_llm_api_value(opts.get(CONF_LLM_HASS_API, []))
+    # Stored ids that are no longer registered (e.g. a removed MCP server)
+    # stay selected but are re-added as labeled selector options: without
+    # them the pre-filled value fails SelectSelector validation on submit,
+    # leaving the form permanently unsaveable (issue #568). Keeping them
+    # selectable — rather than silently dropping them — means a transient
+    # provider outage at render time can never erase the user's choice, and
+    # deselecting a dead server is always an explicit user action.
+    if stale := [api_id for api_id in selected_apis if api_id not in valid_api_ids]:
         LOGGER.warning(
-            "Ignoring LLM API ids no longer registered in Home Assistant: %s",
+            "LLM API ids no longer registered in Home Assistant "
+            "(shown as 'no longer available' in the options form): %s",
             stale,
+        )
+        hass_apis.extend(
+            SelectOptionDict(label=f"{api_id} (no longer available)", value=api_id)
+            for api_id in stale
         )
 
     video_analyzer_mode_opts: list[SelectOptionDict] = [

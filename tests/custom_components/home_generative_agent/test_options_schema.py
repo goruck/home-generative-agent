@@ -112,19 +112,32 @@ def _suggested_llm_apis(schema: dict[Any, Any]) -> list[str]:
     return marker.description["suggested_value"]
 
 
-@pytest.mark.asyncio
-async def test_options_schema_drops_stale_llm_api_ids(hass: Any) -> None:
-    """
-    Removed API ids (e.g. deleted MCP servers) must not pre-fill the form.
+def _llm_api_options(schema: dict[Any, Any]) -> dict[str, str]:
+    """Return the LLM API selector options as a value -> label mapping."""
+    selector = cast("Any", schema[_schema_key(schema, CONF_LLM_HASS_API)])
+    return {opt["value"]: opt["label"] for opt in selector.config["options"]}
 
-    A stale id pre-filled into the selector fails SelectSelector validation on
-    submit, leaving the options form permanently unsaveable (issue #568).
+
+@pytest.mark.asyncio
+async def test_options_schema_preserves_stale_llm_api_ids(hass: Any) -> None:
+    """
+    Removed API ids (e.g. deleted MCP servers) stay selected and selectable.
+
+    A stale id pre-filled into a selector that no longer lists it fails
+    SelectSelector validation on submit, leaving the options form permanently
+    unsaveable (issue #568). The stale id is therefore re-added as a labeled
+    option: the form saves again, but nothing is dropped without an explicit
+    user deselection — a transient provider outage can never erase the
+    selection, nor silently swap in the Assist default.
     """
     schema = await _schema_with_apis(
         hass, {CONF_LLM_HASS_API: ["assist", "mcp-deleted"]}, "assist", "mcp-new"
     )
 
-    assert _suggested_llm_apis(schema) == ["assist"]
+    assert _suggested_llm_apis(schema) == ["assist", "mcp-deleted"]
+    options = _llm_api_options(schema)
+    assert options["mcp-deleted"] == "mcp-deleted (no longer available)"
+    assert "mcp-new" in options
 
 
 @pytest.mark.asyncio
@@ -135,6 +148,11 @@ async def test_options_schema_keeps_valid_llm_api_ids(hass: Any) -> None:
     )
 
     assert _suggested_llm_apis(schema) == ["assist", "mcp-new"]
+    assert not [
+        label
+        for label in _llm_api_options(schema).values()
+        if "(no longer available)" in label
+    ]
 
 
 @pytest.mark.asyncio
@@ -150,16 +168,18 @@ async def test_options_schema_warns_only_for_stale_llm_api_ids(
     hass: Any, caplog: pytest.LogCaptureFixture
 ) -> None:
     """
-    The stale-id warning names every dropped id and stays silent otherwise.
+    The stale-id warning names every unavailable id and stays silent otherwise.
 
-    Also covers a stored list whose ids are ALL stale: the pre-fill collapses
-    to an empty selection rather than blocking the form (issue #568).
+    Also covers a stored list whose ids are ALL stale: every id stays selected
+    and selectable, so the form remains saveable (issue #568) while the
+    selection survives verbatim.
     """
     schema = await _schema_with_apis(
         hass, {CONF_LLM_HASS_API: ["mcp-deleted", "mcp-gone"]}, "assist"
     )
 
-    assert _suggested_llm_apis(schema) == []
+    assert _suggested_llm_apis(schema) == ["mcp-deleted", "mcp-gone"]
+    assert set(_llm_api_options(schema)) == {"assist", "mcp-deleted", "mcp-gone"}
     warnings = [r for r in caplog.records if r.levelname == "WARNING"]
     assert any(
         "mcp-deleted" in r.getMessage() and "mcp-gone" in r.getMessage()
@@ -178,12 +198,13 @@ async def test_options_schema_warns_only_for_stale_llm_api_ids(
 
 @pytest.mark.asyncio
 async def test_options_schema_handles_legacy_string_llm_api(hass: Any) -> None:
-    """A legacy single-string stored value is normalized and filtered."""
+    """A legacy single-string stored value is normalized, valid or not."""
     valid = await _schema_with_apis(hass, {CONF_LLM_HASS_API: "assist"}, "assist")
     stale = await _schema_with_apis(hass, {CONF_LLM_HASS_API: "mcp-deleted"}, "assist")
 
     assert _suggested_llm_apis(valid) == ["assist"]
-    assert _suggested_llm_apis(stale) == []
+    assert _suggested_llm_apis(stale) == ["mcp-deleted"]
+    assert "mcp-deleted" in _llm_api_options(stale)
 
 
 @pytest.mark.asyncio
@@ -191,17 +212,22 @@ async def test_options_schema_tolerates_degenerate_llm_api_values(
     hass: Any, caplog: pytest.LogCaptureFixture
 ) -> None:
     """
-    None and empty-string stored values render an empty selection, no warning.
+    None, "" and non-string list elements render cleanly with no warning.
 
     An explicit None previously crashed the schema build (TypeError on
     iteration), re-creating the form-blocking failure class of issue #568;
-    "" would wrap to [""] and log a spurious stale-id warning on every render.
+    "" would wrap to [""] and a dict element would raise TypeError on the
+    set-membership test.
     """
     none_schema = await _schema_with_apis(hass, {CONF_LLM_HASS_API: None}, "assist")
     empty_schema = await _schema_with_apis(hass, {CONF_LLM_HASS_API: ""}, "assist")
+    mixed_schema = await _schema_with_apis(
+        hass, {CONF_LLM_HASS_API: ["assist", {"id": "mcp-old"}]}, "assist"
+    )
 
     assert _suggested_llm_apis(none_schema) == []
     assert _suggested_llm_apis(empty_schema) == []
+    assert _suggested_llm_apis(mixed_schema) == ["assist"]
     assert not [
         r
         for r in caplog.records
@@ -210,9 +236,9 @@ async def test_options_schema_tolerates_degenerate_llm_api_values(
 
 
 @pytest.mark.asyncio
-async def test_options_flow_init_form_excludes_stale_llm_api(hass: Any) -> None:
+async def test_options_flow_init_form_preserves_stale_llm_api(hass: Any) -> None:
     """
-    The rendered options-flow form itself must not pre-fill a stale id.
+    The rendered options-flow form keeps a stale id selected and selectable.
 
     Exercises the real #568 repro surface (async_step_init merging
     DEFAULT_OPTIONS with the entry's stored options), not just the schema
@@ -233,4 +259,5 @@ async def test_options_flow_init_form_excludes_stale_llm_api(hass: Any) -> None:
 
     assert result["type"] == FlowResultType.FORM
     schema = cast("Any", result["data_schema"]).schema
-    assert _suggested_llm_apis(schema) == ["assist"]
+    assert _suggested_llm_apis(schema) == ["assist", "mcp-deleted"]
+    assert "mcp-deleted" in _llm_api_options(schema)
