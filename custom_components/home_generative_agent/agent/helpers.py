@@ -47,10 +47,29 @@ def active_llm_api_ids(options: Mapping[str, Any]) -> list[str]:
     the critical-action PIN while the rest of the integration still runs the
     Assist API.
     """
-    active = options.get(CONF_LLM_HASS_API, [llm.LLM_API_ASSIST])
-    if isinstance(active, str):
-        active = [active]
-    return list(active)
+    if CONF_LLM_HASS_API not in options:
+        return [llm.LLM_API_ASSIST]
+    return normalize_llm_api_value(options[CONF_LLM_HASS_API])
+
+
+def normalize_llm_api_value(raw: Any) -> list[str]:
+    """
+    Normalize a stored ``CONF_LLM_HASS_API`` value to a list of id strings.
+
+    Storage has carried several shapes over the integration's life: a list of
+    ids, a pre-v6 bare string, and — via programmatic options updates that
+    bypass the form schema — ``None``, ``""``, or lists holding non-string
+    elements.  Iterating or set-testing those degenerate shapes crashes both
+    the options-form build and ``active_llm_api_ids`` at runtime (issue #568's
+    failure class), so every reader funnels through this one normalizer:
+    strings wrap to a single-element list, everything non-list collapses to
+    ``[]``, and non-string or empty elements are dropped.
+    """
+    if isinstance(raw, str):
+        return [raw] if raw else []
+    if not isinstance(raw, list):
+        return []
+    return [api_id for api_id in raw if isinstance(api_id, str) and api_id]
 
 
 def safe_convert(

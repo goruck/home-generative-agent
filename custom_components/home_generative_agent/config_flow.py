@@ -35,6 +35,7 @@ from homeassistant.helpers.selector import (
     TextSelectorType,
 )
 
+from .agent.helpers import normalize_llm_api_value
 from .const import (
     CONF_CRITICAL_ACTION_PIN,
     CONF_CRITICAL_ACTION_PIN_ENABLED,
@@ -169,6 +170,25 @@ async def _schema_for_options(
         SelectOptionDict(label=api.name, value=api.id)
         for api in llm.async_get_apis(hass)
     ]
+    valid_api_ids = {api["value"] for api in hass_apis}
+    selected_apis = normalize_llm_api_value(opts.get(CONF_LLM_HASS_API, []))
+    # Stored ids that are no longer registered (e.g. a removed MCP server)
+    # stay selected but are re-added as labeled selector options: without
+    # them the pre-filled value fails SelectSelector validation on submit,
+    # leaving the form permanently unsaveable (issue #568). Keeping them
+    # selectable — rather than silently dropping them — means a transient
+    # provider outage at render time can never erase the user's choice, and
+    # deselecting a dead server is always an explicit user action.
+    if stale := [api_id for api_id in selected_apis if api_id not in valid_api_ids]:
+        LOGGER.warning(
+            "LLM API ids no longer registered in Home Assistant "
+            "(shown as 'no longer available' in the options form): %s",
+            stale,
+        )
+        hass_apis.extend(
+            SelectOptionDict(label=f"{api_id} (no longer available)", value=api_id)
+            for api_id in stale
+        )
 
     video_analyzer_mode_opts: list[SelectOptionDict] = [
         SelectOptionDict(label="Disable", value=VIDEO_ANALYZER_MODE_DISABLE),
@@ -211,7 +231,7 @@ async def _schema_for_options(
         ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT, multiline=True)),
         vol.Optional(
             CONF_LLM_HASS_API,
-            description={"suggested_value": opts.get(CONF_LLM_HASS_API, [])},
+            description={"suggested_value": selected_apis},
             default=[],
         ): SelectSelector(SelectSelectorConfig(options=hass_apis, multiple=True)),
         vol.Required(

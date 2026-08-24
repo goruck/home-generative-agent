@@ -4,7 +4,7 @@
 
 ### "No LLM APIs" is not an expressible choice, and its two spellings behave oppositely
 
-**What:** `CONF_LLM_HASS_API` has two distinct falsy storage states that mean the same thing to the user and opposite things to the code. Deselecting every API in the options flow hits `_cleanup_none_llm_api` (`config_flow.py:508`), which *pops* the key — and an absent key means "default to `[LLM_API_ASSIST]`" to every reader, so the Assist API is silently re-enabled and the user's choice is discarded. The v5 → v6 migration (`__init__.py:4042`) instead writes an explicit `[]` for the same intent, which really does disable everything. Same apparent user choice, opposite outcome, decided entirely by whether the entry predates v6. The options-flow form compounds it: `config_flow.py:213` suggests `[]` when the key is absent, so the UI shows "nothing selected" on installs that are actively running Assist.
+**What:** `CONF_LLM_HASS_API` has two distinct falsy storage states that mean the same thing to the user and opposite things to the code. Deselecting every API in the options flow hits `_cleanup_none_llm_api` (`config_flow.py:528`), which *pops* the key — and an absent key means "default to `[LLM_API_ASSIST]`" to every reader, so the Assist API is silently re-enabled and the user's choice is discarded. The v5 → v6 migration (`__init__.py:4042`) instead writes an explicit `[]` for the same intent, which really does disable everything. Same apparent user choice, opposite outcome, decided entirely by whether the entry predates v6. The options-flow form compounds it: `config_flow.py:233` suggests `[]` when the key is absent, so the UI shows "nothing selected" on installs that are actively running Assist.
 
 **Why:** Surfaced twice during the v3.30.9 ship — once by inspection, once independently by the Codex adversarial pass, which correctly rejected an earlier claim that `[]` was unreachable. v3.30.9 makes the *security* consequence moot (the CONTROL flag is now also set whenever a PIN is configured, so neither spelling can bypass the gate), but the configuration semantics remain incoherent and a user who genuinely wants no LLM API still cannot express it through the UI.
 
@@ -1303,6 +1303,19 @@ window-scoped check could suppress.
 ---
 
 ## Config Entry Lifecycle
+
+### Migrate deprecated TargetSelectorData to TargetSelection before HA 2026.12
+
+**What:** `__init__.py:1441` instantiates `homeassistant.helpers.target.TargetSelectorData`, which HA Core deprecated with removal scheduled for 2026.12.0 ("Use TargetSelection instead"). Every startup logs a deprecation warning attributed to this integration, and the integration breaks outright on HA 2026.12.
+
+**Why:** Surfaced in the debug logs of issue #568 (2026-08-24) — the reporter's log opens with the warning, which HA explicitly asks users to file against this repo. Not fixed in the #568 ship because that fix was scoped to the stale-LLM-API options-form bug; the rename needs its own look at the `TargetSelection` API shape and a check for other `homeassistant.helpers.target` call sites.
+
+**How to apply:** Replace the `TargetSelectorData(raw_target)` construction (and the import at `__init__.py:48`) with `TargetSelection`, verifying the attribute surface the surrounding code reads still matches. Must land before supporting HA 2026.12.
+
+**Effort:** S
+**Priority:** P2
+
+---
 
 ### image.py and sensor.py still register unwrapped STARTED listeners
 

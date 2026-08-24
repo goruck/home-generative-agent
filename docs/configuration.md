@@ -140,7 +140,7 @@ The **Control Home Assistant** option in the Options flow is a multi-select that
 - **Assist** (`assist`) — the built-in HA Assist API. Grants entity-control intents and the full entity list. Select this for standard voice-assistant control.
 - **MCP server integrations** — any [Model Context Protocol](https://www.home-assistant.io/integrations/mcp_server/) integration you have configured registers its own LLM API (e.g. `mcp-<entry_id>`). Those entries appear in the list once added.
 
-You can select any combination. Selecting both Assist and one or more MCP APIs merges all their tools into a single combined API. Deselecting everything runs the agent with only its built-in LangChain tools (no HA entity control, no MCP tools).
+You can select any combination. Selecting both Assist and one or more MCP APIs merges all their tools into a single combined API. Note that deselecting everything does **not** disable HA control: an empty selection is stored as "unset", which the agent reads as the Assist default, so Assist is silently re-enabled on the next save. Running with no LLM API at all is currently not expressible through the form (tracked in `TODOS.md`).
 
 **Adding an MCP server:**
 
@@ -149,6 +149,8 @@ You can select any combination. Selecting both Assist and one or more MCP APIs m
 3. The MCP integration registers an LLM API automatically.
 4. Open **Settings → Devices & Services → Home Generative Agent → Configure**.
 5. Select the new entry in **Control Home Assistant** and save.
+
+**Removing an MCP server:** if a selected server's integration is removed (or is temporarily unavailable), its entry stays selected and is shown as `<id> (no longer available)` so the form remains saveable and your selection is never dropped behind your back. Deselect the dead entry and save to clean it up. While it stays selected, a warning is logged when the options form is built and each time the agent loads its APIs; other selected APIs keep working, but if the unavailable entry is the *only* selection, conversations fail with "No LLM APIs could be loaded" until the server returns or you deselect it.
 
 ---
 

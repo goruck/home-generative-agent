@@ -22,7 +22,10 @@ from homeassistant.const import CONF_LLM_HASS_API
 from homeassistant.helpers import llm
 
 from custom_components.home_generative_agent.agent.graph import _get_allowed_api_ids
-from custom_components.home_generative_agent.agent.helpers import active_llm_api_ids
+from custom_components.home_generative_agent.agent.helpers import (
+    active_llm_api_ids,
+    normalize_llm_api_value,
+)
 
 
 def test_absent_key_defaults_to_assist() -> None:
@@ -67,6 +70,24 @@ def test_explicit_ids_are_returned() -> None:
 def test_legacy_string_value_is_wrapped() -> None:
     """Pre-v6 configs stored a bare string; it must normalize to a list."""
     assert active_llm_api_ids({CONF_LLM_HASS_API: "assist"}) == ["assist"]
+
+
+def test_degenerate_stored_shapes_normalize_instead_of_crashing() -> None:
+    """
+    None, "" and non-string list elements normalize to clean lists.
+
+    Before the shared normalizer, an explicit None (reachable via programmatic
+    options updates that bypass the form schema) crashed ``list(None)`` at
+    runtime — blocking conversation-entity setup — and "" wrapped to [""],
+    a truthy id that is guaranteed to fail loading. The options form and the
+    runtime readers must agree on these shapes (issue #568 review follow-up).
+    """
+    assert active_llm_api_ids({CONF_LLM_HASS_API: None}) == []
+    assert active_llm_api_ids({CONF_LLM_HASS_API: ""}) == []
+    assert active_llm_api_ids({CONF_LLM_HASS_API: ["assist", {"id": "x"}]}) == [
+        "assist"
+    ]
+    assert normalize_llm_api_value(["", "assist", 3]) == ["assist"]
 
 
 def test_returned_list_is_a_copy() -> None:
