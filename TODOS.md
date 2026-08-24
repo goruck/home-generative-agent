@@ -1304,6 +1304,19 @@ window-scoped check could suppress.
 
 ## Config Entry Lifecycle
 
+### Migrate deprecated TargetSelectorData to TargetSelection before HA 2026.12
+
+**What:** `__init__.py:1441` instantiates `homeassistant.helpers.target.TargetSelectorData`, which HA Core deprecated with removal scheduled for 2026.12.0 ("Use TargetSelection instead"). Every startup logs a deprecation warning attributed to this integration, and the integration breaks outright on HA 2026.12.
+
+**Why:** Surfaced in the debug logs of issue #568 (2026-08-24) — the reporter's log opens with the warning, which HA explicitly asks users to file against this repo. Not fixed in the #568 ship because that fix was scoped to the stale-LLM-API options-form bug; the rename needs its own look at the `TargetSelection` API shape and a check for other `homeassistant.helpers.target` call sites.
+
+**How to apply:** Replace the `TargetSelectorData(raw_target)` construction (and the import at `__init__.py:48`) with `TargetSelection`, verifying the attribute surface the surrounding code reads still matches. Must land before supporting HA 2026.12.
+
+**Effort:** S
+**Priority:** P2
+
+---
+
 ### image.py and sensor.py still register unwrapped STARTED listeners
 
 **What:** `hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _on_started)` at `image.py:42` and `sensor.py:64` are not wrapped in `entry.async_on_unload`. Both call `async_add_entities(...)` for an entry that may already have unloaded — the same leak class the deferred-start work just closed for the four engines.

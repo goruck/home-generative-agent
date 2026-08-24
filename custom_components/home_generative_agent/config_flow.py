@@ -169,6 +169,19 @@ async def _schema_for_options(
         SelectOptionDict(label=api.name, value=api.id)
         for api in llm.async_get_apis(hass)
     ]
+    valid_api_ids = {api["value"] for api in hass_apis}
+    stored_apis = opts.get(CONF_LLM_HASS_API, [])
+    if isinstance(stored_apis, str):
+        stored_apis = [stored_apis]
+    # Drop API ids that no longer exist (e.g. a removed MCP server): a stale
+    # id pre-filled into the selector fails SelectSelector validation on
+    # submit, leaving the form permanently unsaveable (issue #568).
+    selected_apis = [api_id for api_id in stored_apis if api_id in valid_api_ids]
+    if stale := [api_id for api_id in stored_apis if api_id not in valid_api_ids]:
+        LOGGER.warning(
+            "Ignoring LLM API ids no longer registered in Home Assistant: %s",
+            stale,
+        )
 
     video_analyzer_mode_opts: list[SelectOptionDict] = [
         SelectOptionDict(label="Disable", value=VIDEO_ANALYZER_MODE_DISABLE),
@@ -211,7 +224,7 @@ async def _schema_for_options(
         ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT, multiline=True)),
         vol.Optional(
             CONF_LLM_HASS_API,
-            description={"suggested_value": opts.get(CONF_LLM_HASS_API, [])},
+            description={"suggested_value": selected_apis},
             default=[],
         ): SelectSelector(SelectSelectorConfig(options=hass_apis, multiple=True)),
         vol.Required(

@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import patch
 
 import pytest
+from homeassistant.const import CONF_LLM_HASS_API
 from homeassistant.helpers.selector import ConstantSelector, TextSelector
 
 from custom_components.home_generative_agent.config_flow import _schema_for_options
@@ -74,3 +77,61 @@ async def test_options_schema_stt_filters_are_bottom_multiline_section(
         cast("Any", _schema_key(schema, CONF_STT_HALLUCINATION_PATTERNS)).default()
         == "back to our show"
     )
+
+
+def _fake_apis(*ids: str) -> list[Any]:
+    """Build fake registered LLM APIs with the given ids."""
+    return [SimpleNamespace(id=api_id, name=api_id.title()) for api_id in ids]
+
+
+def _suggested_llm_apis(schema: dict[Any, Any]) -> list[str]:
+    """Return the pre-filled LLM API selection from the schema."""
+    marker = cast("Any", _schema_key(schema, CONF_LLM_HASS_API))
+    return marker.description["suggested_value"]
+
+
+@pytest.mark.asyncio
+async def test_options_schema_drops_stale_llm_api_ids(hass: Any) -> None:
+    """
+    Removed API ids (e.g. deleted MCP servers) must not pre-fill the form.
+
+    A stale id pre-filled into the selector fails SelectSelector validation on
+    submit, leaving the options form permanently unsaveable (issue #568).
+    """
+    with patch(
+        "custom_components.home_generative_agent.config_flow.llm.async_get_apis",
+        return_value=_fake_apis("assist", "mcp-new"),
+    ):
+        schema = await _schema_for_options(
+            hass, {CONF_LLM_HASS_API: ["assist", "mcp-deleted"]}
+        )
+
+    assert _suggested_llm_apis(schema) == ["assist"]
+
+
+@pytest.mark.asyncio
+async def test_options_schema_keeps_valid_llm_api_ids(hass: Any) -> None:
+    """Stored ids that are still registered pre-fill the form unchanged."""
+    with patch(
+        "custom_components.home_generative_agent.config_flow.llm.async_get_apis",
+        return_value=_fake_apis("assist", "mcp-new"),
+    ):
+        schema = await _schema_for_options(
+            hass, {CONF_LLM_HASS_API: ["assist", "mcp-new"]}
+        )
+
+    assert _suggested_llm_apis(schema) == ["assist", "mcp-new"]
+
+
+@pytest.mark.asyncio
+async def test_options_schema_handles_legacy_string_llm_api(hass: Any) -> None:
+    """A legacy single-string stored value is normalized and filtered."""
+    with patch(
+        "custom_components.home_generative_agent.config_flow.llm.async_get_apis",
+        return_value=_fake_apis("assist"),
+    ):
+        valid = await _schema_for_options(hass, {CONF_LLM_HASS_API: "assist"})
+        stale = await _schema_for_options(hass, {CONF_LLM_HASS_API: "mcp-deleted"})
+
+    assert _suggested_llm_apis(valid) == ["assist"]
+    assert _suggested_llm_apis(stale) == []
