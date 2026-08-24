@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.31.2] - 2026-08-24
+
+### Fixed
+
+- **The options page can be saved again after an MCP server is removed.** Deleting an MCP server integration left its LLM API id stored in the Home Generative Agent configuration; the **Control Home Assistant** selector rejected the now-unknown id on save with "value must be one of […]", leaving the whole settings form permanently unsaveable ([#568](https://github.com/goruck/home-generative-agent/issues/568)). Unavailable ids now stay selected and appear in the list as `<id> (no longer available)`, so the form always saves and the new server can be selected — while your selection is never dropped behind your back: removing a dead entry is always an explicit deselection, and a server that is merely reloading when you open the form keeps its place. Reported by [@krishgcek](https://github.com/krishgcek).
+- **Corrupted or legacy LLM API values can no longer break the integration.** A stored `None`, empty string, or non-string list element — reachable through programmatic options updates or old config versions — could crash the options form build or block the conversation entity from loading at startup. All readers now share one normalizer that quietly drops the degenerate shapes.
+
 ## [3.31.1] - 2026-08-23
 
 ### Fixed
