@@ -172,7 +172,11 @@ async def _schema_for_options(
     valid_api_ids = {api["value"] for api in hass_apis}
     stored_apis = opts.get(CONF_LLM_HASS_API, [])
     if isinstance(stored_apis, str):
-        stored_apis = [stored_apis]
+        # Legacy single-string storage; "" would otherwise become [""].
+        stored_apis = [stored_apis] if stored_apis else []
+    elif not isinstance(stored_apis, list):
+        # e.g. an explicit None — iterating it would crash the form build.
+        stored_apis = []
     # Drop API ids that no longer exist (e.g. a removed MCP server): a stale
     # id pre-filled into the selector fails SelectSelector validation on
     # submit, leaving the form permanently unsaveable (issue #568).
