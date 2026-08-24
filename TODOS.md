@@ -1145,6 +1145,20 @@ window-scoped check could suppress.
 
 ## Notifier / Observability
 
+### Sanitize friendly_name-derived text in notification copy like the unit string
+
+**What:** The v3.31.1 baseline-copy fix strips control/bidi characters and length-caps the untrusted `unit_of_measurement` before it reaches push text (`_baseline_deviation_mobile_message`), but the appliance/sensor display name (`friendly_name` → `_strip_power_suffix(...).title()`) is still embedded uncapped and unfiltered in the same messages, and camera names elsewhere use only a `[:30]` cap with no control-char strip. A crafted device name can carry the same bidi-reorder / instruction-text spoofing the unit fix closed (raised by both the Claude adversarial and Codex passes on v3.31.1; same class, pre-existing convention).
+
+**Why:** Notification copy is a trust boundary: entity names arrive from semi-trusted integrations (MQTT/ESPHome/template sensors over untrusted data).
+
+**How to apply:** Extract the unit sanitizer (category-C strip + whitespace collapse + cap) into a small helper and apply it to every evidence-derived display string in `sentinel/notifier.py` (appliance names, camera names, entry names), with a generous cap (e.g. 40) for names. One test per surface.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+---
+
 ### Remaining notification-localization gaps after PR #565 (buttons, cs plural, uncurated labels)
 
 **What:** Three gaps deliberately shipped with the v3.31.0 notification-chrome localization (PR #565), awaiting @hruba202's input (asked in the close-out comment, issuecomment-5386281819): (1) **action-button titles stay English** — "Confirm"/"Cancel" under the Czech permanent-snooze prompt guide a destructive action in the wrong language (cross-model review's top remaining finding), plus "Ask Agent"/"Arm Alarm"/"Snooze Always"; (2) **cs `batch_message` plural** — "{count} novinek" is grammatically wrong for counts 1–4, the common batch size (needs novinka/novinky/novinek forms or a count-agnostic phrasing); (3) **uncurated type labels** — `camera_missing_snapshot_night_home`, `unknown_person_camera_no_home`, `phone_battery_low_at_night_home`, `vehicle_detected_near_camera_home`, `pet_detected_at_night_no_occupancy` are absent from `_KNOWN_TYPE_LABEL_KEYS`, so they render as prettified English slugs on Czech installs.
@@ -1198,18 +1212,6 @@ window-scoped check could suppress.
 **Effort:** S
 **Priority:** P2
 **Depends on:** v3.30.11
-
----
-
-### Baseline-deviation notifications guess the display unit from the entity_id
-
-**What:** `_baseline_deviation_mobile_message` (`sentinel/notifier.py:904`) picks the display unit with `"W" if "power" in entity_id else "kWh" if "energy" in entity_id else ""`. A kW-denominated sensor renders as e.g. "0.4W vs usual 0.3W", and a power sensor without "power" in its entity_id gets no unit at all. Surfaced during the #461 unit-normalization review (v3.21.3).
-
-**How to apply:** Plumb the sensor's `unit_of_measurement` into the baseline finding evidence in `sentinel/baseline.py` (alongside `current_value`/`baseline_value`, which stay native) and render it verbatim in the notifier, falling back to the current heuristic for old persisted findings.
-
-**Effort:** S
-**Priority:** P3
-**Depends on:** None
 
 ---
 
@@ -1472,6 +1474,21 @@ window-scoped check could suppress.
 ---
 
 ## Completed
+
+### Baseline-deviation notifications guess the display unit from the entity_id
+
+**What:** `_baseline_deviation_mobile_message` (`sentinel/notifier.py:904`) picks the display unit with `"W" if "power" in entity_id else "kWh" if "energy" in entity_id else ""`. A kW-denominated sensor renders as e.g. "0.4W vs usual 0.3W", and a power sensor without "power" in its entity_id gets no unit at all. Surfaced during the #461 unit-normalization review (v3.21.3).
+
+**How to apply:** Plumb the sensor's `unit_of_measurement` into the baseline finding evidence in `sentinel/baseline.py` (alongside `current_value`/`baseline_value`, which stay native) and render it verbatim in the notifier, falling back to the current heuristic for old persisted findings.
+
+**Resolution:** Shipped as prescribed in the metric-aware baseline-copy fix: `evaluate_baseline_deviation` and `_evaluate_dow_anomaly` capture `unit_of_measurement` and `device_class` into finding evidence, and `_baseline_deviation_mobile_message` renders the captured unit (sanitized — control/bidi characters stripped, length-capped). The entity_id heuristic survives only for legacy persisted findings whose evidence lacks the unit key; a present-but-empty unit means a genuinely unitless sensor and no unit is fabricated. Anomaly-id stability across the new evidence keys is preserved via `DISPLAY_ONLY_EVIDENCE_KEYS` / `hashable_evidence` in `sentinel/models.py`. Follow-up spoofing gap for `friendly_name`-derived text is tracked as its own P3 above.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+**Completed:** v3.31.1 (2026-08-23)
+
+---
 
 ### Sentinel unknown-person rules are suppressed by any non-empty recognized list
 

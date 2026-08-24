@@ -19,6 +19,7 @@ from .models import (
     AnomalyFinding,
     Severity,
     build_anomaly_id,
+    hashable_evidence,
     unknown_person_sighting_is_actionable,
 )
 from .proposal_templates import SUPPORTED_TEMPLATES
@@ -1067,8 +1068,9 @@ def _build_finding(
     if not isinstance(suggested_actions, list):
         suggested_actions = []
     is_sensitive = bool(rule.get("is_sensitive", False))
-    _hash_evidence = {k: v for k, v in evidence.items() if k != "friendly_name"}
-    anomaly_id = build_anomaly_id(rule_id, triggering_entities, _hash_evidence)
+    anomaly_id = build_anomaly_id(
+        rule_id, triggering_entities, hashable_evidence(evidence)
+    )
     return AnomalyFinding(
         anomaly_id=anomaly_id,
         type=rule_id,

@@ -23,7 +23,9 @@ delegated to ``ActionHandler``.  The ``dismiss`` action sets
 from __future__ import annotations
 
 import logging
+import math
 import re
+import unicodedata
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -51,6 +53,10 @@ from custom_components.home_generative_agent.core.utils import extract_final
 from custom_components.home_generative_agent.sentinel.models import enrolled_people
 from custom_components.home_generative_agent.sentinel.notifier_messages import (
     notif_msg,
+)
+from custom_components.home_generative_agent.sentinel.power_units import (
+    is_energy_unit,
+    is_power_unit,
 )
 from custom_components.home_generative_agent.sentinel.suppression import (
     SUPPRESSION_REASON_NOT_SUPPRESSED,
@@ -817,6 +823,33 @@ def _strip_power_suffix(name: str) -> str:
     return name
 
 
+def _is_power_class_evidence(ev: dict[str, Any]) -> bool:
+    """
+    Return True when a baseline finding's entity is a power/energy sensor.
+
+    Baseline rules can target any numeric sensor (humidity, temperature, …),
+    but the power/appliance copy only fits power-class entities.  Findings
+    persisted before unit/device_class were captured in evidence fall back to
+    the entity_id substring heuristic the copy previously relied on.
+    """
+    device_class = str(ev.get("device_class") or "")
+    if device_class in {"power", "energy"}:
+        return True
+    unit = str(ev.get("unit_of_measurement") or "")
+    if unit and (is_power_unit(unit) or is_energy_unit(unit)):
+        # A power-dimension unit wins even under an exotic device_class
+        # (e.g. energy_storage sensors reporting kWh).
+        return True
+    if "device_class" in ev or "unit_of_measurement" in ev:
+        # New finding whose captured metadata says non-power; never fall back
+        # to the entity_id heuristic here or unitless sensors named like
+        # sensor.energy_score would get appliance copy.
+        return False
+    # Legacy findings persisted before the metadata was captured.
+    entity_id = str(ev.get("entity_id") or "")
+    return "power" in entity_id or "energy" in entity_id
+
+
 def _appliance_power_duration_mobile_message(finding: AnomalyFinding) -> str:
     """Deterministic mobile copy for appliance_power_duration."""
     ev = finding.evidence
@@ -886,9 +919,12 @@ def _build_subtitle(finding: AnomalyFinding, hass: HomeAssistant | None = None) 
             "direction_lower" if deviation == "below" else "direction_higher"
         )
         direction = notif_msg(hass, direction_key)
-        return notif_msg(
-            hass, "subtitle_power_deviation", appliance=appliance, direction=direction
+        subtitle_key = (
+            "subtitle_power_deviation"
+            if _is_power_class_evidence(finding.evidence)
+            else "subtitle_reading_deviation"
         )
+        return notif_msg(hass, subtitle_key, appliance=appliance, direction=direction)
     return _display_type(finding, hass)
 
 
@@ -993,26 +1029,59 @@ def _baseline_deviation_mobile_message(finding: AnomalyFinding) -> str:
     appliance = _strip_power_suffix(raw_name).title() or "Sensor"
 
     current_value = ev.get("current_value")
+    # DOW-blended time_of_day_anomaly findings carry the comparison value as
+    # expected_value, not baseline_value (see _evaluate_dow_anomaly).
     baseline_value = ev.get("baseline_value")
+    if baseline_value is None:
+        baseline_value = ev.get("expected_value")
     deviation_pct = ev.get("deviation_pct")
     direction = str(ev.get("deviation_direction") or "")
 
-    entity_id = str(ev.get("entity_id") or "")
-    unit = "W" if "power" in entity_id else "kWh" if "energy" in entity_id else ""
+    is_power = _is_power_class_evidence(ev)
+    # Untrusted entity attribute: drop control/format characters (bidi
+    # overrides can visually reorder push text), collapse whitespace, and cap
+    # before it is embedded in notification copy.
+    raw_unit = str(ev.get("unit_of_measurement") or "")
+    unit = " ".join(
+        "".join(ch for ch in raw_unit if unicodedata.category(ch)[0] != "C").split()
+    )[:12]
+    if not unit and is_power and "unit_of_measurement" not in ev:
+        # Findings persisted before the unit was captured in evidence: power
+        # circuits report watts by convention, energy circuits kWh.  Key
+        # ABSENCE is the legacy signal — a present-but-empty unit means a
+        # genuinely unitless sensor, where fabricating a unit would be wrong.
+        unit = "kWh" if "energy" in str(ev.get("entity_id") or "") else "W"
+    cta = "Check appliance." if is_power else "Worth checking."
 
     direction_word = "below" if direction == "below" else "above"
+    # Persisted evidence re-renders through here: values may be missing,
+    # non-numeric, or non-finite (poisoned baselines).  Rendering must never
+    # raise — a crash here kills the dispatch path.
+    pct_val: int | None = None
+    if deviation_pct is not None:
+        try:
+            pct_f = float(deviation_pct)
+            pct_val = round(pct_f) if math.isfinite(pct_f) else None
+        except (TypeError, ValueError):
+            pct_val = None
+    have_values = False
+    cur_f = base_f = 0.0
     if current_value is not None and baseline_value is not None:
-        cur = round(float(current_value), 1)
-        base = round(float(baseline_value), 1)
-        pct = (
-            f" ({round(float(deviation_pct))}% {direction_word} normal)"
-            if deviation_pct is not None
-            else ""
-        )
-        msg = f"{appliance}: {cur}{unit} vs usual {base}{unit}{pct}. Check appliance."
+        try:
+            cur_f = float(current_value)
+            base_f = float(baseline_value)
+            have_values = math.isfinite(cur_f) and math.isfinite(base_f)
+        except (TypeError, ValueError):
+            have_values = False
+    if have_values:
+        cur = round(cur_f, 1)
+        base = round(base_f, 1)
+        pct = f" ({pct_val}% {direction_word} normal)" if pct_val is not None else ""
+        msg = f"{appliance}: {cur}{unit} vs usual {base}{unit}{pct}. {cta}"
     else:
-        dev = f" {round(float(deviation_pct))}%" if deviation_pct is not None else ""
-        msg = f"{appliance} power{dev} {direction_word} normal. Check appliance."
+        noun = "power" if is_power else "reading"
+        dev = f" {pct_val}%" if pct_val is not None else ""
+        msg = f"{appliance} {noun}{dev} {direction_word} normal. {cta}"
     return msg[:MAX_MOBILE_MESSAGE_CHARS].rstrip()
 
 
