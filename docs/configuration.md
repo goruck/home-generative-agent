@@ -150,6 +150,8 @@ You can select any combination. Selecting both Assist and one or more MCP APIs m
 4. Open **Settings → Devices & Services → Home Generative Agent → Configure**.
 5. Select the new entry in **Control Home Assistant** and save.
 
+**Removing an MCP server:** if a selected server's integration is removed (or is temporarily unavailable), its entry stays selected and is shown as `<id> (no longer available)` so the form remains saveable and your selection is never dropped behind your back. Deselect the dead entry and save to clean it up; leaving it selected only produces a startup warning until the server returns.
+
 ---
 
 ## Speech-to-Text (STT)
