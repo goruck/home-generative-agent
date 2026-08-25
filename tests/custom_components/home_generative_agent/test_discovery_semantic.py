@@ -3,8 +3,13 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
+from custom_components.home_generative_agent.sentinel.discovery_engine import (
+    _candidate_identity_hash,
+)
 from custom_components.home_generative_agent.sentinel.discovery_semantic import (
     candidate_semantic_key,
     is_battery_level_entity_id,
@@ -14,6 +19,17 @@ from custom_components.home_generative_agent.sentinel.discovery_semantic import 
 from custom_components.home_generative_agent.sentinel.proposal_templates import (
     normalize_candidate,
 )
+
+
+def _effective_dedup_key(candidate: dict[str, Any]) -> str:
+    """
+    Mirror the engine's dedup key: semantic key, else the identity hash.
+
+    _filter_novel_candidates dedups on `key or _candidate_identity_hash(...)`,
+    so a test that only asserts `candidate_semantic_key(...) is None` says
+    nothing about whether two candidates actually stay distinct downstream.
+    """
+    return candidate_semantic_key(candidate) or _candidate_identity_hash(candidate)
 
 
 def test_candidate_semantic_key_collapses_similar_window_home_night() -> None:
@@ -1169,11 +1185,74 @@ def test_zero_evidence_low_battery_candidates_do_not_force_collide() -> None:
         "title": "Nízká úroveň baterie senzoru 0xaaaa11122233344",
         "summary": "Baterie senzoru 0xaaaa11122233344 klesla pod doporučenou hranici.",
     }
-    # Both key None (they no longer force-collide on a shared generic key),
-    # so any downstream dedup happens via _candidate_identity_hash, which
-    # hashes each candidate's own title+summary rather than a constant.
+    # Assert the EFFECTIVE dedup key, not just that both are None: the
+    # semantic key going away is only useful if the identity-hash fallback
+    # the engine substitutes actually separates the two sensors. Asserting
+    # `is None` twice would pass even if both collapsed onto one hash.
+    assert _effective_dedup_key(candidate_a) != _effective_dedup_key(candidate_b)
+
+
+def test_window_worded_zero_evidence_low_battery_candidate_keys_none() -> None:
+    """
+    Window prose must not rescue a zero-evidence battery candidate.
+
+    The subject back-fill near the end of candidate_semantic_key promotes an
+    unresolved subject to entry_window on "window"/"windows" prose. It runs
+    AFTER the battery leg, so a battery leg that merely blanked its predicate
+    and fell through would land on a constant
+    "subject=entry_window|predicate=unknown|...|entities=" key — the exact
+    over-merge the None path exists to prevent, and window/door contacts are
+    the battery-powered devices this leg sees most. The leg therefore returns
+    None directly instead of falling through.
+    """
+    candidate_a = {
+        "candidate_id": "low_battery_sensor_win_a",
+        "title": "Low battery on the bedroom window sensor",
+        "summary": "The bedroom window sensor battery dropped below the limit.",
+    }
+    candidate_b = {
+        "candidate_id": "low_battery_sensor_win_b",
+        "title": "Low battery on the kitchen window sensor",
+        "summary": "The kitchen window sensor battery dropped below the limit.",
+    }
     assert candidate_semantic_key(candidate_a) is None
     assert candidate_semantic_key(candidate_b) is None
+    assert _effective_dedup_key(candidate_a) != _effective_dedup_key(candidate_b)
+
+
+@pytest.mark.parametrize(
+    ("evidence_path", "expected_subject"),
+    [
+        ("entities[entity_id=alarm_control_panel.house].state", "alarm"),
+        ("entities[entity_id=binary_sensor.front_door_contact].state", "entry_door"),
+        ("entities[entity_id=binary_sensor.hall_motion].state", "motion"),
+    ],
+)
+def test_battery_candidate_with_non_sensor_evidence_keeps_low_battery(
+    evidence_path: str, expected_subject: str
+) -> None:
+    """
+    A resolved subject keeps predicate=low_battery when no battery sensor resolves.
+
+    _battery_sensor_entity_ids only ever returns sensor.* IDs, so it is empty
+    for a battery candidate citing an alarm panel, a binary_sensor contact, or
+    a motion sensor — the normal way Zigbee/Z-Wave devices are cited. Blanking
+    the predicate for those would make them key identically to any unrelated
+    predicate-less candidate about the same entity, and the engine's novelty
+    filter would silently drop one for the other in LLM emission order. They
+    keep their pre-existing keying; the None path is scoped to candidates that
+    resolved nothing at all.
+    """
+    candidate = {
+        "candidate_id": "low_battery_device",
+        "title": "Low battery on the device",
+        "summary": "The device battery is low.",
+        "evidence_paths": [evidence_path],
+    }
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert f"subject={expected_subject}" in key
+    assert "predicate=low_battery" in key
 
 
 def test_lock_battery_candidate_keys_sensor_subject() -> None:
