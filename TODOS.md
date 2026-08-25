@@ -568,6 +568,20 @@ And two writer-consistency gaps: (7) `_mark_tool_index_stale` (embedding-provide
 
 ## Discovery
 
+### Earlier predicate legs still emit constant evidence-less keys
+
+**What:** #571 removed the constant `subject=unknown|predicate=low_battery|…|entities=` key from the battery leg, but the legs ABOVE it in `candidate_semantic_key`'s elif chain (`unlocked`, `open`, `unavailable`, `disarmed`) have the same shape and were not touched. They fire on prose alone, so an evidence-less candidate that trips one of them keys a constant string shared by every other candidate that trips the same leg. Reproduced: `{"title": "Battery sensor unavailable", "summary": "The battery is low and offline.", "evidence_paths": []}` keys `v1|subject=unknown|predicate=unavailable|night=any|home=any|scope=any|entities=`, and a second candidate about a different sensor with the same wording collides on it — the `unavailable` leg wins before the battery leg is ever reached. The normalizer resolves no entity either and returns `missing_required_entities`, so the key claims a predicate nothing will ever register.
+
+**Why:** Codex adversarial finding during the #571 ship (2026-08-25), empirically reproduced. Pre-existing and unchanged by that PR — base keys these identically — so it was not fixed there. Note the `staleness` leg already carries the right guard (`subject != "unknown"`) with a comment explaining exactly this hazard; the four legs above it never got it.
+
+**How to apply:** Give each prose-only predicate leg the same treatment the staleness leg has — either gate on a resolved subject, or return None when the leg resolves no entities and the subject is still unknown (the #571 shape). Each leg needs its own check against the normalizer's branch order first: `open`/`unlocked` can legitimately key entity-less for the any-window template, so a blanket guard would break `open_any_window_at_night_while_away` dedup. Pin each with a two-different-sensors non-collision test.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** —
+
+---
+
 ### A null-key candidate persists the LLM's own `semantic_key` and can suppress an unrelated proposal
 
 **What:** `DISCOVERY_OUTPUT_SCHEMA` accepts an optional model-supplied `semantic_key` (discovery_schema.py). In `_filter_novel_candidates` (discovery_engine.py) the stored record is `enriched = dict(candidate)` and the computed key is written back only under `if key:` — so whenever `candidate_semantic_key` returns `None`, whatever string the model put in `semantic_key` survives into the stored discovery record. `_collect_existing_keys` then prefers that stored value over recomputation (`key = str(candidate.get("semantic_key", "")) or candidate_semantic_key(candidate)`), so the model's string lands in `filter_keys`. A candidate that keys `None` but declares e.g. `v1|subject=entry_window|predicate=open|night=1|home=0|scope=any|entities=` suppresses the real open-windows-at-night-while-away proposal as `existing_semantic_key` until that record ages out of the 200-record window.

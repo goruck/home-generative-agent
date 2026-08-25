@@ -1361,6 +1361,18 @@ def test_low_battery_sensor_subject_without_battery_id_keeps_base_keying(
     evidence. All of them still resolved subject=sensor from the subject
     chain, so the new None path must NOT fire for them — they keep the exact
     key they produced before the fix, entities included.
+
+    The pinned key is NOT claimed to be correct. For several of these shapes
+    it is a known mirror mismatch: a lone sensor.*_power with battery prose
+    keys predicate=low_battery here while the normalizer skips its battery
+    branch (no battery target) and registers baseline_deviation, so the
+    activated rule can never cover this candidate (cross-model adversarial,
+    reproduced). That divergence is pre-existing and belongs to the
+    derive-keys-from-the-normalizer's-routing work tracked in TODOS.md — this
+    test pins BASE PARITY so the scoped None path cannot silently re-key
+    these shapes on its way past, which is exactly the regression an earlier
+    round of this fix introduced. Fixing the mismatch means changing this
+    expectation deliberately, not discovering it by surprise.
     """
     candidate = {
         "candidate_id": "low_battery_device",
