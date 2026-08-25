@@ -1226,6 +1226,13 @@ def test_window_worded_zero_evidence_low_battery_candidate_keys_none() -> None:
         ("entities[entity_id=alarm_control_panel.house].state", "alarm"),
         ("entities[entity_id=binary_sensor.front_door_contact].state", "entry_door"),
         ("entities[entity_id=binary_sensor.hall_motion].state", "motion"),
+        # The remaining two subject legs the fall-through has to preserve:
+        # entry_window is the FIRST arm of the subject chain (and the one the
+        # window back-fill would otherwise impersonate), and lock reaches the
+        # battery leg only because the lock-battery hoist above it resolves no
+        # battery sensor either — a lock with no battery sensor cited at all.
+        ("entities[entity_id=binary_sensor.bedroom_window].state", "entry_window"),
+        ("entities[entity_id=lock.front].state", "lock"),
     ],
 )
 def test_battery_candidate_with_non_sensor_evidence_keeps_low_battery(
@@ -1253,6 +1260,120 @@ def test_battery_candidate_with_non_sensor_evidence_keeps_low_battery(
     assert key is not None
     assert f"subject={expected_subject}" in key
     assert "predicate=low_battery" in key
+
+
+@pytest.mark.parametrize(
+    "evidence_paths",
+    [
+        pytest.param([], id="empty_list"),
+        pytest.param(["entities[31].state"], id="index_based_path"),
+        pytest.param(["derived.anyone_home"], id="derived_only_path"),
+        pytest.param(["snapshot.summary"], id="non_entity_path"),
+    ],
+)
+def test_zero_evidence_low_battery_unresolvable_paths_key_none(
+    evidence_paths: list[str],
+) -> None:
+    """
+    Present-but-unresolvable evidence_paths key None, exactly like a missing key.
+
+    The None path is reached whenever _battery_sensor_entity_ids resolves
+    nothing AND no other evidence gave the candidate a subject — which is a
+    property of what the paths RESOLVE to, not of whether the key exists.
+    An index-based path (entities[31].state, issue #518), a derived-only
+    context path, and a non-entity path all resolve to no entity ID, so each
+    must key None rather than the constant
+    "subject=unknown|predicate=low_battery|...|entities=" string every other
+    such candidate would also produce.
+    """
+    candidate = {
+        "candidate_id": "low_battery_sensor_0xffffaa67127301f8",
+        "title": "Low battery on the sensor",
+        "summary": "The sensor battery dropped below the recommended limit.",
+        "evidence_paths": evidence_paths,
+    }
+    assert candidate_semantic_key(candidate) is None
+
+
+@pytest.mark.parametrize(
+    "entity_id",
+    [
+        "camera.front_porch",
+        "device_tracker.phone",
+        "light.kitchen",
+        "cover.garage",
+    ],
+)
+def test_zero_evidence_low_battery_non_subject_domain_keys_none(
+    entity_id: str,
+) -> None:
+    """
+    Evidence in a domain the subject chain ignores still leaves the key None.
+
+    The subject chain only resolves window/door/lock/motion/alarm/sensor IDs,
+    so a battery candidate whose only evidence is a camera, a device tracker,
+    a light, or a domain-name-less cover resolves a subject of "unknown" just
+    like a candidate with no evidence at all — and would otherwise emit the
+    same constant key as every other one of them. Camera evidence in
+    particular does NOT reach the camera leg above: that leg additionally
+    requires unknown/person wording, which a battery candidate never carries.
+    """
+    candidate = {
+        "candidate_id": "low_battery_sensor_abc",
+        "title": "Low battery on the device",
+        "summary": "The device battery is low.",
+        "evidence_paths": [f"entities[entity_id={entity_id}].state"],
+    }
+    assert candidate_semantic_key(candidate) is None
+
+
+@pytest.mark.parametrize(
+    ("evidence_ids", "expected_entities"),
+    [
+        pytest.param(
+            ["sensor.kitchen_thing", "sensor.hall_thing"],
+            "sensor.hall_thing,sensor.kitchen_thing",
+            id="two_ambiguous_sensors",
+        ),
+        pytest.param(
+            ["sensor.kitchen_power", "sensor.hall_lux"],
+            "sensor.hall_lux,sensor.kitchen_power",
+            id="two_excluded_sensors",
+        ),
+        pytest.param(
+            ["sensor.kitchen_power"],
+            "sensor.kitchen_power",
+            id="single_excluded_sensor",
+        ),
+        pytest.param(["binary_sensor.leak"], "binary_sensor.leak", id="binary_sensor"),
+    ],
+)
+def test_low_battery_sensor_subject_without_battery_id_keeps_base_keying(
+    evidence_ids: list[str], expected_entities: str
+) -> None:
+    """
+    subject=sensor shapes that resolve no battery ID keep their base-parity key.
+
+    _battery_sensor_entity_ids returns [] whenever no battery-NAMED sensor.*
+    exists and the non-excluded sensor.* fallback is not exactly one survivor:
+    two ambiguous sensors (fallback count 2), two sensors both filtered by
+    _NON_BATTERY_ID_TOKENS, a single filtered sensor, and binary_sensor-only
+    evidence. All of them still resolved subject=sensor from the subject
+    chain, so the new None path must NOT fire for them — they keep the exact
+    key they produced before the fix, entities included.
+    """
+    candidate = {
+        "candidate_id": "low_battery_device",
+        "title": "Low battery on the device",
+        "summary": "The device battery is low.",
+        "evidence_paths": [
+            f"entities[entity_id={entity_id}].state" for entity_id in evidence_ids
+        ],
+    }
+    assert candidate_semantic_key(candidate) == (
+        "v1|subject=sensor|predicate=low_battery|night=any|home=any|scope=any|"
+        f"entities={expected_entities}"
+    )
 
 
 def test_lock_battery_candidate_keys_sensor_subject() -> None:

@@ -317,6 +317,89 @@ def test_filter_null_key_candidate_novel_when_not_seen() -> None:
     assert dropped == []
 
 
+_ZERO_EVIDENCE_BATTERY_CANDIDATE: dict[str, Any] = {
+    "candidate_id": "low_battery_sensor_0xffffaa67127301f8",
+    "title": "Nízká úroveň baterie senzoru 0xffffaa67127301f8",
+    "summary": "Baterie senzoru 0xffffaa67127301f8 klesla pod doporučenou hranici.",
+    "pattern": "threshold_breach",
+    "suggested_type": "maintenance",
+    "confidence_hint": 0.5,
+    "evidence_paths": [],
+}
+
+
+def test_filter_zero_evidence_low_battery_dedups_on_identity_hash() -> None:
+    """
+    An evidence-less low_battery candidate really does dedup via identity hash.
+
+    candidate_semantic_key now returns None for this shape (issue #571), which
+    is only useful if the engine's `key or _candidate_identity_hash(...)`
+    fallback then makes the candidate dedup against itself. Asserting the key
+    is None in the semantic tests proves nothing about that: it must be driven
+    through _filter_novel_candidates, whose derived-only and
+    entity-text-mismatch guards run BEFORE the dedup check and could drop the
+    candidate first. Both dedup legs are asserted — a re-proposal in a later
+    run (existing_identity_hash) and a twin inside one batch
+    (batch_duplicate).
+    """
+    engine = SentinelDiscoveryEngine(
+        hass=cast("HomeAssistant", object()),
+        options={},
+        model=None,
+        store=cast("DiscoveryStore", _DummyStore()),
+    )
+    hash_key = _candidate_identity_hash(_ZERO_EVIDENCE_BATTERY_CANDIDATE)
+    filtered, dropped = engine._filter_novel_candidates(
+        [dict(_ZERO_EVIDENCE_BATTERY_CANDIDATE)], {hash_key}
+    )
+    assert filtered == []
+    assert [item["dedupe_reason"] for item in dropped] == ["existing_identity_hash"]
+
+    twin = dict(_ZERO_EVIDENCE_BATTERY_CANDIDATE)
+    twin["candidate_id"] = "low_battery_sensor_0xffffaa67127301f8_again"
+    twin["confidence_hint"] = 0.9
+    filtered, dropped = engine._filter_novel_candidates(
+        [dict(_ZERO_EVIDENCE_BATTERY_CANDIDATE), twin], set()
+    )
+    assert len(filtered) == 1
+    assert [item["dedupe_reason"] for item in dropped] == ["batch_duplicate"]
+    assert dropped[0]["identity_hash"] == hash_key
+
+
+def test_filter_zero_evidence_low_battery_keeps_distinct_sensors_novel() -> None:
+    """
+    Two different evidence-less battery sensors stay distinct through the engine.
+
+    This is the over-merge half of issue #571: before the fix both candidates
+    keyed the identical constant
+    "subject=unknown|predicate=low_battery|...|entities=" string, so the
+    second sensor's proposal was dropped as a batch_duplicate of the first and
+    the user never saw it. With the None key the identity hash separates them
+    on wording, and both survive as novel.
+    """
+    engine = SentinelDiscoveryEngine(
+        hass=cast("HomeAssistant", object()),
+        options={},
+        model=None,
+        store=cast("DiscoveryStore", _DummyStore()),
+    )
+    other = dict(_ZERO_EVIDENCE_BATTERY_CANDIDATE)
+    other["candidate_id"] = "low_battery_sensor_0xaaaa11122233344"
+    other["title"] = "Nízká úroveň baterie senzoru 0xaaaa11122233344"
+    other["summary"] = (
+        "Baterie senzoru 0xaaaa11122233344 klesla pod doporučenou hranici."
+    )
+    filtered, dropped = engine._filter_novel_candidates(
+        [dict(_ZERO_EVIDENCE_BATTERY_CANDIDATE), other], set()
+    )
+    assert dropped == []
+    assert [item["dedupe_reason"] for item in filtered] == ["novel", "novel"]
+    assert [item["candidate_id"] for item in filtered] == [
+        "low_battery_sensor_0xffffaa67127301f8",
+        "low_battery_sensor_0xaaaa11122233344",
+    ]
+
+
 # ---------------------------------------------------------------------------
 # hint_keys vs filter_keys split
 # ---------------------------------------------------------------------------
