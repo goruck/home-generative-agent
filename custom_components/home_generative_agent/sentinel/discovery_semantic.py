@@ -668,6 +668,23 @@ def candidate_semantic_key(  # noqa: PLR0912, PLR0915
         if battery_entity_ids:
             subject = "sensor"
             entities = battery_entity_ids
+        else:
+            # No resolvable battery entity (candidate cites no
+            # entities[...] evidence_paths at all — e.g. a slug-only
+            # candidate_id like "low_battery_sensor_<id>" with an empty or
+            # unparsable evidence_paths list). Emitting subject=unknown
+            # here would be strictly worse than no key at all: EVERY
+            # evidence-less low_battery candidate — regardless of which
+            # physical sensor it concerns — would collide on the exact
+            # same "v1|subject=unknown|predicate=low_battery|...|entities="
+            # string (over-merging distinct sensors), while it can never
+            # match a properly-evidenced duplicate about the very same
+            # sensor (under-merging, the reported symptom: two pending
+            # low-battery candidates for one sensor never dedup). Reverting
+            # to "unknown" here routes through the existing None-key path
+            # below so these fall back to _candidate_identity_hash, exactly
+            # like other null-key candidates (Bug 2 fix) already do.
+            predicate = "unknown"
     elif _has_power_anomaly_signal(text, environmental=has_environmental_signal):
         predicate = "power_anomaly"
         if not entities and sensor_ids:

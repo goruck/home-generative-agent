@@ -1132,6 +1132,50 @@ def test_candidate_semantic_key_weak_wording_keys_low_battery() -> None:
     assert "predicate=low_battery" in key
 
 
+def test_zero_evidence_low_battery_candidate_keys_none() -> None:
+    """
+    A low-battery candidate with no resolvable entity evidence keys None.
+
+    The slug-based signal ("low_battery_sensor_<id>") is enough to route the
+    candidate through the low_battery predicate leg, but with no
+    entities[...] evidence_paths to resolve, _battery_sensor_entity_ids
+    returns []. Emitting a "subject=unknown|...|entities=" key here would be
+    strictly worse than no key: every such evidence-less low_battery
+    candidate — regardless of which physical sensor it concerns — would
+    collide on that identical generic string (over-merging unrelated
+    sensors), while it could never match a properly-evidenced duplicate
+    about the very same sensor (the reported symptom: two pending
+    candidates for one sensor's low battery never dedup against each
+    other). Returning None routes these through _candidate_identity_hash
+    instead, matching the existing null-key candidate design (Bug 2 fix).
+    """
+    candidate = {
+        "candidate_id": "low_battery_sensor_0xffffaa67127301f8",
+        "title": "Nízká úroveň baterie senzoru 0xffffaa67127301f8",
+        "summary": "Baterie senzoru 0xffffaa67127301f8 klesla pod doporučenou hranici.",
+    }
+    assert candidate_semantic_key(candidate) is None
+
+
+def test_zero_evidence_low_battery_candidates_do_not_force_collide() -> None:
+    """Two different zero-evidence battery candidates must not share a key."""
+    candidate_a = {
+        "candidate_id": "low_battery_sensor_0xffffaa67127301f8",
+        "title": "Nízká úroveň baterie senzoru 0xffffaa67127301f8",
+        "summary": "Baterie senzoru 0xffffaa67127301f8 klesla pod doporučenou hranici.",
+    }
+    candidate_b = {
+        "candidate_id": "low_battery_sensor_0xaaaa11122233344",
+        "title": "Nízká úroveň baterie senzoru 0xaaaa11122233344",
+        "summary": "Baterie senzoru 0xaaaa11122233344 klesla pod doporučenou hranici.",
+    }
+    # Both key None (they no longer force-collide on a shared generic key),
+    # so any downstream dedup happens via _candidate_identity_hash, which
+    # hashes each candidate's own title+summary rather than a constant.
+    assert candidate_semantic_key(candidate_a) is None
+    assert candidate_semantic_key(candidate_b) is None
+
+
 def test_lock_battery_candidate_keys_sensor_subject() -> None:
     """
     Lock + battery evidence keys subject=sensor on the battery sensor.
