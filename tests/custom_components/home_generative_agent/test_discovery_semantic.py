@@ -11,6 +11,7 @@ from custom_components.home_generative_agent.sentinel.discovery_engine import (
     _candidate_identity_hash,
 )
 from custom_components.home_generative_agent.sentinel.discovery_semantic import (
+    battery_slug_device_token,
     candidate_semantic_key,
     is_battery_level_entity_id,
     rule_key_covers_candidate_key,
@@ -30,6 +31,46 @@ def _effective_dedup_key(candidate: dict[str, Any]) -> str:
     nothing about whether two candidates actually stay distinct downstream.
     """
     return candidate_semantic_key(candidate) or _candidate_identity_hash(candidate)
+
+
+def test_battery_slug_device_token_extracts_hex_id() -> None:
+    """The device token is what's left after stripping known topic words."""
+    candidate = {
+        "candidate_id": "low_battery_sensor_0xffffaa67127301f8",
+        "title": "Nízká úroveň baterie senzoru 0xffffaa67127301f8",
+        "summary": "Baterie senzoru 0xffffaa67127301f8 klesla na 12 %.",
+    }
+    assert battery_slug_device_token(candidate) == "0xffffaa67127301f8"
+
+
+def test_battery_slug_device_token_none_without_low_battery_signal() -> None:
+    """No low-battery signal in text or slug means no device token."""
+    candidate = {
+        "candidate_id": "front_door_camera_offline",
+        "title": "Front door camera offline",
+        "summary": "The front door camera stopped responding.",
+    }
+    assert battery_slug_device_token(candidate) is None
+
+
+def test_battery_slug_device_token_none_when_ambiguous() -> None:
+    """Two or more leftover tokens is ambiguous, not a device token."""
+    candidate = {
+        "candidate_id": "hall_and_garage_low_battery_sensor",
+        "title": "Nízká baterie",
+        "summary": "Baterie senzoru je nízká.",
+    }
+    assert battery_slug_device_token(candidate) is None
+
+
+def test_battery_slug_device_token_none_when_slug_is_all_topic_words() -> None:
+    """A slug with no device-identifying leftover token returns None."""
+    candidate = {
+        "candidate_id": "low_battery_sensor",
+        "title": "Low battery sensor",
+        "summary": "A sensor battery is low.",
+    }
+    assert battery_slug_device_token(candidate) is None
 
 
 def test_candidate_semantic_key_collapses_similar_window_home_night() -> None:

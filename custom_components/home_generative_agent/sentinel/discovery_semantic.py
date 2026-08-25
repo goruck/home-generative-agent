@@ -336,6 +336,63 @@ def _has_low_battery_signal(text: str, slug_text: str) -> bool:
     )
 
 
+# Words in a low-battery candidate_id slug that describe the *topic*
+# rather than the device — stripped before what's left is trusted as a
+# device token. Deliberately conservative (issue #571 follow-up): a false
+# device-token match merges two genuinely different topics, which is worse
+# than the prose-hash re-proposal drift this exists to fix.
+_BATTERY_SLUG_TOPIC_WORDS = frozenset(
+    {
+        "low",
+        "below",
+        "under",
+        "weak",
+        "battery",
+        "batteries",
+        "sensor",
+        "sensors",
+        "level",
+        "levels",
+        "state",
+        "capacity",
+    }
+)
+
+
+def battery_slug_device_token(candidate: dict[str, Any]) -> str | None:
+    """
+    Extract a stable device token from a low-battery candidate's slug.
+
+    Issue #571 follow-up: a null-key low-battery candidate falls back to
+    hashing title+summary, but that prose is re-generated every discovery
+    cycle and routinely embeds the live reading ("Baterie klesla na 12 %"
+    then "11 %"), so the same topic re-proposes as a new card each time.
+    The candidate_id slug the model assigns (e.g.
+    "low_battery_sensor_0xffffaa67127301f8") is comparatively stable across
+    cycles for the same device.
+
+    Only attempted when the candidate actually carries the low-battery
+    signal (mirrors the battery leg's own gate in candidate_semantic_key)
+    so this cannot pull an unrelated candidate into battery-shaped hashing.
+    After stripping known topic words (_BATTERY_SLUG_TOPIC_WORDS), exactly
+    one token must remain — zero means there is no device-identifying
+    text to anchor on, and more than one is ambiguous about which token
+    names the device, so both cases fall through to the prose hash rather
+    than guess.
+    """
+    slug_text = str(candidate.get("candidate_id", "")).lower()
+    title = str(candidate.get("title", "")).strip().lower()
+    summary = str(candidate.get("summary", "")).strip().lower()
+    text = f"{title} {summary}"
+    if not _has_low_battery_signal(text, slug_text):
+        return None
+    tokens = [t for t in _SLUG_TOKEN_SPLIT_RE.split(slug_text) if t]
+    remaining = [t for t in tokens if t not in _BATTERY_SLUG_TOPIC_WORDS]
+    if len(remaining) != 1:
+        return None
+    return remaining[0]
+
+
 # Mirrors proposal_templates._NON_BATTERY_ID_TOKENS for the battery-leg
 # entity normalization below; kept local per this module's decoupling
 # convention.
