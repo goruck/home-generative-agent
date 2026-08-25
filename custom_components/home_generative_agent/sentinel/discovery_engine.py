@@ -37,6 +37,7 @@ from custom_components.home_generative_agent.snapshot.discovery_reducer import (
 
 from .discovery_schema import DISCOVERY_OUTPUT_SCHEMA, DISCOVERY_SCHEMA_VERSION
 from .discovery_semantic import (
+    battery_slug_device_token,
     candidate_semantic_key,
     is_battery_level_entity_id,
     rule_semantic_key,
@@ -671,6 +672,20 @@ class SentinelDiscoveryEngine:
             enriched = dict(candidate)
             if key:
                 enriched["semantic_key"] = key
+            else:
+                # Adversarial finding on the #572 review (2026-08-25): when
+                # the computed key is falsy, the model's own optional
+                # "semantic_key" field (DISCOVERY_OUTPUT_SCHEMA) was left
+                # untouched in `enriched` and persisted into the discovery
+                # record. _collect_existing_keys prefers a stored
+                # semantic_key over recomputation, so an LLM-declared string
+                # on a null-key candidate could suppress an unrelated,
+                # differently-keyed real proposal as "existing_semantic_key"
+                # for as long as it stays in the 200-record window. Drop it
+                # explicitly so a null-key candidate can only ever be
+                # recalled via _candidate_identity_hash, matching what
+                # _collect_existing_keys actually falls back to for it.
+                enriched.pop("semantic_key", None)
             seen_batch.add(identity_key)
             enriched["dedupe_reason"] = "novel"
             filtered.append(enriched)
@@ -681,13 +696,24 @@ def _candidate_identity_hash(candidate: dict[str, Any]) -> str:
     """
     Return a stable identity key for candidates that have no semantic key.
 
-    Uses the first 16 hex digits of SHA-256(title + NUL + summary) so that
-    two candidates with identical wording collide even if their other fields
-    differ (e.g. different confidence_hint or candidate_id).
+    Prefers a device token extracted from a low-battery candidate's
+    candidate_id slug (battery_slug_device_token, issue #571 follow-up)
+    over hashing title+summary: that prose is regenerated every discovery
+    cycle and routinely embeds the live reading ("Baterie klesla na 12 %"
+    then "11 %" the next cycle), so hashing it alone lets the same topic
+    re-propose as a new card each cycle. The slug is comparatively stable
+    for the same device across cycles. Falls back to SHA-256(title + NUL +
+    summary) — the first 16 hex digits — for every other null-key shape,
+    so two candidates with identical wording still collide even if their
+    other fields differ (e.g. different confidence_hint or candidate_id).
     """
-    title = str(candidate.get("title", "")).strip().lower()
-    summary = str(candidate.get("summary", "")).strip().lower()
-    blob = f"{title}\x00{summary}".encode()
+    device_token = battery_slug_device_token(candidate)
+    if device_token is not None:
+        blob = f"battery-device\x00{device_token}".encode()
+    else:
+        title = str(candidate.get("title", "")).strip().lower()
+        summary = str(candidate.get("summary", "")).strip().lower()
+        blob = f"{title}\x00{summary}".encode()
     return "ident|sha256=" + hashlib.sha256(blob).hexdigest()[:16]
 
 

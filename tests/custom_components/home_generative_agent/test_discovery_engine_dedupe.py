@@ -267,6 +267,83 @@ def test_candidate_identity_hash_differs_on_content() -> None:
     )
 
 
+_ZERO_EVIDENCE_LOW_BATTERY_CANDIDATE: dict[str, Any] = {
+    "candidate_id": "low_battery_sensor_0xffffaa67127301f8",
+    "title": "Nízká úroveň baterie senzoru 0xffffaa67127301f8",
+    "summary": "Baterie senzoru 0xffffaa67127301f8 klesla na 12 %.",
+}
+
+
+def test_candidate_identity_hash_collapses_drifting_battery_reproposals() -> None:
+    """
+    Re-proposals of one battery sensor collapse to one identity hash.
+
+    Issue #571 follow-up (TODOS.md "Identity-hash dedup cannot collapse
+    re-proposals whose prose carries live values"): LLM candidate prose
+    routinely embeds the current reading, so a title+summary hash alone
+    made each cycle's re-proposal of the same sensor a new pending card.
+    Deriving the fallback identity from the candidate_id slug's device
+    token when the low-battery signal is present fixes this without
+    touching the prose-hash fallback other null-key shapes still use.
+    """
+    cycle_2 = dict(
+        _ZERO_EVIDENCE_LOW_BATTERY_CANDIDATE,
+        summary="Baterie senzoru 0xffffaa67127301f8 klesla na 11 %.",
+    )
+    cycle_3 = dict(
+        _ZERO_EVIDENCE_LOW_BATTERY_CANDIDATE,
+        summary=(
+            "Baterie senzoru 0xffffaa67127301f8 klesla na 9 %, "
+            "brzy bude potreba vymenit."
+        ),
+    )
+    hashes = {
+        _candidate_identity_hash(candidate)
+        for candidate in (
+            _ZERO_EVIDENCE_LOW_BATTERY_CANDIDATE,
+            cycle_2,
+            cycle_3,
+        )
+    }
+    assert len(hashes) == 1
+
+
+def test_candidate_identity_hash_battery_device_tokens_do_not_collide() -> None:
+    """Two different zero-evidence battery sensors must not share an identity."""
+    other_sensor = {
+        "candidate_id": "low_battery_sensor_0xaaaa11122233344",
+        "title": "Nízká úroveň baterie senzoru 0xaaaa11122233344",
+        "summary": "Baterie senzoru 0xaaaa11122233344 klesla pod doporučenou hranici.",
+    }
+    assert _candidate_identity_hash(
+        _ZERO_EVIDENCE_LOW_BATTERY_CANDIDATE
+    ) != _candidate_identity_hash(other_sensor)
+
+
+def test_candidate_identity_hash_non_battery_null_key_unaffected() -> None:
+    """A non-battery null-key candidate keeps hashing on title+summary."""
+    other = dict(_NULL_KEY_CANDIDATE)
+    other["summary"] = "Person tracking data looks fresh again."
+    assert _candidate_identity_hash(_NULL_KEY_CANDIDATE) != _candidate_identity_hash(
+        other
+    )
+
+
+def test_candidate_identity_hash_ambiguous_battery_slug_falls_back_to_prose() -> None:
+    """A slug with 2+ leftover tokens after stripping topic words is not guessed."""
+    ambiguous = {
+        "candidate_id": "hall_and_garage_low_battery_sensor",
+        "title": "Nízká baterie",
+        "summary": "Baterie senzoru je nízká.",
+    }
+    same_slug_different_prose = dict(ambiguous, summary="Baterie senzoru je slaba.")
+    # No confident device token to anchor on, so this must NOT collapse two
+    # differently-worded candidates the way a real device token would.
+    assert _candidate_identity_hash(ambiguous) != _candidate_identity_hash(
+        same_slug_different_prose
+    )
+
+
 def test_filter_null_key_candidate_dropped_when_hash_in_existing() -> None:
     """A null-key candidate whose identity hash is in existing_keys is dropped."""
     engine = SentinelDiscoveryEngine(
@@ -314,6 +391,35 @@ def test_filter_null_key_candidate_novel_when_not_seen() -> None:
     filtered, dropped = engine._filter_novel_candidates([_NULL_KEY_CANDIDATE], set())
     assert len(filtered) == 1
     assert filtered[0]["dedupe_reason"] == "novel"
+    assert dropped == []
+
+
+def test_filter_null_key_candidate_drops_model_supplied_semantic_key() -> None:
+    """
+    A null-key candidate's own foreign "semantic_key" field must not survive.
+
+    Adversarial finding on the #572 review: DISCOVERY_OUTPUT_SCHEMA lets the
+    model supply an optional "semantic_key". When candidate_semantic_key()
+    returns None, `enriched = dict(candidate)` used to carry that field
+    through untouched into the stored/returned record. _collect_existing_keys
+    prefers a stored semantic_key over recomputation, so a foreign string on
+    a null-key candidate could suppress an unrelated, differently-keyed real
+    proposal. The enriched record must never carry a semantic_key when the
+    computed key is falsy, regardless of what the model supplied.
+    """
+    engine = SentinelDiscoveryEngine(
+        hass=cast("HomeAssistant", object()),
+        options={},
+        model=None,
+        store=cast("DiscoveryStore", _DummyStore()),
+    )
+    poisoned = dict(_NULL_KEY_CANDIDATE)
+    poisoned["semantic_key"] = (
+        "v1|subject=entry_window|predicate=open|night=1|home=0|scope=any|entities="
+    )
+    filtered, dropped = engine._filter_novel_candidates([poisoned], set())
+    assert len(filtered) == 1
+    assert "semantic_key" not in filtered[0]
     assert dropped == []
 
 
