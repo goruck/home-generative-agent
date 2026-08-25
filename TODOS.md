@@ -568,6 +568,62 @@ And two writer-consistency gaps: (7) `_mark_tool_index_stale` (embedding-provide
 
 ## Discovery
 
+### Earlier predicate legs still emit constant evidence-less keys
+
+**What:** #571 removed the constant `subject=unknown|predicate=low_battery|…|entities=` key from the battery leg, but the legs ABOVE it in `candidate_semantic_key`'s elif chain (`unlocked`, `open`, `unavailable`, `disarmed`) have the same shape and were not touched. They fire on prose alone, so an evidence-less candidate that trips one of them keys a constant string shared by every other candidate that trips the same leg. Reproduced: `{"title": "Battery sensor unavailable", "summary": "The battery is low and offline.", "evidence_paths": []}` keys `v1|subject=unknown|predicate=unavailable|night=any|home=any|scope=any|entities=`, and a second candidate about a different sensor with the same wording collides on it — the `unavailable` leg wins before the battery leg is ever reached. The normalizer resolves no entity either and returns `missing_required_entities`, so the key claims a predicate nothing will ever register.
+
+**Why:** Codex adversarial finding during the #571 ship (2026-08-25), empirically reproduced. Pre-existing and unchanged by that PR — base keys these identically — so it was not fixed there. Note the `staleness` leg already carries the right guard (`subject != "unknown"`) with a comment explaining exactly this hazard; the four legs above it never got it.
+
+**How to apply:** Give each prose-only predicate leg the same treatment the staleness leg has — either gate on a resolved subject, or return None when the leg resolves no entities and the subject is still unknown (the #571 shape). Each leg needs its own check against the normalizer's branch order first: `open`/`unlocked` can legitimately key entity-less for the any-window template, so a blanket guard would break `open_any_window_at_night_while_away` dedup. Pin each with a two-different-sensors non-collision test.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** —
+
+---
+
+### A null-key candidate persists the LLM's own `semantic_key` and can suppress an unrelated proposal
+
+**What:** `DISCOVERY_OUTPUT_SCHEMA` accepts an optional model-supplied `semantic_key` (discovery_schema.py). In `_filter_novel_candidates` (discovery_engine.py) the stored record is `enriched = dict(candidate)` and the computed key is written back only under `if key:` — so whenever `candidate_semantic_key` returns `None`, whatever string the model put in `semantic_key` survives into the stored discovery record. `_collect_existing_keys` then prefers that stored value over recomputation (`key = str(candidate.get("semantic_key", "")) or candidate_semantic_key(candidate)`), so the model's string lands in `filter_keys`. A candidate that keys `None` but declares e.g. `v1|subject=entry_window|predicate=open|night=1|home=0|scope=any|entities=` suppresses the real open-windows-at-night-while-away proposal as `existing_semantic_key` until that record ages out of the 200-record window.
+
+**Why:** Codex adversarial finding during the PR #572 review (2026-08-25). Pre-existing — every Bug-2-fix null-key class (staleness, subject-less candidates) already reaches it — but #572 enlarges the null-key population, and discovery output is LLM prose that entity names and attributes feed into, so it is not purely hypothetical. Not fixed in #572 because the fix belongs in the engine, not the key function, and wants its own tests.
+
+**How to apply:** On the null-key path, drop the field rather than leaving it: `enriched.pop("semantic_key", None)` when `key` is falsy. Consider also recomputing rather than trusting stored keys in `_collect_existing_keys`, which would close this and the migration gap below together. Pin with a test that a candidate declaring a foreign `semantic_key` cannot suppress a differently-keyed candidate.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** —
+
+---
+
+### Identity-hash dedup cannot collapse re-proposals whose prose carries live values
+
+**What:** Candidates that key `None` dedup on `_candidate_identity_hash` = SHA-256 of `title\0summary`. LLM candidate prose routinely embeds the current reading ("Baterie klesla na 12 %"), so the same topic re-proposed on successive cycles hashes differently every time and each one becomes a new pending-approval card. Measured during the #572 review: three re-proposals of one sensor with a drifting percentage produce 3 cards where the pre-#572 constant key produced 1. The 200-record exclusion window then evicts real history, resurfacing unrelated previously-suppressed topics (same hot-buffer eviction mode as PR #511).
+
+**Why:** #572 correctly stops the constant key from over-merging distinct sensors, but the fallback it routes to is a prose hash, which is the wrong primitive for a topic that is re-described every cycle. The reported #571 symptom (an evidence-less card and an evidenced card for the same sensor sitting side by side) also survives for the same reason: a hash can never equal a semantic key.
+
+**How to apply:** Derive a stable identity for evidence-less candidates from something that does not drift — the device/sensor token in the `candidate_id` slug (`low_battery_sensor_<id>`), normalized the way the battery leg already normalizes slug text — and hash that instead of, or in addition to, the prose. Alternatively tighten the discovery prompt/schema so a low-battery candidate naming a specific sensor must cite a matching `entities[entity_id=...]` evidence path (the author's own suggestion on #572), which removes the shape entirely. Both wants issue #571 kept open as the tracking home.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** —
+
+---
+
+### Stored discovery keys are never migrated when the key function changes
+
+**What:** `_collect_existing_keys` prefers a record's stored `semantic_key` over recomputation, and there is no key-version stamp. Any change to `candidate_semantic_key` therefore silently desynchronizes history from freshly computed keys: after #572, records holding the old constant `v1|subject=unknown|predicate=low_battery|night=any|home=any|scope=any|entities=` match nothing, so every previously-suppressed evidence-less battery topic — including ones the user **rejected** (`_collect_existing_keys` is the only thing keeping rejected proposals suppressed, the "Bug 1 fix") — reappears once as a fresh card. Pending proposals do not have this problem: they recompute.
+
+**Why:** The class is known and documented (docs/sentinel.md notes a one-shot re-proposal after the v3.25.0 structured-context migration), and it self-heals after one cycle, so it has been accepted each time. It has now happened at least twice; a stamp would make it a non-event and would let CHANGELOG stop hand-writing the warning.
+
+**How to apply:** Stamp records with the key-generation version (`DISCOVERY_SCHEMA_VERSION` or a dedicated `semantic_key_version`) and recompute on read when the stamp is older, or drop stored-key preference entirely and always recompute in `_collect_existing_keys` (cheap: it is a pure function over a dict). Until then, note the one-shot re-proposal in the CHANGELOG entry for any PR that changes the key chain.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** —
+
+---
+
 ### Sanitized candidate IDs can collide across distinct sensors
 
 **What:** `_strip_env_context_id_tokens` (discovery_semantic.py) folds occupancy/time-of-day tail tokens off environmental candidate IDs — not just `*_away`/`*_day`/`*_night` but the full `_ENV_CONTEXT_ID_TOKENS` set (`home`, `daytime`, `nighttime`, `occupied`, `unoccupied`, `overnight`, `present`, …) plus dangling connectives, so e.g. `..._deviation_home` and `..._deviation_away` both collapse to `..._deviation` — so two candidates with different sensors (distinct semantic keys, both stored) can converge on one `candidate_id`; `discovery_store.find_candidate` returns the newest match and `proposal_store` lookups are ID-keyed, so promoting one card could resolve to the other candidate or report a false existing-rule collision (Codex adversarial, env-context-sanitizer ship 2026-08-15).

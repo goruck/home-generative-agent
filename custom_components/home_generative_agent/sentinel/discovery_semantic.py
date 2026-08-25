@@ -668,6 +668,44 @@ def candidate_semantic_key(  # noqa: PLR0912, PLR0915
         if battery_entity_ids:
             subject = "sensor"
             entities = battery_entity_ids
+        elif subject == "unknown":
+            # Nothing resolved at all: the normalizer's battery collection
+            # came back empty AND no other evidence gave the candidate a
+            # subject — a slug-only candidate_id ("low_battery_sensor_<id>")
+            # whose evidence_paths list is empty or unparsable (issue #571).
+            # Mirrors the normalizer, whose battery branch is gated on a
+            # non-empty battery_sensor_ids (proposal_templates.py), so with
+            # nothing resolved it never registers low_battery_sensors and
+            # the key must not claim that predicate. Keying it anyway is
+            # strictly worse than no key: EVERY such candidate — regardless
+            # of which physical sensor it concerns — collides on one
+            # constant "...|predicate=low_battery|...|entities=" string
+            # (over-merging distinct sensors), while it can never match a
+            # properly-evidenced duplicate about the very same sensor
+            # (under-merging, the reported symptom). Returning None routes
+            # these through _candidate_identity_hash exactly like other
+            # null-key candidates (Bug 2 fix) already do.
+            #
+            # RETURNED DIRECTLY, not by falling through to the
+            # subject/predicate "unknown" guard below: the window back-fill
+            # there (subject=entry_window on "window"/"windows" prose) fires
+            # first and would rescue the candidate straight back into a
+            # constant key — window and door contacts being exactly the
+            # battery-powered devices this leg sees most (pre-landing
+            # review, reproduced across three independent passes).
+            #
+            # Gated on subject == "unknown" so the fix stays scoped to the
+            # evidence-less shape. _battery_sensor_entity_ids only ever
+            # returns sensor.* IDs, so it is also empty for a battery
+            # candidate citing a lock, an alarm panel, a binary_sensor
+            # contact, or two ambiguous non-battery sensors — those keep a
+            # resolved subject, and blanking their predicate would make
+            # them key identically to any unrelated predicate-less
+            # candidate about the same entity, silently dropping one for
+            # the other. They keep their pre-existing (base-parity) keying;
+            # the mixed-shape mismatches that keying carries are recorded
+            # in TODOS.md rather than traded for a new collision.
+            return None
     elif _has_power_anomaly_signal(text, environmental=has_environmental_signal):
         predicate = "power_anomaly"
         if not entities and sensor_ids:
