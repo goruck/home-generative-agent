@@ -352,7 +352,8 @@
           "stt_hallucination_patterns": "Ignorované podřetězce STT",
           "stt_hallucination_exact_patterns": "Ignorované přesné fráze STT",
           "tool_retrieval_limit": "Limit načítání nástrojů",
-          "tool_relevance_threshold": "Práh relevance nástrojů"
+          "tool_relevance_threshold": "Práh relevance nástrojů",
+          "tool_exclusions": "Vyloučené nástroje"
         },
         "data_description": {
           "prompt": "Instruujte LLM, jak má odpovídat. Může to být šablona.",
@@ -363,6 +364,7 @@
           "stt_hallucination_exact_patterns": "Jedna fráze na řádek. Pokud se celý přepis STT rovná jakékoli položce, je ignorován před spuštěním LLM. Shoda nerozlišuje malá a velká písmena.",
           "tool_retrieval_limit": "Maximální počet nástrojů k načtení na základě sémantické podobnosti s dotazem uživatele.",
           "tool_relevance_threshold": "Minimální skóre sémantické podobnosti (0.0 až 1.0) vyžadované pro načtení nástroje.",
+          "tool_exclusions": "Nástroje označené zde se modelu nikdy nenabídnou a nikdy se nespustí, ani když si o ně model výslovně řekne. Ponechte prázdné, aby byly dostupné všechny nástroje všech vybraných API. Nástroje, které server přidá později, jsou ve výchozím stavu dostupné.",
           "video_analyzer_uniqueness_enabled": "Přeskočit vizuálně téměř identické snímky před analýzou VLM. Varování: povolení této funkce odstraní kontext pohybu mezi snímky, který souhrnný model používá k popisu pohybu. Povolte pouze v případě, že statická scéna generuje nadměrné duplikáty a akceptujete ztrátu kontinuity pohybu.",
           "video_analyzer_motion_camera_map": "Jedno přepsání na řádek: binary_sensor.X_motion: camera.Y — použijte, když automatické rozpoznávání vybere špatnou kameru. Ponechte prázdné pro spoléhání na rozpoznávání založené na zařízení a názvu."
         }
