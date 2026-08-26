@@ -205,12 +205,15 @@ This document covers the named constants that affect integration behaviour, orga
 |---|---|---|---|
 | `RECOMMENDED_TOOL_RETRIEVAL_LIMIT` | `tool_retrieval_limit` | `5` | Maximum tools injected into the agent's context per turn. Raise if the agent misses tools on multi-step requests; lower to reduce prompt size. |
 | `RECOMMENDED_TOOL_RELEVANCE_THRESHOLD` | `tool_relevance_threshold` | `0.15` | Cosine similarity cutoff. Lower to include more tools; raise to tighten selectivity. |
+| `CONF_TOOL_EXCLUSIONS` | `tool_exclusions` | *(unset)* | Per-API excluded tool names, `{api_id: [tool_name, ...]}`. Subtractive, with no `RECOMMENDED_` default on purpose: an API absent from the map exposes all its tools, so "unset" is the only spelling of "exclude nothing" — the pre-feature behaviour, and the reason a tool a server adds later is available without revisiting the form. |
 
 **Code-only:**
 
 | Constant | File | Value | Purpose |
 |---|---|---|---|
 | `ACTUATION_KEYWORDS_REGEX` | `const.py` | (regex) | Keywords that force-attach entity control tools regardless of similarity score. Prevents the agent from missing control tools when the user issues a command verb. |
+| `TOOL_KEY_SEP` | `agent/helpers.py` | `::` | Separator joining an API id to a tool name in a composite tool key. Shared by `tool_index_key` and `split_tool_index_key` so the join and the split cannot drift; the options form round-trips these keys through its picker values, so a one-sided change would void every stored exclusion. Not escaped — see the delimiter-safe-keys entry in TODOS.md. |
+| `TOOL_TEXT_MAX_LEN` | `agent/helpers.py` | `120` | Length cap applied by `sanitize_tool_text` to any rendered tool string. Long enough for real MCP tool names, short enough that one hostile name cannot flood a log line or a form label. Applied before the per-character pass, so the work is bounded rather than just the result. |
 | `AUTOMATION_INTENT_MARKERS_REGEX` | `const.py` | (regex) | Standalone automation-intent vocabulary ("automate", "remind me", recurring schedules like "every 30 minutes") that force-binds the `add_automation` tool during retrieval. English-only; non-matching languages fall back to similarity ranking. |
 | `AUTOMATION_TRIGGER_CLAUSE_REGEX` | `const.py` | (regex) | Trigger-clause words (when/whenever/always/if). Combined with an action verb it signals conditional-actuation automation intent ("turn on the porch light when motion is detected"). |
 | `AUTOMATION_ACTION_KEYWORDS_REGEX` | `const.py` | (regex) | Action verbs for the conditional-actuation signal. Mirrors `ACTUATION_KEYWORDS_REGEX` plus notification verbs (notify, tell, warn, text); the two must stay in sync when verbs are added. |
