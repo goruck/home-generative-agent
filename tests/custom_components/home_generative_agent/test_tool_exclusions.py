@@ -36,6 +36,7 @@ from custom_components.home_generative_agent.config_flow import (
     _tool_exclusions_as_list,
 )
 from custom_components.home_generative_agent.const import (
+    CONF_MAX_MESSAGES_IN_CONTEXT,
     CONF_TOOL_EXCLUSIONS,
     DOMAIN,
 )
@@ -382,9 +383,22 @@ def test_list_as_tool_exclusions_groups_by_api() -> None:
     ) == {"assist": ["HassTurnOn"], "mcp-abc": ["a", "b"]}
 
 
-def test_parse_tool_exclusions_stores_the_grouped_map() -> None:
-    """A submitted selection is normalized into the stored shape."""
+def _options_flow(hass: Any, options: dict[str, Any]) -> Any:
+    """Build an options flow bound to a stored config entry."""
+    entry = MockConfigEntry(
+        domain=DOMAIN, title="Home Generative Agent", options=options
+    )
+    entry.add_to_hass(hass)
     flow = HomeGenerativeAgentOptionsFlow()
+    flow.hass = hass
+    flow.handler = entry.entry_id
+    return flow
+
+
+@pytest.mark.asyncio
+async def test_parse_tool_exclusions_stores_the_grouped_map(hass: Any) -> None:
+    """A submitted selection is normalized into the stored shape."""
+    flow = _options_flow(hass, {})
     options: dict[str, Any] = {CONF_TOOL_EXCLUSIONS: ["mcp-abc::b", "mcp-abc::a"]}
 
     flow._parse_tool_exclusions(options)
@@ -392,9 +406,10 @@ def test_parse_tool_exclusions_stores_the_grouped_map() -> None:
     assert options == {CONF_TOOL_EXCLUSIONS: {"mcp-abc": ["a", "b"]}}
 
 
-def test_parse_tool_exclusions_drops_an_empty_selection() -> None:
+@pytest.mark.asyncio
+async def test_parse_tool_exclusions_drops_an_empty_selection(hass: Any) -> None:
     """'Exclude nothing' is stored as an absent key, never as {}."""
-    flow = HomeGenerativeAgentOptionsFlow()
+    flow = _options_flow(hass, {})
     options: dict[str, Any] = {CONF_TOOL_EXCLUSIONS: []}
 
     flow._parse_tool_exclusions(options)
@@ -650,18 +665,6 @@ def test_parse_tool_exclusions_drops_a_degenerate_stored_map() -> None:
     flow._parse_tool_exclusions(options)
 
     assert CONF_TOOL_EXCLUSIONS not in options
-
-
-def _options_flow(hass: Any, options: dict[str, Any]) -> Any:
-    """Build an options flow bound to a stored config entry."""
-    entry = MockConfigEntry(
-        domain=DOMAIN, title="Home Generative Agent", options=options
-    )
-    entry.add_to_hass(hass)
-    flow = HomeGenerativeAgentOptionsFlow()
-    flow.hass = hass
-    flow.handler = entry.entry_id
-    return flow
 
 
 @pytest.mark.asyncio
@@ -1228,3 +1231,44 @@ def test_filter_excluded_tools_survives_a_malformed_descriptor() -> None:
 
     assert [tool.name for tool in filtered.tools] == [bad.name, "stay"]
     assert dropped == ["ping"]
+
+
+@pytest.mark.asyncio
+async def test_unrepresentable_exclusion_survives_an_unrelated_save(hass: Any) -> None:
+    """
+    An exclusion the picker cannot represent must not die on an unrelated save.
+
+    It is deliberately withheld from the picker (offering it would mint a value
+    that mis-splits onto a different api id), so the submitted list cannot
+    carry it. Rebuilding the stored map from that list alone would delete it,
+    and the tools it was keeping switched off would go live again — the third
+    incarnation of this same form-versus-storage authority bug.
+    """
+    stored = {
+        "vendor::gateway": ["delete_everything"],
+        "assist": ["HassTurnOn"],
+    }
+    flow = _options_flow(
+        hass, {CONF_LLM_HASS_API: ["assist"], CONF_TOOL_EXCLUSIONS: stored}
+    )
+
+    # It is never offered to the user...
+    assert _tool_exclusions_as_list(stored) == ["assist::HassTurnOn"]
+
+    # ...and it survives a save that touches something else entirely.
+    result = cast(
+        "dict[str, Any]",
+        await flow.async_step_init(
+            {
+                CONF_LLM_HASS_API: ["assist"],
+                CONF_TOOL_EXCLUSIONS: ["assist::HassTurnOn"],
+                CONF_MAX_MESSAGES_IN_CONTEXT: 100,
+            }
+        ),
+    )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_TOOL_EXCLUSIONS] == {
+        "vendor::gateway": ["delete_everything"],
+        "assist": ["HassTurnOn"],
+    }

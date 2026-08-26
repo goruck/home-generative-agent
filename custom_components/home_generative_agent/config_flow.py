@@ -188,9 +188,15 @@ def _tool_exclusions_as_list(raw: Any) -> list[str]:
     """
     if isinstance(raw, list):
         return [value for value in raw if isinstance(value, str) and value]
+    # Unrepresentable api ids are withheld from the picker entirely rather than
+    # rendered and mis-parsed on the way back: flattening "a::b" + "t" yields
+    # "a::b::t", which regroups onto api "a" with tool "b::t" and silently
+    # disables the exclusion. `_parse_tool_exclusions` merges them back from
+    # storage on submit, since the submitted list cannot carry them.
     return sorted(
         tool_index_key(api_id, name)
         for api_id, names in normalize_tool_exclusions(raw).items()
+        if api_id_is_form_representable(api_id)
         for name in names
     )
 
@@ -851,6 +857,17 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         raw = options.get(CONF_TOOL_EXCLUSIONS)
         if isinstance(raw, list):
             normalized = _list_as_tool_exclusions(raw)
+            # The picker deliberately never offered exclusions whose api id it
+            # cannot represent, so the submitted list cannot carry them and
+            # rebuilding the map from that list alone would delete them. An
+            # unrelated save -- the face API URL, a token limit -- would then
+            # silently re-enable tools the user had switched off. Merge them
+            # back from what is actually stored.
+            for api_id, names in normalize_tool_exclusions(
+                self.config_entry.options.get(CONF_TOOL_EXCLUSIONS)
+            ).items():
+                if not api_id_is_form_representable(api_id):
+                    normalized[api_id] = names
         else:
             normalized = normalize_tool_exclusions(raw)
         if normalized:
