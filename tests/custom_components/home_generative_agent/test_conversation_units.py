@@ -14,15 +14,17 @@ import re
 import sys
 import types
 from enum import IntFlag
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from homeassistant.const import CONF_LLM_HASS_API
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import llm as ha_llm
 
 from custom_components.home_generative_agent.const import (
     CONF_CRITICAL_ACTION_PIN_ENABLED,
+    CONF_TOOL_EXCLUSIONS,
 )
 from custom_components.home_generative_agent.core.utils import (
     gather_store_puts_in_chunks,
@@ -122,9 +124,25 @@ def _ensure_conversation_entity_feature() -> None:
         conv.ConversationEntityFeature = _StubConversationEntityFeature
 
 
+def _ensure_trace_symbols() -> None:
+    """
+    Guarantee the trace symbols APIInstance.async_call_tool imports exist.
+
+    Home Assistant resolves them lazily *inside* async_call_tool, so any test
+    that dispatches a tool through a real APIInstance needs them on whichever
+    stub won the import race.
+    """
+    conv: Any = sys.modules["homeassistant.components.conversation"]
+    if not hasattr(conv, "ConversationTraceEventType"):
+        conv.ConversationTraceEventType = MagicMock()
+    if not hasattr(conv, "async_conversation_trace_append"):
+        conv.async_conversation_trace_append = MagicMock()
+
+
 _stub_ha_conversation()
 _ensure_content_classes()
 _ensure_conversation_entity_feature()
+_ensure_trace_symbols()
 
 # These imports must come AFTER the stub so conversation.py loads cleanly.
 from homeassistant.components import conversation as ha_conversation  # noqa: E402
@@ -202,6 +220,115 @@ async def test_multi_llm_api_routes_to_correct_api() -> None:
     assert result == "from_api2"
     api1.async_call_tool.assert_not_called()
     api2.async_call_tool.assert_called_once_with(tool_input)
+
+
+# ---------------------------------------------------------------------------
+# _async_init_llm_apis: per-tool exclusions (issue #570)
+# ---------------------------------------------------------------------------
+
+
+def _excl_api_instance(names: list[str]) -> Any:
+    """Build a real APIInstance so filter_excluded_tools' replace() applies."""
+    tools: list[Any] = []
+    for name in names:
+        tool = MagicMock()
+        tool.name = name
+        tools.append(tool)
+    return ha_llm.APIInstance(
+        api=MagicMock(),
+        api_prompt="prompt",
+        llm_context=MagicMock(),
+        tools=tools,
+    )
+
+
+def _excl_entity(options: dict[str, Any]) -> Any:
+    """Build a bare entity: _async_init_llm_apis only reads hass and options."""
+    entity = HGAConversationEntity.__new__(HGAConversationEntity)
+    entity.hass = MagicMock()
+    entity.entry = cast(
+        "Any",
+        types.SimpleNamespace(runtime_data=types.SimpleNamespace(options=options)),
+    )
+    return entity
+
+
+@pytest.mark.asyncio
+async def test_init_llm_apis_drops_excluded_tools() -> None:
+    """Excluded tools never reach the loaded API instance."""
+    entity = _excl_entity(
+        {
+            CONF_LLM_HASS_API: ["mcp-abc"],
+            CONF_TOOL_EXCLUSIONS: {"mcp-abc": ["web_search_images"]},
+        }
+    )
+    instance = _excl_api_instance(["web_search", "web_search_images"])
+
+    with patch(f"{_CONV}.llm.async_get_api", new=AsyncMock(return_value=instance)):
+        multi = await entity._async_init_llm_apis(MagicMock())
+
+    assert [tool.name for tool in multi.apis["mcp-abc"].tools] == ["web_search"]
+
+
+@pytest.mark.asyncio
+async def test_init_llm_apis_excluded_tool_cannot_be_dispatched() -> None:
+    """
+    A hallucinated call to an excluded tool is rejected, not executed.
+
+    APIInstance.async_call_tool resolves the name against `.tools`, which is
+    what makes the exclusion deterministic rather than merely advisory.
+    """
+    entity = _excl_entity(
+        {
+            CONF_LLM_HASS_API: ["mcp-abc"],
+            CONF_TOOL_EXCLUSIONS: {"mcp-abc": ["web_search_images"]},
+        }
+    )
+    instance = _excl_api_instance(["web_search", "web_search_images"])
+
+    with patch(f"{_CONV}.llm.async_get_api", new=AsyncMock(return_value=instance)):
+        multi = await entity._async_init_llm_apis(MagicMock())
+
+    tool_input = MagicMock()
+    tool_input.tool_name = "web_search_images"
+
+    with pytest.raises(HomeAssistantError, match="No routing target"):
+        await multi.async_call_tool(tool_input)
+
+
+@pytest.mark.asyncio
+async def test_init_llm_apis_without_exclusions_is_unchanged() -> None:
+    """The absent-key default exposes every tool, as before the feature."""
+    entity = _excl_entity({CONF_LLM_HASS_API: ["mcp-abc"]})
+    instance = _excl_api_instance(["web_search", "web_search_images"])
+
+    with patch(f"{_CONV}.llm.async_get_api", new=AsyncMock(return_value=instance)):
+        multi = await entity._async_init_llm_apis(MagicMock())
+
+    assert multi.apis["mcp-abc"] is instance
+
+
+@pytest.mark.asyncio
+async def test_init_llm_apis_excluding_every_tool_keeps_the_api_loaded() -> None:
+    """
+    An emptied API still counts as loaded.
+
+    Dropping it would trip the "No LLM APIs could be loaded" hard failure when
+    it is the only configured API, turning a tool preference into a broken
+    conversation agent.
+    """
+    entity = _excl_entity(
+        {
+            CONF_LLM_HASS_API: ["mcp-abc"],
+            CONF_TOOL_EXCLUSIONS: {"mcp-abc": ["web_search"]},
+        }
+    )
+    instance = _excl_api_instance(["web_search"])
+
+    with patch(f"{_CONV}.llm.async_get_api", new=AsyncMock(return_value=instance)):
+        multi = await entity._async_init_llm_apis(MagicMock())
+
+    assert multi.apis["mcp-abc"].tools == []
 
 
 # ---------------------------------------------------------------------------
