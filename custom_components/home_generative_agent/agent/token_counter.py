@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable, Mapping, Sequence
+import re
+import time
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import lru_cache
 from typing import Any, Literal
 
@@ -16,12 +18,58 @@ from ..const import (  # noqa: TID252
     CONF_GEMINI_API_KEY,
     CONF_OLLAMA_CHAT_URL,
     CONF_OLLAMA_URL,
+    HTTP_STATUS_BAD_REQUEST,
     OLLAMA_EXACT_TOKEN_COUNT,
 )
 
 OPENAI_PREFIXES: tuple[str, ...] = ("gpt",)
 
 LOGGER = logging.getLogger(__name__)
+
+# Longest provider error body we keep when reporting a failed remote count.
+_MAX_ERROR_BODY_CHARS = 500
+
+# Remote token counters can fail for reasons the user cannot fix mid-conversation
+# (model unavailable to the key's project, revoked key, host unreachable). When
+# that happens we fall back to approximate counting rather than taking the whole
+# conversation down, and stop calling the remote counter for a cooldown period --
+# `trim_messages` invokes the counter many times per turn and each retry would pay
+# the full request timeout.
+REMOTE_COUNT_COOLDOWN_S = 300.0
+_remote_count_disabled_until: dict[str, float] = {}
+
+# Anything shaped like an API key that could ride along in a URL or error body.
+_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"AIzaSy[A-Za-z0-9_\-]{20,}"),
+    re.compile(r"(?i)([?&](?:key|api_key|apikey|access_token)=)[^&\s\"']+"),
+)
+
+
+def _redact_secrets(text: str) -> str:
+    """Strip anything key-shaped so credentials never reach a log or traceback."""
+    out = _SECRET_PATTERNS[0].sub("<redacted>", text)
+    return _SECRET_PATTERNS[1].sub(r"\1<redacted>", out)
+
+
+def _remote_count_suppressed(key: str) -> bool:
+    """Return True while a failing remote counter is still in its cooldown."""
+    deadline = _remote_count_disabled_until.get(key)
+    return deadline is not None and time.monotonic() < deadline
+
+
+def _suppress_remote_count(key: str, exc: Exception) -> None:
+    """Disable a remote counter for a cooldown, warning once per outage."""
+    already_suppressed = _remote_count_suppressed(key)
+    _remote_count_disabled_until[key] = time.monotonic() + REMOTE_COUNT_COOLDOWN_S
+    if not already_suppressed:
+        LOGGER.warning(
+            "Exact token counting for %s failed; using approximate counts for the "
+            "next %.0f seconds. Conversation continues. Cause: %s",
+            key,
+            REMOTE_COUNT_COOLDOWN_S,
+            _redact_secrets(str(exc)),
+        )
+
 
 # ---- Providers ----
 Provider = Literal["openai", "openai_compatible", "gemini", "ollama", "anthropic"]
@@ -155,14 +203,29 @@ def _count_gemini_tokens(
     }
 
     try:
+        # The key goes in a header, never the query string: a query-string key
+        # ends up verbatim in tracebacks and Home Assistant logs, which users
+        # then paste into bug reports.
         response = requests.post(
-            url, params={"key": gemini_api_key}, json=payload, timeout=timeout
+            url,
+            headers={"x-goog-api-key": gemini_api_key},
+            json=payload,
+            timeout=timeout,
         )
-        response.raise_for_status()
+        if response.status_code >= HTTP_STATUS_BAD_REQUEST:
+            # Google explains *why* in the body ("model not found for API version
+            # v1beta", quota, disabled key). raise_for_status() drops it, leaving
+            # a bare status code nobody can act on.
+            detail = response.text.strip()[:_MAX_ERROR_BODY_CHARS]
+            msg = (
+                f"Gemini countTokens failed for model {model!r}: "
+                f"HTTP {response.status_code}. {detail}"
+            )
+            raise RuntimeError(_redact_secrets(msg))
         data = response.json()
     except requests.RequestException as exc:
-        msg = f"Gemini countTokens failed: {exc!s}"
-        raise RuntimeError(msg) from exc
+        msg = f"Gemini countTokens failed for model {model!r}: {exc!s}"
+        raise RuntimeError(_redact_secrets(msg)) from exc
 
     val = data.get("totalTokens", data.get("total_tokens"))
     if isinstance(val, int):
@@ -266,6 +329,29 @@ def _looks_like_openai_model(name: str) -> bool:
     return any(n.startswith(p) for p in OPENAI_PREFIXES)
 
 
+def _count_remote_or_approximate(
+    key: str,
+    messages: Sequence[MessageLike],
+    exact: Callable[[], int],
+) -> int:
+    """
+    Run an exact remote count, falling back to an approximate one on failure.
+
+    Token counting runs on the hot path of every chat turn, so a provider outage
+    or an unavailable model must degrade the count, not abort the conversation.
+    After a failure the remote counter is skipped for `REMOTE_COUNT_COOLDOWN_S`.
+    """
+    if not _remote_count_suppressed(key):
+        try:
+            return exact()
+        except (RuntimeError, ValueError) as exc:
+            _suppress_remote_count(key, exc)
+
+    approx = count_tokens_approximately(_as_message_reprs(messages))
+    LOGGER.debug("Token count for %s (approx fallback): %d", key, approx)
+    return approx
+
+
 def count_tokens_cross_provider(
     messages: Sequence[MessageLike],
     model: str,
@@ -281,6 +367,9 @@ def count_tokens_cross_provider(
     gemini  -> REST models/{model}:countTokens
     ollama  -> If model looks like OpenAI (e.g., gpt-oss), use tiktoken;
                otherwise /api/tokenize (fast) or /api/generate with (exact)
+
+    Remote counters (Gemini, Ollama) degrade to an approximate count rather than
+    raising, so a provider failure cannot take the conversation down with it.
     """
     if provider in ("openai", "openai_compatible"):
         return _count_tokens_tiktoken(messages, model=model)
@@ -290,34 +379,50 @@ def count_tokens_cross_provider(
         return _count_tokens_tiktoken(messages, model="gpt-4o")
 
     if provider == "gemini":
-        gemini_api_key_any = options.get(CONF_GEMINI_API_KEY)
-        if not isinstance(gemini_api_key_any, str) or not gemini_api_key_any.strip():
-            msg = "Gemini API key must be a non-empty string in options."
-            raise ValueError(msg)
-        gemini_api_key: str = gemini_api_key_any
-        return _count_gemini_tokens(
-            messages, model=model, gemini_api_key=gemini_api_key
-        )
+
+        def _gemini_exact() -> int:
+            gemini_api_key_any = options.get(CONF_GEMINI_API_KEY)
+            if (
+                not isinstance(gemini_api_key_any, str)
+                or not gemini_api_key_any.strip()
+            ):
+                msg = "Gemini API key must be a non-empty string in options."
+                raise ValueError(msg)
+            return _count_gemini_tokens(
+                messages, model=model, gemini_api_key=gemini_api_key_any
+            )
+
+        return _count_remote_or_approximate(f"gemini/{model}", messages, _gemini_exact)
 
     # Provider "ollama"
     # If Ollama is hosting an OpenAI-style GPT (e.g., gpt-oss), prefer tiktoken.
     if _looks_like_openai_model(model):
         return _count_tokens_tiktoken(messages, model=model)
 
-    ollama_base_url_any = options.get(CONF_OLLAMA_CHAT_URL) or options.get(
-        CONF_OLLAMA_URL
-    )
-    if not isinstance(ollama_base_url_any, str) or not ollama_base_url_any.strip():
-        msg = "Ollama base URL must be a non-empty string in options."
-        raise ValueError(msg)
-    ollama_base_url: str = ollama_base_url_any
-
     if OLLAMA_EXACT_TOKEN_COUNT:
-        n = _count_ollama_tokens(
-            messages, model=model, base_url=ollama_base_url, options=chat_model_options
-        )
-        LOGGER.debug("Ollama token count (exact): %d", n)
-        return n
+
+        def _ollama_exact() -> int:
+            # Only the exact path needs a reachable Ollama host, so the URL is
+            # required here rather than for every count.
+            ollama_base_url_any = options.get(CONF_OLLAMA_CHAT_URL) or options.get(
+                CONF_OLLAMA_URL
+            )
+            if (
+                not isinstance(ollama_base_url_any, str)
+                or not ollama_base_url_any.strip()
+            ):
+                msg = "Ollama base URL must be a non-empty string in options."
+                raise ValueError(msg)
+            n = _count_ollama_tokens(
+                messages,
+                model=model,
+                base_url=ollama_base_url_any,
+                options=chat_model_options,
+            )
+            LOGGER.debug("Ollama token count (exact): %d", n)
+            return n
+
+        return _count_remote_or_approximate(f"ollama/{model}", messages, _ollama_exact)
 
     approx = count_tokens_approximately(_as_message_reprs(messages))
     LOGGER.debug("Ollama token count (approx): %d", approx)

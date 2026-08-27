@@ -55,7 +55,7 @@ This document covers the named constants that affect integration behaviour, orga
 |---|---|
 | `CHAT_MODEL_OLLAMA_SUPPORTED` | `gpt-oss`, `qwen2.5:32b`, `qwen3:32b`, `qwen3:8b` |
 | `CHAT_MODEL_OPENAI_SUPPORTED` | `gpt-5`, `gpt-5-mini`, `gpt-5-nano`, `gpt-4o`, `gpt-4.1`, `o4-mini` |
-| `CHAT_MODEL_GEMINI_SUPPORTED` | `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite` |
+| `CHAT_MODEL_GEMINI_SUPPORTED` | `gemini-3.7-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite`, `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite` |
 | `CHAT_MODEL_ANTHROPIC_SUPPORTED` | `claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5-20251001` |
 
 ---
@@ -95,7 +95,7 @@ This document covers the named constants that affect integration behaviour, orga
 |---|---|
 | `VLM_OLLAMA_SUPPORTED` | `qwen2.5vl:7b`, `qwen3-vl:8b`, `gemma3:4b` |
 | `VLM_OPENAI_SUPPORTED` | `gpt-5-nano`, `gpt-4.1`, `gpt-4.1-nano` |
-| `VLM_GEMINI_SUPPORTED` | `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite` |
+| `VLM_GEMINI_SUPPORTED` | `gemini-3.7-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite`, `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite` |
 | `VLM_ANTHROPIC_SUPPORTED` | `claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5-20251001` |
 
 ---
@@ -131,7 +131,7 @@ This document covers the named constants that affect integration behaviour, orga
 |---|---|
 | `SUMMARIZATION_MODEL_OLLAMA_SUPPORTED` | `qwen3:1.7b`, `qwen3:8b` |
 | `SUMMARIZATION_MODEL_OPENAI_SUPPORTED` | `gpt-5-nano`, `gpt-4.1`, `gpt-4.1-nano` |
-| `SUMMARIZATION_MODEL_GEMINI_SUPPORTED` | `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite` |
+| `SUMMARIZATION_MODEL_GEMINI_SUPPORTED` | `gemini-3.7-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite`, `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite` |
 | `SUMMARIZATION_MODEL_ANTHROPIC_SUPPORTED` | `claude-sonnet-4-6`, `claude-haiku-4-5-20251001` |
 
 ---

@@ -17,6 +17,7 @@ SUBENTRY_TYPE_STT_PROVIDER = "stt_provider"
 SUBENTRY_TYPE_SENTINEL = "sentinel"
 
 HTTP_STATUS_UNAUTHORIZED = 401
+HTTP_STATUS_FORBIDDEN = 403
 HTTP_STATUS_BAD_REQUEST = 400
 HTTP_STATUS_WEBPAGE_NOT_FOUND = 404
 HTTP_STATUS_OK = 200
@@ -406,7 +407,13 @@ CHAT_MODEL_OPENAI_SUPPORTED = Literal[
     "gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-4o", "gpt-4.1", "o4-mini"
 ]
 CHAT_MODEL_GEMINI_SUPPORTED = Literal[
-    "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"
+    "gemini-3.7-flash",
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
 ]
 CHAT_MODEL_ANTHROPIC_SUPPORTED = Literal[
     "claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"
@@ -461,7 +468,13 @@ VLM_TOP_P = 1.0
 VLM_OLLAMA_SUPPORTED = Literal["qwen2.5vl:7b", "qwen3-vl:8b", "gemma3:4b"]
 VLM_OPENAI_SUPPORTED = Literal["gpt-5-nano", "gpt-4.1", "gpt-4.1-nano"]
 VLM_GEMINI_SUPPORTED = Literal[
-    "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"
+    "gemini-3.7-flash",
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
 ]
 VLM_ANTHROPIC_SUPPORTED = Literal[
     "claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"
@@ -579,7 +592,13 @@ SUMMARIZATION_MODEL_TOP_P = 1.0
 SUMMARIZATION_MODEL_OLLAMA_SUPPORTED = Literal["qwen3:1.7b", "qwen3:8b"]
 SUMMARIZATION_MODEL_OPENAI_SUPPORTED = Literal["gpt-5-nano", "gpt-4.1", "gpt-4.1-nano"]
 SUMMARIZATION_MODEL_GEMINI_SUPPORTED = Literal[
-    "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"
+    "gemini-3.7-flash",
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
 ]
 SUMMARIZATION_MODEL_ANTHROPIC_SUPPORTED = Literal[
     "claude-sonnet-4-6", "claude-haiku-4-5-20251001"
