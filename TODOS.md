@@ -597,6 +597,26 @@ And two writer-consistency gaps: (7) `_mark_tool_index_stale` (embedding-provide
 
 ## Discovery
 
+### The battery slug topic-word list is English-only, so a locale slug never yields a device token
+
+**Priority:** P2
+
+**What:** `battery_slug_device_token` (`sentinel/discovery_semantic.py`) strips `_BATTERY_SLUG_TOPIC_WORDS` from the `candidate_id` slug and requires exactly one leftover token. That list is English (`low`, `battery`, `sensor`, `level`, …), so a slug the model writes in the home's language — `nizka_baterie_senzoru_0xffffaa67127301f8` — leaves four tokens and returns `None`. The candidate falls back to the prose hash and keeps minting a card per cycle, which is the exact drift v3.32.1 set out to remove. Reproduced during the #573 review; the #571 reporter's own screenshot shows the English `low_battery_sensor_0x…` form, so it is unknown whether his instance is actually affected — that question is open with him on the PR thread.
+
+**Why:** The whole point of preferring the slug over the prose is that the slug is the one surface that stays stable across cycles when the LLM writes prose in a non-English locale (the #522 premise). An English-only strip list silently undoes that for exactly the users who need it most.
+
+**How to apply:** Do not guess at stems. Wait for the reporter's answer on which slugs his instance emits, then either (a) anchor on the `0x…` token directly rather than by elimination — scan the slug for a token matching the device-address shape and ignore everything else, which removes the strip list from the critical path entirely, or (b) extend the strip list per supported locale. (a) is preferable: it makes the extractor locale-independent by construction and cannot drift the way a word list does.
+
+### A shared 0x address merges two devices, and no syntactic rule can prevent it
+
+**Priority:** P3
+
+**What:** `_is_device_shaped_token` accepts a non-null `0x`-prefixed hex body of 8+ characters as a device identity. If the discovery LLM emits one genuine address for two different sensors, both candidates key the same identity and one card is silently dropped. Six weaker shape tests were tried during the #573 review and an adversarial reviewer broke five with a place label wearing the same grammar (`kitchen1`, `basement1`, `room1234`, `12345678`, `a1234567`); the null EUI `0x00000000` is rejected for the same reason.
+
+**Why:** Accepted knowingly. A device address and a place code are syntactically identical, so no predicate over the token alone can separate them — and at the point the model has written one address onto two candidates it has asserted they are the same device. The failure is bounded (both candidates are evidence-less, so neither can ever be promoted to a rule) and the alternative — matching on prose alone, as base did — over-merges strictly more often.
+
+**How to apply:** Only worth revisiting with a corroborating signal from outside the candidate text, since the model authors both the slug and the prose and cannot corroborate itself (tried and reverted during the review). The real fix is upstream: TODOS.md's "derive keys from routing" item makes the whole textual-key chain unnecessary for any candidate the normalizer can resolve.
+
 ### Earlier predicate legs still emit constant evidence-less keys
 
 **What:** #571 removed the constant `subject=unknown|predicate=low_battery|…|entities=` key from the battery leg, but the legs ABOVE it in `candidate_semantic_key`'s elif chain (`unlocked`, `open`, `unavailable`, `disarmed`) have the same shape and were not touched. They fire on prose alone, so an evidence-less candidate that trips one of them keys a constant string shared by every other candidate that trips the same leg. Reproduced: `{"title": "Battery sensor unavailable", "summary": "The battery is low and offline.", "evidence_paths": []}` keys `v1|subject=unknown|predicate=unavailable|night=any|home=any|scope=any|entities=`, and a second candidate about a different sensor with the same wording collides on it — the `unavailable` leg wins before the battery leg is ever reached. The normalizer resolves no entity either and returns `missing_required_entities`, so the key claims a predicate nothing will ever register.
