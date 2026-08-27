@@ -123,6 +123,8 @@ Also: unknown action types fail closed (a future HA construct over-prompts rathe
 
 **How to apply:** Per-api_id top-up cooldown (skip delta if last top-up for that api was < N minutes ago and produced no new hashes); negative cache of keys that repeatedly fail to index, with a retry deadline; periodic eviction sweep deleting store rows whose keys have not been live for N days; delimiter-safe key encoding (escape `::` or hash the pair).
 
+**Second consumer of the composite key (v3.32.0, #570):** the excluded-tools picker round-trips `tool_index_key`/`split_tool_index_key` through its flat selector values, so gap (4)'s delimiter fix must migrate *stored* `tool_exclusions` values too, not just index rows — a re-encoding that changes the key spelling silently voids every saved exclusion. `split_tool_index_key` deliberately splits on the FIRST `::` (api ids are the constrained side; tool names are free-form), so a tool literally named `a::b` round-trips today, but an api_id containing `::` would not.
+
 Two adjacent gaps from the same review, same disposition (document + defer): (5) concurrent turns — while turn A's inline delta is writing, turn B from a *different* device-class short-circuits on `tool_indexing_in_progress` and proceeds without its own gated tools for that one turn (pre-fix behavior; self-heals on B's next turn); fixing needs per-key coordination or awaiting the active delta then recomputing. (6) a transient failure during the *startup* index run latches `tool_index_failed` until reload, which now also disables per-turn top-ups — startup deserves a retry/backoff instead of a one-shot latch.
 
 And two writer-consistency gaps: (7) `_mark_tool_index_stale` (embedding-provider switch) clears hashes with no generation/epoch guard, so an in-flight index write that completes after the switch marks old-provider rows current (and the background leg re-latches `tool_index_ready`), silently mixing embedding spaces until restart — pre-existing on the startup leg, window widened by the per-turn delta writer; fix wants a generation counter checked before `update()`/`ready=True`. (8) a partially-failed delta write commits zero hashes, so already-written chunks are re-embedded next turn — converges, but a per-chunk `(task, key)` commit would stop burning embedding quota under a flaky provider.
@@ -144,6 +146,33 @@ And two writer-consistency gaps: (7) `_mark_tool_index_stale` (embedding-provide
 **Effort:** M
 **Priority:** P2
 **Depends on:** v3.28.1
+
+---
+
+### Translation parity is enforced for cs only, not ru/tr
+
+**What:** The translation parity test checks `cs` against `en` for missing keys, while `ru` and `tr` are only checked for *unknown* keys. A PR can therefore ship a new `en` string with no `ru`/`tr` counterpart and CI stays green; the user silently sees English in an otherwise translated form.
+
+**Why:** Surfaced during the #570 ship review (v3.32.0) when all four locales happened to be updated together. Not a regression — the asymmetry predates that change — but it means the completeness of `ru`/`tr` decays invisibly rather than failing loudly.
+
+**How to apply:** Extend the missing-key assertion to every locale in `translations/`, or make the locale list explicit and require a deliberate opt-out for any locale intentionally kept partial. Expect an initial batch of failures for keys that are already missing.
+
+**Effort:** S
+**Priority:** P4
+
+---
+
+### Excluded-tools picker: label trust markers and identity are forgeable
+
+**What:** Five findings deferred from the #570 ship review (v3.32.0), all in the options-form exclusion picker. (1) **Marker forgery is narrowed, not closed** — `_label_text` rewrites `(`/`)` to brackets so a tool named `x (not currently available)` cannot imitate the trusted suffix, but that matches only U+0028/U+0029; fullwidth (U+FF08/09), small (U+FE59/5A), white (U+2985/86), superscript and tortoise-shell parens all survive `sanitize_tool_text` and read as parentheses. (2) **Duplicate labels** — `seen` dedupes on value, never on label, so two MCP servers both reporting `serverInfo.name = "Files"` with a `delete_file` each render byte-identical rows; the operator ticks one and leaves the other live. (3) **entry_id churn** — MCP api ids are `mcp-<entry_id>` and `entry_id` is regenerated on delete-and-re-add, so every stored exclusion for that server becomes an orphan that the UI still shows ticked while the new entry's identical tools enumerate unexcluded. (4) **No cardinality cap** — nothing bounds the number of `SelectOptionDict`s or the indexed-key union, and index rows are never evicted, so one server advertising tens of thousands of tools poisons the form permanently. (5) **Permissive `__eq__`** — `filter_excluded_tools` keeps a non-str `.name` (isinstance fails) while `APIInstance.async_call_tool` dispatches on `tool.name == tool_input.tool_name`, so a custom `llm.API` could register an object that is kept by the filter and dispatched by the caller.
+
+**Why:** All five are deceptions or losses in the UI of a *security control* — the user believes a tool is switched off when it is not — but none is reachable through the stock MCP integration by a merely buggy server, and (1) and (2) need a design decision rather than a patch: an in-band lexical marker in a flat label string cannot be made forgery-proof by escaping, because the adversary controls the surrounding text. Documented honestly in `docs/configuration.md` rather than silently carried. Deferred at the 3-cycle review bound after two rounds of fixes each introduced new bugs.
+
+**How to apply:** For (1)+(2) together, stop concatenating remote text with trust markers: put the state in a non-remote position (prefix `[unavailable] Server: tool`, rejecting a leading `[` in sanitized text) and disambiguate colliding labels with the api id, which is unique by construction. Alternatively NFKC-fold the remote half and match the Unicode Ps/Pe categories, which closes (1) only. For (3), consider matching on server name as a secondary key, or warn when an orphaned exclusion's tool name matches a live tool of another api — any auto-migration is a guess about identity, so surface it rather than silently remap. For (4), cap the total choice count and the indexed-key union, and label index-sourced entries distinctly from live-enumerated ones. For (5), one line of honesty in the comment plus an equality-based rather than isinstance-based keep test.
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** v3.32.0
 
 ---
 

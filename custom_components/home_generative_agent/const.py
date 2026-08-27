@@ -1056,6 +1056,16 @@ RECOMMENDED_TOOL_RETRIEVAL_LIMIT = 5
 CONF_TOOL_RELEVANCE_THRESHOLD = "tool_relevance_threshold"
 RECOMMENDED_TOOL_RELEVANCE_THRESHOLD = 0.15
 
+# Per-tool exclusions, keyed by LLM API id: ``{api_id: [tool_name, ...]}``.
+# Subtractive by design — an api_id absent from the map exposes *all* of that
+# API's tools, so the default (an absent key) is exactly the pre-feature
+# behavior and a tool an MCP server adds later is available without the user
+# having to revisit the form. There is deliberately no RECOMMENDED_ default:
+# "unset" is the only spelling of "exclude nothing", so seeding DEFAULT_OPTIONS
+# with an empty map would create a second one. See ``filter_excluded_tools`` in
+# agent/helpers.py for the enforcement point.
+CONF_TOOL_EXCLUSIONS = "tool_exclusions"
+
 # Actuation Safety Net: Keywords that trigger force-attachment of control tools.
 # Derivatives that must stay in sync when verbs are added here:
 # NON_OPEN_ACTUATION_KEYWORDS_REGEX, AUTOMATION_ACTION_KEYWORDS_REGEX.

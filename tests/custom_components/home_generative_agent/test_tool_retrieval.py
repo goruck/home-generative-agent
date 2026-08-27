@@ -2185,3 +2185,240 @@ async def test_pin_injection_rejects_spoofed_store_row() -> None:
 
     assert "evil_tool" not in result["tool_routing_map"]
     assert "confirm_sensitive_action" not in result["tool_routing_map"]
+
+
+def _open_state_retrieval_config(*live_tools: str, excluded: list[str]) -> Any:
+    """Build a retrieval config for the GetLiveContext force-injection path."""
+    options: dict[str, Any] = {
+        "llm_hass_api": ["assist"],
+        "tool_relevance_threshold": 0.15,
+    }
+    if excluded:
+        options["tool_exclusions"] = {"assist": excluded}
+    return {
+        "configurable": {
+            "options": options,
+            "tool_index_ready": True,
+            "langchain_tools": {},
+            "ha_llm_api": _live_llm_api(*live_tools),
+        }
+    }
+
+
+def _store_holding_live_context() -> MagicMock:
+    """Build a store whose index still contains GetLiveContext."""
+    store = MagicMock()
+    live_ctx_item = MagicMock()
+    live_ctx_item.value = {
+        "name": "GetLiveContext",
+        "api_id": "assist",
+        "description": "Get live home state",
+        "parameters": "{}",
+        "is_actuation": False,
+    }
+    store.asearch = AsyncMock(return_value=[])
+    # Exclusion never evicts index rows — it removes the tool from the LIVE
+    # set — so aget() still finds it and only the live check can keep it out.
+    store.aget = AsyncMock(return_value=live_ctx_item)
+    return store
+
+
+@pytest.mark.asyncio
+async def test_live_context_is_force_injected_when_not_excluded() -> None:
+    """
+    Control case: the by-name force-inject path really does reach GetLiveContext.
+
+    Without this half, the exclusion test below would pass on an empty routing
+    map and prove nothing.
+    """
+    state: State = {
+        "messages": [HumanMessage(content="is the garage door open")],
+        "summary": "",
+        "chat_model_usage_metadata": {},
+        "messages_to_remove": [],
+        "selected_tools": [],
+        "tool_routing_map": {},
+    }
+    config: RunnableConfig = _open_state_retrieval_config("GetLiveContext", excluded=[])
+
+    result = await _retrieve_tools(state, config, store=_store_holding_live_context())
+
+    assert "GetLiveContext" in result["tool_routing_map"]
+
+
+@pytest.mark.asyncio
+async def test_excluded_tool_is_not_force_injected_by_name() -> None:
+    """
+    An excluded tool stays out even of the by-name force-inject path.
+
+    This pins the feature's headline claim ("never retrieved", issue #570) at
+    the retrieval layer rather than at the filter that implements it.
+    `GetLiveContext` is injected BY NAME outside the retrieval limit, so it is
+    the one route that could resurrect a tool the user excluded. It is safe
+    only because `_get_tool_by_name` is handed `live_tool_ids` and its
+    `_get_fallback_tools` fallback reads the already-filtered `ha_llm_api`;
+    a future change passing `live_tool_ids=None` there would silently re-expose
+    every excluded tool with an otherwise-green suite.
+    """
+    state: State = {
+        "messages": [HumanMessage(content="is the garage door open")],
+        "summary": "",
+        "chat_model_usage_metadata": {},
+        "messages_to_remove": [],
+        "selected_tools": [],
+        "tool_routing_map": {},
+    }
+    # GetLiveContext excluded -> filter_excluded_tools already removed it from
+    # the loaded instance, so it is absent from the live set for this turn.
+    config: RunnableConfig = _open_state_retrieval_config(excluded=["GetLiveContext"])
+
+    result = await _retrieve_tools(state, config, store=_store_holding_live_context())
+
+    assert "GetLiveContext" not in result["tool_routing_map"]
+
+
+def _indexed_item(name: str, api_id: str = "assist") -> MagicMock:
+    """Build a scored vector-search hit for an indexed tool."""
+    item = MagicMock()
+    item.value = {
+        "name": name,
+        "api_id": api_id,
+        "description": f"{name} description",
+        "parameters": "{}",
+        "is_actuation": False,
+    }
+    item.score = 0.9
+    return item
+
+
+@pytest.mark.asyncio
+async def test_excluded_tool_in_the_index_is_not_bound_via_rag() -> None:
+    """
+    An excluded tool that is still INDEXED must not bind through RAG.
+
+    Exclusion deliberately does not evict index rows: `_async_discover_provider_tools`
+    indexes every registered API unfiltered, so an excluded tool keeps its
+    embedding and can still be returned by vector search. Enforcement lives one
+    layer later, at bind time, where `_filter_live_candidates` drops anything
+    absent from the filtered `ha_llm_api`. This pins that boundary — without
+    it, "excluded tools stay in the index" and "excluded tools never bind" are
+    two claims with nothing proving they coexist.
+    """
+    store = MagicMock()
+    store.asearch = AsyncMock(return_value=[_indexed_item("web_search")])
+
+    state: State = {
+        "messages": [HumanMessage(content="search the web for a recipe")],
+        "summary": "",
+        "chat_model_usage_metadata": {},
+        "messages_to_remove": [],
+        "selected_tools": [],
+        "tool_routing_map": {},
+    }
+    config: RunnableConfig = {
+        "configurable": {
+            "options": {
+                "llm_hass_api": ["assist"],
+                "tool_relevance_threshold": 0.15,
+                "tool_exclusions": {"assist": ["web_search"]},
+            },
+            "tool_index_ready": True,
+            "langchain_tools": {},
+            # filter_excluded_tools already removed web_search from the loaded
+            # instance, so it is absent from the live set even though the index
+            # still returns it above.
+            "ha_llm_api": _live_llm_api("HassTurnOn"),
+        }
+    }
+
+    result = await _retrieve_tools(state, config, store=store)
+
+    assert "web_search" not in result["tool_routing_map"]
+
+
+@pytest.mark.asyncio
+async def test_indexed_tool_binds_via_rag_when_not_excluded() -> None:
+    """Control for the test above: the same setup binds when nothing is excluded."""
+    store = MagicMock()
+    store.asearch = AsyncMock(return_value=[_indexed_item("web_search")])
+
+    state: State = {
+        "messages": [HumanMessage(content="search the web for a recipe")],
+        "summary": "",
+        "chat_model_usage_metadata": {},
+        "messages_to_remove": [],
+        "selected_tools": [],
+        "tool_routing_map": {},
+    }
+    config: RunnableConfig = {
+        "configurable": {
+            "options": {
+                "llm_hass_api": ["assist"],
+                "tool_relevance_threshold": 0.15,
+            },
+            "tool_index_ready": True,
+            "langchain_tools": {},
+            "ha_llm_api": _live_llm_api("HassTurnOn", "web_search"),
+        }
+    }
+
+    result = await _retrieve_tools(state, config, store=store)
+
+    assert "web_search" in result["tool_routing_map"]
+
+
+@pytest.mark.asyncio
+async def test_excluded_tool_does_not_consume_a_retrieval_slot(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """
+    Excluding a tool must not change which OTHER tools reach the model.
+
+    The index is never pruned when a user excludes a tool, so an excluded tool
+    can still be the top-scoring hit — and `sorted_items[:limit]` cuts to the
+    retrieval limit BEFORE `_filter_live_candidates` runs. Filtering late let
+    the excluded tool eat a slot and then vanish, so switching one tool off
+    silently reduced the tools available for unrelated queries. With limit=1
+    that is the difference between getting the runner-up and getting nothing.
+    """
+    store = MagicMock()
+    top = _indexed_item("web_search")
+    top.score = 0.99
+    runner_up = _indexed_item("HassTurnOn")
+    runner_up.score = 0.5
+    store.asearch = AsyncMock(return_value=[top, runner_up])
+    store.aget = AsyncMock(return_value=None)
+
+    state: State = {
+        "messages": [HumanMessage(content="search the web for a recipe")],
+        "summary": "",
+        "chat_model_usage_metadata": {},
+        "messages_to_remove": [],
+        "selected_tools": [],
+        "tool_routing_map": {},
+    }
+    config: RunnableConfig = {
+        "configurable": {
+            "options": {
+                "llm_hass_api": ["assist"],
+                "tool_relevance_threshold": 0.15,
+                "tool_retrieval_limit": 1,
+                "tool_exclusions": {"assist": ["web_search"]},
+            },
+            "tool_index_ready": True,
+            "langchain_tools": {},
+            "ha_llm_api": _live_llm_api("HassTurnOn"),
+        }
+    }
+
+    with caplog.at_level("WARNING"):
+        result = await _retrieve_tools(state, config, store=store)
+
+    assert "web_search" not in result["tool_routing_map"]
+    # The runner-up gets the slot the excluded tool used to waste.
+    assert "HassTurnOn" in result["tool_routing_map"]
+    # And it got there through RAG, not by the whole pass collapsing into the
+    # keyword fallback -- which is the half that actually pins the fix. The
+    # fallback would bind HassTurnOn too, from a differently-shaped tool set,
+    # so asserting only on the routing map would pass without the fix.
+    assert "keyword-filtered fallback" not in caplog.text

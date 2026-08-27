@@ -43,10 +43,13 @@ from pydantic import PydanticInvalidForJsonSchema
 from .agent.graph import workflow
 from .agent.helpers import (
     active_llm_api_ids,
+    filter_excluded_tools,
     format_tool,
     is_actuation_tool,
     resolve_critical_action_policy,
     safe_convert,
+    sanitize_tool_text,
+    tool_exclusions,
     tool_index_key,
 )
 from .agent.rag_embedding_text import (
@@ -710,15 +713,19 @@ class MultiLLMAPI:
 
 def _format_tool_keys_for_log(keys: set[str], limit: int = 10) -> str:
     """
-    Sanitize and truncate tool index keys for log output.
+    Sanitize and truncate tool strings for log output.
+
+    Accepts either composite ``api_id::name`` index keys or bare tool names —
+    the exclusion log line already carries its ``api_id`` as its own field, so
+    it passes names. Nothing here parses the string; it only sanitizes and
+    truncates, so both shapes are equally valid input.
 
     Tool names can originate from remote MCP servers; strip non-printable
-    characters (log-line forgery) and cap the rendered list (log spam).
+    characters (log-line forgery) and cap the rendered list (log spam). The
+    per-string half of that is ``sanitize_tool_text``, shared with the options
+    form's exclusion picker so both renderers of this untrusted text agree.
     """
-    safe = [
-        "".join(ch if ch.isprintable() else "?" for ch in key)[:120]
-        for key in sorted(keys)[:limit]
-    ]
+    safe = [sanitize_tool_text(key) for key in sorted(keys)[:limit]]
     rendered = ", ".join(safe)
     if len(keys) > limit:
         rendered += f", … (+{len(keys) - limit} more)"
@@ -884,16 +891,31 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         options = self.entry.runtime_data.options
 
         active_api_ids = active_llm_api_ids(options)
+        # Single enforcement point for the per-tool exclusion list: every
+        # downstream consumer (tool binding, the RAG fallback set, the live-tool
+        # filter, and dispatch through APIInstance.async_call_tool) reads
+        # `.tools` off these instances, so an excluded tool is unreachable
+        # rather than merely unadvertised.
+        excluded = tool_exclusions(options)
 
         active_apis: dict[str, llm.APIInstance] = {}
         failed_apis: list[str] = []
         for api_id in active_api_ids:
             try:
                 api = await llm.async_get_api(hass, api_id, llm_context)
-                active_apis[api_id] = api
             except HomeAssistantError:
                 _LOGGER.warning("Could not load LLM API: %s", api_id)
                 failed_apis.append(api_id)
+                continue
+            api, dropped = filter_excluded_tools(api_id, api, excluded)
+            if dropped:
+                _LOGGER.debug(
+                    "Excluded %d tool(s) of API %s: %s",
+                    len(dropped),
+                    api_id,
+                    _format_tool_keys_for_log(set(dropped)),
+                )
+            active_apis[api_id] = api
 
         if not active_apis:
             msg = (

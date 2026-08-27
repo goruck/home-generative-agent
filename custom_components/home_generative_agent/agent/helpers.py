@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import re
+from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict
 
@@ -20,6 +22,7 @@ from custom_components.home_generative_agent.const import (
     CONF_CRITICAL_ACTION_PIN_HASH,
     CONF_CRITICAL_ACTION_PIN_SALT,
     CONF_CRITICAL_ACTIONS,
+    CONF_TOOL_EXCLUSIONS,
     RECOMMENDED_CRITICAL_ACTIONS,
 )
 
@@ -27,6 +30,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
 
     from homeassistant.core import HomeAssistant
+
+LOGGER = logging.getLogger(__name__)
 
 
 def active_llm_api_ids(options: Mapping[str, Any]) -> list[str]:
@@ -70,6 +75,131 @@ def normalize_llm_api_value(raw: Any) -> list[str]:
     if not isinstance(raw, list):
         return []
     return [api_id for api_id in raw if isinstance(api_id, str) and api_id]
+
+
+def normalize_tool_exclusions(raw: Any) -> dict[str, list[str]]:
+    """
+    Normalize a stored ``CONF_TOOL_EXCLUSIONS`` value to ``{api_id: [name]}``.
+
+    Mirrors ``normalize_llm_api_value``'s contract: every reader funnels through
+    one normalizer so a degenerate shape written by a programmatic options
+    update (``None``, a bare string, non-string elements) can never crash the
+    options-form build or the per-turn tool filter.  API ids mapping to no
+    surviving names are dropped, because "present with an empty list" and
+    "absent" mean the same thing — expose every tool of that API — and keeping
+    both spellings would invite readers to disagree about which is which.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    normalized: dict[str, list[str]] = {}
+    for api_id, raw_names in raw.items():
+        if not isinstance(api_id, str) or not api_id:
+            continue
+        names = [raw_names] if isinstance(raw_names, str) else raw_names
+        if not isinstance(names, list):
+            continue
+        cleaned = sorted({n for n in names if isinstance(n, str) and n})
+        if cleaned:
+            normalized[api_id] = cleaned
+    return normalized
+
+
+def api_id_is_form_representable(api_id: str) -> bool:
+    """
+    Return whether an API id can round-trip through the options form.
+
+    The picker flattens exclusions to ``api_id::tool_name`` values and regroups
+    them by splitting on the FIRST separator, so an id containing the separator
+    does not survive: ``{"a::b": ["t"]}`` comes back as ``{"a": ["b::t"]}``, an
+    exclusion matching nothing.
+
+    This is deliberately **not** enforced inside ``normalize_tool_exclusions``.
+    That normalizer is shared by the options form and the per-turn runtime
+    filter, and the two want opposite things: the form must refuse to *offer*
+    an exclusion it cannot store faithfully, while the runtime must keep
+    *honouring* one that is already stored. Refusing in the shared path means a
+    stored exclusion for such an id stops being enforced — the tools silently
+    go live again — and is then erased from storage by the next unrelated save.
+    Fail-open on a security control, so: refuse at the form boundary only.
+    """
+    return TOOL_KEY_SEP not in api_id
+
+
+def tool_exclusions(options: Mapping[str, Any]) -> dict[str, set[str]]:
+    """
+    Return the configured per-API excluded tool names as lookup sets.
+
+    Sets, not the sorted lists ``normalize_tool_exclusions`` returns, because
+    this is the per-turn runtime path: ``filter_excluded_tools`` membership-
+    tests every tool of every loaded API against them.  Storage and the options
+    form want the list form instead — it is what round-trips through JSON and
+    what gives the picker a stable order — so the two shapes are deliberate,
+    not redundant.  Take this one when you are filtering, that one when you are
+    reading or writing the stored value.
+    """
+    raw = options.get(CONF_TOOL_EXCLUSIONS)
+    return {
+        api_id: set(names) for api_id, names in normalize_tool_exclusions(raw).items()
+    }
+
+
+def filter_excluded_tools(
+    api_id: str,
+    api: llm.APIInstance,
+    excluded: Mapping[str, set[str]],
+) -> tuple[llm.APIInstance, list[str]]:
+    """
+    Return an APIInstance exposing only the tools the user has not excluded.
+
+    Returns the (possibly unchanged) instance and the names actually dropped.
+
+    A *copy* is returned rather than an in-place edit of ``api.tools``: Home
+    Assistant's MCP integration hands every ``APIInstance`` the very same
+    coordinator-owned list object (``tools=self.coordinator.data``), so mutating
+    it would strip the excluded tools from every other consumer of that server
+    in the whole instance — and keep them stripped until the coordinator's next
+    30-minute refresh.
+
+    Filtering here, on the instance the conversation entity loads, is the single
+    enforcement point: tool binding, the RAG fallback set, the live-tool filter
+    and ``APIInstance.async_call_tool`` all read ``.tools``, so an excluded tool
+    is not merely hidden from the model — a hallucinated call to it is rejected
+    deterministically with ``Tool "x" not found``.
+    """
+    names = excluded.get(api_id)
+    if not names:
+        return api, []
+    # `.tools` is None for an MCP API whose coordinator has not completed its
+    # first refresh (HA builds the instance with `tools=self.coordinator.data`),
+    # and a third-party API may pass None freely. The options form already
+    # guards this with `instance.tools or []`; unguarded here it raises
+    # TypeError on the per-turn path, outside the caller's
+    # `except HomeAssistantError`, and kills every conversation turn until the
+    # coordinator recovers.
+    tools = list(api.tools or [])
+    # `tool.name` is remote data and is not guaranteed to be a string, let alone
+    # a hashable one. An unguarded `tool.name not in names` raises TypeError on
+    # a list/dict name, and this runs on the per-turn path *outside* the
+    # `except HomeAssistantError` in `_async_init_llm_apis` -- so an unguarded
+    # comprehension turns one malformed descriptor into every conversation turn
+    # failing, for as long as that server advertises it. A non-str name can
+    # never equal an excluded name, so treating it as "keep" is also correct,
+    # not merely safe. Guarding here rather than wrapping the call in the caller
+    # is deliberate: a try/except around a security control fails *open*.
+    live_names = [
+        tool.name for tool in tools if isinstance(getattr(tool, "name", None), str)
+    ]
+    kept = [
+        tool
+        for tool in tools
+        if not (isinstance(getattr(tool, "name", None), str) and tool.name in names)
+    ]
+    if len(kept) == len(tools):
+        return api, []
+    dropped = sorted(set(live_names) & names)
+    # replace() rather than the constructor so a field added to APIInstance by a
+    # future Home Assistant release is carried over instead of silently reset.
+    return replace(api, tools=kept), dropped
 
 
 def safe_convert(
@@ -388,6 +518,56 @@ def normalize_intent_for_lock(
     return normalized
 
 
+# Separator between the API id and the tool name in a composite tool key.
+# Shared by `tool_index_key` and `split_tool_index_key` so the join and the
+# split can never drift — the options flow round-trips these keys through a
+# flat picker value, and a one-sided change would void every stored exclusion.
+TOOL_KEY_SEP = "::"
+
+# Cap for any single rendered tool string. Long enough for real MCP tool names,
+# short enough that one hostile name cannot flood a log line or a form label.
+TOOL_TEXT_MAX_LEN = 120
+
+
+def sanitize_tool_text(text: str, limit: int = TOOL_TEXT_MAX_LEN) -> str:
+    """
+    Make a remote-controlled tool string safe to render, and bound its length.
+
+    Tool names and API titles arrive from remote MCP servers, so they are
+    attacker-controlled text that this integration renders in two places: log
+    lines and the options-form exclusion picker.  ``str.isprintable()`` is
+    False for exactly the classes that make rendered text lie — C0/C1 controls,
+    newlines, zero-width characters, and the bidi overrides (U+202E and
+    friends) that reverse the text after them — so replacing every
+    non-printable with ``?`` closes log-line forgery and the reordering
+    attacks.  ASCII space stays printable, so ordinary names are untouched.
+
+    What this deliberately does **not** do is stop a name whose characters are
+    all perfectly printable from *reading* like something else.
+    ``list_files (not currently available)`` passes through here unchanged, so
+    this function alone cannot keep remote text from imitating a trust marker
+    it is concatenated with; the picker's own ``_label_text`` in
+    ``config_flow.py`` is what does that.  Treat this as making remote text
+    safe to *render*, not safe to *concatenate with trusted text*.
+
+    Single definition on purpose: a second copy would drift from this one, and
+    a renderer that forgot to sanitize is exactly the hole this closes.
+
+    The cap is applied *before* the per-character pass, not after. The
+    transform is one character in, one character out, so the two orders return
+    byte-identical strings — but capping afterwards would run the Python-level
+    generator across the whole input first, which is unbounded in the length of
+    text a remote server chose. A multi-megabyte tool name costs ~132ms of
+    event-loop block that way against ~0.05ms this way, which is the difference
+    between a cap that bounds rendering and a cap that only bounds the result.
+    """
+    # Fast path: one C-level scan, and it is what virtually every real tool
+    # name hits, so the common case never enters the generator at all.
+    if len(text) <= limit and text.isprintable():
+        return text
+    return "".join(ch if ch.isprintable() else "?" for ch in text[:limit])
+
+
 def tool_index_key(api_id: str, name: str) -> str:
     """
     Composite tool-index store key.
@@ -397,7 +577,22 @@ def tool_index_key(api_id: str, name: str) -> str:
     discovery writes and the one used for the live-set comparison would make
     a key permanently "missing" and re-fire the top-up every turn.
     """
-    return f"{api_id}::{name}"
+    return f"{api_id}{TOOL_KEY_SEP}{name}"
+
+
+def split_tool_index_key(key: str) -> tuple[str, str] | None:
+    """
+    Split a composite tool key back into ``(api_id, tool_name)``.
+
+    Returns ``None`` for anything that is not a well-formed key.  Splits on the
+    *first* separator: registered API ids never contain ``::`` (Home Assistant
+    builds them from a domain or a config-entry id), while a remote MCP server
+    is free to name a tool anything at all.
+    """
+    api_id, sep, name = key.partition(TOOL_KEY_SEP)
+    if not sep or not api_id or not name:
+        return None
+    return api_id, name
 
 
 def format_tool(
