@@ -83,6 +83,7 @@ from .helpers import (
     register_pending_action,
     resolve_critical_action_policy,
     sanitize_tool_args,
+    tool_exclusions,
     tool_index_key,
 )
 from .pin_messages import pin_msg
@@ -805,7 +806,7 @@ def _split_query_intents(query: str) -> list[str]:
     return [query, *sub_queries]
 
 
-async def _get_rag_retrieved_tools(
+async def _get_rag_retrieved_tools(  # noqa: PLR0912, PLR0915
     store: BaseStore | None,
     config: RunnableConfig,
     query: str,
@@ -833,6 +834,8 @@ async def _get_rag_retrieved_tools(
     opts = config.get("configurable", {}).get("options", {})
     limit = int(opts.get(CONF_TOOL_RETRIEVAL_LIMIT, 5))
     threshold = float(opts.get(CONF_TOOL_RELEVANCE_THRESHOLD, 0.15))
+    excluded_names = tool_exclusions(opts)
+    excluded_hits = 0
 
     sub_queries = _split_query_intents(query)
 
@@ -877,6 +880,19 @@ async def _get_rag_retrieved_tools(
             api_id = item.value.get("api_id")
             if api_id not in allowed_api_ids:
                 continue
+            # Excluded tools are dropped HERE, beside the api-level check, and
+            # not left to the live-tool filter downstream. The index is never
+            # pruned when a user excludes a tool, so an excluded tool can still
+            # be the top-scoring hit -- and `sorted_items[:limit]` below cuts to
+            # the user's retrieval limit *before* `_filter_live_candidates` ever
+            # sees the list. Filtering late therefore lets an excluded tool eat
+            # a retrieval slot and then vanish, so switching one tool off would
+            # silently reduce (or, once the list empties into the keyword
+            # fallback, entirely reshape) which OTHER tools reach the model on
+            # unrelated queries.
+            if name in excluded_names.get(api_id, ()):
+                excluded_hits += 1
+                continue
             allowed_results += 1
             # score is (1 - distance) for pgvector cosine; None when no embedding
             score = getattr(item, "score", None) or 0.0
@@ -891,11 +907,12 @@ async def _get_rag_retrieved_tools(
         LOGGER.debug(
             "RAG tool retrieval produced no candidates: sub_queries=%d "
             "raw_results=%d allowed_results=%d below_threshold=%d "
-            "threshold=%.3f allowed_api_ids=%s top_scores=%s",
+            "excluded=%d threshold=%.3f allowed_api_ids=%s top_scores=%s",
             len(sub_queries),
             total_results,
             allowed_results,
             below_threshold,
+            excluded_hits,
             threshold,
             sorted(allowed_api_ids),
             top_seen[:5],

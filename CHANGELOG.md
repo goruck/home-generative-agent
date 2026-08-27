@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.32.0] - 2026-08-26
+
+### Added
+
+- **Pick exactly which tools the agent may use.** A new **Excluded tools** option lists every tool of every selected LLM API — each MCP server's tools grouped under its name, plus Assist's own intent tools — and anything you tick there is removed from the agent entirely: never advertised to the model, never retrieved, and never executed, so a call to it by name is rejected instead of run. Tool retrieval ranks by similarity and can hand back a near neighbour of what you meant (`web_search` vs `web_search_images`); this is the deterministic complement to it, and it matters most for local and smaller models, where a large MCP server's tool definitions eat a real share of the context window. Requested by [@krishgcek](https://github.com/krishgcek) ([#570](https://github.com/goruck/home-generative-agent/issues/570)).
+
+  The picker subtracts, which keeps three things predictable: excluding nothing (the default) behaves exactly as before; a tool a server adds later arrives enabled, so you are never silently missing new capability; and if a server is unreachable when you open the Options page, its stored exclusions are kept and shown as `Server: tool_name (not currently available)` rather than being dropped — deselecting one is always your explicit action. Excluded tools stay in the vector index, so re-enabling one takes effect on the next turn with no re-index.
+
+  Tool names come from whatever MCP server you configured, so the names shown in the picker are stripped of hidden characters, length-capped, and have their parentheses rewritten to square brackets before display. Without that, a server could name a tool `something (not currently available)` and have it render exactly like a tool that is already switched off — so you would scan past a dangerous tool believing it inactive while it was live and callable. Hidden right-to-left overrides could achieve the same thing by reversing the text around them. The same stripping already applied to tool names written to the log, and both now share one routine.
+
+  Tools that Home Assistant only exposes to capable devices — the timer intents, offered only to timer-capable voice satellites — can be excluded too. An options page has no device to ask on behalf of, so those names are taken from the tool index instead. Previously they would have been callable on every voice turn with no way to switch them off.
+
 ## [3.31.3] - 2026-08-25
 
 ### Fixed

@@ -118,6 +118,25 @@ Two options in the **Options** flow control this:
 - **Retrieval Limit** (`tool_retrieval_limit`, default `5`) — maximum tools made available per turn. Raise if the agent misses tools on complex multi-step requests; lower to reduce prompt size.
 - **Relevance Threshold** (`tool_relevance_threshold`, default `0.15`) — cosine similarity cutoff. Lower if the agent misses tools it should pick up; raise to tighten selectivity.
 
+### Excluded tools
+
+Retrieval is probabilistic: it ranks by semantic similarity, so a server exposing `web_search`, `web_search_images`, `web_search_news` and `web_search_videos` can hand the agent a near neighbour of the one you wanted. **Excluded tools** (`tool_exclusions`) is the deterministic complement — a picker in the **Options** flow listing every tool of every selected LLM API, grouped by API name. Anything you tick there is removed from the tool set the agent loads, so it is never advertised to the model, never retrieved, and never executed: a call to an excluded tool by name is rejected outright rather than run.
+
+It applies to every selected API, not only MCP servers, so Assist's intent tools can be trimmed the same way. This is worth doing for local and smaller models in particular, where tool definitions consume a meaningful share of the context window.
+
+The picker is *subtractive*, and that shapes three behaviours worth knowing:
+
+- **Empty is the default.** No exclusions means every tool of every selected API is exposed — exactly the behaviour before this option existed.
+- **New tools arrive enabled.** A tool a server adds later was never ticked, so it is available immediately without you revisiting the form. If you want it gone, tick it.
+- **Exclusions survive an outage.** If a server is unreachable when you open the Options form, its tools cannot be listed — but your stored exclusions for it are kept and still ticked, labelled with *why* they are missing: `(not currently available)` for a server that is unreachable or gone from Home Assistant, and `(API not selected)` for one you simply unticked under **Control Home Assistant**. They keep applying, and deselecting one is always an explicit action on your part. If nothing at all can be listed and nothing is stored, the field is hidden rather than rendered empty, so saving the form cannot silently clear your selection.
+
+Two details about what the picker shows:
+
+- **Device-gated tools are included.** Home Assistant exposes some Assist tools only to devices that support them — the timer intents are the usual case, offered only when the request comes from a timer-capable voice satellite. An options form has no device, so those tools cannot be listed by asking Home Assistant directly; they are taken from the tool index instead, which records what the agent has actually seen. Without that they would be callable on every voice turn and impossible to switch off.
+- **Tool names are shown defanged.** Names come from the server, not from you, so they are stripped of hidden characters, length-capped, and have their parentheses rewritten to square brackets before display. That last one matters: a server could otherwise name a tool `something (not currently available)` and have it render exactly like a tool that is switched off, so you would skip past a tool that is in fact live.
+
+Excluded tools stay in the vector index (which is global and cumulative by design), so re-enabling one takes effect on the next turn without a re-index.
+
 A **Tool Index Status** diagnostic sensor (`sensor.tool_index_status`) shows the current index state:
 
 | State | Meaning |
@@ -254,6 +273,7 @@ The **Options** flow (gear icon on the integration page) exposes:
 - Context management parameters (`max_messages_in_context`, `max_tokens_in_context`, `manage_context_with_tokens`)
 - Critical action PIN toggle and value
 - Tool retrieval limit and relevance threshold
+- **Excluded tools** (`tool_exclusions`) — per-tool allow/deny picker across every selected LLM API, including MCP servers (see [Excluded tools](#excluded-tools))
 - `model_provider_uncontended` — bypass all local GPU gates when the server has dedicated capacity
 - **Video analyzer mode** — disable / notify_on_anomaly / always_notify
 - **Enable perceptual-hash frame filter (dHash)** — skip visually identical frames before VLM analysis (off by default; always active for ring-mqtt `event_select` capture loops regardless of this setting; see caveat in [Camera Entities](camera-entities.md#advanced-options))

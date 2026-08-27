@@ -352,7 +352,8 @@
           "stt_hallucination_patterns": "Ignored STT substrings",
           "stt_hallucination_exact_patterns": "Ignored exact STT phrases",
           "tool_retrieval_limit": "Tool retrieval limit",
-          "tool_relevance_threshold": "Tool relevance threshold"
+          "tool_relevance_threshold": "Tool relevance threshold",
+          "tool_exclusions": "Excluded tools"
         },
         "data_description": {
           "prompt": "Instruct how the LLM should respond. This can be a template.",
@@ -363,6 +364,7 @@
           "stt_hallucination_exact_patterns": "One phrase per line. If the entire STT transcript equals any entry, it is ignored before the LLM runs. Matching is case-insensitive.",
           "tool_retrieval_limit": "The maximum number of tools to retrieve based on semantic similarity to the user's query.",
           "tool_relevance_threshold": "The minimum semantic similarity score (0.0 to 1.0) required for a tool to be retrieved.",
+          "tool_exclusions": "Tools ticked here are never offered to the model and never executed, even if it asks for one by name. Leave empty to expose every tool of every selected API. Tools a server adds later are available by default.",
           "video_analyzer_uniqueness_enabled": "Skip visually near-identical frames before VLM analysis. Warning: enabling this removes inter-frame motion context that the summary model uses to narrate movement. Only enable if a static scene generates excessive duplicates and you accept that motion continuity may be lost.",
           "video_analyzer_motion_camera_map": "One override per line: binary_sensor.X_motion: camera.Y — use this when automatic resolution picks the wrong camera. Leave blank to rely on device-based and name-based resolution."
         }

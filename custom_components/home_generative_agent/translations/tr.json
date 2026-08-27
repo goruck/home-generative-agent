@@ -329,6 +329,7 @@
           "stt_hallucination_patterns": "Yok sayılan STT alt dizeleri",
           "stt_hallucination_exact_patterns": "Yok sayılan tam STT ifadeleri",
           "tool_relevance_threshold": "Araç ilgi eşiği",
+          "tool_exclusions": "Hariç tutulan araçlar",
           "tool_retrieval_limit": "Araç getirme limiti"
         },
         "data_description": {
@@ -339,6 +340,7 @@
           "stt_hallucination_patterns": "Her satıra bir alt dize yazın. STT metni herhangi bir girdiyi içerirse LLM çalışmadan önce yok sayılır. Eşleşme büyük/küçük harfe duyarsızdır.",
           "stt_hallucination_exact_patterns": "Her satıra bir ifade yazın. STT metninin tamamı herhangi bir girdiye eşitse LLM çalışmadan önce yok sayılır. Eşleşme büyük/küçük harfe duyarsızdır.",
           "tool_relevance_threshold": "Bir aracın getirilmesi için gereken minimum anlamsal benzerlik puanı (0,0 ile 1,0 arasında).",
+          "tool_exclusions": "Burada işaretlenen araçlar modele hiçbir zaman sunulmaz ve adıyla istense bile hiçbir zaman çalıştırılmaz. Seçili tüm API'lerin tüm araçlarını açmak için boş bırakın. Bir sunucunun sonradan eklediği araçlar varsayılan olarak kullanılabilir.",
           "tool_retrieval_limit": "Kullanıcının sorgusuna anlamsal benzerliğe göre getirilecek maksimum araç sayısı."
         }
       }
