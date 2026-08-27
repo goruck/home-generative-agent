@@ -37,6 +37,7 @@ from custom_components.home_generative_agent.snapshot.discovery_reducer import (
 
 from .discovery_schema import DISCOVERY_OUTPUT_SCHEMA, DISCOVERY_SCHEMA_VERSION
 from .discovery_semantic import (
+    battery_slug_device_token,
     candidate_semantic_key,
     is_battery_level_entity_id,
     rule_semantic_key,
@@ -525,6 +526,13 @@ class SentinelDiscoveryEngine:
         active_rule_ids: set[str] = set(_STATIC_RULE_IDS)
         hint_keys: set[str] = set()
         filter_keys: set[str] = set()
+        # Secondary identity keys for pending null-key proposals. Kept OUT
+        # of hint_keys on purpose: hint_keys is truncated to
+        # _MAX_SEMANTIC_KEYS_IN_PROMPT and sorted, and "ident|" sorts ahead
+        # of "v1|", so a second opaque hash per candidate would evict real
+        # semantic keys from the prompt to no benefit — the LLM cannot
+        # compute either hash. The dedup filter is where they matter.
+        extra_identity_keys: set[str] = set()
 
         if self._rule_registry is not None:
             for rule in self._rule_registry.list_rules():
@@ -560,22 +568,38 @@ class SentinelDiscoveryEngine:
                         # patterns that don't resolve to a known subject/predicate)
                         # use a title+summary hash so they are still excluded.
                         hint_keys.add(_candidate_identity_hash(candidate))
+                        extra_identity_keys |= _candidate_identity_keys(candidate)
 
         # filter_keys starts as a copy of hint_keys, then adds history records.
-        filter_keys = set(hint_keys)
+        filter_keys = set(hint_keys) | extra_identity_keys
         discovery_records = await self._store.async_get_latest(200)
         for payload in discovery_records:
             for candidate in payload.get("candidates", []):
                 if not isinstance(candidate, dict):
                     continue
-                key = str(candidate.get("semantic_key", "")) or candidate_semantic_key(
-                    candidate
-                )
+                # ALWAYS recompute; never trust a record's stored
+                # "semantic_key". DISCOVERY_OUTPUT_SCHEMA lets the model
+                # supply that field, and preferring it (as this did) let a
+                # null-key candidate's model-chosen string suppress the
+                # unrelated real proposal it names for the life of the
+                # 200-record window — the #572 adversarial finding. #573
+                # stops new records carrying one; recomputing closes the
+                # records already stored, and the second Codex pass showed
+                # a version-gated variant still leaks whenever the key
+                # chain later learns to key that shape.
+                #
+                # This is TODOS.md's own prescription for the paired
+                # migration gap ("drop stored-key preference entirely and
+                # always recompute … cheap: it is a pure function over a
+                # dict"): the stored value came from an older key chain,
+                # so it matches nothing computed today anyway, and keeping
+                # it only desynchronizes history from fresh candidates.
+                key = candidate_semantic_key(candidate)
                 if key:
                     filter_keys.add(key)
                 else:
                     # Bug 2 fix: same null-key hash fallback for past records.
-                    filter_keys.add(_candidate_identity_hash(candidate))
+                    filter_keys |= _candidate_identity_keys(candidate)
 
         return active_rule_ids, hint_keys, filter_keys
 
@@ -647,16 +671,24 @@ class SentinelDiscoveryEngine:
                 candidate = sanitized  # noqa: PLW2901
             key = candidate_semantic_key(candidate)
             # Bug 2 fix: null-key candidates (unknown subject/predicate) fall
-            # back to a title+summary hash so they are still deduplicated.
-            identity_key = key or _candidate_identity_hash(candidate)
+            # back to identity hashes so they are still deduplicated. A
+            # null-key candidate carries MORE THAN ONE identity key (prose
+            # and, for low-battery slugs, device token) and matches on
+            # intersection: the two surfaces drift independently, so
+            # matching on either one alone loses the re-proposals that
+            # kept the other stable (review of #573).
+            identity_keys = {key} if key else _candidate_identity_keys(candidate)
 
             dedupe_reason: str | None = None
-            if identity_key in existing_keys:
+            matched = identity_keys & existing_keys
+            if matched:
                 dedupe_reason = (
                     "existing_semantic_key" if key else "existing_identity_hash"
                 )
-            elif identity_key in seen_batch:
-                dedupe_reason = "batch_duplicate"
+            else:
+                matched = identity_keys & seen_batch
+                if matched:
+                    dedupe_reason = "batch_duplicate"
             if dedupe_reason is not None:
                 dropped_entry: dict[str, str] = {
                     "candidate_id": str(candidate.get("candidate_id", "")),
@@ -665,13 +697,45 @@ class SentinelDiscoveryEngine:
                 if key:
                     dropped_entry["semantic_key"] = key
                 else:
-                    dropped_entry["identity_hash"] = identity_key
+                    # Report the canonical (prose) hash when it is what
+                    # matched, so the debug field stays comparable across
+                    # records; otherwise report the key that actually hit.
+                    canonical = _candidate_identity_hash(candidate)
+                    dropped_entry["identity_hash"] = (
+                        canonical if canonical in matched else min(matched)
+                    )
                 dropped.append(dropped_entry)
+                # A dropped duplicate deliberately does NOT contribute its
+                # keys to seen_batch. Prose equality and device-token
+                # equality are two heuristics, and the union of two
+                # heuristic equivalences is not transitive: propagating a
+                # dropped candidate's surfaces lets A link B to C even
+                # though B and C share no key, silently hiding a genuinely
+                # distinct low-battery card. Forcing transitivity was
+                # tried and reverted (third Codex pass on the #573
+                # hardening). The residue is that batch ORDER can change
+                # how many cards survive, but only among candidates with
+                # identical prose — indistinguishable on the card anyway,
+                # and base main merged those unconditionally.
                 continue
             enriched = dict(candidate)
             if key:
                 enriched["semantic_key"] = key
-            seen_batch.add(identity_key)
+            else:
+                # Adversarial finding on the #572 review (2026-08-25): when
+                # the computed key is falsy, the model's own optional
+                # "semantic_key" field (DISCOVERY_OUTPUT_SCHEMA) was left
+                # untouched in `enriched` and persisted into the discovery
+                # record. _collect_existing_keys prefers a stored
+                # semantic_key over recomputation, so an LLM-declared string
+                # on a null-key candidate could suppress an unrelated,
+                # differently-keyed real proposal as "existing_semantic_key"
+                # for as long as it stays in the 200-record window. Drop it
+                # explicitly so a null-key candidate can only ever be
+                # recalled via its identity keys, matching what
+                # _collect_existing_keys actually falls back to for it.
+                enriched.pop("semantic_key", None)
+            seen_batch |= identity_keys
             enriched["dedupe_reason"] = "novel"
             filtered.append(enriched)
         return filtered, dropped
@@ -684,11 +748,46 @@ def _candidate_identity_hash(candidate: dict[str, Any]) -> str:
     Uses the first 16 hex digits of SHA-256(title + NUL + summary) so that
     two candidates with identical wording collide even if their other fields
     differ (e.g. different confidence_hint or candidate_id).
+
+    This is the *canonical* key, reported as `identity_hash` on dropped
+    entries. Dedup itself matches on the full set from
+    _candidate_identity_keys, which adds the battery device-token key —
+    see that function for why one key alone is not enough.
     """
     title = str(candidate.get("title", "")).strip().lower()
     summary = str(candidate.get("summary", "")).strip().lower()
     blob = f"{title}\x00{summary}".encode()
     return "ident|sha256=" + hashlib.sha256(blob).hexdigest()[:16]
+
+
+def _candidate_identity_keys(candidate: dict[str, Any]) -> set[str]:
+    """
+    Return every identity key a null-key candidate may be recalled by.
+
+    Two surfaces drift independently, so keying on either one alone loses
+    re-proposals that key on the other (issue #571 follow-ups):
+
+    * The prose (title+summary) is regenerated every discovery cycle and
+      routinely embeds the live reading ("Baterie klesla na 12 %" then
+      "11 %" the next cycle), so the same topic re-proposes as a new card.
+    * The candidate_id slug is comparatively stable for the same device,
+      but the model also decorates it freely ("..._again", an extra word),
+      and it is absent or ambiguous for most non-hardware-addressed
+      candidates.
+
+    Returning BOTH and matching on set intersection is strictly additive:
+    it can only merge candidates that already shared a surface, never
+    split ones that used to collide. Choosing one key per candidate does
+    split them — it regressed
+    test_filter_zero_evidence_low_battery_dedups_on_identity_hash, where a
+    twin differing only in candidate_id stopped deduping (review of #573).
+    """
+    keys = {_candidate_identity_hash(candidate)}
+    device_token = battery_slug_device_token(candidate)
+    if device_token is not None:
+        blob = f"battery-device\x00{device_token}".encode()
+        keys.add("ident|sha256=" + hashlib.sha256(blob).hexdigest()[:16])
+    return keys
 
 
 def _entity_ids_from_evidence_paths(evidence_paths: object) -> set[str]:

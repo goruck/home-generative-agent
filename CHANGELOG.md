@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.32.1] - 2026-08-27
+
+### Fixed
+
+- **A suggestion the model labelled itself can no longer bury an unrelated one.** Sentinel lets the model attach its own internal label to a suggestion. When a suggestion had no label the system could compute for it, whatever the model had written there was stored anyway and then trusted — so a suggestion about, say, a stale phone tracker could carry the label belonging to "open windows at night while nobody is home" and quietly suppress that real proposal for as long as it stayed in recent history. Model-supplied labels are now dropped on that path and never trusted when read back, so suggestions already stored with a borrowed label stop hiding anything on the next Sentinel run rather than waiting weeks to age out. Contributed by [@hruba202](https://github.com/hruba202) ([#573](https://github.com/goruck/home-generative-agent/pull/573), following [#571](https://github.com/goruck/home-generative-agent/issues/571)).
+- **Repeated low-battery suggestions for the same device stop stacking up.** The model rewrites its wording every cycle and usually quotes the current reading ("battery at 12%", then "11%"), and unlabelled suggestions were told apart by that wording alone — so one device could mint a fresh card every run. Where the suggestion's id contains a hardware address (the `0x…` form Zigbee devices use), that address is now used as the device's identity instead of the drifting text, and the two are matched together so a re-proposal is recognised whichever of the two stayed put. This was the remaining half of [#571](https://github.com/goruck/home-generative-agent/issues/571)'s report.
+- **Two different devices are never merged into one card by a shared name.** Only a genuine `0x` hardware address counts as a device identity. Anything else — a room name, a room name with a number, a unit code, a placeholder address — falls back to matching on wording exactly as before, because a suggestion hidden by a false match is a battery warning you never see, while a suggestion the system declines to match costs only a repeat card.
+- **Low-battery suggestions written in your own language are recognised again.** The check that decides whether a suggestion is about a battery read a narrower part of the text than the rest of the system did, so a suggestion whose only English battery wording sat in a field the check skipped was treated inconsistently and kept re-proposing. Both now read the same text.
+
+Note: [#571](https://github.com/goruck/home-generative-agent/issues/571) stays open. A low-battery suggestion you rejected while it named no entity can still return once it starts citing one, because those two forms are identified in fundamentally different ways.
+
 ## [3.32.0] - 2026-08-26
 
 ### Added

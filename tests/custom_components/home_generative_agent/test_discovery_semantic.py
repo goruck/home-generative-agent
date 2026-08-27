@@ -11,6 +11,7 @@ from custom_components.home_generative_agent.sentinel.discovery_engine import (
     _candidate_identity_hash,
 )
 from custom_components.home_generative_agent.sentinel.discovery_semantic import (
+    battery_slug_device_token,
     candidate_semantic_key,
     is_battery_level_entity_id,
     rule_key_covers_candidate_key,
@@ -30,6 +31,131 @@ def _effective_dedup_key(candidate: dict[str, Any]) -> str:
     nothing about whether two candidates actually stay distinct downstream.
     """
     return candidate_semantic_key(candidate) or _candidate_identity_hash(candidate)
+
+
+def test_battery_slug_device_token_extracts_hex_id() -> None:
+    """The device token is what's left after stripping known topic words."""
+    candidate = {
+        "candidate_id": "low_battery_sensor_0xffffaa67127301f8",
+        "title": "Nízká úroveň baterie senzoru 0xffffaa67127301f8",
+        "summary": "Baterie senzoru 0xffffaa67127301f8 klesla na 12 %.",
+    }
+    assert battery_slug_device_token(candidate) == "0xffffaa67127301f8"
+
+
+def test_battery_slug_device_token_none_without_low_battery_signal() -> None:
+    """No low-battery signal in text or slug means no device token."""
+    candidate = {
+        "candidate_id": "front_door_camera_offline",
+        "title": "Front door camera offline",
+        "summary": "The front door camera stopped responding.",
+    }
+    assert battery_slug_device_token(candidate) is None
+
+
+def test_battery_slug_device_token_none_when_ambiguous() -> None:
+    """Two or more leftover tokens is ambiguous, not a device token."""
+    candidate = {
+        "candidate_id": "hall_and_garage_low_battery_sensor",
+        "title": "Nízká baterie",
+        "summary": "Baterie senzoru je nízká.",
+    }
+    assert battery_slug_device_token(candidate) is None
+
+
+def test_battery_slug_device_token_none_when_slug_is_all_topic_words() -> None:
+    """A slug with no device-identifying leftover token returns None."""
+    candidate = {
+        "candidate_id": "low_battery_sensor",
+        "title": "Low battery sensor",
+        "summary": "A sensor battery is low.",
+    }
+    assert battery_slug_device_token(candidate) is None
+
+
+def test_battery_slug_device_token_reads_the_same_surface_as_the_key_leg() -> None:
+    """
+    The low-battery gate reads _candidate_text_blob, not just title+summary.
+
+    Review of #573: the extractor originally gated on title+summary alone
+    while candidate_semantic_key's battery leg gates on _candidate_text_blob
+    (title + summary + pattern + suggested_type). A locale-prose candidate
+    whose only English battery surface is suggested_type took the battery
+    leg for keying but not here, so the exact class this exists to stabilize
+    kept re-proposing every cycle. One more hand-mirrored predicate free to
+    drift is this module's recurring failure mode (#516, #518, #522, #524).
+    """
+    candidate = {
+        "candidate_id": "sensor_0xffffaa67127301f8",
+        "title": "Nízká úroveň baterie senzoru 0xffffaa67127301f8",
+        "summary": "Baterie senzoru 0xffffaa67127301f8 klesla na 12 %.",
+        "pattern": "low battery threshold",
+        "suggested_type": "low_battery_sensors",
+        "evidence_paths": [],
+    }
+    # The Czech prose carries no English "battery" substring and the slug
+    # carries no battery token either, so _has_low_battery_signal fires
+    # only via pattern/suggested_type — the two fields the narrow
+    # title+summary surface dropped.
+    assert candidate_semantic_key(candidate) is None
+    assert battery_slug_device_token(candidate) == "0xffffaa67127301f8"
+
+
+def test_battery_slug_device_token_declines_bare_mac_without_0x() -> None:
+    """
+    A bare MAC-style id is deliberately NOT trusted, and that is safe.
+
+    Codex passes 2-6 on the #573 hardening each broke a looser shape test
+    with a room label wearing the same grammar, ending at "a1234567".
+    A device address and a place code are syntactically identical, so the
+    gate is the 0x literal marker and nothing else. "aabbccddeeff" is a
+    real object id and is given up with the rest: it falls back to the
+    prose hash, which is exactly what base main does, so this costs
+    coverage and never correctness.
+    """
+    candidate = {
+        "candidate_id": "low_battery_sensor_aabbccddeeff",
+        "title": "Low battery on the hallway sensor",
+        "summary": "Battery for AA:BB:CC:DD:EE:FF is low.",
+    }
+    assert battery_slug_device_token(candidate) is None
+
+
+@pytest.mark.parametrize(
+    "slug",
+    [
+        "low_battery_sensor_kitchen",  # room name, not a device
+        "kitchen_battery_low",  # same room name, different device
+        "low_battery_sensor_98",  # too short to identify anything
+        "candidate_low_battery",  # generic scaffolding word
+        "low_battery_sensor_kitchen1",  # word + digit is not an address
+        "low_battery_sensor_basement1",  # nor is it once it self-corroborates
+        "low_battery_sensor_room1234",  # half digits, still a room not a device
+        "low_battery_sensor_livingroom",  # long, all letters, not hex
+        "low_battery_sensor_12345678",  # hex-legal but reads as a room number
+        "low_battery_sensor_a1234567",  # hex letter does not make it an address
+        "low_battery_sensor_0x123456",  # 0x-prefixed but only 6 body characters
+        "low_battery_sensor_0xghijklmn",  # 0x-prefixed but not hexadecimal
+        "low_battery_sensor_0x00000000",  # the null EUI identifies nothing
+    ],
+)
+def test_battery_slug_device_token_rejects_word_shaped_tokens(slug: str) -> None:
+    """
+    Only hardware-address-shaped tokens are trusted as device identities.
+
+    Review of #573: the "exactly one leftover token" rule does not prevent
+    the false merge it was believed to prevent. Two unrelated sensors in
+    one room both reduce to "kitchen" and would collapse into one card,
+    silently hiding the second. A token must be at least
+    _MIN_BATTERY_DEVICE_TOKEN_LEN characters and contain a digit, which
+    the reported Zigbee IEEE address does and a room name does not.
+    """
+    candidate = {
+        "candidate_id": slug,
+        "title": "Low battery",
+        "summary": "The sensor battery is low at 12 %.",
+    }
+    assert battery_slug_device_token(candidate) is None
 
 
 def test_candidate_semantic_key_collapses_similar_window_home_night() -> None:
