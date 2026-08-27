@@ -25,6 +25,7 @@ from ..const import (  # noqa: TID252
     CONF_OLLAMA_URL,
     EMBEDDING_MODEL_DIMS,
     HTTP_STATUS_BAD_REQUEST,
+    HTTP_STATUS_FORBIDDEN,
     HTTP_STATUS_UNAUTHORIZED,
     OLLAMA_BOOL_HINT_TAGS,
     OLLAMA_CATEGORY_URL_KEYS,
@@ -786,14 +787,24 @@ async def validate_gemini_key(
     client = get_async_client(hass)
     try:
         async with asyncio.timeout(timeout_s):
+            # Key goes in a header, not the query string: a key in the URL leaks
+            # into every exception message and log line that quotes the request.
             resp = await client.get(
-                f"https://generativelanguage.googleapis.com/v1/models?key={api_key}"
+                "https://generativelanguage.googleapis.com/v1/models",
+                headers={"x-goog-api-key": api_key},
             )
     except (TimeoutError, httpx.RequestError) as err:
         LOGGER.debug("Gemini connectivity exception: %s", err)
         raise CannotConnectError from err
     else:
-        if resp.status_code == HTTP_STATUS_UNAUTHORIZED:
+        # Google reports a bad, blocked or unauthorized key as 400/401/403 --
+        # reporting those as "cannot connect" sends users hunting a network
+        # problem they do not have.
+        if resp.status_code in (
+            HTTP_STATUS_BAD_REQUEST,
+            HTTP_STATUS_UNAUTHORIZED,
+            HTTP_STATUS_FORBIDDEN,
+        ):
             raise InvalidAuthError
         if resp.status_code >= HTTP_STATUS_BAD_REQUEST:
             raise CannotConnectError

@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.33.0] - 2026-08-27
+
+### Fixed
+
+- **A Gemini conversation no longer dies because Google declined to count its tokens.** Before each reply the integration asks Gemini how large the conversation is, so it knows how much history to trim. When that call failed — an unavailable model, a rejected key, an unreachable Google — nothing caught it and the failure took the entire reply down with it, leaving `Unexpected error in streaming task` in the log and no answer on screen. Counting now falls back to an estimate and the conversation carries on. The exact counter is then set aside for five minutes, because it is called many times per message and a failing endpoint would otherwise be re-dialled on each one. Reported by [@Xornop](https://github.com/Xornop) ([#575](https://github.com/goruck/home-generative-agent/issues/575)).
+- **Your Gemini API key no longer appears in Home Assistant's logs.** The key was sent as part of the request URL, and Python quotes the whole URL in any error it raises — so one failed request wrote the key verbatim into the log, into the traceback Home Assistant shows in the UI, and from there into screenshots and bug reports. The key now travels in a request header, which no error message repeats, and anything key-shaped is stripped from these messages as a second line of defence. **If a `generativelanguage.googleapis.com` error has ever appeared in your log, treat that key as public: delete it at [Google AI Studio](https://aistudio.google.com/apikey) and issue a new one.** The key check run when you save your Gemini settings was doing the same thing and is fixed alongside it.
+- **A failed Gemini request now says what went wrong.** Google puts the reason in the body of its reply — which model it could not find, which quota you crossed, that the key is disabled — and the integration threw that away and reported only the status number. The reason is now included, with any credential removed, so a 404 names the model instead of leaving you to guess.
+- **A rejected Gemini key is reported as an authentication problem rather than a connection one.** Google answers a bad or blocked key with 400 or 403, never 401, and only 401 was recognised — so entering an invalid key told you Home Assistant could not reach Google, sending you after a network fault you did not have.
+- **Approximate token counting for Ollama no longer insists on an Ollama URL.** The URL was required on every count even though only the exact-counting mode ever uses it.
+
+### Added
+
+- **Gemini 3 models can be selected** for chat, image analysis, and summarization: `gemini-3.7-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, and `gemini-3.1-flash-lite`, alongside the 2.5 models already offered. Defaults are unchanged. Google does not grant every account access to every model, so if one reports "not found", choose another from the list.
+
 ## [3.32.1] - 2026-08-27
 
 ### Fixed
