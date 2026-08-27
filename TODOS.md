@@ -597,6 +597,26 @@ And two writer-consistency gaps: (7) `_mark_tool_index_stale` (embedding-provide
 
 ## Discovery
 
+### Identically-worded candidates about different devices still merge; the device token cannot split them as a matcher
+
+**Priority:** P2
+
+**What:** Two evidence-less low-battery candidates with identical `title`/`summary` but different device addresses share an identity key and one card is dropped, hiding a battery warning the user never sees. Reproduced on v3.32.1 with the #571 candidate: same wording under `0xffffaa67127301f8` and `0xaaaa11122233344` still collide. This is base behaviour, not a v3.32.1 regression — it was listed as a known limit in the v3.31.3 close-out on #571 and restated in the v3.32.1 one (issuecomment-5438771917).
+
+**Why it is not already fixed:** `_candidate_identity_keys` returns a SET and matching is set intersection, which is a union of criteria. Adding the device key can only create matches, never break the prose match those two candidates already share. Discrimination is not expressible in that shape.
+
+**Why the obvious fix is wrong:** the tempting move is to drop the bare prose key whenever a device token resolves, so the keys become `{device, prose⊕device}`. That does split the case above, and it silently reintroduces the exact regression #573's review existed to fix: a re-proposal whose slug degrades (`…_0xffffaa67127301f8_again` resolves no token, because two tokens survive the strip) keys on bare prose only, the original keys on `prose⊕device`, and they no longer meet. That is `test_filter_zero_evidence_low_battery_dedups_on_identity_hash` failing again. Do not take this route.
+
+**How to apply:** the fix needs pairwise comparison, not a flat key set. Carry a structured identity `(device_token | None, prose_hash)` and match on a predicate rather than intersection:
+
+- both tokens present and equal -> match
+- both tokens present and different -> never match, regardless of prose
+- otherwise -> fall back to prose equality
+
+That satisfies all three cases at once: different devices with identical prose split, a drifting reading under one address collapses, and a degraded slug still meets its twin on prose. The cost is real: `existing_keys` and `seen_batch` stop being `set[str]`, which changes `_existing_semantic_context`'s return type and every caller, and those sets are shared with the semantic-key path — so the refactor must keep semantic keys matching by equality exactly as they do now. Re-verify every test in `test_discovery_engine_dedupe.py`, and add a case per bullet above.
+
+**Note on precedence:** giving one identity key precedence over another is what produced the transitivity defect during the #573 review (propagating dropped candidates' keys let A link B to C when B and C shared nothing). The predicate above avoids that only because it is evaluated pairwise and never mutates a shared set. Keep that property.
+
 ### The battery slug topic-word list is English-only, so a locale slug never yields a device token
 
 **Priority:** P2
