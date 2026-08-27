@@ -341,12 +341,11 @@ def _has_low_battery_signal(text: str, slug_text: str) -> bool:
 # device token. Deliberately conservative (issue #571 follow-up): a false
 # device-token match merges two genuinely different topics, which is worse
 # than the prose-hash re-proposal drift this exists to fix.
-_BATTERY_SLUG_TOPIC_WORDS = frozenset(
+# _LOW_BATTERY_QUALIFIERS is folded in rather than re-listed: the two must
+# not drift, or a qualifier added there would silently stop being stripped
+# here and every slug carrying it would go token-less (review of #573).
+_BATTERY_SLUG_TOPIC_WORDS = frozenset(_LOW_BATTERY_QUALIFIERS) | frozenset(
     {
-        "low",
-        "below",
-        "under",
-        "weak",
         "battery",
         "batteries",
         "sensor",
@@ -357,6 +356,50 @@ _BATTERY_SLUG_TOPIC_WORDS = frozenset(
         "capacity",
     }
 )
+
+# A leftover slug token is only trusted as a device identity when it looks
+# like a hardware address rather than a room or an ordinal. The reported
+# #571 shape is a Zigbee IEEE address ("0xffffaa67127301f8"); MAC-style
+# object IDs qualify too. Without this, "low_battery_sensor_kitchen" and
+# "kitchen_battery_low" both reduce to "kitchen" and two genuinely
+# different devices merge into one identity — the exact over-merge the
+# one-token rule was believed to prevent but does not (review of #573).
+# A device address and a place code are syntactically indistinguishable,
+# so no "looks technical" heuristic can separate them. Five were tried
+# and an adversarial reviewer broke every one with a room label wearing
+# the same shape (Codex passes 2-6 on the #573 hardening): "contains a
+# digit" admits "kitchen1"; prose corroboration lets "basement1"
+# corroborate itself while losing a MAC written "AA:BB:CC:DD:EE:FF";
+# "at least half digits" admits "room1234"; bare hex-ness admits
+# "12345678"; hex-with-a-letter admits "a1234567". Each collapsed two
+# sensors that base main kept apart, which is the one outcome that is
+# strictly worse than shipping nothing.
+#
+# So the gate is the 0x prefix, and only that. It is a hexadecimal
+# literal marker, not something a room or unit label carries, and it is
+# exactly the Zigbee IEEE address shape the #571 report shows. Bare
+# MAC-style ids are deliberately given up along with everything else:
+# an unrecognized token costs only the prose-hash drift this feature set
+# out to reduce, which is what main already does, while a wrong one
+# hides a low-battery card the user never sees.
+# An all-zero body is the null EUI, a placeholder the stack emits when it
+# has no address to report — two unrelated sensors can genuinely both
+# carry it, so it identifies nothing (Codex pass 7).
+_MIN_BATTERY_DEVICE_TOKEN_LEN = 8
+_HEX_TOKEN_CHARS = frozenset("0123456789abcdef")
+_DEVICE_ADDRESS_PREFIX = "0x"
+
+
+def _is_device_shaped_token(token: str) -> bool:
+    """Return True when a slug token is a 0x-prefixed hex device address."""
+    if not token.startswith(_DEVICE_ADDRESS_PREFIX):
+        return False
+    # Length is judged on the body: "0x123456" is a 6-digit address
+    # wearing an 8-character token (Codex pass 5).
+    body = token[len(_DEVICE_ADDRESS_PREFIX) :]
+    if len(body) < _MIN_BATTERY_DEVICE_TOKEN_LEN or not set(body) <= _HEX_TOKEN_CHARS:
+        return False
+    return set(body) != {"0"}
 
 
 def battery_slug_device_token(candidate: dict[str, Any]) -> str | None:
@@ -372,23 +415,30 @@ def battery_slug_device_token(candidate: dict[str, Any]) -> str | None:
     cycles for the same device.
 
     Only attempted when the candidate actually carries the low-battery
-    signal (mirrors the battery leg's own gate in candidate_semantic_key)
-    so this cannot pull an unrelated candidate into battery-shaped hashing.
+    signal, on the SAME text surface candidate_semantic_key's battery leg
+    reads (_candidate_text_blob: title + summary + pattern +
+    suggested_type). Reading a narrower surface here would be one more
+    hand-mirrored predicate free to drift from its twin — this module's
+    recurring failure mode (#516, #518, #522, #524) — and it measurably
+    did: a locale-prose candidate whose only English battery surface is
+    suggested_type="low_battery_sensors" took the battery leg for keying
+    but not here, so the exact target class kept drifting (review of #573).
+
     After stripping known topic words (_BATTERY_SLUG_TOPIC_WORDS), exactly
     one token must remain — zero means there is no device-identifying
     text to anchor on, and more than one is ambiguous about which token
-    names the device, so both cases fall through to the prose hash rather
-    than guess.
+    names the device — and that token must be device-shaped
+    (_is_device_shaped_token). Over-merging is the dangerous direction
+    here: it hides a low-battery card the user never sees, whereas the
+    worst a rejected token costs is the prose-hash drift this exists to
+    reduce. Anything short of a confident device address falls through.
     """
     slug_text = str(candidate.get("candidate_id", "")).lower()
-    title = str(candidate.get("title", "")).strip().lower()
-    summary = str(candidate.get("summary", "")).strip().lower()
-    text = f"{title} {summary}"
-    if not _has_low_battery_signal(text, slug_text):
+    if not _has_low_battery_signal(_candidate_text_blob(candidate), slug_text):
         return None
     tokens = [t for t in _SLUG_TOKEN_SPLIT_RE.split(slug_text) if t]
     remaining = [t for t in tokens if t not in _BATTERY_SLUG_TOPIC_WORDS]
-    if len(remaining) != 1:
+    if len(remaining) != 1 or not _is_device_shaped_token(remaining[0]):
         return None
     return remaining[0]
 

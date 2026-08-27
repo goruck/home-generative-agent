@@ -267,59 +267,6 @@ def test_candidate_identity_hash_differs_on_content() -> None:
     )
 
 
-_ZERO_EVIDENCE_LOW_BATTERY_CANDIDATE: dict[str, Any] = {
-    "candidate_id": "low_battery_sensor_0xffffaa67127301f8",
-    "title": "Nízká úroveň baterie senzoru 0xffffaa67127301f8",
-    "summary": "Baterie senzoru 0xffffaa67127301f8 klesla na 12 %.",
-}
-
-
-def test_candidate_identity_hash_collapses_drifting_battery_reproposals() -> None:
-    """
-    Re-proposals of one battery sensor collapse to one identity hash.
-
-    Issue #571 follow-up (TODOS.md "Identity-hash dedup cannot collapse
-    re-proposals whose prose carries live values"): LLM candidate prose
-    routinely embeds the current reading, so a title+summary hash alone
-    made each cycle's re-proposal of the same sensor a new pending card.
-    Deriving the fallback identity from the candidate_id slug's device
-    token when the low-battery signal is present fixes this without
-    touching the prose-hash fallback other null-key shapes still use.
-    """
-    cycle_2 = dict(
-        _ZERO_EVIDENCE_LOW_BATTERY_CANDIDATE,
-        summary="Baterie senzoru 0xffffaa67127301f8 klesla na 11 %.",
-    )
-    cycle_3 = dict(
-        _ZERO_EVIDENCE_LOW_BATTERY_CANDIDATE,
-        summary=(
-            "Baterie senzoru 0xffffaa67127301f8 klesla na 9 %, "
-            "brzy bude potreba vymenit."
-        ),
-    )
-    hashes = {
-        _candidate_identity_hash(candidate)
-        for candidate in (
-            _ZERO_EVIDENCE_LOW_BATTERY_CANDIDATE,
-            cycle_2,
-            cycle_3,
-        )
-    }
-    assert len(hashes) == 1
-
-
-def test_candidate_identity_hash_battery_device_tokens_do_not_collide() -> None:
-    """Two different zero-evidence battery sensors must not share an identity."""
-    other_sensor = {
-        "candidate_id": "low_battery_sensor_0xaaaa11122233344",
-        "title": "Nízká úroveň baterie senzoru 0xaaaa11122233344",
-        "summary": "Baterie senzoru 0xaaaa11122233344 klesla pod doporučenou hranici.",
-    }
-    assert _candidate_identity_hash(
-        _ZERO_EVIDENCE_LOW_BATTERY_CANDIDATE
-    ) != _candidate_identity_hash(other_sensor)
-
-
 def test_candidate_identity_hash_non_battery_null_key_unaffected() -> None:
     """A non-battery null-key candidate keeps hashing on title+summary."""
     other = dict(_NULL_KEY_CANDIDATE)
@@ -506,6 +453,173 @@ def test_filter_zero_evidence_low_battery_keeps_distinct_sensors_novel() -> None
     ]
 
 
+def test_filter_zero_evidence_battery_collapses_drifting_prose() -> None:
+    """
+    Three cycles of one sensor with a drifting reading collapse to one card.
+
+    Issue #571 follow-up (TODOS.md "Identity-hash dedup cannot collapse
+    re-proposals whose prose carries live values"): LLM candidate prose
+    embeds the current reading, so a title+summary hash alone made every
+    cycle's re-proposal of the same sensor a new pending card. The
+    candidate_id slug's device token is the stable surface across cycles.
+
+    Driven through _filter_novel_candidates rather than asserted on the
+    hash directly: the identity key set is an implementation detail, only
+    surviving-card count is the user-visible contract.
+    """
+    engine = SentinelDiscoveryEngine(
+        hass=cast("HomeAssistant", object()),
+        options={},
+        model=None,
+        store=cast("DiscoveryStore", _DummyStore()),
+    )
+    cycle_2 = dict(
+        _ZERO_EVIDENCE_BATTERY_CANDIDATE,
+        summary="Baterie senzoru 0xffffaa67127301f8 klesla na 11 %.",
+    )
+    cycle_3 = dict(
+        _ZERO_EVIDENCE_BATTERY_CANDIDATE,
+        summary=(
+            "Baterie senzoru 0xffffaa67127301f8 klesla na 9 %, "
+            "brzy bude potreba vymenit."
+        ),
+    )
+    filtered, dropped = engine._filter_novel_candidates(
+        [dict(_ZERO_EVIDENCE_BATTERY_CANDIDATE), cycle_2, cycle_3], set()
+    )
+    assert len(filtered) == 1
+    assert [item["dedupe_reason"] for item in dropped] == [
+        "batch_duplicate",
+        "batch_duplicate",
+    ]
+
+
+def test_filter_zero_evidence_battery_collapses_slug_drift() -> None:
+    """
+    Stable prose plus a drifting slug still collapses.
+
+    The mirror of the test above, and the regression the two-namespace
+    identity hash introduced (review of #573): keying only on the device
+    token when one resolves meant a re-proposal whose slug picked up one
+    extra word ("..._again") landed in the prose namespace and never met
+    its twin. Matching on the full identity key SET covers both drift
+    axes, because the surface that stayed stable is always compared.
+    """
+    engine = SentinelDiscoveryEngine(
+        hass=cast("HomeAssistant", object()),
+        options={},
+        model=None,
+        store=cast("DiscoveryStore", _DummyStore()),
+    )
+    slug_drift = dict(
+        _ZERO_EVIDENCE_BATTERY_CANDIDATE,
+        candidate_id="low_battery_sensor_0xffffaa67127301f8_again",
+    )
+    filtered, dropped = engine._filter_novel_candidates(
+        [dict(_ZERO_EVIDENCE_BATTERY_CANDIDATE), slug_drift], set()
+    )
+    assert len(filtered) == 1
+    assert [item["dedupe_reason"] for item in dropped] == ["batch_duplicate"]
+
+
+@pytest.mark.parametrize(
+    ("place", "motion_slug", "contact_slug"),
+    [
+        ("kitchen", "low_battery_sensor_kitchen", "kitchen_battery_low"),
+        ("Room 1234", "low_battery_sensor_room1234", "room1234_battery_low"),
+    ],
+)
+def test_filter_zero_evidence_battery_word_slug_token_does_not_merge(
+    place: str, motion_slug: str, contact_slug: str
+) -> None:
+    """
+    A place-name slug token must not merge two genuinely different devices.
+
+    Review of #573: the "exactly one leftover token" rule was believed to
+    prevent false device-token merges, but it does not — "low_battery_
+    sensor_kitchen" and "kitchen_battery_low" both reduce to "kitchen",
+    and two unrelated sensors in one room would silently collapse into a
+    single card. base main keeps both (their prose differs), so anything
+    that merges them is a regression, not just a missed improvement.
+
+    "Room 1234" is the same trap wearing digits: it defeated both a
+    "contains a digit" and an "at least half digits" shape test (Codex
+    passes 2 and 4). Only a hex address, optionally 0x-prefixed, is
+    trusted now; every other token falls through to the prose hash.
+    """
+    engine = SentinelDiscoveryEngine(
+        hass=cast("HomeAssistant", object()),
+        options={},
+        model=None,
+        store=cast("DiscoveryStore", _DummyStore()),
+    )
+    motion = dict(
+        _ZERO_EVIDENCE_BATTERY_CANDIDATE,
+        candidate_id=motion_slug,
+        title=f"Low battery on the {place} motion sensor",
+        summary=f"The {place} motion sensor battery is low.",
+    )
+    contact = dict(
+        _ZERO_EVIDENCE_BATTERY_CANDIDATE,
+        candidate_id=contact_slug,
+        title=f"Low battery on the {place} window contact",
+        summary=f"The {place} window contact battery is low.",
+    )
+    filtered, dropped = engine._filter_novel_candidates([motion, contact], set())
+    assert dropped == []
+    assert [item["dedupe_reason"] for item in filtered] == ["novel", "novel"]
+
+
+@pytest.mark.parametrize("order", [(0, 1, 2), (1, 0, 2), (1, 2, 0), (2, 1, 0)])
+def test_filter_identity_keys_never_dedup_less_than_prose_alone(
+    order: tuple[int, int, int],
+) -> None:
+    """
+    Multi-key matching is never weaker than the prose hash it extends.
+
+    This is the guarantee the design actually makes, and the one worth
+    pinning. It does NOT promise a fixed survivor count across batch
+    orderings: prose equality and device-token equality are two
+    heuristics, and the union of two heuristic equivalences is not
+    transitive, so ordering can shift which pairs meet. Forcing
+    transitivity by propagating dropped candidates' keys was tried and
+    reverted — it let A link B to C when B and C shared no key at all,
+    hiding a genuinely distinct card (third Codex pass on the #573
+    hardening).
+
+    What must hold in every ordering: two candidates with identical prose
+    always collapse, exactly as they did before the device token existed.
+    """
+    engine = SentinelDiscoveryEngine(
+        hass=cast("HomeAssistant", object()),
+        options={},
+        model=None,
+        store=cast("DiscoveryStore", _DummyStore()),
+    )
+    shared_prose = {
+        "title": "Nízká úroveň baterie senzoru 0xffffaa67127301f8",
+        "summary": "Baterie senzoru 0xffffaa67127301f8 klesla pod hranici.",
+    }
+    candidates = [
+        dict(_ZERO_EVIDENCE_BATTERY_CANDIDATE, **shared_prose),
+        dict(
+            _ZERO_EVIDENCE_BATTERY_CANDIDATE,
+            **shared_prose,
+            candidate_id="low_battery_sensor_0xaaaa11122233344",
+        ),
+        dict(
+            _ZERO_EVIDENCE_BATTERY_CANDIDATE,
+            candidate_id="low_battery_sensor_0xffffaa67127301f8",
+            title="Baterie dochazi",
+            summary="Baterie senzoru 0xffffaa67127301f8 je temer vybita.",
+        ),
+    ]
+    filtered, _ = engine._filter_novel_candidates([candidates[i] for i in order], set())
+    # The two identical-prose candidates can never both survive.
+    surviving_prose = [(item["title"], item["summary"]) for item in filtered]
+    assert len(surviving_prose) == len(set(surviving_prose))
+
+
 # ---------------------------------------------------------------------------
 # hint_keys vs filter_keys split
 # ---------------------------------------------------------------------------
@@ -555,6 +669,50 @@ async def test_history_keys_in_filter_not_hint() -> None:
     assert not any("fridge" in k for k in hint_keys), (
         "hint_keys must NOT contain history keys (they mislead the LLM)"
     )
+
+
+@pytest.mark.asyncio
+async def test_history_null_key_record_ignores_stored_semantic_key() -> None:
+    """
+    A stored foreign semantic_key on a null-key history record is not trusted.
+
+    Review of #573: dropping the model-supplied "semantic_key" on the
+    null-key write path stops NEW poisoning, but records already inside
+    the 200-record window still carry one, and _collect_existing_keys
+    preferred a stored key over recomputation unconditionally. Those
+    records kept injecting a model-chosen key into filter_keys and
+    suppressing the unrelated real proposal it names until they aged out.
+    The stored value is now only honoured when the record still computes
+    a key of its own; a null-key record recalls by identity keys instead.
+    """
+    poisoned_history_candidate = dict(_NULL_KEY_CANDIDATE)
+    poisoned_history_candidate["semantic_key"] = (
+        "v1|subject=entry_window|predicate=open|night=1|home=0|scope=any|entities="
+    )
+
+    class _PoisonedHistoryStore:
+        async def async_get_latest(self, _limit: int) -> list[dict[str, Any]]:
+            return [
+                {
+                    "candidates": [poisoned_history_candidate],
+                    "filtered_candidates": [],
+                }
+            ]
+
+        async def async_append(self, _payload: Any) -> None:
+            pass
+
+    engine = SentinelDiscoveryEngine(
+        hass=cast("HomeAssistant", object()),
+        options={},
+        model=None,
+        store=cast("DiscoveryStore", _PoisonedHistoryStore()),
+    )
+    _active, _hint_keys, filter_keys = await engine._existing_semantic_context()
+
+    assert poisoned_history_candidate["semantic_key"] not in filter_keys
+    # The record is still recalled, just by its own identity instead.
+    assert _candidate_identity_hash(_NULL_KEY_CANDIDATE) in filter_keys
 
 
 # ---------------------------------------------------------------------------
