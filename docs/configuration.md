@@ -44,17 +44,17 @@ Supported providers and their default models:
 |---|---|---|---|
 | Chat | OpenAI | gpt-5 | Reasoning and planning |
 | Chat | Ollama | gpt-oss | Reasoning and planning |
-| Chat | Gemini | gemini-2.5-flash-lite | Reasoning and planning |
+| Chat | Gemini | gemini-3.5-flash-lite | Reasoning and planning |
 | Chat | Anthropic | claude-sonnet-4-6 | Reasoning and planning |
 | Chat | OpenAI Compatible | gpt-4o | Reasoning and planning |
 | VLM | Ollama | qwen3-vl:8b | Image scene analysis |
 | VLM | OpenAI | gpt-5-nano | Image scene analysis |
-| VLM | Gemini | gemini-2.5-flash-lite | Image scene analysis |
+| VLM | Gemini | gemini-3.5-flash-lite | Image scene analysis |
 | VLM | Anthropic | claude-sonnet-4-6 | Image scene analysis |
 | VLM | OpenAI Compatible | gpt-4o | Image scene analysis |
 | Summarization | Ollama | qwen3:8b | Context summarization |
 | Summarization | OpenAI | gpt-5-nano | Context summarization |
-| Summarization | Gemini | gemini-2.5-flash-lite | Context summarization |
+| Summarization | Gemini | gemini-3.5-flash-lite | Context summarization |
 | Summarization | Anthropic | claude-haiku-4-5-20251001 | Context summarization |
 | Summarization | OpenAI Compatible | gpt-4o | Context summarization |
 | Embeddings | Ollama | mxbai-embed-large | Semantic search |
