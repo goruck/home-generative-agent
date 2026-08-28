@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.33.1] - 2026-08-28
+
+### Changed
+
+- **New Gemini setups now default to `gemini-3.5-flash-lite`** for chat, image analysis and summarization, replacing `gemini-2.5-flash-lite`. Google has stopped handing out the 2.5 model to accounts that were not already using it, so a fresh Gemini install failed on its first message with `404 ... This model models/gemini-2.5-flash-lite is no longer available to new users`, and Google's own advice in that message is to move to `gemini-3.5-flash-lite`. Reported by [@Xornop](https://github.com/Xornop) ([#575](https://github.com/goruck/home-generative-agent/issues/575)).
+- **Nothing changes for an install that is already running.** The model you picked is stored with the feature that uses it and is not rewritten, and every 2.5 model stays on the list for accounts that still have access to them. If your install is one of the ones seeing the 404, open the affected feature — Chat, Image analysis or Summarization — and choose `gemini-3.5-flash-lite` yourself; nothing else needs to change.
+
+Note on temperature: Google recommends running the Gemini 3 family at its default temperature of `1.0` and warns that lower values can cause looping or weaker reasoning on harder questions. The integration still sends `0.2`, unchanged in this release. If a Gemini 3 model starts repeating itself or reasoning poorly, raise the temperature to `1.0` in that feature's settings.
+
 ## [3.33.0] - 2026-08-27
 
 ### Fixed

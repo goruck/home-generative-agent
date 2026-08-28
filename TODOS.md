@@ -2,6 +2,19 @@
 
 ## Agent
 
+### Gemini 3 models are sent temperature 0.2, which Google advises against
+
+**What:** Every Gemini call site in `__init__.py` (chat ~2394, VLM ~2463, summarization ~2539) binds `"temperature": <feature temp>` and `"top_p": 1.0` through `configurable_fields`. The feature default is `RECOMMENDED_*_TEMPERATURE = 0.2`. Google's Gemini 3 guide says "For all Gemini 3 models, we strongly recommend keeping the temperature parameter at its default value of `1.0`", and that lower values "may cause looping or degraded performance, particularly in complex mathematical or reasoning tasks". As of v3.33.1 the Gemini defaults are `gemini-3.5-flash-lite`, so the out-of-the-box configuration now hits that advice on every turn.
+
+**Why:** Surfaced while moving the Gemini defaults off the withdrawn `gemini-2.5-flash-lite` ([#575](https://github.com/goruck/home-generative-agent/issues/575)). It is not an error — Google accepts the parameter — so nothing in the logs will ever point at it; the symptom is a model that loops or reasons worse than it should, which reads as "the model is bad" rather than "we detuned it". Left out of v3.33.1 by user decision so the release stays a one-line default change. Note the existing `_invoke_chat_model_with_sampling_rebind` (`agent/graph.py:2045`) does not help here: it strips `DROPPABLE_SAMPLING_PARAMS` only *after* a provider rejects them, and Gemini never rejects.
+
+**How to apply:** Gate on the model string rather than the provider, since the same Gemini provider object serves 2.5 and 3.x: where the three gemini branches build their `configurable` dict, pass `None` for `temperature` (and `top_p`) when the selected model matches `gemini-3`, letting Google's own defaults apply. `dict.fromkeys(DROPPABLE_SAMPLING_PARAMS)` in `core/fallback.py:394` is the existing idiom for "unset these". The wrinkle is that temperature is a *per-feature* setting shared across providers (`CONF_CHAT_MODEL_TEMPERATURE` et al.), so this silently overrides a value the user typed — decide whether to override outright, or only when the value is still the recommended `0.2`, and say which in the release note. Mind that a fallback chain can route the same feature to a non-Gemini model, where 0.2 is still correct.
+
+**Effort:** S
+**Priority:** P2
+
+---
+
 ### "No LLM APIs" is not an expressible choice, and its two spellings behave oppositely
 
 **What:** `CONF_LLM_HASS_API` has two distinct falsy storage states that mean the same thing to the user and opposite things to the code. Deselecting every API in the options flow hits `_cleanup_none_llm_api` (`config_flow.py:528`), which *pops* the key — and an absent key means "default to `[LLM_API_ASSIST]`" to every reader, so the Assist API is silently re-enabled and the user's choice is discarded. The v5 → v6 migration (`__init__.py:4042`) instead writes an explicit `[]` for the same intent, which really does disable everything. Same apparent user choice, opposite outcome, decided entirely by whether the entry predates v6. The options-flow form compounds it: `config_flow.py:233` suggests `[]` when the key is absent, so the UI shows "nothing selected" on installs that are actively running Assist.

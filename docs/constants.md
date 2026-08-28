@@ -32,7 +32,7 @@ This document covers the named constants that affect integration behaviour, orga
 | `RECOMMENDED_CHAT_MODEL_PROVIDER` | `ollama` | Default provider for conversation |
 | `RECOMMENDED_OLLAMA_CHAT_MODEL` | `gpt-oss` | Ollama chat model |
 | `RECOMMENDED_OPENAI_CHAT_MODEL` | `gpt-5` | OpenAI chat model |
-| `RECOMMENDED_GEMINI_CHAT_MODEL` | `gemini-2.5-flash-lite` | Gemini chat model |
+| `RECOMMENDED_GEMINI_CHAT_MODEL` | `gemini-3.5-flash-lite` | Gemini chat model |
 | `RECOMMENDED_ANTHROPIC_CHAT_MODEL` | `claude-sonnet-4-6` | Anthropic chat model |
 | `RECOMMENDED_OPENAI_COMPATIBLE_CHAT_MODEL` | `gpt-4o` | OpenAI-compatible chat model |
 | `RECOMMENDED_CHAT_MODEL_TEMPERATURE` | `0.2` | Sampling temperature for chat responses |
@@ -69,7 +69,7 @@ This document covers the named constants that affect integration behaviour, orga
 | `RECOMMENDED_VLM_PROVIDER` | `ollama` | Default provider for image/camera analysis |
 | `RECOMMENDED_OLLAMA_VLM` | `qwen3-vl:8b` | Ollama VLM model |
 | `RECOMMENDED_OPENAI_VLM` | `gpt-5-nano` | OpenAI VLM model |
-| `RECOMMENDED_GEMINI_VLM` | `gemini-2.5-flash-lite` | Gemini VLM model |
+| `RECOMMENDED_GEMINI_VLM` | `gemini-3.5-flash-lite` | Gemini VLM model |
 | `RECOMMENDED_ANTHROPIC_VLM` | `claude-sonnet-4-6` | Anthropic VLM model |
 | `RECOMMENDED_OPENAI_COMPATIBLE_VLM` | `gpt-4o` | OpenAI-compatible VLM model |
 | `RECOMMENDED_VLM_TEMPERATURE` | `0.2` | Sampling temperature for vision responses |
@@ -109,7 +109,7 @@ This document covers the named constants that affect integration behaviour, orga
 | `RECOMMENDED_SUMMARIZATION_MODEL_PROVIDER` | `ollama` | Default provider for context summarization |
 | `RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL` | `qwen3:8b` | Ollama summarization model |
 | `RECOMMENDED_OPENAI_SUMMARIZATION_MODEL` | `gpt-5-nano` | OpenAI summarization model |
-| `RECOMMENDED_GEMINI_SUMMARIZATION_MODEL` | `gemini-2.5-flash-lite` | Gemini summarization model |
+| `RECOMMENDED_GEMINI_SUMMARIZATION_MODEL` | `gemini-3.5-flash-lite` | Gemini summarization model |
 | `RECOMMENDED_ANTHROPIC_SUMMARIZATION_MODEL` | `claude-haiku-4-5-20251001` | Anthropic summarization model |
 | `RECOMMENDED_OPENAI_COMPATIBLE_SUMMARIZATION_MODEL` | `gpt-4o` | OpenAI-compatible summarization model |
 | `RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE` | `0.2` | Sampling temperature for summaries |
