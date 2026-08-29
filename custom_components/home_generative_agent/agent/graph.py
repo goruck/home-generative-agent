@@ -1425,9 +1425,13 @@ _TOP_LEVEL_UNION_KEYS = ("oneOf", "anyOf", "allOf")
 
 # Providers whose function-calling validator rejects oneOf/anyOf/allOf at the
 # top level of `parameters`. openai_compatible is included because those
-# endpoints proxy or emulate OpenAI's validation; the schema loss is recovered
-# via the description hint either way.
-_FLATTEN_UNION_PROVIDERS = ("openai", "openai_compatible")
+# endpoints proxy or emulate OpenAI's validation. Anthropic's Messages API
+# rejects the same shape on its own account ("tools.N.custom.input_schema:
+# input_schema does not support oneOf, allOf, or anyOf at the top level",
+# issue #585) — Home Assistant's built-in Anthropic integration strips those
+# keys outright before dispatch. The schema loss is recovered via the
+# description hint either way.
+_FLATTEN_UNION_PROVIDERS = ("anthropic", "openai", "openai_compatible")
 
 
 def _merge_conjunctive_required(
@@ -1460,12 +1464,15 @@ def _flatten_top_level_union(schema: dict[str, Any]) -> dict[str, Any]:
     OpenAI's function-calling validator rejects oneOf/anyOf/allOf/enum/
     const/not at the top level of ``parameters`` ("schema must have type
     'object' and not have 'oneOf'/'anyOf'/'allOf'/'enum'/'const'/'not' at
-    the top level"). On HA 2026.8.1 exactly two assist tools carry that
-    shape — HassStartTimer and HassDecreaseTimer, whose
+    the top level"), and Anthropic's Messages API rejects the union keys
+    the same way ("tools.N.custom.input_schema: input_schema does not
+    support oneOf, allOf, or anyOf at the top level"). On HA 2026.8.2
+    exactly two assist tools carry that shape — HassStartTimer and
+    HassDecreaseTimer, whose
     ``vol.Required(vol.Any("hours", "minutes", "seconds"))`` slot converts
     to a top-level ``anyOf`` of bare ``{"required": [...]}`` variants — and
     both are exposed only for timer-capable satellite devices, so the 400
-    surfaces only on voice requests from such a device.
+    surfaces only on turns whose tool set includes one of them.
 
     Every variant's ``properties`` are unioned into one object schema
     (pre-existing top-level properties win).  ``anyOf``/``oneOf`` variant
@@ -1543,10 +1550,10 @@ def _format_and_dedupe_tools(
         if not isinstance(parameters, dict):
             parameters = {"type": "object", "properties": {}}
         else:
-            # OpenAI rejects oneOf/anyOf/allOf at the top level of
-            # `parameters` (HassStartTimer / HassDecreaseTimer). Subtractive,
-            # so gated — Anthropic/Ollama honour the union and keep it, and
-            # the Gemini pass below needs the anyOf intact to restate it.
+            # OpenAI and Anthropic both reject oneOf/anyOf/allOf at the top
+            # level of `parameters` (HassStartTimer / HassDecreaseTimer).
+            # Subtractive, so gated — Ollama honours the union and keeps it,
+            # and the Gemini pass below needs the anyOf intact to restate it.
             if provider in _FLATTEN_UNION_PROVIDERS:
                 flattened = _flatten_top_level_union(parameters)
                 if flattened is not parameters:
@@ -1922,7 +1929,7 @@ async def _retrieve_tools(  # noqa: PLR0915
             )
 
     # 4. Format and deduplicate. The provider drives the subtractive schema
-    # normalisation passes: the OpenAI top-level-union flatten
+    # normalisation passes: the OpenAI/Anthropic top-level-union flatten
     # (_flatten_top_level_union) and the Gemini anyOf-required sanitizer
     # (_sanitize_any_of_required).
     provider_raw = opts.get(CONF_CHAT_MODEL_PROVIDER)
@@ -2090,6 +2097,130 @@ async def _invoke_chat_model_with_sampling_rebind(  # noqa: PLR0913
         return await _invoke_model(stripped, messages, config, drop_unsupported=False)
 
 
+# A provider that refuses a tool's JSON Schema names the offender by its
+# position in the request's tool array, never by name — Anthropic reports
+# "tools.3.custom.input_schema: input_schema does not support oneOf, allOf,
+# or anyOf at the top level" (issue #585), Gemini reports
+# "...function_declarations[1].parameters...". Both indices address the tool
+# list in the order it was bound, so they map back onto selected_tools.
+_TOOL_SCHEMA_REJECTION_RE = re.compile(
+    r"\b(?:tools\.(\d+)\.|function_declarations\[(\d+)\])"
+)
+
+# Tools dropped per turn before giving up. Only two HA assist schemas have
+# ever carried a rejected shape, so a small budget covers a novel offender
+# without letting a mis-parsed index strip the whole tool set.
+_MAX_TOOL_SCHEMA_DROPS = 3
+
+# Longest run of digits accepted as a tool position, so a mis-parsed message
+# cannot turn into an unbounded int().
+_MAX_TOOL_INDEX_DIGITS = 4
+
+
+def _rejected_tool_index(err: BaseException, max_depth: int = 10) -> int | None:
+    """Return the tool position a provider rejected for its schema, if any."""
+    current: BaseException | None = err
+    for _ in range(max_depth):
+        if current is None:
+            return None
+        message = str(current)
+        if "schema" in message and (match := _TOOL_SCHEMA_REJECTION_RE.search(message)):
+            index = match.group(1) or match.group(2)
+            if len(index) <= _MAX_TOOL_INDEX_DIGITS:
+                return int(index)
+        current = current.__cause__
+    return None
+
+
+def _rejected_tool_name(selected_tools: list[Any], index: int | None) -> str | None:
+    """Return the name of the tool at ``index``, or None if unresolvable."""
+    if index is None or not 0 <= index < len(selected_tools):
+        return None
+    entry = selected_tools[index]
+    if not isinstance(entry, dict):
+        return None
+    function = entry.get("function")
+    if not isinstance(function, dict):
+        return None
+    name = function.get("name")
+    return name if isinstance(name, str) else None
+
+
+async def _invoke_chat_model_with_schema_recovery(  # noqa: PLR0913
+    hass: Any,
+    base_model: Any,
+    model: Any,
+    messages: list[AnyMessage],
+    config: RunnableConfig,
+    selected_tools: list[Any],
+    *,
+    disable_reasoning: bool,
+) -> Any:
+    """
+    Invoke the chat model, dropping tools whose schema the provider rejects.
+
+    A provider validates every tool schema before it reads the conversation,
+    so one unsupported tool fails the whole turn — the user hears an error
+    even though nothing about their request was wrong (issue #585: Anthropic
+    rejects the top-level ``anyOf`` HA's timer intents emit). The schema
+    normalisation in ``_format_and_dedupe_tools()`` is the real fix for the
+    shapes we know about; this is the net under it for the ones we do not.
+
+    The rejection names the offender only by position, so resolve that to a
+    tool name, log it, drop it and retry: losing one tool beats losing the
+    turn. When the position cannot be resolved the original error is raised
+    untouched, and when retries run out the tool name is added to it so the
+    log names what to exclude.
+    """
+    tools = list(selected_tools)
+    dropped = 0
+    while True:
+        try:
+            return await _invoke_chat_model_with_sampling_rebind(
+                hass,
+                base_model,
+                model,
+                messages,
+                config,
+                tools,
+                disable_reasoning=disable_reasoning,
+            )
+        except HomeAssistantError as err:
+            index = _rejected_tool_index(err)
+            name = _rejected_tool_name(tools, index)
+            if index is None or name is None:
+                raise
+            if dropped == _MAX_TOOL_SCHEMA_DROPS:
+                msg = (
+                    f"Model invocation failed: the provider rejected the schema "
+                    f"of tool '{name}' and dropping it did not clear the error. "
+                    f"{err}"
+                )
+                raise HomeAssistantError(msg) from err
+            LOGGER.warning(
+                "Provider rejected the schema of tool '%s' (position %d); "
+                "dropping it and retrying the turn without it. Exclude the tool "
+                "to avoid the retry. %s",
+                name,
+                index,
+                err,
+            )
+            del tools[index]
+            dropped += 1
+            model = (
+                await hass.async_add_executor_job(
+                    partial(
+                        _bind_model_tools,
+                        base_model,
+                        tools,
+                        disable_reasoning=disable_reasoning,
+                    )
+                )
+                if tools
+                else base_model
+            )
+
+
 def _bind_model_tools(
     model: Any, selected_tools: list[Any], *, disable_reasoning: bool
 ) -> Any:
@@ -2197,7 +2328,7 @@ async def _call_model(
     if llm_api and hasattr(llm_api, "routing_map"):
         llm_api.routing_map = routing_map
 
-    raw_response = await _invoke_chat_model_with_sampling_rebind(
+    raw_response = await _invoke_chat_model_with_schema_recovery(
         hass,
         base_model,
         model,

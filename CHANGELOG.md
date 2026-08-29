@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.33.2] - 2026-08-28
+
+### Fixed
+
+- **Claude no longer fails a turn because of how Home Assistant describes its timer commands.** Two of Assist's built-in commands — start a timer and shorten a timer — say "give me hours, or minutes, or seconds" in a form Anthropic's API refuses to accept, and it refuses the whole request rather than the one command, so any turn that happened to offer Claude one of those two tools died with `input_schema does not support oneOf, allOf, or anyOf at the top level` and the user heard an error. The requirement is now restated in the tool's own description before the request is sent, exactly as is already done for OpenAI and Gemini, so Claude still knows a duration is needed. **If you excluded the `Hass*` tools to work around this, you can restore them.** Reported by [@a4bell64](https://github.com/a4bell64) ([#585](https://github.com/goruck/home-generative-agent/issues/585)).
+- **One tool a provider refuses to accept no longer takes the whole reply down with it.** Providers validate every tool before reading the conversation, so a single schema they dislike fails the turn. When that happens the offending tool is now dropped and the turn is retried without it — a lost tool instead of a lost answer.
+- **The log now names the tool a provider rejected.** Providers identify it only by its position in the request ("tools.3"), and because the set of tools sent changes from turn to turn that position points at something different each time. The name is now resolved and written to the log, so the tool to exclude is stated outright instead of having to be deduced.
+
 ## [3.33.1] - 2026-08-28
 
 ### Changed
