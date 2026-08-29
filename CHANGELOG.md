@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.33.4] - 2026-08-29
+
+### Fixed
+
+- **Two Sentinel suggestions about one low battery are now recognised as one idea.** When the discovery model wrote a suggestion for a battery it names only in passing — "`low_battery_sensor_0xffffaa67127301f8`", with the address in the text but no sensor actually cited — nothing tied that card to the properly-worked-out suggestion about the very same sensor, so both sat in the Proposals list forever looking like two different ideas. The address is now resolved against your own battery sensors and the sensor is attached to the suggestion, which makes the two cards match and collapse into one, whichever arrives first. Reported by [@hruba202](https://github.com/hruba202) ([#571](https://github.com/goruck/home-generative-agent/issues/571)).
+- **Those suggestions can also be approved now.** A card citing no sensor had nothing to build a rule from, so approving it could only ever mark it unsupported. With the sensor attached it becomes a real low-battery rule.
+- **Two suggestions worded identically about different batteries stop merging.** They previously matched on their wording alone, so one of them was dropped and that battery warning was never seen. Each now carries its own sensor and they stay apart. This applies when both addresses resolve to a sensor; identically-worded suggestions that resolve nothing still merge.
+- **A device address is now found in the suggestion's internal name whatever language surrounds it.** The address used to be located by removing English words (`low`, `battery`, `sensor`, …) and seeing what was left, so an internal name written in your own language kept nothing recognisable and the improvement shipped in v3.32.1 quietly did nothing for you — as did any name the model decorated with an extra word. The address is now recognised by its own shape and everything around it is ignored.
+
+The address is only used when exactly one of your battery sensors carries it, so a name that matches nothing — or two sensors — changes nothing rather than risking the wrong sensor being attached and a real warning being hidden. **After upgrading, a previously dismissed low-battery suggestion may reappear once** while stored identifiers catch up, then settles after one Sentinel run.
+
 ## [3.33.3] - 2026-08-29
 
 ### Fixed

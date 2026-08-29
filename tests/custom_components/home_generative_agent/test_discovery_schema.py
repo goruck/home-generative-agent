@@ -79,3 +79,35 @@ def test_schema_rejects_non_string_evidence_paths() -> None:
     }
     with pytest.raises(vol.Invalid):
         DISCOVERY_OUTPUT_SCHEMA(payload)
+
+
+def test_schema_round_trips_evidence_backfilled_marker() -> None:
+    """
+    A stored record carrying the backfill marker validates again.
+
+    The engine sets "evidence_backfilled" on candidates whose battery
+    evidence it resolved (issue #571), and stored payloads are round-tripped
+    through this PREVENT_EXTRA schema — same reason
+    "environmental_context_stripped" is declared.
+    """
+    payload = {
+        "schema_version": DISCOVERY_SCHEMA_VERSION,
+        "generated_at": "2026-08-29T00:00:00+00:00",
+        "model": "test",
+        "candidates": [
+            {
+                "candidate_id": "low_battery_sensor_0xffffaa67127301f8",
+                "title": "Low battery",
+                "summary": "Sensor battery below threshold.",
+                "evidence_paths": [
+                    "entities[entity_id=sensor.0xffffaa67127301f8_battery].state"
+                ],
+                "pattern": "threshold_breach",
+                "confidence_hint": 0.5,
+                "evidence_backfilled": True,
+            }
+        ],
+    }
+    validated = cast("dict[str, object]", DISCOVERY_OUTPUT_SCHEMA(payload))
+    candidates = cast("list[dict[str, object]]", validated["candidates"])
+    assert candidates[0]["evidence_backfilled"] is True

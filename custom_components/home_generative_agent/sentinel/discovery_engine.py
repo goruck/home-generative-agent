@@ -37,8 +37,10 @@ from custom_components.home_generative_agent.snapshot.discovery_reducer import (
 
 from .discovery_schema import DISCOVERY_OUTPUT_SCHEMA, DISCOVERY_SCHEMA_VERSION
 from .discovery_semantic import (
+    battery_evidence_entity_id,
     battery_slug_device_token,
     candidate_semantic_key,
+    entity_evidence_path,
     is_battery_level_entity_id,
     rule_semantic_key,
     sanitize_environmental_candidate,
@@ -143,6 +145,86 @@ def _is_battery_level_entity(hass: HomeAssistant, entity_id: str) -> bool:
         if unit is not None and unit != "%":
             return False
     return is_battery_level_entity_id(entity_id)
+
+
+def _battery_level_entity_ids(
+    hass: HomeAssistant, snapshot: Mapping[str, Any]
+) -> list[str]:
+    """
+    List the battery-LEVEL sensors this home actually reports.
+
+    Sourced from the snapshot (the authoritative home-state representation)
+    and classified by the same metadata-first predicate the monitoring-gap
+    exclusion uses, so there is one answer to "is this a battery level" in
+    this module rather than two that can drift.
+    """
+    entity_ids: list[str] = []
+    for entity in snapshot.get("entities", []):
+        if not isinstance(entity, Mapping):
+            continue
+        entity_id = str(entity.get("entity_id", ""))
+        if entity_id.startswith("sensor.") and _is_battery_level_entity(
+            hass, entity_id
+        ):
+            entity_ids.append(entity_id)
+    return entity_ids
+
+
+def _backfill_battery_evidence(
+    candidate: dict[str, Any],
+    key: str | None,
+    battery_entity_ids: list[str] | None,
+) -> tuple[dict[str, Any], str | None]:
+    """
+    Cite the sensor an evidence-less low-battery candidate only names.
+
+    Issue #571's remaining symptom: the discovery LLM writes the device
+    address into the slug and the prose but leaves evidence_paths empty, so
+    the candidate keys None and falls back to an identity hash — and a hash
+    can never equal the semantic key of the properly-evidenced proposal
+    about the same sensor. The two describe one idea and sit side by side on
+    the approval card forever.
+
+    The prompt already forbids this shape (ENTITY REQUIREMENT) and the model
+    emits it anyway, which is why the enforcement here is deterministic
+    rather than another sentence of instruction: resolve the address against
+    the sensors the home actually reports and add the evidence path the
+    candidate should have carried.
+
+    Returns the (candidate, key) pair to carry on with — the originals
+    unchanged unless a sensor was resolved. Only null-key candidates are
+    eligible: one that already keys semantically is already deduping, and
+    adding evidence to it would move the key it is deduping on.
+
+    The rewritten key is re-computed and required to be non-null before the
+    rewrite is accepted: a path that buys no key would be a fabricated
+    citation on the card for no dedup benefit.
+    """
+    if key is not None or not battery_entity_ids:
+        return candidate, key
+    entity_id = battery_evidence_entity_id(candidate, battery_entity_ids)
+    if entity_id is None:
+        return candidate, key
+    path = entity_evidence_path(entity_id)
+    existing = candidate.get("evidence_paths")
+    paths: list[Any] = list(existing) if isinstance(existing, list) else []
+    if path in paths:
+        return candidate, key
+    enriched = dict(candidate)
+    enriched["evidence_paths"] = [*paths, path]
+    backfilled_key = candidate_semantic_key(enriched)
+    if backfilled_key is None:
+        return candidate, key
+    # Marked so the stored record, the approval card, and any later audit
+    # can tell a cited entity the model chose from one the integration
+    # resolved on its behalf.
+    enriched["evidence_backfilled"] = True
+    LOGGER.debug(
+        "Discovery backfilled battery evidence for %s: %s",
+        enriched.get("candidate_id"),
+        path,
+    )
+    return enriched, backfilled_key
 
 
 def _entity_ids_from_key(key: str) -> set[str]:
@@ -491,6 +573,11 @@ class SentinelDiscoveryEngine:
             candidates,
             filter_keys,
             baseline_ready,
+            # From the FULL snapshot, not the reduced one: the reducer caps
+            # and trims entities, and a battery sensor dropped from the
+            # prompt is still the sensor a candidate's device address names
+            # (issue #571).
+            _battery_level_entity_ids(self._hass, snapshot),
         )
         self._discovery_cycle_stats["candidates_novel"] = len(filtered)
         self._discovery_cycle_stats["candidates_deduplicated"] = len(
@@ -608,6 +695,7 @@ class SentinelDiscoveryEngine:
         candidates: list[dict[str, Any]],
         existing_keys: set[str],
         known_entity_ids: list[str] | None = None,
+        battery_entity_ids: list[str] | None = None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
         seen_batch: set[str] = set()
         filtered: list[dict[str, Any]] = []
@@ -669,7 +757,18 @@ class SentinelDiscoveryEngine:
             sanitized = sanitize_environmental_candidate(candidate)
             if sanitized is not None:
                 candidate = sanitized  # noqa: PLW2901
-            key = candidate_semantic_key(candidate)
+            # Issue #571: a low-battery candidate that names a device address
+            # but cites no entity keys None and can never dedup against the
+            # properly-evidenced proposal about that same sensor. Resolve the
+            # address and cite it. Runs AFTER the derived-only and
+            # entity-text-mismatch guards for the same reason the
+            # environmental sanitizer does: those guards must judge the LLM's
+            # actual output, not a copy this code wrote.
+            candidate, key = _backfill_battery_evidence(  # noqa: PLW2901
+                candidate,
+                candidate_semantic_key(candidate),
+                battery_entity_ids,
+            )
             # Bug 2 fix: null-key candidates (unknown subject/predicate) fall
             # back to identity hashes so they are still deduplicated. A
             # null-key candidate carries MORE THAN ONE identity key (prose

@@ -35,5 +35,5 @@
     "langchain-anthropic==1.4.3"
   ],
   "single_config_entry": true,
-  "version": "3.33.3"
+  "version": "3.33.4"
 }
