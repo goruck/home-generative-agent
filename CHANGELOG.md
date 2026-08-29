@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.33.3] - 2026-08-29
+
+### Fixed
+
+- **The agent no longer learns to stop controlling your home.** When a command was handled by another assistant sharing the conversation — Home Assistant's own built-in one, for instance — the agent read that turn back as if the assistant had simply *said* "Turned on the light" without doing anything. That is a perfect example of the wrong behaviour, and the model copied it: the next command got a confident spoken reply and no action, which was then read back as another example, and so on. Nothing in the log looked wrong, because from the agent's side nothing failed. The whole of a turn that used tools is now kept out of the history rather than just the part that names the tool, so a reply that no longer shows its actions can't be mistaken for one that never needed any ([#588](https://github.com/goruck/home-generative-agent/issues/588)).
+
+  This is more likely to bite smaller local models, which follow the shape of a conversation more readily than the large cloud ones. **Conversations that already went wrong stay wrong** — the old messages are saved with the conversation. Start a new one and it will be clean.
+
 ## [3.33.2] - 2026-08-28
 
 ### Fixed

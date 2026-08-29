@@ -863,15 +863,34 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
     ) -> list[HumanMessage | AIMessage]:
         """Extract and slice the relevant chat log history."""
         # Include only HA User/Assistant messages not already seen by this entity.
-        # Exclude AssistantContent with tool_calls: those are intermediate LangGraph
-        # turns already persisted in the PostgreSQL checkpointer. Including them would
-        # duplicate messages that LangGraph already manages internally.
-        message_history = [
-            _convert_content(m)
-            for m in chat_log.content
-            if isinstance(m, conversation.UserContent)
-            or (isinstance(m, conversation.AssistantContent) and m.tool_calls is None)
-        ]
+        #
+        # Exclude every part of a turn that used tools, not just the
+        # AssistantContent carrying the tool_calls. A tool-using turn writes
+        # three entries — tool_calls, ToolResultContent, then the spoken text —
+        # and the spoken text alone ("Turned on the light") is indistinguishable
+        # from a turn that answered without acting. Ingesting it teaches the
+        # model that such a request is answered with prose and no tool call:
+        # the conversation then repeats that shape and every device command
+        # silently becomes a lie (issue #588). This matters most for turns
+        # handled by ANOTHER agent sharing the conversation — HA's built-in
+        # agent, say — whose tool calls the checkpointer never saw. HGA's own
+        # tool-using turns are already persisted in full by LangGraph, so
+        # dropping their chat_log echo also removes a duplicate.
+        message_history: list[HumanMessage | AIMessage] = []
+        turn_used_tools = False
+        for m in chat_log.content:
+            if isinstance(m, conversation.UserContent):
+                turn_used_tools = False
+                message_history.append(_convert_content(m))
+            elif isinstance(m, conversation.ToolResultContent):
+                turn_used_tools = True
+            elif isinstance(m, conversation.AssistantContent):
+                # `is not None` keeps the original inclusion predicate exactly;
+                # only the turn-level suppression below is new.
+                if m.tool_calls is not None:
+                    turn_used_tools = True
+                elif not turn_used_tools:
+                    message_history.append(_convert_content(m))
         # The last chat log entry will be the current user request—add it later.
         message_history = message_history[:-1]
 
