@@ -104,6 +104,12 @@ def _ensure_content_classes() -> None:
             pass
 
         conv.UserContent = _StubUserContent
+    if not hasattr(conv, "ToolResultContent"):
+
+        class _StubToolResultContent:
+            pass
+
+        conv.ToolResultContent = _StubToolResultContent
 
 
 def _ensure_conversation_entity_feature() -> None:
@@ -1106,3 +1112,167 @@ def test_control_feature_absent_when_stored_api_list_is_empty() -> None:
         }
     )
     assert not _supported_features(entity) & control
+
+
+# ---------------------------------------------------------------------------
+# _async_get_message_history: a tool-using turn must not be ingested as prose
+# ---------------------------------------------------------------------------
+
+
+def _mk_content(cls: Any, **kwargs: Any) -> Any:
+    """
+    Build a chat_log content object for the real class or the module stub.
+
+    The real HA classes are frozen dataclasses (constructor works, setattr does
+    not); the suite's lean stubs are bare classes (constructor takes nothing).
+    """
+    try:
+        return cls(**kwargs)
+    except TypeError:
+        obj = cls()
+        for key, value in kwargs.items():
+            object.__setattr__(obj, key, value)
+        return obj
+
+
+def _history(content: list) -> list:
+    """Run _async_get_message_history against a fresh entity counter."""
+    fake_self = cast("Any", types.SimpleNamespace(message_history_len=0))
+    chat_log = cast("Any", types.SimpleNamespace(content=content))
+    return HGAConversationEntity._async_get_message_history(fake_self, chat_log)
+
+
+def test_message_history_drops_spoken_text_of_a_tool_using_turn() -> None:
+    """
+    A turn that used tools is not ingested as a bare assistant reply.
+
+    Regression for issue #588. When another agent sharing the conversation
+    (Home Assistant's built-in agent) handles a device command, chat_log gets
+    three entries: the tool_calls, the ToolResultContent, then the spoken
+    "Turned on the light". Ingesting only the third teaches the model that
+    "turn on the light" is answered with prose and no tool call — after which
+    the model repeats that shape and every device command silently becomes a
+    lie. The whole turn must be dropped, not just its tool_calls entry.
+    """
+    content = [
+        _mk_content(ha_conversation.UserContent, content="Turn on the garage light."),
+        _mk_content(
+            ha_conversation.AssistantContent,
+            agent_id="conversation.home_assistant",
+            content=None,
+            tool_calls=[object()],
+        ),
+        _mk_content(
+            ha_conversation.ToolResultContent,
+            agent_id="conversation.home_assistant",
+            tool_call_id="01M16N286Y2A5T0BVZ163SMKT7",
+            tool_name="HassTurnOn",
+            tool_result={"speech": {"plain": {"speech": "Turned on the light"}}},
+        ),
+        _mk_content(
+            ha_conversation.AssistantContent,
+            agent_id="conversation.home_assistant",
+            content="Turned on the light",
+            tool_calls=None,
+        ),
+        _mk_content(ha_conversation.UserContent, content="Turn off the garage light."),
+    ]
+
+    history = _history(content)
+
+    assert [type(m).__name__ for m in history] == ["HumanMessage"], (
+        "the spoken tail of a tool-using turn must not reach the model"
+    )
+    assert history[0].content == "Turn on the garage light."
+    assert not any("Turned on the light" in str(m.content) for m in history), (
+        "an assistant reply with the tool call erased is the poison itself"
+    )
+
+
+def test_message_history_keeps_a_genuine_toolless_reply() -> None:
+    """A turn that really answered without tools is still ingested."""
+    content = [
+        _mk_content(ha_conversation.UserContent, content="what can you do?"),
+        _mk_content(
+            ha_conversation.AssistantContent,
+            agent_id="conversation.home_generative_agent",
+            content="I can control your home.",
+            tool_calls=None,
+        ),
+        _mk_content(ha_conversation.UserContent, content="Turn off the garage light."),
+    ]
+
+    history = _history(content)
+
+    assert [type(m).__name__ for m in history] == ["HumanMessage", "AIMessage"], (
+        "over-filtering would strip ordinary conversational context"
+    )
+    assert history[1].content == "I can control your home."
+
+
+def test_message_history_tool_flag_resets_on_the_next_user_turn() -> None:
+    """One tool-using turn must not suppress every later reply."""
+    content = [
+        _mk_content(ha_conversation.UserContent, content="Turn on the garage light."),
+        _mk_content(
+            ha_conversation.AssistantContent,
+            agent_id="conversation.home_assistant",
+            content=None,
+            tool_calls=[object()],
+        ),
+        _mk_content(
+            ha_conversation.ToolResultContent,
+            agent_id="conversation.home_assistant",
+            tool_call_id="call_1",
+            tool_name="HassTurnOn",
+            tool_result={},
+        ),
+        _mk_content(
+            ha_conversation.AssistantContent,
+            agent_id="conversation.home_assistant",
+            content="Turned on the light",
+            tool_calls=None,
+        ),
+        _mk_content(ha_conversation.UserContent, content="thanks"),
+        _mk_content(
+            ha_conversation.AssistantContent,
+            agent_id="conversation.home_generative_agent",
+            content="You're welcome.",
+            tool_calls=None,
+        ),
+        _mk_content(ha_conversation.UserContent, content="Turn off the garage light."),
+    ]
+
+    history = _history(content)
+
+    assert [type(m).__name__ for m in history] == [
+        "HumanMessage",
+        "HumanMessage",
+        "AIMessage",
+    ], "the tool flag must clear at the next user message"
+    assert history[2].content == "You're welcome."
+
+
+def test_message_history_non_none_tool_calls_still_excluded() -> None:
+    """
+    An empty-but-present tool_calls list is excluded, as it always was.
+
+    The inclusion predicate stays `tool_calls is None`, so this fix changes
+    only which *other* entries a tool-using turn suppresses. Guards against
+    quietly widening the filter while fixing #588.
+    """
+    content = [
+        _mk_content(ha_conversation.UserContent, content="hello"),
+        _mk_content(
+            ha_conversation.AssistantContent,
+            agent_id="conversation.home_generative_agent",
+            content="Hi there.",
+            tool_calls=[],
+        ),
+        _mk_content(ha_conversation.UserContent, content="Turn off the garage light."),
+    ]
+
+    history = _history(content)
+
+    assert [type(m).__name__ for m in history] == ["HumanMessage"]
+    assert history[0].content == "hello"
