@@ -11,6 +11,8 @@ from custom_components.home_generative_agent.agent.graph import (
     _ensure_array_items,
     _flatten_top_level_union,
     _format_and_dedupe_tools,
+    _rejected_tool_index,
+    _rejected_tool_name,
     _sanitize_any_of_required,
 )
 from custom_components.home_generative_agent.const import CONF_ANTHROPIC_CHAT_MODEL
@@ -492,11 +494,11 @@ def test_format_and_dedupe_tools_union_capable_keeps_any_of_required() -> None:
     Union-capable providers keep HA's at-least-one-target constraint intact.
 
     Both sanitizers are subtractive: running either unconditionally would
-    hand Anthropic/Ollama a vacuous schema, letting the model emit a
-    targetless call that HA's own voluptuous validation then rejects.
-    Unknown/unset providers (None) also keep the schema untouched.
+    hand Ollama a vacuous schema, letting the model emit a targetless call
+    that HA's own voluptuous validation then rejects. Unknown/unset
+    providers (None) also keep the schema untouched.
     """
-    for provider in ("anthropic", "ollama", None):
+    for provider in ("ollama", None):
         selected, _ = _format_and_dedupe_tools(_target_tool(), provider)
         params = selected[0]["function"]["parameters"]
         assert params["anyOf"] == [
@@ -529,6 +531,24 @@ def test_format_and_dedupe_tools_openai_flattens_any_of_with_hint() -> None:
         assert params["description"] == (
             "At least one of: name, area, floor is required."
         ), "constraint must be preserved as guidance"
+
+
+def test_format_and_dedupe_tools_anthropic_flattens_any_of_with_hint() -> None:
+    """
+    Anthropic gets the top-level anyOf flattened with a hint (issue #585).
+
+    The Messages API refuses the union keys outright — "tools.N.custom
+    .input_schema: input_schema does not support oneOf, allOf, or anyOf at
+    the top level" — and rejects the request before the model sees the
+    turn, so the constraint has to survive as description guidance instead.
+    """
+    selected, _ = _format_and_dedupe_tools(_target_tool(), "anthropic")
+    params = selected[0]["function"]["parameters"]
+    assert "anyOf" not in params, "Anthropic must not receive a top-level anyOf"
+    assert set(params["properties"]) == {"name", "area", "floor"}
+    assert params["description"] == (
+        "At least one of: name, area, floor is required."
+    ), "constraint must be preserved as guidance"
 
 
 def test_determine_model_name_anthropic_returns_configured_model() -> None:
@@ -869,9 +889,31 @@ def test_format_and_dedupe_tools_openai_flattens_hass_start_timer() -> None:
         ), f"provider {provider!r} must keep the constraint as guidance"
 
 
+def test_format_and_dedupe_tools_anthropic_flattens_hass_start_timer() -> None:
+    """
+    End-to-end regression: HassStartTimer no longer 400s on Anthropic.
+
+    Reproduces issue #585 — anthropic.BadRequestError "tools.3.custom
+    .input_schema: input_schema does not support oneOf, allOf, or anyOf at
+    the top level" — with the schema HA 2026.8.2 actually emits.
+    langchain_anthropic copies ``parameters`` into ``input_schema``
+    verbatim, so an unflattened union reaches the API untouched.
+    """
+    selected, _ = _format_and_dedupe_tools(_timer_tool(), "anthropic")
+    params = selected[0]["function"]["parameters"]
+    assert params["type"] == "object"
+    assert not {"anyOf", "oneOf", "allOf"} & set(params)
+    assert params["properties"] == _HASS_START_TIMER_SCHEMA["properties"], (
+        "Anthropic must keep every property schema intact"
+    )
+    assert params["description"] == (
+        "At least one of: hours, minutes, seconds is required."
+    ), "Anthropic must keep the constraint as guidance"
+
+
 def test_format_and_dedupe_tools_union_capable_keeps_hass_start_timer() -> None:
-    """Anthropic/Ollama/unset keep the timer union schema fully intact."""
-    for provider in ("anthropic", "ollama", None):
+    """Ollama/unset providers keep the timer union schema fully intact."""
+    for provider in ("ollama", None):
         selected, _ = _format_and_dedupe_tools(_timer_tool(), provider)
         params = selected[0]["function"]["parameters"]
         assert params == _HASS_START_TIMER_SCHEMA, (
@@ -959,3 +1001,65 @@ def test_format_and_dedupe_tools_openai_plain_schema_untouched() -> None:
         assert selected[0]["function"]["parameters"] == schema, (
             f"provider {provider!r} must not modify a plain object schema"
         )
+
+
+# ----- Tool-schema rejection parsing (issue #585) -----
+
+
+def _named_tool(name: str) -> dict:
+    """Return a formatted tool entry carrying only the name."""
+    return {"type": "function", "function": {"name": name, "parameters": {}}}
+
+
+def test_rejected_tool_index_reads_anthropic_position() -> None:
+    """The Anthropic 400 names the offending tool only by position."""
+    err = Exception(
+        "Error code: 400 - {'type': 'error', 'error': {'type': "
+        "'invalid_request_error', 'message': 'tools.3.custom.input_schema: "
+        "input_schema does not support oneOf, allOf, or anyOf at the top "
+        "level'}}"
+    )
+    assert _rejected_tool_index(err) == 3
+
+
+def test_rejected_tool_index_reads_gemini_position() -> None:
+    """Gemini reports the same class of failure with a bracketed index."""
+    err = Exception(
+        "GenerateContentRequest.tools[0].function_declarations[1].parameters"
+        ".any_of[0].required: only allowed for OBJECT type; invalid schema"
+    )
+    assert _rejected_tool_index(err) == 1
+
+
+def test_rejected_tool_index_walks_the_cause_chain() -> None:
+    """The provider error arrives wrapped in a HomeAssistantError."""
+    cause = Exception("tools.2.custom.input_schema: bad schema")
+    wrapper = Exception("Model invocation failed")
+    wrapper.__cause__ = cause
+    assert _rejected_tool_index(wrapper) == 2
+
+
+def test_rejected_tool_index_ignores_unrelated_errors() -> None:
+    """Errors that are not about a tool schema must not trigger a drop."""
+    assert _rejected_tool_index(Exception("connection reset by peer")) is None
+    assert _rejected_tool_index(Exception("tools.2 were slow to run")) is None, (
+        "a positional match without 'schema' is not a schema rejection"
+    )
+
+
+def test_rejected_tool_index_rejects_absurd_position() -> None:
+    """A mis-parsed message cannot turn into an unbounded int()."""
+    err = Exception(f"tools.{'9' * 40}.custom.input_schema: bad schema")
+    assert _rejected_tool_index(err) is None
+
+
+def test_rejected_tool_name_resolves_and_guards() -> None:
+    """Positions map back onto the bound tool list; bad ones return None."""
+    tools = [_named_tool("GetLiveContext"), _named_tool("HassStartTimer")]
+    assert _rejected_tool_name(tools, 1) == "HassStartTimer"
+    assert _rejected_tool_name(tools, None) is None
+    assert _rejected_tool_name(tools, 2) is None, "out-of-range index"
+    assert _rejected_tool_name(tools, -1) is None, "negative index must not wrap"
+    assert _rejected_tool_name(["not_a_dict"], 0) is None
+    assert _rejected_tool_name([{"function": "not_a_dict"}], 0) is None
+    assert _rejected_tool_name([{"function": {"name": 7}}], 0) is None

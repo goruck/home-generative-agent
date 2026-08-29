@@ -736,3 +736,188 @@ async def test_sampling_rebind_recovers_tool_bound_chat_model(
     assert result.content == "ok"
     # Exactly two API calls: baked 0.2 rejected once, rebind with None succeeds.
     assert seen_temperatures == [0.2, None]
+
+
+@pytest.mark.asyncio
+async def test_schema_recovery_drops_tool_rejected_by_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """
+    A tool the provider refuses to validate is dropped, not the whole turn.
+
+    Regression for issue #585: Anthropic validates every tool schema before
+    it reads the conversation, so one bad schema 400s the request and the
+    user hears an error. The provider names the offender only by position
+    ("tools.1.custom.input_schema: ..."), so the graph must map that back to
+    the bound tool list, drop it and retry.
+    """
+    monkeypatch.setattr(agent_graph, "_LLM_INVOKE_TIMEOUT_S", 5.0)
+
+    seen_tool_sets: list[list[str]] = []
+
+    class _SchemaPickyChatModel(BaseChatModel):
+        """400s while a tool named HassStartTimer is bound."""
+
+        # pydantic model field: the default is copied per instance.
+        bound_tools: list[Any] = []  # noqa: RUF012
+
+        @property
+        def _llm_type(self) -> str:
+            return "schema_picky"
+
+        def bind_tools(self, tools: Any, **_kwargs: Any) -> Any:
+            return self.model_copy(update={"bound_tools": list(tools)})
+
+        def _generate(
+            self,
+            messages: Any,
+            stop: Any = None,
+            run_manager: Any = None,
+            **kwargs: Any,
+        ) -> ChatResult:
+            names = [t["function"]["name"] for t in self.bound_tools]
+            seen_tool_sets.append(names)
+            if "HassStartTimer" in names:
+                index = names.index("HassStartTimer")
+                msg = (
+                    f"tools.{index}.custom.input_schema: input_schema does not "
+                    "support oneOf, allOf, or anyOf at the top level"
+                )
+                raise ValueError(msg)
+            return ChatResult(
+                generations=[ChatGeneration(message=AIMessage(content="ok"))]
+            )
+
+    selected_tools = [
+        {"type": "function", "function": {"name": "GetLiveContext"}},
+        {"type": "function", "function": {"name": "HassStartTimer"}},
+    ]
+    base_model = _SchemaPickyChatModel()
+    hass = MagicMock()
+    hass.async_add_executor_job = AsyncMock(side_effect=lambda fn: fn())
+
+    bound = agent_graph._bind_model_tools(
+        base_model, selected_tools, disable_reasoning=False
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = await agent_graph._invoke_chat_model_with_schema_recovery(
+            hass,
+            base_model,
+            bound,
+            [HumanMessage(content="hi")],
+            {},
+            selected_tools,
+            disable_reasoning=False,
+        )
+
+    assert result.content == "ok"
+    assert seen_tool_sets == [
+        ["GetLiveContext", "HassStartTimer"],
+        ["GetLiveContext"],
+    ], "exactly one retry, with only the rejected tool removed"
+    assert "HassStartTimer" in caplog.text, "the log must name the dropped tool"
+    assert selected_tools[1]["function"]["name"] == "HassStartTimer", (
+        "the caller's tool list must not be mutated"
+    )
+
+
+@pytest.mark.asyncio
+async def test_schema_recovery_names_the_tool_when_retries_run_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    An unrecoverable schema rejection still names the tool it blames.
+
+    The reporter of issue #585 lost hours to a 400 that identified the tool
+    only as `tools.3`; with a retrieval limit of five that index points at a
+    different tool every turn. Whatever else happens, the error must name it.
+    """
+    monkeypatch.setattr(agent_graph, "_LLM_INVOKE_TIMEOUT_S", 5.0)
+
+    class _AlwaysRejects(BaseChatModel):
+        """Blames position 0 no matter which tools are bound."""
+
+        # pydantic model field: the default is copied per instance.
+        bound_tools: list[Any] = []  # noqa: RUF012
+
+        @property
+        def _llm_type(self) -> str:
+            return "always_rejects"
+
+        def bind_tools(self, tools: Any, **_kwargs: Any) -> Any:
+            return self.model_copy(update={"bound_tools": list(tools)})
+
+        def _generate(
+            self,
+            messages: Any,
+            stop: Any = None,
+            run_manager: Any = None,
+            **kwargs: Any,
+        ) -> ChatResult:
+            msg = "tools.0.custom.input_schema: unsupported schema"
+            raise ValueError(msg)
+
+    selected_tools = [
+        {"type": "function", "function": {"name": f"Tool{i}"}} for i in range(5)
+    ]
+    base_model = _AlwaysRejects()
+    hass = MagicMock()
+    hass.async_add_executor_job = AsyncMock(side_effect=lambda fn: fn())
+    bound = agent_graph._bind_model_tools(
+        base_model, selected_tools, disable_reasoning=False
+    )
+
+    with pytest.raises(HomeAssistantError, match="Tool3"):
+        await agent_graph._invoke_chat_model_with_schema_recovery(
+            hass,
+            base_model,
+            bound,
+            [HumanMessage(content="hi")],
+            {},
+            selected_tools,
+            disable_reasoning=False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_schema_recovery_passes_through_unrelated_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An error that is not a tool-schema rejection is raised untouched."""
+    monkeypatch.setattr(agent_graph, "_LLM_INVOKE_TIMEOUT_S", 5.0)
+
+    class _Broken(BaseChatModel):
+        @property
+        def _llm_type(self) -> str:
+            return "broken"
+
+        def bind_tools(self, tools: Any, **_kwargs: Any) -> Any:
+            return self
+
+        def _generate(
+            self,
+            messages: Any,
+            stop: Any = None,
+            run_manager: Any = None,
+            **kwargs: Any,
+        ) -> ChatResult:
+            msg = "upstream connect error"
+            raise ValueError(msg)
+
+    hass = MagicMock()
+    hass.async_add_executor_job = AsyncMock(side_effect=lambda fn: fn())
+    selected_tools = [{"type": "function", "function": {"name": "GetLiveContext"}}]
+
+    with pytest.raises(HomeAssistantError, match="upstream connect error"):
+        await agent_graph._invoke_chat_model_with_schema_recovery(
+            hass,
+            _Broken(),
+            _Broken(),
+            [HumanMessage(content="hi")],
+            {},
+            selected_tools,
+            disable_reasoning=False,
+        )
+    assert hass.async_add_executor_job.await_count == 0, "no rebind on a non-schema 400"
