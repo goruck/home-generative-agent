@@ -1012,7 +1012,7 @@ async def test_index_tools_poisoned_tool_does_not_starve_neighbors() -> None:
 
     llm_api = _loaded_llm_api("HassStartTimer", "HassPauseTimer")
     # Poison the first tool: json.dumps cannot serialize an object() schema.
-    llm_api.apis["assist"].tools[0].parameters = {"bad": object()}
+    llm_api.apis["assist"].tools[0].parameters = {"bad": object()}  # type: ignore[assignment]
 
     with (
         patch(f"{_CONV}.async_dispatcher_send"),
