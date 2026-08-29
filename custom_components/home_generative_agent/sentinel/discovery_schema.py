@@ -28,6 +28,10 @@ DISCOVERY_OUTPUT_SCHEMA = vol.Schema(
                 # declared so a stored payload round-tripped through this
                 # PREVENT_EXTRA schema is not rejected (red-team review).
                 vol.Optional("environmental_context_stripped"): bool,
+                # Set by the discovery engine when it resolved and cited the
+                # battery sensor a low-battery candidate only named (issue
+                # #571); declared for the same round-trip reason as above.
+                vol.Optional("evidence_backfilled"): bool,
             }
         ],
         vol.Optional("filtered_candidates"): [

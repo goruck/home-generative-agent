@@ -11,8 +11,10 @@ from custom_components.home_generative_agent.sentinel.discovery_engine import (
     _candidate_identity_hash,
 )
 from custom_components.home_generative_agent.sentinel.discovery_semantic import (
+    battery_evidence_entity_id,
     battery_slug_device_token,
     candidate_semantic_key,
+    entity_evidence_path,
     is_battery_level_entity_id,
     rule_key_covers_candidate_key,
     rule_semantic_key,
@@ -41,6 +43,131 @@ def test_battery_slug_device_token_extracts_hex_id() -> None:
         "summary": "Baterie senzoru 0xffffaa67127301f8 klesla na 12 %.",
     }
     assert battery_slug_device_token(candidate) == "0xffffaa67127301f8"
+
+
+def test_battery_slug_device_token_reads_a_locale_slug() -> None:
+    """
+    A slug written in the home's language still yields its device address.
+
+    The extractor used to strip a list of English topic words and trust a
+    sole leftover, so "nizka_baterie_senzoru_0x…" left four tokens and
+    resolved nothing — silently excluding exactly the non-English users the
+    slug-over-prose preference (#522) exists for. The address is found by
+    shape now, so every other token can say anything.
+    """
+    candidate = {
+        "candidate_id": "nizka_baterie_senzoru_0xffffaa67127301f8",
+        "title": "Nízká úroveň baterie",
+        "summary": "Baterie klesla pod hranici.",
+        # The battery signal itself is still read from an English surface —
+        # shared with candidate_semantic_key's battery leg by design, so a
+        # candidate with no English battery surface takes that leg nowhere.
+        "suggested_type": "low_battery_sensors",
+    }
+    assert battery_slug_device_token(candidate) == "0xffffaa67127301f8"
+
+
+def test_battery_slug_device_token_reads_a_decorated_slug() -> None:
+    """An extra word the model appended is not a second device address."""
+    candidate = {
+        "candidate_id": "low_battery_sensor_0xffffaa67127301f8_again",
+        "title": "Low battery",
+        "summary": "Sensor battery is low.",
+    }
+    assert battery_slug_device_token(candidate) == "0xffffaa67127301f8"
+
+
+def test_battery_slug_device_token_none_with_two_addresses() -> None:
+    """Two device-shaped tokens are ambiguous about which names the device."""
+    candidate = {
+        "candidate_id": "low_battery_0xffffaa67127301f8_and_0xaaaa11122233344",
+        "title": "Low battery",
+        "summary": "Sensor battery is low.",
+    }
+    assert battery_slug_device_token(candidate) is None
+
+
+def test_battery_evidence_entity_id_resolves_named_device() -> None:
+    """The address in the slug resolves the home's matching battery sensor."""
+    candidate = {
+        "candidate_id": "low_battery_sensor_0xffffaa67127301f8",
+        "title": "Nízká úroveň baterie senzoru 0xffffaa67127301f8",
+        "summary": "Baterie senzoru 0xffffaa67127301f8 klesla na 12 %.",
+    }
+    assert (
+        battery_evidence_entity_id(
+            candidate,
+            [
+                "sensor.0xaaaa11122233344_battery",
+                "sensor.0xffffaa67127301f8_battery",
+            ],
+        )
+        == "sensor.0xffffaa67127301f8_battery"
+    )
+
+
+@pytest.mark.parametrize(
+    "battery_entity_ids",
+    [
+        pytest.param([], id="no_battery_sensors"),
+        pytest.param(["sensor.0xaaaa11122233344_battery"], id="different_device"),
+        pytest.param(
+            ["sensor.0xffffaa67127301f8a_battery"], id="longer_address_same_prefix"
+        ),
+        pytest.param(
+            [
+                "sensor.0xffffaa67127301f8_battery",
+                "sensor.hall_0xffffaa67127301f8_battery",
+            ],
+            id="ambiguous_two_matches",
+        ),
+    ],
+)
+def test_battery_evidence_entity_id_declines_unless_unique(
+    battery_entity_ids: list[str],
+) -> None:
+    """
+    Anything short of exactly one whole-token match resolves nothing.
+
+    Over-attaching is the dangerous direction (the #573 design rule): a
+    wrongly cited sensor makes a real low-battery card dedup away as a
+    duplicate of an unrelated one, while declining costs only the
+    pre-existing prose-hash behaviour.
+    """
+    candidate = {
+        "candidate_id": "low_battery_sensor_0xffffaa67127301f8",
+        "title": "Nízká úroveň baterie senzoru 0xffffaa67127301f8",
+        "summary": "Baterie senzoru 0xffffaa67127301f8 klesla na 12 %.",
+    }
+    assert battery_evidence_entity_id(candidate, battery_entity_ids) is None
+
+
+def test_backfilled_battery_candidate_becomes_promotable() -> None:
+    """
+    Citing the resolved sensor also makes the card approvable.
+
+    An evidence-less low-battery candidate normalizes to nothing, so the
+    proposal it produces can only ever be marked unsupported. With the
+    entity cited (issue #571) the same idea registers the low_battery_sensors
+    rule the user was being asked to approve.
+    """
+    candidate: dict[str, Any] = {
+        "candidate_id": "low_battery_sensor_0xffffaa67127301f8",
+        "title": "Nízká úroveň baterie senzoru 0xffffaa67127301f8",
+        "summary": "Baterie senzoru klesla pod doporučenou hranici.",
+        "pattern": "threshold_breach",
+        "suggested_type": "maintenance",
+        "confidence_hint": 0.5,
+        "evidence_paths": [],
+    }
+    assert normalize_candidate(candidate) is None
+
+    entity_id = "sensor.0xffffaa67127301f8_battery"
+    candidate["evidence_paths"] = [entity_evidence_path(entity_id)]
+    normalized = normalize_candidate(candidate)
+    assert normalized is not None
+    assert normalized.template_id == "low_battery_sensors"
+    assert normalized.params["sensor_entity_ids"] == [entity_id]
 
 
 def test_battery_slug_device_token_none_without_low_battery_signal() -> None:

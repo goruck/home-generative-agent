@@ -14,10 +14,14 @@ from custom_components.home_generative_agent.sentinel.discovery_engine import (
     _MAX_SEMANTIC_KEYS_IN_PROMPT,
     _STATIC_RULE_IDS,
     SentinelDiscoveryEngine,
+    _battery_level_entity_ids,
     _candidate_identity_hash,
     _entity_ids_from_evidence_paths,
     _entity_ids_from_key,
     _is_cumulative_energy_entity,
+)
+from custom_components.home_generative_agent.sentinel.discovery_semantic import (
+    candidate_semantic_key,
 )
 
 if TYPE_CHECKING:
@@ -618,6 +622,250 @@ def test_filter_identity_keys_never_dedup_less_than_prose_alone(
     # The two identical-prose candidates can never both survive.
     surviving_prose = [(item["title"], item["summary"]) for item in filtered]
     assert len(surviving_prose) == len(set(surviving_prose))
+
+
+# ---------------------------------------------------------------------------
+# Battery evidence backfill (issue #571)
+# ---------------------------------------------------------------------------
+
+_BATTERY_ENTITY_IDS = [
+    "sensor.0xffffaa67127301f8_battery",
+    "sensor.0xaaaa11122233344_battery",
+]
+
+_EVIDENCED_BATTERY_CANDIDATE: dict[str, Any] = {
+    "candidate_id": "low_battery_sensor_0xffffaa67127301f8_threshold",
+    "title": "Nízká úroveň baterie senzoru 0xffffaa67127301f8",
+    "summary": "Upozornit, když kapacita baterie klesne pod definovaný práh.",
+    "pattern": "threshold_breach",
+    "suggested_type": "maintenance",
+    "confidence_hint": 0.6,
+    "evidence_paths": ["entities[entity_id=sensor.0xffffaa67127301f8_battery].state"],
+}
+
+
+def _engine() -> SentinelDiscoveryEngine:
+    return SentinelDiscoveryEngine(
+        hass=cast("HomeAssistant", object()),
+        options={},
+        model=None,
+        store=cast("DiscoveryStore", _DummyStore()),
+    )
+
+
+def test_filter_battery_backfill_dedups_against_evidenced_twin() -> None:
+    """
+    The reported #571 symptom: two cards for one sensor become one.
+
+    An evidence-less low-battery candidate names the device address but
+    cites nothing, so it keys None and falls back to an identity hash — and
+    a hash can never equal the semantic key of the properly-evidenced
+    proposal about that same sensor. Resolving the address against the
+    home's battery sensors and citing it gives both candidates the same
+    semantic key, in both arrival orders.
+    """
+    engine = _engine()
+    evidenced_key = candidate_semantic_key(_EVIDENCED_BATTERY_CANDIDATE)
+    assert evidenced_key is not None
+
+    # Evidenced proposal already pending; the evidence-less re-description
+    # arrives next and must be recognised as the same idea.
+    filtered, dropped = engine._filter_novel_candidates(
+        [dict(_ZERO_EVIDENCE_BATTERY_CANDIDATE)],
+        {evidenced_key},
+        None,
+        _BATTERY_ENTITY_IDS,
+    )
+    assert filtered == []
+    assert [item["dedupe_reason"] for item in dropped] == ["existing_semantic_key"]
+    assert dropped[0]["semantic_key"] == evidenced_key
+
+    # Reverse order, one batch: whichever comes first survives, once.
+    filtered, dropped = engine._filter_novel_candidates(
+        [dict(_ZERO_EVIDENCE_BATTERY_CANDIDATE), dict(_EVIDENCED_BATTERY_CANDIDATE)],
+        set(),
+        None,
+        _BATTERY_ENTITY_IDS,
+    )
+    assert len(filtered) == 1
+    assert [item["dedupe_reason"] for item in dropped] == ["batch_duplicate"]
+
+
+def test_filter_battery_backfill_records_path_and_marker() -> None:
+    """A backfilled candidate stores the resolved path, a marker, and a key."""
+    filtered, dropped = _engine()._filter_novel_candidates(
+        [dict(_ZERO_EVIDENCE_BATTERY_CANDIDATE)], set(), None, _BATTERY_ENTITY_IDS
+    )
+    assert dropped == []
+    record = filtered[0]
+    assert record["evidence_paths"] == [
+        "entities[entity_id=sensor.0xffffaa67127301f8_battery].state"
+    ]
+    assert record["evidence_backfilled"] is True
+    assert record["semantic_key"] == candidate_semantic_key(
+        _EVIDENCED_BATTERY_CANDIDATE
+    )
+
+
+def test_filter_battery_backfill_needs_a_unique_sensor() -> None:
+    """
+    Two sensors carrying the address are ambiguous, so nothing is cited.
+
+    Attaching the wrong sensor would let a real low-battery card be dropped
+    as a duplicate of an unrelated one — the outcome this feature treats as
+    worse than doing nothing (the #573 review's design rule).
+    """
+    ambiguous = [
+        "sensor.0xffffaa67127301f8_battery",
+        "sensor.hall_0xffffaa67127301f8_battery",
+    ]
+    filtered, _ = _engine()._filter_novel_candidates(
+        [dict(_ZERO_EVIDENCE_BATTERY_CANDIDATE)], set(), None, ambiguous
+    )
+    assert filtered[0]["evidence_paths"] == []
+    assert "evidence_backfilled" not in filtered[0]
+    assert "semantic_key" not in filtered[0]
+
+
+def test_filter_battery_backfill_ignores_unresolvable_address() -> None:
+    """An address this home does not report leaves the candidate untouched."""
+    filtered, _ = _engine()._filter_novel_candidates(
+        [dict(_ZERO_EVIDENCE_BATTERY_CANDIDATE)],
+        set(),
+        None,
+        ["sensor.0xdeadbeefdeadbeef_battery"],
+    )
+    assert filtered[0]["evidence_paths"] == []
+    assert "evidence_backfilled" not in filtered[0]
+
+
+def test_filter_battery_backfill_matches_whole_tokens_only() -> None:
+    """
+    A longer address that merely starts with the token is not this device.
+
+    Substring matching would make 0xffffaa67127301f8 resolve
+    sensor.0xffffaa67127301f8a_battery — a different device — so the
+    address must equal a whole object-id token.
+    """
+    filtered, _ = _engine()._filter_novel_candidates(
+        [dict(_ZERO_EVIDENCE_BATTERY_CANDIDATE)],
+        set(),
+        None,
+        ["sensor.0xffffaa67127301f8a_battery"],
+    )
+    assert filtered[0]["evidence_paths"] == []
+    assert "evidence_backfilled" not in filtered[0]
+
+
+def test_filter_battery_backfill_leaves_non_battery_null_key_alone() -> None:
+    """A null-key candidate with no battery signal is never given evidence."""
+    filtered, _ = _engine()._filter_novel_candidates(
+        [dict(_NULL_KEY_CANDIDATE)], set(), None, _BATTERY_ENTITY_IDS
+    )
+    assert filtered[0]["evidence_paths"] == []
+    assert "evidence_backfilled" not in filtered[0]
+
+
+def test_filter_battery_backfill_absent_without_battery_entity_ids() -> None:
+    """
+    With no battery sensors supplied the pre-#571 identity-hash path stands.
+
+    The parameter is optional and every legacy call site omits it, so the
+    old behaviour must be exactly preserved when it is not passed.
+    """
+    engine = _engine()
+    hash_key = _candidate_identity_hash(_ZERO_EVIDENCE_BATTERY_CANDIDATE)
+    filtered, dropped = engine._filter_novel_candidates(
+        [dict(_ZERO_EVIDENCE_BATTERY_CANDIDATE)], {hash_key}
+    )
+    assert filtered == []
+    assert [item["dedupe_reason"] for item in dropped] == ["existing_identity_hash"]
+
+
+def test_filter_battery_backfill_splits_identically_worded_devices() -> None:
+    """
+    Identical prose about two different sensors stops merging once resolved.
+
+    TODOS.md "Identically-worded candidates about different devices still
+    merge": the prose hash collapses them and the device token cannot split
+    them, because multi-key matching is a union. Resolved evidence sidesteps
+    that entirely — each candidate keys semantically on its own entity, and
+    semantic keys are compared by equality.
+    """
+    shared_prose = {
+        "title": "Nízká úroveň baterie senzoru",
+        "summary": "Baterie senzoru klesla pod hranici.",
+    }
+    candidates = [
+        dict(_ZERO_EVIDENCE_BATTERY_CANDIDATE, **shared_prose),
+        dict(
+            _ZERO_EVIDENCE_BATTERY_CANDIDATE,
+            **shared_prose,
+            candidate_id="low_battery_sensor_0xaaaa11122233344",
+        ),
+    ]
+    filtered, dropped = _engine()._filter_novel_candidates(
+        candidates, set(), None, _BATTERY_ENTITY_IDS
+    )
+    prefix = "v1|subject=sensor|predicate=low_battery|night=any|home=any|scope=any"
+    assert dropped == []
+    assert [item["semantic_key"] for item in filtered] == [
+        f"{prefix}|entities=sensor.0xffffaa67127301f8_battery",
+        f"{prefix}|entities=sensor.0xaaaa11122233344_battery",
+    ]
+
+
+def _snapshot_with(entities: list[Any]) -> dict[str, Any]:
+    return {"entities": entities}
+
+
+def _hass_with_attributes(attributes: dict[str, dict[str, Any]]) -> HomeAssistant:
+    return cast(
+        "HomeAssistant",
+        SimpleNamespace(
+            states=SimpleNamespace(
+                get=lambda entity_id: (
+                    SimpleNamespace(attributes=attributes[entity_id])
+                    if entity_id in attributes
+                    else None
+                )
+            )
+        ),
+    )
+
+
+def test_battery_level_entity_ids_uses_metadata_first() -> None:
+    """
+    device_class decides where it exists; the name heuristic only fills in.
+
+    A locale-named charge level (sensor.zamek_vrata_baterie) is a battery
+    level because its metadata says so, while battery-named telemetry with
+    another device_class or a non-percent unit is not.
+    """
+    hass = _hass_with_attributes(
+        {
+            "sensor.zamek_vrata_baterie": {"device_class": "battery"},
+            "sensor.battery_power": {"device_class": "power"},
+            "sensor.ev_battery_charging_rate": {"unit_of_measurement": "W"},
+        }
+    )
+    snapshot = _snapshot_with(
+        [
+            {"entity_id": "sensor.zamek_vrata_baterie"},
+            {"entity_id": "sensor.battery_power"},
+            {"entity_id": "sensor.ev_battery_charging_rate"},
+            # No live metadata: the object-id heuristic decides.
+            {"entity_id": "sensor.0xffffaa67127301f8_battery"},
+            {"entity_id": "sensor.outdoor_temperature"},
+            # Non-sensor domains can never be a battery level.
+            {"entity_id": "binary_sensor.front_door_battery_low"},
+            "not-a-mapping",
+        ]
+    )
+    assert _battery_level_entity_ids(hass, snapshot) == [
+        "sensor.zamek_vrata_baterie",
+        "sensor.0xffffaa67127301f8_battery",
+    ]
 
 
 # ---------------------------------------------------------------------------

@@ -336,34 +336,13 @@ def _has_low_battery_signal(text: str, slug_text: str) -> bool:
     )
 
 
-# Words in a low-battery candidate_id slug that describe the *topic*
-# rather than the device — stripped before what's left is trusted as a
-# device token. Deliberately conservative (issue #571 follow-up): a false
-# device-token match merges two genuinely different topics, which is worse
-# than the prose-hash re-proposal drift this exists to fix.
-# _LOW_BATTERY_QUALIFIERS is folded in rather than re-listed: the two must
-# not drift, or a qualifier added there would silently stop being stripped
-# here and every slug carrying it would go token-less (review of #573).
-_BATTERY_SLUG_TOPIC_WORDS = frozenset(_LOW_BATTERY_QUALIFIERS) | frozenset(
-    {
-        "battery",
-        "batteries",
-        "sensor",
-        "sensors",
-        "level",
-        "levels",
-        "state",
-        "capacity",
-    }
-)
-
-# A leftover slug token is only trusted as a device identity when it looks
+# A slug token is only trusted as a device identity when it looks
 # like a hardware address rather than a room or an ordinal. The reported
 # #571 shape is a Zigbee IEEE address ("0xffffaa67127301f8"); MAC-style
-# object IDs qualify too. Without this, "low_battery_sensor_kitchen" and
-# "kitchen_battery_low" both reduce to "kitchen" and two genuinely
-# different devices merge into one identity — the exact over-merge the
-# one-token rule was believed to prevent but does not (review of #573).
+# object IDs qualify too. This shape test IS the extractor — an earlier
+# rule that stripped topic words and trusted a sole leftover let
+# "low_battery_sensor_kitchen" and "kitchen_battery_low" both reduce to
+# "kitchen", merging two genuinely different devices (review of #573).
 # A device address and a place code are syntactically indistinguishable,
 # so no "looks technical" heuristic can separate them. Five were tried
 # and an adversarial reviewer broke every one with a room label wearing
@@ -424,23 +403,37 @@ def battery_slug_device_token(candidate: dict[str, Any]) -> str | None:
     suggested_type="low_battery_sensors" took the battery leg for keying
     but not here, so the exact target class kept drifting (review of #573).
 
-    After stripping known topic words (_BATTERY_SLUG_TOPIC_WORDS), exactly
-    one token must remain — zero means there is no device-identifying
-    text to anchor on, and more than one is ambiguous about which token
-    names the device — and that token must be device-shaped
-    (_is_device_shaped_token). Over-merging is the dangerous direction
-    here: it hides a low-battery card the user never sees, whereas the
-    worst a rejected token costs is the prose-hash drift this exists to
-    reduce. Anything short of a confident device address falls through.
+    The slug must contain exactly one device-shaped token
+    (_is_device_shaped_token); every other token is ignored, whatever it
+    says. Two such tokens are ambiguous about which one names the device,
+    and none means there is no device identity to anchor on.
+
+    The address is found by SHAPE, not by elimination. Requiring exactly
+    one leftover after stripping a list of English topic words was the
+    original rule and it silently excluded the users it was written for:
+    the whole premise of preferring the slug over the prose (#522) is that
+    the slug survives the discovery LLM writing in the home's language, and
+    "nizka_baterie_senzoru_0xffffaa67127301f8" leaves four leftovers and
+    resolved nothing. It also lost every slug the model decorated
+    ("..._again"). Neither costs anything to admit: an extra word is not a
+    second device address.
+
+    Over-merging is the dangerous direction here: it hides a low-battery
+    card the user never sees, whereas the worst a rejected token costs is
+    the prose-hash drift this exists to reduce. Anything short of a
+    confident device address falls through.
     """
     slug_text = str(candidate.get("candidate_id", "")).lower()
     if not _has_low_battery_signal(_candidate_text_blob(candidate), slug_text):
         return None
-    tokens = [t for t in _SLUG_TOKEN_SPLIT_RE.split(slug_text) if t]
-    remaining = [t for t in tokens if t not in _BATTERY_SLUG_TOPIC_WORDS]
-    if len(remaining) != 1 or not _is_device_shaped_token(remaining[0]):
+    device_tokens = [
+        token
+        for token in _SLUG_TOKEN_SPLIT_RE.split(slug_text)
+        if _is_device_shaped_token(token)
+    ]
+    if len(device_tokens) != 1:
         return None
-    return remaining[0]
+    return device_tokens[0]
 
 
 # Mirrors proposal_templates._NON_BATTERY_ID_TOKENS for the battery-leg
@@ -1072,6 +1065,58 @@ def _extract_camera_ids(evidence_paths: list[str]) -> list[str]:
                 path.split("camera_activity[camera_entity_id=", 1)[1].split("]", 1)[0]
             )
     return camera_ids
+
+
+def entity_evidence_path(entity_id: str) -> str:
+    """
+    Render the canonical evidence path citing one concrete entity.
+
+    Deliberately adjacent to _extract_entity_ids, which parses this exact
+    shape: a writer and a parser of the same string in two modules is the
+    mirror drift this file keeps paying for (#516, #518, #522, #524).
+    """
+    return f"entities[entity_id={entity_id}].state"
+
+
+def battery_evidence_entity_id(
+    candidate: dict[str, Any],
+    battery_entity_ids: list[str],
+) -> str | None:
+    """
+    Resolve the battery sensor a low-battery candidate names but never cites.
+
+    Issue #571: the discovery LLM routinely writes the device address into
+    the candidate_id slug ("low_battery_sensor_0xffffaa67127301f8") and its
+    prose while leaving evidence_paths empty, despite the prompt's ENTITY
+    REQUIREMENT. Such a candidate cannot key semantically at all (see the
+    battery leg of candidate_semantic_key), so it can never dedup against a
+    properly-evidenced proposal about the very same sensor, and the user is
+    left with two cards for one idea.
+
+    ``battery_entity_ids`` is the caller's list of battery-LEVEL sensors
+    that actually exist; the caller classifies them, so this stays a pure
+    function over text. The device token comes from battery_slug_device_token
+    — same gate, same narrowness — and must match a WHOLE object-id token,
+    not a substring, so one address can never resolve a longer address that
+    merely starts with it.
+
+    Exactly one match is required. Zero means the address names nothing this
+    home reports and there is nothing honest to cite; two or more means the
+    address is ambiguous, and attaching the wrong sensor would let a real
+    low-battery card be dropped as a duplicate of an unrelated one — the
+    one outcome this whole feature treats as worse than doing nothing.
+    """
+    device_token = battery_slug_device_token(candidate)
+    if device_token is None:
+        return None
+    matches = {
+        entity_id
+        for entity_id in battery_entity_ids
+        if device_token in _SLUG_TOKEN_SPLIT_RE.split(entity_id.lower())
+    }
+    if len(matches) != 1:
+        return None
+    return next(iter(matches))
 
 
 def _extract_entity_ids(evidence_paths: list[str]) -> list[str]:

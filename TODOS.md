@@ -630,6 +630,8 @@ That satisfies all three cases at once: different devices with identical prose s
 
 **Note on precedence:** giving one identity key precedence over another is what produced the transitivity defect during the #573 review (propagating dropped candidates' keys let A link B to C when B and C shared nothing). The predicate above avoids that only because it is evaluated pairwise and never mutates a shared set. Keep that property.
 
+**Narrowed by v3.33.4 (issue #571), not closed.** The battery evidence backfill resolves the device address against the home's battery sensors and cites it, so a candidate whose address resolves keys semantically on its own entity and is compared by equality — the identically-worded pair above now stays apart without any change to identity matching. What remains is the residue where the backfill declines: an address that matches no sensor, matches two, or is not `0x`-shaped at all. Those candidates still key on prose alone and still merge. Pinned by `test_filter_battery_backfill_splits_identically_worded_devices`; the structured-identity refactor above is still the only fix for the residue, and is now a smaller prize than it was.
+
 ### The battery slug topic-word list is English-only, so a locale slug never yields a device token
 
 **Priority:** P2
@@ -639,6 +641,12 @@ That satisfies all three cases at once: different devices with identical prose s
 **Why:** The whole point of preferring the slug over the prose is that the slug is the one surface that stays stable across cycles when the LLM writes prose in a non-English locale (the #522 premise). An English-only strip list silently undoes that for exactly the users who need it most.
 
 **How to apply:** Do not guess at stems. Wait for the reporter's answer on which slugs his instance emits, then either (a) anchor on the `0x…` token directly rather than by elimination — scan the slug for a token matching the device-address shape and ignore everything else, which removes the strip list from the critical path entirely, or (b) extend the strip list per supported locale. (a) is preferable: it makes the extractor locale-independent by construction and cannot drift the way a word list does.
+
+**Done via (a) in v3.33.4**, without waiting for the answer — (a) needed no information about his slugs, since it ignores every token that is not device-shaped. `_BATTERY_SLUG_TOPIC_WORDS` is deleted; the extractor now requires exactly one `_is_device_shaped_token` in the slug and reads nothing else, so `nizka_baterie_senzoru_0x…` resolves, and so does a slug the model decorated (`…_again`), which the sole-leftover rule also lost. Two device-shaped tokens still resolve nothing.
+
+**Residual, deliberately untouched:** `battery_slug_device_token` still gates on `_has_low_battery_signal(_candidate_text_blob(candidate), slug_text)`, which is English (`battery` + a qualifier). A candidate with NO English battery surface anywhere — not in the slug, not in `pattern`, not in `suggested_type` — resolves no token. That gate is shared with `candidate_semantic_key`'s battery leg on purpose (#522 mirror), so such a candidate takes the battery route nowhere in the module; widening it here alone would resurrect the mirror drift the shared surface was introduced to end. Widening it means widening both together, and that is a bigger change than this entry.
+
+**Completed:** v3.33.4 (2026-08-29)
 
 ### A shared 0x address merges two devices, and no syntactic rule can prevent it
 
@@ -685,6 +693,10 @@ That satisfies all three cases at once: different devices with identical prose s
 **Why:** #572 correctly stops the constant key from over-merging distinct sensors, but the fallback it routes to is a prose hash, which is the wrong primitive for a topic that is re-described every cycle. The reported #571 symptom (an evidence-less card and an evidenced card for the same sensor sitting side by side) also survives for the same reason: a hash can never equal a semantic key.
 
 **How to apply:** Derive a stable identity for evidence-less candidates from something that does not drift — the device/sensor token in the `candidate_id` slug (`low_battery_sensor_<id>`), normalized the way the battery leg already normalizes slug text — and hash that instead of, or in addition to, the prose. Alternatively tighten the discovery prompt/schema so a low-battery candidate naming a specific sensor must cite a matching `entities[entity_id=...]` evidence path (the author's own suggestion on #572), which removes the shape entirely. Both wants issue #571 kept open as the tracking home.
+
+**Done, both halves.** The device-token key landed in v3.32.1 (#573) and collapses a drifting reading under one address. The second half landed in v3.33.4: the engine resolves the address against the home's battery sensors and cites the entity, so the candidate leaves the identity-hash population altogether and keys semantically — which is what makes it meet the evidenced card about the same sensor, the reported #571 symptom, and makes it promotable rather than permanently unsupported. Note the prompt was NOT relied on: the ENTITY REQUIREMENT clause it would have been added to already existed and the model violated it anyway, so enforcement is deterministic at ingest and the prompt clause is only an ask. Residual: a candidate whose address resolves nothing (unknown address, two matches, or a non-`0x` label) keeps the prose-hash behaviour described above.
+
+**Completed:** v3.33.4 (2026-08-29)
 
 **Effort:** M
 **Priority:** P2
