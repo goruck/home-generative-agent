@@ -247,7 +247,16 @@ class ModelProviderSubentryFlow(ConfigSubentryFlow):
         provider_type = self._provider_type or "ollama"
         errors: dict[str, str] = {}
         current = _current_subentry(self)
-        current_settings = dict(current.data.get("settings", {})) if current else {}
+        stored_settings = dict(current.data.get("settings", {})) if current else {}
+        stored_type = current.data.get("provider_type") if current else None
+        # Every cloud provider stores its credential under the same
+        # settings["api_key"], so pre-filling from the stored subentry after a
+        # type change put the PREVIOUS service's key into the new service's
+        # field. It is a password field, so it renders as dots and reads as a
+        # remembered value; submitting then sends that key to the new provider
+        # for validation - a Gemini key transmitted to api.anthropic.com in an
+        # x-api-key header - and comes back "Invalid credentials".
+        current_settings = stored_settings if stored_type == provider_type else {}
 
         if user_input is not None:
             settings: dict[str, Any] = {}

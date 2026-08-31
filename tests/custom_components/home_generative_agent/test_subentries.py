@@ -35,6 +35,7 @@ from custom_components.home_generative_agent.const import (
     CONF_FEATURE_FALLBACK_PROVIDER_IDS,
     CONF_FEATURE_MODEL,
     CONF_FEATURE_MODEL_NAME,
+    CONF_GEMINI_API_KEY,
     CONF_NOTIFY_SERVICE,
     CONF_OLLAMA_CHAT_MODEL,
     CONF_OLLAMA_CHAT_URL,
@@ -3806,3 +3807,54 @@ async def test_reconfigure_keeps_the_existing_provider_title(
     name_key = next(k for k in schema if str(k) == "name")
     assert provider_key.default() == "gemini"
     assert name_key.default() == "My Own Gemini Name"
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_to_another_type_does_not_prefill_the_old_credential(
+    hass: HomeAssistant,
+) -> None:
+    """
+    Switching a provider's type must not carry the old service's key across.
+
+    Every cloud provider stores its credential under settings["api_key"], so
+    pre-filling from the stored subentry put the Gemini key into the Anthropic
+    key field. Being a password field it renders as dots, so submitting sends
+    that key to api.anthropic.com for validation and returns "Invalid
+    credentials" for a key that was never wrong.
+    """
+    entry = DummyEntry()
+    entry.subentries["gem1"] = DummySubentry(
+        "gem1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Primary Gemini",
+        {
+            "provider_type": "gemini",
+            "deployment": "cloud",
+            "capabilities": ["chat", "vlm", "summarization", "embedding"],
+            "settings": {"api_key": "GEMINI-SECRET"},
+        },
+    )
+    flow = _make_compat_flow(hass, entry)
+    flow.context = {"source": "reconfigure", "subentry_id": "gem1"}
+    flow._source = "reconfigure"
+    captured: dict[str, Any] = {}
+    flow.async_show_form = lambda **kwargs: captured.update(kwargs) or {}  # type: ignore[assignment]
+
+    # Reconfiguring to Anthropic: the key field must come up empty.
+    flow._provider_type = "anthropic"
+    await flow.async_step_settings()
+    key = next(
+        k for k in captured["data_schema"].schema if str(k) == CONF_ANTHROPIC_API_KEY
+    )
+    assert key.default() == ""
+    assert captured["data_schema"].schema[key] is not None
+    assert "GEMINI-SECRET" not in str(key.description)
+
+    # Reconfiguring Gemini as Gemini still remembers its own key.
+    captured.clear()
+    flow._provider_type = "gemini"
+    await flow.async_step_settings()
+    key = next(
+        k for k in captured["data_schema"].schema if str(k) == CONF_GEMINI_API_KEY
+    )
+    assert key.default() == "GEMINI-SECRET"
