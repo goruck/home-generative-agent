@@ -38,6 +38,7 @@ from custom_components.home_generative_agent.const import (
     CONF_NOTIFY_SERVICE,
     CONF_OLLAMA_CHAT_MODEL,
     CONF_OLLAMA_CHAT_URL,
+    CONF_OLLAMA_EMBEDDING_MODEL,
     CONF_OLLAMA_EMBEDDING_URL,
     CONF_OLLAMA_SUMMARIZATION_URL,
     CONF_OLLAMA_URL,
@@ -88,6 +89,7 @@ from custom_components.home_generative_agent.core.subentry_resolver import (
 )
 from custom_components.home_generative_agent.core.subentry_types import (
     ModelProviderConfig,
+    ProviderType,
 )
 from custom_components.home_generative_agent.core.utils import (
     CannotConnectError,
@@ -3573,3 +3575,151 @@ def test_runtime_options_and_fallback_chain_agree_on_the_promoted_provider() -> 
     assert chains["embedding"][0].entry_id == "prov3"
     assert options[CONF_EMBEDDING_MODEL_PROVIDER] == "ollama"
     assert deployments["embedding"] == "edge"
+
+
+def _f1_entry_and_providers() -> tuple[DummyEntry, dict[str, ModelProviderConfig]]:
+    """Conversation pinned to Ollama, Embeddings pinned to incapable Anthropic."""
+    specs: list[tuple[str, ProviderType, set[str], str]] = [
+        ("p0", "openai", {"chat", "vlm", "summarization", "embedding"}, "cloud"),
+        ("p1", "ollama", {"chat", "vlm", "summarization", "embedding"}, "edge"),
+        ("p2", "anthropic", {"chat", "vlm", "summarization"}, "cloud"),
+    ]
+    subs = [
+        DummySubentry(
+            pid,
+            SUBENTRY_TYPE_MODEL_PROVIDER,
+            pid,
+            {
+                "provider_type": ptype,
+                "capabilities": sorted(caps),
+                "deployment": dep,
+                "settings": {"base_url": f"http://{pid}"},
+            },
+        )
+        for pid, ptype, caps, dep in specs
+    ]
+    features = [
+        DummySubentry(
+            "f_conv",
+            SUBENTRY_TYPE_FEATURE,
+            "Conversation",
+            {"feature_type": "conversation", "model_provider_id": "p1"},
+        ),
+        DummySubentry(
+            "f_emb",
+            SUBENTRY_TYPE_FEATURE,
+            "Embeddings",
+            {"feature_type": "embedding", "model_provider_id": "p2"},
+        ),
+    ]
+    entry = DummyEntry()
+    entry.subentries = {s.subentry_id: s for s in [*subs, *features]}
+    providers = {
+        pid: ModelProviderConfig(
+            entry_id=pid,
+            name=pid,
+            provider_type=ptype,
+            capabilities=caps,
+            data={"settings": {"base_url": f"http://{pid}"}},
+            deployment=dep,
+        )
+        for pid, ptype, caps, dep in specs
+    }
+    return entry, providers
+
+
+def test_all_three_resolvers_agree_when_a_pin_is_dropped() -> None:
+    """
+    The embedding-piggybacks-on-chat rule must not live in one resolver only.
+
+    With the Embeddings pin dropped, resolve_runtime_options used to reach
+    that rule and pick the chat provider while the other two ran the plain
+    capability loop and picked the first capable provider in subentry order.
+    Setup then paired the model instance built from the options with
+    `chains["embedding"][0]`'s id and deployment, so the instance was filed
+    under a provider that did not build it, the ranked provider was never
+    constructed, and the id comparison that triggers the fallback
+    notification compared equal - silently.
+    """
+    entry, providers = _f1_entry_and_providers()
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    deployments = build_model_deployments(entry, providers, {})  # type: ignore[arg-type]
+    chains = resolve_fallback_chains(entry, providers, {})  # type: ignore[arg-type]
+
+    head = chains["embedding"][0]
+    assert options[CONF_EMBEDDING_MODEL_PROVIDER] == head.provider_type
+    assert deployments["embedding"] == head.deployment
+    # The conversation pin is capable, so embeddings ride along with it.
+    assert head.entry_id == "p1"
+
+
+def test_every_chain_head_matches_its_resolved_provider() -> None:
+    """The invariant setup depends on, asserted across all four categories."""
+    entry, providers = _f1_entry_and_providers()
+
+    deployments = build_model_deployments(entry, providers, {})  # type: ignore[arg-type]
+    chains = resolve_fallback_chains(entry, providers, {})  # type: ignore[arg-type]
+
+    for category, chain in chains.items():
+        assert chain, f"{category} chain is empty"
+        assert deployments[category] == chain[0].deployment, category
+
+
+def test_dangling_pin_keeps_the_users_model_name() -> None:
+    """
+    A pin naming a deleted provider must not cost the user their model.
+
+    The id is truthy and never equal to the resolved provider's, so the
+    "this model name belongs to someone else" check treated it as a foreign
+    pin and silently substituted the recommended default. Nothing repairs a
+    dangling pin, so the substitution persisted across reloads.
+    """
+    ollama = DummySubentry(
+        "prov1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Primary Ollama",
+        {
+            "provider_type": "ollama",
+            "deployment": "edge",
+            "capabilities": ["chat", "vlm", "summarization", "embedding"],
+            "settings": {"base_url": "http://ollama-host:11434"},
+        },
+    )
+    emb_feature = DummySubentry(
+        "emb_feat",
+        SUBENTRY_TYPE_FEATURE,
+        "Embeddings",
+        {
+            "feature_type": "embedding",
+            "model_provider_id": "deleted-provider",
+            CONF_FEATURE_MODEL: {CONF_FEATURE_MODEL_NAME: "my-custom-embed"},
+        },
+    )
+    entry = DummyEntry()
+    entry.subentries = {s.subentry_id: s for s in (ollama, emb_feature)}
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_OLLAMA_EMBEDDING_MODEL] == "my-custom-embed"
+
+
+def test_dropped_pin_warning_names_the_provider_actually_used(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """
+    The warning must name the real destination, not a placeholder.
+
+    It used to say "using 'another configured provider' instead" whenever the
+    user's own ranked list came back empty - including when nothing was
+    selected at all, so the line claimed a substitution that never happened.
+    """
+    entry, providers = _f1_entry_and_providers()
+    _ = providers
+
+    with caplog.at_level("WARNING"):
+        resolve_runtime_options(entry)  # type: ignore[arg-type]
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("has no embedding support" in m for m in warnings)
+    assert any("using 'p1' instead" in m for m in warnings)
+    assert not any("another configured provider" in m for m in warnings)
