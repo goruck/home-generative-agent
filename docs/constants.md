@@ -206,6 +206,7 @@ This document covers the named constants that affect integration behaviour, orga
 | `RECOMMENDED_TOOL_RETRIEVAL_LIMIT` | `tool_retrieval_limit` | `5` | Maximum tools injected into the agent's context per turn. Raise if the agent misses tools on multi-step requests; lower to reduce prompt size. |
 | `RECOMMENDED_TOOL_RELEVANCE_THRESHOLD` | `tool_relevance_threshold` | `0.15` | Cosine similarity cutoff. Lower to include more tools; raise to tighten selectivity. |
 | `CONF_TOOL_EXCLUSIONS` | `tool_exclusions` | *(unset)* | Per-API excluded tool names, `{api_id: [tool_name, ...]}`. Subtractive, with no `RECOMMENDED_` default on purpose: an API absent from the map exposes all its tools, so "unset" is the only spelling of "exclude nothing" — the pre-feature behaviour, and the reason a tool a server adds later is available without revisiting the form. |
+| `CONF_TOOL_INCLUSIONS` | `tool_inclusions` | *(unset)* | Per-API always-included tool names, same `{api_id: [tool_name, ...]}` shape. Additive: every listed tool is appended after vector retrieval, outside the retrieval limit, so general-purpose tools (e.g. web search) stay available on queries their embedding never ranks. An exclusion always beats an inclusion. |
 
 **Code-only:**
 

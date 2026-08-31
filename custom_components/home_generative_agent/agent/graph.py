@@ -64,6 +64,7 @@ from custom_components.home_generative_agent.const import (
     SUMMARIZATION_SYSTEM_PROMPT,
     TOOL_CALL_ERROR_TEMPLATE,
     TOOL_CALL_TRANSIENT_ERROR_TEMPLATE,
+    TOOL_INCLUSIONS_MAX_PER_TURN,
 )
 
 from ..core.fallback import (  # noqa: TID252
@@ -83,7 +84,9 @@ from .helpers import (
     register_pending_action,
     resolve_critical_action_policy,
     sanitize_tool_args,
+    sanitize_tool_text,
     tool_exclusions,
+    tool_inclusions,
     tool_index_key,
 )
 from .pin_messages import pin_msg
@@ -1224,6 +1227,13 @@ def _get_fallback_tools(
                         )
                     )
 
+    # Gated like the HA APIs above: every caller filters results by api_id
+    # membership anyway, so formatting hga_local tools for a lookup restricted
+    # to one MCP api (_get_tool_by_name's miss path, run per always-included
+    # tool) would json.dumps every local tool's pydantic schema just to have
+    # the caller discard it.
+    if "hga_local" not in allowed_api_ids:
+        return fallback_tools
     langchain_tools = config.get("configurable", {}).get("langchain_tools", {})
     for name, lc_tool in langchain_tools.items():
         params = "{}"
@@ -1545,8 +1555,23 @@ def _format_and_dedupe_tools(
         if name in routing_map:
             continue
 
+        # Parse BEFORE claiming the route: a corrupt stored row (partial
+        # write, migration bug) must cost one skipped tool, not the whole
+        # turn. Unguarded, a bad row for a force-bound tool (GetLiveContext,
+        # an always-included tool) crashed _retrieve_tools on EVERY turn
+        # until the row was repaired. Skipping also must not leave a phantom
+        # routing entry, or dispatch would route calls to a tool that was
+        # never offered to the model.
+        try:
+            parameters = json.loads(tool["parameters"])
+        except (TypeError, ValueError):
+            LOGGER.warning(
+                "Skipping tool %s (api %s): stored parameters are not valid JSON",
+                sanitize_tool_text(name, limit=200),
+                tool["api_id"],
+            )
+            continue
         routing_map[name] = tool["api_id"]
-        parameters = json.loads(tool["parameters"])
         if not isinstance(parameters, dict):
             parameters = {"type": "object", "properties": {}}
         else:
@@ -1740,10 +1765,17 @@ async def _get_tool_by_name(
             psycopg.ProgrammingError,
             ValueError,
         ) as err:
-            LOGGER.debug("Could not fetch %s from tool index: %s", name, err)
+            LOGGER.debug(
+                "Could not fetch %s from tool index: %s",
+                sanitize_tool_text(name, limit=200),
+                err,
+            )
             break
         except Exception:
-            LOGGER.exception("Unexpected failure fetching %s from tool index", name)
+            LOGGER.exception(
+                "Unexpected failure fetching %s from tool index",
+                sanitize_tool_text(name, limit=200),
+            )
             break
 
         if item is None:
@@ -1772,6 +1804,77 @@ async def _get_tool_by_name(
             return tool
 
     return None
+
+
+async def _append_included_tools(
+    all_candidates: list[RawTool],
+    store: BaseStore,
+    config: RunnableConfig,
+    live_tool_ids: set[tuple[str, str]] | None,
+) -> list[RawTool]:
+    """
+    Append the user's always-included tools to the candidate list.
+
+    Three filters still apply to an inclusion — the API must be active this
+    turn, the live-tool filter (via ``_get_tool_by_name``) must know the tool,
+    and an exclusion beats an inclusion. The exclusion check looks redundant
+    (an excluded tool is already stripped from the ``APIInstance``, so
+    ``live_tool_ids`` cannot carry it) but is not: when the live filter is
+    fail-open (``live_tool_ids`` is None) ``_get_tool_by_name`` reads the raw
+    index, which is never pruned on exclusion — and a security control must
+    not depend on an optional filter being wired.
+    """
+    opts = config.get("configurable", {}).get("options", {})
+    allowed_api_ids = _get_allowed_api_ids(config)
+    excluded_names = tool_exclusions(opts)
+    bound_api_by_name = {t["name"]: t["api_id"] for t in all_candidates}
+    inclusions = tool_inclusions(opts)
+    if len(inclusions) > TOOL_INCLUSIONS_MAX_PER_TURN:
+        # Only a programmatic options write can get here — the picker offers
+        # real tools and the docs say to pin one or two. Without the cap each
+        # entry is a sequential store round-trip per turn plus prompt tokens,
+        # so a degenerate map would stall every turn and overflow the
+        # provider's tool limit.
+        LOGGER.warning(
+            "Honouring only the first %d of %d configured always-included "
+            "tools this turn",
+            TOOL_INCLUSIONS_MAX_PER_TURN,
+            len(inclusions),
+        )
+        inclusions = inclusions[:TOOL_INCLUSIONS_MAX_PER_TURN]
+    for api_id, name in inclusions:
+        if api_id not in allowed_api_ids or name in excluded_names.get(api_id, ()):
+            continue
+        # Dedupe by bare name, not (api_id, name): _format_and_dedupe_tools
+        # routes by name (first seen wins), so a same-named tool from another
+        # API would be dropped there anyway — skipping saves the store fetch.
+        # A SAME-api duplicate is the normal case (RAG already selected the
+        # pinned tool) and stays quiet; a DIFFERENT api holding the name means
+        # that other server's tool will answer calls meant for the pinned one,
+        # which the operator cannot otherwise see — say so at warning level.
+        if (bound_api := bound_api_by_name.get(name)) is not None:
+            if bound_api != api_id:
+                LOGGER.warning(
+                    "Always-included tool %s (api %s) is shadowed by a "
+                    "same-named tool from api %s, which will receive its "
+                    "calls this turn",
+                    sanitize_tool_text(name, limit=200),
+                    api_id,
+                    bound_api,
+                )
+            continue
+        fetched = await _get_tool_by_name(store, config, name, {api_id}, live_tool_ids)
+        if fetched is None:
+            LOGGER.debug(
+                "Always-included tool %s (api %s) is not in the tool index, "
+                "fallback set, or live tool list; skipping",
+                sanitize_tool_text(name, limit=200),
+                api_id,
+            )
+            continue
+        all_candidates.append(fetched)
+        bound_api_by_name[name] = api_id
+    return all_candidates
 
 
 async def _retrieve_tools(  # noqa: PLR0915
@@ -1927,6 +2030,18 @@ async def _retrieve_tools(  # noqa: PLR0915
                 "Automation intent detected but add_automation is not in the "
                 "tool index or fallback; skipping force-injection"
             )
+
+    # 3e. Force-bind the user's always-included tools (issue #579). A
+    # general-purpose tool — a web-search MCP tool on "who won the World
+    # Cup?" — can score below the relevance threshold on exactly the queries
+    # it exists for, and no system-prompt instruction can reach a tool that
+    # was filtered out before the model saw the list. Appended outside the
+    # limit, like GetLiveContext and add_automation above, so an inclusion
+    # never evicts a RAG/safety selection. Deliberately after step 3b's
+    # actuation strip: "always included" means always.
+    all_candidates = await _append_included_tools(
+        all_candidates, store, config, live_tool_ids
+    )
 
     # 4. Format and deduplicate. The provider drives the subtractive schema
     # normalisation passes: the OpenAI/Anthropic top-level-union flatten

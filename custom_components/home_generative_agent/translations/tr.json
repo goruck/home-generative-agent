@@ -10,6 +10,7 @@
       "cannot_connect": "Servise ulaşılamıyor. Anahtarları/URL'leri kontrol edip tekrar deneyin.",
       "invalid_auth": "Geçersiz API anahtarı.",
       "invalid_pin": "PIN 4-10 rakam olmalıdır.",
+      "tool_excluded_and_included": "Bir araç aynı anda hem hariç tutulan hem de her zaman dahil edilen olamaz. Aracı iki listeden birinden kaldırın.",
       "unknown": "Beklenmeyen hata."
     }
   },
@@ -330,6 +331,7 @@
           "stt_hallucination_exact_patterns": "Yok sayılan tam STT ifadeleri",
           "tool_relevance_threshold": "Araç ilgi eşiği",
           "tool_exclusions": "Hariç tutulan araçlar",
+          "tool_inclusions": "Her zaman dahil edilen araçlar",
           "tool_retrieval_limit": "Araç getirme limiti"
         },
         "data_description": {
@@ -341,6 +343,7 @@
           "stt_hallucination_exact_patterns": "Her satıra bir ifade yazın. STT metninin tamamı herhangi bir girdiye eşitse LLM çalışmadan önce yok sayılır. Eşleşme büyük/küçük harfe duyarsızdır.",
           "tool_relevance_threshold": "Bir aracın getirilmesi için gereken minimum anlamsal benzerlik puanı (0,0 ile 1,0 arasında).",
           "tool_exclusions": "Burada işaretlenen araçlar modele hiçbir zaman sunulmaz ve adıyla istense bile hiçbir zaman çalıştırılmaz. Seçili tüm API'lerin tüm araçlarını açmak için boş bırakın. Bir sunucunun sonradan eklediği araçlar varsayılan olarak kullanılabilir.",
+          "tool_inclusions": "Burada işaretlenen araçlar modele her zaman sunulur: vektör tabanlı araç aramasından sonra, arama limitinin üzerine eklenirler. Anlamsal aramanın seçmeyebileceği web araması gibi genel amaçlı araçlar için kullanışlıdır. Aracı kullanıp kullanmamaya yine model karar verir. Bir araç aynı anda hem hariç tutulan hem de her zaman dahil edilen olamaz.",
           "tool_retrieval_limit": "Kullanıcının sorgusuna anlamsal benzerliğe göre getirilecek maksimum araç sayısı."
         }
       }

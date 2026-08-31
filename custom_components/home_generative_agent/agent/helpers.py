@@ -23,6 +23,7 @@ from custom_components.home_generative_agent.const import (
     CONF_CRITICAL_ACTION_PIN_SALT,
     CONF_CRITICAL_ACTIONS,
     CONF_TOOL_EXCLUSIONS,
+    CONF_TOOL_INCLUSIONS,
     RECOMMENDED_CRITICAL_ACTIONS,
 )
 
@@ -89,6 +90,23 @@ def normalize_tool_exclusions(raw: Any) -> dict[str, list[str]]:
     "absent" mean the same thing — expose every tool of that API — and keeping
     both spellings would invite readers to disagree about which is which.
     """
+    return normalize_api_tool_map(raw)
+
+
+def normalize_tool_inclusions(raw: Any) -> dict[str, list[str]]:
+    """
+    Normalize a stored ``CONF_TOOL_INCLUSIONS`` value to ``{api_id: [name]}``.
+
+    Same contract and same shape as ``normalize_tool_exclusions`` — the two
+    options are mirror images (subtractive vs. additive), and here too an api
+    id mapping to no surviving names means the same thing as an absent one:
+    nothing extra is force-bound for that API.
+    """
+    return normalize_api_tool_map(raw)
+
+
+def normalize_api_tool_map(raw: Any) -> dict[str, list[str]]:
+    """Normalize an ``{api_id: [tool_name]}`` option value; see the wrappers."""
     if not isinstance(raw, dict):
         return {}
     normalized: dict[str, list[str]] = {}
@@ -141,6 +159,24 @@ def tool_exclusions(options: Mapping[str, Any]) -> dict[str, set[str]]:
     return {
         api_id: set(names) for api_id, names in normalize_tool_exclusions(raw).items()
     }
+
+
+def tool_inclusions(options: Mapping[str, Any]) -> list[tuple[str, str]]:
+    """
+    Return the configured always-included tools as sorted (api_id, name) pairs.
+
+    Pairs, not the ``{api_id: [name]}`` map storage holds, because the runtime
+    consumer (the always-included step in ``_retrieve_tools``) iterates them to
+    fetch each tool individually — and sorted so the append order, and with it
+    the bound tool order, is stable across turns rather than dict-insertion
+    dependent.
+    """
+    raw = options.get(CONF_TOOL_INCLUSIONS)
+    return sorted(
+        (api_id, name)
+        for api_id, names in normalize_tool_inclusions(raw).items()
+        for name in names
+    )
 
 
 def filter_excluded_tools(

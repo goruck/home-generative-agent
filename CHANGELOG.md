@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.34.0] - 2026-08-31
+
+### Added
+
+- **Tools you choose can now always reach the model.** Tool retrieval ranks tools by how similar their description is to your message, and that ranking systematically misses general-purpose tools on exactly the questions they exist for — "Who won the FIFA World Cup?" shares no vocabulary with a `web_search` tool's description, so the tool was filtered out before the model ever saw the list, and no system-prompt instruction could reach it. A new **Always-included tools** picker in the Options flow, beside the excluded-tools picker, lists the same tools across every selected LLM API (MCP servers included); anything you tick is appended after retrieval, on top of the retrieval limit, so it never crowds out a ranked tool. The model still decides whether to actually call it. An exclusion always beats an inclusion — the form refuses a tool ticked in both lists, and the runtime enforces the same rule — and an inclusion binds only while its API is active and the server actually advertises the tool. Requested by [@krishgcek](https://github.com/krishgcek) ([#579](https://github.com/goruck/home-generative-agent/issues/579)).
+
 ## [3.33.5] - 2026-08-30
 
 ### Fixed
