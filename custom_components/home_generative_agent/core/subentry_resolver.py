@@ -194,6 +194,21 @@ def _model_key_for(cat: str, provider: str) -> str | None:
     return spec.get("model_keys", {}).get(provider)
 
 
+def _provider_supports_category(provider: ModelProviderConfig, category: str) -> bool:
+    """
+    Return True when the provider's type can serve the model category at all.
+
+    Stored capabilities can go stale: reconfiguring a provider in place changes
+    its type while feature subentries keep pointing at the same subentry id.
+    MODEL_CATEGORY_SPECS is the authority on which provider types have models
+    for a category (Anthropic, for example, has no embeddings endpoint).
+    """
+    providers = MODEL_CATEGORY_SPECS.get(category, {}).get("providers", {})
+    if not isinstance(providers, Mapping):
+        return True
+    return provider.provider_type in providers
+
+
 def _coerce_capabilities(raw: Any) -> set[str]:
     """Safely coerce stored capabilities to a set of strings."""
     if not raw:
@@ -879,14 +894,16 @@ def build_model_deployments(
         if not cat:
             continue
         provider = providers_by_id.get(feature.model_provider_id or "")
-        if provider:
+        if provider and _provider_supports_category(provider, cat):
             category_provider.setdefault(cat, provider)
 
     for cat in ("chat", "vlm", "summarization", "embedding"):
         if cat in category_provider:
             continue
         for provider in providers_by_id.values():
-            if cat in provider.capabilities:
+            if cat in provider.capabilities and _provider_supports_category(
+                provider, cat
+            ):
                 category_provider[cat] = provider
                 break
 
@@ -915,7 +932,7 @@ def resolve_runtime_options(entry: ConfigEntry) -> dict[str, Any]:
         if not cat:
             continue
         provider = providers_by_id.get(feature.model_provider_id or "")
-        if provider:
+        if provider and _provider_supports_category(provider, cat):
             category_provider.setdefault(cat, provider)
 
     for cat in ("chat", "vlm", "summarization", "embedding"):
@@ -923,11 +940,15 @@ def resolve_runtime_options(entry: ConfigEntry) -> dict[str, Any]:
             continue
         if cat == "embedding" and "chat" in category_provider:
             chat_provider = category_provider["chat"]
-            if "embedding" in chat_provider.capabilities:
+            if "embedding" in chat_provider.capabilities and (
+                _provider_supports_category(chat_provider, "embedding")
+            ):
                 category_provider[cat] = chat_provider
                 continue
         for provider in providers_by_id.values():
-            if cat in provider.capabilities:
+            if cat in provider.capabilities and _provider_supports_category(
+                provider, cat
+            ):
                 category_provider[cat] = provider
                 break
 
@@ -964,12 +985,17 @@ def resolve_fallback_chains(
         if not cat:
             continue
         primary = providers_by_id.get(feature.model_provider_id or "")
-        if not primary:
+        if not primary or not _provider_supports_category(primary, cat):
             continue
         chain = [primary]
         for fb_id in feature.fallback_provider_ids or []:
             fb = providers_by_id.get(fb_id)
-            if fb and fb.entry_id != primary.entry_id and cat in fb.capabilities:
+            if (
+                fb
+                and fb.entry_id != primary.entry_id
+                and cat in fb.capabilities
+                and _provider_supports_category(fb, cat)
+            ):
                 chain.append(fb)
         chains[cat] = chain
 
@@ -979,7 +1005,9 @@ def resolve_fallback_chains(
             continue
         primary: ModelProviderConfig | None = None
         for provider in providers_by_id.values():
-            if cat in provider.capabilities:
+            if cat in provider.capabilities and _provider_supports_category(
+                provider, cat
+            ):
                 if primary is None:
                     primary = provider
                 elif provider.entry_id != primary.entry_id:

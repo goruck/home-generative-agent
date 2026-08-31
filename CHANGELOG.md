@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.33.5] - 2026-08-30
+
+### Fixed
+
+- **Embeddings no longer break silently when a provider is switched to Anthropic.** Anthropic has no embeddings endpoint, but a feature stays pointed at the same provider entry across a reconfigure, so switching your only provider from Gemini to Anthropic left the Embeddings feature aimed at a service that cannot do embeddings — nothing warned you, and long-term semantic memory simply stopped working. A feature is now checked against what its provider can actually serve: if the provider cannot do the job, an able one is used instead, and if there is none, embeddings are left alone rather than sent somewhere they will fail. Reported by [@bgiuriceo](https://github.com/bgiuriceo) ([#593](https://github.com/goruck/home-generative-agent/issues/593)).
+
+### Changed
+
+- **Adding a cloud provider is no longer hidden behind the Deployment step.** Two cloud providers side by side always worked, but the first step of **+ Model Provider** arrived with **Edge** already chosen and said nothing about what that choice did, so accepting it led to a provider list of Ollama and OpenAI Compatible only — and it looked as though OpenAI, Gemini and Anthropic could not be added at all. Nothing is preselected now, and the two choices say what is behind them: **Edge - self-hosted (Ollama, OpenAI Compatible)** and **Cloud - hosted API (OpenAI, Gemini, Anthropic)**.
+- **A feature with no provider to offer now says why.** "No model provider is configured" was shown even when providers *were* configured and simply could not serve that feature — the message for the Embeddings feature on an Anthropic-only install, which read as a dead end. The two cases are now told apart, and the second names the provider types that can do the job.
+- **The docs say how to add a second provider.** Reconfiguring an existing provider replaces it in place and takes every feature using it along; **+ Model Provider** is what adds another alongside. That, and Anthropic's missing embeddings endpoint, are now written down in the README and the configuration guide.
+
 ## [3.33.4] - 2026-08-29
 
 ### Fixed

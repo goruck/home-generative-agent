@@ -124,10 +124,14 @@ class ModelProviderSubentryFlow(ConfigSubentryFlow):
                 ]
             )
         if not opts:
+            # A provider stored before the deployment step existed: offer every
+            # type so a reconfigure is never boxed into the edge/cloud split.
             opts = [
                 SelectOptionDict(label="Ollama", value="ollama"),
+                SelectOptionDict(label="OpenAI Compatible", value="openai_compatible"),
                 SelectOptionDict(label="OpenAI", value="openai"),
                 SelectOptionDict(label="Gemini", value="gemini"),
+                SelectOptionDict(label="Anthropic", value="anthropic"),
             ]
         return opts
 
@@ -154,16 +158,27 @@ class ModelProviderSubentryFlow(ConfigSubentryFlow):
             self._deployment = user_input.get("deployment")
             return await self.async_step_provider()
 
+        # No default: the choice gates which provider types the next step
+        # offers, so the user must make it deliberately rather than submit a
+        # preselected "Edge" and conclude the cloud providers are unavailable.
+        deployment_field = (
+            vol.Required("deployment", default=self._deployment)
+            if self._deployment
+            else vol.Required("deployment")
+        )
         schema = vol.Schema(
             {
-                vol.Required(
-                    "deployment",
-                    default=self._deployment or "edge",
-                ): SelectSelector(
+                deployment_field: SelectSelector(
                     SelectSelectorConfig(
                         options=[
-                            SelectOptionDict(label="Edge", value="edge"),
-                            SelectOptionDict(label="Cloud", value="cloud"),
+                            SelectOptionDict(
+                                label="Edge - self-hosted (Ollama, OpenAI Compatible)",
+                                value="edge",
+                            ),
+                            SelectOptionDict(
+                                label="Cloud - hosted API (OpenAI, Gemini, Anthropic)",
+                                value="cloud",
+                            ),
                         ],
                         mode=SelectSelectorMode.DROPDOWN,
                         sort=False,

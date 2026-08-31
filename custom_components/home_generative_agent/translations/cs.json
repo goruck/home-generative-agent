@@ -1,7 +1,10 @@
 {
   "common": {
     "feature_overwrite_warning": "⚠️ Funkce jsou již nakonfigurovány. Výběr **základního nastavení** přepíše vaše stávající přiřazení poskytovatelů doporučenými výchozími hodnotami.",
-    "sentinel_overwrite_warning": "⚠️ Sentinel je již nakonfigurován. Výběr **základního nastavení** přepíše vaše stávající nastavení doporučenými výchozími hodnotami."
+    "sentinel_overwrite_warning": "⚠️ Sentinel je již nakonfigurován. Výběr **základního nastavení** přepíše vaše stávající nastavení doporučenými výchozími hodnotami.",
+    "no_model_provider_notice": "Není nakonfigurován žádný poskytovatel modelů. Jakmile bude k dispozici, přiřadí se výchozí model.",
+    "no_capable_model_provider_notice": "Žádný z vašich poskytovatelů modelů tuto funkci nepodporuje. Přidejte dalšího poskytovatele modelů podporovaného typu - poskytovatele lze přidat pro každou službu, kterou používáte, a každá funkce může používat jiného.",
+    "supported_provider_types_label": "Zde podporováno:"
   },
   "config": {
     "step": {
@@ -60,14 +63,14 @@
       "step": {
         "deployment": {
           "title": "Nasazení",
-          "description": "Vyberte, kde tento poskytovatel běží.",
+          "description": "Vyberte, kde tento poskytovatel běží. **Edge** znamená provoz ve vaší vlastní síti (Ollama, OpenAI Compatible). **Cloud** znamená hostovanou službu (OpenAI, Gemini, Anthropic). Tato volba pouze určuje, jaké typy poskytovatelů nabídne další krok - můžete přidat libovolný počet poskytovatelů obou druhů a každé funkci přiřadit jiného.",
           "data": {
             "deployment": "Nasazení"
           }
         },
         "provider": {
           "title": "Poskytovatel",
-          "description": "Vyberte typ a název poskytovatele.",
+          "description": "Vyberte typ a název poskytovatele. Pro každou službu, kterou chcete používat, přidejte samostatného poskytovatele - například Anthropic pro konverzaci a Gemini pro embeddingy, protože Anthropic žádný endpoint pro embeddingy nemá.",
           "data": {
             "provider_type": "Poskytovatel",
             "name": "Název poskytovatele"

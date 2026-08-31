@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
+import voluptuous as vol
 from homeassistant.const import (
     CONF_API_KEY,
     CONF_HOST,
@@ -110,7 +111,6 @@ from custom_components.home_generative_agent.flows.stt_provider_subentry_flow im
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    import voluptuous as vol
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
 
@@ -3035,3 +3035,217 @@ async def test_sentinel_setup_mode_selector_uses_translation_key(
     assert config["mode"] == "list"
     assert config["sort"] is False
     assert config["custom_value"] is False
+
+
+# ---------------------------------------------------------------------------
+# Issue #593: multiple providers side by side
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_model_provider_flow_offers_cloud_when_provider_exists(
+    hass: HomeAssistant,
+) -> None:
+    """Adding a second provider still reaches the cloud provider types."""
+    entry = DummyEntry()
+    entry.subentries["gem1"] = DummySubentry(
+        "gem1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Cloud-LLM Gemini",
+        {
+            "provider_type": "gemini",
+            "deployment": "cloud",
+            "capabilities": ["chat", "vlm", "summarization", "embedding"],
+            "settings": {"api_key": "gk"},
+        },
+    )
+    flow = _make_compat_flow(hass, entry)
+    flow.async_show_form = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "form",
+        "step_id": kwargs.get("step_id"),
+        "data_schema": kwargs["data_schema"],
+    }
+
+    first = cast("dict[str, Any]", await flow.async_step_user())
+    assert first.get("step_id") == "deployment"
+
+    second = cast(
+        "dict[str, Any]",
+        await flow.async_step_deployment({"deployment": "cloud"}),
+    )
+    assert second.get("step_id") == "provider"
+    options: list[Any] = []
+    for key, value in second["data_schema"].schema.items():
+        if str(key) == "provider_type":
+            options = value.config["options"]
+    assert [opt["value"] for opt in options] == ["openai", "gemini", "anthropic"]
+
+
+@pytest.mark.asyncio
+async def test_deployment_step_has_no_preselected_default() -> None:
+    """
+    The deployment choice must be made deliberately.
+
+    A preselected "Edge" reads as "cloud providers are unavailable" once the
+    next step drops them from the list (issue #593).
+    """
+    flow = ModelProviderSubentryFlow()
+    captured: dict[str, Any] = {}
+    flow.async_show_form = lambda **kwargs: captured.update(kwargs) or {}  # type: ignore[assignment]
+
+    await flow.async_step_deployment()
+
+    defaults = [
+        key.default
+        for key in captured["data_schema"].schema
+        if str(key) == "deployment"
+    ]
+    assert defaults == [vol.UNDEFINED]
+
+
+def test_provider_options_fallback_covers_every_type() -> None:
+    """A provider stored without a deployment can reconfigure to any type."""
+    flow = ModelProviderSubentryFlow()
+    flow._deployment = None
+    values = [opt["value"] for opt in flow._provider_options()]
+    assert set(values) == {
+        "ollama",
+        "openai_compatible",
+        "openai",
+        "gemini",
+        "anthropic",
+    }
+
+
+def test_embedding_feature_pinned_to_incapable_provider_falls_through() -> None:
+    """
+    An embedding feature pinned to Anthropic must not select Anthropic.
+
+    Reconfiguring a provider in place keeps its subentry id, so feature
+    subentries keep pointing at a provider type that can no longer serve
+    them (issue #593).
+    """
+    anthropic = DummySubentry(
+        "prov1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Cloud-LLM Anthropic",
+        {
+            "provider_type": "anthropic",
+            "deployment": "cloud",
+            "capabilities": ["chat", "vlm", "summarization"],
+            "settings": {"api_key": "sk-ant"},
+        },
+    )
+    gemini = DummySubentry(
+        "prov2",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Cloud-LLM Gemini",
+        {
+            "provider_type": "gemini",
+            "deployment": "cloud",
+            "capabilities": ["chat", "vlm", "summarization", "embedding"],
+            "settings": {"api_key": "gk"},
+        },
+    )
+    emb_feature = DummySubentry(
+        "emb_feat",
+        SUBENTRY_TYPE_FEATURE,
+        "Embeddings",
+        {"feature_type": "embedding", "model_provider_id": "prov1"},
+    )
+    entry = DummyEntry()
+    entry.subentries = {s.subentry_id: s for s in (anthropic, gemini, emb_feature)}
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_EMBEDDING_MODEL_PROVIDER] == "gemini"
+
+
+def test_embedding_feature_pinned_to_anthropic_alone_stays_unset() -> None:
+    """With only Anthropic configured, embeddings must not be sent to it."""
+    anthropic = DummySubentry(
+        "prov1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Cloud-LLM Anthropic",
+        {
+            "provider_type": "anthropic",
+            "deployment": "cloud",
+            "capabilities": ["chat", "vlm", "summarization"],
+            "settings": {"api_key": "sk-ant"},
+        },
+    )
+    emb_feature = DummySubentry(
+        "emb_feat",
+        SUBENTRY_TYPE_FEATURE,
+        "Embeddings",
+        {"feature_type": "embedding", "model_provider_id": "prov1"},
+    )
+    entry = DummyEntry()
+    entry.subentries = {s.subentry_id: s for s in (anthropic, emb_feature)}
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options.get(CONF_EMBEDDING_MODEL_PROVIDER) != "anthropic"
+
+
+def test_build_model_deployments_skips_incapable_pinned_provider() -> None:
+    """Deployment mapping must not credit Anthropic with embeddings."""
+    providers = {
+        "prov1": ModelProviderConfig(
+            entry_id="prov1",
+            name="Cloud-LLM Anthropic",
+            provider_type="anthropic",
+            capabilities={"chat", "vlm", "summarization"},
+            data={"settings": {}},
+            deployment="cloud",
+        ),
+        "prov2": ModelProviderConfig(
+            entry_id="prov2",
+            name="Primary Ollama",
+            provider_type="ollama",
+            capabilities={"embedding"},
+            data={"settings": {}},
+            deployment="edge",
+        ),
+    }
+    emb_feature = DummySubentry(
+        "emb_feat",
+        SUBENTRY_TYPE_FEATURE,
+        "Embeddings",
+        {"feature_type": "embedding", "model_provider_id": "prov1"},
+    )
+    entry = DummyEntry()
+    entry.subentries = {"emb_feat": emb_feature}
+
+    deployments = build_model_deployments(entry, providers, {})  # type: ignore[arg-type]
+    assert deployments["embedding"] == "edge"
+
+
+@pytest.mark.asyncio
+async def test_feature_notice_names_the_capability_gap(hass: HomeAssistant) -> None:
+    """
+    The notice distinguishes "no providers" from "no capable provider".
+
+    Telling an Anthropic-only user to "add a model provider" when they already
+    have one is what made issue #593 look like a dead end.
+    """
+    flow = FeatureSubentryFlow()
+    flow.hass = hass
+
+    empty_entry = DummyEntry()
+    notice = await flow._async_provider_notice(empty_entry, "embedding")  # type: ignore[arg-type]
+    assert "No model provider is configured" in notice
+
+    anthropic_entry = DummyEntry()
+    anthropic_entry.subentries["prov1"] = DummySubentry(
+        "prov1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Cloud-LLM Anthropic",
+        {
+            "provider_type": "anthropic",
+            "capabilities": ["chat", "vlm", "summarization"],
+            "settings": {"api_key": "sk-ant"},
+        },
+    )
+    notice = await flow._async_provider_notice(anthropic_entry, "embedding")  # type: ignore[arg-type]
+    assert "None of your model providers support this feature" in notice
+    assert "Gemini" in notice
+    assert "Anthropic" not in notice
