@@ -1480,6 +1480,19 @@ window-scoped check could suppress.
 
 ---
 
+### A pinned provider bypasses the capability check its fallbacks must pass
+
+**What:** `_feature_chain` (`core/subentry_resolver.py`) filters the user's ranked fallbacks with `category in fb.capabilities` but applies no such test to the pin itself — the pin is checked only by `_provider_supports_category`, which reads the provider *type*, not the stored capabilities. So a provider subentry whose stored capabilities exclude a category still serves it when pinned, and the very same provider is dropped when it appears as a fallback.
+
+**Why:** Found by the re-verification pass on [#593](https://github.com/goruck/home-generative-agent/issues/593) and confirmed present at v3.33.4, so it predates that work and was deliberately left alone there: tightening the pin to also require `category in provider.capabilities` would regress legacy subentries stored before capabilities existed, whose caps are inferred as `{"chat"}` by `_provider_capabilities_from_settings` and would lose vlm, summarization and embedding at a stroke. The visible oddity is that the promotion promise fails for exactly that caps-less legacy population: their provider works as a pin and vanishes as a fallback.
+
+**How to apply:** Decide what an inferred capability set means. Either mark inferred sets so they can be distinguished from user-confirmed ones and skip the capability test for them in both positions, or backfill real capabilities onto caps-less subentries at migration time and then apply the same test to pin and fallback alike. Do not simply add the test to the pin.
+
+**Effort:** M
+**Priority:** P3
+
+---
+
 ### ru.json has no `common` section at all
 
 **What:** `strings.json`, `translations/en.json` and `translations/cs.json` each carry every `common.*` key; `translations/ru.json` carries none — the two pre-existing overwrite warnings are missing as well as the three notice strings added in v3.33.5.
