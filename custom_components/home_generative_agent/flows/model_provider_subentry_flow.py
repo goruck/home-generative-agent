@@ -31,6 +31,7 @@ from ..const import (  # noqa: TID252
     CONF_GEMINI_API_KEY,
     CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
     MODEL_CATEGORY_SPECS,
+    PROVIDER_TYPE_LABELS,
     RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
     SUBENTRY_TYPE_MODEL_PROVIDER,
 )
@@ -109,31 +110,25 @@ class ModelProviderSubentryFlow(ConfigSubentryFlow):
         )
 
     def _provider_options(self) -> list[SelectOptionDict]:
-        opts: list[SelectOptionDict] = []
+        def _opt(provider_type: str) -> SelectOptionDict:
+            return SelectOptionDict(
+                label=PROVIDER_TYPE_LABELS.get(provider_type, provider_type),
+                value=provider_type,
+            )
+
         if self._deployment == "edge":
-            opts.append(SelectOptionDict(label="Ollama", value="ollama"))
-            opts.append(
-                SelectOptionDict(label="OpenAI Compatible", value="openai_compatible")
-            )
+            return [_opt("ollama"), _opt("openai_compatible")]
         if self._deployment == "cloud":
-            opts.extend(
-                [
-                    SelectOptionDict(label="OpenAI", value="openai"),
-                    SelectOptionDict(label="Gemini", value="gemini"),
-                    SelectOptionDict(label="Anthropic", value="anthropic"),
-                ]
-            )
-        if not opts:
-            # A provider stored before the deployment step existed: offer every
-            # type so a reconfigure is never boxed into the edge/cloud split.
-            opts = [
-                SelectOptionDict(label="Ollama", value="ollama"),
-                SelectOptionDict(label="OpenAI Compatible", value="openai_compatible"),
-                SelectOptionDict(label="OpenAI", value="openai"),
-                SelectOptionDict(label="Gemini", value="gemini"),
-                SelectOptionDict(label="Anthropic", value="anthropic"),
-            ]
-        return opts
+            return [_opt("openai"), _opt("gemini"), _opt("anthropic")]
+        # A provider stored before the deployment step existed: offer every
+        # type so a reconfigure is never boxed into the edge/cloud split.
+        return [
+            _opt("ollama"),
+            _opt("openai_compatible"),
+            _opt("openai"),
+            _opt("gemini"),
+            _opt("anthropic"),
+        ]
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None

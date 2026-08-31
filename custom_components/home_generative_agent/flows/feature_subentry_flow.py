@@ -48,6 +48,7 @@ from ..const import (  # noqa: TID252
     KEEPALIVE_MAX_SECONDS,
     KEEPALIVE_SENTINEL,
     MODEL_CATEGORY_SPECS,
+    PROVIDER_TYPE_LABELS,
     RECOMMENDED_DB_HOST,
     RECOMMENDED_DB_NAME,
     RECOMMENDED_DB_PARAMS,
@@ -118,6 +119,14 @@ def _provider_options(entry: ConfigEntry, category: str) -> list[SelectOptionDic
         caps = set(subentry.data.get("capabilities") or [])
         if caps and category not in caps:
             continue
+        # A subentry stored before capabilities existed has an empty caps set,
+        # so the check above passes and it would be offered for every category
+        # - Anthropic for embeddings included - which the resolver then
+        # refuses to use, leaving the feature silently unserved.
+        if not _provider_type_serves(
+            str(subentry.data.get("provider_type") or ""), category
+        ):
+            continue
         options.append(
             SelectOptionDict(
                 label=subentry.title or subentry.subentry_id,
@@ -127,13 +136,29 @@ def _provider_options(entry: ConfigEntry, category: str) -> list[SelectOptionDic
     return options
 
 
-PROVIDER_TYPE_LABELS = {
-    "ollama": "Ollama",
-    "openai_compatible": "OpenAI Compatible",
-    "openai": "OpenAI",
-    "gemini": "Gemini",
-    "anthropic": "Anthropic",
-}
+def _provider_type_serves(provider_type: str, category: str) -> bool:
+    """
+    Return False only when *provider_type* is known NOT to serve *category*.
+
+    Mirrors _provider_supports_category in core.subentry_resolver so the picker
+    cannot offer a provider the resolver will then refuse to use. Unknown
+    categories and unknown provider types fail open, as they do there.
+    """
+    spec = MODEL_CATEGORY_SPECS.get(category)
+    if spec is None:
+        return True
+    providers = spec.get("providers", {})
+    if not isinstance(providers, dict):
+        return True
+    known = {
+        str(name)
+        for other in MODEL_CATEGORY_SPECS.values()
+        if isinstance(other.get("providers", {}), dict)
+        for name in other.get("providers", {})
+    }
+    if provider_type not in known:
+        return True
+    return provider_type in providers
 
 
 def _capable_provider_types(category: str) -> list[str]:
@@ -173,6 +198,14 @@ def _fallback_provider_options(
             continue
         caps = set(subentry.data.get("capabilities") or [])
         if caps and category not in caps:
+            continue
+        # A subentry stored before capabilities existed has an empty caps set,
+        # so the check above passes and it would be offered for every category
+        # - Anthropic for embeddings included - which the resolver then
+        # refuses to use, leaving the feature silently unserved.
+        if not _provider_type_serves(
+            str(subentry.data.get("provider_type") or ""), category
+        ):
             continue
         options.append(
             SelectOptionDict(
@@ -695,7 +728,6 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
 
         provider_notice = ""
         if not provider_opts:
-            provider_notice = await self._async_provider_notice(entry, category or "")
             if user_input is not None:
                 if self._setup_mode:
                     return await self._advance_setup()
@@ -705,6 +737,9 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
                     data=subentry.data,
                     title=subentry.title,
                 )
+            # Built only on the branch that renders it; the branches above
+            # discard it, and it costs up to three translation lookups.
+            provider_notice = await self._async_provider_notice(entry, category or "")
             return self.async_show_form(
                 step_id="feature_model",
                 data_schema=vol.Schema({}),

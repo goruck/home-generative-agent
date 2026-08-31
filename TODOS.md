@@ -1452,6 +1452,47 @@ window-scoped check could suppress.
 
 ---
 
+## Model Providers
+
+### An unset embedding provider still means "use Ollama" downstream
+
+**What:** `resolve_runtime_options` (`core/subentry_resolver.py`) leaves `CONF_EMBEDDING_MODEL_PROVIDER` unset when no configured provider can serve embeddings. The consumer disagrees about what that means: `__init__.py:2143` reads it as `options.get(CONF_EMBEDDING_MODEL_PROVIDER, RECOMMENDED_EMBEDDING_MODEL_PROVIDER)` with `RECOMMENDED_EMBEDDING_MODEL_PROVIDER = "ollama"` (`const.py:668`), and the dispatch below it ends in a bare `else: embedding_model = ollama_embeddings`. So "no capable provider" and "provider we do not recognise" both arrive at Ollama at `RECOMMENDED_OLLAMA_URL`.
+
+**Why:** Found by both adversarial review passes on [#593](https://github.com/goruck/home-generative-agent/issues/593). It is **not** a regression from that PR — the pre-existing `"anthropic"` value took the same `else` branch — which is why it was left out of v3.33.5 rather than fixed there. It survives only because `ollama_embeddings` is gated on `if ollama_health.get(ollama_embedding_url)` (`__init__.py:2073`): with nothing answering on `localhost:11434` the model is `None` and semantic memory is cleanly disabled. On a box where something *does* answer, an embedder is built with a model that was probably never pulled, `index_config` is built anyway, and every embed call 404s while setup reports healthy. Two contracts ("absent = none" vs "absent = ollama") that must be reconciled explicitly.
+
+**How to apply:** Give "no capable provider" its own value rather than absence — the resolver writes an explicit sentinel, and `__init__.py` turns the `else` catch-all into an explicit `elif embedding_provider == "ollama"` so an unrecognised value disables embeddings instead of silently selecting Ollama. Check `build_model_deployments` and `resolve_fallback_chains` for the same absent-means-default assumption before changing the sentinel.
+
+**Effort:** M
+**Priority:** P2
+
+---
+
+### Two providers of the same type share one global API-key slot
+
+**What:** `_apply_provider_to_category` (`core/subentry_resolver.py`) writes credentials to flat global option keys — `CONF_API_KEY`, `CONF_GEMINI_API_KEY`, `CONF_ANTHROPIC_API_KEY` — one per provider *type*, not per category. Each is overwritten once per category as `category_provider` is iterated. With Conversation pinned to a "Work OpenAI" provider and Camera Image Analysis pinned to a "Personal OpenAI" provider, both categories run on whichever key was written last; the adversarial pass reproduced `CONF_API_KEY = sk-WORK` serving both.
+
+**Why:** Surfaced by the adversarial review of [#593](https://github.com/goruck/home-generative-agent/issues/593). Keys never cross provider *types* (each type has its own const), only instances of the same type — but #593 is precisely a request to run several providers side by side, and two accounts of the same provider (work/personal, or separate billing per feature) is the natural next configuration. The user sees no error: the second provider's key is simply never used, and its billing never moves. The v3.33.5 guard changes which instances enter `category_provider` and in what order, so it also changes which key wins.
+
+**How to apply:** The option keys are consumed all over `__init__.py`, so this is not a rename. Either give the per-category model builders the resolved `ModelProviderConfig` (which already carries its own settings) instead of reading global option keys, or add per-category key overrides that fall back to the global. Until then, document in `docs/configuration.md` that two providers of the same type cannot hold different credentials.
+
+**Effort:** L
+**Priority:** P2
+
+---
+
+### ru.json has no `common` section at all
+
+**What:** `strings.json`, `translations/en.json` and `translations/cs.json` each carry every `common.*` key; `translations/ru.json` carries none — the two pre-existing overwrite warnings are missing as well as the three notice strings added in v3.33.5.
+
+**Why:** Noticed during the v3.33.5 review. Not a crash: `homeassistant/helpers/translation.py` merges English underneath any non-English locale, so Russian users see the English text. It is a completeness gap, not a defect, and `test_translations.py` enforces full parity only for `cs.json`.
+
+**How to apply:** Add a `common` block to `ru.json` with all five keys translated, or leave it and accept English fallback. Decide deliberately rather than by omission.
+
+**Effort:** S
+**Priority:** P3
+
+---
+
 ## Config Entry Lifecycle
 
 ### Migrate deprecated TargetSelectorData to TargetSelection before HA 2026.12

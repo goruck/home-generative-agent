@@ -194,19 +194,75 @@ def _model_key_for(cat: str, provider: str) -> str | None:
     return spec.get("model_keys", {}).get(provider)
 
 
+_SPEC_PROVIDER_TYPES: frozenset[str] | None = None
+
+
+def _spec_provider_types() -> frozenset[str]:
+    """Return every provider type MODEL_CATEGORY_SPECS knows about."""
+    global _SPEC_PROVIDER_TYPES  # noqa: PLW0603
+    if _SPEC_PROVIDER_TYPES is None:
+        known: set[str] = set()
+        for spec in MODEL_CATEGORY_SPECS.values():
+            providers = spec.get("providers", {})
+            if isinstance(providers, Mapping):
+                known.update(str(name) for name in providers)
+        _SPEC_PROVIDER_TYPES = frozenset(known)
+    return _SPEC_PROVIDER_TYPES
+
+
 def _provider_supports_category(provider: ModelProviderConfig, category: str) -> bool:
     """
-    Return True when the provider's type can serve the model category at all.
+    Return False only when the provider's type is known NOT to serve *category*.
 
-    Stored capabilities can go stale: reconfiguring a provider in place changes
-    its type while feature subentries keep pointing at the same subentry id.
-    MODEL_CATEGORY_SPECS is the authority on which provider types have models
-    for a category (Anthropic, for example, has no embeddings endpoint).
+    A feature's model_provider_id keeps pointing at the same subentry after a
+    reconfigure changes that provider's type, and unlike the automatic-selection
+    path an explicit pin was never checked against the provider at all. This is
+    that missing check, and MODEL_CATEGORY_SPECS is its authority (Anthropic,
+    for example, has no embeddings endpoint).
+
+    An unrecognised category or provider type fails OPEN. A type the specs have
+    never heard of - "triton" and "docker_runner" are declared in ProviderType
+    and given deployment defaults but appear in no category - must not lose
+    every category to a guard that cannot describe it.
     """
-    providers = MODEL_CATEGORY_SPECS.get(category, {}).get("providers", {})
+    spec = MODEL_CATEGORY_SPECS.get(category)
+    if spec is None:
+        return True
+    providers = spec.get("providers", {})
     if not isinstance(providers, Mapping):
         return True
+    if provider.provider_type not in _spec_provider_types():
+        return True
     return provider.provider_type in providers
+
+
+def _pinned_provider_for(
+    feature: FeatureConfig,
+    providers_by_id: Mapping[str, ModelProviderConfig],
+    category: str,
+) -> ModelProviderConfig | None:
+    """
+    Return the feature's pinned provider, or None when it cannot serve *category*.
+
+    Issue #593's complaint was that nothing warned the user, so a dropped pin
+    says so in the log rather than silently resolving to a different provider.
+    """
+    provider = providers_by_id.get(feature.model_provider_id or "")
+    if provider is None:
+        return None
+    if not _provider_supports_category(provider, category):
+        LOGGER.warning(
+            "Feature '%s' is assigned model provider '%s' (%s), which has no "
+            "%s support; using another configured provider instead. Reassign "
+            "the feature to a %s-capable provider to silence this.",
+            feature.feature_type,
+            provider.name,
+            provider.provider_type,
+            category,
+            category,
+        )
+        return None
+    return provider
 
 
 def _coerce_capabilities(raw: Any) -> set[str]:
@@ -893,8 +949,8 @@ def build_model_deployments(
         cat = FEATURE_CATEGORY_MAP.get(feature.feature_type)
         if not cat:
             continue
-        provider = providers_by_id.get(feature.model_provider_id or "")
-        if provider and _provider_supports_category(provider, cat):
+        provider = _pinned_provider_for(feature, providers_by_id, cat)
+        if provider:
             category_provider.setdefault(cat, provider)
 
     for cat in ("chat", "vlm", "summarization", "embedding"):
@@ -908,6 +964,29 @@ def build_model_deployments(
                 break
 
     return {cat: p.deployment for cat, p in category_provider.items()}
+
+
+def _model_for_resolved_provider(
+    feature: FeatureConfig, provider: ModelProviderConfig
+) -> Mapping[str, object]:
+    """
+    Return the feature's model settings, less a model name meant for another provider.
+
+    When a category resolves to a provider the feature is not pinned to, the
+    stored model name was chosen for a different service and means nothing
+    here - writing it onto the new provider's model key asks for a model that
+    does not exist (a Gemini embedding name handed to OpenAI, which then 404s
+    on every call while setup still reports healthy). Dropping it lets the
+    recommended model for this provider type stand in. Temperature and the
+    Ollama tuning keys are provider-agnostic and stay.
+    """
+    if not feature.model_provider_id or feature.model_provider_id == provider.entry_id:
+        return feature.model
+    return {
+        key: value
+        for key, value in feature.model.items()
+        if key != CONF_FEATURE_MODEL_NAME
+    }
 
 
 def resolve_runtime_options(entry: ConfigEntry) -> dict[str, Any]:
@@ -931,8 +1010,8 @@ def resolve_runtime_options(entry: ConfigEntry) -> dict[str, Any]:
         cat = FEATURE_CATEGORY_MAP.get(feature.feature_type)
         if not cat:
             continue
-        provider = providers_by_id.get(feature.model_provider_id or "")
-        if provider and _provider_supports_category(provider, cat):
+        provider = _pinned_provider_for(feature, providers_by_id, cat)
+        if provider:
             category_provider.setdefault(cat, provider)
 
     for cat in ("chat", "vlm", "summarization", "embedding"):
@@ -958,10 +1037,53 @@ def resolve_runtime_options(entry: ConfigEntry) -> dict[str, Any]:
             if FEATURE_CATEGORY_MAP.get(feature.feature_type) != cat:
                 continue
             _apply_feature_model_to_options(
-                options, cat, provider.provider_type, feature.model
+                options,
+                cat,
+                provider.provider_type,
+                _model_for_resolved_provider(feature, provider),
             )
 
     return options
+
+
+def _feature_chain(
+    feature: FeatureConfig,
+    providers_by_id: Mapping[str, ModelProviderConfig],
+    category: str,
+) -> list[ModelProviderConfig]:
+    """
+    Return the feature's provider chain in the order the user configured it.
+
+    The user's own order is assembled first - pin, then their fallbacks - and
+    only then is anything that cannot serve *category* dropped. Skipping the
+    whole feature when the pin is incapable would discard their ordered list
+    and leave the caller's automatic loop to rebuild it in subentry insertion
+    order, silently promoting a provider they never ranked.
+    """
+    pinned = providers_by_id.get(feature.model_provider_id or "")
+    if not pinned:
+        return []
+    candidates = [pinned]
+    for fb_id in feature.fallback_provider_ids or []:
+        fb = providers_by_id.get(fb_id)
+        if (
+            fb
+            and all(fb.entry_id != c.entry_id for c in candidates)
+            and category in fb.capabilities
+        ):
+            candidates.append(fb)
+    chain = [c for c in candidates if _provider_supports_category(c, category)]
+    if chain and chain[0].entry_id != pinned.entry_id:
+        LOGGER.warning(
+            "Feature '%s' is assigned model provider '%s' (%s), which has no "
+            "%s support; promoting its next configured fallback '%s'.",
+            feature.feature_type,
+            pinned.name,
+            pinned.provider_type,
+            category,
+            chain[0].name,
+        )
+    return chain
 
 
 def resolve_fallback_chains(
@@ -984,20 +1106,9 @@ def resolve_fallback_chains(
         cat = FEATURE_CATEGORY_MAP.get(feature.feature_type)
         if not cat:
             continue
-        primary = providers_by_id.get(feature.model_provider_id or "")
-        if not primary or not _provider_supports_category(primary, cat):
-            continue
-        chain = [primary]
-        for fb_id in feature.fallback_provider_ids or []:
-            fb = providers_by_id.get(fb_id)
-            if (
-                fb
-                and fb.entry_id != primary.entry_id
-                and cat in fb.capabilities
-                and _provider_supports_category(fb, cat)
-            ):
-                chain.append(fb)
-        chains[cat] = chain
+        chain = _feature_chain(feature, providers_by_id, cat)
+        if chain:
+            chains[cat] = chain
 
     # Auto-build for legacy configs or categories without explicit fallbacks
     for cat in ("chat", "vlm", "summarization", "embedding"):

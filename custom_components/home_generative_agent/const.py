@@ -932,6 +932,18 @@ AUTOMATION_TOOL_BLUEPRINT_NAME = "goruck/hga_scene_analysis.yaml"
 # ---------------- Dynamic model + provider registry ----------------
 # This is a dynamic registry of model categories, providers, and models.
 # It allows for easy addition of new models and providers without changing the code.
+# Human-readable provider-type names. Single source of truth: both the model
+# provider picker and the "which providers can serve this feature" notice read
+# it, so a type added to MODEL_CATEGORY_SPECS cannot render its raw key
+# ("openai_compatible") inside a user-facing sentence.
+PROVIDER_TYPE_LABELS: dict[str, str] = {
+    "ollama": "Ollama",
+    "openai_compatible": "OpenAI Compatible",
+    "openai": "OpenAI",
+    "gemini": "Gemini",
+    "anthropic": "Anthropic",
+}
+
 MODEL_CATEGORY_SPECS: dict[str, dict[str, Any]] = {
     "chat": {
         "provider_key": CONF_CHAT_MODEL_PROVIDER,

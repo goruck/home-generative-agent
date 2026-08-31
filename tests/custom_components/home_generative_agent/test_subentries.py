@@ -32,6 +32,7 @@ from custom_components.home_generative_agent.const import (
     CONF_DB_PARAMS,
     CONF_EMBEDDING_MODEL_PROVIDER,
     CONF_EXPLAIN_ENABLED,
+    CONF_FEATURE_FALLBACK_PROVIDER_IDS,
     CONF_FEATURE_MODEL,
     CONF_FEATURE_MODEL_NAME,
     CONF_NOTIFY_SERVICE,
@@ -47,6 +48,7 @@ from custom_components.home_generative_agent.const import (
     CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
     CONF_OPENAI_COMPATIBLE_EMBEDDING_MODEL,
     CONF_OPENAI_COMPATIBLE_EMBEDDING_URL,
+    CONF_OPENAI_EMBEDDING_MODEL,
     CONF_SENTINEL_APPLIANCE_DURATION_MIN,
     CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
     CONF_SENTINEL_CAMERA_ENTRY_LINKS,
@@ -70,6 +72,7 @@ from custom_components.home_generative_agent.const import (
     FEATURE_DEFS,
     MODEL_CATEGORY_SPECS,
     RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
+    RECOMMENDED_OPENAI_EMBEDDING_MODEL,
     RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES,
     SUBENTRY_TYPE_DATABASE,
     SUBENTRY_TYPE_FEATURE,
@@ -80,6 +83,7 @@ from custom_components.home_generative_agent.const import (
 from custom_components.home_generative_agent.core.subentry_resolver import (
     build_model_deployments,
     legacy_model_provider_configs,
+    resolve_fallback_chains,
     resolve_runtime_options,
 )
 from custom_components.home_generative_agent.core.subentry_types import (
@@ -91,6 +95,9 @@ from custom_components.home_generative_agent.core.utils import (
 )
 from custom_components.home_generative_agent.flows.feature_subentry_flow import (
     FeatureSubentryFlow,
+)
+from custom_components.home_generative_agent.flows.feature_subentry_flow import (
+    _provider_options as _feature_provider_options,
 )
 from custom_components.home_generative_agent.flows.model_provider_subentry_flow import (
     ModelProviderSubentryFlow,
@@ -3249,3 +3256,239 @@ async def test_feature_notice_names_the_capability_gap(hass: HomeAssistant) -> N
     assert "None of your model providers support this feature" in notice
     assert "Gemini" in notice
     assert "Anthropic" not in notice
+
+
+# ---------------------------------------------------------------------------
+# Issue #593 review findings: the guard must not over-reach
+# ---------------------------------------------------------------------------
+
+
+def test_unknown_provider_type_keeps_every_category() -> None:
+    """
+    A provider type the specs have never heard of must fail OPEN.
+
+    "triton" and "docker_runner" are declared in ProviderType and given
+    deployment defaults but appear in no MODEL_CATEGORY_SPECS category. A
+    guard that answers "unsupported" for them would silently strip such a
+    provider of chat, vlm, summarization and embedding all at once.
+    """
+    provider = DummySubentry(
+        "prov1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Triton",
+        {
+            "provider_type": "triton",
+            "capabilities": ["chat"],
+            "settings": {},
+        },
+    )
+    feature = DummySubentry(
+        "feat1",
+        SUBENTRY_TYPE_FEATURE,
+        "Conversation",
+        {"feature_type": "conversation", "model_provider_id": "prov1"},
+    )
+    entry = DummyEntry()
+    entry.subentries = {s.subentry_id: s for s in (provider, feature)}
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_CHAT_MODEL_PROVIDER] == "triton"
+
+
+def test_substituted_provider_does_not_inherit_the_pinned_model_name() -> None:
+    """
+    A redirected category must not carry the pinned provider's model name.
+
+    Reconfiguring Gemini to Anthropic leaves the Embeddings feature pinned to
+    that subentry with a Gemini model name stored. Resolving the category to a
+    capable OpenAI provider and then writing `gemini-embedding-001` onto
+    OpenAI's model key would 404 on every embed call while setup still
+    reported healthy - #593's silent failure moved to a new provider.
+    """
+    anthropic = DummySubentry(
+        "prov1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Cloud-LLM Anthropic",
+        {
+            "provider_type": "anthropic",
+            "deployment": "cloud",
+            "capabilities": ["chat", "vlm", "summarization"],
+            "settings": {"api_key": "sk-ant"},
+        },
+    )
+    openai = DummySubentry(
+        "prov2",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Cloud-LLM OpenAI",
+        {
+            "provider_type": "openai",
+            "deployment": "cloud",
+            "capabilities": ["chat", "vlm", "summarization", "embedding"],
+            "settings": {"api_key": "sk-openai"},
+        },
+    )
+    emb_feature = DummySubentry(
+        "emb_feat",
+        SUBENTRY_TYPE_FEATURE,
+        "Embeddings",
+        {
+            "feature_type": "embedding",
+            "model_provider_id": "prov1",
+            CONF_FEATURE_MODEL: {CONF_FEATURE_MODEL_NAME: "gemini-embedding-001"},
+        },
+    )
+    entry = DummyEntry()
+    entry.subentries = {s.subentry_id: s for s in (anthropic, openai, emb_feature)}
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_EMBEDDING_MODEL_PROVIDER] == "openai"
+    assert options[CONF_OPENAI_EMBEDDING_MODEL] != "gemini-embedding-001"
+    assert options[CONF_OPENAI_EMBEDDING_MODEL] == RECOMMENDED_OPENAI_EMBEDDING_MODEL
+
+
+def test_pinned_model_name_survives_when_the_pin_is_honored() -> None:
+    """A feature resolved to its own pinned provider keeps its chosen model."""
+    openai = DummySubentry(
+        "prov2",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Cloud-LLM OpenAI",
+        {
+            "provider_type": "openai",
+            "deployment": "cloud",
+            "capabilities": ["chat", "vlm", "summarization", "embedding"],
+            "settings": {"api_key": "sk-openai"},
+        },
+    )
+    emb_feature = DummySubentry(
+        "emb_feat",
+        SUBENTRY_TYPE_FEATURE,
+        "Embeddings",
+        {
+            "feature_type": "embedding",
+            "model_provider_id": "prov2",
+            CONF_FEATURE_MODEL: {CONF_FEATURE_MODEL_NAME: "text-embedding-3-large"},
+        },
+    )
+    entry = DummyEntry()
+    entry.subentries = {s.subentry_id: s for s in (openai, emb_feature)}
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_OPENAI_EMBEDDING_MODEL] == "text-embedding-3-large"
+
+
+def _incapable_pin_chain_providers() -> dict[str, ModelProviderConfig]:
+    """Anthropic (no embeddings), plus two providers that do have them."""
+    return {
+        "prov1": ModelProviderConfig(
+            entry_id="prov1",
+            name="Cloud-LLM Anthropic",
+            provider_type="anthropic",
+            capabilities={"chat", "vlm", "summarization"},
+            data={"settings": {}},
+            deployment="cloud",
+        ),
+        "prov2": ModelProviderConfig(
+            entry_id="prov2",
+            name="Cloud-LLM Gemini",
+            provider_type="gemini",
+            capabilities={"chat", "vlm", "summarization", "embedding"},
+            data={"settings": {}},
+            deployment="cloud",
+        ),
+        "prov3": ModelProviderConfig(
+            entry_id="prov3",
+            name="Primary Ollama",
+            provider_type="ollama",
+            capabilities={"embedding"},
+            data={"settings": {}},
+            deployment="edge",
+        ),
+    }
+
+
+def test_fallback_chain_drops_incapable_pin_but_keeps_the_users_order() -> None:
+    """
+    An incapable primary promotes the user's own next choice, not insertion order.
+
+    Discarding the whole feature would hand the category to the automatic
+    loop, which walks providers in subentry insertion order - here Gemini,
+    the provider the user ranked second, would lose to whichever came first.
+    """
+    providers = _incapable_pin_chain_providers()
+    emb_feature = DummySubentry(
+        "emb_feat",
+        SUBENTRY_TYPE_FEATURE,
+        "Embeddings",
+        {
+            "feature_type": "embedding",
+            "model_provider_id": "prov1",
+            CONF_FEATURE_FALLBACK_PROVIDER_IDS: ["prov3", "prov2"],
+        },
+    )
+    entry = DummyEntry()
+    entry.subentries = {"emb_feat": emb_feature}
+
+    chains = resolve_fallback_chains(entry, providers, {})  # type: ignore[arg-type]
+    assert [p.entry_id for p in chains["embedding"]] == ["prov3", "prov2"]
+
+
+def test_fallback_chain_keeps_a_capable_pin_first() -> None:
+    """A capable pin stays the primary and its ordered fallbacks follow."""
+    providers = _incapable_pin_chain_providers()
+    emb_feature = DummySubentry(
+        "emb_feat",
+        SUBENTRY_TYPE_FEATURE,
+        "Embeddings",
+        {
+            "feature_type": "embedding",
+            "model_provider_id": "prov2",
+            CONF_FEATURE_FALLBACK_PROVIDER_IDS: ["prov3"],
+        },
+    )
+    entry = DummyEntry()
+    entry.subentries = {"emb_feat": emb_feature}
+
+    chains = resolve_fallback_chains(entry, providers, {})  # type: ignore[arg-type]
+    assert [p.entry_id for p in chains["embedding"]] == ["prov2", "prov3"]
+
+
+def test_fallback_chain_falls_through_when_nothing_ranked_is_capable() -> None:
+    """With no capable provider in the user's list, the automatic loop takes over."""
+    providers = _incapable_pin_chain_providers()
+    emb_feature = DummySubentry(
+        "emb_feat",
+        SUBENTRY_TYPE_FEATURE,
+        "Embeddings",
+        {"feature_type": "embedding", "model_provider_id": "prov1"},
+    )
+    entry = DummyEntry()
+    entry.subentries = {"emb_feat": emb_feature}
+
+    chains = resolve_fallback_chains(entry, providers, {})  # type: ignore[arg-type]
+    assert chains["embedding"]
+    assert all(p.provider_type != "anthropic" for p in chains["embedding"])
+
+
+def test_provider_picker_hides_a_capability_less_anthropic_subentry() -> None:
+    """
+    A subentry stored before capabilities existed must not be offered for embeddings.
+
+    Its empty capabilities set passes the caps filter, so the picker used to
+    offer Anthropic for Embeddings and the resolver then refused to use it -
+    the feature was left silently unserved and the new notice, which only
+    renders when the picker is empty, could never fire.
+    """
+    legacy_anthropic = DummySubentry(
+        "prov1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Cloud-LLM Anthropic",
+        {"provider_type": "anthropic", "settings": {"api_key": "sk-ant"}},
+    )
+    entry = DummyEntry()
+    entry.subentries = {"prov1": legacy_anthropic}
+
+    assert _feature_provider_options(entry, "embedding") == []  # type: ignore[arg-type]
+    assert [
+        opt["value"]
+        for opt in _feature_provider_options(entry, "chat")  # type: ignore[arg-type]
+    ] == ["prov1"]
