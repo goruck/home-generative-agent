@@ -196,8 +196,30 @@ class ModelProviderSubentryFlow(ConfigSubentryFlow):
             )
             return await self.async_step_settings()
 
-        provider_type = self._provider_type or "ollama"
-        default_name = self._name or ProviderNames.get(provider_type, "Model Provider")
+        options = self._provider_options()
+        values = [opt["value"] for opt in options]
+        # The deployment step decides this list, so a remembered type - or the
+        # old hardcoded "ollama" default - may not be on it. A select whose
+        # value is absent from its own options renders the raw value rather
+        # than the label, so choosing Cloud showed a lowercase "ollama" that
+        # could not be picked from the list below it.
+        provider_type = (
+            self._provider_type if self._provider_type in values else values[0]
+        )
+        name_field = (
+            # Reconfigure: the existing title is the user's, keep it.
+            vol.Optional(
+                "name",
+                description={"suggested_value": self._name},
+                default=self._name,
+            )
+            if self._name
+            # New provider: leave it blank so the title follows whichever type
+            # is actually chosen. Pre-filling a name derived from the default
+            # type produced an Anthropic provider titled "Primary Ollama"
+            # whenever the field was left as offered.
+            else vol.Optional("name")
+        )
         schema = vol.Schema(
             {
                 vol.Required(
@@ -205,17 +227,15 @@ class ModelProviderSubentryFlow(ConfigSubentryFlow):
                     default=provider_type,
                 ): SelectSelector(
                     SelectSelectorConfig(
-                        options=self._provider_options(),
+                        options=options,
                         mode=SelectSelectorMode.DROPDOWN,
                         sort=False,
                         custom_value=False,
                     )
                 ),
-                vol.Optional(
-                    "name",
-                    description={"suggested_value": default_name},
-                    default=default_name,
-                ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+                name_field: TextSelector(
+                    TextSelectorConfig(type=TextSelectorType.TEXT)
+                ),
             }
         )
         return self.async_show_form(step_id="provider", data_schema=schema)

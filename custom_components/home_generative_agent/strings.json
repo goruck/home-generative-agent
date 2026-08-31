@@ -74,6 +74,9 @@
           "data": {
             "provider_type": "Provider",
             "name": "Provider name"
+          },
+          "data_description": {
+            "name": "Leave the name blank to have it named after the provider type you pick."
           }
         },
         "settings": {

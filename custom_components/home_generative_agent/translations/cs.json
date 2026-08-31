@@ -74,6 +74,9 @@
           "data": {
             "provider_type": "Poskytovatel",
             "name": "Název poskytovatele"
+          },
+          "data_description": {
+            "name": "Ponechte název prázdný a bude pojmenován podle zvoleného typu poskytovatele."
           }
         },
         "settings": {

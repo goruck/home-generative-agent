@@ -3723,3 +3723,86 @@ def test_dropped_pin_warning_names_the_provider_actually_used(
     assert any("has no embedding support" in m for m in warnings)
     assert any("using 'p1' instead" in m for m in warnings)
     assert not any("another configured provider" in m for m in warnings)
+
+
+@pytest.mark.asyncio
+async def test_provider_step_default_is_always_an_offered_option(
+    hass: HomeAssistant,
+) -> None:
+    """
+    The pre-selected provider type must be one the deployment actually offers.
+
+    The step defaulted to a hardcoded "ollama". After choosing Cloud - which
+    offers OpenAI, Gemini and Anthropic - that value is absent from the
+    select's own options, so Home Assistant renders the raw value instead of
+    a label and the field shows a provider that cannot be picked from it.
+    """
+    entry = DummyEntry()
+    flow = _make_compat_flow(hass, entry)
+    captured: dict[str, Any] = {}
+    flow.async_show_form = lambda **kwargs: captured.update(kwargs) or {}  # type: ignore[assignment]
+
+    await flow.async_step_deployment({"deployment": "cloud"})
+
+    schema = captured["data_schema"].schema
+    provider_key = next(k for k in schema if str(k) == "provider_type")
+    offered = [opt["value"] for opt in schema[provider_key].config["options"]]
+    assert offered == ["openai", "gemini", "anthropic"]
+    assert provider_key.default() in offered
+
+
+@pytest.mark.asyncio
+async def test_new_provider_name_follows_the_type_actually_chosen(
+    hass: HomeAssistant,
+) -> None:
+    """
+    A new provider must not arrive pre-named after a type the user did not pick.
+
+    The name field was pre-filled from the defaulted type, so accepting the
+    form as offered created an Anthropic provider titled "Primary Ollama" -
+    `user_input.get("name")` is truthy, so the stale name won.
+    """
+    entry = DummyEntry()
+    flow = _make_compat_flow(hass, entry)
+    captured: dict[str, Any] = {}
+    flow.async_show_form = lambda **kwargs: captured.update(kwargs) or {}  # type: ignore[assignment]
+
+    await flow.async_step_deployment({"deployment": "cloud"})
+    name_key = next(k for k in captured["data_schema"].schema if str(k) == "name")
+    assert name_key.default is vol.UNDEFINED
+
+    # Submitting with the field untouched names it after the chosen type.
+    await flow.async_step_provider({"provider_type": "anthropic"})
+    assert flow._name == "Cloud-LLM Anthropic"
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_keeps_the_existing_provider_title(
+    hass: HomeAssistant,
+) -> None:
+    """A reconfigure must still offer the title the user already chose."""
+    entry = DummyEntry()
+    entry.subentries["gem1"] = DummySubentry(
+        "gem1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "My Own Gemini Name",
+        {
+            "provider_type": "gemini",
+            "deployment": "cloud",
+            "capabilities": ["chat", "vlm", "summarization", "embedding"],
+            "settings": {"api_key": "gk"},
+        },
+    )
+    flow = _make_compat_flow(hass, entry)
+    flow.context = {"source": "reconfigure", "subentry_id": "gem1"}
+    flow._source = "reconfigure"
+    captured: dict[str, Any] = {}
+    flow.async_show_form = lambda **kwargs: captured.update(kwargs) or {}  # type: ignore[assignment]
+
+    await flow.async_step_user()
+
+    schema = captured["data_schema"].schema
+    provider_key = next(k for k in schema if str(k) == "provider_type")
+    name_key = next(k for k in schema if str(k) == "name")
+    assert provider_key.default() == "gemini"
+    assert name_key.default() == "My Own Gemini Name"
