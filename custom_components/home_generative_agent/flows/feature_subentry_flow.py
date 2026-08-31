@@ -48,6 +48,7 @@ from ..const import (  # noqa: TID252
     KEEPALIVE_MAX_SECONDS,
     KEEPALIVE_SENTINEL,
     MODEL_CATEGORY_SPECS,
+    PROVIDER_TYPE_LABELS,
     RECOMMENDED_DB_HOST,
     RECOMMENDED_DB_NAME,
     RECOMMENDED_DB_PARAMS,
@@ -118,6 +119,14 @@ def _provider_options(entry: ConfigEntry, category: str) -> list[SelectOptionDic
         caps = set(subentry.data.get("capabilities") or [])
         if caps and category not in caps:
             continue
+        # A subentry stored before capabilities existed has an empty caps set,
+        # so the check above passes and it would be offered for every category
+        # - Anthropic for embeddings included - which the resolver then
+        # refuses to use, leaving the feature silently unserved.
+        if not _provider_type_serves(
+            str(subentry.data.get("provider_type") or ""), category
+        ):
+            continue
         options.append(
             SelectOptionDict(
                 label=subentry.title or subentry.subentry_id,
@@ -125,6 +134,47 @@ def _provider_options(entry: ConfigEntry, category: str) -> list[SelectOptionDic
             )
         )
     return options
+
+
+def _provider_type_serves(provider_type: str, category: str) -> bool:
+    """
+    Return False only when *provider_type* is known NOT to serve *category*.
+
+    Mirrors _provider_supports_category in core.subentry_resolver so the picker
+    cannot offer a provider the resolver will then refuse to use. Unknown
+    categories and unknown provider types fail open, as they do there.
+    """
+    spec = MODEL_CATEGORY_SPECS.get(category)
+    if spec is None:
+        return True
+    providers = spec.get("providers", {})
+    if not isinstance(providers, dict):
+        return True
+    known = {
+        str(name)
+        for other in MODEL_CATEGORY_SPECS.values()
+        if isinstance(other.get("providers", {}), dict)
+        for name in other.get("providers", {})
+    }
+    if provider_type not in known:
+        return True
+    return provider_type in providers
+
+
+def _capable_provider_types(category: str) -> list[str]:
+    """Return the display names of provider types that can serve *category*."""
+    providers = MODEL_CATEGORY_SPECS.get(category, {}).get("providers", {})
+    if not isinstance(providers, dict):
+        return []
+    return [PROVIDER_TYPE_LABELS.get(str(name), str(name)) for name in providers]
+
+
+def _has_model_providers(entry: ConfigEntry) -> bool:
+    """Return True when at least one model provider subentry exists."""
+    return any(
+        subentry.subentry_type == SUBENTRY_TYPE_MODEL_PROVIDER
+        for subentry in entry.subentries.values()
+    )
 
 
 def _provider_type_for_id(entry: ConfigEntry, provider_id: str | None) -> str | None:
@@ -148,6 +198,14 @@ def _fallback_provider_options(
             continue
         caps = set(subentry.data.get("capabilities") or [])
         if caps and category not in caps:
+            continue
+        # A subentry stored before capabilities existed has an empty caps set,
+        # so the check above passes and it would be offered for every category
+        # - Anthropic for embeddings included - which the resolver then
+        # refuses to use, leaving the feature silently unserved.
+        if not _provider_type_serves(
+            str(subentry.data.get("provider_type") or ""), category
+        ):
             continue
         options.append(
             SelectOptionDict(
@@ -272,6 +330,40 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
             return await self._async_step_feature(self._active_feature, user_input)
         self._setup_mode = True
         return await self.async_step_feature_enable(user_input)
+
+    async def _async_provider_notice(self, entry: ConfigEntry, category: str) -> str:
+        """
+        Explain why no provider can be selected for a feature.
+
+        "No providers at all" and "providers exist but none supports this
+        category" are different problems with different fixes, and Anthropic
+        hitting the second one (it has no embeddings endpoint) is the common
+        case worth naming explicitly.
+        """
+        if not _has_model_providers(entry):
+            return await async_common_translation(
+                self.hass,
+                "no_model_provider_notice",
+                "No model provider is configured. "
+                "A default model will be assigned once available.",
+            )
+        sentence = await async_common_translation(
+            self.hass,
+            "no_capable_model_provider_notice",
+            "None of your model providers support this feature. "
+            "Add another Model Provider of a supported type - a provider "
+            "can be added for each service you use, and each feature can "
+            "point at a different one.",
+        )
+        capable = _capable_provider_types(category)
+        if capable:
+            label = await async_common_translation(
+                self.hass,
+                "supported_provider_types_label",
+                "Supported here:",
+            )
+            sentence = f"{sentence} {label} {', '.join(capable)}."
+        return sentence
 
     async def async_step_setup_mode(
         self, user_input: dict[str, Any] | None = None
@@ -503,10 +595,7 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
 
         provider_notice = ""
         if not provider_opts:
-            provider_notice = """
-            No model provider is configured.
-            A default model will be assigned once available.
-            """
+            provider_notice = await self._async_provider_notice(entry, category or "")
             return self.async_show_form(
                 step_id="feature_model",
                 data_schema=vol.Schema({}),
@@ -639,10 +728,6 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
 
         provider_notice = ""
         if not provider_opts:
-            provider_notice = """
-            No model provider is configured.
-            A default model will be assigned once available.
-            """
             if user_input is not None:
                 if self._setup_mode:
                     return await self._advance_setup()
@@ -652,6 +737,9 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
                     data=subentry.data,
                     title=subentry.title,
                 )
+            # Built only on the branch that renders it; the branches above
+            # discard it, and it costs up to three translation lookups.
+            provider_notice = await self._async_provider_notice(entry, category or "")
             return self.async_show_form(
                 step_id="feature_model",
                 data_schema=vol.Schema({}),

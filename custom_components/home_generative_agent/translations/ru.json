@@ -56,14 +56,14 @@
       "step": {
         "deployment": {
           "title": "Deployment",
-          "description": "Choose where this provider runs.",
+          "description": "Choose where this provider runs. **Edge** is self-hosted on your own network (Ollama, OpenAI Compatible). **Cloud** is a hosted API (OpenAI, Gemini, Anthropic). This choice only decides which provider types the next step offers - you can add as many providers as you like, of either kind, and point each feature at a different one.",
           "data": {
             "deployment": "Deployment"
           }
         },
         "provider": {
           "title": "Provider",
-          "description": "Select a provider type and name.",
+          "description": "Select a provider type and name. Add a separate provider for each service you want to use - for example Anthropic for Conversation and Gemini for Embeddings, since Anthropic has no embeddings endpoint.",
           "data": {
             "provider_type": "Provider",
             "name": "Provider name"

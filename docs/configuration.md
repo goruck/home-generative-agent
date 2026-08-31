@@ -64,7 +64,11 @@ Supported providers and their default models:
 
 **Embedding model selection:** Embeddings are configured like any other feature: enable the **Embeddings** feature under **+ Setup** (Advanced mode) and assign it a provider and model. The embedding provider can be completely separate from the chat provider — e.g. llama.cpp for chat and a dedicated llama.cpp or Ollama server for embeddings. When the Embeddings feature is disabled, the provider is chosen automatically: the Conversation provider if it supports embeddings, otherwise the first embedding-capable provider.
 
-**Multiple providers:** You can add multiple Model Provider subentries and assign them per-feature. For example: a "Primary Ollama" provider for chat and a "Vision Ollama" provider for camera analysis. You can also mix types — a local vLLM server as **OpenAI Compatible** alongside an Ollama provider.
+**Multiple providers:** You can add multiple Model Provider subentries and assign them per-feature. For example: a "Primary Ollama" provider for chat and a "Vision Ollama" provider for camera analysis. You can also mix types — a local vLLM server as **OpenAI Compatible** alongside an Ollama provider, or two cloud providers side by side (Anthropic for Conversation and Summary, Gemini for Camera Image Analysis and Embeddings).
+
+Add each one with **+ Model Provider** on the integration page. The flow's first step asks **Edge** or **Cloud**, and that choice is what determines the provider types the next step lists — **Edge** offers Ollama and OpenAI Compatible, **Cloud** offers OpenAI, Gemini, and Anthropic. Reconfiguring an existing provider *replaces it in place* (the subentry keeps its identity, and every feature pointing at it moves with it), so use **+ Model Provider** — not reconfigure — when you want a second provider alongside the first.
+
+**Anthropic has no embeddings endpoint.** It can serve Chat, VLM, and Summarization but never Embeddings, so it is absent from the Embeddings row of the table above and from the Embeddings feature's provider picker. If Anthropic is your only provider, add an embedding-capable one (OpenAI, Gemini, Ollama, or OpenAI Compatible) alongside it to keep long-term semantic memory working. A feature pinned to a provider that cannot serve its category is skipped at runtime in favor of a capable provider rather than failing silently.
 
 ### Provider Fallbacks
 

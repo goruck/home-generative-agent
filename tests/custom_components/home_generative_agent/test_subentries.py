@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
+import voluptuous as vol
 from homeassistant.const import (
     CONF_API_KEY,
     CONF_HOST,
@@ -31,11 +32,14 @@ from custom_components.home_generative_agent.const import (
     CONF_DB_PARAMS,
     CONF_EMBEDDING_MODEL_PROVIDER,
     CONF_EXPLAIN_ENABLED,
+    CONF_FEATURE_FALLBACK_PROVIDER_IDS,
     CONF_FEATURE_MODEL,
     CONF_FEATURE_MODEL_NAME,
+    CONF_GEMINI_API_KEY,
     CONF_NOTIFY_SERVICE,
     CONF_OLLAMA_CHAT_MODEL,
     CONF_OLLAMA_CHAT_URL,
+    CONF_OLLAMA_EMBEDDING_MODEL,
     CONF_OLLAMA_EMBEDDING_URL,
     CONF_OLLAMA_SUMMARIZATION_URL,
     CONF_OLLAMA_URL,
@@ -46,6 +50,7 @@ from custom_components.home_generative_agent.const import (
     CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
     CONF_OPENAI_COMPATIBLE_EMBEDDING_MODEL,
     CONF_OPENAI_COMPATIBLE_EMBEDDING_URL,
+    CONF_OPENAI_EMBEDDING_MODEL,
     CONF_SENTINEL_APPLIANCE_DURATION_MIN,
     CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
     CONF_SENTINEL_CAMERA_ENTRY_LINKS,
@@ -69,6 +74,7 @@ from custom_components.home_generative_agent.const import (
     FEATURE_DEFS,
     MODEL_CATEGORY_SPECS,
     RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
+    RECOMMENDED_OPENAI_EMBEDDING_MODEL,
     RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES,
     SUBENTRY_TYPE_DATABASE,
     SUBENTRY_TYPE_FEATURE,
@@ -79,10 +85,12 @@ from custom_components.home_generative_agent.const import (
 from custom_components.home_generative_agent.core.subentry_resolver import (
     build_model_deployments,
     legacy_model_provider_configs,
+    resolve_fallback_chains,
     resolve_runtime_options,
 )
 from custom_components.home_generative_agent.core.subentry_types import (
     ModelProviderConfig,
+    ProviderType,
 )
 from custom_components.home_generative_agent.core.utils import (
     CannotConnectError,
@@ -90,6 +98,9 @@ from custom_components.home_generative_agent.core.utils import (
 )
 from custom_components.home_generative_agent.flows.feature_subentry_flow import (
     FeatureSubentryFlow,
+)
+from custom_components.home_generative_agent.flows.feature_subentry_flow import (
+    _provider_options as _feature_provider_options,
 )
 from custom_components.home_generative_agent.flows.model_provider_subentry_flow import (
     ModelProviderSubentryFlow,
@@ -110,7 +121,6 @@ from custom_components.home_generative_agent.flows.stt_provider_subentry_flow im
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    import voluptuous as vol
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
 
@@ -3035,3 +3045,816 @@ async def test_sentinel_setup_mode_selector_uses_translation_key(
     assert config["mode"] == "list"
     assert config["sort"] is False
     assert config["custom_value"] is False
+
+
+# ---------------------------------------------------------------------------
+# Issue #593: multiple providers side by side
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_model_provider_flow_offers_cloud_when_provider_exists(
+    hass: HomeAssistant,
+) -> None:
+    """Adding a second provider still reaches the cloud provider types."""
+    entry = DummyEntry()
+    entry.subentries["gem1"] = DummySubentry(
+        "gem1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Cloud-LLM Gemini",
+        {
+            "provider_type": "gemini",
+            "deployment": "cloud",
+            "capabilities": ["chat", "vlm", "summarization", "embedding"],
+            "settings": {"api_key": "gk"},
+        },
+    )
+    flow = _make_compat_flow(hass, entry)
+    flow.async_show_form = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "form",
+        "step_id": kwargs.get("step_id"),
+        "data_schema": kwargs["data_schema"],
+    }
+
+    first = cast("dict[str, Any]", await flow.async_step_user())
+    assert first.get("step_id") == "deployment"
+
+    second = cast(
+        "dict[str, Any]",
+        await flow.async_step_deployment({"deployment": "cloud"}),
+    )
+    assert second.get("step_id") == "provider"
+    options: list[Any] = []
+    for key, value in second["data_schema"].schema.items():
+        if str(key) == "provider_type":
+            options = value.config["options"]
+    assert [opt["value"] for opt in options] == ["openai", "gemini", "anthropic"]
+
+
+@pytest.mark.asyncio
+async def test_deployment_step_has_no_preselected_default() -> None:
+    """
+    The deployment choice must be made deliberately.
+
+    A preselected "Edge" reads as "cloud providers are unavailable" once the
+    next step drops them from the list (issue #593).
+    """
+    flow = ModelProviderSubentryFlow()
+    captured: dict[str, Any] = {}
+    flow.async_show_form = lambda **kwargs: captured.update(kwargs) or {}  # type: ignore[assignment]
+
+    await flow.async_step_deployment()
+
+    defaults = [
+        key.default
+        for key in captured["data_schema"].schema
+        if str(key) == "deployment"
+    ]
+    assert defaults == [vol.UNDEFINED]
+
+
+def test_provider_options_fallback_covers_every_type() -> None:
+    """A provider stored without a deployment can reconfigure to any type."""
+    flow = ModelProviderSubentryFlow()
+    flow._deployment = None
+    values = [opt["value"] for opt in flow._provider_options()]
+    assert set(values) == {
+        "ollama",
+        "openai_compatible",
+        "openai",
+        "gemini",
+        "anthropic",
+    }
+
+
+def test_embedding_feature_pinned_to_incapable_provider_falls_through() -> None:
+    """
+    An embedding feature pinned to Anthropic must not select Anthropic.
+
+    Reconfiguring a provider in place keeps its subentry id, so feature
+    subentries keep pointing at a provider type that can no longer serve
+    them (issue #593).
+    """
+    anthropic = DummySubentry(
+        "prov1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Cloud-LLM Anthropic",
+        {
+            "provider_type": "anthropic",
+            "deployment": "cloud",
+            "capabilities": ["chat", "vlm", "summarization"],
+            "settings": {"api_key": "sk-ant"},
+        },
+    )
+    gemini = DummySubentry(
+        "prov2",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Cloud-LLM Gemini",
+        {
+            "provider_type": "gemini",
+            "deployment": "cloud",
+            "capabilities": ["chat", "vlm", "summarization", "embedding"],
+            "settings": {"api_key": "gk"},
+        },
+    )
+    emb_feature = DummySubentry(
+        "emb_feat",
+        SUBENTRY_TYPE_FEATURE,
+        "Embeddings",
+        {"feature_type": "embedding", "model_provider_id": "prov1"},
+    )
+    entry = DummyEntry()
+    entry.subentries = {s.subentry_id: s for s in (anthropic, gemini, emb_feature)}
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_EMBEDDING_MODEL_PROVIDER] == "gemini"
+
+
+def test_embedding_feature_pinned_to_anthropic_alone_stays_unset() -> None:
+    """With only Anthropic configured, embeddings must not be sent to it."""
+    anthropic = DummySubentry(
+        "prov1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Cloud-LLM Anthropic",
+        {
+            "provider_type": "anthropic",
+            "deployment": "cloud",
+            "capabilities": ["chat", "vlm", "summarization"],
+            "settings": {"api_key": "sk-ant"},
+        },
+    )
+    emb_feature = DummySubentry(
+        "emb_feat",
+        SUBENTRY_TYPE_FEATURE,
+        "Embeddings",
+        {"feature_type": "embedding", "model_provider_id": "prov1"},
+    )
+    entry = DummyEntry()
+    entry.subentries = {s.subentry_id: s for s in (anthropic, emb_feature)}
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options.get(CONF_EMBEDDING_MODEL_PROVIDER) != "anthropic"
+
+
+def test_build_model_deployments_skips_incapable_pinned_provider() -> None:
+    """Deployment mapping must not credit Anthropic with embeddings."""
+    providers = {
+        "prov1": ModelProviderConfig(
+            entry_id="prov1",
+            name="Cloud-LLM Anthropic",
+            provider_type="anthropic",
+            capabilities={"chat", "vlm", "summarization"},
+            data={"settings": {}},
+            deployment="cloud",
+        ),
+        "prov2": ModelProviderConfig(
+            entry_id="prov2",
+            name="Primary Ollama",
+            provider_type="ollama",
+            capabilities={"embedding"},
+            data={"settings": {}},
+            deployment="edge",
+        ),
+    }
+    emb_feature = DummySubentry(
+        "emb_feat",
+        SUBENTRY_TYPE_FEATURE,
+        "Embeddings",
+        {"feature_type": "embedding", "model_provider_id": "prov1"},
+    )
+    entry = DummyEntry()
+    entry.subentries = {"emb_feat": emb_feature}
+
+    deployments = build_model_deployments(entry, providers, {})  # type: ignore[arg-type]
+    assert deployments["embedding"] == "edge"
+
+
+@pytest.mark.asyncio
+async def test_feature_notice_names_the_capability_gap(hass: HomeAssistant) -> None:
+    """
+    The notice distinguishes "no providers" from "no capable provider".
+
+    Telling an Anthropic-only user to "add a model provider" when they already
+    have one is what made issue #593 look like a dead end.
+    """
+    flow = FeatureSubentryFlow()
+    flow.hass = hass
+
+    empty_entry = DummyEntry()
+    notice = await flow._async_provider_notice(empty_entry, "embedding")  # type: ignore[arg-type]
+    assert "No model provider is configured" in notice
+
+    anthropic_entry = DummyEntry()
+    anthropic_entry.subentries["prov1"] = DummySubentry(
+        "prov1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Cloud-LLM Anthropic",
+        {
+            "provider_type": "anthropic",
+            "capabilities": ["chat", "vlm", "summarization"],
+            "settings": {"api_key": "sk-ant"},
+        },
+    )
+    notice = await flow._async_provider_notice(anthropic_entry, "embedding")  # type: ignore[arg-type]
+    assert "None of your model providers support this feature" in notice
+    assert "Gemini" in notice
+    assert "Anthropic" not in notice
+
+
+# ---------------------------------------------------------------------------
+# Issue #593 review findings: the guard must not over-reach
+# ---------------------------------------------------------------------------
+
+
+def test_unknown_provider_type_keeps_every_category() -> None:
+    """
+    A provider type the specs have never heard of must fail OPEN.
+
+    "triton" and "docker_runner" are declared in ProviderType and given
+    deployment defaults but appear in no MODEL_CATEGORY_SPECS category. A
+    guard that answers "unsupported" for them would silently strip such a
+    provider of chat, vlm, summarization and embedding all at once.
+    """
+    provider = DummySubentry(
+        "prov1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Triton",
+        {
+            "provider_type": "triton",
+            "capabilities": ["chat"],
+            "settings": {},
+        },
+    )
+    feature = DummySubentry(
+        "feat1",
+        SUBENTRY_TYPE_FEATURE,
+        "Conversation",
+        {"feature_type": "conversation", "model_provider_id": "prov1"},
+    )
+    entry = DummyEntry()
+    entry.subentries = {s.subentry_id: s for s in (provider, feature)}
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_CHAT_MODEL_PROVIDER] == "triton"
+
+
+def test_substituted_provider_does_not_inherit_the_pinned_model_name() -> None:
+    """
+    A redirected category must not carry the pinned provider's model name.
+
+    Reconfiguring Gemini to Anthropic leaves the Embeddings feature pinned to
+    that subentry with a Gemini model name stored. Resolving the category to a
+    capable OpenAI provider and then writing `gemini-embedding-001` onto
+    OpenAI's model key would 404 on every embed call while setup still
+    reported healthy - #593's silent failure moved to a new provider.
+    """
+    anthropic = DummySubentry(
+        "prov1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Cloud-LLM Anthropic",
+        {
+            "provider_type": "anthropic",
+            "deployment": "cloud",
+            "capabilities": ["chat", "vlm", "summarization"],
+            "settings": {"api_key": "sk-ant"},
+        },
+    )
+    openai = DummySubentry(
+        "prov2",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Cloud-LLM OpenAI",
+        {
+            "provider_type": "openai",
+            "deployment": "cloud",
+            "capabilities": ["chat", "vlm", "summarization", "embedding"],
+            "settings": {"api_key": "sk-openai"},
+        },
+    )
+    emb_feature = DummySubentry(
+        "emb_feat",
+        SUBENTRY_TYPE_FEATURE,
+        "Embeddings",
+        {
+            "feature_type": "embedding",
+            "model_provider_id": "prov1",
+            CONF_FEATURE_MODEL: {CONF_FEATURE_MODEL_NAME: "gemini-embedding-001"},
+        },
+    )
+    entry = DummyEntry()
+    entry.subentries = {s.subentry_id: s for s in (anthropic, openai, emb_feature)}
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_EMBEDDING_MODEL_PROVIDER] == "openai"
+    assert options[CONF_OPENAI_EMBEDDING_MODEL] != "gemini-embedding-001"
+    assert options[CONF_OPENAI_EMBEDDING_MODEL] == RECOMMENDED_OPENAI_EMBEDDING_MODEL
+
+
+def test_pinned_model_name_survives_when_the_pin_is_honored() -> None:
+    """A feature resolved to its own pinned provider keeps its chosen model."""
+    openai = DummySubentry(
+        "prov2",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Cloud-LLM OpenAI",
+        {
+            "provider_type": "openai",
+            "deployment": "cloud",
+            "capabilities": ["chat", "vlm", "summarization", "embedding"],
+            "settings": {"api_key": "sk-openai"},
+        },
+    )
+    emb_feature = DummySubentry(
+        "emb_feat",
+        SUBENTRY_TYPE_FEATURE,
+        "Embeddings",
+        {
+            "feature_type": "embedding",
+            "model_provider_id": "prov2",
+            CONF_FEATURE_MODEL: {CONF_FEATURE_MODEL_NAME: "text-embedding-3-large"},
+        },
+    )
+    entry = DummyEntry()
+    entry.subentries = {s.subentry_id: s for s in (openai, emb_feature)}
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_OPENAI_EMBEDDING_MODEL] == "text-embedding-3-large"
+
+
+def _incapable_pin_chain_providers() -> dict[str, ModelProviderConfig]:
+    """Anthropic (no embeddings), plus two providers that do have them."""
+    return {
+        "prov1": ModelProviderConfig(
+            entry_id="prov1",
+            name="Cloud-LLM Anthropic",
+            provider_type="anthropic",
+            capabilities={"chat", "vlm", "summarization"},
+            data={"settings": {}},
+            deployment="cloud",
+        ),
+        "prov2": ModelProviderConfig(
+            entry_id="prov2",
+            name="Cloud-LLM Gemini",
+            provider_type="gemini",
+            capabilities={"chat", "vlm", "summarization", "embedding"},
+            data={"settings": {}},
+            deployment="cloud",
+        ),
+        "prov3": ModelProviderConfig(
+            entry_id="prov3",
+            name="Primary Ollama",
+            provider_type="ollama",
+            capabilities={"embedding"},
+            data={"settings": {}},
+            deployment="edge",
+        ),
+    }
+
+
+def test_fallback_chain_drops_incapable_pin_but_keeps_the_users_order() -> None:
+    """
+    An incapable primary promotes the user's own next choice, not insertion order.
+
+    Discarding the whole feature would hand the category to the automatic
+    loop, which walks providers in subentry insertion order - here Gemini,
+    the provider the user ranked second, would lose to whichever came first.
+    """
+    providers = _incapable_pin_chain_providers()
+    emb_feature = DummySubentry(
+        "emb_feat",
+        SUBENTRY_TYPE_FEATURE,
+        "Embeddings",
+        {
+            "feature_type": "embedding",
+            "model_provider_id": "prov1",
+            CONF_FEATURE_FALLBACK_PROVIDER_IDS: ["prov3", "prov2"],
+        },
+    )
+    entry = DummyEntry()
+    entry.subentries = {"emb_feat": emb_feature}
+
+    chains = resolve_fallback_chains(entry, providers, {})  # type: ignore[arg-type]
+    assert [p.entry_id for p in chains["embedding"]] == ["prov3", "prov2"]
+
+
+def test_fallback_chain_keeps_a_capable_pin_first() -> None:
+    """A capable pin stays the primary and its ordered fallbacks follow."""
+    providers = _incapable_pin_chain_providers()
+    emb_feature = DummySubentry(
+        "emb_feat",
+        SUBENTRY_TYPE_FEATURE,
+        "Embeddings",
+        {
+            "feature_type": "embedding",
+            "model_provider_id": "prov2",
+            CONF_FEATURE_FALLBACK_PROVIDER_IDS: ["prov3"],
+        },
+    )
+    entry = DummyEntry()
+    entry.subentries = {"emb_feat": emb_feature}
+
+    chains = resolve_fallback_chains(entry, providers, {})  # type: ignore[arg-type]
+    assert [p.entry_id for p in chains["embedding"]] == ["prov2", "prov3"]
+
+
+def test_fallback_chain_falls_through_when_nothing_ranked_is_capable() -> None:
+    """With no capable provider in the user's list, the automatic loop takes over."""
+    providers = _incapable_pin_chain_providers()
+    emb_feature = DummySubentry(
+        "emb_feat",
+        SUBENTRY_TYPE_FEATURE,
+        "Embeddings",
+        {"feature_type": "embedding", "model_provider_id": "prov1"},
+    )
+    entry = DummyEntry()
+    entry.subentries = {"emb_feat": emb_feature}
+
+    chains = resolve_fallback_chains(entry, providers, {})  # type: ignore[arg-type]
+    assert chains["embedding"]
+    assert all(p.provider_type != "anthropic" for p in chains["embedding"])
+
+
+def test_provider_picker_hides_a_capability_less_anthropic_subentry() -> None:
+    """
+    A subentry stored before capabilities existed must not be offered for embeddings.
+
+    Its empty capabilities set passes the caps filter, so the picker used to
+    offer Anthropic for Embeddings and the resolver then refused to use it -
+    the feature was left silently unserved and the new notice, which only
+    renders when the picker is empty, could never fire.
+    """
+    legacy_anthropic = DummySubentry(
+        "prov1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Cloud-LLM Anthropic",
+        {"provider_type": "anthropic", "settings": {"api_key": "sk-ant"}},
+    )
+    entry = DummyEntry()
+    entry.subentries = {"prov1": legacy_anthropic}
+
+    assert _feature_provider_options(entry, "embedding") == []  # type: ignore[arg-type]
+    assert [
+        opt["value"]
+        for opt in _feature_provider_options(entry, "chat")  # type: ignore[arg-type]
+    ] == ["prov1"]
+
+
+def test_runtime_options_and_fallback_chain_agree_on_the_promoted_provider() -> None:
+    """
+    The category's active provider must be the head of its own fallback chain.
+
+    Setup pairs the embedding model instance built from the runtime options
+    with `fallback_chains["embedding"][0]`'s id and deployment. If the two
+    disagree - options picking the first capable provider in subentry order
+    while the chain promotes the user's first ranked fallback - the instance
+    is filed under the wrong provider, the ranked provider is never used and
+    the other is retried twice.
+    """
+    anthropic = DummySubentry(
+        "prov1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Cloud-LLM Anthropic",
+        {
+            "provider_type": "anthropic",
+            "deployment": "cloud",
+            "capabilities": ["chat", "vlm", "summarization"],
+            "settings": {"api_key": "sk-ant"},
+        },
+    )
+    gemini = DummySubentry(
+        "prov2",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Cloud-LLM Gemini",
+        {
+            "provider_type": "gemini",
+            "deployment": "cloud",
+            "capabilities": ["chat", "vlm", "summarization", "embedding"],
+            "settings": {"api_key": "gk"},
+        },
+    )
+    ollama = DummySubentry(
+        "prov3",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Primary Ollama",
+        {
+            "provider_type": "ollama",
+            "deployment": "edge",
+            "capabilities": ["embedding"],
+            "settings": {"base_url": "http://ollama-host:11434"},
+        },
+    )
+    # Pinned to the incapable Anthropic, with Ollama ranked ahead of Gemini.
+    # Gemini is the earlier subentry, so an order-blind pick would take it.
+    emb_feature = DummySubentry(
+        "emb_feat",
+        SUBENTRY_TYPE_FEATURE,
+        "Embeddings",
+        {
+            "feature_type": "embedding",
+            "model_provider_id": "prov1",
+            CONF_FEATURE_FALLBACK_PROVIDER_IDS: ["prov3", "prov2"],
+        },
+    )
+    entry = DummyEntry()
+    entry.subentries = {
+        s.subentry_id: s for s in (anthropic, gemini, ollama, emb_feature)
+    }
+    providers = {
+        sub.subentry_id: ModelProviderConfig(
+            entry_id=sub.subentry_id,
+            name=sub.title,
+            provider_type=sub.data["provider_type"],
+            capabilities=set(sub.data["capabilities"]),
+            data={"settings": sub.data["settings"]},
+            deployment=sub.data["deployment"],
+        )
+        for sub in (anthropic, gemini, ollama)
+    }
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    chains = resolve_fallback_chains(entry, providers, {})  # type: ignore[arg-type]
+    deployments = build_model_deployments(entry, providers, {})  # type: ignore[arg-type]
+
+    assert chains["embedding"][0].entry_id == "prov3"
+    assert options[CONF_EMBEDDING_MODEL_PROVIDER] == "ollama"
+    assert deployments["embedding"] == "edge"
+
+
+def _f1_entry_and_providers() -> tuple[DummyEntry, dict[str, ModelProviderConfig]]:
+    """Conversation pinned to Ollama, Embeddings pinned to incapable Anthropic."""
+    specs: list[tuple[str, ProviderType, set[str], str]] = [
+        ("p0", "openai", {"chat", "vlm", "summarization", "embedding"}, "cloud"),
+        ("p1", "ollama", {"chat", "vlm", "summarization", "embedding"}, "edge"),
+        ("p2", "anthropic", {"chat", "vlm", "summarization"}, "cloud"),
+    ]
+    subs = [
+        DummySubentry(
+            pid,
+            SUBENTRY_TYPE_MODEL_PROVIDER,
+            pid,
+            {
+                "provider_type": ptype,
+                "capabilities": sorted(caps),
+                "deployment": dep,
+                "settings": {"base_url": f"http://{pid}"},
+            },
+        )
+        for pid, ptype, caps, dep in specs
+    ]
+    features = [
+        DummySubentry(
+            "f_conv",
+            SUBENTRY_TYPE_FEATURE,
+            "Conversation",
+            {"feature_type": "conversation", "model_provider_id": "p1"},
+        ),
+        DummySubentry(
+            "f_emb",
+            SUBENTRY_TYPE_FEATURE,
+            "Embeddings",
+            {"feature_type": "embedding", "model_provider_id": "p2"},
+        ),
+    ]
+    entry = DummyEntry()
+    entry.subentries = {s.subentry_id: s for s in [*subs, *features]}
+    providers = {
+        pid: ModelProviderConfig(
+            entry_id=pid,
+            name=pid,
+            provider_type=ptype,
+            capabilities=caps,
+            data={"settings": {"base_url": f"http://{pid}"}},
+            deployment=dep,
+        )
+        for pid, ptype, caps, dep in specs
+    }
+    return entry, providers
+
+
+def test_all_three_resolvers_agree_when_a_pin_is_dropped() -> None:
+    """
+    The embedding-piggybacks-on-chat rule must not live in one resolver only.
+
+    With the Embeddings pin dropped, resolve_runtime_options used to reach
+    that rule and pick the chat provider while the other two ran the plain
+    capability loop and picked the first capable provider in subentry order.
+    Setup then paired the model instance built from the options with
+    `chains["embedding"][0]`'s id and deployment, so the instance was filed
+    under a provider that did not build it, the ranked provider was never
+    constructed, and the id comparison that triggers the fallback
+    notification compared equal - silently.
+    """
+    entry, providers = _f1_entry_and_providers()
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    deployments = build_model_deployments(entry, providers, {})  # type: ignore[arg-type]
+    chains = resolve_fallback_chains(entry, providers, {})  # type: ignore[arg-type]
+
+    head = chains["embedding"][0]
+    assert options[CONF_EMBEDDING_MODEL_PROVIDER] == head.provider_type
+    assert deployments["embedding"] == head.deployment
+    # The conversation pin is capable, so embeddings ride along with it.
+    assert head.entry_id == "p1"
+
+
+def test_every_chain_head_matches_its_resolved_provider() -> None:
+    """The invariant setup depends on, asserted across all four categories."""
+    entry, providers = _f1_entry_and_providers()
+
+    deployments = build_model_deployments(entry, providers, {})  # type: ignore[arg-type]
+    chains = resolve_fallback_chains(entry, providers, {})  # type: ignore[arg-type]
+
+    for category, chain in chains.items():
+        assert chain, f"{category} chain is empty"
+        assert deployments[category] == chain[0].deployment, category
+
+
+def test_dangling_pin_keeps_the_users_model_name() -> None:
+    """
+    A pin naming a deleted provider must not cost the user their model.
+
+    The id is truthy and never equal to the resolved provider's, so the
+    "this model name belongs to someone else" check treated it as a foreign
+    pin and silently substituted the recommended default. Nothing repairs a
+    dangling pin, so the substitution persisted across reloads.
+    """
+    ollama = DummySubentry(
+        "prov1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Primary Ollama",
+        {
+            "provider_type": "ollama",
+            "deployment": "edge",
+            "capabilities": ["chat", "vlm", "summarization", "embedding"],
+            "settings": {"base_url": "http://ollama-host:11434"},
+        },
+    )
+    emb_feature = DummySubentry(
+        "emb_feat",
+        SUBENTRY_TYPE_FEATURE,
+        "Embeddings",
+        {
+            "feature_type": "embedding",
+            "model_provider_id": "deleted-provider",
+            CONF_FEATURE_MODEL: {CONF_FEATURE_MODEL_NAME: "my-custom-embed"},
+        },
+    )
+    entry = DummyEntry()
+    entry.subentries = {s.subentry_id: s for s in (ollama, emb_feature)}
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_OLLAMA_EMBEDDING_MODEL] == "my-custom-embed"
+
+
+def test_dropped_pin_warning_names_the_provider_actually_used(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """
+    The warning must name the real destination, not a placeholder.
+
+    It used to say "using 'another configured provider' instead" whenever the
+    user's own ranked list came back empty - including when nothing was
+    selected at all, so the line claimed a substitution that never happened.
+    """
+    entry, providers = _f1_entry_and_providers()
+    _ = providers
+
+    with caplog.at_level("WARNING"):
+        resolve_runtime_options(entry)  # type: ignore[arg-type]
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("has no embedding support" in m for m in warnings)
+    assert any("using 'p1' instead" in m for m in warnings)
+    assert not any("another configured provider" in m for m in warnings)
+
+
+@pytest.mark.asyncio
+async def test_provider_step_default_is_always_an_offered_option(
+    hass: HomeAssistant,
+) -> None:
+    """
+    The pre-selected provider type must be one the deployment actually offers.
+
+    The step defaulted to a hardcoded "ollama". After choosing Cloud - which
+    offers OpenAI, Gemini and Anthropic - that value is absent from the
+    select's own options, so Home Assistant renders the raw value instead of
+    a label and the field shows a provider that cannot be picked from it.
+    """
+    entry = DummyEntry()
+    flow = _make_compat_flow(hass, entry)
+    captured: dict[str, Any] = {}
+    flow.async_show_form = lambda **kwargs: captured.update(kwargs) or {}  # type: ignore[assignment]
+
+    await flow.async_step_deployment({"deployment": "cloud"})
+
+    schema = captured["data_schema"].schema
+    provider_key = next(k for k in schema if str(k) == "provider_type")
+    offered = [opt["value"] for opt in schema[provider_key].config["options"]]
+    assert offered == ["openai", "gemini", "anthropic"]
+    assert provider_key.default() in offered
+
+
+@pytest.mark.asyncio
+async def test_new_provider_name_follows_the_type_actually_chosen(
+    hass: HomeAssistant,
+) -> None:
+    """
+    A new provider must not arrive pre-named after a type the user did not pick.
+
+    The name field was pre-filled from the defaulted type, so accepting the
+    form as offered created an Anthropic provider titled "Primary Ollama" -
+    `user_input.get("name")` is truthy, so the stale name won.
+    """
+    entry = DummyEntry()
+    flow = _make_compat_flow(hass, entry)
+    captured: dict[str, Any] = {}
+    flow.async_show_form = lambda **kwargs: captured.update(kwargs) or {}  # type: ignore[assignment]
+
+    await flow.async_step_deployment({"deployment": "cloud"})
+    name_key = next(k for k in captured["data_schema"].schema if str(k) == "name")
+    assert name_key.default is vol.UNDEFINED
+
+    # Submitting with the field untouched names it after the chosen type.
+    await flow.async_step_provider({"provider_type": "anthropic"})
+    assert flow._name == "Cloud-LLM Anthropic"
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_keeps_the_existing_provider_title(
+    hass: HomeAssistant,
+) -> None:
+    """A reconfigure must still offer the title the user already chose."""
+    entry = DummyEntry()
+    entry.subentries["gem1"] = DummySubentry(
+        "gem1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "My Own Gemini Name",
+        {
+            "provider_type": "gemini",
+            "deployment": "cloud",
+            "capabilities": ["chat", "vlm", "summarization", "embedding"],
+            "settings": {"api_key": "gk"},
+        },
+    )
+    flow = _make_compat_flow(hass, entry)
+    flow.context = {"source": "reconfigure", "subentry_id": "gem1"}
+    flow._source = "reconfigure"
+    captured: dict[str, Any] = {}
+    flow.async_show_form = lambda **kwargs: captured.update(kwargs) or {}  # type: ignore[assignment]
+
+    await flow.async_step_user()
+
+    schema = captured["data_schema"].schema
+    provider_key = next(k for k in schema if str(k) == "provider_type")
+    name_key = next(k for k in schema if str(k) == "name")
+    assert provider_key.default() == "gemini"
+    assert name_key.default() == "My Own Gemini Name"
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_to_another_type_does_not_prefill_the_old_credential(
+    hass: HomeAssistant,
+) -> None:
+    """
+    Switching a provider's type must not carry the old service's key across.
+
+    Every cloud provider stores its credential under settings["api_key"], so
+    pre-filling from the stored subentry put the Gemini key into the Anthropic
+    key field. Being a password field it renders as dots, so submitting sends
+    that key to api.anthropic.com for validation and returns "Invalid
+    credentials" for a key that was never wrong.
+    """
+    entry = DummyEntry()
+    entry.subentries["gem1"] = DummySubentry(
+        "gem1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Primary Gemini",
+        {
+            "provider_type": "gemini",
+            "deployment": "cloud",
+            "capabilities": ["chat", "vlm", "summarization", "embedding"],
+            "settings": {"api_key": "GEMINI-SECRET"},
+        },
+    )
+    flow = _make_compat_flow(hass, entry)
+    flow.context = {"source": "reconfigure", "subentry_id": "gem1"}
+    flow._source = "reconfigure"
+    captured: dict[str, Any] = {}
+    flow.async_show_form = lambda **kwargs: captured.update(kwargs) or {}  # type: ignore[assignment]
+
+    # Reconfiguring to Anthropic: the key field must come up empty.
+    flow._provider_type = "anthropic"
+    await flow.async_step_settings()
+    key = next(
+        k for k in captured["data_schema"].schema if str(k) == CONF_ANTHROPIC_API_KEY
+    )
+    assert key.default() == ""
+    assert captured["data_schema"].schema[key] is not None
+    assert "GEMINI-SECRET" not in str(key.description)
+
+    # Reconfiguring Gemini as Gemini still remembers its own key.
+    captured.clear()
+    flow._provider_type = "gemini"
+    await flow.async_step_settings()
+    key = next(
+        k for k in captured["data_schema"].schema if str(k) == CONF_GEMINI_API_KEY
+    )
+    assert key.default() == "GEMINI-SECRET"

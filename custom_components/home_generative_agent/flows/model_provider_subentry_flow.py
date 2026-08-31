@@ -31,6 +31,7 @@ from ..const import (  # noqa: TID252
     CONF_GEMINI_API_KEY,
     CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
     MODEL_CATEGORY_SPECS,
+    PROVIDER_TYPE_LABELS,
     RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
     SUBENTRY_TYPE_MODEL_PROVIDER,
 )
@@ -109,27 +110,25 @@ class ModelProviderSubentryFlow(ConfigSubentryFlow):
         )
 
     def _provider_options(self) -> list[SelectOptionDict]:
-        opts: list[SelectOptionDict] = []
+        def _opt(provider_type: str) -> SelectOptionDict:
+            return SelectOptionDict(
+                label=PROVIDER_TYPE_LABELS.get(provider_type, provider_type),
+                value=provider_type,
+            )
+
         if self._deployment == "edge":
-            opts.append(SelectOptionDict(label="Ollama", value="ollama"))
-            opts.append(
-                SelectOptionDict(label="OpenAI Compatible", value="openai_compatible")
-            )
+            return [_opt("ollama"), _opt("openai_compatible")]
         if self._deployment == "cloud":
-            opts.extend(
-                [
-                    SelectOptionDict(label="OpenAI", value="openai"),
-                    SelectOptionDict(label="Gemini", value="gemini"),
-                    SelectOptionDict(label="Anthropic", value="anthropic"),
-                ]
-            )
-        if not opts:
-            opts = [
-                SelectOptionDict(label="Ollama", value="ollama"),
-                SelectOptionDict(label="OpenAI", value="openai"),
-                SelectOptionDict(label="Gemini", value="gemini"),
-            ]
-        return opts
+            return [_opt("openai"), _opt("gemini"), _opt("anthropic")]
+        # A provider stored before the deployment step existed: offer every
+        # type so a reconfigure is never boxed into the edge/cloud split.
+        return [
+            _opt("ollama"),
+            _opt("openai_compatible"),
+            _opt("openai"),
+            _opt("gemini"),
+            _opt("anthropic"),
+        ]
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -154,16 +153,27 @@ class ModelProviderSubentryFlow(ConfigSubentryFlow):
             self._deployment = user_input.get("deployment")
             return await self.async_step_provider()
 
+        # No default: the choice gates which provider types the next step
+        # offers, so the user must make it deliberately rather than submit a
+        # preselected "Edge" and conclude the cloud providers are unavailable.
+        deployment_field = (
+            vol.Required("deployment", default=self._deployment)
+            if self._deployment
+            else vol.Required("deployment")
+        )
         schema = vol.Schema(
             {
-                vol.Required(
-                    "deployment",
-                    default=self._deployment or "edge",
-                ): SelectSelector(
+                deployment_field: SelectSelector(
                     SelectSelectorConfig(
                         options=[
-                            SelectOptionDict(label="Edge", value="edge"),
-                            SelectOptionDict(label="Cloud", value="cloud"),
+                            SelectOptionDict(
+                                label="Edge - self-hosted (Ollama, OpenAI Compatible)",
+                                value="edge",
+                            ),
+                            SelectOptionDict(
+                                label="Cloud - hosted API (OpenAI, Gemini, Anthropic)",
+                                value="cloud",
+                            ),
                         ],
                         mode=SelectSelectorMode.DROPDOWN,
                         sort=False,
@@ -186,8 +196,30 @@ class ModelProviderSubentryFlow(ConfigSubentryFlow):
             )
             return await self.async_step_settings()
 
-        provider_type = self._provider_type or "ollama"
-        default_name = self._name or ProviderNames.get(provider_type, "Model Provider")
+        options = self._provider_options()
+        values = [opt["value"] for opt in options]
+        # The deployment step decides this list, so a remembered type - or the
+        # old hardcoded "ollama" default - may not be on it. A select whose
+        # value is absent from its own options renders the raw value rather
+        # than the label, so choosing Cloud showed a lowercase "ollama" that
+        # could not be picked from the list below it.
+        provider_type = (
+            self._provider_type if self._provider_type in values else values[0]
+        )
+        name_field = (
+            # Reconfigure: the existing title is the user's, keep it.
+            vol.Optional(
+                "name",
+                description={"suggested_value": self._name},
+                default=self._name,
+            )
+            if self._name
+            # New provider: leave it blank so the title follows whichever type
+            # is actually chosen. Pre-filling a name derived from the default
+            # type produced an Anthropic provider titled "Primary Ollama"
+            # whenever the field was left as offered.
+            else vol.Optional("name")
+        )
         schema = vol.Schema(
             {
                 vol.Required(
@@ -195,17 +227,15 @@ class ModelProviderSubentryFlow(ConfigSubentryFlow):
                     default=provider_type,
                 ): SelectSelector(
                     SelectSelectorConfig(
-                        options=self._provider_options(),
+                        options=options,
                         mode=SelectSelectorMode.DROPDOWN,
                         sort=False,
                         custom_value=False,
                     )
                 ),
-                vol.Optional(
-                    "name",
-                    description={"suggested_value": default_name},
-                    default=default_name,
-                ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+                name_field: TextSelector(
+                    TextSelectorConfig(type=TextSelectorType.TEXT)
+                ),
             }
         )
         return self.async_show_form(step_id="provider", data_schema=schema)
@@ -217,7 +247,16 @@ class ModelProviderSubentryFlow(ConfigSubentryFlow):
         provider_type = self._provider_type or "ollama"
         errors: dict[str, str] = {}
         current = _current_subentry(self)
-        current_settings = dict(current.data.get("settings", {})) if current else {}
+        stored_settings = dict(current.data.get("settings", {})) if current else {}
+        stored_type = current.data.get("provider_type") if current else None
+        # Every cloud provider stores its credential under the same
+        # settings["api_key"], so pre-filling from the stored subentry after a
+        # type change put the PREVIOUS service's key into the new service's
+        # field. It is a password field, so it renders as dots and reads as a
+        # remembered value; submitting then sends that key to the new provider
+        # for validation - a Gemini key transmitted to api.anthropic.com in an
+        # x-api-key header - and comes back "Invalid credentials".
+        current_settings = stored_settings if stored_type == provider_type else {}
 
         if user_input is not None:
             settings: dict[str, Any] = {}

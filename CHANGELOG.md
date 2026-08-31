@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.33.5] - 2026-08-30
+
+### Fixed
+
+- **Embeddings no longer break silently when a provider is switched to Anthropic.** Anthropic has no embeddings endpoint, but a feature stays pointed at the same provider entry across a reconfigure, so switching your only provider from Gemini to Anthropic left the Embeddings feature aimed at a service that cannot do embeddings — nothing warned you, and long-term semantic memory simply stopped working. A feature is now checked against what its provider can actually serve, and an able provider is used instead. The log names the feature that moved, the provider it came off, and the one now serving it, so the switch is no longer silent. Reported by [@bgiuriceo](https://github.com/bgiuriceo) ([#593](https://github.com/goruck/home-generative-agent/issues/593)).
+- **A feature moved to a different provider now gets a model that provider actually has.** The model name is stored with the feature, so handing the feature to a stand-in provider would have handed over the old provider's model name with it — a Gemini embedding model requested from OpenAI, which rejects every call while setup still reports healthy. The stand-in now starts from its own recommended model. A feature still using the provider you chose keeps the model you chose.
+- **Switching to a provider that cannot serve a feature no longer discards your fallback order.** If you had ranked fallback providers for that feature, the whole list used to be thrown away and rebuilt in the order the providers happened to be added, which could promote one you never ranked. Your next ranked choice is used instead.
+
+### Changed
+
+- **Adding a cloud provider is no longer hidden behind the Deployment step.** Two cloud providers side by side always worked, but the first step of **+ Model Provider** arrived with **Edge** already chosen and said nothing about what that choice did, so accepting it led to a provider list of Ollama and OpenAI Compatible only — and it looked as though OpenAI, Gemini and Anthropic could not be added at all. Nothing is preselected now, and the two choices say what is behind them: **Edge - self-hosted (Ollama, OpenAI Compatible)** and **Cloud - hosted API (OpenAI, Gemini, Anthropic)**.
+- **A feature with no provider to offer now says why.** "No model provider is configured" was shown even when providers *were* configured and simply could not serve that feature — the message for the Embeddings feature on an Anthropic-only install, which read as a dead end. The two cases are now told apart, and the second names the provider types that can do the job. The provider picker also stops offering a provider the integration would then refuse to use.
+- **Switching a provider to a different type no longer carries the old service's API key into the new one's field.** Every cloud provider stores its key in the same place, so reconfiguring — say Gemini to Anthropic — pre-filled the Anthropic key field with the Gemini key. It is a password field, so it showed as dots and read as a remembered value; submitting sent that key to Anthropic to be checked and came back **Invalid credentials** for a key that was never wrong. Changing a provider's type now starts from an empty credential field. Reconfiguring a provider as the *same* type still remembers its key.
+- **Choosing Cloud no longer pre-fills a provider you cannot pick.** The provider step always started on Ollama, so after choosing Cloud the field showed a lowercase `ollama` that was not in its own dropdown, and the name below it read "Primary Ollama". Accepting that name as offered created a provider whose title named the wrong service entirely — an Anthropic provider called "Primary Ollama". The step now starts on a type the deployment actually offers, and a new provider's name is left blank so it follows whatever you pick. Reconfiguring keeps the name you gave it.
+- **The docs say how to add a second provider.** Reconfiguring an existing provider replaces it in place and takes every feature using it along; **+ Model Provider** is what adds another alongside. That, and Anthropic's missing embeddings endpoint, are now written down in the README and the configuration guide.
+
 ## [3.33.4] - 2026-08-29
 
 ### Fixed
