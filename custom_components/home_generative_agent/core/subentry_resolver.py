@@ -236,33 +236,55 @@ def _provider_supports_category(provider: ModelProviderConfig, category: str) ->
     return provider.provider_type in providers
 
 
-def _pinned_provider_for(
+def _feature_chain(
     feature: FeatureConfig,
     providers_by_id: Mapping[str, ModelProviderConfig],
     category: str,
-) -> ModelProviderConfig | None:
+    *,
+    warn: bool = False,
+) -> list[ModelProviderConfig]:
     """
-    Return the feature's pinned provider, or None when it cannot serve *category*.
+    Return the feature's provider chain in the order the user configured it.
 
-    Issue #593's complaint was that nothing warned the user, so a dropped pin
-    says so in the log rather than silently resolving to a different provider.
+    The user's own order is assembled first - pin, then their fallbacks - and
+    only then is anything that cannot serve *category* dropped, so an incapable
+    pin promotes their next ranked choice rather than discarding the list.
+
+    Every caller that resolves a provider for a category must go through this,
+    or they disagree: a chain promoting the user's first fallback while the
+    runtime options pick the first capable provider in subentry order leaves
+    setup pairing one provider's model instance with another's id, so the
+    ranked provider is never used and a third is retried twice.
+
+    *warn* logs the demotion. Only the caller that runs on every reload sets
+    it, so one reconfigure does not print the same line three times.
     """
-    provider = providers_by_id.get(feature.model_provider_id or "")
-    if provider is None:
-        return None
-    if not _provider_supports_category(provider, category):
+    pinned = providers_by_id.get(feature.model_provider_id or "")
+    if not pinned:
+        return []
+    candidates = [pinned]
+    for fb_id in feature.fallback_provider_ids or []:
+        fb = providers_by_id.get(fb_id)
+        if (
+            fb
+            and all(fb.entry_id != c.entry_id for c in candidates)
+            and category in fb.capabilities
+        ):
+            candidates.append(fb)
+    chain = [c for c in candidates if _provider_supports_category(c, category)]
+    if warn and (not chain or chain[0].entry_id != pinned.entry_id):
         LOGGER.warning(
             "Feature '%s' is assigned model provider '%s' (%s), which has no "
-            "%s support; using another configured provider instead. Reassign "
-            "the feature to a %s-capable provider to silence this.",
+            "%s support; using '%s' instead. Reassign the feature to a "
+            "%s-capable provider to silence this.",
             feature.feature_type,
-            provider.name,
-            provider.provider_type,
+            pinned.name,
+            pinned.provider_type,
             category,
+            chain[0].name if chain else "another configured provider",
             category,
         )
-        return None
-    return provider
+    return chain
 
 
 def _coerce_capabilities(raw: Any) -> set[str]:
@@ -949,9 +971,9 @@ def build_model_deployments(
         cat = FEATURE_CATEGORY_MAP.get(feature.feature_type)
         if not cat:
             continue
-        provider = _pinned_provider_for(feature, providers_by_id, cat)
-        if provider:
-            category_provider.setdefault(cat, provider)
+        chain = _feature_chain(feature, providers_by_id, cat)
+        if chain:
+            category_provider.setdefault(cat, chain[0])
 
     for cat in ("chat", "vlm", "summarization", "embedding"):
         if cat in category_provider:
@@ -1010,9 +1032,9 @@ def resolve_runtime_options(entry: ConfigEntry) -> dict[str, Any]:
         cat = FEATURE_CATEGORY_MAP.get(feature.feature_type)
         if not cat:
             continue
-        provider = _pinned_provider_for(feature, providers_by_id, cat)
-        if provider:
-            category_provider.setdefault(cat, provider)
+        chain = _feature_chain(feature, providers_by_id, cat, warn=True)
+        if chain:
+            category_provider.setdefault(cat, chain[0])
 
     for cat in ("chat", "vlm", "summarization", "embedding"):
         if cat in category_provider:
@@ -1044,46 +1066,6 @@ def resolve_runtime_options(entry: ConfigEntry) -> dict[str, Any]:
             )
 
     return options
-
-
-def _feature_chain(
-    feature: FeatureConfig,
-    providers_by_id: Mapping[str, ModelProviderConfig],
-    category: str,
-) -> list[ModelProviderConfig]:
-    """
-    Return the feature's provider chain in the order the user configured it.
-
-    The user's own order is assembled first - pin, then their fallbacks - and
-    only then is anything that cannot serve *category* dropped. Skipping the
-    whole feature when the pin is incapable would discard their ordered list
-    and leave the caller's automatic loop to rebuild it in subentry insertion
-    order, silently promoting a provider they never ranked.
-    """
-    pinned = providers_by_id.get(feature.model_provider_id or "")
-    if not pinned:
-        return []
-    candidates = [pinned]
-    for fb_id in feature.fallback_provider_ids or []:
-        fb = providers_by_id.get(fb_id)
-        if (
-            fb
-            and all(fb.entry_id != c.entry_id for c in candidates)
-            and category in fb.capabilities
-        ):
-            candidates.append(fb)
-    chain = [c for c in candidates if _provider_supports_category(c, category)]
-    if chain and chain[0].entry_id != pinned.entry_id:
-        LOGGER.warning(
-            "Feature '%s' is assigned model provider '%s' (%s), which has no "
-            "%s support; promoting its next configured fallback '%s'.",
-            feature.feature_type,
-            pinned.name,
-            pinned.provider_type,
-            category,
-            chain[0].name,
-        )
-    return chain
 
 
 def resolve_fallback_chains(

@@ -3492,3 +3492,84 @@ def test_provider_picker_hides_a_capability_less_anthropic_subentry() -> None:
         opt["value"]
         for opt in _feature_provider_options(entry, "chat")  # type: ignore[arg-type]
     ] == ["prov1"]
+
+
+def test_runtime_options_and_fallback_chain_agree_on_the_promoted_provider() -> None:
+    """
+    The category's active provider must be the head of its own fallback chain.
+
+    Setup pairs the embedding model instance built from the runtime options
+    with `fallback_chains["embedding"][0]`'s id and deployment. If the two
+    disagree - options picking the first capable provider in subentry order
+    while the chain promotes the user's first ranked fallback - the instance
+    is filed under the wrong provider, the ranked provider is never used and
+    the other is retried twice.
+    """
+    anthropic = DummySubentry(
+        "prov1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Cloud-LLM Anthropic",
+        {
+            "provider_type": "anthropic",
+            "deployment": "cloud",
+            "capabilities": ["chat", "vlm", "summarization"],
+            "settings": {"api_key": "sk-ant"},
+        },
+    )
+    gemini = DummySubentry(
+        "prov2",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Cloud-LLM Gemini",
+        {
+            "provider_type": "gemini",
+            "deployment": "cloud",
+            "capabilities": ["chat", "vlm", "summarization", "embedding"],
+            "settings": {"api_key": "gk"},
+        },
+    )
+    ollama = DummySubentry(
+        "prov3",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Primary Ollama",
+        {
+            "provider_type": "ollama",
+            "deployment": "edge",
+            "capabilities": ["embedding"],
+            "settings": {"base_url": "http://ollama-host:11434"},
+        },
+    )
+    # Pinned to the incapable Anthropic, with Ollama ranked ahead of Gemini.
+    # Gemini is the earlier subentry, so an order-blind pick would take it.
+    emb_feature = DummySubentry(
+        "emb_feat",
+        SUBENTRY_TYPE_FEATURE,
+        "Embeddings",
+        {
+            "feature_type": "embedding",
+            "model_provider_id": "prov1",
+            CONF_FEATURE_FALLBACK_PROVIDER_IDS: ["prov3", "prov2"],
+        },
+    )
+    entry = DummyEntry()
+    entry.subentries = {
+        s.subentry_id: s for s in (anthropic, gemini, ollama, emb_feature)
+    }
+    providers = {
+        sub.subentry_id: ModelProviderConfig(
+            entry_id=sub.subentry_id,
+            name=sub.title,
+            provider_type=sub.data["provider_type"],
+            capabilities=set(sub.data["capabilities"]),
+            data={"settings": sub.data["settings"]},
+            deployment=sub.data["deployment"],
+        )
+        for sub in (anthropic, gemini, ollama)
+    }
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    chains = resolve_fallback_chains(entry, providers, {})  # type: ignore[arg-type]
+    deployments = build_model_deployments(entry, providers, {})  # type: ignore[arg-type]
+
+    assert chains["embedding"][0].entry_id == "prov3"
+    assert options[CONF_EMBEDDING_MODEL_PROVIDER] == "ollama"
+    assert deployments["embedding"] == "edge"
