@@ -115,21 +115,29 @@ What each choice sends depends on the provider:
 
 | Provider | Off | On | Effort levels | Budget |
 | --- | --- | --- | --- | --- |
-| Ollama | `reasoning: false` | `reasoning: true` (`low` effort for gpt-oss) | passed through | not supported by the Ollama API |
-| OpenAI Compatible (llama.cpp, vLLM, …) | `reasoning_effort: none` + `chat_template_kwargs: {enable_thinking: false}` | `chat_template_kwargs: {enable_thinking: true}` | `reasoning_effort` | `thinking_budget_tokens` (recent llama.cpp servers; older servers ignore it) |
-| OpenAI | not sent (cloud reasoning models cannot disable thinking) | not sent | `reasoning_effort` | not supported |
-| Gemini | `thinking_budget: 0` | `thinking_budget` (dynamic when no budget set) | `thinking_level` low/high (Gemini 3-style models) | `thinking_budget` |
-| Anthropic | not sent (thinking is off by default) | extended thinking with `budget_tokens` | — | `budget_tokens` (floor 1024; `max_tokens` is raised above the budget and temperature is pinned to 1, as the API requires) |
+| Ollama | `reasoning: false` | `reasoning: true` | passed through for gpt-oss models; other models treat any effort as On | not supported by the Ollama API |
+| OpenAI Compatible (llama.cpp, vLLM, …) | `reasoning_effort: none` + `chat_template_kwargs: {enable_thinking: false}` | `chat_template_kwargs: {enable_thinking: true}` | `reasoning_effort` — free-form values (e.g. `xhigh`) pass through verbatim; the server owns the vocabulary | `thinking_budget_tokens` (recent llama.cpp servers; older servers ignore it) |
+| OpenAI | not sent (cloud reasoning models cannot disable thinking) | not sent | `reasoning_effort` (known levels only); a model that rejects it is retried without it automatically | not supported |
+| Gemini 2.x | `thinking_budget: 0` | `thinking_budget` (dynamic when no budget set) | treated as On | `thinking_budget` |
+| Gemini 3-family (`gemini-3*`) | `thinking_level: low` (cannot fully disable) | `thinking_level: high` | minimal/low → `low`, medium/high → `high` | ignored (the API takes a level, not a budget) |
+| Anthropic | not sent (thinking is off by default) | extended thinking with `budget_tokens` | not applicable (only Off/On offered) | `budget_tokens`, clamped to 1024–32768; `max_tokens` is raised above the budget and temperature is pinned to 1, as the API requires |
 
 **Provider default** sends nothing, leaving the server/model behavior unchanged.
 
 Notes:
 
+- Entering a **budget** while the thinking select is at Provider default counts
+  as turning thinking **On** — a budget only means something with thinking
+  enabled.
+- Switching to a model with **no remembered entry** starts it at Provider
+  default — the thinking values still on screen belong to the previous model
+  and are never carried over. Save again to configure the new model.
+- The chat model's thinking settings apply **everywhere the chat model is
+  used** — conversation, Sentinel triage and discovery, and explanation
+  generation — so a large budget also slows and bills those background calls.
 - llama.cpp: a `--reasoning-budget` set on the server command line overrides the
   per-request budget. If a model ignores the toggle, check that its chat template
   supports `enable_thinking` (Qwen-style) or `reasoning_effort`.
-- Choosing **Off** on a model that cannot disable thinking (e.g. `gemini-3.5-pro`)
-  is rejected by the provider, not by HGA — prefer **Provider default** there.
 - Fallback providers follow the same per-model memory: a fallback model uses its
   own remembered entry if one exists, otherwise the provider default.
 

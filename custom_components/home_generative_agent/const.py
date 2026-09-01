@@ -380,8 +380,11 @@ CONF_CHAT_REASONING = "chat_reasoning"
 CONF_CHAT_REASONING_BUDGET = "chat_reasoning_budget"
 CONF_CHAT_REASONING_BY_MODEL = "chat_reasoning_by_model"
 # Anthropic extended thinking constraints: the API requires
-# budget_tokens >= 1024 and max_tokens > budget_tokens.
+# budget_tokens >= 1024 and max_tokens > budget_tokens. The budget is capped
+# so budget + response headroom stays under every current model's output
+# limit (the drop-on-400 retry cannot recover an Anthropic max_tokens 400).
 ANTHROPIC_THINKING_MIN_BUDGET = 1024
+ANTHROPIC_THINKING_MAX_BUDGET = 32768
 ANTHROPIC_THINKING_RESPONSE_TOKENS = 4096
 
 # ---- Fallback configuration ----

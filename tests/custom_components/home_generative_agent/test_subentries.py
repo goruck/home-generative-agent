@@ -4121,3 +4121,65 @@ def test_resolve_runtime_options_ollama_reasoning_false_kept() -> None:
     options = resolve_runtime_options(entry)  # type: ignore[arg-type]
     assert options[CONF_OLLAMA_REASONING] is False
     assert options[CONF_CHAT_REASONING] is False
+
+
+@pytest.mark.asyncio
+async def test_feature_flow_switching_to_unremembered_model_uses_defaults(
+    hass: HomeAssistant,
+) -> None:
+    """A model with no remembered entry never inherits the on-screen values."""
+    entry, feature = _thinking_entry(
+        {
+            CONF_FEATURE_MODEL_NAME: "gemma-4-e4b",
+            CONF_FEATURE_MODEL_REASONING: True,
+            CONF_FEATURE_MODEL_REASONING_BUDGET: 8192,
+            CONF_FEATURE_MODEL_REASONING_BY_MODEL: {
+                "gemma-4-e4b": {"reasoning": True, "budget": 8192},
+            },
+        }
+    )
+    flow = _thinking_flow(hass, entry, feature)
+
+    await flow.async_step_user()
+    await flow.async_step_conversation({"model_provider_id": "prov1"})
+    # The form still shows gemma's values; phi-4 must not inherit them.
+    result = await flow.async_step_feature_model(
+        {
+            CONF_FEATURE_MODEL_NAME: "phi-4",
+            CONF_FEATURE_MODEL_REASONING: "true",
+            CONF_FEATURE_MODEL_REASONING_BUDGET: 8192.0,
+        }
+    )
+    assert result.get("type") == "abort"
+    model = feature.data[CONF_FEATURE_MODEL]
+    assert CONF_FEATURE_MODEL_REASONING not in model
+    assert CONF_FEATURE_MODEL_REASONING_BUDGET not in model
+    assert model[CONF_FEATURE_MODEL_REASONING_BY_MODEL] == {
+        "gemma-4-e4b": {"reasoning": True, "budget": 8192},
+    }
+
+
+@pytest.mark.asyncio
+async def test_feature_flow_budget_with_default_enables_thinking(
+    hass: HomeAssistant,
+) -> None:
+    """Entering a budget while the select is at Provider default turns On."""
+    entry, feature = _thinking_entry({CONF_FEATURE_MODEL_NAME: "gemma-4-e4b"})
+    flow = _thinking_flow(hass, entry, feature)
+
+    await flow.async_step_user()
+    await flow.async_step_conversation({"model_provider_id": "prov1"})
+    result = await flow.async_step_feature_model(
+        {
+            CONF_FEATURE_MODEL_NAME: "gemma-4-e4b",
+            CONF_FEATURE_MODEL_REASONING: "default",
+            CONF_FEATURE_MODEL_REASONING_BUDGET: 512.0,
+        }
+    )
+    assert result.get("type") == "abort"
+    model = feature.data[CONF_FEATURE_MODEL]
+    assert model[CONF_FEATURE_MODEL_REASONING] is True
+    assert model[CONF_FEATURE_MODEL_REASONING_BUDGET] == 512
+    assert model[CONF_FEATURE_MODEL_REASONING_BY_MODEL] == {
+        "gemma-4-e4b": {"reasoning": True, "budget": 512}
+    }

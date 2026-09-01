@@ -2382,15 +2382,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         if isinstance(remembered, Mapping):
             reasoning_val = remembered.get("reasoning")
             budget_val = remembered.get("budget")
+            # A budget-only entry (older stored data) must not mask the flat
+            # setting for the primary model.
+            if reasoning_val is None and default_to_flat:
+                reasoning_val = chat_reasoning
+                budget_val = budget_val or chat_reasoning_budget
         elif default_to_flat:
             reasoning_val = chat_reasoning
             budget_val = chat_reasoning_budget
         else:
             return {}
+        try:
+            budget_int = int(budget_val) if budget_val else None
+        except (TypeError, ValueError):
+            budget_int = None
         return thinking_configurable(
             provider_type=provider_type,
             reasoning=reasoning_val,
-            budget=int(budget_val) if budget_val else None,
+            budget=budget_int,
+            model=str(model_name),
         )
 
     ollama_chat_keep_alive = options.get(

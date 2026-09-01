@@ -342,10 +342,18 @@ def _add_reasoning_schema(
             defaults.get(CONF_FEATURE_MODEL_REASONING),
         ),
     )
+    display = _reasoning_display(reasoning_val, provider_type)
+    if provider_type not in _REASONING_CUSTOM_VALUE_PROVIDERS and display not in {
+        value for _, value in _REASONING_CHOICES[provider_type]
+    }:
+        # A value stored under a different provider type (the provider was
+        # reconfigured in place) would otherwise become an un-submittable
+        # default on a select that rejects custom values.
+        display = "default"
     schema[
         vol.Optional(
             CONF_FEATURE_MODEL_REASONING,
-            default=_reasoning_display(reasoning_val, provider_type),
+            default=display,
         )
     ] = SelectSelector(
         SelectSelectorConfig(
@@ -370,6 +378,57 @@ def _add_reasoning_schema(
         schema[budget_key] = NumberSelector(
             NumberSelectorConfig(min=0, max=_REASONING_BUDGET_MAX_TOKENS, step=1)
         )
+
+
+def _resolve_submitted_thinking(
+    user_input: Mapping[str, Any],
+    existing_model: Mapping[str, Any],
+    submitted_name: Any,
+    category: str | None,
+) -> tuple[Any, int | None, dict[str, dict[str, Any]]]:
+    """
+    Resolve the thinking values and per-model map for a model-form submission.
+
+    Returns (reasoning, budget, by_model). The on-screen thinking fields
+    belong to the previously stored model, so they never follow a model
+    switch: the new model uses its remembered entry or provider defaults, and
+    a second save changes them. With no stored model this is first-time setup
+    and the entered values are the user's own.
+    """
+    stored_name = existing_model.get(CONF_FEATURE_MODEL_NAME)
+    by_model: dict[str, dict[str, Any]] = {
+        str(name): dict(entry_val)
+        for name, entry_val in (
+            existing_model.get(CONF_FEATURE_MODEL_REASONING_BY_MODEL) or {}
+        ).items()
+        if isinstance(entry_val, Mapping)
+    }
+    reasoning_val = _normalize_reasoning(user_input.get(CONF_FEATURE_MODEL_REASONING))
+    budget_val = _normalize_reasoning_budget(
+        user_input.get(CONF_FEATURE_MODEL_REASONING_BUDGET)
+    )
+    if stored_name is not None and submitted_name != stored_name:
+        remembered = by_model.get(str(submitted_name or ""), {})
+        return (
+            remembered.get("reasoning"),
+            _normalize_reasoning_budget(remembered.get("budget")),
+            by_model,
+        )
+    if submitted_name and category == "chat":
+        if reasoning_val is None and budget_val:
+            # A budget only means something with thinking on; entering one
+            # while the select is at "Provider default" enables it.
+            reasoning_val = True
+        entry_val: dict[str, Any] = {}
+        if reasoning_val is not None:
+            entry_val["reasoning"] = reasoning_val
+        if budget_val:
+            entry_val["budget"] = budget_val
+        if entry_val:
+            by_model[submitted_name] = entry_val
+        else:
+            by_model.pop(submitted_name, None)
+    return reasoning_val, budget_val, by_model
 
 
 def _remembered_reasoning_entry(
@@ -1008,37 +1067,9 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
             model_data = dict(defaults)
             model_data.update(existing_model)
             submitted_name = user_input.get(CONF_FEATURE_MODEL_NAME)
-            stored_name = existing_model.get(CONF_FEATURE_MODEL_NAME)
-            by_model: dict[str, dict[str, Any]] = {
-                str(name): dict(entry_val)
-                for name, entry_val in (
-                    existing_model.get(CONF_FEATURE_MODEL_REASONING_BY_MODEL) or {}
-                ).items()
-                if isinstance(entry_val, Mapping)
-            }
-            reasoning_val = _normalize_reasoning(
-                user_input.get(CONF_FEATURE_MODEL_REASONING)
+            reasoning_val, budget_val, by_model = _resolve_submitted_thinking(
+                user_input, existing_model, submitted_name, category
             )
-            budget_val = _normalize_reasoning_budget(
-                user_input.get(CONF_FEATURE_MODEL_REASONING_BUDGET)
-            )
-            if submitted_name != stored_name and submitted_name in by_model:
-                # Switching to a model with remembered thinking settings: the
-                # on-screen thinking fields still showed the previous model's
-                # values, so the remembered entry wins. Save again to change it.
-                remembered = by_model[submitted_name]
-                reasoning_val = remembered.get("reasoning")
-                budget_val = _normalize_reasoning_budget(remembered.get("budget"))
-            elif submitted_name and category == "chat":
-                entry_val = {}
-                if reasoning_val is not None:
-                    entry_val["reasoning"] = reasoning_val
-                if budget_val:
-                    entry_val["budget"] = budget_val
-                if entry_val:
-                    by_model[submitted_name] = entry_val
-                else:
-                    by_model.pop(submitted_name, None)
             model_data.update(
                 {
                     CONF_FEATURE_MODEL_NAME: submitted_name,

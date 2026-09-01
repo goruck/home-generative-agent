@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 from custom_components.home_generative_agent.const import (
+    ANTHROPIC_THINKING_MAX_BUDGET,
     ANTHROPIC_THINKING_MIN_BUDGET,
     ANTHROPIC_THINKING_RESPONSE_TOKENS,
 )
@@ -525,9 +526,19 @@ def test_thinking_none_sends_nothing_for_all_providers() -> None:
         )
 
 
-def test_thinking_unknown_effort_string_sends_nothing() -> None:
-    """A free-form value outside known effort levels is not forwarded."""
+def test_thinking_unknown_effort_string_sends_nothing_for_cloud_openai() -> None:
+    """Cloud OpenAI only forwards known effort levels."""
     assert thinking_configurable(provider_type="openai", reasoning="frobnicate") == {}
+
+
+def test_thinking_openai_compatible_forwards_custom_effort() -> None:
+    """llama.cpp-style servers own the effort vocabulary - pass verbatim."""
+    assert thinking_configurable(
+        provider_type="openai_compatible", reasoning="xhigh"
+    ) == {"reasoning_effort": "xhigh"}
+    assert thinking_configurable(
+        provider_type="openai_compatible", reasoning="none"
+    ) == {"reasoning_effort": "none"}
 
 
 def test_thinking_ollama_returns_empty() -> None:
@@ -574,23 +585,44 @@ def test_thinking_openai_compatible_effort() -> None:
     assert config == {"reasoning_effort": "low"}
 
 
-def test_thinking_gemini_mappings() -> None:
-    """Gemini: off=budget 0, on=budget or dynamic, effort=thinking level."""
-    assert thinking_configurable(provider_type="gemini", reasoning=False) == {
-        "thinking_budget": 0
-    }
+def test_thinking_gemini_2x_uses_budget() -> None:
+    """Gemini 2.x: off=budget 0, on=budget or dynamic, effort treated as On."""
+    model = "gemini-2.5-flash"
     assert thinking_configurable(
-        provider_type="gemini", reasoning=True, budget=512
+        provider_type="gemini", reasoning=False, model=model
+    ) == {"thinking_budget": 0}
+    assert thinking_configurable(
+        provider_type="gemini", reasoning=True, budget=512, model=model
     ) == {"thinking_budget": 512}
-    assert thinking_configurable(provider_type="gemini", reasoning=True) == {
-        "thinking_budget": -1
-    }
-    assert thinking_configurable(provider_type="gemini", reasoning="low") == {
-        "thinking_level": "low"
-    }
-    assert thinking_configurable(provider_type="gemini", reasoning="high") == {
-        "thinking_level": "high"
-    }
+    assert thinking_configurable(
+        provider_type="gemini", reasoning=True, model=model
+    ) == {"thinking_budget": -1}
+    assert thinking_configurable(
+        provider_type="gemini", reasoning="low", model=model
+    ) == {"thinking_budget": -1}
+
+
+def test_thinking_gemini_3_family_uses_level() -> None:
+    """Gemini 3-family models take thinking_level, never a budget."""
+    model = "gemini-3.5-flash-lite"
+    assert thinking_configurable(
+        provider_type="gemini", reasoning=True, budget=512, model=model
+    ) == {"thinking_level": "high"}
+    assert thinking_configurable(
+        provider_type="gemini", reasoning=False, model=model
+    ) == {"thinking_level": "low"}
+    assert thinking_configurable(
+        provider_type="gemini", reasoning="low", model=model
+    ) == {"thinking_level": "low"}
+    assert thinking_configurable(
+        provider_type="gemini", reasoning="high", model=model
+    ) == {"thinking_level": "high"}
+    assert (
+        thinking_configurable(
+            provider_type="gemini", reasoning="frobnicate", model=model
+        )
+        == {}
+    )
 
 
 def test_thinking_anthropic_enforces_api_constraints() -> None:
@@ -610,3 +642,32 @@ def test_thinking_anthropic_enforces_api_constraints() -> None:
     big = thinking_configurable(provider_type="anthropic", reasoning=True, budget=8192)
     assert big["thinking"] == {"type": "enabled", "budget_tokens": 8192}
     assert thinking_configurable(provider_type="anthropic", reasoning=False) == {}
+
+
+def test_thinking_anthropic_caps_budget_below_output_limit() -> None:
+    """A UI-permitted oversized budget is clamped so max_tokens stays valid."""
+    config = thinking_configurable(
+        provider_type="anthropic", reasoning=True, budget=131072
+    )
+    assert config["thinking"] == {
+        "type": "enabled",
+        "budget_tokens": ANTHROPIC_THINKING_MAX_BUDGET,
+    }
+    assert (
+        config["max_tokens"]
+        == ANTHROPIC_THINKING_MAX_BUDGET + ANTHROPIC_THINKING_RESPONSE_TOKENS
+    )
+
+
+def test_thinking_anthropic_ignores_stale_effort_strings() -> None:
+    """An effort left over from another provider type must not enable thinking."""
+    assert thinking_configurable(provider_type="anthropic", reasoning="medium") == {}
+
+
+def test_reasoning_field_passes_effort_through_for_gpt_oss() -> None:
+    """gpt-oss models get the configured effort verbatim, not the heuristic."""
+    assert reasoning_field(model="gpt-oss:20b", enabled="high") == {"reasoning": "high"}
+    assert reasoning_field(model="gpt-oss:20b", enabled=True) == {"reasoning": "low"}
+    # Boolean-style models treat any truthy value as on.
+    assert reasoning_field(model="qwen3:8b", enabled="high") == {"reasoning": True}
+    assert reasoning_field(model="qwen3:8b", enabled=False) == {"reasoning": False}

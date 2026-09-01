@@ -47,8 +47,10 @@ except ImportError:
     OpenAIBadRequestError = None  # type: ignore[assignment, misc]
 
 # Sampling parameters that can be safely omitted when a model rejects them
-# (e.g. OpenAI reasoning-style models only accept the default temperature=1).
-DROPPABLE_SAMPLING_PARAMS = frozenset({"temperature", "top_p"})
+# (e.g. OpenAI reasoning-style models only accept the default temperature=1,
+# and non-reasoning models reject reasoning_effort outright). Each name must
+# match a registered ConfigurableField id so the retry can null it.
+DROPPABLE_SAMPLING_PARAMS = frozenset({"temperature", "top_p", "reasoning_effort"})
 
 _UNSUPPORTED_PARAM_CODES = frozenset({"unsupported_value", "unsupported_parameter"})
 
