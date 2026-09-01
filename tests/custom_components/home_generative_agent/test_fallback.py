@@ -14,6 +14,7 @@ from homeassistant.exceptions import HomeAssistantError
 
 from custom_components.home_generative_agent.const import EMBEDDING_MODEL_DIMS
 from custom_components.home_generative_agent.core.fallback import (
+    DROPPABLE_SAMPLING_PARAMS,
     CircuitBreaker,
     FallbackChatModel,
     FallbackEmbeddings,
@@ -831,7 +832,7 @@ async def test_fallback_chat_tool_bound_rebinds_same_provider() -> None:
     # p1 was retried in place with default sampling; p2 never entered.
     bound_p2.ainvoke.assert_not_awaited()
     strip_config = src_p1.with_config.call_args.kwargs["config"]
-    assert strip_config == {"configurable": {"temperature": None, "top_p": None}}
+    assert strip_config == {"configurable": dict.fromkeys(DROPPABLE_SAMPLING_PARAMS)}
     # The rebind success cleared p1 instead of recording a breaker failure.
     assert breaker._failures.get("p1") in (None, [])
 
@@ -859,3 +860,8 @@ async def test_fallback_chat_rebind_failure_still_falls_over() -> None:
 
     result = await bound.ainvoke(["hello"])
     assert result.content == "fallback"
+
+
+def test_reasoning_effort_is_droppable() -> None:
+    """A 400 rejecting reasoning_effort must be retried without it (issue #580)."""
+    assert "reasoning_effort" in DROPPABLE_SAMPLING_PARAMS

@@ -11,7 +11,7 @@ import re
 import secrets
 import time
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -22,6 +22,9 @@ from homeassistant.helpers.httpx_client import get_async_client
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
 from ..const import (  # noqa: TID252
+    ANTHROPIC_THINKING_MAX_BUDGET,
+    ANTHROPIC_THINKING_MIN_BUDGET,
+    ANTHROPIC_THINKING_RESPONSE_TOKENS,
     CONF_OLLAMA_URL,
     EMBEDDING_MODEL_DIMS,
     HTTP_STATUS_BAD_REQUEST,
@@ -937,18 +940,135 @@ def _guess_ollama_reasoning(model: str) -> tuple[bool, ReasoningValue]:
 def reasoning_field(
     *,
     model: str,
-    enabled: bool,
+    enabled: Any,
 ) -> dict[str, ReasoningValue]:
     """
     Return {'reasoning': value} for models that support thinking.
 
     Explicitly passes False when disabled so ChatOllama does not fall back to
-    the model's default (which for Qwen3-family is thinking-on).
+    the model's default (which for Qwen3-family is thinking-on). For gpt-oss
+    models a configured effort string passes through verbatim; boolean-style
+    models treat any truthy value as on.
     """
     supported, value = _guess_ollama_reasoning(model)
     if not supported:
         return {}
-    return {"reasoning": value if enabled else False}
+    if not enabled:
+        return {"reasoning": False}
+    if value == OLLAMA_GPT_EFFORT and enabled in ("low", "medium", "high"):
+        return {"reasoning": cast("ReasoningValue", enabled)}
+    return {"reasoning": value}
+
+
+_EFFORT_LEVELS = frozenset({"minimal", "low", "medium", "high"})
+
+
+def _thinking_openai(
+    _reasoning: Any, effort: str | None, _budget: int | None, _model: str
+) -> dict[str, Any]:
+    # Cloud OpenAI reasoning models cannot disable thinking; only known effort
+    # levels are meaningful. On/Off and free-form strings are not sent.
+    return {"reasoning_effort": effort} if effort in _EFFORT_LEVELS else {}
+
+
+def _thinking_openai_compatible(
+    reasoning: Any, effort: str | None, budget: int | None, _model: str
+) -> dict[str, Any]:
+    # llama.cpp/vLLM-style servers: 'reasoning_effort: none' plus
+    # 'chat_template_kwargs.enable_thinking' cover both template styles;
+    # unknown template variables are ignored, so sending both is safe.
+    # Free-form effort strings (llama.cpp also understands e.g. "xhigh")
+    # pass through verbatim - the server, not this code, owns the vocabulary.
+    config: dict[str, Any] = {}
+    extra_body: dict[str, Any] = {}
+    if reasoning is False:
+        config["reasoning_effort"] = "none"
+        extra_body["chat_template_kwargs"] = {"enable_thinking": False}
+    elif effort:
+        config["reasoning_effort"] = effort
+    else:
+        extra_body["chat_template_kwargs"] = {"enable_thinking": True}
+    if reasoning is not False and budget:
+        # Per-request budget on recent llama.cpp servers; older servers
+        # ignore unknown body fields.
+        extra_body["thinking_budget_tokens"] = budget
+    if extra_body:
+        config["extra_body"] = extra_body
+    return config
+
+
+def _thinking_gemini(
+    reasoning: Any, effort: str | None, budget: int | None, _model: str
+) -> dict[str, Any]:
+    # Only thinking_budget is expressible on the pinned stack:
+    # google-ai-generativelanguage 0.10.0's ThinkingConfig protobuf has no
+    # thinking_level field, so langchain-google-genai 3.1.0 crashes at proto
+    # marshaling if that pydantic field is ever set - for every model,
+    # Gemini 3-family included. Level control can land with the 4.x upgrade.
+    if reasoning is False:
+        return {"thinking_budget": 0}
+    if effort is not None and effort not in _EFFORT_LEVELS:
+        return {}
+    # Effort levels have no budget-API equivalent; treat them as On.
+    # -1 = dynamic thinking when no explicit budget is configured.
+    return {"thinking_budget": budget or -1}
+
+
+def _thinking_anthropic(
+    reasoning: Any, _effort: str | None, budget: int | None, _model: str
+) -> dict[str, Any]:
+    # Only an explicit On enables extended thinking; effort strings can only
+    # arrive as stale data from another provider type and must not enable it.
+    if reasoning is not True:
+        return {}
+    budget_tokens = min(
+        max(budget or 0, ANTHROPIC_THINKING_MIN_BUDGET),
+        ANTHROPIC_THINKING_MAX_BUDGET,
+    )
+    # Extended thinking requires max_tokens > budget_tokens and
+    # temperature=1; these override the feature-level temperature.
+    return {
+        "thinking": {"type": "enabled", "budget_tokens": budget_tokens},
+        "max_tokens": budget_tokens + ANTHROPIC_THINKING_RESPONSE_TOKENS,
+        "temperature": 1,
+    }
+
+
+_THINKING_BUILDERS: dict[
+    str, Callable[[Any, str | None, int | None, str], dict[str, Any]]
+] = {
+    "openai": _thinking_openai,
+    "openai_compatible": _thinking_openai_compatible,
+    "gemini": _thinking_gemini,
+    "anthropic": _thinking_anthropic,
+}
+
+
+def thinking_configurable(
+    *,
+    provider_type: str,
+    reasoning: Any,
+    budget: int | None = None,
+    model: str = "",
+) -> dict[str, Any]:
+    """
+    Map the canonical chat thinking setting to provider configurable fields.
+
+    Canonical ``reasoning`` values: ``None`` (provider default - send nothing),
+    ``False`` (explicitly off), ``True`` (explicitly on), or an effort-level
+    string. ``budget`` is a thinking-token budget honored where the provider
+    API has one; ``model`` steers model-family mappings (Gemini 3 levels).
+
+    Ollama is handled separately via :func:`reasoning_field` (its value depends
+    on model-name heuristics); this helper returns ``{}`` for it.
+    """
+    if reasoning is None:
+        return {}
+    effort = reasoning if isinstance(reasoning, str) else None
+    builder = _THINKING_BUILDERS.get(provider_type)
+    if builder is None:
+        return {}
+    return builder(reasoning, effort, budget, model)
 
 
 def extract_final(raw: str | list[Any], max_chars: int | None = None) -> str:

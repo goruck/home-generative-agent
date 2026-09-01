@@ -251,10 +251,13 @@
             "temperature": "Sıcaklık",
             "keepalive_s": "Ollama keepalive (saniye veya Asla boşaltma (-1))",
             "context_size": "Ollama bağlam boyutu (token)",
-            "reasoning": "Ollama akıl yürütme"
+            "reasoning": "Düşünme / akıl yürütme",
+            "reasoning_budget": "Düşünme bütçesi (token)"
           },
           "data_description": {
-            "fallback_provider_ids": "Sıralı yedek sağlayıcı listesi. Birincil sağlayıcı başarısız olursa ilk kullanılabilir sağlayıcı kullanılır."
+            "fallback_provider_ids": "Sıralı yedek sağlayıcı listesi. Birincil sağlayıcı başarısız olursa ilk kullanılabilir sağlayıcı kullanılır.",
+            "reasoning": "Seçili sohbet modeli için model düşünmesini denetler. Sağlayıcı varsayılanı sunucu/model davranışını değiştirmez; Kapalı ve Açık bunu açıkça ayarlar; çaba düzeyleri destekleyen sağlayıcılara iletilir. Ayarlar model adına göre hatırlanır, bu nedenle model değiştirildiğinde her modelin yapılandırması geri yüklenir.",
+            "reasoning_budget": "Bunu destekleyen sağlayıcılar için isteğe bağlı düşünme token bütçesi (llama.cpp gibi OpenAI uyumlu sunucular, Gemini, Anthropic). Sağlayıcı varsayılanı için boş bırakın."
           }
         },
         "database": {

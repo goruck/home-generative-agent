@@ -365,8 +365,27 @@ CONF_FEATURE_MODEL = "model"
 CONF_FEATURE_MODEL_NAME = "model_name"
 CONF_FEATURE_MODEL_TEMPERATURE = "temperature"
 CONF_FEATURE_MODEL_REASONING = "reasoning"
+CONF_FEATURE_MODEL_REASONING_BUDGET = "reasoning_budget"
+# Per-model-name memory of thinking settings so switching the chat model back
+# and forth restores each model's configuration (issue #580):
+# {model_name: {"reasoning": <canonical value>, "budget": <int tokens>}}.
+CONF_FEATURE_MODEL_REASONING_BY_MODEL = "reasoning_by_model"
 CONF_FEATURE_MODEL_KEEPALIVE = "keepalive_s"
 CONF_FEATURE_MODEL_CONTEXT_SIZE = "context_size"
+
+# ---- Chat thinking/reasoning (resolved runtime options, provider-agnostic) ----
+# Canonical values: None = provider default, False = explicitly off,
+# True = explicitly on, "minimal"/"low"/"medium"/"high" = effort level.
+CONF_CHAT_REASONING = "chat_reasoning"
+CONF_CHAT_REASONING_BUDGET = "chat_reasoning_budget"
+CONF_CHAT_REASONING_BY_MODEL = "chat_reasoning_by_model"
+# Anthropic extended thinking constraints: the API requires
+# budget_tokens >= 1024 and max_tokens > budget_tokens. The budget is capped
+# so budget + response headroom stays under every current model's output
+# limit (the drop-on-400 retry cannot recover an Anthropic max_tokens 400).
+ANTHROPIC_THINKING_MIN_BUDGET = 1024
+ANTHROPIC_THINKING_MAX_BUDGET = 32768
+ANTHROPIC_THINKING_RESPONSE_TOKENS = 4096
 
 # ---- Fallback configuration ----
 CONF_FEATURE_FALLBACK_PROVIDER_IDS = "fallback_provider_ids"

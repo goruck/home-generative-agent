@@ -283,10 +283,13 @@
             "temperature": "Teplota",
             "keepalive_s": "Ollama keepalive (sekundy nebo Nikdy neuvolňovat (-1))",
             "context_size": "Ollama velikost kontextu (tokeny)",
-            "reasoning": "Ollama uvažování (reasoning)"
+            "reasoning": "Přemýšlení / uvažování (thinking)",
+            "reasoning_budget": "Rozpočet přemýšlení (tokeny)"
           },
           "data_description": {
-            "fallback_provider_ids": "Seřazený seznam záložních poskytovatelů. První dostupný poskytovatel se použije, pokud primární selže."
+            "fallback_provider_ids": "Seřazený seznam záložních poskytovatelů. První dostupný poskytovatel se použije, pokud primární selže.",
+            "reasoning": "Řídí přemýšlení vybraného chat modelu. Výchozí nastavení poskytovatele ponechá chování serveru/modelu beze změny; Vypnuto a Zapnuto jej nastaví explicitně; úrovně úsilí se předají poskytovatelům, kteří je podporují. Nastavení se pamatuje pro každý název modelu, takže přepnutí modelu obnoví jeho konfiguraci.",
+            "reasoning_budget": "Volitelný rozpočet tokenů pro přemýšlení u poskytovatelů, kteří jej podporují (OpenAI-kompatibilní servery jako llama.cpp, Gemini, Anthropic). Ponechte prázdné pro výchozí nastavení poskytovatele."
           }
         },
         "database": {

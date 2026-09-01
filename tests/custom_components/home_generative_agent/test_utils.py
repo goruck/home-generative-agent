@@ -7,7 +7,14 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
+from langchain_google_genai import ChatGoogleGenerativeAI
+from pydantic import SecretStr
 
+from custom_components.home_generative_agent.const import (
+    ANTHROPIC_THINKING_MAX_BUDGET,
+    ANTHROPIC_THINKING_MIN_BUDGET,
+    ANTHROPIC_THINKING_RESPONSE_TOKENS,
+)
 from custom_components.home_generative_agent.core.utils import (
     CannotConnectError,
     InvalidAuthError,
@@ -16,6 +23,7 @@ from custom_components.home_generative_agent.core.utils import (
     normalize_openai_compatible_base_url,
     openai_compatible_healthy,
     reasoning_field,
+    thinking_configurable,
     validate_anthropic_key,
     validate_openai_compatible_url,
 )
@@ -504,3 +512,188 @@ async def test_anthropic_healthy_returns_false_on_auth_error(
         lambda _hass: client,
     )
     assert await anthropic_healthy(hass, "sk-ant-bad") is False
+
+
+# ---------------------------------------------------------------------------
+# thinking_configurable tests (issue #580)
+# ---------------------------------------------------------------------------
+
+
+def test_thinking_none_sends_nothing_for_all_providers() -> None:
+    """Provider default (None) never sends thinking fields."""
+    for provider in ("openai", "openai_compatible", "gemini", "anthropic", "ollama"):
+        assert (
+            thinking_configurable(provider_type=provider, reasoning=None, budget=512)
+            == {}
+        )
+
+
+def test_thinking_unknown_effort_string_sends_nothing_for_cloud_openai() -> None:
+    """Cloud OpenAI only forwards known effort levels."""
+    assert thinking_configurable(provider_type="openai", reasoning="frobnicate") == {}
+
+
+def test_thinking_openai_compatible_forwards_custom_effort() -> None:
+    """llama.cpp-style servers own the effort vocabulary - pass verbatim."""
+    assert thinking_configurable(
+        provider_type="openai_compatible", reasoning="xhigh"
+    ) == {"reasoning_effort": "xhigh"}
+    assert thinking_configurable(
+        provider_type="openai_compatible", reasoning="none"
+    ) == {"reasoning_effort": "none"}
+
+
+def test_thinking_ollama_returns_empty() -> None:
+    """Ollama thinking flows through reasoning_field, not this helper."""
+    assert thinking_configurable(provider_type="ollama", reasoning=True) == {}
+
+
+def test_thinking_openai_effort_only() -> None:
+    """Cloud OpenAI forwards effort levels and ignores On/Off."""
+    assert thinking_configurable(provider_type="openai", reasoning="medium") == {
+        "reasoning_effort": "medium"
+    }
+    assert thinking_configurable(provider_type="openai", reasoning=True) == {}
+    assert thinking_configurable(provider_type="openai", reasoning=False) == {}
+
+
+def test_thinking_openai_compatible_off() -> None:
+    """Off sends reasoning_effort=none and enable_thinking=False (llama.cpp)."""
+    config = thinking_configurable(
+        provider_type="openai_compatible", reasoning=False, budget=512
+    )
+    assert config == {
+        "reasoning_effort": "none",
+        "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
+    }
+
+
+def test_thinking_openai_compatible_on_with_budget() -> None:
+    """On sends enable_thinking=True plus the per-request budget."""
+    config = thinking_configurable(
+        provider_type="openai_compatible", reasoning=True, budget=512
+    )
+    assert config == {
+        "extra_body": {
+            "chat_template_kwargs": {"enable_thinking": True},
+            "thinking_budget_tokens": 512,
+        }
+    }
+
+
+def test_thinking_openai_compatible_effort() -> None:
+    """Effort levels map to reasoning_effort for llama.cpp-style servers."""
+    config = thinking_configurable(provider_type="openai_compatible", reasoning="low")
+    assert config == {"reasoning_effort": "low"}
+
+
+def test_thinking_gemini_always_uses_budget_never_level() -> None:
+    """
+    Gemini sends only thinking_budget on the pinned stack.
+
+    google-ai-generativelanguage 0.10.0's ThinkingConfig protobuf has no
+    thinking_level field; setting it crashes langchain-google-genai 3.1.0 at
+    proto marshaling ("Unknown field for ThinkingConfig: thinking_level"),
+    Gemini 3-family models included. Field-hit during #580 integration
+    testing.
+    """
+    for model in ("gemini-2.5-flash", "gemini-3.5-flash-lite"):
+        assert thinking_configurable(
+            provider_type="gemini", reasoning=False, model=model
+        ) == {"thinking_budget": 0}
+        assert thinking_configurable(
+            provider_type="gemini", reasoning=True, budget=512, model=model
+        ) == {"thinking_budget": 512}
+        assert thinking_configurable(
+            provider_type="gemini", reasoning=True, model=model
+        ) == {"thinking_budget": -1}
+        # Effort strings have no budget-API equivalent; known ones mean On.
+        assert thinking_configurable(
+            provider_type="gemini", reasoning="low", model=model
+        ) == {"thinking_budget": -1}
+        assert (
+            thinking_configurable(
+                provider_type="gemini", reasoning="frobnicate", model=model
+            )
+            == {}
+        )
+        for config in (
+            thinking_configurable(
+                provider_type="gemini", reasoning=value, budget=512, model=model
+            )
+            for value in (False, True, "low", "high")
+        ):
+            assert "thinking_level" not in config
+
+
+def test_thinking_anthropic_enforces_api_constraints() -> None:
+    """Anthropic: budget floor 1024, max_tokens above budget, temperature 1."""
+    config = thinking_configurable(
+        provider_type="anthropic", reasoning=True, budget=512
+    )
+    assert config["thinking"] == {
+        "type": "enabled",
+        "budget_tokens": ANTHROPIC_THINKING_MIN_BUDGET,
+    }
+    assert (
+        config["max_tokens"]
+        == ANTHROPIC_THINKING_MIN_BUDGET + ANTHROPIC_THINKING_RESPONSE_TOKENS
+    )
+    assert config["temperature"] == 1
+    big = thinking_configurable(provider_type="anthropic", reasoning=True, budget=8192)
+    assert big["thinking"] == {"type": "enabled", "budget_tokens": 8192}
+    assert thinking_configurable(provider_type="anthropic", reasoning=False) == {}
+
+
+def test_thinking_anthropic_caps_budget_below_output_limit() -> None:
+    """A UI-permitted oversized budget is clamped so max_tokens stays valid."""
+    config = thinking_configurable(
+        provider_type="anthropic", reasoning=True, budget=131072
+    )
+    assert config["thinking"] == {
+        "type": "enabled",
+        "budget_tokens": ANTHROPIC_THINKING_MAX_BUDGET,
+    }
+    assert (
+        config["max_tokens"]
+        == ANTHROPIC_THINKING_MAX_BUDGET + ANTHROPIC_THINKING_RESPONSE_TOKENS
+    )
+
+
+def test_thinking_anthropic_ignores_stale_effort_strings() -> None:
+    """An effort left over from another provider type must not enable thinking."""
+    assert thinking_configurable(provider_type="anthropic", reasoning="medium") == {}
+
+
+def test_reasoning_field_passes_effort_through_for_gpt_oss() -> None:
+    """gpt-oss models get the configured effort verbatim, not the heuristic."""
+    assert reasoning_field(model="gpt-oss:20b", enabled="high") == {"reasoning": "high"}
+    assert reasoning_field(model="gpt-oss:20b", enabled=True) == {"reasoning": "low"}
+    # Boolean-style models treat any truthy value as on.
+    assert reasoning_field(model="qwen3:8b", enabled="high") == {"reasoning": True}
+    assert reasoning_field(model="qwen3:8b", enabled=False) == {"reasoning": False}
+
+
+def test_thinking_gemini_output_marshals_to_protobuf() -> None:
+    """
+    Everything _thinking_gemini emits must survive proto marshaling.
+
+    Guards the field-hit #580 crash: a pydantic field that exists on
+    ChatGoogleGenerativeAI but not on the installed ThinkingConfig protobuf
+    (thinking_level on google-ai-generativelanguage 0.10.0) only explodes in
+    _prepare_params, so this exercises the real marshaling path.
+    """
+    for reasoning, budget in ((True, 512), (True, None), (False, None)):
+        config = thinking_configurable(
+            provider_type="gemini",
+            reasoning=reasoning,
+            budget=budget,
+            model="gemini-3.5-flash-lite",
+        )
+        model = ChatGoogleGenerativeAI(
+            model="gemini-3.5-flash-lite",
+            google_api_key=SecretStr("test-key"),
+            **config,
+        )
+        params = model._prepare_params(stop=None)
+        assert params.thinking_config is not None

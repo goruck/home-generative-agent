@@ -251,10 +251,13 @@
             "temperature": "Temperature",
             "keepalive_s": "Ollama keepalive (seconds or Never unload (-1))",
             "context_size": "Ollama context size (tokens)",
-            "reasoning": "Ollama reasoning"
+            "reasoning": "Thinking / reasoning",
+            "reasoning_budget": "Thinking budget (tokens)"
           },
           "data_description": {
-            "fallback_provider_ids": "Ordered list of fallback providers. The first available provider is used if the primary fails."
+            "fallback_provider_ids": "Ordered list of fallback providers. The first available provider is used if the primary fails.",
+            "reasoning": "Controls model thinking for the selected chat model. Provider default leaves the server/model behavior unchanged; Off and On set it explicitly; effort levels are passed to providers that support them. Settings are remembered per model name, so switching models restores each model's configuration.",
+            "reasoning_budget": "Optional thinking-token budget for providers that support one (OpenAI-compatible servers such as llama.cpp, Gemini, Anthropic). Leave empty for the provider default."
           }
         },
         "database": {
