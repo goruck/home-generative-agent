@@ -38,8 +38,8 @@ from homeassistant.helpers.selector import (
 from .agent.helpers import (
     TOOL_KEY_SEP,
     api_id_is_form_representable,
+    normalize_api_tool_map,
     normalize_llm_api_value,
-    normalize_tool_exclusions,
     sanitize_tool_text,
     split_tool_index_key,
     tool_index_key,
@@ -60,6 +60,7 @@ from .const import (
     CONF_STT_HALLUCINATION_EXACT_PATTERNS,
     CONF_STT_HALLUCINATION_PATTERNS,
     CONF_TOOL_EXCLUSIONS,
+    CONF_TOOL_INCLUSIONS,
     CONF_TOOL_RELEVANCE_THRESHOLD,
     CONF_TOOL_RETRIEVAL_LIMIT,
     CONF_VIDEO_ANALYZER_MODE,
@@ -178,30 +179,31 @@ def _text_as_map(text: str) -> dict[str, str]:
     return result
 
 
-def _tool_exclusions_as_list(raw: Any) -> list[str]:
+def _tool_map_as_list(raw: Any) -> list[str]:
     """
-    Render the stored ``{api_id: [name]}`` exclusions as flat picker values.
+    Render a stored ``{api_id: [name]}`` tool map as flat picker values.
 
-    Also accepts the flat list itself, because a form re-render after a
-    validation error sees the raw ``user_input`` value, not the parsed one --
-    the same dual-shape contract ``_map_as_text`` has.
+    Shared by the excluded-tools and always-included-tools fields, which store
+    the identical shape. Also accepts the flat list itself, because a form
+    re-render after a validation error sees the raw ``user_input`` value, not
+    the parsed one -- the same dual-shape contract ``_map_as_text`` has.
     """
     if isinstance(raw, list):
         return [value for value in raw if isinstance(value, str) and value]
     # Unrepresentable api ids are withheld from the picker entirely rather than
     # rendered and mis-parsed on the way back: flattening "a::b" + "t" yields
     # "a::b::t", which regroups onto api "a" with tool "b::t" and silently
-    # disables the exclusion. `_parse_tool_exclusions` merges them back from
-    # storage on submit, since the submitted list cannot carry them.
+    # disables the stored selection. `_parse_tool_picker` merges them back
+    # from storage on submit, since the submitted list cannot carry them.
     return sorted(
         tool_index_key(api_id, name)
-        for api_id, names in normalize_tool_exclusions(raw).items()
+        for api_id, names in normalize_api_tool_map(raw).items()
         if api_id_is_form_representable(api_id)
         for name in names
     )
 
 
-def _list_as_tool_exclusions(values: list[Any]) -> dict[str, list[str]]:
+def _list_as_tool_map(values: list[Any]) -> dict[str, list[str]]:
     """Group flat picker values back into the stored ``{api_id: [name]}`` map."""
     grouped: dict[str, list[str]] = {}
     for value in values:
@@ -211,7 +213,7 @@ def _list_as_tool_exclusions(values: list[Any]) -> dict[str, list[str]]:
             continue
         api_id, name = parts
         grouped.setdefault(api_id, []).append(name)
-    return normalize_tool_exclusions(grouped)
+    return normalize_api_tool_map(grouped)
 
 
 # Suffixes marking a stored exclusion whose tool is not in the live list. They
@@ -266,23 +268,29 @@ def _tool_choice(
     )
 
 
-async def _tool_exclusion_choices(
+async def _live_tool_choices(
     hass: HomeAssistant,
     selected_apis: list[str],
-    selected_exclusions: list[str],
     indexed_keys: set[str] | None = None,
-) -> list[SelectOptionDict]:
+) -> tuple[list[SelectOptionDict], set[str], dict[str, str]]:
     """
-    Build the excluded-tools picker options for the currently selected APIs.
+    Enumerate the live tool choices shared by both tool pickers.
+
+    Both the excluded-tools and the always-included-tools pickers list the
+    same universe -- every tool of every selected API -- so the enumeration
+    runs once and each picker appends its own stale stored selections via
+    ``_stale_selection_choices``. (For the Assist API, enumerating means
+    sorting every exposed state plus a registry sweep; doing it once per
+    picker would double that on every form open.) Returns the choices, the
+    set of composite values already offered, and the api id -> display name
+    map, which the stale pass needs to label what it re-adds.
 
     Enumeration is per API and failures are isolated: one unreachable MCP
     server -- or one malformed tool descriptor from an otherwise healthy one --
     must not empty the whole picker, let alone stop the options form opening.
-    Whatever cannot be enumerated is re-added from the *stored* selection
-    instead, labelled with why it is missing, so a server that is merely
-    offline at render time keeps its exclusions -- dropping them would both
-    fail SelectSelector validation on submit (issue #568's unsaveable-form
-    class) and silently re-expose tools the user had switched off.
+    Whatever cannot be enumerated here is re-added per picker from its
+    *stored* selection by ``_stale_selection_choices``, which carries the
+    rationale for why dropping a stored value is never acceptable.
     """
     llm_context = llm.LLMContext(
         platform=DOMAIN,
@@ -307,8 +315,8 @@ async def _tool_exclusion_choices(
             # an exclusion that matches nothing while the form reports success.
             # Refuse at the boundary rather than store a lie.
             LOGGER.warning(
-                "Not offering tool exclusions for LLM API id %r: ids containing "
-                "%r cannot round-trip through the options form",
+                "Not offering tools of LLM API id %r in the tool pickers: ids "
+                "containing %r cannot round-trip through the options form",
                 api_id,
                 TOOL_KEY_SEP,
             )
@@ -322,7 +330,7 @@ async def _tool_exclusion_choices(
             # names beside it -- a message containing a newline writes
             # attacker-chosen WARNING records into the HA log.
             LOGGER.warning(
-                "Could not list tools of LLM API %s for the exclusion picker: %s",
+                "Could not list tools of LLM API %s for the tool pickers: %s",
                 api_id,
                 sanitize_tool_text(str(err), limit=200),
             )
@@ -341,7 +349,7 @@ async def _tool_exclusion_choices(
         if len(named) != len(tools):
             LOGGER.warning(
                 "LLM API %s advertised %d tool(s) with an unusable name; "
-                "they are omitted from the exclusion picker",
+                "they are omitted from the tool pickers",
                 api_id,
                 len(tools) - len(named),
             )
@@ -383,7 +391,28 @@ async def _tool_exclusion_choices(
             _tool_choice(api_names.get(api_id, api_id), tool_name, key, suffix="")
         )
 
-    for value in selected_exclusions:
+    return choices, seen, api_names
+
+
+def _stale_selection_choices(
+    selected_values: list[str],
+    seen: set[str],
+    api_names: dict[str, str],
+    selected_set: set[str],
+) -> list[SelectOptionDict]:
+    """
+    Build labelled options for stored selections the live enumeration missed.
+
+    One picker's worth: called once per picker with that picker's own stored
+    values, against the shared ``seen``/``api_names`` from
+    ``_live_tool_choices``. ``seen`` is copied, not mutated -- the same base
+    set serves both pickers, and a value stale in both must be re-added to
+    both or the second one's pre-filled selection fails SelectSelector
+    validation on submit (issue #568's unsaveable-form class).
+    """
+    seen = set(seen)
+    choices: list[SelectOptionDict] = []
+    for value in selected_values:
         if value in seen:
             continue
         seen.add(value)
@@ -408,6 +437,40 @@ async def _tool_exclusion_choices(
         )
 
     return choices
+
+
+def _add_tool_picker(
+    schema: VolDictType,
+    conf_key: str,
+    choices: list[SelectOptionDict],
+    selected: list[str],
+) -> None:
+    """
+    Add one tool picker field, or none when there is nothing to list.
+
+    One definition for both pickers so their selector contract cannot drift:
+    multiple (the submitted value must be the flat list ``_parse_tool_picker``
+    groups), sort=False (grouping by API order is built into the choices), and
+    custom_value=False (an unoffered value must fail validation, or free text
+    could mint selections that match nothing).
+    """
+    if not choices:
+        return
+    schema[
+        vol.Optional(
+            conf_key,
+            description={"suggested_value": selected},
+            default=[],
+        )
+    ] = SelectSelector(
+        SelectSelectorConfig(
+            options=choices,
+            multiple=True,
+            mode=SelectSelectorMode.DROPDOWN,
+            sort=False,
+            custom_value=False,
+        )
+    )
 
 
 async def _schema_for_options(
@@ -443,9 +506,17 @@ async def _schema_for_options(
             for api_id in stale
         )
 
-    selected_exclusions = _tool_exclusions_as_list(opts.get(CONF_TOOL_EXCLUSIONS))
-    tool_exclusion_choices = await _tool_exclusion_choices(
-        hass, selected_apis, selected_exclusions, indexed_keys
+    live_choices, live_seen, api_names = await _live_tool_choices(
+        hass, selected_apis, indexed_keys
+    )
+    selected_api_set = set(selected_apis)
+    selected_exclusions = _tool_map_as_list(opts.get(CONF_TOOL_EXCLUSIONS))
+    tool_exclusion_choices = live_choices + _stale_selection_choices(
+        selected_exclusions, live_seen, api_names, selected_api_set
+    )
+    selected_inclusions = _tool_map_as_list(opts.get(CONF_TOOL_INCLUSIONS))
+    tool_inclusion_choices = live_choices + _stale_selection_choices(
+        selected_inclusions, live_seen, api_names, selected_api_set
     )
 
     video_analyzer_mode_opts: list[SelectOptionDict] = [
@@ -506,27 +577,17 @@ async def _schema_for_options(
         ): NumberSelector(NumberSelectorConfig(min=0.0, max=1.0, step=0.01)),
     }
 
-    # Rendered next to the other tool-selection settings, and only when there is
-    # something to list: no API selected, or every provider unreachable *and*
-    # nothing stored, means the field is omitted entirely.  An absent field is
-    # never present in `user_input`, so a render-time provider outage can never
-    # write an empty selection over a stored one.
-    if tool_exclusion_choices:
-        schema[
-            vol.Optional(
-                CONF_TOOL_EXCLUSIONS,
-                description={"suggested_value": selected_exclusions},
-                default=[],
-            )
-        ] = SelectSelector(
-            SelectSelectorConfig(
-                options=tool_exclusion_choices,
-                multiple=True,
-                mode=SelectSelectorMode.DROPDOWN,
-                sort=False,
-                custom_value=False,
-            )
-        )
+    # Both tool pickers render next to the other tool-selection settings, and
+    # only when there is something to list: no API selected, or every provider
+    # unreachable *and* nothing stored, means the field is omitted entirely.
+    # An absent field is never present in `user_input`, so a render-time
+    # provider outage can never write an empty selection over a stored one.
+    _add_tool_picker(
+        schema, CONF_TOOL_EXCLUSIONS, tool_exclusion_choices, selected_exclusions
+    )
+    _add_tool_picker(
+        schema, CONF_TOOL_INCLUSIONS, tool_inclusion_choices, selected_inclusions
+    )
 
     schema.update(
         {
@@ -843,37 +904,77 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         """Remove schema-only fields before storing options."""
         options.pop(_CONF_STT_FILTERS_SECTION, None)
 
-    def _parse_tool_exclusions(self, options: dict[str, Any]) -> None:
+    def _parse_tool_picker(self, options: dict[str, Any], conf_key: str) -> None:
         """
-        Convert the flat excluded-tools picker value back to ``{api_id: [name]}``.
+        Convert a flat tool-picker value back to ``{api_id: [name]}``.
 
-        A dict is what storage already holds, and it reaches here unchanged when
-        the picker was not rendered this pass (nothing enumerable) -- normalize
-        and keep it, because the user did not touch it.  A list is a submitted
-        selection: an empty one is an explicit "exclude nothing", so the key is
-        dropped rather than stored as ``{}``, keeping "absent" the single
-        spelling of the default.
+        Shared by the excluded-tools and always-included-tools fields, which
+        store the identical shape. A dict is what storage already holds, and it
+        reaches here unchanged when the picker was not rendered this pass
+        (nothing enumerable) -- normalize and keep it, because the user did not
+        touch it.  A list is a submitted selection: an empty one is an explicit
+        "select nothing", so the key is dropped rather than stored as ``{}``,
+        keeping "absent" the single spelling of the default.
         """
-        raw = options.get(CONF_TOOL_EXCLUSIONS)
+        raw = options.get(conf_key)
         if isinstance(raw, list):
-            normalized = _list_as_tool_exclusions(raw)
-            # The picker deliberately never offered exclusions whose api id it
+            normalized = _list_as_tool_map(raw)
+            # The picker deliberately never offered selections whose api id it
             # cannot represent, so the submitted list cannot carry them and
             # rebuilding the map from that list alone would delete them. An
             # unrelated save -- the face API URL, a token limit -- would then
-            # silently re-enable tools the user had switched off. Merge them
-            # back from what is actually stored.
-            for api_id, names in normalize_tool_exclusions(
-                self.config_entry.options.get(CONF_TOOL_EXCLUSIONS)
+            # silently discard the user's per-tool choices. Merge them back
+            # from what is actually stored.
+            for api_id, names in normalize_api_tool_map(
+                self.config_entry.options.get(conf_key)
             ).items():
                 if not api_id_is_form_representable(api_id):
                     normalized[api_id] = names
         else:
-            normalized = normalize_tool_exclusions(raw)
+            normalized = normalize_api_tool_map(raw)
         if normalized:
-            options[CONF_TOOL_EXCLUSIONS] = normalized
+            options[conf_key] = normalized
         else:
-            options.pop(CONF_TOOL_EXCLUSIONS, None)
+            options.pop(conf_key, None)
+
+    def _parse_tool_exclusions(self, options: dict[str, Any]) -> None:
+        """Convert the flat excluded-tools picker value to the stored map."""
+        self._parse_tool_picker(options, CONF_TOOL_EXCLUSIONS)
+
+    def _parse_tool_inclusions(self, options: dict[str, Any]) -> None:
+        """Convert the flat always-included-tools picker value to the stored map."""
+        self._parse_tool_picker(options, CONF_TOOL_INCLUSIONS)
+
+    @staticmethod
+    def _tool_picker_overlap_error(user_input: Mapping[str, Any]) -> str | None:
+        """
+        Reject a submission that both excludes and always-includes a tool.
+
+        The runtime resolves the contradiction (the exclusion wins -- it is a
+        security control and must fail closed), but storing it would mean the
+        form silently accepts a selection it will never honour. Checked on the
+        submitted lists only: the merge-back of unrepresentable api ids cannot
+        create an overlap, because those ids are never offered in either
+        picker, and a stored contradiction can only exist if this check let it
+        through in the first place.
+        """
+        excluded = user_input.get(CONF_TOOL_EXCLUSIONS)
+        included = user_input.get(CONF_TOOL_INCLUSIONS)
+        if not isinstance(excluded, list) or not isinstance(included, list):
+            return None
+        both = {v for v in excluded if isinstance(v, str)} & {
+            v for v in included if isinstance(v, str)
+        }
+        if both:
+            # The values embed MCP tool names — remote text, and a log-line
+            # forgery sink like every other remote string this module logs.
+            LOGGER.warning(
+                "Options rejected: tool(s) selected as both excluded and "
+                "always included: %s",
+                [sanitize_tool_text(v, limit=200) for v in sorted(both)],
+            )
+            return "tool_excluded_and_included"
+        return None
 
     def _parse_motion_camera_map(self, options: dict[str, Any]) -> None:
         """Convert the motion camera map text area to a dict before storing."""
@@ -912,6 +1013,8 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         err = await self._maybe_edit_face_recognition_url(options, user_input)
         if not err:
             err = self._maybe_edit_pin(options, user_input)
+        if not err:
+            err = self._tool_picker_overlap_error(user_input)
         if err:
             errors["base"] = err
 
@@ -932,4 +1035,5 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         self._drop_empty_fields(options)
         self._parse_motion_camera_map(options)
         self._parse_tool_exclusions(options)
+        self._parse_tool_inclusions(options)
         return self.async_create_entry(title="", data=options)

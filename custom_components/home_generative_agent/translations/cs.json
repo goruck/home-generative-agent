@@ -17,6 +17,7 @@
       "cannot_connect": "Ke službě se nelze připojit. Zkontrolujte klíče/URL a zkuste to znovu.",
       "invalid_auth": "Neplatný API klíč.",
       "invalid_pin": "PIN musí mít 4-10 číslic.",
+      "tool_excluded_and_included": "Nástroj nemůže být zároveň vyloučený a vždy zahrnutý. Odeberte jej z jednoho ze dvou seznamů.",
       "unknown": "Neočekávaná chyba."
     }
   },
@@ -359,7 +360,8 @@
           "stt_hallucination_exact_patterns": "Ignorované přesné fráze STT",
           "tool_retrieval_limit": "Limit načítání nástrojů",
           "tool_relevance_threshold": "Práh relevance nástrojů",
-          "tool_exclusions": "Vyloučené nástroje"
+          "tool_exclusions": "Vyloučené nástroje",
+          "tool_inclusions": "Vždy zahrnuté nástroje"
         },
         "data_description": {
           "prompt": "Instruujte LLM, jak má odpovídat. Může to být šablona.",
@@ -371,6 +373,7 @@
           "tool_retrieval_limit": "Maximální počet nástrojů k načtení na základě sémantické podobnosti s dotazem uživatele.",
           "tool_relevance_threshold": "Minimální skóre sémantické podobnosti (0.0 až 1.0) vyžadované pro načtení nástroje.",
           "tool_exclusions": "Nástroje označené zde se modelu nikdy nenabídnou a nikdy se nespustí, ani když si o ně model výslovně řekne. Ponechte prázdné, aby byly dostupné všechny nástroje všech vybraných API. Nástroje, které server přidá později, jsou ve výchozím stavu dostupné.",
+          "tool_inclusions": "Nástroje označené zde se modelu nabídnou vždy: přidávají se po vektorovém vyhledávání nástrojů, nad rámec limitu vyhledávání. Hodí se pro univerzální nástroje, například webové vyhledávání, které sémantické vyhledávání nemusí vybrat. Model sám rozhodne, zda je použije. Nástroj nemůže být zároveň vyloučený a vždy zahrnutý.",
           "video_analyzer_uniqueness_enabled": "Přeskočit vizuálně téměř identické snímky před analýzou VLM. Varování: povolení této funkce odstraní kontext pohybu mezi snímky, který souhrnný model používá k popisu pohybu. Povolte pouze v případě, že statická scéna generuje nadměrné duplikáty a akceptujete ztrátu kontinuity pohybu.",
           "video_analyzer_motion_camera_map": "Jedno přepsání na řádek: binary_sensor.X_motion: camera.Y — použijte, když automatické rozpoznávání vybere špatnou kameru. Ponechte prázdné pro spoléhání na rozpoznávání založené na zařízení a názvu."
         }

@@ -2,6 +2,18 @@
 
 ## Agent
 
+### Tool routing is by bare name, so a second server's same-named tool can capture calls
+
+**What:** `_format_and_dedupe_tools` (agent/graph.py) routes model tool calls through `routing_map[name] = api_id`, first seen wins. Tool names are remote data — each MCP server chooses its own — so when two selected servers advertise the same name, whichever candidate lands in the list first receives every call to that name, including arguments meant for the other server's tool. The v3.34.0 always-included-tools feature warns when this shadows a configured inclusion (`_append_included_tools` logs the cross-API collision), but the underlying surface predates it and covers ordinary RAG selections too, silently.
+
+**Why:** Converged on independently by three pre-landing review passes of the #579 branch (Claude adversarial, testing specialist, Codex adversarial retry — Codex also confirmed it empirically with a scripted probe). Out of scope for #579 because the fix is architectural: routing identity would need to become `(api_id, name)` end to end — the routing map, dispatch (`_call_tools`), the dedupe, and the name the model sees — and the model-visible name is the collision point, so composite identity likely means disambiguating advertised names (e.g. suffixing the API) rather than just the map key. Note dispatch for local tools additionally lowercases (`langchain_tools[tool_name.lower()]`, graph.py `_run_langchain_tool`), so case-variant names are a second, smaller collision class.
+
+**How to apply:** Decide the product shape first: either (a) disambiguate duplicate names at bind time (rename the later tool's advertised name, keep a reverse map for dispatch), or (b) refuse to bind a second same-named tool from a different API and warn — extending the inclusion-shadow warning to all candidates. (b) is a small deterministic change that keeps today's behavior for the non-colliding majority; (a) preserves both tools. Either way, add a regression test with two APIs advertising one name and assert where the call lands.
+
+**Effort:** M
+**Priority:** P2
+
+
 ### Gemini 3 models are sent temperature 0.2, which Google advises against
 
 **What:** Every Gemini call site in `__init__.py` (chat ~2394, VLM ~2463, summarization ~2539) binds `"temperature": <feature temp>` and `"top_p": 1.0` through `configurable_fields`. The feature default is `RECOMMENDED_*_TEMPERATURE = 0.2`. Google's Gemini 3 guide says "For all Gemini 3 models, we strongly recommend keeping the temperature parameter at its default value of `1.0`", and that lower values "may cause looping or degraded performance, particularly in complex mathematical or reasoning tasks". As of v3.33.1 the Gemini defaults are `gemini-3.5-flash-lite`, so the out-of-the-box configuration now hits that advice on every turn.

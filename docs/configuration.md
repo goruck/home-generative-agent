@@ -141,6 +141,21 @@ Two details about what the picker shows:
 
 Excluded tools stay in the vector index (which is global and cumulative by design), so re-enabling one takes effect on the next turn without a re-index.
 
+### Always-included tools
+
+The relevance threshold cuts both ways: a genuinely general-purpose tool can score *below* it on exactly the queries it exists for. "Who won the FIFA World Cup?" shares almost no vocabulary with a `web_search` tool's description, so retrieval never selects it — and no system-prompt instruction can help, because the model cannot call a tool that was filtered out before it saw the list. Lowering the global threshold instead would drag in irrelevant tools on every turn.
+
+**Always-included tools** (`tool_inclusions`) is the additive complement to the exclusions: a second picker in the **Options** flow, listing the same tools, where anything you tick is appended to the tool list *after* vector retrieval — on top of the retrieval limit, like `GetLiveContext`, so an inclusion never crowds out a ranked tool. The model still decides whether to actually call it.
+
+It shares the exclusion picker's contract: empty is the default (nothing extra is bound), stored selections survive a server outage labelled with why they cannot be listed, and the field is hidden when nothing can be listed so a save cannot clear your selection. Three boundaries apply on every turn:
+
+- **An exclusion always wins.** The form refuses a tool ticked in both lists, and the runtime enforces the same rule against configurations written programmatically — the exclusion is a security control and fails closed.
+- **The API must be active.** An inclusion under an API you have deselected (or that failed to load this turn) stays unbound.
+- **The tool must exist this turn.** An inclusion is reconciled against the live tool universe like every other candidate; a tool the server no longer advertises is skipped, not invented.
+- **Inclusions survive the read-only strip.** On read-only state questions ("which doors are open?") the agent normally drops actuation tools from the turn's list; an always-included actuation tool stays bound anyway — always means always. The critical-action PIN still gates any critical call at execution time, and at most 16 inclusions are honoured per turn.
+
+Each inclusion adds its schema and description to the prompt on every turn, so keep the list short — it is meant for the one or two fallback tools (typically web search) that similarity ranking systematically misses, not as a way around retrieval.
+
 A **Tool Index Status** diagnostic sensor (`sensor.tool_index_status`) shows the current index state:
 
 | State | Meaning |
@@ -278,6 +293,7 @@ The **Options** flow (gear icon on the integration page) exposes:
 - Critical action PIN toggle and value
 - Tool retrieval limit and relevance threshold
 - **Excluded tools** (`tool_exclusions`) — per-tool allow/deny picker across every selected LLM API, including MCP servers (see [Excluded tools](#excluded-tools))
+- **Always-included tools** (`tool_inclusions`) — tools appended after vector retrieval, on top of the retrieval limit (see [Always-included tools](#always-included-tools))
 - `model_provider_uncontended` — bypass all local GPU gates when the server has dedicated capacity
 - **Video analyzer mode** — disable / notify_on_anomaly / always_notify
 - **Enable perceptual-hash frame filter (dHash)** — skip visually identical frames before VLM analysis (off by default; always active for ring-mqtt `event_select` capture loops regardless of this setting; see caveat in [Camera Entities](camera-entities.md#advanced-options))

@@ -31,9 +31,9 @@ from custom_components.home_generative_agent.config_flow import (
     _SUFFIX_NOT_SELECTED,
     HomeGenerativeAgentOptionsFlow,
     _label_text,
-    _list_as_tool_exclusions,
+    _list_as_tool_map,
     _schema_for_options,
-    _tool_exclusions_as_list,
+    _tool_map_as_list,
 )
 from custom_components.home_generative_agent.const import (
     CONF_MAX_MESSAGES_IN_CONTEXT,
@@ -360,25 +360,23 @@ async def test_picker_renders_after_the_relevance_threshold(hass: Any) -> None:
 # --------------------------------------------------------------------------
 
 
-def test_tool_exclusions_as_list_flattens_the_stored_map() -> None:
+def test_tool_map_as_list_flattens_the_stored_map() -> None:
     """Storage shape renders as flat composite picker values."""
-    assert _tool_exclusions_as_list(
-        {"mcp-abc": ["b", "a"], "assist": ["HassTurnOn"]}
-    ) == [
+    assert _tool_map_as_list({"mcp-abc": ["b", "a"], "assist": ["HassTurnOn"]}) == [
         "assist::HassTurnOn",
         "mcp-abc::a",
         "mcp-abc::b",
     ]
 
 
-def test_tool_exclusions_as_list_passes_a_submitted_list_through() -> None:
+def test_tool_map_as_list_passes_a_submitted_list_through() -> None:
     """A re-render after a validation error sees the raw submitted list."""
-    assert _tool_exclusions_as_list(["mcp-abc::a", "", 7]) == ["mcp-abc::a"]
+    assert _tool_map_as_list(["mcp-abc::a", "", 7]) == ["mcp-abc::a"]
 
 
-def test_list_as_tool_exclusions_groups_by_api() -> None:
+def test_list_as_tool_map_groups_by_api() -> None:
     """Picker values group back into the stored map, malformed ones dropped."""
-    assert _list_as_tool_exclusions(
+    assert _list_as_tool_map(
         ["mcp-abc::b", "mcp-abc::a", "assist::HassTurnOn", "junk", 7]
     ) == {"assist": ["HassTurnOn"], "mcp-abc": ["a", "b"]}
 
@@ -467,7 +465,10 @@ async def test_picker_renders_for_a_really_registered_api(
 
     keys = [str(cast("Any", key).schema) for key in schema]
     assert keys[keys.index("tool_relevance_threshold") + 1] == CONF_TOOL_EXCLUSIONS
-    assert keys[keys.index(CONF_TOOL_EXCLUSIONS) + 1] == "video_analyzer_mode"
+    # The always-included picker (issue #579) sits between the exclusions
+    # and the video analyzer settings.
+    assert keys[keys.index(CONF_TOOL_EXCLUSIONS) + 1] == "tool_inclusions"
+    assert keys[keys.index("tool_inclusions") + 1] == "video_analyzer_mode"
     assert _selector_options(schema) == [
         {"label": "mcp-time: convert_time", "value": "mcp-time::convert_time"},
         {
@@ -1210,7 +1211,7 @@ def test_exclusion_round_trip_is_lossless_for_representable_maps() -> None:
         "mcp-abc": ["odd::name", "web_search"],
     }
     normalized = normalize_tool_exclusions(original)
-    assert _list_as_tool_exclusions(_tool_exclusions_as_list(normalized)) == normalized
+    assert _list_as_tool_map(_tool_map_as_list(normalized)) == normalized
 
 
 def test_filter_excluded_tools_survives_a_malformed_descriptor() -> None:
@@ -1253,7 +1254,7 @@ async def test_unrepresentable_exclusion_survives_an_unrelated_save(hass: Any) -
     )
 
     # It is never offered to the user...
-    assert _tool_exclusions_as_list(stored) == ["assist::HassTurnOn"]
+    assert _tool_map_as_list(stored) == ["assist::HassTurnOn"]
 
     # ...and it survives a save that touches something else entirely.
     result = cast(
