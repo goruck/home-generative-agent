@@ -27,6 +27,9 @@ from custom_components.home_generative_agent.config_flow import (
 from custom_components.home_generative_agent.const import (
     CONF_ANTHROPIC_API_KEY,
     CONF_CHAT_MODEL_PROVIDER,
+    CONF_CHAT_REASONING,
+    CONF_CHAT_REASONING_BUDGET,
+    CONF_CHAT_REASONING_BY_MODEL,
     CONF_CRITICAL_ACTION_PIN,
     CONF_DB_NAME,
     CONF_DB_PARAMS,
@@ -35,12 +38,16 @@ from custom_components.home_generative_agent.const import (
     CONF_FEATURE_FALLBACK_PROVIDER_IDS,
     CONF_FEATURE_MODEL,
     CONF_FEATURE_MODEL_NAME,
+    CONF_FEATURE_MODEL_REASONING,
+    CONF_FEATURE_MODEL_REASONING_BUDGET,
+    CONF_FEATURE_MODEL_REASONING_BY_MODEL,
     CONF_GEMINI_API_KEY,
     CONF_NOTIFY_SERVICE,
     CONF_OLLAMA_CHAT_MODEL,
     CONF_OLLAMA_CHAT_URL,
     CONF_OLLAMA_EMBEDDING_MODEL,
     CONF_OLLAMA_EMBEDDING_URL,
+    CONF_OLLAMA_REASONING,
     CONF_OLLAMA_SUMMARIZATION_URL,
     CONF_OLLAMA_URL,
     CONF_OLLAMA_VLM_URL,
@@ -3858,3 +3865,259 @@ async def test_reconfigure_to_another_type_does_not_prefill_the_old_credential(
         k for k in captured["data_schema"].schema if str(k) == CONF_GEMINI_API_KEY
     )
     assert key.default() == "GEMINI-SECRET"
+
+
+# ---------------------------------------------------------------------------
+# Per-model thinking configuration (issue #580)
+# ---------------------------------------------------------------------------
+
+
+def _thinking_flow(
+    hass: HomeAssistant, entry: DummyEntry, feature: DummySubentry
+) -> FeatureSubentryFlow:
+    """Build a FeatureSubentryFlow wired to a dummy entry for thinking tests."""
+    flow = FeatureSubentryFlow()
+    flow.hass = hass
+    flow.async_show_form = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "form",
+        "data_schema": kwargs["data_schema"],
+        "errors": kwargs.get("errors"),
+    }
+    flow.async_abort = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "abort",
+        "reason": kwargs.get("reason"),
+    }
+
+    def _update_subentry(
+        _entry: DummyEntry,
+        subentry: DummySubentry,
+        data: Mapping[str, Any],
+        title: str | None,
+    ) -> None:
+        _ = title
+        subentry.data = {**subentry.data, **data}
+
+    flow.hass.config_entries.async_update_subentry = (  # type: ignore[assignment]
+        _update_subentry
+    )
+    flow._schedule_reload = lambda: None  # type: ignore[assignment]
+    _patch_entry(flow, entry)
+    flow.context["subentry_id"] = feature.subentry_id
+    return flow
+
+
+def _thinking_entry(
+    feature_model: dict[str, Any] | None = None,
+) -> tuple[DummyEntry, DummySubentry]:
+    """Build a dummy entry with an openai_compatible chat provider + feature."""
+    provider = DummySubentry(
+        "prov1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "llama.cpp",
+        {
+            "provider_type": "openai_compatible",
+            "capabilities": ["chat"],
+            "settings": {"base_url": "http://llama:8080", "api_key": "none"},
+        },
+    )
+    feature_data: dict[str, Any] = {
+        "feature_type": "conversation",
+        "model_provider_id": "prov1",
+        "name": "Conversation",
+    }
+    if feature_model is not None:
+        feature_data[CONF_FEATURE_MODEL] = feature_model
+    feature = DummySubentry(
+        "feature1", SUBENTRY_TYPE_FEATURE, "Conversation", feature_data
+    )
+    entry = DummyEntry()
+    entry.subentries = {
+        provider.subentry_id: provider,
+        feature.subentry_id: feature,
+    }
+    return entry, feature
+
+
+def _schema_keys(form: Mapping[str, Any]) -> set[str]:
+    return {str(key) for key in form["data_schema"].schema}
+
+
+@pytest.mark.asyncio
+async def test_feature_flow_openai_compatible_shows_thinking_fields(
+    hass: HomeAssistant,
+) -> None:
+    """The chat model form offers thinking + budget for OpenAI-compatible."""
+    entry, feature = _thinking_entry()
+    flow = _thinking_flow(hass, entry, feature)
+
+    await flow.async_step_user()
+    form = await flow.async_step_conversation({"model_provider_id": "prov1"})
+    keys = _schema_keys(form)
+    assert CONF_FEATURE_MODEL_REASONING in keys
+    assert CONF_FEATURE_MODEL_REASONING_BUDGET in keys
+
+
+@pytest.mark.asyncio
+async def test_feature_flow_saves_thinking_per_model(hass: HomeAssistant) -> None:
+    """Saving thinking settings stores flat values plus a per-model entry."""
+    entry, feature = _thinking_entry()
+    flow = _thinking_flow(hass, entry, feature)
+
+    await flow.async_step_user()
+    await flow.async_step_conversation({"model_provider_id": "prov1"})
+    result = await flow.async_step_feature_model(
+        {
+            CONF_FEATURE_MODEL_NAME: "gemma-4-e4b",
+            CONF_FEATURE_MODEL_REASONING: "true",
+            CONF_FEATURE_MODEL_REASONING_BUDGET: 512.0,
+        }
+    )
+    assert result.get("type") == "abort"
+    model = feature.data[CONF_FEATURE_MODEL]
+    assert model[CONF_FEATURE_MODEL_REASONING] is True
+    assert model[CONF_FEATURE_MODEL_REASONING_BUDGET] == 512
+    assert model[CONF_FEATURE_MODEL_REASONING_BY_MODEL] == {
+        "gemma-4-e4b": {"reasoning": True, "budget": 512}
+    }
+
+
+@pytest.mark.asyncio
+async def test_feature_flow_switching_model_restores_remembered_thinking(
+    hass: HomeAssistant,
+) -> None:
+    """Switching to a remembered model wins over the stale on-screen values."""
+    entry, feature = _thinking_entry(
+        {
+            CONF_FEATURE_MODEL_NAME: "gemma-4-e4b",
+            CONF_FEATURE_MODEL_REASONING: True,
+            CONF_FEATURE_MODEL_REASONING_BUDGET: 512,
+            CONF_FEATURE_MODEL_REASONING_BY_MODEL: {
+                "gemma-4-e4b": {"reasoning": True, "budget": 512},
+                "qwen3-8b": {"reasoning": False},
+            },
+        }
+    )
+    flow = _thinking_flow(hass, entry, feature)
+
+    await flow.async_step_user()
+    await flow.async_step_conversation({"model_provider_id": "prov1"})
+    # The submitted thinking fields still show Gemma's values; Qwen's
+    # remembered entry must win.
+    result = await flow.async_step_feature_model(
+        {
+            CONF_FEATURE_MODEL_NAME: "qwen3-8b",
+            CONF_FEATURE_MODEL_REASONING: "true",
+            CONF_FEATURE_MODEL_REASONING_BUDGET: 512.0,
+        }
+    )
+    assert result.get("type") == "abort"
+    model = feature.data[CONF_FEATURE_MODEL]
+    assert model[CONF_FEATURE_MODEL_REASONING] is False
+    assert CONF_FEATURE_MODEL_REASONING_BUDGET not in model
+    assert model[CONF_FEATURE_MODEL_REASONING_BY_MODEL] == {
+        "gemma-4-e4b": {"reasoning": True, "budget": 512},
+        "qwen3-8b": {"reasoning": False},
+    }
+
+
+@pytest.mark.asyncio
+async def test_feature_flow_switching_back_restores_first_model(
+    hass: HomeAssistant,
+) -> None:
+    """Round-trip Gemma -> Qwen -> Gemma restores Gemma's budget."""
+    entry, feature = _thinking_entry(
+        {
+            CONF_FEATURE_MODEL_NAME: "qwen3-8b",
+            CONF_FEATURE_MODEL_REASONING: False,
+            CONF_FEATURE_MODEL_REASONING_BY_MODEL: {
+                "gemma-4-e4b": {"reasoning": True, "budget": 512},
+                "qwen3-8b": {"reasoning": False},
+            },
+        }
+    )
+    flow = _thinking_flow(hass, entry, feature)
+
+    await flow.async_step_user()
+    await flow.async_step_conversation({"model_provider_id": "prov1"})
+    result = await flow.async_step_feature_model(
+        {
+            CONF_FEATURE_MODEL_NAME: "gemma-4-e4b",
+            CONF_FEATURE_MODEL_REASONING: "false",
+        }
+    )
+    assert result.get("type") == "abort"
+    model = feature.data[CONF_FEATURE_MODEL]
+    assert model[CONF_FEATURE_MODEL_REASONING] is True
+    assert model[CONF_FEATURE_MODEL_REASONING_BUDGET] == 512
+
+
+def test_resolve_runtime_options_chat_thinking_propagates() -> None:
+    """Chat thinking settings resolve into provider-agnostic runtime options."""
+    by_model = {
+        "gemma-4-e4b": {"reasoning": True, "budget": 512},
+        "qwen3-8b": {"reasoning": False},
+    }
+    entry, _feature = _thinking_entry(
+        {
+            CONF_FEATURE_MODEL_NAME: "gemma-4-e4b",
+            CONF_FEATURE_MODEL_REASONING: True,
+            CONF_FEATURE_MODEL_REASONING_BUDGET: 512,
+            CONF_FEATURE_MODEL_REASONING_BY_MODEL: by_model,
+        }
+    )
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_CHAT_REASONING] is True
+    assert options[CONF_CHAT_REASONING_BUDGET] == 512
+    assert options[CONF_CHAT_REASONING_BY_MODEL] == by_model
+
+
+def test_resolve_runtime_options_chat_thinking_off_propagates_false() -> None:
+    """Explicit Off (False) survives resolution instead of being dropped."""
+    entry, _feature = _thinking_entry(
+        {
+            CONF_FEATURE_MODEL_NAME: "qwen3-8b",
+            CONF_FEATURE_MODEL_REASONING: False,
+        }
+    )
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_CHAT_REASONING] is False
+    assert CONF_CHAT_REASONING_BUDGET not in options
+
+
+def test_resolve_runtime_options_ollama_reasoning_false_kept() -> None:
+    """Ollama chat with explicit Off resolves CONF_OLLAMA_REASONING=False."""
+    provider = DummySubentry(
+        "prov1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Primary Ollama",
+        {
+            "provider_type": "ollama",
+            "capabilities": ["chat"],
+            "settings": {"base_url": "http://ollama:11434"},
+        },
+    )
+    feature = DummySubentry(
+        "feature1",
+        SUBENTRY_TYPE_FEATURE,
+        "Conversation",
+        {
+            "feature_type": "conversation",
+            "model_provider_id": "prov1",
+            "name": "Conversation",
+            CONF_FEATURE_MODEL: {
+                CONF_FEATURE_MODEL_NAME: "qwen3:8b",
+                CONF_FEATURE_MODEL_REASONING: False,
+            },
+        },
+    )
+    entry = DummyEntry()
+    entry.subentries = {
+        provider.subentry_id: provider,
+        feature.subentry_id: feature,
+    }
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_OLLAMA_REASONING] is False
+    assert options[CONF_CHAT_REASONING] is False

@@ -103,6 +103,36 @@ Each feature is enabled separately under **+ Setup** and has its own model/provi
 
 Global options such as system prompt, face recognition URL, context management parameters, and the critical-action PIN live in the integration's **Options** flow (gear icon on the integration page).
 
+### Per-Model Thinking / Reasoning
+
+The Conversation feature's model form has a **Thinking / reasoning** setting (and,
+for providers that support one, a **Thinking budget** in tokens). Settings are
+remembered **per model name**: switch the chat model from, say, Gemma (thinking on,
+budget 512) to Qwen (thinking off) and back, and each model's configuration is
+restored automatically — the conversation itself is unaffected.
+
+What each choice sends depends on the provider:
+
+| Provider | Off | On | Effort levels | Budget |
+| --- | --- | --- | --- | --- |
+| Ollama | `reasoning: false` | `reasoning: true` (`low` effort for gpt-oss) | passed through | not supported by the Ollama API |
+| OpenAI Compatible (llama.cpp, vLLM, …) | `reasoning_effort: none` + `chat_template_kwargs: {enable_thinking: false}` | `chat_template_kwargs: {enable_thinking: true}` | `reasoning_effort` | `thinking_budget_tokens` (recent llama.cpp servers; older servers ignore it) |
+| OpenAI | not sent (cloud reasoning models cannot disable thinking) | not sent | `reasoning_effort` | not supported |
+| Gemini | `thinking_budget: 0` | `thinking_budget` (dynamic when no budget set) | `thinking_level` low/high (Gemini 3-style models) | `thinking_budget` |
+| Anthropic | not sent (thinking is off by default) | extended thinking with `budget_tokens` | — | `budget_tokens` (floor 1024; `max_tokens` is raised above the budget and temperature is pinned to 1, as the API requires) |
+
+**Provider default** sends nothing, leaving the server/model behavior unchanged.
+
+Notes:
+
+- llama.cpp: a `--reasoning-budget` set on the server command line overrides the
+  per-request budget. If a model ignores the toggle, check that its chat template
+  supports `enable_thinking` (Qwen-style) or `reasoning_effort`.
+- Choosing **Off** on a model that cannot disable thinking (e.g. `gemini-3.5-pro`)
+  is rejected by the provider, not by HGA — prefer **Provider default** there.
+- Fallback providers follow the same per-model memory: a fallback model uses its
+  own remembered entry if one exists, otherwise the provider default.
+
 > **Models that pin temperature** — Some OpenAI models (o-series and other reasoning-style models) only accept their default `temperature`/`top_p` and reject any other value with a 400 error. When that happens, HGA logs a warning and automatically retries the call without the rejected parameter, so conversation, camera analysis, summarization, and Sentinel keep working. In a multi-provider fallback chain the retry is applied per provider; a provider that still rejects its sampling settings fails over to the next provider in the chain and counts toward the circuit breaker. To avoid the extra retry on every call, leave the feature's temperature at the model's supported default (`top_p` has no UI setting — its default is a code-only constant, see the [Constants Reference](constants.md)).
 
 ---

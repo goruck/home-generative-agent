@@ -17,6 +17,9 @@ from homeassistant.const import (
 from ..const import (  # noqa: TID252
     CONF_ANTHROPIC_API_KEY,
     CONF_CHAT_MODEL_PROVIDER,
+    CONF_CHAT_REASONING,
+    CONF_CHAT_REASONING_BUDGET,
+    CONF_CHAT_REASONING_BY_MODEL,
     CONF_DB_NAME,
     CONF_DB_PARAMS,
     CONF_DB_URI,
@@ -28,6 +31,8 @@ from ..const import (  # noqa: TID252
     CONF_FEATURE_MODEL_KEEPALIVE,
     CONF_FEATURE_MODEL_NAME,
     CONF_FEATURE_MODEL_REASONING,
+    CONF_FEATURE_MODEL_REASONING_BUDGET,
+    CONF_FEATURE_MODEL_REASONING_BY_MODEL,
     CONF_FEATURE_MODEL_TEMPERATURE,
     CONF_GEMINI_API_KEY,
     CONF_GEMINI_CHAT_MODEL,
@@ -931,6 +936,17 @@ def _apply_feature_model_to_options(
             options[CONF_OLLAMA_REASONING] = model_data.get(
                 CONF_FEATURE_MODEL_REASONING
             )
+
+    if category == "chat":
+        reasoning_val = model_data.get(CONF_FEATURE_MODEL_REASONING)
+        if reasoning_val is not None:
+            options[CONF_CHAT_REASONING] = reasoning_val
+        budget_val = model_data.get(CONF_FEATURE_MODEL_REASONING_BUDGET)
+        if isinstance(budget_val, (int, float)) and budget_val > 0:
+            options[CONF_CHAT_REASONING_BUDGET] = int(budget_val)
+        by_model = model_data.get(CONF_FEATURE_MODEL_REASONING_BY_MODEL)
+        if isinstance(by_model, Mapping) and by_model:
+            options[CONF_CHAT_REASONING_BY_MODEL] = dict(by_model)
 
 
 MODEL_CATEGORIES = ("chat", "vlm", "summarization", "embedding")

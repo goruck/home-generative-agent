@@ -8,6 +8,10 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import pytest
 
+from custom_components.home_generative_agent.const import (
+    ANTHROPIC_THINKING_MIN_BUDGET,
+    ANTHROPIC_THINKING_RESPONSE_TOKENS,
+)
 from custom_components.home_generative_agent.core.utils import (
     CannotConnectError,
     InvalidAuthError,
@@ -16,6 +20,7 @@ from custom_components.home_generative_agent.core.utils import (
     normalize_openai_compatible_base_url,
     openai_compatible_healthy,
     reasoning_field,
+    thinking_configurable,
     validate_anthropic_key,
     validate_openai_compatible_url,
 )
@@ -504,3 +509,104 @@ async def test_anthropic_healthy_returns_false_on_auth_error(
         lambda _hass: client,
     )
     assert await anthropic_healthy(hass, "sk-ant-bad") is False
+
+
+# ---------------------------------------------------------------------------
+# thinking_configurable tests (issue #580)
+# ---------------------------------------------------------------------------
+
+
+def test_thinking_none_sends_nothing_for_all_providers() -> None:
+    """Provider default (None) never sends thinking fields."""
+    for provider in ("openai", "openai_compatible", "gemini", "anthropic", "ollama"):
+        assert (
+            thinking_configurable(provider_type=provider, reasoning=None, budget=512)
+            == {}
+        )
+
+
+def test_thinking_unknown_effort_string_sends_nothing() -> None:
+    """A free-form value outside known effort levels is not forwarded."""
+    assert thinking_configurable(provider_type="openai", reasoning="frobnicate") == {}
+
+
+def test_thinking_ollama_returns_empty() -> None:
+    """Ollama thinking flows through reasoning_field, not this helper."""
+    assert thinking_configurable(provider_type="ollama", reasoning=True) == {}
+
+
+def test_thinking_openai_effort_only() -> None:
+    """Cloud OpenAI forwards effort levels and ignores On/Off."""
+    assert thinking_configurable(provider_type="openai", reasoning="medium") == {
+        "reasoning_effort": "medium"
+    }
+    assert thinking_configurable(provider_type="openai", reasoning=True) == {}
+    assert thinking_configurable(provider_type="openai", reasoning=False) == {}
+
+
+def test_thinking_openai_compatible_off() -> None:
+    """Off sends reasoning_effort=none and enable_thinking=False (llama.cpp)."""
+    config = thinking_configurable(
+        provider_type="openai_compatible", reasoning=False, budget=512
+    )
+    assert config == {
+        "reasoning_effort": "none",
+        "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
+    }
+
+
+def test_thinking_openai_compatible_on_with_budget() -> None:
+    """On sends enable_thinking=True plus the per-request budget."""
+    config = thinking_configurable(
+        provider_type="openai_compatible", reasoning=True, budget=512
+    )
+    assert config == {
+        "extra_body": {
+            "chat_template_kwargs": {"enable_thinking": True},
+            "thinking_budget_tokens": 512,
+        }
+    }
+
+
+def test_thinking_openai_compatible_effort() -> None:
+    """Effort levels map to reasoning_effort for llama.cpp-style servers."""
+    config = thinking_configurable(provider_type="openai_compatible", reasoning="low")
+    assert config == {"reasoning_effort": "low"}
+
+
+def test_thinking_gemini_mappings() -> None:
+    """Gemini: off=budget 0, on=budget or dynamic, effort=thinking level."""
+    assert thinking_configurable(provider_type="gemini", reasoning=False) == {
+        "thinking_budget": 0
+    }
+    assert thinking_configurable(
+        provider_type="gemini", reasoning=True, budget=512
+    ) == {"thinking_budget": 512}
+    assert thinking_configurable(provider_type="gemini", reasoning=True) == {
+        "thinking_budget": -1
+    }
+    assert thinking_configurable(provider_type="gemini", reasoning="low") == {
+        "thinking_level": "low"
+    }
+    assert thinking_configurable(provider_type="gemini", reasoning="high") == {
+        "thinking_level": "high"
+    }
+
+
+def test_thinking_anthropic_enforces_api_constraints() -> None:
+    """Anthropic: budget floor 1024, max_tokens above budget, temperature 1."""
+    config = thinking_configurable(
+        provider_type="anthropic", reasoning=True, budget=512
+    )
+    assert config["thinking"] == {
+        "type": "enabled",
+        "budget_tokens": ANTHROPIC_THINKING_MIN_BUDGET,
+    }
+    assert (
+        config["max_tokens"]
+        == ANTHROPIC_THINKING_MIN_BUDGET + ANTHROPIC_THINKING_RESPONSE_TOKENS
+    )
+    assert config["temperature"] == 1
+    big = thinking_configurable(provider_type="anthropic", reasoning=True, budget=8192)
+    assert big["thinking"] == {"type": "enabled", "budget_tokens": 8192}
+    assert thinking_configurable(provider_type="anthropic", reasoning=False) == {}

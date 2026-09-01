@@ -22,6 +22,8 @@ from homeassistant.helpers.httpx_client import get_async_client
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
 from ..const import (  # noqa: TID252
+    ANTHROPIC_THINKING_MIN_BUDGET,
+    ANTHROPIC_THINKING_RESPONSE_TOKENS,
     CONF_OLLAMA_URL,
     EMBEDDING_MODEL_DIMS,
     HTTP_STATUS_BAD_REQUEST,
@@ -949,6 +951,104 @@ def reasoning_field(
     if not supported:
         return {}
     return {"reasoning": value if enabled else False}
+
+
+_EFFORT_LEVELS = frozenset({"minimal", "low", "medium", "high"})
+
+
+def _thinking_openai(
+    _reasoning: Any, effort: str | None, _budget: int | None
+) -> dict[str, Any]:
+    # Cloud OpenAI reasoning models cannot disable thinking; only effort
+    # levels are meaningful. On/Off are not sent.
+    return {"reasoning_effort": effort} if effort else {}
+
+
+def _thinking_openai_compatible(
+    reasoning: Any, effort: str | None, budget: int | None
+) -> dict[str, Any]:
+    # llama.cpp/vLLM-style servers: 'reasoning_effort: none' plus
+    # 'chat_template_kwargs.enable_thinking' cover both template styles;
+    # unknown template variables are ignored, so sending both is safe.
+    config: dict[str, Any] = {}
+    extra_body: dict[str, Any] = {}
+    if reasoning is False:
+        config["reasoning_effort"] = "none"
+        extra_body["chat_template_kwargs"] = {"enable_thinking": False}
+    elif effort:
+        config["reasoning_effort"] = effort
+    else:
+        extra_body["chat_template_kwargs"] = {"enable_thinking": True}
+    if reasoning is not False and budget:
+        # Per-request budget on recent llama.cpp servers; older servers
+        # ignore unknown body fields.
+        extra_body["thinking_budget_tokens"] = budget
+    if extra_body:
+        config["extra_body"] = extra_body
+    return config
+
+
+def _thinking_gemini(
+    reasoning: Any, effort: str | None, budget: int | None
+) -> dict[str, Any]:
+    if reasoning is False:
+        return {"thinking_budget": 0}
+    if effort:
+        # Gemini 3-style models take a thinking level, not a budget.
+        return {"thinking_level": "low" if effort in ("minimal", "low") else "high"}
+    # -1 = dynamic thinking when no explicit budget is configured.
+    return {"thinking_budget": budget or -1}
+
+
+def _thinking_anthropic(
+    reasoning: Any, _effort: str | None, budget: int | None
+) -> dict[str, Any]:
+    if reasoning is False:
+        return {}
+    budget_tokens = max(budget or 0, ANTHROPIC_THINKING_MIN_BUDGET)
+    # Extended thinking requires max_tokens > budget_tokens and
+    # temperature=1; these override the feature-level temperature.
+    return {
+        "thinking": {"type": "enabled", "budget_tokens": budget_tokens},
+        "max_tokens": budget_tokens + ANTHROPIC_THINKING_RESPONSE_TOKENS,
+        "temperature": 1,
+    }
+
+
+_THINKING_BUILDERS: dict[
+    str, Callable[[Any, str | None, int | None], dict[str, Any]]
+] = {
+    "openai": _thinking_openai,
+    "openai_compatible": _thinking_openai_compatible,
+    "gemini": _thinking_gemini,
+    "anthropic": _thinking_anthropic,
+}
+
+
+def thinking_configurable(
+    *,
+    provider_type: str,
+    reasoning: Any,
+    budget: int | None = None,
+) -> dict[str, Any]:
+    """
+    Map the canonical chat thinking setting to provider configurable fields.
+
+    Canonical ``reasoning`` values: ``None`` (provider default - send nothing),
+    ``False`` (explicitly off), ``True`` (explicitly on), or an effort-level
+    string ("minimal"/"low"/"medium"/"high"). ``budget`` is a thinking-token
+    budget honored where the provider API has one.
+
+    Ollama is handled separately via :func:`reasoning_field` (its value depends
+    on model-name heuristics); this helper returns ``{}`` for it.
+    """
+    effort = reasoning if isinstance(reasoning, str) else None
+    if reasoning is None or (effort is not None and effort not in _EFFORT_LEVELS):
+        return {}
+    builder = _THINKING_BUILDERS.get(provider_type)
+    if builder is None:
+        return {}
+    return builder(reasoning, effort, budget)
 
 
 def extract_final(raw: str | list[Any], max_chars: int | None = None) -> str:

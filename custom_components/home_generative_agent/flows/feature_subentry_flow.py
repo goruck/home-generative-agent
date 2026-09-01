@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
@@ -42,6 +43,8 @@ from ..const import (  # noqa: TID252
     CONF_FEATURE_MODEL_KEEPALIVE,
     CONF_FEATURE_MODEL_NAME,
     CONF_FEATURE_MODEL_REASONING,
+    CONF_FEATURE_MODEL_REASONING_BUDGET,
+    CONF_FEATURE_MODEL_REASONING_BY_MODEL,
     CONF_FEATURE_MODEL_TEMPERATURE,
     FEATURE_CATEGORY_MAP,
     FEATURE_DEFS,
@@ -239,12 +242,145 @@ def _default_model_data(category: str, provider_type: str | None) -> dict[str, A
     return defaults
 
 
+# Thinking/reasoning choices offered per provider type for the chat feature.
+# Stored canonical values: None (provider default), False (off), True (on),
+# or an effort-level string. See CONF_CHAT_REASONING in const.py.
+_REASONING_CHOICES: dict[str, list[tuple[str, str]]] = {
+    "ollama": [
+        ("Off", "false"),
+        ("On", "true"),
+        ("GPT-OSS effort", "low"),
+    ],
+    "openai": [
+        ("Provider default", "default"),
+        ("Minimal effort", "minimal"),
+        ("Low effort", "low"),
+        ("Medium effort", "medium"),
+        ("High effort", "high"),
+    ],
+    "openai_compatible": [
+        ("Provider default", "default"),
+        ("Off", "false"),
+        ("On", "true"),
+        ("Low effort", "low"),
+        ("Medium effort", "medium"),
+        ("High effort", "high"),
+    ],
+    "gemini": [
+        ("Provider default", "default"),
+        ("Off", "false"),
+        ("On (dynamic or budget)", "true"),
+        ("Low (thinking level)", "low"),
+        ("High (thinking level)", "high"),
+    ],
+    "anthropic": [
+        ("Off (default)", "default"),
+        ("On (extended thinking)", "true"),
+    ],
+}
+
+# Providers whose reasoning select accepts free-form values (model-specific
+# effort strings) in addition to the listed choices.
+_REASONING_CUSTOM_VALUE_PROVIDERS = frozenset({"ollama", "openai_compatible"})
+
+# Providers whose API accepts a thinking-token budget.
+_REASONING_BUDGET_PROVIDERS = frozenset({"openai_compatible", "gemini", "anthropic"})
+
+_REASONING_BUDGET_MAX_TOKENS = 131072
+
+
 def _normalize_reasoning(value: Any) -> Any:
-    if value in ("false", "", None):
+    if value in ("default", "", None):
         return None
+    if value == "false":
+        return False
     if value == "true":
         return True
     return value
+
+
+def _normalize_reasoning_budget(value: Any) -> int | None:
+    try:
+        budget = int(value)
+    except (TypeError, ValueError):
+        return None
+    return budget if budget > 0 else None
+
+
+def _reasoning_display(value: Any, provider_type: str | None) -> str:
+    """Map a stored canonical reasoning value to its select-option string."""
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if value is None:
+        # Ollama predates the explicit "default" choice; absent means off.
+        return "false" if provider_type == "ollama" else "default"
+    return str(value)
+
+
+def _add_reasoning_schema(
+    schema: dict[Any, Any],
+    provider_type: str,
+    existing_model: Mapping[str, Any],
+    defaults: Mapping[str, Any],
+) -> None:
+    """
+    Add thinking/reasoning fields to the chat feature-model schema.
+
+    Defaults follow the currently stored model: a per-model remembered entry
+    wins over the flat field so switching models restores that model's
+    thinking settings (issue #580).
+    """
+    remembered = _remembered_reasoning_entry(
+        existing_model, existing_model.get(CONF_FEATURE_MODEL_NAME)
+    )
+    reasoning_val = remembered.get(
+        "reasoning",
+        existing_model.get(
+            CONF_FEATURE_MODEL_REASONING,
+            defaults.get(CONF_FEATURE_MODEL_REASONING),
+        ),
+    )
+    schema[
+        vol.Optional(
+            CONF_FEATURE_MODEL_REASONING,
+            default=_reasoning_display(reasoning_val, provider_type),
+        )
+    ] = SelectSelector(
+        SelectSelectorConfig(
+            options=[
+                SelectOptionDict(label=label, value=value)
+                for label, value in _REASONING_CHOICES[provider_type]
+            ],
+            mode=SelectSelectorMode.DROPDOWN,
+            sort=False,
+            custom_value=provider_type in _REASONING_CUSTOM_VALUE_PROVIDERS,
+        )
+    )
+    if provider_type in _REASONING_BUDGET_PROVIDERS:
+        budget_val = remembered.get(
+            "budget", existing_model.get(CONF_FEATURE_MODEL_REASONING_BUDGET)
+        )
+        budget_key = (
+            vol.Optional(CONF_FEATURE_MODEL_REASONING_BUDGET, default=budget_val)
+            if budget_val
+            else vol.Optional(CONF_FEATURE_MODEL_REASONING_BUDGET)
+        )
+        schema[budget_key] = NumberSelector(
+            NumberSelectorConfig(min=0, max=_REASONING_BUDGET_MAX_TOKENS, step=1)
+        )
+
+
+def _remembered_reasoning_entry(
+    model_data: Mapping[str, Any], model_name: Any
+) -> dict[str, Any]:
+    """Return the per-model-name remembered thinking entry, if any."""
+    by_model = model_data.get(CONF_FEATURE_MODEL_REASONING_BY_MODEL)
+    if not isinstance(by_model, Mapping) or not model_name:
+        return {}
+    entry = by_model.get(model_name)
+    return dict(entry) if isinstance(entry, Mapping) else {}
 
 
 class FeatureSubentryFlow(ConfigSubentryFlow):
@@ -864,39 +1000,48 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
                     )
                 ] = NumberSelector(NumberSelectorConfig(min=64, max=65536, step=1))
 
-            if category == "chat":
-                reasoning_val = existing_model.get(CONF_FEATURE_MODEL_REASONING)
-                if reasoning_val is True:
-                    reasoning_default = "true"
-                elif reasoning_val is None or reasoning_val is False:
-                    reasoning_default = "false"
-                else:
-                    reasoning_default = str(reasoning_val)
-                schema[
-                    vol.Optional(
-                        CONF_FEATURE_MODEL_REASONING,
-                        default=reasoning_default,
-                    )
-                ] = SelectSelector(
-                    SelectSelectorConfig(
-                        options=[
-                            SelectOptionDict(label="Off", value="false"),
-                            SelectOptionDict(label="On", value="true"),
-                            SelectOptionDict(label="GPT-OSS effort", value="low"),
-                        ],
-                        mode=SelectSelectorMode.DROPDOWN,
-                        sort=False,
-                        custom_value=True,
-                    )
-                )
+        if category == "chat" and provider_type in _REASONING_CHOICES:
+            _add_reasoning_schema(schema, provider_type, existing_model, defaults)
 
         if user_input is not None:
             provider_type = _provider_type_for_id(entry, provider_id)
             model_data = dict(defaults)
             model_data.update(existing_model)
+            submitted_name = user_input.get(CONF_FEATURE_MODEL_NAME)
+            stored_name = existing_model.get(CONF_FEATURE_MODEL_NAME)
+            by_model: dict[str, dict[str, Any]] = {
+                str(name): dict(entry_val)
+                for name, entry_val in (
+                    existing_model.get(CONF_FEATURE_MODEL_REASONING_BY_MODEL) or {}
+                ).items()
+                if isinstance(entry_val, Mapping)
+            }
+            reasoning_val = _normalize_reasoning(
+                user_input.get(CONF_FEATURE_MODEL_REASONING)
+            )
+            budget_val = _normalize_reasoning_budget(
+                user_input.get(CONF_FEATURE_MODEL_REASONING_BUDGET)
+            )
+            if submitted_name != stored_name and submitted_name in by_model:
+                # Switching to a model with remembered thinking settings: the
+                # on-screen thinking fields still showed the previous model's
+                # values, so the remembered entry wins. Save again to change it.
+                remembered = by_model[submitted_name]
+                reasoning_val = remembered.get("reasoning")
+                budget_val = _normalize_reasoning_budget(remembered.get("budget"))
+            elif submitted_name and category == "chat":
+                entry_val = {}
+                if reasoning_val is not None:
+                    entry_val["reasoning"] = reasoning_val
+                if budget_val:
+                    entry_val["budget"] = budget_val
+                if entry_val:
+                    by_model[submitted_name] = entry_val
+                else:
+                    by_model.pop(submitted_name, None)
             model_data.update(
                 {
-                    CONF_FEATURE_MODEL_NAME: user_input.get(CONF_FEATURE_MODEL_NAME),
+                    CONF_FEATURE_MODEL_NAME: submitted_name,
                     CONF_FEATURE_MODEL_TEMPERATURE: user_input.get(
                         CONF_FEATURE_MODEL_TEMPERATURE
                     ),
@@ -906,9 +1051,9 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
                     CONF_FEATURE_MODEL_CONTEXT_SIZE: user_input.get(
                         CONF_FEATURE_MODEL_CONTEXT_SIZE
                     ),
-                    CONF_FEATURE_MODEL_REASONING: _normalize_reasoning(
-                        user_input.get(CONF_FEATURE_MODEL_REASONING)
-                    ),
+                    CONF_FEATURE_MODEL_REASONING: reasoning_val,
+                    CONF_FEATURE_MODEL_REASONING_BUDGET: budget_val,
+                    CONF_FEATURE_MODEL_REASONING_BY_MODEL: by_model or None,
                 }
             )
             model_data = {k: v for k, v in model_data.items() if v is not None}

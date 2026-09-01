@@ -92,6 +92,9 @@ from .const import (
     CONF_AUDIT_HOT_MAX_RECORDS,
     CONF_CHAT_MODEL_PROVIDER,
     CONF_CHAT_MODEL_TEMPERATURE,
+    CONF_CHAT_REASONING,
+    CONF_CHAT_REASONING_BUDGET,
+    CONF_CHAT_REASONING_BY_MODEL,
     CONF_DB_BOOTSTRAPPED,
     CONF_DB_NAME,
     CONF_DB_PARAMS,
@@ -280,6 +283,7 @@ from .core.utils import (
     openai_compatible_healthy,
     openai_healthy,
     reasoning_field,
+    thinking_configurable,
 )
 from .core.video_analyzer import VideoAnalyzer
 from .core.video_helpers import latest_target, publish_latest_atomic
@@ -1946,6 +1950,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 temperature=ConfigurableField(id="temperature"),
                 top_p=ConfigurableField(id="top_p"),
                 max_tokens=ConfigurableField(id="max_tokens"),
+                reasoning_effort=ConfigurableField(id="reasoning_effort"),
             )
         except Exception:
             LOGGER.exception("OpenAI provider init failed; continuing without it.")
@@ -1996,6 +2001,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 temperature=ConfigurableField(id="temperature"),
                 top_p=ConfigurableField(id="top_p"),
                 max_output_tokens=ConfigurableField(id="max_output_tokens"),
+                thinking_budget=ConfigurableField(id="thinking_budget"),
+                thinking_level=ConfigurableField(id="thinking_level"),
             )
         except Exception:
             LOGGER.exception("Gemini provider init failed; continuing without it.")
@@ -2013,6 +2020,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             ).configurable_fields(
                 model=ConfigurableField(id="model"),
                 temperature=ConfigurableField(id="temperature"),
+                thinking=ConfigurableField(id="thinking"),
+                max_tokens=ConfigurableField(id="max_tokens"),
             )
             # Pre-warm the now-cached async httpx client in a thread so the first
             # API call doesn't trigger a blocking SSL context load in the event loop.
@@ -2048,6 +2057,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 temperature=ConfigurableField(id="temperature"),
                 top_p=ConfigurableField(id="top_p"),
                 max_tokens=ConfigurableField(id="max_tokens"),
+                reasoning_effort=ConfigurableField(id="reasoning_effort"),
+                extra_body=ConfigurableField(id="extra_body"),
             )
         except Exception:
             LOGGER.exception(
@@ -2351,6 +2362,37 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     chat_temp = options.get(
         CONF_CHAT_MODEL_TEMPERATURE, RECOMMENDED_CHAT_MODEL_TEMPERATURE
     )
+    chat_reasoning = options.get(CONF_CHAT_REASONING)
+    chat_reasoning_budget = options.get(CONF_CHAT_REASONING_BUDGET)
+    chat_reasoning_by_model: dict[str, Any] = dict(
+        options.get(CONF_CHAT_REASONING_BY_MODEL) or {}
+    )
+
+    def _chat_thinking_for_model(
+        provider_type: str, model_name: Any, *, default_to_flat: bool = True
+    ) -> dict[str, Any]:
+        """
+        Thinking configurable entries for a chat model, keyed by model name.
+
+        The flat effective setting mirrors the primary chat model, so fallback
+        models pass default_to_flat=False and only apply a remembered per-model
+        entry.
+        """
+        remembered = chat_reasoning_by_model.get(str(model_name))
+        if isinstance(remembered, Mapping):
+            reasoning_val = remembered.get("reasoning")
+            budget_val = remembered.get("budget")
+        elif default_to_flat:
+            reasoning_val = chat_reasoning
+            budget_val = chat_reasoning_budget
+        else:
+            return {}
+        return thinking_configurable(
+            provider_type=provider_type,
+            reasoning=reasoning_val,
+            budget=int(budget_val) if budget_val else None,
+        )
+
     ollama_chat_keep_alive = options.get(
         CONF_OLLAMA_CHAT_KEEPALIVE, RECOMMENDED_OLLAMA_CHAT_KEEPALIVE
     )
@@ -2366,50 +2408,60 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         "keep_alive": ollama_chat_keep_alive,
     }
     if chat_provider == "openai":
+        openai_chat_model = options.get(
+            CONF_OPENAI_CHAT_MODEL, RECOMMENDED_OPENAI_CHAT_MODEL
+        )
         chat_model = (openai_provider or NullChat()).with_config(
             config={
                 "configurable": {
-                    "model_name": options.get(
-                        CONF_OPENAI_CHAT_MODEL, RECOMMENDED_OPENAI_CHAT_MODEL
-                    ),
+                    "model_name": openai_chat_model,
                     "temperature": chat_temp,
                     "top_p": CHAT_MODEL_TOP_P,
+                    **_chat_thinking_for_model("openai", openai_chat_model),
                 }
             }
         )
     elif chat_provider == "openai_compatible":
+        openai_compatible_chat_model = options.get(
+            CONF_OPENAI_COMPATIBLE_CHAT_MODEL,
+            RECOMMENDED_OPENAI_COMPATIBLE_CHAT_MODEL,
+        )
         chat_model = (openai_compatible_provider or NullChat()).with_config(
             config={
                 "configurable": {
-                    "model_name": options.get(
-                        CONF_OPENAI_COMPATIBLE_CHAT_MODEL,
-                        RECOMMENDED_OPENAI_COMPATIBLE_CHAT_MODEL,
-                    ),
+                    "model_name": openai_compatible_chat_model,
                     "temperature": chat_temp,
                     "top_p": CHAT_MODEL_TOP_P,
+                    **_chat_thinking_for_model(
+                        "openai_compatible", openai_compatible_chat_model
+                    ),
                 }
             }
         )
     elif chat_provider == "gemini":
+        gemini_chat_model = options.get(
+            CONF_GEMINI_CHAT_MODEL, RECOMMENDED_GEMINI_CHAT_MODEL
+        )
         chat_model = (gemini_provider or NullChat()).with_config(
             config={
                 "configurable": {
-                    "model": options.get(
-                        CONF_GEMINI_CHAT_MODEL, RECOMMENDED_GEMINI_CHAT_MODEL
-                    ),
+                    "model": gemini_chat_model,
                     "temperature": chat_temp,
                     "top_p": CHAT_MODEL_TOP_P,
+                    **_chat_thinking_for_model("gemini", gemini_chat_model),
                 }
             }
         )
     elif chat_provider == "anthropic":
+        anthropic_chat_model = options.get(
+            CONF_ANTHROPIC_CHAT_MODEL, RECOMMENDED_ANTHROPIC_CHAT_MODEL
+        )
         chat_model = (anthropic_provider or NullChat()).with_config(
             config={
                 "configurable": {
-                    "model": options.get(
-                        CONF_ANTHROPIC_CHAT_MODEL, RECOMMENDED_ANTHROPIC_CHAT_MODEL
-                    ),
+                    "model": anthropic_chat_model,
                     "temperature": chat_temp,
+                    **_chat_thinking_for_model("anthropic", anthropic_chat_model),
                 }
             }
         )
@@ -2624,6 +2676,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         config = {model_key: model_name, "temperature": temperature}
         if (top_p := _category_top_p(category)) is not None:
             config["top_p"] = top_p
+        if category == "chat":
+            config.update(
+                _chat_thinking_for_model(
+                    provider.provider_type, model_name, default_to_flat=False
+                )
+            )
         return model.with_config(config={"configurable": config})
 
     def _configured_ollama_model(
@@ -2636,6 +2694,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         """Configure an Ollama fallback model for its category."""
         settings = provider.data.get("settings", {})
         reasoning_enabled = settings.get("reasoning", ollama_reasoning)
+        if category == "chat":
+            remembered = chat_reasoning_by_model.get(str(model_name))
+            if isinstance(remembered, Mapping) and "reasoning" in remembered:
+                reasoning_enabled = remembered["reasoning"]
         rf_fallback = reasoning_field(model=str(model_name), enabled=reasoning_enabled)
         config = {
             "model": model_name,
@@ -2713,14 +2775,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 model, provider, category, model_name, temperature
             )
         if provider.provider_type == "anthropic":
-            return model.with_config(
-                config={
-                    "configurable": {
-                        "model": model_name,
-                        "temperature": temperature,
-                    }
-                }
-            )
+            anthropic_config = {"model": model_name, "temperature": temperature}
+            if category == "chat":
+                anthropic_config.update(
+                    _chat_thinking_for_model(
+                        "anthropic", model_name, default_to_flat=False
+                    )
+                )
+            return model.with_config(config={"configurable": anthropic_config})
         if provider.provider_type == "ollama":
             return _configured_ollama_model(
                 model, provider, category, model_name, temperature
