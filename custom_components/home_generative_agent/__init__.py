@@ -2001,8 +2001,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 temperature=ConfigurableField(id="temperature"),
                 top_p=ConfigurableField(id="top_p"),
                 max_output_tokens=ConfigurableField(id="max_output_tokens"),
+                # No thinking_level field: the pinned generativelanguage
+                # protobuf cannot marshal it (see _thinking_gemini).
                 thinking_budget=ConfigurableField(id="thinking_budget"),
-                thinking_level=ConfigurableField(id="thinking_level"),
             )
         except Exception:
             LOGGER.exception("Gemini provider init failed; continuing without it.")

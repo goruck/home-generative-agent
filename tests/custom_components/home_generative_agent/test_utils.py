@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
+from langchain_google_genai import ChatGoogleGenerativeAI
+from pydantic import SecretStr
 
 from custom_components.home_generative_agent.const import (
     ANTHROPIC_THINKING_MAX_BUDGET,
@@ -585,44 +587,43 @@ def test_thinking_openai_compatible_effort() -> None:
     assert config == {"reasoning_effort": "low"}
 
 
-def test_thinking_gemini_2x_uses_budget() -> None:
-    """Gemini 2.x: off=budget 0, on=budget or dynamic, effort treated as On."""
-    model = "gemini-2.5-flash"
-    assert thinking_configurable(
-        provider_type="gemini", reasoning=False, model=model
-    ) == {"thinking_budget": 0}
-    assert thinking_configurable(
-        provider_type="gemini", reasoning=True, budget=512, model=model
-    ) == {"thinking_budget": 512}
-    assert thinking_configurable(
-        provider_type="gemini", reasoning=True, model=model
-    ) == {"thinking_budget": -1}
-    assert thinking_configurable(
-        provider_type="gemini", reasoning="low", model=model
-    ) == {"thinking_budget": -1}
+def test_thinking_gemini_always_uses_budget_never_level() -> None:
+    """
+    Gemini sends only thinking_budget on the pinned stack.
 
-
-def test_thinking_gemini_3_family_uses_level() -> None:
-    """Gemini 3-family models take thinking_level, never a budget."""
-    model = "gemini-3.5-flash-lite"
-    assert thinking_configurable(
-        provider_type="gemini", reasoning=True, budget=512, model=model
-    ) == {"thinking_level": "high"}
-    assert thinking_configurable(
-        provider_type="gemini", reasoning=False, model=model
-    ) == {"thinking_level": "low"}
-    assert thinking_configurable(
-        provider_type="gemini", reasoning="low", model=model
-    ) == {"thinking_level": "low"}
-    assert thinking_configurable(
-        provider_type="gemini", reasoning="high", model=model
-    ) == {"thinking_level": "high"}
-    assert (
-        thinking_configurable(
-            provider_type="gemini", reasoning="frobnicate", model=model
+    google-ai-generativelanguage 0.10.0's ThinkingConfig protobuf has no
+    thinking_level field; setting it crashes langchain-google-genai 3.1.0 at
+    proto marshaling ("Unknown field for ThinkingConfig: thinking_level"),
+    Gemini 3-family models included. Field-hit during #580 integration
+    testing.
+    """
+    for model in ("gemini-2.5-flash", "gemini-3.5-flash-lite"):
+        assert thinking_configurable(
+            provider_type="gemini", reasoning=False, model=model
+        ) == {"thinking_budget": 0}
+        assert thinking_configurable(
+            provider_type="gemini", reasoning=True, budget=512, model=model
+        ) == {"thinking_budget": 512}
+        assert thinking_configurable(
+            provider_type="gemini", reasoning=True, model=model
+        ) == {"thinking_budget": -1}
+        # Effort strings have no budget-API equivalent; known ones mean On.
+        assert thinking_configurable(
+            provider_type="gemini", reasoning="low", model=model
+        ) == {"thinking_budget": -1}
+        assert (
+            thinking_configurable(
+                provider_type="gemini", reasoning="frobnicate", model=model
+            )
+            == {}
         )
-        == {}
-    )
+        for config in (
+            thinking_configurable(
+                provider_type="gemini", reasoning=value, budget=512, model=model
+            )
+            for value in (False, True, "low", "high")
+        ):
+            assert "thinking_level" not in config
 
 
 def test_thinking_anthropic_enforces_api_constraints() -> None:
@@ -671,3 +672,28 @@ def test_reasoning_field_passes_effort_through_for_gpt_oss() -> None:
     # Boolean-style models treat any truthy value as on.
     assert reasoning_field(model="qwen3:8b", enabled="high") == {"reasoning": True}
     assert reasoning_field(model="qwen3:8b", enabled=False) == {"reasoning": False}
+
+
+def test_thinking_gemini_output_marshals_to_protobuf() -> None:
+    """
+    Everything _thinking_gemini emits must survive proto marshaling.
+
+    Guards the field-hit #580 crash: a pydantic field that exists on
+    ChatGoogleGenerativeAI but not on the installed ThinkingConfig protobuf
+    (thinking_level on google-ai-generativelanguage 0.10.0) only explodes in
+    _prepare_params, so this exercises the real marshaling path.
+    """
+    for reasoning, budget in ((True, 512), (True, None), (False, None)):
+        config = thinking_configurable(
+            provider_type="gemini",
+            reasoning=reasoning,
+            budget=budget,
+            model="gemini-3.5-flash-lite",
+        )
+        model = ChatGoogleGenerativeAI(
+            model="gemini-3.5-flash-lite",
+            google_api_key=SecretStr("test-key"),
+            **config,
+        )
+        params = model._prepare_params(stop=None)
+        assert params.thinking_config is not None

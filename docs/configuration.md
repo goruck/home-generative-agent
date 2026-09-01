@@ -118,8 +118,7 @@ What each choice sends depends on the provider:
 | Ollama | `reasoning: false` | `reasoning: true` | passed through for gpt-oss models; other models treat any effort as On | not supported by the Ollama API |
 | OpenAI Compatible (llama.cpp, vLLM, …) | `reasoning_effort: none` + `chat_template_kwargs: {enable_thinking: false}` | `chat_template_kwargs: {enable_thinking: true}` | `reasoning_effort` — free-form values (e.g. `xhigh`) pass through verbatim; the server owns the vocabulary | `thinking_budget_tokens` (recent llama.cpp servers; older servers ignore it) |
 | OpenAI | not sent (cloud reasoning models cannot disable thinking) | not sent | `reasoning_effort` (known levels only); a model that rejects it is retried without it automatically | not supported |
-| Gemini 2.x | `thinking_budget: 0` | `thinking_budget` (dynamic when no budget set) | treated as On | `thinking_budget` |
-| Gemini 3-family (`gemini-3*`) | `thinking_level: low` (cannot fully disable) | `thinking_level: high` | minimal/low → `low`, medium/high → `high` | ignored (the API takes a level, not a budget) |
+| Gemini | `thinking_budget: 0` | `thinking_budget` (dynamic when no budget set) | not offered | `thinking_budget` |
 | Anthropic | not sent (thinking is off by default) | extended thinking with `budget_tokens` | not applicable (only Off/On offered) | `budget_tokens`, clamped to 1024–32768; `max_tokens` is raised above the budget and temperature is pinned to 1, as the API requires |
 
 **Provider default** sends nothing, leaving the server/model behavior unchanged.
@@ -138,6 +137,10 @@ Notes:
 - llama.cpp: a `--reasoning-budget` set on the server command line overrides the
   per-request budget. If a model ignores the toggle, check that its chat template
   supports `enable_thinking` (Qwen-style) or `reasoning_effort`.
+- Gemini: only `thinking_budget` is sent — the pinned `google-ai-generativelanguage`
+  protobuf cannot express `thinking_level`, so level control (Gemini 3-style) has
+  to wait for the langchain-google-genai 4.x upgrade. A model that cannot disable
+  thinking rejects **Off**; prefer **Provider default** there.
 - Fallback providers follow the same per-model memory: a fallback model uses its
   own remembered entry if one exists, otherwise the provider default.
 

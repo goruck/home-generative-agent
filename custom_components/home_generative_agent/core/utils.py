@@ -998,22 +998,18 @@ def _thinking_openai_compatible(
 
 
 def _thinking_gemini(
-    reasoning: Any, effort: str | None, budget: int | None, model: str
+    reasoning: Any, effort: str | None, budget: int | None, _model: str
 ) -> dict[str, Any]:
-    if model.lower().lstrip().startswith("gemini-3"):
-        # Gemini 3-family models take thinking_level (low/high), not a
-        # budget, and cannot fully disable thinking - Off maps to the
-        # minimum level.
-        if reasoning is False or effort in ("minimal", "low"):
-            return {"thinking_level": "low"}
-        if effort is not None and effort not in _EFFORT_LEVELS:
-            return {}
-        return {"thinking_level": "high"}
+    # Only thinking_budget is expressible on the pinned stack:
+    # google-ai-generativelanguage 0.10.0's ThinkingConfig protobuf has no
+    # thinking_level field, so langchain-google-genai 3.1.0 crashes at proto
+    # marshaling if that pydantic field is ever set - for every model,
+    # Gemini 3-family included. Level control can land with the 4.x upgrade.
     if reasoning is False:
         return {"thinking_budget": 0}
     if effort is not None and effort not in _EFFORT_LEVELS:
         return {}
-    # Gemini 2.x: effort levels have no API equivalent; treat them as On.
+    # Effort levels have no budget-API equivalent; treat them as On.
     # -1 = dynamic thinking when no explicit budget is configured.
     return {"thinking_budget": budget or -1}
 

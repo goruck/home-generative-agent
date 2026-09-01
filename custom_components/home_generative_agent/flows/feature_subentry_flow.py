@@ -266,12 +266,12 @@ _REASONING_CHOICES: dict[str, list[tuple[str, str]]] = {
         ("Medium effort", "medium"),
         ("High effort", "high"),
     ],
+    # No effort/level choices: the pinned google-ai-generativelanguage
+    # protobuf cannot express thinking_level (see _thinking_gemini).
     "gemini": [
         ("Provider default", "default"),
         ("Off", "false"),
         ("On (dynamic or budget)", "true"),
-        ("Low (thinking level)", "low"),
-        ("High (thinking level)", "high"),
     ],
     "anthropic": [
         ("Off (default)", "default"),
