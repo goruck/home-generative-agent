@@ -23,6 +23,7 @@ from homeassistant.helpers.selector import (
     BooleanSelector,
     NumberSelector,
     NumberSelectorConfig,
+    NumberSelectorMode,
     ObjectSelector,
     SelectOptionDict,
     SelectSelector,
@@ -376,7 +377,14 @@ def _add_reasoning_schema(
             else vol.Optional(CONF_FEATURE_MODEL_REASONING_BUDGET)
         )
         schema[budget_key] = NumberSelector(
-            NumberSelectorConfig(min=0, max=_REASONING_BUDGET_MAX_TOKENS, step=1)
+            NumberSelectorConfig(
+                min=0,
+                max=_REASONING_BUDGET_MAX_TOKENS,
+                step=1,
+                # Box, not slider: 1024 tokens on a 0-131072 slider is a
+                # sliver at the far left; the value is always typed.
+                mode=NumberSelectorMode.BOX,
+            )
         )
 
 
