@@ -8,6 +8,17 @@ All notable changes to this project will be documented in this file.
 
 - **Gemini 3 models are no longer quietly detuned.** Google strongly recommends leaving Gemini 3 models at their default temperature of `1.0` — lower values can cause looping or degraded reasoning — but every feature here sent its own default of `0.2`, and since the Gemini defaults moved to `gemini-3.5-flash-lite` (v3.33.1) that meant every out-of-the-box Gemini install was running detuned on every turn, with nothing in the log to say so. When a Gemini 3-family model is selected and the feature's temperature is still the recommended default, `1.0` is now sent instead and `top_p` is left to the API default. **A temperature you set yourself is still sent exactly as configured**, with a warning at setup pointing at Google's guidance. Gemini 2.5 and earlier models — and non-Gemini models serving the same feature, fallback chains included — keep the configured values.
 
+## [3.35.0] - 2026-09-01
+
+### Added
+
+- **Per-model thinking configuration and budget.** The Conversation feature's model form now has a **Thinking / reasoning** setting for every chat provider, plus a **Thinking budget (tokens)** field for providers whose API supports one (OpenAI-compatible servers such as llama.cpp, Gemini, Anthropic). Settings are **remembered per model name**, so switching the chat model from, say, Gemma (thinking on, budget 512) to Qwen (thinking off) and back restores each model's configuration automatically — the conversation itself is untouched. Each choice maps to what the provider actually understands: Ollama's `reasoning` field (with effort pass-through for gpt-oss), `reasoning_effort` and `chat_template_kwargs.enable_thinking` for OpenAI-compatible servers, `reasoning_effort` for cloud OpenAI, `thinking_budget` for Gemini, and extended thinking with `budget_tokens` for Anthropic (budget clamped and `max_tokens`/temperature adjusted as the API requires). Entering a budget with the select at Provider default counts as turning thinking on. Full per-provider details are in the new "Per-Model Thinking / Reasoning" section of the [configuration guide](https://github.com/goruck/home-generative-agent/blob/main/docs/configuration.md). Requested by [@krishgcek](https://github.com/krishgcek) ([#580](https://github.com/goruck/home-generative-agent/issues/580)).
+
+### Fixed
+
+- **llama.cpp reasoning could not be controlled through HGA.** The OpenAI-compatible provider previously sent no reasoning fields at all, so neither `--reasoning on` nor system-prompt instructions had any effect while the llama.cpp WebUI worked with the same model and server. HGA now sends the same per-request fields the WebUI uses. Note: a `--reasoning-budget` set on the server command line still overrides the per-request budget. Reported by [@krishgcek](https://github.com/krishgcek) ([#580](https://github.com/goruck/home-generative-agent/issues/580)).
+- **A rejected `reasoning_effort` no longer fails chat.** A model that rejects the parameter (for example a non-reasoning cloud OpenAI model) is automatically retried without it, the same way unsupported `temperature`/`top_p` values already were.
+
 ## [3.34.0] - 2026-08-31
 
 ### Added
