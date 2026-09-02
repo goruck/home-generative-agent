@@ -198,8 +198,25 @@ class SttProviderSubentryFlow(ConfigSubentryFlow):
         errors: dict[str, str] = {}
         if user_input is not None:
             provider_type = user_input.get("provider_type") or "openai"
+            type_changed = (
+                self._provider_type is not None and provider_type != self._provider_type
+            )
+            submitted_name = user_input.get("name")
+            if type_changed:
+                # Switching provider types must not carry state across.
+                # Settings: the stored OpenAI key would otherwise prefill the
+                # local server's optional key field and be sent to a plaintext
+                # LAN endpoint (the model-provider flow guards the same leak).
+                # Model: the other type's model ID is invalid or a silent 404
+                # for the new one. Name: the pre-filled old default ("STT -
+                # OpenAI") would mislabel the new provider in the Assist
+                # pipeline dropdown; only a deliberately edited name survives.
+                self._settings = {}
+                self._model = {}
+                if submitted_name == self._name:
+                    submitted_name = None
             self._provider_type = provider_type
-            self._name = user_input.get("name") or ProviderNames.get(
+            self._name = submitted_name or ProviderNames.get(
                 provider_type, "STT Provider"
             )
             return await self.async_step_credentials()
@@ -251,6 +268,10 @@ class SttProviderSubentryFlow(ConfigSubentryFlow):
                     self.hass, openai_opts, user_input
                 )
             else:
+                # Unreachable today (the provider select admits only the two
+                # types above, custom_value=False) — kept so a future type
+                # added to the select but not wired here fails visibly
+                # instead of storing an empty credentials payload.
                 settings, error = {}, "not_supported"
             if error:
                 errors["base"] = error
@@ -259,21 +280,24 @@ class SttProviderSubentryFlow(ConfigSubentryFlow):
                 return await self.async_step_model()
 
         if provider_type == "local":
+            # On a validation error, redisplay what was just typed — not the
+            # stored settings — so a retry against a booting server does not
+            # demand retyping the URL, and a corrected typo does not silently
+            # revert to the saved value.
+            prefill = (
+                user_input if user_input is not None and errors else self._settings
+            )
             local_schema = vol.Schema(
                 {
                     vol.Required(
                         CONF_STT_BASE_URL,
-                        description={
-                            "suggested_value": self._settings.get(CONF_STT_BASE_URL)
-                        },
-                        default=self._settings.get(CONF_STT_BASE_URL) or "",
+                        description={"suggested_value": prefill.get(CONF_STT_BASE_URL)},
+                        default=prefill.get(CONF_STT_BASE_URL) or "",
                     ): TextSelector(TextSelectorConfig(type=TextSelectorType.URL)),
                     vol.Optional(
                         CONF_API_KEY,
-                        description={
-                            "suggested_value": self._settings.get(CONF_API_KEY)
-                        },
-                        default=self._settings.get(CONF_API_KEY) or "",
+                        description={"suggested_value": prefill.get(CONF_API_KEY)},
+                        default=prefill.get(CONF_API_KEY) or "",
                     ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
                 }
             )

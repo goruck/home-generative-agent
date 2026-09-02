@@ -428,8 +428,11 @@ STT_RESPONSE_FORMATS = ("text", "json", "verbose_json", "srt", "vtt")
 CONF_STT_BASE_URL = "base_url"
 # Speaches model ID; the flow accepts any custom value, this is only a default.
 RECOMMENDED_LOCAL_STT_MODEL = "Systran/faster-whisper-large-v3-turbo"
-# AsyncOpenAI requires a non-empty key even for keyless local servers.
-LOCAL_STT_PLACEHOLDER_API_KEY = "sk-local"
+# Keyless local servers get an empty key: the SDK accepts it and then sends
+# no Authorization header at all, matching the flow's validation request. A
+# fabricated placeholder would send a bogus bearer token that auth proxies
+# (e.g. LiteLLM virtual keys) reject even though validation passed.
+LOCAL_STT_KEYLESS_API_KEY = ""
 
 # ---------------- Chat model ----------------
 CHAT_MODEL_TOP_P = 1.0

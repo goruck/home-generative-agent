@@ -29,7 +29,7 @@ from .const import (
     CONF_STT_RESPONSE_FORMAT,
     CONF_STT_TEMPERATURE,
     CONF_STT_TRANSLATE,
-    LOCAL_STT_PLACEHOLDER_API_KEY,
+    LOCAL_STT_KEYLESS_API_KEY,
     RECOMMENDED_LOCAL_STT_MODEL,
     RECOMMENDED_OPENAI_STT_MODEL,
     SUBENTRY_TYPE_MODEL_PROVIDER,
@@ -322,8 +322,9 @@ class HGASttEntity(SpeechToTextEntity):
         """
         Return (api_key, base_url) for the provider, or None if unconfigured.
 
-        Local providers require a base URL and fall back to a placeholder key
-        (the SDK insists on one) when the server needs no authentication.
+        Local providers require a base URL and fall back to an empty key —
+        which the SDK turns into no Authorization header, the same shape the
+        flow's validation request used — when the server needs none.
         """
         if provider_type == "local":
             settings = data.get("settings", {})
@@ -336,7 +337,7 @@ class HGASttEntity(SpeechToTextEntity):
             api_key = (
                 configured_key
                 if isinstance(configured_key, str) and configured_key
-                else LOCAL_STT_PLACEHOLDER_API_KEY
+                else LOCAL_STT_KEYLESS_API_KEY
             )
             return api_key, base_url
         api_key = self._resolve_api_key(data)
@@ -399,8 +400,17 @@ class HGASttEntity(SpeechToTextEntity):
         try:
             client = self._get_client(api_key, base_url)
             # Local servers (faster-whisper) serve /audio/translations for any
-            # whisper model; OpenAI only does for whisper-1.
-            if translate and (provider_type == "local" or model_name == "whisper-1"):
+            # whisper model; OpenAI only does for whisper-1. A local non-whisper
+            # model degrades to transcription like the OpenAI path does, rather
+            # than 404ing against an endpoint the server never exposes.
+            if translate and (
+                "whisper" in str(model_name).lower()
+                if provider_type == "local"
+                else model_name == "whisper-1"
+            ):
+                # The translations endpoint always outputs English and has no
+                # language parameter — passing one is a TypeError in the SDK.
+                request.pop("language", None)
                 response = await client.audio.translations.create(**request)
             else:
                 if translate:

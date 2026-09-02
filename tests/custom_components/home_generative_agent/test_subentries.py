@@ -190,20 +190,8 @@ def test_supported_subentry_types() -> None:
     }
 
 
-@pytest.mark.asyncio
-async def test_stt_provider_flow_reuses_openai_provider(
-    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """STT flow can reuse an existing OpenAI model provider."""
-    entry = DummyEntry()
-    openai_provider = DummySubentry(
-        "openai1",
-        SUBENTRY_TYPE_MODEL_PROVIDER,
-        "Cloud-LLM OpenAI",
-        {"provider_type": "openai", "settings": {"api_key": "sk-reused"}},
-    )
-    entry.subentries[openai_provider.subentry_id] = openai_provider
-
+def _make_stt_flow(hass: HomeAssistant, entry: DummyEntry) -> SttProviderSubentryFlow:
+    """Build an STT subentry flow with the usual test doubles attached."""
     flow = SttProviderSubentryFlow()
     flow.hass = hass
     flow.async_show_form = lambda **kwargs: {  # type: ignore[assignment]
@@ -220,8 +208,40 @@ async def test_stt_provider_flow_reuses_openai_provider(
         "type": "abort",
         "reason": kwargs.get("reason"),
     }
+    flow.async_update_and_abort = lambda *_args, **kwargs: {  # type: ignore[assignment]
+        "type": "update_entry",
+        "title": kwargs.get("title"),
+        "data": kwargs.get("data"),
+    }
     flow._schedule_reload = lambda: None  # type: ignore[assignment]
     _patch_entry(flow, entry)
+    return flow
+
+
+def _schema_marker(form: Any, field: str) -> Any:
+    """Return the voluptuous marker for a field of a shown form's schema."""
+    for key in form["data_schema"].schema:
+        if getattr(key, "schema", None) == field:
+            return key
+    msg = f"field {field} not in schema"
+    raise AssertionError(msg)
+
+
+@pytest.mark.asyncio
+async def test_stt_provider_flow_reuses_openai_provider(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """STT flow can reuse an existing OpenAI model provider."""
+    entry = DummyEntry()
+    openai_provider = DummySubentry(
+        "openai1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Cloud-LLM OpenAI",
+        {"provider_type": "openai", "settings": {"api_key": "sk-reused"}},
+    )
+    entry.subentries[openai_provider.subentry_id] = openai_provider
+
+    flow = _make_stt_flow(hass, entry)
 
     async def _noop_validate(*_args: Any, **_kwargs: Any) -> None:
         return None
@@ -259,24 +279,7 @@ async def test_stt_provider_flow_uses_separate_key(
 ) -> None:
     """STT flow stores a separate API key when no providers exist."""
     entry = DummyEntry()
-    flow = SttProviderSubentryFlow()
-    flow.hass = hass
-    flow.async_show_form = lambda **kwargs: {  # type: ignore[assignment]
-        "type": "form",
-        "data_schema": kwargs["data_schema"],
-        "errors": kwargs.get("errors"),
-    }
-    flow.async_create_entry = lambda **kwargs: {  # type: ignore[assignment]
-        "type": "create_entry",
-        "title": kwargs.get("title"),
-        "data": kwargs.get("data"),
-    }
-    flow.async_abort = lambda **kwargs: {  # type: ignore[assignment]
-        "type": "abort",
-        "reason": kwargs.get("reason"),
-    }
-    flow._schedule_reload = lambda: None  # type: ignore[assignment]
-    _patch_entry(flow, entry)
+    flow = _make_stt_flow(hass, entry)
 
     async def _noop_validate(*_args: Any, **_kwargs: Any) -> None:
         return None
@@ -303,29 +306,6 @@ async def test_stt_provider_flow_uses_separate_key(
     assert result_data is not None
     assert result_data["settings"]["api_key"] == "sk-separate"
     assert result_data["settings"]["openai_provider_subentry_id"] is None
-
-
-def _make_stt_flow(hass: HomeAssistant, entry: DummyEntry) -> SttProviderSubentryFlow:
-    """Build an STT subentry flow with the usual test doubles attached."""
-    flow = SttProviderSubentryFlow()
-    flow.hass = hass
-    flow.async_show_form = lambda **kwargs: {  # type: ignore[assignment]
-        "type": "form",
-        "data_schema": kwargs["data_schema"],
-        "errors": kwargs.get("errors"),
-    }
-    flow.async_create_entry = lambda **kwargs: {  # type: ignore[assignment]
-        "type": "create_entry",
-        "title": kwargs.get("title"),
-        "data": kwargs.get("data"),
-    }
-    flow.async_abort = lambda **kwargs: {  # type: ignore[assignment]
-        "type": "abort",
-        "reason": kwargs.get("reason"),
-    }
-    flow._schedule_reload = lambda: None  # type: ignore[assignment]
-    _patch_entry(flow, entry)
-    return flow
 
 
 @pytest.mark.asyncio
@@ -384,6 +364,80 @@ async def test_stt_provider_flow_local_unreachable_server(
     result = await flow.async_step_credentials({"base_url": "http://down-box:8000"})
     assert result.get("type") == "form"
     assert (result.get("errors") or {}).get("base") == "cannot_connect"
+    # The re-shown form keeps what was just typed — retrying against a booting
+    # server must not demand retyping the URL.
+    assert _schema_marker(result, "base_url").default() == "http://down-box:8000"
+
+
+@pytest.mark.asyncio
+async def test_stt_provider_flow_switch_to_local_resets_openai_state(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Reconfiguring openai -> local carries no key, model, or stale title across.
+
+    The stored OpenAI secret must never prefill the local server's optional key
+    field (it would be sent as a bearer token to a plaintext LAN endpoint), the
+    OpenAI model name must not become the local default, and an untouched
+    pre-filled name must follow the new provider type.
+    """
+    entry = DummyEntry()
+    entry.subentries["stt1"] = DummySubentry(
+        "stt1",
+        SUBENTRY_TYPE_STT_PROVIDER,
+        "STT - OpenAI",
+        {
+            "provider_type": "openai",
+            "name": "STT - OpenAI",
+            "settings": {
+                "api_key": "sk-proj-real",
+                "openai_provider_subentry_id": None,
+            },
+            "model": {"model_name": "gpt-4o-mini-transcribe"},
+        },
+    )
+    flow = _make_stt_flow(hass, entry)
+    cast("Any", flow)._subentry_id = "stt1"
+
+    async def _noop_validate(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.flows.stt_provider_subentry_flow.validate_openai_compatible_url",
+        _noop_validate,
+    )
+
+    first = await flow.async_step_user()
+    assert first.get("type") == "form"
+
+    # Submit the pre-filled name untouched, as a user tabbing past it would.
+    second = await flow.async_step_provider(
+        {"provider_type": "local", "name": "STT - OpenAI"}
+    )
+    assert second.get("type") == "form"
+    key_marker = _schema_marker(second, "api_key")
+    assert key_marker.default() == ""
+    assert (key_marker.description or {}).get("suggested_value") is None
+
+    third = await flow.async_step_credentials({"base_url": "http://box:8000"})
+    assert third.get("type") == "form"
+    assert _schema_marker(third, "model_name").default() == (
+        "Systran/faster-whisper-large-v3-turbo"
+    )
+
+    result = await flow.async_step_model(
+        {"model_name": "Systran/faster-whisper-large-v3-turbo"}
+    )
+    assert result.get("type") == "update_entry"
+    result_data = result.get("data")
+    assert result_data is not None
+    assert result_data["provider_type"] == "local"
+    assert result_data["name"] == "STT - Local"
+    assert result_data["settings"] == {
+        "base_url": "http://box:8000/v1",
+        "api_key": None,
+        "openai_provider_subentry_id": None,
+    }
 
 
 @pytest.mark.asyncio

@@ -22,7 +22,7 @@ from custom_components.home_generative_agent.const import (
     CONF_STT_RESPONSE_FORMAT,
     CONF_STT_TEMPERATURE,
     CONF_STT_TRANSLATE,
-    LOCAL_STT_PLACEHOLDER_API_KEY,
+    LOCAL_STT_KEYLESS_API_KEY,
     RECOMMENDED_LOCAL_STT_MODEL,
     SUBENTRY_TYPE_MODEL_PROVIDER,
     SUBENTRY_TYPE_STT_PROVIDER,
@@ -735,7 +735,7 @@ def _make_local_entity(
 async def test_local_provider_builds_client_with_base_url(
     patched_client: Any,
 ) -> None:
-    """A local provider passes its base URL and a placeholder key to the SDK."""
+    """A keyless local provider gets an empty key and sends no auth header."""
     entity, _ = _make_local_entity()
     result, seen = await _run(entity, [SimpleNamespace(text="hello")])
     assert result.result == ha_stt.SpeechResultState.SUCCESS
@@ -743,7 +743,11 @@ async def test_local_provider_builds_client_with_base_url(
     assert len(patched_client["kwargs"]) == 1
     kwargs = patched_client["kwargs"][0]
     assert kwargs["base_url"] == LOCAL_BASE_URL
-    assert kwargs["api_key"] == LOCAL_STT_PLACEHOLDER_API_KEY
+    assert kwargs["api_key"] == LOCAL_STT_KEYLESS_API_KEY
+    # The flow validated the endpoint without an Authorization header; runtime
+    # must match, or servers that reject unknown bearer tokens 401 every
+    # utterance after a setup that passed.
+    assert patched_client["constructed"][0].auth_headers == {}
     assert len(seen["transcriptions"]) == 1
 
 
@@ -802,7 +806,7 @@ async def test_local_default_model_is_local_recommendation() -> None:
 
 
 @pytest.mark.usefixtures("patched_client")
-async def test_local_translate_uses_translations_for_any_model() -> None:
+async def test_local_translate_uses_translations_for_whisper_models() -> None:
     """Local servers serve translations for all whisper models, not just whisper-1."""
     entity, _ = _make_local_entity(
         model={
@@ -814,3 +818,63 @@ async def test_local_translate_uses_translations_for_any_model() -> None:
     assert result.result == ha_stt.SpeechResultState.SUCCESS
     assert len(seen["translations"]) == 1
     assert seen["transcriptions"] == []
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_translate_drops_language_from_translations_request() -> None:
+    """
+    The translations endpoint has no ``language`` parameter.
+
+    ``Translations.create`` in the SDK is keyword-only without ``language``
+    (output is always English), so forwarding the configured language would
+    raise a TypeError inside the catch-all and fail every utterance for a
+    translate+language configuration.
+    """
+    entity, _ = _make_local_entity(
+        model={
+            CONF_STT_MODEL_NAME: "Systran/faster-whisper-large-v3",
+            CONF_STT_TRANSLATE: True,
+            CONF_STT_LANGUAGE: "en",
+        },
+    )
+    result, seen = await _run(entity, [SimpleNamespace(text="hola")])
+    assert result.result == ha_stt.SpeechResultState.SUCCESS
+    assert len(seen["translations"]) == 1
+    assert "language" not in seen["translations"][0]
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_openai_whisper1_translate_drops_language() -> None:
+    """The OpenAI whisper-1 translations path drops ``language`` too."""
+    entity, _ = _make_entity(
+        model={
+            CONF_STT_MODEL_NAME: "whisper-1",
+            CONF_STT_TRANSLATE: True,
+            CONF_STT_LANGUAGE: "de",
+        },
+    )
+    result, seen = await _run(entity, [SimpleNamespace(text="hello")])
+    assert result.result == ha_stt.SpeechResultState.SUCCESS
+    assert len(seen["translations"]) == 1
+    assert "language" not in seen["translations"][0]
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_local_translate_non_whisper_falls_back_to_transcription() -> None:
+    """
+    A local non-whisper model degrades to transcription like the OpenAI path.
+
+    Local servers only expose /audio/translations for whisper models; routing a
+    Parakeet-style model there would 404 and fail the utterance instead of
+    returning untranslated text.
+    """
+    entity, _ = _make_local_entity(
+        model={
+            CONF_STT_MODEL_NAME: "nvidia/parakeet-tdt-0.6b",
+            CONF_STT_TRANSLATE: True,
+        },
+    )
+    result, seen = await _run(entity, [SimpleNamespace(text="hola")])
+    assert result.result == ha_stt.SpeechResultState.SUCCESS
+    assert seen["translations"] == []
+    assert len(seen["transcriptions"]) == 1
