@@ -424,6 +424,13 @@ STT_MODEL_OPENAI_SUPPORTED = Literal[
 RECOMMENDED_OPENAI_STT_MODEL: STT_MODEL_OPENAI_SUPPORTED = "gpt-4o-mini-transcribe"
 STT_RESPONSE_FORMATS = ("text", "json", "verbose_json", "srt", "vtt")
 
+# Local (OpenAI-compatible) STT provider, e.g. Speaches serving faster-whisper.
+CONF_STT_BASE_URL = "base_url"
+# Speaches model ID; the flow accepts any custom value, this is only a default.
+RECOMMENDED_LOCAL_STT_MODEL = "Systran/faster-whisper-large-v3-turbo"
+# AsyncOpenAI requires a non-empty key even for keyless local servers.
+LOCAL_STT_PLACEHOLDER_API_KEY = "sk-local"
+
 # ---------------- Chat model ----------------
 CHAT_MODEL_TOP_P = 1.0
 # *SUPPORTED are used as defaults and fallbacks for Ollama in the UI.

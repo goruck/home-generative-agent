@@ -110,10 +110,15 @@
         },
         "credentials": {
           "title": "Credentials",
-          "description": "Choose how to authenticate the STT provider.",
+          "description": "Choose how to authenticate the STT provider. Local providers connect to an OpenAI-compatible server URL instead.",
           "data": {
             "openai_provider_subentry_id": "Reuse OpenAI model provider",
-            "api_key": "OpenAI API key"
+            "api_key": "API key",
+            "base_url": "Server URL"
+          },
+          "data_description": {
+            "api_key": "Required for OpenAI. Optional for local servers that need no authentication.",
+            "base_url": "OpenAI-compatible endpoint of the local STT server, e.g. a Speaches instance. A missing /v1 suffix is added automatically."
           }
         },
         "model": {

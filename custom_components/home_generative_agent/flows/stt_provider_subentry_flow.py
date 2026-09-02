@@ -28,6 +28,7 @@ from homeassistant.helpers.selector import (
 )
 
 from ..const import (  # noqa: TID252
+    CONF_STT_BASE_URL,
     CONF_STT_LANGUAGE,
     CONF_STT_MODEL_NAME,
     CONF_STT_OPENAI_PROVIDER_ID,
@@ -35,6 +36,7 @@ from ..const import (  # noqa: TID252
     CONF_STT_RESPONSE_FORMAT,
     CONF_STT_TEMPERATURE,
     CONF_STT_TRANSLATE,
+    RECOMMENDED_LOCAL_STT_MODEL,
     RECOMMENDED_OPENAI_STT_MODEL,
     STT_MODEL_OPENAI_SUPPORTED,
     STT_RESPONSE_FORMATS,
@@ -44,6 +46,8 @@ from ..const import (  # noqa: TID252
 from ..core.utils import (  # noqa: TID252
     CannotConnectError,
     InvalidAuthError,
+    normalize_openai_compatible_base_url,
+    validate_openai_compatible_url,
     validate_openai_key,
 )
 
@@ -128,6 +132,33 @@ async def _build_openai_settings(
     return settings, None
 
 
+async def _build_local_settings(
+    hass: Any, user_input: dict[str, Any]
+) -> tuple[dict[str, Any], str | None]:
+    """Build local (OpenAI-compatible) settings and return error key if any."""
+    base_url = user_input.get(CONF_STT_BASE_URL)
+    if not isinstance(base_url, str) or not base_url.strip():
+        return {}, "cannot_connect"
+    base_url = normalize_openai_compatible_base_url(base_url)
+    api_key = user_input.get(CONF_API_KEY) or None
+
+    try:
+        await validate_openai_compatible_url(hass, base_url, api_key)
+    except InvalidAuthError:
+        return {}, "invalid_auth"
+    except CannotConnectError:
+        return {}, "cannot_connect"
+    except Exception:
+        LOGGER.exception("Unexpected exception validating local STT endpoint")
+        return {}, "unknown"
+
+    return {
+        CONF_STT_BASE_URL: base_url,
+        CONF_API_KEY: api_key,
+        CONF_STT_OPENAI_PROVIDER_ID: None,
+    }, None
+
+
 class SttProviderSubentryFlow(ConfigSubentryFlow):
     """Config flow handler for STT provider subentries."""
 
@@ -167,14 +198,11 @@ class SttProviderSubentryFlow(ConfigSubentryFlow):
         errors: dict[str, str] = {}
         if user_input is not None:
             provider_type = user_input.get("provider_type") or "openai"
-            if provider_type == "local":
-                errors["base"] = "not_supported"
-            else:
-                self._provider_type = provider_type
-                self._name = user_input.get("name") or ProviderNames.get(
-                    provider_type, "STT Provider"
-                )
-                return await self.async_step_credentials()
+            self._provider_type = provider_type
+            self._name = user_input.get("name") or ProviderNames.get(
+                provider_type, "STT Provider"
+            )
+            return await self.async_step_credentials()
 
         provider_type = self._provider_type or "openai"
         default_name = self._name or ProviderNames.get(provider_type, "STT Provider")
@@ -188,7 +216,7 @@ class SttProviderSubentryFlow(ConfigSubentryFlow):
                         options=[
                             SelectOptionDict(label="OpenAI", value="openai"),
                             SelectOptionDict(
-                                label="Local (coming soon)", value="local"
+                                label="Local (OpenAI-compatible)", value="local"
                             ),
                         ],
                         mode=SelectSelectorMode.DROPDOWN,
@@ -216,17 +244,42 @@ class SttProviderSubentryFlow(ConfigSubentryFlow):
         openai_opts = _openai_provider_options(self)
 
         if user_input is not None:
-            if provider_type != "openai":
-                errors["base"] = "not_supported"
-            else:
+            if provider_type == "local":
+                settings, error = await _build_local_settings(self.hass, user_input)
+            elif provider_type == "openai":
                 settings, error = await _build_openai_settings(
                     self.hass, openai_opts, user_input
                 )
-                if error:
-                    errors["base"] = error
-                else:
-                    self._settings = settings
-                    return await self.async_step_model()
+            else:
+                settings, error = {}, "not_supported"
+            if error:
+                errors["base"] = error
+            else:
+                self._settings = settings
+                return await self.async_step_model()
+
+        if provider_type == "local":
+            local_schema = vol.Schema(
+                {
+                    vol.Required(
+                        CONF_STT_BASE_URL,
+                        description={
+                            "suggested_value": self._settings.get(CONF_STT_BASE_URL)
+                        },
+                        default=self._settings.get(CONF_STT_BASE_URL) or "",
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.URL)),
+                    vol.Optional(
+                        CONF_API_KEY,
+                        description={
+                            "suggested_value": self._settings.get(CONF_API_KEY)
+                        },
+                        default=self._settings.get(CONF_API_KEY) or "",
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
+                }
+            )
+            return self.async_show_form(
+                step_id="credentials", data_schema=local_schema, errors=errors
+            )
 
         schema_dict: dict[Any, Any] = {}
         if openai_opts:
@@ -295,7 +348,10 @@ class SttProviderSubentryFlow(ConfigSubentryFlow):
             if not errors:
                 payload = {
                     "provider_type": self._provider_type or "openai",
-                    "name": self._name or ProviderNames.get("openai", "STT Provider"),
+                    "name": self._name
+                    or ProviderNames.get(
+                        self._provider_type or "openai", "STT Provider"
+                    ),
                     "settings": self._settings,
                     "model": model_data,
                 }
@@ -315,22 +371,35 @@ class SttProviderSubentryFlow(ConfigSubentryFlow):
                     title=payload["name"],
                 )
 
+        provider_type = self._provider_type or "openai"
+        if provider_type == "local":
+            model_options = [
+                SelectOptionDict(
+                    label=RECOMMENDED_LOCAL_STT_MODEL,
+                    value=RECOMMENDED_LOCAL_STT_MODEL,
+                )
+            ]
+            recommended_model = RECOMMENDED_LOCAL_STT_MODEL
+            allow_custom_model = True
+        else:
+            model_options = [
+                SelectOptionDict(label=model, value=model)
+                for model in get_args(STT_MODEL_OPENAI_SUPPORTED)
+            ]
+            recommended_model = RECOMMENDED_OPENAI_STT_MODEL
+            allow_custom_model = False
+
         schema = vol.Schema(
             {
                 vol.Required(
                     CONF_STT_MODEL_NAME,
-                    default=model_data.get(
-                        CONF_STT_MODEL_NAME, RECOMMENDED_OPENAI_STT_MODEL
-                    ),
+                    default=model_data.get(CONF_STT_MODEL_NAME, recommended_model),
                 ): SelectSelector(
                     SelectSelectorConfig(
-                        options=[
-                            SelectOptionDict(label=model, value=model)
-                            for model in get_args(STT_MODEL_OPENAI_SUPPORTED)
-                        ],
+                        options=model_options,
                         mode=SelectSelectorMode.DROPDOWN,
                         sort=False,
-                        custom_value=False,
+                        custom_value=allow_custom_model,
                     )
                 ),
                 vol.Optional(

@@ -305,6 +305,87 @@ async def test_stt_provider_flow_uses_separate_key(
     assert result_data["settings"]["openai_provider_subentry_id"] is None
 
 
+def _make_stt_flow(hass: HomeAssistant, entry: DummyEntry) -> SttProviderSubentryFlow:
+    """Build an STT subentry flow with the usual test doubles attached."""
+    flow = SttProviderSubentryFlow()
+    flow.hass = hass
+    flow.async_show_form = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "form",
+        "data_schema": kwargs["data_schema"],
+        "errors": kwargs.get("errors"),
+    }
+    flow.async_create_entry = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "create_entry",
+        "title": kwargs.get("title"),
+        "data": kwargs.get("data"),
+    }
+    flow.async_abort = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "abort",
+        "reason": kwargs.get("reason"),
+    }
+    flow._schedule_reload = lambda: None  # type: ignore[assignment]
+    _patch_entry(flow, entry)
+    return flow
+
+
+@pytest.mark.asyncio
+async def test_stt_provider_flow_local_keyless(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Local STT flow stores a normalized base URL and no key or linked provider."""
+    flow = _make_stt_flow(hass, DummyEntry())
+
+    async def _noop_validate(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.flows.stt_provider_subentry_flow.validate_openai_compatible_url",
+        _noop_validate,
+    )
+
+    second = await flow.async_step_provider(
+        {"provider_type": "local", "name": "STT - Local"}
+    )
+    assert second.get("type") == "form"
+
+    # Entered without /v1 on purpose: normalization must add it.
+    third = await flow.async_step_credentials({"base_url": "http://ollama-box:8000"})
+    assert third.get("type") == "form"
+
+    result = await flow.async_step_model(
+        {"model_name": "Systran/faster-whisper-large-v3-turbo"}
+    )
+    assert result.get("type") == "create_entry"
+    result_data = result.get("data")
+    assert result_data is not None
+    assert result_data["provider_type"] == "local"
+    assert result_data["settings"]["base_url"] == "http://ollama-box:8000/v1"
+    assert result_data["settings"]["api_key"] is None
+    assert result_data["settings"]["openai_provider_subentry_id"] is None
+    assert result_data["model"]["model_name"] == "Systran/faster-whisper-large-v3-turbo"
+
+
+@pytest.mark.asyncio
+async def test_stt_provider_flow_local_unreachable_server(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unreachable local server keeps the user on the credentials form."""
+    flow = _make_stt_flow(hass, DummyEntry())
+
+    async def _fail_validate(*_args: Any, **_kwargs: Any) -> None:
+        raise CannotConnectError
+
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.flows.stt_provider_subentry_flow.validate_openai_compatible_url",
+        _fail_validate,
+    )
+
+    await flow.async_step_provider({"provider_type": "local", "name": "STT - Local"})
+    result = await flow.async_step_credentials({"base_url": "http://down-box:8000"})
+    assert result.get("type") == "form"
+    assert (result.get("errors") or {}).get("base") == "cannot_connect"
+
+
 @pytest.mark.asyncio
 async def test_sentinel_subentry_flow_hashes_level_increase_pin(
     hass: HomeAssistant,

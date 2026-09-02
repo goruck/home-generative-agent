@@ -237,20 +237,49 @@ You can select any combination. Selecting both Assist and one or more MCP APIs m
 
 ## Speech-to-Text (STT)
 
-HGA provides a built-in STT engine using the OpenAI Whisper API — no separate STT integration required.
+HGA provides a built-in STT engine — no separate STT integration required. Two provider types are supported: **OpenAI** (Whisper API) and **Local** (any OpenAI-compatible transcription server, e.g. [Speaches](https://speaches.ai/) serving faster-whisper on the same box as Ollama).
 
 1. Open **Settings → Devices & Services → Home Generative Agent**.
 2. Click **+ STT Provider**.
-3. Choose **OpenAI** and give it a name.
-4. On the **Credentials** step, either reuse an existing OpenAI Model Provider subentry or select **Use a separate key** and enter a dedicated API key.
-5. On **Model & advanced options**, pick a model (recommended: `gpt-4o-mini-transcribe`) and set optional fields:
+3. Choose **OpenAI** or **Local (OpenAI-compatible)** and give it a name.
+4. On the **Credentials** step:
+   - **OpenAI:** either reuse an existing OpenAI Model Provider subentry or select **Use a separate key** and enter a dedicated API key.
+   - **Local:** enter the server URL (e.g. `http://192.168.1.100:8000` — a missing `/v1` suffix is added automatically). The API key is optional; leave it blank for servers without authentication. The endpoint is validated when you submit the form.
+5. On **Model & advanced options**, pick a model and set optional fields:
+   - model: recommended `gpt-4o-mini-transcribe` (OpenAI) or `Systran/faster-whisper-large-v3-turbo` (Local; any custom model ID your server exposes can be typed in)
    - `language` (optional): e.g. `en` or `en-US`
    - `prompt` (optional): hints for domain-specific vocabulary
    - `temperature` (optional): 0–1
-   - `translate`: only supported by `whisper-1`; other models fall back to transcription
-6. Go to **Settings → Voice assistants → Assist pipelines** and select **STT - OpenAI** (or your chosen name) for Speech-to-text.
+   - `translate`: on OpenAI only `whisper-1` supports it (other models fall back to transcription); local whisper servers support it for every model
+6. Go to **Settings → Voice assistants → Assist pipelines** and select **STT - OpenAI** / **STT - Local** (or your chosen name) for Speech-to-text.
 
-**Credential changes take effect on the next utterance.** Each STT entity keeps one OpenAI client, built on Home Assistant's shared HTTP client, and rebuilds it when the resolved API key changes — no restart or integration reload needed. If the entry is linked to a Model Provider subentry, that provider's key is the only one used: linking blanks the separate STT key, so a linked provider without a usable key fails the utterance with an `OpenAI STT API key missing` warning in the log rather than falling back to a stale key.
+**Credential changes take effect on the next utterance.** Each STT entity keeps one OpenAI client, built on Home Assistant's shared HTTP client, and rebuilds it when the resolved API key or server URL changes — no restart or integration reload needed. If the entry is linked to a Model Provider subentry, that provider's key is the only one used: linking blanks the separate STT key, so a linked provider without a usable key fails the utterance with an `OpenAI STT API key missing` warning in the log rather than falling back to a stale key.
+
+### Running a local STT server
+
+Any server exposing the OpenAI `/v1/audio/transcriptions` endpoint works. Speaches is a good fit for a GPU box already running Ollama (`faster-whisper-large-v3-turbo` needs roughly 1.5–2 GB of VRAM):
+
+```yaml
+# docker-compose.yaml on the GPU box
+services:
+  speaches:
+    image: ghcr.io/speaches-ai/speaches:latest-cuda
+    ports:
+      - "8000:8000"
+    volumes:
+      - hf-hub-cache:/home/ubuntu/.cache/huggingface/hub
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+volumes:
+  hf-hub-cache:
+```
+
+> **Tip:** local whisper models occasionally hallucinate short phrases ("Thank you.") from silence or noise. The **Speech input filters** in the integration options (**Configure**) drop such phantom transcriptions before they reach the agent — add the phrases you see under **Ignored exact STT phrases**.
 
 ---
 
