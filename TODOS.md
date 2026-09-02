@@ -26,7 +26,7 @@
 
 **Effort:** S
 **Priority:** P2
-**Completed:** fix/gemini3-default-temperature branch (2026-09-01, release pending)
+**Completed:** v3.36.0 (2026-09-01)
 
 ---
 

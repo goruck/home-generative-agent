@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.36.0] - 2026-09-01
+
+### Changed
+
+- **Gemini 3 models are no longer quietly detuned.** Google strongly recommends leaving Gemini 3 models at their default temperature of `1.0` — lower values can cause looping or degraded reasoning — but every feature here sent its own default of `0.2`, and since the Gemini defaults moved to `gemini-3.5-flash-lite` (v3.33.1) that meant every out-of-the-box Gemini install was running detuned on every turn, with nothing in the log to say so. When a Gemini 3-family model is selected and the feature's temperature is still the recommended default, `1.0` is now sent instead and `top_p` is left to the API default. **A temperature you set yourself is still sent exactly as configured**, with a warning at setup pointing at Google's guidance. Gemini 2.5 and earlier models — and non-Gemini models serving the same feature, fallback chains included — keep the configured values.
+
 ## [3.34.0] - 2026-08-31
 
 ### Added
