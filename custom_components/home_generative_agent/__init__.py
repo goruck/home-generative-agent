@@ -276,6 +276,7 @@ from .core.utils import (
     dispatch_on_loop,
     ensure_http_url,
     gemini_healthy,
+    gemini_sampling_configurable,
     generate_embeddings,
     normalize_openai_compatible_base_url,
     ollama_healthy,
@@ -2457,8 +2458,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             config={
                 "configurable": {
                     "model": gemini_chat_model,
-                    "temperature": chat_temp,
-                    "top_p": CHAT_MODEL_TOP_P,
+                    **gemini_sampling_configurable(
+                        model=gemini_chat_model,
+                        temperature=chat_temp,
+                        top_p=CHAT_MODEL_TOP_P,
+                        recommended_temperature=RECOMMENDED_CHAT_MODEL_TEMPERATURE,
+                    ),
                     **_chat_thinking_for_model("gemini", gemini_chat_model),
                 }
             }
@@ -2523,12 +2528,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             }
         )
     elif vlm_provider == "gemini":
+        gemini_vlm = options.get(CONF_GEMINI_VLM, RECOMMENDED_GEMINI_VLM)
         vision_model = (gemini_provider or NullChat()).with_config(
             config={
                 "configurable": {
-                    "model": options.get(CONF_GEMINI_VLM, RECOMMENDED_GEMINI_VLM),
-                    "temperature": vlm_temp,
-                    "top_p": VLM_TOP_P,
+                    "model": gemini_vlm,
+                    **gemini_sampling_configurable(
+                        model=gemini_vlm,
+                        temperature=vlm_temp,
+                        top_p=VLM_TOP_P,
+                        recommended_temperature=RECOMMENDED_VLM_TEMPERATURE,
+                    ),
                 }
             }
         )
@@ -2599,15 +2609,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             }
         )
     elif sum_provider == "gemini":
+        gemini_sum_model = options.get(
+            CONF_GEMINI_SUMMARIZATION_MODEL,
+            RECOMMENDED_GEMINI_SUMMARIZATION_MODEL,
+        )
         summarization_model = (gemini_provider or NullChat()).with_config(
             config={
                 "configurable": {
-                    "model": options.get(
-                        CONF_GEMINI_SUMMARIZATION_MODEL,
-                        RECOMMENDED_GEMINI_SUMMARIZATION_MODEL,
+                    "model": gemini_sum_model,
+                    **gemini_sampling_configurable(
+                        model=gemini_sum_model,
+                        temperature=sum_temp,
+                        top_p=SUMMARIZATION_MODEL_TOP_P,
+                        recommended_temperature=(
+                            RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE
+                        ),
                     ),
-                    "temperature": sum_temp,
-                    "top_p": SUMMARIZATION_MODEL_TOP_P,
                 }
             }
         )
@@ -2687,6 +2704,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         config = {model_key: model_name, "temperature": temperature}
         if (top_p := _category_top_p(category)) is not None:
             config["top_p"] = top_p
+        if provider.provider_type == "gemini":
+            spec = MODEL_CATEGORY_SPECS.get(category, {})
+            config.update(
+                gemini_sampling_configurable(
+                    model=model_name,
+                    temperature=temperature,
+                    top_p=top_p,
+                    recommended_temperature=spec.get("recommended_temperature"),
+                )
+            )
         if category == "chat":
             config.update(
                 _chat_thinking_for_model(

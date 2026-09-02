@@ -27,6 +27,7 @@ from ..const import (  # noqa: TID252
     ANTHROPIC_THINKING_RESPONSE_TOKENS,
     CONF_OLLAMA_URL,
     EMBEDDING_MODEL_DIMS,
+    GEMINI_3_RECOMMENDED_TEMPERATURE,
     HTTP_STATUS_BAD_REQUEST,
     HTTP_STATUS_FORBIDDEN,
     HTTP_STATUS_UNAUTHORIZED,
@@ -1069,6 +1070,56 @@ def thinking_configurable(
     if builder is None:
         return {}
     return builder(reasoning, effort, budget, model)
+
+
+def is_gemini_3_or_later(model: Any) -> bool:
+    """Return True for Gemini 3-family (and later) model names."""
+    return "gemini-3" in str(model or "").lower()
+
+
+def gemini_sampling_configurable(
+    *,
+    model: Any,
+    temperature: Any,
+    top_p: float | None,
+    recommended_temperature: Any,
+) -> dict[str, Any]:
+    """
+    Return sampling configurable entries (temperature/top_p) for a Gemini model.
+
+    Google strongly recommends keeping Gemini 3 models at their default
+    temperature of 1.0 - lower values can cause looping or degraded
+    reasoning - and the per-feature recommended default (0.2) predates
+    Gemini 3. When the configured temperature still equals that recommended
+    default, it is not a deliberate per-model choice: bind 1.0 explicitly
+    (the configurable-fields path reconstructs the model with every field
+    set, so the library's own not-explicitly-set default of 1.0 never
+    applies) and unset top_p (None is dropped from the request, deferring
+    to the API default). An explicitly customized temperature is honored,
+    with a warning pointing at Google's guidance.
+
+    Pre-Gemini-3 models keep the configured values unchanged.
+    """
+    if (
+        not is_gemini_3_or_later(model)
+        or temperature is None
+        or recommended_temperature is None
+    ):
+        return {"temperature": temperature, "top_p": top_p}
+    if temperature == recommended_temperature:
+        return {"temperature": GEMINI_3_RECOMMENDED_TEMPERATURE, "top_p": None}
+    if temperature != GEMINI_3_RECOMMENDED_TEMPERATURE:
+        LOGGER.warning(
+            (
+                "Gemini model %s is configured with temperature %s; Google "
+                "recommends leaving Gemini 3 models at their default "
+                "temperature of %s to avoid looping or degraded reasoning."
+            ),
+            model,
+            temperature,
+            GEMINI_3_RECOMMENDED_TEMPERATURE,
+        )
+    return {"temperature": temperature, "top_p": top_p}
 
 
 def extract_final(raw: str | list[Any], max_chars: int | None = None) -> str:

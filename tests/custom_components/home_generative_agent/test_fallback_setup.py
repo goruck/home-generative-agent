@@ -19,6 +19,7 @@ from custom_components.home_generative_agent.const import (
     CONF_EXPLAIN_ENABLED,
     CONF_FACE_RECOGNITION,
     CONF_FEATURE_MODEL_TEMPERATURE,
+    CONF_GEMINI_API_KEY,
     CONF_NOTIFY_SERVICE,
     CONF_OLLAMA_CHAT_MODEL,
     CONF_OLLAMA_URL,
@@ -32,6 +33,8 @@ from custom_components.home_generative_agent.const import (
     CONF_VIDEO_ANALYZER_MODE,
     CONF_VLM_PROVIDER,
     DOMAIN,
+    GEMINI_3_RECOMMENDED_TEMPERATURE,
+    RECOMMENDED_GEMINI_CHAT_MODEL,
     VIDEO_ANALYZER_MODE_DISABLE,
 )
 from custom_components.home_generative_agent.core.fallback import (
@@ -598,3 +601,79 @@ async def test_model_fallback_notification_strips_role_prefixes(
     assert "Primary OpenAI" not in message
     assert "Primary provider Primary Ollama" not in message
     assert message.startswith("Using OpenAI for chat; Ollama failed.")
+
+
+@pytest.mark.asyncio
+async def test_setup_gemini3_chat_binds_recommended_temperature(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A Gemini 3 chat primary on the default temperature binds 1.0, top_p unset.
+
+    Guards the Gemini 3 detuning fix: the configurable-fields path always sets
+    temperature explicitly, so without the setup-time rebind every default
+    install would send 0.2 - which Google advises against for Gemini 3. The
+    fallback leg exercises _configured_cloud_model for a second Gemini entry.
+    """
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _fallback_setup_data()
+
+    gemini_primary = ModelProviderConfig(
+        entry_id="gemini1",
+        name="Gemini",
+        provider_type="gemini",
+        capabilities={"chat"},
+        data={"settings": {"api_key": "gm-test"}},
+        deployment="cloud",
+    )
+    gemini_fallback = ModelProviderConfig(
+        entry_id="gemini2",
+        name="Gemini Fallback",
+        provider_type="gemini",
+        capabilities={"chat"},
+        data={"settings": {"api_key": "gm-test-2", "chat_model": "gemini-3.5-flash"}},
+        deployment="cloud",
+    )
+    data.providers[gemini_primary.entry_id] = gemini_primary
+    data.providers[gemini_fallback.entry_id] = gemini_fallback
+    data.options[CONF_CHAT_MODEL_PROVIDER] = "gemini"
+    data.options[CONF_GEMINI_API_KEY] = "gm-test"
+    # CONF_GEMINI_CHAT_MODEL left unset -> RECOMMENDED_GEMINI_CHAT_MODEL,
+    # the Gemini 3 default every fresh install gets.
+    data.fallback_chains["chat"] = [gemini_primary, gemini_fallback]
+    _patch_setup_dependencies(hass, monkeypatch, data)
+
+    async def _healthy(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    monkeypatch.setattr(hga_component, "gemini_healthy", _healthy)
+    monkeypatch.setattr(
+        hga_component,
+        "ChatGoogleGenerativeAI",
+        lambda *_args, **_kwargs: FakeRunnable("gemini"),
+    )
+    monkeypatch.setattr(
+        hga_component,
+        "GoogleGenerativeAIEmbeddings",
+        lambda *_args, **_kwargs: FakeEmbeddings("gemini"),
+    )
+
+    result = await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    assert result is True
+    chat_model = entry.runtime_data.chat_model
+    assert isinstance(chat_model, FallbackChatModel)
+
+    primary = cast("FakeConfiguredModel", chat_model.chain[0][0])
+    primary_config = primary.config["configurable"]
+    assert primary_config["model"] == RECOMMENDED_GEMINI_CHAT_MODEL
+    assert primary_config["temperature"] == GEMINI_3_RECOMMENDED_TEMPERATURE
+    assert primary_config["top_p"] is None
+
+    fallback = cast("FakeConfiguredModel", chat_model.chain[1][0])
+    fallback_config = fallback.config["configurable"]
+    assert fallback_config["model"] == "gemini-3.5-flash"
+    assert fallback_config["temperature"] == GEMINI_3_RECOMMENDED_TEMPERATURE
+    assert fallback_config["top_p"] is None

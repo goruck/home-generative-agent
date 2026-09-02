@@ -398,6 +398,12 @@ FALLBACK_CIRCUIT_BREAKER_COOLDOWN_SECONDS: float = 120.0
 # --- Gemini API key (used in config_flow/__init__.py) ---
 CONF_GEMINI_API_KEY = "gemini_api_key"
 
+# Google strongly recommends keeping Gemini 3 models at their default
+# temperature of 1.0; lower values can cause looping or degraded reasoning.
+# Applied when the feature temperature is still the recommended default (0.2,
+# which predates Gemini 3); an explicit user-set value is honored.
+GEMINI_3_RECOMMENDED_TEMPERATURE = 1.0
+
 # --- Anthropic API key ---
 CONF_ANTHROPIC_API_KEY = "anthropic_api_key"
 
