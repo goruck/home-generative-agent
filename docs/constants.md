@@ -35,7 +35,7 @@ This document covers the named constants that affect integration behaviour, orga
 | `RECOMMENDED_GEMINI_CHAT_MODEL` | `gemini-3.5-flash-lite` | Gemini chat model |
 | `RECOMMENDED_ANTHROPIC_CHAT_MODEL` | `claude-sonnet-4-6` | Anthropic chat model |
 | `RECOMMENDED_OPENAI_COMPATIBLE_CHAT_MODEL` | `gpt-4o` | OpenAI-compatible chat model |
-| `RECOMMENDED_CHAT_MODEL_TEMPERATURE` | `0.2` | Sampling temperature for chat responses |
+| `RECOMMENDED_CHAT_MODEL_TEMPERATURE` | `0.2` | Sampling temperature for chat responses. Gemini 3 models replace a still-default `0.2` with `1.0` (see `GEMINI_3_RECOMMENDED_TEMPERATURE`) |
 | `RECOMMENDED_OLLAMA_CHAT_KEEPALIVE` | `300` (s) | Seconds to keep Ollama chat model loaded between requests |
 | `RECOMMENDED_OLLAMA_REASONING` | `False` | Enable extended reasoning mode for supported Ollama models |
 
@@ -44,6 +44,7 @@ This document covers the named constants that affect integration behaviour, orga
 | Constant | File | Value | Purpose |
 |---|---|---|---|
 | `CHAT_MODEL_TOP_P` | `const.py` | `1.0` | nucleus sampling p for chat |
+| `GEMINI_3_RECOMMENDED_TEMPERATURE` | `const.py` | `1.0` | Temperature bound to Gemini 3-family models (all features) when the feature temperature is still the recommended default; `top_p` is left unset in that case. An explicitly customized temperature is honored, with a logged warning |
 | `CHAT_MODEL_MAX_TOKENS` | `const.py` | `-2` | Ollama max tokens (`-2` = fill context) |
 | `CHAT_MODEL_REPEAT_PENALTY` | `const.py` | `1.05` | Ollama repeat penalty |
 | `OLLAMA_GPT_EFFORT` | `const.py` | `"low"` | Effort hint for `gpt-oss` reasoning tag |
@@ -72,7 +73,7 @@ This document covers the named constants that affect integration behaviour, orga
 | `RECOMMENDED_GEMINI_VLM` | `gemini-3.5-flash-lite` | Gemini VLM model |
 | `RECOMMENDED_ANTHROPIC_VLM` | `claude-sonnet-4-6` | Anthropic VLM model |
 | `RECOMMENDED_OPENAI_COMPATIBLE_VLM` | `gpt-4o` | OpenAI-compatible VLM model |
-| `RECOMMENDED_VLM_TEMPERATURE` | `0.2` | Sampling temperature for vision responses |
+| `RECOMMENDED_VLM_TEMPERATURE` | `0.2` | Sampling temperature for vision responses. Gemini 3 models replace a still-default `0.2` with `1.0` |
 | `RECOMMENDED_OLLAMA_VLM_KEEPALIVE` | `300` (s) | Seconds to keep Ollama VLM loaded |
 | `RECOMMENDED_VLM_RESPONSE_LANGUAGE` | `""` (empty) | Language for VLM camera descriptions; empty = English. The `Scene unchanged.` sentinel always stays in English |
 | `RECOMMENDED_VLM_PROMPT_EXTRA` | `""` (empty) | Extra instructions appended to the VLM system prompt; never replaces built-in rules |
@@ -112,7 +113,7 @@ This document covers the named constants that affect integration behaviour, orga
 | `RECOMMENDED_GEMINI_SUMMARIZATION_MODEL` | `gemini-3.5-flash-lite` | Gemini summarization model |
 | `RECOMMENDED_ANTHROPIC_SUMMARIZATION_MODEL` | `claude-haiku-4-5-20251001` | Anthropic summarization model |
 | `RECOMMENDED_OPENAI_COMPATIBLE_SUMMARIZATION_MODEL` | `gpt-4o` | OpenAI-compatible summarization model |
-| `RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE` | `0.2` | Sampling temperature for summaries |
+| `RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE` | `0.2` | Sampling temperature for summaries. Gemini 3 models replace a still-default `0.2` with `1.0` |
 | `RECOMMENDED_OLLAMA_SUMMARIZATION_KEEPALIVE` | `300` (s) | Seconds to keep Ollama summarization model loaded |
 
 **Code-only:**

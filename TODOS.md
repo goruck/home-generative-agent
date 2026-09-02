@@ -22,8 +22,11 @@
 
 **How to apply:** Gate on the model string rather than the provider, since the same Gemini provider object serves 2.5 and 3.x: where the three gemini branches build their `configurable` dict, pass `None` for `temperature` (and `top_p`) when the selected model matches `gemini-3`, letting Google's own defaults apply. `dict.fromkeys(DROPPABLE_SAMPLING_PARAMS)` in `core/fallback.py:394` is the existing idiom for "unset these". The wrinkle is that temperature is a *per-feature* setting shared across providers (`CONF_CHAT_MODEL_TEMPERATURE` et al.), so this silently overrides a value the user typed — decide whether to override outright, or only when the value is still the recommended `0.2`, and say which in the release note. Mind that a fallback chain can route the same feature to a non-Gemini model, where 0.2 is still correct.
 
+**Resolution:** Shipped as `gemini_sampling_configurable` (`core/utils.py`), applied at all four Gemini bind sites (chat/VLM/summarization primaries + `_configured_cloud_model` for fallback members). Decision taken: override **only when the temperature still equals the feature's recommended default**; an explicitly customized value is honored with a setup-time warning citing Google's guidance. The suggested `None`-passthrough was impossible: `RunnableConfigurableFields._prepare` reconstructs `ChatGoogleGenerativeAI` via `__init__` with every field explicit, `temperature` there is a non-Optional `float` (None raises), and that same reconstruction defeats the library's own built-in Gemini-3→1.0 default (temperature always lands in `model_fields_set`). So the fix binds an explicit `1.0` and `top_p=None` (Optional; filtered from the request by `_prepare_params`), both verified against the pinned `langchain-google-genai` 3.1.0 and pinned by a real-class marshaling test. Non-Gemini chain members keep the configured 0.2. Spun off the latent `temperature: None` rebind crash as its own item (see "Sampling-rebind sets `temperature: None`" below).
+
 **Effort:** S
 **Priority:** P2
+**Completed:** v3.36.0 (2026-09-01)
 
 ---
 
@@ -171,6 +174,20 @@ And two writer-consistency gaps: (7) `_mark_tool_index_stale` (embedding-provide
 **Effort:** M
 **Priority:** P2
 **Depends on:** v3.28.1
+
+---
+
+### Sampling-rebind sets `temperature: None`, which a Gemini chain member cannot accept
+
+**What:** The drop-and-retry path for rejected sampling params (`core/fallback.py`, `dict.fromkeys(DROPPABLE_SAMPLING_PARAMS)`) rebinds the model with `temperature: None`. That idiom is fine for OpenAI/Ollama, but `RunnableConfigurableFields._prepare` *reconstructs* the model class via `__init__` with every configurable entry passed explicitly, and `ChatGoogleGenerativeAI.temperature` is a non-Optional `float` — so a `None` raises a pydantic `ValidationError` instead of unsetting the param. The retry meant to save the turn would crash it.
+
+**Why:** Unreachable today: the rebind only fires after a provider rejects sampling params with a 400, and Gemini accepts any temperature without error (which is exactly why the Gemini 3 default-temperature fix had to act at setup time — see `gemini_sampling_configurable`). Found while building that fix (2026-09-01), where the same reconstruction behavior was verified empirically against the pinned `langchain-google-genai` 3.1.0. Becomes live if Google ever starts rejecting sampling params, or if `DROPPABLE_SAMPLING_PARAMS` handling is extended to new error classes.
+
+**How to apply:** In the rebind helper, special-case provider types whose temperature field is non-Optional: omit the key from the rebind config instead of setting it to `None` — but note omission does *not* restore the class default on the configurable-fields path (the default instance's explicit value is re-passed), so a true unset needs a provider-aware substitute value or a wrapper. A regression test can reconstruct `ChatGoogleGenerativeAI` through `RunnableConfigurableFields` with the drop-config and assert it does not raise.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
 
 ---
 

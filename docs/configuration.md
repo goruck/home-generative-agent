@@ -146,6 +146,8 @@ Notes:
 
 > **Models that pin temperature** — Some OpenAI models (o-series and other reasoning-style models) only accept their default `temperature`/`top_p` and reject any other value with a 400 error. When that happens, HGA logs a warning and automatically retries the call without the rejected parameter, so conversation, camera analysis, summarization, and Sentinel keep working. In a multi-provider fallback chain the retry is applied per provider; a provider that still rejects its sampling settings fails over to the next provider in the chain and counts toward the circuit breaker. To avoid the extra retry on every call, leave the feature's temperature at the model's supported default (`top_p` has no UI setting — its default is a code-only constant, see the [Constants Reference](constants.md)).
 
+> **Gemini 3 temperature** — Google strongly recommends leaving Gemini 3 models at their default temperature of `1.0`; lower values can cause looping or degraded reasoning. Gemini accepts a low temperature without error, so HGA handles this at setup time instead: when a Gemini 3-family model is selected and the feature's temperature is still the recommended default (`0.2`, which predates Gemini 3), HGA sends `1.0` and leaves `top_p` unset so the API defaults apply. A temperature you have explicitly changed away from the default is sent as configured — with a warning in the log pointing at Google's guidance. Gemini 2.5 and earlier models always use the configured values. This applies to primary and fallback Gemini models alike; non-Gemini models in the same feature keep the configured temperature.
+
 ---
 
 ## Tool Retrieval (RAG)

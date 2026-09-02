@@ -14,12 +14,15 @@ from custom_components.home_generative_agent.const import (
     ANTHROPIC_THINKING_MAX_BUDGET,
     ANTHROPIC_THINKING_MIN_BUDGET,
     ANTHROPIC_THINKING_RESPONSE_TOKENS,
+    GEMINI_3_RECOMMENDED_TEMPERATURE,
 )
 from custom_components.home_generative_agent.core.utils import (
     CannotConnectError,
     InvalidAuthError,
     anthropic_healthy,
     extract_final,
+    gemini_sampling_configurable,
+    is_gemini_3_or_later,
     normalize_openai_compatible_base_url,
     openai_compatible_healthy,
     reasoning_field,
@@ -697,3 +700,112 @@ def test_thinking_gemini_output_marshals_to_protobuf() -> None:
         )
         params = model._prepare_params(stop=None)
         assert params.thinking_config is not None
+
+
+# ---------------------------------------------------------------------------
+# gemini_sampling_configurable tests (Gemini 3 default-temperature TODO)
+# ---------------------------------------------------------------------------
+
+
+def test_is_gemini_3_or_later_matches_family() -> None:
+    """Gemini 3-family names match; earlier and non-Gemini names do not."""
+    assert is_gemini_3_or_later("gemini-3.5-flash-lite")
+    assert is_gemini_3_or_later("gemini-3.7-flash")
+    assert is_gemini_3_or_later("models/gemini-3.1-flash-lite")
+    assert not is_gemini_3_or_later("gemini-2.5-flash")
+    assert not is_gemini_3_or_later("gpt-5")
+    assert not is_gemini_3_or_later(None)
+    assert not is_gemini_3_or_later("")
+
+
+def test_gemini_sampling_gemini3_default_temp_rebinds_to_recommended() -> None:
+    """A still-default 0.2 on a Gemini 3 model becomes 1.0 with top_p unset."""
+    assert gemini_sampling_configurable(
+        model="gemini-3.5-flash-lite",
+        temperature=0.2,
+        top_p=1.0,
+        recommended_temperature=0.2,
+    ) == {"temperature": GEMINI_3_RECOMMENDED_TEMPERATURE, "top_p": None}
+
+
+def test_gemini_sampling_pre_gemini3_keeps_configured_values() -> None:
+    """Gemini 2.5 keeps the configured temperature and top_p unchanged."""
+    assert gemini_sampling_configurable(
+        model="gemini-2.5-flash-lite",
+        temperature=0.2,
+        top_p=1.0,
+        recommended_temperature=0.2,
+    ) == {"temperature": 0.2, "top_p": 1.0}
+
+
+def test_gemini_sampling_gemini3_custom_temp_is_honored_with_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A user-set non-default temperature is kept, with a warning logged."""
+    with caplog.at_level("WARNING"):
+        config = gemini_sampling_configurable(
+            model="gemini-3.5-flash-lite",
+            temperature=0.7,
+            top_p=1.0,
+            recommended_temperature=0.2,
+        )
+    assert config == {"temperature": 0.7, "top_p": 1.0}
+    assert any("Gemini 3" in record.message for record in caplog.records)
+
+
+def test_gemini_sampling_gemini3_explicit_recommended_temp_no_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An explicit 1.0 is passed through without any warning."""
+    with caplog.at_level("WARNING"):
+        config = gemini_sampling_configurable(
+            model="gemini-3.7-flash",
+            temperature=1.0,
+            top_p=1.0,
+            recommended_temperature=0.2,
+        )
+    assert config == {"temperature": 1.0, "top_p": 1.0}
+    assert not caplog.records
+
+
+def test_gemini_sampling_none_inputs_pass_through() -> None:
+    """Missing temperature or recommended default never triggers the rebind."""
+    assert gemini_sampling_configurable(
+        model="gemini-3.5-flash-lite",
+        temperature=None,
+        top_p=None,
+        recommended_temperature=0.2,
+    ) == {"temperature": None, "top_p": None}
+    assert gemini_sampling_configurable(
+        model="gemini-3.5-flash-lite",
+        temperature=0.2,
+        top_p=1.0,
+        recommended_temperature=None,
+    ) == {"temperature": 0.2, "top_p": 1.0}
+
+
+def test_gemini_sampling_output_survives_model_reconstruction() -> None:
+    """
+    The rebound values must survive the configurable-fields path for real.
+
+    RunnableConfigurableFields reconstructs ChatGoogleGenerativeAI via
+    __init__ with every configurable entry passed explicitly (temperature
+    is a non-Optional float there, so None would raise), and
+    _prepare_params drops None values from the request. Exercise both with
+    the real class: temperature lands at 1.0 and top_p is absent from the
+    generated GenerationConfig.
+    """
+    config = gemini_sampling_configurable(
+        model="gemini-3.5-flash-lite",
+        temperature=0.2,
+        top_p=1.0,
+        recommended_temperature=0.2,
+    )
+    model = ChatGoogleGenerativeAI(
+        model="gemini-3.5-flash-lite",
+        google_api_key=SecretStr("test-key"),
+        **config,
+    )
+    params = model._prepare_params(stop=None)
+    assert params.temperature == GEMINI_3_RECOMMENDED_TEMPERATURE
+    assert "top_p" not in params
