@@ -247,7 +247,7 @@ async def test_stt_provider_flow_reuses_openai_provider(
         return None
 
     monkeypatch.setattr(
-        "custom_components.home_generative_agent.flows.stt_provider_subentry_flow.validate_openai_key",
+        "custom_components.home_generative_agent.flows.openai_compatible_endpoint.validate_openai_key",
         _noop_validate,
     )
 
@@ -285,7 +285,7 @@ async def test_stt_provider_flow_uses_separate_key(
         return None
 
     monkeypatch.setattr(
-        "custom_components.home_generative_agent.flows.stt_provider_subentry_flow.validate_openai_key",
+        "custom_components.home_generative_agent.flows.openai_compatible_endpoint.validate_openai_key",
         _noop_validate,
     )
 
@@ -319,7 +319,7 @@ async def test_stt_provider_flow_local_keyless(
         return None
 
     monkeypatch.setattr(
-        "custom_components.home_generative_agent.flows.stt_provider_subentry_flow.validate_openai_compatible_url",
+        "custom_components.home_generative_agent.flows.openai_compatible_endpoint.validate_openai_compatible_url",
         _noop_validate,
     )
 
@@ -359,7 +359,7 @@ async def test_stt_provider_flow_local_unreachable_server(
         raise CannotConnectError
 
     monkeypatch.setattr(
-        "custom_components.home_generative_agent.flows.stt_provider_subentry_flow.validate_openai_compatible_url",
+        "custom_components.home_generative_agent.flows.openai_compatible_endpoint.validate_openai_compatible_url",
         _fail_validate,
     )
 
@@ -373,6 +373,44 @@ async def test_stt_provider_flow_local_unreachable_server(
 
 
 @pytest.mark.asyncio
+async def test_stt_provider_flow_add_local_replaces_stale_default_name(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Adding a local provider without editing the pre-filled name gets the local name.
+
+    The provider form renders before the dropdown is touched, so it pre-fills
+    the default type's name ("STT - OpenAI"); submitting that unchanged for a
+    local provider must not label the local backend as OpenAI in the Assist
+    pipeline dropdown. A name the user actually typed still survives.
+    """
+    flow = _make_stt_flow(hass, DummyEntry())
+
+    async def _noop_validate(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.flows.openai_compatible_endpoint.validate_openai_compatible_url",
+        _noop_validate,
+    )
+
+    await flow.async_step_provider({"provider_type": "local", "name": "STT - OpenAI"})
+    await flow.async_step_credentials({"base_url": "http://box:8000"})
+    result = await flow.async_step_model({"model_name": "some/whisper"})
+    assert result.get("type") == "create_entry"
+    assert result.get("title") == "STT - Local"
+    result_data = result.get("data")
+    assert result_data is not None
+    assert result_data["name"] == "STT - Local"
+
+    # A deliberately typed name is kept verbatim.
+    flow = _make_stt_flow(hass, DummyEntry())
+    await flow.async_step_provider({"provider_type": "local", "name": "Garage Whisper"})
+    await flow.async_step_credentials({"base_url": "http://box:8000"})
+    result = await flow.async_step_model({"model_name": "some/whisper"})
+    assert result.get("title") == "Garage Whisper"
+
+
 async def test_stt_provider_flow_switch_to_local_resets_openai_state(
     hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -406,7 +444,7 @@ async def test_stt_provider_flow_switch_to_local_resets_openai_state(
         return None
 
     monkeypatch.setattr(
-        "custom_components.home_generative_agent.flows.stt_provider_subentry_flow.validate_openai_compatible_url",
+        "custom_components.home_generative_agent.flows.openai_compatible_endpoint.validate_openai_compatible_url",
         _noop_validate,
     )
 

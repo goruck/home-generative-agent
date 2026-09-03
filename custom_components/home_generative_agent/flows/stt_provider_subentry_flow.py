@@ -9,11 +9,9 @@ import voluptuous as vol
 from homeassistant.config_entries import (
     SOURCE_RECONFIGURE,
     SOURCE_USER,
-    ConfigSubentry,
     ConfigSubentryFlow,
     SubentryFlowResult,
 )
-from homeassistant.const import CONF_API_KEY
 from homeassistant.helpers.selector import (
     BooleanSelector,
     NumberSelector,
@@ -28,7 +26,6 @@ from homeassistant.helpers.selector import (
 )
 
 from ..const import (  # noqa: TID252
-    CONF_STT_BASE_URL,
     CONF_STT_LANGUAGE,
     CONF_STT_MODEL_NAME,
     CONF_STT_OPENAI_PROVIDER_ID,
@@ -40,15 +37,16 @@ from ..const import (  # noqa: TID252
     RECOMMENDED_OPENAI_STT_MODEL,
     STT_MODEL_OPENAI_SUPPORTED,
     STT_RESPONSE_FORMATS,
-    SUBENTRY_TYPE_MODEL_PROVIDER,
     SUBENTRY_TYPE_STT_PROVIDER,
 )
-from ..core.utils import (  # noqa: TID252
-    CannotConnectError,
-    InvalidAuthError,
-    normalize_openai_compatible_base_url,
-    validate_openai_compatible_url,
-    validate_openai_key,
+from .openai_compatible_endpoint import (
+    build_local_endpoint_settings,
+    build_openai_key_settings,
+    current_subentry,
+    local_endpoint_schema,
+    openai_key_schema,
+    openai_provider_options,
+    resolve_provider_name,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -57,106 +55,7 @@ ProviderNames = {
     "openai": "STT - OpenAI",
     "local": "STT - Local",
 }
-
-
-def _get_entry_from_flow(flow: ConfigSubentryFlow) -> Any:
-    """Return the config entry for a subentry flow."""
-    return flow._get_entry()  # type: ignore[attr-defined]  # noqa: SLF001
-
-
-def _current_subentry(flow: ConfigSubentryFlow) -> ConfigSubentry | None:
-    """Return the subentry currently being edited, if any."""
-    entry = _get_entry_from_flow(flow)
-    subentry_id = getattr(flow, "_subentry_id", None)
-    if not subentry_id:
-        subentry_id = flow.context.get("subentry_id")
-    if subentry_id:
-        return entry.subentries.get(subentry_id)
-    if flow.source == SOURCE_RECONFIGURE:
-        matches = [
-            subentry
-            for subentry in entry.subentries.values()
-            if subentry.subentry_type == SUBENTRY_TYPE_STT_PROVIDER
-        ]
-        if len(matches) == 1:
-            return matches[0]
-    return None
-
-
-def _openai_provider_options(flow: ConfigSubentryFlow) -> list[SelectOptionDict]:
-    """Return OpenAI model provider subentries for reuse."""
-    entry = _get_entry_from_flow(flow)
-    options: list[SelectOptionDict] = []
-    for subentry in entry.subentries.values():
-        if subentry.subentry_type != SUBENTRY_TYPE_MODEL_PROVIDER:
-            continue
-        if subentry.data.get("provider_type") != "openai":
-            continue
-        options.append(
-            SelectOptionDict(
-                label=subentry.title or subentry.subentry_id,
-                value=subentry.subentry_id,
-            )
-        )
-    return options
-
-
-async def _build_openai_settings(
-    hass: Any, openai_opts: list[SelectOptionDict], user_input: dict[str, Any]
-) -> tuple[dict[str, Any], str | None]:
-    """Build OpenAI settings and return error key if any."""
-    settings: dict[str, Any] = {}
-    api_key = user_input.get(CONF_API_KEY)
-    provider_id = user_input.get(CONF_STT_OPENAI_PROVIDER_ID)
-
-    if openai_opts and provider_id and provider_id != "none":
-        settings[CONF_STT_OPENAI_PROVIDER_ID] = provider_id
-        settings[CONF_API_KEY] = None
-        return settings, None
-
-    if not api_key:
-        return {}, "invalid_auth"
-
-    try:
-        await validate_openai_key(hass, api_key)
-    except InvalidAuthError:
-        return {}, "invalid_auth"
-    except CannotConnectError:
-        return {}, "cannot_connect"
-    except Exception:
-        LOGGER.exception("Unexpected exception validating OpenAI key")
-        return {}, "unknown"
-
-    settings[CONF_API_KEY] = api_key
-    settings[CONF_STT_OPENAI_PROVIDER_ID] = None
-    return settings, None
-
-
-async def _build_local_settings(
-    hass: Any, user_input: dict[str, Any]
-) -> tuple[dict[str, Any], str | None]:
-    """Build local (OpenAI-compatible) settings and return error key if any."""
-    base_url = user_input.get(CONF_STT_BASE_URL)
-    if not isinstance(base_url, str) or not base_url.strip():
-        return {}, "cannot_connect"
-    base_url = normalize_openai_compatible_base_url(base_url)
-    api_key = user_input.get(CONF_API_KEY) or None
-
-    try:
-        await validate_openai_compatible_url(hass, base_url, api_key)
-    except InvalidAuthError:
-        return {}, "invalid_auth"
-    except CannotConnectError:
-        return {}, "cannot_connect"
-    except Exception:
-        LOGGER.exception("Unexpected exception validating local STT endpoint")
-        return {}, "unknown"
-
-    return {
-        CONF_STT_BASE_URL: base_url,
-        CONF_API_KEY: api_key,
-        CONF_STT_OPENAI_PROVIDER_ID: None,
-    }, None
+_FALLBACK_NAME = "STT Provider"
 
 
 class SttProviderSubentryFlow(ConfigSubentryFlow):
@@ -179,11 +78,11 @@ class SttProviderSubentryFlow(ConfigSubentryFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
         """Entry point for STT provider setup or reconfigure."""
-        current = _current_subentry(self)
+        current = current_subentry(self, SUBENTRY_TYPE_STT_PROVIDER)
         if current:
             self._provider_type = current.data.get("provider_type")
             self._name = current.data.get("name") or ProviderNames.get(
-                self._provider_type or "openai", "STT Provider"
+                self._provider_type or "openai", _FALLBACK_NAME
             )
             self._settings = dict(current.data.get("settings") or {})
             self._model = dict(current.data.get("model") or {})
@@ -201,28 +100,27 @@ class SttProviderSubentryFlow(ConfigSubentryFlow):
             type_changed = (
                 self._provider_type is not None and provider_type != self._provider_type
             )
-            submitted_name = user_input.get("name")
             if type_changed:
                 # Switching provider types must not carry state across.
                 # Settings: the stored OpenAI key would otherwise prefill the
                 # local server's optional key field and be sent to a plaintext
                 # LAN endpoint (the model-provider flow guards the same leak).
                 # Model: the other type's model ID is invalid or a silent 404
-                # for the new one. Name: the pre-filled old default ("STT -
-                # OpenAI") would mislabel the new provider in the Assist
-                # pipeline dropdown; only a deliberately edited name survives.
+                # for the new one.
                 self._settings = {}
                 self._model = {}
-                if submitted_name == self._name:
-                    submitted_name = None
-            self._provider_type = provider_type
-            self._name = submitted_name or ProviderNames.get(
-                provider_type, "STT Provider"
+            self._name = resolve_provider_name(
+                user_input.get("name"),
+                provider_type,
+                provider_names=ProviderNames,
+                stale_name=self._name if type_changed else None,
+                fallback=_FALLBACK_NAME,
             )
+            self._provider_type = provider_type
             return await self.async_step_credentials()
 
         provider_type = self._provider_type or "openai"
-        default_name = self._name or ProviderNames.get(provider_type, "STT Provider")
+        default_name = self._name or ProviderNames.get(provider_type, _FALLBACK_NAME)
         schema = vol.Schema(
             {
                 vol.Required(
@@ -258,14 +156,19 @@ class SttProviderSubentryFlow(ConfigSubentryFlow):
         """Configure provider credentials."""
         errors: dict[str, str] = {}
         provider_type = self._provider_type or "openai"
-        openai_opts = _openai_provider_options(self)
+        openai_opts = openai_provider_options(self)
 
         if user_input is not None:
             if provider_type == "local":
-                settings, error = await _build_local_settings(self.hass, user_input)
+                settings, error = await build_local_endpoint_settings(
+                    self.hass, user_input, provider_id_key=CONF_STT_OPENAI_PROVIDER_ID
+                )
             elif provider_type == "openai":
-                settings, error = await _build_openai_settings(
-                    self.hass, openai_opts, user_input
+                settings, error = await build_openai_key_settings(
+                    self.hass,
+                    openai_opts,
+                    user_input,
+                    provider_id_key=CONF_STT_OPENAI_PROVIDER_ID,
                 )
             else:
                 # Unreachable today (the provider select admits only the two
@@ -287,60 +190,20 @@ class SttProviderSubentryFlow(ConfigSubentryFlow):
             prefill = (
                 user_input if user_input is not None and errors else self._settings
             )
-            local_schema = vol.Schema(
-                {
-                    vol.Required(
-                        CONF_STT_BASE_URL,
-                        description={"suggested_value": prefill.get(CONF_STT_BASE_URL)},
-                        default=prefill.get(CONF_STT_BASE_URL) or "",
-                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.URL)),
-                    vol.Optional(
-                        CONF_API_KEY,
-                        description={"suggested_value": prefill.get(CONF_API_KEY)},
-                        default=prefill.get(CONF_API_KEY) or "",
-                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
-                }
-            )
             return self.async_show_form(
-                step_id="credentials", data_schema=local_schema, errors=errors
+                step_id="credentials",
+                data_schema=local_endpoint_schema(prefill),
+                errors=errors,
             )
-
-        schema_dict: dict[Any, Any] = {}
-        if openai_opts:
-            reuse_opts = [
-                SelectOptionDict(label="Use a separate key", value="none"),
-                *openai_opts,
-            ]
-            stored_provider_id = self._settings.get(CONF_STT_OPENAI_PROVIDER_ID)
-            stored_api_key = self._settings.get(CONF_API_KEY)
-            if stored_provider_id is None and stored_api_key:
-                default_id = "none"
-            else:
-                default_id = stored_provider_id or reuse_opts[1]["value"]
-            schema_dict[
-                vol.Required(
-                    CONF_STT_OPENAI_PROVIDER_ID,
-                    default=default_id,
-                )
-            ] = SelectSelector(
-                SelectSelectorConfig(
-                    options=reuse_opts,
-                    mode=SelectSelectorMode.DROPDOWN,
-                    sort=False,
-                    custom_value=False,
-                )
-            )
-
-        schema_dict[
-            vol.Optional(
-                CONF_API_KEY,
-                description={"suggested_value": self._settings.get(CONF_API_KEY)},
-                default=self._settings.get(CONF_API_KEY) or "",
-            )
-        ] = TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
 
         return self.async_show_form(
-            step_id="credentials", data_schema=vol.Schema(schema_dict), errors=errors
+            step_id="credentials",
+            data_schema=openai_key_schema(
+                openai_opts,
+                self._settings,
+                provider_id_key=CONF_STT_OPENAI_PROVIDER_ID,
+            ),
+            errors=errors,
         )
 
     async def async_step_model(
@@ -348,7 +211,7 @@ class SttProviderSubentryFlow(ConfigSubentryFlow):
     ) -> SubentryFlowResult:
         """Configure model and advanced STT options."""
         errors: dict[str, str] = {}
-        current = _current_subentry(self)
+        current = current_subentry(self, SUBENTRY_TYPE_STT_PROVIDER)
         model_data = dict(self._model)
 
         if user_input is not None:
@@ -374,7 +237,7 @@ class SttProviderSubentryFlow(ConfigSubentryFlow):
                     "provider_type": self._provider_type or "openai",
                     "name": self._name
                     or ProviderNames.get(
-                        self._provider_type or "openai", "STT Provider"
+                        self._provider_type or "openai", _FALLBACK_NAME
                     ),
                     "settings": self._settings,
                     "model": model_data,

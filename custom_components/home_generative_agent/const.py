@@ -407,6 +407,20 @@ GEMINI_3_RECOMMENDED_TEMPERATURE = 1.0
 # --- Anthropic API key ---
 CONF_ANTHROPIC_API_KEY = "anthropic_api_key"
 
+# ---- OpenAI-compatible endpoints (shared by the STT and TTS provider flows) ----
+# Settings key under which a local server's normalized base URL is stored. The
+# STT and TTS provider subentries use the same key and the same shared flow
+# helper (flows/openai_compatible_endpoint.py).
+CONF_OPENAI_COMPATIBLE_ENDPOINT_BASE_URL = "base_url"
+# Keyless local servers get a placeholder key, NOT an empty one: openai>=2.45
+# (the version HA 2026.8+ ships) rejects an empty api_key in the constructor
+# with "Missing credentials". The placeholder never reaches the wire — the
+# runtime strips the Authorization header per request with the SDK's ``Omit``
+# sentinel, matching the flow's keyless validation request. A bogus bearer
+# would be rejected by auth proxies (e.g. LiteLLM virtual keys) even though
+# validation passed.
+LOCAL_KEYLESS_API_KEY = "sk-hga-keyless-local"
+
 # ---- Speech-to-Text (STT) ----
 CONF_STT_OPENAI_PROVIDER_ID = "openai_provider_subentry_id"
 CONF_STT_MODEL_NAME = "model_name"
@@ -425,20 +439,13 @@ RECOMMENDED_OPENAI_STT_MODEL: STT_MODEL_OPENAI_SUPPORTED = "gpt-4o-mini-transcri
 STT_RESPONSE_FORMATS = ("text", "json", "verbose_json", "srt", "vtt")
 
 # Local (OpenAI-compatible) STT provider, e.g. Speaches serving faster-whisper.
-CONF_STT_BASE_URL = "base_url"
+CONF_STT_BASE_URL = CONF_OPENAI_COMPATIBLE_ENDPOINT_BASE_URL
 # Speaches model ID; the flow accepts any custom value, this is only a default.
 # Systran's large-v3-turbo repo went private on Hugging Face (2026-09); this is
 # the public CTranslate2 conversion of the same weights, tagged so Speaches'
 # registry accepts it.
 RECOMMENDED_LOCAL_STT_MODEL = "deepdml/faster-whisper-large-v3-turbo-ct2"
-# Keyless local servers get a placeholder key, NOT an empty one: openai>=2.45
-# (the version HA 2026.8+ ships) rejects an empty api_key in the constructor
-# with "Missing credentials". The placeholder never reaches the wire — the
-# runtime strips the Authorization header per request with the SDK's ``Omit``
-# sentinel, matching the flow's keyless validation request. A bogus bearer
-# would be rejected by auth proxies (e.g. LiteLLM virtual keys) even though
-# validation passed.
-LOCAL_STT_KEYLESS_API_KEY = "sk-hga-keyless-local"
+LOCAL_STT_KEYLESS_API_KEY = LOCAL_KEYLESS_API_KEY
 
 # ---------------- Chat model ----------------
 CHAT_MODEL_TOP_P = 1.0
