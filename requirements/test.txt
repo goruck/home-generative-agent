@@ -2,6 +2,9 @@
 
 homeassistant==2026.8.3
 pytest-homeassistant-custom-component==0.13.357
+# Match HA core's openai_conversation pin for this HA version: the STT platform
+# runs against core's SDK, and its constructor rules change between releases.
+openai==2.45.0
 
 pytest==9.*
 pytest-asyncio==1.*

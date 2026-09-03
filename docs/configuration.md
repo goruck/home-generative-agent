@@ -246,7 +246,7 @@ HGA provides a built-in STT engine — no separate STT integration required. Two
    - **OpenAI:** either reuse an existing OpenAI Model Provider subentry or select **Use a separate key** and enter a dedicated API key.
    - **Local:** enter the server URL (e.g. `http://192.168.1.100:8000` — a missing `/v1` suffix is added automatically). The API key is optional; leave it blank for servers without authentication. The endpoint is validated when you submit the form.
 5. On **Model & advanced options**, pick a model and set optional fields:
-   - model: recommended `gpt-4o-mini-transcribe` (OpenAI) or `Systran/faster-whisper-large-v3-turbo` (Local; any custom model ID your server exposes can be typed in)
+   - model: recommended `gpt-4o-mini-transcribe` (OpenAI) or `deepdml/faster-whisper-large-v3-turbo-ct2` (Local; any custom model ID your server exposes can be typed in)
    - `language` (optional): e.g. `en` or `en-US`
    - `prompt` (optional): hints for domain-specific vocabulary
    - `temperature` (optional): 0–1
@@ -257,7 +257,7 @@ HGA provides a built-in STT engine — no separate STT integration required. Two
 
 ### Running a local STT server
 
-Any server exposing the OpenAI `/v1/audio/transcriptions` endpoint works. Speaches is a good fit for a GPU box already running Ollama (`faster-whisper-large-v3-turbo` needs roughly 1.5–2 GB of VRAM):
+Any server exposing the OpenAI `/v1/audio/transcriptions` endpoint works. Speaches is a good fit for a GPU box already running Ollama (`faster-whisper-large-v3-turbo` needs roughly 1.5–2 GB of VRAM). Speaches only serves models that have already been downloaded, so list the model in `PRELOAD_MODELS` (or `POST /v1/models/<model-id>` once) before the first utterance:
 
 ```yaml
 # docker-compose.yaml on the GPU box
@@ -268,6 +268,10 @@ services:
       - "8000:8000"
     volumes:
       - hf-hub-cache:/home/ubuntu/.cache/huggingface/hub
+    environment:
+      - PRELOAD_MODELS=["deepdml/faster-whisper-large-v3-turbo-ct2"]
+      - STT_MODEL_TTL=-1            # keep the model resident; the first utterance after a reload pays several seconds
+      # - WHISPER__COMPUTE_TYPE=int8_float32   # required on Pascal GPUs (GTX 10xx): float16 is not supported there
     deploy:
       resources:
         reservations:

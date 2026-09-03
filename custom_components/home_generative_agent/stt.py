@@ -18,7 +18,7 @@ from homeassistant.components.stt import (
     SpeechToTextEntity,
 )
 from homeassistant.helpers.httpx_client import get_async_client
-from openai import AsyncOpenAI, AuthenticationError, OpenAIError
+from openai import AsyncOpenAI, AuthenticationError, Omit, OpenAIError
 
 from .const import (
     CONF_STT_BASE_URL,
@@ -322,9 +322,10 @@ class HGASttEntity(SpeechToTextEntity):
         """
         Return (api_key, base_url) for the provider, or None if unconfigured.
 
-        Local providers require a base URL and fall back to an empty key —
-        which the SDK turns into no Authorization header, the same shape the
-        flow's validation request used — when the server needs none.
+        Local providers require a base URL and fall back to the keyless
+        placeholder when the server needs none. The placeholder only satisfies
+        the SDK constructor; the stream strips the Authorization header per
+        request so the wire shape matches the flow's validation request.
         """
         if provider_type == "local":
             settings = data.get("settings", {})
@@ -393,6 +394,12 @@ class HGASttEntity(SpeechToTextEntity):
             temperature,
             response_format,
         )
+        if api_key == LOCAL_STT_KEYLESS_API_KEY:
+            # Keyless local server: send no Authorization header at all. The
+            # placeholder exists only because the SDK constructor refuses an
+            # empty key; ``Omit`` drops the header the client would otherwise
+            # add from it.
+            request["extra_headers"] = {"Authorization": Omit()}
 
         # Building the client is inside the try: it now touches hass.data and
         # the SDK constructor, and a failure there should fail this utterance,

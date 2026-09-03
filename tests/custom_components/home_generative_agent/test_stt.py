@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING, Any, cast
 import httpx
 import pytest
 from homeassistant.components import stt as ha_stt
+from openai import Omit
+from openai._models import FinalRequestOptions
 
 from custom_components.home_generative_agent import stt as hga_stt
 from custom_components.home_generative_agent.const import (
@@ -735,7 +737,7 @@ def _make_local_entity(
 async def test_local_provider_builds_client_with_base_url(
     patched_client: Any,
 ) -> None:
-    """A keyless local provider gets an empty key and sends no auth header."""
+    """A keyless local provider gets the placeholder key and sends no auth header."""
     entity, _ = _make_local_entity()
     result, seen = await _run(entity, [SimpleNamespace(text="hello")])
     assert result.result == ha_stt.SpeechResultState.SUCCESS
@@ -743,12 +745,23 @@ async def test_local_provider_builds_client_with_base_url(
     assert len(patched_client["kwargs"]) == 1
     kwargs = patched_client["kwargs"][0]
     assert kwargs["base_url"] == LOCAL_BASE_URL
+    # openai>=2.45 (HA 2026.8+) raises "Missing credentials" on an empty
+    # api_key, so the constructor must always get a non-empty placeholder.
     assert kwargs["api_key"] == LOCAL_STT_KEYLESS_API_KEY
+    assert LOCAL_STT_KEYLESS_API_KEY
+    assert len(seen["transcriptions"]) == 1
     # The flow validated the endpoint without an Authorization header; runtime
     # must match, or servers that reject unknown bearer tokens 401 every
-    # utterance after a setup that passed.
-    assert patched_client["constructed"][0].auth_headers == {}
-    assert len(seen["transcriptions"]) == 1
+    # utterance after a setup that passed. Prove it on the real request the
+    # installed SDK would send, not on the marker alone.
+    extra_headers = seen["transcriptions"][0]["extra_headers"]
+    assert isinstance(extra_headers["Authorization"], Omit)
+    built = patched_client["constructed"][0]._build_request(
+        FinalRequestOptions(
+            method="post", url="/audio/transcriptions", headers=extra_headers
+        )
+    )
+    assert "authorization" not in built.headers
 
 
 async def test_local_provider_uses_configured_key(patched_client: Any) -> None:
@@ -756,8 +769,14 @@ async def test_local_provider_uses_configured_key(patched_client: Any) -> None:
     entity, _ = _make_local_entity(
         settings={"base_url": LOCAL_BASE_URL, "api_key": "local-key"}
     )
-    await _run(entity, [SimpleNamespace(text="hello")])
+    _, seen = await _run(entity, [SimpleNamespace(text="hello")])
     assert patched_client["kwargs"][0]["api_key"] == "local-key"
+    # A configured key must reach the wire as a bearer token: the keyless
+    # header strip applies only to the placeholder.
+    assert "extra_headers" not in seen["transcriptions"][0]
+    assert patched_client["constructed"][0].auth_headers == {
+        "Authorization": "Bearer local-key"
+    }
 
 
 async def test_local_provider_missing_base_url_builds_no_client(
