@@ -1455,7 +1455,27 @@ window-scoped check could suppress.
 
 ## Speech-to-Text
 
-### Add-flow provider name pre-fills for the default type, not the selected one
+### STT entities are not bound to their subentry in the entity registry
+
+**What:** `stt.py::async_setup_entry` calls `async_add_entities(entities)` without
+`config_subentry_id=`, while `tts.py` (added later) passes it, following core's
+`openai_conversation` platforms. Without the binding, deleting an STT provider subentry leaves an
+orphaned entity-registry entry (restored as unavailable) until the next reload prunes it, and the
+entity is not listed under its subentry in the UI.
+
+**Why:** Parity with TTS and core; cosmetic today because the flow's `_schedule_reload()` rebuilds the
+platform, but the orphan is visible after a delete.
+
+**How to apply:** Loop the subentries and add each entity with
+`config_subentry_id=subentry.subentry_id` (type the callback as
+`AddConfigEntryEntitiesCallback`), mirroring `tts.py`; add a setup test like
+`test_tts.py::test_setup_entry_adds_one_entity_per_tts_subentry`.
+
+**Effort:** S
+**Priority:** P3
+
+
+### ~~Add-flow provider name pre-fills for the default type, not the selected one~~ (DONE in the TTS PR)
 
 **What:** The STT provider step's name field defaults to `ProviderNames["openai"]` ("STT - OpenAI") because the form renders before the user touches the provider dropdown, and HA forms do not live-update one field from another. A user who switches the dropdown to **Local (OpenAI-compatible)** and submits without editing the name gets a local provider labeled "STT - OpenAI" in the Assist pipeline dropdown. The reconfigure path already resets a stale default name on a type *switch* (v3.37.0 review fix); the add path has no previous type to compare against, so `type_changed` never fires.
 
@@ -1465,16 +1485,35 @@ window-scoped check could suppress.
 
 **Effort:** S
 **Priority:** P3
+**Status:** Fixed in `flows/openai_compatible_endpoint.py::resolve_provider_name` (shared by the STT and TTS flows) with add-flow tests for both. A submitted name equal to another type's default is treated as the stale pre-fill; typed names survive.
 
 ---
 
-### Unify the two OpenAI-compatible endpoint conventions (STT flow vs model-provider flow)
+### Migrate the model-provider `openai_compatible` flow onto the shared endpoint helper
 
-**What:** The local STT provider (#598) and the `openai_compatible` model provider store the same concept — an OpenAI-compatible endpoint — in divergent shapes. STT (`flows/stt_provider_subentry_flow.py:_build_local_settings`) normalizes with `/v1` at write time and stores `api_key: None` for keyless servers; the model-provider flow (`flows/model_provider_subentry_flow.py:276-302`) stores the raw `ensure_http_url(...)` and normalizes at read time, and uses the literal `"none"` sentinel for keyless (which `validate_openai_compatible_url` at `core/utils.py:750` special-cases; the STT runtime instead uses `LOCAL_STT_KEYLESS_API_KEY = ""`). `CONF_STT_BASE_URL` and `CONF_OPENAI_COMPATIBLE_BASE_URL` are two constants for the same `base_url`/`openai_compatible_base_url` settings ideas.
+**What:** The STT and TTS provider flows now share one copy of the OpenAI-compatible endpoint
+convention — `flows/openai_compatible_endpoint.py` (normalize `/v1` at write time, `api_key: None`
+for keyless, `CONF_OPENAI_COMPATIBLE_ENDPOINT_BASE_URL`, runtime placeholder `LOCAL_KEYLESS_API_KEY`
++ per-request `Omit()` header strip). The model-provider flow's `openai_compatible` type still uses
+the older shape: raw `ensure_http_url(...)` stored and normalized at read time
+(`__init__.py` ChatOpenAI/OpenAIEmbeddings construction), and the literal `"none"` keyless sentinel,
+which is written in three places (`flows/model_provider_subentry_flow.py`, `core/subentry_resolver.py`
+`_apply_openai_compatible_to_category`, `__init__.py` runtime fallback) and handed to `SecretStr` as a
+real bearer token — `validate_openai_compatible_url` special-cases it (`core/utils.py`).
 
-**Why:** Flagged by the pre-merge review of #598. Any future change to how an OpenAI-compatible endpoint is validated, authenticated, or normalized must now be made twice in two conventions; miss one and local STT and local chat behave differently for the identical URL the user typed. Not unified in #598 to keep that PR a self-contained STT feature; the model-provider convention has existing stored entries, so unification needs a migration or read-both compatibility.
+**Why:** Two conventions for the identical URL a user typed; a change to validation, auth, or
+normalization must still be made twice. Deferred from the TTS PR on purpose: the model-provider
+convention has stored entries in the field and its `"none"` sentinel reaches the SDK at runtime, so
+the migration needs read-both compatibility (`normalize_openai_compatible_base_url` is idempotent, so
+the URL half is safe; the key half needs the placeholder + `Omit()` treatment or a non-empty
+placeholder wherever `SecretStr(...)` is built) and the reconfigure prefill must map the sentinel to an
+empty password field instead of showing literal `none`.
 
-**How to apply:** Extract a shared "openai-compatible endpoint settings" helper (build + validate + normalize + keyless convention) used by both flows, pick one storage shape (write-time normalized is simpler for readers), and accept the other on read for existing entries. The planned TTS provider (PR B) is the forcing function — do this before adding a third copy there.
+**How to apply:** Have the model-provider flow's `openai_compatible` branch call
+`build_local_endpoint_settings` / `local_endpoint_schema`; coerce `None`/`""`/`"none"` on every read
+site listed above; keep `validate_openai_compatible_url` accepting both; migrate the four
+`test_subentries.py` assertions that pin the un-normalized / `"none"` shape; settle on one translation
+label pair ("Server URL" vs "Base URL").
 
 **Effort:** M
 **Priority:** P2

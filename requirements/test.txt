@@ -5,6 +5,10 @@ pytest-homeassistant-custom-component==0.13.357
 # Match HA core's openai_conversation pin for this HA version: the STT platform
 # runs against core's SDK, and its constructor rules change between releases.
 openai==2.45.0
+# HA's tts component imports mutagen at module import; pin to core's tts manifest.
+mutagen==1.48.1
+# ...and HA's ffmpeg component (imported by tts); pin to core's ffmpeg manifest.
+ha-ffmpeg==3.2.2
 
 pytest==9.*
 pytest-asyncio==1.*

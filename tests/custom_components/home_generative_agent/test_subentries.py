@@ -88,6 +88,7 @@ from custom_components.home_generative_agent.const import (
     SUBENTRY_TYPE_MODEL_PROVIDER,
     SUBENTRY_TYPE_SENTINEL,
     SUBENTRY_TYPE_STT_PROVIDER,
+    SUBENTRY_TYPE_TTS_PROVIDER,
 )
 from custom_components.home_generative_agent.core.subentry_resolver import (
     build_model_deployments,
@@ -123,6 +124,9 @@ from custom_components.home_generative_agent.flows.sentinel_subentry_flow import
 )
 from custom_components.home_generative_agent.flows.stt_provider_subentry_flow import (
     SttProviderSubentryFlow,
+)
+from custom_components.home_generative_agent.flows.tts_provider_subentry_flow import (
+    TtsProviderSubentryFlow,
 )
 
 if TYPE_CHECKING:
@@ -186,6 +190,7 @@ def test_supported_subentry_types() -> None:
         SUBENTRY_TYPE_MODEL_PROVIDER,
         SUBENTRY_TYPE_FEATURE,
         SUBENTRY_TYPE_STT_PROVIDER,
+        SUBENTRY_TYPE_TTS_PROVIDER,
         SUBENTRY_TYPE_SENTINEL,
     }
 
@@ -193,6 +198,34 @@ def test_supported_subentry_types() -> None:
 def _make_stt_flow(hass: HomeAssistant, entry: DummyEntry) -> SttProviderSubentryFlow:
     """Build an STT subentry flow with the usual test doubles attached."""
     flow = SttProviderSubentryFlow()
+    flow.hass = hass
+    flow.async_show_form = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "form",
+        "data_schema": kwargs["data_schema"],
+        "errors": kwargs.get("errors"),
+    }
+    flow.async_create_entry = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "create_entry",
+        "title": kwargs.get("title"),
+        "data": kwargs.get("data"),
+    }
+    flow.async_abort = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "abort",
+        "reason": kwargs.get("reason"),
+    }
+    flow.async_update_and_abort = lambda *_args, **kwargs: {  # type: ignore[assignment]
+        "type": "update_entry",
+        "title": kwargs.get("title"),
+        "data": kwargs.get("data"),
+    }
+    flow._schedule_reload = lambda: None  # type: ignore[assignment]
+    _patch_entry(flow, entry)
+    return flow
+
+
+def _make_tts_flow(hass: HomeAssistant, entry: DummyEntry) -> TtsProviderSubentryFlow:
+    """Build a TTS subentry flow with the usual test doubles attached."""
+    flow = TtsProviderSubentryFlow()
     flow.hass = hass
     flow.async_show_form = lambda **kwargs: {  # type: ignore[assignment]
         "type": "form",
@@ -475,6 +508,259 @@ async def test_stt_provider_flow_switch_to_local_resets_openai_state(
     assert result_data["provider_type"] == "local"
     assert result_data["name"] == "STT - Local"
     assert result_data["settings"] == {
+        "base_url": "http://box:8000/v1",
+        "api_key": None,
+        "openai_provider_subentry_id": None,
+    }
+
+
+_ENDPOINT_MODULE = (
+    "custom_components.home_generative_agent.flows.openai_compatible_endpoint"
+)
+
+
+async def test_tts_provider_flow_reuses_openai_provider(hass: HomeAssistant) -> None:
+    """Linking an OpenAI model provider stores its id and blanks the key."""
+    entry = DummyEntry()
+    entry.subentries["openai1"] = DummySubentry(
+        "openai1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "OpenAI",
+        {"provider_type": "openai", "settings": {"api_key": "sk-shared"}},
+    )
+    flow = _make_tts_flow(hass, entry)
+
+    second = await flow.async_step_provider({"provider_type": "openai"})
+    assert second.get("type") == "form"
+    assert _schema_marker(second, "openai_provider_subentry_id").default() == "openai1"
+
+    third = await flow.async_step_credentials(
+        {"openai_provider_subentry_id": "openai1", "api_key": "ignored"}
+    )
+    assert third.get("type") == "form"
+    assert _schema_marker(third, "model_name").default() == "gpt-4o-mini-tts"
+    assert _schema_marker(third, "voice").default() == "alloy"
+
+    result = await flow.async_step_model(
+        {"model_name": "gpt-4o-mini-tts", "voice": "nova", "speed": 1.1}
+    )
+    assert result.get("type") == "create_entry"
+    assert result.get("title") == "TTS - OpenAI"
+    data = result.get("data")
+    assert data is not None
+    assert data["provider_type"] == "openai"
+    assert data["settings"] == {
+        "openai_provider_subentry_id": "openai1",
+        "api_key": None,
+    }
+    assert data["model"] == {
+        "model_name": "gpt-4o-mini-tts",
+        "voice": "nova",
+        "speed": 1.1,
+        "instructions": None,
+    }
+
+
+async def test_tts_provider_flow_uses_separate_key(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A separate OpenAI key is validated and stored without a provider link."""
+    flow = _make_tts_flow(hass, DummyEntry())
+    validated: list[str] = []
+
+    async def _validate(_hass: Any, api_key: str, *_a: Any, **_k: Any) -> None:
+        validated.append(api_key)
+
+    monkeypatch.setattr(f"{_ENDPOINT_MODULE}.validate_openai_key", _validate)
+
+    await flow.async_step_provider({"provider_type": "openai", "name": "Speaker"})
+    third = await flow.async_step_credentials({"api_key": "sk-separate"})
+    assert third.get("type") == "form"
+    assert validated == ["sk-separate"]
+
+    result = await flow.async_step_model(
+        {"model_name": "tts-1", "voice": "", "instructions": "Warm and slow."}
+    )
+    assert result.get("type") == "create_entry"
+    assert result.get("title") == "Speaker"
+    data = result.get("data")
+    assert data is not None
+    assert data["settings"] == {
+        "api_key": "sk-separate",
+        "openai_provider_subentry_id": None,
+    }
+    # A blank voice falls back to the provider's recommended voice; a blank
+    # speed to the default; instructions are stored even for tts-1 (the
+    # runtime, not the flow, decides whether the model accepts them).
+    assert data["model"] == {
+        "model_name": "tts-1",
+        "voice": "alloy",
+        "speed": 1.0,
+        "instructions": "Warm and slow.",
+    }
+
+
+async def test_tts_provider_flow_openai_invalid_key(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rejected key redisplays the credentials form with invalid_auth."""
+    flow = _make_tts_flow(hass, DummyEntry())
+
+    async def _reject(*_args: Any, **_kwargs: Any) -> None:
+        raise InvalidAuthError
+
+    monkeypatch.setattr(f"{_ENDPOINT_MODULE}.validate_openai_key", _reject)
+    await flow.async_step_provider({"provider_type": "openai"})
+    result = await flow.async_step_credentials({"api_key": "sk-bad"})
+    assert result.get("type") == "form"
+    assert (result.get("errors") or {}).get("base") == "invalid_auth"
+
+
+async def test_tts_provider_flow_local_keyless(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Local TTS flow stores a normalized base URL and no key or linked provider."""
+    flow = _make_tts_flow(hass, DummyEntry())
+    validated: list[tuple[str, str | None]] = []
+
+    async def _validate(_hass: Any, base_url: str, api_key: str | None = None) -> None:
+        validated.append((base_url, api_key))
+
+    monkeypatch.setattr(f"{_ENDPOINT_MODULE}.validate_openai_compatible_url", _validate)
+
+    await flow.async_step_provider({"provider_type": "local", "name": "TTS - Local"})
+    # Entered without /v1 on purpose: normalization must add it before validation.
+    third = await flow.async_step_credentials({"base_url": "speaches-box:8000"})
+    assert third.get("type") == "form"
+    assert validated == [("http://speaches-box:8000/v1", None)]
+    assert _schema_marker(third, "model_name").default() == (
+        "speaches-ai/Kokoro-82M-v1.0-ONNX"
+    )
+    assert _schema_marker(third, "voice").default() == "af_heart"
+
+    result = await flow.async_step_model(
+        {
+            "model_name": "speaches-ai/piper-en_US-hfc_female-medium",
+            "voice": "hfc_female",
+        }
+    )
+    assert result.get("type") == "create_entry"
+    data = result.get("data")
+    assert data is not None
+    assert data["provider_type"] == "local"
+    assert data["settings"] == {
+        "base_url": "http://speaches-box:8000/v1",
+        "api_key": None,
+        "openai_provider_subentry_id": None,
+    }
+    assert data["model"]["model_name"] == "speaches-ai/piper-en_US-hfc_female-medium"
+    assert data["model"]["voice"] == "hfc_female"
+    assert data["model"]["speed"] == 1.0
+
+
+async def test_tts_provider_flow_local_unreachable_server_keeps_input(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed connection test redisplays the typed URL, not an empty form."""
+    flow = _make_tts_flow(hass, DummyEntry())
+
+    async def _fail(*_args: Any, **_kwargs: Any) -> None:
+        raise CannotConnectError
+
+    monkeypatch.setattr(f"{_ENDPOINT_MODULE}.validate_openai_compatible_url", _fail)
+    await flow.async_step_provider({"provider_type": "local"})
+    result = await flow.async_step_credentials({"base_url": "http://down-box:8000"})
+    assert result.get("type") == "form"
+    assert (result.get("errors") or {}).get("base") == "cannot_connect"
+    assert _schema_marker(result, "base_url").default() == "http://down-box:8000"
+
+
+async def test_tts_provider_flow_speed_is_clamped(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Out-of-range or garbage speeds are clamped to the API's range or defaulted."""
+
+    async def _noop(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(f"{_ENDPOINT_MODULE}.validate_openai_compatible_url", _noop)
+    for submitted, stored in ((9.0, 4.0), (0.1, 0.25), ("fast", 1.0), (None, 1.0)):
+        flow = _make_tts_flow(hass, DummyEntry())
+        await flow.async_step_provider({"provider_type": "local"})
+        await flow.async_step_credentials({"base_url": "http://box:8000"})
+        result = await flow.async_step_model({"model_name": "m", "speed": submitted})
+        data = result.get("data")
+        assert data is not None
+        assert data["model"]["speed"] == stored, submitted
+
+
+async def test_tts_provider_flow_add_local_replaces_stale_default_name(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Submitting the pre-filled OpenAI name for a local provider yields the local name."""
+
+    async def _noop(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(f"{_ENDPOINT_MODULE}.validate_openai_compatible_url", _noop)
+    flow = _make_tts_flow(hass, DummyEntry())
+    await flow.async_step_provider({"provider_type": "local", "name": "TTS - OpenAI"})
+    await flow.async_step_credentials({"base_url": "http://box:8000"})
+    result = await flow.async_step_model({"model_name": "m"})
+    assert result.get("title") == "TTS - Local"
+
+
+async def test_tts_provider_flow_switch_to_local_resets_openai_state(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reconfiguring openai -> local carries no key, model, voice, or stale title."""
+    entry = DummyEntry()
+    entry.subentries["tts1"] = DummySubentry(
+        "tts1",
+        SUBENTRY_TYPE_TTS_PROVIDER,
+        "TTS - OpenAI",
+        {
+            "provider_type": "openai",
+            "name": "TTS - OpenAI",
+            "settings": {
+                "api_key": "sk-proj-real",
+                "openai_provider_subentry_id": None,
+            },
+            "model": {"model_name": "gpt-4o-mini-tts", "voice": "nova", "speed": 1.0},
+        },
+    )
+    flow = _make_tts_flow(hass, entry)
+    cast("Any", flow)._subentry_id = "tts1"
+
+    async def _noop(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(f"{_ENDPOINT_MODULE}.validate_openai_compatible_url", _noop)
+
+    first = await flow.async_step_user()
+    assert first.get("type") == "form"
+    second = await flow.async_step_provider(
+        {"provider_type": "local", "name": "TTS - OpenAI"}
+    )
+    key_marker = _schema_marker(second, "api_key")
+    assert key_marker.default() == ""
+    assert (key_marker.description or {}).get("suggested_value") is None
+
+    third = await flow.async_step_credentials({"base_url": "http://box:8000"})
+    assert _schema_marker(third, "model_name").default() == (
+        "speaches-ai/Kokoro-82M-v1.0-ONNX"
+    )
+    assert _schema_marker(third, "voice").default() == "af_heart"
+
+    result = await flow.async_step_model(
+        {"model_name": "speaches-ai/Kokoro-82M-v1.0-ONNX", "voice": "af_heart"}
+    )
+    assert result.get("type") == "update_entry"
+    data = result.get("data")
+    assert data is not None
+    assert data["provider_type"] == "local"
+    assert data["name"] == "TTS - Local"
+    assert data["settings"] == {
         "base_url": "http://box:8000/v1",
         "api_key": None,
         "openai_provider_subentry_id": None,

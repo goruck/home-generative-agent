@@ -86,6 +86,7 @@ from .const import (
     SUBENTRY_TYPE_MODEL_PROVIDER,
     SUBENTRY_TYPE_SENTINEL,
     SUBENTRY_TYPE_STT_PROVIDER,
+    SUBENTRY_TYPE_TTS_PROVIDER,
     VIDEO_ANALYZER_MODE_ALWAYS_NOTIFY,
     VIDEO_ANALYZER_MODE_DISABLE,
     VIDEO_ANALYZER_MODE_NOTIFY_ON_ANOMALY,
@@ -101,6 +102,7 @@ from .flows.feature_subentry_flow import FeatureSubentryFlow
 from .flows.model_provider_subentry_flow import ModelProviderSubentryFlow
 from .flows.sentinel_subentry_flow import SentinelSubentryFlow
 from .flows.stt_provider_subentry_flow import SttProviderSubentryFlow
+from .flows.tts_provider_subentry_flow import TtsProviderSubentryFlow
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -780,6 +782,7 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
             SUBENTRY_TYPE_MODEL_PROVIDER: ModelProviderSubentryFlow,
             SUBENTRY_TYPE_FEATURE: FeatureSubentryFlow,
             SUBENTRY_TYPE_STT_PROVIDER: SttProviderSubentryFlow,
+            SUBENTRY_TYPE_TTS_PROVIDER: TtsProviderSubentryFlow,
             SUBENTRY_TYPE_SENTINEL: SentinelSubentryFlow,
         }
 

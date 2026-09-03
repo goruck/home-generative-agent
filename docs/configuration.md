@@ -10,6 +10,7 @@ The configuration UI is available in English, Czech, and Turkish, with a partial
 - [Tool Retrieval (RAG)](#tool-retrieval-rag)
 - [Control Home Assistant (LLM API)](#control-home-assistant-llm-api)
 - [Speech-to-Text (STT)](#speech-to-text-stt)
+- [Text-to-Speech (TTS)](#text-to-speech-tts)
 - [Schema-first YAML Mode](#schema-first-yaml-mode)
 - [Critical Action PIN](#critical-action-pin)
 - [Global Options](#global-options)
@@ -269,7 +270,7 @@ services:
     volumes:
       - hf-hub-cache:/home/ubuntu/.cache/huggingface/hub
     environment:
-      - PRELOAD_MODELS=["deepdml/faster-whisper-large-v3-turbo-ct2"]
+      - PRELOAD_MODELS=["deepdml/faster-whisper-large-v3-turbo-ct2", "speaches-ai/Kokoro-82M-v1.0-ONNX"]
       - STT_MODEL_TTL=-1            # keep the model resident; the first utterance after a reload pays several seconds
       # - WHISPER__COMPUTE_TYPE=int8_float32   # required on Pascal GPUs (GTX 10xx): float16 is not supported there
     deploy:
@@ -284,6 +285,40 @@ volumes:
 ```
 
 > **Tip:** local whisper models occasionally hallucinate short phrases ("Thank you.") from silence or noise. The **Speech input filters** in the integration options (**Configure**) drop such phantom transcriptions before they reach the agent — add the phrases you see under **Ignored exact STT phrases**.
+
+---
+
+## Text-to-Speech (TTS)
+
+HGA also provides a built-in TTS engine for Assist pipelines, so a reply can be spoken by the OpenAI speech API or by the same local server that handles speech-to-text. Two provider types are supported: **OpenAI** and **Local** (any server exposing the OpenAI `/v1/audio/speech` endpoint, e.g. [Speaches](https://speaches.ai/) serving Kokoro or piper voices).
+
+1. Open **Settings → Devices & Services → Home Generative Agent**.
+2. Click **+ TTS Provider**.
+3. Choose **OpenAI** or **Local (OpenAI-compatible)** and give it a name. The name is what the Assist pipeline's Text-to-speech dropdown shows.
+4. On the **Credentials** step:
+   - **OpenAI:** reuse an existing OpenAI Model Provider subentry or select **Use a separate key** and enter a dedicated API key.
+   - **Local:** enter the server URL (e.g. `http://192.168.1.100:8000` — a missing `/v1` suffix is added automatically). The API key is optional; leave it blank for servers without authentication. The endpoint is validated when you submit the form.
+5. On **Model, voice & advanced options**:
+   - model: `gpt-4o-mini-tts` (recommended), `tts-1`, or `tts-1-hd` for OpenAI; `speaches-ai/Kokoro-82M-v1.0-ONNX` (recommended) or any model ID your server serves for Local
+   - voice: OpenAI offers `alloy`, `ash`, `ballad`, `cedar`, `coral`, `echo`, `fable`, `marin`, `nova`, `onyx`, `sage`, `shimmer`, and `verse`; for Local, type a voice id the model provides (Kokoro: `af_heart`, `af_bella`, `am_adam`, `bf_emma`, `bm_george`, …; piper: the voice name from the model id, e.g. `hfc_female` for `speaches-ai/piper-en_US-hfc_female-medium`)
+   - speed: 0.25–4.0, default 1.0
+   - voice instructions (optional): tone and pacing hints, used only by OpenAI's `gpt-4o-mini-tts` models and ignored elsewhere
+6. Go to **Settings → Voice assistants → Assist pipelines** and select **TTS - OpenAI** / **TTS - Local** (or your chosen name) for Text-to-speech. The configured voice is the pipeline's default; the pipeline's own voice picker lists the OpenAI voices, or the single configured voice for a local server.
+
+Audio is requested as mp3 (or wav/flac/pcm when the pipeline asks for it) and Home Assistant converts to whatever the satellite needs, so a Voice PE's 16 kHz wav request works with either provider. Credential and server changes take effect on the next reply, like STT.
+
+### Running a local TTS server
+
+The Speaches container from the [STT section](#running-a-local-stt-server) serves TTS too. Speaches only serves models that are already downloaded, so add the TTS model to `PRELOAD_MODELS` (the compose example above lists Kokoro) or download it once with `POST /v1/models/<model-id>`:
+
+```bash
+curl -X POST http://192.168.1.100:8000/v1/models/speaches-ai/Kokoro-82M-v1.0-ONNX
+```
+
+Two things to know about the local backend:
+
+- **Kokoro needs a reasonably modern machine.** On a GPU box that also runs Ollama it is fast and sounds good. On an old CPU without AVX2 it can take several times the audio duration to synthesize a sentence, and ONNX Runtime's CUDA path does not help it on Pascal-class GPUs. In that case use a piper voice instead — `speaches-ai/piper-en_US-hfc_female-medium` (voice `hfc_female`) or a `-low` variant — which synthesizes a sentence in about a second on CPU and needs no GPU. Browse the available models with `GET /v1/registry?task=text-to-speech`.
+- **Speaches does not produce opus or aac.** HGA never asks it to; a pipeline that wants those gets mp3 converted by Home Assistant.
 
 ---
 

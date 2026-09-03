@@ -326,7 +326,7 @@ LOGGER = logging.getLogger(__name__)
 
 _SERVICE_RESPONSE_ONLY = SupportsResponse.ONLY
 
-PLATFORMS = (Platform.CONVERSATION, Platform.STT, "image", "sensor")
+PLATFORMS = (Platform.CONVERSATION, Platform.STT, Platform.TTS, "image", "sensor")
 
 SERVICE_ENROLL_PERSON = "enroll_person"
 SERVICE_GET_AUDIT_RECORDS = "get_audit_records"
