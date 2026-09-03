@@ -1370,6 +1370,36 @@ def _append_requirement_hint(
     }
 
 
+def _strip_additional_properties(schema: dict[str, Any]) -> dict[str, Any]:
+    """
+    Remove ``additionalProperties`` keys from a tool schema, recursively.
+
+    Probatio's ``to_openapi`` (the converter on HA 2026.9 cores) emits
+    ``additionalProperties: false`` on every closed object schema —
+    voluptuous-openapi never did. langchain-google-genai marshals tool
+    schemas into the gapic ``Schema`` proto, which has no such field, and
+    logs a WARNING per unrecognised key, so on a 2026.9 core every Gemini
+    turn floods the HA log with one warning per bound tool. The key is
+    purely advisory for Gemini (the proto cannot express it either way), so
+    stripping loses nothing. Gated to Gemini in
+    ``_format_and_dedupe_tools()`` because other providers accept the key —
+    OpenAI's strict mode even requires it.
+    """
+
+    def _strip(node: Any) -> Any:
+        if isinstance(node, dict):
+            return {
+                key: _strip(value)
+                for key, value in node.items()
+                if key != "additionalProperties"
+            }
+        if isinstance(node, list):
+            return [_strip(item) for item in node]
+        return node
+
+    return _strip(schema)
+
+
 def _sanitize_any_of_required(schema: dict[str, Any]) -> dict[str, Any]:
     """
     Recursively strip ``required`` entries that Gemini's validation rejects.
@@ -1500,11 +1530,14 @@ def _flatten_top_level_union(schema: dict[str, Any]) -> dict[str, Any]:
     ``_FLATTEN_UNION_PROVIDERS``.
 
     Scope: only the union keywords are handled, and only variant
-    ``properties``/``required`` survive the merge. voluptuous_openapi always
-    wraps tool schemas in a top-level object, so OpenAI's other forbidden
-    top-level keywords (enum/const/not) and richer variant keywords
-    (additionalProperties, dependentRequired, discriminator const, ...)
-    never occur in this pipeline's input and are deliberately not handled.
+    ``properties``/``required`` survive the merge. Both converters wrap tool
+    schemas in a top-level object, so OpenAI's other forbidden top-level
+    keywords (enum/const/not) and richer variant keywords (dependentRequired,
+    discriminator const, ...) never occur in this pipeline's input and are
+    deliberately not handled. ``additionalProperties`` is the exception:
+    probatio (HA 2026.9) emits it on every closed object, and
+    ``_strip_additional_properties()`` removes it for Gemini in
+    ``_format_and_dedupe_tools()``.
     """
     merged_keys = [k for k in _TOP_LEVEL_UNION_KEYS if isinstance(schema.get(k), list)]
     if not merged_keys:
@@ -1600,6 +1633,7 @@ def _format_and_dedupe_tools(
         # for providers that can honour it — so it is gated on the provider.
         if provider == "gemini":
             parameters = _sanitize_any_of_required(parameters)
+            parameters = _strip_additional_properties(parameters)
         selected_tools.append(
             {
                 "type": "function",

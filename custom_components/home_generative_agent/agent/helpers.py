@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import logging
 import re
 from dataclasses import replace
@@ -13,7 +14,6 @@ import voluptuous as vol
 from homeassistant.const import CONF_LLM_HASS_API
 from homeassistant.helpers import llm
 from homeassistant.util import ulid
-from voluptuous_openapi import UNSUPPORTED, convert
 
 from custom_components.home_generative_agent.const import (
     ACTUATION_LANGCHAIN_TOOLS,
@@ -33,6 +33,73 @@ if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _resolve_converter() -> tuple[Any, Any]:
+    """
+    Return the (converter, deferral sentinel) pair matching the running core.
+
+    Home Assistant 2026.9 swapped voluptuous for probatio and
+    voluptuous-openapi for probatio's ``to_openapi``, aliasing probatio under
+    the ``voluptuous`` name (``install_as_voluptuous()`` in
+    ``homeassistant/__init__.py``) for everything that still imports
+    voluptuous — ``vol`` here included. The converter has to match the
+    library the schemas actually come from, since neither one renders the
+    other's ``Schema``. Core's ``llm`` helper imports exactly the pair the
+    running core was built against (``convert`` + ``UNSUPPORTED`` from
+    voluptuous-openapi on <= 2026.8; ``to_openapi`` + ``UNSUPPORTED`` from
+    probatio on 2026.9+), so prefer those re-exports — they cannot diverge
+    from core by construction, where sniffing ``vol.Schema.__module__``
+    breaks the day probatio stamps a voluptuous-compatible ``__module__`` on
+    its shim. The sniff survives only as a fallback for a core that stops
+    re-exporting them. Neither library is declared in our manifest on
+    purpose: core installs exactly the one it uses.
+    """
+    core_convert = getattr(llm, "to_openapi", None) or getattr(llm, "convert", None)
+    core_unsupported = getattr(llm, "UNSUPPORTED", None)
+    if core_convert is not None and core_unsupported is not None:
+        return core_convert, core_unsupported
+    if vol.Schema.__module__.startswith("probatio"):
+        module = importlib.import_module("probatio")
+        return module.to_openapi, module.UNSUPPORTED
+    module = importlib.import_module("voluptuous_openapi")
+    return module.convert, module.UNSUPPORTED
+
+
+convert, UNSUPPORTED = _resolve_converter()
+
+
+def _collect_unsupported_sentinels() -> tuple[Any, ...]:
+    """
+    Return every deferral sentinel a serializer might hand back.
+
+    ``UNSUPPORTED`` above is core's own, but ``APIInstance.custom_serializer``
+    is a public field a third-party ``llm.API`` can set with a serializer
+    built against the sibling library — pip does not uninstall
+    voluptuous-openapi when a core upgrade brings probatio — and sentinels
+    compare by identity, so a foreign one would read "I cannot render this"
+    as a rendered schema. Accept the sentinel of every importable converter
+    library; what we hand back stays ours, so the converter in use always
+    recognises it.
+    """
+    sentinels: list[Any] = [UNSUPPORTED]
+    for module_name in ("voluptuous_openapi", "probatio"):
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError:
+            continue
+        sentinel = getattr(module, "UNSUPPORTED", None)
+        if sentinel is not None and all(sentinel is not seen for seen in sentinels):
+            sentinels.append(sentinel)
+    return tuple(sentinels)
+
+
+_UNSUPPORTED_SENTINELS: tuple[Any, ...] = _collect_unsupported_sentinels()
+
+
+def _is_unsupported(value: Any) -> bool:
+    """Return True if a serializer deferred rather than returning a schema."""
+    return any(value is sentinel for sentinel in _UNSUPPORTED_SENTINELS)
 
 
 def active_llm_api_ids(options: Mapping[str, Any]) -> list[str]:
@@ -245,7 +312,7 @@ def safe_convert(
 
     def robust_serializer(obj: Any) -> Any:
         """Robustly handle HA types that might be unhashable or need mapping."""
-        # 0. Skip basic types that voluptuous_openapi handles natively.
+        # 0. Skip basic types that the schema converter handles natively.
         # vol.Schema, dict, and list are unhashable but handled by the library.
         if isinstance(obj, (vol.Schema, dict, list)):
             return UNSUPPORTED
@@ -256,7 +323,7 @@ def safe_convert(
                 res = custom_serializer(obj)
                 # If external serializer returns non-None/UNSUPPORTED, use it.
                 # Some HA serializers might return None for unhandled types.
-                if res is not None and res is not UNSUPPORTED:
+                if res is not None and not _is_unsupported(res):
                     return res
             except Exception:  # noqa: BLE001, S110
                 # Fallback to the robust serializer if custom_serializer fails.
@@ -279,7 +346,7 @@ def safe_convert(
         if hasattr(obj, "config") or (isinstance(obj, dict) and "selector" in obj):
             return {"type": "string"}
 
-        # 4. General unhashable safety net to prevent voluptuous_openapi crash
+        # 4. General unhashable safety net to prevent a converter crash
         try:
             hash(obj)
         except TypeError:
