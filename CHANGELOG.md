@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.37.0] - 2026-09-03
+
+### Added
+
+- **Fully local speech-to-text.** The STT provider's **Local (OpenAI-compatible)** option — shown as "coming soon" since STT shipped — now works. Point it at any server exposing the OpenAI `/v1/audio/transcriptions` endpoint, such as [Speaches](https://speaches.ai/) running faster-whisper on the same GPU box as Ollama, and Assist speech-to-text runs entirely on your network with no cloud calls. Enter the server URL (a missing `/v1` suffix is added automatically; the endpoint is validated when you submit the form) and an optional API key — leave it blank for keyless servers, and no `Authorization` header is sent at all. The model name is free text (recommended: `Systran/faster-whisper-large-v3-turbo`), and **Translate to English** works with every local whisper model, not just `whisper-1`; a local non-whisper model falls back to plain transcription the way the OpenAI path always has. Setup instructions and a ready-to-use Speaches `docker-compose` example are in the [configuration guide](https://github.com/goruck/home-generative-agent/blob/main/docs/configuration.md#speech-to-text-stt).
+
+### Fixed
+
+- **Switching an STT provider between types no longer carries the old type's settings across.** Reconfiguring an OpenAI STT entry to Local used to pre-fill the local server's optional key field with the stored OpenAI API key — a password field of dots that read as a remembered value, and submitting would have sent that key to a plaintext LAN endpoint. The old type's model name and default title also leaked into the new type's form. Changing the provider type now starts from clean settings, the right model default, and a title matching the new type (a name you typed yourself is kept).
+- **A failed local STT connection test no longer discards what you typed.** The credentials form used to redisplay empty (or silently revert to the previously saved URL) after a validation error, so retrying against a server that was still starting up meant retyping the URL every time. The form now keeps your input.
+- **Translate plus a configured language no longer fails every utterance.** The translations endpoint has no language parameter, so a `whisper-1` configuration with both **Translate to English** and a language set failed with an unhelpful log entry on every single utterance. The language is now dropped on the translation path (its output is always English anyway).
+
 ## [3.36.1] - 2026-09-02
 
 ### Fixed
