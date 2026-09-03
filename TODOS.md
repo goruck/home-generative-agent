@@ -1455,6 +1455,19 @@ window-scoped check could suppress.
 
 ## Speech-to-Text
 
+### Add-flow provider name pre-fills for the default type, not the selected one
+
+**What:** The STT provider step's name field defaults to `ProviderNames["openai"]` ("STT - OpenAI") because the form renders before the user touches the provider dropdown, and HA forms do not live-update one field from another. A user who switches the dropdown to **Local (OpenAI-compatible)** and submits without editing the name gets a local provider labeled "STT - OpenAI" in the Assist pipeline dropdown. The reconfigure path already resets a stale default name on a type *switch* (v3.37.0 review fix); the add path has no previous type to compare against, so `type_changed` never fires.
+
+**Why:** Hit live by Lindo during v3.37.0 field validation (2026-09-03 screenshot): the add dialog showed provider "Local (OpenAI-compatible)" over name "STT - OpenAI". Cosmetic, but the label is exactly what the Assist pipeline dropdown shows, so it misidentifies which backend utterances go to — the same misdirection the reconfigure fix closed.
+
+**How to apply:** In `async_step_provider`'s submit branch, treat a submitted name equal to *any* value of `ProviderNames` that is not the selected type's own default as "untouched pre-fill" and replace it with `ProviderNames[provider_type]` — this covers add and reconfigure with one rule and still preserves any name the user actually typed. Alternatively leave the name field blank by default with a "named after the type you pick" hint, the pattern the model-provider flow's `data_description` already uses. Add an add-flow test mirroring `test_stt_provider_flow_switch_to_local_resets_openai_state`'s name assertion.
+
+**Effort:** S
+**Priority:** P3
+
+---
+
 ### Unify the two OpenAI-compatible endpoint conventions (STT flow vs model-provider flow)
 
 **What:** The local STT provider (#598) and the `openai_compatible` model provider store the same concept — an OpenAI-compatible endpoint — in divergent shapes. STT (`flows/stt_provider_subentry_flow.py:_build_local_settings`) normalizes with `/v1` at write time and stores `api_key: None` for keyless servers; the model-provider flow (`flows/model_provider_subentry_flow.py:276-302`) stores the raw `ensure_http_url(...)` and normalizes at read time, and uses the literal `"none"` sentinel for keyless (which `validate_openai_compatible_url` at `core/utils.py:750` special-cases; the STT runtime instead uses `LOCAL_STT_KEYLESS_API_KEY = ""`). `CONF_STT_BASE_URL` and `CONF_OPENAI_COMPATIBLE_BASE_URL` are two constants for the same `base_url`/`openai_compatible_base_url` settings ideas.
