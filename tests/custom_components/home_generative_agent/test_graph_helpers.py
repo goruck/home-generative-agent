@@ -183,6 +183,49 @@ def test_format_and_dedupe_tools_gemini_array_items_injected() -> None:
     assert domain_schema["items"] == {"type": "string"}
 
 
+# The shape probatio's to_openapi emits on HA 2026.9: additionalProperties:
+# false on every closed object, at every nesting level. langchain-google-genai
+# logs a WARNING per unrecognised key when marshaling to the gapic proto, so
+# for Gemini the key must be stripped everywhere; other providers accept it.
+_CLOSED_OBJECT_SCHEMA = (
+    '{"type": "object", "additionalProperties": false, "properties": {'
+    '"target": {"type": "object", "additionalProperties": false, '
+    '"properties": {"name": {"type": "string"}}}}}'
+)
+
+
+def _closed_tool() -> list:
+    """Build a raw tool carrying a probatio-style closed-object schema."""
+    return [
+        {
+            "name": "HassTurnOn",
+            "api_id": "test",
+            "description": "Turns on a device",
+            "parameters": _CLOSED_OBJECT_SCHEMA,
+            "is_actuation": True,
+        }
+    ]
+
+
+def test_format_and_dedupe_tools_gemini_strips_additional_properties() -> None:
+    """Gemini: additionalProperties is removed at every nesting level."""
+    selected, _ = _format_and_dedupe_tools(_closed_tool(), provider="gemini")
+    parameters = selected[0]["function"]["parameters"]
+    assert "additionalProperties" not in parameters
+    target = parameters["properties"]["target"]
+    assert "additionalProperties" not in target
+    assert target["properties"] == {"name": {"type": "string"}}
+
+
+def test_format_and_dedupe_tools_keeps_additional_properties_elsewhere() -> None:
+    """Non-Gemini providers keep additionalProperties (OpenAI strict needs it)."""
+    for provider in ("openai", "anthropic", "ollama", None):
+        selected, _ = _format_and_dedupe_tools(_closed_tool(), provider=provider)
+        parameters = selected[0]["function"]["parameters"]
+        assert parameters["additionalProperties"] is False
+        assert parameters["properties"]["target"]["additionalProperties"] is False
+
+
 # The shape voluptuous_openapi emits for Home Assistant's "at least one target"
 # pattern, vol.Required(vol.Any("name", "area", "floor")): parent-level
 # properties plus bare-'required' anyOf variants. Valid JSON Schema; only
