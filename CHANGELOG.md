@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.37.1] - 2026-09-03
+
+### Fixed
+
+- **Local STT with a blank API key works again on current Home Assistant.** Home Assistant 2026.8 and 2026.9 ship a newer OpenAI SDK whose client refuses an empty API key with `Missing credentials`, so every utterance against a keyless local server (Speaches, for example) failed before a request was ever sent. The entity now hands the SDK a placeholder that never reaches the wire and strips the `Authorization` header from each request, so a keyless server still receives no bearer token at all — the behavior v3.37.0 intended. Entries that worked around this by entering a dummy key can leave the key blank again.
+- **The recommended local model no longer points at a repository that has gone private.** `Systran/faster-whisper-large-v3-turbo` disappeared from Hugging Face, so a Speaches server could not download the v3.37.0 default. The recommended (and pre-filled) model is now `deepdml/faster-whisper-large-v3-turbo-ct2`, the public CTranslate2 conversion of the same weights. Existing entries keep whatever model name they have; a server that already holds the Systran files keeps serving them.
+- **Docs:** the Speaches `docker-compose` example now pre-downloads the model — Speaches only serves models already on disk — keeps it resident between utterances, and notes the compute type needed on Pascal-generation GPUs.
+
 ## [3.37.0] - 2026-09-03
 
 ### Added
