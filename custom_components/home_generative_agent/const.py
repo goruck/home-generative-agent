@@ -427,12 +427,18 @@ STT_RESPONSE_FORMATS = ("text", "json", "verbose_json", "srt", "vtt")
 # Local (OpenAI-compatible) STT provider, e.g. Speaches serving faster-whisper.
 CONF_STT_BASE_URL = "base_url"
 # Speaches model ID; the flow accepts any custom value, this is only a default.
-RECOMMENDED_LOCAL_STT_MODEL = "Systran/faster-whisper-large-v3-turbo"
-# Keyless local servers get an empty key: the SDK accepts it and then sends
-# no Authorization header at all, matching the flow's validation request. A
-# fabricated placeholder would send a bogus bearer token that auth proxies
-# (e.g. LiteLLM virtual keys) reject even though validation passed.
-LOCAL_STT_KEYLESS_API_KEY = ""
+# Systran's large-v3-turbo repo went private on Hugging Face (2026-09); this is
+# the public CTranslate2 conversion of the same weights, tagged so Speaches'
+# registry accepts it.
+RECOMMENDED_LOCAL_STT_MODEL = "deepdml/faster-whisper-large-v3-turbo-ct2"
+# Keyless local servers get a placeholder key, NOT an empty one: openai>=2.45
+# (the version HA 2026.8+ ships) rejects an empty api_key in the constructor
+# with "Missing credentials". The placeholder never reaches the wire — the
+# runtime strips the Authorization header per request with the SDK's ``Omit``
+# sentinel, matching the flow's keyless validation request. A bogus bearer
+# would be rejected by auth proxies (e.g. LiteLLM virtual keys) even though
+# validation passed.
+LOCAL_STT_KEYLESS_API_KEY = "sk-hga-keyless-local"
 
 # ---------------- Chat model ----------------
 CHAT_MODEL_TOP_P = 1.0

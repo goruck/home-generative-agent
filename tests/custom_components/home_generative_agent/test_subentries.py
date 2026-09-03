@@ -333,7 +333,7 @@ async def test_stt_provider_flow_local_keyless(
     assert third.get("type") == "form"
 
     result = await flow.async_step_model(
-        {"model_name": "Systran/faster-whisper-large-v3-turbo"}
+        {"model_name": "deepdml/faster-whisper-large-v3-turbo-ct2"}
     )
     assert result.get("type") == "create_entry"
     result_data = result.get("data")
@@ -342,7 +342,10 @@ async def test_stt_provider_flow_local_keyless(
     assert result_data["settings"]["base_url"] == "http://ollama-box:8000/v1"
     assert result_data["settings"]["api_key"] is None
     assert result_data["settings"]["openai_provider_subentry_id"] is None
-    assert result_data["model"]["model_name"] == "Systran/faster-whisper-large-v3-turbo"
+    assert (
+        result_data["model"]["model_name"]
+        == "deepdml/faster-whisper-large-v3-turbo-ct2"
+    )
 
 
 @pytest.mark.asyncio
@@ -422,11 +425,11 @@ async def test_stt_provider_flow_switch_to_local_resets_openai_state(
     third = await flow.async_step_credentials({"base_url": "http://box:8000"})
     assert third.get("type") == "form"
     assert _schema_marker(third, "model_name").default() == (
-        "Systran/faster-whisper-large-v3-turbo"
+        "deepdml/faster-whisper-large-v3-turbo-ct2"
     )
 
     result = await flow.async_step_model(
-        {"model_name": "Systran/faster-whisper-large-v3-turbo"}
+        {"model_name": "deepdml/faster-whisper-large-v3-turbo-ct2"}
     )
     assert result.get("type") == "update_entry"
     result_data = result.get("data")
