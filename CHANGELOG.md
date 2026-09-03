@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.36.1] - 2026-09-02
+
+### Fixed
+
+- **The integration loads again on Home Assistant 2026.9.** HA 2026.9 swapped its schema library from voluptuous to probatio and dropped voluptuous-openapi from core's requirements, so setup died with `No module named 'voluptuous_openapi'` before the integration loaded at all. The OpenAPI tool-schema converter is now taken from Home Assistant's own `llm` helper — the exact pair the running core was built against, on 2026.8 and 2026.9 alike — with the previous library detection kept as a fallback ([#599](https://github.com/goruck/home-generative-agent/issues/599)).
+- **Gemini on HA 2026.9 no longer floods the log.** Probatio marks every closed tool schema with `additionalProperties: false`, which the Gemini client library warns about once per tool on every conversation turn. The key is stripped for Gemini only — it carries no meaning for Gemini's schema format, while other providers (OpenAI strict mode included) keep it.
+- **A tool serializer built against the wrong schema library is now recognized.** Upgrading core does not uninstall the old converter library, and a third-party LLM API's serializer built against it could hand back a "cannot render this" marker that was mistaken for a real schema. The markers of both libraries are accepted wherever either is installed.
+
 ## [3.36.0] - 2026-09-01
 
 ### Changed
