@@ -21,6 +21,7 @@ from homeassistant.helpers.httpx_client import get_async_client
 from openai import AsyncOpenAI, AuthenticationError, OpenAIError
 
 from .const import (
+    CONF_STT_BASE_URL,
     CONF_STT_LANGUAGE,
     CONF_STT_MODEL_NAME,
     CONF_STT_OPENAI_PROVIDER_ID,
@@ -28,6 +29,8 @@ from .const import (
     CONF_STT_RESPONSE_FORMAT,
     CONF_STT_TEMPERATURE,
     CONF_STT_TRANSLATE,
+    LOCAL_STT_KEYLESS_API_KEY,
+    RECOMMENDED_LOCAL_STT_MODEL,
     RECOMMENDED_OPENAI_STT_MODEL,
     SUBENTRY_TYPE_MODEL_PROVIDER,
     SUBENTRY_TYPE_STT_PROVIDER,
@@ -198,7 +201,7 @@ class HGASttEntity(SpeechToTextEntity):
         self._attr_unique_id = f"{entry.entry_id}_{subentry_id}"
         self._attr_name = self._subentry.title or "STT"
         self._openai_client: AsyncOpenAI | None = None
-        self._openai_client_api_key: str | None = None
+        self._openai_client_cache_key: tuple[str, str | None] | None = None
 
     @property
     def supported_languages(self) -> list[str]:
@@ -262,16 +265,16 @@ class HGASttEntity(SpeechToTextEntity):
         api_key = settings.get("api_key")
         return api_key if isinstance(api_key, str) and api_key else None
 
-    def _get_client(self, api_key: str) -> AsyncOpenAI:
+    def _get_client(self, api_key: str, base_url: str | None) -> AsyncOpenAI:
         """
-        Return a cached OpenAI client for the resolved API key.
+        Return a cached OpenAI client for the resolved API key and base URL.
 
         The client is built on Home Assistant's shared httpx client so the SDK
         never creates its own SSL context — a blocking read of the certifi
         bundle — on the event loop, and so back-to-back utterances can reuse a
         pooled connection instead of repeating the TLS handshake. The cache is
-        keyed on the API key so reconfiguring the STT subentry or its linked
-        model provider takes effect on the next stream.
+        keyed on the API key and base URL so reconfiguring the STT subentry or
+        its linked model provider takes effect on the next stream.
 
         The httpx client belongs to Home Assistant. Do not close it from here.
         HA also blocks that mistake — it swaps in a warn-only ``aclose`` and only
@@ -291,20 +294,57 @@ class HGASttEntity(SpeechToTextEntity):
         connection limits (HA's pool keeps connections alive for 15s, which is
         what bounds the reuse win above to back-to-back utterances).
 
-        ``api_key`` is the whole cache key because it is the only configurable
-        input to the client: the STT flow admits ``openai`` providers only, so
-        there is no per-subentry ``base_url``. Adding one means keying on it too.
+        The cache is keyed on ``(api_key, base_url)`` — the two configurable
+        inputs to the client. ``base_url`` is ``None`` for the OpenAI provider
+        (SDK default endpoint) and the configured endpoint for ``local``
+        providers, so switching a subentry between provider types or repointing
+        a local server rebuilds the client on the next stream.
         """
-        if self._openai_client is not None and self._openai_client_api_key == api_key:
+        cache_key = (api_key, base_url)
+        if (
+            self._openai_client is not None
+            and self._openai_client_cache_key == cache_key
+        ):
             return self._openai_client
         client = AsyncOpenAI(
             api_key=api_key,
+            base_url=base_url,
             http_client=get_async_client(self.hass),
             timeout=httpx.Timeout(STT_REQUEST_TIMEOUT_S, connect=5.0),
         )
         self._openai_client = client
-        self._openai_client_api_key = api_key
+        self._openai_client_cache_key = cache_key
         return client
+
+    def _resolve_connection(
+        self, provider_type: str, data: dict[str, Any]
+    ) -> tuple[str, str | None] | None:
+        """
+        Return (api_key, base_url) for the provider, or None if unconfigured.
+
+        Local providers require a base URL and fall back to an empty key —
+        which the SDK turns into no Authorization header, the same shape the
+        flow's validation request used — when the server needs none.
+        """
+        if provider_type == "local":
+            settings = data.get("settings", {})
+            settings = dict(settings) if isinstance(settings, Mapping) else {}
+            base_url = settings.get(CONF_STT_BASE_URL)
+            if not isinstance(base_url, str) or not base_url:
+                LOGGER.warning("Local STT base URL missing for %s", self.entity_id)
+                return None
+            configured_key = settings.get("api_key")
+            api_key = (
+                configured_key
+                if isinstance(configured_key, str) and configured_key
+                else LOCAL_STT_KEYLESS_API_KEY
+            )
+            return api_key, base_url
+        api_key = self._resolve_api_key(data)
+        if not api_key:
+            LOGGER.warning("OpenAI STT API key missing for %s", self.entity_id)
+            return None
+        return api_key, None
 
     async def async_process_audio_stream(  # noqa: PLR0912
         self, metadata: SpeechMetadata, stream: Any
@@ -313,16 +353,22 @@ class HGASttEntity(SpeechToTextEntity):
         result_state = stt.SpeechResultState.ERROR
         text: str | None = None
         data = dict(self._subentry.data)
-        if data.get("provider_type") != "openai":
+        provider_type = data.get("provider_type")
+        if provider_type not in ("openai", "local"):
             return SpeechResult(result=result_state, text=None)
 
-        api_key = self._resolve_api_key(data)
-        if not api_key:
-            LOGGER.warning("OpenAI STT API key missing for %s", self.entity_id)
+        connection = self._resolve_connection(provider_type, data)
+        if connection is None:
             return SpeechResult(result=result_state, text=None)
+        api_key, base_url = connection
 
         model_data = _load_model_settings(data)
-        model_name = model_data.get(CONF_STT_MODEL_NAME, RECOMMENDED_OPENAI_STT_MODEL)
+        default_model = (
+            RECOMMENDED_LOCAL_STT_MODEL
+            if provider_type == "local"
+            else RECOMMENDED_OPENAI_STT_MODEL
+        )
+        model_name = model_data.get(CONF_STT_MODEL_NAME, default_model)
         language = model_data.get(CONF_STT_LANGUAGE)
         prompt = model_data.get(CONF_STT_PROMPT)
         temperature = model_data.get(CONF_STT_TEMPERATURE)
@@ -352,8 +398,19 @@ class HGASttEntity(SpeechToTextEntity):
         # the SDK constructor, and a failure there should fail this utterance,
         # not raise out into the assist pipeline.
         try:
-            client = self._get_client(api_key)
-            if translate and model_name == "whisper-1":
+            client = self._get_client(api_key, base_url)
+            # Local servers (faster-whisper) serve /audio/translations for any
+            # whisper model; OpenAI only does for whisper-1. A local non-whisper
+            # model degrades to transcription like the OpenAI path does, rather
+            # than 404ing against an endpoint the server never exposes.
+            if translate and (
+                "whisper" in str(model_name).lower()
+                if provider_type == "local"
+                else model_name == "whisper-1"
+            ):
+                # The translations endpoint always outputs English and has no
+                # language parameter — passing one is a TypeError in the SDK.
+                request.pop("language", None)
                 response = await client.audio.translations.create(**request)
             else:
                 if translate:

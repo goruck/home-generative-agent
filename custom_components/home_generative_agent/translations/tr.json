@@ -110,10 +110,15 @@
         },
         "credentials": {
           "title": "Kimlik bilgileri",
-          "description": "STT sağlayıcısı için kimlik doğrulama seçin.",
+          "description": "STT sağlayıcısı için kimlik doğrulama seçin. Yerel sağlayıcılar bunun yerine OpenAI uyumlu bir sunucu URL'sine bağlanır.",
           "data": {
             "openai_provider_subentry_id": "OpenAI model sağlayıcıyı yeniden kullan",
-            "api_key": "OpenAI API anahtarı"
+            "api_key": "API anahtarı",
+            "base_url": "Sunucu URL'si"
+          },
+          "data_description": {
+            "api_key": "OpenAI için zorunludur. Kimlik doğrulaması gerektirmeyen yerel sunucular için isteğe bağlıdır.",
+            "base_url": "Yerel STT sunucusunun OpenAI uyumlu uç noktası, örn. bir Speaches örneği. Eksik /v1 eki otomatik olarak eklenir."
           }
         },
         "model": {

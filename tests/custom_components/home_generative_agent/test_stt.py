@@ -22,6 +22,8 @@ from custom_components.home_generative_agent.const import (
     CONF_STT_RESPONSE_FORMAT,
     CONF_STT_TEMPERATURE,
     CONF_STT_TRANSLATE,
+    LOCAL_STT_KEYLESS_API_KEY,
+    RECOMMENDED_LOCAL_STT_MODEL,
     SUBENTRY_TYPE_MODEL_PROVIDER,
     SUBENTRY_TYPE_STT_PROVIDER,
 )
@@ -198,8 +200,8 @@ async def _run(
     seen: dict[str, list[Any]] = {}
     original = entity._get_client
 
-    def _wrapped(api_key: str) -> Any:
-        client = original(api_key)
+    def _wrapped(api_key: str, base_url: str | None = None) -> Any:
+        client = original(api_key, base_url)
         seen.update(_stub_responses(client, responses))
         return client
 
@@ -653,7 +655,9 @@ async def test_client_reused_when_key_value_unchanged(patched_client: Any) -> No
     # A literal here would be interned and defeat the point of this test.
     reloaded = "".join(["key", "-", "1"])  # noqa: FLY002
     assert reloaded == "key-1"
-    assert reloaded is not entity._openai_client_api_key
+    cache_key = entity._openai_client_cache_key
+    assert cache_key is not None
+    assert reloaded is not cache_key[0]
     entry.subentries["stt_1"].reconfigure(
         {**entry.subentries["stt_1"].data, "settings": {"api_key": reloaded}}
     )
@@ -711,3 +715,166 @@ async def test_stream_to_bytes_reads_sync_and_coroutine_read_objects() -> None:
 async def test_stream_to_bytes_returns_empty_for_unknown_stream() -> None:
     """An object with none of the three interfaces yields the empty-audio guard."""
     assert await hga_stt._stream_to_bytes(object()) == b""
+
+
+LOCAL_BASE_URL = "http://ollama-box:8000/v1"
+
+
+def _make_local_entity(
+    settings: dict[str, Any] | None = None,
+    model: dict[str, Any] | None = None,
+) -> tuple[HGASttEntity, _FakeEntry]:
+    """Build a local-provider STT entity with a keyless server by default."""
+    return _make_entity(
+        settings=settings if settings is not None else {"base_url": LOCAL_BASE_URL},
+        model=model,
+        provider_type="local",
+    )
+
+
+async def test_local_provider_builds_client_with_base_url(
+    patched_client: Any,
+) -> None:
+    """A keyless local provider gets an empty key and sends no auth header."""
+    entity, _ = _make_local_entity()
+    result, seen = await _run(entity, [SimpleNamespace(text="hello")])
+    assert result.result == ha_stt.SpeechResultState.SUCCESS
+    assert result.text == "hello"
+    assert len(patched_client["kwargs"]) == 1
+    kwargs = patched_client["kwargs"][0]
+    assert kwargs["base_url"] == LOCAL_BASE_URL
+    assert kwargs["api_key"] == LOCAL_STT_KEYLESS_API_KEY
+    # The flow validated the endpoint without an Authorization header; runtime
+    # must match, or servers that reject unknown bearer tokens 401 every
+    # utterance after a setup that passed.
+    assert patched_client["constructed"][0].auth_headers == {}
+    assert len(seen["transcriptions"]) == 1
+
+
+async def test_local_provider_uses_configured_key(patched_client: Any) -> None:
+    """A configured key on a local provider wins over the placeholder."""
+    entity, _ = _make_local_entity(
+        settings={"base_url": LOCAL_BASE_URL, "api_key": "local-key"}
+    )
+    await _run(entity, [SimpleNamespace(text="hello")])
+    assert patched_client["kwargs"][0]["api_key"] == "local-key"
+
+
+async def test_local_provider_missing_base_url_builds_no_client(
+    patched_client: Any,
+) -> None:
+    """A local provider without a base URL fails the utterance, not the pipeline."""
+    entity, _ = _make_local_entity(settings={})
+    result, _ = await _run(entity, [SimpleNamespace(text="hello")])
+    assert result.result == ha_stt.SpeechResultState.ERROR
+    assert result.text is None
+    assert patched_client["constructed"] == []
+
+
+async def test_client_rebuilt_when_base_url_changes(patched_client: Any) -> None:
+    """Repointing a local subentry at a new server takes effect on the next stream."""
+    entity, entry = _make_local_entity()
+    await _run(entity, [SimpleNamespace(text="one")])
+    first = entity._openai_client
+    assert first is not None
+    entry.subentries["stt_1"].reconfigure(
+        {
+            **entry.subentries["stt_1"].data,
+            "settings": {"base_url": "http://other-box:8000/v1"},
+        }
+    )
+    await _run(entity, [SimpleNamespace(text="two")])
+    assert entity._openai_client is not first
+    assert len(patched_client["constructed"]) == 2
+    assert patched_client["kwargs"][1]["base_url"] == "http://other-box:8000/v1"
+
+
+async def test_local_client_reused_across_streams(patched_client: Any) -> None:
+    """An unchanged local configuration reuses one client across utterances."""
+    entity, _ = _make_local_entity()
+    await _run(entity, [SimpleNamespace(text="one")])
+    await _run(entity, [SimpleNamespace(text="two")])
+    assert len(patched_client["constructed"]) == 1
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_local_default_model_is_local_recommendation() -> None:
+    """With no model configured, a local provider requests the local default."""
+    entity, _ = _make_local_entity(model={})
+    _, seen = await _run(entity, [SimpleNamespace(text="hello")])
+    assert seen["transcriptions"][0]["model"] == RECOMMENDED_LOCAL_STT_MODEL
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_local_translate_uses_translations_for_whisper_models() -> None:
+    """Local servers serve translations for all whisper models, not just whisper-1."""
+    entity, _ = _make_local_entity(
+        model={
+            CONF_STT_MODEL_NAME: "Systran/faster-whisper-large-v3",
+            CONF_STT_TRANSLATE: True,
+        },
+    )
+    result, seen = await _run(entity, [SimpleNamespace(text="hola")])
+    assert result.result == ha_stt.SpeechResultState.SUCCESS
+    assert len(seen["translations"]) == 1
+    assert seen["transcriptions"] == []
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_translate_drops_language_from_translations_request() -> None:
+    """
+    The translations endpoint has no ``language`` parameter.
+
+    ``Translations.create`` in the SDK is keyword-only without ``language``
+    (output is always English), so forwarding the configured language would
+    raise a TypeError inside the catch-all and fail every utterance for a
+    translate+language configuration.
+    """
+    entity, _ = _make_local_entity(
+        model={
+            CONF_STT_MODEL_NAME: "Systran/faster-whisper-large-v3",
+            CONF_STT_TRANSLATE: True,
+            CONF_STT_LANGUAGE: "en",
+        },
+    )
+    result, seen = await _run(entity, [SimpleNamespace(text="hola")])
+    assert result.result == ha_stt.SpeechResultState.SUCCESS
+    assert len(seen["translations"]) == 1
+    assert "language" not in seen["translations"][0]
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_openai_whisper1_translate_drops_language() -> None:
+    """The OpenAI whisper-1 translations path drops ``language`` too."""
+    entity, _ = _make_entity(
+        model={
+            CONF_STT_MODEL_NAME: "whisper-1",
+            CONF_STT_TRANSLATE: True,
+            CONF_STT_LANGUAGE: "de",
+        },
+    )
+    result, seen = await _run(entity, [SimpleNamespace(text="hello")])
+    assert result.result == ha_stt.SpeechResultState.SUCCESS
+    assert len(seen["translations"]) == 1
+    assert "language" not in seen["translations"][0]
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_local_translate_non_whisper_falls_back_to_transcription() -> None:
+    """
+    A local non-whisper model degrades to transcription like the OpenAI path.
+
+    Local servers only expose /audio/translations for whisper models; routing a
+    Parakeet-style model there would 404 and fail the utterance instead of
+    returning untranslated text.
+    """
+    entity, _ = _make_local_entity(
+        model={
+            CONF_STT_MODEL_NAME: "nvidia/parakeet-tdt-0.6b",
+            CONF_STT_TRANSLATE: True,
+        },
+    )
+    result, seen = await _run(entity, [SimpleNamespace(text="hola")])
+    assert result.result == ha_stt.SpeechResultState.SUCCESS
+    assert seen["translations"] == []
+    assert len(seen["transcriptions"]) == 1

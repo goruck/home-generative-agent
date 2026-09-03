@@ -31,6 +31,7 @@ Most AI conversation integrations are prompt passthroughs: they forward your wor
 | **Face recognition** | Identify people in camera frames and personalize alerts. |
 | **Long-term memory** | Semantic search over past conversations. The agent remembers your preferences and context. |
 | **Streaming responses** | First tokens appear word-by-word in the HA conversation UI — no waiting for the full response. |
+| **Built-in speech-to-text** | STT provider for Assist pipelines, backed by the OpenAI Whisper API or a fully local OpenAI-compatible server (e.g. [Speaches](https://speaches.ai/) running faster-whisper next to Ollama) — see [STT setup](docs/configuration.md#speech-to-text-stt). |
 | **Cloud and edge models** | Use OpenAI, Gemini, Anthropic, or run everything locally with Ollama or any OpenAI-compatible server. |
 
 ## Screenshots
@@ -103,7 +104,7 @@ You can now open the HA Assist panel and start talking to your home.
 | Guide | Contents |
 | --- | --- |
 | [Installation](docs/installation.md) | HACS install, manual install, optional apps (Ollama, face recognition) |
-| [Configuration](docs/configuration.md) | Model providers, features, per-model thinking/reasoning & budget, Tool Retrieval (RAG), per-tool exclusions & always-included tools, LLM API, STT, YAML mode, Critical Action PIN, camera description language & extra VLM instructions, UI languages (en/cs/ru/tr) |
+| [Configuration](docs/configuration.md) | Model providers, features, per-model thinking/reasoning & budget, Tool Retrieval (RAG), per-tool exclusions & always-included tools, LLM API, STT (OpenAI or local), YAML mode, Critical Action PIN, camera description language & extra VLM instructions, UI languages (en/cs/ru/tr) |
 | [Sentinel](docs/sentinel.md) | Anomaly detection pipeline, built-in rules, triage, baseline, blueprints, notification quiet hours, services API, health sensor |
 | [Camera Entities](docs/camera-entities.md) | Image and sensor entities, dashboards, automations, proactive video analysis, face recognition |
 | [Architecture](docs/architecture.md) | LangGraph agent, model tiers, context management, streaming, latency, tools |

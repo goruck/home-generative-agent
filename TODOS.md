@@ -1455,6 +1455,19 @@ window-scoped check could suppress.
 
 ## Speech-to-Text
 
+### Unify the two OpenAI-compatible endpoint conventions (STT flow vs model-provider flow)
+
+**What:** The local STT provider (#598) and the `openai_compatible` model provider store the same concept — an OpenAI-compatible endpoint — in divergent shapes. STT (`flows/stt_provider_subentry_flow.py:_build_local_settings`) normalizes with `/v1` at write time and stores `api_key: None` for keyless servers; the model-provider flow (`flows/model_provider_subentry_flow.py:276-302`) stores the raw `ensure_http_url(...)` and normalizes at read time, and uses the literal `"none"` sentinel for keyless (which `validate_openai_compatible_url` at `core/utils.py:750` special-cases; the STT runtime instead uses `LOCAL_STT_KEYLESS_API_KEY = ""`). `CONF_STT_BASE_URL` and `CONF_OPENAI_COMPATIBLE_BASE_URL` are two constants for the same `base_url`/`openai_compatible_base_url` settings ideas.
+
+**Why:** Flagged by the pre-merge review of #598. Any future change to how an OpenAI-compatible endpoint is validated, authenticated, or normalized must now be made twice in two conventions; miss one and local STT and local chat behave differently for the identical URL the user typed. Not unified in #598 to keep that PR a self-contained STT feature; the model-provider convention has existing stored entries, so unification needs a migration or read-both compatibility.
+
+**How to apply:** Extract a shared "openai-compatible endpoint settings" helper (build + validate + normalize + keyless convention) used by both flows, pick one storage shape (write-time normalized is simpler for readers), and accept the other on read for existing entries. The planned TTS provider (PR B) is the forcing function — do this before adding a third copy there.
+
+**Effort:** M
+**Priority:** P2
+
+---
+
 ### SDK client defaults given up by using HA's shared httpx client
 
 **What:** `_get_client` (stt.py) builds the OpenAI client on Home Assistant's shared httpx client. That is what removes the per-stream SSL-context build (#556), but it also means the SDK's own client defaults no longer apply. Two are currently accepted and documented rather than restored: `follow_redirects` (openai's own client sets `True`; HA leaves httpx's `False`, so a 3xx from an egress proxy or a future endpoint move surfaces as an error instead of being followed), and the SDK's connection limits (HA's pool expires keepalive at 15s, which is what bounds the connection-reuse win to back-to-back utterances). The request timeout was the third and *is* pinned.

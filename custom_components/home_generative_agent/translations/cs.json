@@ -120,10 +120,15 @@
         },
         "credentials": {
           "title": "Přihlašovací údaje",
-          "description": "Vyberte způsob autentizace poskytovatele STT.",
+          "description": "Vyberte způsob autentizace poskytovatele STT. Lokální poskytovatelé se místo toho připojují přes URL serveru kompatibilního s OpenAI.",
           "data": {
             "openai_provider_subentry_id": "Znovu použít poskytovatele OpenAI",
-            "api_key": "OpenAI API klíč"
+            "api_key": "API klíč",
+            "base_url": "URL serveru"
+          },
+          "data_description": {
+            "api_key": "Vyžadováno pro OpenAI. Volitelné pro lokální servery bez autentizace.",
+            "base_url": "OpenAI-kompatibilní koncový bod lokálního STT serveru, např. instance Speaches. Chybějící přípona /v1 se doplní automaticky."
           }
         },
         "model": {
