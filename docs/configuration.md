@@ -238,7 +238,7 @@ You can select any combination. Selecting both Assist and one or more MCP APIs m
 
 ## Speech-to-Text (STT)
 
-HGA provides a built-in STT engine — no separate STT integration required. Two provider types are supported: **OpenAI** (Whisper API) and **Local** (any OpenAI-compatible transcription server, e.g. [Speaches](https://speaches.ai/) serving faster-whisper on the same box as Ollama).
+HGA provides a built-in STT engine — no separate STT integration required. Two provider types are supported: **OpenAI** (Whisper API) and **Local** (any OpenAI-compatible transcription server, e.g. [Speaches](https://speaches.ai/) serving faster-whisper). A local server can run on any machine Home Assistant can reach; it does not have to be the box that serves your LLM.
 
 1. Open **Settings → Devices & Services → Home Generative Agent**.
 2. Click **+ STT Provider**.
@@ -254,14 +254,14 @@ HGA provides a built-in STT engine — no separate STT integration required. Two
    - `translate`: on OpenAI only `whisper-1` supports it (other models fall back to transcription); local whisper servers support it for every model
 6. Go to **Settings → Voice assistants → Assist pipelines** and select **STT - OpenAI** / **STT - Local** (or your chosen name) for Speech-to-text.
 
-**Credential changes take effect on the next utterance.** Each STT entity keeps one OpenAI client, built on Home Assistant's shared HTTP client, and rebuilds it when the resolved API key or server URL changes — no restart or integration reload needed. If the entry is linked to a Model Provider subentry, that provider's key is the only one used: linking blanks the separate STT key, so a linked provider without a usable key fails the utterance with an `OpenAI STT API key missing` warning in the log rather than falling back to a stale key.
+**Credential changes take effect on the next utterance.** Each STT entity keeps one OpenAI client, built on Home Assistant's shared HTTP client, and rebuilds it when the resolved API key or server URL changes — no restart or integration reload needed. If the entry is linked to a Model Provider subentry, that provider's key is the only one used: linking blanks the separate STT key, so a linked provider without a usable key fails the utterance with an `STT API key missing` warning in the log rather than falling back to a stale key.
 
 ### Running a local STT server
 
-Any server exposing the OpenAI `/v1/audio/transcriptions` endpoint works. Speaches is a good fit for a GPU box already running Ollama (`faster-whisper-large-v3-turbo` needs roughly 1.5–2 GB of VRAM). Speaches only serves models that have already been downloaded, so list the model in `PRELOAD_MODELS` (or `POST /v1/models/<model-id>` once) before the first utterance:
+Any server exposing the OpenAI `/v1/audio/transcriptions` endpoint works. Speaches runs on any machine Home Assistant can reach — a dedicated box, the LLM server, or a spare machine with an older GPU. `faster-whisper-large-v3-turbo` needs roughly 1.5–2 GB of VRAM and transcribes a short command in well under a second on even a Pascal-class card; without a GPU pick a smaller whisper model (`Systran/faster-whisper-small`, for example) and the CPU image (`latest-cpu`). Speaches only serves models that have already been downloaded, so list the model in `PRELOAD_MODELS` (or `POST /v1/models/<model-id>` once) before the first utterance:
 
 ```yaml
-# docker-compose.yaml on the GPU box
+# docker-compose.yaml on the speech server
 services:
   speaches:
     image: ghcr.io/speaches-ai/speaches:latest-cuda
@@ -272,6 +272,7 @@ services:
     environment:
       - PRELOAD_MODELS=["deepdml/faster-whisper-large-v3-turbo-ct2", "speaches-ai/Kokoro-82M-v1.0-ONNX"]
       - STT_MODEL_TTL=-1            # keep the model resident; the first utterance after a reload pays several seconds
+      - WHISPER__TTL=-1             # same setting under the name older Speaches images read; harmless to set both
       # - WHISPER__COMPUTE_TYPE=int8_float32   # required on Pascal GPUs (GTX 10xx): float16 is not supported there
     deploy:
       resources:
@@ -290,7 +291,7 @@ volumes:
 
 ## Text-to-Speech (TTS)
 
-HGA also provides a built-in TTS engine for Assist pipelines, so a reply can be spoken by the OpenAI speech API or by the same local server that handles speech-to-text. Two provider types are supported: **OpenAI** and **Local** (any server exposing the OpenAI `/v1/audio/speech` endpoint, e.g. [Speaches](https://speaches.ai/) serving Kokoro or piper voices).
+HGA also provides a built-in TTS engine for Assist pipelines, so a reply can be spoken by the OpenAI speech API or by a local server — the same Speaches container that handles speech-to-text can serve both, but the two providers are configured independently and can point at different machines. Two provider types are supported: **OpenAI** and **Local** (any server exposing the OpenAI `/v1/audio/speech` endpoint, e.g. [Speaches](https://speaches.ai/) serving Kokoro or piper voices).
 
 1. Open **Settings → Devices & Services → Home Generative Agent**.
 2. Click **+ TTS Provider**.
@@ -317,7 +318,7 @@ curl -X POST http://192.168.1.100:8000/v1/models/speaches-ai/Kokoro-82M-v1.0-ONN
 
 Two things to know about the local backend:
 
-- **Kokoro needs a reasonably modern machine.** On a GPU box that also runs Ollama it is fast and sounds good. On an old CPU without AVX2 it can take several times the audio duration to synthesize a sentence, and ONNX Runtime's CUDA path does not help it on Pascal-class GPUs. In that case use a piper voice instead — `speaches-ai/piper-en_US-hfc_female-medium` (voice `hfc_female`) or a `-low` variant — which synthesizes a sentence in about a second on CPU and needs no GPU. Browse the available models with `GET /v1/registry?task=text-to-speech`.
+- **Kokoro needs a reasonably modern machine.** On a modern CPU (AVX2) or a recent GPU it is fast and sounds good. On an old CPU without AVX2 it can take several times the audio duration to synthesize a sentence, and ONNX Runtime's CUDA path does not help it on Pascal-class GPUs. In that case use a piper voice instead — `speaches-ai/piper-en_US-hfc_female-medium` (voice `hfc_female`) or a `-low` variant — which synthesizes a sentence in about a second on CPU and needs no GPU. Browse the available models with `GET /v1/registry?task=text-to-speech`.
 - **Speaches does not produce opus or aac.** HGA never asks it to; a pipeline that wants those gets mp3 converted by Home Assistant.
 
 ---

@@ -104,7 +104,7 @@ Several techniques reduce latency:
 - Static prompt content is placed upfront to enable cloud provider prompt caching.
 - Multi-tool turns execute tool calls concurrently (`asyncio.gather`).
 - Streaming means perceived response time is near-instant even when total generation time is longer.
-- OpenAI speech-to-text reuses one API client per STT entity, built on Home Assistant's shared HTTP client. No SSL context is constructed on the event loop between the end of a recording and the start of transcription, and back-to-back utterances reuse a pooled connection instead of repeating the TLS handshake.
+- The STT and TTS entities each reuse one API client (OpenAI or a local OpenAI-compatible server), built on Home Assistant's shared HTTP client by the runtime they share in `core/openai_endpoint.py`. No SSL context is constructed on the event loop between the end of a recording and the start of transcription, back-to-back utterances and replies reuse a pooled connection instead of repeating the TLS handshake, and each request is a single attempt so a wedged speech server costs one timeout, not three.
 
 Typical performance on the [author's reference setup](architecture.md#hardware-reference-setup) (Raspberry Pi 5 + Nvidia 3090 edge server):
 

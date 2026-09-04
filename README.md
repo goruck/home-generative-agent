@@ -31,8 +31,8 @@ Most AI conversation integrations are prompt passthroughs: they forward your wor
 | **Face recognition** | Identify people in camera frames and personalize alerts. |
 | **Long-term memory** | Semantic search over past conversations. The agent remembers your preferences and context. |
 | **Streaming responses** | First tokens appear word-by-word in the HA conversation UI — no waiting for the full response. |
-| **Built-in speech-to-text** | STT provider for Assist pipelines, backed by the OpenAI Whisper API or a fully local OpenAI-compatible server (e.g. [Speaches](https://speaches.ai/) running faster-whisper next to Ollama) — see [STT setup](docs/configuration.md#speech-to-text-stt). |
-| **Built-in text-to-speech** | TTS provider for Assist pipelines, backed by the OpenAI speech API or the same local OpenAI-compatible server (Speaches serving Kokoro or piper voices), so the whole voice pipeline can stay on your network — see [TTS setup](docs/configuration.md#text-to-speech-tts). |
+| **Built-in speech-to-text** | STT provider for Assist pipelines, backed by the OpenAI Whisper API or a fully local OpenAI-compatible server — e.g. [Speaches](https://speaches.ai/) running faster-whisper on any machine Home Assistant can reach; it does not have to be the box that serves your LLM — see [STT setup](docs/configuration.md#speech-to-text-stt). |
+| **Built-in text-to-speech** | TTS provider for Assist pipelines, backed by the OpenAI speech API or a local OpenAI-compatible server (one Speaches container can serve both STT and TTS, with Kokoro or piper voices), so the whole voice pipeline can stay on your network — see [TTS setup](docs/configuration.md#text-to-speech-tts). |
 | **Cloud and edge models** | Use OpenAI, Gemini, Anthropic, or run everything locally with Ollama or any OpenAI-compatible server. |
 
 ## Screenshots
@@ -67,10 +67,12 @@ Most AI conversation integrations are prompt passthroughs: they forward your wor
 | Model provider | At least one of: OpenAI, Gemini, Anthropic, Ollama, or any OpenAI-compatible server |
 | Edge GPU server *(optional)* | Ollama, vLLM, llama.cpp, or LiteLLM for local model serving |
 | face-service *(optional)* | An external service for face recognition in camera analysis. Also powers Sentinel's unknown-person rules, which never fire unless face recognition is enabled (the `face_recognition` option, off by default) with this service configured |
+| Speech-to-text *(optional)* | An OpenAI API key (Whisper API), **or** a local server exposing the OpenAI `/v1/audio/transcriptions` endpoint, such as [Speaches](https://speaches.ai/) serving faster-whisper. The server can run on any machine Home Assistant can reach — it need not be the LLM box. A GPU with about 2 GB of VRAM is recommended for `faster-whisper-large-v3-turbo`; smaller whisper models run on CPU. See [STT setup](docs/configuration.md#speech-to-text-stt) |
+| Text-to-speech *(optional)* | An OpenAI API key (speech API), **or** a local server exposing the OpenAI `/v1/audio/speech` endpoint — the same Speaches container can serve both. piper voices synthesize on any CPU; Kokoro needs a modern CPU (AVX2) or a recent GPU. Audio conversion for voice satellites uses the ffmpeg bundled with Home Assistant. See [TTS setup](docs/configuration.md#text-to-speech-tts) |
 
 ## Quick Start
 
-Get the basic conversational agent running in seven steps. See the [full installation guide](docs/installation.md) for optional apps (edge models, face recognition).
+Get the basic conversational agent running in seven steps. See the [full installation guide](docs/installation.md) for optional apps (edge models, face recognition, a local speech server).
 
 **1. Install the [PostgreSQL with pgvector](https://github.com/goruck/addon-postgres-pgvector/tree/main/postgres_pgvector) app.**
 
@@ -100,11 +102,13 @@ Click the button below to add the repository, then install and configure the app
 
 You can now open the HA Assist panel and start talking to your home.
 
+**Optional — voice in and out:** click **+ STT Provider** and **+ TTS Provider** on the integration page to add HGA's own speech-to-text and text-to-speech engines (OpenAI, or a local [Speaches](https://speaches.ai/) server on any machine), then select them in your Assist pipeline. See [STT setup](docs/configuration.md#speech-to-text-stt) and [TTS setup](docs/configuration.md#text-to-speech-tts).
+
 ## Documentation
 
 | Guide | Contents |
 | --- | --- |
-| [Installation](docs/installation.md) | HACS install, manual install, optional apps (Ollama, face recognition) |
+| [Installation](docs/installation.md) | HACS install, manual install, optional apps (Ollama, face recognition, local speech server for STT/TTS) |
 | [Configuration](docs/configuration.md) | Model providers, features, per-model thinking/reasoning & budget, Tool Retrieval (RAG), per-tool exclusions & always-included tools, LLM API, STT and TTS (OpenAI or local), YAML mode, Critical Action PIN, camera description language & extra VLM instructions, UI languages (en/cs/ru/tr) |
 | [Sentinel](docs/sentinel.md) | Anomaly detection pipeline, built-in rules, triage, baseline, blueprints, notification quiet hours, services API, health sensor |
 | [Camera Entities](docs/camera-entities.md) | Image and sensor entities, dashboards, automations, proactive video analysis, face recognition |

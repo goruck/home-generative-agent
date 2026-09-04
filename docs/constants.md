@@ -459,7 +459,7 @@ The same rules screen two surfaces: direct tool calls from the conversation agen
 
 | Constant | File | Value | Purpose |
 |---|---|---|---|
-| `STT_REQUEST_TIMEOUT_S` | `stt.py` | `120.0` (s) | Timeout for a transcription or translation request (connect timeout 5 s). Matches the chat provider timeout in `__init__.py`. Pinned on the OpenAI client rather than inherited from Home Assistant's shared httpx client, so a future HA change to that client cannot silently retime transcription. |
+| `STT_REQUEST_TIMEOUT_S` | `stt.py` | `120.0` (s) | Timeout for a transcription or translation request (connect timeout 5 s). Matches the chat provider timeout in `__init__.py`. Pinned on the OpenAI client rather than inherited from Home Assistant's shared httpx client, so a future HA change to that client cannot silently retime transcription. One attempt per utterance (`max_retries=0`), like TTS. |
 
 ---
 
