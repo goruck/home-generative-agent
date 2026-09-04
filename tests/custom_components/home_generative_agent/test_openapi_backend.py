@@ -163,9 +163,15 @@ def test_module_sniff_fallback_when_llm_stops_reexporting(
     schema would corrupt the tool.
     """
     probatio, aliased_vol, seen = _fake_probatio_core()
+    # The sibling library is faked too: with the fake probatio shadowing the
+    # real one, a probatio core's own sentinel is no longer importable, so the
+    # "other library" on either core is whatever ``voluptuous_openapi`` names.
+    foreign = ModuleType("voluptuous_openapi")
+    foreign.UNSUPPORTED = object()  # type: ignore[attr-defined]
     try:
         monkeypatch.setitem(sys.modules, "probatio", probatio)
         monkeypatch.setitem(sys.modules, "voluptuous", aliased_vol)
+        monkeypatch.setitem(sys.modules, "voluptuous_openapi", foreign)
         monkeypatch.delattr(llm, "convert", raising=False)
         monkeypatch.delattr(llm, "to_openapi", raising=False)
         monkeypatch.delattr(llm, "UNSUPPORTED", raising=False)
@@ -175,7 +181,7 @@ def test_module_sniff_fallback_when_llm_stops_reexporting(
 
         helpers.safe_convert(
             aliased_vol.Schema(),  # type: ignore[attr-defined]
-            custom_serializer=lambda _obj: _CORE_UNSUPPORTED,
+            custom_serializer=lambda _obj: foreign.UNSUPPORTED,  # type: ignore[attr-defined]
         )
         robust = seen[-1]
         assert robust(_Opaque()) is probatio.UNSUPPORTED

@@ -998,6 +998,19 @@ async def test_gather_store_puts_closes_remaining_on_failure() -> None:
     assert later.cr_frame is None
 
 
+class _PoisonedTool:
+    """A live tool whose schema cannot be read, whatever converter core uses."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.description = f"{name} live"
+
+    @property
+    def parameters(self) -> Any:
+        msg = "unserializable schema"
+        raise TypeError(msg)
+
+
 @pytest.mark.asyncio
 async def test_index_tools_poisoned_tool_does_not_starve_neighbors() -> None:
     """
@@ -1011,8 +1024,11 @@ async def test_index_tools_poisoned_tool_does_not_starve_neighbors() -> None:
     rd = _index_runtime_data(tool_content_hashes={})
 
     llm_api = _loaded_llm_api("HassStartTimer", "HassPauseTimer")
-    # Poison the first tool: json.dumps cannot serialize an object() schema.
-    llm_api.apis["assist"].tools[0].parameters = {"bad": object()}  # type: ignore[assignment]
+    # Poison the first tool: its schema blows up on access. A converter-level
+    # poison is core-specific (voluptuous-openapi raises on an object() leaf,
+    # probatio renders it as a string), so the failure is raised upstream of
+    # the converter to hold on both cores.
+    llm_api.apis["assist"].tools[0] = _PoisonedTool("HassStartTimer")
 
     with (
         patch(f"{_CONV}.async_dispatcher_send"),
