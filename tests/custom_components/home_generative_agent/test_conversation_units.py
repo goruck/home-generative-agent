@@ -1028,7 +1028,8 @@ async def test_index_tools_poisoned_tool_does_not_starve_neighbors() -> None:
     # poison is core-specific (voluptuous-openapi raises on an object() leaf,
     # probatio renders it as a string), so the failure is raised upstream of
     # the converter to hold on both cores.
-    llm_api.apis["assist"].tools[0] = _PoisonedTool("HassStartTimer")
+    tools: Any = llm_api.apis["assist"].tools
+    tools[0] = _PoisonedTool("HassStartTimer")
 
     with (
         patch(f"{_CONV}.async_dispatcher_send"),

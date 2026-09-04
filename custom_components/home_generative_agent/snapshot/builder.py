@@ -67,7 +67,9 @@ def _build_area_lookup(hass: HomeAssistant) -> dict[str, str | None]:
         # area, which is how areas are most commonly assigned in HA.
         area_id = entry.area_id
         if area_id is None and entry.device_id is not None:
-            device = device_registry.devices.get(entry.device_id)
+            # async_get rather than devices.get: HA 2026.9 turned ``devices`` into
+            # a deprecated view that logs on every access and types as Collection.
+            device = device_registry.async_get(entry.device_id)
             if device is not None:
                 area_id = device.area_id
         lookup[entity_id] = area_names.get(area_id) if area_id is not None else None
