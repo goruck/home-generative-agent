@@ -40,15 +40,14 @@ It is available in the default HACS repository, or click the button below to ope
 
 > If you previously used the legacy single-entry flow, your settings are automatically migrated to the new subentry UI.
 
-**5. Open the integration page and click Setup.**
+**5. Add a Model Provider.**
 
-- Enable the features you want (Conversation, Camera Image Analysis, Conversation Summary are on by default).
-- Configure the database connection.
-- If no model provider exists yet, you will see a reminder to add one.
+Click **+ Model Provider** on the integration page and configure at least one provider: OpenAI, Ollama, Gemini, Anthropic, or any OpenAI-compatible endpoint. The first provider is automatically assigned to all features with default models. A provider must exist before Setup will run — Setup aborts with a reminder otherwise.
 
-**6. Add a Model Provider.**
+**6. Open the integration page and click + Setup.**
 
-Click **+ Model Provider** on the integration page and configure at least one provider: OpenAI, Ollama, Gemini, Anthropic, or any OpenAI-compatible endpoint. The first provider is automatically assigned to all features with default models.
+- **Basic** enables all features (Conversation, Camera Image Analysis, Conversation Summary) with recommended defaults and creates the database subentry automatically.
+- **Advanced** steps through each feature individually and includes a database configuration step.
 
 **7. Set HGA as your voice assistant.**
 
@@ -77,6 +76,10 @@ Run models locally for lower cost and latency.
   ollama pull gemma3:4b          # vision alternative (lighter; needs Ollama 0.6+)
   ollama pull mxbai-embed-large  # embeddings
   ```
+
+**Local speech server (STT and TTS)**
+
+HGA has its own speech-to-text and text-to-speech engines for Assist pipelines. Each can use the OpenAI API or a local OpenAI-compatible server such as [Speaches](https://speaches.ai/), which serves faster-whisper for STT and Kokoro or piper voices for TTS from one container. The server can run on any machine Home Assistant can reach — it does not have to be the box that runs Ollama or your other models, and it needs no GPU for piper voices or small whisper models. Setup, a ready-to-use `docker-compose` example, and model notes are in the [configuration guide](configuration.md#speech-to-text-stt).
 
 **Automation blueprints**
 
