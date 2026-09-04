@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.38.0] - 2026-09-04
+
+### Added
+
+- **Built-in text-to-speech.** A new **+ TTS Provider** subentry gives Assist pipelines a TTS engine backed by the OpenAI speech API (`gpt-4o-mini-tts`, `tts-1`, `tts-1-hd`) or by any local server exposing the OpenAI `/v1/audio/speech` endpoint — such as the same [Speaches](https://speaches.ai/) container that already serves speech-to-text, voicing replies with Kokoro or piper voices. Together with the local STT provider this keeps the whole voice pipeline on your network. The flow mirrors the STT one: reuse an OpenAI model provider's key or enter a separate one, or point at a local server URL (a missing `/v1` is added; a blank key means no `Authorization` header is sent); then pick a model, voice, speed, and — for OpenAI's `gpt-4o-mini-tts` models — optional voice instructions. The configured voice becomes the pipeline's default and the OpenAI voice list is offered in the pipeline's voice picker. Audio containers are negotiated per backend (Speaches has no opus/aac) and Home Assistant converts to whatever the satellite needs, so a Voice PE works with either provider. Setup and Speaches notes — including why an old CPU should pick a piper voice over Kokoro — are in the [configuration guide](https://github.com/goruck/home-generative-agent/blob/main/docs/configuration.md#text-to-speech-tts).
+
+### Fixed
+
+- **Adding a local STT provider no longer labels it "STT - OpenAI".** The provider form pre-fills the default type's name before the dropdown is touched, so submitting it unchanged for a local provider stored the OpenAI label — which is exactly what the Assist pipeline dropdown shows. A submitted name that is another type's default is now treated as the stale pre-fill and replaced; typed names are kept, and reconfiguring an existing entry without changing its type never renames it.
+- **A wedged speech server now fails one utterance, not three.** The OpenAI SDK's default of two retries meant a local STT server that accepted the connection but never answered cost three full timeouts of silence before the pipeline heard an error. The STT and TTS clients now make one attempt.
+
+### Changed
+
+- The STT and TTS provider flows share one implementation of the OpenAI-compatible endpoint handling (URL normalization, validation, keyless servers), and both platforms share one runtime for key resolution and the cached OpenAI client. No stored settings change.
+
 ## [3.37.1] - 2026-09-03
 
 ### Fixed
