@@ -13,3 +13,7 @@ updates:
     ignore:
       # Dependabot should not update Home Assistant as that should match the homeassistant key in hacs.json
       - dependency-name: "homeassistant"
+      # openai must match HA core's openai_conversation pin for the tested HA version
+      # (and langchain-openai in manifest.json caps it), so it is bumped by hand.
+      - dependency-name: "openai"
+
