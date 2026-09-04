@@ -142,6 +142,61 @@
         "unknown": "Beklenmeyen hata."
       }
     },
+    "tts_provider": {
+      "entry_type": "service",
+      "abort": {
+        "reconfigure_successful": "TTS sağlayıcı güncellendi."
+      },
+      "initiate_flow": {
+        "reconfigure": "TTS sağlayıcıyı yeniden yapılandır",
+        "user": "TTS sağlayıcı ekle"
+      },
+      "step": {
+        "provider": {
+          "title": "Metinden Konuşmaya Sağlayıcı",
+          "description": "Sağlayıcı türünü ve adını seçin.",
+          "data": {
+            "provider_type": "Sağlayıcı",
+            "name": "Sağlayıcı adı"
+          }
+        },
+        "credentials": {
+          "title": "Kimlik bilgileri",
+          "description": "TTS sağlayıcısı için kimlik doğrulama seçin. Yerel sağlayıcılar bunun yerine OpenAI uyumlu bir sunucu URL'sine bağlanır.",
+          "data": {
+            "openai_provider_subentry_id": "OpenAI model sağlayıcıyı yeniden kullan",
+            "api_key": "API anahtarı",
+            "base_url": "Sunucu URL'si"
+          },
+          "data_description": {
+            "api_key": "OpenAI için zorunludur. Kimlik doğrulaması gerektirmeyen yerel sunucular için isteğe bağlıdır.",
+            "base_url": "Yerel TTS sunucusunun OpenAI uyumlu uç noktası, örn. bir Speaches örneği. Eksik /v1 eki otomatik olarak eklenir."
+          }
+        },
+        "model": {
+          "title": "Model, ses ve gelişmiş seçenekler",
+          "description": "Bir model ve ses seçin, isteğe bağlı gelişmiş ayarları yapılandırın.",
+          "data": {
+            "model_name": "Model",
+            "voice": "Ses",
+            "speed": "Hız",
+            "instructions": "Ses yönergeleri (isteğe bağlı)"
+          },
+          "data_description": {
+            "voice": "OpenAI: alloy, ash, ballad, cedar, coral, echo, fable, marin, nova, onyx, sage, shimmer veya verse. Yerel: sunucunun modelinin sağladığı bir ses kimliği, örn. Kokoro için af_heart.",
+            "speed": "Oynatma hızı çarpanı, 0,25 ile 4,0 arası. 1,0 normal hızdır.",
+            "instructions": "Sesin nasıl olması gerektiği, örn. ton veya tempo. Yalnızca OpenAI gpt-4o-mini-tts modelleri kullanır; diğerlerinde yok sayılır."
+          }
+        }
+      },
+      "error": {
+        "cannot_connect": "Sağlayıcıya erişilemiyor.",
+        "invalid_auth": "Geçersiz kimlik bilgileri.",
+        "invalid_model": "Geçerli bir model seçin.",
+        "not_supported": "Sağlayıcı henüz desteklenmiyor.",
+        "unknown": "Beklenmeyen hata."
+      }
+    },
     "sentinel": {
       "entry_type": "service",
       "abort": {

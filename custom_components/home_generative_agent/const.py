@@ -440,13 +440,11 @@ RECOMMENDED_OPENAI_STT_MODEL: STT_MODEL_OPENAI_SUPPORTED = "gpt-4o-mini-transcri
 STT_RESPONSE_FORMATS = ("text", "json", "verbose_json", "srt", "vtt")
 
 # Local (OpenAI-compatible) STT provider, e.g. Speaches serving faster-whisper.
-CONF_STT_BASE_URL = CONF_OPENAI_COMPATIBLE_ENDPOINT_BASE_URL
 # Speaches model ID; the flow accepts any custom value, this is only a default.
 # Systran's large-v3-turbo repo went private on Hugging Face (2026-09); this is
 # the public CTranslate2 conversion of the same weights, tagged so Speaches'
 # registry accepts it.
 RECOMMENDED_LOCAL_STT_MODEL = "deepdml/faster-whisper-large-v3-turbo-ct2"
-LOCAL_STT_KEYLESS_API_KEY = LOCAL_KEYLESS_API_KEY
 
 # ---- Text-to-Speech (TTS) ----
 CONF_TTS_OPENAI_PROVIDER_ID = "openai_provider_subentry_id"
@@ -454,7 +452,6 @@ CONF_TTS_MODEL_NAME = "model_name"
 CONF_TTS_VOICE = "voice"
 CONF_TTS_SPEED = "speed"
 CONF_TTS_INSTRUCTIONS = "instructions"
-CONF_TTS_BASE_URL = CONF_OPENAI_COMPATIBLE_ENDPOINT_BASE_URL
 
 TTS_MODEL_OPENAI_SUPPORTED = Literal["gpt-4o-mini-tts", "tts-1", "tts-1-hd"]
 RECOMMENDED_OPENAI_TTS_MODEL: TTS_MODEL_OPENAI_SUPPORTED = "gpt-4o-mini-tts"

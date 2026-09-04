@@ -21,7 +21,7 @@ from homeassistant.helpers.httpx_client import get_async_client
 from openai import AsyncOpenAI, AuthenticationError, Omit, OpenAIError
 
 from .const import (
-    CONF_STT_BASE_URL,
+    CONF_OPENAI_COMPATIBLE_ENDPOINT_BASE_URL,
     CONF_STT_LANGUAGE,
     CONF_STT_MODEL_NAME,
     CONF_STT_OPENAI_PROVIDER_ID,
@@ -29,7 +29,7 @@ from .const import (
     CONF_STT_RESPONSE_FORMAT,
     CONF_STT_TEMPERATURE,
     CONF_STT_TRANSLATE,
-    LOCAL_STT_KEYLESS_API_KEY,
+    LOCAL_KEYLESS_API_KEY,
     RECOMMENDED_LOCAL_STT_MODEL,
     RECOMMENDED_OPENAI_STT_MODEL,
     SUBENTRY_TYPE_MODEL_PROVIDER,
@@ -311,6 +311,10 @@ class HGASttEntity(SpeechToTextEntity):
             base_url=base_url,
             http_client=get_async_client(self.hass),
             timeout=httpx.Timeout(STT_REQUEST_TIMEOUT_S, connect=5.0),
+            # The SDK default of 2 retries would make a wedged server cost three
+            # timeouts of silence before the pipeline hears an error; a voice
+            # turn should fail fast instead, so the timeout means one attempt.
+            max_retries=0,
         )
         self._openai_client = client
         self._openai_client_cache_key = cache_key
@@ -330,7 +334,7 @@ class HGASttEntity(SpeechToTextEntity):
         if provider_type == "local":
             settings = data.get("settings", {})
             settings = dict(settings) if isinstance(settings, Mapping) else {}
-            base_url = settings.get(CONF_STT_BASE_URL)
+            base_url = settings.get(CONF_OPENAI_COMPATIBLE_ENDPOINT_BASE_URL)
             if not isinstance(base_url, str) or not base_url:
                 LOGGER.warning("Local STT base URL missing for %s", self.entity_id)
                 return None
@@ -338,7 +342,7 @@ class HGASttEntity(SpeechToTextEntity):
             api_key = (
                 configured_key
                 if isinstance(configured_key, str) and configured_key
-                else LOCAL_STT_KEYLESS_API_KEY
+                else LOCAL_KEYLESS_API_KEY
             )
             return api_key, base_url
         api_key = self._resolve_api_key(data)
@@ -394,7 +398,7 @@ class HGASttEntity(SpeechToTextEntity):
             temperature,
             response_format,
         )
-        if api_key == LOCAL_STT_KEYLESS_API_KEY:
+        if api_key == LOCAL_KEYLESS_API_KEY:
             # Keyless local server: send no Authorization header at all. The
             # placeholder exists only because the SDK constructor refuses an
             # empty key; ``Omit`` drops the header the client would otherwise

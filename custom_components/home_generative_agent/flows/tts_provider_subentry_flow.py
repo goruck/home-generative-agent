@@ -120,10 +120,10 @@ class TtsProviderSubentryFlow(ConfigSubentryFlow):
             self._name = resolve_provider_name(
                 user_input.get("name"),
                 provider_type,
+                previous_type=self._provider_type,
+                current_name=self._name,
                 provider_names=ProviderNames,
-                stale_name=self._name if type_changed else None,
-                fallback=_FALLBACK_NAME,
-            )
+            ) or ProviderNames.get(provider_type, _FALLBACK_NAME)
             self._provider_type = provider_type
             return await self.async_step_credentials()
 
@@ -233,10 +233,12 @@ class TtsProviderSubentryFlow(ConfigSubentryFlow):
                 errors["base"] = "invalid_model"
             else:
                 model_data[CONF_TTS_MODEL_NAME] = model_name
-                model_data[CONF_TTS_VOICE] = (
-                    str(user_input.get(CONF_TTS_VOICE) or "").strip()
-                    or recommended_voice
-                )
+                voice = str(user_input.get(CONF_TTS_VOICE) or "").strip()
+                if provider_type == "openai":
+                    # The API's voice enum is lowercase while the advertised
+                    # labels are display-cased ("Nova"); accept either.
+                    voice = voice.lower()
+                model_data[CONF_TTS_VOICE] = voice or recommended_voice
                 model_data[CONF_TTS_SPEED] = _coerce_speed(
                     user_input.get(CONF_TTS_SPEED)
                 )

@@ -112,28 +112,37 @@ def resolve_provider_name(
     submitted_name: str | None,
     provider_type: str,
     *,
+    previous_type: str | None,
+    current_name: str | None,
     provider_names: Mapping[str, str],
-    stale_name: str | None,
-    fallback: str,
-) -> str:
+) -> str | None:
     """
-    Return the provider name to store after the provider step is submitted.
+    Return the provider name to store after the provider step, or ``None``.
 
-    Two kinds of untouched pre-fill are replaced with the selected type's own
-    default. ``stale_name`` is the previously stored name when the provider
-    type just changed (``None`` otherwise): a submission equal to it is the
-    form's pre-fill and would mislabel the new provider in the Assist pipeline
-    dropdown. On an add, the form renders before the dropdown is touched, so it
-    pre-fills the default type's name; a submitted name that is another type's
-    default is that stale pre-fill, not a choice. Any other name survives.
+    Two kinds of untouched pre-fill are dropped (the caller then applies the
+    selected type's default). On a type switch (``previous_type`` set and
+    different), a submission equal to ``current_name`` is the form's pre-fill
+    and would mislabel the new provider in the Assist pipeline dropdown. On an
+    add (``previous_type`` is ``None``), the form renders before the dropdown
+    is touched and pre-fills the default type's name, so a submission that is
+    another type's default is that stale pre-fill, not a choice. A same-type
+    reconfigure keeps whatever name is stored or typed, even another type's
+    default — renaming an existing entry behind the user's back is worse than
+    a label they can fix themselves.
     """
     name = submitted_name
-    if stale_name is not None and name == stale_name:
-        name = None
+    type_changed = previous_type is not None and previous_type != provider_type
+    if type_changed and name == current_name:
+        return None
     own_default = provider_names.get(provider_type)
-    if name and name in provider_names.values() and name != own_default:
-        name = None
-    return name or own_default or fallback
+    if (
+        previous_type is None
+        and name
+        and name in provider_names.values()
+        and name != own_default
+    ):
+        return None
+    return name or None
 
 
 async def build_openai_key_settings(

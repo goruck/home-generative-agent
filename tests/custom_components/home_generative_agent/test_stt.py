@@ -24,7 +24,7 @@ from custom_components.home_generative_agent.const import (
     CONF_STT_RESPONSE_FORMAT,
     CONF_STT_TEMPERATURE,
     CONF_STT_TRANSLATE,
-    LOCAL_STT_KEYLESS_API_KEY,
+    LOCAL_KEYLESS_API_KEY,
     RECOMMENDED_LOCAL_STT_MODEL,
     SUBENTRY_TYPE_MODEL_PROVIDER,
     SUBENTRY_TYPE_STT_PROVIDER,
@@ -261,6 +261,13 @@ async def test_no_ssl_context_is_built_on_the_event_loop(
     assert result.result == ha_stt.SpeechResultState.SUCCESS
     assert calls == []
     assert len(patched_client["constructed"]) == 1
+
+
+async def test_client_does_not_retry(patched_client: Any) -> None:
+    """One attempt per utterance: SDK retries would triple a timeout's silence."""
+    entity, _ = _make_entity()
+    await _run(entity, [SimpleNamespace(text="hello")])
+    assert patched_client["kwargs"][0]["max_retries"] == 0
 
 
 async def test_request_timeout_is_pinned_not_inherited(patched_client: Any) -> None:
@@ -747,8 +754,8 @@ async def test_local_provider_builds_client_with_base_url(
     assert kwargs["base_url"] == LOCAL_BASE_URL
     # openai>=2.45 (HA 2026.8+) raises "Missing credentials" on an empty
     # api_key, so the constructor must always get a non-empty placeholder.
-    assert kwargs["api_key"] == LOCAL_STT_KEYLESS_API_KEY
-    assert LOCAL_STT_KEYLESS_API_KEY
+    assert kwargs["api_key"] == LOCAL_KEYLESS_API_KEY
+    assert LOCAL_KEYLESS_API_KEY
     assert len(seen["transcriptions"]) == 1
     # The flow validated the endpoint without an Authorization header; runtime
     # must match, or servers that reject unknown bearer tokens 401 every

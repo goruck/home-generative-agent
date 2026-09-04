@@ -112,10 +112,10 @@ class SttProviderSubentryFlow(ConfigSubentryFlow):
             self._name = resolve_provider_name(
                 user_input.get("name"),
                 provider_type,
+                previous_type=self._provider_type,
+                current_name=self._name,
                 provider_names=ProviderNames,
-                stale_name=self._name if type_changed else None,
-                fallback=_FALLBACK_NAME,
-            )
+            ) or ProviderNames.get(provider_type, _FALLBACK_NAME)
             self._provider_type = provider_type
             return await self.async_step_credentials()
 

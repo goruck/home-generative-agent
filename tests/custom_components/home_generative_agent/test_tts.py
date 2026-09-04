@@ -217,6 +217,9 @@ async def test_request_timeout_is_pinned(patched_client: Any) -> None:
     assert isinstance(timeout, httpx.Timeout)
     assert timeout.read == hga_tts.TTS_REQUEST_TIMEOUT_S
     assert timeout.connect == 5.0
+    # One attempt: the SDK's default 2 retries would triple the silence a
+    # wedged server causes before the pipeline hears an error.
+    assert patched_client["kwargs"][0]["max_retries"] == 0
 
 
 async def test_client_reused_across_replies(patched_client: Any) -> None:
@@ -404,8 +407,9 @@ async def test_instructions_never_sent_to_local() -> None:
         ("wav", "wav", "wav"),
         ("flac", "flac", "flac"),
         ("ogg", "ogg", "opus"),
-        ("oga", "ogg", "opus"),
-        ("raw", "pcm", "pcm"),
+        ("oga", "oga", "opus"),
+        ("raw", "raw", "pcm"),
+        ("pcm", "pcm", "pcm"),
         ("m4a", "mp3", "mp3"),
     ],
 )
@@ -496,7 +500,8 @@ def test_openai_defaults() -> None:
     assert entity._configured_model() == RECOMMENDED_OPENAI_TTS_MODEL
     assert entity.supported_options == [ATTR_VOICE, ATTR_PREFERRED_FORMAT]
     assert entity.default_language == "en-US"
-    assert "en-US" in entity.supported_languages
+    # tts.speak checks exact membership, so bare subtags must be accepted too.
+    assert {"en-US", "en", "cs", "pt-PT"} <= set(entity.supported_languages)
 
 
 def test_entity_identity_follows_subentry() -> None:

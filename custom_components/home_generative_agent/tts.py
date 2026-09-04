@@ -21,7 +21,7 @@ from openai import AsyncOpenAI, AuthenticationError, Omit, OpenAIError
 from propcache.api import cached_property
 
 from .const import (
-    CONF_TTS_BASE_URL,
+    CONF_OPENAI_COMPATIBLE_ENDPOINT_BASE_URL,
     CONF_TTS_INSTRUCTIONS,
     CONF_TTS_MODEL_NAME,
     CONF_TTS_OPENAI_PROVIDER_ID,
@@ -137,10 +137,15 @@ def _negotiate_format(preferred: Any, supported: frozenset[str]) -> tuple[str, s
     Voice PE's 16 kHz mono wav request is always converted by HA as well.
     """
     fmt = str(preferred or TTS_DEFAULT_RESPONSE_FORMAT).lower()
+    # HA compares the returned extension to the literal preference and only
+    # skips ffmpeg on an exact match, so the caller's own spelling is reported
+    # even where the backend calls the codec something else (ogg/oga carry
+    # opus; raw is pcm). Reporting the backend's name would re-mux every
+    # reply, and ``-f pcm`` is not an ffmpeg demuxer at all.
     if fmt in ("ogg", "oga"):
-        return ("ogg", "opus") if "opus" in supported else ("mp3", "mp3")
+        return (fmt, "opus") if "opus" in supported else ("mp3", "mp3")
     if fmt == "raw":
-        fmt = "pcm"
+        return ("raw", "pcm") if "pcm" in supported else ("mp3", "mp3")
     if fmt in supported:
         return fmt, fmt
     return TTS_DEFAULT_RESPONSE_FORMAT, TTS_DEFAULT_RESPONSE_FORMAT
@@ -173,7 +178,6 @@ class HGATtsEntity(TextToSpeechEntity):
     """Text-to-speech entity backed by the OpenAI speech API or a local server."""
 
     _attr_has_entity_name = True
-    _attr_supported_languages = SUPPORTED_LANGUAGES
     _attr_default_language = DEFAULT_LANGUAGE
 
     def __init__(self, entry: ConfigEntry, subentry_id: str) -> None:
@@ -192,6 +196,28 @@ class HGATtsEntity(TextToSpeechEntity):
         self._openai_client_cache_key: tuple[str, str | None] | None = None
 
     # ------------------------------------------------------------------ config
+
+    @cached_property
+    def supported_languages(self) -> list[str]:
+        """
+        Return the accepted language tags.
+
+        The Assist pipeline matches loosely, but ``tts.speak`` and the media
+        source check exact membership, so the bare primary subtags (``en``) and
+        Home Assistant's own configured language are accepted alongside the
+        region-qualified tags the models document. The models detect the
+        language from the text; the tag only has to get past that check.
+        Cached like the base class declares; it is first read after the entity
+        is added, when ``hass`` is set.
+        """
+        languages = set(SUPPORTED_LANGUAGES)
+        languages.update(tag.split("-", 1)[0] for tag in SUPPORTED_LANGUAGES)
+        hass = getattr(self, "hass", None)
+        hass_lang = getattr(getattr(hass, "config", None), "language", None)
+        if isinstance(hass_lang, str) and hass_lang:
+            languages.add(hass_lang)
+            languages.add(hass_lang.split("-", 1)[0])
+        return sorted(languages)
 
     @property
     def _provider_type(self) -> str:
@@ -286,7 +312,7 @@ class HGATtsEntity(TextToSpeechEntity):
         if provider_type == "local":
             settings = data.get("settings", {})
             settings = dict(settings) if isinstance(settings, Mapping) else {}
-            base_url = settings.get(CONF_TTS_BASE_URL)
+            base_url = settings.get(CONF_OPENAI_COMPATIBLE_ENDPOINT_BASE_URL)
             if not isinstance(base_url, str) or not base_url:
                 msg = f"Local TTS base URL missing for {self.entity_id}"
                 raise HomeAssistantError(msg)
@@ -326,6 +352,10 @@ class HGATtsEntity(TextToSpeechEntity):
             base_url=base_url,
             http_client=get_async_client(self.hass),
             timeout=httpx.Timeout(TTS_REQUEST_TIMEOUT_S, connect=5.0),
+            # The SDK default of 2 retries would make a wedged local server cost
+            # three timeouts (~3 minutes) of silence on the satellite before an
+            # error surfaces; a spoken reply should fail fast instead.
+            max_retries=0,
         )
         self._openai_client = client
         self._openai_client_cache_key = cache_key

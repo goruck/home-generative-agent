@@ -481,7 +481,7 @@ The same rules screen two surfaces: direct tool calls from the conversation agen
 |---|---|---|---|
 | `TTS_INSTRUCTIONS_MODEL_PREFIX` | `const.py` | `gpt-4o-mini-tts` | Only models with this prefix on the OpenAI provider receive the optional voice instructions; the API rejects the parameter for `tts-1`/`tts-1-hd`, and local servers never get it. |
 | `TTS_OPENAI_RESPONSE_FORMATS` / `TTS_LOCAL_RESPONSE_FORMATS` | `const.py` | mp3, opus, aac, flac, wav, pcm / mp3, flac, wav, pcm | Containers each backend can produce; a pipeline preference outside the set is served as mp3 and converted by Home Assistant. |
-| `TTS_REQUEST_TIMEOUT_S` | `tts.py` | `60.0` (s) | Timeout for one speech request (connect timeout 5 s), pinned on the OpenAI client rather than inherited from Home Assistant's shared httpx client. |
+| `TTS_REQUEST_TIMEOUT_S` | `tts.py` | `60.0` (s) | Timeout for one speech request (connect timeout 5 s), pinned on the OpenAI client rather than inherited from Home Assistant's shared httpx client. The client makes one attempt (`max_retries=0`), as does the STT client, so a wedged server costs one timeout of silence rather than three. |
 | `LOCAL_KEYLESS_API_KEY` | `const.py` | `sk-hga-keyless-local` | Placeholder key for keyless local STT/TTS servers; satisfies the SDK constructor and is stripped from every request with the SDK's `Omit` sentinel. |
 
 ---

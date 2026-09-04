@@ -142,6 +142,61 @@
         "unknown": "Unexpected error."
       }
     },
+    "tts_provider": {
+      "entry_type": "service",
+      "abort": {
+        "reconfigure_successful": "TTS provider updated."
+      },
+      "initiate_flow": {
+        "reconfigure": "Reconfigure TTS Provider",
+        "user": "Add TTS Provider"
+      },
+      "step": {
+        "provider": {
+          "title": "Text-to-Speech Provider",
+          "description": "Select a provider type and name.",
+          "data": {
+            "provider_type": "Provider",
+            "name": "Provider name"
+          }
+        },
+        "credentials": {
+          "title": "Credentials",
+          "description": "Choose how to authenticate the TTS provider. Local providers connect to an OpenAI-compatible server URL instead.",
+          "data": {
+            "openai_provider_subentry_id": "Reuse OpenAI model provider",
+            "api_key": "API key",
+            "base_url": "Server URL"
+          },
+          "data_description": {
+            "api_key": "Required for OpenAI. Optional for local servers that need no authentication.",
+            "base_url": "OpenAI-compatible endpoint of the local TTS server, e.g. a Speaches instance. A missing /v1 suffix is added automatically."
+          }
+        },
+        "model": {
+          "title": "Model, voice & advanced options",
+          "description": "Select a model and voice, and optional advanced settings.",
+          "data": {
+            "model_name": "Model",
+            "voice": "Voice",
+            "speed": "Speed",
+            "instructions": "Voice instructions (optional)"
+          },
+          "data_description": {
+            "voice": "OpenAI: alloy, ash, ballad, cedar, coral, echo, fable, marin, nova, onyx, sage, shimmer, or verse. Local: a voice id the server's model provides, e.g. af_heart for Kokoro.",
+            "speed": "Playback speed multiplier, 0.25 to 4.0. 1.0 is normal speed.",
+            "instructions": "How the voice should sound, e.g. tone or pacing. Used only by OpenAI gpt-4o-mini-tts models; ignored elsewhere."
+          }
+        }
+      },
+      "error": {
+        "cannot_connect": "Can't reach the provider.",
+        "invalid_auth": "Invalid credentials.",
+        "invalid_model": "Select a valid model.",
+        "not_supported": "Provider not supported yet.",
+        "unknown": "Unexpected error."
+      }
+    },
     "sentinel": {
       "entry_type": "service",
       "abort": {

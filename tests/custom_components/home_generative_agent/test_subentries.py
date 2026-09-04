@@ -444,6 +444,51 @@ async def test_stt_provider_flow_add_local_replaces_stale_default_name(
     assert result.get("title") == "Garage Whisper"
 
 
+async def test_stt_provider_flow_same_type_reconfigure_keeps_stored_name(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Changing only the URL of an existing local entry never renames it.
+
+    An entry stored as "STT - OpenAI" by the old add-flow pre-fill wart keeps
+    that label on a same-type reconfigure; the stale-default rule applies to
+    adds and type switches only, so an entity name and pipeline label never
+    change behind the user's back.
+    """
+    entry = DummyEntry()
+    entry.subentries["stt1"] = DummySubentry(
+        "stt1",
+        SUBENTRY_TYPE_STT_PROVIDER,
+        "STT - OpenAI",
+        {
+            "provider_type": "local",
+            "name": "STT - OpenAI",
+            "settings": {
+                "base_url": "http://old:8000/v1",
+                "api_key": None,
+                "openai_provider_subentry_id": None,
+            },
+            "model": {"model_name": "some/whisper"},
+        },
+    )
+    flow = _make_stt_flow(hass, entry)
+    cast("Any", flow)._subentry_id = "stt1"
+
+    async def _noop_validate(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.flows.openai_compatible_endpoint.validate_openai_compatible_url",
+        _noop_validate,
+    )
+    await flow.async_step_user()
+    await flow.async_step_provider({"provider_type": "local", "name": "STT - OpenAI"})
+    await flow.async_step_credentials({"base_url": "http://new:8000"})
+    result = await flow.async_step_model({"model_name": "some/whisper"})
+    assert result.get("type") == "update_entry"
+    assert result.get("title") == "STT - OpenAI"
+
+
 async def test_stt_provider_flow_switch_to_local_resets_openai_state(
     hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -541,8 +586,9 @@ async def test_tts_provider_flow_reuses_openai_provider(hass: HomeAssistant) -> 
     assert _schema_marker(third, "model_name").default() == "gpt-4o-mini-tts"
     assert _schema_marker(third, "voice").default() == "alloy"
 
+    # Display-cased voice (as the entity itself advertises it) is normalized.
     result = await flow.async_step_model(
-        {"model_name": "gpt-4o-mini-tts", "voice": "nova", "speed": 1.1}
+        {"model_name": "gpt-4o-mini-tts", "voice": "Nova", "speed": 1.1}
     )
     assert result.get("type") == "create_entry"
     assert result.get("title") == "TTS - OpenAI"
