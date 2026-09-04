@@ -47,11 +47,11 @@ After changing `manifest.json`: run `make runtimedeps` (or `python scripts/gen_m
 - **`sentinel/`** — Anomaly detection engine: rules evaluation, LLM-based triage & discovery, baseline statistics, notifications, audit trail
 - **`snapshot/`** — Authoritative JSON representation of home state (entities + derived context + camera activity); consumed by Sentinel and explain flows
 - **`explain/`** — LLM-backed explanation generation and discovery prompt templates
-- **`core/`** — Video analysis, DB utilities, schema migrations, face recognition helpers, config subentry resolution, config-entry lifecycle helpers (startup-deferred engine start and camera discovery)
-- **`flows/`** — Home Assistant config flow subentries (model providers, features, database, STT, Sentinel)
+- **`core/`** — Video analysis, DB utilities, schema migrations, face recognition helpers, config subentry resolution, config-entry lifecycle helpers (startup-deferred engine start and camera discovery), shared OpenAI audio-client runtime for the STT/TTS platforms (`openai_endpoint.py`)
+- **`flows/`** — Home Assistant config flow subentries (model providers, features, database, STT, TTS, Sentinel); `openai_compatible_endpoint.py` holds the credential steps the STT and TTS flows share
 - **`notify/`** — Mobile push + persistent notification dispatch with snooze/action buttons
 
-Top-level platform files: `conversation.py`, `sensor.py`, `image.py`, `stt.py`, `http.py`, `config_flow.py`.
+Top-level platform files: `conversation.py`, `sensor.py`, `image.py`, `stt.py`, `tts.py`, `http.py`, `config_flow.py`.
 
 ### Agent Graph (`agent/graph.py`)
 

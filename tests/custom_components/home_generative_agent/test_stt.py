@@ -29,6 +29,7 @@ from custom_components.home_generative_agent.const import (
     SUBENTRY_TYPE_MODEL_PROVIDER,
     SUBENTRY_TYPE_STT_PROVIDER,
 )
+from custom_components.home_generative_agent.core import openai_endpoint
 from custom_components.home_generative_agent.stt import HGASttEntity
 
 if TYPE_CHECKING:
@@ -155,7 +156,7 @@ def patched_client(monkeypatch: pytest.MonkeyPatch, shared_httpx_client: Any) ->
         calls["http_clients"].append(hass)
         return shared_httpx_client
 
-    real_async_openai = hga_stt.AsyncOpenAI
+    real_async_openai = openai_endpoint.AsyncOpenAI
 
     def _counting_async_openai(**kwargs: Any) -> Any:
         client = real_async_openai(**kwargs)
@@ -163,8 +164,8 @@ def patched_client(monkeypatch: pytest.MonkeyPatch, shared_httpx_client: Any) ->
         calls["kwargs"].append(kwargs)
         return client
 
-    monkeypatch.setattr(hga_stt, "get_async_client", _fake_get_async_client)
-    monkeypatch.setattr(hga_stt, "AsyncOpenAI", _counting_async_openai)
+    monkeypatch.setattr(openai_endpoint, "get_async_client", _fake_get_async_client)
+    monkeypatch.setattr(openai_endpoint, "AsyncOpenAI", _counting_async_openai)
     return calls
 
 
@@ -231,7 +232,7 @@ async def test_client_uses_shared_httpx_client(
     assert patched_client["http_clients"] == [entity.hass]
     # Our contract: HA's client is handed to the SDK constructor.
     assert patched_client["kwargs"][0]["http_client"] is shared_httpx_client
-    client = entity._openai_client
+    client = entity._clients.client
     assert client is not None
     # And the SDK honors it, so it never builds an SSL context of its own.
     assert client._client is shared_httpx_client
@@ -283,7 +284,7 @@ async def test_request_timeout_is_pinned_not_inherited(patched_client: Any) -> N
     timeout = patched_client["kwargs"][0]["timeout"]
     assert timeout.read == hga_stt.STT_REQUEST_TIMEOUT_S
     assert timeout.connect == 5.0
-    client = entity._openai_client
+    client = entity._clients.client
     assert client is not None
     assert client.timeout == timeout
 
@@ -358,12 +359,12 @@ async def test_client_construction_failure_returns_error_result(
         msg = "shared client unavailable"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr(hga_stt, "get_async_client", _boom)
+    monkeypatch.setattr(openai_endpoint, "get_async_client", _boom)
     entity, _ = _make_entity()
     result = await entity.async_process_audio_stream(_metadata(), await _stream())
     assert result.result == ha_stt.SpeechResultState.ERROR
     assert result.text is None
-    assert entity._openai_client is None
+    assert entity._clients.client is None
 
 
 async def test_concurrent_streams_build_one_client(patched_client: Any) -> None:
@@ -388,10 +389,10 @@ async def test_client_reused_across_streams(patched_client: Any) -> None:
     """Repeated utterances reuse one client and one connection pool."""
     entity, _ = _make_entity()
     await _run(entity, [SimpleNamespace(text="one")])
-    first = entity._openai_client
+    first = entity._clients.client
     assert first is not None
     await _run(entity, [SimpleNamespace(text="two")])
-    assert entity._openai_client is first
+    assert entity._clients.client is first
     assert len(patched_client["constructed"]) == 1
     assert len(patched_client["http_clients"]) == 1
 
@@ -400,14 +401,14 @@ async def test_client_rebuilt_when_api_key_changes(patched_client: Any) -> None:
     """Reconfiguring the STT subentry key takes effect on the next stream."""
     entity, entry = _make_entity(settings={"api_key": "key-1"})
     await _run(entity, [SimpleNamespace(text="one")])
-    first = entity._openai_client
+    first = entity._clients.client
     entry.subentries["stt_1"].reconfigure(
         {**entry.subentries["stt_1"].data, "settings": {"api_key": "key-2"}}
     )
     await _run(entity, [SimpleNamespace(text="two")])
-    assert entity._openai_client is not first
-    assert entity._openai_client is not None
-    assert entity._openai_client.api_key == "key-2"
+    assert entity._clients.client is not first
+    assert entity._clients.client is not None
+    assert entity._clients.client.api_key == "key-2"
     assert len(patched_client["constructed"]) == 2
 
 
@@ -419,14 +420,14 @@ async def test_client_rebuilt_when_linked_provider_key_changes() -> None:
         provider_settings={"api_key": "prov-key-1"},
     )
     await _run(entity, [SimpleNamespace(text="one")])
-    assert entity._openai_client is not None
-    assert entity._openai_client.api_key == "prov-key-1"
-    first = entity._openai_client
+    assert entity._clients.client is not None
+    assert entity._clients.client.api_key == "prov-key-1"
+    first = entity._clients.client
     entry.subentries["prov_1"].reconfigure({"settings": {"api_key": "prov-key-2"}})
     await _run(entity, [SimpleNamespace(text="two")])
-    assert entity._openai_client is not first
-    assert entity._openai_client is not None
-    assert entity._openai_client.api_key == "prov-key-2"
+    assert entity._clients.client is not first
+    assert entity._clients.client is not None
+    assert entity._clients.client.api_key == "prov-key-2"
 
 
 @pytest.mark.usefixtures("patched_client")
@@ -535,7 +536,7 @@ async def test_empty_audio_builds_no_client(patched_client: Any) -> None:
 
     result = await entity.async_process_audio_stream(_metadata(), _empty())
     assert result.result == ha_stt.SpeechResultState.ERROR
-    assert entity._openai_client is None
+    assert entity._clients.client is None
     assert not patched_client["constructed"]
     assert not patched_client["http_clients"]
 
@@ -545,7 +546,7 @@ async def test_missing_api_key_builds_no_client(patched_client: Any) -> None:
     entity, _ = _make_entity(settings={})
     result = await entity.async_process_audio_stream(_metadata(), await _stream())
     assert result.result == ha_stt.SpeechResultState.ERROR
-    assert entity._openai_client is None
+    assert entity._clients.client is None
     assert not patched_client["constructed"]
     assert not patched_client["http_clients"]
 
@@ -555,7 +556,7 @@ async def test_non_openai_provider_builds_no_client(patched_client: Any) -> None
     entity, _ = _make_entity(provider_type="whisper")
     result = await entity.async_process_audio_stream(_metadata(), await _stream())
     assert result.result == ha_stt.SpeechResultState.ERROR
-    assert entity._openai_client is None
+    assert entity._clients.client is None
     assert not patched_client["constructed"]
     assert not patched_client["http_clients"]
 
@@ -614,8 +615,8 @@ async def test_missing_provider_subentry_falls_back_to_settings_key() -> None:
     )
     result, _ = await _run(entity, [SimpleNamespace(text="ok")])
     assert result.result == ha_stt.SpeechResultState.SUCCESS
-    assert entity._openai_client is not None
-    assert entity._openai_client.api_key == "fallback-key"
+    assert entity._clients.client is not None
+    assert entity._clients.client.api_key == "fallback-key"
 
 
 @pytest.mark.usefixtures("patched_client")
@@ -628,8 +629,8 @@ async def test_wrong_provider_subentry_type_falls_back_to_settings_key() -> None
     entry.subentries["prov_1"].subentry_type = SUBENTRY_TYPE_STT_PROVIDER
     result, _ = await _run(entity, [SimpleNamespace(text="ok")])
     assert result.result == ha_stt.SpeechResultState.SUCCESS
-    assert entity._openai_client is not None
-    assert entity._openai_client.api_key == "fallback-key"
+    assert entity._clients.client is not None
+    assert entity._clients.client.api_key == "fallback-key"
 
 
 async def test_linked_provider_without_key_builds_no_client(
@@ -642,7 +643,7 @@ async def test_linked_provider_without_key_builds_no_client(
     )
     result = await entity.async_process_audio_stream(_metadata(), await _stream())
     assert result.result == ha_stt.SpeechResultState.ERROR
-    assert entity._openai_client is None
+    assert entity._clients.client is None
     assert not patched_client["constructed"]
     assert not patched_client["http_clients"]
 
@@ -659,19 +660,19 @@ async def test_client_reused_when_key_value_unchanged(patched_client: Any) -> No
     """
     entity, entry = _make_entity(settings={"api_key": "key-1"})
     await _run(entity, [SimpleNamespace(text="one")])
-    first = entity._openai_client
+    first = entity._clients.client
     assert first is not None
     # A literal here would be interned and defeat the point of this test.
     reloaded = "".join(["key", "-", "1"])  # noqa: FLY002
     assert reloaded == "key-1"
-    cache_key = entity._openai_client_cache_key
+    cache_key = entity._clients.cache_key
     assert cache_key is not None
     assert reloaded is not cache_key[0]
     entry.subentries["stt_1"].reconfigure(
         {**entry.subentries["stt_1"].data, "settings": {"api_key": reloaded}}
     )
     await _run(entity, [SimpleNamespace(text="two")])
-    assert entity._openai_client is first
+    assert entity._clients.client is first
     assert len(patched_client["constructed"]) == 1
 
 
@@ -801,7 +802,7 @@ async def test_client_rebuilt_when_base_url_changes(patched_client: Any) -> None
     """Repointing a local subentry at a new server takes effect on the next stream."""
     entity, entry = _make_local_entity()
     await _run(entity, [SimpleNamespace(text="one")])
-    first = entity._openai_client
+    first = entity._clients.client
     assert first is not None
     entry.subentries["stt_1"].reconfigure(
         {
@@ -810,7 +811,7 @@ async def test_client_rebuilt_when_base_url_changes(patched_client: Any) -> None
         }
     )
     await _run(entity, [SimpleNamespace(text="two")])
-    assert entity._openai_client is not first
+    assert entity._clients.client is not first
     assert len(patched_client["constructed"]) == 2
     assert patched_client["kwargs"][1]["base_url"] == "http://other-box:8000/v1"
 

@@ -10,18 +10,15 @@ import wave
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
-import httpx
 from homeassistant.components import stt
 from homeassistant.components.stt import (
     SpeechMetadata,
     SpeechResult,
     SpeechToTextEntity,
 )
-from homeassistant.helpers.httpx_client import get_async_client
-from openai import AsyncOpenAI, AuthenticationError, Omit, OpenAIError
+from openai import AuthenticationError, OpenAIError
 
 from .const import (
-    CONF_OPENAI_COMPATIBLE_ENDPOINT_BASE_URL,
     CONF_STT_LANGUAGE,
     CONF_STT_MODEL_NAME,
     CONF_STT_OPENAI_PROVIDER_ID,
@@ -29,11 +26,16 @@ from .const import (
     CONF_STT_RESPONSE_FORMAT,
     CONF_STT_TEMPERATURE,
     CONF_STT_TRANSLATE,
-    LOCAL_KEYLESS_API_KEY,
     RECOMMENDED_LOCAL_STT_MODEL,
     RECOMMENDED_OPENAI_STT_MODEL,
-    SUBENTRY_TYPE_MODEL_PROVIDER,
     SUBENTRY_TYPE_STT_PROVIDER,
+)
+from .core.openai_endpoint import (
+    OpenAIClientCache,
+    OpenAIConnection,
+    OpenAIConnectionError,
+    load_model_settings,
+    resolve_openai_connection,
 )
 
 if TYPE_CHECKING:
@@ -106,14 +108,6 @@ def _normalize_int(value: Any, default: int) -> int:
         except ValueError:
             return default
     return default
-
-
-def _load_model_settings(data: dict[str, Any]) -> dict[str, Any]:
-    """Normalize model settings payload."""
-    model_data = data.get("model", {})
-    if not isinstance(model_data, Mapping):
-        model_data = {}
-    return dict(model_data)
 
 
 def _build_openai_request(  # noqa: PLR0913
@@ -200,8 +194,7 @@ class HGASttEntity(SpeechToTextEntity):
         self._subentry = entry.subentries[subentry_id]
         self._attr_unique_id = f"{entry.entry_id}_{subentry_id}"
         self._attr_name = self._subentry.title or "STT"
-        self._openai_client: AsyncOpenAI | None = None
-        self._openai_client_cache_key: tuple[str, str | None] | None = None
+        self._clients = OpenAIClientCache(STT_REQUEST_TIMEOUT_S)
 
     @property
     def supported_languages(self) -> list[str]:
@@ -247,109 +240,24 @@ class HGASttEntity(SpeechToTextEntity):
         """Return supported audio channels."""
         return _all_enum_values(stt.AudioChannels)
 
-    def _resolve_api_key(self, data: dict[str, Any]) -> str | None:
-        settings = data.get("settings", {})
-        settings = dict(settings) if isinstance(settings, Mapping) else {}
-        provider_id = settings.get(CONF_STT_OPENAI_PROVIDER_ID)
-        if provider_id:
-            provider = self.entry.subentries.get(provider_id)
-            if provider and provider.subentry_type == SUBENTRY_TYPE_MODEL_PROVIDER:
-                provider_settings = provider.data.get("settings", {})
-                if isinstance(provider_settings, Mapping):
-                    # A linked provider is authoritative: never fall back to the
-                    # STT-level key, which the flow blanks out when linking.
-                    provider_key = dict(provider_settings).get("api_key")
-                    if isinstance(provider_key, str) and provider_key:
-                        return provider_key
-                    return None
-        api_key = settings.get("api_key")
-        return api_key if isinstance(api_key, str) and api_key else None
-
-    def _get_client(self, api_key: str, base_url: str | None) -> AsyncOpenAI:
-        """
-        Return a cached OpenAI client for the resolved API key and base URL.
-
-        The client is built on Home Assistant's shared httpx client so the SDK
-        never creates its own SSL context — a blocking read of the certifi
-        bundle — on the event loop, and so back-to-back utterances can reuse a
-        pooled connection instead of repeating the TLS handshake. The cache is
-        keyed on the API key and base URL so reconfiguring the STT subentry or
-        its linked model provider takes effect on the next stream.
-
-        The httpx client belongs to Home Assistant. Do not close it from here.
-        HA also blocks that mistake — it swaps in a warn-only ``aclose`` and only
-        its own shutdown listener holds the real one — so a stray close would
-        warn rather than tear down the shared pool. Dropping a superseded cached
-        client is safe for the same reason the fix works: the SDK installs its
-        close-on-GC finalizer only on a client it built itself, never on one we
-        supply. The old per-stream client did carry that finalizer.
-
-        The timeout is pinned rather than inherited. The SDK adopts a supplied
-        client's timeout only when it differs from the httpx default, so leaving
-        it off would silently retime every transcription if a future Home
-        Assistant release ever set one on the shared client. Two other SDK
-        defaults are deliberately given up with the swap and left as HA has
-        them: ``follow_redirects`` (HA leaves httpx's ``False``, so a 3xx from a
-        proxy surfaces as an error rather than being followed) and the SDK's
-        connection limits (HA's pool keeps connections alive for 15s, which is
-        what bounds the reuse win above to back-to-back utterances).
-
-        The cache is keyed on ``(api_key, base_url)`` — the two configurable
-        inputs to the client. ``base_url`` is ``None`` for the OpenAI provider
-        (SDK default endpoint) and the configured endpoint for ``local``
-        providers, so switching a subentry between provider types or repointing
-        a local server rebuilds the client on the next stream.
-        """
-        cache_key = (api_key, base_url)
-        if (
-            self._openai_client is not None
-            and self._openai_client_cache_key == cache_key
-        ):
-            return self._openai_client
-        client = AsyncOpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            http_client=get_async_client(self.hass),
-            timeout=httpx.Timeout(STT_REQUEST_TIMEOUT_S, connect=5.0),
-            # The SDK default of 2 retries would make a wedged server cost three
-            # timeouts of silence before the pipeline hears an error; a voice
-            # turn should fail fast instead, so the timeout means one attempt.
-            max_retries=0,
-        )
-        self._openai_client = client
-        self._openai_client_cache_key = cache_key
-        return client
+    def _get_client(self, api_key: str, base_url: str | None) -> Any:
+        """Return the cached OpenAI client for these credentials."""
+        return self._clients.get(self.hass, api_key, base_url)
 
     def _resolve_connection(
         self, provider_type: str, data: dict[str, Any]
-    ) -> tuple[str, str | None] | None:
-        """
-        Return (api_key, base_url) for the provider, or None if unconfigured.
-
-        Local providers require a base URL and fall back to the keyless
-        placeholder when the server needs none. The placeholder only satisfies
-        the SDK constructor; the stream strips the Authorization header per
-        request so the wire shape matches the flow's validation request.
-        """
-        if provider_type == "local":
-            settings = data.get("settings", {})
-            settings = dict(settings) if isinstance(settings, Mapping) else {}
-            base_url = settings.get(CONF_OPENAI_COMPATIBLE_ENDPOINT_BASE_URL)
-            if not isinstance(base_url, str) or not base_url:
-                LOGGER.warning("Local STT base URL missing for %s", self.entity_id)
-                return None
-            configured_key = settings.get("api_key")
-            api_key = (
-                configured_key
-                if isinstance(configured_key, str) and configured_key
-                else LOCAL_KEYLESS_API_KEY
+    ) -> OpenAIConnection | None:
+        """Return the connection for this subentry, or None (logged) if unusable."""
+        try:
+            return resolve_openai_connection(
+                self.entry,
+                provider_type,
+                data,
+                provider_id_key=CONF_STT_OPENAI_PROVIDER_ID,
             )
-            return api_key, base_url
-        api_key = self._resolve_api_key(data)
-        if not api_key:
-            LOGGER.warning("OpenAI STT API key missing for %s", self.entity_id)
+        except OpenAIConnectionError as err:
+            LOGGER.warning("STT %s for %s", err, self.entity_id)
             return None
-        return api_key, None
 
     async def async_process_audio_stream(  # noqa: PLR0912
         self, metadata: SpeechMetadata, stream: Any
@@ -365,9 +273,8 @@ class HGASttEntity(SpeechToTextEntity):
         connection = self._resolve_connection(provider_type, data)
         if connection is None:
             return SpeechResult(result=result_state, text=None)
-        api_key, base_url = connection
 
-        model_data = _load_model_settings(data)
+        model_data = load_model_settings(data)
         default_model = (
             RECOMMENDED_LOCAL_STT_MODEL
             if provider_type == "local"
@@ -398,18 +305,13 @@ class HGASttEntity(SpeechToTextEntity):
             temperature,
             response_format,
         )
-        if api_key == LOCAL_KEYLESS_API_KEY:
-            # Keyless local server: send no Authorization header at all. The
-            # placeholder exists only because the SDK constructor refuses an
-            # empty key; ``Omit`` drops the header the client would otherwise
-            # add from it.
-            request["extra_headers"] = {"Authorization": Omit()}
+        connection.apply_to_request(request)
 
         # Building the client is inside the try: it now touches hass.data and
         # the SDK constructor, and a failure there should fail this utterance,
         # not raise out into the assist pipeline.
         try:
-            client = self._get_client(api_key, base_url)
+            client = self._get_client(connection.api_key, connection.base_url)
             # Local servers (faster-whisper) serve /audio/translations for any
             # whisper model; OpenAI only does for whisper-1. A local non-whisper
             # model degrades to transcription like the OpenAI path does, rather

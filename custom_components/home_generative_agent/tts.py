@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
-import httpx
 from homeassistant.components.tts import (
     ATTR_PREFERRED_FORMAT,
     ATTR_VOICE,
@@ -16,24 +14,20 @@ from homeassistant.components.tts import (
 )
 from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.httpx_client import get_async_client
-from openai import AsyncOpenAI, AuthenticationError, Omit, OpenAIError
+from openai import AuthenticationError, OpenAIError
 from propcache.api import cached_property
 
 from .const import (
-    CONF_OPENAI_COMPATIBLE_ENDPOINT_BASE_URL,
     CONF_TTS_INSTRUCTIONS,
     CONF_TTS_MODEL_NAME,
     CONF_TTS_OPENAI_PROVIDER_ID,
     CONF_TTS_SPEED,
     CONF_TTS_VOICE,
-    LOCAL_KEYLESS_API_KEY,
     OPENAI_TTS_VOICES,
     RECOMMENDED_LOCAL_TTS_MODEL,
     RECOMMENDED_LOCAL_TTS_VOICE,
     RECOMMENDED_OPENAI_TTS_MODEL,
     RECOMMENDED_OPENAI_TTS_VOICE,
-    SUBENTRY_TYPE_MODEL_PROVIDER,
     SUBENTRY_TYPE_TTS_PROVIDER,
     TTS_DEFAULT_RESPONSE_FORMAT,
     TTS_INSTRUCTIONS_MODEL_PREFIX,
@@ -41,8 +35,16 @@ from .const import (
     TTS_OPENAI_RESPONSE_FORMATS,
     TTS_SPEED_DEFAULT,
 )
+from .core.openai_endpoint import (
+    OpenAIClientCache,
+    OpenAIConnectionError,
+    load_model_settings,
+    resolve_openai_connection,
+)
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
     from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
@@ -121,11 +123,6 @@ SUPPORTED_LANGUAGES = [
 DEFAULT_LANGUAGE = "en-US"
 
 
-def _load_model_settings(data: Mapping[str, Any]) -> dict[str, Any]:
-    model_data = data.get("model", {})
-    return dict(model_data) if isinstance(model_data, Mapping) else {}
-
-
 def _negotiate_format(preferred: Any, supported: frozenset[str]) -> tuple[str, str]:
     """
     Return ``(extension, request_format)`` for a preferred output format.
@@ -192,8 +189,7 @@ class HGATtsEntity(TextToSpeechEntity):
         self._subentry = entry.subentries[subentry_id]
         self._attr_unique_id = f"{entry.entry_id}_{subentry_id}"
         self._attr_name = self._subentry.title or "TTS"
-        self._openai_client: AsyncOpenAI | None = None
-        self._openai_client_cache_key: tuple[str, str | None] | None = None
+        self._clients = OpenAIClientCache(TTS_REQUEST_TIMEOUT_S)
 
     # ------------------------------------------------------------------ config
 
@@ -224,7 +220,7 @@ class HGATtsEntity(TextToSpeechEntity):
         return str(self._subentry.data.get("provider_type") or "openai")
 
     def _model_settings(self) -> dict[str, Any]:
-        return _load_model_settings(self._subentry.data)
+        return load_model_settings(self._subentry.data)
 
     def _configured_model(self) -> str:
         model = self._model_settings().get(CONF_TTS_MODEL_NAME)
@@ -280,86 +276,9 @@ class HGATtsEntity(TextToSpeechEntity):
 
     # ------------------------------------------------------------ connection
 
-    def _resolve_api_key(self, data: Mapping[str, Any]) -> str | None:
-        settings = data.get("settings", {})
-        settings = dict(settings) if isinstance(settings, Mapping) else {}
-        provider_id = settings.get(CONF_TTS_OPENAI_PROVIDER_ID)
-        if provider_id:
-            provider = self.entry.subentries.get(provider_id)
-            if provider and provider.subentry_type == SUBENTRY_TYPE_MODEL_PROVIDER:
-                provider_settings = provider.data.get("settings", {})
-                if isinstance(provider_settings, Mapping):
-                    # A linked provider is authoritative: never fall back to the
-                    # TTS-level key, which the flow blanks out when linking.
-                    provider_key = dict(provider_settings).get("api_key")
-                    if isinstance(provider_key, str) and provider_key:
-                        return provider_key
-                    return None
-        api_key = settings.get("api_key")
-        return api_key if isinstance(api_key, str) and api_key else None
-
-    def _resolve_connection(
-        self, provider_type: str, data: Mapping[str, Any]
-    ) -> tuple[str, str | None]:
-        """
-        Return (api_key, base_url) for the provider.
-
-        Local providers require a base URL and fall back to the keyless
-        placeholder when the server needs none; the request strips the
-        Authorization header so the wire shape matches the flow's validation.
-        Raises HomeAssistantError when the subentry cannot be used.
-        """
-        if provider_type == "local":
-            settings = data.get("settings", {})
-            settings = dict(settings) if isinstance(settings, Mapping) else {}
-            base_url = settings.get(CONF_OPENAI_COMPATIBLE_ENDPOINT_BASE_URL)
-            if not isinstance(base_url, str) or not base_url:
-                msg = f"Local TTS base URL missing for {self.entity_id}"
-                raise HomeAssistantError(msg)
-            configured_key = settings.get("api_key")
-            api_key = (
-                configured_key
-                if isinstance(configured_key, str) and configured_key
-                else LOCAL_KEYLESS_API_KEY
-            )
-            return api_key, base_url
-        api_key = self._resolve_api_key(data)
-        if not api_key:
-            msg = f"OpenAI TTS API key missing for {self.entity_id}"
-            raise HomeAssistantError(msg)
-        return api_key, None
-
-    def _get_client(self, api_key: str, base_url: str | None) -> AsyncOpenAI:
-        """
-        Return a cached OpenAI client for the resolved API key and base URL.
-
-        Built on Home Assistant's shared httpx client so the SDK never creates
-        its own SSL context (a blocking read of the certifi bundle) on the event
-        loop, and so consecutive replies reuse a pooled connection. The client
-        belongs to HA and is never closed here. The timeout is pinned on the
-        SDK client rather than inherited from the shared one. The cache is keyed
-        on ``(api_key, base_url)`` so reconfiguring the subentry or its linked
-        model provider takes effect on the next reply.
-        """
-        cache_key = (api_key, base_url)
-        if (
-            self._openai_client is not None
-            and self._openai_client_cache_key == cache_key
-        ):
-            return self._openai_client
-        client = AsyncOpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            http_client=get_async_client(self.hass),
-            timeout=httpx.Timeout(TTS_REQUEST_TIMEOUT_S, connect=5.0),
-            # The SDK default of 2 retries would make a wedged local server cost
-            # three timeouts (~3 minutes) of silence on the satellite before an
-            # error surfaces; a spoken reply should fail fast instead.
-            max_retries=0,
-        )
-        self._openai_client = client
-        self._openai_client_cache_key = cache_key
-        return client
+    def _get_client(self, api_key: str, base_url: str | None) -> Any:
+        """Return the cached OpenAI client for these credentials."""
+        return self._clients.get(self.hass, api_key, base_url)
 
     # ------------------------------------------------------------- synthesis
 
@@ -409,17 +328,21 @@ class HGATtsEntity(TextToSpeechEntity):
             msg = f"Unsupported TTS provider type {provider_type!r}"
             raise HomeAssistantError(msg)
 
-        api_key, base_url = self._resolve_connection(provider_type, self._subentry.data)
+        try:
+            connection = resolve_openai_connection(
+                self.entry,
+                provider_type,
+                self._subentry.data,
+                provider_id_key=CONF_TTS_OPENAI_PROVIDER_ID,
+            )
+        except OpenAIConnectionError as err:
+            msg = f"TTS {err} for {self.entity_id}"
+            raise HomeAssistantError(msg) from err
         extension, request = self._build_request(message, options)
-        if api_key == LOCAL_KEYLESS_API_KEY:
-            # Keyless local server: send no Authorization header at all. The
-            # placeholder exists only because the SDK constructor refuses an
-            # empty key; ``Omit`` drops the header the client would otherwise
-            # add from it.
-            request["extra_headers"] = {"Authorization": Omit()}
+        connection.apply_to_request(request)
 
         try:
-            client = self._get_client(api_key, base_url)
+            client = self._get_client(connection.api_key, connection.base_url)
             response = await client.audio.speech.create(**request)
             audio = response.content
         except AuthenticationError as err:

@@ -30,6 +30,7 @@ from custom_components.home_generative_agent.const import (
     SUBENTRY_TYPE_MODEL_PROVIDER,
     SUBENTRY_TYPE_TTS_PROVIDER,
 )
+from custom_components.home_generative_agent.core import openai_endpoint
 from custom_components.home_generative_agent.tts import HGATtsEntity
 
 if TYPE_CHECKING:
@@ -128,7 +129,7 @@ def patched_client(monkeypatch: pytest.MonkeyPatch, shared_httpx_client: Any) ->
         calls["http_clients"].append(hass)
         return shared_httpx_client
 
-    real_async_openai = hga_tts.AsyncOpenAI
+    real_async_openai = openai_endpoint.AsyncOpenAI
 
     def _counting_async_openai(**kwargs: Any) -> Any:
         client = real_async_openai(**kwargs)
@@ -136,8 +137,8 @@ def patched_client(monkeypatch: pytest.MonkeyPatch, shared_httpx_client: Any) ->
         calls["kwargs"].append(kwargs)
         return client
 
-    monkeypatch.setattr(hga_tts, "get_async_client", _fake_get_async_client)
-    monkeypatch.setattr(hga_tts, "AsyncOpenAI", _counting_async_openai)
+    monkeypatch.setattr(openai_endpoint, "get_async_client", _fake_get_async_client)
+    monkeypatch.setattr(openai_endpoint, "AsyncOpenAI", _counting_async_openai)
     return calls
 
 

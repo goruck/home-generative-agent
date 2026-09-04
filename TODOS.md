@@ -1455,6 +1455,30 @@ window-scoped check could suppress.
 
 ## Speech-to-Text
 
+### Fold the STT and TTS provider flow skeletons into one base class
+
+**What:** `flows/stt_provider_subentry_flow.py` and `flows/tts_provider_subentry_flow.py` share the
+credential step through `flows/openai_compatible_endpoint.py`, but the rest of the skeleton is
+duplicated character-for-character with `Stt`→`Tts`: `__init__` state, `_schedule_reload` (also a copy in
+the model-provider, feature, and sentinel flows — `hass.config_entries.async_schedule_reload` already
+de-duplicates), `async_step_user`/`reconfigure` hydration, the provider step with its type-switch reset,
+the credentials dispatch, and the create-vs-`async_update_and_abort` tail with the
+`SOURCE_RECONFIGURE`→`SOURCE_USER` rewrite (~170 of ~330 lines each). Flagged by the /code-review pass
+on the TTS PR.
+
+**Why:** The next skeleton change (a third backend type, the `_source` rewrite breaking on an HA release,
+a `current_subentry` disambiguation fix) has to be made and tested twice; drift is already visible in
+the comments the two copies carry.
+
+**How to apply:** An `OpenAICompatibleProviderSubentryFlow(ConfigSubentryFlow)` base in
+`flows/openai_compatible_endpoint.py` parameterised by `subentry_type`, `provider_names`,
+`fallback_name`, and `provider_id_key`, with an abstract `async_step_model`; each concrete flow keeps
+only its model step (~40 lines). Swap `_schedule_reload` for `async_schedule_reload` in all five flows
+while there.
+
+**Effort:** M
+**Priority:** P3
+
 ### STT entities are not bound to their subentry in the entity registry
 
 **What:** `stt.py::async_setup_entry` calls `async_add_entities(entities)` without
@@ -1492,9 +1516,10 @@ platform, but the orphan is visible after a delete.
 ### Migrate the model-provider `openai_compatible` flow onto the shared endpoint helper
 
 **What:** The STT and TTS provider flows now share one copy of the OpenAI-compatible endpoint
-convention — `flows/openai_compatible_endpoint.py` (normalize `/v1` at write time, `api_key: None`
-for keyless, `CONF_OPENAI_COMPATIBLE_ENDPOINT_BASE_URL`, runtime placeholder `LOCAL_KEYLESS_API_KEY`
-+ per-request `Omit()` header strip). The model-provider flow's `openai_compatible` type still uses
+convention — `flows/openai_compatible_endpoint.py` on the flow side (normalize `/v1` at write time,
+`api_key: None` for keyless, `CONF_OPENAI_COMPATIBLE_ENDPOINT_BASE_URL`) and `core/openai_endpoint.py`
+on the runtime side (linked-provider key resolution, placeholder `LOCAL_KEYLESS_API_KEY` + per-request
+`Omit()` header strip, cached no-retry client on HA's shared httpx client). The model-provider flow's `openai_compatible` type still uses
 the older shape: raw `ensure_http_url(...)` stored and normalized at read time
 (`__init__.py` ChatOpenAI/OpenAIEmbeddings construction), and the literal `"none"` keyless sentinel,
 which is written in three places (`flows/model_provider_subentry_flow.py`, `core/subentry_resolver.py`
