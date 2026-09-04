@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.38.1] - 2026-09-04
+
+### Fixed
+
+- **No more device-registry deprecation warning on Home Assistant 2026.9.** Home Assistant 2026.9 deprecated using the device registry's `devices` collection as a mapping and removes that use in 2027.9. The home-state snapshot looked devices up that way while resolving entity areas, so the first snapshot build after startup logged a deprecation warning against this integration. The snapshot now resolves devices through the registry's public lookup, which is supported on every Home Assistant release the integration runs on. No behavior or configuration changes.
+
 ## [3.38.0] - 2026-09-04
 
 ### Added
