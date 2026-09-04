@@ -152,6 +152,61 @@
         "unknown": "Neočekávaná chyba."
       }
     },
+    "tts_provider": {
+      "entry_type": "service",
+      "abort": {
+        "reconfigure_successful": "Poskytovatel TTS byl aktualizován."
+      },
+      "initiate_flow": {
+        "reconfigure": "Přenastavit poskytovatele TTS",
+        "user": "Přidat poskytovatele TTS"
+      },
+      "step": {
+        "provider": {
+          "title": "Poskytovatel převodu textu na řeč (TTS)",
+          "description": "Vyberte typ a název poskytovatele.",
+          "data": {
+            "provider_type": "Poskytovatel",
+            "name": "Název poskytovatele"
+          }
+        },
+        "credentials": {
+          "title": "Přihlašovací údaje",
+          "description": "Vyberte způsob autentizace poskytovatele TTS. Lokální poskytovatelé se místo toho připojují přes URL serveru kompatibilního s OpenAI.",
+          "data": {
+            "openai_provider_subentry_id": "Znovu použít poskytovatele OpenAI",
+            "api_key": "API klíč",
+            "base_url": "URL serveru"
+          },
+          "data_description": {
+            "api_key": "Vyžadováno pro OpenAI. Volitelné pro lokální servery bez autentizace.",
+            "base_url": "OpenAI-kompatibilní koncový bod lokálního TTS serveru, např. instance Speaches. Chybějící přípona /v1 se doplní automaticky."
+          }
+        },
+        "model": {
+          "title": "Model, hlas a pokročilé možnosti",
+          "description": "Vyberte model a hlas a volitelná pokročilá nastavení.",
+          "data": {
+            "model_name": "Model",
+            "voice": "Hlas",
+            "speed": "Rychlost",
+            "instructions": "Pokyny pro hlas (volitelné)"
+          },
+          "data_description": {
+            "voice": "OpenAI: alloy, ash, ballad, cedar, coral, echo, fable, marin, nova, onyx, sage, shimmer nebo verse. Lokální: identifikátor hlasu, který poskytuje model serveru, např. af_heart pro Kokoro.",
+            "speed": "Násobek rychlosti přehrávání, 0,25 až 4,0. 1,0 je normální rychlost.",
+            "instructions": "Jak má hlas znít, např. tón nebo tempo. Používají pouze modely OpenAI gpt-4o-mini-tts; jinde se ignoruje."
+          }
+        }
+      },
+      "error": {
+        "cannot_connect": "K poskytovateli se nelze připojit.",
+        "invalid_auth": "Neplatné přihlašovací údaje.",
+        "invalid_model": "Vyberte platný model.",
+        "not_supported": "Poskytovatel zatím není podporován.",
+        "unknown": "Neočekávaná chyba."
+      }
+    },
     "sentinel": {
       "entry_type": "service",
       "abort": {

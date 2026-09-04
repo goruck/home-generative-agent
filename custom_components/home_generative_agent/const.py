@@ -14,6 +14,7 @@ SUBENTRY_TYPE_DATABASE = "database"
 SUBENTRY_TYPE_MODEL_PROVIDER = "model_provider"
 SUBENTRY_TYPE_FEATURE = "feature"
 SUBENTRY_TYPE_STT_PROVIDER = "stt_provider"
+SUBENTRY_TYPE_TTS_PROVIDER = "tts_provider"
 SUBENTRY_TYPE_SENTINEL = "sentinel"
 
 HTTP_STATUS_UNAUTHORIZED = 401
@@ -407,6 +408,20 @@ GEMINI_3_RECOMMENDED_TEMPERATURE = 1.0
 # --- Anthropic API key ---
 CONF_ANTHROPIC_API_KEY = "anthropic_api_key"
 
+# ---- OpenAI-compatible endpoints (shared by the STT and TTS provider flows) ----
+# Settings key under which a local server's normalized base URL is stored. The
+# STT and TTS provider subentries use the same key and the same shared flow
+# helper (flows/openai_compatible_endpoint.py).
+CONF_OPENAI_COMPATIBLE_ENDPOINT_BASE_URL = "base_url"
+# Keyless local servers get a placeholder key, NOT an empty one: openai>=2.45
+# (the version HA 2026.8+ ships) rejects an empty api_key in the constructor
+# with "Missing credentials". The placeholder never reaches the wire — the
+# runtime strips the Authorization header per request with the SDK's ``Omit``
+# sentinel, matching the flow's keyless validation request. A bogus bearer
+# would be rejected by auth proxies (e.g. LiteLLM virtual keys) even though
+# validation passed.
+LOCAL_KEYLESS_API_KEY = "sk-hga-keyless-local"
+
 # ---- Speech-to-Text (STT) ----
 CONF_STT_OPENAI_PROVIDER_ID = "openai_provider_subentry_id"
 CONF_STT_MODEL_NAME = "model_name"
@@ -425,20 +440,53 @@ RECOMMENDED_OPENAI_STT_MODEL: STT_MODEL_OPENAI_SUPPORTED = "gpt-4o-mini-transcri
 STT_RESPONSE_FORMATS = ("text", "json", "verbose_json", "srt", "vtt")
 
 # Local (OpenAI-compatible) STT provider, e.g. Speaches serving faster-whisper.
-CONF_STT_BASE_URL = "base_url"
 # Speaches model ID; the flow accepts any custom value, this is only a default.
 # Systran's large-v3-turbo repo went private on Hugging Face (2026-09); this is
 # the public CTranslate2 conversion of the same weights, tagged so Speaches'
 # registry accepts it.
 RECOMMENDED_LOCAL_STT_MODEL = "deepdml/faster-whisper-large-v3-turbo-ct2"
-# Keyless local servers get a placeholder key, NOT an empty one: openai>=2.45
-# (the version HA 2026.8+ ships) rejects an empty api_key in the constructor
-# with "Missing credentials". The placeholder never reaches the wire — the
-# runtime strips the Authorization header per request with the SDK's ``Omit``
-# sentinel, matching the flow's keyless validation request. A bogus bearer
-# would be rejected by auth proxies (e.g. LiteLLM virtual keys) even though
-# validation passed.
-LOCAL_STT_KEYLESS_API_KEY = "sk-hga-keyless-local"
+
+# ---- Text-to-Speech (TTS) ----
+CONF_TTS_OPENAI_PROVIDER_ID = "openai_provider_subentry_id"
+CONF_TTS_MODEL_NAME = "model_name"
+CONF_TTS_VOICE = "voice"
+CONF_TTS_SPEED = "speed"
+CONF_TTS_INSTRUCTIONS = "instructions"
+
+TTS_MODEL_OPENAI_SUPPORTED = Literal["gpt-4o-mini-tts", "tts-1", "tts-1-hd"]
+RECOMMENDED_OPENAI_TTS_MODEL: TTS_MODEL_OPENAI_SUPPORTED = "gpt-4o-mini-tts"
+# Only the gpt-4o-mini-tts family accepts the `instructions` parameter; the API
+# rejects it for tts-1 / tts-1-hd, so the runtime gates on this prefix.
+TTS_INSTRUCTIONS_MODEL_PREFIX = "gpt-4o-mini-tts"
+# Built-in OpenAI voices, display-cased; voice ids are the lowercase form.
+OPENAI_TTS_VOICES = (
+    "Alloy",
+    "Ash",
+    "Ballad",
+    "Cedar",
+    "Coral",
+    "Echo",
+    "Fable",
+    "Marin",
+    "Nova",
+    "Onyx",
+    "Sage",
+    "Shimmer",
+    "Verse",
+)
+RECOMMENDED_OPENAI_TTS_VOICE = "alloy"
+# Local (OpenAI-compatible) TTS provider, e.g. Speaches serving Kokoro.
+RECOMMENDED_LOCAL_TTS_MODEL = "speaches-ai/Kokoro-82M-v1.0-ONNX"
+RECOMMENDED_LOCAL_TTS_VOICE = "af_heart"
+TTS_SPEED_MIN = 0.25
+TTS_SPEED_MAX = 4.0
+TTS_SPEED_DEFAULT = 1.0
+# Audio containers each backend can produce. Home Assistant converts anything
+# else with ffmpeg, so the entity only has to pick something the backend
+# accepts; Speaches (faster-whisper/Kokoro) rejects opus and aac.
+TTS_OPENAI_RESPONSE_FORMATS = frozenset({"mp3", "opus", "aac", "flac", "wav", "pcm"})
+TTS_LOCAL_RESPONSE_FORMATS = frozenset({"mp3", "flac", "wav", "pcm"})
+TTS_DEFAULT_RESPONSE_FORMAT = "mp3"
 
 # ---------------- Chat model ----------------
 CHAT_MODEL_TOP_P = 1.0

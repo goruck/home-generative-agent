@@ -1,4 +1,4 @@
-"""Speech-to-text provider config subentry flow."""
+"""Text-to-speech provider config subentry flow."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from homeassistant.config_entries import (
     SubentryFlowResult,
 )
 from homeassistant.helpers.selector import (
-    BooleanSelector,
     NumberSelector,
     NumberSelectorConfig,
     SelectOptionDict,
@@ -26,18 +25,20 @@ from homeassistant.helpers.selector import (
 )
 
 from ..const import (  # noqa: TID252
-    CONF_STT_LANGUAGE,
-    CONF_STT_MODEL_NAME,
-    CONF_STT_OPENAI_PROVIDER_ID,
-    CONF_STT_PROMPT,
-    CONF_STT_RESPONSE_FORMAT,
-    CONF_STT_TEMPERATURE,
-    CONF_STT_TRANSLATE,
-    RECOMMENDED_LOCAL_STT_MODEL,
-    RECOMMENDED_OPENAI_STT_MODEL,
-    STT_MODEL_OPENAI_SUPPORTED,
-    STT_RESPONSE_FORMATS,
-    SUBENTRY_TYPE_STT_PROVIDER,
+    CONF_TTS_INSTRUCTIONS,
+    CONF_TTS_MODEL_NAME,
+    CONF_TTS_OPENAI_PROVIDER_ID,
+    CONF_TTS_SPEED,
+    CONF_TTS_VOICE,
+    RECOMMENDED_LOCAL_TTS_MODEL,
+    RECOMMENDED_LOCAL_TTS_VOICE,
+    RECOMMENDED_OPENAI_TTS_MODEL,
+    RECOMMENDED_OPENAI_TTS_VOICE,
+    SUBENTRY_TYPE_TTS_PROVIDER,
+    TTS_MODEL_OPENAI_SUPPORTED,
+    TTS_SPEED_DEFAULT,
+    TTS_SPEED_MAX,
+    TTS_SPEED_MIN,
 )
 from .openai_compatible_endpoint import (
     build_local_endpoint_settings,
@@ -52,17 +53,26 @@ from .openai_compatible_endpoint import (
 LOGGER = logging.getLogger(__name__)
 
 ProviderNames = {
-    "openai": "STT - OpenAI",
-    "local": "STT - Local",
+    "openai": "TTS - OpenAI",
+    "local": "TTS - Local",
 }
-_FALLBACK_NAME = "STT Provider"
+_FALLBACK_NAME = "TTS Provider"
 
 
-class SttProviderSubentryFlow(ConfigSubentryFlow):
-    """Config flow handler for STT provider subentries."""
+def _coerce_speed(value: Any) -> float:
+    """Clamp a submitted speed into the API's range; blank means the default."""
+    try:
+        speed = float(value)
+    except (TypeError, ValueError):
+        return TTS_SPEED_DEFAULT
+    return min(max(speed, TTS_SPEED_MIN), TTS_SPEED_MAX)
+
+
+class TtsProviderSubentryFlow(ConfigSubentryFlow):
+    """Config flow handler for TTS provider subentries."""
 
     def __init__(self) -> None:
-        """Initialize the STT provider flow."""
+        """Initialize the TTS provider flow."""
         self._provider_type: str | None = None
         self._name: str | None = None
         self._settings: dict[str, Any] = {}
@@ -77,8 +87,8 @@ class SttProviderSubentryFlow(ConfigSubentryFlow):
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
-        """Entry point for STT provider setup or reconfigure."""
-        current = current_subentry(self, SUBENTRY_TYPE_STT_PROVIDER)
+        """Entry point for TTS provider setup or reconfigure."""
+        current = current_subentry(self, SUBENTRY_TYPE_TTS_PROVIDER)
         if current:
             self._provider_type = current.data.get("provider_type")
             self._name = current.data.get("name") or ProviderNames.get(
@@ -101,12 +111,10 @@ class SttProviderSubentryFlow(ConfigSubentryFlow):
                 self._provider_type is not None and provider_type != self._provider_type
             )
             if type_changed:
-                # Switching provider types must not carry state across.
-                # Settings: the stored OpenAI key would otherwise prefill the
-                # local server's optional key field and be sent to a plaintext
-                # LAN endpoint (the model-provider flow guards the same leak).
-                # Model: the other type's model ID is invalid or a silent 404
-                # for the new one.
+                # Switching provider types must not carry state across: the
+                # stored OpenAI key would otherwise prefill the local server's
+                # optional key field, and the other type's model and voice ids
+                # are invalid for the new one.
                 self._settings = {}
                 self._model = {}
             self._name = resolve_provider_name(
@@ -161,20 +169,19 @@ class SttProviderSubentryFlow(ConfigSubentryFlow):
         if user_input is not None:
             if provider_type == "local":
                 settings, error = await build_local_endpoint_settings(
-                    self.hass, user_input, provider_id_key=CONF_STT_OPENAI_PROVIDER_ID
+                    self.hass, user_input, provider_id_key=CONF_TTS_OPENAI_PROVIDER_ID
                 )
             elif provider_type == "openai":
                 settings, error = await build_openai_key_settings(
                     self.hass,
                     openai_opts,
                     user_input,
-                    provider_id_key=CONF_STT_OPENAI_PROVIDER_ID,
+                    provider_id_key=CONF_TTS_OPENAI_PROVIDER_ID,
                 )
             else:
                 # Unreachable today (the provider select admits only the two
                 # types above, custom_value=False) — kept so a future type
-                # added to the select but not wired here fails visibly
-                # instead of storing an empty credentials payload.
+                # added to the select but not wired here fails visibly.
                 settings, error = {}, "not_supported"
             if error:
                 errors["base"] = error
@@ -185,8 +192,7 @@ class SttProviderSubentryFlow(ConfigSubentryFlow):
         if provider_type == "local":
             # On a validation error, redisplay what was just typed — not the
             # stored settings — so a retry against a booting server does not
-            # demand retyping the URL, and a corrected typo does not silently
-            # revert to the saved value.
+            # demand retyping the URL.
             prefill = (
                 user_input if user_input is not None and errors else self._settings
             )
@@ -201,7 +207,7 @@ class SttProviderSubentryFlow(ConfigSubentryFlow):
             data_schema=openai_key_schema(
                 openai_opts,
                 self._settings,
-                provider_id_key=CONF_STT_OPENAI_PROVIDER_ID,
+                provider_id_key=CONF_TTS_OPENAI_PROVIDER_ID,
             ),
             errors=errors,
         )
@@ -209,36 +215,42 @@ class SttProviderSubentryFlow(ConfigSubentryFlow):
     async def async_step_model(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
-        """Configure model and advanced STT options."""
+        """Configure model, voice, and advanced TTS options."""
         errors: dict[str, str] = {}
-        current = current_subentry(self, SUBENTRY_TYPE_STT_PROVIDER)
+        current = current_subentry(self, SUBENTRY_TYPE_TTS_PROVIDER)
         model_data = dict(self._model)
+        provider_type = self._provider_type or "openai"
+        if provider_type == "local":
+            recommended_model = RECOMMENDED_LOCAL_TTS_MODEL
+            recommended_voice = RECOMMENDED_LOCAL_TTS_VOICE
+        else:
+            recommended_model = RECOMMENDED_OPENAI_TTS_MODEL
+            recommended_voice = RECOMMENDED_OPENAI_TTS_VOICE
 
         if user_input is not None:
-            model_name = user_input.get(CONF_STT_MODEL_NAME)
+            model_name = user_input.get(CONF_TTS_MODEL_NAME)
             if not model_name:
                 errors["base"] = "invalid_model"
             else:
-                model_data[CONF_STT_MODEL_NAME] = model_name
-                model_data[CONF_STT_LANGUAGE] = (
-                    user_input.get(CONF_STT_LANGUAGE) or None
+                model_data[CONF_TTS_MODEL_NAME] = model_name
+                voice = str(user_input.get(CONF_TTS_VOICE) or "").strip()
+                if provider_type == "openai":
+                    # The API's voice enum is lowercase while the advertised
+                    # labels are display-cased ("Nova"); accept either.
+                    voice = voice.lower()
+                model_data[CONF_TTS_VOICE] = voice or recommended_voice
+                model_data[CONF_TTS_SPEED] = _coerce_speed(
+                    user_input.get(CONF_TTS_SPEED)
                 )
-                model_data[CONF_STT_PROMPT] = user_input.get(CONF_STT_PROMPT) or None
-                model_data[CONF_STT_TEMPERATURE] = user_input.get(CONF_STT_TEMPERATURE)
-                model_data[CONF_STT_TRANSLATE] = bool(
-                    user_input.get(CONF_STT_TRANSLATE)
-                )
-                model_data[CONF_STT_RESPONSE_FORMAT] = user_input.get(
-                    CONF_STT_RESPONSE_FORMAT
+                model_data[CONF_TTS_INSTRUCTIONS] = (
+                    user_input.get(CONF_TTS_INSTRUCTIONS) or None
                 )
 
             if not errors:
                 payload = {
-                    "provider_type": self._provider_type or "openai",
+                    "provider_type": provider_type,
                     "name": self._name
-                    or ProviderNames.get(
-                        self._provider_type or "openai", _FALLBACK_NAME
-                    ),
+                    or ProviderNames.get(provider_type, _FALLBACK_NAME),
                     "settings": self._settings,
                     "model": model_data,
                 }
@@ -258,29 +270,23 @@ class SttProviderSubentryFlow(ConfigSubentryFlow):
                     title=payload["name"],
                 )
 
-        provider_type = self._provider_type or "openai"
         if provider_type == "local":
             model_options = [
-                SelectOptionDict(
-                    label=RECOMMENDED_LOCAL_STT_MODEL,
-                    value=RECOMMENDED_LOCAL_STT_MODEL,
-                )
+                SelectOptionDict(label=recommended_model, value=recommended_model)
             ]
-            recommended_model = RECOMMENDED_LOCAL_STT_MODEL
             allow_custom_model = True
         else:
             model_options = [
                 SelectOptionDict(label=model, value=model)
-                for model in get_args(STT_MODEL_OPENAI_SUPPORTED)
+                for model in get_args(TTS_MODEL_OPENAI_SUPPORTED)
             ]
-            recommended_model = RECOMMENDED_OPENAI_STT_MODEL
             allow_custom_model = False
 
         schema = vol.Schema(
             {
                 vol.Required(
-                    CONF_STT_MODEL_NAME,
-                    default=model_data.get(CONF_STT_MODEL_NAME, recommended_model),
+                    CONF_TTS_MODEL_NAME,
+                    default=model_data.get(CONF_TTS_MODEL_NAME, recommended_model),
                 ): SelectSelector(
                     SelectSelectorConfig(
                         options=model_options,
@@ -290,43 +296,33 @@ class SttProviderSubentryFlow(ConfigSubentryFlow):
                     )
                 ),
                 vol.Optional(
-                    CONF_STT_LANGUAGE,
-                    description={"suggested_value": model_data.get(CONF_STT_LANGUAGE)},
-                    default=model_data.get(CONF_STT_LANGUAGE) or "",
+                    CONF_TTS_VOICE,
+                    description={
+                        "suggested_value": model_data.get(CONF_TTS_VOICE)
+                        or recommended_voice
+                    },
+                    default=model_data.get(CONF_TTS_VOICE) or recommended_voice,
                 ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
                 vol.Optional(
-                    CONF_STT_PROMPT,
-                    description={"suggested_value": model_data.get(CONF_STT_PROMPT)},
-                    default=model_data.get(CONF_STT_PROMPT) or "",
-                ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
-                vol.Optional(
-                    CONF_STT_TEMPERATURE,
+                    CONF_TTS_SPEED,
                     description={
-                        "suggested_value": model_data.get(CONF_STT_TEMPERATURE)
+                        "suggested_value": model_data.get(
+                            CONF_TTS_SPEED, TTS_SPEED_DEFAULT
+                        )
                     },
-                ): NumberSelector(NumberSelectorConfig(min=0.0, max=1.0, step=0.1)),
-                vol.Optional(
-                    CONF_STT_TRANSLATE,
-                    description={"suggested_value": model_data.get(CONF_STT_TRANSLATE)},
-                    default=bool(model_data.get(CONF_STT_TRANSLATE)),
-                ): BooleanSelector(),
-                vol.Optional(
-                    CONF_STT_RESPONSE_FORMAT,
-                    description={
-                        "suggested_value": model_data.get(CONF_STT_RESPONSE_FORMAT)
-                    },
-                    default=model_data.get(CONF_STT_RESPONSE_FORMAT) or "text",
-                ): SelectSelector(
-                    SelectSelectorConfig(
-                        options=[
-                            SelectOptionDict(label=fmt, value=fmt)
-                            for fmt in STT_RESPONSE_FORMATS
-                        ],
-                        mode=SelectSelectorMode.DROPDOWN,
-                        sort=False,
-                        custom_value=False,
+                    default=model_data.get(CONF_TTS_SPEED, TTS_SPEED_DEFAULT),
+                ): NumberSelector(
+                    NumberSelectorConfig(
+                        min=TTS_SPEED_MIN, max=TTS_SPEED_MAX, step=0.05
                     )
                 ),
+                vol.Optional(
+                    CONF_TTS_INSTRUCTIONS,
+                    description={
+                        "suggested_value": model_data.get(CONF_TTS_INSTRUCTIONS)
+                    },
+                    default=model_data.get(CONF_TTS_INSTRUCTIONS) or "",
+                ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             }
         )
 
