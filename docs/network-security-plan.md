@@ -32,9 +32,9 @@ the installed integrations can see.
   alarms exposed to voice assistants, cloud remote access, pending updates).
 - Explain findings and per-device privacy exposure in plain language via the
   LLM, using pseudonymized identifiers and an optional local-model override.
-- Work on every install: a home with no router integration still gets the
-  HA-native audit; a home with eero, UniFi, or another supported router gets
-  progressively more.
+- Work on every install: a home with no router integration still gets a
+  complete HA hardening audit (see HA-Only MVP); a home with Fritz!Box,
+  UniFi, eero, or another supported router gets progressively more.
 - Reuse existing Sentinel machinery (rules, baseline, discovery, notifier,
   audit trail, triage) rather than build a parallel pipeline.
 
@@ -168,6 +168,14 @@ class HaSecurityPosture(TypedDict, total=False):
     pending_updates: list[str]  # update.* entity_ids
     http_use_x_forwarded_for: bool
     http_trusted_proxies_configured: bool
+    http_ip_ban_enabled: bool
+    trusted_networks_bypass_login: bool
+    addons_with_host_ports: dict[str, list[int]]  # slug -> host ports
+    addons_unprotected: list[str]  # slugs with protection mode off
+    webhook_automations_public: list[str]  # automation entity_ids
+    unavailable_security_devices: dict[str, int]  # entity_id -> minutes
+    discovered_unconfigured: list[dict[str, str]]  # {handler, source, title}
+    discovered_ignored: list[dict[str, str]]
 
 
 class NetworkSnapshot(TypedDict):
@@ -342,6 +350,25 @@ translation key or unique-id suffix, never by friendly name.
   security device when its device is a lock, alarm, camera, or router.
 - **Device-registry MAC index.** `connections` entries of type `mac`, used to
   join router clients to HA devices and their integration domain.
+- **Security device availability.** Every `lock`, `alarm_control_panel`, and
+  `camera` entity whose state is `unavailable`, with minutes since
+  `last_changed`. Needs no router; HA already knows when it lost a device.
+- **Discovered but unconfigured devices.** In-progress config flows whose
+  source is `ssdp`, `zeroconf`, `dhcp`, or `homekit`, plus config entries
+  with source `ignore`. This is a partial LAN inventory HA collects on
+  every install without any router integration.
+- **Supervisor add-ons** (HA OS and Supervised only). Via the `hassio`
+  component's add-on info: add-ons with container ports mapped to the host,
+  and add-ons running with protection mode off. Absent on Container and
+  Core installs, reported as a missing capability.
+- **Webhook automations.** Automations whose raw config has a webhook
+  trigger with `local_only: false`, read from the automation entities'
+  stored config. These are reachable from the internet whenever remote
+  access is on.
+- **Auth providers.** A `trusted_networks` provider with
+  `allow_bypass_login` enabled.
+- **HTTP settings.** `use_x_forwarded_for` without trusted proxies, and IP
+  banning disabled, from the `http` component's runtime configuration.
 
 ## Known-Device Inventory
 
@@ -384,12 +411,19 @@ would enable it.
 |---|---|---|---|
 | `network_unknown_device_joined` | `network.clients` | high while away or at night, medium otherwise | 1 |
 | `network_upnp_enabled` | `network.posture.upnp_enabled` | medium | 1 |
-| `network_security_device_offline` | `network.clients` | high for lock/alarm/camera devices offline > N min | 1 |
+| `security_device_unavailable` | none (HA-native); `network.clients` corroborates when present | high for lock/alarm/camera unavailable > N min | 1 |
 | `network_router_update_pending` | `network.posture.router_update_pending` | medium | 1 |
 | `ha_sensitive_entity_exposed_without_pin` | `network.ha_security.exposed_sensitive_entities` | high | 1 |
 | `ha_long_lived_token_stale` | `network.ha_security.long_lived_tokens_unused_days` | low | 1 |
 | `ha_new_admin_or_token` | `network.ha_security.*` | high | 1 |
 | `ha_failed_logins` | `network.ha_security.failed_login_notification_present` | medium | 1 |
+| `ha_cloud_remote_ui_enabled` | `network.ha_security.cloud_remote_ui_enabled` | low, informational | 1 |
+| `ha_addon_exposed_port` | `network.ha_security.addons_with_host_ports` | medium; high for SSH, Samba, or a database | 1 |
+| `ha_addon_unprotected` | `network.ha_security.addons_unprotected` | high | 1 |
+| `ha_webhook_automation_public` | `network.ha_security.webhook_automations_public` | medium; high when the automation targets a critical action | 1 |
+| `ha_trusted_networks_bypass_login` | `network.ha_security.trusted_networks_bypass_login` | medium | 1 |
+| `ha_http_proxy_misconfigured` | `network.ha_security.http_*` | medium | 1 |
+| `network_unconfigured_discovered_device` | `network.ha_security.discovered_unconfigured` | low; medium while away for a camera or NVR handler | 1 |
 | `network_guest_network_idle` | `network.posture.guest_network_enabled`, `guest_client_count` | low, after N days idle | 1 |
 | `network_wpa3_disabled` | `network.posture.wpa3_enabled` | low, advisory only | 1 |
 | `network_protection_disabled` | `malware_blocking_enabled` or `ad_blocking_enabled` | medium | 1 |
@@ -401,6 +435,12 @@ would enable it.
 | `network_public_ip_changed` | `network.posture.public_ip_changed` | info | 2 |
 
 Rule conventions:
+
+- A rule may also declare `corroborates: frozenset[str]` for capabilities
+  that improve its evidence but are not required. `security_device_unavailable`
+  runs everywhere on entity availability and, when `network.clients` is
+  present, adds whether the router still sees the device, which separates
+  an integration outage from a device that left the network.
 
 - `triggering_entities` holds the tracker, switch, or update entity id so the
   existing per-type entity exclusions and snooze machinery work unchanged.
@@ -416,6 +456,40 @@ Rule conventions:
   administered bit set (randomized MAC) and whose hostname matches a trusted
   client is reported once at low severity, not as a new device every
   rotation. Phones do this constantly.
+
+## HA-Only MVP
+
+A home with no router or DNS integration still gets a complete, useful audit,
+because the highest-value target on the network is Home Assistant itself and
+HA already knows its own attack surface. This is the minimum every install
+receives, and it is the first thing to build and validate.
+
+| Rule | Runs with no third-party integration | Source |
+|---|---|---|
+| `ha_sensitive_entity_exposed_without_pin` | yes | exposed-entities registry, HGA options |
+| `ha_new_admin_or_token` | yes | auth registry |
+| `ha_long_lived_token_stale` | yes | auth registry |
+| `ha_failed_logins` | yes | `http-login` persistent notification |
+| `ha_cloud_remote_ui_enabled` | yes, when the cloud integration is loaded | cloud preferences |
+| `ha_addon_exposed_port` / `ha_addon_unprotected` | yes on HA OS and Supervised | Supervisor add-on info |
+| `ha_webhook_automation_public` | yes | automation raw config |
+| `ha_trusted_networks_bypass_login` | yes | auth providers |
+| `ha_http_proxy_misconfigured` | yes | `http` runtime config |
+| `security_device_unavailable` | yes | entity availability |
+| `network_unconfigured_discovered_device` | yes | in-progress and ignored discovery flows |
+| `network_router_update_pending` | partly | any `update.*` entity |
+| `network_upnp_enabled`, `network_public_ip_changed` | on about a third of installs | the core, auto-discovered `upnp` integration |
+| `network_unknown_device_joined`, guest, WPA3, port-forward, VLAN rules | no | need a router adapter |
+
+The `audit_home_security` tool reports the last row as missing capabilities
+and names the integrations that would unlock them, so a user without a router
+integration is told exactly what they are not seeing rather than shown a
+clean bill of health.
+
+Validation order: build `ha_native` and the rules above first, run them on a
+plain HA install with no router integration, and only then add the router
+adapters. If the HA-only audit is not useful on its own, the router adapters
+will not rescue it.
 
 ## Baseline Extension
 
@@ -585,6 +659,11 @@ Mechanics:
   merge and precedence, capability list correctness, MAC join to the device
   registry, pseudonymization stability across runs and instability across
   installs.
+- `tests/.../test_snapshot_ha_native.py`: auth, exposed entities, add-on
+  info, webhook automations, auth providers, discovery flows, and
+  availability, each with and without the underlying component loaded, so
+  a Container install reports add-on capabilities as missing rather than
+  failing.
 - `tests/.../test_rules_network.py`: each rule against synthetic snapshots,
   including the randomized-MAC suppression and grace windows.
 - `tests/.../test_engine_capability_gating.py`: rules skipped when
@@ -644,15 +723,17 @@ Resolved with the maintainer during design review.
 ## Implementation Order (Phase 1)
 
 1. `platform` field on `SnapshotEntity`, builder change, schema bump.
-2. `snapshot/network.py` with `ha_native`, `generic_router_tracker`,
-   `upnp_igd`, `fritz`, `unifi`, `adguard`, and `eero` adapters;
-   pseudonymization helper; capability list.
-3. `sentinel/network_inventory.py` store and services.
-4. Engine capability gating and health-sensor reporting.
-5. Phase 1 rules from the catalogue, in the order listed.
-6. `redact_network_identifiers` in the explain path; `network_audit` feature
+2. `snapshot/network.py` with the `ha_native` adapter only; pseudonymization
+   helper; capability list.
+3. Engine capability gating and health-sensor reporting.
+4. The HA-only MVP rules, validated on an install with no router
+   integration.
+5. `generic_router_tracker`, `upnp_igd`, `fritz`, `unifi`, `adguard`, and
+   `eero` adapters, then the remaining phase 1 rules.
+6. `sentinel/network_inventory.py` store and services.
+7. `redact_network_identifiers` in the explain path; `network_audit` feature
    type and resolver plumbing.
-7. `audit_home_security` tool, system prompt addition, `run_network_audit`
+8. `audit_home_security` tool, system prompt addition, `run_network_audit`
    service.
-8. Baseline counters and discovery templates.
-9. Docs and CHANGELOG.
+9. Baseline counters and discovery templates.
+10. Docs and CHANGELOG.
