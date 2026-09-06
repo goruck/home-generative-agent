@@ -116,21 +116,22 @@ It is `NotRequired` so stored snapshots and existing tests remain valid. The
 
 ```python
 class NetworkClient(TypedDict):
-    key: str                       # stable id: pseudonymized MAC (see Privacy)
-    mac: NotRequired[str | None]   # raw, stripped before any LLM call
+    key: str  # stable id: pseudonymized MAC (see Privacy)
+    mac: NotRequired[str | None]  # raw, stripped before any LLM call
     ip: NotRequired[str | None]
     hostname: NotRequired[str | None]
     manufacturer: NotRequired[str | None]
-    connection_type: NotRequired[str | None]   # "wired" | "wireless" | None
-    network_name: NotRequired[str | None]      # SSID / VLAN / "guest" when known
+    connection_type: NotRequired[str | None]  # "wired" | "wireless" | None
+    network_name: NotRequired[str | None]  # SSID / VLAN / "guest" when known
     connected: bool
     last_seen: NotRequired[str | None]
-    ha_device_id: NotRequired[str | None]      # device-registry join, if any
-    ha_integration: NotRequired[str | None]    # e.g. "shelly" when joined
+    ha_device_id: NotRequired[str | None]  # device-registry join, if any
+    ha_integration: NotRequired[str | None]  # e.g. "shelly" when joined
     tracker_entity_id: NotRequired[str | None]
     signal: NotRequired[float | None]
     usage_day_bytes: NotRequired[int | None]
     blocked_day: NotRequired[int | None]
+
 
 class NetworkPosture(TypedDict, total=False):
     upnp_enabled: bool
@@ -147,26 +148,28 @@ class NetworkPosture(TypedDict, total=False):
     public_ip_changed: bool
     # every key carries a companion "<key>_entity_id" for evidence/fixes
 
+
 class HaSecurityPosture(TypedDict, total=False):
     admin_user_count: int
     long_lived_token_count: int
-    long_lived_tokens_unused_days: dict[str, int]      # client_name -> days
-    refresh_tokens_from_new_ip: list[str]              # client names
+    long_lived_tokens_unused_days: dict[str, int]  # client_name -> days
+    refresh_tokens_from_new_ip: list[str]  # client names
     failed_login_notification_present: bool
-    exposed_sensitive_entities: dict[str, list[str]]   # assistant -> entity_ids
+    exposed_sensitive_entities: dict[str, list[str]]  # assistant -> entity_ids
     critical_action_pin_enabled: bool
     cloud_remote_ui_enabled: bool
-    pending_updates: list[str]                          # update.* entity_ids
+    pending_updates: list[str]  # update.* entity_ids
     http_use_x_forwarded_for: bool
     http_trusted_proxies_configured: bool
 
+
 class NetworkSnapshot(TypedDict):
-    capabilities: list[str]         # dotted paths present, e.g. "network.posture.upnp_enabled"
-    sources: dict[str, str]         # capability -> platform that provided it
+    capabilities: list[str]  # dotted paths present, e.g. "network.posture.upnp_enabled"
+    sources: dict[str, str]  # capability -> platform that provided it
     clients: list[NetworkClient]
     posture: NetworkPosture
     ha_security: HaSecurityPosture
-    counters: dict[str, float]      # baseline inputs, see Baseline section
+    counters: dict[str, float]  # baseline inputs, see Baseline section
 ```
 
 `FullStateSnapshot` gains `network: NotRequired[NetworkSnapshot]`. The
