@@ -42,7 +42,8 @@ the installed integrations can see.
 
 - **No active scanning.** No nmap, ARP sweeps, or port probes from the HA host.
   Everything is derived from what HA already ingests. This is a hard scope
-  decision, not a phasing one.
+  decision, not a phasing one. A user who already runs the `nmap_tracker`
+  integration is a data source like any other; HGA never initiates scans.
 - **No fixes in phase 1.** The first implementation is read-only: it audits,
   notifies, and recommends. PIN-gated remediation is phase 2.
 - No deep packet inspection or flow analysis; HGA never sees traffic.
@@ -131,6 +132,8 @@ class NetworkClient(TypedDict):
     signal: NotRequired[float | None]
     usage_day_bytes: NotRequired[int | None]
     blocked_day: NotRequired[int | None]
+    is_guest: NotRequired[bool | None]  # UniFi, Fritz guest SSID
+    vlan: NotRequired[int | None]  # UniFi
 
 
 class NetworkPosture(TypedDict, total=False):
@@ -146,6 +149,10 @@ class NetworkPosture(TypedDict, total=False):
     router_update_pending: bool
     router_update_entities: list[str]
     public_ip_changed: bool
+    port_forwards: list[
+        dict[str, Any]
+    ]  # {entity_id, external_port, protocol, description}
+    wlan_enabled: dict[str, bool]  # WLAN name -> enabled
     # every key carries a companion "<key>_entity_id" for evidence/fixes
 
 
@@ -183,17 +190,105 @@ NetworkSnapshot`. The builder runs every adapter, merges results, and records
 which adapter provided each capability. Order matters only for conflicts, where
 a router-specific adapter wins over the generic one.
 
-| Adapter | Selected when | Provides |
+#### Adapter priority
+
+Priority follows Home Assistant's public analytics, which are opt-in and
+reported by roughly two-thirds of the installed base. Router-class
+integrations, most popular first:
+
+| Integration | Share of reporting installs | Notes |
 |---|---|---|
-| `ha_native` | always | `ha_security.*`, `posture.pending_updates`, device-registry MAC index |
-| `generic_router_tracker` | any `device_tracker` with `source_type: router` | `clients[]` with mac, ip, hostname when the tracker exposes them |
-| `eero` | any entity with `platform == "eero"` | everything in the eero table below |
-| `unifi` | `platform == "unifi"` | clients with VLAN, wired/wireless, uplink; block switches (phase 3) |
-| `fritz` / `asuswrt` / `openwrt` | by platform | clients; per-integration posture where exposed (phase 3) |
+| UPnP/IGD (`upnp`) | 32.8% | auto-discovered; its presence proves UPnP is on |
+| FRITZ!Box Tools (`fritz`) | 8.8% | local API; richest consumer-router integration |
+| UniFi Network (`unifi`) | 6.8% | local API; richest prosumer integration |
+| AdGuard Home (`adguard`) | 4.3% | DNS protection switches and counters |
+| Nmap Tracker (`nmap_tracker`) | 1.5% | client presence only, user-configured scanning |
+| Pi-hole (`pi_hole`) | 1.3% | DNS counters, protection switch |
+| ASUSWRT (`asuswrt`) | ~5,000 installs | clients, bandwidth |
+| TP-Link Omada (`tplink_omada`) | ~3,300 installs | clients, PoE, WLAN |
+| Keenetic NDMS2 (`keenetic_ndms2`) | ~3,200 installs | clients |
+| MikroTik (`mikrotik`) | ~2,900 installs | clients |
+| NETGEAR (`netgear`) | ~2,900 installs | clients, allow/block switches |
+| eero (HACS, `schmittx/home-assistant-eero`) | not in core analytics | cloud-only, unofficial API |
+
+Sources: the "used by N active installations" line on each integration's
+page at home-assistant.io (September 2026). eero is a community integration
+and does not appear in the core integration analytics; it is well below the
+top two.
+
+Phase 1 therefore ships `ha_native`, `generic_router_tracker`, `upnp_igd`,
+`fritz`, `unifi`, and `adguard`. `eero` also ships in phase 1, not on
+popularity but because the maintainer runs it and it is the only adapter that
+can be validated on real hardware during development; it doubles as the
+reference for cloud-only mesh integrations. The remaining routers are phase 3.
+
+| Adapter | Selected when | Provides | Phase |
+|---|---|---|---|
+| `ha_native` | always | `ha_security.*`, `posture.pending_updates`, device-registry MAC index | 1 |
+| `generic_router_tracker` | any `device_tracker` with `source_type: router` | `clients[]` with mac, ip, hostname when the tracker exposes them | 1 |
+| `upnp_igd` | a loaded `upnp` config entry, or an in-progress `upnp` discovery flow | `posture.upnp_enabled = True`, `posture.public_ip_changed` from the external-IP sensor, WAN status | 1 |
+| `fritz` | `platform == "fritz"` | clients, guest Wi-Fi, port forwards to the HA host, per-device internet access, firmware update | 1 |
+| `unifi` | `platform == "unifi"` | clients with VLAN, guest flag, wired/wireless; block, port-forward, WLAN, firewall, traffic-rule switches; device updates | 1 |
+| `adguard` | `platform == "adguard"` | protection, filtering, safe-browsing, parental switches; blocked-query counters | 1 |
+| `eero` | `platform == "eero"` | everything in the eero table below | 1 |
+| `pi_hole` | `platform == "pi_hole"` | protection switch, blocked-query counters | 3 |
+| `asuswrt` / `tplink_omada` / `keenetic_ndms2` / `mikrotik` / `netgear` | by platform | clients; per-integration posture where exposed | 3 |
 
 Adapters must not import integration code. They read entity state and
 attributes only, so they work whether the integration is core or HACS and
 they are testable with plain `hass.states` fixtures.
+
+#### FRITZ!Box adapter mapping
+
+From the core `fritz` integration source. Trackers carry `mac_address`,
+`last_time_reachable`, `connected_to`, `connection_type`, and `ssid`.
+
+| Normalized field | fritz entity | Notes |
+|---|---|---|
+| `clients[].mac/hostname` | `device_tracker.*` | hostname is the entity name |
+| `clients[].connection_type` | tracker attr `connection_type` | |
+| `clients[].network_name` | tracker attr `ssid` | guest SSID identifies guest clients |
+| `clients[].last_seen` | tracker attr `last_time_reachable` | |
+| `posture.guest_network_enabled` | Wi-Fi network switch for the guest network | |
+| `posture.port_forwards` | port-forward switches | only forwards whose target is the HA host are exposed |
+| `posture.router_update_pending` | `update.*` with `platform == "fritz"` | |
+| `posture.public_ip_changed` | external IP / IPv6 sensors | |
+| fix: per-device internet access | `switch.*_internet_access` | phase 2 |
+
+#### UniFi adapter mapping
+
+From the core `unifi` integration source. Connected client trackers carry
+`ip`, `mac`, `name`, `oui`, `essid`, `vlan`, `is_guest`, `is_wired`,
+`authorized`, `ap_mac`, `radio`, and `radio_proto`.
+
+| Normalized field | unifi entity | Notes |
+|---|---|---|
+| `clients[].mac/ip/hostname` | tracker attrs `mac`, `ip`, `name` | |
+| `clients[].manufacturer` | tracker attr `oui` | |
+| `clients[].connection_type` | tracker attr `is_wired` | |
+| `clients[].network_name` | tracker attrs `essid`, `vlan` | VLAN is the strongest IoT-segmentation signal available |
+| `clients[].is_guest` | tracker attr `is_guest` | new optional field |
+| `posture.port_forwards` | port-forward switches | |
+| `posture.wlan_enabled[]` | WLAN switches | |
+| `posture.firewall_policies` | firewall-policy and traffic-rule switches | informational in phase 1 |
+| `posture.router_update_pending` | `update.*` with `platform == "unifi"` | |
+| `counters.client.<key>.usage` | per-client bandwidth sensors | baseline input |
+| fix: block client | block-client switch | phase 2 |
+| fix: PoE off | PoE port switch | phase 2, cameras and APs |
+
+#### UPnP/IGD and AdGuard adapters
+
+- `upnp_igd`: a loaded `upnp` config entry means the router answered an
+  Internet Gateway Device discovery, which by definition means UPnP is on.
+  This gives `posture.upnp_enabled` on roughly a third of installs with no
+  router adapter at all. The integration's external-IP and WAN-status sensors
+  feed `public_ip_changed` and a `wan_down` counter. An in-progress
+  (discovered but not configured) `upnp` flow is treated the same way, since
+  the discovery itself is the evidence.
+- `adguard`: `switch.adguard_protection`, `switch.adguard_filtering`,
+  `switch.adguard_safe_browsing`, and `switch.adguard_parental_control` map to
+  `posture.malware_blocking_enabled` and `posture.ad_blocking_enabled`; the
+  blocked-query and DNS-queries sensors feed `counters.network.threats_day`.
 
 #### eero adapter mapping
 
@@ -299,6 +394,9 @@ would enable it.
 | `network_wpa3_disabled` | `network.posture.wpa3_enabled` | low, advisory only | 1 |
 | `network_protection_disabled` | `malware_blocking_enabled` or `ad_blocking_enabled` | medium | 1 |
 | `network_ddns_enabled` | `network.posture.ddns_enabled` | low | 1 |
+| `network_port_forward_active` | `network.posture.port_forwards` | medium; high when the target is a camera or NVR | 1 |
+| `network_iot_device_on_main_vlan` | `network.clients[].vlan` | low, advisory | 1 |
+| `network_guest_client_present` | `network.clients[].is_guest` | medium while away or at night | 1 |
 | `network_client_identity_drift` | `network.clients` | low | 2 |
 | `network_public_ip_changed` | `network.posture.public_ip_changed` | info | 2 |
 
@@ -442,7 +540,8 @@ Every fix is an existing HA entity call, so no new actuation code is needed:
 
 | Finding | Fix | Entity |
 |---|---|---|
-| unknown device | pause client | eero `switch.*_paused`; UniFi block switch |
+| unknown device | block or pause client | UniFi block-client switch; Fritz `switch.*_internet_access`; eero `switch.*_paused` |
+| port forward active | turn off | Fritz and UniFi port-forward switches |
 | UPnP enabled | turn off | `switch.*_upnp` |
 | guest network idle | turn off | `switch.*_guest_network` |
 | WPA3 disabled | turn on | `switch.*_wpa3` (advisory, may drop old devices) |
@@ -468,8 +567,8 @@ Mechanics:
 
 ## Phase 3: More Adapters and LLM-Assisted Mapping
 
-- UniFi, Fritz!Box, ASUSWRT, OpenWrt, Omada adapters, each a fixture-tested
-  mapping table like eero's.
+- Pi-hole, ASUSWRT, TP-Link Omada, Keenetic, MikroTik, and NETGEAR adapters,
+  each a fixture-tested mapping table like the phase 1 ones.
 - For a router platform without an adapter, an advisory flow asks the
   configured model once to propose a mapping from that platform's entities to
   the normalized fields. The proposal is shown to the user, approved or
@@ -481,7 +580,8 @@ Mechanics:
 ## Testing
 
 - `tests/.../test_snapshot_network.py`: adapter unit tests with `hass.states`
-  fixtures per platform (eero fixture built from the integration's entity keys),
+  fixtures per platform (fritz and unifi fixtures built from the core
+  integration sources, eero from the community integration's entity keys),
   merge and precedence, capability list correctness, MAC join to the device
   registry, pseudonymization stability across runs and instability across
   installs.
@@ -521,24 +621,32 @@ Mechanics:
   advisory only and never auto-executed; pause-client is reversible and its
   notification carries an "Unpause" action.
 
-## Open Questions
+## Decisions
 
-1. Should the HA-security checks (tokens, admins, exposure) be enabled by
-   default, or opt-in, given some users run HA behind a VPN and consider them
-   noise? Proposal: on by default at severity as listed, easy to exclude by
-   type key.
-2. Eero Plus dependence: roughly half the posture checks need it. The adapter
-   reports those capabilities as missing on non-Plus accounts; no separate
-   configuration is needed, but the docs should say so.
-3. Whether `network_client_identity_drift` is worth shipping at all, given
-   how noisy hostname changes are on phones. Deferred to phase 2 for that
-   reason.
+Resolved with the maintainer during design review.
+
+1. **HA-security checks are on by default.** The token, admin-user,
+   failed-login, and exposed-entity rules run at the severities in the
+   catalogue. Users behind a VPN who consider them noise exclude them by type
+   key like any other rule.
+2. **Adapter priority follows install share, not the maintainer's hardware.**
+   Fritz!Box and UniFi are the most-used router integrations by a wide margin
+   and ship in phase 1 alongside the UPnP/IGD signal and AdGuard. eero ships
+   in phase 1 as the dogfood and cloud-mesh reference adapter. eero Plus
+   dependence needs no configuration: Plus-only capabilities are simply
+   reported as missing on non-Plus accounts, and the docs say so.
+3. **`network_client_identity_drift` is deferred** to phase 2 and ships only
+   if phase 1 inventory data shows it would be quiet enough on real homes.
+4. **Both pseudonymization and the local-model override are phase 1.**
+   Pseudonymization is unconditional; the `network_audit` feature type lets
+   the audit be pinned to a local provider.
 
 ## Implementation Order (Phase 1)
 
 1. `platform` field on `SnapshotEntity`, builder change, schema bump.
-2. `snapshot/network.py` with `ha_native`, `generic_router_tracker`, and
-   `eero` adapters; pseudonymization helper; capability list.
+2. `snapshot/network.py` with `ha_native`, `generic_router_tracker`,
+   `upnp_igd`, `fritz`, `unifi`, `adguard`, and `eero` adapters;
+   pseudonymization helper; capability list.
 3. `sentinel/network_inventory.py` store and services.
 4. Engine capability gating and health-sensor reporting.
 5. Phase 1 rules from the catalogue, in the order listed.
