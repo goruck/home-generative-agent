@@ -20,6 +20,8 @@ class UnknownPersonAtNightWhileHomeRule:
     """Detect an unrecognized person on camera at night while the home is occupied."""
 
     rule_id = "unknown_person_camera_night_home"
+    requires: frozenset[str] = frozenset()
+    cooldown_minutes = 0
 
     def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:
         """Return findings when an unknown person is seen on camera at night."""

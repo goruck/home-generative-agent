@@ -20,6 +20,7 @@ import hashlib
 import hmac
 import logging
 import secrets
+from functools import cached_property
 from typing import TYPE_CHECKING
 
 from homeassistant.exceptions import HomeAssistantError
@@ -41,6 +42,18 @@ class Pseudonymizer:
     def __init__(self, salt: str) -> None:
         """Initialize with the per-install salt (hex string)."""
         self._salt = salt.encode("utf-8")
+
+    @cached_property
+    def fingerprint(self) -> str:
+        """
+        Return a short, non-secret identifier of the salt.
+
+        Persisted next to data keyed under this salt so a consumer can tell
+        that its stored keys were made with a different salt (salt file
+        deleted, temporary salt after a storage failure) and must not compare
+        them, instead of raising a false "never seen before" on every row.
+        """
+        return hashlib.sha256(self._salt).hexdigest()[:12]
 
     def key(self, value: str) -> str:
         """Return the pseudonymized key for an arbitrary identifier."""
@@ -69,7 +82,9 @@ async def async_load_pseudonymizer(hass: HomeAssistant) -> Pseudonymizer:
     consistent within this run and are regenerated on the next start, which
     means inventories re-bootstrap rather than the feature failing.
     """
-    store: Store[dict[str, str]] = Store(hass, STORE_VERSION, STORE_KEY)
+    store: Store[dict[str, str]] = Store(
+        hass, STORE_VERSION, STORE_KEY, private=True, atomic_writes=True
+    )
     try:
         data = await store.async_load()
     except (HomeAssistantError, OSError, ValueError):
@@ -94,7 +109,9 @@ async def async_load_pseudonymizer(hass: HomeAssistant) -> Pseudonymizer:
 
 async def async_remove_pseudonymizer_salt(hass: HomeAssistant) -> None:
     """Delete the persisted salt (Sentinel subentry removal)."""
-    store: Store[dict[str, str]] = Store(hass, STORE_VERSION, STORE_KEY)
+    store: Store[dict[str, str]] = Store(
+        hass, STORE_VERSION, STORE_KEY, private=True, atomic_writes=True
+    )
     try:
         await store.async_remove()
     except (HomeAssistantError, OSError):

@@ -21,6 +21,8 @@ class OpenEntryWhileAwayRule:
     """Detect open entry sensors while the home is away."""
 
     rule_id = "open_entry_while_away"
+    requires: frozenset[str] = frozenset()
+    cooldown_minutes = 0
 
     def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:
         """Return findings for open entries while nobody is home."""

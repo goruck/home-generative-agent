@@ -31,6 +31,8 @@ class CameraEntryUnsecuredRule:
     """Detect camera activity while nearby entries are unsecured."""
 
     rule_id = "camera_entry_unsecured"
+    requires: frozenset[str] = frozenset()
+    cooldown_minutes = 0
 
     def __init__(
         self,

@@ -19,6 +19,8 @@ class CameraMissingSnapshotRule:
     """Detect any monitored camera without a snapshot summary at night while home."""
 
     rule_id = "camera_missing_snapshot_night_home"
+    requires: frozenset[str] = frozenset()
+    cooldown_minutes = 0
 
     def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:
         """Return findings for monitored cameras missing a snapshot at night."""

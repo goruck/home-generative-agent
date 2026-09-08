@@ -116,10 +116,9 @@ class HaSecurityPosture(TypedDict, total=False):
 
     admin_user_count: int
     long_lived_token_count: int
-    long_lived_tokens_unused_days: dict[str, int]  # token label -> days
+    long_lived_token_age_days: dict[str, int]  # token label -> days since created
     new_admin_users: list[str]  # names, vs. the persistent auth inventory
     new_long_lived_tokens: list[str]  # token labels, vs. the auth inventory
-    refresh_tokens_from_new_ip: list[str]  # token labels
     failed_login_notification_present: bool
     exposed_sensitive_entities: dict[str, list[str]]  # assistant -> entity_ids
     critical_action_pin_enabled: bool

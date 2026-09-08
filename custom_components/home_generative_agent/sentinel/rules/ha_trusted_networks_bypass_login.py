@@ -39,7 +39,7 @@ class HaTrustedNetworksBypassLoginRule:
                 suggested_actions=[
                     (
                         "Set allow_bypass_login to false in the auth provider "
-                        "configuration, or narrow trusted_networks to specific hosts."
+                        "configuration, or narrow trusted_networks to specific hosts"
                     )
                 ],
             )

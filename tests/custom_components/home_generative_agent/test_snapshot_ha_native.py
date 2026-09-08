@@ -9,6 +9,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from custom_components.home_generative_agent.agent.helpers import (
+    resolve_critical_action_policy,
+)
 from custom_components.home_generative_agent.const import (
     CONF_CRITICAL_ACTION_PIN_ENABLED,
     CONF_CRITICAL_ACTION_PIN_HASH,
@@ -24,6 +27,7 @@ from custom_components.home_generative_agent.sentinel.auth_inventory import (
 from custom_components.home_generative_agent.sentinel.pseudonymizer import (
     Pseudonymizer,
 )
+from custom_components.home_generative_agent.snapshot import network as network_mod
 from custom_components.home_generative_agent.snapshot.network import (
     CAP_CLIENTS,
     AdapterResult,
@@ -32,6 +36,13 @@ from custom_components.home_generative_agent.snapshot.network import (
     HaNativeInputs,
     HttpInput,
     NetworkBuildContext,
+    _collect_addons,
+    _collect_auth_providers,
+    _collect_cloud,
+    _collect_discovery,
+    _collect_failed_login,
+    _collect_http,
+    _log_input_failure,
     async_build_network_snapshot,
     async_collect_auth_observation,
     automation_calls_critical_action,
@@ -42,6 +53,7 @@ from custom_components.home_generative_agent.snapshot.network import (
     is_sensitive_entity,
     merge_adapter_results,
     posture_cap,
+    sanitize_label,
 )
 from custom_components.home_generative_agent.snapshot.schema import validate_snapshot
 
@@ -194,9 +206,9 @@ def test_adapter_auth_counts_and_stale_days() -> None:
     ha = ha_native_adapter(inputs, [], NetworkBuildContext()).ha_security
     assert ha["admin_user_count"] == 1
     assert ha["long_lived_token_count"] == 2
-    # Duplicate client names are disambiguated with an id prefix; a token never
-    # used counts from its creation date.
-    assert ha["long_lived_tokens_unused_days"] == {"api (t1)": 120, "api (t2)": 400}
+    # Duplicate client names are disambiguated with an id prefix; age counts
+    # from creation because HA never logs long-lived token use.
+    assert ha["long_lived_token_age_days"] == {"api (t1)": 400, "api (t2)": 400}
     # No inventory -> no change-detection capabilities.
     assert "new_admin_users" not in ha
 
@@ -214,7 +226,7 @@ def test_adapter_change_fields_only_after_inventory_bootstrap() -> None:
     after = ha_native_adapter(inputs, [], context).ha_security
     assert after["new_long_lived_tokens"] == ["api"]
     assert after["new_admin_users"] == ["Lindo"]
-    assert after["refresh_tokens_from_new_ip"] == []
+    assert "refresh_tokens_from_new_ip" not in after
 
 
 def test_adapter_exposed_entities_filters_to_sensitive_ones() -> None:
@@ -531,7 +543,13 @@ async def test_full_snapshot_carries_platform_and_network_section(hass: Any) -> 
     )
 
     hass.states.async_set("lock.front", "unavailable", {"friendly_name": "Front"})
-    snapshot = await async_build_full_state_snapshot(hass)
+    # No context (baseline, discovery, preview callers): an empty section.
+    bare = await async_build_full_state_snapshot(hass)
+    validate_snapshot(dict(bare))
+    assert bare.get("network", {}).get("capabilities") == []
+    snapshot = await async_build_full_state_snapshot(
+        hass, network=NetworkBuildContext(options={})
+    )
     validate_snapshot(dict(snapshot))
     assert snapshot["schema_version"] == 2
     entity = next(e for e in snapshot["entities"] if e["entity_id"] == "lock.front")
@@ -547,3 +565,334 @@ async def test_full_snapshot_carries_platform_and_network_section(hass: Any) -> 
     assert ha_cap("admin_user_count") in network["capabilities"]
     assert ha_cap("cloud_remote_ui_enabled") not in network["capabilities"]
     assert network["sources"][ha_cap("admin_user_count")] == "ha_native"
+
+
+# ---------------------------------------------------------------------------
+# HA-internals collectors (the booleans every plain-install rule acts on)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _reset_logged_failures() -> None:
+    """Clear the once-per-process log guard so tests do not leak into each other."""
+    network_mod._LOGGED_INPUT_FAILURES.clear()
+
+
+def test_input_failure_logs_once_per_input_and_exception_class(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Same input + same error class logs once; a new error class logs again."""
+    with caplog.at_level("WARNING"):
+        _log_input_failure("thing", RuntimeError("a"))
+        _log_input_failure("thing", RuntimeError("b"))
+        _log_input_failure("thing", KeyError("c"))
+        _log_input_failure("other", RuntimeError("d"))
+    messages = [
+        r.getMessage() for r in caplog.records if "Network audit" in r.getMessage()
+    ]
+    assert len(messages) == 3
+
+
+def test_collect_http_ip_ban_states() -> None:
+    """Ban manager presence and threshold are reported as separate facts."""
+    from homeassistant.components.http.ban import (  # noqa: PLC0415
+        KEY_BAN_MANAGER,
+        KEY_LOGIN_THRESHOLD,
+    )
+
+    server = MagicMock()
+    server.trusted_proxies = []
+    server.app = {KEY_BAN_MANAGER: object(), KEY_LOGIN_THRESHOLD: 5}
+    hass = MagicMock(http=server)
+    assert _collect_http(hass) == HttpInput(
+        trusted_proxies_configured=False,
+        ip_ban_enabled=True,
+        login_attempts_threshold=5,
+    )
+    # Home Assistant's stock configuration: banning on, no threshold.
+    server.app = {KEY_BAN_MANAGER: object(), KEY_LOGIN_THRESHOLD: -1}
+    stock = _collect_http(hass)
+    assert stock is not None
+    assert stock.ip_ban_enabled is True
+    assert stock.login_attempts_threshold == -1
+    server.app = {}
+    off = _collect_http(hass)
+    assert off is not None
+    assert off.ip_ban_enabled is False
+    server.trusted_proxies = ["10.0.0.0/8"]
+    assert _collect_http(hass).trusted_proxies_configured is True  # type: ignore[union-attr]
+    hass.http = None
+    assert _collect_http(hass) is None
+
+
+def test_collect_auth_providers_bypass_flag() -> None:
+    """Only a trusted_networks provider with allow_bypass_login counts."""
+    homeassistant_provider = MagicMock(type="homeassistant", config={})
+    trusted = MagicMock(type="trusted_networks", config={"allow_bypass_login": True})
+    hass = MagicMock()
+    hass.auth.auth_providers = [homeassistant_provider]
+    assert _collect_auth_providers(hass) is False
+    hass.auth.auth_providers = [homeassistant_provider, trusted]
+    assert _collect_auth_providers(hass) is True
+    trusted.config = {"allow_bypass_login": False}
+    assert _collect_auth_providers(hass) is False
+    hass.auth = None
+    assert _collect_auth_providers(hass) is None
+
+
+def test_collect_cloud_requires_loaded_logged_in_and_enabled() -> None:
+    """Remote UI counts only when cloud is loaded, logged in, and enabled."""
+    hass = MagicMock()
+    hass.config.components = set()
+    assert _collect_cloud(hass) is None
+    hass.config.components = {"cloud"}
+    hass.data = {}
+    assert _collect_cloud(hass) is None
+    cloud = MagicMock()
+    cloud.client.prefs.remote_enabled = True
+    cloud.is_logged_in = False
+    hass.data = {"cloud": cloud}
+    assert _collect_cloud(hass) is False
+    cloud.is_logged_in = True
+    assert _collect_cloud(hass) is True
+
+
+@pytest.mark.asyncio
+async def test_collect_failed_login_sees_real_http_login_notification(
+    hass: Any,
+) -> None:
+    """The failed-login fact tracks Home Assistant's own notification id."""
+    from homeassistant.components import persistent_notification  # noqa: PLC0415
+
+    assert _collect_failed_login(hass) is False
+    persistent_notification.async_create(
+        hass, "bad", "Login attempt failed", "http-login"
+    )
+    await hass.async_block_till_done()
+    assert _collect_failed_login(hass) is True
+    persistent_notification.async_dismiss(hass, "http-login")
+    assert _collect_failed_login(hass) is False
+
+
+def test_collect_discovery_filters_sources_and_sanitizes_titles() -> None:
+    """Only LAN discovery sources count; titles are printable and bounded."""
+    hass = MagicMock()
+    hass.config_entries.flow.async_progress.return_value = [
+        {
+            "handler": "reolink",
+            "context": {
+                "source": "dhcp",
+                "title_placeholders": {"name": "cam\u202e\u200b " + "x" * 100},
+            },
+        },
+        {"handler": "hue", "context": {"source": "user"}},
+        {"handler": "sonos", "context": {"source": "ssdp"}},
+    ]
+    ignored_entry = MagicMock(source="ignore", domain="tplink", title="Plug")
+    hass.config_entries.async_entries.return_value = [
+        ignored_entry,
+        MagicMock(source="user", domain="hue", title="Hue"),
+    ]
+    unconfigured, ignored = _collect_discovery(hass)
+    assert unconfigured is not None
+    assert [d["handler"] for d in unconfigured] == ["reolink", "sonos"]
+    title = unconfigured[0]["title"]
+    assert "\u202e" not in title
+    assert len(title) <= network_mod.MAX_LABEL_CHARS
+    assert title.startswith("cam x")
+    assert ignored == [{"handler": "tplink", "source": "ignore", "title": "Plug"}]
+
+
+def test_sanitize_label_strips_controls_and_caps() -> None:
+    """Control/format characters go, whitespace collapses, length is capped."""
+    assert sanitize_label("  a\u200b b\n\tc  ") == "a b c"
+    assert sanitize_label(None) == ""
+    long = sanitize_label("y" * 200)
+    assert len(long) == network_mod.MAX_LABEL_CHARS
+    assert long.endswith("…")
+
+
+def test_collect_addons_merges_list_and_info(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Running state comes from the fresh list; ports and protection from info."""
+    import homeassistant.helpers.hassio as hassio_helper  # noqa: PLC0415
+    from homeassistant.components import hassio  # noqa: PLC0415
+
+    monkeypatch.setattr(hassio_helper, "is_hassio", lambda _hass: True)
+    monkeypatch.setattr(
+        hassio,
+        "get_addons_list",
+        lambda _hass: [
+            {"slug": "core_ssh", "name": "Terminal & SSH", "state": "started"},
+            {"slug": "a0d7b954_grafana", "name": "Grafana", "state": "stopped"},
+            {"slug": "fresh", "name": "Just installed", "state": "started"},
+            {"name": "no slug"},
+        ],
+    )
+    monkeypatch.setattr(
+        hassio,
+        "get_addons_info",
+        lambda _hass: {
+            "core_ssh": {
+                "network": {"22/tcp": 22, "80/tcp": None, "flag": True},
+                "protected": False,
+                "state": "stopped",  # stale: the list wins
+            },
+            "a0d7b954_grafana": {"network": {"3000/tcp": 3000}, "protected": True},
+            "fresh": None,
+        },
+    )
+    addons = _collect_addons(MagicMock())
+    assert addons == [
+        AddonInput("core_ssh", "Terminal & SSH", (22,), protected=False, running=True),
+        AddonInput(
+            "a0d7b954_grafana", "Grafana", (3000,), protected=True, running=False
+        ),
+        AddonInput("fresh", "Just installed", (), protected=True, running=True),
+    ]
+
+
+def test_collect_addons_not_ready_and_not_hassio(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Supervisor not ready is silent; a non-Supervisor install reports None."""
+    import homeassistant.helpers.hassio as hassio_helper  # noqa: PLC0415
+    from homeassistant.components import hassio  # noqa: PLC0415
+
+    monkeypatch.setattr(hassio_helper, "is_hassio", lambda _hass: False)
+    assert _collect_addons(MagicMock()) is None
+
+    def _not_ready(_hass: Any) -> Any:
+        raise hassio.HassioNotReadyError
+
+    monkeypatch.setattr(hassio_helper, "is_hassio", lambda _hass: True)
+    monkeypatch.setattr(hassio, "get_addons_list", _not_ready)
+    with caplog.at_level("WARNING"):
+        assert _collect_addons(MagicMock()) is None
+    assert not [r for r in caplog.records if "Network audit" in r.getMessage()]
+
+
+def test_is_sensitive_entity_word_boundaries() -> None:
+    """'indoor' and 'outdoor' covers are not doors."""
+    assert not is_sensitive_entity(_entity("cover.outdoor_awning", "closed"))
+    assert not is_sensitive_entity(
+        _entity("cover.shade_1", "closed", friendly_name="Indoor Shade")
+    )
+    assert is_sensitive_entity(_entity("cover.side_door", "closed"))
+    assert is_sensitive_entity(
+        _entity("cover.c1", "closed", friendly_name="Garage Door Left")
+    )
+
+
+def test_webhook_screener_sees_device_actions_and_turn_on() -> None:
+    """The shared allowlist screener catches spellings a service blocklist misses."""
+    critical = resolve_critical_action_policy({}).critical_actions
+    device_action = {
+        "actions": [
+            {
+                "device_id": "abc",
+                "domain": "lock",
+                "type": "unlock",
+                "entity_id": "lock.front",
+            }
+        ]
+    }
+    assert automation_calls_critical_action(device_action, critical)
+    # A generic call whose targets cannot be resolved fails closed.
+    generic_area = {
+        "actions": [
+            {"action": "homeassistant.turn_on", "target": {"area_id": "garage"}}
+        ]
+    }
+    assert automation_calls_critical_action(generic_area, critical)
+    harmless = {
+        "actions": [{"action": "light.turn_on", "target": {"entity_id": "light.a"}}]
+    }
+    assert not automation_calls_critical_action(harmless, critical)
+
+
+def test_automation_config_prefers_validated_triggers_and_actions() -> None:
+    """Validated (blueprint-substituted) config wins over raw_config."""
+    from custom_components.home_generative_agent.snapshot.network import (  # noqa: PLC0415
+        _automation_config,
+    )
+
+    entity = MagicMock()
+    entity.raw_config = {"use_blueprint": {"path": "x.yaml"}}
+    entity._trigger_config = [
+        {"trigger": "webhook", "webhook_id": "w", "local_only": False}
+    ]
+    entity.action_script.sequence = [
+        {"action": "lock.unlock", "target": {"entity_id": "lock.a"}}
+    ]
+    config = _automation_config(entity)
+    assert config is not None
+    assert automation_has_public_webhook(config)
+    assert automation_calls_critical_action(
+        config, resolve_critical_action_policy({}).critical_actions
+    )
+    bare = MagicMock(spec=["raw_config"])
+    bare.raw_config = {"triggers": []}
+    assert _automation_config(bare) == {"triggers": []}
+    assert _automation_config(MagicMock(spec=[])) is None
+
+
+@pytest.mark.asyncio
+async def test_collect_exposed_uses_default_exposure(hass: Any) -> None:
+    """A cover never configured but default-exposed to Assist counts as exposed."""
+    from homeassistant.setup import async_setup_component  # noqa: PLC0415
+
+    from custom_components.home_generative_agent.snapshot.network import (  # noqa: PLC0415
+        _collect_exposed,
+    )
+
+    assert await async_setup_component(hass, "homeassistant", {})
+    hass.states.async_set("cover.garage_door", "closed")
+    hass.states.async_set("lock.front", "locked")
+    exposed = _collect_exposed(hass, ["cover.garage_door", "lock.front"])
+    assert exposed is not None
+    # Assist exposes covers by default but not locks; the cloud assistants
+    # expose nothing until configured.
+    assert exposed["conversation"] == ["cover.garage_door"]
+    assert exposed["cloud.alexa"] == []
+
+
+@pytest.mark.asyncio
+async def test_salt_is_persisted_and_reused_across_loads(hass: Any) -> None:
+    """The salt survives a reload; removing it produces different keys."""
+    from custom_components.home_generative_agent.sentinel.pseudonymizer import (  # noqa: PLC0415
+        async_load_pseudonymizer,
+        async_remove_pseudonymizer_salt,
+    )
+
+    first = await async_load_pseudonymizer(hass)
+    await hass.async_block_till_done()
+    second = await async_load_pseudonymizer(hass)
+    assert first.ip_key("10.0.0.7") == second.ip_key("10.0.0.7")
+    assert first.fingerprint == second.fingerprint
+    await async_remove_pseudonymizer_salt(hass)
+    third = await async_load_pseudonymizer(hass)
+    assert third.ip_key("10.0.0.7") != first.ip_key("10.0.0.7")
+
+
+@pytest.mark.asyncio
+async def test_salt_load_failure_yields_temporary_salt(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A storage failure degrades to a usable temporary salt with a warning."""
+    from custom_components.home_generative_agent.sentinel import (  # noqa: PLC0415
+        pseudonymizer as pmod,
+    )
+
+    class _BrokenStore:
+        def __init__(self, *_a: Any, **_k: Any) -> None:
+            pass
+
+        async def async_load(self) -> Any:
+            msg = "disk"
+            raise OSError(msg)
+
+    monkeypatch.setattr(pmod, "Store", _BrokenStore)
+    with caplog.at_level("WARNING"):
+        temp = await pmod.async_load_pseudonymizer(MagicMock())
+    assert len(temp.ip_key("1.2.3.4")) == 8
+    assert any("temporary salt" in r.getMessage() for r in caplog.records)

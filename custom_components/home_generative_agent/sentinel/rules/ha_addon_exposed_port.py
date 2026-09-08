@@ -1,4 +1,4 @@
-"""Rule: a Supervisor add-on maps a container port onto the host."""
+"""Rule: Supervisor add-ons map container ports onto the host."""
 
 from __future__ import annotations
 
@@ -6,13 +6,10 @@ from typing import TYPE_CHECKING
 
 from custom_components.home_generative_agent.snapshot.network import ha_cap
 
-from .network_common import POSTURE_COOLDOWN_MINUTES, ha_security, make_finding
+from .network_common import POSTURE_COOLDOWN_MINUTES, ha_security, make_finding, plural
 
 if TYPE_CHECKING:
-    from custom_components.home_generative_agent.sentinel.models import (
-        AnomalyFinding,
-        Severity,
-    )
+    from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
     from custom_components.home_generative_agent.snapshot.schema import (
         FullStateSnapshot,
     )
@@ -33,49 +30,51 @@ _HIGH_RISK_HINTS: tuple[str, ...] = (
 )
 
 
-def _severity_for(slug: str, name: str) -> Severity:
+def _high_risk(slug: str, name: str) -> bool:
     haystack = f"{slug} {name}".lower()
-    return "high" if any(h in haystack for h in _HIGH_RISK_HINTS) else "medium"
+    return any(h in haystack for h in _HIGH_RISK_HINTS)
 
 
 class HaAddonExposedPortRule:
-    """Running add-ons with host-mapped ports."""
+    """One finding per cycle listing every running add-on with host ports."""
 
     rule_id = "ha_addon_exposed_port"
     requires = frozenset({ha_cap("addons_with_host_ports")})
     cooldown_minutes = POSTURE_COOLDOWN_MINUTES
 
     def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:
-        """Return one finding per add-on that exposes host ports."""
+        """Return one finding covering every exposed add-on."""
         ha = ha_security(snapshot)
         ports_by_slug: dict[str, list[int]] = ha.get("addons_with_host_ports") or {}
         names: dict[str, str] = ha.get("addon_names") or {}
-        findings: list[AnomalyFinding] = []
-        for slug, ports in sorted(ports_by_slug.items()):
-            if not ports:
-                continue
-            name = names.get(slug, slug)
-            port_list = ", ".join(str(p) for p in sorted(ports))
-            findings.append(
-                make_finding(
-                    self.rule_id,
-                    severity=_severity_for(slug, name),
-                    evidence={
-                        "addon_slug": slug,
-                        "addon_name": name,
-                        "host_ports": sorted(ports),
-                    },
-                    summary=(
-                        f"Add-on {name} listens on host port(s) {port_list}, "
-                        "reachable by anything on your network."
-                    ),
-                    suggested_actions=[
-                        (
-                            "Disable the host port in the add-on's Network settings "
-                            "if you only use it through Ingress, or restrict it "
-                            "with a firewall."
-                        )
-                    ],
-                )
+        exposed = {
+            slug: sorted(ports) for slug, ports in ports_by_slug.items() if ports
+        }
+        if not exposed:
+            return []
+        high = sorted(
+            slug for slug in exposed if _high_risk(slug, names.get(slug, slug))
+        )
+        listed = ", ".join(
+            f"{names.get(slug, slug)} ({', '.join(str(p) for p in ports)})"
+            for slug, ports in sorted(exposed.items())
+        )
+        return [
+            make_finding(
+                self.rule_id,
+                severity="high" if high else "medium",
+                evidence={"addons": exposed, "high_risk": high},
+                display={"addon_names": {s: names.get(s, s) for s in exposed}},
+                summary=(
+                    f"{plural(len(exposed), 'add-on')} listening on host ports, "
+                    f"reachable by anything on your network: {listed}."
+                ),
+                suggested_actions=[
+                    (
+                        "Disable the host port in each add-on's Network settings if "
+                        "you only use it through Ingress, or restrict it with a "
+                        "firewall"
+                    )
+                ],
             )
-        return findings
+        ]

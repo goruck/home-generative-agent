@@ -301,3 +301,112 @@ def test_pseudonymizer_is_stable_per_salt_and_differs_across_salts() -> None:
     assert a.mac_key("AA:BB:CC:DD:EE:FF") != b.mac_key("AA:BB:CC:DD:EE:FF")
     assert len(a.ip_key("192.168.1.1")) == 8
     assert a.ip_key("192.168.1.1") != a.ip_key("192.168.1.2")
+
+
+@pytest.mark.asyncio
+async def test_commit_saves_only_when_something_changed() -> None:
+    """A quiet install does not rewrite the store every cycle."""
+    inventory, store = _inventory()
+    await inventory.async_load()
+    saves = 0
+    original = store.async_save
+
+    async def _counting_save(data: dict[str, Any]) -> None:
+        nonlocal saves
+        saves += 1
+        await original(data)
+
+    store.async_save = _counting_save  # type: ignore[method-assign]
+    observation = [_user("u1", _token("t1", ip_key="ip-a"))]
+    await inventory.async_commit(observation, NOW)
+    assert saves == 1
+    # Same observation five minutes later: the address's last_seen refresh is
+    # rate-limited to an hour, so nothing is dirty.
+    await inventory.async_commit(observation, NOW + timedelta(minutes=5))
+    assert saves == 1
+    await inventory.async_commit(observation, NOW + timedelta(hours=2))
+    assert saves == 2
+    await inventory.async_commit([_user("u1", _token("t1", ip_key="ip-b"))], NOW)
+    assert saves == 3
+
+
+@pytest.mark.asyncio
+async def test_salt_change_resets_addresses_without_alerting() -> None:
+    """Keys under a different salt are never compared; history restarts."""
+    inventory, store = _inventory()
+    await inventory.async_load()
+    await inventory.async_commit(
+        [_user("u1", _token("t1", ip_key="old-a"))], NOW, salt_fingerprint="salt-1"
+    )
+    delta = inventory.diff(
+        [_user("u1", _token("t1", ip_key="new-a"))], salt_fingerprint="salt-2"
+    )
+    assert delta.tokens_from_new_ip == []
+    await inventory.async_commit(
+        [_user("u1", _token("t1", ip_key="new-a"))], NOW, salt_fingerprint="salt-2"
+    )
+    assert store.data is not None
+    assert store.data["salt_fingerprint"] == "salt-2"
+    assert [ip["key"] for ip in store.data["tokens"]["t1"]["seen_ips"]] == ["new-a"]
+    # Under the new salt, a further new address is detected again.
+    assert inventory.diff(
+        [_user("u1", _token("t1", ip_key="new-b"))], salt_fingerprint="salt-2"
+    ).tokens_from_new_ip == ["api"]
+
+
+@pytest.mark.asyncio
+async def test_hold_back_keeps_undelivered_changes_reportable() -> None:
+    """Changes whose finding was not delivered are reported again next run."""
+    inventory, _ = _inventory()
+    await inventory.async_load()
+    await inventory.async_commit([_user("u1", _token("t1", ip_key="ip-a"))], NOW)
+    later = [
+        _user("u1", _token("t1", ip_key="ip-b"), _token("t2", client_name="new")),
+        _user("u2", name="Guest", admin=True),
+    ]
+    delta = inventory.diff(later)
+    assert delta.has_changes
+    assert delta.new_token_ids == ["t2"]
+    assert delta.new_admin_user_ids == ["u2"]
+    assert delta.new_ip_token_ids == ["t1"]
+    await inventory.async_commit(later, NOW, hold_back=delta)
+    # Still new on the next run, because nothing was recorded for them.
+    again = inventory.diff(later)
+    assert again.new_long_lived_tokens == ["new"]
+    assert again.new_admin_users == ["Guest"]
+    assert again.tokens_from_new_ip == ["api"]
+    # Delivered this time: committed and quiet afterwards.
+    await inventory.async_commit(later, NOW)
+    assert not inventory.diff(later).has_changes
+
+
+@pytest.mark.asyncio
+async def test_load_drops_corrupt_rows_instead_of_raising_later() -> None:
+    """A hand-edited row that is not a mapping is discarded on load."""
+    inventory, store = _inventory()
+    store.data = {
+        "bootstrapped_at": NOW.isoformat(),
+        "users": {"u1": {"is_admin": True}, "bad": "not a row"},
+        "tokens": {
+            "t1": {"token_type": TOKEN_TYPE_LONG_LIVED, "seen_ips": "nope"},
+            "t2": 3,
+        },
+    }
+    await inventory.async_load()
+    assert inventory.is_bootstrapped
+    assert inventory.summary()["user_count"] == 1
+    assert inventory.summary()["token_count"] == 1
+    # The surviving token row is usable by diff and commit.
+    delta = inventory.diff([_user("u1", _token("t1", ip_key="ip-a"))])
+    assert delta.tokens_from_new_ip == ["api"]
+    await inventory.async_commit([_user("u1", _token("t1", ip_key="ip-a"))], NOW)
+
+
+@pytest.mark.asyncio
+async def test_persisted_rows_carry_no_user_name() -> None:
+    """User rows keep flags and ids only; the display name is not duplicated."""
+    inventory, store = _inventory()
+    await inventory.async_load()
+    await inventory.async_commit([_user("u1", name="Lindo")], NOW)
+    assert store.data is not None
+    assert "Lindo" not in json.dumps(store.data)

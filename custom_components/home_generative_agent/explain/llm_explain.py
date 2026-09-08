@@ -139,7 +139,7 @@ _KNOWN_TYPE_LABELS = {
     "alarm_disarmed_during_external_threat": "Outdoor activity while alarm disarmed",
     "ha_sensitive_entity_exposed_without_pin": "Sensitive entity exposed without PIN",
     "ha_new_admin_or_token": "New administrator or access token",
-    "ha_long_lived_token_stale": "Unused long-lived access token",
+    "ha_long_lived_token_stale": "Old long-lived access token",
     "ha_failed_logins": "Failed login attempts",
     "ha_cloud_remote_ui_enabled": "Cloud remote access enabled",
     "ha_addon_exposed_port": "Add-on port exposed on host",

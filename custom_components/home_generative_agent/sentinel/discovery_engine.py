@@ -47,6 +47,7 @@ from .discovery_semantic import (
 )
 from .evidence_paths import is_derived_path
 from .logging_utils import RepeatingLogLimiter
+from .rules.network_common import NETWORK_RULE_TYPES
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -248,6 +249,9 @@ _STATIC_RULE_IDS: frozenset[str] = frozenset(
         "alarm_disarmed_during_external_threat",
         "phone_battery_low_at_night_home",
     }
+    # The HA / network security family, so discovery does not re-propose
+    # "alert on unavailable locks" or "failed logins" as candidates.
+    | NETWORK_RULE_TYPES
 )
 
 

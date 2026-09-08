@@ -2530,3 +2530,19 @@ def test_network_finding_without_summary_falls_back() -> None:
     finding = _network_finding(summary="")
     msg = _mobile_message(None, finding)
     assert "Add-on port exposed on host" in msg
+
+
+def test_network_finding_summary_beats_explanation_and_language() -> None:
+    """Security copy for the network family never yields to model prose."""
+    finding = _network_finding(summary="New long-lived access token: api.")
+    assert (
+        _mobile_message("Someone made a token.", finding) == finding.evidence["summary"]
+    )
+    assert (
+        _mobile_message("Někdo vytvořil token.", finding, response_language="cs")
+        == finding.evidence["summary"]
+    )
+    assert (
+        _notifier_mod._persistent_message("Someone made a token.", finding)
+        == finding.evidence["summary"]
+    )

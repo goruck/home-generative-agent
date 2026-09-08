@@ -311,6 +311,10 @@ class StubAutoExecRule:
 
     rule_id = "stub_auto_exec"
 
+    requires: frozenset[str] = frozenset()
+
+    cooldown_minutes = 0
+
     def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:  # type: ignore[override]
         """Return a fixed finding with a service-type suggested action."""
         return [

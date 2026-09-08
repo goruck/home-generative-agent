@@ -149,6 +149,7 @@ if TYPE_CHECKING:
     from .notifier import SentinelNotifier
     from .pseudonymizer import Pseudonymizer
     from .rule_registry import RuleRegistry
+    from .rules import StaticRule
 
 LOGGER = logging.getLogger(__name__)
 
@@ -289,60 +290,74 @@ class SentinelEngine:
                 "event-driven triggering (evaluation falls back to polling).",
                 len(self._rule_entity_exclusions),
             )
-        self._rules = [
-            UnlockedLockAtNightRule(),
-            OpenEntryWhileAwayRule(),
-            AppliancePowerDurationRule(
-                power_threshold_w=_coerce_float(
-                    options.get(CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W),
-                    RECOMMENDED_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
+        self._rules: list[StaticRule] = []
+        self._rules.extend(
+            [
+                UnlockedLockAtNightRule(),
+                OpenEntryWhileAwayRule(),
+                AppliancePowerDurationRule(
+                    power_threshold_w=_coerce_float(
+                        options.get(CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W),
+                        RECOMMENDED_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
+                    ),
+                    duration_min=_coerce_int(
+                        options.get(CONF_SENTINEL_APPLIANCE_DURATION_MIN),
+                        default=RECOMMENDED_SENTINEL_APPLIANCE_DURATION_MIN,
+                    ),
                 ),
-                duration_min=_coerce_int(
-                    options.get(CONF_SENTINEL_APPLIANCE_DURATION_MIN),
-                    default=RECOMMENDED_SENTINEL_APPLIANCE_DURATION_MIN,
+                CameraEntryUnsecuredRule(
+                    camera_entry_links=cast(
+                        "dict[str, list[str]]",
+                        options.get(CONF_SENTINEL_CAMERA_ENTRY_LINKS) or {},
+                    ),
+                    is_entity_excluded=self._entity_excluded_for_type,
                 ),
-            ),
-            CameraEntryUnsecuredRule(
-                camera_entry_links=cast(
-                    "dict[str, list[str]]",
-                    options.get(CONF_SENTINEL_CAMERA_ENTRY_LINKS) or {},
+                UnknownPersonCameraNoHomeRule(),
+                UnknownPersonAtNightWhileHomeRule(),
+                VehicleDetectedNearCameraRule(),
+                PetDetectedAtNightNoOccupancyRule(),
+                CameraMissingSnapshotRule(),
+                AlarmDisarmedDuringExternalThreatRule(),
+                PhoneBatteryLowAtNightRule(),
+                # Network / HA-security rules. Each declares ``requires`` and is
+                # skipped (and reported on the health sensor) when the snapshot's
+                # network section lacks a capability it needs.
+                HaSensitiveEntityExposedWithoutPinRule(),
+                HaNewAdminOrTokenRule(),
+                HaLongLivedTokenStaleRule(
+                    stale_days=_coerce_int(
+                        options.get(CONF_SENTINEL_HA_TOKEN_STALE_DAYS),
+                        default=RECOMMENDED_SENTINEL_HA_TOKEN_STALE_DAYS,
+                    )
                 ),
-                is_entity_excluded=self._entity_excluded_for_type,
-            ),
-            UnknownPersonCameraNoHomeRule(),
-            UnknownPersonAtNightWhileHomeRule(),
-            VehicleDetectedNearCameraRule(),
-            PetDetectedAtNightNoOccupancyRule(),
-            CameraMissingSnapshotRule(),
-            AlarmDisarmedDuringExternalThreatRule(),
-            PhoneBatteryLowAtNightRule(),
-            # Network / HA-security rules. Each declares ``requires`` and is
-            # skipped (and reported on the health sensor) when the snapshot's
-            # network section lacks a capability it needs.
-            HaSensitiveEntityExposedWithoutPinRule(),
-            HaNewAdminOrTokenRule(),
-            HaLongLivedTokenStaleRule(
-                stale_days=_coerce_int(
-                    options.get(CONF_SENTINEL_HA_TOKEN_STALE_DAYS),
-                    default=RECOMMENDED_SENTINEL_HA_TOKEN_STALE_DAYS,
-                )
-            ),
-            HaFailedLoginsRule(),
-            HaCloudRemoteUiEnabledRule(),
-            HaAddonExposedPortRule(),
-            HaAddonUnprotectedRule(),
-            HaWebhookAutomationPublicRule(),
-            HaTrustedNetworksBypassLoginRule(),
-            HaHttpProxyMisconfiguredRule(),
-            SecurityDeviceUnavailableRule(
-                offline_minutes=_coerce_int(
-                    options.get(CONF_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN),
-                    default=RECOMMENDED_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN,
-                )
-            ),
-            NetworkUnconfiguredDiscoveredDeviceRule(),
-            NetworkRouterUpdatePendingRule(),
-        ]
+                HaFailedLoginsRule(),
+                HaCloudRemoteUiEnabledRule(),
+                HaAddonExposedPortRule(),
+                HaAddonUnprotectedRule(),
+                HaWebhookAutomationPublicRule(
+                    is_entity_excluded=self._entity_excluded_for_type
+                ),
+                HaTrustedNetworksBypassLoginRule(),
+                HaHttpProxyMisconfiguredRule(),
+                SecurityDeviceUnavailableRule(
+                    offline_minutes=_coerce_int(
+                        options.get(CONF_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN),
+                        default=RECOMMENDED_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN,
+                    ),
+                    is_entity_excluded=self._entity_excluded_for_type,
+                ),
+                NetworkUnconfiguredDiscoveredDeviceRule(),
+                NetworkRouterUpdatePendingRule(
+                    is_entity_excluded=self._entity_excluded_for_type
+                ),
+            ]
+        )
+        # Per-type cooldown floors declared by posture rules (see const).
+        self._rule_cooldown_floors: dict[str, timedelta] = {
+            rule.rule_id: timedelta(minutes=rule.cooldown_minutes)
+            for rule in self._rules
+            if rule.cooldown_minutes > 0
+        }
         # Event-driven triggering — unsubscribe callbacks.
         self._event_unsubscribers: list[Callable[[], None]] = []
         # Presence tracking for grace-window registration.
@@ -665,26 +680,45 @@ class SentinelEngine:
         )
 
     async def _commit_auth_inventory(
-        self, context: NetworkBuildContext, now: datetime
+        self,
+        context: NetworkBuildContext,
+        now: datetime,
+        *,
+        auth_change_delivered: bool | None = None,
     ) -> None:
         """
         Record this run's auth observation; announce the first bootstrap once.
 
-        Runs after rule evaluation so the rules compared against the previous
-        inventory. A failure here must not end the run loop.
+        Runs after dispatch so the rules compared against the previous
+        inventory. When the auth-change finding existed but was not delivered
+        (``auth_change_delivered is False``) the changed users and tokens are
+        held back so the next run reports them again. A failure here must not
+        end the run loop.
         """
         inventory = self._auth_inventory
         if inventory is None or context.auth_observation is None:
             return
+        fingerprint = (
+            self._pseudonymizer.fingerprint if self._pseudonymizer is not None else None
+        )
+        hold_back = None
+        if auth_change_delivered is False:
+            hold_back = inventory.diff(
+                context.auth_observation, salt_fingerprint=fingerprint
+            )
         retention_days = _coerce_int(
             self._options.get(CONF_SENTINEL_AUTH_IP_RETENTION_DAYS),
             default=RECOMMENDED_SENTINEL_AUTH_IP_RETENTION_DAYS,
         )
         try:
             bootstrapped = await inventory.async_commit(
-                context.auth_observation, now, ip_retention_days=retention_days
+                context.auth_observation,
+                now,
+                ip_retention_days=retention_days,
+                salt_fingerprint=fingerprint,
+                hold_back=hold_back,
             )
-        except (ValueError, TypeError, KeyError):
+        except (ValueError, TypeError, KeyError, AttributeError):
             self._log_limiter.warning(
                 "auth_inventory_commit", "Auth inventory commit failed."
             )
@@ -711,9 +745,9 @@ class SentinelEngine:
                     f"access tokens as known: {summary['admin_count']} "
                     f"administrator(s) and {summary['long_lived_token_count']} "
                     "long-lived access token(s). From now on a new "
-                    "administrator, a new long-lived token, or a token used "
-                    "from an unfamiliar address raises an alert. Review the "
-                    "list under Settings > People and your profile page."
+                    "administrator or a new long-lived access token raises an "
+                    "alert. Review the list under Settings > People and your "
+                    "profile page."
                 ),
                 "notification_id": f"hga_sentinel_auth_inventory_{self._entry_id}",
             },
@@ -809,7 +843,7 @@ class SentinelEngine:
         capabilities = set(snapshot.get("network", {}).get("capabilities", []))
         inactive_rules: dict[str, list[str]] = {}
         for rule in self._rules:
-            missing = sorted(set(getattr(rule, "requires", frozenset())) - capabilities)
+            missing = sorted(rule.requires - capabilities)
             if missing:
                 # Capability gating: the home cannot provide what this rule
                 # reads, so it neither runs nor false-positives; the health
@@ -883,30 +917,39 @@ class SentinelEngine:
         self.run_stats["inactive_rules"] = inactive_rules
         self.run_stats["network_capabilities"] = sorted(capabilities)
 
-        # Commit after evaluation: the auth change rules compared this run's
-        # observation against the inventory as it stood before the run.
-        await self._commit_auth_inventory(network_context, now)
-
         if self._rule_entity_exclusions:
             all_findings = self._filter_excluded_findings(all_findings)
 
-        if not all_findings:
-            return
+        # Whether this run's auth-change finding reached the user: None when
+        # there was none, False when suppression/triage/policy stopped it.
+        auth_change_delivered: bool | None = None
+        if all_findings:
+            # Correlation pass: group related findings from this single cycle.
+            # Each call to correlate() is stateless; no cross-run merging occurs.
+            correlated = self._correlator.correlate(all_findings)
 
-        # Correlation pass: group related findings from this single cycle.
-        # Each call to correlate() is stateless — no cross-run merging occurs.
-        correlated = self._correlator.correlate(all_findings)
+            for item in correlated:
+                delivered = await self._dispatch_item(
+                    item,
+                    snapshot,
+                    now,
+                    cooldown_type,
+                    cooldown_entity,
+                    explain_enabled,
+                    trigger_source=trigger_source,
+                )
+                if (
+                    isinstance(item, AnomalyFinding)
+                    and item.type == HaNewAdminOrTokenRule.rule_id
+                ):
+                    auth_change_delivered = delivered
 
-        for item in correlated:
-            await self._dispatch_item(
-                item,
-                snapshot,
-                now,
-                cooldown_type,
-                cooldown_entity,
-                explain_enabled,
-                trigger_source=trigger_source,
-            )
+        # Commit after dispatch: the auth change rule compared this run's
+        # observation against the inventory as it stood before the run, and a
+        # change whose alert was not delivered is held back so it re-fires.
+        await self._commit_auth_inventory(
+            network_context, now, auth_change_delivered=auth_change_delivered
+        )
 
     # ---------------------------------------------------------------------- #
     # Per-rule entity exclusions (Issue #462)
@@ -1121,14 +1164,7 @@ class SentinelEngine:
 
     def _rule_cooldown_floor(self, anomaly_type: str) -> timedelta:
         """Return the cooldown floor a static rule declares for its type."""
-        for rule in self._rules:
-            if rule.rule_id != anomaly_type:
-                continue
-            minutes = getattr(rule, "cooldown_minutes", None)
-            if isinstance(minutes, int) and minutes > 0:
-                return timedelta(minutes=minutes)
-            break
-        return timedelta(0)
+        return self._rule_cooldown_floors.get(anomaly_type, timedelta(0))
 
     async def _dispatch_item(  # noqa: PLR0913
         self,
@@ -1140,10 +1176,16 @@ class SentinelEngine:
         explain_enabled: bool,  # noqa: FBT001
         *,
         trigger_source: str = "poll",
-    ) -> None:
-        """Route a finding or compound finding through suppression and dispatch."""
+    ) -> bool:
+        """
+        Route a finding or compound finding through suppression and dispatch.
+
+        Returns True when the notifier was handed the finding (delivered), False
+        when suppression, triage, or policy stopped it; callers that must know
+        whether an alert reached the user (the auth inventory commit) rely on it.
+        """
         if isinstance(item, CompoundFinding):
-            await self._dispatch_compound(
+            return await self._dispatch_compound(
                 item,
                 snapshot,
                 now,
@@ -1152,7 +1194,6 @@ class SentinelEngine:
                 explain_enabled,
                 trigger_source=trigger_source,
             )
-            return
 
         # Plain AnomalyFinding
         finding: AnomalyFinding = item
@@ -1181,7 +1222,7 @@ class SentinelEngine:
                 suppression_decision.reason_code,
                 trigger_source=trigger_source,
             )
-            return
+            return False
 
         # Suppression state is read-only → downgrade to Level 0.
         effective_autonomy = (
@@ -1214,7 +1255,7 @@ class SentinelEngine:
                     autonomy_level_at_decision=effective_autonomy,
                     trigger_source=trigger_source,
                 )
-                return
+                return False
 
         # Execution policy evaluation.
         canary_mode = bool(
@@ -1273,7 +1314,7 @@ class SentinelEngine:
                 autonomy_level_at_decision=effective_autonomy,
                 trigger_source=trigger_source,
             )
-            return
+            return False
 
         register_prompt(self._suppression.state, finding, now)
         await self._suppression.async_save()
@@ -1300,6 +1341,7 @@ class SentinelEngine:
             autonomy_level_at_decision=effective_autonomy,
             trigger_source=trigger_source,
         )
+        return True
 
     async def _dispatch_compound(  # noqa: PLR0913
         self,
@@ -1311,9 +1353,11 @@ class SentinelEngine:
         explain_enabled: bool,  # noqa: FBT001
         *,
         trigger_source: str = "poll",
-    ) -> None:
+    ) -> bool:
         """
         Apply suppression to a CompoundFinding and dispatch it when appropriate.
+
+        Returns True when the compound reached the notifier.
 
         A compound finding is suppressed only when **all** of its constituents
         would individually be suppressed.  When at least one constituent passes
@@ -1351,7 +1395,7 @@ class SentinelEngine:
                 "suppressed",
                 trigger_source=trigger_source,
             )
-            return
+            return False
 
         best = max(compound.constituent_findings, key=lambda f: f.confidence)
 
@@ -1385,7 +1429,7 @@ class SentinelEngine:
                 autonomy_level_at_decision=effective_autonomy,
                 trigger_source=trigger_source,
             )
-            return
+            return False
 
         for constituent, _reason in passing:
             register_prompt(self._suppression.state, constituent, now)
@@ -1436,10 +1480,10 @@ class SentinelEngine:
             trigger_source=trigger_source,
         )
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+        # ---------------------------------------------------------------------------
+        # Helpers
+        # ---------------------------------------------------------------------------
+        return True
 
 
 async def _auto_execute_finding(

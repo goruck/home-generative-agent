@@ -1,4 +1,4 @@
-"""Rule: Home Assistant discovered a device on the LAN that nobody configured."""
+"""Rule: Home Assistant discovered devices on the LAN that nobody configured."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from .network_common import (
     anyone_home,
     ha_security,
     make_finding,
+    plural,
 )
 
 if TYPE_CHECKING:
@@ -51,40 +52,49 @@ class NetworkUnconfiguredDiscoveredDeviceRule:
     cooldown_minutes = POSTURE_COOLDOWN_MINUTES
 
     def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:
-        """Return one finding per discovered-but-unconfigured device."""
+        """Return one finding listing every discovered-but-unconfigured device."""
         discovered = ha_security(snapshot).get("discovered_unconfigured") or []
-        away = not anyone_home(snapshot)
-        findings: list[AnomalyFinding] = []
-        for item in discovered:
-            handler = str(item.get("handler") or "")
-            title = str(item.get("title") or "")
-            source = str(item.get("source") or "")
-            camera = handler in CAMERA_HANDLERS
-            label = title or handler
-            findings.append(
-                make_finding(
-                    self.rule_id,
-                    severity="medium" if (camera and away) else "low",
-                    confidence=0.7,
-                    evidence={
-                        "handler": handler,
-                        "source": source,
-                        "title": title,
-                        "is_camera_handler": camera,
-                        "anyone_home": not away,
-                    },
-                    summary=(
-                        f"Home Assistant discovered {label} ({handler} via "
-                        f"{source}) on your network, but it is not configured."
-                    ),
-                    suggested_actions=[
-                        (
-                            "Configure it under Settings > Devices & services if it "
-                            "is yours, or ignore the discovery if you recognize it "
-                            "and do not want it; investigate if you do not recognize "
-                            "it."
-                        )
-                    ],
+        items = sorted(
+            {
+                (
+                    str(item.get("handler") or ""),
+                    str(item.get("source") or ""),
+                    str(item.get("title") or ""),
                 )
+                for item in discovered
+            }
+        )
+        if not items:
+            return []
+        away = not anyone_home(snapshot)
+        cameras = sorted({h for h, _, _ in items if h in CAMERA_HANDLERS})
+        listed = ", ".join(
+            f"{title or handler} ({handler} via {source})"
+            for handler, source, title in items
+        )
+        return [
+            make_finding(
+                self.rule_id,
+                severity="medium" if (cameras and away) else "low",
+                confidence=0.7,
+                evidence={
+                    "devices": [
+                        {"handler": h, "source": s, "title": t} for h, s, t in items
+                    ],
+                    "camera_handlers": cameras,
+                },
+                display={"anyone_home": not away},
+                summary=(
+                    "Home Assistant discovered "
+                    f"{plural(len(items), 'unconfigured device')} "
+                    f"on your network: {listed}."
+                ),
+                suggested_actions=[
+                    (
+                        "Configure them under Settings > Devices & services if they "
+                        "are yours, ignore the discovery if you recognize them and "
+                        "do not want them, and investigate any you do not recognize"
+                    )
+                ],
             )
-        return findings
+        ]

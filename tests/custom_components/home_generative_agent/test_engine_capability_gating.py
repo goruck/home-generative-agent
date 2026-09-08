@@ -310,8 +310,10 @@ async def test_auth_inventory_bootstrap_commits_and_notifies_once(
     assert "1 administrator" in service_calls[0][2]["message"]
 
     await engine._timed_run()
-    assert len(saved) == 2
-    assert len(service_calls) == 1  # no second bootstrap notification
+    # Nothing changed, so the inventory is not rewritten; no second
+    # bootstrap notification either.
+    assert len(saved) == 1
+    assert len(service_calls) == 1
 
 
 @pytest.mark.asyncio
@@ -341,3 +343,130 @@ async def test_health_sensor_exposes_inactive_rules() -> None:
     assert attrs["inactive_rules"] == {"ha_failed_logins": ["network.ha_security.x"]}
     assert attrs["inactive_rule_count"] == 1
     assert attrs["network_capabilities"] == ["network.ha_security.y"]
+
+
+@pytest.mark.asyncio
+async def test_auth_inventory_commit_failure_does_not_end_the_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raising commit is contained; the run still writes its stats."""
+    inventory = MagicMock()
+    inventory.is_bootstrapped = True
+    calls = {"n": 0}
+
+    async def _commit(*_a: Any, **_k: Any) -> bool:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            msg = "corrupt row"
+            raise AttributeError(msg)
+        return False
+
+    inventory.async_commit = _commit
+    inventory.diff = MagicMock(return_value=MagicMock(bootstrap=False))
+
+    async def _collect(_hass: Any, _p: Any) -> list[ObservedUser]:
+        return []
+
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.sentinel.engine."
+        "async_collect_auth_observation",
+        _collect,
+    )
+    engine, _ = _engine(
+        monkeypatch, _snapshot(), auth_inventory=cast("AuthInventory", inventory)
+    )
+    await engine._timed_run()
+    assert engine.run_stats["last_run_end"]
+    await engine._timed_run()
+    assert calls["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_suppressed_auth_change_is_held_back_and_refires(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A snoozed new-token alert is not baselined; it fires once the snooze ends."""
+    from datetime import timedelta as _td  # noqa: PLC0415
+
+    from custom_components.home_generative_agent.sentinel.auth_inventory import (  # noqa: PLC0415
+        AuthDelta,
+    )
+
+    inventory = MagicMock()
+    inventory.is_bootstrapped = True
+    delta = AuthDelta(new_long_lived_tokens=["script"], new_token_ids=["t2"])
+    inventory.diff = MagicMock(return_value=delta)
+    commits: list[dict[str, Any]] = []
+
+    async def _commit(*_a: Any, **kwargs: Any) -> bool:
+        commits.append(kwargs)
+        return False
+
+    inventory.async_commit = _commit
+    observation = [
+        ObservedUser("u1", "Lindo", True, True, False, ())  # noqa: FBT003
+    ]
+
+    async def _collect(_hass: Any, _p: Any) -> list[ObservedUser]:
+        return observation
+
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.sentinel.engine."
+        "async_collect_auth_observation",
+        _collect,
+    )
+    snapshot = _snapshot({"new_admin_users": [], "new_long_lived_tokens": ["script"]})
+    engine, _ = _engine(monkeypatch, snapshot, auth_inventory=inventory)
+    state = cast("Any", engine)._suppression.state
+    # Snooze the type: the finding is produced but never delivered.
+    state.snoozed_until["ha_new_admin_or_token"] = {
+        "until": (NOW + _td(days=365)).isoformat()
+    }
+    await engine._timed_run()
+    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+    assert notifier.calls == []
+    assert commits[-1]["hold_back"] is delta
+
+    state.snoozed_until.clear()
+    await engine._timed_run()
+    assert [f.type for f in notifier.calls] == ["ha_new_admin_or_token"]
+    assert commits[-1]["hold_back"] is None
+
+
+def test_correlator_keeps_posture_findings_out_of_compounds() -> None:
+    """A posture finding on lock.front never swallows a live event on lock.front."""
+    from custom_components.home_generative_agent.sentinel.correlator import (  # noqa: PLC0415
+        SentinelCorrelator,
+    )
+    from custom_components.home_generative_agent.sentinel.models import (  # noqa: PLC0415
+        AnomalyFinding,
+        CompoundFinding,
+    )
+    from custom_components.home_generative_agent.sentinel.rules.network_common import (  # noqa: PLC0415
+        make_finding,
+    )
+
+    posture = make_finding(
+        "ha_sensitive_entity_exposed_without_pin",
+        severity="high",
+        evidence={"exposures": {"conversation": ["lock.front"]}},
+        summary="exposed",
+        suggested_actions=["Unexpose it"],
+        triggering_entities=["lock.front"],
+    )
+    live = AnomalyFinding(
+        anomaly_id="live1",
+        type="unlocked_lock_at_night",
+        severity="high",
+        confidence=0.7,
+        triggering_entities=["lock.front"],
+        evidence={"area": "front"},
+        suggested_actions=["lock_entity"],
+        is_sensitive=True,
+    )
+    out = SentinelCorrelator().correlate([posture, live])
+    assert not any(isinstance(item, CompoundFinding) for item in out)
+    assert {f.type for f in out if isinstance(f, AnomalyFinding)} == {
+        "ha_sensitive_entity_exposed_without_pin",
+        "unlocked_lock_at_night",
+    }

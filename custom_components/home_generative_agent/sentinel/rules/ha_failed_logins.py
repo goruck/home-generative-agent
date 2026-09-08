@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from custom_components.home_generative_agent.snapshot.network import ha_cap
+from custom_components.home_generative_agent.snapshot.network import (
+    LOGIN_NOTIFICATION_ID,
+    ha_cap,
+)
 
 from .network_common import POSTURE_COOLDOWN_MINUTES, ha_security, make_finding
 
@@ -30,16 +33,16 @@ class HaFailedLoginsRule:
             make_finding(
                 self.rule_id,
                 severity="medium",
-                evidence={"notification_id": "http-login"},
+                evidence={"notification_id": LOGIN_NOTIFICATION_ID},
                 summary=(
                     "Home Assistant recorded failed login attempts; see the "
                     "'Login attempt failed' notification for the source address."
                 ),
                 suggested_actions=[
                     (
-                        "Check the address in the notification. If it is not yours, "
+                        "Check the address in the notification; if it is not yours, "
                         "confirm IP banning is enabled and consider putting Home "
-                        "Assistant behind a VPN."
+                        "Assistant behind a VPN"
                     )
                 ],
             )

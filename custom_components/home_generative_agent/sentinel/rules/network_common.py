@@ -11,6 +11,7 @@ entity to name for most of these findings.
 
 from __future__ import annotations
 
+import unicodedata
 from typing import TYPE_CHECKING, Any
 
 from custom_components.home_generative_agent.const import (
@@ -20,10 +21,11 @@ from custom_components.home_generative_agent.sentinel.models import (
     AnomalyFinding,
     Severity,
     build_anomaly_id,
+    hashable_evidence,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from custom_components.home_generative_agent.snapshot.schema import (
         FullStateSnapshot,
@@ -75,15 +77,19 @@ def anyone_home(snapshot: FullStateSnapshot) -> bool:
     return bool(snapshot["derived"].get("anyone_home", False))
 
 
-def is_night(snapshot: FullStateSnapshot) -> bool:
-    """Return the derived night flag."""
-    return bool(snapshot["derived"].get("is_night", False))
+def noun(count: int, singular: str, plural_form: str | None = None) -> str:
+    """Return the singular or plural noun for *count* without the number."""
+    return singular if count == 1 else (plural_form or f"{singular}s")
 
 
 def plural(count: int, singular: str, plural_form: str | None = None) -> str:
     """Return ``"1 token"`` / ``"3 tokens"`` style phrases."""
-    word = singular if count == 1 else (plural_form or f"{singular}s")
-    return f"{count} {word}"
+    return f"{count} {noun(count, singular, plural_form)}"
+
+
+def _printable(text: str) -> str:
+    """Drop control and format characters (bidi overrides, zero-width joiners)."""
+    return "".join(ch for ch in text if unicodedata.category(ch)[0] != "C")
 
 
 def make_finding(  # noqa: PLR0913
@@ -95,22 +101,32 @@ def make_finding(  # noqa: PLR0913
     suggested_actions: Sequence[str],
     triggering_entities: Sequence[str] = (),
     confidence: float = 0.9,
+    display: Mapping[str, Any] | None = None,
 ) -> AnomalyFinding:
     """
     Build a sensitive finding for a network / HA-security rule.
 
-    ``summary`` is display-only (excluded from the anomaly-id hash) so a
-    changing count in the sentence never breaks snooze or cooldown identity.
+    ``evidence`` is the finding's identity: only keys that name *what* is
+    wrong belong there. ``display`` carries figures that change from cycle to
+    cycle (days idle, minutes offline, versions) and ``summary`` the rendered
+    sentence; both are attached for the notifier and the audit trail but
+    excluded from the anomaly-id hash, so pending-prompt and snooze identity
+    survive a changing count. ``suggested_actions`` must not contain a dot:
+    the engine treats ``a.b`` strings as ``domain.service`` calls.
     """
     entities = list(triggering_entities)
-    full_evidence = {**evidence, "summary": summary}
+    actions = list(suggested_actions)
+    if any("." in action for action in actions):
+        msg = f"{rule_id}: suggested actions must not contain '.'"
+        raise ValueError(msg)
+    full_evidence = {**evidence, **(display or {}), "summary": _printable(summary)}
     return AnomalyFinding(
-        anomaly_id=build_anomaly_id(rule_id, entities, full_evidence),
+        anomaly_id=build_anomaly_id(rule_id, entities, hashable_evidence(evidence)),
         type=rule_id,
         severity=severity,
         confidence=confidence,
         triggering_entities=entities,
         evidence=full_evidence,
-        suggested_actions=list(suggested_actions),
+        suggested_actions=actions,
         is_sensitive=True,
     )

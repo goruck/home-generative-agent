@@ -1,4 +1,4 @@
-"""Rule: a lock, alarm, or entry cover is exposed to an assistant with no PIN."""
+"""Rule: a lock, alarm, or entry cover is exposed to a voice assistant."""
 
 from __future__ import annotations
 
@@ -20,9 +20,19 @@ _ASSISTANT_LABELS = {
     "cloud.google_assistant": "Google Assistant",
 }
 
+# The Critical Action PIN guards this integration's conversation agent only.
+# Alexa and Google Assistant reach Home Assistant through the cloud
+# integration and never see the PIN, so exposure to them is always reported.
+_PIN_GATED_ASSISTANTS = frozenset({"conversation"})
+
 
 class HaSensitiveEntityExposedWithoutPinRule:
-    """Sensitive entities reachable by voice with no critical-action PIN."""
+    """
+    Sensitive entities reachable by voice without a gate.
+
+    One finding per cycle listing every exposure, so a second assistant or a
+    second lock is never starved by the per-type cooldown.
+    """
 
     rule_id = "ha_sensitive_entity_exposed_without_pin"
     requires = frozenset(
@@ -31,41 +41,51 @@ class HaSensitiveEntityExposedWithoutPinRule:
     cooldown_minutes = POSTURE_COOLDOWN_MINUTES
 
     def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:
-        """Return one finding per assistant that exposes sensitive entities."""
+        """Return one finding covering every ungated exposure."""
         ha = ha_security(snapshot)
-        # An absent PIN capability is "unknown", never "off".
-        if ha.get("critical_action_pin_enabled") is not False:
+        pin = ha.get("critical_action_pin_enabled")
+        if pin is None:
             return []
-        findings: list[AnomalyFinding] = []
         exposed: dict[str, list[str]] = ha.get("exposed_sensitive_entities") or {}
+        exposures: dict[str, list[str]] = {}
         for assistant, entity_ids in sorted(exposed.items()):
-            if not entity_ids:
+            if not entity_ids or (pin and assistant in _PIN_GATED_ASSISTANTS):
                 continue
+            exposures[assistant] = sorted(entity_ids)
+        if not exposures:
+            return []
+        all_ids = sorted({e for ids in exposures.values() for e in ids})
+        parts = []
+        actions = []
+        for assistant, ids in exposures.items():
             label = _ASSISTANT_LABELS.get(assistant, assistant)
-            ids = sorted(entity_ids)
-            findings.append(
-                make_finding(
-                    self.rule_id,
-                    severity="high",
-                    triggering_entities=ids,
-                    evidence={
-                        "assistant": assistant,
-                        "entity_ids": ids,
-                        "entity_count": len(ids),
-                        "critical_action_pin_enabled": False,
-                    },
-                    summary=(
-                        f"{plural(len(ids), 'sensitive entity', 'sensitive entities')} "
-                        f"exposed to {label} with no Critical Action PIN: "
-                        f"{', '.join(ids)}."
-                    ),
-                    suggested_actions=[
-                        (
-                            "Enable the Critical Action PIN in the integration's "
-                            "global options, or unexpose these entities from the "
-                            "assistant."
-                        )
-                    ],
-                )
+            gate = (
+                " with no Critical Action PIN"
+                if assistant in _PIN_GATED_ASSISTANTS
+                else ""
             )
-        return findings
+            parts.append(f"{', '.join(ids)} to {label}{gate}")
+            if assistant in _PIN_GATED_ASSISTANTS:
+                actions.append(
+                    "Enable the Critical Action PIN in the integration's global "
+                    "options, or unexpose these entities from Assist"
+                )
+            else:
+                actions.append(
+                    f"Unexpose these entities from {label}, or require the "
+                    f"{label} app's own PIN for unlocking"
+                )
+        return [
+            make_finding(
+                self.rule_id,
+                severity="high",
+                triggering_entities=all_ids,
+                evidence={"exposures": exposures},
+                display={"critical_action_pin_enabled": bool(pin)},
+                summary=(
+                    f"{plural(len(all_ids), 'sensitive entity', 'sensitive entities')} "
+                    f"exposed: {'; '.join(parts)}."
+                ),
+                suggested_actions=actions,
+            )
+        ]

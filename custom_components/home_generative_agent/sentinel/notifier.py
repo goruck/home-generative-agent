@@ -1159,8 +1159,28 @@ _TEMPLATE_MOBILE_FORMATTERS: dict[
 # ("someone is still inside"), so these never defer to a translated
 # explanation, even when a response language is configured. Translating them
 # needs real string templates, not model prose.
-_SECURITY_MESSAGE_TYPES = frozenset({"alarm_disarmed_during_external_threat"})
+# Findings whose deterministic copy must never be replaced by model prose.
+# The network / HA-security family qualifies as a whole: its summaries carry
+# the exact token label, port, account, or device an attacker would want
+# blurred, and parts of that evidence originate from untrusted sources.
+_SECURITY_MESSAGE_TYPES = frozenset(
+    {"alarm_disarmed_during_external_threat"} | NETWORK_RULE_TYPES
+)
 _SECURITY_MESSAGE_TEMPLATE_IDS = frozenset({"alarm_disarmed_open_entry"})
+
+
+def _network_summary(finding: AnomalyFinding) -> str | None:
+    """
+    Return the pre-rendered summary of a network / HA-security finding.
+
+    These rules render their exact facts themselves; most have no triggering
+    entity, so the generic fallback would name nothing. None for every other
+    finding type or when the summary is empty.
+    """
+    if finding.type not in NETWORK_RULE_TYPES:
+        return None
+    summary = str(finding.evidence.get("summary") or "").strip()
+    return summary or None
 
 
 def _is_security_copy(finding: AnomalyFinding) -> bool:
@@ -1184,12 +1204,8 @@ def _deterministic_mobile_message(finding: AnomalyFinding) -> str | None:
         return _alarm_disarmed_mobile_message(finding)
     if finding.type == "appliance_power_duration":
         return _appliance_power_duration_mobile_message(finding)
-    if finding.type in NETWORK_RULE_TYPES:
-        # Network / HA-security rules pre-render their exact facts; most have
-        # no triggering entity, so the generic fallback would name nothing.
-        summary = str(finding.evidence.get("summary") or "").strip()
-        if summary:
-            return summary[:MAX_MOBILE_MESSAGE_CHARS].rstrip()
+    if (summary := _network_summary(finding)) is not None:
+        return summary[:MAX_MOBILE_MESSAGE_CHARS].rstrip()
     formatter = _TEMPLATE_MOBILE_FORMATTERS.get(
         str(finding.evidence.get("template_id") or "")
     )
@@ -1242,6 +1258,11 @@ def _persistent_message(
     finding: AnomalyFinding,
     hass: HomeAssistant | None = None,
 ) -> str:
+    # Security copy never yields to model prose (see _is_security_copy):
+    # the summary names the token, port, or account, and a paraphrase built
+    # from attacker-influenced evidence could drop or reshape it.
+    if (summary := _network_summary(finding)) is not None:
+        return summary
     if explanation:
         text = _normalize_text(explanation)
         if text:
@@ -1249,10 +1270,6 @@ def _persistent_message(
 
     if finding.type == "appliance_power_duration":
         return _appliance_power_duration_mobile_message(finding)
-    if finding.type in NETWORK_RULE_TYPES:
-        summary = str(finding.evidence.get("summary") or "").strip()
-        if summary:
-            return summary
 
     entities = ", ".join(
         _friendly_entity(entity) for entity in finding.triggering_entities

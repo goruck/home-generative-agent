@@ -58,7 +58,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "Sensitive entity exposed without PIN"
         ),
         "type_ha_new_admin_or_token": "New administrator or access token",
-        "type_ha_long_lived_token_stale": "Unused long-lived access token",
+        "type_ha_long_lived_token_stale": "Old long-lived access token",
         "type_ha_failed_logins": "Failed login attempts",
         "type_ha_cloud_remote_ui_enabled": "Cloud remote access enabled",
         "type_ha_addon_exposed_port": "Add-on port exposed on host",
@@ -118,7 +118,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "Citlivá entita zpřístupněna bez PIN"
         ),
         "type_ha_new_admin_or_token": "Nový administrátor nebo přístupový token",
-        "type_ha_long_lived_token_stale": "Nepoužívaný dlouhodobý přístupový token",
+        "type_ha_long_lived_token_stale": "Starý dlouhodobý přístupový token",
         "type_ha_failed_logins": "Neúspěšné pokusy o přihlášení",
         "type_ha_cloud_remote_ui_enabled": "Vzdálený přístup přes cloud je zapnutý",
         "type_ha_addon_exposed_port": "Port doplňku vystaven na hostiteli",

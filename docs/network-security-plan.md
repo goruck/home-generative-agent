@@ -1,6 +1,6 @@
 # Network Security & Privacy Audit Plan
 
-Status: phase 1 in progress. Implementation-order steps 1–5 (the HA-only MVP: `platform` field, `network` snapshot section with the `ha_native` adapter, auth inventory, engine capability gating with health-sensor reporting, and the HA-native rules) are implemented; steps 6–11 (radio and router adapters, redaction, the `network_audit` feature type, the `audit_home_security` tool, baseline counters, discovery templates) are pending field validation of the MVP on a plain install.
+Status: phase 1 in progress. Implementation-order steps 1–5 (the HA-only MVP: `platform` field, `network` snapshot section with the `ha_native` adapter, auth inventory, engine capability gating with health-sensor reporting, and the HA-native rules) are implemented; steps 6–11 (radio and router adapters, redaction, the `network_audit` feature type, the `audit_home_security` tool, baseline counters, discovery templates) are pending field validation of the MVP on a plain install. Two facts learned while implementing narrow the plan: Home Assistant records refresh-token use only on the access-token exchange, which a long-lived token performs once at creation, so `long_lived_tokens_unused_days` became `long_lived_token_age_days` and `refresh_tokens_from_new_ip` is collected into the inventory but not alerted on; and the per-type cooldown means every rule in this family emits one aggregated finding per cycle rather than one per item.
 
 ## Problem Statement
 

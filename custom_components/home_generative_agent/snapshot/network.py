@@ -24,18 +24,21 @@ line, never to a failed snapshot build.
 from __future__ import annotations
 
 import logging
+import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.util import dt as dt_util
 
+from custom_components.home_generative_agent.agent.automation_pin import (
+    find_critical_automation_calls,
+)
 from custom_components.home_generative_agent.agent.helpers import (
-    matches_critical_rule,
     resolve_critical_action_policy,
 )
 from custom_components.home_generative_agent.sentinel.auth_inventory import (
     TOKEN_TYPE_LONG_LIVED,
-    TOKEN_TYPE_SYSTEM,
     ObservedToken,
     ObservedUser,
     token_labels,
@@ -98,25 +101,47 @@ ROUTER_PLATFORMS: frozenset[str] = frozenset(
 # Entity domains whose devices count as security devices.
 SECURITY_DOMAINS: frozenset[str] = frozenset({"lock", "alarm_control_panel", "camera"})
 
-# Cover device classes / name hints that make a cover an entry point.
+# Cover device classes / name hints that make a cover an entry point. The
+# hints are word-bounded so "indoor" / "outdoor" shades do not match.
 _ENTRY_COVER_CLASSES: frozenset[str] = frozenset({"door", "garage", "gate"})
-_ENTRY_COVER_HINTS: tuple[str, ...] = ("door", "garage", "gate")
+_ENTRY_COVER_HINT_RE = re.compile(r"\b(door|garage|gate)\b")
 
 # Config-flow sources that mean "Home Assistant found this on the LAN".
 DISCOVERY_SOURCES: frozenset[str] = frozenset({"ssdp", "zeroconf", "dhcp", "homekit"})
 
-# Assistants whose exposure lists are audited (mirrors the core constant).
-KNOWN_ASSISTANTS: tuple[str, ...] = (
-    "cloud.alexa",
-    "cloud.google_assistant",
-    "conversation",
-)
+# Persistent-notification id Home Assistant's http component uses for failed
+# logins (homeassistant.components.http.ban.NOTIFICATION_ID_LOGIN).
+LOGIN_NOTIFICATION_ID = "http-login"
 
-_LOGIN_NOTIFICATION_ID = "http-login"
+# Longest label copied from an untrusted source (mDNS name, add-on title,
+# token client name) into evidence and notification text.
+MAX_LABEL_CHARS = 64
 
 # Once-per-process log guard for runtime reads that fail: the snapshot builds
-# every few minutes and a version drift must not fill the log.
+# every few minutes and a version drift must not fill the log. Keyed by input
+# and exception class so a new failure mode still logs once.
 _LOGGED_INPUT_FAILURES: set[str] = set()
+
+
+def sanitize_label(value: Any, *, limit: int = MAX_LABEL_CHARS) -> str:
+    """
+    Return *value* as a short, printable label safe for notification text.
+
+    Names that reach this module come from the LAN (mDNS/SSDP advertisements,
+    DHCP hostnames), from third-party add-on repositories, and from whoever
+    minted a token. Control and format characters (bidi overrides, zero-width
+    joiners) are dropped, whitespace is collapsed, and the length is capped so
+    a hostile name cannot restyle a push notification or pad an LLM prompt.
+    """
+    text = "".join(
+        ch
+        for ch in str(value or "")
+        if ch.isspace() or unicodedata.category(ch)[0] != "C"
+    )
+    text = " ".join(text.split())
+    if len(text) > limit:
+        text = text[: limit - 1].rstrip() + "\u2026"
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -224,10 +249,17 @@ class AddonInput:
 
 @dataclass(frozen=True)
 class AutomationInput:
-    """An automation entity and its raw configuration."""
+    """
+    An automation entity and its configuration.
+
+    ``config`` carries ``triggers`` and ``actions`` in Home Assistant's
+    validated form (blueprints substituted, ``service:`` normalized to
+    ``action:``) when the entity exposes them, falling back to the raw
+    configuration otherwise.
+    """
 
     entity_id: str
-    raw_config: Mapping[str, Any]
+    config: Mapping[str, Any]
 
 
 @dataclass(frozen=True)
@@ -260,15 +292,16 @@ class HaNativeInputs:
     discovered_unconfigured: list[dict[str, str]] | None = None
     discovered_ignored: list[dict[str, str]] | None = None
     # Device-registry facts for tagging updates: entity -> device, device ->
-    # set of entity domains it owns.
-    entity_device: dict[str, str] = field(default_factory=dict)
-    device_domains: dict[str, set[str]] = field(default_factory=dict)
+    # set of entity domains it owns. Shared with the builder, never copied.
+    entity_device: Mapping[str, str] = field(default_factory=dict)
+    device_domains: Mapping[str, set[str]] = field(default_factory=dict)
 
 
 def _log_input_failure(name: str, err: Exception) -> None:
-    if name in _LOGGED_INPUT_FAILURES:
+    key = f"{name}:{type(err).__name__}"
+    if key in _LOGGED_INPUT_FAILURES:
         return
-    _LOGGED_INPUT_FAILURES.add(name)
+    _LOGGED_INPUT_FAILURES.add(key)
     LOGGER.warning(
         "Network audit: could not read %s (%s: %s); the related checks are "
         "reported as missing capabilities.",
@@ -312,7 +345,9 @@ async def async_collect_auth_observation(
                         token_id=str(token.id),
                         user_id=str(user.id),
                         token_type=str(token.token_type),
-                        client_name=getattr(token, "client_name", None),
+                        client_name=(
+                            sanitize_label(getattr(token, "client_name", None)) or None
+                        ),
                         created_at=_iso(getattr(token, "created_at", None)),
                         last_used_at=_iso(getattr(token, "last_used_at", None)),
                         last_used_ip_key=(
@@ -325,7 +360,7 @@ async def async_collect_auth_observation(
             observation.append(
                 ObservedUser(
                     user_id=str(user.id),
-                    name=user.name,
+                    name=sanitize_label(user.name) or None,
                     is_admin=bool(user.is_admin),
                     is_active=bool(user.is_active),
                     system_generated=bool(user.system_generated),
@@ -346,31 +381,42 @@ def _collect_failed_login(hass: HomeAssistant) -> bool | None:
         return None
     if notifications is None:
         return False
-    return _LOGIN_NOTIFICATION_ID in notifications
+    return LOGIN_NOTIFICATION_ID in notifications
 
 
-def _collect_exposed(hass: HomeAssistant) -> dict[str, list[str]] | None:
+def _collect_exposed(
+    hass: HomeAssistant, entity_ids: Sequence[str]
+) -> dict[str, list[str]] | None:
+    """
+    Return ``assistant -> exposed entity ids`` for the given entities.
+
+    Uses Home Assistant's own decision helper so entities that were never
+    explicitly configured but fall under an assistant's default exposure
+    (covers are a default-exposed domain) count as exposed, exactly as the
+    assistant itself would treat them. Only the handful of sensitive entities
+    is asked about, not the whole registry.
+    """
     try:
         from homeassistant.components.homeassistant.const import (  # noqa: PLC0415
             DATA_EXPOSED_ENTITIES,
         )
         from homeassistant.components.homeassistant.exposed_entities import (  # noqa: PLC0415
-            async_get_assistant_settings,
+            KNOWN_ASSISTANTS,
+            async_should_expose,
         )
 
         if DATA_EXPOSED_ENTITIES not in hass.data:
             # The exposed-entities registry is created by the homeassistant
             # component at startup; absent means we cannot audit exposure.
             return None
-        exposed: dict[str, list[str]] = {}
-        for assistant in KNOWN_ASSISTANTS:
-            settings = async_get_assistant_settings(hass, assistant)
-            exposed[assistant] = sorted(
+        return {
+            assistant: sorted(
                 entity_id
-                for entity_id, cfg in settings.items()
-                if bool(cfg.get("should_expose"))
+                for entity_id in entity_ids
+                if async_should_expose(hass, assistant, entity_id)
             )
-        return exposed  # noqa: TRY300
+            for assistant in KNOWN_ASSISTANTS
+        }
     except Exception as err:  # noqa: BLE001
         _log_input_failure("exposed entities", err)
         return None
@@ -403,9 +449,12 @@ def _collect_http(hass: HomeAssistant) -> HttpInput | None:
 
         app = server.app
         threshold = int(app.get(KEY_LOGIN_THRESHOLD, -1))
+        # ip_ban_enabled reflects the http option (a ban manager exists);
+        # whether a ban can ever trigger is the separate threshold fact: Home
+        # Assistant ships ip_ban_enabled=true with no threshold (-1).
         return HttpInput(
             trusted_proxies_configured=bool(getattr(server, "trusted_proxies", None)),
-            ip_ban_enabled=KEY_BAN_MANAGER in app and threshold >= 1,
+            ip_ban_enabled=KEY_BAN_MANAGER in app,
             login_attempts_threshold=threshold,
         )
     except Exception as err:  # noqa: BLE001
@@ -427,6 +476,15 @@ def _collect_auth_providers(hass: HomeAssistant) -> bool | None:
 
 
 def _collect_addons(hass: HomeAssistant) -> list[AddonInput] | None:
+    """
+    Read installed add-ons from the Supervisor coordinator's caches.
+
+    The add-on *list* (name, state) is refreshed on every coordinator update;
+    the per-add-on *info* (host ports, protection mode) is fetched for every
+    add-on at the first update and afterwards only for add-ons with
+    subscribed entities, so ports and protection mode can lag until the next
+    Home Assistant restart. Running state therefore comes from the list.
+    """
     try:
         from homeassistant.helpers.hassio import is_hassio  # noqa: PLC0415
 
@@ -435,11 +493,13 @@ def _collect_addons(hass: HomeAssistant) -> list[AddonInput] | None:
         from homeassistant.components.hassio import (  # noqa: PLC0415
             HassioNotReadyError,
             get_addons_info,
+            get_addons_list,
         )
     except Exception as err:  # noqa: BLE001
         _log_input_failure("Supervisor add-on info", err)
         return None
     try:
+        listed = get_addons_list(hass)
         info = get_addons_info(hass)
     except HassioNotReadyError:
         # Normal during the first cycles after boot: the Supervisor
@@ -449,9 +509,12 @@ def _collect_addons(hass: HomeAssistant) -> list[AddonInput] | None:
         _log_input_failure("Supervisor add-on info", err)
         return None
     addons: list[AddonInput] = []
-    for slug, data in (info or {}).items():
-        if not isinstance(data, dict):
+    for entry in listed or []:
+        if not isinstance(entry, dict) or not entry.get("slug"):
             continue
+        slug = str(entry["slug"])
+        data = info.get(slug) if isinstance(info, dict) else None
+        data = data if isinstance(data, dict) else {}
         ports: list[int] = []
         network = data.get("network")
         if isinstance(network, dict):
@@ -462,14 +525,33 @@ def _collect_addons(hass: HomeAssistant) -> list[AddonInput] | None:
             )
         addons.append(
             AddonInput(
-                slug=str(slug),
-                name=str(data.get("name") or slug),
+                slug=slug,
+                name=sanitize_label(entry.get("name") or data.get("name") or slug),
                 host_ports=tuple(ports),
                 protected=bool(data.get("protected", True)),
-                running=str(data.get("state") or "") == "started",
+                running=str(entry.get("state") or data.get("state") or "") == "started",
             )
         )
     return addons
+
+
+def _automation_config(entity: Any) -> Mapping[str, Any] | None:
+    """
+    Return an automation's validated ``triggers`` / ``actions``.
+
+    ``AutomationEntity`` keeps the validated trigger list in
+    ``_trigger_config`` and the validated action sequence on
+    ``action_script.sequence`` (both post blueprint substitution). A blueprint
+    automation's ``raw_config`` holds only ``use_blueprint``, so the raw form
+    is the fallback, not the source.
+    """
+    triggers = getattr(entity, "_trigger_config", None)
+    script = getattr(entity, "action_script", None)
+    actions = getattr(script, "sequence", None)
+    if isinstance(triggers, list) and isinstance(actions, list):
+        return {"triggers": triggers, "actions": actions}
+    raw = getattr(entity, "raw_config", None)
+    return raw if isinstance(raw, dict) else None
 
 
 def _collect_automations(hass: HomeAssistant) -> list[AutomationInput] | None:
@@ -481,9 +563,9 @@ def _collect_automations(hass: HomeAssistant) -> list[AutomationInput] | None:
             return None
         automations: list[AutomationInput] = []
         for entity in component.entities:
-            raw = getattr(entity, "raw_config", None)
-            if isinstance(raw, dict):
-                automations.append(AutomationInput(entity.entity_id, raw))
+            config = _automation_config(entity)
+            if config is not None:
+                automations.append(AutomationInput(entity.entity_id, config))
         return automations  # noqa: TRY300
     except Exception as err:  # noqa: BLE001
         _log_input_failure("automation configurations", err)
@@ -507,7 +589,7 @@ def _collect_discovery(
                 {
                     "handler": str(flow.get("handler") or ""),
                     "source": source,
-                    "title": str(placeholders.get("name") or ""),
+                    "title": sanitize_label(placeholders.get("name")),
                 }
             )
         unconfigured.sort(key=lambda d: (d["handler"], d["title"], d["source"]))
@@ -520,7 +602,11 @@ def _collect_discovery(
             if entry.source != "ignore":
                 continue
             ignored.append(
-                {"handler": entry.domain, "source": "ignore", "title": entry.title}
+                {
+                    "handler": entry.domain,
+                    "source": "ignore",
+                    "title": sanitize_label(entry.title),
+                }
             )
         ignored.sort(key=lambda d: (d["handler"], d["title"]))
     except Exception as err:  # noqa: BLE001
@@ -529,9 +615,10 @@ def _collect_discovery(
     return unconfigured, ignored
 
 
-async def async_collect_ha_native_inputs(
+async def async_collect_ha_native_inputs(  # noqa: PLR0913
     hass: HomeAssistant,
     context: NetworkBuildContext,
+    entities: Sequence[SnapshotEntity],
     *,
     now: datetime,
     entity_device: Mapping[str, str],
@@ -542,11 +629,12 @@ async def async_collect_ha_native_inputs(
     if auth is None:
         auth = await async_collect_auth_observation(hass, context.pseudonymizer)
     unconfigured, ignored = _collect_discovery(hass)
+    sensitive_ids = [e["entity_id"] for e in entities if is_sensitive_entity(e)]
     return HaNativeInputs(
         now=now,
         auth=auth,
         failed_login_notification_present=_collect_failed_login(hass),
-        exposed=_collect_exposed(hass),
+        exposed=_collect_exposed(hass, sensitive_ids),
         cloud_remote_ui_enabled=_collect_cloud(hass),
         http=_collect_http(hass),
         trusted_networks_bypass_login=_collect_auth_providers(hass),
@@ -554,8 +642,8 @@ async def async_collect_ha_native_inputs(
         automations=_collect_automations(hass),
         discovered_unconfigured=unconfigured,
         discovered_ignored=ignored,
-        entity_device=dict(entity_device),
-        device_domains={k: set(v) for k, v in device_domains.items()},
+        entity_device=entity_device,
+        device_domains=device_domains,
     )
 
 
@@ -596,71 +684,32 @@ def is_sensitive_entity(entity: SnapshotEntity) -> bool:
     if device_class in _ENTRY_COVER_CLASSES:
         return True
     haystack = f"{entity['entity_id']} {entity['friendly_name'] or ''}".lower()
-    return any(hint in haystack for hint in _ENTRY_COVER_HINTS)
-
-
-def _walk_actions(node: Any) -> Iterable[dict[str, Any]]:
-    """Yield every mapping in an automation's action tree (any nesting)."""
-    if isinstance(node, dict):
-        yield node
-        for value in node.values():
-            yield from _walk_actions(value)
-    elif isinstance(node, list):
-        for item in node:
-            yield from _walk_actions(item)
-
-
-def _action_entity_ids(call: Mapping[str, Any]) -> tuple[list[str], bool]:
-    """Return (entity ids, unresolved-target) for one service-call mapping."""
-    ids: list[str] = []
-    unresolved = False
-    for container in (call.get("target"), call.get("data"), call):
-        if not isinstance(container, dict):
-            continue
-        raw = container.get("entity_id")
-        if isinstance(raw, str):
-            ids.append(raw)
-        elif isinstance(raw, list):
-            ids.extend(str(v) for v in raw)
-        if any(
-            k in container for k in ("area_id", "device_id", "label_id", "floor_id")
-        ):
-            unresolved = True
-    if not ids:
-        unresolved = True
-    return ids, unresolved
+    return _ENTRY_COVER_HINT_RE.search(haystack.replace("_", " ")) is not None
 
 
 def automation_calls_critical_action(
-    raw_config: Mapping[str, Any], critical_actions: Sequence[Mapping[str, str]]
+    config: Mapping[str, Any], critical_actions: Sequence[Mapping[str, str]]
 ) -> bool:
-    """Return True when any action in *raw_config* matches a critical rule."""
-    actions = raw_config.get("actions", raw_config.get("action"))
-    for call in _walk_actions(actions):
-        service = call.get("action") or call.get("service")
-        if not isinstance(service, str) or "." not in service:
-            continue
-        domain, _, name = service.partition(".")
-        entity_ids, unresolved = _action_entity_ids(call)
-        if matches_critical_rule(
-            domain=domain,
-            service=name,
-            entity_ids=entity_ids,
-            critical_actions=critical_actions,
-            unresolved_target=unresolved,
-        ):
-            return True
-    return False
+    """
+    Return True when any action in *config* can perform a critical action.
+
+    Delegates to the screener the add-automation PIN gate uses: an allowlist
+    over Home Assistant's script-action taxonomy that also recognizes device
+    actions, ``homeassistant.turn_on`` aimed at a guarded domain, scene state
+    reproduction, and script/scene indirection, and fails closed on steps
+    whose real effect cannot be determined.
+    """
+    return bool(find_critical_automation_calls(config, critical_actions))
 
 
-def automation_has_public_webhook(raw_config: Mapping[str, Any]) -> bool:
+def automation_has_public_webhook(config: Mapping[str, Any]) -> bool:
     """
     Return True when a webhook trigger is reachable beyond the local network.
 
     Home Assistant defaults ``local_only`` to True, so only an explicit False
     counts.
     """
-    triggers = raw_config.get("triggers", raw_config.get("trigger"))
+    triggers = config.get("triggers", config.get("trigger"))
     if isinstance(triggers, dict):
         triggers = [triggers]
     if not isinstance(triggers, list):
@@ -677,38 +726,44 @@ def automation_has_public_webhook(raw_config: Mapping[str, Any]) -> bool:
 
 
 def _auth_fields(
-    inputs: HaNativeInputs, auth_inventory: AuthInventory | None
+    inputs: HaNativeInputs, context: NetworkBuildContext
 ) -> dict[str, Any]:
     auth = inputs.auth
+    auth_inventory = context.auth_inventory
     if auth is None:
         return {}
     labels = token_labels(auth)
     admins = 0
     long_lived = 0
-    unused_days: dict[str, int] = {}
+    age_days: dict[str, int] = {}
     for user in auth:
         if user.is_admin and user.is_active and not user.system_generated:
             admins += 1
         for token in user.tokens:
-            if token.token_type == TOKEN_TYPE_SYSTEM:
-                continue
             if token.token_type != TOKEN_TYPE_LONG_LIVED:
                 continue
             long_lived += 1
-            days = _days_between(token.last_used_at or token.created_at, inputs.now)
+            # Home Assistant logs refresh-token usage only on the access-token
+            # exchange, which a long-lived token performs once at creation;
+            # age is the only observable fact about it.
+            days = _days_between(token.created_at, inputs.now)
             if days is not None:
-                unused_days[labels[token.token_id]] = days
+                age_days[labels[token.token_id]] = days
     fields: dict[str, Any] = {
         "admin_user_count": admins,
         "long_lived_token_count": long_lived,
-        "long_lived_tokens_unused_days": unused_days,
+        "long_lived_token_age_days": age_days,
     }
     if auth_inventory is not None:
-        delta = auth_inventory.diff(auth)
+        fingerprint = (
+            context.pseudonymizer.fingerprint
+            if context.pseudonymizer is not None
+            else None
+        )
+        delta = auth_inventory.diff(auth, salt_fingerprint=fingerprint)
         if not delta.bootstrap:
             fields["new_admin_users"] = list(delta.new_admin_users)
             fields["new_long_lived_tokens"] = list(delta.new_long_lived_tokens)
-            fields["refresh_tokens_from_new_ip"] = list(delta.tokens_from_new_ip)
     return fields
 
 
@@ -756,7 +811,7 @@ def ha_native_adapter(  # noqa: PLR0912 - one branch per input, kept flat on pur
     result = AdapterResult(name="ha_native")
     ha = result.ha_security
 
-    ha.update(_auth_fields(inputs, context.auth_inventory))
+    ha.update(_auth_fields(inputs, context))
 
     if inputs.failed_login_notification_present is not None:
         ha["failed_login_notification_present"] = (
@@ -829,7 +884,7 @@ def ha_native_adapter(  # noqa: PLR0912 - one branch per input, kept flat on pur
         public = sorted(
             a.entity_id
             for a in inputs.automations
-            if automation_has_public_webhook(a.raw_config)
+            if automation_has_public_webhook(a.config)
         )
         ha["webhook_automations_public"] = public
         public_set = set(public)
@@ -837,7 +892,7 @@ def ha_native_adapter(  # noqa: PLR0912 - one branch per input, kept flat on pur
             a.entity_id
             for a in inputs.automations
             if a.entity_id in public_set
-            and automation_calls_critical_action(a.raw_config, critical_actions)
+            and automation_calls_critical_action(a.config, critical_actions)
         )
 
     unavailable: dict[str, int] = {}
@@ -871,15 +926,24 @@ async def async_build_network_snapshot(  # noqa: PLR0913
     entity_device: Mapping[str, str],
     device_domains: Mapping[str, set[str]],
 ) -> NetworkSnapshot:
-    """Build the ``network`` section; never raises for a failed input read."""
-    ctx = context or NetworkBuildContext()
-    if not ctx.enabled:
+    """
+    Build the ``network`` section; never raises for a failed input read.
+
+    Only the Sentinel engine passes a context. Every other snapshot consumer
+    (baseline, discovery, the preview service) gets an empty section, so the
+    auth store and Supervisor are read on the detection cadence alone and the
+    user's master switch is honored everywhere.
+    """
+    if context is None:
+        return empty_network_snapshot("Network section not requested by caller.")
+    if not context.enabled:
         return empty_network_snapshot("Network audit is disabled in Sentinel options.")
     inputs = await async_collect_ha_native_inputs(
         hass,
-        ctx,
+        context,
+        entities,
         now=now,
         entity_device=entity_device,
         device_domains=device_domains,
     )
-    return merge_adapter_results([ha_native_adapter(inputs, entities, ctx)])
+    return merge_adapter_results([ha_native_adapter(inputs, entities, context)])

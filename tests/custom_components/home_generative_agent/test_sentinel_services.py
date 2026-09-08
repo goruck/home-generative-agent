@@ -1247,3 +1247,38 @@ async def test_approve_rule_proposal_resolves_domainless_battery_id(hass) -> Non
     assert rule_registry.added_rules[0]["params"]["sensor_entity_ids"] == [
         "battery_level"
     ]
+
+
+@pytest.mark.asyncio
+async def test_require_admin_refuses_anonymous_and_non_admin_callers() -> None:
+    """The gate shared by the autonomy-level and inventory-reset services."""
+    from homeassistant.core import Context, ServiceCall  # noqa: PLC0415
+    from homeassistant.exceptions import HomeAssistantError  # noqa: PLC0415
+
+    hass = SimpleNamespace(auth=SimpleNamespace())
+    admin = SimpleNamespace(id="a1", name="Admin", is_admin=True)
+    member = SimpleNamespace(id="m1", name="Member", is_admin=False)
+    users = {"a1": admin, "m1": member}
+
+    async def _get_user(user_id: str) -> Any:
+        return users.get(user_id)
+
+    hass.auth.async_get_user = _get_user
+
+    def _call(user_id: str | None) -> ServiceCall:
+        return ServiceCall(
+            cast("Any", hass),
+            "home_generative_agent",
+            "sentinel_reset_auth_inventory",
+            {},
+            context=Context(user_id=user_id),
+        )
+
+    require = _hga_component._async_require_admin
+    assert await require(cast("Any", hass), _call("a1"), "svc") is admin
+    with pytest.raises(HomeAssistantError, match="authenticated"):
+        await require(cast("Any", hass), _call(None), "svc")
+    with pytest.raises(HomeAssistantError, match="admin"):
+        await require(cast("Any", hass), _call("m1"), "svc")
+    with pytest.raises(HomeAssistantError, match="admin"):
+        await require(cast("Any", hass), _call("ghost"), "svc")

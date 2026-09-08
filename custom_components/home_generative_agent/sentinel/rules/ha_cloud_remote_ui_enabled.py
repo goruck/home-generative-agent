@@ -39,7 +39,7 @@ class HaCloudRemoteUiEnabledRule:
                     (
                         "Keep remote access on only while you need it, and make "
                         "sure every user has a strong password and multi-factor "
-                        "authentication."
+                        "authentication"
                     )
                 ],
             )

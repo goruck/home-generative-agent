@@ -1,4 +1,4 @@
-"""Rule: a new admin user, long-lived token, or token seen from a new address."""
+"""Rule: a new admin user or a new long-lived access token appeared."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from custom_components.home_generative_agent.snapshot.network import ha_cap
 
-from .network_common import ha_security, make_finding
+from .network_common import ha_security, make_finding, noun
 
 if TYPE_CHECKING:
     from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
@@ -19,70 +19,50 @@ class HaNewAdminOrTokenRule:
     """
     Auth changes against the persistent inventory.
 
-    The inventory commits after every run, so each change is reported once;
-    no cooldown floor is needed and none is set.
+    One finding per cycle carrying every change, so a new admin and a new
+    token in the same cycle are reported together rather than one starving
+    the other under the per-type cooldown. The engine commits the inventory
+    only after this finding was delivered; a suppressed finding leaves the
+    changes uncommitted so they are reported again on a later run.
     """
 
     rule_id = "ha_new_admin_or_token"
-    requires = frozenset(
-        {
-            ha_cap("new_admin_users"),
-            ha_cap("new_long_lived_tokens"),
-            ha_cap("refresh_tokens_from_new_ip"),
-        }
-    )
+    requires = frozenset({ha_cap("new_admin_users"), ha_cap("new_long_lived_tokens")})
+    cooldown_minutes = 0
 
     def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:
-        """Return one finding per new admin, new token, or new token address."""
+        """Return one finding covering every new admin and new token."""
         ha = ha_security(snapshot)
-        findings: list[AnomalyFinding] = []
-        for user in ha.get("new_admin_users") or []:
-            findings.append(  # noqa: PERF401 - three parallel loops read better
-                make_finding(
-                    self.rule_id,
-                    severity="high",
-                    evidence={"change": "new_admin_user", "user": user},
-                    summary=f"New administrator account: {user}.",
-                    suggested_actions=[
-                        (
-                            "If you did not create this administrator, remove the "
-                            "account under Settings > People and change your passwords."
-                        )
-                    ],
-                )
+        admins = sorted(ha.get("new_admin_users") or [])
+        tokens = sorted(ha.get("new_long_lived_tokens") or [])
+        if not admins and not tokens:
+            return []
+        parts: list[str] = []
+        actions: list[str] = []
+        if admins:
+            parts.append(
+                f"new administrator {noun(len(admins), 'account')}: {', '.join(admins)}"
             )
-        for token in ha.get("new_long_lived_tokens") or []:
-            findings.append(  # noqa: PERF401
-                make_finding(
-                    self.rule_id,
-                    severity="high",
-                    evidence={"change": "new_long_lived_token", "token": token},
-                    summary=f"New long-lived access token: {token}.",
-                    suggested_actions=[
-                        (
-                            "If you did not create this token, revoke it from your "
-                            "profile page (Security > Long-lived access tokens)."
-                        )
-                    ],
-                )
+            actions.append(
+                "If you did not create this administrator, remove the account "
+                "under Settings > People and change your passwords"
             )
-        for token in ha.get("refresh_tokens_from_new_ip") or []:
-            findings.append(  # noqa: PERF401
-                make_finding(
-                    self.rule_id,
-                    severity="medium",
-                    confidence=0.6,
-                    evidence={"change": "token_from_new_address", "token": token},
-                    summary=(
-                        f"Long-lived access token {token} was used from an "
-                        "address not seen before."
-                    ),
-                    suggested_actions=[
-                        (
-                            "If nothing of yours moved to a new network, revoke the "
-                            "token from your profile page."
-                        )
-                    ],
-                )
+        if tokens:
+            parts.append(
+                f"new long-lived access {noun(len(tokens), 'token')}: "
+                f"{', '.join(tokens)}"
             )
-        return findings
+            actions.append(
+                "If you did not create this token, revoke it from your profile "
+                "page under Security > Long-lived access tokens"
+            )
+        summary = "; ".join(parts)
+        return [
+            make_finding(
+                self.rule_id,
+                severity="high",
+                evidence={"new_admin_users": admins, "new_long_lived_tokens": tokens},
+                summary=summary[0].upper() + summary[1:] + ".",
+                suggested_actions=actions,
+            )
+        ]

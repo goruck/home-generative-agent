@@ -318,6 +318,7 @@ from .snapshot.builder import async_build_full_state_snapshot
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
+    from homeassistant.auth.models import User
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant, ServiceCall
     from homeassistant.helpers.typing import ConfigType
@@ -1410,6 +1411,26 @@ class NullStore:
 def _ollama_httpx_client_kwargs() -> dict[str, Any]:
     """Return httpx kwargs that avoid creating SSL contexts in the event loop."""
     return {"verify": client_context(alpn_protocols=SSL_ALPN_HTTP11)}
+
+
+async def _async_require_admin(
+    hass: HomeAssistant, call: ServiceCall, service: str
+) -> User:
+    """
+    Return the calling admin user, or raise for anonymous and non-admin callers.
+
+    Shared by the services that can weaken Sentinel (raising the autonomy
+    level, resetting the auth inventory): both must refuse a stolen
+    low-privilege session or an automation running as a non-admin user.
+    """
+    if not call.context.user_id:
+        msg = f"{service} requires an authenticated user."
+        raise HomeAssistantError(msg)
+    user = await hass.auth.async_get_user(call.context.user_id)
+    if user is None or not user.is_admin:
+        msg = f"{service} is restricted to admin users."
+        raise HomeAssistantError(msg)
+    return user
 
 
 def _register_entry_service(  # noqa: PLR0913
@@ -3620,14 +3641,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         level = int(call.data["level"])
         pin: str | None = call.data.get("pin")
 
-        # Restrict to admin users only.
-        if not call.context.user_id:
-            msg = "sentinel_set_autonomy_level requires an authenticated user."
-            raise HomeAssistantError(msg)
-        user = await hass.auth.async_get_user(call.context.user_id)
-        if user is None or not user.is_admin:
-            msg = "sentinel_set_autonomy_level is restricted to admin users."
-            raise HomeAssistantError(msg)
+        await _async_require_admin(hass, call, SERVICE_SENTINEL_SET_AUTONOMY_LEVEL)
 
         sentinel = entry.runtime_data.sentinel
         if sentinel is None:
@@ -3705,12 +3719,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     async def _handle_sentinel_reset_auth_inventory(
         call: ServiceCall,
     ) -> dict[str, Any]:
-        """Clear the auth inventory; the next Sentinel run re-bootstraps it."""
-        _ = call
+        """
+        Clear the auth inventory; the next Sentinel run re-bootstraps it.
+
+        Admin-only, like ``sentinel_set_autonomy_level``: a reset makes every
+        current user and token "known" without alerting, so a non-admin
+        caller could blind the new-admin / new-token detector before creating
+        exactly what it exists to catch. The reset is logged with the caller's
+        user id so it leaves a trace in the Home Assistant log as well.
+        """
+        user = await _async_require_admin(
+            hass, call, SERVICE_SENTINEL_RESET_AUTH_INVENTORY
+        )
         inventory = entry.runtime_data.auth_inventory
         if inventory is None:
             return {"status": "unavailable"}
         before = inventory.summary()
+        LOGGER.warning(
+            "Sentinel auth inventory reset by user %s (%s): %d user(s), %d "
+            "token(s) forgotten; the next run bootstraps without alerting.",
+            user.name,
+            user.id,
+            before["user_count"],
+            before["token_count"],
+        )
         await inventory.async_reset()
         await hass.services.async_call(
             "persistent_notification",
@@ -3778,11 +3810,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             rd = changed_entry.runtime_data
             if rd.sentinel is not None:
                 hass.async_create_task(rd.sentinel.stop())
-            # Deleting Sentinel deletes what the network audit persisted: the
-            # auth inventory and the pseudonymization salt.
-            if rd.auth_inventory is not None:
-                hass.async_create_task(rd.auth_inventory.async_reset())
-            hass.async_create_task(async_remove_pseudonymizer_salt(hass))
+
+            async def _forget_network_audit() -> None:
+                # Deleting Sentinel deletes what the network audit persisted
+                # (the auth inventory and the pseudonymization salt), but
+                # only once the engine has stopped: a mid-cycle commit racing
+                # the deletion would recreate the inventory file.
+                if rd.sentinel is not None:
+                    await rd.sentinel.stop()
+                if rd.auth_inventory is not None:
+                    await rd.auth_inventory.async_reset()
+                await async_remove_pseudonymizer_salt(hass)
+
+            hass.async_create_task(_forget_network_audit())
             if rd.baseline_updater is not None:
                 hass.async_create_task(rd.baseline_updater.stop())
             if rd.discovery_engine is not None:

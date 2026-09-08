@@ -1,4 +1,4 @@
-"""Rule: a Supervisor add-on runs with protection mode off."""
+"""Rule: Supervisor add-ons run with protection mode off."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from custom_components.home_generative_agent.snapshot.network import ha_cap
 
-from .network_common import POSTURE_COOLDOWN_MINUTES, ha_security, make_finding
+from .network_common import POSTURE_COOLDOWN_MINUTES, ha_security, make_finding, plural
 
 if TYPE_CHECKING:
     from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
@@ -23,27 +23,28 @@ class HaAddonUnprotectedRule:
     cooldown_minutes = POSTURE_COOLDOWN_MINUTES
 
     def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:
-        """Return one finding per unprotected running add-on."""
+        """Return one finding covering every unprotected running add-on."""
         ha = ha_security(snapshot)
+        slugs = sorted(ha.get("addons_unprotected") or [])
+        if not slugs:
+            return []
         names: dict[str, str] = ha.get("addon_names") or {}
-        findings: list[AnomalyFinding] = []
-        for slug in sorted(ha.get("addons_unprotected") or []):
-            name = names.get(slug, slug)
-            findings.append(
-                make_finding(
-                    self.rule_id,
-                    severity="high",
-                    evidence={"addon_slug": slug, "addon_name": name},
-                    summary=(
-                        f"Add-on {name} is running with protection mode off, "
-                        "which grants it full access to the host system."
-                    ),
-                    suggested_actions=[
-                        (
-                            "Turn protection mode back on in the add-on's Info tab "
-                            "unless the add-on's documentation requires it off."
-                        )
-                    ],
-                )
+        listed = ", ".join(str(names.get(slug, slug)) for slug in slugs)
+        return [
+            make_finding(
+                self.rule_id,
+                severity="high",
+                evidence={"addons": slugs},
+                display={"addon_names": {s: names.get(s, s) for s in slugs}},
+                summary=(
+                    f"{plural(len(slugs), 'add-on')} running with protection mode "
+                    f"off, which grants full access to the host system: {listed}."
+                ),
+                suggested_actions=[
+                    (
+                        "Turn protection mode back on in each add-on's Info tab "
+                        "unless the add-on's documentation requires it off"
+                    )
+                ],
             )
-        return findings
+        ]
