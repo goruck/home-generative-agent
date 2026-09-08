@@ -1184,8 +1184,14 @@ def _network_summary(finding: AnomalyFinding) -> str | None:
     return summary or None
 
 
-def _is_security_copy(finding: AnomalyFinding) -> bool:
-    """Return True when *finding*'s deterministic copy must never be paraphrased."""
+def is_security_copy(finding: AnomalyFinding) -> bool:
+    """
+    Return True when *finding*'s deterministic copy must never be paraphrased.
+
+    The engine consults this before calling the explainer: a finding whose
+    push and persistent notification are both rendered from its own summary
+    would spend a model call on prose that reaches nobody.
+    """
     return (
         finding.type in _SECURITY_MESSAGE_TYPES
         or str(finding.evidence.get("template_id") or "")
@@ -1259,7 +1265,7 @@ def _mobile_message(
     explanation, the mobile push and the persistent notification would
     disagree for the same finding.
 
-    Security copy (see ``_is_security_copy``) is exempt and stays
+    Security copy (see ``is_security_copy``) is exempt and stays
     deterministic in every case: losing the camera, the entry, the disarm
     time, or the call to action matters more than the language it is in.
 
@@ -1269,7 +1275,7 @@ def _mobile_message(
     """
     deterministic = _deterministic_mobile_message(finding)
     if deterministic is not None and (
-        not response_language or _is_security_copy(finding)
+        not response_language or is_security_copy(finding)
     ):
         return deterministic
     if explanation:
@@ -1286,7 +1292,7 @@ def _persistent_message(
     finding: AnomalyFinding,
     hass: HomeAssistant | None = None,
 ) -> str:
-    # Security copy never yields to model prose (see _is_security_copy):
+    # Security copy never yields to model prose (see is_security_copy):
     # the summary names the token, port, or account, and a paraphrase built
     # from attacker-influenced evidence could drop or reshape it.
     if (summary := _network_summary(finding)) is not None:

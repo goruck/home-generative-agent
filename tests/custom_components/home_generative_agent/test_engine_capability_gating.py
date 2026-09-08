@@ -23,6 +23,7 @@ from custom_components.home_generative_agent.sentinel.auth_inventory import (
     ObservedUser,
 )
 from custom_components.home_generative_agent.sentinel.engine import SentinelEngine
+from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
 from custom_components.home_generative_agent.sentinel.rules.network_common import (
     NETWORK_RULE_TYPES,
 )
@@ -87,7 +88,7 @@ class DummyAudit:
     async def async_append_finding(  # type: ignore[no-untyped-def]
         self, snapshot, finding, explanation, **kwargs: Any
     ) -> None:
-        self.calls.append({"finding": finding, **kwargs})
+        self.calls.append({"finding": finding, "explanation": explanation, **kwargs})
 
 
 def _snapshot(
@@ -122,13 +123,14 @@ def _snapshot(
     return validate_snapshot(payload)
 
 
-def _engine(
+def _engine(  # noqa: PLR0913
     monkeypatch: pytest.MonkeyPatch,
     snapshot: FullStateSnapshot,
     *,
     options: dict[str, Any] | None = None,
     auth_inventory: AuthInventory | None = None,
     hass: Any = None,
+    explainer: Any = None,
 ) -> tuple[SentinelEngine, list[NetworkBuildContext]]:
     contexts: list[NetworkBuildContext] = []
 
@@ -162,7 +164,7 @@ def _engine(
         suppression=DummySuppression(),
         notifier=cast("SentinelNotifier", DummyNotifier()),
         audit_store=cast("AuditStore", DummyAudit()),
-        explainer=None,
+        explainer=explainer,
         auth_inventory=auth_inventory,
     )
     return engine, contexts
@@ -225,6 +227,55 @@ async def test_network_disabled_passes_disabled_context(
     )
     await engine._timed_run()
     assert contexts[0].enabled is False
+
+
+class _RecordingExplainer:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def async_explain(self, finding: Any) -> str:
+        self.calls.append(finding.type)
+        return "model prose"
+
+
+@pytest.mark.asyncio
+async def test_explainer_skipped_for_security_copy_findings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Network findings never reach the explainer even with explanations on."""
+    explainer = _RecordingExplainer()
+    engine, _ = _engine(
+        monkeypatch,
+        _snapshot({"failed_login_notification_present": True}),
+        options={"explain_enabled": True},
+        explainer=explainer,
+    )
+    await engine._timed_run()
+    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+    assert [f.type for f in notifier.calls] == ["ha_failed_logins"]
+    assert explainer.calls == []
+    # The audit row carries no explanation either.
+    audit = cast("DummyAudit", cast("Any", engine)._audit_store)
+    assert audit.calls[-1].get("explanation") is None
+    # An ordinary finding still gets one.
+    ordinary = AnomalyFinding(
+        anomaly_id="plain",
+        type="unlocked_lock_at_night",
+        severity="low",
+        confidence=0.9,
+        triggering_entities=["lock.front"],
+        evidence={},
+        suggested_actions=[],
+        is_sensitive=False,
+    )
+    assert (
+        cast("Any", engine)._explainer_for(explain_enabled=True, finding=ordinary)
+        is explainer
+    )
+    assert (
+        cast("Any", engine)._explainer_for(explain_enabled=False, finding=ordinary)
+        is None
+    )
 
 
 @pytest.mark.asyncio

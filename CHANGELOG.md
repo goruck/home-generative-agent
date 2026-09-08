@@ -13,6 +13,7 @@ All notable changes to this project will be documented in this file.
 - The home-state snapshot is now schema version 2: every entity carries its entity-registry `platform`, and the snapshot has a `network` section built from capability-declaring adapters (`snapshot/network.py`). Both additions are optional at the schema level, so persisted audit records and older fixtures remain valid.
 
 ### Fixed
+- Sentinel no longer calls the LLM explainer for findings whose notification copy is deterministic (the Home Assistant security audit rules and the alarm-disarm rules); the prose never reached the user, so every such call was wasted compute.
 - Sentinel burst-batch digest ("N home updates: …") now lists each held finding's own push body under the header instead of only its type label, so a rate-limited finding such as `network_unconfigured_discovered_device` still names every device.
 
 ## [3.38.1] - 2026-09-04

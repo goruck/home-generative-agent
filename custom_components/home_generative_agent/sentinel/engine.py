@@ -90,6 +90,7 @@ from .execution import (
 from .lock_enrichment import async_enrich_lock_last_changed
 from .logging_utils import RepeatingLogLimiter
 from .models import AnomalyFinding, CompoundFinding
+from .notifier import is_security_copy
 from .power_enrichment import async_enrich_power_last_changed
 from .rules.alarm_disarmed_external_threat import AlarmDisarmedDuringExternalThreatRule
 from .rules.appliance_power_duration import AppliancePowerDurationRule
@@ -1166,6 +1167,24 @@ class SentinelEngine:
         """Return the cooldown floor a static rule declares for its type."""
         return self._rule_cooldown_floors.get(anomaly_type, timedelta(0))
 
+    def _explainer_for(
+        self,
+        explain_enabled: bool,  # noqa: FBT001
+        finding: AnomalyFinding,
+    ) -> LLMExplainer | None:
+        """
+        Return the explainer to run for *finding*, or None to skip it.
+
+        Security copy (the network / HA-security family and the alarm-disarm
+        rules) is rendered from the finding's own deterministic summary in
+        both the mobile push and the persistent notification, and nothing
+        reads the stored explanation back, so the model call would be pure
+        waste. Everything else follows the ``explain_enabled`` option.
+        """
+        if not explain_enabled or is_security_copy(finding):
+            return None
+        return self._explainer
+
     async def _dispatch_item(  # noqa: PLR0913
         self,
         item: AnomalyFinding | CompoundFinding,
@@ -1320,8 +1339,8 @@ class SentinelEngine:
         await self._suppression.async_save()
 
         explanation = None
-        if explain_enabled and self._explainer is not None:
-            explanation = await self._explainer.async_explain(finding)
+        if (explainer := self._explainer_for(explain_enabled, finding)) is not None:
+            explanation = await explainer.async_explain(finding)
 
         await self._notifier.async_notify(finding, snapshot, explanation)
         await _append_finding_audit(
@@ -1458,8 +1477,8 @@ class SentinelEngine:
                 )
 
         explanation = None
-        if explain_enabled and self._explainer is not None:
-            explanation = await self._explainer.async_explain(best)
+        if (explainer := self._explainer_for(explain_enabled, best)) is not None:
+            explanation = await explainer.async_explain(best)
 
         await self._notifier.async_notify(best, snapshot, explanation)
         await _append_finding_audit(
