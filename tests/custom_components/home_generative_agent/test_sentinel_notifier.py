@@ -899,6 +899,53 @@ async def test_async_flush_batch_sends_summary_no_actions() -> None:
 
 
 @pytest.mark.asyncio
+async def test_flush_batch_lists_each_held_finding_body() -> None:
+    """The digest carries every held finding's own push body under its header."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+
+    network = _finding_with_severity(
+        "low",
+        anomaly_id="flushnet",
+        ftype="network_unconfigured_discovered_device",
+    )
+    network.evidence["summary"] = (
+        "Home Assistant discovered 2 unconfigured devices on your network: "
+        "XBR-65X850E (androidtv_remote via zeroconf), eero (upnp via ssdp)."
+    )
+    ordinary = _finding_with_severity("low", anomaly_id="flushplain")
+    notifier._held_batch.append((network, "model prose", "notify.mobile_app_phone"))
+    notifier._held_batch.append((ordinary, "Kettle ran longer.", None))
+
+    notifier._async_flush_batch()
+    await hass.drain_tasks()
+
+    assert len(hass.services.calls) == 1
+    message = hass.services.calls[0]["data"]["message"]
+    header, _, body = message.partition("\n\n")
+    assert header.startswith("2 home updates: ")
+    assert "XBR-65X850E (androidtv_remote via zeroconf), eero (upnp via ssdp)" in body
+    assert "model prose" not in body
+    assert "\u2022 Kettle ran longer." in body
+
+
+@pytest.mark.asyncio
+async def test_flush_batch_single_finding_keeps_header_and_body() -> None:
+    """A lone held finding still gets its header line plus its full body."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    finding = _finding_with_severity("low", anomaly_id="flushone")
+    notifier._held_batch.append((finding, "Only one thing happened.", None))
+
+    notifier._async_flush_batch()
+    await hass.drain_tasks()
+
+    message = hass.services.calls[0]["data"]["message"]
+    assert message.startswith("1 home update: ")
+    assert message.endswith("\n\n\u2022 Only one thing happened.")
+
+
+@pytest.mark.asyncio
 async def test_high_severity_bypasses_batch() -> None:
     """More than 3 high-severity notifications all dispatched immediately (no batching)."""
     options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}

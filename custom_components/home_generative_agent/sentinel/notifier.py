@@ -69,7 +69,7 @@ from custom_components.home_generative_agent.sentinel.suppression import (
 
 if TYPE_CHECKING:
     import asyncio
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from homeassistant.core import Event, HomeAssistant
 
@@ -424,13 +424,14 @@ class SentinelNotifier:
         count = len(held)
         types = list({_display_type(f, self._hass) for f, _, _svc in held})
         type_summary = ", ".join(types)
-        message = notif_msg(
+        header = notif_msg(
             self._hass,
             "batch_message",
             count=count,
             plural="s" if count > 1 else "",
             type_summary=type_summary,
         )
+        message = _batch_body(header, held, self._options, self._hass)
         batch_title = notif_msg(self._hass, "batch_title")
 
         # Use the first non-None resolved service from the held batch (which
@@ -1212,6 +1213,33 @@ def _deterministic_mobile_message(finding: AnomalyFinding) -> str | None:
     if formatter:
         return formatter(finding)
     return None
+
+
+def _batch_body(
+    header: str,
+    held: list[tuple[AnomalyFinding, str | None, str | None]],
+    options: Mapping[str, Any],
+    hass: HomeAssistant | None,
+) -> str:
+    """
+    Return the burst-batch digest: *header* plus one line per held finding.
+
+    Each line is the body the finding's own push would have carried, so a
+    finding delayed by the rate limiter still names its devices, ports, or
+    figures instead of collapsing to a bare type label (a four-device
+    ``network_unconfigured_discovered_device`` finding once reached the phone
+    as "1 home update: Unconfigured device discovered."). Duplicate bodies
+    are listed once.
+    """
+    response_language = str(options.get(CONF_SENTINEL_RESPONSE_LANGUAGE, "") or "")
+    lines: list[str] = []
+    for finding, explanation, _svc in held:
+        body = _mobile_message(explanation, finding, response_language, hass).strip()
+        if body and body not in lines:
+            lines.append(body)
+    if not lines:
+        return header
+    return header + "\n\n" + "\n".join(f"\u2022 {line}" for line in lines)
 
 
 def _mobile_message(
