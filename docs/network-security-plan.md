@@ -7,8 +7,10 @@ Status: design proposal (no code yet)
 Home Assistant knows a great deal about a home's network, but that knowledge is
 scattered across the device registry, the auth system, the exposed-entities
 registry, `update` entities, and whichever router integration the user happens
-to run. Nothing in HA or HGA reads across those sources to answer "is my home
-network configured safely, and has anything changed that I should know about?"
+to run. Add the Zigbee, Z-Wave, Bluetooth, and Matter integrations, which know the
+security configuration of most locks and sensors. Nothing in HA or HGA reads
+across those sources to answer "is my home network configured safely, and has
+anything changed that I should know about?"
 
 HGA is well placed to do this. It already builds an authoritative snapshot of
 home state, evaluates deterministic Sentinel rules over it, learns per-home
@@ -30,6 +32,9 @@ the installed integrations can see.
   joined, a security device went offline, a usage or threat spike).
 - Audit HA's own attack surface (admin users, long-lived tokens, locks and
   alarms exposed to voice assistants, cloud remote access, pending updates).
+- Audit radio-protocol configuration HA can observe: Z-Wave security
+  classes, Zigbee permit-join, new radio devices, Bluetooth trackers,
+  Matter fabrics.
 - Explain findings and per-device privacy exposure in plain language via the
   LLM, using pseudonymized identifiers and an optional local-model override.
 - Work on every install: a home with no router integration still gets a
@@ -47,6 +52,10 @@ the installed integrations can see.
 - **No fixes in phase 1.** The first implementation is read-only: it audits,
   notifies, and recommends. PIN-gated remediation is phase 2.
 - No deep packet inspection or flow analysis; HGA never sees traffic.
+- No detection of active radio-layer attacks: Zigbee key sniffing during
+  join, Z-Wave S0 downgrade, Bluetooth pairing exploits, jamming, or
+  replay. Those need RF monitoring HA does not do. Radio *configuration*
+  weaknesses that HA can observe are in scope (see Radio Protocols).
 - No new router integrations. HGA consumes entities from integrations the user
   already installed; it does not talk to router APIs itself.
 - No change to the Sentinel safety invariant: the LLM never gates detection,
@@ -178,12 +187,45 @@ class HaSecurityPosture(TypedDict, total=False):
     discovered_ignored: list[dict[str, str]]
 
 
+class RadioDevice(TypedDict):
+    device_id: str  # device-registry id
+    protocol: str  # "zigbee" | "zwave" | "bluetooth" | "matter" | "thread"
+    platform: str  # "zha" | "mqtt" (Zigbee2MQTT) | "zwave_js" | "bluetooth" | "matter"
+    name: str | None
+    manufacturer: NotRequired[str | None]
+    model: NotRequired[str | None]
+    is_security_device: bool  # lock, alarm, garage, camera
+    first_seen: NotRequired[str | None]
+    security_class: NotRequired[
+        str | None
+    ]  # zwave: "none" | "s0" | "s2_unauth" | "s2_auth" | "s2_access"
+    fabrics: NotRequired[list[dict[str, Any]]]  # matter: {vendor_id, fabric_id, label}
+
+
+class RadioPosture(TypedDict, total=False):
+    zigbee_permit_join: bool
+    zigbee_permit_join_entity_id: str
+    zwave_inclusion_active: bool
+    coordinator_update_pending: list[str]  # update.* for coordinators and proxies
+    bluetooth_unknown_trackers: list[
+        dict[str, Any]
+    ]  # {key, first_seen, days_present, kind}
+    thread_border_router_count: int
+
+
+class RadioSnapshot(TypedDict):
+    capabilities: list[str]
+    devices: list[RadioDevice]
+    posture: RadioPosture
+
+
 class NetworkSnapshot(TypedDict):
     capabilities: list[str]  # dotted paths present, e.g. "network.posture.upnp_enabled"
     sources: dict[str, str]  # capability -> platform that provided it
     clients: list[NetworkClient]
     posture: NetworkPosture
     ha_security: HaSecurityPosture
+    radio: NotRequired[RadioSnapshot]
     counters: dict[str, float]  # baseline inputs, see Baseline section
 ```
 
@@ -239,6 +281,11 @@ reference for cloud-only mesh integrations. The remaining routers are phase 3.
 | `unifi` | `platform == "unifi"` | clients with VLAN, guest flag, wired/wireless; block, port-forward, WLAN, firewall, traffic-rule switches; device updates | 1 |
 | `adguard` | `platform == "adguard"` | protection, filtering, safe-browsing, parental switches; blocked-query counters | 1 |
 | `eero` | `platform == "eero"` | everything in the eero table below | 1 |
+| `zwave` | `platform == "zwave_js"` | per-node security class, inclusion state, controller update | 1 |
+| `zigbee` | `platform == "zha"` or Zigbee2MQTT bridge entities via `mqtt` | permit-join state, coordinator update, device list | 1 |
+| `radio_registry` | always | new radio devices from the device registry, per protocol | 1 |
+| `bluetooth` | the `bluetooth` integration is loaded | persistent unknown tracker-class advertisements | 2 |
+| `matter` | `platform == "matter"` | per-node fabric list | 3 |
 | `pi_hole` | `platform == "pi_hole"` | protection switch, blocked-query counters | 3 |
 | `asuswrt` / `tplink_omada` / `keenetic_ndms2` / `mikrotik` / `netgear` | by platform | clients; per-integration posture where exposed | 3 |
 
@@ -375,9 +422,12 @@ translation key or unique-id suffix, never by friendly name.
 A new `sentinel/network_inventory.py` store, shaped like `RuleRegistry`
 (`Store` under key `home_generative_agent_sentinel_network_inventory`).
 
-- Keyed by the pseudonymized client key, holding `first_seen`, `last_seen`,
-  `trusted` (bool), the last observed hostname and manufacturer, and the HA
-  device id when joined.
+- Keyed by a source-qualified id: the pseudonymized MAC for router clients
+  and the device-registry id for radio devices. Each row holds `source`
+  (`router`, `zigbee`, `zwave`, `bluetooth`, `matter`), `first_seen`,
+  `last_seen`, `trusted` (bool), the last observed name and manufacturer,
+  and the HA device id when known. Router MACs are one source among
+  several, not the inventory's identity.
 - **Bootstrap:** on the first run after enablement every currently connected
   client is recorded with `trusted = True` and a single "inventory
   established" notification asks the user to review it. This mirrors the
@@ -431,6 +481,12 @@ would enable it.
 | `network_port_forward_active` | `network.posture.port_forwards` | medium; high when the target is a camera or NVR | 1 |
 | `network_iot_device_on_main_vlan` | `network.clients[].vlan` | low, advisory | 1 |
 | `network_guest_client_present` | `network.clients[].is_guest` | medium while away or at night | 1 |
+| `zwave_insecure_security_class` | `network.radio.devices[].security_class` | high for locks and garage doors on S0 or none; low otherwise | 1 |
+| `zigbee_permit_join_open` | `network.radio.posture.zigbee_permit_join` | medium; high while away | 1 |
+| `radio_new_device_joined` | `network.radio.devices` | medium while away or at night, low otherwise | 1 |
+| `radio_coordinator_update_pending` | `network.radio.posture.coordinator_update_pending` | medium | 1 |
+| `bluetooth_unknown_tracker_present` | `network.radio.posture.bluetooth_unknown_trackers` | medium after N days | 2 |
+| `matter_unexpected_fabric` | `network.radio.devices[].fabrics` | low | 3 |
 | `network_client_identity_drift` | `network.clients` | low | 2 |
 | `network_public_ip_changed` | `network.posture.public_ip_changed` | info | 2 |
 
@@ -477,6 +533,8 @@ receives, and it is the first thing to build and validate.
 | `ha_http_proxy_misconfigured` | yes | `http` runtime config |
 | `security_device_unavailable` | yes | entity availability |
 | `network_unconfigured_discovered_device` | yes | in-progress and ignored discovery flows |
+| `radio_new_device_joined` | yes, for any home with ZHA, Zigbee2MQTT, Z-Wave JS, Bluetooth, or Matter | device registry |
+| `zwave_insecure_security_class`, `zigbee_permit_join_open` | yes, when the protocol integration is loaded | Z-Wave JS and Zigbee integrations (core, not third-party) |
 | `network_router_update_pending` | partly | any `update.*` entity |
 | `network_upnp_enabled`, `network_public_ip_changed` | on about a third of installs | the core, auto-discovered `upnp` integration |
 | `network_unknown_device_joined`, guest, WPA3, port-forward, VLAN rules | no | need a router adapter |
@@ -490,6 +548,57 @@ Validation order: build `ha_native` and the rules above first, run them on a
 plain HA install with no router integration, and only then add the router
 adapters. If the HA-only audit is not useful on its own, the router adapters
 will not rescue it.
+
+## Radio Protocols
+
+The IP network is not the only network in the home. Zigbee, Z-Wave,
+Bluetooth, Thread, and Matter devices include most locks and sensors, and HA
+has direct visibility into their configuration through the integrations that
+drive them. The same adapter and capability pattern applies; the data lands
+in `snapshot["network"]["radio"]`.
+
+What HA can observe, ranked by value:
+
+| Check | Source | Phase |
+|---|---|---|
+| Z-Wave node security class | Z-Wave JS reports each node's highest security class. A lock or garage opener on S0 or with no security is a concrete, well-documented weakness. | 1 |
+| Zigbee permit-join left open | Zigbee2MQTT exposes a bridge permit-join switch through MQTT discovery. ZHA exposes the coordinator's permit state through its gateway; confirm the access path against the pinned HA version at implementation time, and report the capability as missing if it is not readable. | 1 |
+| New radio device joined | Device-registry delta filtered by integration domain (`zha`, `mqtt` with a Zigbee2MQTT identifier, `zwave_js`, `bluetooth`, `matter`). Feeds the general inventory. | 1 |
+| Coordinator and proxy firmware | `update.*` entities whose device is a Zigbee or Z-Wave coordinator or an ESPHome Bluetooth proxy, weighted as security devices. | 1 |
+| Z-Wave inclusion left active | Z-Wave JS controller inclusion state. | 1 |
+| Unknown Bluetooth tracker | The Bluetooth integration already receives every BLE advertisement in range. A tracker-class advertisement (Apple Find My, Samsung SmartTag, Tile) that is not a configured device and stays present for days is a privacy finding. Passive: HA is already listening, so this stays inside the no-scanning rule. | 2 |
+| Matter fabrics | Matter node diagnostics list the fabrics a device is commissioned to. A device still attached to a vendor fabric the user does not recognize is a privacy exposure. | 3 |
+| Thread border routers | Count and dataset presence, informational. | 3 |
+
+Adapter notes:
+
+- `zwave`: reads node security class and controller state from the Z-Wave JS
+  integration's node objects, never from the driver directly. Security class
+  is normalized to `none`, `s0`, `s2_unauth`, `s2_auth`, `s2_access`.
+- `zigbee`: two sources behind one adapter. Zigbee2MQTT bridge entities
+  arrive through `mqtt` and are recognized by the bridge device identifier,
+  not by friendly name. ZHA state comes from the ZHA gateway.
+- `radio_registry`: pure device-registry read, always available, so
+  `radio_new_device_joined` is part of the HA-only MVP for any home with a
+  radio integration.
+- `bluetooth`: advertisement addresses are pseudonymized like MACs. Tracker
+  classification uses manufacturer-data prefixes and is conservative:
+  unknown means "not a configured device and not an HA-known manufacturer",
+  and the rule requires persistence across days before it fires. A resident's
+  own tag registered through the Private BLE Device integration is a
+  configured device and never flagged.
+- `matter`: fabric vendor ids are matched against the device's own
+  manufacturer and the user's configured ecosystems; anything else is
+  reported, not judged.
+
+Explicitly not covered: active protocol attacks such as Zigbee key sniffing
+during join, Z-Wave S0 downgrade, Bluetooth pairing exploits, jamming, or
+replay. These need RF monitoring that HA does not perform, and the audit says
+so in its `privacy_notes` rather than implying radio coverage it lacks.
+
+Remediation (phase 2): turn off permit join or inclusion via the exposing
+switch, both PIN-gated. An insecure Z-Wave security class has no automated
+fix; the finding tells the user to re-include the device with S2.
 
 ## Baseline Extension
 
@@ -616,6 +725,8 @@ Every fix is an existing HA entity call, so no new actuation code is needed:
 |---|---|---|
 | unknown device | block or pause client | UniFi block-client switch; Fritz `switch.*_internet_access`; eero `switch.*_paused` |
 | port forward active | turn off | Fritz and UniFi port-forward switches |
+| Zigbee permit join open | turn off | Zigbee2MQTT bridge switch; ZHA permit service with duration 0 |
+| Z-Wave inclusion active | stop inclusion | Z-Wave JS controller |
 | UPnP enabled | turn off | `switch.*_upnp` |
 | guest network idle | turn off | `switch.*_guest_network` |
 | WPA3 disabled | turn on | `switch.*_wpa3` (advisory, may drop old devices) |
@@ -664,6 +775,10 @@ Mechanics:
   availability, each with and without the underlying component loaded, so
   a Container install reports add-on capabilities as missing rather than
   failing.
+- `tests/.../test_snapshot_radio.py`: Z-Wave security-class normalization,
+  Zigbee2MQTT bridge recognition by identifier, ZHA gateway state, device
+  registry deltas per protocol, Bluetooth tracker classification with
+  known-tag and Private BLE Device exclusions.
 - `tests/.../test_rules_network.py`: each rule against synthetic snapshots,
   including the randomized-MAC suppression and grace windows.
 - `tests/.../test_engine_capability_gating.py`: rules skipped when
@@ -719,6 +834,11 @@ Resolved with the maintainer during design review.
 4. **Both pseudonymization and the local-model override are phase 1.**
    Pseudonymization is unconditional; the `network_audit` feature type lets
    the audit be pinned to a local provider.
+5. **Radio protocols are in scope for configuration weaknesses HA can
+   observe.** Z-Wave security class, Zigbee permit-join, new radio devices,
+   and coordinator firmware are phase 1. Bluetooth tracker detection is
+   phase 2, Matter fabrics phase 3. Active radio attacks are a stated
+   non-goal.
 
 ## Implementation Order (Phase 1)
 
@@ -728,9 +848,11 @@ Resolved with the maintainer during design review.
 3. Engine capability gating and health-sensor reporting.
 4. The HA-only MVP rules, validated on an install with no router
    integration.
-5. `generic_router_tracker`, `upnp_igd`, `fritz`, `unifi`, `adguard`, and
-   `eero` adapters, then the remaining phase 1 rules.
-6. `sentinel/network_inventory.py` store and services.
+5. `radio_registry`, `zwave`, and `zigbee` adapters with their phase 1
+   rules; the general device inventory.
+6. `generic_router_tracker`, `upnp_igd`, `fritz`, `unifi`, `adguard`, and
+   `eero` adapters, then the remaining phase 1 rules; router clients join
+   the inventory as a second source.
 7. `redact_network_identifiers` in the explain path; `network_audit` feature
    type and resolver plumbing.
 8. `audit_home_security` tool, system prompt addition, `run_network_audit`
