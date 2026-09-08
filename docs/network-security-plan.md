@@ -289,9 +289,29 @@ reference for cloud-only mesh integrations. The remaining routers are phase 3.
 | `pi_hole` | `platform == "pi_hole"` | protection switch, blocked-query counters | 3 |
 | `asuswrt` / `tplink_omada` / `keenetic_ndms2` / `mikrotik` / `netgear` | by platform | clients; per-integration posture where exposed | 3 |
 
-Adapters must not import integration code. They read entity state and
-attributes only, so they work whether the integration is core or HACS and
-they are testable with plain `hass.states` fixtures.
+Adapters come in two tiers, and the tier is declared on the adapter:
+
+- **Entity adapters** read entity state, attributes, and the entity and
+  device registries only. They never import integration code, so they work
+  whether the integration is core or HACS and are tested with plain
+  `hass.states` fixtures. Every router and DNS adapter above is an entity
+  adapter.
+- **Runtime adapters** read an integration's runtime objects through that
+  integration's own helper API, because the data is not on any entity.
+  Z-Wave `highest_security_class` and controller inclusion state live on
+  Z-Wave JS node and controller objects; ZHA permit-join state lives on the
+  ZHA gateway. `zwave`, `zigbee` (ZHA half), `bluetooth`, and `matter` are
+  runtime adapters. They are permitted under four rules: the import happens
+  lazily inside the adapter function, never at module load; every read is
+  wrapped so `ImportError`, `AttributeError`, `KeyError`, and `TypeError`
+  degrade to a missing capability with one rate-limited log line, never an
+  engine failure; each runtime adapter has a test that exercises the real
+  integration objects from the pinned `homeassistant` version in
+  `requirements/test.txt`, so an HA upgrade that moves the attribute fails a
+  test instead of silently dropping the capability; and the adapter's
+  docstring names the HA version and the exact objects it reads. A runtime
+  adapter whose data cannot be obtained on the pinned version defers its
+  rules rather than approximating from entity state.
 
 #### FRITZ!Box adapter mapping
 
@@ -378,14 +398,40 @@ guest flag, per-client blocked flag, port forwards, DHCP reservations, band or
 SSID, device type. The entity is matched by `platform` plus the integration's
 translation key or unique-id suffix, never by friendly name.
 
+#### Auth inventory store
+
+A new `sentinel/auth_inventory.py` store (`Store` under key
+`home_generative_agent_sentinel_auth_inventory`) gives the auth change rules
+something to compare against, because the existing audit store keeps only a
+snapshot hash and HA's auth objects have no history.
+
+- **Contents, all non-secret:** per user `user_id`, `is_admin`, `is_active`,
+  `first_seen`; per refresh token `token_id` (HA's own identifier, not the
+  token), `user_id`, `token_type`, `client_name`, `created_at`, `first_seen`,
+  and `seen_ips`, a bounded list of HMAC-pseudonymized IPs with first and
+  last seen timestamps. The raw IP is never stored; the rule only needs to
+  know whether the current one was seen before.
+- **Bootstrap:** the first run records every existing user and token as
+  known without alerting, with one "auth inventory established"
+  notification listing admin count and long-lived token count.
+- **Retention and deletion:** a token row is deleted when its `token_id`
+  no longer exists in HA; `seen_ips` keeps the most recent 20 entries and
+  drops entries not seen for `sentinel_auth_ip_retention_days` (default 90).
+  Deleting the Sentinel subentry deletes the store. A
+  `sentinel_reset_auth_inventory` service clears it on demand.
+- **Restart safety:** because the store is persistent, a restart does not
+  re-bootstrap and does not re-alert on tokens seen before.
+
 #### `ha_native` adapter details
 
 - **Auth.** `hass.auth.async_get_users()` gives `is_admin`, `is_active`, and
-  each user's refresh tokens with `token_type`, `client_name`, `created_at`,
-  `last_used_at`, and `last_used_ip`. Long-lived tokens unused for more than a
-  configurable number of days, and a refresh token whose `last_used_ip` was
-  not seen in the previous run, become posture fields. No token values are
-  ever read into the snapshot.
+  each user's refresh tokens with `id`, `token_type`, `client_name`,
+  `created_at`, `last_used_at`, and `last_used_ip`. These objects describe
+  the present only, so the change rules (`ha_new_admin_or_token`,
+  `refresh_tokens_from_new_ip`) compare against a persistent auth inventory
+  described below. Stale-token detection is computed from `last_used_at`
+  directly. No token values, JWT keys, or secrets are ever read into the
+  snapshot or the inventory.
 - **Failed logins.** Presence of the `http-login` persistent notification.
 - **Exposed entities.** Via the `homeassistant.exposed_entities` helpers, for
   each assistant list exposed entities whose domain is `lock`,
@@ -432,8 +478,16 @@ A new `sentinel/network_inventory.py` store, shaped like `RuleRegistry`
   client is recorded with `trusted = True` and a single "inventory
   established" notification asks the user to review it. This mirrors the
   baseline establishment notification and avoids a flood of alerts on day one.
-- **Auto-trust:** a client that joins to an HA device in the registry is
-  trusted automatically; HA already knows what it is.
+- **Auto-trust is narrow.** A device-registry match alone proves nothing:
+  the FRITZ!Box and UniFi integrations create a registry device with a MAC
+  connection for every client they track, so a registry hit would trust
+  every new client and silence `network_unknown_device_joined`. A client is
+  auto-trusted only when the joined registry device has at least one config
+  entry whose domain is not a router, tracker, or discovery platform (the
+  adapter platforms, `device_tracker`-only integrations, `dhcp`, `ssdp`,
+  `zeroconf`) and that entry owns at least one non-`device_tracker` entity.
+  A Shelly plug qualifies; a Fritz-created client device does not.
+  Everything else stays untrusted until the user approves it.
 - **Services:** `sentinel_get_network_inventory`,
   `sentinel_trust_network_device`, `sentinel_untrust_network_device`,
   `sentinel_reset_network_inventory`. The notifier gains a "Trust device"
@@ -656,8 +710,13 @@ Returns:
 }
 ```
 
-The tool reads the snapshot; it never polls integrations, so it is safe to
-call repeatedly and respects the router integration's own rate limits. The
+The payload above is what the tool assembles internally and what the
+`network_audit` model sees. What is returned to the conversation model is
+the digest described under Local-model override; `devices` and the
+detailed evidence stay inside the tool unless the conversation provider is
+the audit provider. The tool reads the snapshot; it never polls
+integrations, so it is safe to call repeatedly and respects the router
+integration's own rate limits. The
 system prompt gains a short instruction: use this tool when the user asks
 about network security, privacy, unknown devices, or whether the home is
 "safe"; report findings by severity; state which checks could not run and
@@ -686,11 +745,37 @@ rendering the final notification, after the model has produced its text.
 
 Add `network_audit` to `FEATURE_DEFS` (`{"name": "Network Audit", "required": False}`)
 mapped to category `chat` in `FEATURE_CATEGORY_MAP`. The existing feature
-subentry flow then lets the user pin the audit tool, network-rule
-explanations, and network discovery to a specific provider, typically a local
-Ollama model, while conversation stays on a cloud provider. When the feature
-subentry is absent, resolution falls back to the conversation provider exactly
-as `conversation_summary` does today.
+subentry flow then lets the user pin network-rule explanations, network
+triage, network discovery, and the audit tool's own narrative step to a
+specific provider, typically a local Ollama model. When the feature subentry
+is absent, resolution falls back to the conversation provider exactly as
+`conversation_summary` does today.
+
+**What the override does not do.** The agent tool returns a `ToolMessage`
+that the graph feeds back to the conversation model. A feature mapping
+cannot change that: whatever the tool returns reaches the conversation
+provider. So the override is designed around that fact rather than around
+the assumption it can be avoided.
+
+- The tool receives the `network_audit` model through the graph's
+  `configurable` mapping, the same way `get_and_analyze_camera_image`
+  receives `vlm_model`. It runs the narrative step on that model, inside the
+  tool, over the full pseudonymized payload.
+- The tool's return value to the conversation model is a **digest**, not the
+  payload: severity counts, the narrative produced by the audit model, the
+  capability and missing-capability lists, and per-finding `type`,
+  `severity`, and pseudonymized `key`. No manufacturer strings, hostnames,
+  usage figures, token client names, add-on slugs, or automation ids leave
+  the tool. `include_devices` is honored only when the conversation
+  provider is the same provider as `network_audit`; otherwise the tool
+  returns the digest and says so in `privacy_notes`.
+- When no `network_audit` feature is configured, the conversation provider
+  is the audit model and receives the full pseudonymized payload. The
+  README states this plainly: pinning `network_audit` to a local provider
+  keeps audit detail local; without it, the conversation provider sees the
+  pseudonymized audit.
+- Sentinel-side calls (explain, triage, discovery) never touch the
+  conversation graph, so for them the override is complete.
 
 ### Disclosure
 
@@ -712,6 +797,7 @@ interval, quiet hours, cooldowns, and exclusions. New keys in `const.py`:
 | `sentinel_network_offline_device_min` | `30` | threshold for security-device-offline |
 | `sentinel_network_guest_idle_days` | `7` | threshold for guest-network-idle |
 | `sentinel_ha_token_stale_days` | `90` | threshold for stale long-lived tokens |
+| `sentinel_auth_ip_retention_days` | `90` | how long a pseudonymized token IP stays in the auth inventory |
 | `sentinel_network_fixes_enabled` | `False` | phase 2 only |
 
 Basic setup leaves all of these at defaults. `docs/constants.md` and
@@ -737,8 +823,23 @@ Every fix is an existing HA entity call, so no new actuation code is needed:
 
 Mechanics:
 
-- `suggested_actions` becomes a list of `{label, domain, service, entity_id}`
-  descriptors. The notifier renders them as action buttons.
+- `AnomalyFinding.suggested_actions` stays `list[str]`. It is joined into
+  notification text in `notify/actions.py`, split per entry by
+  `sentinel/execution.py`, filtered for dotted service names in
+  `sentinel/engine.py`, counted by triage, and exposed as a string list in
+  event payloads and the proposals UI. Changing its type would break every
+  one of those. Network fixes go in a new, additive field
+  `remediations: list[Remediation]` with `field(default_factory=list)`,
+  where `Remediation` is a frozen dataclass `{label, domain, service,
+  entity_id, reversible: bool}`. `as_dict()` serializes it under
+  `remediations`; audit records written before the field exists load with
+  an empty list via `_migrate_record`; `build_anomaly_id()` excludes it
+  like the display-only keys so ids stay stable. The notifier renders
+  `remediations` as action buttons and continues to use `suggested_actions`
+  for text. Existing rules are untouched.
+- For autonomous execution, each `Remediation` is also mirrored into
+  `suggested_actions` as the existing `domain.service` string form, so the
+  `allowed_services` allowlist and the execution gate work without change.
 - Every network fix is added to `RECOMMENDED_CRITICAL_ACTIONS` with
   `entity_match` patterns (`upnp`, `guest_network`, `paused`, `wpa3`), so both
   a direct agent call and an LLM-authored automation hit the PIN gate in
@@ -783,7 +884,19 @@ Mechanics:
   including the randomized-MAC suppression and grace windows.
 - `tests/.../test_engine_capability_gating.py`: rules skipped when
   capabilities are missing and reported on the health sensor.
-- `tests/.../test_network_inventory.py`: bootstrap, auto-trust, services.
+- `tests/.../test_network_inventory.py`: bootstrap, services, and
+  auto-trust negative cases: a Fritz- or UniFi-created client device must
+  not be auto-trusted; a Shelly device must.
+- `tests/.../test_auth_inventory.py`: bootstrap without alerts, new admin
+  and new token detection across a simulated restart, token-row deletion
+  when HA drops the token, `seen_ips` bound and retention, no raw IP or
+  token value anywhere in the persisted JSON.
+- `tests/.../test_snapshot_radio.py` runs against the real Z-Wave JS and
+  ZHA objects from the pinned `homeassistant` version, not mocks of them,
+  so the runtime-adapter boundary is exercised by CI.
+- `tests/.../test_audit_home_security_tool.py` asserts the digest contract:
+  the returned payload contains no key outside the allowed set when the
+  conversation provider differs from the audit provider.
 - `tests/.../test_audit_home_security_tool.py`: tool output schema, no raw
   identifiers in the payload, missing-capability reporting.
 - `tests/.../test_llm_explain.py`: extend for `redact_network_identifiers`.
@@ -839,23 +952,32 @@ Resolved with the maintainer during design review.
    and coordinator firmware are phase 1. Bluetooth tracker detection is
    phase 2, Matter fabrics phase 3. Active radio attacks are a stated
    non-goal.
+6. **Review findings on PR #611, all accepted.** The tool returns a digest
+   and runs its narrative on the `network_audit` model in-tool, because the
+   conversation provider always receives the `ToolMessage`; auto-trust
+   requires a non-router integration behind the registry device; auth
+   change rules compare against a persistent, non-secret auth inventory;
+   adapters are split into entity and runtime tiers with version-pinned
+   tests for the latter; `suggested_actions` keeps its string contract and
+   fixes live in an additive `remediations` field.
 
 ## Implementation Order (Phase 1)
 
 1. `platform` field on `SnapshotEntity`, builder change, schema bump.
 2. `snapshot/network.py` with the `ha_native` adapter only; pseudonymization
    helper; capability list.
-3. Engine capability gating and health-sensor reporting.
-4. The HA-only MVP rules, validated on an install with no router
+3. `sentinel/auth_inventory.py` store and reset service.
+4. Engine capability gating and health-sensor reporting.
+5. The HA-only MVP rules, validated on an install with no router
    integration.
-5. `radio_registry`, `zwave`, and `zigbee` adapters with their phase 1
+6. `radio_registry`, `zwave`, and `zigbee` adapters with their phase 1
    rules; the general device inventory.
-6. `generic_router_tracker`, `upnp_igd`, `fritz`, `unifi`, `adguard`, and
+7. `generic_router_tracker`, `upnp_igd`, `fritz`, `unifi`, `adguard`, and
    `eero` adapters, then the remaining phase 1 rules; router clients join
    the inventory as a second source.
-7. `redact_network_identifiers` in the explain path; `network_audit` feature
+8. `redact_network_identifiers` in the explain path; `network_audit` feature
    type and resolver plumbing.
-8. `audit_home_security` tool, system prompt addition, `run_network_audit`
+9. `audit_home_security` tool, system prompt addition, `run_network_audit`
    service.
-9. Baseline counters and discovery templates.
-10. Docs and CHANGELOG.
+10. Baseline counters and discovery templates.
+11. Docs and CHANGELOG.
