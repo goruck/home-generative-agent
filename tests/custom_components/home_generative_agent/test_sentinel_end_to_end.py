@@ -136,7 +136,7 @@ async def test_sentinel_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
         }
     )
 
-    async def _fake_build(_hass: HomeAssistant) -> FullStateSnapshot:
+    async def _fake_build(_hass: HomeAssistant, **_kwargs: Any) -> FullStateSnapshot:
         return snapshot
 
     monkeypatch.setattr(
@@ -201,7 +201,7 @@ async def test_sentinel_canary_mode_records_would_execute(
         }
     )
 
-    async def _fake_build(_hass: HomeAssistant) -> FullStateSnapshot:
+    async def _fake_build(_hass: HomeAssistant, **_kwargs: Any) -> FullStateSnapshot:
         return snapshot
 
     monkeypatch.setattr(
@@ -359,7 +359,7 @@ def _make_ae_engine(
         lambda: _AE_FROZEN_NOW,
     )
 
-    async def _fake_build(_hass: Any) -> FullStateSnapshot:
+    async def _fake_build(_hass: Any, **_kwargs: Any) -> FullStateSnapshot:
         return _AE_SNAPSHOT
 
     monkeypatch.setattr(
@@ -564,7 +564,7 @@ def _make_engine(
 ) -> tuple[SentinelEngine, DummyNotifier, DummyAudit]:
     """Return a wired SentinelEngine with DummyNotifier and DummyAudit."""
 
-    async def _fake_build(_hass: HomeAssistant) -> FullStateSnapshot:
+    async def _fake_build(_hass: HomeAssistant, **_kwargs: Any) -> FullStateSnapshot:
         return snapshot
 
     monkeypatch.setattr(

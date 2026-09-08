@@ -131,7 +131,7 @@ def _make_engine(options: dict[str, object]) -> SentinelEngine:
 def _patch_snapshot(
     monkeypatch: pytest.MonkeyPatch, snapshot: FullStateSnapshot
 ) -> None:
-    async def _fake_build(_hass: HomeAssistant) -> FullStateSnapshot:
+    async def _fake_build(_hass: HomeAssistant, **_kwargs: Any) -> FullStateSnapshot:
         return snapshot
 
     monkeypatch.setattr(

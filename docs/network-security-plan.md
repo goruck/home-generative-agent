@@ -1,6 +1,6 @@
 # Network Security & Privacy Audit Plan
 
-Status: design proposal (no code yet)
+Status: phase 1 in progress. Implementation-order steps 1–5 (the HA-only MVP: `platform` field, `network` snapshot section with the `ha_native` adapter, auth inventory, engine capability gating with health-sensor reporting, and the HA-native rules) are implemented; steps 6–11 (radio and router adapters, redaction, the `network_audit` feature type, the `audit_home_security` tool, baseline counters, discovery templates) are pending field validation of the MVP on a plain install.
 
 ## Problem Statement
 

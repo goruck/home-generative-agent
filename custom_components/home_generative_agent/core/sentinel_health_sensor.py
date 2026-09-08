@@ -271,8 +271,14 @@ class SentinelHealthSensor(SensorEntity):
             "sentinel_admission_consecutive_deferrals",
             "sentinel_admission_starved_for_s",
             "triggers_excluded",
+            # Network / HA-security audit: rules skipped because the snapshot
+            # lacks a capability they need ({rule_id: [missing paths]}) and
+            # the capabilities the last snapshot did provide.
+            "inactive_rules",
+            "network_capabilities",
         ):
             self._attrs[key] = run_stats.get(key)
+        self._attrs["inactive_rule_count"] = len(run_stats.get("inactive_rules") or {})
 
         # Merge trigger scheduler statistics.
         scheduler_stats: dict[str, Any] = run_stats.get("scheduler", {})

@@ -163,7 +163,10 @@ def _jsonify(value: Any) -> Any:
 # is added or temporarily unavailable.  Single authority for every evaluator
 # that hashes evidence — do not fork this set per call site.
 DISPLAY_ONLY_EVIDENCE_KEYS: frozenset[str] = frozenset(
-    {"friendly_name", "unit_of_measurement", "device_class"}
+    # "summary" is the pre-rendered sentence the network / HA-security rules
+    # attach for the notifier; its figures (days idle, minutes offline)
+    # change every cycle and must not churn the anomaly id.
+    {"friendly_name", "unit_of_measurement", "device_class", "summary"}
 )
 
 

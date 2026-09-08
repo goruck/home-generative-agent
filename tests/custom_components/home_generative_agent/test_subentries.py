@@ -4691,3 +4691,109 @@ async def test_feature_flow_budget_with_default_enables_thinking(
     assert model[CONF_FEATURE_MODEL_REASONING_BY_MODEL] == {
         "gemma-4-e4b": {"reasoning": True, "budget": 512}
     }
+
+
+@pytest.mark.asyncio
+async def test_sentinel_subentry_flow_persists_network_audit_keys(
+    hass: HomeAssistant,
+) -> None:
+    """The advanced Sentinel form carries the network-audit keys through."""
+    from custom_components.home_generative_agent.const import (  # noqa: PLC0415
+        CONF_SENTINEL_AUTH_IP_RETENTION_DAYS,
+        CONF_SENTINEL_HA_TOKEN_STALE_DAYS,
+        CONF_SENTINEL_NETWORK_ENABLED,
+        CONF_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN,
+    )
+
+    entry = DummyEntry()
+    flow = SentinelSubentryFlow()
+    flow.hass = hass
+    flow.async_show_form = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "form",
+        "data_schema": kwargs["data_schema"],
+        "errors": kwargs.get("errors"),
+    }
+    flow.async_create_entry = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "create_entry",
+        "title": kwargs.get("title"),
+        "data": kwargs.get("data"),
+    }
+    flow._schedule_reload = lambda: None  # type: ignore[assignment]
+    _patch_entry(flow, entry)
+
+    form = await flow.async_step_settings()
+    data_schema = cast("Any", form).get("data_schema")
+    assert data_schema is not None
+    schema_keys = {str(getattr(k, "schema", k)) for k in data_schema.schema}
+    for key in (
+        CONF_SENTINEL_NETWORK_ENABLED,
+        CONF_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN,
+        CONF_SENTINEL_HA_TOKEN_STALE_DAYS,
+        CONF_SENTINEL_AUTH_IP_RETENTION_DAYS,
+    ):
+        assert key in schema_keys, key
+
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_NETWORK_ENABLED: False,
+            CONF_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN: 45,
+            CONF_SENTINEL_HA_TOKEN_STALE_DAYS: 30,
+            CONF_SENTINEL_AUTH_IP_RETENTION_DAYS: 10,
+        }
+    )
+    assert result.get("type") == "create_entry"
+    data = result.get("data")
+    assert data is not None
+    assert data[CONF_SENTINEL_NETWORK_ENABLED] is False
+    assert data[CONF_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN] == 45
+    assert data[CONF_SENTINEL_HA_TOKEN_STALE_DAYS] == 30
+    assert data[CONF_SENTINEL_AUTH_IP_RETENTION_DAYS] == 10
+
+
+def test_runtime_options_default_network_audit_keys() -> None:
+    """A Sentinel subentry without the new keys resolves to their defaults."""
+    from custom_components.home_generative_agent.const import (  # noqa: PLC0415
+        CONF_SENTINEL_AUTH_IP_RETENTION_DAYS,
+        CONF_SENTINEL_HA_TOKEN_STALE_DAYS,
+        CONF_SENTINEL_NETWORK_ENABLED,
+        CONF_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN,
+        RECOMMENDED_SENTINEL_AUTH_IP_RETENTION_DAYS,
+        RECOMMENDED_SENTINEL_HA_TOKEN_STALE_DAYS,
+        RECOMMENDED_SENTINEL_NETWORK_ENABLED,
+        RECOMMENDED_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN,
+    )
+    from custom_components.home_generative_agent.core.subentry_resolver import (  # noqa: PLC0415
+        resolve_runtime_options,
+    )
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Home Generative Agent",
+        subentries_data=[
+            {
+                "subentry_type": SUBENTRY_TYPE_SENTINEL,
+                "title": "Sentinel",
+                "unique_id": None,
+                "data": {CONF_SENTINEL_ENABLED: True},
+            }
+        ],
+    )
+    options = resolve_runtime_options(entry)
+    assert (
+        options[CONF_SENTINEL_NETWORK_ENABLED] is RECOMMENDED_SENTINEL_NETWORK_ENABLED
+    )
+    assert (
+        options[CONF_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN]
+        == RECOMMENDED_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN
+    )
+    assert (
+        options[CONF_SENTINEL_HA_TOKEN_STALE_DAYS]
+        == RECOMMENDED_SENTINEL_HA_TOKEN_STALE_DAYS
+    )
+    assert (
+        options[CONF_SENTINEL_AUTH_IP_RETENTION_DAYS]
+        == RECOMMENDED_SENTINEL_AUTH_IP_RETENTION_DAYS
+    )

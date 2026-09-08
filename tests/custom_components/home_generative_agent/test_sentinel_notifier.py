@@ -2493,3 +2493,40 @@ def test_baseline_mobile_message_unit_control_chars_stripped() -> None:
     assert rlo not in msg
     assert zwsp not in msg
     assert "W evil" in msg
+
+
+# ---------------------------------------------------------------------------
+# Network / HA-security findings render their pre-built summary
+# ---------------------------------------------------------------------------
+
+
+def _network_finding(
+    summary: str = "Add-on Terminal & SSH listens on host port(s) 22.",
+) -> AnomalyFinding:
+    return AnomalyFinding(
+        anomaly_id="net1",
+        type="ha_addon_exposed_port",
+        severity="high",
+        confidence=0.9,
+        triggering_entities=[],
+        evidence={"addon_slug": "core_ssh", "summary": summary},
+        suggested_actions=["Disable the host port."],
+        is_sensitive=True,
+    )
+
+
+def test_network_finding_mobile_and_persistent_use_summary() -> None:
+    """With no entity to name, the summary replaces the generic fallback copy."""
+    finding = _network_finding()
+    assert _mobile_message(None, finding) == finding.evidence["summary"]
+    assert (
+        _notifier_mod._persistent_message(None, finding) == finding.evidence["summary"]
+    )
+    assert "Unknown entity" not in _mobile_message(None, finding)
+
+
+def test_network_finding_without_summary_falls_back() -> None:
+    """A network finding that somehow lacks a summary still renders something."""
+    finding = _network_finding(summary="")
+    msg = _mobile_message(None, finding)
+    assert "Add-on port exposed on host" in msg

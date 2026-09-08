@@ -15,6 +15,9 @@ if TYPE_CHECKING:
     from custom_components.home_generative_agent.audit.store import AuditStore
     from custom_components.home_generative_agent.explain.llm_explain import LLMExplainer
     from custom_components.home_generative_agent.notify.actions import ActionHandler
+    from custom_components.home_generative_agent.sentinel.auth_inventory import (
+        AuthInventory,
+    )
     from custom_components.home_generative_agent.sentinel.baseline import (
         SentinelBaselineUpdater,
     )
@@ -69,6 +72,8 @@ class HGAData:
     proposal_store: ProposalStore | None
     rule_registry: RuleRegistry | None
     baseline_updater: SentinelBaselineUpdater | None = None
+    # Network / HA-security audit: persistent, non-secret user+token inventory.
+    auth_inventory: AuthInventory | None = None
     # Synchronous httpx client handed to the OpenAI provider instances. Held
     # here so async_unload_entry can close it: a fresh one is built on every
     # setup, so without an unload-time close a reload storm retains one client,

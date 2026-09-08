@@ -29,11 +29,11 @@ The configuration UI is available in English, Czech, and Turkish, with a partial
 4. Use the **gear icon** on any feature to adjust its model settings later.
 5. Click **+ Sentinel** to configure proactive anomaly detection (see [Sentinel guide](sentinel.md)). Choose a setup mode:
    - **Basic** — enables anomaly alerting with recommended defaults. Prompts for notify service, daily digest, and an optional level-increase PIN.
-   - **Advanced** — exposes all Sentinel options: intervals, cooldowns, quiet hours, triage, baseline, discovery, camera entry links, and per-entity rule exclusions.
+   - **Advanced** — exposes all Sentinel options: intervals, cooldowns, quiet hours, triage, baseline, discovery, the Home Assistant & network security audit (master switch and thresholds), camera entry links, and per-entity rule exclusions.
 
 > **Reconfiguring:** Running **+ Setup** or **+ Sentinel** again when a subentry already exists opens the same mode selector. Advanced mode pre-populates every field with the current saved values. Basic mode always starts from recommended defaults and warns before overwriting.
 
-> **Removing Sentinel:** Delete the Sentinel subentry from the integration page to stop all monitoring immediately. Sentinel background tasks stop and the health sensor transitions to `disabled`.
+> **Removing Sentinel:** Delete the Sentinel subentry from the integration page to stop all monitoring immediately. Sentinel background tasks stop, the health sensor transitions to `disabled`, and the network audit's persisted auth inventory and pseudonymization salt are deleted.
 
 ---
 

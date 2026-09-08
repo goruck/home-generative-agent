@@ -333,6 +333,28 @@ CONF_SENTINEL_DAILY_DIGEST_TIME = "sentinel_daily_digest_time"
 RECOMMENDED_SENTINEL_DAILY_DIGEST_ENABLED: bool = False
 RECOMMENDED_SENTINEL_DAILY_DIGEST_TIME: str = "08:00:00"
 
+# ---- Sentinel network security audit (docs/network-security-plan.md) ----
+# Master switch for the network section of the snapshot and every network /
+# HA-security rule. Off = the section carries no capabilities, so the rules
+# are reported as inactive on the health sensor rather than silently absent.
+CONF_SENTINEL_NETWORK_ENABLED = "sentinel_network_enabled"
+RECOMMENDED_SENTINEL_NETWORK_ENABLED: bool = True
+# Minutes a lock, alarm panel, or camera may be ``unavailable`` before
+# ``security_device_unavailable`` fires.
+CONF_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN = "sentinel_network_offline_device_min"
+RECOMMENDED_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN: int = 30
+# Days a long-lived access token may go unused before it is reported stale.
+CONF_SENTINEL_HA_TOKEN_STALE_DAYS = "sentinel_ha_token_stale_days"  # noqa: S105
+RECOMMENDED_SENTINEL_HA_TOKEN_STALE_DAYS: int = 90
+# How long a pseudonymized token address stays in the auth inventory.
+CONF_SENTINEL_AUTH_IP_RETENTION_DAYS = "sentinel_auth_ip_retention_days"
+RECOMMENDED_SENTINEL_AUTH_IP_RETENTION_DAYS: int = 90
+# Posture findings describe a standing condition (a stale token, an exposed
+# add-on port), not an event. Re-alerting every type-cooldown (30 min) would
+# be pure fatigue, so those rules carry a cooldown floor of one day; the
+# engine uses the larger of this and the configured type cooldown.
+SENTINEL_POSTURE_RULE_COOLDOWN_MINUTES: int = 24 * 60
+
 # ---- Feature definitions ----
 DEFAULT_FEATURE_TYPES: tuple[str, ...] = (
     "conversation",

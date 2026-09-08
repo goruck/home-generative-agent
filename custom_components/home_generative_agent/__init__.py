@@ -291,6 +291,7 @@ from .core.video_helpers import latest_target, publish_latest_atomic
 from .explain.llm_explain import LLMExplainer
 from .http import EnrollPersonView
 from .notify.actions import ActionHandler
+from .sentinel.auth_inventory import AuthInventory
 from .sentinel.baseline import SentinelBaselineUpdater
 from .sentinel.discovery_engine import SentinelDiscoveryEngine
 from .sentinel.discovery_semantic import (
@@ -305,6 +306,10 @@ from .sentinel.engine import SentinelEngine
 from .sentinel.notifier import SentinelNotifier
 from .sentinel.proposal_store import ProposalStore
 from .sentinel.proposal_templates import explain_normalize_candidate
+from .sentinel.pseudonymizer import (
+    async_load_pseudonymizer,
+    async_remove_pseudonymizer_salt,
+)
 from .sentinel.rule_registry import RuleRegistry
 from .sentinel.suppression import SuppressionManager
 from .sentinel.triage import SentinelTriageService
@@ -344,6 +349,7 @@ SERVICE_PATCH_DYNAMIC_RULE = "patch_dynamic_rule"
 SERVICE_SENTINEL_SET_AUTONOMY_LEVEL = "sentinel_set_autonomy_level"
 SERVICE_SENTINEL_GET_BASELINES = "sentinel_get_baselines"
 SERVICE_SENTINEL_RESET_BASELINE = "sentinel_reset_baseline"
+SERVICE_SENTINEL_RESET_AUTH_INVENTORY = "sentinel_reset_auth_inventory"
 
 ENROLL_SCHEMA = vol.Schema(
     {
@@ -3022,6 +3028,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     await proposal_store.async_load()
     rule_registry = RuleRegistry(hass)
     await rule_registry.async_load()
+    # Network / HA-security audit (docs/network-security-plan.md): the
+    # per-install salt pseudonymizes addresses before anything persists them,
+    # and the auth inventory is what the auth-change rules compare against.
+    # Created only when Sentinel is enabled so that removing the Sentinel
+    # subentry (which deletes both files) does not see them recreated on the
+    # reload that follows.
+    pseudonymizer = None
+    auth_inventory = None
+    if options.get(CONF_SENTINEL_ENABLED, RECOMMENDED_SENTINEL_ENABLED):
+        pseudonymizer = await async_load_pseudonymizer(hass)
+        auth_inventory = AuthInventory(hass)
+        await auth_inventory.async_load()
     action_handler = ActionHandler(
         hass,
         suppression,
@@ -3090,6 +3108,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         triage_service=triage_service,
         baseline_updater=baseline_updater,
         run_stats=sentinel_run_stats,
+        auth_inventory=auth_inventory,
+        pseudonymizer=pseudonymizer,
     )
     discovery_engine = SentinelDiscoveryEngine(
         hass=hass,
@@ -3138,6 +3158,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         proposal_store=proposal_store,
         rule_registry=rule_registry,
         baseline_updater=baseline_updater,
+        auth_inventory=auth_inventory,
         openai_http_client=openai_http_client,
     )
 
@@ -3681,6 +3702,42 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         supports_response=_SERVICE_RESPONSE_ONLY,
     )
 
+    async def _handle_sentinel_reset_auth_inventory(
+        call: ServiceCall,
+    ) -> dict[str, Any]:
+        """Clear the auth inventory; the next Sentinel run re-bootstraps it."""
+        _ = call
+        inventory = entry.runtime_data.auth_inventory
+        if inventory is None:
+            return {"status": "unavailable"}
+        before = inventory.summary()
+        await inventory.async_reset()
+        await hass.services.async_call(
+            "persistent_notification",
+            "create",
+            {
+                "title": "Sentinel auth inventory reset",
+                "message": (
+                    "The Home Assistant user and token inventory was cleared "
+                    f"({before['user_count']} user(s), {before['token_count']} "
+                    "token(s)). The next Sentinel run records the current state "
+                    "as known without alerting."
+                ),
+                "notification_id": f"sentinel_auth_inventory_reset_{entry.entry_id}",
+            },
+            blocking=False,
+        )
+        return {"status": "ok", "cleared": before}
+
+    _register_entry_service(
+        hass,
+        entry,
+        SERVICE_SENTINEL_RESET_AUTH_INVENTORY,
+        _handle_sentinel_reset_auth_inventory,
+        schema=vol.Schema({}),
+        supports_response=_SERVICE_RESPONSE_ONLY,
+    )
+
     # Reload whenever a Sentinel subentry is added, updated, or removed so that
     # tasks started during setup are stopped or started to match the current
     # subentry configuration.
@@ -3721,6 +3778,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             rd = changed_entry.runtime_data
             if rd.sentinel is not None:
                 hass.async_create_task(rd.sentinel.stop())
+            # Deleting Sentinel deletes what the network audit persisted: the
+            # auth inventory and the pseudonymization salt.
+            if rd.auth_inventory is not None:
+                hass.async_create_task(rd.auth_inventory.async_reset())
+            hass.async_create_task(async_remove_pseudonymizer_salt(hass))
             if rd.baseline_updater is not None:
                 hass.async_create_task(rd.baseline_updater.stop())
             if rd.discovery_engine is not None:

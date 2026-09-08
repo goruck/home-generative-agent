@@ -36,6 +36,7 @@ from ..const import (  # noqa: TID252
     CONF_NOTIFY_SERVICE,
     CONF_SENTINEL_APPLIANCE_DURATION_MIN,
     CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
+    CONF_SENTINEL_AUTH_IP_RETENTION_DAYS,
     CONF_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
     CONF_SENTINEL_BASELINE_ENABLED,
     CONF_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS,
@@ -52,9 +53,12 @@ from ..const import (  # noqa: TID252
     CONF_SENTINEL_DISCOVERY_MAX_RECORDS,
     CONF_SENTINEL_ENABLED,
     CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES,
+    CONF_SENTINEL_HA_TOKEN_STALE_DAYS,
     CONF_SENTINEL_INTERVAL_SECONDS,
     CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH,
     CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT,
+    CONF_SENTINEL_NETWORK_ENABLED,
+    CONF_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN,
     CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
     CONF_SENTINEL_QUIET_HOURS_END,
     CONF_SENTINEL_QUIET_HOURS_SEVERITIES,
@@ -67,6 +71,7 @@ from ..const import (  # noqa: TID252
     RECOMMENDED_EXPLAIN_ENABLED,
     RECOMMENDED_SENTINEL_APPLIANCE_DURATION_MIN,
     RECOMMENDED_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
+    RECOMMENDED_SENTINEL_AUTH_IP_RETENTION_DAYS,
     RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
     RECOMMENDED_SENTINEL_BASELINE_ENABLED,
     RECOMMENDED_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS,
@@ -83,7 +88,10 @@ from ..const import (  # noqa: TID252
     RECOMMENDED_SENTINEL_DISCOVERY_MAX_RECORDS,
     RECOMMENDED_SENTINEL_ENABLED,
     RECOMMENDED_SENTINEL_ENTITY_COOLDOWN_MINUTES,
+    RECOMMENDED_SENTINEL_HA_TOKEN_STALE_DAYS,
     RECOMMENDED_SENTINEL_INTERVAL_SECONDS,
+    RECOMMENDED_SENTINEL_NETWORK_ENABLED,
+    RECOMMENDED_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN,
     RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
     RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES,
     RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
@@ -401,6 +409,14 @@ def _default_payload() -> dict[str, Any]:
         CONF_SENTINEL_APPLIANCE_DURATION_MIN: (
             RECOMMENDED_SENTINEL_APPLIANCE_DURATION_MIN
         ),
+        CONF_SENTINEL_NETWORK_ENABLED: RECOMMENDED_SENTINEL_NETWORK_ENABLED,
+        CONF_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN: (
+            RECOMMENDED_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN
+        ),
+        CONF_SENTINEL_HA_TOKEN_STALE_DAYS: RECOMMENDED_SENTINEL_HA_TOKEN_STALE_DAYS,
+        CONF_SENTINEL_AUTH_IP_RETENTION_DAYS: (
+            RECOMMENDED_SENTINEL_AUTH_IP_RETENTION_DAYS
+        ),
         CONF_EXPLAIN_ENABLED: RECOMMENDED_EXPLAIN_ENABLED,
         # See const.py: language override for the explainer's finding text.
         CONF_SENTINEL_RESPONSE_LANGUAGE: RECOMMENDED_SENTINEL_RESPONSE_LANGUAGE,
@@ -585,6 +601,42 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                     )
                 ),
             ): NumberSelector(NumberSelectorConfig(min=5, max=1440, step=5)),
+            vol.Required(
+                CONF_SENTINEL_NETWORK_ENABLED,
+                default=bool(
+                    payload.get(
+                        CONF_SENTINEL_NETWORK_ENABLED,
+                        RECOMMENDED_SENTINEL_NETWORK_ENABLED,
+                    )
+                ),
+            ): BooleanSelector(),
+            vol.Required(
+                CONF_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN,
+                default=int(
+                    payload.get(
+                        CONF_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN,
+                        RECOMMENDED_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN,
+                    )
+                ),
+            ): NumberSelector(NumberSelectorConfig(min=1, max=1440, step=1)),
+            vol.Required(
+                CONF_SENTINEL_HA_TOKEN_STALE_DAYS,
+                default=int(
+                    payload.get(
+                        CONF_SENTINEL_HA_TOKEN_STALE_DAYS,
+                        RECOMMENDED_SENTINEL_HA_TOKEN_STALE_DAYS,
+                    )
+                ),
+            ): NumberSelector(NumberSelectorConfig(min=1, max=3650, step=1)),
+            vol.Required(
+                CONF_SENTINEL_AUTH_IP_RETENTION_DAYS,
+                default=int(
+                    payload.get(
+                        CONF_SENTINEL_AUTH_IP_RETENTION_DAYS,
+                        RECOMMENDED_SENTINEL_AUTH_IP_RETENTION_DAYS,
+                    )
+                ),
+            ): NumberSelector(NumberSelectorConfig(min=1, max=3650, step=1)),
             vol.Required(
                 CONF_EXPLAIN_ENABLED,
                 default=bool(

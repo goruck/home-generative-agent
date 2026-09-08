@@ -23,6 +23,7 @@ from custom_components.home_generative_agent.const import (
     CONF_EXPLAIN_ENABLED,
     CONF_SENTINEL_APPLIANCE_DURATION_MIN,
     CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
+    CONF_SENTINEL_AUTH_IP_RETENTION_DAYS,
     CONF_SENTINEL_AUTO_EXEC_CANARY_MODE,
     CONF_SENTINEL_AUTONOMY_LEVEL,
     CONF_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
@@ -32,9 +33,12 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_CAMERA_ENTRY_LINKS,
     CONF_SENTINEL_COOLDOWN_MINUTES,
     CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES,
+    CONF_SENTINEL_HA_TOKEN_STALE_DAYS,
     CONF_SENTINEL_INTERVAL_SECONDS,
     CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH,
     CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT,
+    CONF_SENTINEL_NETWORK_ENABLED,
+    CONF_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN,
     CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
     CONF_SENTINEL_PRESENCE_GRACE_MINUTES,
     CONF_SENTINEL_QUIET_HOURS_END,
@@ -45,12 +49,16 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
     RECOMMENDED_SENTINEL_APPLIANCE_DURATION_MIN,
     RECOMMENDED_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
+    RECOMMENDED_SENTINEL_AUTH_IP_RETENTION_DAYS,
     RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE,
     RECOMMENDED_SENTINEL_AUTONOMY_LEVEL,
     RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
     RECOMMENDED_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT,
     RECOMMENDED_SENTINEL_BASELINE_SUSTAINED_MINUTES,
     RECOMMENDED_SENTINEL_BASELINE_WEEKLY_PATTERNS,
+    RECOMMENDED_SENTINEL_HA_TOKEN_STALE_DAYS,
+    RECOMMENDED_SENTINEL_NETWORK_ENABLED,
+    RECOMMENDED_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN,
     RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
     RECOMMENDED_SENTINEL_PRESENCE_GRACE_MINUTES,
     RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES,
@@ -66,6 +74,10 @@ from custom_components.home_generative_agent.core.utils import (
 )
 from custom_components.home_generative_agent.snapshot.builder import (
     async_build_full_state_snapshot,
+)
+from custom_components.home_generative_agent.snapshot.network import (
+    NetworkBuildContext,
+    async_collect_auth_observation,
 )
 
 from .alarm_enrichment import async_enrich_alarm_last_changed
@@ -83,9 +95,26 @@ from .rules.alarm_disarmed_external_threat import AlarmDisarmedDuringExternalThr
 from .rules.appliance_power_duration import AppliancePowerDurationRule
 from .rules.camera_entry_unsecured import CameraEntryUnsecuredRule
 from .rules.camera_missing_snapshot import CameraMissingSnapshotRule
+from .rules.ha_addon_exposed_port import HaAddonExposedPortRule
+from .rules.ha_addon_unprotected import HaAddonUnprotectedRule
+from .rules.ha_cloud_remote_ui_enabled import HaCloudRemoteUiEnabledRule
+from .rules.ha_failed_logins import HaFailedLoginsRule
+from .rules.ha_http_proxy_misconfigured import HaHttpProxyMisconfiguredRule
+from .rules.ha_long_lived_token_stale import HaLongLivedTokenStaleRule
+from .rules.ha_new_admin_or_token import HaNewAdminOrTokenRule
+from .rules.ha_sensitive_entity_exposed_without_pin import (
+    HaSensitiveEntityExposedWithoutPinRule,
+)
+from .rules.ha_trusted_networks_bypass_login import HaTrustedNetworksBypassLoginRule
+from .rules.ha_webhook_automation_public import HaWebhookAutomationPublicRule
+from .rules.network_router_update_pending import NetworkRouterUpdatePendingRule
+from .rules.network_unconfigured_discovered_device import (
+    NetworkUnconfiguredDiscoveredDeviceRule,
+)
 from .rules.open_entry_while_away import OpenEntryWhileAwayRule
 from .rules.pet_detected_at_night_no_occupancy import PetDetectedAtNightNoOccupancyRule
 from .rules.phone_battery_low_at_night import PhoneBatteryLowAtNightRule
+from .rules.security_device_unavailable import SecurityDeviceUnavailableRule
 from .rules.unknown_person_camera_night_home import UnknownPersonAtNightWhileHomeRule
 from .rules.unknown_person_camera_no_home import UnknownPersonCameraNoHomeRule
 from .rules.unlocked_lock_at_night import UnlockedLockAtNightRule
@@ -115,8 +144,10 @@ if TYPE_CHECKING:
         FullStateSnapshot,
     )
 
+    from .auth_inventory import AuthInventory, ObservedUser
     from .baseline import SentinelBaselineUpdater
     from .notifier import SentinelNotifier
+    from .pseudonymizer import Pseudonymizer
     from .rule_registry import RuleRegistry
 
 LOGGER = logging.getLogger(__name__)
@@ -216,10 +247,20 @@ class SentinelEngine:
         triage_service: SentinelTriageService | None = None,
         baseline_updater: SentinelBaselineUpdater | None = None,
         run_stats: dict[str, Any] | None = None,
+        auth_inventory: AuthInventory | None = None,
+        pseudonymizer: Pseudonymizer | None = None,
     ) -> None:
         """Initialize sentinel dependencies and runtime state."""
         self._hass = hass
         self._options = options
+        # Network / HA-security audit dependencies (docs/network-security-plan.md).
+        self._auth_inventory = auth_inventory
+        self._pseudonymizer = pseudonymizer
+        self._network_enabled = bool(
+            options.get(
+                CONF_SENTINEL_NETWORK_ENABLED, RECOMMENDED_SENTINEL_NETWORK_ENABLED
+            )
+        )
         self._suppression = suppression
         self._notifier = notifier
         self._audit_store = audit_store
@@ -275,6 +316,32 @@ class SentinelEngine:
             CameraMissingSnapshotRule(),
             AlarmDisarmedDuringExternalThreatRule(),
             PhoneBatteryLowAtNightRule(),
+            # Network / HA-security rules. Each declares ``requires`` and is
+            # skipped (and reported on the health sensor) when the snapshot's
+            # network section lacks a capability it needs.
+            HaSensitiveEntityExposedWithoutPinRule(),
+            HaNewAdminOrTokenRule(),
+            HaLongLivedTokenStaleRule(
+                stale_days=_coerce_int(
+                    options.get(CONF_SENTINEL_HA_TOKEN_STALE_DAYS),
+                    default=RECOMMENDED_SENTINEL_HA_TOKEN_STALE_DAYS,
+                )
+            ),
+            HaFailedLoginsRule(),
+            HaCloudRemoteUiEnabledRule(),
+            HaAddonExposedPortRule(),
+            HaAddonUnprotectedRule(),
+            HaWebhookAutomationPublicRule(),
+            HaTrustedNetworksBypassLoginRule(),
+            HaHttpProxyMisconfiguredRule(),
+            SecurityDeviceUnavailableRule(
+                offline_minutes=_coerce_int(
+                    options.get(CONF_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN),
+                    default=RECOMMENDED_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN,
+                )
+            ),
+            NetworkUnconfiguredDiscoveredDeviceRule(),
+            NetworkRouterUpdatePendingRule(),
         ]
         # Event-driven triggering — unsubscribe callbacks.
         self._event_unsubscribers: list[Callable[[], None]] = []
@@ -561,18 +628,104 @@ class SentinelEngine:
             self.run_stats["run_duration_ms"] = int(
                 (_end - _start).total_seconds() * 1000
             )
-            self.run_stats["active_rule_count"] = len(self._rules) + (
-                len(self._rule_registry.list_rules())
-                if self._rule_registry is not None
-                else 0
+            inactive = self.run_stats.get("inactive_rules") or {}
+            self.run_stats["active_rule_count"] = (
+                len(self._rules)
+                - len(inactive)
+                + (
+                    len(self._rule_registry.list_rules())
+                    if self._rule_registry is not None
+                    else 0
+                )
             )
             self.run_stats["scheduler"] = self._trigger_scheduler.stats
             self.run_stats["triggers_excluded"] = self._excluded_trigger_count
             async_dispatcher_send(self._hass, SIGNAL_SENTINEL_RUN_COMPLETE)
 
-    async def _run_once(self, trigger_source: str = "poll") -> None:  # noqa: PLR0912, PLR0915
+    async def _network_context(self) -> NetworkBuildContext:
+        """
+        Build the network-section context for this run.
+
+        The auth observation is collected here, once, so the same data feeds
+        the snapshot's change detection and the inventory commit afterwards.
+        """
+        if not self._network_enabled:
+            return NetworkBuildContext(enabled=False)
+        observation: list[ObservedUser] | None = None
+        if self._auth_inventory is not None:
+            observation = await async_collect_auth_observation(
+                self._hass, self._pseudonymizer
+            )
+        return NetworkBuildContext(
+            enabled=True,
+            options=self._options,
+            pseudonymizer=self._pseudonymizer,
+            auth_inventory=self._auth_inventory,
+            auth_observation=observation,
+        )
+
+    async def _commit_auth_inventory(
+        self, context: NetworkBuildContext, now: datetime
+    ) -> None:
+        """
+        Record this run's auth observation; announce the first bootstrap once.
+
+        Runs after rule evaluation so the rules compared against the previous
+        inventory. A failure here must not end the run loop.
+        """
+        inventory = self._auth_inventory
+        if inventory is None or context.auth_observation is None:
+            return
+        retention_days = _coerce_int(
+            self._options.get(CONF_SENTINEL_AUTH_IP_RETENTION_DAYS),
+            default=RECOMMENDED_SENTINEL_AUTH_IP_RETENTION_DAYS,
+        )
         try:
-            snapshot = await async_build_full_state_snapshot(self._hass)
+            bootstrapped = await inventory.async_commit(
+                context.auth_observation, now, ip_retention_days=retention_days
+            )
+        except (ValueError, TypeError, KeyError):
+            self._log_limiter.warning(
+                "auth_inventory_commit", "Auth inventory commit failed."
+            )
+            return
+        self._log_limiter.recovered(
+            "auth_inventory_commit",
+            "Auth inventory commit recovered after %d failed cycle(s).",
+        )
+        if not bootstrapped:
+            return
+        summary = inventory.summary()
+        LOGGER.info(
+            "Sentinel auth inventory established: %d admin(s), %d long-lived token(s).",
+            summary["admin_count"],
+            summary["long_lived_token_count"],
+        )
+        await self._hass.services.async_call(
+            "persistent_notification",
+            "create",
+            {
+                "title": "Sentinel auth inventory established",
+                "message": (
+                    "Sentinel recorded the current Home Assistant users and "
+                    f"access tokens as known: {summary['admin_count']} "
+                    f"administrator(s) and {summary['long_lived_token_count']} "
+                    "long-lived access token(s). From now on a new "
+                    "administrator, a new long-lived token, or a token used "
+                    "from an unfamiliar address raises an alert. Review the "
+                    "list under Settings > People and your profile page."
+                ),
+                "notification_id": f"hga_sentinel_auth_inventory_{self._entry_id}",
+            },
+            blocking=False,
+        )
+
+    async def _run_once(self, trigger_source: str = "poll") -> None:  # noqa: PLR0912, PLR0915
+        network_context = await self._network_context()
+        try:
+            snapshot = await async_build_full_state_snapshot(
+                self._hass, network=network_context
+            )
         except (ValueError, TypeError, KeyError):
             self._log_limiter.warning(
                 "snapshot_build",
@@ -653,7 +806,16 @@ class SentinelEngine:
         self._update_presence_grace(snapshot, now)
 
         all_findings: list[AnomalyFinding] = []
+        capabilities = set(snapshot.get("network", {}).get("capabilities", []))
+        inactive_rules: dict[str, list[str]] = {}
         for rule in self._rules:
+            missing = sorted(set(getattr(rule, "requires", frozenset())) - capabilities)
+            if missing:
+                # Capability gating: the home cannot provide what this rule
+                # reads, so it neither runs nor false-positives; the health
+                # sensor shows why (docs/network-security-plan.md).
+                inactive_rules[rule.rule_id] = missing
+                continue
             try:
                 findings = rule.evaluate(snapshot)
             except (KeyError, ValueError, TypeError):
@@ -717,6 +879,13 @@ class SentinelEngine:
                         dynamic_findings, now, sustained_minutes
                     )
                 all_findings.extend(dynamic_findings)
+
+        self.run_stats["inactive_rules"] = inactive_rules
+        self.run_stats["network_capabilities"] = sorted(capabilities)
+
+        # Commit after evaluation: the auth change rules compared this run's
+        # observation against the inventory as it stood before the run.
+        await self._commit_auth_inventory(network_context, now)
 
         if self._rule_entity_exclusions:
             all_findings = self._filter_excluded_findings(all_findings)
@@ -950,6 +1119,17 @@ class SentinelEngine:
     # Dispatch
     # ---------------------------------------------------------------------- #
 
+    def _rule_cooldown_floor(self, anomaly_type: str) -> timedelta:
+        """Return the cooldown floor a static rule declares for its type."""
+        for rule in self._rules:
+            if rule.rule_id != anomaly_type:
+                continue
+            minutes = getattr(rule, "cooldown_minutes", None)
+            if isinstance(minutes, int) and minutes > 0:
+                return timedelta(minutes=minutes)
+            break
+        return timedelta(0)
+
     async def _dispatch_item(  # noqa: PLR0913
         self,
         item: AnomalyFinding | CompoundFinding,
@@ -976,6 +1156,10 @@ class SentinelEngine:
 
         # Plain AnomalyFinding
         finding: AnomalyFinding = item
+
+        # Posture rules (standing conditions such as a stale token) declare a
+        # cooldown floor so they do not re-alert every type-cooldown.
+        cooldown_type = max(cooldown_type, self._rule_cooldown_floor(finding.type))
 
         # Build suppression kwargs from options.
         suppress_kwargs = _build_suppress_kwargs(self._options, snapshot)

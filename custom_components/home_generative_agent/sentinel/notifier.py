@@ -58,6 +58,9 @@ from custom_components.home_generative_agent.sentinel.power_units import (
     is_energy_unit,
     is_power_unit,
 )
+from custom_components.home_generative_agent.sentinel.rules.network_common import (
+    NETWORK_RULE_TYPES,
+)
 from custom_components.home_generative_agent.sentinel.suppression import (
     SUPPRESSION_REASON_NOT_SUPPRESSED,
     record_cooldown_feedback,
@@ -746,6 +749,23 @@ _KNOWN_TYPE_LABEL_KEYS = {
     "alarm_disarmed_during_external_threat": (
         "type_alarm_disarmed_during_external_threat"
     ),
+    "ha_sensitive_entity_exposed_without_pin": (
+        "type_ha_sensitive_entity_exposed_without_pin"
+    ),
+    "ha_new_admin_or_token": "type_ha_new_admin_or_token",
+    "ha_long_lived_token_stale": "type_ha_long_lived_token_stale",
+    "ha_failed_logins": "type_ha_failed_logins",
+    "ha_cloud_remote_ui_enabled": "type_ha_cloud_remote_ui_enabled",
+    "ha_addon_exposed_port": "type_ha_addon_exposed_port",
+    "ha_addon_unprotected": "type_ha_addon_unprotected",
+    "ha_webhook_automation_public": "type_ha_webhook_automation_public",
+    "ha_trusted_networks_bypass_login": "type_ha_trusted_networks_bypass_login",
+    "ha_http_proxy_misconfigured": "type_ha_http_proxy_misconfigured",
+    "security_device_unavailable": "type_security_device_unavailable",
+    "network_unconfigured_discovered_device": (
+        "type_network_unconfigured_discovered_device"
+    ),
+    "network_router_update_pending": "type_network_router_update_pending",
     "appliance_power_duration": "type_appliance_power_duration",
 }
 
@@ -1164,6 +1184,12 @@ def _deterministic_mobile_message(finding: AnomalyFinding) -> str | None:
         return _alarm_disarmed_mobile_message(finding)
     if finding.type == "appliance_power_duration":
         return _appliance_power_duration_mobile_message(finding)
+    if finding.type in NETWORK_RULE_TYPES:
+        # Network / HA-security rules pre-render their exact facts; most have
+        # no triggering entity, so the generic fallback would name nothing.
+        summary = str(finding.evidence.get("summary") or "").strip()
+        if summary:
+            return summary[:MAX_MOBILE_MESSAGE_CHARS].rstrip()
     formatter = _TEMPLATE_MOBILE_FORMATTERS.get(
         str(finding.evidence.get("template_id") or "")
     )
@@ -1223,6 +1249,10 @@ def _persistent_message(
 
     if finding.type == "appliance_power_duration":
         return _appliance_power_duration_mobile_message(finding)
+    if finding.type in NETWORK_RULE_TYPES:
+        summary = str(finding.evidence.get("summary") or "").strip()
+        if summary:
+            return summary
 
     entities = ", ".join(
         _friendly_entity(entity) for entity in finding.triggering_entities
