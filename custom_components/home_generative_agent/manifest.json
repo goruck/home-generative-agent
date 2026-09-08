@@ -3,6 +3,7 @@
   "name": "Home Generative Agent",
   "after_dependencies": [
     "assist_pipeline",
+    "hassio",
     "intent"
   ],
   "codeowners": [
