@@ -110,3 +110,9 @@ def async_check_pin_pipeline_conflict(
             "pipelines": ", ".join(sorted(conflicting)),
         },
     )
+
+
+@callback
+def async_clear_pin_pipeline_issue(hass: HomeAssistant, entry_id: str) -> None:
+    """Drop the issue when the entry is removed; nothing re-evaluates it after."""
+    ir.async_delete_issue(hass, DOMAIN, _issue_id(entry_id))

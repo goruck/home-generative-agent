@@ -10,7 +10,7 @@ from aiohttp import multipart, web
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.helpers.http import HomeAssistantView
 
-from .const import DOMAIN, NO_DATABASE_ENROLL_MESSAGE
+from .const import DOMAIN, NO_DATABASE_ENROLL_MESSAGE, NO_DATABASE_ERROR_CODE
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -20,6 +20,10 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 MAX_UPLOAD_BYTES: Final = 10 * 1024 * 1024
+# Per-request cap on image parts: each part is bounded by MAX_UPLOAD_BYTES, but
+# without this an authenticated caller could stream any number of them into
+# memory in one request. The card sends a handful; 25 is generous.
+MAX_UPLOAD_FILES = 25
 ALLOWED_EXTENSIONS: Final = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 
 
@@ -82,6 +86,37 @@ class EnrollPersonView(HomeAssistantView):
                 status=400,
             )
 
+        # Resolved before the body is consumed: an entry that cannot enroll
+        # (not loaded, or loaded without a gallery) must be refused before an
+        # authenticated caller streams any number of 10 MiB parts into memory.
+        # Hoisted once: a reload can tear the entry down between images, and
+        # Home Assistant deletes ``runtime_data`` on unload — a per-iteration
+        # re-read would raise AttributeError mid-loop.
+        entry = self._current_entry()
+        if entry is None:
+            return web.json_response(
+                {
+                    "status": "error",
+                    "message": "Home Generative Agent is not loaded.",
+                },
+                status=503,
+            )
+        runtime_data = entry.runtime_data
+        dao = runtime_data.person_gallery
+        if dao is None:
+            # A permanent configuration gap, not the transient reload case
+            # below: say what is missing instead of "may be reloading", and
+            # carry a code so scripted callers do not retry it.
+            return web.json_response(
+                {
+                    "status": "error",
+                    "code": NO_DATABASE_ERROR_CODE,
+                    "message": NO_DATABASE_ENROLL_MESSAGE,
+                },
+                status=503,
+            )
+        face_api_url = runtime_data.face_api_url
+
         name: str | None = None
         images: list[bytes] = []
 
@@ -111,6 +146,17 @@ class EnrollPersonView(HomeAssistantView):
                             },
                             status=413,
                         )
+                if len(images) >= MAX_UPLOAD_FILES:
+                    return web.json_response(
+                        {
+                            "status": "error",
+                            "message": (
+                                f"Too many files; at most {MAX_UPLOAD_FILES}"
+                                " per request."
+                            ),
+                        },
+                        status=413,
+                    )
                 images.append(bytes(data))
 
         if not name:
@@ -124,29 +170,6 @@ class EnrollPersonView(HomeAssistantView):
                 status=400,
             )
 
-        entry = self._current_entry()
-        if entry is None:
-            return web.json_response(
-                {
-                    "status": "error",
-                    "message": "Home Generative Agent is not loaded.",
-                },
-                status=503,
-            )
-
-        # Hoisted once: a reload can tear the entry down between images, and
-        # Home Assistant deletes ``runtime_data`` on unload — a per-iteration
-        # re-read would raise AttributeError mid-loop.
-        runtime_data = entry.runtime_data
-        dao = runtime_data.person_gallery
-        if dao is None:
-            # A permanent configuration gap, not the transient reload case
-            # below: say what is missing instead of "may be reloading".
-            return web.json_response(
-                {"status": "error", "message": NO_DATABASE_ENROLL_MESSAGE},
-                status=503,
-            )
-        face_api_url = runtime_data.face_api_url
         enrolled = 0
         skipped = 0
         try:
