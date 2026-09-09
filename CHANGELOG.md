@@ -13,6 +13,7 @@ All notable changes to this project will be documented in this file.
 - The home-state snapshot is now schema version 2: every entity carries its entity-registry `platform`, and the snapshot has a `network` section built from capability-declaring adapters (`snapshot/network.py`). Both additions are optional at the schema level, so persisted audit records and older fixtures remain valid.
 
 ### Fixed
+
 - Sentinel's exposed-entity rule no longer lets the Critical Action PIN silence Assist exposure when an Assist pipeline runs on another conversation agent (the built-in agent or another LLM integration), which the PIN never covered; such agents are named in the finding.
 - Sentinel add-on rules skip, and the snapshot notes name, add-ons whose details the Supervisor has not reported yet instead of treating them as protected with no ports.
 - Sentinel's auth inventory retries a failed store write on the next cycle and posts the "inventory established" notification only once the file exists.

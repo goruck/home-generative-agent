@@ -478,6 +478,63 @@ And two writer-consistency gaps: (7) `_mark_tool_index_stale` (embedding-provide
 
 ---
 
+## Sentinel Network Audit
+
+### Network security plan steps 6–11 (radio and router adapters, redaction, audit tool)
+
+**What:** `docs/network-security-plan.md` implementation-order steps 6–11 are unimplemented: zwave_js / zha / bluetooth / matter radio adapters, the router adapters (eero, UniFi, Fritz!Box, OpenWrt, AdGuard/Pi-hole), `redact_network_identifiers` in the explain path, the `network_audit` feature type, the `audit_home_security` tool with its `run_network_audit` service, baseline counters, and discovery templates. Phase 1 (steps 1–5) shipped in v3.39.0 and passed its field-validation gate on 2026-09-08.
+
+**Why:** The plan deliberately sequenced the router work after the HA-only audit was validated on a plain install so the adapter framework (`AdapterResult`, `merge_adapter_results`, per-rule `requires`) was proven before it grew. That gate has passed. Runtime adapters for zwave_js and zha need `zwave-js-server-python==0.73.1` and `zha==2.2.0` (the HA 2026.9.0b4 pins) added to `requirements/test.txt`; neither is installed in the test venv today.
+
+**How to apply:** One PR per adapter family, each reusing `AdapterResult` and declaring `requires` on its rules. Redaction (step 8) must land before any adapter introduces MACs, IPs, or hostnames, because those reach the LLM explain/triage/discovery paths. Keep the design deviations already recorded in the plan's status line (aggregated findings, 24 h posture cooldown floor, salt in its own `.storage` file, age-only token rule).
+
+**Effort:** L
+**Priority:** P2
+
+### On-demand `audit_home_security` tool, HA-only form
+
+**What:** The chat agent cannot reach the Home Assistant security audit. The engine runs the thirteen rules every cycle and the results exist only as notifications, audit rows, and health-sensor attributes; `get_current_device_state` returns an entity's state value alone, so even `sensor.sentinel_health` reads as `ok` with no attributes. A user asking "is my home secure?" gets nothing from the audit.
+
+**Why:** Asked for on 2026-09-08 after field validation. The plan schedules the tool as step 9 behind redaction and the router adapters, but the HA-only data carries no MACs or IPs and every untrusted label already passes `sanitize_label`, so the HA-only tool is mostly plumbing: build a fresh snapshot with a `NetworkBuildContext`, run the network rules, and return findings plus the capability and missing-capability report. Running live avoids the 24 h cooldown hiding a still-true finding.
+
+**How to apply:** Add the tool in `agent/tools.py` returning findings (with their deterministic `summary`), `capabilities`, `missing_capabilities` with reasons, and `notes`; add the system-prompt line the plan specifies (report by severity, state which checks could not run, never claim a check passed when its capability is missing); index it for RAG retrieval; add the `run_network_audit` service. Defer the digest/provider-override design until router client data exists.
+
+**Effort:** M
+**Priority:** P2
+
+### Burst-batch digest is fire-and-forget: a failed service call loses every held finding
+
+**What:** `SentinelNotifier._async_flush_batch` clears `_held_batch` and schedules the notify service call with `async_create_task(..., blocking=False)`. If the mobile app service errors (provider limit, app offline, payload rejected) the task fails silently and the batched findings are gone; they were already charged their per-finding cooldown when they were held, so they do not re-fire either.
+
+**Why:** Raised by the Codex adversarial pass on #613. The body-size half of that finding is fixed (`MAX_BATCH_BODY_CHARS` plus an "…and N more" line); the delivery half predates the branch and is shared with every other notification path, which also fire with `blocking=False` and no retry.
+
+**How to apply:** Either await the flush call and on failure fall back to `persistent_notification.create` with the same body, or record the failure in the audit rows so the daily digest can carry them. A single `_deliver(domain, service, data)` helper used by the direct and batched paths would let both get the same fallback.
+
+**Effort:** S
+**Priority:** P3
+
+### Audit store runs at capacity on a live install; posture findings add steady rows
+
+**What:** The live box logs `Audit store at capacity (500 records) with no evictable records; evicting oldest not_suppressed record` on most cycles (observed 2026-09-08, before and after the network audit landed). The thirteen posture rules add up to one row per rule per day on top of the existing motion, camera, and power findings, so the store is permanently full and the oldest delivered findings are evicted first.
+
+**Why:** `audit_hot_max_records` defaults to 500 and the eviction policy prefers suppressed rows, which a quiet install does not have. Standing posture findings are the least useful rows to keep in full (they repeat daily with the same summary) yet they push out one-off security events.
+
+**How to apply:** Raise the default (rows are small) and/or evict posture-family rows (`NETWORK_RULE_TYPES`) before others once the store is full. Add the store's occupancy to the health sensor so the condition is visible without reading logs.
+
+**Effort:** S
+**Priority:** P3
+
+### `assist_agents_outside_pin` only sees Assist pipelines, not direct conversation calls
+
+**What:** `_collect_assist_agents` derives the agents the Critical Action PIN does not cover from `assist_pipeline.async_get_pipelines`. A `conversation.process` service call or the frontend chat panel can name any agent via `agent_id` without a pipeline, so an exposed lock reachable through the built-in agent that way is not counted when every configured pipeline runs on this integration.
+
+**Why:** Consequence of the Codex finding fixed in #613. Pipelines are the voice path the PIN was designed around, and direct `conversation.process` calls need an authenticated HA user, so the residual risk is smaller than the pipeline gap; but the rule's "covered" verdict is still slightly stronger than the evidence.
+
+**How to apply:** Either always list the built-in agent as uncovered when the `conversation` integration's default agent is loaded (simple, one more named agent in the finding), or word the finding's gate clause as "no Assist pipeline" rather than "no agent". Decide with the plan's step-9 tool work, which will restate the exposure semantics for the chat surface anyway. The test venv lacks `hassil`, so tests touching `assist_pipeline` must stub `sys.modules` as `test_collect_assist_agents_excludes_own_agent` does.
+
+**Effort:** S
+**Priority:** P3
+
 ## Audit Store
 
 ### Audit notifier-drop findings as non-user-facing (delivery status from async_notify)
