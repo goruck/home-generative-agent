@@ -24,6 +24,8 @@ class AlarmDisarmedDuringExternalThreatRule:
     """Detect alarm disarmed while an unknown person is seen on a camera."""
 
     rule_id = "alarm_disarmed_during_external_threat"
+    requires: frozenset[str] = frozenset()
+    cooldown_minutes = 0
 
     def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:
         """Return a finding for a disarmed alarm with a fresh stranger sighting."""

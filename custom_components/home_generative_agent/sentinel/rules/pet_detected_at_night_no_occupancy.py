@@ -39,6 +39,8 @@ class PetDetectedAtNightNoOccupancyRule:
     """Detect a pet on camera at night while no residents are home."""
 
     rule_id = "pet_detected_at_night_no_occupancy"
+    requires: frozenset[str] = frozenset()
+    cooldown_minutes = 0
 
     def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:
         """Return findings when a pet is seen at night with no one home."""

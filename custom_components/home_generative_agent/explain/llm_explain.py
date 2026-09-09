@@ -137,6 +137,19 @@ _KNOWN_TYPE_LABELS = {
     "unlocked_lock_at_night": "Door lock left unlocked",
     "camera_entry_unsecured": "Activity near unsecured entry",
     "alarm_disarmed_during_external_threat": "Outdoor activity while alarm disarmed",
+    "ha_sensitive_entity_exposed_without_pin": "Sensitive entity exposed without PIN",
+    "ha_new_admin_or_token": "New administrator or access token",
+    "ha_long_lived_token_stale": "Old long-lived access token",
+    "ha_failed_logins": "Failed login attempts",
+    "ha_cloud_remote_ui_enabled": "Cloud remote access enabled",
+    "ha_addon_exposed_port": "Add-on port exposed on host",
+    "ha_addon_unprotected": "Add-on protection mode off",
+    "ha_webhook_automation_public": "Public webhook automation",
+    "ha_trusted_networks_bypass_login": "Trusted network login bypass",
+    "ha_http_proxy_misconfigured": "IP banning disabled",
+    "security_device_unavailable": "Security device unavailable",
+    "network_unconfigured_discovered_device": "Unconfigured device discovered",
+    "network_router_update_pending": "Router update available",
 }
 
 

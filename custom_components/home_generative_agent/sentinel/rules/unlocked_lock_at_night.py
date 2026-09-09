@@ -39,6 +39,8 @@ class UnlockedLockAtNightRule:
     """Detect unlocked exterior locks at night."""
 
     rule_id = "unlocked_lock_at_night"
+    requires: frozenset[str] = frozenset()
+    cooldown_minutes = 0
 
     def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:
         """Return findings for exterior locks left unlocked at night."""

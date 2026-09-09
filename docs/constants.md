@@ -400,6 +400,30 @@ This document covers the named constants that affect integration behaviour, orga
 
 ---
 
+## Sentinel Network Security Audit
+
+**File:** `const.py` | **UI-configurable** (Sentinel subentry, Advanced setup)
+
+| Constant | Config key | Default | Purpose |
+|---|---|---|---|
+| `RECOMMENDED_SENTINEL_NETWORK_ENABLED` | `sentinel_network_enabled` | `True` | Master switch for the snapshot's `network` section and the Home Assistant & network security rules. Off = the rules are reported as inactive on the health sensor. |
+| `RECOMMENDED_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN` | `sentinel_network_offline_device_min` | `30` | Minutes a lock, alarm panel, or camera may be `unavailable` before `security_device_unavailable` fires |
+| `RECOMMENDED_SENTINEL_HA_TOKEN_STALE_DAYS` | `sentinel_ha_token_stale_days` | `90` | Age in days past which `ha_long_lived_token_stale` reports a long-lived access token (Home Assistant does not record long-lived token use, so age is the only observable fact) |
+| `RECOMMENDED_SENTINEL_AUTH_IP_RETENTION_DAYS` | `sentinel_auth_ip_retention_days` | `90` | How long a pseudonymized token address stays in the auth inventory |
+
+**Code-only:**
+
+| Constant | File | Value | Purpose |
+|---|---|---|---|
+| `SENTINEL_POSTURE_RULE_COOLDOWN_MINUTES` | `const.py` | `1440` (24 h) | Cooldown floor for posture rules (standing conditions such as a stale token or an exposed add-on port); the engine uses the larger of this and `sentinel_cooldown_minutes` |
+| `MAX_SEEN_IPS` | `sentinel/auth_inventory.py` | `20` | Pseudonymized addresses kept per token in the auth inventory |
+| `SEEN_IP_REFRESH` | `sentinel/auth_inventory.py` | `1 h` | How often an address's `last_seen` stamp is refreshed, so steady use does not rewrite the store every cycle |
+| `MAX_LABEL_CHARS` | `snapshot/network.py` | `64` | Cap on labels copied from untrusted sources (mDNS names, add-on titles, token client names) into evidence and notifications |
+| `ROUTER_PLATFORMS` | `snapshot/network.py` | `fritz, unifi, eero, asuswrt, tplink_omada, keenetic_ndms2, mikrotik, netgear, freebox, upnp` | Entity-registry platforms whose `update.*` entities count as router firmware |
+| `KEY_LENGTH` | `sentinel/pseudonymizer.py` | `8` | Hex characters of the HMAC-SHA256 kept as a pseudonymized identifier |
+
+---
+
 ## Sentinel Discovery
 
 **File:** `const.py` | **UI-configurable**

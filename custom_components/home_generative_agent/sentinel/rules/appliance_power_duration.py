@@ -63,6 +63,8 @@ class AppliancePowerDurationRule:
     """
 
     rule_id = "appliance_power_duration"
+    requires: frozenset[str] = frozenset()
+    cooldown_minutes = 0
 
     def __init__(
         self,

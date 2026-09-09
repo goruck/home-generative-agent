@@ -39,6 +39,8 @@ class VehicleDetectedNearCameraRule:
     """Detect a vehicle on any monitored camera while residents are home."""
 
     rule_id = "vehicle_detected_near_camera_home"
+    requires: frozenset[str] = frozenset()
+    cooldown_minutes = 0
 
     def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:
         """Return findings when a vehicle is observed on any monitored camera."""

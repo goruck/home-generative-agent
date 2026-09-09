@@ -283,3 +283,13 @@ sentinel_reset_baseline:
             - sensor
             - number
             - input_number
+
+sentinel_reset_auth_inventory:
+  name: Reset sentinel auth inventory
+  description: >
+    Clear the persistent inventory of Home Assistant users and access tokens
+    that the network security audit compares against. The next Sentinel run
+    records the current users and tokens as known without alerting, exactly
+    like the first run after installation. The inventory never contains token
+    values or raw IP addresses.
+  fields: {}

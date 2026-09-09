@@ -54,6 +54,21 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "Outdoor activity while alarm disarmed"
         ),
         "type_appliance_power_duration": "Appliance power duration",
+        "type_ha_sensitive_entity_exposed_without_pin": (
+            "Sensitive entity exposed without PIN"
+        ),
+        "type_ha_new_admin_or_token": "New administrator or access token",
+        "type_ha_long_lived_token_stale": "Old long-lived access token",
+        "type_ha_failed_logins": "Failed login attempts",
+        "type_ha_cloud_remote_ui_enabled": "Cloud remote access enabled",
+        "type_ha_addon_exposed_port": "Add-on port exposed on host",
+        "type_ha_addon_unprotected": "Add-on protection mode off",
+        "type_ha_webhook_automation_public": "Public webhook automation",
+        "type_ha_trusted_networks_bypass_login": "Trusted network login bypass",
+        "type_ha_http_proxy_misconfigured": "IP banning disabled",
+        "type_security_device_unavailable": "Security device unavailable",
+        "type_network_unconfigured_discovered_device": "Unconfigured device discovered",
+        "type_network_router_update_pending": "Router update available",
         "subtitle_appliance_finished": "{appliance} finished",
         "subtitle_appliance_cycle_complete": "Appliance cycle complete",
         "subtitle_entry_open_alarm_disarmed": "{entry_name} open, alarm disarmed",
@@ -68,6 +83,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "persistent_fallback": "{summary} (severity {severity}) for {entities}. {hint}",
         "batch_title": "Home Update",
         "batch_message": "{count} home update{plural}: {type_summary}.",
+        "batch_more": "\u2026and {count} more",
         "digest_title": "Sentinel Daily Digest",
         "digest_message": (
             "Sentinel: {count} alert{plural} in the last 24 h ({sev_summary})."
@@ -99,6 +115,25 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "Pohyb venku při vypnutém alarmu"
         ),
         "type_appliance_power_duration": "Doba provozu spotřebiče",
+        "type_ha_sensitive_entity_exposed_without_pin": (
+            "Citlivá entita zpřístupněna bez PIN"
+        ),
+        "type_ha_new_admin_or_token": "Nový administrátor nebo přístupový token",
+        "type_ha_long_lived_token_stale": "Starý dlouhodobý přístupový token",
+        "type_ha_failed_logins": "Neúspěšné pokusy o přihlášení",
+        "type_ha_cloud_remote_ui_enabled": "Vzdálený přístup přes cloud je zapnutý",
+        "type_ha_addon_exposed_port": "Port doplňku vystaven na hostiteli",
+        "type_ha_addon_unprotected": "Ochranný režim doplňku vypnutý",
+        "type_ha_webhook_automation_public": "Veřejná webhook automatizace",
+        "type_ha_trusted_networks_bypass_login": (
+            "Obejití přihlášení z důvěryhodné sítě"
+        ),
+        "type_ha_http_proxy_misconfigured": "Blokování IP adres vypnuté",
+        "type_security_device_unavailable": "Bezpečnostní zařízení nedostupné",
+        "type_network_unconfigured_discovered_device": (
+            "Nalezeno nenakonfigurované zařízení"
+        ),
+        "type_network_router_update_pending": "K dispozici aktualizace routeru",
         "subtitle_appliance_finished": "{appliance} dokončeno",
         "subtitle_appliance_cycle_complete": "Cyklus spotřebiče dokončen",
         "subtitle_entry_open_alarm_disarmed": "{entry_name} otevřeno, alarm vypnutý",
@@ -117,6 +152,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         ),
         "batch_title": "Novinka z domova",
         "batch_message": "{count} novinek z domova: {type_summary}.",
+        "batch_more": "\u2026a dal\u0161\u00edch {count}",
         "digest_title": "Denní přehled Sentinelu",
         "digest_message": (
             "Sentinel: {count} upozornění za posledních 24 h ({sev_summary})."

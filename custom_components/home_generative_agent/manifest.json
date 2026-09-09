@@ -3,6 +3,7 @@
   "name": "Home Generative Agent",
   "after_dependencies": [
     "assist_pipeline",
+    "hassio",
     "intent"
   ],
   "codeowners": [
@@ -35,5 +36,5 @@
     "langchain-anthropic==1.4.3"
   ],
   "single_config_entry": true,
-  "version": "3.38.1"
+  "version": "3.39.0"
 }

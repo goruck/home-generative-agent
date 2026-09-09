@@ -58,6 +58,9 @@ from custom_components.home_generative_agent.sentinel.power_units import (
     is_energy_unit,
     is_power_unit,
 )
+from custom_components.home_generative_agent.sentinel.rules.network_common import (
+    NETWORK_RULE_TYPES,
+)
 from custom_components.home_generative_agent.sentinel.suppression import (
     SUPPRESSION_REASON_NOT_SUPPRESSED,
     record_cooldown_feedback,
@@ -66,7 +69,7 @@ from custom_components.home_generative_agent.sentinel.suppression import (
 
 if TYPE_CHECKING:
     import asyncio
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from homeassistant.core import Event, HomeAssistant
 
@@ -82,6 +85,8 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 MAX_MOBILE_MESSAGE_CHARS = 220
+# Ceiling for the burst-batch digest body (header plus per-finding lines).
+MAX_BATCH_BODY_CHARS = 1200
 _AUDIT_FETCH_LIMIT = 1000
 
 _SEVERITY_INTERRUPT_LEVEL: dict[str, str] = {
@@ -421,13 +426,14 @@ class SentinelNotifier:
         count = len(held)
         types = list({_display_type(f, self._hass) for f, _, _svc in held})
         type_summary = ", ".join(types)
-        message = notif_msg(
+        header = notif_msg(
             self._hass,
             "batch_message",
             count=count,
             plural="s" if count > 1 else "",
             type_summary=type_summary,
         )
+        message = _batch_body(header, held, self._options, self._hass)
         batch_title = notif_msg(self._hass, "batch_title")
 
         # Use the first non-None resolved service from the held batch (which
@@ -746,6 +752,23 @@ _KNOWN_TYPE_LABEL_KEYS = {
     "alarm_disarmed_during_external_threat": (
         "type_alarm_disarmed_during_external_threat"
     ),
+    "ha_sensitive_entity_exposed_without_pin": (
+        "type_ha_sensitive_entity_exposed_without_pin"
+    ),
+    "ha_new_admin_or_token": "type_ha_new_admin_or_token",
+    "ha_long_lived_token_stale": "type_ha_long_lived_token_stale",
+    "ha_failed_logins": "type_ha_failed_logins",
+    "ha_cloud_remote_ui_enabled": "type_ha_cloud_remote_ui_enabled",
+    "ha_addon_exposed_port": "type_ha_addon_exposed_port",
+    "ha_addon_unprotected": "type_ha_addon_unprotected",
+    "ha_webhook_automation_public": "type_ha_webhook_automation_public",
+    "ha_trusted_networks_bypass_login": "type_ha_trusted_networks_bypass_login",
+    "ha_http_proxy_misconfigured": "type_ha_http_proxy_misconfigured",
+    "security_device_unavailable": "type_security_device_unavailable",
+    "network_unconfigured_discovered_device": (
+        "type_network_unconfigured_discovered_device"
+    ),
+    "network_router_update_pending": "type_network_router_update_pending",
     "appliance_power_duration": "type_appliance_power_duration",
 }
 
@@ -1139,12 +1162,38 @@ _TEMPLATE_MOBILE_FORMATTERS: dict[
 # ("someone is still inside"), so these never defer to a translated
 # explanation, even when a response language is configured. Translating them
 # needs real string templates, not model prose.
-_SECURITY_MESSAGE_TYPES = frozenset({"alarm_disarmed_during_external_threat"})
+# Findings whose deterministic copy must never be replaced by model prose.
+# The network / HA-security family qualifies as a whole: its summaries carry
+# the exact token label, port, account, or device an attacker would want
+# blurred, and parts of that evidence originate from untrusted sources.
+_SECURITY_MESSAGE_TYPES = frozenset(
+    {"alarm_disarmed_during_external_threat"} | NETWORK_RULE_TYPES
+)
 _SECURITY_MESSAGE_TEMPLATE_IDS = frozenset({"alarm_disarmed_open_entry"})
 
 
-def _is_security_copy(finding: AnomalyFinding) -> bool:
-    """Return True when *finding*'s deterministic copy must never be paraphrased."""
+def _network_summary(finding: AnomalyFinding) -> str | None:
+    """
+    Return the pre-rendered summary of a network / HA-security finding.
+
+    These rules render their exact facts themselves; most have no triggering
+    entity, so the generic fallback would name nothing. None for every other
+    finding type or when the summary is empty.
+    """
+    if finding.type not in NETWORK_RULE_TYPES:
+        return None
+    summary = str(finding.evidence.get("summary") or "").strip()
+    return summary or None
+
+
+def is_security_copy(finding: AnomalyFinding) -> bool:
+    """
+    Return True when *finding*'s deterministic copy must never be paraphrased.
+
+    The engine consults this before calling the explainer: a finding whose
+    push and persistent notification are both rendered from its own summary
+    would spend a model call on prose that reaches nobody.
+    """
     return (
         finding.type in _SECURITY_MESSAGE_TYPES
         or str(finding.evidence.get("template_id") or "")
@@ -1164,12 +1213,52 @@ def _deterministic_mobile_message(finding: AnomalyFinding) -> str | None:
         return _alarm_disarmed_mobile_message(finding)
     if finding.type == "appliance_power_duration":
         return _appliance_power_duration_mobile_message(finding)
+    if (summary := _network_summary(finding)) is not None:
+        return summary[:MAX_MOBILE_MESSAGE_CHARS].rstrip()
     formatter = _TEMPLATE_MOBILE_FORMATTERS.get(
         str(finding.evidence.get("template_id") or "")
     )
     if formatter:
         return formatter(finding)
     return None
+
+
+def _batch_body(
+    header: str,
+    held: list[tuple[AnomalyFinding, str | None, str | None]],
+    options: Mapping[str, Any],
+    hass: HomeAssistant | None,
+) -> str:
+    """
+    Return the burst-batch digest: *header* plus one line per held finding.
+
+    Each line is the body the finding's own push would have carried, so a
+    finding delayed by the rate limiter still names its devices, ports, or
+    figures instead of collapsing to a bare type label (a four-device
+    ``network_unconfigured_discovered_device`` finding once reached the phone
+    as "1 home update: Unconfigured device discovered."). Duplicate bodies
+    are listed once.
+    """
+    response_language = str(options.get(CONF_SENTINEL_RESPONSE_LANGUAGE, "") or "")
+    lines: list[str] = []
+    for finding, explanation, _svc in held:
+        body = _mobile_message(explanation, finding, response_language, hass).strip()
+        if body and body not in lines:
+            lines.append(body)
+    if not lines:
+        return header
+    shown: list[str] = []
+    total = len(header)
+    omitted = 0
+    for line in lines:
+        if shown and total + len(line) + 3 > MAX_BATCH_BODY_CHARS:
+            omitted += 1
+            continue
+        shown.append(line)
+        total += len(line) + 3
+    if omitted:
+        shown.append(notif_msg(hass, "batch_more", count=omitted))
+    return header + "\n\n" + "\n".join(f"\u2022 {line}" for line in shown)
 
 
 def _mobile_message(
@@ -1189,7 +1278,7 @@ def _mobile_message(
     explanation, the mobile push and the persistent notification would
     disagree for the same finding.
 
-    Security copy (see ``_is_security_copy``) is exempt and stays
+    Security copy (see ``is_security_copy``) is exempt and stays
     deterministic in every case: losing the camera, the entry, the disarm
     time, or the call to action matters more than the language it is in.
 
@@ -1199,7 +1288,7 @@ def _mobile_message(
     """
     deterministic = _deterministic_mobile_message(finding)
     if deterministic is not None and (
-        not response_language or _is_security_copy(finding)
+        not response_language or is_security_copy(finding)
     ):
         return deterministic
     if explanation:
@@ -1216,6 +1305,11 @@ def _persistent_message(
     finding: AnomalyFinding,
     hass: HomeAssistant | None = None,
 ) -> str:
+    # Security copy never yields to model prose (see is_security_copy):
+    # the summary names the token, port, or account, and a paraphrase built
+    # from attacker-influenced evidence could drop or reshape it.
+    if (summary := _network_summary(finding)) is not None:
+        return summary
     if explanation:
         text = _normalize_text(explanation)
         if text:

@@ -899,6 +899,53 @@ async def test_async_flush_batch_sends_summary_no_actions() -> None:
 
 
 @pytest.mark.asyncio
+async def test_flush_batch_lists_each_held_finding_body() -> None:
+    """The digest carries every held finding's own push body under its header."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+
+    network = _finding_with_severity(
+        "low",
+        anomaly_id="flushnet",
+        ftype="network_unconfigured_discovered_device",
+    )
+    network.evidence["summary"] = (
+        "Home Assistant discovered 2 unconfigured devices on your network: "
+        "XBR-65X850E (androidtv_remote via zeroconf), eero (upnp via ssdp)."
+    )
+    ordinary = _finding_with_severity("low", anomaly_id="flushplain")
+    notifier._held_batch.append((network, "model prose", "notify.mobile_app_phone"))
+    notifier._held_batch.append((ordinary, "Kettle ran longer.", None))
+
+    notifier._async_flush_batch()
+    await hass.drain_tasks()
+
+    assert len(hass.services.calls) == 1
+    message = hass.services.calls[0]["data"]["message"]
+    header, _, body = message.partition("\n\n")
+    assert header.startswith("2 home updates: ")
+    assert "XBR-65X850E (androidtv_remote via zeroconf), eero (upnp via ssdp)" in body
+    assert "model prose" not in body
+    assert "\u2022 Kettle ran longer." in body
+
+
+@pytest.mark.asyncio
+async def test_flush_batch_single_finding_keeps_header_and_body() -> None:
+    """A lone held finding still gets its header line plus its full body."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    finding = _finding_with_severity("low", anomaly_id="flushone")
+    notifier._held_batch.append((finding, "Only one thing happened.", None))
+
+    notifier._async_flush_batch()
+    await hass.drain_tasks()
+
+    message = hass.services.calls[0]["data"]["message"]
+    assert message.startswith("1 home update: ")
+    assert message.endswith("\n\n\u2022 Only one thing happened.")
+
+
+@pytest.mark.asyncio
 async def test_high_severity_bypasses_batch() -> None:
     """More than 3 high-severity notifications all dispatched immediately (no batching)."""
     options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
@@ -2493,3 +2540,79 @@ def test_baseline_mobile_message_unit_control_chars_stripped() -> None:
     assert rlo not in msg
     assert zwsp not in msg
     assert "W evil" in msg
+
+
+# ---------------------------------------------------------------------------
+# Network / HA-security findings render their pre-built summary
+# ---------------------------------------------------------------------------
+
+
+def _network_finding(
+    summary: str = "Add-on Terminal & SSH listens on host port(s) 22.",
+) -> AnomalyFinding:
+    return AnomalyFinding(
+        anomaly_id="net1",
+        type="ha_addon_exposed_port",
+        severity="high",
+        confidence=0.9,
+        triggering_entities=[],
+        evidence={"addon_slug": "core_ssh", "summary": summary},
+        suggested_actions=["Disable the host port."],
+        is_sensitive=True,
+    )
+
+
+def test_network_finding_mobile_and_persistent_use_summary() -> None:
+    """With no entity to name, the summary replaces the generic fallback copy."""
+    finding = _network_finding()
+    assert _mobile_message(None, finding) == finding.evidence["summary"]
+    assert (
+        _notifier_mod._persistent_message(None, finding) == finding.evidence["summary"]
+    )
+    assert "Unknown entity" not in _mobile_message(None, finding)
+
+
+def test_network_finding_without_summary_falls_back() -> None:
+    """A network finding that somehow lacks a summary still renders something."""
+    finding = _network_finding(summary="")
+    msg = _mobile_message(None, finding)
+    assert "Add-on port exposed on host" in msg
+
+
+def test_network_finding_summary_beats_explanation_and_language() -> None:
+    """Security copy for the network family never yields to model prose."""
+    finding = _network_finding(summary="New long-lived access token: api.")
+    assert (
+        _mobile_message("Someone made a token.", finding) == finding.evidence["summary"]
+    )
+    assert (
+        _mobile_message("Někdo vytvořil token.", finding, response_language="cs")
+        == finding.evidence["summary"]
+    )
+    assert (
+        _notifier_mod._persistent_message("Someone made a token.", finding)
+        == finding.evidence["summary"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_flush_batch_body_is_capped() -> None:
+    """The digest stops adding lines at the cap and says how many were left out."""
+    from custom_components.home_generative_agent.sentinel.notifier import (
+        MAX_BATCH_BODY_CHARS,
+    )
+
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    for i in range(12):
+        finding = _finding_with_severity("low", anomaly_id=f"cap{i}")
+        notifier._held_batch.append((finding, f"Finding number {i} " + "x" * 180, None))
+
+    notifier._async_flush_batch()
+    await hass.drain_tasks()
+
+    message = hass.services.calls[0]["data"]["message"]
+    assert len(message) <= MAX_BATCH_BODY_CHARS + 40
+    assert "\u2026and " in message
+    assert " more" in message
+    assert "Finding number 0" in message

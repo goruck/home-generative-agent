@@ -35,6 +35,8 @@ class PhoneBatteryLowAtNightRule:
     """Detect phone batteries that are low at night while the home is occupied."""
 
     rule_id = "phone_battery_low_at_night_home"
+    requires: frozenset[str] = frozenset()
+    cooldown_minutes = 0
 
     def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:
         """Return findings for phone batteries below threshold at night while home."""

@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.39.0] - 2026-09-09
+
+### Added
+
+- **Home Assistant security audit (Sentinel).** Thirteen new deterministic rules audit Home Assistant's own attack surface on every detection cycle, with no router or third-party integration required: a new administrator account or long-lived access token, locks, alarm panels, and door/garage covers exposed to Alexa or Google Assistant (or to Assist while the Critical Action PIN is not enforceable), long-lived tokens older than a configurable age, failed login attempts, Cloud remote access, Supervisor add-ons with host-mapped ports or protection mode off, automations with public webhook triggers (high when they can unlock or open an entry, screened by the same allowlist the automation PIN gate uses), trusted-network login bypass, IP banning that cannot trigger, locks/alarms/cameras unavailable for too long, devices Home Assistant discovered on the LAN that nobody configured, and pending router firmware updates. Each rule reports one aggregated finding per cycle so a second item is never starved by the type cooldown, and none of them is ever merged into a compound with a live event. Each rule declares the snapshot facts it needs and is skipped, visibly, on an install that cannot provide them (a Container install has no Supervisor, for example): the `sentinel_health` sensor's new `inactive_rules`, `inactive_rule_count`, and `network_capabilities` attributes say which checks are not running and why, so a missing capability never reads as a clean bill of health. The auth-change rule compares against a small persistent inventory of user ids, token ids, client names, and HMAC-pseudonymized last-used addresses (never token values, user names, or raw IPs), written as a private file and updated only after the alert was delivered so a snoozed change is reported later rather than baselined; the first run records everything as known and posts one *auth inventory established* notification instead of alerting on pre-existing tokens. Standing conditions such as an old token re-alert at most once a day, and their notification text is deterministic and control-character-safe even with the LLM explainer on. New Sentinel options (Advanced setup): `sentinel_network_enabled` (master switch, default on), `sentinel_network_offline_device_min`, `sentinel_ha_token_stale_days`, `sentinel_auth_ip_retention_days`; new admin-only service `home_generative_agent.sentinel_reset_auth_inventory`. This is the first phase of the [network security and privacy audit plan](docs/network-security-plan.md); router, DNS, and radio-protocol adapters follow.
+
+### Changed
+
+- The home-state snapshot is now schema version 2: every entity carries its entity-registry `platform`, and the snapshot has a `network` section built from capability-declaring adapters (`snapshot/network.py`). Both additions are optional at the schema level, so persisted audit records and older fixtures remain valid.
+
+### Fixed
+
+- Sentinel's exposed-entity rule no longer lets the Critical Action PIN silence Assist exposure when an Assist pipeline runs on another conversation agent (the built-in agent or another LLM integration), which the PIN never covered; such agents are named in the finding.
+- Sentinel add-on rules skip, and the snapshot notes name, add-ons whose details the Supervisor has not reported yet instead of treating them as protected with no ports.
+- Sentinel's auth inventory retries a failed store write on the next cycle and posts the "inventory established" notification only once the file exists.
+- Removing the Sentinel subentry reloads the entry only after the auth inventory and pseudonymization salt have been deleted.
+- The burst-batch digest body is capped and says how many findings were left out.
+- The snapshot no longer reports a derived `http_use_x_forwarded_for` value; core never stores that setting.
+- Sentinel no longer calls the LLM explainer for findings whose notification copy is deterministic (the Home Assistant security audit rules and the alarm-disarm rules); the prose never reached the user, so every such call was wasted compute.
+- Sentinel burst-batch digest ("N home updates: …") now lists each held finding's own push body under the header instead of only its type label, so a rate-limited finding such as `network_unconfigured_discovered_device` still names every device.
+
 ## [3.38.1] - 2026-09-04
 
 ### Fixed

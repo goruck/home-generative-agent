@@ -148,6 +148,7 @@ _CALL_SITE_KWARGS: dict[str, set[str]] = {
     "fallback_message": {"summary", "entity", "action_hint"},
     "persistent_fallback": {"summary", "severity", "entities", "hint"},
     "batch_message": {"count", "plural", "type_summary"},
+    "batch_more": {"count"},
     "digest_message": {"count", "plural", "sev_summary"},
     "snooze_confirm_message": {"friendly"},
 }

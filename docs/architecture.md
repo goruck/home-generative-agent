@@ -143,6 +143,30 @@ Tools the user has excluded (see [Excluded tools](configuration.md#excluded-tool
 
 ---
 
+## Home-State Snapshot and Network Audit
+
+Sentinel, discovery, baseline collection, and the explain flows all consume one authoritative JSON snapshot of home state built by `snapshot/builder.py`: every entity (with its area and entity-registry `platform`), per-camera activity, derived context (night, occupancy, last motion), and, since schema version 2, a `network` section.
+
+The `network` section is assembled from adapters in `snapshot/network.py`. An adapter is a pure function over inputs read from Home Assistant; the merge step records which adapter provided each field and publishes the result as a `capabilities` list of dotted paths (`network.ha_security.admin_user_count`, `network.posture.router_update_pending`, …). Rules declare the capabilities they need and the Sentinel engine skips, and reports on the health sensor, any rule whose home cannot provide them. Nothing scans the network: every fact is derived from what Home Assistant already ingests.
+
+```
+HA auth / registries / config flows / Supervisor / http
+        │
+        ▼
+snapshot/builder.py ──► snapshot/network.py (adapters) ──► snapshot["network"]
+                                                                  │
+                          sentinel/rules/ha_*.py, security_device_unavailable.py,
+                          network_*.py  (each declares `requires`)
+                                                                  │
+                          sentinel/engine.py (capability gating) ──► notifier ──► audit
+                                  │
+                          sentinel/auth_inventory.py (persistent, non-secret)
+```
+
+Phase 1 ships the `ha_native` adapter (Home Assistant's own attack surface). Router, DNS, and radio adapters are described in the [network security plan](network-security-plan.md). Identifiers that could single out a device or person (token last-used addresses today; MACs and Bluetooth addresses in later phases) are pseudonymized with a per-install HMAC salt (`sentinel/pseudonymizer.py`) before anything persists them.
+
+---
+
 ## Hardware Reference Setup
 
 The author's test installation:

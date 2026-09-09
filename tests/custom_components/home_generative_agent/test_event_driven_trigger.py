@@ -384,7 +384,7 @@ async def test_polling_runs_when_no_triggers_queued(
         }
     )
 
-    async def _fake_build(_hass: HomeAssistant) -> FullStateSnapshot:
+    async def _fake_build(_hass: HomeAssistant, **_kwargs: Any) -> FullStateSnapshot:
         return snapshot
 
     monkeypatch.setattr(
