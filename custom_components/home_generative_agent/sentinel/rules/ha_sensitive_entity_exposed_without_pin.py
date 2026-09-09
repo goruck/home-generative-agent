@@ -6,7 +6,13 @@ from typing import TYPE_CHECKING
 
 from custom_components.home_generative_agent.snapshot.network import ha_cap
 
-from .network_common import POSTURE_COOLDOWN_MINUTES, ha_security, make_finding, plural
+from .network_common import (
+    POSTURE_COOLDOWN_MINUTES,
+    ha_security,
+    make_finding,
+    noun,
+    plural,
+)
 
 if TYPE_CHECKING:
     from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
@@ -23,6 +29,8 @@ _ASSISTANT_LABELS = {
 # The Critical Action PIN guards this integration's conversation agent only.
 # Alexa and Google Assistant reach Home Assistant through the cloud
 # integration and never see the PIN, so exposure to them is always reported.
+# Assist exposure is shared by every conversation agent, so the PIN silences
+# it only when every Assist pipeline runs on this integration's agent.
 _PIN_GATED_ASSISTANTS = frozenset({"conversation"})
 
 
@@ -46,10 +54,16 @@ class HaSensitiveEntityExposedWithoutPinRule:
         pin = ha.get("critical_action_pin_enabled")
         if pin is None:
             return []
+        outside_raw = ha.get("assist_agents_outside_pin")
+        outside: list[str] | None = (
+            sorted(str(a) for a in outside_raw) if outside_raw is not None else None
+        )
+        # Unknown pipeline coverage never counts as covered.
+        assist_gated = bool(pin) and outside == []
         exposed: dict[str, list[str]] = ha.get("exposed_sensitive_entities") or {}
         exposures: dict[str, list[str]] = {}
         for assistant, entity_ids in sorted(exposed.items()):
-            if not entity_ids or (pin and assistant in _PIN_GATED_ASSISTANTS):
+            if not entity_ids or (assist_gated and assistant in _PIN_GATED_ASSISTANTS):
                 continue
             exposures[assistant] = sorted(entity_ids)
         if not exposures:
@@ -59,13 +73,26 @@ class HaSensitiveEntityExposedWithoutPinRule:
         actions = []
         for assistant, ids in exposures.items():
             label = _ASSISTANT_LABELS.get(assistant, assistant)
-            gate = (
-                " with no Critical Action PIN"
-                if assistant in _PIN_GATED_ASSISTANTS
-                else ""
-            )
+            if assistant not in _PIN_GATED_ASSISTANTS:
+                gate = ""
+            elif not pin:
+                gate = " with no Critical Action PIN"
+            elif outside:
+                gate = (
+                    ", where the Critical Action PIN does not cover the "
+                    f"{noun(len(outside), 'pipeline agent')} "
+                    f"{', '.join(outside)}"
+                )
+            else:
+                gate = ", where Critical Action PIN coverage could not be verified"
             parts.append(f"{', '.join(ids)} to {label}{gate}")
-            if assistant in _PIN_GATED_ASSISTANTS:
+            if assistant in _PIN_GATED_ASSISTANTS and pin:
+                actions.append(
+                    "Point every Assist pipeline at this integration's "
+                    "conversation agent so the Critical Action PIN applies, or "
+                    "unexpose these entities from Assist"
+                )
+            elif assistant in _PIN_GATED_ASSISTANTS:
                 actions.append(
                     "Enable the Critical Action PIN in the integration's global "
                     "options, or unexpose these entities from Assist"
@@ -81,7 +108,10 @@ class HaSensitiveEntityExposedWithoutPinRule:
                 severity="high",
                 triggering_entities=all_ids,
                 evidence={"exposures": exposures},
-                display={"critical_action_pin_enabled": bool(pin)},
+                display={
+                    "critical_action_pin_enabled": bool(pin),
+                    "assist_agents_outside_pin": outside,
+                },
                 summary=(
                     f"{plural(len(all_ids), 'sensitive entity', 'sensitive entities')} "
                     f"exposed: {'; '.join(parts)}."

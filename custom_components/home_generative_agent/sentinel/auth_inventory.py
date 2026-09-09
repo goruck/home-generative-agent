@@ -189,6 +189,10 @@ class AuthInventory:
             hass, STORE_VERSION, STORE_KEY, private=True, atomic_writes=True
         )
         self._data: dict[str, Any] = _empty_data()
+        # A save that failed leaves memory ahead of disk; retry next commit
+        # and withhold the bootstrap announcement until the file exists.
+        self._dirty = False
+        self._announce_pending = False
 
     # ------------------------------------------------------------------ #
     # Persistence
@@ -214,12 +218,14 @@ class AuthInventory:
             "tokens": _valid_rows(data.get("tokens")),
         }
 
-    async def async_save(self) -> None:
-        """Persist the inventory."""
+    async def async_save(self) -> bool:
+        """Persist the inventory; return False when the write failed."""
         try:
             await self._store.async_save(self._data)
         except (HomeAssistantError, OSError, ValueError):
-            LOGGER.warning("Auth inventory could not be saved.")
+            LOGGER.warning("Auth inventory could not be saved; will retry.")
+            return False
+        return True
 
     async def async_reset(self) -> None:
         """Clear the inventory; the next run bootstraps again without alerts."""
@@ -334,7 +340,9 @@ class AuthInventory:
 
         ``hold_back`` names changes whose finding was not delivered this run;
         those users and tokens are left as they were so the next run reports
-        them again. Returns True when this call bootstrapped the inventory.
+        them again. Returns True once the bootstrap baseline has been written
+        to disk: on the bootstrapping call when its save succeeds, otherwise
+        on the first later call whose save succeeds.
         """
         now_iso = dt_util.as_utc(now).isoformat()
         bootstrap = not self.is_bootstrapped
@@ -413,9 +421,16 @@ class AuthInventory:
 
         if bootstrap:
             self._data["bootstrapped_at"] = now_iso
-        if changed:
-            await self.async_save()
-        return bootstrap
+        if not (changed or self._dirty):
+            return False
+        saved = await self.async_save()
+        self._dirty = not saved
+        if not saved:
+            self._announce_pending = self._announce_pending or bootstrap
+            return False
+        announce = bootstrap or self._announce_pending
+        self._announce_pending = False
+        return announce
 
 
 def _update_seen_ips(

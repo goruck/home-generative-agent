@@ -410,3 +410,34 @@ async def test_persisted_rows_carry_no_user_name() -> None:
     await inventory.async_commit([_user("u1", name="Lindo")], NOW)
     assert store.data is not None
     assert "Lindo" not in json.dumps(store.data)
+
+
+@pytest.mark.asyncio
+async def test_failed_save_retries_and_defers_bootstrap_notice() -> None:
+    """A failed write is retried next cycle and the bootstrap notice waits for it."""
+    from homeassistant.exceptions import HomeAssistantError  # noqa: PLC0415
+
+    inventory, store = _inventory()
+    await inventory.async_load()
+    original = store.async_save
+    failures = 1
+
+    async def _flaky_save(data: dict[str, Any]) -> None:
+        nonlocal failures
+        if failures:
+            failures -= 1
+            msg = "disk full"
+            raise HomeAssistantError(msg)
+        await original(data)
+
+    store.async_save = _flaky_save  # type: ignore[method-assign]
+    observation = [_user("u1", _token("t1", ip_key="ip-a"))]
+    # Bootstrap in memory, but nothing reached disk: no announcement yet.
+    assert await inventory.async_commit(observation, NOW) is False
+    assert inventory.is_bootstrapped
+    # Same observation, nothing changed: the retry alone triggers the save
+    # and the deferred announcement.
+    assert await inventory.async_commit(observation, NOW + timedelta(minutes=5)) is True
+    assert (
+        await inventory.async_commit(observation, NOW + timedelta(minutes=10)) is False
+    )

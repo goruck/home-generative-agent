@@ -122,10 +122,10 @@ class HaSecurityPosture(TypedDict, total=False):
     failed_login_notification_present: bool
     exposed_sensitive_entities: dict[str, list[str]]  # assistant -> entity_ids
     critical_action_pin_enabled: bool
+    assist_agents_outside_pin: list[str]  # pipeline agents the PIN does not cover
     cloud_remote_ui_enabled: bool
     pending_updates: list[str]  # update.* entity_ids in state "on"
     pending_security_updates: list[str]  # subset whose device is security-class
-    http_use_x_forwarded_for: bool
     http_trusted_proxies_configured: bool
     http_ip_ban_enabled: bool
     http_login_attempts_threshold: int

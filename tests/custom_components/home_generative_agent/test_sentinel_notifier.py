@@ -2593,3 +2593,26 @@ def test_network_finding_summary_beats_explanation_and_language() -> None:
         _notifier_mod._persistent_message("Someone made a token.", finding)
         == finding.evidence["summary"]
     )
+
+
+@pytest.mark.asyncio
+async def test_flush_batch_body_is_capped() -> None:
+    """The digest stops adding lines at the cap and says how many were left out."""
+    from custom_components.home_generative_agent.sentinel.notifier import (
+        MAX_BATCH_BODY_CHARS,
+    )
+
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    for i in range(12):
+        finding = _finding_with_severity("low", anomaly_id=f"cap{i}")
+        notifier._held_batch.append((finding, f"Finding number {i} " + "x" * 180, None))
+
+    notifier._async_flush_batch()
+    await hass.drain_tasks()
+
+    message = hass.services.calls[0]["data"]["message"]
+    assert len(message) <= MAX_BATCH_BODY_CHARS + 40
+    assert "\u2026and " in message
+    assert " more" in message
+    assert "Finding number 0" in message

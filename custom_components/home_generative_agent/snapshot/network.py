@@ -37,6 +37,7 @@ from custom_components.home_generative_agent.agent.automation_pin import (
 from custom_components.home_generative_agent.agent.helpers import (
     resolve_critical_action_policy,
 )
+from custom_components.home_generative_agent.const import DOMAIN
 from custom_components.home_generative_agent.sentinel.auth_inventory import (
     TOKEN_TYPE_LONG_LIVED,
     ObservedToken,
@@ -245,6 +246,9 @@ class AddonInput:
     host_ports: tuple[int, ...]
     protected: bool
     running: bool
+    # False when the Supervisor has not reported this add-on's details yet;
+    # ``host_ports`` and ``protected`` are then placeholders, not facts.
+    info_known: bool = True
 
 
 @dataclass(frozen=True)
@@ -289,6 +293,9 @@ class HaNativeInputs:
     trusted_networks_bypass_login: bool | None = None
     addons: list[AddonInput] | None = None
     automations: list[AutomationInput] | None = None
+    # Conversation engines used by Assist pipelines that this integration's
+    # Critical Action PIN does not cover (built-in agent, other LLM agents).
+    assist_agents_outside_pin: list[str] | None = None
     discovered_unconfigured: list[dict[str, str]] | None = None
     discovered_ignored: list[dict[str, str]] | None = None
     # Device-registry facts for tagging updates: entity -> device, device ->
@@ -422,6 +429,45 @@ def _collect_exposed(
         return None
 
 
+def _collect_assist_agents(hass: HomeAssistant) -> list[str] | None:
+    """
+    Return the Assist pipeline agents the Critical Action PIN does not cover.
+
+    The exposure registry is shared by every conversation agent, but the PIN
+    guards only this integration's own agent. A pipeline on Home Assistant's
+    built-in agent (whose turn-off intent unlocks locks) or on another LLM
+    integration can unlock an exposed lock with no PIN at all, so the
+    exposure rule must know such pipelines exist. An empty list means every
+    pipeline uses this integration; None means the read failed.
+    """
+    try:
+        from homeassistant.components.assist_pipeline import (  # noqa: PLC0415
+            async_get_pipelines,
+        )
+        from homeassistant.helpers import entity_registry as er  # noqa: PLC0415
+
+        own = {
+            entry.entity_id
+            for entry in er.async_get(hass).entities.values()
+            if entry.domain == "conversation" and entry.platform == DOMAIN
+        }
+        try:
+            pipelines = async_get_pipelines(hass)
+        except KeyError:
+            # assist_pipeline not loaded: no voice pipeline exists at all.
+            return []
+        return sorted(
+            {
+                str(pipeline.conversation_engine)
+                for pipeline in pipelines
+                if str(pipeline.conversation_engine) not in own
+            }
+        )
+    except Exception as err:  # noqa: BLE001
+        _log_input_failure("Assist pipelines", err)
+        return None
+
+
 def _collect_cloud(hass: HomeAssistant) -> bool | None:
     if "cloud" not in hass.config.components:
         return None
@@ -513,8 +559,9 @@ def _collect_addons(hass: HomeAssistant) -> list[AddonInput] | None:
         if not isinstance(entry, dict) or not entry.get("slug"):
             continue
         slug = str(entry["slug"])
-        data = info.get(slug) if isinstance(info, dict) else None
-        data = data if isinstance(data, dict) else {}
+        raw = info.get(slug) if isinstance(info, dict) else None
+        info_known = isinstance(raw, dict)
+        data = raw if isinstance(raw, dict) else {}
         ports: list[int] = []
         network = data.get("network")
         if isinstance(network, dict):
@@ -530,6 +577,7 @@ def _collect_addons(hass: HomeAssistant) -> list[AddonInput] | None:
                 host_ports=tuple(ports),
                 protected=bool(data.get("protected", True)),
                 running=str(entry.get("state") or data.get("state") or "") == "started",
+                info_known=info_known,
             )
         )
     return addons
@@ -640,6 +688,7 @@ async def async_collect_ha_native_inputs(  # noqa: PLR0913
         trusted_networks_bypass_login=_collect_auth_providers(hass),
         addons=_collect_addons(hass),
         automations=_collect_automations(hass),
+        assist_agents_outside_pin=_collect_assist_agents(hass),
         discovered_unconfigured=unconfigured,
         discovered_ignored=ignored,
         entity_device=entity_device,
@@ -802,6 +851,42 @@ def _update_fields(
     return ha_fields, posture
 
 
+def _addon_fields(inputs: HaNativeInputs, result: AdapterResult) -> None:
+    """Fill the add-on exposure fields; unknown add-ons are named, not assumed safe."""
+    ha = result.ha_security
+    if inputs.addons is not None:
+        # An add-on whose details the Supervisor has not fetched yet carries
+        # placeholder ports and protection; it is skipped and named, never
+        # asserted safe.
+        ha["addons_with_host_ports"] = {
+            addon.slug: list(addon.host_ports)
+            for addon in inputs.addons
+            if addon.running and addon.info_known and addon.host_ports
+        }
+        ha["addons_unprotected"] = sorted(
+            addon.slug
+            for addon in inputs.addons
+            if addon.running and addon.info_known and not addon.protected
+        )
+        ha["addon_names"] = {addon.slug: addon.name for addon in inputs.addons}
+        pending = sorted(
+            addon.name
+            for addon in inputs.addons
+            if addon.running and not addon.info_known
+        )
+        if pending:
+            result.notes.append(
+                "Supervisor has not reported details for "
+                f"{len(pending)} running add-on(s) ({', '.join(pending)}); "
+                "their host ports and protection mode are not audited yet."
+            )
+    else:
+        result.notes.append(
+            "Supervisor add-on data is unavailable on this install type; "
+            "add-on exposure is not audited."
+        )
+
+
 def ha_native_adapter(  # noqa: PLR0912 - one branch per input, kept flat on purpose
     inputs: HaNativeInputs,
     entities: Sequence[SnapshotEntity],
@@ -833,6 +918,8 @@ def ha_native_adapter(  # noqa: PLR0912 - one branch per input, kept flat on pur
         ha["critical_action_pin_enabled"] = resolve_critical_action_policy(
             context.options
         ).enforceable
+    if inputs.assist_agents_outside_pin is not None:
+        ha["assist_agents_outside_pin"] = list(inputs.assist_agents_outside_pin)
 
     if inputs.cloud_remote_ui_enabled is not None:
         ha["cloud_remote_ui_enabled"] = inputs.cloud_remote_ui_enabled
@@ -846,10 +933,9 @@ def ha_native_adapter(  # noqa: PLR0912 - one branch per input, kept flat on pur
     result.posture.update(posture_fields)
 
     if inputs.http is not None:
-        # Home Assistant validates use_x_forwarded_for and trusted_proxies as
-        # an inclusive pair, so one implies the other; the server object only
-        # exposes the proxy list.
-        ha["http_use_x_forwarded_for"] = inputs.http.trusted_proxies_configured
+        # Only the proxy list is observable on the server object; the
+        # use_x_forwarded_for flag is consumed at setup and never stored, so
+        # the snapshot does not pretend to know it.
         ha["http_trusted_proxies_configured"] = inputs.http.trusted_proxies_configured
         ha["http_ip_ban_enabled"] = inputs.http.ip_ban_enabled
         ha["http_login_attempts_threshold"] = inputs.http.login_attempts_threshold
@@ -857,23 +943,7 @@ def ha_native_adapter(  # noqa: PLR0912 - one branch per input, kept flat on pur
     if inputs.trusted_networks_bypass_login is not None:
         ha["trusted_networks_bypass_login"] = inputs.trusted_networks_bypass_login
 
-    if inputs.addons is not None:
-        ha["addons_with_host_ports"] = {
-            addon.slug: list(addon.host_ports)
-            for addon in inputs.addons
-            if addon.running and addon.host_ports
-        }
-        ha["addons_unprotected"] = sorted(
-            addon.slug
-            for addon in inputs.addons
-            if addon.running and not addon.protected
-        )
-        ha["addon_names"] = {addon.slug: addon.name for addon in inputs.addons}
-    else:
-        result.notes.append(
-            "Supervisor add-on data is unavailable on this install type; "
-            "add-on exposure is not audited."
-        )
+    _addon_fields(inputs, result)
 
     if inputs.automations is not None:
         critical_actions = (

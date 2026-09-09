@@ -345,15 +345,35 @@ def test_adapter_addons_only_running_ones_with_ports() -> None:
                 running=True,
             ),
             AddonInput("core_whisper", "Whisper", (), protected=True, running=True),
+            # Details not fetched yet: placeholders must not read as "safe".
+            AddonInput(
+                "fresh", "Fresh", (), protected=True, running=True, info_known=False
+            ),
         ],
     )
-    ha = ha_native_adapter(inputs, [], NetworkBuildContext()).ha_security
+    result = ha_native_adapter(inputs, [], NetworkBuildContext())
+    ha = result.ha_security
     assert ha["addons_with_host_ports"] == {
         "core_ssh": [22],
         "core_mosquitto": [1883, 8883],
     }
     assert ha["addons_unprotected"] == ["core_mosquitto"]
     assert ha["addon_names"]["core_ssh"] == "Terminal & SSH"
+    assert "fresh" in ha["addon_names"]
+    assert any("Fresh" in note and "not audited yet" in note for note in result.notes)
+
+
+def test_adapter_assist_agents_outside_pin_passthrough() -> None:
+    """Pipeline agents the PIN does not cover are published verbatim."""
+    inputs = HaNativeInputs(
+        now=NOW, assist_agents_outside_pin=["conversation.home_assistant"]
+    )
+    ha = ha_native_adapter(inputs, [], NetworkBuildContext()).ha_security
+    assert ha["assist_agents_outside_pin"] == ["conversation.home_assistant"]
+    absent = ha_native_adapter(
+        HaNativeInputs(now=NOW), [], NetworkBuildContext()
+    ).ha_security
+    assert "assist_agents_outside_pin" not in absent
 
 
 def test_adapter_webhook_automations_public_and_critical() -> None:
@@ -446,7 +466,8 @@ def test_adapter_http_and_auth_provider_fields() -> None:
         discovered_ignored=[{"handler": "hue", "source": "ignore", "title": "Hue"}],
     )
     ha = ha_native_adapter(inputs, [], NetworkBuildContext()).ha_security
-    assert ha["http_use_x_forwarded_for"] is True
+    # Core consumes use_x_forwarded_for at setup and never stores it.
+    assert "http_use_x_forwarded_for" not in ha
     assert ha["http_trusted_proxies_configured"] is True
     assert ha["http_ip_ban_enabled"] is False
     assert ha["http_login_attempts_threshold"] == -1
@@ -747,7 +768,14 @@ def test_collect_addons_merges_list_and_info(monkeypatch: pytest.MonkeyPatch) ->
         AddonInput(
             "a0d7b954_grafana", "Grafana", (3000,), protected=True, running=False
         ),
-        AddonInput("fresh", "Just installed", (), protected=True, running=True),
+        AddonInput(
+            "fresh",
+            "Just installed",
+            (),
+            protected=True,
+            running=True,
+            info_known=False,
+        ),
     ]
 
 
@@ -896,3 +924,56 @@ async def test_salt_load_failure_yields_temporary_salt(
         temp = await pmod.async_load_pseudonymizer(MagicMock())
     assert len(temp.ip_key("1.2.3.4")) == 8
     assert any("temporary salt" in r.getMessage() for r in caplog.records)
+
+
+def test_collect_assist_agents_excludes_own_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only pipelines on agents other than this integration's are returned."""
+    import sys  # noqa: PLC0415
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from homeassistant.helpers import entity_registry as er  # noqa: PLC0415
+
+    # The real package drags in the voice stack (hassil), which the test
+    # venv does not ship; the collector only needs async_get_pipelines.
+    assist_pipeline = SimpleNamespace(async_get_pipelines=lambda _hass: [])
+    monkeypatch.setitem(
+        sys.modules, "homeassistant.components.assist_pipeline", assist_pipeline
+    )
+
+    from custom_components.home_generative_agent.const import DOMAIN  # noqa: PLC0415
+    from custom_components.home_generative_agent.snapshot.network import (  # noqa: PLC0415
+        _collect_assist_agents,
+    )
+
+    own = SimpleNamespace(
+        entity_id="conversation.hga", domain="conversation", platform=DOMAIN
+    )
+    other = SimpleNamespace(
+        entity_id="conversation.openai", domain="conversation", platform="openai"
+    )
+    registry = SimpleNamespace(entities={"a": own, "b": other})
+    monkeypatch.setattr(er, "async_get", lambda _hass: registry)
+    pipelines = [
+        SimpleNamespace(conversation_engine="conversation.hga"),
+        SimpleNamespace(conversation_engine="conversation.home_assistant"),
+        SimpleNamespace(conversation_engine="conversation.openai"),
+        SimpleNamespace(conversation_engine="conversation.hga"),
+    ]
+    monkeypatch.setattr(assist_pipeline, "async_get_pipelines", lambda _hass: pipelines)
+    assert _collect_assist_agents(MagicMock()) == [
+        "conversation.home_assistant",
+        "conversation.openai",
+    ]
+    monkeypatch.setattr(
+        assist_pipeline, "async_get_pipelines", lambda _hass: pipelines[:1]
+    )
+    assert _collect_assist_agents(MagicMock()) == []
+
+    def _not_loaded(_hass: Any) -> list[Any]:
+        key = "assist_pipeline"
+        raise KeyError(key)
+
+    monkeypatch.setattr(assist_pipeline, "async_get_pipelines", _not_loaded)
+    assert _collect_assist_agents(MagicMock()) == []

@@ -272,6 +272,7 @@ def test_sensitive_exposed_pin_gates_assist_only() -> None:
         ha_security={
             "exposed_sensitive_entities": exposed,
             "critical_action_pin_enabled": True,
+            "assist_agents_outside_pin": [],
         }
     )
     gated = _only(rule.evaluate(on))
@@ -284,6 +285,7 @@ def test_sensitive_exposed_pin_gates_assist_only() -> None:
         ha_security={
             "exposed_sensitive_entities": {"conversation": ["lock.front"]},
             "critical_action_pin_enabled": True,
+            "assist_agents_outside_pin": [],
         }
     )
     assert rule.evaluate(assist_only) == []
@@ -552,3 +554,39 @@ def test_router_update_pending_aggregates_with_versions() -> None:
         is_entity_excluded=lambda entity_id, _t: entity_id == "update.fritz_fw"
     )
     assert _only(excluded.evaluate(snapshot)).triggering_entities == ["update.eero_fw"]
+
+
+def test_sensitive_exposed_pin_does_not_cover_other_pipeline_agents() -> None:
+    """A pipeline on another agent keeps Assist exposure reported despite the PIN."""
+    rule = HaSensitiveEntityExposedWithoutPinRule()
+    exposed = {"conversation": ["lock.front"]}
+    covered = _snapshot(
+        ha_security={
+            "exposed_sensitive_entities": exposed,
+            "critical_action_pin_enabled": True,
+            "assist_agents_outside_pin": [],
+        }
+    )
+    assert rule.evaluate(covered) == []
+    uncovered = _snapshot(
+        ha_security={
+            "exposed_sensitive_entities": exposed,
+            "critical_action_pin_enabled": True,
+            "assist_agents_outside_pin": ["conversation.home_assistant"],
+        }
+    )
+    finding = _only(rule.evaluate(uncovered))
+    assert finding.evidence["exposures"] == {"conversation": ["lock.front"]}
+    assert (
+        "does not cover the pipeline agent conversation.home_assistant"
+        in (finding.evidence["summary"])
+    )
+    assert "Point every Assist pipeline" in finding.suggested_actions[0]
+    # Unknown coverage is never treated as covered.
+    unknown = _snapshot(
+        ha_security={
+            "exposed_sensitive_entities": exposed,
+            "critical_action_pin_enabled": True,
+        }
+    )
+    assert "could not be verified" in _only(rule.evaluate(unknown)).evidence["summary"]

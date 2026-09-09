@@ -3822,13 +3822,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     await rd.auth_inventory.async_reset()
                 await async_remove_pseudonymizer_salt(hass)
 
-            hass.async_create_task(_forget_network_audit())
+            cleanup = hass.async_create_task(_forget_network_audit())
             if rd.baseline_updater is not None:
                 hass.async_create_task(rd.baseline_updater.stop())
             if rd.discovery_engine is not None:
                 hass.async_create_task(rd.discovery_engine.stop())
             if rd.notifier is not None:
                 rd.notifier.stop()
+            # Reload only after the inventory and salt are gone: a replacement
+            # setup racing the cleanup could load them just before deletion.
+            cleanup.add_done_callback(
+                lambda _task: hass.config_entries.async_schedule_reload(entry.entry_id)
+            )
+            return
         hass.config_entries.async_schedule_reload(entry.entry_id)
 
     entry.async_on_unload(

@@ -83,6 +83,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "persistent_fallback": "{summary} (severity {severity}) for {entities}. {hint}",
         "batch_title": "Home Update",
         "batch_message": "{count} home update{plural}: {type_summary}.",
+        "batch_more": "\u2026and {count} more",
         "digest_title": "Sentinel Daily Digest",
         "digest_message": (
             "Sentinel: {count} alert{plural} in the last 24 h ({sev_summary})."
@@ -151,6 +152,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         ),
         "batch_title": "Novinka z domova",
         "batch_message": "{count} novinek z domova: {type_summary}.",
+        "batch_more": "\u2026a dal\u0161\u00edch {count}",
         "digest_title": "Denní přehled Sentinelu",
         "digest_message": (
             "Sentinel: {count} upozornění za posledních 24 h ({sev_summary})."

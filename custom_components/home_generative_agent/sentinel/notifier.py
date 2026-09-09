@@ -85,6 +85,8 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 MAX_MOBILE_MESSAGE_CHARS = 220
+# Ceiling for the burst-batch digest body (header plus per-finding lines).
+MAX_BATCH_BODY_CHARS = 1200
 _AUDIT_FETCH_LIMIT = 1000
 
 _SEVERITY_INTERRUPT_LEVEL: dict[str, str] = {
@@ -1245,7 +1247,18 @@ def _batch_body(
             lines.append(body)
     if not lines:
         return header
-    return header + "\n\n" + "\n".join(f"\u2022 {line}" for line in lines)
+    shown: list[str] = []
+    total = len(header)
+    omitted = 0
+    for line in lines:
+        if shown and total + len(line) + 3 > MAX_BATCH_BODY_CHARS:
+            omitted += 1
+            continue
+        shown.append(line)
+        total += len(line) + 3
+    if omitted:
+        shown.append(notif_msg(hass, "batch_more", count=omitted))
+    return header + "\n\n" + "\n".join(f"\u2022 {line}" for line in shown)
 
 
 def _mobile_message(
