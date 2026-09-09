@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.39.1] - 2026-09-09
+
+### Fixed
+
+- An entry that loads without a Database subentry no longer does so silently. Setup now logs a warning naming everything that is unavailable (persistent conversation memory, long-term semantic memory, the person gallery for face recognition, Sentinel audit storage) and raises a repair issue in **Settings → Repairs** that explains how to add the database through **+ Setup**; the issue clears on the next reload once a database is configured and is removed with the entry. This state was easy to reach because the Advanced setup wizard writes the feature subentries before its final Database step, so closing it at a "cannot connect" error left every feature configured and no database. ([#615](https://github.com/goruck/home-generative-agent/issues/615), reported in [#612](https://github.com/goruck/home-generative-agent/discussions/612))
+- `home_generative_agent.enroll_person` and the enrollment upload endpoint now fail with a clear "Face recognition needs a configured database" message when the entry has no person gallery, instead of an `AttributeError: 'NoneType' object has no attribute 'enroll_from_image'` traceback (service) or a misleading "may be reloading" 503 (upload card).
+
 ## [3.39.0] - 2026-09-09
 
 ### Added

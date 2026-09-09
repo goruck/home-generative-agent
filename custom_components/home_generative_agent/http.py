@@ -10,7 +10,7 @@ from aiohttp import multipart, web
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.helpers.http import HomeAssistantView
 
-from .const import DOMAIN
+from .const import DOMAIN, NO_DATABASE_ENROLL_MESSAGE
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -139,6 +139,13 @@ class EnrollPersonView(HomeAssistantView):
         # re-read would raise AttributeError mid-loop.
         runtime_data = entry.runtime_data
         dao = runtime_data.person_gallery
+        if dao is None:
+            # A permanent configuration gap, not the transient reload case
+            # below: say what is missing instead of "may be reloading".
+            return web.json_response(
+                {"status": "error", "message": NO_DATABASE_ENROLL_MESSAGE},
+                status=503,
+            )
         face_api_url = runtime_data.face_api_url
         enrolled = 0
         skipped = 0

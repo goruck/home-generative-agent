@@ -31,6 +31,8 @@ The configuration UI is available in English, Czech, and Turkish, with a partial
    - **Basic** — enables anomaly alerting with recommended defaults. Prompts for notify service, daily digest, and an optional level-increase PIN.
    - **Advanced** — exposes all Sentinel options: intervals, cooldowns, quiet hours, triage, baseline, discovery, the Home Assistant & network security audit (master switch and thresholds), camera entry links, and per-entity rule exclusions.
 
+> **No database?** In Advanced mode the feature subentries are saved before the final **Database setup** step, so closing the wizard at that step (for example after a "cannot connect" error) leaves the features configured and the database missing. The entry still loads, but with in-memory storage only: conversations are forgotten on restart, semantic memory and face recognition are unavailable, and Sentinel keeps no audit history. Home Assistant shows a repair issue under **Settings → Repairs** and the log carries a warning; run **+ Setup → Advanced** again and complete the Database step to fix it. With the bundled PostgreSQL with pgvector app the defaults (`localhost`, port `5432`, database `ha_db`, user `ha_user`) are correct.
+
 > **Reconfiguring:** Running **+ Setup** or **+ Sentinel** again when a subentry already exists opens the same mode selector. Advanced mode pre-populates every field with the current saved values. Basic mode always starts from recommended defaults and warns before overwriting.
 
 > **Removing Sentinel:** Delete the Sentinel subentry from the integration page to stop all monitoring immediately. Sentinel background tasks stop, the health sensor transitions to `disabled`, and the network audit's persisted auth inventory and pseudonymization salt are deleted.

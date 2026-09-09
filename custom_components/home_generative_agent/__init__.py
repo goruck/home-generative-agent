@@ -176,6 +176,7 @@ from .const import (
     HGA_CARD_STATIC_PATH,
     HGA_CARD_STATIC_PATH_LEGACY,
     MODEL_CATEGORY_SPECS,
+    NO_DATABASE_ENROLL_MESSAGE,
     RECOMMENDED_ANTHROPIC_CHAT_MODEL,
     RECOMMENDED_ANTHROPIC_SUMMARIZATION_MODEL,
     RECOMMENDED_ANTHROPIC_VLM,
@@ -248,6 +249,10 @@ from .const import (
     VLM_NUM_PREDICT,
     VLM_REPEAT_PENALTY,
     VLM_TOP_P,
+)
+from .core.database_guard import (
+    async_clear_database_issue,
+    async_sync_database_issue,
 )
 from .core.db_utils import parse_postgres_uri
 from .core.fallback import (
@@ -2370,10 +2375,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             await pool.close()
             return False
     else:
+        # Loud on purpose: this branch is the only place a missing database
+        # is visible, and everything downstream (chat included) keeps working.
+        LOGGER.warning(
+            "No database is configured for this entry; running without "
+            "persistent conversation memory, long-term semantic memory, the "
+            "person gallery (face recognition), or Sentinel audit storage. "
+            "Run + Setup on the integration page and complete the Database "
+            "step to fix this."
+        )
         person_gallery = None
         checkpointer = MemorySaver()
         pool = None
         store = NullStore()
+
+    async_sync_database_issue(hass, entry.entry_id, configured=db_uri is not None)
 
     # ----- Choose concrete models for roles from constants -----
 
@@ -3335,7 +3351,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             msg = f"Could not read media: {err}"
             raise HomeAssistantError(msg) from err
 
-        dao: PersonGalleryDAO = entry.runtime_data.person_gallery
+        dao: PersonGalleryDAO | None = entry.runtime_data.person_gallery
+        if dao is None:
+            raise HomeAssistantError(NO_DATABASE_ENROLL_MESSAGE)
         ok = await dao.enroll_from_image(
             entry.runtime_data.face_api_url, name, img_bytes
         )
@@ -3896,6 +3914,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool
     # Home Assistant runs those callbacks only when this returns True, so the
     # abort above correctly leaves the client open for the still-loaded entry.
     return True
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> None:
+    """Clear per-entry repair issues when the entry is deleted for good."""
+    async_clear_database_issue(hass, entry.entry_id)
 
 
 async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:  # noqa: C901, PLR0912, PLR0915

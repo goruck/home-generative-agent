@@ -361,3 +361,26 @@ async def test_enroll_returns_503_when_teardown_races_the_upload(
 
     assert response.status == HTTP_STATUS_SERVICE_UNAVAILABLE
     assert "reloading" in data["message"]
+
+
+@pytest.mark.asyncio
+async def test_enroll_without_database_reports_missing_gallery(
+    hass: HomeAssistant, hass_client: Callable[[], Awaitable[TestClient]]
+) -> None:
+    """A None gallery is a configuration gap, not the transient reload 503."""
+    await async_setup_component(hass, "http", {})
+    entry = _add_loaded_entry(hass, DummyDAO())
+    entry.runtime_data.person_gallery = None
+    hass.http.register_view(EnrollPersonView(hass))
+    client = await hass_client()
+
+    form = FormData()
+    form.add_field("name", "Alice")
+    form.add_field("file", b"img", filename="face.jpg", content_type="image/jpeg")
+
+    response = await client.post("/api/home_generative_agent/enroll", data=form)
+    data = await response.json()
+
+    assert response.status == HTTP_STATUS_SERVICE_UNAVAILABLE
+    assert "configured database" in data["message"]
+    assert "reloading" not in data["message"]

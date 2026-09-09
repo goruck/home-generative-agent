@@ -438,6 +438,8 @@ Internal dispatcher signals (most users will not need these directly — platfor
 
 Face recognition requires the optional [face-service](https://github.com/goruck/face-service) external service. See [Installation — Optional Apps](installation.md#optional-apps) for setup.
 
+It also requires the integration's PostgreSQL database: enrolled faces live in a `person_gallery` table there. If the entry has no Database subentry, face recognition is disabled at startup (a repair issue in **Settings → Repairs** says so), and both enrollment paths below refuse with "Face recognition needs a configured database". Run **+ Setup** on the integration page and complete the **Database setup** step to fix it (see [Configuration](configuration.md#basic-setup)).
+
 ### Enroll via Service
 
 **Service:** `home_generative_agent.enroll_person`
