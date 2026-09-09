@@ -1866,6 +1866,30 @@ label pair ("Server URL" vs "Base URL").
 
 ---
 
+### Deleting the Database subentry from the UI does not reload the entry
+
+**What:** `_on_entry_changed` (`__init__.py`, the `SIGNAL_CONFIG_ENTRY_CHANGED` listener) snapshots and diffs only Sentinel subentries. The feature wizard schedules its own reload when it creates or updates the Database subentry, but a UI deletion of that subentry has no equivalent path: the entry keeps running on the old pool, store, and gallery, no warning is logged and no `database_not_configured` repair issue appears, until an unrelated reload or restart flips it to in-memory storage at some arbitrary later time.
+
+**Why:** Converged on by the Claude adversarial pass and the Codex pass during the review of the #615 fix (v3.39.1). Deferred by user decision (2026-09-09): deleting the Database subentry from the UI is a rare, deliberate action, and extending the reload guard risks a double reload because the wizard already schedules one on DB writes, so the reload semantics deserve their own change.
+
+**How to apply:** Extend the `_sentinel_snapshot` / `current_snapshot` comprehensions to include `SUBENTRY_TYPE_DATABASE`, so a Database subentry add/remove/change reloads the entry (the immediate-stop branch is Sentinel-specific and must stay gated on the Sentinel diff). Add a test that a UI deletion (`hass.config_entries.async_remove_subentry`) reloads and raises the repair issue, and one that the wizard's own `_schedule_reload` on a DB write does not double-fire.
+
+**Effort:** S
+**Priority:** P2
+
+
+### A configured but unreachable database ends in SETUP_ERROR with no repair issue and no retry
+
+**What:** When a Database subentry exists but the server cannot be reached, `async_setup_entry` returns `False` from the bootstrap block, which Home Assistant treats as a terminal `SETUP_ERROR` (no retry) with no translated reason and, since v3.39.1 clears the not-configured issue as soon as a subentry exists, no repair issue either. Two things make this common: Basic setup writes the `localhost` defaults with no connection test (the Advanced step validates, Basic does not), and a pgvector add-on that starts after Home Assistant on a cold boot hits the same path. Note also that psycopg-pool's `open()` defaults to `wait=False`, so the `except PoolTimeout` around `pool.open()` is dead code; the failure surfaces one block later in the broad `except Exception`.
+
+**Why:** Red-team finding during the review of the #615 fix (v3.39.1). Deferred by user decision (2026-09-09): the right fix changes retry semantics for every install and needs field validation on cold boot, so it does not belong in a bug-fix release.
+
+**How to apply:** Raise `ConfigEntryNotReady` (with a translated reason naming host/port) instead of returning `False` on the unreachable path so Home Assistant retries with backoff; raise a `database_unreachable` repair issue (`is_fixable=False`, host/port placeholders, en/cs/strings parity) alongside it and clear it on a successful setup; delete the dead `PoolTimeout` branch or pass `wait=True` to `pool.open()` so it becomes live; and run `validate_db_uri` in `_async_step_basic_setup` before writing the subentry, as the Advanced step already does.
+
+**Effort:** M
+**Priority:** P2
+
+
 ## Completed
 
 ### Baseline-deviation notifications guess the display unit from the entity_id

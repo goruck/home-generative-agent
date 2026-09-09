@@ -176,6 +176,8 @@ from .const import (
     HGA_CARD_STATIC_PATH,
     HGA_CARD_STATIC_PATH_LEGACY,
     MODEL_CATEGORY_SPECS,
+    NO_DATABASE_ENROLL_MESSAGE,
+    NO_DATABASE_REMEDIATION,
     RECOMMENDED_ANTHROPIC_CHAT_MODEL,
     RECOMMENDED_ANTHROPIC_SUMMARIZATION_MODEL,
     RECOMMENDED_ANTHROPIC_VLM,
@@ -249,6 +251,10 @@ from .const import (
     VLM_REPEAT_PENALTY,
     VLM_TOP_P,
 )
+from .core.database_guard import (
+    async_clear_database_issue,
+    async_sync_database_issue,
+)
 from .core.db_utils import parse_postgres_uri
 from .core.fallback import (
     CircuitBreaker,
@@ -260,6 +266,7 @@ from .core.fallback import (
 from .core.lifecycle import defer_start_until_hass_started
 from .core.migrations import migrate_person_gallery
 from .core.person_gallery import PersonGalleryDAO
+from .core.pipeline_guard import async_clear_pin_pipeline_issue
 from .core.runtime import HGAConfigEntry, HGAData
 from .core.subentry_resolver import (
     build_database_uri_from_entry,
@@ -2296,6 +2303,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
     db_uri = build_database_uri_from_entry(entry)
 
+    # "Configured" is a property of the entry, not of the connection: clear
+    # the not-configured issue before the pool is even built, so a database
+    # that is configured but unreachable (both `return False` exits below)
+    # never leaves a stale issue claiming the subentry does not exist.
+    if db_uri is not None:
+        async_sync_database_issue(hass, entry.entry_id, database_missing=False)
+
     if db_uri is not None:
         pool: AsyncConnectionPool[AsyncConnection[DictRow]] | None = (
             AsyncConnectionPool(
@@ -2370,6 +2384,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             await pool.close()
             return False
     else:
+        # Log loudly: nothing downstream fails without a database (chat
+        # included), so without this line and the repair issue raised at the
+        # end of setup the gap is invisible. A fresh entry with no Model
+        # Provider yet is mid-onboarding, not misconfigured: info only.
+        LOGGER.log(
+            logging.WARNING if providers else logging.INFO,
+            "No database is configured for this entry; running with in-memory "
+            "storage only. Conversation history is lost on every reload or "
+            "restart, long-term memory (conversation summaries, camera "
+            "activity recall, alarm-arming consent) is unavailable, the person "
+            "gallery (face recognition) is unavailable, and the Sentinel "
+            "baseline anomaly detector is off. %s",
+            NO_DATABASE_REMEDIATION,
+        )
         person_gallery = None
         checkpointer = MemorySaver()
         pool = None
@@ -3146,7 +3174,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
     face_recognition = options.get(CONF_FACE_RECOGNITION, RECOMMENDED_FACE_RECOGNITION)
     if face_recognition and person_gallery is None:
-        LOGGER.warning(
+        # The root cause (no database) was already logged at WARNING above;
+        # this is the consequence, not a second problem.
+        LOGGER.info(
             "Face recognition is enabled but person gallery is unavailable; "
             "disabling face recognition for this entry."
         )
@@ -3324,6 +3354,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         name: str = call.data["name"]
         file_path: str = call.data["file_path"]
 
+        # Captured before the first await: a reload landing during the media
+        # read deletes ``entry.runtime_data`` (the service is deregistered on
+        # unload, but an in-flight call is not cancelled). And refused before
+        # any I/O: an entry with no gallery must not read a caller-chosen
+        # file or fetch a media source on behalf of a call that cannot succeed.
+        runtime_data = entry.runtime_data
+        dao: PersonGalleryDAO | None = runtime_data.person_gallery
+        if dao is None:
+            raise HomeAssistantError(NO_DATABASE_ENROLL_MESSAGE)
+
         try:
             img_bytes = await _read_enroll_image_bytes(hass, file_path)
         except (
@@ -3335,10 +3375,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             msg = f"Could not read media: {err}"
             raise HomeAssistantError(msg) from err
 
-        dao: PersonGalleryDAO = entry.runtime_data.person_gallery
-        ok = await dao.enroll_from_image(
-            entry.runtime_data.face_api_url, name, img_bytes
-        )
+        ok = await dao.enroll_from_image(runtime_data.face_api_url, name, img_bytes)
         if not ok:
             msg = f"No face found in image for {name}"
             raise HomeAssistantError(msg)
@@ -3841,6 +3878,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         async_dispatcher_connect(hass, SIGNAL_CONFIG_ENTRY_CHANGED, _on_entry_changed)
     )
 
+    # Raised last so it is only ever true of a *loaded* entry: every exit
+    # above is a failed setup, which is its own visible state. Gated on a
+    # Model Provider because a freshly added entry has neither a provider nor
+    # a database and is mid-onboarding (README steps 5-6), not misconfigured;
+    # the feature subentries cannot serve as that gate — setup creates them.
+    async_sync_database_issue(
+        hass,
+        entry.entry_id,
+        database_missing=db_uri is None and bool(providers),
+    )
+
     return True
 
 
@@ -3895,7 +3943,23 @@ async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool
     # callback registered where it is built, which also covers failed setups.
     # Home Assistant runs those callbacks only when this returns True, so the
     # abort above correctly leaves the client open for the still-loaded entry.
+    #
+    # An unloaded entry is not "running without a database": drop the issue
+    # (a disable would otherwise leave it standing); the next successful
+    # setup re-raises it if the database is still missing.
+    async_clear_database_issue(hass, entry.entry_id)
     return True
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> None:
+    """
+    Clear every per-entry repair issue when the entry is deleted for good.
+
+    Both issues are keyed by entry_id, so a remove-and-re-add (new entry_id)
+    would otherwise leave the old ones standing until a restart.
+    """
+    async_clear_database_issue(hass, entry.entry_id)
+    async_clear_pin_pipeline_issue(hass, entry.entry_id)
 
 
 async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:  # noqa: C901, PLR0912, PLR0915

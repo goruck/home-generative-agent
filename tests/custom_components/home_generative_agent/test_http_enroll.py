@@ -22,6 +22,7 @@ from custom_components.home_generative_agent.const import (
 from custom_components.home_generative_agent.core.runtime import HGAData
 from custom_components.home_generative_agent.http import (
     MAX_UPLOAD_BYTES,
+    MAX_UPLOAD_FILES,
     EnrollPersonView,
 )
 
@@ -361,3 +362,87 @@ async def test_enroll_returns_503_when_teardown_races_the_upload(
 
     assert response.status == HTTP_STATUS_SERVICE_UNAVAILABLE
     assert "reloading" in data["message"]
+
+
+@pytest.mark.asyncio
+async def test_enroll_without_database_reports_missing_gallery(
+    hass: HomeAssistant, hass_client: Callable[[], Awaitable[TestClient]]
+) -> None:
+    """A None gallery is a configuration gap, not the transient reload 503."""
+    await async_setup_component(hass, "http", {})
+    entry = _add_loaded_entry(hass, DummyDAO())
+    entry.runtime_data.person_gallery = None
+    hass.http.register_view(EnrollPersonView(hass))
+    client = await hass_client()
+
+    form = FormData()
+    form.add_field("name", "Alice")
+    form.add_field("file", b"img", filename="face.jpg", content_type="image/jpeg")
+
+    response = await client.post("/api/home_generative_agent/enroll", data=form)
+    data = await response.json()
+
+    assert response.status == HTTP_STATUS_SERVICE_UNAVAILABLE
+    assert data["code"] == "database_not_configured"
+    assert "configured database" in data["message"]
+    assert "reloading" not in data["message"]
+
+
+@pytest.mark.asyncio
+async def test_enroll_refuses_before_reading_the_body(
+    hass: HomeAssistant, hass_client: Callable[[], Awaitable[TestClient]]
+) -> None:
+    """
+    An unconfigured entry is refused before the multipart body is consumed.
+
+    Otherwise an authenticated caller could stream any number of 10 MiB parts
+    into memory against an entry that answers 503 regardless. A body that is
+    over the per-part limit proves the point: it would have produced a 413 if
+    it had been read.
+    """
+    await async_setup_component(hass, "http", {})
+    entry = _add_loaded_entry(hass, DummyDAO())
+    entry.runtime_data.person_gallery = None
+    hass.http.register_view(EnrollPersonView(hass))
+    client = await hass_client()
+
+    form = FormData()
+    form.add_field("name", "Alice")
+    form.add_field(
+        "file",
+        b"x" * (MAX_UPLOAD_BYTES + 1),
+        filename="face.jpg",
+        content_type="image/jpeg",
+    )
+
+    response = await client.post("/api/home_generative_agent/enroll", data=form)
+    data = await response.json()
+
+    assert response.status == HTTP_STATUS_SERVICE_UNAVAILABLE
+    assert data["code"] == "database_not_configured"
+
+
+@pytest.mark.asyncio
+async def test_enroll_too_many_files(
+    hass: HomeAssistant, hass_client: Callable[[], Awaitable[TestClient]]
+) -> None:
+    """The per-part size cap alone leaves the part count unbounded; cap it."""
+    await async_setup_component(hass, "http", {})
+    dao = DummyDAO()
+    _add_loaded_entry(hass, dao)
+    hass.http.register_view(EnrollPersonView(hass))
+    client = await hass_client()
+
+    form = FormData()
+    form.add_field("name", "Alice")
+    for i in range(MAX_UPLOAD_FILES + 1):
+        form.add_field(
+            "file", b"img", filename=f"face{i}.jpg", content_type="image/jpeg"
+        )
+
+    response = await client.post("/api/home_generative_agent/enroll", data=form)
+    data = await response.json()
+
+    assert response.status == HTTP_STATUS_REQUEST_TOO_LARGE
+    assert "Too many files" in data["message"]
+    assert dao.last_args is None, "enrollment ran despite the refused request"

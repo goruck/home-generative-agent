@@ -25,6 +25,22 @@ HTTP_STATUS_OK = 200
 HTTP_STATUS_REQUEST_TOO_LARGE = 413
 HTTP_STATUS_SERVICE_UNAVAILABLE = 503
 
+# One remediation sentence for every surface that reports a missing database
+# (startup log, enroll_person service, upload endpoint); the repair-issue
+# translations carry their own literal copy because they must be static text.
+NO_DATABASE_REMEDIATION = (
+    "Run + Setup on the integration page and complete the Database step."
+)
+# Shared by the enroll_person service and the upload endpoint when the entry
+# loaded without a database (no Database subentry), so there is no gallery.
+NO_DATABASE_ENROLL_MESSAGE = (
+    "Face recognition needs a configured database, and this entry has none. "
+    f"{NO_DATABASE_REMEDIATION} Then try again."
+)
+# Machine-readable discriminator on the upload endpoint's 503 for this case, so
+# callers need not match on prose to tell it from the transient reload 503s.
+NO_DATABASE_ERROR_CODE = "database_not_configured"
+
 # ---- Critical action guard ----
 CONF_CRITICAL_ACTION_PIN_ENABLED = "critical_action_pin_enabled"
 CONF_CRITICAL_ACTION_PIN = "critical_action_pin"

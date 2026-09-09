@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.39.1] - 2026-09-09
+
+### Fixed
+
+- An entry that loads without a Database subentry no longer does so silently. Setup logs a warning naming what is unavailable (conversation history across reloads, long-term memory, the person gallery for face recognition, the Sentinel baseline anomaly detector) and, once a Model Provider exists, raises a repair issue in **Settings → Repairs** that explains how to add the database through **+ Setup**. The issue clears as soon as the entry loads with a Database subentry, even one that cannot connect yet, is dropped while the entry is unloaded or disabled, and is removed with the entry (together with the critical-action PIN repair issue, which was previously left behind). Two paths lead to this state: **+ Setup** never run after adding the integration, or the Advanced wizard closed at its final Database step, which writes the feature subentries first. ([#615](https://github.com/goruck/home-generative-agent/issues/615), reported in [#612](https://github.com/goruck/home-generative-agent/discussions/612))
+- `home_generative_agent.enroll_person` and the enrollment upload endpoint now fail with a clear "Face recognition needs a configured database" message when the entry has no person gallery, instead of an `AttributeError: 'NoneType' object has no attribute 'enroll_from_image'` traceback (service) or a misleading "may be reloading" 503 (upload card). Both refuse before any I/O: the service no longer reads the caller's file or fetches a media source first, and the endpoint no longer buffers the upload body first. The endpoint's 503 for this case carries `"code": "database_not_configured"` so scripted callers can tell it from the transient reload 503s. The service also no longer risks an `AttributeError` when a reload lands during the image read.
+- The enrollment upload endpoint now caps a request at 25 images (HTTP 413 past that); the per-image 10 MiB limit alone left the number of images, and so the memory one request could consume, unbounded.
+
 ## [3.39.0] - 2026-09-09
 
 ### Added
