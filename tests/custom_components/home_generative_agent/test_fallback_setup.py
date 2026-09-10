@@ -384,6 +384,9 @@ async def test_setup_configures_fallback_models_and_embedding_chain(
     vlm_fallback = cast("FakeConfiguredModel", vision_model.chain[1][0])
     assert vlm_fallback.config["configurable"]["model"] == "llava-fallback"
     assert vlm_fallback.config["configurable"]["mirostat"] is not None
+    # VLM_NUM_PREDICT is None so the Ollama server applies its own default
+    # instead of a hard-coded -2 sentinel (issue #614).
+    assert vlm_fallback.config["configurable"]["num_predict"] is None
 
     summarization_model = entry.runtime_data.summarization_model
     assert isinstance(summarization_model, FallbackChatModel)
