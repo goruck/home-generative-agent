@@ -180,16 +180,19 @@ else:
 
 def _convert_content(
     content: conversation.UserContent | conversation.AssistantContent,
+    message_id: str,
 ) -> HumanMessage | AIMessage:
     """
     Convert HA native chat messages to LangChain messages.
 
     Only called with UserContent or tool-call-free AssistantContent (filtered
-    upstream — see message_history comprehension in _async_handle_message).
+    upstream — see _async_get_message_history). The id is derived from the
+    entry's position in chat_log so that ingesting the same entry twice
+    upserts the message in the thread instead of appending a second copy.
     """
     if isinstance(content, conversation.UserContent):
-        return HumanMessage(content=content.content or "")
-    return AIMessage(content=content.content or "")
+        return HumanMessage(content=content.content or "", id=message_id)
+    return AIMessage(content=content.content or "", id=message_id)
 
 
 def _normalize_ai_content(content: str | list) -> str | None:
@@ -287,9 +290,9 @@ def _populate_chat_log_from_response(
     """
     Backfill chat_log with LangGraph response messages for HA Show Details.
 
-    Walks new_messages (messages produced this turn, sliced from
-    response["messages"][len(app_input["messages"]):]) and appends AssistantContent
-    and ToolResultContent entries so HA's "Show Details" panel renders the full tool
+    Walks new_messages (the messages produced this turn: everything after the
+    current request in the returned thread) and appends AssistantContent and
+    ToolResultContent entries so HA's "Show Details" panel renders the full tool
     call / result chain.
 
     All ToolInput entries use external=True because LangGraph, not HA, executed the
@@ -789,8 +792,6 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             model="Home Generative Agent",
             entry_type=dr.DeviceEntryType.SERVICE,
         )
-        self.message_history_len = 0
-
         # CONTROL tells Home Assistant this agent controls entities.  Its only
         # consumer is assist_pipeline, which uses it to route *state questions*
         # and media search to the agent instead of answering them locally --
@@ -861,46 +862,82 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
     def _async_get_message_history(
         self, chat_log: conversation.ChatLog
     ) -> list[HumanMessage | AIMessage]:
-        """Extract and slice the relevant chat log history."""
-        # Include only HA User/Assistant messages not already seen by this entity.
-        #
-        # Exclude every part of a turn that used tools, not just the
-        # AssistantContent carrying the tool_calls. A tool-using turn writes
-        # three entries — tool_calls, ToolResultContent, then the spoken text —
-        # and the spoken text alone ("Turned on the light") is indistinguishable
-        # from a turn that answered without acting. Ingesting it teaches the
-        # model that such a request is answered with prose and no tool call:
-        # the conversation then repeats that shape and every device command
-        # silently becomes a lie (issue #588). This matters most for turns
-        # handled by ANOTHER agent sharing the conversation — HA's built-in
-        # agent, say — whose tool calls the checkpointer never saw. HGA's own
-        # tool-using turns are already persisted in full by LangGraph, so
-        # dropping their chat_log echo also removes a duplicate.
-        message_history: list[HumanMessage | AIMessage] = []
-        turn_used_tools = False
-        for m in chat_log.content:
-            if isinstance(m, conversation.UserContent):
-                turn_used_tools = False
-                message_history.append(_convert_content(m))
-            elif isinstance(m, conversation.ToolResultContent):
-                turn_used_tools = True
-            elif isinstance(m, conversation.AssistantContent):
-                # `is not None` keeps the original inclusion predicate exactly;
-                # only the turn-level suppression below is new.
-                if m.tool_calls is not None:
-                    turn_used_tools = True
-                elif not turn_used_tools:
-                    message_history.append(_convert_content(m))
-        # The last chat log entry will be the current user request—add it later.
-        message_history = message_history[:-1]
+        """
+        Return the chat_log turns that the agent's own thread does not hold yet.
 
-        mhlen = len(message_history)
-        if mhlen <= self.message_history_len:
-            message_history = []
-        else:
-            diff = mhlen - self.message_history_len
-            message_history = message_history[-diff:]
-            self.message_history_len = mhlen
+        The LangGraph checkpointer already persists, in full, every turn this
+        entity handled: the thread is keyed on the conversation_id. The only
+        chat_log content worth ingesting is therefore what ANOTHER agent added
+        to the same conversation — Home Assistant's built-in agent answering a
+        quick local command on a shared pipeline, say — because the checkpointer
+        never saw it. Re-ingesting one of our own turns appends a second copy
+        under a fresh message id, and that stale copy then sits directly before
+        the new request, which the model frequently answers instead of the new
+        question (issue #621).
+
+        Turns are grouped from each UserContent. A turn is ours when its final
+        entry is an AssistantContent we wrote: HA's built-in agent stamps its
+        tool_calls and ToolResultContent with the pipeline's agent id (ours, on
+        an HGA pipeline) but speaks the result under its own id, so only the
+        last entry tells the two apart. Every foreign turn BEFORE our latest
+        own turn was ingested when that turn ran, so only the foreign turns
+        after it are new; the walk is stateless and per-conversation by
+        construction. The trailing user-only turn is the current request,
+        which the caller appends. Ingested messages carry an id derived from
+        their chat_log position, so a turn that failed or was cancelled before
+        it could leave our mark only upserts the same messages next time.
+
+        A foreign turn that used tools contributes only the user's message.
+        A tool-using turn writes three entries — tool_calls, ToolResultContent,
+        then the spoken text — and the spoken text alone ("Turned on the
+        light") is indistinguishable from a turn that answered without acting.
+        Ingesting it teaches the model that such a request is answered with
+        prose and no tool call, after which every device command silently
+        becomes a lie (issue #588).
+        """
+        turns: list[list[tuple[int, Any]]] = []
+        for index, m in enumerate(chat_log.content):
+            if isinstance(m, conversation.UserContent):
+                turns.append([(index, m)])
+            elif turns and isinstance(
+                m, conversation.AssistantContent | conversation.ToolResultContent
+            ):
+                turns[-1].append((index, m))
+
+        # The last chat_log entry is the current user request; the caller adds it.
+        if turns and len(turns[-1]) == 1:
+            turns.pop()
+
+        def _is_own(turn: list[tuple[int, Any]]) -> bool:
+            _, last = turn[-1]
+            return (
+                isinstance(last, conversation.AssistantContent)
+                and last.agent_id == self.entity_id
+            )
+
+        def _used_tools(turn: list[tuple[int, Any]]) -> bool:
+            # `is not None` keeps the #588 inclusion predicate exactly: an
+            # empty-but-present tool_calls list still marks the turn.
+            return any(
+                isinstance(entry, conversation.ToolResultContent)
+                or entry.tool_calls is not None
+                for _, entry in turn[1:]
+            )
+
+        last_own = max((i for i, turn in enumerate(turns) if _is_own(turn)), default=-1)
+
+        def _message_id(index: int) -> str:
+            return f"chat_log:{chat_log.conversation_id}:{index}"
+
+        message_history: list[HumanMessage | AIMessage] = []
+        for turn in turns[last_own + 1 :]:
+            index, user = turn[0]
+            message_history.append(_convert_content(user, _message_id(index)))
+            if _used_tools(turn):
+                continue
+            message_history.extend(
+                _convert_content(entry, _message_id(index)) for index, entry in turn[1:]
+            )
 
         return message_history
 
@@ -1052,10 +1089,24 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
 
         try:
             response = await app.ainvoke(input=input_data, config=config)
-        except HomeAssistantError as err:
+        except Exception as err:
             _LOGGER.exception("LangGraph error during conversation processing.")
-            msg = f"Something went wrong: {err}"
-            raise HomeAssistantError(msg) from err
+            # Leave our mark on the turn even though it failed. LangGraph
+            # checkpoints the input before the first node runs, so the thread
+            # already holds this request and any foreign history prepended to
+            # it; without an own entry HA drops the whole turn from chat_log as
+            # one with no assistant message, and _async_get_message_history
+            # would see no boundary next turn (issue #621, review finding).
+            chat_log.async_add_assistant_content_without_tools(
+                conversation.AssistantContent(
+                    agent_id=self.entity_id,
+                    content=_streaming_failure_content(err),
+                )
+            )
+            if isinstance(err, HomeAssistantError):
+                msg = f"Something went wrong: {err}"
+                raise HomeAssistantError(msg) from err
+            raise HomeAssistantError(_streaming_failure_content(err)) from err
 
         trace.async_conversation_trace_append(
             trace.ConversationTraceEventType.AGENT_DETAIL,
@@ -1078,8 +1129,23 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
 
         # Backfill chat_log with the messages produced this turn so HA's
         # "Show Details" panel renders the full tool call / result chain.
-        # Slice off history + current HumanMessage — only net-new messages.
-        new_messages = response["messages"][len(input_data["messages"]) :]
+        # ainvoke returns the whole checkpointed thread, not input plus output,
+        # so slicing by the input length would replay earlier turns' replies
+        # into chat_log once the thread holds more than this turn. Net-new is
+        # everything after the current request, found by the id stamped on it.
+        # The request is absent only when this turn's own trim-and-summarize
+        # removed it; the final reply is then all Show Details can carry.
+        thread = response["messages"]
+        request_id = input_data["messages"][-1].id
+        request_index = next(
+            (i for i in range(len(thread) - 1, -1, -1) if thread[i].id == request_id),
+            None,
+        )
+        if request_index is None:
+            _LOGGER.debug("Request was summarized away; backfilling the reply only.")
+            new_messages = thread[-1:]
+        else:
+            new_messages = thread[request_index + 1 :]
 
         # Guard: async_get_result_from_chat_log requires last entry to be
         # AssistantContent, which means the last new message must be an
@@ -1410,8 +1476,13 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             debug=LANGCHAIN_LOGGING_LEVEL == "debug",
         )
 
-        # Agent input: message history + current user request.
-        messages = [*message_history, HumanMessage(content=user_input.text)]
+        # Agent input: message history + current user request. The request
+        # carries an explicit id so the non-streaming path can find it in the
+        # returned thread (add_messages keeps a caller-supplied id).
+        messages = [
+            *message_history,
+            HumanMessage(content=user_input.text, id=ulid.ulid_now()),
+        ]
         app_input: State = {
             "messages": messages,
             "summary": "",
@@ -1439,11 +1510,13 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         else:
             await self._async_run_astream(app, app_input, app_config, chat_log, tools)
 
-        # Guard against an empty chat log (e.g. HomeAssistantError swallowed mid-stream
-        # before any AssistantContent was committed).
-        # async_get_result_from_chat_log raises if no AssistantContent is present.
-        if not any(
-            isinstance(msg, conversation.AssistantContent) for msg in chat_log.content
+        # Guard against a turn that committed no reply (e.g. a HomeAssistantError
+        # swallowed mid-stream and a state recovery that raised too). Earlier
+        # turns' replies do not count: async_get_result_from_chat_log reads the
+        # LAST entry, and HA drops the whole turn from chat_log unless we leave
+        # our mark on it (see _async_get_message_history).
+        if not chat_log.content or not isinstance(
+            chat_log.content[-1], conversation.AssistantContent
         ):
             chat_log.async_add_assistant_content_without_tools(
                 conversation.AssistantContent(

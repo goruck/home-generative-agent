@@ -9,12 +9,13 @@ homeassistant.components.conversation import chain before importing conversation
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import re
 import sys
 import types
 from enum import IntFlag
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 from zoneinfo import ZoneInfo
 
@@ -22,6 +23,12 @@ import pytest
 from homeassistant.const import CONF_LLM_HASS_API
 from homeassistant.exceptions import HomeAssistantError, TemplateError
 from homeassistant.helpers import llm as ha_llm
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import END, START, MessagesState, StateGraph
+
+if TYPE_CHECKING:
+    from langchain_core.runnables import RunnableConfig
 
 from custom_components.home_generative_agent.const import (
     CONF_CRITICAL_ACTION_PIN_ENABLED,
@@ -1133,8 +1140,11 @@ def test_control_feature_absent_when_stored_api_list_is_empty() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _async_get_message_history: a tool-using turn must not be ingested as prose
+# _async_get_message_history: only foreign turns reach the thread (#588, #621, #590)
 # ---------------------------------------------------------------------------
+
+HGA_AGENT_ID = "conversation.home_generative_agent"
+FOREIGN_AGENT_ID = "conversation.home_assistant"
 
 
 def _mk_content(cls: Any, **kwargs: Any) -> Any:
@@ -1153,11 +1163,57 @@ def _mk_content(cls: Any, **kwargs: Any) -> Any:
         return obj
 
 
-def _history(content: list) -> list:
-    """Run _async_get_message_history against a fresh entity counter."""
-    fake_self = cast("Any", types.SimpleNamespace(message_history_len=0))
-    chat_log = cast("Any", types.SimpleNamespace(content=content))
+def _history(content: list, entity: Any | None = None) -> list:
+    """Run _async_get_message_history for this entity over a chat_log."""
+    fake_self = entity if entity is not None else _entity()
+    chat_log = cast(
+        "Any", types.SimpleNamespace(content=content, conversation_id="conv-1")
+    )
     return HGAConversationEntity._async_get_message_history(fake_self, chat_log)
+
+
+def _entity() -> Any:
+    """Build a bare entity: the filter needs nothing beyond its own entity_id."""
+    return cast("Any", types.SimpleNamespace(entity_id=HGA_AGENT_ID))
+
+
+def _own_tool_turn(question: str, answer: str) -> list:
+    """Build what HGA itself writes to chat_log for a turn that called a tool."""
+    return [
+        _mk_content(ha_conversation.UserContent, content=question),
+        _mk_content(
+            ha_conversation.AssistantContent,
+            agent_id=HGA_AGENT_ID,
+            content=None,
+            tool_calls=[object()],
+        ),
+        _mk_content(
+            ha_conversation.ToolResultContent,
+            agent_id=HGA_AGENT_ID,
+            tool_call_id="call_1",
+            tool_name="plex_library",
+            tool_result={"movies": 1389},
+        ),
+        _mk_content(
+            ha_conversation.AssistantContent,
+            agent_id=HGA_AGENT_ID,
+            content=answer,
+            tool_calls=None,
+        ),
+    ]
+
+
+def _plain_turn(agent_id: str, question: str, answer: str) -> list:
+    """Build a user question answered in prose, with no tool call, by `agent_id`."""
+    return [
+        _mk_content(ha_conversation.UserContent, content=question),
+        _mk_content(
+            ha_conversation.AssistantContent,
+            agent_id=agent_id,
+            content=answer,
+            tool_calls=None,
+        ),
+    ]
 
 
 def test_message_history_drops_spoken_text_of_a_tool_using_turn() -> None:
@@ -1176,20 +1232,20 @@ def test_message_history_drops_spoken_text_of_a_tool_using_turn() -> None:
         _mk_content(ha_conversation.UserContent, content="Turn on the garage light."),
         _mk_content(
             ha_conversation.AssistantContent,
-            agent_id="conversation.home_assistant",
+            agent_id=FOREIGN_AGENT_ID,
             content=None,
             tool_calls=[object()],
         ),
         _mk_content(
             ha_conversation.ToolResultContent,
-            agent_id="conversation.home_assistant",
+            agent_id=FOREIGN_AGENT_ID,
             tool_call_id="01M16N286Y2A5T0BVZ163SMKT7",
             tool_name="HassTurnOn",
             tool_result={"speech": {"plain": {"speech": "Turned on the light"}}},
         ),
         _mk_content(
             ha_conversation.AssistantContent,
-            agent_id="conversation.home_assistant",
+            agent_id=FOREIGN_AGENT_ID,
             content="Turned on the light",
             tool_calls=None,
         ),
@@ -1208,12 +1264,12 @@ def test_message_history_drops_spoken_text_of_a_tool_using_turn() -> None:
 
 
 def test_message_history_keeps_a_genuine_toolless_reply() -> None:
-    """A turn that really answered without tools is still ingested."""
+    """A foreign turn that really answered without tools is still ingested."""
     content = [
         _mk_content(ha_conversation.UserContent, content="what can you do?"),
         _mk_content(
             ha_conversation.AssistantContent,
-            agent_id="conversation.home_generative_agent",
+            agent_id=FOREIGN_AGENT_ID,
             content="I can control your home.",
             tool_calls=None,
         ),
@@ -1234,27 +1290,27 @@ def test_message_history_tool_flag_resets_on_the_next_user_turn() -> None:
         _mk_content(ha_conversation.UserContent, content="Turn on the garage light."),
         _mk_content(
             ha_conversation.AssistantContent,
-            agent_id="conversation.home_assistant",
+            agent_id=FOREIGN_AGENT_ID,
             content=None,
             tool_calls=[object()],
         ),
         _mk_content(
             ha_conversation.ToolResultContent,
-            agent_id="conversation.home_assistant",
+            agent_id=FOREIGN_AGENT_ID,
             tool_call_id="call_1",
             tool_name="HassTurnOn",
             tool_result={},
         ),
         _mk_content(
             ha_conversation.AssistantContent,
-            agent_id="conversation.home_assistant",
+            agent_id=FOREIGN_AGENT_ID,
             content="Turned on the light",
             tool_calls=None,
         ),
         _mk_content(ha_conversation.UserContent, content="thanks"),
         _mk_content(
             ha_conversation.AssistantContent,
-            agent_id="conversation.home_generative_agent",
+            agent_id=FOREIGN_AGENT_ID,
             content="You're welcome.",
             tool_calls=None,
         ),
@@ -1283,7 +1339,7 @@ def test_message_history_non_none_tool_calls_still_excluded() -> None:
         _mk_content(ha_conversation.UserContent, content="hello"),
         _mk_content(
             ha_conversation.AssistantContent,
-            agent_id="conversation.home_generative_agent",
+            agent_id=FOREIGN_AGENT_ID,
             content="Hi there.",
             tool_calls=[],
         ),
@@ -1294,6 +1350,372 @@ def test_message_history_non_none_tool_calls_still_excluded() -> None:
 
     assert [type(m).__name__ for m in history] == ["HumanMessage"]
     assert history[0].content == "hello"
+
+
+def test_message_history_skips_the_entitys_own_turns() -> None:
+    """
+    Nothing HGA itself said is fed back into its own thread.
+
+    Regression for issue #621. The LangGraph checkpointer already holds every
+    turn this entity handled, so re-ingesting the chat_log echo of one appends a
+    second copy under a fresh message id. The stale copy then sits directly
+    before the new request and the model answers it instead — a question about
+    free disk space got the previous turn's movie count. Both a tool-using turn
+    and a plain prose turn must contribute nothing.
+    """
+    content = [
+        *_own_tool_turn("How many movies are in my library?", "1,389 movies."),
+        *_plain_turn(HGA_AGENT_ID, "Thanks!", "Any time."),
+        _mk_content(
+            ha_conversation.UserContent, content="How much free space is left?"
+        ),
+    ]
+
+    assert _history(content) == [], "our own turns are already in the thread"
+
+
+def test_message_history_ingests_only_foreign_turns_after_our_latest_turn() -> None:
+    """
+    A foreign turn older than our latest turn was ingested when that turn ran.
+
+    Replaces the per-entity high-water mark with a stateless rule: everything
+    before HGA's most recent own turn is already in the thread; only foreign
+    turns after it are new.
+    """
+    content = [
+        *_plain_turn(FOREIGN_AGENT_ID, "what time is it?", "It is 4:42 AM."),
+        *_own_tool_turn("Turn on the garage light.", "Done."),
+        *_plain_turn(FOREIGN_AGENT_ID, "and the date?", "September 10th."),
+        _mk_content(ha_conversation.UserContent, content="Turn it off again."),
+    ]
+
+    history = _history(content)
+
+    assert [(type(m).__name__, m.content) for m in history] == [
+        ("HumanMessage", "and the date?"),
+        ("AIMessage", "September 10th."),
+    ], "only the foreign turn after our latest own turn is new"
+
+
+def test_message_history_is_per_conversation() -> None:
+    """
+    Two conversations served by one entity do not starve each other.
+
+    Regression for issue #590: the old counter lived on the entity while
+    chat_log is per conversation, so a second conversation got no history until
+    it outgrew the first. The walk now needs no entity state at all.
+    """
+    entity = _entity()
+    conv_a = [
+        *_plain_turn(FOREIGN_AGENT_ID, "A question", "A answer"),
+        _mk_content(ha_conversation.UserContent, content="A follow-up"),
+    ]
+    conv_b = [
+        *_plain_turn(FOREIGN_AGENT_ID, "B question", "B answer"),
+        _mk_content(ha_conversation.UserContent, content="B follow-up"),
+    ]
+
+    assert [m.content for m in _history(conv_a, entity)] == ["A question", "A answer"]
+    assert [m.content for m in _history(conv_b, entity)] == ["B question", "B answer"]
+    assert [m.content for m in _history(conv_a, entity)] == ["A question", "A answer"]
+
+
+def test_message_history_own_failed_turn_still_marks_the_boundary() -> None:
+    """
+    A turn we failed still counts as ours, so foreign history is not replayed.
+
+    The non-streaming path records its failure as an own AssistantContent;
+    the foreign turn before it was already prepended to the failed request
+    and checkpointed, so it must not be ingested a second time.
+    """
+    content = [
+        *_plain_turn(FOREIGN_AGENT_ID, "what time is it?", "It is 4:42 AM."),
+        _mk_content(ha_conversation.UserContent, content="Turn on the garage light."),
+        _mk_content(
+            ha_conversation.AssistantContent,
+            agent_id=HGA_AGENT_ID,
+            content="I'm sorry, I was unable to respond: Something went wrong",
+            tool_calls=None,
+        ),
+        _mk_content(ha_conversation.UserContent, content="Try again."),
+    ]
+
+    assert _history(content) == []
+
+
+def test_message_history_locally_handled_intent_is_a_foreign_turn() -> None:
+    """
+    A turn HA's built-in agent handled on our pipeline is not ours.
+
+    With prefer_local_intents the default agent stamps its tool_calls and
+    ToolResultContent with the pipeline's agent id — this entity's — but the
+    pipeline speaks the result under conversation.home_assistant. Judging the
+    turn by any entry would swallow it and every foreign turn before it; the
+    user's message must survive (the #588 rule drops the rest).
+    """
+    content = [
+        *_plain_turn(FOREIGN_AGENT_ID, "what time is it?", "It is 4:42 AM."),
+        _mk_content(ha_conversation.UserContent, content="Turn on the garage light."),
+        _mk_content(
+            ha_conversation.AssistantContent,
+            agent_id=HGA_AGENT_ID,
+            content=None,
+            tool_calls=[object()],
+        ),
+        _mk_content(
+            ha_conversation.ToolResultContent,
+            agent_id=HGA_AGENT_ID,
+            tool_call_id="01M16N286Y2A5T0BVZ163SMKT7",
+            tool_name="HassTurnOn",
+            tool_result={"speech": {"plain": {"speech": "Turned on the light"}}},
+        ),
+        _mk_content(
+            ha_conversation.AssistantContent,
+            agent_id=FOREIGN_AGENT_ID,
+            content="Turned on the light",
+            tool_calls=None,
+        ),
+        _mk_content(ha_conversation.UserContent, content="Turn it off again."),
+    ]
+
+    assert [m.content for m in _history(content)] == [
+        "what time is it?",
+        "It is 4:42 AM.",
+        "Turn on the garage light.",
+    ]
+
+
+def test_message_history_ids_make_re_ingestion_an_upsert() -> None:
+    """
+    Ingesting the same foreign turn twice leaves one copy in the thread.
+
+    A turn of ours that fails or is cancelled before it leaves its mark means
+    the foreign history prepended to it is offered again next turn. The ids
+    derive from chat_log position, so add_messages replaces in place.
+    """
+    content = [
+        *_plain_turn(FOREIGN_AGENT_ID, "what time is it?", "It is 4:42 AM."),
+        _mk_content(ha_conversation.UserContent, content="Turn on the garage light."),
+    ]
+    first = _history(content)
+    second = _history(content)
+    assert [m.id for m in first] == [m.id for m in second]
+    assert first[0].id == "chat_log:conv-1:0"
+
+    graph = StateGraph(MessagesState)
+    graph.add_node("agent", _no_op_node)
+    graph.add_edge(START, "agent")
+    graph.add_edge("agent", END)
+    app = graph.compile(checkpointer=MemorySaver())
+    config: RunnableConfig = {"configurable": {"thread_id": "conv-1"}}
+    app.invoke({"messages": first}, config)
+    app.invoke({"messages": second}, config)
+
+    assert [m.content for m in app.get_state(config).values["messages"]] == [
+        "what time is it?",
+        "It is 4:42 AM.",
+    ]
+
+
+def _no_op_node(state: MessagesState) -> dict[str, Any]:  # noqa: ARG001
+    return {"messages": []}
+
+
+def _runner_entity() -> Any:
+    """Build an entity with just what _async_run_ainvoke touches."""
+    entity = HGAConversationEntity.__new__(HGAConversationEntity)
+    entity.hass = MagicMock()
+    entity.entity_id = HGA_AGENT_ID
+    entity.entry = cast(
+        "Any",
+        types.SimpleNamespace(runtime_data=types.SimpleNamespace(options={})),
+    )
+    return entity
+
+
+class _RecordedContent:
+    """Kwargs-accepting stand-in: the suite's HA import stub takes no arguments."""
+
+    def __init__(self, **fields: Any) -> None:
+        self.tool_calls = None
+        self.__dict__.update(fields)
+
+
+class _FakeAssistantContent(_RecordedContent):
+    pass
+
+
+class _FakeToolResultContent(_RecordedContent):
+    pass
+
+
+def _patch_runner_deps() -> list[Any]:
+    """Patch what the runner touches that the stubbed venv cannot provide."""
+    module = "custom_components.home_generative_agent.conversation"
+    return [
+        patch(
+            f"{module}._fix_entity_ids_in_text", side_effect=lambda text, _hass: text
+        ),
+        patch(f"{module}.trace.async_conversation_trace_append"),
+        patch(f"{module}.conversation.AssistantContent", _FakeAssistantContent),
+        patch(f"{module}.conversation.ToolResultContent", _FakeToolResultContent),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "expected_text"),
+    [
+        (
+            HomeAssistantError("Model invocation failed: 429"),
+            "I'm sorry, I was unable to respond: Model invocation failed: 429",
+        ),
+        (
+            RuntimeError("psycopg lost the connection to db://secret"),
+            "I'm sorry, I was unable to respond (RuntimeError). Please try again.",
+        ),
+    ],
+)
+async def test_non_streaming_failure_leaves_an_own_chat_log_entry(
+    error: Exception, expected_text: str
+) -> None:
+    """
+    A failed non-streaming turn still writes our AssistantContent.
+
+    Without it HA discards the whole turn from chat_log (no assistant message
+    was added), the boundary rule in _async_get_message_history sees no own
+    turn, and the foreign history already checkpointed with the failed request
+    is offered again next turn (issue #621 review finding). Any exception
+    counts, not only HomeAssistantError, and arbitrary ones surface only their
+    class name.
+    """
+    request = HumanMessage(content="Turn on the garage light.", id="req-1")
+    app = types.SimpleNamespace(ainvoke=AsyncMock(side_effect=error))
+    written: list[Any] = []
+    chat_log = types.SimpleNamespace(
+        content=written,
+        async_add_assistant_content_without_tools=written.append,
+    )
+    entity = _runner_entity()
+
+    with contextlib.ExitStack() as stack:
+        for patcher in _patch_runner_deps():
+            stack.enter_context(patcher)
+        with pytest.raises(HomeAssistantError):
+            await entity._async_run_ainvoke(
+                app,
+                cast("Any", {"messages": [request]}),
+                cast("Any", {}),
+                cast("Any", chat_log),
+                None,
+            )
+
+    assert len(written) == 1
+    assert written[0].agent_id == HGA_AGENT_ID
+    assert written[0].content == expected_text
+    assert "db://secret" not in written[0].content
+
+
+@pytest.mark.asyncio
+async def test_non_streaming_backfill_only_writes_this_turns_messages() -> None:
+    """
+    The runner gets the whole thread back; only this turn reaches chat_log.
+
+    The old slice `response["messages"][len(input):]` assumed the response was
+    input plus output. With a checkpointed thread it is the full history, so
+    from the second turn on every earlier reply was written to chat_log again.
+    """
+    request = HumanMessage(content="How much free space is left?", id="req-2")
+    thread = [
+        HumanMessage(content="How many movies are in my library?", id="req-1"),
+        AIMessage(content="", tool_calls=[{"name": "plex", "args": {}, "id": "c1"}]),
+        ToolMessage(content="1389", tool_call_id="c1", name="plex"),
+        AIMessage(content="You have 1,389 movies."),
+        request,
+        AIMessage(content="", tool_calls=[{"name": "disk", "args": {}, "id": "c2"}]),
+        ToolMessage(content="2 TB", tool_call_id="c2", name="disk"),
+        AIMessage(content="About 2 TB free."),
+    ]
+    app = types.SimpleNamespace(ainvoke=AsyncMock(return_value={"messages": thread}))
+
+    written: list[Any] = []
+    chat_log = types.SimpleNamespace(
+        content=written,
+        async_add_assistant_content_without_tools=written.append,
+    )
+    entity = _runner_entity()
+
+    with contextlib.ExitStack() as stack:
+        for patcher in _patch_runner_deps():
+            stack.enter_context(patcher)
+        await entity._async_run_ainvoke(
+            app,
+            cast("Any", {"messages": [request]}),
+            cast("Any", {}),
+            cast("Any", chat_log),
+            None,
+        )
+
+    contents = [getattr(entry, "content", None) for entry in written]
+    assert "You have 1,389 movies." not in contents, (
+        "the previous turn's reply must not be written to chat_log again"
+    )
+    assert [type(entry).__name__.removeprefix("_Fake") for entry in written] == [
+        "AssistantContent",
+        "ToolResultContent",
+        "AssistantContent",
+    ]
+    assert written[-1].content == "About 2 TB free."
+
+
+def test_message_history_thread_holds_each_user_message_once() -> None:
+    """
+    End to end through the real reducer: four turns, no duplicate messages.
+
+    Mirrors the trace in issue #621. The chat_log grows the way HGA writes it,
+    the filter's output is prepended to each request exactly as
+    _async_handle_message_active does, and the thread is checkpointed by
+    LangGraph's add_messages reducer. Every user message must appear once.
+    """
+    turns = [
+        ("How many movies are in my library?", "You have 1,389 movies."),
+        ("How much free space is left?", "About 2 TB free."),
+        ("Did the backup run?", "Yes, last night."),
+        ("What's for dinner?", "Pasta?"),
+    ]
+    answers = iter(answer for _, answer in turns)
+
+    def agent(state: MessagesState) -> dict[str, Any]:  # noqa: ARG001
+        return {
+            "messages": [
+                AIMessage(
+                    content="", tool_calls=[{"name": "t", "args": {}, "id": "c"}]
+                ),
+                AIMessage(content=next(answers)),
+            ]
+        }
+
+    graph = StateGraph(MessagesState)
+    graph.add_node("agent", agent)
+    graph.add_edge(START, "agent")
+    graph.add_edge("agent", END)
+    app = graph.compile(checkpointer=MemorySaver())
+    config: RunnableConfig = {"configurable": {"thread_id": "conv-1"}}
+
+    entity = _entity()
+    chat_log: list = []
+    for question, answer in turns:
+        chat_log.append(_mk_content(ha_conversation.UserContent, content=question))
+        history = _history(chat_log, entity)
+        app.invoke({"messages": [*history, HumanMessage(content=question)]}, config)
+        chat_log.extend(_own_tool_turn(question, answer)[1:])
+
+    thread = app.get_state(config).values["messages"]
+    human = [m.content for m in thread if isinstance(m, HumanMessage)]
+    assert human == [question for question, _ in turns], (
+        "each user message must be in the thread exactly once, in order"
+    )
+    assert len(thread) == 3 * len(turns)
 
 
 # ---------------------------------------------------------------------------
