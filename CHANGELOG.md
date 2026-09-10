@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.39.4] - 2026-09-10
+
+### Fixed
+
+- The agent no longer answers the previous question instead of the new one after a few turns in the same conversation. Every turn's user message (and, for a turn that answered without tools, the reply too) was being appended to the conversation thread a second time on the following turn, under a fresh message id, so the stale copy sat directly before the new request and the model frequently answered it instead: a question about free disk space got the previous turn's movie count. The cause was the chat_log history filter, which exists to pick up turns handled by *another* agent sharing the conversation (Home Assistant's built-in agent on a shared pipeline) but could not tell those from the agent's own turns, which the LangGraph checkpointer already holds. The design dates from when the integration wrote nothing to chat_log; populating it for Show Details in v3.11.0 silently turned every own turn into a duplicate. The filter now groups chat_log into turns, recognises its own turns by `agent_id`, and ingests only foreign turns that follow its latest own turn. The per-entity high-water mark is gone, so two conversations served at once (a voice satellite plus the chat box) no longer starve each other of that shared-agent history either. Threads also stop carrying a stale copy of every turn, which was eating into `max_messages_in_context`. Thanks to [@andrewvlahopoulos](https://github.com/andrewvlahopoulos) for the trace that pinned the shape. ([#621](https://github.com/goruck/home-generative-agent/issues/621), [#590](https://github.com/goruck/home-generative-agent/issues/590))
+- Two related holes in the non-streaming path (schema-first YAML mode) are closed with it: a turn that failed with any error now still records its own entry in chat_log, so the foreign history already checkpointed with that request is not prepended again on the next turn; and the chat_log backfill for Show Details now writes only the messages produced this turn. It sliced the returned thread by the input length, but the graph returns the whole checkpointed thread, so from the second turn on it also wrote every earlier reply to chat_log again. Messages ingested from chat_log now carry an id derived from their position, so a turn cancelled before it could leave its mark only upserts the same messages next time instead of appending duplicates.
+- Conversations continued under a fixed, user-supplied `conversation_id` (for example `conversation.process` calls from an automation) keep the history already duplicated by earlier versions until it is trimmed past `max_messages_in_context`; start such a conversation under a new id for an immediate fix. Frontend and voice-satellite conversations start fresh after the restart.
+
 ## [3.39.3] - 2026-09-10
 
 ### Fixed
