@@ -986,8 +986,18 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         llm_api: MultiLLMAPI,
         *,
         has_tools: bool,
-    ) -> str:
-        """Render the full system instructions."""
+    ) -> tuple[str, str]:
+        """
+        Render the system instructions as a (stable, volatile) pair.
+
+        The stable part — instructions, timezone, the PIN and YAML-mode
+        guidance, the tool-error rule, the LLM APIs' exposed-entity context —
+        is identical from one turn to the next and forms the prefix a cloud
+        provider can serve from cache. The volatile part is Home Assistant's
+        date/time line, which changes every second and therefore must come
+        *after* the stable part (issue #617); the graph appends the other
+        per-turn context (memories, summary) behind it.
+        """
         options = self.entry.runtime_data.options
 
         pin_enabled = options.get(CONF_CRITICAL_ACTION_PIN_ENABLED, False)
@@ -997,38 +1007,36 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             if options.get(CONF_SCHEMA_FIRST_YAML, False)
             else ""
         )
+        tool_error_prompt = TOOL_CALL_ERROR_SYSTEM_MESSAGE if has_tools else ""
+        variables = {
+            "ha_name": self.hass.config.location_name,
+            "user_name": user_name,
+            "llm_context": llm_context,
+        }
         try:
-            prompt_parts = [
-                template.Template(
-                    (
-                        llm.DATE_TIME_PROMPT
-                        + options.get(CONF_PROMPT, llm.DEFAULT_INSTRUCTIONS_PROMPT)
-                        + f"\nYou are in the {self.tz} timezone."
-                        + critical_prompt
-                        + schema_prompt
-                        + TOOL_CALL_ERROR_SYSTEM_MESSAGE
-                        if has_tools
-                        else ""
-                    ),
-                    self.hass,
-                ).async_render(
-                    {
-                        "ha_name": self.hass.config.location_name,
-                        "user_name": user_name,
-                        "llm_context": llm_context,
-                    },
-                    parse_result=False,
-                )
-            ]
+            stable = template.Template(
+                (
+                    options.get(CONF_PROMPT, llm.DEFAULT_INSTRUCTIONS_PROMPT)
+                    + f"\nYou are in the {self.tz} timezone."
+                    + critical_prompt
+                    + schema_prompt
+                    + tool_error_prompt
+                ),
+                self.hass,
+            ).async_render(variables, parse_result=False)
+            volatile = template.Template(llm.DATE_TIME_PROMPT, self.hass).async_render(
+                variables, parse_result=False
+            )
         except TemplateError as err:
             _LOGGER.exception("Error rendering prompt")
             msg = f"Error rendering prompt: {err}"
             raise HomeAssistantError(msg) from err
 
+        stable_parts = [stable]
         if llm_api:
-            prompt_parts.append(llm_api.api_prompt)
+            stable_parts.append(llm_api.api_prompt)
 
-        return "\n".join(prompt_parts)
+        return "\n".join(stable_parts), volatile.strip()
 
     async def _async_run_ainvoke(
         self,
@@ -1333,7 +1341,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         ):
             user_name = user.name
 
-        prompt = self._async_render_system_prompt(
+        prompt, volatile_prompt = self._async_render_system_prompt(
             llm_context, user_name, llm_api, has_tools=bool(tools)
         )
 
@@ -1379,6 +1387,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 "chat_model": base_llm,
                 "chat_model_options": runtime_data.chat_model_options,
                 "prompt": prompt,
+                "prompt_volatile": volatile_prompt,
                 "options": options,
                 "vlm_model": runtime_data.vision_model,
                 "summarization_model": runtime_data.summarization_model,
@@ -1410,6 +1419,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             "messages_to_remove": [],
             "selected_tools": [],
             "tool_routing_map": {},
+            "turn_memories": {},
         }
 
         # Interact with agent app.

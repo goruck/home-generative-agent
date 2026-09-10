@@ -72,6 +72,10 @@ from ..core.fallback import (  # noqa: TID252
     ainvoke_dropping_unsupported_params,
     unsupported_sampling_param_in_chain,
 )
+from ..core.prompt_cache import (  # noqa: TID252
+    adapt_system_message_for_model,
+    build_system_message,
+)
 from ..core.utils import extract_final  # noqa: TID252
 from .helpers import (
     active_llm_api_ids,
@@ -131,6 +135,11 @@ class State(MessagesState):
     selected_tools: list[dict[str, Any]]
     tool_routing_map: dict[str, str]
     action_rounds: NotRequired[int]
+    # Memories retrieved for the user message this turn serves, memoized so
+    # every model call of the turn (tool call → answer) sees the same block
+    # and pays for one embedding, not one per call. Reset per turn by the
+    # conversation entity; keyed so a stale entry can never be reused.
+    turn_memories: NotRequired[dict[str, str]]
 
 
 def _determine_model_name(provider: str, opts: dict[str, Any]) -> str:
@@ -1645,6 +1654,14 @@ def _format_and_dedupe_tools(
             }
         )
 
+    # Bind in name order. Retrieval ranks candidates by per-query relevance,
+    # so the same set of tools arrives in a different order on different
+    # turns; providers cache by exact prefix and the tool array is the head
+    # of that prefix, so an order change alone forfeits the whole cache
+    # (issue #617). Dedupe above already fixed which api_id owns each name,
+    # and dispatch routes by name, so the order carries no meaning here.
+    selected_tools.sort(key=lambda t: str(t["function"]["name"]))
+
     return selected_tools, routing_map
 
 
@@ -2156,21 +2173,39 @@ async def _trim_messages_for_model(
     )
 
 
+def _format_memories(mems: list[Any]) -> str:
+    """Render retrieved memories as the <memories> block, or "" when none."""
+    if not mems:
+        return ""
+    formatted_mems = "\n".join(f"[{mem.key}]: {mem.value}" for mem in mems)
+    return f"<memories>\n{formatted_mems}\n</memories>"
+
+
 def _build_system_message(
     base_prompt: str,
-    mems: list[Any],
+    volatile_prompt: str,
+    memories: str,
     summary: str,
-) -> str:
-    """Compose the system message from the base prompt and retrieved context."""
-    system_message = base_prompt
-    if mems:
-        formatted_mems = "\n".join(f"[{mem.key}]: {mem.value}" for mem in mems)
-        system_message += f"\n<memories>\n{formatted_mems}\n</memories>"
+) -> SystemMessage:
+    """
+    Compose the system message: stable prefix first, per-turn context last.
+
+    ``base_prompt`` is the cacheable part (instructions, tool guidance, the
+    exposed-entity context). Everything that changes from turn to turn — the
+    wall-clock ``volatile_prompt``, the memories retrieved for this request,
+    the running summary — goes after it, so a cloud provider's exact-prefix
+    cache can match the stable part (issue #617). The two parts travel as
+    separate text blocks; ``adapt_system_message_for_model`` shapes them per
+    provider at call time.
+    """
+    volatile = volatile_prompt
+    if memories:
+        volatile += f"\n{memories}"
     if summary:
-        system_message += (
+        volatile += (
             f"\n<past_conversation_summary>\n{summary}\n</past_conversation_summary>"
         )
-    return system_message
+    return build_system_message(base_prompt, volatile.strip("\n"))
 
 
 async def _invoke_model(
@@ -2181,6 +2216,9 @@ async def _invoke_model(
     drop_unsupported: bool = True,
 ) -> Any:
     """Invoke a chat model, wrapping non-HA exceptions as HomeAssistantError."""
+    # A fallback chain resolves to no concrete model here and shapes the
+    # system message per member itself (FallbackChatModel.ainvoke).
+    messages = adapt_system_message_for_model(model, messages)
     try:
         async with asyncio.timeout(_LLM_INVOKE_TIMEOUT_S):
             if drop_unsupported:
@@ -2429,24 +2467,47 @@ async def _call_model(
     opts = conf["options"]
     chat_model_options = conf.get("chat_model_options", {})
 
-    # Retrieve memories (semantic if last message is from user).
-    last_message = state["messages"][-1]
-    last_message_from_user = isinstance(last_message, HumanMessage)
-    query_prompt = None
-    if last_message_from_user:
-        query_prompt = EMBEDDING_MODEL_PROMPT_TEMPLATE.format(
-            query=last_message.content
+    # Retrieve memories once per turn, for the user message being served.
+    # Inside a tool loop the last message is a ToolMessage; the block must
+    # nonetheless stay byte-identical across the turn's model calls, or the
+    # system prompt — and with it the provider's cached prefix — changes
+    # between the call that requested a tool and the call that answers.
+    # So the first call searches and memoizes; later calls reuse. A memory
+    # written by a tool mid-turn is therefore seen next turn, by design.
+    last_user_message = next(
+        (m for m in reversed(state["messages"]) if isinstance(m, HumanMessage)),
+        None,
+    )
+    user_text = _message_text(last_user_message) if last_user_message else ""
+    memo_key = (
+        (last_user_message.id or user_text) if last_user_message is not None else ""
+    )
+    memo = state.get("turn_memories") or {}
+    if memo.get("key") == memo_key and "text" in memo:
+        memories = memo["text"]
+    else:
+        # An attachment-only turn has no text: embedding the bare template
+        # would inject the memories nearest to nothing, so list by recency.
+        query_prompt = (
+            EMBEDDING_MODEL_PROMPT_TEMPLATE.format(query=user_text)
+            if user_text.strip()
+            else None
         )
+        memories = _format_memories(
+            await _search_memories(store, user_id, query_prompt)
+        )
+        memo = {"key": memo_key, "text": memories}
 
-    mems = await _search_memories(store, user_id, query_prompt)
-
-    # Build system message.
+    # Build system message: stable prefix, then this turn's volatile context.
     system_message = _build_system_message(
-        conf["prompt"], mems, state.get("summary", "")
+        conf["prompt"],
+        conf.get("prompt_volatile", ""),
+        memories,
+        state.get("summary", ""),
     )
 
     # Model input = System + current messages.
-    messages = [SystemMessage(content=system_message)] + state["messages"]
+    messages = [system_message, *state["messages"]]
 
     trimmed_messages = await _trim_messages_for_model(
         messages, opts, chat_model_options, hass
@@ -2523,6 +2584,7 @@ async def _call_model(
         "messages": ai_response,
         "chat_model_usage_metadata": metadata,
         "messages_to_remove": messages_to_remove,
+        "turn_memories": memo,
     }
 
 

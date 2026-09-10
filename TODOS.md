@@ -2,6 +2,30 @@
 
 ## Agent
 
+### Per-turn tool retrieval defeats cross-turn prompt caching
+
+**What:** Providers cache by exact prefix in the order `tools → system → messages`. v3.39.2 ([#617](https://github.com/goruck/home-generative-agent/issues/617)) made the system prompt's stable part cacheable and binds tools in name order, but Tool Retrieval still selects a per-request *set* of tools, so any turn whose retrieved set differs from the previous turn's cannot read the previous entry: `cache_read` is 0 again and the whole prefix is rewritten at the cache-write premium. Hits are guaranteed only within a turn (tool call → answer) and between turns that happen to retrieve the same set.
+
+**Why:** Out of scope for #617, which fixed the prompt ordering the reporter identified. The fix here is a retrieval-policy decision, not a prompt one. Note Anthropic's automatic last-block breakpoint (kept on the client) already pays the write premium on the volatile tail + history every turn; it only earns that back inside tool loops. Also note both breakpoints use the 5-minute TTL: for a voice assistant whose turns are typically more than five minutes apart, cross-turn hits need `ttl: "1h"` on the stable breakpoint (2× write vs 1.25×, allowed because the 1h marker precedes the 5m automatic one) — a cost decision to take together with the retrieval policy, since a 1h write only pays off when the tool set also matches.
+
+**How to apply:** Options, cheapest first: (a) for cloud providers, bind a *stable superset* — the union of the always-included tools, the safety tools and the top-N RAG tools across a sliding window of recent turns, so the set changes rarely rather than per query; (b) when the total number of indexed tools is below some bound (say 40), skip retrieval entirely for providers with prompt caching and bind everything — the cached prefix then costs ~0.1× per turn and the model sees every tool; (c) drop the automatic last-block breakpoint when the conversation has no tool calls, to stop paying the write premium on a tail that is never re-read. Measure with `usage_metadata.input_token_details` in the `agent.graph` debug log before and after; a Sonnet install with ~30 exposed entities is the reference case.
+
+**Effort:** M
+**Priority:** P2
+
+
+### Conversation history is never served from cache because the volatile context sits in the system prompt
+
+**What:** After #617 the volatile tail (time, memories, summary) is still part of the `system` block, which precedes `messages` in the cache hierarchy. Because the tail changes every turn, the conversation history behind it can never match a previous entry across turns, only within a turn. Anthropic's documented multi-turn pattern keeps the system prompt fully static and puts per-turn context in the latest user turn.
+
+**Why:** Moving the tail into the user turn is a bigger change than #617 warranted: the graph's `HumanMessage` is persisted in the LangGraph checkpoint and echoed into HA's chat log, so a timestamp or memory block injected there either has to be persisted (changing history shape, summarization input and trimming) or stripped before persistence. Filed so the trade-off is decided deliberately.
+
+**How to apply:** Inject a small context block (time only; memories stay in the system tail or move to a tool) as a second text block on the *current* `HumanMessage` and persist it, so earlier turns keep their block and the prefix stays stable; strip it from the `chat_log` echo. Alternatively keep the system tail but coarsen the time to the minute so consecutive calls within a minute match. Only worth doing after the tool-set item above, which is the larger miss.
+
+**Effort:** M
+**Priority:** P3
+
+
 ### Tool routing is by bare name, so a second server's same-named tool can capture calls
 
 **What:** `_format_and_dedupe_tools` (agent/graph.py) routes model tool calls through `routing_map[name] = api_id`, first seen wins. Tool names are remote data — each MCP server chooses its own — so when two selected servers advertise the same name, whichever candidate lands in the list first receives every call to that name, including arguments meant for the other server's tool. The v3.34.0 always-included-tools feature warns when this shadows a configured inclusion (`_append_included_tools` logs the cross-API collision), but the underlying surface predates it and covers ordinary RAG selections too, silently.

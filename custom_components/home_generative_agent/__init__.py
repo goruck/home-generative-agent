@@ -267,6 +267,7 @@ from .core.lifecycle import defer_start_until_hass_started
 from .core.migrations import migrate_person_gallery
 from .core.person_gallery import PersonGalleryDAO
 from .core.pipeline_guard import async_clear_pin_pipeline_issue
+from .core.prompt_cache import CACHE_CONTROL_EPHEMERAL
 from .core.runtime import HGAConfigEntry, HGAData
 from .core.subentry_resolver import (
     build_database_uri_from_entry,
@@ -2047,11 +2048,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         None
     )
     if anthropic_ok:
+        # Top-level cache_control = Anthropic's automatic breakpoint on the
+        # LAST block of every request (history reuse inside a tool loop). The
+        # stable system prefix gets its own explicit breakpoint per call in
+        # core/prompt_cache.py (issue #617).
         try:
             anthropic_provider = ChatAnthropic(  # type: ignore[call-arg]
                 anthropic_api_key=anthropic_secret,  # type: ignore[call-arg]
                 model=RECOMMENDED_ANTHROPIC_CHAT_MODEL,  # type: ignore[call-arg]
-                model_kwargs={"cache_control": {"type": "ephemeral"}},
+                model_kwargs={"cache_control": dict(CACHE_CONTROL_EPHEMERAL)},
                 streaming=True,
             ).configurable_fields(
                 model=ConfigurableField(id="model"),

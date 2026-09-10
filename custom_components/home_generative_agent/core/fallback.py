@@ -11,6 +11,7 @@ from homeassistant.exceptions import HomeAssistantError
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
 from ..const import EMBEDDING_MODEL_DIMS  # noqa: TID252
+from .prompt_cache import adapt_system_message_for_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -399,7 +400,9 @@ class FallbackChatModel:
 
         try:
             rebound = await asyncio.to_thread(_rebuild)
-            result = await rebound.ainvoke(input_data, config, **kwargs)
+            result = await rebound.ainvoke(
+                adapt_system_message_for_model(rebound, input_data), config, **kwargs
+            )
             _raise_for_retryable_empty_response(result)
         except Exception:
             LOGGER.exception(
@@ -453,7 +456,12 @@ class FallbackChatModel:
                 continue
             try:
                 result = await ainvoke_dropping_unsupported_params(
-                    model, input_data, config, **kwargs
+                    # Members can be different providers; shape the system
+                    # message for the one actually being called.
+                    model,
+                    adapt_system_message_for_model(model, input_data),
+                    config,
+                    **kwargs,
                 )
                 _raise_for_retryable_empty_response(result)
             except Exception as err:
