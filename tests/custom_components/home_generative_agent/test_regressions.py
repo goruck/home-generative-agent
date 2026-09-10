@@ -18,7 +18,7 @@ import pytest
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import ConfigurableField
 
@@ -921,3 +921,175 @@ async def test_schema_recovery_passes_through_unrelated_errors(
             disable_reasoning=False,
         )
     assert hass.async_add_executor_job.await_count == 0, "no rebind on a non-schema 400"
+
+
+# ---------------------------------------------------------------------------
+# Issue #617 — the system prompt's stable prefix must not change per turn
+# ---------------------------------------------------------------------------
+
+
+class _Mem:
+    def __init__(self, key: str, value: str) -> None:
+        self.key = key
+        self.value = value
+
+
+def test_build_system_message_puts_volatile_context_after_stable_prefix() -> None:
+    """Time, memories and summary all land in the second block, in that order."""
+    msg = agent_graph._build_system_message(
+        "STABLE",
+        "Current time is 15:09:20. Today's date is 2026-09-09.",
+        [_Mem("k", "v")],
+        "earlier we talked",
+    )
+    assert msg.content == [
+        {"type": "text", "text": "STABLE"},
+        {
+            "type": "text",
+            "text": (
+                "Current time is 15:09:20. Today's date is 2026-09-09.\n"
+                "<memories>\n[k]: v\n</memories>\n"
+                "<past_conversation_summary>\nearlier we talked\n"
+                "</past_conversation_summary>"
+            ),
+        },
+    ]
+
+
+def test_build_system_message_stable_prefix_identical_across_turns() -> None:
+    """The regression itself: two turns a second apart share the first block."""
+    turn1 = agent_graph._build_system_message(
+        "STABLE", "Current time is 15:09:20.", [], ""
+    )
+    turn2 = agent_graph._build_system_message(
+        "STABLE", "Current time is 15:09:34.", [], ""
+    )
+    assert turn1.content[0] == turn2.content[0]
+    assert turn1.content[1] != turn2.content[1]
+
+
+def test_build_system_message_plain_string_without_any_volatile_context() -> None:
+    assert agent_graph._build_system_message("STABLE", "", [], "").content == "STABLE"
+
+
+@pytest.mark.asyncio
+async def test_call_model_tool_loop_keys_memories_on_last_user_message(
+    hass: HomeAssistant,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Mid tool loop the memory search must use the request, not recency.
+
+    A recency listing differs from the semantic result the first call used,
+    so the <memories> block — and with it the cached prefix — changed between
+    the call that requested the tool and the call that answers.
+    """
+    captured: dict[str, object] = {}
+
+    async def _fake_invoke_model(
+        _model: object, messages: list[object], *_args: object, **_kwargs: object
+    ) -> AIMessage:
+        captured["messages"] = messages
+        return AIMessage(content="Done.")
+
+    async def _fake_trim(
+        messages: list[object], *_args: object, **_kwargs: object
+    ) -> list[object]:
+        return messages
+
+    mock_store = MagicMock()
+    mock_store.asearch = AsyncMock(return_value=[_Mem("pref", "likes it warm")])
+    monkeypatch.setattr(agent_graph, "_invoke_model", _fake_invoke_model)
+    monkeypatch.setattr(agent_graph, "_trim_messages_for_model", _fake_trim)
+
+    state: dict[str, object] = {
+        "messages": [
+            HumanMessage(content="turn it off"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "HassTurnOff", "args": {}, "id": "c1", "type": "tool_call"}
+                ],
+            ),
+            ToolMessage(content="action_done", tool_call_id="c1"),
+        ],
+        "selected_tools": [],
+        "summary": "",
+        "tool_routing_map": {},
+        "messages_to_remove": [],
+        "chat_model_usage_metadata": {},
+    }
+    config: dict[str, object] = {
+        "configurable": {
+            "chat_model": MagicMock(),
+            "user_id": "user-test",
+            "hass": hass,
+            "options": {},
+            "chat_model_options": {},
+            "prompt": "STABLE",
+            "prompt_volatile": "Current time is 15:09:20.",
+            "langchain_tools": {},
+            "ha_llm_api": None,
+            "pending_actions": {},
+        }
+    }
+
+    await agent_graph._call_model(state, config, store=mock_store)  # type: ignore[arg-type]
+
+    query = mock_store.asearch.await_args.kwargs["query"]
+    assert query is not None
+    assert "turn it off" in query
+    system = cast("list[object]", captured["messages"])[0]
+    assert isinstance(system, SystemMessage)
+    assert system.content[0] == {"type": "text", "text": "STABLE"}
+    tail = cast("dict[str, Any]", system.content[1])
+    assert "Current time is 15:09:20." in tail["text"]
+    assert "[pref]: likes it warm" in tail["text"]
+
+
+def test_format_and_dedupe_tools_binds_in_name_order() -> None:
+    """Same tool set, different retrieval order → identical bound array."""
+
+    def _raw(*names: str) -> list:
+        return [
+            {
+                "name": n,
+                "api_id": "assist",
+                "description": n,
+                "parameters": "{}",
+                "is_actuation": False,
+            }
+            for n in names
+        ]
+
+    first, _ = agent_graph._format_and_dedupe_tools(
+        _raw("HassTurnOn", "GetLiveContext")
+    )
+    second, _ = agent_graph._format_and_dedupe_tools(
+        _raw("GetLiveContext", "HassTurnOn")
+    )
+    assert first == second
+    assert [t["function"]["name"] for t in first] == ["GetLiveContext", "HassTurnOn"]
+
+
+def test_format_and_dedupe_tools_first_seen_still_owns_the_route() -> None:
+    """Sorting happens after dedupe: the earlier api_id keeps the name."""
+    raw: list = [
+        {
+            "name": "search",
+            "api_id": "mcp-a",
+            "description": "a",
+            "parameters": "{}",
+            "is_actuation": False,
+        },
+        {
+            "name": "search",
+            "api_id": "mcp-b",
+            "description": "b",
+            "parameters": "{}",
+            "is_actuation": False,
+        },
+    ]
+    selected, routing = agent_graph._format_and_dedupe_tools(raw)
+    assert routing == {"search": "mcp-a"}
+    assert [t["function"]["description"] for t in selected] == ["a"]

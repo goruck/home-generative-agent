@@ -16,6 +16,7 @@ import types
 from enum import IntFlag
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
+from zoneinfo import ZoneInfo
 
 import pytest
 from homeassistant.const import CONF_LLM_HASS_API
@@ -1293,3 +1294,75 @@ def test_message_history_non_none_tool_calls_still_excluded() -> None:
 
     assert [type(m).__name__ for m in history] == ["HumanMessage"]
     assert history[0].content == "hello"
+
+
+# ---------------------------------------------------------------------------
+# Issue #617 — _async_render_system_prompt splits stable and volatile parts
+# ---------------------------------------------------------------------------
+
+
+class _EchoTemplate:
+    """Stand-in for template.Template that returns its source unrendered."""
+
+    def __init__(self, source: str, _hass: Any) -> None:
+        self.source = source
+
+    def async_render(self, _variables: Any, *, parse_result: bool) -> str:
+        assert parse_result is False
+        return self.source
+
+
+def _render_entity(options: dict[str, Any]) -> Any:
+    entity = HGAConversationEntity.__new__(HGAConversationEntity)
+    entity.hass = MagicMock()
+    entity.hass.config.location_name = "Home"
+    entity.tz = ZoneInfo("America/Los_Angeles")
+    entity.entry = cast(
+        "Any",
+        types.SimpleNamespace(runtime_data=types.SimpleNamespace(options=options)),
+    )
+    return entity
+
+
+def test_render_system_prompt_moves_date_time_out_of_the_stable_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The time line was the first bytes of the prompt; it must now be the tail."""
+    monkeypatch.setattr(f"{_CONV}.template.Template", _EchoTemplate)
+    entity = _render_entity({})
+    llm_api = cast("Any", types.SimpleNamespace(api_prompt="EXPOSED ENTITIES"))
+
+    stable, volatile = entity._async_render_system_prompt(
+        MagicMock(), "lindo", llm_api, has_tools=True
+    )
+
+    assert volatile == ha_llm.DATE_TIME_PROMPT.strip()
+    assert "Current time is" not in stable
+    assert stable.startswith(ha_llm.DEFAULT_INSTRUCTIONS_PROMPT)
+    assert "You are in the America/Los_Angeles timezone." in stable
+    assert "Always call tools again with your mistakes corrected." in stable
+    assert stable.endswith("\nEXPOSED ENTITIES")
+
+
+def test_render_system_prompt_without_tools_keeps_instructions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the tool-error rule is conditional on tools, not the whole prompt."""
+    monkeypatch.setattr(f"{_CONV}.template.Template", _EchoTemplate)
+    entity = _render_entity({})
+    llm_api = cast("Any", types.SimpleNamespace(api_prompt="EXPOSED ENTITIES"))
+
+    stable, volatile = entity._async_render_system_prompt(
+        MagicMock(), None, llm_api, has_tools=False
+    )
+
+    assert stable.startswith(ha_llm.DEFAULT_INSTRUCTIONS_PROMPT)
+    assert "Always call tools again" not in stable
+    assert volatile == ha_llm.DATE_TIME_PROMPT.strip()
+
+
+def test_handle_message_passes_volatile_prompt_to_the_graph() -> None:
+    """Pin the call-site wiring: the volatile part must reach the graph config."""
+    src = inspect.getsource(HGAConversationEntity._async_handle_message_active)
+    assert "prompt, volatile_prompt = self._async_render_system_prompt(" in src
+    assert '"prompt_volatile": volatile_prompt,' in src

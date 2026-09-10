@@ -2047,6 +2047,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         None
     )
     if anthropic_ok:
+        # Top-level cache_control = Anthropic's automatic breakpoint on the
+        # LAST block of every request (history reuse inside a tool loop). The
+        # stable system prefix gets its own explicit breakpoint per call in
+        # core/prompt_cache.py (issue #617).
         try:
             anthropic_provider = ChatAnthropic(  # type: ignore[call-arg]
                 anthropic_api_key=anthropic_secret,  # type: ignore[call-arg]

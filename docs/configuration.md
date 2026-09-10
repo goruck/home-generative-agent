@@ -408,6 +408,28 @@ The **Options** flow (gear icon on the integration page) exposes:
 - Tool retrieval limit and relevance threshold
 - **Excluded tools** (`tool_exclusions`) — per-tool allow/deny picker across every selected LLM API, including MCP servers (see [Excluded tools](#excluded-tools))
 - **Always-included tools** (`tool_inclusions`) — tools appended after vector retrieval, on top of the retrieval limit (see [Always-included tools](#always-included-tools))
+
+### Prompt caching
+
+Cloud providers only reuse a cached prompt when the *beginning* of the request is byte-identical to an earlier one. HGA therefore renders the system prompt in two parts and always sends the stable part first:
+
+| Part | Contents | Changes |
+|------|----------|---------|
+| Stable prefix | your system prompt, the timezone line, Critical Action PIN and YAML-mode guidance, the tool-error rule, the exposed-entity context from the selected LLM APIs | only when you edit options or expose/rename entities |
+| Volatile tail | Home Assistant's `Current time is … Today's date is …` line, the memories retrieved for this request, the running conversation summary | every turn |
+
+What each provider does with that:
+
+- **Anthropic** — the stable prefix gets an explicit `cache_control` breakpoint and the request also carries the automatic last-block breakpoint, so the prefix is written once (`cache_creation` in the debug log's `usage_metadata`) and read back on later calls (`cache_read`). Reads are billed at a fraction of the input price; writes at a premium. A prefix shorter than the model's minimum cacheable length (1,024 tokens for Sonnet, 4,096 for Haiku 4.5, 512 for the Claude 5 models) is processed uncached without error.
+- **OpenAI, Gemini** — both cache prefixes implicitly; the same ordering lets them match.
+- **Ollama, OpenAI-compatible servers** — receive the same plain-string prompt as before; local servers keep their own KV-cache behaviour.
+
+Two things still prevent a hit between turns, by design of the providers' caches:
+
+- **A different tool set.** Tool Retrieval (RAG) selects tools per request, and the tool array precedes the system prompt in the cached prefix, so a turn that binds a different set of tools cannot read the previous turn's entry. Consecutive turns on the same topic, and every model call after the first inside one turn (a tool call followed by the answer), do hit. Raising the retrieval limit or adding always-included tools makes the bound set more stable.
+- **Time-dependent expressions in your own system prompt.** The prompt is a Home Assistant template; a `{{ now() }}` or a state lookup in it re-renders differently each turn and lands in the stable part. Keep such values out of the prompt, or accept that the prefix will be rewritten on every turn.
+
+If you use a fallback chain, each member is shaped for its own provider: an OpenAI fallback behind an Anthropic primary receives the plain string, never the Anthropic cache key.
 - `model_provider_uncontended` — bypass all local GPU gates when the server has dedicated capacity
 - **Video analyzer mode** — disable / notify_on_anomaly / always_notify
 - **Enable perceptual-hash frame filter (dHash)** — skip visually identical frames before VLM analysis (off by default; always active for ring-mqtt `event_select` capture loops regardless of this setting; see caveat in [Camera Entities](camera-entities.md#advanced-options))

@@ -80,7 +80,7 @@ Context length is carefully managed to balance cost, accuracy, and latency and t
 
 These are configurable in the integration's **Options** flow.
 
-**Prompt caching:** Static content (instructions, examples) is placed upfront in prompts so cloud providers can cache it across turns, reducing both latency and cost.
+**Prompt caching:** The system prompt is built as a stable prefix followed by a volatile tail. The prefix — your instructions, timezone, PIN/YAML guidance, the tool-error rule and the LLM APIs' exposed-entity context — is identical from turn to turn; the tail carries everything that changes per request: Home Assistant's date/time line, the memories retrieved for the request and the running conversation summary. Cloud providers cache by exact prefix (Anthropic in the order tools → system → messages, OpenAI and Gemini implicitly over the same prefix), so this ordering is what lets a later turn read the prefix back instead of paying to write it again. `core/prompt_cache.py` shapes the message per concrete model at call time: Anthropic receives the two parts as separate system blocks with an explicit `cache_control` breakpoint on the stable one (in addition to the client's automatic last-block breakpoint, which reuses conversation history inside a tool loop); every other provider receives the plain concatenated string. Retrieved tools are bound in name order and the memory search is keyed on the last user message for the whole turn, so neither changes the prefix between the model calls of one turn. Because the tool array heads the cached prefix, a turn that retrieves a different set of tools than the previous one still cannot read the previous cache entry. See [Configuration → Prompt caching](configuration.md#prompt-caching).
 
 ---
 
