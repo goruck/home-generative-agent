@@ -1066,7 +1066,8 @@ async def test_retrieve_tools_force_injects_live_context_for_open_doors() -> Non
     result = await _retrieve_tools(state, config, store=store)
     selected_names = [t["function"]["name"] for t in result["selected_tools"]]
 
-    assert selected_names[0] == "GetLiveContext"
+    # Bound order is name order (issue #617), so membership is the contract.
+    assert "GetLiveContext" in selected_names
     assert "GetLiveContext" in result["tool_routing_map"]
     assert "get_entity_history" in result["tool_routing_map"]
     assert "resolve_entity_ids" in result["tool_routing_map"]

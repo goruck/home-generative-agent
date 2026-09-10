@@ -939,7 +939,7 @@ def test_build_system_message_puts_volatile_context_after_stable_prefix() -> Non
     msg = agent_graph._build_system_message(
         "STABLE",
         "Current time is 15:09:20. Today's date is 2026-09-09.",
-        [_Mem("k", "v")],
+        agent_graph._format_memories([_Mem("k", "v")]),
         "earlier we talked",
     )
     assert msg.content == [
@@ -959,17 +959,18 @@ def test_build_system_message_puts_volatile_context_after_stable_prefix() -> Non
 def test_build_system_message_stable_prefix_identical_across_turns() -> None:
     """The regression itself: two turns a second apart share the first block."""
     turn1 = agent_graph._build_system_message(
-        "STABLE", "Current time is 15:09:20.", [], ""
+        "STABLE", "Current time is 15:09:20.", "", ""
     )
     turn2 = agent_graph._build_system_message(
-        "STABLE", "Current time is 15:09:34.", [], ""
+        "STABLE", "Current time is 15:09:34.", "", ""
     )
     assert turn1.content[0] == turn2.content[0]
     assert turn1.content[1] != turn2.content[1]
 
 
 def test_build_system_message_plain_string_without_any_volatile_context() -> None:
-    assert agent_graph._build_system_message("STABLE", "", [], "").content == "STABLE"
+    assert agent_graph._build_system_message("STABLE", "", "", "").content == "STABLE"
+    assert agent_graph._format_memories([]) == ""
 
 
 @pytest.mark.asyncio
@@ -1034,7 +1035,7 @@ async def test_call_model_tool_loop_keys_memories_on_last_user_message(
         }
     }
 
-    await agent_graph._call_model(state, config, store=mock_store)  # type: ignore[arg-type]
+    result = await agent_graph._call_model(state, config, store=mock_store)  # type: ignore[arg-type]
 
     query = mock_store.asearch.await_args.kwargs["query"]
     assert query is not None
@@ -1045,6 +1046,199 @@ async def test_call_model_tool_loop_keys_memories_on_last_user_message(
     tail = cast("dict[str, Any]", system.content[1])
     assert "Current time is 15:09:20." in tail["text"]
     assert "[pref]: likes it warm" in tail["text"]
+    # The memo the next call of this turn will reuse.
+    memo = result["turn_memories"]
+    assert memo["key"] == "turn it off"
+    assert "[pref]: likes it warm" in memo["text"]
+
+
+def _call_model_harness(
+    monkeypatch: pytest.MonkeyPatch,
+    hass: HomeAssistant,
+    messages: list[object],
+    *,
+    turn_memories: dict[str, str] | None = None,
+    search_result: list[object] | None = None,
+) -> tuple[dict[str, object], dict[str, object], MagicMock, dict[str, object]]:
+    """Build state/config/store for a _call_model call and capture its input."""
+    captured: dict[str, object] = {}
+
+    async def _fake_invoke_model(
+        _model: object, msgs: list[object], *_args: object, **_kwargs: object
+    ) -> AIMessage:
+        captured["messages"] = msgs
+        return AIMessage(content="ok")
+
+    async def _fake_trim(
+        msgs: list[object], *_args: object, **_kwargs: object
+    ) -> list[object]:
+        return msgs
+
+    monkeypatch.setattr(agent_graph, "_invoke_model", _fake_invoke_model)
+    monkeypatch.setattr(agent_graph, "_trim_messages_for_model", _fake_trim)
+    mock_store = MagicMock()
+    mock_store.asearch = AsyncMock(return_value=search_result or [])
+    state: dict[str, object] = {
+        "messages": messages,
+        "selected_tools": [],
+        "summary": "",
+        "tool_routing_map": {},
+        "messages_to_remove": [],
+        "chat_model_usage_metadata": {},
+    }
+    if turn_memories is not None:
+        state["turn_memories"] = turn_memories
+    config: dict[str, object] = {
+        "configurable": {
+            "chat_model": MagicMock(),
+            "user_id": "user-test",
+            "hass": hass,
+            "options": {},
+            "chat_model_options": {},
+            "prompt": "STABLE",
+            "prompt_volatile": "Current time is 15:09:20.",
+            "langchain_tools": {},
+            "ha_llm_api": None,
+            "pending_actions": {},
+        }
+    }
+    return state, config, mock_store, captured
+
+
+def _system_tail(captured: dict[str, object]) -> str:
+    system = cast("list[object]", captured["messages"])[0]
+    assert isinstance(system, SystemMessage)
+    return cast("dict[str, Any]", system.content[1])["text"]
+
+
+@pytest.mark.asyncio
+async def test_call_model_reuses_memoized_memories_within_a_turn(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A later call of the same turn must not search again (no extra embedding)."""
+    memo = {"key": "turn it off", "text": "<memories>\n[k]: v\n</memories>"}
+    state, config, store, captured = _call_model_harness(
+        monkeypatch,
+        hass,
+        [
+            HumanMessage(content="turn it off"),
+            AIMessage(content="", tool_calls=[{"name": "T", "args": {}, "id": "c1"}]),
+            ToolMessage(content="done", tool_call_id="c1"),
+        ],
+        turn_memories=memo,
+    )
+    result = await agent_graph._call_model(state, config, store=store)  # type: ignore[arg-type]
+    store.asearch.assert_not_awaited()
+    assert "[k]: v" in _system_tail(captured)
+    assert result["turn_memories"] == memo
+
+
+@pytest.mark.asyncio
+async def test_call_model_ignores_memo_from_another_user_message(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A memo keyed on a different message is stale and must be recomputed."""
+    state, config, store, _captured = _call_model_harness(
+        monkeypatch,
+        hass,
+        [HumanMessage(content="what time is it")],
+        turn_memories={"key": "turn it off", "text": "<memories>\n[k]: v\n</memories>"},
+        search_result=[_Mem("new", "fresh")],
+    )
+    result = await agent_graph._call_model(state, config, store=store)  # type: ignore[arg-type]
+    store.asearch.assert_awaited_once()
+    assert "what time is it" in store.asearch.await_args.kwargs["query"]
+    assert result["turn_memories"]["key"] == "what time is it"
+    assert "[new]: fresh" in result["turn_memories"]["text"]
+
+
+@pytest.mark.asyncio
+async def test_call_model_memo_key_prefers_message_id(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With an id assigned by the reducer, the memo is keyed on it, not the text."""
+    state, config, store, _captured = _call_model_harness(
+        monkeypatch, hass, [HumanMessage(content="turn it off", id="msg-1")]
+    )
+    result = await agent_graph._call_model(state, config, store=store)  # type: ignore[arg-type]
+    assert result["turn_memories"]["key"] == "msg-1"
+
+
+@pytest.mark.asyncio
+async def test_call_model_multimodal_user_message_embeds_text_only(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state, config, store, _captured = _call_model_harness(
+        monkeypatch,
+        hass,
+        [
+            HumanMessage(
+                content=[
+                    {"type": "text", "text": "what is in this picture"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,AAAA"},
+                    },
+                ]
+            )
+        ],
+    )
+    await agent_graph._call_model(state, config, store=store)  # type: ignore[arg-type]
+    query = store.asearch.await_args.kwargs["query"]
+    assert "what is in this picture" in query
+    assert "AAAA" not in query
+
+
+@pytest.mark.asyncio
+async def test_call_model_attachment_only_user_message_lists_by_recency(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No text to embed → recency listing, never the bare template."""
+    state, config, store, _captured = _call_model_harness(
+        monkeypatch,
+        hass,
+        [
+            HumanMessage(
+                content=[{"type": "image_url", "image_url": {"url": "data:,x"}}]
+            )
+        ],
+    )
+    await agent_graph._call_model(state, config, store=store)  # type: ignore[arg-type]
+    assert store.asearch.await_args.kwargs["query"] is None
+
+
+@pytest.mark.asyncio
+async def test_call_model_without_user_message_lists_by_recency(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state, config, store, _captured = _call_model_harness(
+        monkeypatch, hass, [AIMessage(content="hello")]
+    )
+    result = await agent_graph._call_model(state, config, store=store)  # type: ignore[arg-type]
+    assert store.asearch.await_args.kwargs["query"] is None
+    assert result["turn_memories"]["key"] == ""
+
+
+def test_format_and_dedupe_tools_sorts_non_string_names_without_raising() -> None:
+    """A corrupt index row with a non-str name must not abort the turn."""
+    raw: list = [
+        {
+            "name": 7,
+            "api_id": "a",
+            "description": "seven",
+            "parameters": "{}",
+            "is_actuation": False,
+        },
+        {
+            "name": "b",
+            "api_id": "a",
+            "description": "bee",
+            "parameters": "{}",
+            "is_actuation": False,
+        },
+    ]
+    selected, _routing = agent_graph._format_and_dedupe_tools(raw)
+    assert [t["function"]["name"] for t in selected] == [7, "b"]
 
 
 def test_format_and_dedupe_tools_binds_in_name_order() -> None:

@@ -126,7 +126,7 @@ def adapt_system_message_for_model(model: Any, messages: Any) -> Any:
     concrete = concrete_chat_model(model)
     if concrete is None:
         return messages
-    anthropic = getattr(concrete, "_llm_type", None) == ANTHROPIC_LLM_TYPE
+    anthropic = is_anthropic_chat_model(concrete)
 
     adapted: list[Any] = []
     changed = False
@@ -150,13 +150,3 @@ def adapt_system_message_for_model(model: Any, messages: Any) -> Any:
         else:
             adapted.append(message.model_copy(update={"content": "\n".join(texts)}))
     return adapted if changed else messages
-
-
-__all__ = [
-    "ANTHROPIC_LLM_TYPE",
-    "CACHE_CONTROL_EPHEMERAL",
-    "adapt_system_message_for_model",
-    "build_system_message",
-    "concrete_chat_model",
-    "is_anthropic_chat_model",
-]

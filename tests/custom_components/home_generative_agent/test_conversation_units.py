@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from homeassistant.const import CONF_LLM_HASS_API
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import HomeAssistantError, TemplateError
 from homeassistant.helpers import llm as ha_llm
 
 from custom_components.home_generative_agent.const import (
@@ -1359,6 +1359,43 @@ def test_render_system_prompt_without_tools_keeps_instructions(
     assert stable.startswith(ha_llm.DEFAULT_INSTRUCTIONS_PROMPT)
     assert "Always call tools again" not in stable
     assert volatile == ha_llm.DATE_TIME_PROMPT.strip()
+
+
+def test_render_system_prompt_without_llm_api_has_no_trailing_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(f"{_CONV}.template.Template", _EchoTemplate)
+    entity = _render_entity({})
+
+    stable, _volatile = entity._async_render_system_prompt(
+        MagicMock(), None, cast("Any", None), has_tools=True
+    )
+
+    assert "None" not in stable
+    assert stable.rstrip("\n").endswith("Do not repeat mistakes.")
+
+
+def test_render_system_prompt_volatile_template_error_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failing date/time render must surface the same HomeAssistantError."""
+    calls: list[str] = []
+
+    class _Boom(_EchoTemplate):
+        def async_render(self, _variables: Any, *, parse_result: bool) -> str:
+            calls.append(self.source)
+            if len(calls) == 2:
+                msg = "bad"
+                raise TemplateError(msg)
+            return self.source
+
+    monkeypatch.setattr(f"{_CONV}.template.Template", _Boom)
+    entity = _render_entity({})
+    with pytest.raises(HomeAssistantError, match="Error rendering prompt"):
+        entity._async_render_system_prompt(
+            MagicMock(), None, cast("Any", None), has_tools=False
+        )
+    assert calls[1] == ha_llm.DATE_TIME_PROMPT
 
 
 def test_handle_message_passes_volatile_prompt_to_the_graph() -> None:

@@ -1419,6 +1419,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             "messages_to_remove": [],
             "selected_tools": [],
             "tool_routing_map": {},
+            "turn_memories": {},
         }
 
         # Interact with agent app.
