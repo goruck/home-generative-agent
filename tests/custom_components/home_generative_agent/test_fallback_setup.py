@@ -375,19 +375,26 @@ async def test_setup_configures_fallback_models_and_embedding_chain(
     chat_fallback = cast("FakeConfiguredModel", chat_model.chain[1][0])
     assert chat_fallback.base.name == "ollama"
     assert chat_fallback.config["configurable"]["model"] == "qwen-chat-fallback"
-    assert chat_fallback.config["configurable"]["num_predict"] is not None
+    # CHAT_MODEL_MAX_TOKENS is None so the Ollama server applies its own
+    # default instead of a hard-coded -2 sentinel (issue #614).
+    assert chat_fallback.config["configurable"]["num_predict"] is None
 
     vision_model = entry.runtime_data.vision_model
     assert isinstance(vision_model, FallbackVLM)
     vlm_fallback = cast("FakeConfiguredModel", vision_model.chain[1][0])
     assert vlm_fallback.config["configurable"]["model"] == "llava-fallback"
     assert vlm_fallback.config["configurable"]["mirostat"] is not None
+    # VLM_NUM_PREDICT is None so the Ollama server applies its own default
+    # instead of a hard-coded -2 sentinel (issue #614).
+    assert vlm_fallback.config["configurable"]["num_predict"] is None
 
     summarization_model = entry.runtime_data.summarization_model
     assert isinstance(summarization_model, FallbackChatModel)
     summary_fallback = cast("FakeConfiguredModel", summarization_model.chain[1][0])
     assert summary_fallback.config["configurable"]["model"] == "qwen-summary-fallback"
-    assert summary_fallback.config["configurable"]["num_predict"] is not None
+    # SUMMARIZATION_MODEL_PREDICT is None so the Ollama server applies its
+    # own default instead of a hard-coded -2 sentinel (issue #614).
+    assert summary_fallback.config["configurable"]["num_predict"] is None
 
     embedding_chain = data.captured_embedding_chain["chain"]
     assert [model.name for model, _deployment, _provider_id in embedding_chain] == [
