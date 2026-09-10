@@ -555,7 +555,13 @@ RECOMMENDED_OLLAMA_CHAT_MODEL: CHAT_MODEL_OLLAMA_SUPPORTED = "gpt-oss"
 CONF_OLLAMA_CHAT_KEEPALIVE = "ollama_chat_keepalive"
 RECOMMENDED_OLLAMA_CHAT_KEEPALIVE: KeepAliveSeconds = 300
 CONF_OLLAMA_CHAT_CONTEXT_SIZE = "ollama_chat_context_size"
-CHAT_MODEL_MAX_TOKENS = -2  # Ollama only, -2 = fill context
+# Ollama only; None = let the server apply its own default (local: fill
+# context on current servers; Cloud: the model's default). A hard-coded -2
+# sentinel is rejected by the Ollama Cloud backend with "max_tokens must be
+# positive" (issue #614); langchain-ollama and the ollama client both drop
+# None options before the request is sent, so this is a no-op on local
+# servers that still accept -2.
+CHAT_MODEL_MAX_TOKENS = None
 CHAT_MODEL_REPEAT_PENALTY = 1.05  # Ollama only
 
 CONF_OPENAI_CHAT_MODEL = "openai_chat_model"
@@ -615,9 +621,11 @@ RECOMMENDED_OLLAMA_VLM: VLM_OLLAMA_SUPPORTED = "qwen3-vl:8b"
 CONF_OLLAMA_VLM_KEEPALIVE = "ollama_vlm_keepalive"
 RECOMMENDED_OLLAMA_VLM_KEEPALIVE: KeepAliveSeconds = 300
 CONF_OLLAMA_VLM_CONTEXT_SIZE = "ollama_vlm_context_size"
-VLM_NUM_PREDICT = (
-    -2
-)  # Ollama only, -2 = fill context; do not change — governs ad-hoc agent image analysis
+# Ollama only; None = let the server apply its own default (see
+# CHAT_MODEL_MAX_TOKENS for why -2 was replaced, issue #614). Governs ad-hoc
+# agent image analysis; not the same constant as VIDEO_VLM_NUM_PREDICT below,
+# which stays a fixed positive cap by design.
+VLM_NUM_PREDICT = None
 VIDEO_VLM_NUM_PREDICT: int = (
     256  # video-role token limit (see video-sentinel-priority-plan.md)
 )
@@ -743,9 +751,11 @@ RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL: SUMMARIZATION_MODEL_OLLAMA_SUPPORTED = (
 CONF_OLLAMA_SUMMARIZATION_KEEPALIVE = "ollama_summarization_keepalive"
 RECOMMENDED_OLLAMA_SUMMARIZATION_KEEPALIVE: KeepAliveSeconds = 300
 CONF_OLLAMA_SUMMARIZATION_CONTEXT_SIZE = "ollama_summarization_context_size"
-SUMMARIZATION_MODEL_PREDICT = (
-    -2
-)  # Ollama only, -2 = fill context; do not change — governs conversation summarization
+# Ollama only; None = let the server apply its own default (see
+# CHAT_MODEL_MAX_TOKENS for why -2 was replaced, issue #614). Governs
+# conversation summarization; not the same constant as
+# VIDEO_SUMMARY_NUM_PREDICT below, which stays a fixed positive cap by design.
+SUMMARIZATION_MODEL_PREDICT = None
 VIDEO_SUMMARY_NUM_PREDICT: int = (
     128  # video-role token limit (see video-sentinel-priority-plan.md)
 )

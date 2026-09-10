@@ -45,7 +45,7 @@ This document covers the named constants that affect integration behaviour, orga
 |---|---|---|---|
 | `CHAT_MODEL_TOP_P` | `const.py` | `1.0` | nucleus sampling p for chat |
 | `GEMINI_3_RECOMMENDED_TEMPERATURE` | `const.py` | `1.0` | Temperature bound to Gemini 3-family models (all features) when the feature temperature is still the recommended default; `top_p` is left unset in that case. An explicitly customized temperature is honored, with a logged warning |
-| `CHAT_MODEL_MAX_TOKENS` | `const.py` | `-2` | Ollama max tokens (`-2` = fill context) |
+| `CHAT_MODEL_MAX_TOKENS` | `const.py` | `None` | Ollama max tokens. `None` is dropped by langchain-ollama/ollama, so the server applies its own default (local: fill-context; Cloud: model default). Was `-2`, rejected by Ollama Cloud (issue #614). |
 | `CHAT_MODEL_REPEAT_PENALTY` | `const.py` | `1.05` | Ollama repeat penalty |
 | `OLLAMA_GPT_EFFORT` | `const.py` | `"low"` | Effort hint for `gpt-oss` reasoning tag |
 | `LANGCHAIN_LOGGING_LEVEL` | `const.py` | `"disable"` | LangChain debug verbosity (`disable`, `verbose`, `debug`) |
@@ -83,7 +83,7 @@ This document covers the named constants that affect integration behaviour, orga
 | Constant | File | Value | Purpose |
 |---|---|---|---|
 | `VLM_TOP_P` | `const.py` | `1.0` | Nucleus sampling p for VLM |
-| `VLM_NUM_PREDICT` | `const.py` | `-2` | Ollama token budget for agent image analysis (`-2` = fill context) |
+| `VLM_NUM_PREDICT` | `const.py` | `None` | Ollama token budget for agent image analysis. `None` lets the server apply its own default. Was `-2`, rejected by Ollama Cloud (issue #614). |
 | `VIDEO_VLM_NUM_PREDICT` | `const.py` | `256` | Token budget for proactive video frame descriptions. Capped intentionally to prevent video from monopolizing context. |
 | `VLM_REPEAT_PENALTY` | `const.py` | `1.05` | Ollama repeat penalty |
 | `VLM_MIRO_STAT` | `const.py` | `0` | Ollama mirostat setting |
@@ -121,7 +121,7 @@ This document covers the named constants that affect integration behaviour, orga
 | Constant | File | Value | Purpose |
 |---|---|---|---|
 | `SUMMARIZATION_MODEL_TOP_P` | `const.py` | `1.0` | Nucleus sampling p |
-| `SUMMARIZATION_MODEL_PREDICT` | `const.py` | `-2` | Ollama token budget for conversation summaries (`-2` = fill context) |
+| `SUMMARIZATION_MODEL_PREDICT` | `const.py` | `None` | Ollama token budget for conversation summaries. `None` lets the server apply its own default. Was `-2`, rejected by Ollama Cloud (issue #614). |
 | `VIDEO_SUMMARY_NUM_PREDICT` | `const.py` | `128` | Token budget for video batch summaries. Capped to prevent video from blocking other callers. |
 | `SUMMARIZATION_MODEL_REPEAT_PENALTY` | `const.py` | `1.05` | Ollama repeat penalty |
 | `SUMMARIZATION_MIRO_STAT` | `const.py` | `0` | Ollama mirostat setting |
