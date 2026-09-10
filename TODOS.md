@@ -2,6 +2,17 @@
 
 ## Agent
 
+### Ollama exact token count sends non-option keys inside `options`
+
+**What:** `_count_ollama_tokens` (`agent/token_counter.py`) copies `chat_model_options` wholesale into the `/api/generate` request's `options` object before overriding `num_predict` to 0. That dict also carries `keep_alive` and, when a reasoning model is configured, `reasoning`, which are top-level request parameters, not runner options. Ollama logs an invalid-option warning for each and ignores them, so the count still works, but the request is malformed on every exact count and a stricter server (Ollama Cloud rejects unknown values more readily, see [#614](https://github.com/goruck/home-generative-agent/issues/614)) could start refusing it.
+
+**Why:** Found during the [#620](https://github.com/goruck/home-generative-agent/pull/620) review; pre-existing and only reachable with `OLLAMA_EXACT_TOKEN_COUNT` on, so left out of v3.39.3. The fallback also degrades to an approximate count on failure, so nothing breaks today.
+
+**How to apply:** Pass only runner options (`num_ctx`, `temperature`, `top_p`, `repeat_penalty`, `mirostat`) into `options`, and send `keep_alive` at the top level of the body. Pin it with a test that captures the posted JSON.
+
+**Effort:** S
+**Priority:** P3
+
 ### Per-turn tool retrieval defeats cross-turn prompt caching
 
 **What:** Providers cache by exact prefix in the order `tools → system → messages`. v3.39.2 ([#617](https://github.com/goruck/home-generative-agent/issues/617)) made the system prompt's stable part cacheable and binds tools in name order, but Tool Retrieval still selects a per-request *set* of tools, so any turn whose retrieved set differs from the previous turn's cannot read the previous entry: `cache_read` is 0 again and the whole prefix is rewritten at the cache-write premium. Hits are guaranteed only within a turn (tool call → answer) and between turns that happen to retrieve the same set.

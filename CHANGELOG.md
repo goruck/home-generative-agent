@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.39.3] - 2026-09-10
+
+### Fixed
+
+- Ollama chat, ad-hoc image analysis, and conversation summarization no longer send `num_predict: -2` (Ollama's "fill context" sentinel). A model served by Ollama Cloud rejects it with `max_tokens must be positive, got: -2`, which failed every request on such a setup. The three agent-path output limits (`CHAT_MODEL_MAX_TOKENS`, `VLM_NUM_PREDICT`, `SUMMARIZATION_MODEL_PREDICT`) are now unset, so the option is omitted from the request and the server applies its own default. On a local Ollama server that is the same behaviour as before: `-2`, `-1`, and no value all stop at the same runner limit (verified against Ollama 0.32.13). On Ollama Cloud the model's own default applies. The video pipeline's fixed caps (`VIDEO_VLM_NUM_PREDICT`, `VIDEO_SUMMARY_NUM_PREDICT`) are unchanged. Thanks to [@hruba202](https://github.com/hruba202) for the report and the fix. ([#614](https://github.com/goruck/home-generative-agent/issues/614), [#620](https://github.com/goruck/home-generative-agent/pull/620))
+
 ## [3.39.2] - 2026-09-09
 
 ### Fixed
