@@ -12,6 +12,7 @@ workaround exists for, and the sharing that neutralises it.
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import logging
 import threading
 from typing import TYPE_CHECKING, Any
@@ -258,3 +259,45 @@ async def test_async_prime_builds_the_client_in_the_executor(sdk_ctor: Any) -> N
     copy = _per_call_copy(provider)
     assert copy._async_client is primed
     assert sdk_ctor.call_count == 1
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("anthropic.lib.credentials") is None,
+    reason="anthropic < 0.98 has no credential discovery; nothing to observe",
+)
+async def test_real_sdk_reads_the_credential_file_once_off_the_loop() -> None:
+    """
+    Issue #618 against the real SDK: no mocks around the client constructor.
+
+    Counts every read of ``~/.config/anthropic/active_config`` while priming
+    and then serving five per-request copies, and asserts one read total, on
+    an executor thread. This is the only test that fails on the SDK behaviour
+    itself; the others patch ``anthropic.AsyncClient`` and cannot.
+    """
+    from anthropic.lib.credentials import _constants as credentials  # noqa: PLC0415
+
+    reads: list[str] = []
+    real_read = credentials._read_active_config_pointer
+
+    def _counting_read() -> str | None:
+        reads.append(threading.current_thread().name)
+        return real_read()
+
+    class _Hass:
+        async def async_add_executor_job(
+            self, func: Callable[..., Any], *args: Any
+        ) -> Any:
+            return await asyncio.get_running_loop().run_in_executor(None, func, *args)
+
+    provider = _provider()
+    with patch.object(credentials, "_read_active_config_pointer", _counting_read):
+        await async_prime_async_client(_Hass(), provider.default)  # type: ignore[arg-type]
+        primed = provider.default._async_client
+        for _ in range(5):
+            copy = _per_call_copy(provider)
+            assert copy._async_client is primed
+            copy._async_client.platform_headers()
+
+    assert len(reads) == 1
+    assert reads[0] != threading.current_thread().name
+    assert "MainThread" not in reads
