@@ -2,17 +2,6 @@
 
 ## Agent
 
-### The `anthropic` SDK floats across 30 releases the test venv never sees
-
-**What:** `manifest.json` pins `langchain-anthropic==1.4.3`, which only constrains `anthropic` to `>=0.96.0,<1.0.0`. The dev venv sits on 0.97.0, the last release without `anthropic/lib/credentials/`; a fresh Home Assistant install resolves 0.125.0. Everything that module does at client construction (credential auto-discovery, the `active_config` read, the env-shadow warning) is invisible to `make test` and CI, which is why [#587](https://github.com/goruck/home-generative-agent/issues/587) and [#618](https://github.com/goruck/home-generative-agent/issues/618) were only ever seen on live boxes. `core/anthropic_client.py` now keeps that construction off the loop regardless of SDK version, but the blind spot itself remains.
-
-**Why:** Deferred from the #618 fix, which is a behaviour change, not a dependency decision. Pinning `anthropic` explicitly in `manifest.json` trades "silently newer on every install" for "must be bumped by hand", and `langchain-anthropic` may itself tighten the floor on its next release; the right pin depends on when that lands.
-
-**How to apply:** Either pin `anthropic==<tested version>` in `manifest.json` and add it to the `make testdeps` install so the venv and installs agree, or keep the float and add a CI job that installs the newest allowed `anthropic` and runs the provider tests (`test_anthropic_shared_client.py`) against it. Whichever is chosen, `make lint`'s manifest check should cover it.
-
-**Effort:** S
-**Priority:** P2
-
 ### Ollama exact token count sends non-option keys inside `options`
 
 **What:** `_count_ollama_tokens` (`agent/token_counter.py`) copies `chat_model_options` wholesale into the `/api/generate` request's `options` object before overriding `num_predict` to 0. That dict also carries `keep_alive` and, when a reasoning model is configured, `reasoning`, which are top-level request parameters, not runner options. Ollama logs an invalid-option warning for each and ignores them, so the count still works, but the request is malformed on every exact count and a stricter server (Ollama Cloud rejects unknown values more readily, see [#614](https://github.com/goruck/home-generative-agent/issues/614)) could start refusing it.

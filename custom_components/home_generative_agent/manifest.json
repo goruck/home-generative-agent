@@ -33,8 +33,9 @@
     "psycopg-pool==3.3.0",
     "transformers==4.57.1",
     "langchain-google-genai==3.1.0",
-    "langchain-anthropic==1.4.3"
+    "langchain-anthropic==1.4.3",
+    "anthropic==0.125.0"
   ],
   "single_config_entry": true,
-  "version": "3.39.5"
+  "version": "3.39.6"
 }

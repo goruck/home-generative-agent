@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.39.6] - 2026-09-11
+
+### Changed
+
+- The Anthropic SDK is now pinned (`anthropic==0.125.0`) instead of floating with `langchain-anthropic`, which only constrained it to a 30-release range. Every other runtime dependency was already pinned exactly; this one arrived as a transitive dependency, so each fresh install resolved whatever was newest that day while existing installs kept whatever they had first resolved. The development environment had settled on 0.97.0, the last release without the credential-discovery module, which is why the event-loop blocking fixed in v3.39.5 was only ever seen on live installs. The pinned version is the one that fix was verified against. Existing installs pick up the pin on this update. ([#618](https://github.com/goruck/home-generative-agent/issues/618), [#587](https://github.com/goruck/home-generative-agent/issues/587))
+- The test suite now runs in CI on every pull request and push to `main`, against the manifest's pinned runtime dependencies, and includes a test that exercises the real Anthropic SDK client constructor rather than a stand-in. Until now CI ran lint, Hassfest, HACS, and CodeQL only.
+
 ## [3.39.5] - 2026-09-11
 
 ### Fixed

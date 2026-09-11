@@ -13,3 +13,4 @@ psycopg-pool==3.3.0
 transformers==4.57.1
 langchain-google-genai==3.1.0
 langchain-anthropic==1.4.3
+anthropic==0.125.0
