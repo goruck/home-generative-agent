@@ -264,8 +264,12 @@ async def test_sentinel_admission_edge_marks_health_degraded_without_prior_succe
     """Sustained deferrals degrade health even if no Sentinel LLM run succeeded yet."""
     _idle().clear()
     health_stats: dict[str, object] = {}
-    now = time.monotonic()
-    monkeypatch.setattr(utils_mod, "_sentinel_first_defer", now - 400.0)
+    # time.monotonic() is seconds since boot on a fresh CI runner and can be
+    # below any fixed offset; a negative "first deferral" reads as "none yet"
+    # and starvation resets to zero. Lower the threshold instead of reaching
+    # hundreds of seconds into the past.
+    monkeypatch.setattr(utils_mod, "_SENTINEL_STARVATION_WARN_S", 1.0)
+    monkeypatch.setattr(utils_mod, "_sentinel_first_defer", time.monotonic() - 5.0)
 
     result = await utils_mod.sentinel_admission(
         "edge", category="triage", timeout_s=0.05, health_stats=health_stats
