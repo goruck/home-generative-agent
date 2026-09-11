@@ -14,6 +14,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 import custom_components.home_generative_agent as hga_component
 from custom_components.home_generative_agent.const import (
+    CONF_ANTHROPIC_API_KEY,
     CONF_CHAT_MODEL_PROVIDER,
     CONF_EMBEDDING_MODEL_PROVIDER,
     CONF_EXPLAIN_ENABLED,
@@ -684,3 +685,84 @@ async def test_setup_gemini3_chat_binds_recommended_temperature(
     assert fallback_config["model"] == "gemini-3.5-flash"
     assert fallback_config["temperature"] == GEMINI_3_RECOMMENDED_TEMPERATURE
     assert fallback_config["top_p"] is None
+
+
+def _anthropic_primary_setup_data() -> FallbackSetupData:
+    """Chat on Anthropic with an Ollama fallback; everything else on OpenAI."""
+    data = _fallback_setup_data()
+    anthropic_provider = ModelProviderConfig(
+        entry_id="anthropic1",
+        name="Anthropic",
+        provider_type="anthropic",
+        capabilities={"chat"},
+        data={"settings": {"api_key": "sk-ant-test"}},
+        deployment="cloud",
+    )
+    data.providers[anthropic_provider.entry_id] = anthropic_provider
+    data.options[CONF_CHAT_MODEL_PROVIDER] = "anthropic"
+    data.options[CONF_ANTHROPIC_API_KEY] = "sk-ant-test"
+    data.fallback_chains["chat"] = [anthropic_provider, data.providers["ollama1"]]
+    return data
+
+
+def _patch_anthropic_provider(
+    monkeypatch: pytest.MonkeyPatch, prime: Any
+) -> FakeRunnable:
+    """Make Anthropic healthy, stub its model class, and install ``prime``."""
+
+    async def _healthy(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    fake = FakeRunnable("anthropic")
+    monkeypatch.setattr(hga_component, "anthropic_healthy", _healthy)
+    monkeypatch.setattr(
+        hga_component, "SharedClientChatAnthropic", lambda *_a, **_kw: fake
+    )
+    monkeypatch.setattr(hga_component, "async_prime_async_client", prime)
+    return fake
+
+
+@pytest.mark.asyncio
+async def test_setup_primes_the_anthropic_client_before_publishing_it(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The SDK client is primed once, off the loop, on the instance the chain uses."""
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _anthropic_primary_setup_data()
+    _patch_setup_dependencies(hass, monkeypatch, data)
+    prime = AsyncMock()
+    fake = _patch_anthropic_provider(monkeypatch, prime)
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry) is True
+
+    prime.assert_awaited_once_with(hass, fake)
+    chat_model = entry.runtime_data.chat_model
+    assert isinstance(chat_model, FallbackChatModel)
+    primary = cast("FakeConfiguredModel", chat_model.chain[0][0])
+    assert primary.base is fake
+    assert chat_model.chain[0][2] == "anthropic1"
+
+
+@pytest.mark.asyncio
+async def test_setup_drops_the_anthropic_provider_when_priming_fails(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A client that cannot be built off the loop is never built on it (#618)."""
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _anthropic_primary_setup_data()
+    _patch_setup_dependencies(hass, monkeypatch, data)
+    prime = AsyncMock(side_effect=RuntimeError("executor down"))
+    fake = _patch_anthropic_provider(monkeypatch, prime)
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry) is True
+
+    prime.assert_awaited_once()
+    assert fake.configured == []
+    chat_model = entry.runtime_data.chat_model
+    assert isinstance(chat_model, FakeConfiguredModel)
+    assert chat_model.base.name == "ollama"
+    assert "Anthropic provider init failed; continuing without it." in caplog.text
