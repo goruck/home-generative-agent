@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.39.5] - 2026-09-11
+
+### Fixed
+
+- Conversations on the Anthropic provider no longer block Home Assistant's event loop on every turn. Each request was constructing a fresh Anthropic SDK client on the loop, and since anthropic 0.98 that constructor reads `~/.config/anthropic/active_config` from disk to warn about environment-shadowed credentials, which Home Assistant flags as a stability problem. The cause is that the provider is wrapped in `configurable_fields`, and LangChain honours per-call configuration by rebuilding the model object on every call, which discarded the lazily cached client each time. Home Assistant reports each blocking call site once per start and then only at debug level, so the log made it look like a one-off. The client is now built once, in a worker thread, before the provider is published, and every per-request copy inherits it; the SDK's platform headers, which read `/etc/os-release` on the first request, are computed there too. If that build fails at setup the Anthropic provider is left unset and the fallback chain takes over, instead of every turn retrying the build on the loop. Thanks to [@andrewvlahopoulos](https://github.com/andrewvlahopoulos) for the report. ([#618](https://github.com/goruck/home-generative-agent/issues/618), [#587](https://github.com/goruck/home-generative-agent/issues/587))
+- The test suite cannot observe this behaviour: the development environment resolves anthropic 0.97.0, the last release without the credential-discovery module, while a fresh install resolves 0.125.0. The fix was verified against 0.125.0 directly; pinning or CI-testing the newest allowed SDK is filed as a follow-up in `TODOS.md`.
+
 ## [3.39.4] - 2026-09-10
 
 ### Fixed
