@@ -50,23 +50,7 @@ from homeassistant.helpers.target import (
 )
 from homeassistant.util import dt as dt_util
 from homeassistant.util.ssl import SSL_ALPN_HTTP11, client_context
-from langchain_anthropic import ChatAnthropic
 from langchain_core.runnables import ConfigurableField
-
-# langchain_anthropic caches the sync httpx client with @lru_cache but omits it
-# for the async path, causing a repeated blocking SSL context creation inside the
-# HA event loop. Patch parity: cache the async function the same way.
-try:
-    import langchain_anthropic.chat_models as _lc_anthropic_chat
-
-    if not hasattr(_lc_anthropic_chat._get_default_async_httpx_client, "cache_info"):  # noqa: SLF001  # type: ignore[reportPrivateImportUsage]
-        from functools import lru_cache as _lru_cache
-
-        _lc_anthropic_chat._get_default_async_httpx_client = _lru_cache(  # noqa: SLF001  # type: ignore[reportPrivateImportUsage]
-            _lc_anthropic_chat._get_default_async_httpx_client  # noqa: SLF001  # type: ignore[reportPrivateImportUsage]
-        )
-except Exception:  # noqa: BLE001, S110
-    pass
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
@@ -251,6 +235,7 @@ from .const import (
     VLM_REPEAT_PENALTY,
     VLM_TOP_P,
 )
+from .core.anthropic_client import SharedClientChatAnthropic, async_prime_async_client
 from .core.database_guard import (
     async_clear_database_issue,
     async_sync_database_issue,
@@ -2053,30 +2038,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         # stable system prefix gets its own explicit breakpoint per call in
         # core/prompt_cache.py (issue #617).
         try:
-            anthropic_provider = ChatAnthropic(  # type: ignore[call-arg]
+            anthropic_chat = SharedClientChatAnthropic(  # type: ignore[call-arg]
                 anthropic_api_key=anthropic_secret,  # type: ignore[call-arg]
                 model=RECOMMENDED_ANTHROPIC_CHAT_MODEL,  # type: ignore[call-arg]
                 model_kwargs={"cache_control": dict(CACHE_CONTROL_EPHEMERAL)},
                 streaming=True,
-            ).configurable_fields(
+            )
+            # Build the SDK client (and its SSL context) in a thread once,
+            # BEFORE the provider is published: the per-request copies
+            # configurable_fields makes inherit it instead of constructing
+            # their own on the event loop (issues #587, #618). If the build
+            # fails here it would fail the same way on the loop, so the
+            # provider stays unset and the fallback chain takes over.
+            await async_prime_async_client(hass, anthropic_chat)
+            anthropic_provider = anthropic_chat.configurable_fields(
                 model=ConfigurableField(id="model"),
                 temperature=ConfigurableField(id="temperature"),
                 thinking=ConfigurableField(id="thinking"),
                 max_tokens=ConfigurableField(id="max_tokens"),
             )
-            # Pre-warm the now-cached async httpx client in a thread so the first
-            # API call doesn't trigger a blocking SSL context load in the event loop.
-            _warm_fn = getattr(
-                globals().get("_lc_anthropic_chat"),
-                "_get_default_async_httpx_client",
-                None,
-            )
-            if callable(_warm_fn):
-                await hass.async_add_executor_job(
-                    partial(
-                        _warm_fn, base_url="https://api.anthropic.com", timeout=None
-                    )
-                )
         except Exception:
             LOGGER.exception("Anthropic provider init failed; continuing without it.")
 

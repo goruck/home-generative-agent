@@ -32,7 +32,7 @@ def test_openai_provider_has_stream_usage_true() -> None:
 
 def test_anthropic_provider_has_streaming_true() -> None:
     """ChatAnthropic construction includes streaming=True."""
-    block = _provider_block("anthropic_provider = ChatAnthropic(")
+    block = _provider_block("anthropic_chat = SharedClientChatAnthropic(")
     assert "streaming=True" in block
 
 
@@ -43,9 +43,14 @@ def test_openai_provider_http_client_preserved() -> None:
     assert "http_async_client=http_async_client" in block
 
 
-def test_anthropic_provider_prewarm_preserved() -> None:
-    """Anthropic async-client pre-warm call is still present after streaming change."""
-    assert "_get_default_async_httpx_client" in _INIT
+def test_anthropic_provider_primed_before_publish() -> None:
+    """The SDK client is primed off the loop before the provider exists (#587, #618)."""
+    start = _INIT.index("anthropic_chat = SharedClientChatAnthropic(")
+    end = _INIT.index("except Exception:", start)
+    block = _INIT[start:end]
+    prime = block.index("await async_prime_async_client(hass, anthropic_chat)")
+    publish = block.index("anthropic_provider = anthropic_chat.configurable_fields(")
+    assert prime < publish
 
 
 async def test_stream_usage_metadata_flows_through_invoke_model() -> None:
