@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.41.2] - 2026-09-12
+
+### Fixed
+
+- Two tools were offered to the model with no parameters whenever the tool index was unavailable. `upsert_memory` and `confirm_sensitive_action` take arguments that LangGraph injects at runtime rather than asking the model for, and the schema those two carry cannot be turned into JSON — so the fallback that runs when the tool index is still building or the database is unreachable gave up on them and advertised both as taking no arguments at all. The model was then invited to call the critical-action PIN gate, and the memory tool, with nothing in them. This path is hit at startup before indexing finishes and any time PostgreSQL is down, which is exactly when a working fallback matters most. The startup indexing path already got this right; both paths now share one schema extractor, so they cannot drift apart again. A tool whose schema cannot be read is now logged instead of silently becoming argument-free, one unreadable schema can no longer cost the turn every other fallback tool, and the extracted schema is cached per tool so the fallback is faster than before the fix. Contributed by [@MaestroMetty](https://github.com/MaestroMetty). ([#630](https://github.com/goruck/home-generative-agent/pull/630))
+
 ## [3.41.1] - 2026-09-12
 
 ### Fixed
