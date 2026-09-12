@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib
+import json
 import logging
 import re
+import weakref
 from dataclasses import replace
 from datetime import datetime, timedelta
+from functools import partial
 from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict
 
 import homeassistant.util.dt as dt_util
@@ -14,6 +18,7 @@ import voluptuous as vol
 from homeassistant.const import CONF_LLM_HASS_API
 from homeassistant.helpers import llm
 from homeassistant.util import ulid
+from pydantic import PydanticInvalidForJsonSchema
 
 from custom_components.home_generative_agent.const import (
     ACTUATION_LANGCHAIN_TOOLS,
@@ -759,6 +764,129 @@ def split_tool_index_key(key: str) -> tuple[str, str] | None:
     if not sep or not api_id or not name:
         return None
     return api_id, name
+
+
+_SCHEMA_ERRORS = (
+    AttributeError,
+    TypeError,
+    ValueError,
+    PydanticInvalidForJsonSchema,
+)
+
+_EMPTY_SCHEMA = "{}"
+
+# Memo of the extracted schema string, keyed by tool identity.  ``BaseTool`` is
+# a Pydantic model, so it is neither hashable nor usable as a WeakKeyDictionary
+# key -- hence id() plus a weakref that proves the id still names the object it
+# was recorded for.  Without that proof a freed tool's recycled id would serve
+# a stale schema to whatever object landed on the address next.
+_schema_memo: dict[int, tuple[weakref.ReferenceType[Any], str]] = {}
+
+
+def _drop_schema_memo(key: int, dead: weakref.ReferenceType[Any]) -> None:
+    """Evict a memo entry once its tool is collected."""
+    # The local tools are singletons, so in practice nothing is ever evicted.
+    # This exists so the memo cannot become a leak if per-turn tool objects
+    # (an MCP set rebuilt each turn) are ever routed through here: the weakref
+    # would die while its dict entry lived on forever.  Guarded on identity so
+    # a late callback cannot delete the entry of a live tool that has already
+    # claimed the recycled id.
+    if _schema_memo.get(key, (None, ""))[0] is dead:
+        del _schema_memo[key]
+
+
+def _dump_json_schema(schema_obj: Any) -> str:
+    """Serialize a dict or Pydantic model to a JSON-schema string."""
+    if isinstance(schema_obj, dict):
+        try:
+            return json.dumps(schema_obj, sort_keys=True)
+        except (TypeError, ValueError):
+            return _EMPTY_SCHEMA
+    try:
+        model_json_schema = getattr(schema_obj, "model_json_schema", None)
+        if callable(model_json_schema):
+            dumped = model_json_schema()
+            if isinstance(dumped, dict):
+                return json.dumps(dumped, sort_keys=True)
+        schema_func = getattr(schema_obj, "schema", None)
+        if callable(schema_func):
+            dumped = schema_func()
+            if isinstance(dumped, dict):
+                return json.dumps(dumped, sort_keys=True)
+    except _SCHEMA_ERRORS:
+        return _EMPTY_SCHEMA
+    return _EMPTY_SCHEMA
+
+
+def _extract_tool_parameters_json(lc_tool: Any) -> str:
+    """Extract the model-facing schema string for one tool (uncached)."""
+    # getattr() evaluates tool_call_schema, which is a *computed* property --
+    # it runs get_input_schema() + _create_subset_model() on every access -- so
+    # the access itself has to sit inside the guard, not just the serialization.
+    # Its default only swallows AttributeError; anything else the property
+    # raises would otherwise escape into _get_fallback_tools(), which has no
+    # guard of its own and would lose every tool in the turn over one bad
+    # schema instead of just that tool's parameters.
+    try:
+        tool_call_schema = getattr(lc_tool, "tool_call_schema", None)
+        if tool_call_schema is not None:
+            return _dump_json_schema(tool_call_schema)
+        args_schema = getattr(lc_tool, "args_schema", None)
+        if args_schema is not None:
+            return _dump_json_schema(args_schema)
+    except _SCHEMA_ERRORS:
+        return _EMPTY_SCHEMA
+    return _EMPTY_SCHEMA
+
+
+def langchain_tool_parameters_json(lc_tool: Any) -> str:
+    """
+    Return the model-facing JSON schema for a LangChain tool.
+
+    Prefers ``tool_call_schema``, which excludes ``InjectedToolArg`` /
+    ``InjectedStore`` fields (``config``, ``store``, ``BaseStore``) that must
+    not be shown to the model and cannot be serialized. ``args_schema`` is
+    used only when ``tool_call_schema`` is absent, so a failed injected-arg
+    schema never falls through to ``args_schema.schema()``.
+
+    Memoized per tool object because ``tool_call_schema`` is an *uncached*
+    property that rebuilds a Pydantic subset model on every read -- ~2.9x the
+    cost of the ``args_schema.schema()`` call it replaces (16.4ms against
+    5.7ms for the ten local tools).  ``_get_fallback_tools()`` runs once per
+    always-included tool on ``_get_tool_by_name()``'s miss path, so that delta
+    is multiplied by up to ``TOOL_INCLUSIONS_MAX_PER_TURN`` on the very path
+    that already exists because rebuilding local schemas per lookup is
+    wasteful.  The local tools are module-level singletons with static
+    schemas, so one extraction per object is all that is ever needed.
+
+    An empty ``{}`` is returned -- and logged -- when no schema can be
+    extracted.  The log line matters: ``{}`` is indistinguishable downstream
+    from a tool that genuinely takes no arguments (``_format_and_dedupe_tools``
+    normalizes it to ``{"type": "object", "properties": {}}``), which is
+    exactly how ``upsert_memory`` and ``confirm_sensitive_action`` were
+    silently advertised to the model as argument-free on the fallback path.
+    """
+    key = id(lc_tool)
+    cached = _schema_memo.get(key)
+    if cached is not None and cached[0]() is lc_tool:
+        return cached[1]
+
+    params = _extract_tool_parameters_json(lc_tool)
+    if params == _EMPTY_SCHEMA:
+        LOGGER.warning(
+            "No JSON schema could be extracted for tool %s; it will be offered "
+            "to the model with no parameters",
+            sanitize_tool_text(str(getattr(lc_tool, "name", "?")), limit=200),
+        )
+
+    # Not weak-referenceable: correctness does not depend on the memo, so a
+    # tool that cannot be tracked simply pays the extraction cost every time.
+    with contextlib.suppress(TypeError):
+        _schema_memo[key] = (
+            weakref.ref(lc_tool, partial(_drop_schema_memo, key)),
+            params,
+        )
+    return params
 
 
 def format_tool(
