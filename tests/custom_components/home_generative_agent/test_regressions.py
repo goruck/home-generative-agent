@@ -470,9 +470,10 @@ async def test_call_model_preserves_newlines_in_reply(
         "1. **Add-ons** - text.\n"
         "2. **Locks** - text.\n"
     )
+    raw_reply = formatted
 
     async def _fake_invoke_model(*_args: object, **_kwargs: object) -> AIMessage:
-        return AIMessage(content=f"<think>reasoning</think>{formatted}")
+        return AIMessage(content=raw_reply)
 
     async def _fake_trim(
         messages: list[object], *_args: object, **_kwargs: object
@@ -508,8 +509,16 @@ async def test_call_model_preserves_newlines_in_reply(
         }
     }
 
+    # No <think> block: the reply must survive byte-for-byte, trailing newline
+    # included, or it differs from the streamed copy and replace_partial fires.
     result = await agent_graph._call_model(state, config, store=mock_store)  # type: ignore[arg-type]
+    ai_msg = result["messages"]
+    assert isinstance(ai_msg, AIMessage)
+    assert ai_msg.content == formatted
 
+    # Leaked reasoning is still stripped, along with the whitespace it leaves.
+    raw_reply = f"<think>reasoning</think>\n\n{formatted}"
+    result = await agent_graph._call_model(state, config, store=mock_store)  # type: ignore[arg-type]
     ai_msg = result["messages"]
     assert isinstance(ai_msg, AIMessage)
     assert ai_msg.content == formatted.strip()
