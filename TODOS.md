@@ -241,6 +241,40 @@ values back on submit, so no exclusion is lost by opening and saving the form.
 
 ---
 
+### The model invents a PIN before the user supplies one
+
+**What:** Field test 2026-09-12 on the live box, qwen3.8 local. "Unlock the
+garage door lock." correctly hit the PIN gate (`status: requires_pin`), and the
+model then called `confirm_sensitive_action(action_id=..., pin="1234")` in the
+SAME turn, before the user had said anything. The gate rejected it ("Incorrect
+PIN. Action not executed.") and the user's real PIN worked on the next turn, so
+nothing unsafe happened — but the guess consumed one of the five attempts
+(`max_pin_attempts = 5`, agent/tools.py:986) before the user had typed a digit.
+
+**Why:** The system prompt already forbids it in as many words: "Never guess or
+invent a PIN. Do not proceed without a PIN." A small local model did it anyway.
+The lesson recorded on issue #571 applies exactly — a prompt clause forbidding a
+shape that is still being emitted is not enforcement; enforce it
+deterministically instead of adding another sentence.
+
+Practical impact today is a wasted attempt, not a bypass: PINs are 4-10 digits,
+so five attempts against even a 4-digit PIN is a 0.05% chance. It gets worse if
+a model emits several guesses across a multi-round turn, which
+`_MAX_ACTION_ROUNDS = 3` permits.
+
+**How to apply:** Reject a `confirm_sensitive_action` call whose PIN did not
+come from a user message in this turn — the pending-action record already
+carries the requesting user, so the guard can require that a HumanMessage
+arrived after the `requires_pin` ToolMessage before any attempt is counted. A
+model-supplied PIN with no intervening user turn should be refused WITHOUT
+incrementing `attempts`, so a chatty model cannot burn the user's budget.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** v3.41.1
+
+---
+
 ### v3.41.1 review findings left unfixed (eviction robustness, base-name over-match)
 
 **What:** The pre-landing review of v3.41.1 (5 specialists + Codex) confirmed
