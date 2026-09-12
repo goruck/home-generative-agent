@@ -65,6 +65,22 @@ from custom_components.home_generative_agent.conversation import (
     _sanitize_tool_result_dict,
     _stream_langgraph_to_ha,
 )
+from custom_components.home_generative_agent.core.utils import extract_final
+
+
+async def _streamed_text(event_stream: AsyncGenerator[dict[str, Any]]) -> str:
+    """
+    Accumulate deltas the way HA's chat_log does.
+
+    ChatLog.async_add_delta_content_stream builds the committed AssistantContent
+    with `current_content += delta_content` — verbatim concatenation, no
+    separator and no stripping.
+    """
+    text = ""
+    async for delta in _stream_langgraph_to_ha(event_stream, "agent_1"):
+        if chunk := cast("dict[str, Any]", delta).get("content"):
+            text += chunk
+    return text
 
 
 @pytest.mark.asyncio
@@ -831,3 +847,94 @@ def test_normalize_tool_result_ha_intent_string() -> None:
     assert result["result"] == "Turned on Garage Light"
     assert "response_type" not in result
     assert "speech" not in result
+
+
+# ---------------------------------------------------------------------------
+# Issue #628: the streamed copy and the graph-state copy must be byte-identical
+# ---------------------------------------------------------------------------
+# _async_run_astream compares chat_log's committed text against the final
+# AIMessage from graph state and, when they differ, assumes a mid-stream model
+# fallback produced a new answer and replaces the chat_log entry. _call_model
+# builds that graph-state text with extract_final(..., collapse_whitespace=False).
+# These tests pin both sides of that comparison: nothing in the suite covered it,
+# so a normalization change on either side would silently reintroduce #628.
+
+
+@pytest.mark.asyncio
+async def test_streamed_text_matches_graph_state_for_multiline_reply() -> None:
+    """A streamed markdown reply must equal its extract_final graph-state copy."""
+    reply = (
+        "Here's your security audit:\n\n"
+        "**High severity:**\n\n"
+        "1. **Add-ons** - text.\n"
+        "2. **Locks** - text.\n"
+    )
+
+    async def event_stream() -> AsyncGenerator[dict[str, Any]]:
+        yield {"event": "on_chat_model_start", "metadata": {"langgraph_node": "agent"}}
+        # Providers split a reply at arbitrary points, including inside a line.
+        for piece in (reply[:20], reply[20:47], reply[47:]):
+            yield {
+                "event": "on_chat_model_stream",
+                "metadata": {"langgraph_node": "agent"},
+                "data": {"chunk": AIMessageChunk(content=piece)},
+            }
+        yield {
+            "event": "on_chat_model_end",
+            "metadata": {"langgraph_node": "agent"},
+            "data": {"output": AIMessage(content=reply)},
+        }
+
+    streamed = await _streamed_text(event_stream())
+    graph_state = extract_final(reply, collapse_whitespace=False)
+
+    assert streamed == reply
+    assert streamed == graph_state
+
+
+@pytest.mark.asyncio
+async def test_streamed_text_matches_graph_state_for_anthropic_blocks() -> None:
+    """Multiple content blocks must join the same way on both sides."""
+    blocks: list[Any] = [
+        {"type": "thinking", "thinking": "reasoning"},
+        {"type": "text", "text": "First paragraph.\n\n"},
+        {"type": "text", "text": "Second paragraph.\n"},
+    ]
+
+    async def event_stream() -> AsyncGenerator[dict[str, Any]]:
+        yield {"event": "on_chat_model_start", "metadata": {"langgraph_node": "agent"}}
+        for block in blocks:
+            yield {
+                "event": "on_chat_model_stream",
+                "metadata": {"langgraph_node": "agent"},
+                "data": {"chunk": AIMessageChunk(content=[block])},
+            }
+        yield {
+            "event": "on_chat_model_end",
+            "metadata": {"langgraph_node": "agent"},
+            "data": {"output": AIMessage(content=blocks)},
+        }
+
+    streamed = await _streamed_text(event_stream())
+    graph_state = extract_final(blocks, collapse_whitespace=False)
+
+    assert streamed == "First paragraph.\n\nSecond paragraph.\n"
+    assert streamed == graph_state
+
+
+@pytest.mark.asyncio
+async def test_nonstreaming_text_matches_graph_state_for_multiline_reply() -> None:
+    """The on_chat_model_end fallback path must agree with graph state too."""
+    reply = "Line one.\n\n- bullet\n- bullet\n"
+
+    async def event_stream() -> AsyncGenerator[dict[str, Any]]:
+        yield {"event": "on_chat_model_start", "metadata": {"langgraph_node": "agent"}}
+        yield {
+            "event": "on_chat_model_end",
+            "metadata": {"langgraph_node": "agent"},
+            "data": {"output": AIMessage(content=reply)},
+        }
+
+    streamed = await _streamed_text(event_stream())
+
+    assert streamed == extract_final(reply, collapse_whitespace=False)

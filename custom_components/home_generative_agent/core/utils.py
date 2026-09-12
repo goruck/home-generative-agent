@@ -59,6 +59,15 @@ LOGGER = logging.getLogger(__name__)
 
 _THINK_BLOCK = re.compile(r"<think>.*?(?:</think>|$)", re.IGNORECASE | re.DOTALL)
 
+# The last whitespace character of a string: the word boundary extract_final
+# truncates on. A plain rfind(" ") misses it when newlines are preserved.
+_LAST_WHITESPACE = re.compile(r"\s(?=\S*\Z)")
+
+# Trailing whitespace and dangling punctuation left by a max_chars cut. A
+# plain rstrip(" ,;") leaves a newline or tab behind when whitespace is
+# preserved, and cannot strip a space that sits behind a comma.
+_TRAILING_PUNCT_OR_SPACE = re.compile(r"[\s,;]+\Z")
+
 # ---------------------------
 # Exceptions
 # ---------------------------
@@ -1122,30 +1131,62 @@ def gemini_sampling_configurable(
     return {"temperature": temperature, "top_p": top_p}
 
 
-def extract_final(raw: str | list[Any], max_chars: int | None = None) -> str:
-    """Return plain text with <think> blocks removed."""
+def extract_final(
+    raw: str | list[Any],
+    max_chars: int | None = None,
+    *,
+    collapse_whitespace: bool = True,
+) -> str:
+    """
+    Return plain text with <think> blocks removed.
+
+    ``collapse_whitespace`` (default True) folds every whitespace run into a
+    single space and joins content blocks with a space, which is what the
+    one-line consumers want (notifications, triage/discovery verdicts,
+    explanations, video summaries).
+
+    The conversation agent must pass False. Its text is rendered as markdown in
+    the chat UI and is also compared byte-for-byte against the streamed copy to
+    detect a mid-stream model fallback, so with False this returns the model's
+    text verbatim apart from removed <think> blocks: whitespace runs, leading
+    and trailing whitespace, and the block join all match what the streaming
+    path delivers to HA's chat_log. Collapsing instead made that comparison
+    fire on every multi-line turn and flattened the reply (issue #628).
+    """
     if not raw:
         return ""
     if isinstance(raw, list):
-        raw = " ".join(
+        # Anthropic returns one text block per contiguous run of text, and the
+        # streaming path emits one delta per block which HA's chat_log
+        # concatenates with no separator. The agent path must join the same way
+        # or its copy differs from the streamed one by the separator alone. The
+        # one-line callers keep the space so adjacent blocks cannot run
+        # together in a notification.
+        raw = (" " if collapse_whitespace else "").join(
             part["text"]
             for part in raw
             if isinstance(part, dict) and isinstance(part.get("text"), str)
         )
     # Remove any leaked reasoning
-    s = _THINK_BLOCK.sub("", raw)
-    # Collapse whitespace
-    s = re.sub(r"\s+", " ", s).strip()
+    s, think_blocks_removed = _THINK_BLOCK.subn("", raw)
+    if collapse_whitespace:
+        s = re.sub(r"\s+", " ", s).strip()
+    elif think_blocks_removed:
+        # Strip only the whitespace the removed <think> block left behind. The
+        # model's own leading and trailing whitespace has to survive, or the
+        # agent copy differs from the streamed copy on any reply that ends in a
+        # newline (most of them) and the fallback check fires anyway (#628).
+        s = s.strip()
     # Char-limit (if specified)
     if max_chars is None:
         return s
     if len(s) <= max_chars:
         return s
     segment = s[:max_chars]
-    last_space = segment.rfind(" ")
-    if last_space > 0:
-        return segment[:last_space].rstrip(" ,;")
-    return segment.rstrip(" ,;")
+    last_space = _LAST_WHITESPACE.search(segment)
+    if last_space is not None and last_space.start() > 0:
+        segment = segment[: last_space.start()]
+    return _TRAILING_PUNCT_OR_SPACE.sub("", segment)
 
 
 def _close_pending_coroutines(tasks: list[Any]) -> None:

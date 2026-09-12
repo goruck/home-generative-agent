@@ -86,6 +86,72 @@ def test_extract_final_empty_list_returns_empty_string() -> None:
     assert extract_final([]) == ""
 
 
+def test_extract_final_collapses_whitespace_by_default() -> None:
+    # The notification/summary callers want one line of text.
+    assert extract_final("line one\n\nline two") == "line one line two"
+
+
+def test_extract_final_no_collapse_preserves_newlines() -> None:
+    # Issue #628: the agent path must keep markdown formatting intact.
+    text = "Heading:\n\n1. first\n2. second"
+    assert extract_final(text, collapse_whitespace=False) == text
+
+
+def test_extract_final_no_collapse_still_strips_think_and_edges() -> None:
+    raw = "<think>reasoning</think>\n\nfirst\nsecond\n"
+    assert extract_final(raw, collapse_whitespace=False) == "first\nsecond"
+
+
+def test_extract_final_no_collapse_max_chars_cuts_at_newline() -> None:
+    result = extract_final(
+        "first line\nsecond line", max_chars=14, collapse_whitespace=False
+    )
+    assert result == "first line"
+
+
+def test_extract_final_no_collapse_keeps_trailing_newline() -> None:
+    # Most models end a reply with a newline; stripping it alone was enough to
+    # make the streamed and graph-state copies differ (issue #628).
+    assert extract_final("Reply text.\n", collapse_whitespace=False) == "Reply text.\n"
+
+
+def test_extract_final_no_collapse_keeps_leading_indent() -> None:
+    text = "    indented code block\nmore"
+    assert extract_final(text, collapse_whitespace=False) == text
+
+
+def test_extract_final_no_collapse_strips_only_think_residue() -> None:
+    # A removed <think> block leaves whitespace behind that the model never
+    # emitted, so that case still strips.
+    assert extract_final("<think>r</think>\n\nAnswer\n", collapse_whitespace=False) == (
+        "Answer"
+    )
+
+
+def test_extract_final_no_collapse_joins_blocks_without_separator() -> None:
+    # The streaming path emits one delta per content block and HA concatenates
+    # them with no separator, so the agent copy must join the same way.
+    blocks: list[Any] = [
+        {"type": "thinking", "thinking": "hm"},
+        {"type": "text", "text": "Hello"},
+        {"type": "text", "text": " world"},
+    ]
+    assert extract_final(blocks, collapse_whitespace=False) == "Hello world"
+
+
+def test_extract_final_no_collapse_max_chars_leaves_no_dangling_whitespace() -> None:
+    assert (
+        extract_final(
+            "para one\n\nsecond para", max_chars=12, collapse_whitespace=False
+        )
+        == "para one"
+    )
+    assert (
+        extract_final("line\t \tnext word", max_chars=10, collapse_whitespace=False)
+        == "line"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Fake HTTP helpers
 # ---------------------------------------------------------------------------

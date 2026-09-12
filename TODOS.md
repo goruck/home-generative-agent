@@ -291,6 +291,45 @@ And two writer-consistency gaps: (7) `_mark_tool_index_stale` (embedding-provide
 
 ---
 
+### Leaked `<think>` reasoning can become the final chat reply
+
+**What:** The streaming path commits model text to `chat_log` verbatim — `_stream_langgraph_to_ha` / `_nonstreaming_text` never run it through `extract_final`. Only the graph-state copy is cleaned. When a response is entirely reasoning (a `<think>` block with no closing tag, or think-only output), `extract_final` returns `""`, `_normalize_ai_content("")` returns `None`, so `_async_run_astream` takes neither the `replace_partial` nor the `add_recovered` branch and the raw `<think>` text stays as the user-visible reply. Reasoning emitted before a tool call likewise stays in Show Details, since recovery only inspects the final assistant entry.
+
+**Why:** Found by the Codex adversarial pass on the #628 branch; pre-existing, not introduced by it. #628 makes the normal path byte-identical, which leaves this as the remaining case where the streamed and cleaned copies diverge. User-visible: raw chain-of-thought rendered in chat and spoken by voice pipelines.
+
+**How to apply:** Strip `<think>` in the delta path rather than only in `_call_model`, which needs a small state machine — an opening tag can arrive in one delta and its closing tag several deltas later, so the generator has to suppress text between them and handle a stream that ends mid-block. Alternatively, in `_async_run_astream`, treat an empty `recovered_content` with a non-empty last `AssistantContent` as a signal to replace with the "Done."-style fallback instead of leaving raw reasoning. Add a test for the unclosed-`<think>` case.
+
+**Effort:** M
+**Priority:** P2
+
+---
+
+### `replace_partial` drops tool calls when it re-commits the last entry
+
+**What:** `_async_run_astream`'s `replace_partial` branch (`conversation.py`) pops `chat_log.content[-1]` and re-adds it via `async_add_assistant_content_without_tools` with only `content` set. The guard checks `isinstance(..., AssistantContent)` but not `.tool_calls`, so if the last entry carries tool calls they are silently discarded. `_recommit_final_assistant_content` does guard on `not ...tool_calls`; this branch does not.
+
+**Why:** Found by the `/code-review` pass on the #628 branch; pre-existing. Hard to hit today because a turn normally ends on a text-only reply, but #628's byte-identity work is what makes it clear this branch should be rare, and any future change that makes it fire on a tool-calling turn would corrupt Show Details.
+
+**How to apply:** Mirror the `_recommit_final_assistant_content` guard — skip the replacement (or carry the tool calls through) when the popped entry has `tool_calls`.
+
+**Effort:** S
+**Priority:** P3
+
+---
+
+### Streaming path skips the post-processing the ainvoke path applies
+
+**What:** `_async_run_invoke` runs the final text through `_fix_entity_ids_in_text`, and through `_maybe_fix_dashboard_entities` + `_convert_schema_json_to_yaml` when `schema_first_yaml` is on. `_async_run_astream` applies none of these — the deltas go to `chat_log` raw.
+
+**Why:** The two paths return different text for the same model output, so entity-ID repair and YAML conversion are silently unavailable to every streaming user. Noted while fixing #628 (the same streamed-vs-state divergence, from the other direction).
+
+**How to apply:** Post-processing cannot run per-delta without breaking incremental rendering. Either apply it to the committed `AssistantContent` after the stream flushes (and accept one corrected re-commit), or move the repair upstream into `_call_model` so both paths inherit it — the latter also keeps the graph-state and streamed copies identical.
+
+**Effort:** M
+**Priority:** P2
+
+---
+
 ### Integration tests for streaming conversation path (HA fixture level)
 
 **What:** Add four HA-fixture-level integration tests using a real (mocked) LangGraph + HA conversation entity: (1) single-turn text-only streaming, (2) multi-turn with tool calls, (3) PIN flow multi-turn with confirmation, (4) `schema_first_yaml=True` fallback fires `ainvoke` path correctly.

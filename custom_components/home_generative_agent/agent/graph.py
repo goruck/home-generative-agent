@@ -2591,7 +2591,12 @@ async def _call_model(
     )
     LOGGER.debug("Raw chat model response: %s", raw_response)
 
-    response = extract_final(getattr(raw_response, "content", "") or "")
+    # collapse_whitespace=False: the reply is rendered as markdown and is
+    # compared byte-for-byte with the streamed copy to detect a mid-stream
+    # model fallback, so newlines must survive (issue #628).
+    response = extract_final(
+        getattr(raw_response, "content", "") or "", collapse_whitespace=False
+    )
 
     tool_calls = getattr(raw_response, "tool_calls", []) or []
 
@@ -2662,7 +2667,10 @@ async def _summarize_and_remove_messages(
     raw_response = await _invoke_model(model, messages, {})
     LOGGER.debug("Raw summary response: %s", raw_response)
 
-    response = extract_final(getattr(raw_response, "content", "") or "")
+    # Keep the summary's own line breaks; it is fed back into the prompt.
+    response = extract_final(
+        getattr(raw_response, "content", "") or "", collapse_whitespace=False
+    )
 
     return {
         "summary": response,
