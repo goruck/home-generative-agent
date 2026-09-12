@@ -57,6 +57,10 @@ from ..const import (  # noqa: TID252
     CRITICAL_PIN_MIN_LEN,
     HISTORY_TOOL_CONTEXT_LIMIT,
     HISTORY_TOOL_PURGE_KEEP_DAYS,
+    NETWORK_AUDIT_TOOL_LABEL_NOTE,
+    NETWORK_AUDIT_TOOL_MAX_ENTITIES,
+    NETWORK_AUDIT_TOOL_MAX_NOTES,
+    NETWORK_AUDIT_TOOL_MAX_SUMMARY_CHARS,
     RECOMMENDED_VLM_PROMPT_EXTRA,
     RECOMMENDED_VLM_RESPONSE_LANGUAGE,
     VLM_IMAGE_HEIGHT,
@@ -1554,6 +1558,20 @@ async def get_camera_last_events(  # noqa: D417
     )
 
 
+def _clip_text(text: str, limit: int) -> str:
+    """Truncate *text* to *limit* characters with a visible marker."""
+    if len(text) <= limit:
+        return text
+    return text[: max(limit - 1, 0)] + "…"
+
+
+def _clip_list(items: list[Any], limit: int) -> list[Any]:
+    """Keep the first *limit* items and say how many were left out."""
+    if len(items) <= limit:
+        return items
+    return [*items[:limit], f"… and {len(items) - limit} more"]
+
+
 @tool(parse_docstring=True)
 async def audit_home_security(
     *,
@@ -1588,13 +1606,8 @@ async def audit_home_security(
             "settings (Advanced setup) to audit this home."
         )
     report = await sentinel.async_audit_network()
-    if report["status"] == "disabled":
-        return (
-            "The network and Home Assistant security audit is turned off in the "
-            "Sentinel settings (option 'Enable network and Home Assistant "
-            "security audit'). Turn it on to run these checks."
-        )
-    if report["status"] == "unavailable":
+    if report["status"] != "ok":
+        # The engine owns the wording for both "disabled" and "unavailable".
         return "The security audit could not run: " + "; ".join(report["notes"])
     payload: dict[str, Any] = {
         "generated_at": report["generated_at"],
@@ -1603,15 +1616,29 @@ async def audit_home_security(
             {
                 "severity": finding["severity"],
                 "type": finding["type"],
-                "summary": finding["summary"],
+                "summary": _clip_text(
+                    str(finding["summary"]), NETWORK_AUDIT_TOOL_MAX_SUMMARY_CHARS
+                ),
                 "suggested_actions": finding["suggested_actions"],
-                "triggering_entities": finding["triggering_entities"],
+                "triggering_entities": _clip_list(
+                    list(finding["triggering_entities"]),
+                    NETWORK_AUDIT_TOOL_MAX_ENTITIES,
+                ),
             }
             for finding in report["findings"]
         ],
         "checks_run": report["checks_run"],
         "checks_not_run": report["checks_not_run"],
-        "notes": report["notes"],
+        "notes": [
+            NETWORK_AUDIT_TOOL_LABEL_NOTE,
+            *_clip_list(
+                [
+                    _clip_text(str(n), NETWORK_AUDIT_TOOL_MAX_SUMMARY_CHARS)
+                    for n in report["notes"]
+                ],
+                NETWORK_AUDIT_TOOL_MAX_NOTES,
+            ),
+        ],
         "privacy_notes": report["privacy_notes"],
     }
     return yaml.dump(

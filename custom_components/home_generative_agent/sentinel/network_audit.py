@@ -153,9 +153,17 @@ def build_report(  # noqa: PLR0913
     checks_run: Iterable[str],
     inactive_rules: Mapping[str, list[str]],
     capabilities: Iterable[str],
+    failed_rules: Iterable[str] = (),
     notes: Iterable[str] = (),
 ) -> NetworkAuditReport:
-    """Assemble the report for one completed evaluation."""
+    """
+    Assemble the report for one completed evaluation.
+
+    ``inactive_rules`` maps a rule to the capability paths it lacks;
+    ``failed_rules`` names rules whose evaluation raised. Both land in
+    ``checks_not_run`` with a reason, so the caller never has to encode a
+    failure as an empty capability list.
+    """
     missing: dict[str, str] = {}
     not_run: dict[str, str] = {}
     for rule_id, paths in sorted(inactive_rules.items()):
@@ -165,7 +173,9 @@ def build_report(  # noqa: PLR0913
             missing[path] = reason
             if reason not in reasons:
                 reasons.append(reason)
-        not_run[rule_id] = "; ".join(reasons) or (
+        not_run[rule_id] = "; ".join(reasons) or "required snapshot data missing"
+    for rule_id in sorted(failed_rules):
+        not_run[rule_id] = (
             "the check raised an error while evaluating; see the Home Assistant log"
         )
     return {

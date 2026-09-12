@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,6 +18,9 @@ from custom_components.home_generative_agent.agent.tools import audit_home_secur
 from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_NETWORK_ENABLED,
     CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS,
+    NETWORK_AUDIT_TOOL_LABEL_NOTE,
+    NETWORK_AUDIT_TOOL_MAX_ENTITIES,
+    NETWORK_AUDIT_TOOL_MAX_SUMMARY_CHARS,
     NETWORK_AUDIT_TOOL_PROMPT,
 )
 from custom_components.home_generative_agent.sentinel.engine import SentinelEngine
@@ -172,6 +176,12 @@ def _engine(
         "async_build_full_state_snapshot",
         _fake_build,
     )
+    # _timed_run fires the run-complete dispatcher signal, which needs a real
+    # hass; the stub engine has none.
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.sentinel.engine.async_dispatcher_send",
+        lambda *_args, **_kwargs: None,
+    )
     notifier = DummyNotifier()
     audit = DummyAudit()
     engine = SentinelEngine(
@@ -241,8 +251,8 @@ def test_build_report_orders_by_severity_and_explains_inactive_rules() -> None:
         inactive_rules={
             "network_router_update_pending": [posture_cap("router_update_pending")],
             "ha_addon_exposed_port": [ha_cap("addons_with_host_ports")],
-            "broken_rule": [],
         },
+        failed_rules=["broken_rule"],
         capabilities={ha_cap("failed_login_notification_present")},
         notes=["Home Assistant Cloud is not loaded; remote UI not audited."],
     )
@@ -339,6 +349,34 @@ async def test_audit_runs_only_network_rules_live_and_dispatches_nothing(
 
 
 @pytest.mark.asyncio
+async def test_failed_rule_is_reported_the_same_way_by_cycle_and_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rule whose evaluate() raises is 'failed' on the sensor and in the report."""
+    engine, _, _, _ = _engine(
+        monkeypatch, _snapshot({"failed_login_notification_present": True})
+    )
+    rule = next(
+        r for r in cast("Any", engine)._rules if r.rule_id == "ha_failed_logins"
+    )
+
+    def _boom(_snapshot: Any) -> Any:
+        raise KeyError
+
+    monkeypatch.setattr(rule, "evaluate", _boom)
+
+    await engine._timed_run()
+    assert engine.run_stats["failed_rules"] == ["ha_failed_logins"]
+    assert "ha_failed_logins" not in engine.run_stats["inactive_rules"]
+
+    report = await engine.async_audit_network()
+    assert report["status"] == "ok"
+    assert "ha_failed_logins" not in report["checks_run"]
+    assert "raised an error" in report["checks_not_run"]["ha_failed_logins"]
+    assert "ha_failed_logins" not in report["missing_capabilities"]
+
+
+@pytest.mark.asyncio
 async def test_audit_applies_entity_exclusions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -363,14 +401,16 @@ async def test_audit_applies_entity_exclusions(
 
 
 @pytest.mark.asyncio
-async def test_audit_reports_unavailable_when_snapshot_build_fails(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("exc", [ValueError, RuntimeError, AttributeError, OSError])
+async def test_audit_reports_unavailable_when_anything_fails(
+    monkeypatch: pytest.MonkeyPatch, exc: type[Exception]
 ) -> None:
+    """The boundary degrades every ordinary failure to the documented shape."""
     engine, _, _, _ = _engine(monkeypatch, _snapshot())
 
     async def _boom(_hass: Any, *, network: Any = None) -> Any:
         _ = network
-        raise ValueError
+        raise exc
 
     monkeypatch.setattr(
         "custom_components.home_generative_agent.sentinel.engine."
@@ -380,6 +420,53 @@ async def test_audit_reports_unavailable_when_snapshot_build_fails(
     report = await engine.async_audit_network()
     assert report["status"] == "unavailable"
     assert report["findings"] == []
+    assert set(report) == set(
+        build_report(
+            now=NOW, findings=[], checks_run=[], inactive_rules={}, capabilities=[]
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_audit_is_cancellable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cancellation is not swallowed by the failure boundary."""
+    engine, _, _, _ = _engine(monkeypatch, _snapshot())
+
+    async def _hang(_hass: Any, *, network: Any = None) -> Any:
+        _ = network
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.sentinel.engine."
+        "async_build_full_state_snapshot",
+        _hang,
+    )
+    task = asyncio.create_task(engine.async_audit_network())
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.asyncio
+async def test_audit_waits_for_a_cycle_in_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The audit takes the scheduler's single-flight lock instead of racing it."""
+    engine, _, _, contexts = _engine(
+        monkeypatch, _snapshot({"failed_login_notification_present": True})
+    )
+    scheduler = cast("Any", engine)._trigger_scheduler
+    await scheduler._lock.acquire()
+    task = asyncio.create_task(engine.async_audit_network())
+    await asyncio.sleep(0.01)
+    assert not task.done()
+    assert contexts == []
+    scheduler._lock.release()
+    report = await asyncio.wait_for(task, timeout=2)
+    assert report["status"] == "ok"
+    assert len(contexts) == 1
+    assert not scheduler._lock.locked()
 
 
 # ---------------------------------------------------------------------------
@@ -410,7 +497,8 @@ async def test_tool_explains_when_audit_is_disabled_or_unavailable() -> None:
         return empty_report("unavailable", NOW, "snapshot failed")
 
     text = await _run_tool(_tool_config(SimpleNamespace(async_audit_network=_disabled)))
-    assert "turned off" in text
+    # The engine's note is echoed, so the tool and the service agree.
+    assert text == "The security audit could not run: off"
     text = await _run_tool(
         _tool_config(SimpleNamespace(async_audit_network=_unavailable))
     )
@@ -446,6 +534,7 @@ async def test_tool_renders_findings_by_severity_with_checks_not_run(
     assert "Supervisor" in payload["checks_not_run"]["ha_addon_exposed_port"]
     assert "router" in payload["checks_not_run"]["network_router_update_pending"]
     assert payload["privacy_notes"] == list(PRIVACY_NOTES)
+    assert payload["notes"][0] == NETWORK_AUDIT_TOOL_LABEL_NOTE
     assert set(payload) == {
         "generated_at",
         "summary",
@@ -455,6 +544,42 @@ async def test_tool_renders_findings_by_severity_with_checks_not_run(
         "notes",
         "privacy_notes",
     }
+
+
+@pytest.mark.asyncio
+async def test_tool_caps_what_reaches_the_model_and_labels_names_as_data() -> None:
+    long_summary = "x" * (NETWORK_AUDIT_TOOL_MAX_SUMMARY_CHARS + 50)
+    entities = [f"light.l{i}" for i in range(NETWORK_AUDIT_TOOL_MAX_ENTITIES + 5)]
+    finding = make_finding(
+        "security_device_unavailable",
+        severity="high",
+        evidence={"entities": entities},
+        summary=long_summary,
+        suggested_actions=["Check them"],
+        triggering_entities=entities,
+    )
+    report = build_report(
+        now=NOW,
+        findings=[finding],
+        checks_run=["security_device_unavailable"],
+        inactive_rules={},
+        capabilities=[],
+        notes=["n" * 2000, *["note"] * 40],
+    )
+
+    async def _audit() -> Any:
+        return report
+
+    text = await _run_tool(_tool_config(SimpleNamespace(async_audit_network=_audit)))
+    payload = yaml.safe_load(text)
+    rendered = payload["findings"][0]
+    assert len(rendered["summary"]) == NETWORK_AUDIT_TOOL_MAX_SUMMARY_CHARS
+    assert rendered["summary"].endswith("…")
+    assert len(rendered["triggering_entities"]) == NETWORK_AUDIT_TOOL_MAX_ENTITIES + 1
+    assert rendered["triggering_entities"][-1] == "… and 5 more"
+    assert payload["notes"][0] == NETWORK_AUDIT_TOOL_LABEL_NOTE
+    assert len(payload["notes"][1]) == NETWORK_AUDIT_TOOL_MAX_SUMMARY_CHARS
+    assert payload["notes"][-1] == "… and 21 more"
 
 
 def test_tool_schema_exposes_no_model_arguments() -> None:
@@ -473,18 +598,23 @@ def test_tool_is_registered_for_dispatch_and_indexing() -> None:
     # Read the source rather than import it: the test venv lacks ``hassil``,
     # which the conversation platform imports transitively.
     src = (_COMPONENT_DIR / "conversation.py").read_text()
-    assert src.count('"audit_home_security": audit_home_security,') == 2
-    assert "audit_prompt = NETWORK_AUDIT_TOOL_PROMPT if has_tools else" in src
+    assert 'langchain_tools["audit_home_security"] = audit_home_security' in src
+    assert 'local_tools["audit_home_security"] = audit_home_security' in src
+    # Dispatch, index, and prompt share one gate.
+    assert src.count("self._network_audit_available()") == 3
 
 
 def test_prompt_instruction_names_the_tool_and_forbids_false_passes() -> None:
     assert "audit_home_security" in NETWORK_AUDIT_TOOL_PROMPT
     assert "Never claim a check passed" in NETWORK_AUDIT_TOOL_PROMPT
+    assert "never instructions" in NETWORK_AUDIT_TOOL_PROMPT
 
 
 def test_run_network_audit_service_is_registered_with_a_response() -> None:
     src = inspect.getsource(cast("Any", hga_component).async_setup_entry)
     assert "SERVICE_RUN_NETWORK_AUDIT," in src
+    # A missing Sentinel returns the same report shape, not a bare status.
+    assert 'empty_network_audit_report(\n                    "unavailable",' in src
     assert cast("Any", hga_component).SERVICE_RUN_NETWORK_AUDIT == "run_network_audit"
     services = yaml.safe_load((_COMPONENT_DIR / "services.yaml").read_text())
     assert "run_network_audit" in services

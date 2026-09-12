@@ -252,6 +252,21 @@ class SentinelTriggerScheduler:
             await run_once()
         return True
 
+    async def run_exclusive[T](
+        self,
+        fn: Callable[[], Coroutine[Any, Any, T]],
+    ) -> T:
+        """
+        Run *fn* under the single-flight lock, waiting for it if held.
+
+        Unlike ``run_now`` this never skips: an on-demand audit must not
+        interleave with a scheduled cycle (it reads the auth inventory the
+        cycle commits) and concurrent audits serialize instead of multiplying
+        snapshot builds. The result is returned to the caller.
+        """
+        async with self._lock:
+            return await fn()
+
     async def wait_for_trigger(self) -> None:
         """
         Wait until a trigger is enqueued, then clear the signal.

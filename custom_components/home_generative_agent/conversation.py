@@ -72,6 +72,7 @@ from .const import (
     CONF_CRITICAL_ACTION_PIN_ENABLED,
     CONF_PROMPT,
     CONF_SCHEMA_FIRST_YAML,
+    CONF_SENTINEL_NETWORK_ENABLED,
     CONF_STT_HALLUCINATION_EXACT_PATTERNS,
     CONF_STT_HALLUCINATION_PATTERNS,
     CRITICAL_ACTION_PROMPT,
@@ -80,6 +81,7 @@ from .const import (
     DOMAIN,
     LANGCHAIN_LOGGING_LEVEL,
     NETWORK_AUDIT_TOOL_PROMPT,
+    RECOMMENDED_SENTINEL_NETWORK_ENABLED,
     SCHEMA_FIRST_YAML_PROMPT,
     SIGNAL_TOOL_INDEX_UPDATED,
     SUBENTRY_TYPE_MODEL_PROVIDER,
@@ -985,6 +987,21 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
 
         return MultiLLMAPI(active_apis, {})
 
+    def _network_audit_available(self) -> bool:
+        """
+        Return True when ``audit_home_security`` can answer.
+
+        Sentinel must be running with its network audit on. Gates the tool's
+        dispatch table, its index entry, and the system-prompt instruction
+        together so the model is never told to call a tool it cannot be given.
+        """
+        runtime_data = self.entry.runtime_data
+        return runtime_data.sentinel is not None and bool(
+            runtime_data.options.get(
+                CONF_SENTINEL_NETWORK_ENABLED, RECOMMENDED_SENTINEL_NETWORK_ENABLED
+            )
+        )
+
     def _async_get_all_tools(
         self, active_apis: dict[str, llm.APIInstance]
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -1011,10 +1028,11 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             "alarm_control": alarm_control,
             "resolve_entity_ids": resolve_entity_ids,
             "write_yaml_file": write_yaml_file,
-            "audit_home_security": audit_home_security,
         }
         if not options.get(CONF_SCHEMA_FIRST_YAML, False):
             langchain_tools["add_automation"] = add_automation
+        if self._network_audit_available():
+            langchain_tools["audit_home_security"] = audit_home_security
         tools.extend(langchain_tools.values())
 
         return tools, langchain_tools
@@ -1048,7 +1066,11 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             else ""
         )
         tool_error_prompt = TOOL_CALL_ERROR_SYSTEM_MESSAGE if has_tools else ""
-        audit_prompt = NETWORK_AUDIT_TOOL_PROMPT if has_tools else ""
+        audit_prompt = (
+            NETWORK_AUDIT_TOOL_PROMPT
+            if has_tools and self._network_audit_available()
+            else ""
+        )
         variables = {
             "ha_name": self.hass.config.location_name,
             "user_name": user_name,
@@ -1630,12 +1652,13 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             "alarm_control": alarm_control,
             "resolve_entity_ids": resolve_entity_ids,
             "write_yaml_file": write_yaml_file,
-            "audit_home_security": audit_home_security,
         }
         # Mirror the dispatch-time guard: add_automation is excluded when
         # schema_first_yaml=True so the index and langchain_tools stay in sync.
         if not self.entry.options.get(CONF_SCHEMA_FIRST_YAML, False):
             local_tools["add_automation"] = add_automation
+        if self._network_audit_available():
+            local_tools["audit_home_security"] = audit_home_security
         for t_name, t_func in local_tools.items():
             try:
                 # Extract the JSON schema for local tools.

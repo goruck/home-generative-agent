@@ -296,6 +296,7 @@ from .sentinel.discovery_semantic import (
 from .sentinel.discovery_store import DiscoveryStore
 from .sentinel.dynamic_rules import evaluate_dynamic_rule
 from .sentinel.engine import SentinelEngine
+from .sentinel.network_audit import empty_report as empty_network_audit_report
 from .sentinel.notifier import SentinelNotifier
 from .sentinel.proposal_store import ProposalStore
 from .sentinel.proposal_templates import explain_normalize_candidate
@@ -3804,7 +3805,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         _ = call
         sentinel = entry.runtime_data.sentinel
         if sentinel is None:
-            return {"status": "unavailable", "entry_id": entry.entry_id}
+            # Same shape as every other outcome so automations can rely on it.
+            return dict(
+                empty_network_audit_report(
+                    "unavailable",
+                    dt_util.utcnow(),
+                    "Sentinel is not enabled for this entry.",
+                )
+            )
         return dict(await sentinel.async_audit_network())
 
     _register_entry_service(

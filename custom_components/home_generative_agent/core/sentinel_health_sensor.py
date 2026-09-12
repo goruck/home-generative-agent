@@ -275,6 +275,10 @@ class SentinelHealthSensor(SensorEntity):
             # lacks a capability they need ({rule_id: [missing paths]}) and
             # the capabilities the last snapshot did provide.
             "inactive_rules",
+            # Rules whose evaluate() raised in the last cycle, so a broken
+            # rule is not counted as active (the on-demand audit reports the
+            # same list under checks_not_run).
+            "failed_rules",
             "network_capabilities",
         ):
             self._attrs[key] = run_stats.get(key)
