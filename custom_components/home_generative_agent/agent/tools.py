@@ -68,6 +68,9 @@ from ..const import (  # noqa: TID252
 from ..core.conversation_helpers import _resolve_entity_id  # noqa: TID252
 from ..core.fallback import ainvoke_dropping_unsupported_params  # noqa: TID252
 from ..core.utils import extract_final, verify_pin  # noqa: TID252
+from ..sentinel.network_audit import (  # noqa: TID252
+    summarize as summarize_network_audit,
+)
 from .automation_pin import find_critical_automation_calls
 from .camera_activity import get_camera_last_events_from_states
 from .helpers import (
@@ -1548,4 +1551,69 @@ async def get_camera_last_events(  # noqa: D417
         default_flow_style=False,
         allow_unicode=True,
         sort_keys=False,
+    )
+
+
+@tool(parse_docstring=True)
+async def audit_home_security(
+    *,
+    config: Annotated[RunnableConfig, InjectedToolArg()],
+) -> str:
+    """
+    Audit the Home Assistant and network security posture of this home.
+
+    Runs Sentinel's security checks right now and returns the findings by
+    severity plus the checks that could not run and why. Checks cover locks
+    and alarms exposed to voice assistants without PIN protection, new
+    administrators or access tokens, stale tokens, failed logins, cloud
+    remote access, add-ons listening on host ports or running unprotected,
+    public webhook automations, login bypass and IP-ban settings, security
+    devices that are offline, devices Home Assistant discovered but nobody
+    configured, and pending router updates. Use it when the user asks whether
+    the home is secure or safe, or about network or Home Assistant security,
+    privacy, access tokens, or unknown devices. Never scans the network or
+    changes anything.
+
+    Args:
+        config: Injected runtime configuration; not a model argument.
+
+    """
+    configurable = config.get("configurable") or {}
+    runtime_data = configurable.get("hga_runtime_data")
+    sentinel = getattr(runtime_data, "sentinel", None)
+    if sentinel is None:
+        return (
+            "Sentinel is not enabled, so no security checks can run. Enable "
+            "Sentinel in the Home Generative Agent integration's Sentinel "
+            "settings (Advanced setup) to audit this home."
+        )
+    report = await sentinel.async_audit_network()
+    if report["status"] == "disabled":
+        return (
+            "The network and Home Assistant security audit is turned off in the "
+            "Sentinel settings (option 'Enable network and Home Assistant "
+            "security audit'). Turn it on to run these checks."
+        )
+    if report["status"] == "unavailable":
+        return "The security audit could not run: " + "; ".join(report["notes"])
+    payload: dict[str, Any] = {
+        "generated_at": report["generated_at"],
+        "summary": summarize_network_audit(report),
+        "findings": [
+            {
+                "severity": finding["severity"],
+                "type": finding["type"],
+                "summary": finding["summary"],
+                "suggested_actions": finding["suggested_actions"],
+                "triggering_entities": finding["triggering_entities"],
+            }
+            for finding in report["findings"]
+        ],
+        "checks_run": report["checks_run"],
+        "checks_not_run": report["checks_not_run"],
+        "notes": report["notes"],
+        "privacy_notes": report["privacy_notes"],
+    }
+    return yaml.dump(
+        payload, default_flow_style=False, allow_unicode=True, sort_keys=False
     )

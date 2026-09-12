@@ -27,7 +27,7 @@ Most AI conversation integrations are prompt passthroughs: they forward your wor
 | **Conversational control** | Talk to your home in natural language. Turn things on, check status, ask questions. |
 | **Automation creation** | Describe what you want in chat and the agent writes and registers the HA automation. With the [Critical Action PIN](docs/configuration.md#critical-action-pin) enabled, an automation that would unlock a door or open a garage is held for PIN confirmation before it is installed — same as the direct command. |
 | **Camera & image analysis** | Ask the agent what it sees in any camera. Proactive motion-triggered analysis with anomaly detection. Works with Axis, Ring via ring-mqtt, Reolink, UniFi Protect, and any camera that exposes a motion entity or `recording` state in HA — see [Camera Entities](docs/camera-entities.md) for setup notes (battery Ring cameras need a [snapshot-mode tweak](docs/camera-entities.md#ring-cameras-via-ring-mqtt)). |
-| **Sentinel anomaly detection** | Deterministic rules watch for security and safety issues (unlocked locks, open entries, unknown people — the unknown-person rules require the face-service) and alert your phone. A built-in [Home Assistant security audit](docs/sentinel.md#home-assistant--network-security) also flags new admin accounts and access tokens, old long-lived tokens, locks exposed to voice assistants, failed logins, exposed add-on ports, public webhooks, offline security devices, and unconfigured devices found on the LAN — with no router integration required. Optional LLM-powered triage and rule discovery — covering power, battery, and environmental sensors (temperature, humidity, CO₂, air quality, …). Approved discovery rules can be inspected, deactivated, reactivated, and surgically repaired via HA services. |
+| **Sentinel anomaly detection** | Deterministic rules watch for security and safety issues (unlocked locks, open entries, unknown people — the unknown-person rules require the face-service) and alert your phone. A built-in [Home Assistant security audit](docs/sentinel.md#home-assistant--network-security) also flags new admin accounts and access tokens, old long-lived tokens, locks exposed to voice assistants, failed logins, exposed add-on ports, public webhooks, offline security devices, and unconfigured devices found on the LAN — with no router integration required. Ask "is my home secure?" and the agent runs the same checks on demand and tells you which ones it could not run. Optional LLM-powered triage and rule discovery — covering power, battery, and environmental sensors (temperature, humidity, CO₂, air quality, …). Approved discovery rules can be inspected, deactivated, reactivated, and surgically repaired via HA services. |
 | **Face recognition** | Identify people in camera frames and personalize alerts. |
 | **Long-term memory** | Semantic search over past conversations. The agent remembers your preferences and context. |
 | **Streaming responses** | First tokens appear word-by-word in the HA conversation UI — no waiting for the full response. |
@@ -153,6 +153,10 @@ actions:
 *User asked in a later conversation: "always prepare the home for my arrival at night" Agent retrieved the relevant context from long-term memory and then built the automation, remembering that the user arrives home around 7:30 PM.*
 
 ![Semantic memory 2](./assets/semantic2.png) ![Semantic memory 3](./assets/semantic3.png)
+
+### Ask whether the home is secure
+
+*User asks: "Is my home secure?" The agent runs the [Home Assistant security audit](docs/sentinel.md#home-assistant--network-security) on demand, reports the findings by severity with their suggested fixes, and names the checks it could not run and why (for example, no router integration is installed), instead of claiming they passed.*
 
 ### Check a camera for packages
 

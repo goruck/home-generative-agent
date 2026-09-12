@@ -1011,6 +1011,14 @@ for verbal confirmation first. The tool itself enforces security.
   arming or disarming an alarm, ask for the alarm code and include it in the tool
   call. Do NOT call "confirm_sensitive_action" for alarm control.
 """
+NETWORK_AUDIT_TOOL_PROMPT = """
+When the user asks whether the home is secure or safe, or about Home Assistant
+or network security, privacy, exposed devices, access tokens, or unknown
+devices, call the audit_home_security tool. Report its findings by severity,
+highest first, using each finding's summary. Say which checks could not run
+and why. Never claim a check passed when it is listed as not run.
+"""
+
 SCHEMA_FIRST_YAML_PROMPT = """
 When the user requests YAML, automations, or Lovelace dashboards, output ONLY valid JSON
 with no prose or code fences. Use double quotes and no trailing commas.

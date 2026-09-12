@@ -59,6 +59,7 @@ from .agent.rag_embedding_text import (
 from .agent.tools import (
     add_automation,
     alarm_control,
+    audit_home_security,
     confirm_sensitive_action,
     get_and_analyze_camera_image,
     get_camera_last_events,
@@ -78,6 +79,7 @@ from .const import (
     DEFAULT_STT_HALLUCINATION_PATTERNS,
     DOMAIN,
     LANGCHAIN_LOGGING_LEVEL,
+    NETWORK_AUDIT_TOOL_PROMPT,
     SCHEMA_FIRST_YAML_PROMPT,
     SIGNAL_TOOL_INDEX_UPDATED,
     SUBENTRY_TYPE_MODEL_PROVIDER,
@@ -1009,6 +1011,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             "alarm_control": alarm_control,
             "resolve_entity_ids": resolve_entity_ids,
             "write_yaml_file": write_yaml_file,
+            "audit_home_security": audit_home_security,
         }
         if not options.get(CONF_SCHEMA_FIRST_YAML, False):
             langchain_tools["add_automation"] = add_automation
@@ -1045,6 +1048,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             else ""
         )
         tool_error_prompt = TOOL_CALL_ERROR_SYSTEM_MESSAGE if has_tools else ""
+        audit_prompt = NETWORK_AUDIT_TOOL_PROMPT if has_tools else ""
         variables = {
             "ha_name": self.hass.config.location_name,
             "user_name": user_name,
@@ -1057,6 +1061,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                     + f"\nYou are in the {self.tz} timezone."
                     + critical_prompt
                     + schema_prompt
+                    + audit_prompt
                     + tool_error_prompt
                 ),
                 self.hass,
@@ -1625,6 +1630,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             "alarm_control": alarm_control,
             "resolve_entity_ids": resolve_entity_ids,
             "write_yaml_file": write_yaml_file,
+            "audit_home_security": audit_home_security,
         }
         # Mirror the dispatch-time guard: add_automation is excluded when
         # schema_first_yaml=True so the index and langchain_tools stay in sync.

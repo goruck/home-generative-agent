@@ -344,6 +344,7 @@ SERVICE_SENTINEL_SET_AUTONOMY_LEVEL = "sentinel_set_autonomy_level"
 SERVICE_SENTINEL_GET_BASELINES = "sentinel_get_baselines"
 SERVICE_SENTINEL_RESET_BASELINE = "sentinel_reset_baseline"
 SERVICE_SENTINEL_RESET_AUTH_INVENTORY = "sentinel_reset_auth_inventory"
+SERVICE_RUN_NETWORK_AUDIT = "run_network_audit"
 
 ENROLL_SCHEMA = vol.Schema(
     {
@@ -3788,6 +3789,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         entry,
         SERVICE_SENTINEL_RESET_AUTH_INVENTORY,
         _handle_sentinel_reset_auth_inventory,
+        schema=vol.Schema({}),
+        supports_response=_SERVICE_RESPONSE_ONLY,
+    )
+
+    async def _handle_run_network_audit(call: ServiceCall) -> dict[str, Any]:
+        """
+        Run the network / HA-security rules now and return the report.
+
+        Read-only and side-effect free: nothing is notified, stored, or
+        cooled down, and the auth inventory is not committed. The same
+        report backs the ``audit_home_security`` agent tool.
+        """
+        _ = call
+        sentinel = entry.runtime_data.sentinel
+        if sentinel is None:
+            return {"status": "unavailable", "entry_id": entry.entry_id}
+        return dict(await sentinel.async_audit_network())
+
+    _register_entry_service(
+        hass,
+        entry,
+        SERVICE_RUN_NETWORK_AUDIT,
+        _handle_run_network_audit,
         schema=vol.Schema({}),
         supports_response=_SERVICE_RESPONSE_ONLY,
     )

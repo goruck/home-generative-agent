@@ -90,6 +90,7 @@ from .execution import (
 from .lock_enrichment import async_enrich_lock_last_changed
 from .logging_utils import RepeatingLogLimiter
 from .models import AnomalyFinding, CompoundFinding
+from .network_audit import NetworkAuditReport, build_report, empty_report
 from .notifier import is_security_copy
 from .power_enrichment import async_enrich_power_last_changed
 from .rules.alarm_disarmed_external_threat import AlarmDisarmedDuringExternalThreatRule
@@ -108,6 +109,7 @@ from .rules.ha_sensitive_entity_exposed_without_pin import (
 )
 from .rules.ha_trusted_networks_bypass_login import HaTrustedNetworksBypassLoginRule
 from .rules.ha_webhook_automation_public import HaWebhookAutomationPublicRule
+from .rules.network_common import NETWORK_RULE_TYPES
 from .rules.network_router_update_pending import NetworkRouterUpdatePendingRule
 from .rules.network_unconfigured_discovered_device import (
     NetworkUnconfiguredDiscoveredDeviceRule,
@@ -753,6 +755,67 @@ class SentinelEngine:
                 "notification_id": f"hga_sentinel_auth_inventory_{self._entry_id}",
             },
             blocking=False,
+        )
+
+    async def async_audit_network(self) -> NetworkAuditReport:
+        """
+        Evaluate the network / HA-security rules right now, without side effects.
+
+        Serves the ``audit_home_security`` agent tool and the
+        ``run_network_audit`` service. Builds a fresh snapshot (so the answer
+        is live, not the last cycle's) and runs only the rules in
+        ``NETWORK_RULE_TYPES`` with the same capability gating and entity
+        exclusions as a scheduled run. Nothing is dispatched: no notification,
+        no audit row, no cooldown charge, no explainer call, and the auth
+        inventory is not committed, so a new admin or token seen here is still
+        reported by the next scheduled run.
+        """
+        now = dt_util.utcnow()
+        if not self._network_enabled:
+            return empty_report(
+                "disabled",
+                now,
+                "The network and Home Assistant security audit is turned off in "
+                "the Sentinel options.",
+            )
+        network_context = await self._network_context()
+        try:
+            snapshot = await async_build_full_state_snapshot(
+                self._hass, network=network_context
+            )
+        except (ValueError, TypeError, KeyError):
+            LOGGER.exception("On-demand network audit failed to build a snapshot.")
+            return empty_report(
+                "unavailable", now, "The home state snapshot could not be built."
+            )
+        section = snapshot.get("network") or {}
+        capabilities = set(section.get("capabilities", []))
+        findings: list[AnomalyFinding] = []
+        checks_run: list[str] = []
+        inactive_rules: dict[str, list[str]] = {}
+        for rule in self._rules:
+            if rule.rule_id not in NETWORK_RULE_TYPES:
+                continue
+            missing = sorted(rule.requires - capabilities)
+            if missing:
+                inactive_rules[rule.rule_id] = missing
+                continue
+            try:
+                findings.extend(rule.evaluate(snapshot))
+            except (KeyError, ValueError, TypeError):
+                LOGGER.exception("Sentinel rule %s failed to evaluate.", rule.rule_id)
+                inactive_rules[rule.rule_id] = []
+                continue
+            checks_run.append(rule.rule_id)
+        if self._rule_entity_exclusions:
+            findings = self._filter_excluded_findings(findings)
+        return build_report(
+            now=now,
+            findings=findings,
+            checks_run=checks_run,
+            inactive_rules=inactive_rules,
+            capabilities=capabilities,
+            notes=section.get("notes", []),
         )
 
     async def _run_once(self, trigger_source: str = "poll") -> None:  # noqa: PLR0912, PLR0915
