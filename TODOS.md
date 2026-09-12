@@ -251,6 +251,12 @@ PIN. Action not executed.") and the user's real PIN worked on the next turn, so
 nothing unsafe happened — but the guess consumed one of the five attempts
 (`max_pin_attempts = 5`, agent/tools.py:986) before the user had typed a digit.
 
+**Intermittent.** The immediately following round in the same session ("Lock the
+garage door lock" -> `requires_pin` -> user PIN -> completed) produced NO
+invented PIN: the model asked and waited. So this is nondeterministic model
+behaviour, not a reliable trigger — which argues for the deterministic guard
+rather than against it, since it cannot be caught by testing.
+
 **Why:** The system prompt already forbids it in as many words: "Never guess or
 invent a PIN. Do not proceed without a PIN." A small local model did it anyway.
 The lesson recorded on issue #571 applies exactly — a prompt clause forbidding a
