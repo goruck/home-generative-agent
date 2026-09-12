@@ -21,11 +21,13 @@ from custom_components.home_generative_agent.agent.graph import (
     _get_actuation_safety_tools,
     _get_allowed_api_ids,
     _get_rag_retrieved_tools,
+    _is_referential_follow_up,
     _latest_open_state_query,
     _normalize_live_context_args_for_open_state,
     _query_needs_actuation_safety,
     _query_wants_automation,
     _query_wants_security_audit,
+    _retrieval_query,
     _retrieve_tools,
     _split_query_intents,
 )
@@ -397,7 +399,7 @@ async def test_retrieve_tools_store_is_none(caplog: pytest.LogCaptureFixture) ->
     allowed = {"assist"}
 
     # Test RAG retrieval
-    rag_tools = await _get_rag_retrieved_tools(None, config, "query", allowed)
+    rag_tools, _ = await _get_rag_retrieved_tools(None, config, "query", allowed)
     assert rag_tools == []
     assert "Store is None; skipping RAG tool retrieval" in caplog.text
 
@@ -425,7 +427,7 @@ async def test_retrieve_tools_specific_exceptions(
 
     # 1. Test psycopg.OperationalError
     store.asearch = AsyncMock(side_effect=psycopg.OperationalError("Conn lost"))
-    rag_tools = await _get_rag_retrieved_tools(store, config, "query", allowed)
+    rag_tools, _ = await _get_rag_retrieved_tools(store, config, "query", allowed)
     assert rag_tools == []
     assert "RAG tool retrieval search failed (known error): Conn lost" in caplog.text
 
@@ -442,7 +444,7 @@ async def test_retrieve_tools_specific_exceptions(
 
     # 3. Test unexpected Exception (last resort)
     store.asearch = AsyncMock(side_effect=RuntimeError("Boom"))
-    rag_tools = await _get_rag_retrieved_tools(store, config, "query", allowed)
+    rag_tools, _ = await _get_rag_retrieved_tools(store, config, "query", allowed)
     assert rag_tools == []
     assert "Unexpected RAG tool retrieval search failure" in caplog.text
 
@@ -463,7 +465,7 @@ async def test_retrieve_tools_vector_dimension_mismatch_is_known_error(
         }
     }
 
-    rag_tools = await _get_rag_retrieved_tools(store, config, "query", {"assist"})
+    rag_tools, _ = await _get_rag_retrieved_tools(store, config, "query", {"assist"})
 
     assert rag_tools == []
     assert "RAG tool retrieval search failed (known error)" in caplog.text
@@ -606,7 +608,7 @@ async def test_rag_retrieval_none_score_is_treated_as_zero() -> None:
     }
 
     # Must not raise; None score < threshold so tool is filtered out
-    result = await _get_rag_retrieved_tools(store, config, "query", {"hga_local"})
+    result, _ = await _get_rag_retrieved_tools(store, config, "query", {"hga_local"})
     assert result == []
 
 
@@ -2530,3 +2532,309 @@ async def test_retrieve_tools_does_not_bind_audit_when_sentinel_is_off() -> None
         store=_security_store(indexed=True),
     )
     assert "audit_home_security" not in result["tool_routing_map"]
+
+
+# ---------------------------------------------------------------------------
+# HA namespaced tool names (2026.9): `<domain>__<Name>` and index staleness
+# ---------------------------------------------------------------------------
+
+
+def _renamed_index() -> list[MagicMock]:
+    """
+    Reproduce the index of an install upgraded across HA's tool rename.
+
+    HA 2026.9 moved the built-in intent tools into per-integration `llm.py`
+    modules that name them `f"{DOMAIN}__{intent_type}"`. The indexer only ever
+    `aput()`s, so the pre-rename rows survive — and they embed almost
+    identically to their live twins while scoring slightly HIGHER, because
+    their text is the same minus the domain prefix. Field report (2026-09-12):
+    "turn it off" after a successful "turn on the garage lights" returned five
+    candidates, four of them renamed-away rows.
+    """
+    scores = {
+        "HassMediaPlayerMute": 0.645,
+        "media_player__HassMediaPlayerMute": 0.625,
+        "HassMediaPlayerUnmute": 0.598,
+        "HassMediaPause": 0.586,
+        "HassTurnOff": 0.585,
+        "media_player__HassMediaPlayerUnmute": 0.580,
+        "media_player__HassMediaPause": 0.570,
+        "intent__HassTurnOff": 0.565,
+        "intent__HassTurnOn": 0.560,
+    }
+    items = []
+    for name, score in scores.items():
+        item = _indexed_item(name)
+        item.score = score
+        items.append(item)
+    return items
+
+
+@pytest.mark.asyncio
+async def test_renamed_index_rows_do_not_consume_retrieval_slots(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """
+    A dead index row must not eat a retrieval slot and then vanish.
+
+    `sorted_items[:limit]` cuts to the user's retrieval limit BEFORE
+    `_filter_live_candidates` runs, so before the fix the five top-scoring rows
+    were four renamed-away names plus one live one: the model was handed a
+    single media-player tool and could not turn the light off. The live twins
+    are all present in the same index and rank just below.
+    """
+    store = MagicMock()
+    store.asearch = AsyncMock(return_value=_renamed_index())
+    store.aget = AsyncMock(return_value=None)
+
+    state: State = {
+        "messages": [HumanMessage(content="Turn it off")],
+        "summary": "",
+        "chat_model_usage_metadata": {},
+        "messages_to_remove": [],
+        "selected_tools": [],
+        "tool_routing_map": {},
+    }
+    config: RunnableConfig = {
+        "configurable": {
+            "options": {
+                "llm_hass_api": ["assist"],
+                "tool_relevance_threshold": 0.15,
+                "tool_retrieval_limit": 5,
+            },
+            "tool_index_ready": True,
+            "langchain_tools": {},
+            "ha_llm_api": _live_llm_api(
+                "media_player__HassMediaPlayerMute",
+                "media_player__HassMediaPlayerUnmute",
+                "media_player__HassMediaPause",
+                "intent__HassTurnOff",
+                "intent__HassTurnOn",
+            ),
+        }
+    }
+
+    with caplog.at_level("WARNING"):
+        result = await _retrieve_tools(state, config, store=store)
+
+    routed = result["tool_routing_map"]
+    # The whole point: the tool that turns the light off is bound.
+    assert "intent__HassTurnOff" in routed
+    # No renamed-away row reaches the model.
+    assert "HassTurnOff" not in routed
+    assert "HassMediaPlayerMute" not in routed
+    # Via RAG, not by the pass collapsing into the keyword fallback.
+    assert "keyword-filtered fallback" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_live_context_force_injection_survives_the_rename(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """
+    Force-injection keyed on the bare name must find HA's namespaced tool.
+
+    Step 3c injects `GetLiveContext` unconditionally, but HA publishes it as
+    `homeassistant__GetLiveContext`. The bare key still resolves — to the
+    pre-rename row — which the live check then rejects, so the injection
+    silently did nothing and the system prompt's primary instruction pointed at
+    a tool the model had never been given.
+    """
+    live_row = _indexed_item("homeassistant__GetLiveContext")
+    stale_row = _indexed_item("GetLiveContext")
+
+    async def _aget(_namespace: tuple[str, ...], key: str) -> MagicMock | None:
+        return {
+            "assist::homeassistant__GetLiveContext": live_row,
+            "assist::GetLiveContext": stale_row,
+        }.get(key)
+
+    store = MagicMock()
+    # RAG must return something: an empty candidate list drops the whole pass
+    # into the keyword fallback, which binds every live tool and would mask the
+    # force-injection leg entirely.
+    store.asearch = AsyncMock(return_value=[_indexed_item("intent__HassTurnOn")])
+    store.aget = AsyncMock(side_effect=_aget)
+
+    state: State = {
+        "messages": [HumanMessage(content="who won the world cup")],
+        "summary": "",
+        "chat_model_usage_metadata": {},
+        "messages_to_remove": [],
+        "selected_tools": [],
+        "tool_routing_map": {},
+    }
+    config: RunnableConfig = {
+        "configurable": {
+            "options": {
+                "llm_hass_api": ["assist"],
+                "tool_relevance_threshold": 0.15,
+                "tool_retrieval_limit": 5,
+            },
+            "tool_index_ready": True,
+            "langchain_tools": {},
+            "ha_llm_api": _live_llm_api(
+                "homeassistant__GetLiveContext", "intent__HassTurnOn"
+            ),
+        }
+    }
+
+    with caplog.at_level("WARNING"):
+        result = await _retrieve_tools(state, config, store=store)
+
+    assert "homeassistant__GetLiveContext" in result["tool_routing_map"]
+    assert "GetLiveContext" not in result["tool_routing_map"]
+    # Injected by step 3c, not by the whole pass collapsing into the fallback.
+    assert "keyword-filtered fallback" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_rag_keeps_dead_rows_when_live_filtering_is_off() -> None:
+    """
+    Fail-open contract: no `ha_llm_api` means no liveness filtering at all.
+
+    Callers that wire neither surface (tests, robot runs) must keep pre-filter
+    behavior — the new pre-limit drop must not become a second, silent filter.
+    """
+    store = MagicMock()
+    item = _indexed_item("HassTurnOff")
+    item.score = 0.9
+    store.asearch = AsyncMock(return_value=[item])
+
+    config: RunnableConfig = {
+        "configurable": {
+            "options": {"llm_hass_api": ["assist"], "tool_relevance_threshold": 0.15},
+            "tool_index_ready": True,
+        }
+    }
+
+    tools, dropped = await _get_rag_retrieved_tools(
+        store, config, "turn it off", {"assist"}, None
+    )
+
+    assert [t["name"] for t in tools] == ["HassTurnOff"]
+    assert dropped == 0
+
+
+# ---------------------------------------------------------------------------
+# Referential follow-ups: rank tools on the previous turn too
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "query",
+    ["Turn them off.", "turn it off", "do that again", "the other one", "same again"],
+)
+def test_referential_follow_ups_are_detected(query: str) -> None:
+    """A turn that points back instead of naming a target."""
+    assert _is_referential_follow_up(query)
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Turn on the garage lights.",
+        "set the temperature in this room to 70",
+        "is the front door open?",
+        "turn off the kitchen light and tell me if that fixed the humidity problem",
+        "",
+    ],
+)
+def test_ordinary_queries_are_not_referential(query: str) -> None:
+    """A query that names its own target must keep ranking on its own words."""
+    assert not _is_referential_follow_up(query)
+
+
+def test_retrieval_query_widens_a_referential_follow_up() -> None:
+    """
+    The field case. "Turn them off." carries no target at all.
+
+    After the v3.41.1 index cleanup it still ranked five media-player tools
+    between 0.600 and 0.512 and never surfaced a light tool, so the model's
+    correct `intent__HassTurnOff(name="Garage Light", ...)` was rejected as a
+    tool it had not been given. `light__HassLightSet` scored 0.564 on the
+    PREVIOUS turn's words, which is enough to enter the top 5 once both turns
+    are searched.
+    """
+    messages = [
+        HumanMessage(content="Turn on the garage lights."),
+        AIMessage(content="The garage light is now on."),
+        HumanMessage(content="Turn them off."),
+    ]
+    assert _retrieval_query(messages) == "Turn on the garage lights. Turn them off."
+
+
+def test_retrieval_query_leaves_an_ordinary_turn_alone() -> None:
+    """No widening when the query names its own target."""
+    messages = [
+        HumanMessage(content="Is the front door open?"),
+        AIMessage(content="No."),
+        HumanMessage(content="Turn on the garage lights."),
+    ]
+    assert _retrieval_query(messages) == "Turn on the garage lights."
+
+
+def test_retrieval_query_skips_ai_turns_to_find_the_user_turn() -> None:
+    """The previous USER turn is the context, not the assistant's reply."""
+    messages = [
+        HumanMessage(content="Turn on the garage lights."),
+        AIMessage(content="I'll turn on the garage light for you."),
+        ToolMessage(content="{}", name="light__HassLightSet", tool_call_id="1"),
+        AIMessage(content="The garage light is now on."),
+        HumanMessage(content="Turn it off"),
+    ]
+    assert _retrieval_query(messages) == "Turn on the garage lights. Turn it off"
+
+
+def test_retrieval_query_handles_a_first_turn() -> None:
+    """A referential first turn has nothing to widen with."""
+    assert _retrieval_query([HumanMessage(content="turn it off")]) == "turn it off"
+    assert _retrieval_query([]) == ""
+
+
+@pytest.mark.asyncio
+async def test_widened_query_does_not_leak_into_the_intent_detectors() -> None:
+    """
+    Ranking on two turns must not make a behaviour gate fire on the older one.
+
+    "close it" after "is the garage door open?" is the trap: if the widened
+    query replaced the raw one, `_query_is_read_only_open_state` would match
+    the previous turn's words and step 3b would STRIP every actuation tool --
+    turning a close command into a state report. The widening is deliberately
+    confined to what ranks tools.
+    """
+    store = MagicMock()
+    turn_off = _indexed_item("intent__HassTurnOff")
+    turn_off.score = 0.9
+    store.asearch = AsyncMock(return_value=[turn_off])
+    store.aget = AsyncMock(return_value=None)
+
+    state: State = {
+        "messages": [
+            HumanMessage(content="is the garage door open?"),
+            AIMessage(content="Yes, it is open."),
+            HumanMessage(content="close it"),
+        ],
+        "summary": "",
+        "chat_model_usage_metadata": {},
+        "messages_to_remove": [],
+        "selected_tools": [],
+        "tool_routing_map": {},
+    }
+    config: RunnableConfig = {
+        "configurable": {
+            "options": {
+                "llm_hass_api": ["assist"],
+                "tool_relevance_threshold": 0.15,
+                "tool_retrieval_limit": 5,
+            },
+            "tool_index_ready": True,
+            "langchain_tools": {},
+            "ha_llm_api": _live_llm_api("intent__HassTurnOff"),
+        }
+    }
+
+    result = await _retrieve_tools(state, config, store=store)
+
+    # The actuation tool survives: step 3b never fired.
+    assert "intent__HassTurnOff" in result["tool_routing_map"]

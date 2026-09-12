@@ -79,6 +79,7 @@ from .automation_pin import find_critical_automation_calls
 from .camera_activity import get_camera_last_events_from_states
 from .helpers import (
     ConfigurableData,
+    base_tool_name,
     maybe_fill_lock_entity,
     normalize_intent_for_alarm,
     normalize_intent_for_lock,
@@ -144,7 +145,8 @@ def _map_alarm_service(tool_name: str, requested_state: str) -> str:
         "off": "alarm_disarm",
         "disarmed": "alarm_disarm",
     }
-    default_service = "alarm_arm_home" if tool_name == "HassTurnOn" else "alarm_disarm"
+    is_arm_intent = base_tool_name(tool_name) == "HassTurnOn"
+    default_service = "alarm_arm_home" if is_arm_intent else "alarm_disarm"
     return service_map.get(requested_state, default_service)
 
 

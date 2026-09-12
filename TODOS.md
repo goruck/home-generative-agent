@@ -192,11 +192,207 @@ Two adjacent gaps from the same review, same disposition (document + defer): (5)
 
 And two writer-consistency gaps: (7) `_mark_tool_index_stale` (embedding-provider switch) clears hashes with no generation/epoch guard, so an in-flight index write that completes after the switch marks old-provider rows current (and the background leg re-latches `tool_index_ready`), silently mixing embedding spaces until restart — pre-existing on the startup leg, window widened by the per-turn delta writer; fix wants a generation counter checked before `update()`/`ready=True`. (8) a partially-failed delta write commits zero hashes, so already-written chunks are re-embedded next turn — converges, but a per-chunk `(task, key)` commit would stop burning embedding quota under a flaky provider.
 
+**Resolution of gap (3) (v3.41.1):** shipped. The full discovery pass now
+deletes index rows whose keys were not seen this pass, scoped to api_ids that
+enumerated cleanly (`_async_evict_stale_tool_index_rows`, conversation.py).
+The premise of the original disposition — that un-evicted rows are inert
+because the bind-time live filter excludes them — was wrong: vector search
+ranks and truncates to the retrieval limit BEFORE that filter runs, so a dead
+row consumes a retrieval slot and then vanishes. HA 2026.9's rename of every
+built-in tool to `<domain>__<Name>` turned that from a rare nuisance into a
+complete shadow index that outranked the live rows (same embedding text, one
+prefix shorter) and starved the model of real tools. Gaps (1), (2) and (4-8)
+are still open.
+
 **Effort:** M
 **Priority:** P3
 **Depends on:** v3.30.4
 
 ---
+
+### Stored tool exclusions/inclusions still display the pre-rename name
+
+**What:** Enforcement is fixed (see Resolution below); what remains is
+cosmetic and optional. A stored exclusion saved before HA 2026.9 still holds
+the bare name (`HassTurnOff`), so `_tool_exclusion_choices` cannot find it in
+the live tool list and labels it `(not currently available)` even though it is
+actively excluding `intent__HassTurnOff`. The label is wrong, not the control.
+
+**How to apply:** On entry setup, rewrite a stored exclusion/inclusion value
+whose name is absent from the live tool set but whose base name matches exactly
+one live tool; log anything ambiguous and leave it. Note the interaction with
+gap (4) of the tool-index hygiene TODO: any re-encoding of the composite key
+has to migrate these same stored values.
+
+**Resolution (v3.41.1):** the fail-open is closed. `is_tool_excluded`
+(agent/helpers.py) matches a live tool against the stored deny-list by exact
+name first, then — only for stored entries carrying no `__`, i.e. legacy
+pre-rename ones — by base name, so `HassTurnOff` keeps excluding
+`intent__HassTurnOff`. A stored name that already carries a namespace is
+matched exactly and never stripped, so one specific exclusion can never widen
+to a same-suffix tool from another domain. All three enforcement sites route
+through it: `filter_excluded_tools`, the RAG leg of `_get_rag_retrieved_tools`,
+and `_append_included_tools`. The picker already merges stored-but-not-live
+values back on submit, so no exclusion is lost by opening and saving the form.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** v3.41.1
+
+---
+
+### The model invents a PIN before the user supplies one
+
+**What:** Field test 2026-09-12 on the live box, qwen3.8 local. "Unlock the
+garage door lock." correctly hit the PIN gate (`status: requires_pin`), and the
+model then called `confirm_sensitive_action(action_id=..., pin="1234")` in the
+SAME turn, before the user had said anything. The gate rejected it ("Incorrect
+PIN. Action not executed.") and the user's real PIN worked on the next turn, so
+nothing unsafe happened — but the guess consumed one of the five attempts
+(`max_pin_attempts = 5`, agent/tools.py:986) before the user had typed a digit.
+
+**Intermittent.** The immediately following round in the same session ("Lock the
+garage door lock" -> `requires_pin` -> user PIN -> completed) produced NO
+invented PIN: the model asked and waited. So this is nondeterministic model
+behaviour, not a reliable trigger — which argues for the deterministic guard
+rather than against it, since it cannot be caught by testing.
+
+**Why:** The system prompt already forbids it in as many words: "Never guess or
+invent a PIN. Do not proceed without a PIN." A small local model did it anyway.
+The lesson recorded on issue #571 applies exactly — a prompt clause forbidding a
+shape that is still being emitted is not enforcement; enforce it
+deterministically instead of adding another sentence.
+
+Practical impact today is a wasted attempt, not a bypass: PINs are 4-10 digits,
+so five attempts against even a 4-digit PIN is a 0.05% chance. It gets worse if
+a model emits several guesses across a multi-round turn, which
+`_MAX_ACTION_ROUNDS = 3` permits.
+
+**How to apply:** Reject a `confirm_sensitive_action` call whose PIN did not
+come from a user message in this turn — the pending-action record already
+carries the requesting user, so the guard can require that a HumanMessage
+arrived after the `requires_pin` ToolMessage before any attempt is counted. A
+model-supplied PIN with no intervening user turn should be refused WITHOUT
+incrementing `attempts`, so a chatty model cannot burn the user's budget.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** v3.41.1
+
+---
+
+### v3.41.1 review findings left unfixed (eviction robustness, base-name over-match)
+
+**What:** The pre-landing review of v3.41.1 (5 specialists + Codex) confirmed
+five defects that were consciously not fixed in that release. Only the lock
+payload bug was fixed.
+
+1. **Eviction can stall or break startup.** `_async_evict_stale_tool_index_rows`
+   is awaited from `_async_index_tools` -> `async_added_to_hass`
+   (conversation.py:1848), i.e. on the path every index *write* is deliberately
+   backgrounded off. It has no `asyncio.timeout` (the delta writer has one), so
+   a hung postgres blocks entity setup indefinitely. Worse, the
+   `stale = [... item.value.get("api_id") ...]` comprehension sits OUTSIDE its
+   own `try`, so an index row whose `value` is `None` raises `AttributeError`,
+   propagates out of `_async_index_tools` (try/finally, no except) and leaves
+   `tool_index_ready` False — RAG retrieval off until restart.
+   *Fix:* move the sweep into `_run_tool_index_background`, wrap it in
+   `asyncio.timeout(_TOOL_INDEX_DELTA_TIMEOUT_S)`, and guard the comprehension
+   with an `isinstance(item.value, dict)` check.
+
+2. **An API that enumerates successfully but EMPTY loses all its rows.**
+   `discovered_api_ids.add(api_id)` (conversation.py:1587) fires on any
+   non-raising discovery. An MCP coordinator that completed a refresh against a
+   flaky server holds `data == []` — no exception, zero `seen_keys`, every one
+   of that server's rows deleted, and the per-turn delta path deliberately does
+   not evict, so they stay gone until restart.
+   *Fix:* only mark an api evictable once it recorded at least one seen key.
+
+3. **`base_tool_name` over-matches attacker-chosen names.** It strips
+   everything before the last `__` unconditionally, so a user-configured MCP
+   server advertising `foo__HassTurnOff` or `foo__GetLiveContext` is classified
+   as the HA intent: argument mutation by the lock/alarm normalizers, actuation
+   prioritisation, a spurious PIN challenge, and — for the live-context case —
+   `_extract_last_live_context` parsing that server's response as authoritative
+   home state. Confirmed independently by the security specialist, the testing
+   specialist and Codex. Dispatch is NOT affected (`_format_and_dedupe_tools`
+   dedupes on the full name and `MultiLLMAPI` routes by full name), and the
+   lock PIN case fails *closed*. Related to the existing "Tool routing is by
+   bare name" TODO, which this widens.
+   *Fix:* resolve aliases only for canonical HA identities (known bare HA tool
+   names, HA-owned api_ids) rather than for every provider name; reject
+   ambiguous alias matches instead of taking the lexicographically first.
+
+4. **`is_actuation_tool` got strictly weaker for `__`-containing names.**
+   Matching the prefix list against the base name instead of the full name
+   means an MCP tool named `HassTurnOff__helper` now classifies as
+   non-actuation, so it survives the actuation strip on read-only turns.
+   *Fix:* match the prefixes against BOTH the full name and the base name and
+   take the union — the change the rename needed was additive, not a
+   replacement. (Separately: the prefix list is incomplete against HA's real
+   intent set — `HassOpenCover`, `HassCloseCover`, `HassToggle`,
+   `HassSetPosition`, `HassStopMoving`, `HassSetVolume` match nothing.)
+
+5. **The pre-limit liveness filter still runs after the store's `limit * 4`
+   fetch window** (Codex, and missed by every Claude pass). Enough stale,
+   excluded, failed-API or disallowed rows can fill all 20 fetched rows and hide
+   every live candidate. The eviction sweep mitigates this in steady state but
+   not before the first restart after an upgrade.
+   *Fix:* over-fetch adaptively until enough live candidates are collected, or
+   push the filter into the store query.
+
+**Also noted, not filed separately:** `_Unset`/`_UNSET` in graph.py is dead
+machinery (one caller, always passes the value); the eviction failure log
+prints an unsanitized remote tool name while the line below it sanitizes;
+`_tool_lookup_targets` compares `base_tool_name(live_name) == name` while the
+fallback in the same lookup compares base-to-base; `dead_hits` counts repeated
+hits across sub-queries rather than unique rows; the paging test seeds 25 rows
+against a page size of 100 so it never pages; the alarm carve-out test passes
+without the fix; and `test_namespaced_tool_names.py` parametrizes
+`lock__HassTurnOff` / `alarm_control_panel__HassTurnOn`, spellings HA never
+emits.
+
+**Note:** the exclusions fail-open that this review also found was fixed in
+v3.41.1 rather than deferred; see the TODO above.
+
+**Effort:** M
+**Priority:** P2 (item 1 is P1 if any user reports a stuck startup)
+**Depends on:** v3.41.1
+
+---
+
+### Follow-up turns retrieve tools from a pronoun-only query
+
+**What:** `_retrieve_tools` built its RAG query from the last message only, so
+"turn it off" / "do that again" ranked tools on text carrying no entity,
+domain, or action target.
+
+**Resolution (v3.41.1):** `_retrieval_query` (agent/graph.py) prepends the
+previous human turn when the current one is short AND matches
+`REFERENTIAL_FOLLOW_UP_REGEX`. Joined with ". " so `_split_query_intents`
+searches the combined text and each turn separately and the best score per
+tool wins, meaning added context can never displace a tool the new phrasing
+alone would have found. Deliberately confined to the RANKING query: `query`
+stays the raw last message for `_query_wants_automation`,
+`_query_is_read_only_open_state` and `_query_wants_security_audit`, because
+those gate behaviour — "close it" after "is the garage door open?" would
+otherwise read as a read-only state query and have its actuation tools
+stripped.
+
+**Field data it was built from (2026-09-12, after the index cleanup):**
+"Turn on the garage lights." scored `light__HassLightSet` at 0.564;
+"Turn them off." scored five media-player tools 0.600 / 0.553 / 0.541 / 0.516
+/ 0.512 and no light tool at all. Searching both turns puts the light tool
+second. Whether `intent__HassTurnOff` itself also enters the window was NOT
+predicted — the last such prediction was wrong — and is left to field
+validation.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** v3.41.1
+
+---
+
 
 ### Provider-gated schema normalisation vs mixed-provider fallback chains
 
