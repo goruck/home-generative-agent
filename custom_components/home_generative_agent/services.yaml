@@ -293,3 +293,13 @@ sentinel_reset_auth_inventory:
     like the first run after installation. The inventory never contains token
     values or raw IP addresses.
   fields: {}
+
+run_network_audit:
+  name: Run network security audit
+  description: >
+    Run the network and Home Assistant security checks now and return the
+    findings by severity, the checks that ran, and the checks that could not
+    run with the reason. Read-only: nothing is notified, stored, or changed,
+    and finding cooldowns are untouched. Requires Sentinel with the network
+    and Home Assistant security audit enabled.
+  fields: {}

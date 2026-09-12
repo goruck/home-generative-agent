@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.40.0] - 2026-09-11
+
+### Added
+
+- The chat agent can now run the Home Assistant security audit on demand. Asking "is my home secure?" (or about network security, privacy, access tokens, or unknown devices) calls the new `audit_home_security` tool, which builds a fresh snapshot, evaluates the thirteen Home Assistant & network security rules with the usual capability gating and entity exclusions, and returns the findings by severity, each with its deterministic summary and suggested actions, plus the checks that could not run and why (which integration or install type would provide the missing fact). The system prompt tells the model to report by severity, name the checks that did not run, and never claim a check passed when it is listed as not run. Until now the audit's results existed only as notifications, audit rows, and health-sensor attributes, so the agent had nothing to say when asked. The on-demand run is read-only: no notification, audit row, cooldown charge, explainer call, or auth-inventory commit, and it bypasses the 24-hour posture cooldown so a standing finding is still listed. This is step 9 of the [network security plan](docs/network-security-plan.md) in its HA-only form; the privacy digest and the `network_audit` provider override wait for router adapters, since no MAC, IP, or hostname exists in the HA-only data.
+- The `sentinel_health` sensor gains a `failed_rules` attribute listing rules whose evaluation raised in the last cycle; such rules were counted as active before. The on-demand audit reports the same rules under `checks_not_run`.
+- New `home_generative_agent.run_network_audit` service returns the same report (`status`, `findings`, `checks_run`, `checks_not_run`, `capabilities`, `missing_capabilities`, `notes`, `privacy_notes`) for dashboards and automations.
+
 ## [3.39.6] - 2026-09-11
 
 ### Changed

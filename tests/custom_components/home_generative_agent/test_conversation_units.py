@@ -1734,16 +1734,43 @@ class _EchoTemplate:
         return self.source
 
 
-def _render_entity(options: dict[str, Any]) -> Any:
+def _render_entity(options: dict[str, Any], *, sentinel: Any = None) -> Any:
     entity = HGAConversationEntity.__new__(HGAConversationEntity)
     entity.hass = MagicMock()
     entity.hass.config.location_name = "Home"
     entity.tz = ZoneInfo("America/Los_Angeles")
     entity.entry = cast(
         "Any",
-        types.SimpleNamespace(runtime_data=types.SimpleNamespace(options=options)),
+        types.SimpleNamespace(
+            runtime_data=types.SimpleNamespace(options=options, sentinel=sentinel)
+        ),
     )
     return entity
+
+
+def test_render_system_prompt_audit_instruction_follows_sentinel_availability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The audit_home_security instruction appears only when the tool can exist."""
+    monkeypatch.setattr(f"{_CONV}.template.Template", _EchoTemplate)
+    llm_api = cast("Any", types.SimpleNamespace(api_prompt="EXPOSED"))
+
+    stable, _ = _render_entity({})._async_render_system_prompt(
+        MagicMock(), None, llm_api, has_tools=True
+    )
+    assert "audit_home_security" not in stable
+
+    stable, _ = _render_entity({}, sentinel=object())._async_render_system_prompt(
+        MagicMock(), None, llm_api, has_tools=True
+    )
+    assert "audit_home_security" in stable
+    # Still ahead of the tool-error rule that closes the stable prefix.
+    assert stable.index("audit_home_security") < stable.index("Always call tools again")
+
+    stable, _ = _render_entity(
+        {"sentinel_network_enabled": False}, sentinel=object()
+    )._async_render_system_prompt(MagicMock(), None, llm_api, has_tools=True)
+    assert "audit_home_security" not in stable
 
 
 def test_render_system_prompt_moves_date_time_out_of_the_stable_prefix(

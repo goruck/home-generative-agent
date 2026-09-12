@@ -25,6 +25,7 @@ from custom_components.home_generative_agent.agent.graph import (
     _normalize_live_context_args_for_open_state,
     _query_needs_actuation_safety,
     _query_wants_automation,
+    _query_wants_security_audit,
     _retrieve_tools,
     _split_query_intents,
 )
@@ -2423,3 +2424,109 @@ async def test_excluded_tool_does_not_consume_a_retrieval_slot(
     # fallback would bind HassTurnOn too, from a differently-shaped tool set,
     # so asserting only on the routing map would pass without the fix.
     assert "keyword-filtered fallback" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Security-posture intent: _query_wants_security_audit + audit_home_security
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Is my home secure?",
+        "is the house safe right now",
+        "Any privacy problems I should know about?",
+        "are there unknown devices on my network",
+        "do I have old access tokens",
+        "run a security audit",
+    ],
+)
+def test_query_wants_security_audit_positive(query: str) -> None:
+    assert _query_wants_security_audit(query)
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "turn on the porch light",
+        "what is the temperature in the garage",
+        "lock the front door",
+    ],
+)
+def test_query_wants_security_audit_negative(query: str) -> None:
+    assert not _query_wants_security_audit(query)
+
+
+def _security_store(*, indexed: bool) -> MagicMock:
+    store = MagicMock()
+    store.asearch = AsyncMock(
+        return_value=[
+            _make_search_item("HassTurnOn", score=0.6, is_actuation=True),
+            _make_search_item("get_entity_history", score=0.5, api_id="hga_local"),
+        ]
+    )
+    audit_item = MagicMock()
+    audit_item.value = {
+        "name": "audit_home_security",
+        "api_id": "hga_local",
+        "description": "Audit the home.",
+        "parameters": "{}",
+        "is_actuation": False,
+    }
+
+    async def aget(namespace: Any, key: str = "", **_kwargs: Any) -> Any:  # noqa: ARG001
+        if indexed and key.endswith("::audit_home_security"):
+            return audit_item
+        return None
+
+    store.aget = AsyncMock(side_effect=aget)
+    return store
+
+
+def _security_state() -> State:
+    return {
+        "messages": [MagicMock(content="Is my home secure?")],
+        "summary": "",
+        "chat_model_usage_metadata": {},
+        "messages_to_remove": [],
+        "selected_tools": [],
+        "tool_routing_map": {},
+    }
+
+
+def _security_config(*, registered: bool) -> RunnableConfig:
+    tools: dict[str, Any] = {"get_entity_history": MagicMock()}
+    if registered:
+        tools["audit_home_security"] = MagicMock()
+    return {
+        "configurable": {
+            "options": {"llm_hass_api": ["assist"], "tool_relevance_threshold": 0.15},
+            "tool_index_ready": True,
+            "langchain_tools": tools,
+            "ha_llm_api": _live_llm_api("HassTurnOn"),
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_retrieve_tools_force_binds_audit_for_security_questions() -> None:
+    """The prompt orders the call, so retrieval must hand the model the tool."""
+    result = await _retrieve_tools(
+        _security_state(),
+        _security_config(registered=True),
+        store=_security_store(indexed=True),
+    )
+    assert result["tool_routing_map"]["audit_home_security"] == "hga_local"
+    assert "get_entity_history" in result["tool_routing_map"]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_tools_does_not_bind_audit_when_sentinel_is_off() -> None:
+    """Not registered (Sentinel off) means not live, so the index entry is ignored."""
+    result = await _retrieve_tools(
+        _security_state(),
+        _security_config(registered=False),
+        store=_security_store(indexed=True),
+    )
+    assert "audit_home_security" not in result["tool_routing_map"]

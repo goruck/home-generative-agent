@@ -7,7 +7,7 @@ import contextlib
 import fnmatch
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
@@ -90,6 +90,7 @@ from .execution import (
 from .lock_enrichment import async_enrich_lock_last_changed
 from .logging_utils import RepeatingLogLimiter
 from .models import AnomalyFinding, CompoundFinding
+from .network_audit import NetworkAuditReport, build_report, empty_report
 from .notifier import is_security_copy
 from .power_enrichment import async_enrich_power_last_changed
 from .rules.alarm_disarmed_external_threat import AlarmDisarmedDuringExternalThreatRule
@@ -108,6 +109,7 @@ from .rules.ha_sensitive_entity_exposed_without_pin import (
 )
 from .rules.ha_trusted_networks_bypass_login import HaTrustedNetworksBypassLoginRule
 from .rules.ha_webhook_automation_public import HaWebhookAutomationPublicRule
+from .rules.network_common import NETWORK_RULE_TYPES
 from .rules.network_router_update_pending import NetworkRouterUpdatePendingRule
 from .rules.network_unconfigured_discovered_device import (
     NetworkUnconfiguredDiscoveredDeviceRule,
@@ -135,7 +137,7 @@ from .triage import TRIAGE_SUPPRESS, SentinelTriageService
 from .trigger_scheduler import SentinelTriggerScheduler, TriggerRecord
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
 
     from homeassistant.core import Event, EventStateChangedData, HomeAssistant, State
 
@@ -153,6 +155,27 @@ if TYPE_CHECKING:
     from .rules import StaticRule
 
 LOGGER = logging.getLogger(__name__)
+
+# Note carried by the ``disabled`` audit report; the tool echoes it verbatim.
+NETWORK_AUDIT_DISABLED_NOTE = (
+    "The network and Home Assistant security audit is turned off in the "
+    "Sentinel options (option 'Enable network and Home Assistant security "
+    "audit'). Turn it on to run these checks."
+)
+
+
+@dataclass
+class GatedEvaluation:
+    """Outcome of one capability-gated pass over a set of static rules."""
+
+    capabilities: set[str]
+    findings: list[AnomalyFinding] = field(default_factory=list)
+    evaluated_rules: list[str] = field(default_factory=list)
+    # rule_id -> the capability paths the snapshot lacks
+    inactive_rules: dict[str, list[str]] = field(default_factory=dict)
+    # rule_ids whose ``evaluate`` raised
+    failed_rules: list[str] = field(default_factory=list)
+
 
 # Module-level in-memory store for runtime autonomy-level overrides.
 # Maps entry_id -> (level: int, expires_at: datetime)
@@ -755,6 +778,106 @@ class SentinelEngine:
             blocking=False,
         )
 
+    def _evaluate_gated_rules(
+        self, snapshot: FullStateSnapshot, rules: Iterable[StaticRule]
+    ) -> GatedEvaluation:
+        """
+        Capability-gate and evaluate *rules* against *snapshot*.
+
+        Shared by the scheduled cycle and the on-demand audit so both report
+        the same three outcomes per rule: evaluated, inactive (a capability
+        it reads is missing; the paths are recorded), or failed (``evaluate``
+        raised; logged through the repeat limiter). Exclusion filtering is
+        the caller's job because the cycle applies it after dynamic rules.
+        """
+        capabilities = set(snapshot.get("network", {}).get("capabilities", []))
+        result = GatedEvaluation(capabilities=capabilities)
+        for rule in rules:
+            missing = sorted(rule.requires - capabilities)
+            if missing:
+                # Capability gating: the home cannot provide what this rule
+                # reads, so it neither runs nor false-positives; the health
+                # sensor shows why (docs/network-security-plan.md).
+                result.inactive_rules[rule.rule_id] = missing
+                continue
+            try:
+                findings = rule.evaluate(snapshot)
+            except (KeyError, ValueError, TypeError):
+                self._log_limiter.warning(
+                    f"rule_eval:{rule.rule_id}",
+                    "Sentinel rule %s failed to evaluate.",
+                    rule.rule_id,
+                )
+                result.failed_rules.append(rule.rule_id)
+                continue
+            self._log_limiter.recovered(
+                f"rule_eval:{rule.rule_id}",
+                "Sentinel rule %s recovered after %d failed evaluation(s).",
+                rule.rule_id,
+            )
+            result.evaluated_rules.append(rule.rule_id)
+            result.findings.extend(findings)
+        return result
+
+    async def async_audit_network(self) -> NetworkAuditReport:
+        """
+        Evaluate the network / HA-security rules right now, without side effects.
+
+        Serves the ``audit_home_security`` agent tool and the
+        ``run_network_audit`` service. Builds a fresh snapshot (so the answer
+        is live, not the last cycle's) and runs only the rules in
+        ``NETWORK_RULE_TYPES`` with the same capability gating and entity
+        exclusions as a scheduled run. Nothing is dispatched: no notification,
+        no audit row, no cooldown charge, no explainer call, and the auth
+        inventory is not committed, so a new admin or token seen here is still
+        reported by the next scheduled run.
+
+        Runs under the scheduler's single-flight lock: it waits for a cycle in
+        progress (whose inventory commit it would otherwise race) and
+        concurrent audits serialize rather than each building a snapshot. Any
+        failure degrades to an ``unavailable`` report so the service and the
+        tool always return the documented shape.
+        """
+        if not self._network_enabled:
+            return empty_report(
+                "disabled", dt_util.utcnow(), NETWORK_AUDIT_DISABLED_NOTE
+            )
+        try:
+            return await self._trigger_scheduler.run_exclusive(
+                self._audit_network_locked
+            )
+        except Exception:
+            LOGGER.exception("On-demand network audit failed.")
+            return empty_report(
+                "unavailable",
+                dt_util.utcnow(),
+                "The audit failed; the Home Assistant log has the details.",
+            )
+
+    async def _audit_network_locked(self) -> NetworkAuditReport:
+        """Body of ``async_audit_network``; called under the single-flight lock."""
+        now = dt_util.utcnow()
+        network_context = await self._network_context()
+        snapshot = await async_build_full_state_snapshot(
+            self._hass, network=network_context
+        )
+        evaluation = self._evaluate_gated_rules(
+            snapshot, (r for r in self._rules if r.rule_id in NETWORK_RULE_TYPES)
+        )
+        findings = evaluation.findings
+        if self._rule_entity_exclusions:
+            findings = self._filter_excluded_findings(findings)
+        section = snapshot.get("network") or {}
+        return build_report(
+            now=now,
+            findings=findings,
+            checks_run=evaluation.evaluated_rules,
+            inactive_rules=evaluation.inactive_rules,
+            failed_rules=evaluation.failed_rules,
+            capabilities=evaluation.capabilities,
+            notes=section.get("notes", []),
+        )
+
     async def _run_once(self, trigger_source: str = "poll") -> None:  # noqa: PLR0912, PLR0915
         network_context = await self._network_context()
         try:
@@ -840,32 +963,10 @@ class SentinelEngine:
         # the last known set.  Register grace for any person whose state changed.
         self._update_presence_grace(snapshot, now)
 
-        all_findings: list[AnomalyFinding] = []
-        capabilities = set(snapshot.get("network", {}).get("capabilities", []))
-        inactive_rules: dict[str, list[str]] = {}
-        for rule in self._rules:
-            missing = sorted(rule.requires - capabilities)
-            if missing:
-                # Capability gating: the home cannot provide what this rule
-                # reads, so it neither runs nor false-positives; the health
-                # sensor shows why (docs/network-security-plan.md).
-                inactive_rules[rule.rule_id] = missing
-                continue
-            try:
-                findings = rule.evaluate(snapshot)
-            except (KeyError, ValueError, TypeError):
-                self._log_limiter.warning(
-                    f"rule_eval:{rule.rule_id}",
-                    "Sentinel rule %s failed to evaluate.",
-                    rule.rule_id,
-                )
-                continue
-            self._log_limiter.recovered(
-                f"rule_eval:{rule.rule_id}",
-                "Sentinel rule %s recovered after %d failed evaluation(s).",
-                rule.rule_id,
-            )
-            all_findings.extend(findings)
+        evaluation = self._evaluate_gated_rules(snapshot, self._rules)
+        all_findings: list[AnomalyFinding] = evaluation.findings
+        capabilities = evaluation.capabilities
+        inactive_rules = evaluation.inactive_rules
 
         if self._rule_registry is not None:
             dynamic_rules = self._rule_registry.list_rules()
@@ -916,6 +1017,7 @@ class SentinelEngine:
                 all_findings.extend(dynamic_findings)
 
         self.run_stats["inactive_rules"] = inactive_rules
+        self.run_stats["failed_rules"] = evaluation.failed_rules
         self.run_stats["network_capabilities"] = sorted(capabilities)
 
         if self._rule_entity_exclusions:

@@ -59,6 +59,7 @@ from custom_components.home_generative_agent.const import (
     OPEN_AS_STATE_REGEX,
     OPEN_COMMAND_CLAUSE_REGEX,
     READ_ONLY_STATE_QUERY_REGEX,
+    SECURITY_AUDIT_INTENT_REGEX,
     SUMMARIZATION_INITIAL_PROMPT,
     SUMMARIZATION_PROMPT_TEMPLATE,
     SUMMARIZATION_SYSTEM_PROMPT,
@@ -989,6 +990,42 @@ def _query_wants_automation(query: str) -> bool:
         re.search(AUTOMATION_ACTION_KEYWORDS_REGEX, query)
         and re.search(AUTOMATION_TRIGGER_CLAUSE_REGEX, query)
     )
+
+
+def _query_wants_security_audit(query: str) -> bool:
+    """Return True when the query asks about the home's security posture."""
+    return bool(re.search(SECURITY_AUDIT_INTENT_REGEX, query[:_MAX_INTENT_SCAN_CHARS]))
+
+
+async def _append_security_audit_tool(  # noqa: PLR0913
+    candidates: list[RawTool],
+    store: BaseStore,
+    config: RunnableConfig,
+    query: str,
+    allowed_api_ids: set[str],
+    live_tool_ids: set[tuple[str, str]] | None,
+) -> list[RawTool]:
+    """
+    Force-bind ``audit_home_security`` when the query asks about security.
+
+    The system prompt tells the model to call it for "is my home secure?",
+    but the tool reaches the bound set only through ranking, and the keyword
+    fallback used while the index is not ready lists local tools in
+    registration order and cuts at the limit. A mandated-but-unbound tool
+    costs the model up to ``_MAX_ACTION_ROUNDS`` of "not available" retries.
+    Appended outside the limit like ``add_automation``, so it never evicts a
+    RAG/safety selection. The tool is registered only when Sentinel's network
+    audit is on, so a miss (absent from index and config) is the normal off
+    state.
+    """
+    if not _query_wants_security_audit(query) or any(
+        t["name"] == "audit_home_security" for t in candidates
+    ):
+        return candidates
+    fetched = await _get_tool_by_name(
+        store, config, "audit_home_security", allowed_api_ids, live_tool_ids
+    )
+    return candidates if fetched is None else [*candidates, fetched]
 
 
 # How many trailing HUMAN turns establish automation-creation context for
@@ -2081,6 +2118,11 @@ async def _retrieve_tools(  # noqa: PLR0915
                 "Automation intent detected but add_automation is not in the "
                 "tool index or fallback; skipping force-injection"
             )
+
+    # 3f. Force-bind audit_home_security for security-posture questions.
+    all_candidates = await _append_security_audit_tool(
+        all_candidates, store, config, query, allowed_api_ids, live_tool_ids
+    )
 
     # 3e. Force-bind the user's always-included tools (issue #579). A
     # general-purpose tool — a web-search MCP tool on "who won the World
