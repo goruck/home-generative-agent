@@ -392,7 +392,13 @@ class HGASttEntity(SpeechToTextEntity):
         extra_body = (
             dict(stored_extra_body) if isinstance(stored_extra_body, Mapping) else {}
         )
-        use_json = model_data.get(CONF_STT_REQUEST_FORMAT) == STT_REQUEST_FORMAT_JSON
+        # The flow only offers the JSON format on local endpoints, but the rule
+        # is repeated here so it holds for stored state the flow never wrote —
+        # a hand-edited or migrated subentry would otherwise post base64 JSON
+        # to api.openai.com and fail every utterance.
+        use_json = provider_type == "local" and (
+            model_data.get(CONF_STT_REQUEST_FORMAT) == STT_REQUEST_FORMAT_JSON
+        )
 
         audio_bytes = await _stream_to_bytes(stream)
         ext = _format_extension(metadata)
@@ -402,36 +408,39 @@ class HGASttEntity(SpeechToTextEntity):
         if ext == "wav" and metadata.codec == stt.AudioCodecs.PCM:
             audio_bytes = _ensure_wav(audio_bytes, metadata)
 
-        json_body: dict[str, Any] | None = None
-        request: dict[str, Any] = {}
-        if use_json:
-            json_body = _build_json_request(
-                model_name,
-                audio_bytes,
-                ext,
-                language,
-                temperature,
-                response_format,
-                extra_body,
-            )
-        else:
-            audio_file = io.BytesIO(audio_bytes)
-            audio_file.name = f"audio.{ext}"
-            request = _build_openai_request(
-                model_name,
-                audio_file,
-                language,
-                prompt,
-                temperature,
-                response_format,
-                extra_body,
-            )
-            connection.apply_to_request(request)
-
         # Building the client is inside the try: it now touches hass.data and
         # the SDK constructor, and a failure there should fail this utterance,
         # not raise out into the assist pipeline.
         try:
+            # Building the request is inside the try with the client: the JSON
+            # format base64-encodes the whole utterance, so an oversized stream
+            # should fail this utterance rather than raise into the pipeline.
+            json_body: dict[str, Any] | None = None
+            request: dict[str, Any] = {}
+            if use_json:
+                json_body = _build_json_request(
+                    model_name,
+                    audio_bytes,
+                    ext,
+                    language,
+                    temperature,
+                    response_format,
+                    extra_body,
+                )
+            else:
+                audio_file = io.BytesIO(audio_bytes)
+                audio_file.name = f"audio.{ext}"
+                request = _build_openai_request(
+                    model_name,
+                    audio_file,
+                    language,
+                    prompt,
+                    temperature,
+                    response_format,
+                    extra_body,
+                )
+                connection.apply_to_request(request)
+
             client = self._get_client(connection.api_key, connection.base_url)
             response = await self._send_request(
                 client,

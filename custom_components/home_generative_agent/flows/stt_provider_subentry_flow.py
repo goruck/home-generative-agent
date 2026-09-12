@@ -39,7 +39,6 @@ from ..const import (  # noqa: TID252
     RECOMMENDED_LOCAL_STT_MODEL,
     RECOMMENDED_OPENAI_STT_MODEL,
     STT_MODEL_OPENAI_SUPPORTED,
-    STT_REQUEST_FORMAT_JSON,
     STT_REQUEST_FORMAT_MULTIPART,
     STT_REQUEST_FORMATS,
     STT_RESPONSE_FORMATS,
@@ -57,12 +56,15 @@ from .openai_compatible_endpoint import (
 
 LOGGER = logging.getLogger(__name__)
 
-# Request-format labels. The value is what goes in the subentry; the label is
-# what the user picks from, so it names the transport rather than the constant.
-_REQUEST_FORMAT_LABELS = {
-    STT_REQUEST_FORMAT_MULTIPART: "Multipart upload (default)",
-    STT_REQUEST_FORMAT_JSON: "JSON with base64 audio",
-}
+# Fields HGA owns as *transport*, not as parameters. The extra body is merged
+# last on purpose so it can override a real parameter (that is the escape
+# hatch), but these three decide how the audio and the response are carried,
+# and overriding them cannot do anything useful. "stream" is the dangerous one:
+# an endpoint that honors it answers with text/event-stream, which the SDK
+# hands back as a plain string, and a plain string is exactly what a successful
+# transcript looks like — so the raw SSE frames would be spoken back as the
+# utterance with no error anywhere.
+_RESERVED_EXTRA_BODY_KEYS = frozenset({"stream", "file", "input_audio"})
 
 
 def _parse_extra_body(raw: Any, errors: dict[str, str]) -> dict[str, Any]:
@@ -84,8 +86,19 @@ def _parse_extra_body(raw: Any, errors: dict[str, str]) -> dict[str, Any]:
     except (json.JSONDecodeError, ValueError):
         errors.setdefault("base", "invalid_extra_body")
         return {}
+    except RecursionError:
+        # Deeply nested JSON blows the stack inside the decoder. RecursionError
+        # is a RuntimeError, not a ValueError, so without this the one input
+        # this function exists to sanitize takes the whole flow down with an
+        # "Unknown error" and a traceback.
+        errors.setdefault("base", "invalid_extra_body")
+        return {}
     if not isinstance(parsed, dict) or not all(isinstance(k, str) for k in parsed):
         errors.setdefault("base", "invalid_extra_body")
+        return {}
+    if reserved := _RESERVED_EXTRA_BODY_KEYS.intersection(parsed):
+        LOGGER.debug("STT extra request body rejected, reserved keys: %s", reserved)
+        errors.setdefault("base", "reserved_extra_body_key")
         return {}
     return parsed
 
@@ -262,35 +275,38 @@ class SttProviderSubentryFlow(ConfigSubentryFlow):
         provider_type = self._provider_type or "openai"
 
         if user_input is not None:
+            # Every optional field is copied before the required-model check,
+            # so submitting with the model box cleared redisplays the form with
+            # the rest of what was typed intact. Doing this inside the `else`
+            # reverted them all to the stored values, which is invisible until
+            # one of the fields is a hand-written JSON body.
+            model_data[CONF_STT_LANGUAGE] = user_input.get(CONF_STT_LANGUAGE) or None
+            model_data[CONF_STT_PROMPT] = user_input.get(CONF_STT_PROMPT) or None
+            model_data[CONF_STT_TEMPERATURE] = user_input.get(CONF_STT_TEMPERATURE)
+            model_data[CONF_STT_TRANSLATE] = bool(user_input.get(CONF_STT_TRANSLATE))
+            model_data[CONF_STT_RESPONSE_FORMAT] = user_input.get(
+                CONF_STT_RESPONSE_FORMAT
+            )
+            # The JSON request format is offered on local endpoints only (the
+            # OpenAI API speaks multipart alone), so an OpenAI subentry always
+            # stores the default rather than whatever a stale form round-trip
+            # happened to carry.
+            model_data[CONF_STT_REQUEST_FORMAT] = (
+                user_input.get(CONF_STT_REQUEST_FORMAT) or STT_REQUEST_FORMAT_MULTIPART
+                if provider_type == "local"
+                else STT_REQUEST_FORMAT_MULTIPART
+            )
+
+            # The model name is required, so its error is reported first: the
+            # extra-body parser records with setdefault and will not mask it.
             model_name = user_input.get(CONF_STT_MODEL_NAME)
             if not model_name:
                 errors["base"] = "invalid_model"
             else:
                 model_data[CONF_STT_MODEL_NAME] = model_name
-                model_data[CONF_STT_LANGUAGE] = (
-                    user_input.get(CONF_STT_LANGUAGE) or None
-                )
-                model_data[CONF_STT_PROMPT] = user_input.get(CONF_STT_PROMPT) or None
-                model_data[CONF_STT_TEMPERATURE] = user_input.get(CONF_STT_TEMPERATURE)
-                model_data[CONF_STT_TRANSLATE] = bool(
-                    user_input.get(CONF_STT_TRANSLATE)
-                )
-                model_data[CONF_STT_RESPONSE_FORMAT] = user_input.get(
-                    CONF_STT_RESPONSE_FORMAT
-                )
-                model_data[CONF_STT_EXTRA_BODY] = _parse_extra_body(
-                    user_input.get(CONF_STT_EXTRA_BODY), errors
-                )
-                # The JSON request format is offered on local endpoints only
-                # (the OpenAI API speaks multipart alone), so an OpenAI
-                # subentry always stores the default rather than whatever a
-                # stale form round-trip happened to carry.
-                model_data[CONF_STT_REQUEST_FORMAT] = (
-                    user_input.get(CONF_STT_REQUEST_FORMAT)
-                    or STT_REQUEST_FORMAT_MULTIPART
-                    if provider_type == "local"
-                    else STT_REQUEST_FORMAT_MULTIPART
-                )
+            model_data[CONF_STT_EXTRA_BODY] = _parse_extra_body(
+                user_input.get(CONF_STT_EXTRA_BODY), errors
+            )
 
             if not errors:
                 payload = {
@@ -407,15 +423,11 @@ class SttProviderSubentryFlow(ConfigSubentryFlow):
                         or STT_REQUEST_FORMAT_MULTIPART,
                     ): SelectSelector(
                         SelectSelectorConfig(
-                            options=[
-                                SelectOptionDict(
-                                    label=_REQUEST_FORMAT_LABELS[fmt], value=fmt
-                                )
-                                for fmt in STT_REQUEST_FORMATS
-                            ],
+                            options=list(STT_REQUEST_FORMATS),
                             mode=SelectSelectorMode.DROPDOWN,
                             sort=False,
                             custom_value=False,
+                            translation_key="stt_request_format",
                         )
                     )
                 }

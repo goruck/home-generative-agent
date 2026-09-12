@@ -156,7 +156,8 @@
         "invalid_model": "Select a valid model.",
         "not_supported": "Provider not supported yet.",
         "unknown": "Unexpected error.",
-        "invalid_extra_body": "Extra request body must be a JSON object."
+        "invalid_extra_body": "Extra request body must be a JSON object.",
+        "reserved_extra_body_key": "Extra request body cannot set stream, file or input_audio - Home Generative Agent controls those."
       }
     },
     "tts_provider": {
@@ -399,6 +400,12 @@
           "name": "Value",
           "description": "Connection parameter value (for example: disable, 30)"
         }
+      }
+    },
+    "stt_request_format": {
+      "options": {
+        "multipart": "Multipart upload (default)",
+        "json_base64": "JSON with base64 audio"
       }
     }
   },

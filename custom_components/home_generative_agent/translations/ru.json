@@ -146,7 +146,8 @@
         "invalid_model": "Select a valid model.",
         "not_supported": "Provider not supported yet.",
         "unknown": "Unexpected error.",
-        "invalid_extra_body": "Дополнительное тело запроса должно быть объектом JSON."
+        "invalid_extra_body": "Дополнительное тело запроса должно быть объектом JSON.",
+        "reserved_extra_body_key": "Дополнительное тело запроса не может задавать stream, file или input_audio - ими управляет Home Generative Agent."
       }
     },
     "tts_provider": {
@@ -368,6 +369,12 @@
           "name": "Value",
           "description": "Connection parameter value (for example: disable, 30)"
         }
+      }
+    },
+    "stt_request_format": {
+      "options": {
+        "multipart": "Загрузка multipart (по умолчанию)",
+        "json_base64": "JSON со звуком в base64"
       }
     }
   },

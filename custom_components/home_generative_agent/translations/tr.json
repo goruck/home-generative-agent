@@ -146,7 +146,8 @@
         "invalid_model": "Geçerli bir model seçin.",
         "not_supported": "Sağlayıcı henüz desteklenmiyor.",
         "unknown": "Beklenmeyen hata.",
-        "invalid_extra_body": "Ek istek gövdesi bir JSON nesnesi olmalıdır."
+        "invalid_extra_body": "Ek istek gövdesi bir JSON nesnesi olmalıdır.",
+        "reserved_extra_body_key": "Ek istek gövdesi stream, file veya input_audio ayarlayamaz - bunları Home Generative Agent yönetir."
       }
     },
     "tts_provider": {
@@ -368,6 +369,12 @@
           "name": "Değer",
           "description": "Bağlantı parametresi değeri (ör. disable, 30)"
         }
+      }
+    },
+    "stt_request_format": {
+      "options": {
+        "multipart": "Multipart yükleme (varsayılan)",
+        "json_base64": "base64 sesli JSON"
       }
     }
   },

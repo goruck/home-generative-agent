@@ -254,7 +254,7 @@ HGA provides a built-in STT engine — no separate STT integration required. Two
    - `prompt` (optional): hints for domain-specific vocabulary
    - `temperature` (optional): 0–1
    - `translate`: on OpenAI only `whisper-1` supports it (other models fall back to transcription); local whisper servers support it for every model
-   - `extra request body` (optional): a JSON **object** merged into the request body, for parameters HGA does not expose as fields. It is merged last, so it can also override anything above. Invalid JSON, or JSON that is not an object, keeps you on the form.
+   - `extra request body` (optional): a JSON **object** merged into the request body, for parameters HGA does not expose as fields. It is merged last, so it can also override a parameter set above (`model` or `response_format`, say). It cannot set `stream`, `file` or `input_audio` — HGA owns how the audio and the response are carried. Invalid JSON, JSON that is not an object, or one of those three keys keeps you on the form.
    - `request format` (Local only): how the audio goes on the wire — see [Provider-specific request options](#provider-specific-request-options) below
 6. Go to **Settings → Voice assistants → Assist pipelines** and select **STT - OpenAI** / **STT - Local** (or your chosen name) for Speech-to-text.
 
@@ -270,6 +270,7 @@ Some endpoints accept transcription parameters that are not part of the OpenAI A
 
 - There is **no translations endpoint** for this shape, so `translate` degrades to transcription with a warning in the log.
 - The **`prompt` field is not sent** — this shape has no such parameter. (OpenRouter ignores `prompt` on multipart too, so nothing is lost there.) If your endpoint wants one, put it in the extra request body.
+- The extra request body **cannot set `stream`, `file` or `input_audio`**. These decide how the audio and the response are carried rather than how the audio is transcribed, and overriding them cannot do anything useful: an endpoint that honours `stream` replies with an event stream, which would be handed back as the transcript itself with no error.
 
 Example: biasing OpenRouter's `microsoft/mai-transcribe-2` towards names its model mishears. Set **request format** to *JSON with base64 audio* and put this in **extra request body**:
 

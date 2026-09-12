@@ -1121,3 +1121,59 @@ async def test_json_request_format_on_the_real_sdk_path(
     sent = json.loads(request.content)
     assert sent["provider"] == PHRASE_BIAS["provider"]
     assert base64.b64decode(sent["input_audio"]["data"])[:4] == b"RIFF"
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_json_request_format_ignored_for_an_openai_subentry() -> None:
+    """
+    The local-only rule is enforced at runtime, not just in the flow.
+
+    The flow never writes this combination, but hand-edited or migrated
+    storage can hold it, and posting base64 JSON to api.openai.com would fail
+    every utterance.
+    """
+    entity, _ = _make_entity(
+        model={
+            CONF_STT_MODEL_NAME: "whisper-1",
+            CONF_STT_REQUEST_FORMAT: STT_REQUEST_FORMAT_JSON,
+        }
+    )
+    result, seen = await _run(entity, [SimpleNamespace(text="hello")])
+    assert result.result == ha_stt.SpeechResultState.SUCCESS
+    assert not seen["posts"]
+    assert len(seen["transcriptions"]) == 1
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_json_request_format_on_the_real_sdk_path_keyless(
+    shared_httpx_client: Any,
+) -> None:
+    """
+    A keyless local server gets no Authorization header on the raw post path.
+
+    The other keyless assertions check what HGA hands the SDK; only this one
+    checks what leaves, so an SDK change to how ``Omit`` is honored in request
+    options cannot regress the keyless wire shape silently.
+    """
+    seen: list[httpx.Request] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"text": "ok"})
+
+    shared_httpx_client._transport = httpx.MockTransport(_handler)
+
+    entity, _ = _make_local_entity(
+        model={
+            CONF_STT_MODEL_NAME: "whisper-1",
+            CONF_STT_REQUEST_FORMAT: STT_REQUEST_FORMAT_JSON,
+        }
+    )
+    result = await entity.async_process_audio_stream(_metadata(), await _stream())
+
+    assert result.result == ha_stt.SpeechResultState.SUCCESS
+    assert len(seen) == 1
+    assert "authorization" not in {k.lower() for k in seen[0].headers}
+    # The constructor placeholder must not reach the wire by any other route.
+    assert LOCAL_KEYLESS_API_KEY not in seen[0].headers.get("authorization", "")
+    assert LOCAL_KEYLESS_API_KEY.encode() not in seen[0].content

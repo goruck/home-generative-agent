@@ -4930,3 +4930,63 @@ async def test_stt_flow_reshows_stored_extra_body_as_json_text(
     form = await flow.async_step_model()
     shown = _schema_marker(form, "extra_body").default()
     assert json.loads(shown) == {"hotwords": "Frigate"}
+
+
+@pytest.mark.asyncio
+async def test_stt_flow_rejects_deeply_nested_extra_body(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Deeply nested JSON is rejected, not raised.
+
+    json.loads blows the stack on this input, and RecursionError is a
+    RuntimeError rather than a ValueError — so without an explicit catch the
+    one input this field exists to sanitize takes the whole flow down.
+    """
+    flow = await _local_stt_flow_to_model(hass, monkeypatch)
+    nested = "[" * 100000 + "]" * 100000
+    result = await flow.async_step_model(
+        {"model_name": "whisper-1", "extra_body": nested}
+    )
+    assert result.get("type") == "form"
+    assert (result.get("errors") or {}).get("base") == "invalid_extra_body"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", ["stream", "file", "input_audio"])
+async def test_stt_flow_rejects_transport_owned_extra_body_keys(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch, key: str
+) -> None:
+    """
+    HGA owns how the audio and the response are carried.
+
+    `stream` is the one that matters: an endpoint honoring it answers with
+    text/event-stream, the SDK hands that back as a plain string, and a plain
+    string is exactly what a successful transcript looks like — so raw SSE
+    frames would be spoken back as the utterance with no error anywhere.
+    """
+    flow = await _local_stt_flow_to_model(hass, monkeypatch)
+    result = await flow.async_step_model(
+        {"model_name": "whisper-1", "extra_body": json.dumps({key: True})}
+    )
+    assert result.get("type") == "form"
+    assert (result.get("errors") or {}).get("base") == "reserved_extra_body_key"
+
+
+@pytest.mark.asyncio
+async def test_stt_flow_keeps_other_fields_when_model_name_is_missing(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cleared model box must not silently revert everything else typed."""
+    flow = await _local_stt_flow_to_model(hass, monkeypatch)
+    result = await flow.async_step_model(
+        {
+            "model_name": "",
+            "language": "cs",
+            "extra_body": '{"hotwords": "Frigate"}',
+        }
+    )
+    assert result.get("type") == "form"
+    assert (result.get("errors") or {}).get("base") == "invalid_model"
+    assert _schema_marker(result, "language").default() == "cs"
+    assert _schema_marker(result, "extra_body").default() == '{"hotwords": "Frigate"}'

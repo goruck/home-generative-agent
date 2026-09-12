@@ -156,7 +156,8 @@
         "invalid_model": "Vyberte platný model.",
         "not_supported": "Poskytovatel zatím není podporován.",
         "unknown": "Neočekávaná chyba.",
-        "invalid_extra_body": "Další tělo požadavku musí být objekt JSON."
+        "invalid_extra_body": "Další tělo požadavku musí být objekt JSON.",
+        "reserved_extra_body_key": "Další tělo požadavku nesmí nastavovat stream, file ani input_audio - ty řídí Home Generative Agent."
       }
     },
     "tts_provider": {
@@ -399,6 +400,12 @@
       "options": {
         "basic": "Základní nastavení",
         "advanced": "Pokročilé nastavení"
+      }
+    },
+    "stt_request_format": {
+      "options": {
+        "multipart": "Nahrání multipart (výchozí)",
+        "json_base64": "JSON se zvukem v base64"
       }
     }
   },
