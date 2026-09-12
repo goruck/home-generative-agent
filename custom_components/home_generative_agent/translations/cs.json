@@ -140,7 +140,13 @@
             "prompt": "Prompt (volitelné)",
             "temperature": "Teplota (volitelné)",
             "translate": "Přeložit do angličtiny",
-            "response_format": "Formát odpovědi"
+            "response_format": "Formát odpovědi",
+            "request_format": "Formát požadavku",
+            "extra_body": "Další tělo požadavku (JSON, volitelné)"
+          },
+          "data_description": {
+            "request_format": "Jak se odesílá zvuk. Nahrání multipart je vlastní formát OpenAI a funguje všude. JSON se zvukem v base64 je nativní formát přepisu služby OpenRouter - zvolte jej jen tehdy, pokud jej váš server dokumentuje. Nemá koncový bod pro překlad a ignoruje pole Pokyn výše.",
+            "extra_body": "Objekt JSON vložený do těla požadavku pro pole, která HGA nenabízí. U služby OpenRouter sem patří volby poskytovatele, například upřednostnění klíčových slov, a ty vyžadují formát požadavku JSON. Ukázku najdete v části STT v dokumentaci. Pokud si nejste jisti, nechte prázdné."
           }
         }
       },
@@ -149,7 +155,8 @@
         "invalid_auth": "Neplatné přihlašovací údaje.",
         "invalid_model": "Vyberte platný model.",
         "not_supported": "Poskytovatel zatím není podporován.",
-        "unknown": "Neočekávaná chyba."
+        "unknown": "Neočekávaná chyba.",
+        "invalid_extra_body": "Další tělo požadavku musí být objekt JSON."
       }
     },
     "tts_provider": {

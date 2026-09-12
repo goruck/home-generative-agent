@@ -130,7 +130,13 @@
             "prompt": "Prompt (optional)",
             "temperature": "Temperature (optional)",
             "translate": "Translate to English",
-            "response_format": "Response format"
+            "response_format": "Response format",
+            "request_format": "Формат запроса",
+            "extra_body": "Дополнительное тело запроса (JSON, необязательно)"
+          },
+          "data_description": {
+            "request_format": "Как отправляется звук. Загрузка multipart - собственный формат OpenAI, работает везде. JSON со звуком в base64 - родной формат транскрипции OpenRouter; выбирайте его, только если ваш сервер его документирует. У него нет конечной точки перевода, и он игнорирует поле «Подсказка» выше.",
+            "extra_body": "Объект JSON, добавляемый в тело запроса, для полей, которые HGA не предоставляет. В OpenRouter здесь указываются параметры провайдера, например приоритет ключевых слов; для них нужен формат запроса JSON. Пример см. в разделе STT документации. Если не уверены, оставьте пустым."
           }
         }
       },
@@ -139,7 +145,8 @@
         "invalid_auth": "Invalid credentials.",
         "invalid_model": "Select a valid model.",
         "not_supported": "Provider not supported yet.",
-        "unknown": "Unexpected error."
+        "unknown": "Unexpected error.",
+        "invalid_extra_body": "Дополнительное тело запроса должно быть объектом JSON."
       }
     },
     "tts_provider": {

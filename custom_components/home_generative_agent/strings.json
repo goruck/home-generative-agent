@@ -140,7 +140,13 @@
             "prompt": "Prompt (optional)",
             "temperature": "Temperature (optional)",
             "translate": "Translate to English",
-            "response_format": "Response format"
+            "response_format": "Response format",
+            "request_format": "Request format",
+            "extra_body": "Extra request body (JSON, optional)"
+          },
+          "data_description": {
+            "request_format": "How the audio is sent. Multipart upload is OpenAI's own shape and works everywhere. JSON with base64 audio is OpenRouter's native transcription shape - pick it only if your server documents it. It has no translations endpoint and ignores the Prompt field above.",
+            "extra_body": "A JSON object merged into the request body, for fields HGA does not expose. On OpenRouter this is where provider options such as keyword biasing go, and those need the JSON request format. See the STT section of the documentation for a worked example. Leave blank if unsure."
           }
         }
       },
@@ -149,7 +155,8 @@
         "invalid_auth": "Invalid credentials.",
         "invalid_model": "Select a valid model.",
         "not_supported": "Provider not supported yet.",
-        "unknown": "Unexpected error."
+        "unknown": "Unexpected error.",
+        "invalid_extra_body": "Extra request body must be a JSON object."
       }
     },
     "tts_provider": {

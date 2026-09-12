@@ -130,7 +130,13 @@
             "prompt": "İstem (isteğe bağlı)",
             "temperature": "Sıcaklık (isteğe bağlı)",
             "translate": "İngilizceye çevir",
-            "response_format": "Yanıt biçimi"
+            "response_format": "Yanıt biçimi",
+            "request_format": "İstek biçimi",
+            "extra_body": "Ek istek gövdesi (JSON, isteğe bağlı)"
+          },
+          "data_description": {
+            "request_format": "Sesin nasıl gönderileceği. Multipart yükleme OpenAI'nin kendi biçimidir ve her yerde çalışır. base64 sesli JSON, OpenRouter'ın yerel deşifre biçimidir - yalnızca sunucunuz bunu belgeliyorsa seçin. Çeviri uç noktası yoktur ve yukarıdaki İstem alanını yok sayar.",
+            "extra_body": "HGA'nın sunmadığı alanlar için istek gövdesine eklenen bir JSON nesnesi. OpenRouter'da anahtar sözcük önceliklendirme gibi sağlayıcı seçenekleri buraya yazılır ve bunlar JSON istek biçimini gerektirir. Örnek için belgelerdeki STT bölümüne bakın. Emin değilseniz boş bırakın."
           }
         }
       },
@@ -139,7 +145,8 @@
         "invalid_auth": "Geçersiz kimlik bilgileri.",
         "invalid_model": "Geçerli bir model seçin.",
         "not_supported": "Sağlayıcı henüz desteklenmiyor.",
-        "unknown": "Beklenmeyen hata."
+        "unknown": "Beklenmeyen hata.",
+        "invalid_extra_body": "Ek istek gövdesi bir JSON nesnesi olmalıdır."
       }
     },
     "tts_provider": {

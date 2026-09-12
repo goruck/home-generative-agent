@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, get_args
 
@@ -26,16 +27,21 @@ from homeassistant.helpers.selector import (
 )
 
 from ..const import (  # noqa: TID252
+    CONF_STT_EXTRA_BODY,
     CONF_STT_LANGUAGE,
     CONF_STT_MODEL_NAME,
     CONF_STT_OPENAI_PROVIDER_ID,
     CONF_STT_PROMPT,
+    CONF_STT_REQUEST_FORMAT,
     CONF_STT_RESPONSE_FORMAT,
     CONF_STT_TEMPERATURE,
     CONF_STT_TRANSLATE,
     RECOMMENDED_LOCAL_STT_MODEL,
     RECOMMENDED_OPENAI_STT_MODEL,
     STT_MODEL_OPENAI_SUPPORTED,
+    STT_REQUEST_FORMAT_JSON,
+    STT_REQUEST_FORMAT_MULTIPART,
+    STT_REQUEST_FORMATS,
     STT_RESPONSE_FORMATS,
     SUBENTRY_TYPE_STT_PROVIDER,
 )
@@ -50,6 +56,46 @@ from .openai_compatible_endpoint import (
 )
 
 LOGGER = logging.getLogger(__name__)
+
+# Request-format labels. The value is what goes in the subentry; the label is
+# what the user picks from, so it names the transport rather than the constant.
+_REQUEST_FORMAT_LABELS = {
+    STT_REQUEST_FORMAT_MULTIPART: "Multipart upload (default)",
+    STT_REQUEST_FORMAT_JSON: "JSON with base64 audio",
+}
+
+
+def _parse_extra_body(raw: Any, errors: dict[str, str]) -> dict[str, Any]:
+    """
+    Parse the extra-request-body text field into a JSON object.
+
+    Empty input is an empty object. Anything that is not valid JSON, or is
+    valid JSON but not an object, records ``invalid_extra_body`` and returns
+    ``{}`` — the caller redisplays the raw text so the typo is still on screen.
+    A non-object is rejected rather than coerced because the value is merged
+    into the request body as top-level fields; a list or scalar has nowhere to
+    merge into and would silently do nothing.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        errors.setdefault("base", "invalid_extra_body")
+        return {}
+    if not isinstance(parsed, dict) or not all(isinstance(k, str) for k in parsed):
+        errors.setdefault("base", "invalid_extra_body")
+        return {}
+    return parsed
+
+
+def _extra_body_text(stored: Any) -> str:
+    """Render a stored extra body back into the text the form shows."""
+    if not isinstance(stored, dict) or not stored:
+        return ""
+    return json.dumps(stored, indent=2, ensure_ascii=False)
+
 
 ProviderNames = {
     "openai": "STT - OpenAI",
@@ -213,6 +259,7 @@ class SttProviderSubentryFlow(ConfigSubentryFlow):
         errors: dict[str, str] = {}
         current = current_subentry(self, SUBENTRY_TYPE_STT_PROVIDER)
         model_data = dict(self._model)
+        provider_type = self._provider_type or "openai"
 
         if user_input is not None:
             model_name = user_input.get(CONF_STT_MODEL_NAME)
@@ -230,6 +277,19 @@ class SttProviderSubentryFlow(ConfigSubentryFlow):
                 )
                 model_data[CONF_STT_RESPONSE_FORMAT] = user_input.get(
                     CONF_STT_RESPONSE_FORMAT
+                )
+                model_data[CONF_STT_EXTRA_BODY] = _parse_extra_body(
+                    user_input.get(CONF_STT_EXTRA_BODY), errors
+                )
+                # The JSON request format is offered on local endpoints only
+                # (the OpenAI API speaks multipart alone), so an OpenAI
+                # subentry always stores the default rather than whatever a
+                # stale form round-trip happened to carry.
+                model_data[CONF_STT_REQUEST_FORMAT] = (
+                    user_input.get(CONF_STT_REQUEST_FORMAT)
+                    or STT_REQUEST_FORMAT_MULTIPART
+                    if provider_type == "local"
+                    else STT_REQUEST_FORMAT_MULTIPART
                 )
 
             if not errors:
@@ -258,7 +318,15 @@ class SttProviderSubentryFlow(ConfigSubentryFlow):
                     title=payload["name"],
                 )
 
-        provider_type = self._provider_type or "openai"
+        # On a validation error, redisplay the JSON that was just typed rather
+        # than the stored value, so a single misplaced brace does not throw
+        # away the whole hand-written body (the credentials step does the same
+        # with the server URL).
+        if user_input is not None and errors:
+            extra_body_prefill = str(user_input.get(CONF_STT_EXTRA_BODY) or "")
+        else:
+            extra_body_prefill = _extra_body_text(model_data.get(CONF_STT_EXTRA_BODY))
+
         if provider_type == "local":
             model_options = [
                 SelectOptionDict(
@@ -326,6 +394,41 @@ class SttProviderSubentryFlow(ConfigSubentryFlow):
                         sort=False,
                         custom_value=False,
                     )
+                ),
+            }
+        )
+
+        if provider_type == "local":
+            schema = schema.extend(
+                {
+                    vol.Optional(
+                        CONF_STT_REQUEST_FORMAT,
+                        default=model_data.get(CONF_STT_REQUEST_FORMAT)
+                        or STT_REQUEST_FORMAT_MULTIPART,
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(
+                                    label=_REQUEST_FORMAT_LABELS[fmt], value=fmt
+                                )
+                                for fmt in STT_REQUEST_FORMATS
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                            sort=False,
+                            custom_value=False,
+                        )
+                    )
+                }
+            )
+
+        schema = schema.extend(
+            {
+                vol.Optional(
+                    CONF_STT_EXTRA_BODY,
+                    description={"suggested_value": extra_body_prefill},
+                    default=extra_body_prefill,
+                ): TextSelector(
+                    TextSelectorConfig(type=TextSelectorType.TEXT, multiline=True)
                 ),
             }
         )

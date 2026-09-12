@@ -4797,3 +4797,136 @@ def test_runtime_options_default_network_audit_keys() -> None:
         options[CONF_SENTINEL_AUTH_IP_RETENTION_DAYS]
         == RECOMMENDED_SENTINEL_AUTH_IP_RETENTION_DAYS
     )
+
+
+# --- STT request format and extra request body (issue #610) ------------------
+
+
+def _has_field(form: Any, field: str) -> bool:
+    """Whether a shown form's schema carries this field at all."""
+    return any(
+        getattr(key, "schema", None) == field for key in form["data_schema"].schema
+    )
+
+
+async def _local_stt_flow_to_model(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> SttProviderSubentryFlow:
+    """Walk a local STT flow up to the model step."""
+
+    async def _noop_validate(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.flows.openai_compatible_endpoint.validate_openai_compatible_url",
+        _noop_validate,
+    )
+    flow = _make_stt_flow(hass, DummyEntry())
+    await flow.async_step_provider({"provider_type": "local", "name": "STT - Local"})
+    await flow.async_step_credentials({"base_url": "http://openrouter-proxy:8000"})
+    return flow
+
+
+@pytest.mark.asyncio
+async def test_stt_local_flow_stores_request_format_and_extra_body(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The local model step stores the picked format and the parsed JSON body."""
+    flow = await _local_stt_flow_to_model(hass, monkeypatch)
+    result = await flow.async_step_model(
+        {
+            "model_name": "microsoft/mai-transcribe-2",
+            "request_format": "json_base64",
+            "extra_body": '{"provider": {"options": {"azure": {"x": 1}}}}',
+        }
+    )
+    assert result.get("type") == "create_entry"
+    model = (result.get("data") or {})["model"]
+    assert model["request_format"] == "json_base64"
+    assert model["extra_body"] == {"provider": {"options": {"azure": {"x": 1}}}}
+
+
+@pytest.mark.asyncio
+async def test_stt_local_flow_defaults_to_multipart_and_empty_body(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Leaving both new fields alone keeps the pre-#610 wire behavior."""
+    flow = await _local_stt_flow_to_model(hass, monkeypatch)
+    result = await flow.async_step_model({"model_name": "whisper-1"})
+    model = (result.get("data") or {})["model"]
+    assert model["request_format"] == "multipart"
+    assert model["extra_body"] == {}
+
+
+@pytest.mark.asyncio
+async def test_stt_flow_rejects_malformed_extra_body(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Broken JSON keeps the user on the form with what they typed intact."""
+    flow = await _local_stt_flow_to_model(hass, monkeypatch)
+    typed = '{"provider": {'
+    result = await flow.async_step_model(
+        {"model_name": "whisper-1", "extra_body": typed}
+    )
+    assert result.get("type") == "form"
+    assert (result.get("errors") or {}).get("base") == "invalid_extra_body"
+    # Losing a long hand-written body to one missing brace would be brutal.
+    assert _schema_marker(result, "extra_body").default() == typed
+
+
+@pytest.mark.asyncio
+async def test_stt_flow_rejects_non_object_extra_body(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Valid JSON that is not an object has nowhere to merge into."""
+    flow = await _local_stt_flow_to_model(hass, monkeypatch)
+    result = await flow.async_step_model(
+        {"model_name": "whisper-1", "extra_body": '["provider"]'}
+    )
+    assert result.get("type") == "form"
+    assert (result.get("errors") or {}).get("base") == "invalid_extra_body"
+
+
+@pytest.mark.asyncio
+async def test_stt_openai_flow_has_no_request_format_field(
+    hass: HomeAssistant,
+) -> None:
+    """
+    The OpenAI API speaks multipart only, so the format picker is local-only.
+
+    The extra body field stays, though: it still reaches OpenAI transcription
+    parameters that HGA does not surface.
+    """
+    flow = _make_stt_flow(hass, DummyEntry())
+    await flow.async_step_provider({"provider_type": "openai", "name": "STT - OpenAI"})
+    form = await flow.async_step_model()
+    assert not _has_field(form, "request_format")
+    assert _has_field(form, "extra_body")
+
+
+@pytest.mark.asyncio
+async def test_stt_openai_flow_stores_multipart_regardless(
+    hass: HomeAssistant,
+) -> None:
+    """An OpenAI subentry never stores the JSON format, even if posted."""
+    flow = _make_stt_flow(hass, DummyEntry())
+    await flow.async_step_provider({"provider_type": "openai", "name": "STT - OpenAI"})
+    result = await flow.async_step_model(
+        {"model_name": "whisper-1", "request_format": "json_base64"}
+    )
+    assert (result.get("data") or {})["model"]["request_format"] == "multipart"
+
+
+@pytest.mark.asyncio
+async def test_stt_flow_reshows_stored_extra_body_as_json_text(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stored body comes back as editable text, not a Python dict repr."""
+    flow = await _local_stt_flow_to_model(hass, monkeypatch)
+    await flow.async_step_model(
+        {"model_name": "whisper-1", "extra_body": '{"hotwords": "Frigate"}'}
+    )
+    cast("Any", flow)._model = {"extra_body": {"hotwords": "Frigate"}}
+    form = await flow.async_step_model()
+    shown = _schema_marker(form, "extra_body").default()
+    assert json.loads(shown) == {"hotwords": "Frigate"}

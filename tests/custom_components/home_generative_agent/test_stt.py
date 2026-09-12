@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
+import json
 import ssl
 from types import MappingProxyType, SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -17,15 +19,18 @@ from openai._models import FinalRequestOptions
 
 from custom_components.home_generative_agent import stt as hga_stt
 from custom_components.home_generative_agent.const import (
+    CONF_STT_EXTRA_BODY,
     CONF_STT_LANGUAGE,
     CONF_STT_MODEL_NAME,
     CONF_STT_OPENAI_PROVIDER_ID,
     CONF_STT_PROMPT,
+    CONF_STT_REQUEST_FORMAT,
     CONF_STT_RESPONSE_FORMAT,
     CONF_STT_TEMPERATURE,
     CONF_STT_TRANSLATE,
     LOCAL_KEYLESS_API_KEY,
     RECOMMENDED_LOCAL_STT_MODEL,
+    STT_REQUEST_FORMAT_JSON,
     SUBENTRY_TYPE_MODEL_PROVIDER,
     SUBENTRY_TYPE_STT_PROVIDER,
 )
@@ -171,7 +176,7 @@ def patched_client(monkeypatch: pytest.MonkeyPatch, shared_httpx_client: Any) ->
 
 def _stub_responses(client: Any, responses: list[Any]) -> dict[str, list[Any]]:
     """Stub transcription/translation calls on a real OpenAI client object."""
-    seen: dict[str, list[Any]] = {"transcriptions": [], "translations": []}
+    seen: dict[str, list[Any]] = {"transcriptions": [], "translations": [], "posts": []}
     queue = list(responses)
 
     async def _next() -> Any:
@@ -188,8 +193,13 @@ def _stub_responses(client: Any, responses: list[Any]) -> dict[str, list[Any]]:
         seen["translations"].append(kwargs)
         return await _next()
 
+    async def _post(path: str, **kwargs: Any) -> Any:
+        seen["posts"].append({"path": path, **kwargs})
+        return await _next()
+
     client.audio.transcriptions.create = _transcribe
     client.audio.translations.create = _translate
+    client.post = _post
     return seen
 
 
@@ -905,3 +915,209 @@ async def test_local_translate_non_whisper_falls_back_to_transcription() -> None
     assert result.result == ha_stt.SpeechResultState.SUCCESS
     assert seen["translations"] == []
     assert len(seen["transcriptions"]) == 1
+
+
+# --- Extra request body and the JSON request format (issue #610) -------------
+#
+# OpenRouter's multipart endpoint is an OpenAI compatibility layer whose
+# documented field list is file/model/language/temperature/response_format/
+# timestamp_granularities, so `provider.options` (keyword biasing, diarization)
+# is unreachable there no matter how extra_body is serialized. These lock the
+# JSON request format that does carry it.
+
+PHRASE_BIAS = {
+    "provider": {"options": {"azure": {"phraseList": {"phrases": ["Réaltín"]}}}}
+}
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_extra_body_is_forwarded_on_the_multipart_request() -> None:
+    """A configured extra body rides along on the normal multipart call."""
+    entity, _ = _make_local_entity(
+        model={
+            CONF_STT_MODEL_NAME: "whisper-1",
+            CONF_STT_EXTRA_BODY: {"hotwords": "Frigate"},
+        }
+    )
+    _, seen = await _run(entity, [SimpleNamespace(text="ok")])
+    assert len(seen["transcriptions"]) == 1
+    assert seen["transcriptions"][0]["extra_body"] == {"hotwords": "Frigate"}
+    assert not seen["posts"]
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_empty_extra_body_adds_no_key() -> None:
+    """No configured extra body means no extra_body key at all."""
+    entity, _ = _make_local_entity(model={CONF_STT_MODEL_NAME: "whisper-1"})
+    _, seen = await _run(entity, [SimpleNamespace(text="ok")])
+    assert "extra_body" not in seen["transcriptions"][0]
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_json_request_format_posts_base64_audio() -> None:
+    """The JSON format posts the audio base64-encoded, not as a form file."""
+    entity, _ = _make_local_entity(
+        model={
+            CONF_STT_MODEL_NAME: "microsoft/mai-transcribe-2",
+            CONF_STT_LANGUAGE: "en",
+            CONF_STT_TEMPERATURE: 0.2,
+            CONF_STT_RESPONSE_FORMAT: "json",
+            CONF_STT_REQUEST_FORMAT: STT_REQUEST_FORMAT_JSON,
+            CONF_STT_EXTRA_BODY: PHRASE_BIAS,
+        }
+    )
+    result, seen = await _run(entity, [{"text": "Turn off Réaltín's light."}])
+
+    assert result.result == ha_stt.SpeechResultState.SUCCESS
+    assert result.text == "Turn off Réaltín's light."
+    # The multipart resource method was never touched.
+    assert not seen["transcriptions"]
+    assert not seen["translations"]
+    assert len(seen["posts"]) == 1
+
+    post = seen["posts"][0]
+    assert post["path"] == "/audio/transcriptions"
+    body = post["body"]
+    assert body["model"] == "microsoft/mai-transcribe-2"
+    assert body["language"] == "en"
+    assert body["temperature"] == 0.2
+    assert body["response_format"] == "json"
+    # The provider block survives verbatim — this is the whole point of #610.
+    assert body["provider"] == PHRASE_BIAS["provider"]
+    # And the audio is the real WAV-wrapped payload, base64-encoded.
+    assert body["input_audio"]["format"] == "wav"
+    decoded = base64.b64decode(body["input_audio"]["data"])
+    assert decoded[:4] == b"RIFF"
+    assert AUDIO in decoded
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_json_request_format_omits_the_prompt() -> None:
+    """The JSON shape has no prompt field, so a configured one is not sent."""
+    entity, _ = _make_local_entity(
+        model={
+            CONF_STT_MODEL_NAME: "microsoft/mai-transcribe-2",
+            CONF_STT_PROMPT: "smart home",
+            CONF_STT_REQUEST_FORMAT: STT_REQUEST_FORMAT_JSON,
+        }
+    )
+    _, seen = await _run(entity, [{"text": "ok"}])
+    assert "prompt" not in seen["posts"][0]["body"]
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_json_request_format_extra_body_is_merged_last() -> None:
+    """Extra body overrides a built field, as documented."""
+    entity, _ = _make_local_entity(
+        model={
+            CONF_STT_MODEL_NAME: "microsoft/mai-transcribe-2",
+            CONF_STT_RESPONSE_FORMAT: "json",
+            CONF_STT_REQUEST_FORMAT: STT_REQUEST_FORMAT_JSON,
+            CONF_STT_EXTRA_BODY: {"response_format": "verbose_json"},
+        }
+    )
+    _, seen = await _run(entity, [{"text": "ok"}])
+    assert seen["posts"][0]["body"]["response_format"] == "verbose_json"
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_json_request_format_strips_auth_for_a_keyless_server() -> None:
+    """The keyless rule reaches the raw post path too, not just the SDK method."""
+    entity, _ = _make_local_entity(
+        model={
+            CONF_STT_MODEL_NAME: "whisper-1",
+            CONF_STT_REQUEST_FORMAT: STT_REQUEST_FORMAT_JSON,
+        }
+    )
+    _, seen = await _run(entity, [{"text": "ok"}])
+    headers = seen["posts"][0]["options"]["headers"]
+    assert isinstance(headers["Authorization"], Omit)
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_json_request_format_keeps_auth_for_a_keyed_server() -> None:
+    """A configured key means no header override, so the SDK sends the bearer."""
+    entity, _ = _make_local_entity(
+        settings={"base_url": LOCAL_BASE_URL, "api_key": "or-key"},
+        model={
+            CONF_STT_MODEL_NAME: "whisper-1",
+            CONF_STT_REQUEST_FORMAT: STT_REQUEST_FORMAT_JSON,
+        },
+    )
+    _, seen = await _run(entity, [{"text": "ok"}])
+    assert seen["posts"][0]["options"] == {}
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_json_request_format_falls_back_from_translate(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Translate degrades to transcription: the JSON shape has no such endpoint."""
+    entity, _ = _make_local_entity(
+        model={
+            CONF_STT_MODEL_NAME: "whisper-1",
+            CONF_STT_TRANSLATE: True,
+            CONF_STT_REQUEST_FORMAT: STT_REQUEST_FORMAT_JSON,
+        }
+    )
+    result, seen = await _run(entity, [{"text": "ok"}])
+    assert result.result == ha_stt.SpeechResultState.SUCCESS
+    assert not seen["translations"]
+    assert len(seen["posts"]) == 1
+    assert seen["posts"][0]["path"] == "/audio/transcriptions"
+    assert "no translations endpoint" in caplog.text
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_json_request_format_missing_text_is_an_error() -> None:
+    """A JSON body without text fails the utterance like any other response."""
+    entity, _ = _make_local_entity(
+        model={
+            CONF_STT_MODEL_NAME: "whisper-1",
+            CONF_STT_REQUEST_FORMAT: STT_REQUEST_FORMAT_JSON,
+        }
+    )
+    result, _ = await _run(entity, [{"usage": {"seconds": 8}}])
+    assert result.result == ha_stt.SpeechResultState.ERROR
+    assert result.text is None
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_json_request_format_on_the_real_sdk_path(
+    shared_httpx_client: Any,
+) -> None:
+    """
+    Drive the genuine SDK post path, not a stub.
+
+    The stubbed tests above prove what HGA hands the SDK; only this one proves
+    what the SDK then puts on the wire — a JSON content type with the provider
+    block intact, which is exactly what the multipart path could not do.
+    """
+    seen: list[httpx.Request] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"text": "Turn off Réaltín's light."})
+
+    shared_httpx_client._transport = httpx.MockTransport(_handler)
+
+    entity, _ = _make_local_entity(
+        settings={"base_url": LOCAL_BASE_URL, "api_key": "or-key"},
+        model={
+            CONF_STT_MODEL_NAME: "microsoft/mai-transcribe-2",
+            CONF_STT_REQUEST_FORMAT: STT_REQUEST_FORMAT_JSON,
+            CONF_STT_EXTRA_BODY: PHRASE_BIAS,
+        },
+    )
+    result = await entity.async_process_audio_stream(_metadata(), await _stream())
+
+    assert result.result == ha_stt.SpeechResultState.SUCCESS
+    assert result.text == "Turn off Réaltín's light."
+    assert len(seen) == 1
+    request = seen[0]
+    assert request.url.path.endswith("/audio/transcriptions")
+    assert request.headers["content-type"] == "application/json"
+    assert request.headers["authorization"] == "Bearer or-key"
+    sent = json.loads(request.content)
+    assert sent["provider"] == PHRASE_BIAS["provider"]
+    assert base64.b64decode(sent["input_audio"]["data"])[:4] == b"RIFF"
