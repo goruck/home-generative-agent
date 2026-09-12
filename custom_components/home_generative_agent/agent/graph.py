@@ -35,7 +35,7 @@ from langchain_core.messages import (
 from langchain_core.messages.utils import trim_messages
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.store.base import InvalidNamespaceError
-from pydantic import PydanticInvalidForJsonSchema, ValidationError
+from pydantic import ValidationError
 
 from custom_components.home_generative_agent.const import (
     ACTUATION_KEYWORDS_REGEX,
@@ -87,6 +87,7 @@ from .helpers import (
     is_actuation_tool,
     is_on_off_intent,
     is_tool_excluded,
+    langchain_tool_parameters_json,
     matches_critical_rule,
     maybe_fill_lock_entity,
     normalize_intent_for_alarm,
@@ -1391,23 +1392,12 @@ def _get_fallback_tools(
         return fallback_tools
     langchain_tools = config.get("configurable", {}).get("langchain_tools", {})
     for name, lc_tool in langchain_tools.items():
-        params = "{}"
-        if hasattr(lc_tool, "args_schema") and lc_tool.args_schema:
-            try:
-                params = json.dumps(lc_tool.args_schema.schema())
-            except (
-                AttributeError,
-                TypeError,
-                ValueError,
-                PydanticInvalidForJsonSchema,
-            ):
-                params = "{}"
         fallback_tools.append(
             RawTool(
                 name=name,
                 api_id="hga_local",
                 description=lc_tool.description,
-                parameters=params,
+                parameters=langchain_tool_parameters_json(lc_tool),
                 is_actuation=is_actuation_tool(name),
             )
         )
