@@ -1711,6 +1711,17 @@ label pair ("Server URL" vs "Base URL").
 **Effort:** S
 **Priority:** P3
 
+### The STT Prompt field is dead config on some endpoints, with nothing in the UI to say so
+
+**What:** `CONF_STT_PROMPT` is offered on both provider types and described as "hints for domain-specific vocabulary", but whether it does anything depends entirely on the endpoint. On OpenRouter it is inert on **both** transports: their multipart compatibility layer documents `prompt` as "accepted but ignored", and it is not a parameter of their native JSON shape at all, so `_build_json_request` (`stt.py`) deliberately omits it. A user configuring OpenRouter can type a careful vocabulary hint, see no error, and get no effect — the same silent-failure shape that [#610](https://github.com/goruck/home-generative-agent/issues/610) was filed about.
+
+**Why:** Found while building #610 (v3.41.0); pre-existing and unrelated to that change, so left out of it. It is cosmetic in the sense that nothing breaks, but the cost is a user's time spent tuning a field that cannot work, and the failure is invisible by construction. The #610 docs now state it for the JSON format and the release notes mention it, but the form itself still reads as though the field always applies.
+
+**How to apply:** Cheapest first: (a) extend the `prompt` `data_description` in `strings.json` (plus cs/ru/tr) to say the field is endpoint-dependent and ignored by some OpenAI-compatible servers, naming OpenRouter — no code, and it covers every provider we cannot probe. (b) Log once per subentry at INFO when a prompt is configured and the request format is JSON, so the log says what the form cannot. Do **not** try to detect OpenRouter by base URL and hide the field — that is the provider-sniffing this feature was deliberately designed to avoid, and it would break any other endpoint that does honour `prompt`.
+
+**Effort:** S
+**Priority:** P3
+
 ---
 
 ## Model Providers
