@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.41.0] - 2026-09-12
+
+### Added
+
+- Speech-to-text providers gain an **extra request body** field: a JSON object merged into the transcription request, for parameters HGA does not expose as its own fields. It is available on both the OpenAI and Local provider types and is merged last, so it can also override a parameter HGA sets, such as `model` or `response_format`. It cannot set `stream`, `file` or `input_audio`, which decide how the audio and the response are carried rather than how the audio is transcribed.
+- Local (OpenAI-compatible) STT providers gain a **request format** option: *Multipart upload* (the default and previous behavior) or *JSON with base64 audio*. The JSON shape posts the audio inline under `input_audio` instead of uploading it as a form file, which is what OpenRouter's transcription endpoint natively speaks. This makes provider-specific options such as keyword biasing (`provider.options`) reachable — OpenRouter's multipart endpoint is an OpenAI compatibility layer that accepts only `file`, `model`, `language`, `temperature`, `response_format` and `timestamp_granularities`, so a nested `provider` block was dropped there regardless of how it was encoded. The JSON request goes through the same configured client, so the pinned timeout, no-retry policy and keyless-Authorization handling are unchanged. It has no translations endpoint, so `translate` degrades to transcription with a warning, and it does not send the `prompt` field, which is not part of that request shape (OpenRouter ignores `prompt` on multipart as well). Multipart remains the default and the only option for the OpenAI provider type, whose API accepts nothing else. ([#610](https://github.com/goruck/home-generative-agent/issues/610))
+
 ## [3.40.1] - 2026-09-12
 
 ### Fixed

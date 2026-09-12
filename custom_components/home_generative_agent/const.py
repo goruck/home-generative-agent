@@ -468,6 +468,25 @@ CONF_STT_PROMPT = "prompt"
 CONF_STT_TEMPERATURE = "temperature"
 CONF_STT_TRANSLATE = "translate"
 CONF_STT_RESPONSE_FORMAT = "response_format"
+CONF_STT_REQUEST_FORMAT = "request_format"
+CONF_STT_EXTRA_BODY = "extra_body"
+
+# How the transcription request is put on the wire. Multipart is OpenAI's own
+# shape and the only one OpenAI itself and local servers (Speaches,
+# faster-whisper) accept, so it stays the default.
+#
+# ``json_base64`` posts a JSON body with the audio base64-encoded under
+# ``input_audio`` instead of uploading it as a form file. That is OpenRouter's
+# native transcription shape; their multipart endpoint is an OpenAI
+# compatibility layer that supports only file/model/language/temperature/
+# response_format/timestamp_granularities (``prompt`` is accepted and ignored),
+# so anything outside that list — notably ``provider.options``, where per-
+# provider keyword biasing and diarization live — is unreachable over multipart
+# no matter what CONF_STT_EXTRA_BODY carries (issue #610). Offered on the local
+# provider type only; the OpenAI API rejects it.
+STT_REQUEST_FORMAT_MULTIPART = "multipart"
+STT_REQUEST_FORMAT_JSON = "json_base64"
+STT_REQUEST_FORMATS = (STT_REQUEST_FORMAT_MULTIPART, STT_REQUEST_FORMAT_JSON)
 
 STT_MODEL_OPENAI_SUPPORTED = Literal[
     "whisper-1",

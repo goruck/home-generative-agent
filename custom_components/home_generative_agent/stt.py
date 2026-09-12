@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import inspect
 import io
 import logging
@@ -19,15 +20,18 @@ from homeassistant.components.stt import (
 from openai import AuthenticationError, OpenAIError
 
 from .const import (
+    CONF_STT_EXTRA_BODY,
     CONF_STT_LANGUAGE,
     CONF_STT_MODEL_NAME,
     CONF_STT_OPENAI_PROVIDER_ID,
     CONF_STT_PROMPT,
+    CONF_STT_REQUEST_FORMAT,
     CONF_STT_RESPONSE_FORMAT,
     CONF_STT_TEMPERATURE,
     CONF_STT_TRANSLATE,
     RECOMMENDED_LOCAL_STT_MODEL,
     RECOMMENDED_OPENAI_STT_MODEL,
+    STT_REQUEST_FORMAT_JSON,
     SUBENTRY_TYPE_STT_PROVIDER,
 )
 from .core.openai_endpoint import (
@@ -117,6 +121,7 @@ def _build_openai_request(  # noqa: PLR0913
     prompt: Any,
     temperature: Any,
     response_format: Any,
+    extra_body: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build OpenAI STT request payload."""
     request: dict[str, Any] = {"model": model_name, "file": audio_file}
@@ -128,7 +133,60 @@ def _build_openai_request(  # noqa: PLR0913
         request["temperature"] = temperature
     if response_format:
         request["response_format"] = response_format
+    if extra_body:
+        request["extra_body"] = dict(extra_body)
     return request
+
+
+def _build_json_request(  # noqa: PLR0913
+    model_name: str,
+    audio_bytes: bytes,
+    audio_format: str,
+    language: Any,
+    temperature: Any,
+    response_format: Any,
+    extra_body: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """
+    Build the JSON transcription body with the audio base64-encoded.
+
+    The configured prompt is deliberately absent: it is not a field of this
+    request shape (OpenRouter's parameter table has no ``prompt``, and their
+    multipart compatibility layer documents it as accepted-but-ignored), so
+    sending it would at best do nothing and at worst be rejected as unknown.
+    An endpoint that does want one can be given it through ``extra_body``,
+    which is merged last and so can also override anything built here.
+    """
+    body: dict[str, Any] = {
+        "model": model_name,
+        "input_audio": {
+            "data": base64.b64encode(audio_bytes).decode("ascii"),
+            "format": audio_format,
+        },
+    }
+    if language:
+        body["language"] = language
+    if temperature is not None:
+        body["temperature"] = temperature
+    if response_format:
+        body["response_format"] = response_format
+    if extra_body:
+        body.update(extra_body)
+    return body
+
+
+def _supports_translations(model_name: Any, provider_type: str) -> bool:
+    """
+    Whether this model can be sent to the ``/audio/translations`` endpoint.
+
+    Local servers (faster-whisper) serve translations for any whisper model;
+    OpenAI only does for ``whisper-1``. A local non-whisper model degrades to
+    transcription like the OpenAI path does, rather than 404ing against an
+    endpoint the server never exposes.
+    """
+    if provider_type == "local":
+        return "whisper" in str(model_name).lower()
+    return model_name == "whisper-1"
 
 
 def _extract_text_response(response: Any) -> str | None:
@@ -244,6 +302,50 @@ class HGASttEntity(SpeechToTextEntity):
         """Return the cached OpenAI client for these credentials."""
         return self._clients.get(self.hass, api_key, base_url)
 
+    async def _send_request(  # noqa: PLR0913
+        self,
+        client: Any,
+        connection: OpenAIConnection,
+        request: dict[str, Any],
+        json_body: dict[str, Any] | None,
+        *,
+        translate: bool,
+        supports_translations: bool,
+    ) -> Any:
+        """
+        Send the built request over the configured transport.
+
+        ``json_body`` set means the JSON request format: a raw POST of the
+        JSON body through the same configured client, so the pinned timeout,
+        retry policy and keyless-Authorization rule all still apply. That
+        shape has no translations endpoint, so translate degrades to
+        transcription there the way an unsupported model already does.
+        """
+        if json_body is not None:
+            if translate:
+                LOGGER.warning(
+                    "Translate requested but the JSON request format has no "
+                    "translations endpoint; using transcription."
+                )
+            return await client.post(
+                "/audio/transcriptions",
+                body=json_body,
+                cast_to=object,
+                options=connection.request_options(),
+            )
+        if translate and supports_translations:
+            # The translations endpoint always outputs English and has no
+            # language parameter — passing one is a TypeError in the SDK.
+            request.pop("language", None)
+            return await client.audio.translations.create(**request)
+        if translate:
+            LOGGER.warning(
+                "Translate requested but model %s does not support "
+                "translations; using transcription.",
+                request.get("model"),
+            )
+        return await client.audio.transcriptions.create(**request)
+
     def _resolve_connection(
         self, provider_type: str, data: dict[str, Any]
     ) -> OpenAIConnection | None:
@@ -259,7 +361,7 @@ class HGASttEntity(SpeechToTextEntity):
             LOGGER.warning("STT %s for %s", err, self.entity_id)
             return None
 
-    async def async_process_audio_stream(  # noqa: PLR0912
+    async def async_process_audio_stream(
         self, metadata: SpeechMetadata, stream: Any
     ) -> SpeechResult:
         """Process an audio stream for speech-to-text."""
@@ -286,6 +388,17 @@ class HGASttEntity(SpeechToTextEntity):
         temperature = model_data.get(CONF_STT_TEMPERATURE)
         translate = bool(model_data.get(CONF_STT_TRANSLATE))
         response_format = model_data.get(CONF_STT_RESPONSE_FORMAT)
+        stored_extra_body = model_data.get(CONF_STT_EXTRA_BODY)
+        extra_body = (
+            dict(stored_extra_body) if isinstance(stored_extra_body, Mapping) else {}
+        )
+        # The flow only offers the JSON format on local endpoints, but the rule
+        # is repeated here so it holds for stored state the flow never wrote —
+        # a hand-edited or migrated subentry would otherwise post base64 JSON
+        # to api.openai.com and fail every utterance.
+        use_json = provider_type == "local" and (
+            model_data.get(CONF_STT_REQUEST_FORMAT) == STT_REQUEST_FORMAT_JSON
+        )
 
         audio_bytes = await _stream_to_bytes(stream)
         ext = _format_extension(metadata)
@@ -294,45 +407,49 @@ class HGASttEntity(SpeechToTextEntity):
             return SpeechResult(result=result_state, text=None)
         if ext == "wav" and metadata.codec == stt.AudioCodecs.PCM:
             audio_bytes = _ensure_wav(audio_bytes, metadata)
-        audio_file = io.BytesIO(audio_bytes)
-        audio_file.name = f"audio.{ext}"
-
-        request = _build_openai_request(
-            model_name,
-            audio_file,
-            language,
-            prompt,
-            temperature,
-            response_format,
-        )
-        connection.apply_to_request(request)
 
         # Building the client is inside the try: it now touches hass.data and
         # the SDK constructor, and a failure there should fail this utterance,
         # not raise out into the assist pipeline.
         try:
-            client = self._get_client(connection.api_key, connection.base_url)
-            # Local servers (faster-whisper) serve /audio/translations for any
-            # whisper model; OpenAI only does for whisper-1. A local non-whisper
-            # model degrades to transcription like the OpenAI path does, rather
-            # than 404ing against an endpoint the server never exposes.
-            if translate and (
-                "whisper" in str(model_name).lower()
-                if provider_type == "local"
-                else model_name == "whisper-1"
-            ):
-                # The translations endpoint always outputs English and has no
-                # language parameter — passing one is a TypeError in the SDK.
-                request.pop("language", None)
-                response = await client.audio.translations.create(**request)
+            # Building the request is inside the try with the client: the JSON
+            # format base64-encodes the whole utterance, so an oversized stream
+            # should fail this utterance rather than raise into the pipeline.
+            json_body: dict[str, Any] | None = None
+            request: dict[str, Any] = {}
+            if use_json:
+                json_body = _build_json_request(
+                    model_name,
+                    audio_bytes,
+                    ext,
+                    language,
+                    temperature,
+                    response_format,
+                    extra_body,
+                )
             else:
-                if translate:
-                    LOGGER.warning(
-                        "Translate requested but model %s does not support "
-                        "translations; using transcription.",
-                        model_name,
-                    )
-                response = await client.audio.transcriptions.create(**request)
+                audio_file = io.BytesIO(audio_bytes)
+                audio_file.name = f"audio.{ext}"
+                request = _build_openai_request(
+                    model_name,
+                    audio_file,
+                    language,
+                    prompt,
+                    temperature,
+                    response_format,
+                    extra_body,
+                )
+                connection.apply_to_request(request)
+
+            client = self._get_client(connection.api_key, connection.base_url)
+            response = await self._send_request(
+                client,
+                connection,
+                request,
+                json_body,
+                translate=translate,
+                supports_translations=_supports_translations(model_name, provider_type),
+            )
         except AuthenticationError:
             LOGGER.warning("OpenAI STT authentication failed for %s", self.entity_id)
         except OpenAIError as err:

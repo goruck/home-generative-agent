@@ -66,6 +66,18 @@ class OpenAIConnection:
         if self.keyless:
             request["extra_headers"] = {"Authorization": Omit()}
 
+    def request_options(self) -> dict[str, Any]:
+        """
+        Return the same keyless rule shaped for a raw ``client.post`` call.
+
+        The resource methods take ``extra_headers`` and fold it into the
+        request options themselves; ``client.post`` takes the options directly,
+        where the key is ``headers``. Same ``Omit`` sentinel, same wire result.
+        """
+        if self.keyless:
+            return {"headers": {"Authorization": Omit()}}
+        return {}
+
 
 def load_model_settings(data: Mapping[str, Any]) -> dict[str, Any]:
     """Return the subentry's ``model`` mapping as a plain dict."""
