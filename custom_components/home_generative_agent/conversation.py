@@ -38,7 +38,6 @@ from langchain_core.messages import (
     ToolCall,
     ToolMessage,
 )
-from pydantic import PydanticInvalidForJsonSchema
 
 from .agent.graph import workflow
 from .agent.helpers import (
@@ -46,6 +45,7 @@ from .agent.helpers import (
     filter_excluded_tools,
     format_tool,
     is_actuation_tool,
+    langchain_tool_parameters_json,
     resolve_critical_action_policy,
     safe_convert,
     sanitize_tool_text,
@@ -1661,38 +1661,8 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             local_tools["audit_home_security"] = audit_home_security
         for t_name, t_func in local_tools.items():
             try:
-                # Extract the JSON schema for local tools.
-                # Prefer tool_call_schema.model_json_schema() — it excludes
-                # InjectedToolArg / InjectedStore fields that cannot be serialized.
-                # Fall back to args_schema.schema() for non-standard tools.
-                params = "{}"
-                tool_call_schema = getattr(t_func, "tool_call_schema", None)
-                if tool_call_schema is not None:
-                    try:
-                        params = json.dumps(
-                            tool_call_schema.model_json_schema(), sort_keys=True
-                        )
-                    except (
-                        AttributeError,
-                        TypeError,
-                        ValueError,
-                        PydanticInvalidForJsonSchema,
-                    ):
-                        params = "{}"
-                if params == "{}":
-                    args_schema = getattr(t_func, "args_schema", None)
-                    if args_schema is not None:
-                        try:
-                            schema_func = getattr(args_schema, "schema", None)
-                            if callable(schema_func):
-                                params = json.dumps(schema_func(), sort_keys=True)
-                        except (
-                            AttributeError,
-                            TypeError,
-                            ValueError,
-                            PydanticInvalidForJsonSchema,
-                        ):
-                            params = "{}"
+                # tool_call_schema excludes InjectedToolArg / InjectedStore.
+                params = langchain_tool_parameters_json(t_func)
 
                 is_actuation = is_actuation_tool(t_name)
                 # LangChain tools have .name, .description,
