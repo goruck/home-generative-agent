@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import logging
 import re
 from dataclasses import replace
@@ -14,6 +15,7 @@ import voluptuous as vol
 from homeassistant.const import CONF_LLM_HASS_API
 from homeassistant.helpers import llm
 from homeassistant.util import ulid
+from pydantic import PydanticInvalidForJsonSchema
 
 from custom_components.home_generative_agent.const import (
     ACTUATION_LANGCHAIN_TOOLS,
@@ -696,6 +698,56 @@ def split_tool_index_key(key: str) -> tuple[str, str] | None:
     if not sep or not api_id or not name:
         return None
     return api_id, name
+
+
+_SCHEMA_ERRORS = (
+    AttributeError,
+    TypeError,
+    ValueError,
+    PydanticInvalidForJsonSchema,
+)
+
+
+def _dump_json_schema(schema_obj: Any) -> str:
+    """Serialize a dict or Pydantic model to a JSON-schema string."""
+    if isinstance(schema_obj, dict):
+        try:
+            return json.dumps(schema_obj, sort_keys=True)
+        except (TypeError, ValueError):
+            return "{}"
+    try:
+        model_json_schema = getattr(schema_obj, "model_json_schema", None)
+        if callable(model_json_schema):
+            dumped = model_json_schema()
+            if isinstance(dumped, dict):
+                return json.dumps(dumped, sort_keys=True)
+        schema_func = getattr(schema_obj, "schema", None)
+        if callable(schema_func):
+            dumped = schema_func()
+            if isinstance(dumped, dict):
+                return json.dumps(dumped, sort_keys=True)
+    except _SCHEMA_ERRORS:
+        return "{}"
+    return "{}"
+
+
+def langchain_tool_parameters_json(lc_tool: Any) -> str:
+    """
+    Return the model-facing JSON schema for a LangChain tool.
+
+    Prefers ``tool_call_schema``, which excludes ``InjectedToolArg`` /
+    ``InjectedStore`` fields (``config``, ``store``, ``BaseStore``) that must
+    not be shown to the model and cannot be serialized. ``args_schema`` is
+    used only when ``tool_call_schema`` is absent, so a failed injected-arg
+    schema never falls through to ``args_schema.schema()``.
+    """
+    tool_call_schema = getattr(lc_tool, "tool_call_schema", None)
+    if tool_call_schema is not None:
+        return _dump_json_schema(tool_call_schema)
+    args_schema = getattr(lc_tool, "args_schema", None)
+    if args_schema is not None:
+        return _dump_json_schema(args_schema)
+    return "{}"
 
 
 def format_tool(
