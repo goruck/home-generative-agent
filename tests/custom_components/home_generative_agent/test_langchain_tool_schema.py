@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
+import gc
 import json
+import logging
 import warnings
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
+from custom_components.home_generative_agent.agent import helpers
 from custom_components.home_generative_agent.agent.graph import _get_fallback_tools
 from custom_components.home_generative_agent.agent.helpers import (
     langchain_tool_parameters_json,
@@ -19,21 +22,23 @@ from custom_components.home_generative_agent.agent.tools import (
     upsert_memory,
 )
 
-_INJECTED_KEYS = frozenset({"store", "config", "BaseStore"})
+if TYPE_CHECKING:
+    from langchain_core.runnables import RunnableConfig
+
+# Property names LangGraph injects at runtime.  "BaseStore" is not one of them
+# -- the leaked class name shows up in the serialized schema, not as a property
+# -- so it is asserted against the raw string in _properties() instead.
+_INJECTED_KEYS = frozenset({"store", "config"})
 
 
-def _schema_and_properties(tool: Any) -> tuple[str, dict[str, Any]]:
+def _properties(tool: Any) -> dict[str, Any]:
     raw = langchain_tool_parameters_json(tool)
     assert "BaseStore" not in raw
     schema = json.loads(raw)
     assert isinstance(schema, dict)
     props = schema.get("properties", {})
     assert isinstance(props, dict)
-    return raw, cast("dict[str, Any]", props)
-
-
-def _properties(tool: Any) -> dict[str, Any]:
-    return _schema_and_properties(tool)[1]
+    return cast("dict[str, Any]", props)
 
 
 def test_upsert_memory_schema_excludes_injected_args() -> None:
@@ -79,7 +84,7 @@ def test_schema_extraction_does_not_warn_on_injected_store() -> None:
 
 def test_fallback_tools_use_tool_call_schema() -> None:
     """Keyword fallback must bind the injected-arg-free schema, not args_schema."""
-    config: dict[str, Any] = {
+    config: RunnableConfig = {
         "configurable": {
             "langchain_tools": {
                 "upsert_memory": upsert_memory,
@@ -119,3 +124,105 @@ def test_parameters_json_uses_args_schema_only_when_tool_call_schema_absent() ->
 def test_parameters_json_empty_without_schema() -> None:
     """A tool with no schema attributes yields an empty object."""
     assert langchain_tool_parameters_json(SimpleNamespace()) == "{}"
+
+
+def test_raising_tool_call_schema_property_does_not_break_extraction() -> None:
+    """A tool whose tool_call_schema property raises costs only its schema."""
+
+    class _Exploding:
+        name = "exploding_tool"
+        description = "d"
+
+        @property
+        def tool_call_schema(self) -> Any:
+            msg = "subset model construction failed"
+            raise TypeError(msg)
+
+        @property
+        def args_schema(self) -> Any:
+            return None
+
+    assert langchain_tool_parameters_json(_Exploding()) == "{}"
+
+
+def test_raising_tool_keeps_the_rest_of_the_fallback_set() -> None:
+    """One hostile schema must not cost the turn every other fallback tool."""
+
+    class _Exploding:
+        name = "exploding_tool"
+        description = "d"
+
+        @property
+        def tool_call_schema(self) -> Any:
+            msg = "subset model construction failed"
+            raise ValueError(msg)
+
+    config: RunnableConfig = {
+        "configurable": {
+            "langchain_tools": {
+                "exploding_tool": _Exploding(),
+                "upsert_memory": upsert_memory,
+            }
+        }
+    }
+    tools = _get_fallback_tools(config, {"hga_local"})
+    by_name = {tool["name"]: tool["parameters"] for tool in tools}
+    assert by_name["exploding_tool"] == "{}"
+    assert "content" in json.loads(by_name["upsert_memory"])["properties"]
+
+
+def test_empty_schema_is_logged(caplog: Any) -> None:
+    """An unextractable schema must warn: {} is silently 'takes no arguments'."""
+    with caplog.at_level(logging.WARNING):
+        assert langchain_tool_parameters_json(SimpleNamespace(name="mystery")) == "{}"
+    assert "mystery" in caplog.text
+
+
+def test_extraction_is_memoized_per_tool_object() -> None:
+    """tool_call_schema is an uncached property; read it once per tool."""
+    reads = 0
+
+    class _Counting:
+        name = "counting_tool"
+        description = "d"
+
+        @property
+        def tool_call_schema(self) -> Any:
+            nonlocal reads
+            reads += 1
+            return {"type": "object", "properties": {"q": {"type": "string"}}}
+
+    tool = _Counting()
+    first = langchain_tool_parameters_json(tool)
+    second = langchain_tool_parameters_json(tool)
+    assert first == second
+    assert json.loads(first)["properties"] == {"q": {"type": "string"}}
+    assert reads == 1
+
+    # A distinct object must not read the first one's memo.
+    other = _Counting()
+    langchain_tool_parameters_json(other)
+    assert reads == 2
+
+
+def test_memo_does_not_leak_entries_for_collected_tools() -> None:
+    """Per-turn tool objects must not accumulate memo entries forever."""
+
+    class _Throwaway:
+        name = "throwaway"
+        description = "d"
+
+        @property
+        def tool_call_schema(self) -> Any:
+            return {"type": "object", "properties": {}}
+
+    baseline = len(helpers._schema_memo)
+    keys = []
+    for _ in range(25):
+        tool = _Throwaway()
+        keys.append(id(tool))
+        langchain_tool_parameters_json(tool)
+        del tool
+    gc.collect()
+    assert len(helpers._schema_memo) == baseline
+    assert not any(k in helpers._schema_memo for k in keys)
