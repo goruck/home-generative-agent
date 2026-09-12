@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.40.1] - 2026-09-12
+
+### Fixed
+
+- Multi-line chat replies keep their formatting. A streamed reply was being committed to the conversation log a third time as a copy with every line break replaced by a space, and that flattened copy was the one the chat UI rendered and the one stored in the conversation thread — so a numbered list or a severity-grouped audit came back as one run-on paragraph, and on later turns the model saw its own earlier answers with all formatting stripped. The cause: the agent ran the model's reply through the same text cleaner the notification paths use, which collapses all whitespace to single spaces on purpose. The streaming path then compared the cleaned text against the text it had streamed, found them different, and concluded a mid-stream provider fallback had produced a new answer — a check that was meant to fire only in that rare case but fired on every formatted reply. The cleaner now leaves line breaks alone on the agent and summarization paths, and still collapses them for notifications, triage and discovery verdicts, explanations, and video summaries. Short single-line replies were never affected. ([#628](https://github.com/goruck/home-generative-agent/issues/628))
+
 ## [3.40.0] - 2026-09-11
 
 ### Added

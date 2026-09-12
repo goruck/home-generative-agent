@@ -59,6 +59,10 @@ LOGGER = logging.getLogger(__name__)
 
 _THINK_BLOCK = re.compile(r"<think>.*?(?:</think>|$)", re.IGNORECASE | re.DOTALL)
 
+# The last whitespace character of a string: the word boundary extract_final
+# truncates on. A plain rfind(" ") misses it when newlines are preserved.
+_LAST_WHITESPACE = re.compile(r"\s(?=\S*\Z)")
+
 # ---------------------------
 # Exceptions
 # ---------------------------
@@ -1122,8 +1126,24 @@ def gemini_sampling_configurable(
     return {"temperature": temperature, "top_p": top_p}
 
 
-def extract_final(raw: str | list[Any], max_chars: int | None = None) -> str:
-    """Return plain text with <think> blocks removed."""
+def extract_final(
+    raw: str | list[Any],
+    max_chars: int | None = None,
+    *,
+    collapse_whitespace: bool = True,
+) -> str:
+    """
+    Return plain text with <think> blocks removed.
+
+    ``collapse_whitespace`` (default True) folds every whitespace run into a
+    single space, which is what the one-line consumers want (notifications,
+    triage/discovery verdicts, explanations, video summaries). The conversation
+    agent must pass False: its text is rendered as markdown in the chat UI and
+    is also compared byte-for-byte against the streamed copy to detect a
+    mid-stream model fallback, so collapsing newlines both flattens formatted
+    replies and makes that comparison fire on every multi-line turn (issue
+    #628).
+    """
     if not raw:
         return ""
     if isinstance(raw, list):
@@ -1134,17 +1154,17 @@ def extract_final(raw: str | list[Any], max_chars: int | None = None) -> str:
         )
     # Remove any leaked reasoning
     s = _THINK_BLOCK.sub("", raw)
-    # Collapse whitespace
-    s = re.sub(r"\s+", " ", s).strip()
+    # Collapse whitespace (opt-out for the formatting-preserving agent path)
+    s = re.sub(r"\s+", " ", s).strip() if collapse_whitespace else s.strip()
     # Char-limit (if specified)
     if max_chars is None:
         return s
     if len(s) <= max_chars:
         return s
     segment = s[:max_chars]
-    last_space = segment.rfind(" ")
-    if last_space > 0:
-        return segment[:last_space].rstrip(" ,;")
+    last_space = _LAST_WHITESPACE.search(segment)
+    if last_space is not None and last_space.start() > 0:
+        return segment[: last_space.start()].rstrip(" ,;")
     return segment.rstrip(" ,;")
 
 

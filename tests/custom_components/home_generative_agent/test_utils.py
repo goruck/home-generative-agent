@@ -86,6 +86,29 @@ def test_extract_final_empty_list_returns_empty_string() -> None:
     assert extract_final([]) == ""
 
 
+def test_extract_final_collapses_whitespace_by_default() -> None:
+    # The notification/summary callers want one line of text.
+    assert extract_final("line one\n\nline two") == "line one line two"
+
+
+def test_extract_final_no_collapse_preserves_newlines() -> None:
+    # Issue #628: the agent path must keep markdown formatting intact.
+    text = "Heading:\n\n1. first\n2. second"
+    assert extract_final(text, collapse_whitespace=False) == text
+
+
+def test_extract_final_no_collapse_still_strips_think_and_edges() -> None:
+    raw = "<think>reasoning</think>\n\nfirst\nsecond\n"
+    assert extract_final(raw, collapse_whitespace=False) == "first\nsecond"
+
+
+def test_extract_final_no_collapse_max_chars_cuts_at_newline() -> None:
+    result = extract_final(
+        "first line\nsecond line", max_chars=14, collapse_whitespace=False
+    )
+    assert result == "first line"
+
+
 # ---------------------------------------------------------------------------
 # Fake HTTP helpers
 # ---------------------------------------------------------------------------

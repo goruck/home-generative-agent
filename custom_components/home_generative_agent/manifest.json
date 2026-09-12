@@ -37,5 +37,5 @@
     "anthropic==0.125.0"
   ],
   "single_config_entry": true,
-  "version": "3.40.0"
+  "version": "3.40.1"
 }

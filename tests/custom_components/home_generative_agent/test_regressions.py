@@ -451,6 +451,72 @@ async def test_call_model_injects_done_fallback_after_empty_tool_response(
 
 
 @pytest.mark.asyncio
+async def test_call_model_preserves_newlines_in_reply(
+    hass: HomeAssistant,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    _call_model must round-trip a multi-line reply unchanged (issue #628).
+
+    extract_final used to collapse every whitespace run to a single space, so
+    the graph-state copy of a formatted reply differed from the streamed copy
+    by whitespace alone.  conversation.py read that as a mid-stream model
+    fallback and replaced the streamed markdown with the flattened text.
+    Leaked <think> blocks must still be stripped.
+    """
+    formatted = (
+        "Here's your security audit:\n\n"
+        "**High severity:**\n\n"
+        "1. **Add-ons** - text.\n"
+        "2. **Locks** - text.\n"
+    )
+
+    async def _fake_invoke_model(*_args: object, **_kwargs: object) -> AIMessage:
+        return AIMessage(content=f"<think>reasoning</think>{formatted}")
+
+    async def _fake_trim(
+        messages: list[object], *_args: object, **_kwargs: object
+    ) -> list[object]:
+        return messages
+
+    mock_store = MagicMock()
+    mock_store.asearch = AsyncMock(return_value=[])
+
+    monkeypatch.setattr(agent_graph, "_invoke_model", _fake_invoke_model)
+    monkeypatch.setattr(agent_graph, "_trim_messages_for_model", _fake_trim)
+
+    state: dict[str, object] = {
+        "messages": [HumanMessage(content="audit my home")],
+        "selected_tools": [],
+        "summary": "",
+        "tool_routing_map": {},
+        "messages_to_remove": [],
+        "chat_model_usage_metadata": {},
+    }
+
+    config: dict[str, object] = {
+        "configurable": {
+            "chat_model": MagicMock(),
+            "user_id": "user-test",
+            "hass": hass,
+            "options": {},
+            "chat_model_options": {},
+            "prompt": "You are a helpful assistant.",
+            "langchain_tools": {},
+            "ha_llm_api": None,
+            "pending_actions": {},
+        }
+    }
+
+    result = await agent_graph._call_model(state, config, store=mock_store)  # type: ignore[arg-type]
+
+    ai_msg = result["messages"]
+    assert isinstance(ai_msg, AIMessage)
+    assert ai_msg.content == formatted.strip()
+    assert "<think>" not in ai_msg.content
+
+
+@pytest.mark.asyncio
 async def test_call_model_binds_tools_in_executor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
