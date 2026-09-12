@@ -20,6 +20,7 @@ from custom_components.home_generative_agent.agent.helpers import (
     TOOL_TEXT_MAX_LEN,
     api_id_is_form_representable,
     filter_excluded_tools,
+    is_tool_excluded,
     normalize_tool_exclusions,
     sanitize_tool_text,
     split_tool_index_key,
@@ -1273,3 +1274,72 @@ async def test_unrepresentable_exclusion_survives_an_unrelated_save(hass: Any) -
         "vendor::gateway": ["delete_everything"],
         "assist": ["HassTurnOn"],
     }
+
+
+# --------------------------------------------------------------------------
+# HA 2026.9 rename: legacy bare exclusions must keep matching (v3.41.1)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("stored", "live", "expected"),
+    [
+        # Legacy bare entry, saved before HA namespaced its tools.
+        ("HassTurnOff", "intent__HassTurnOff", True),
+        ("HassLightSet", "light__HassLightSet", True),
+        ("GetLiveContext", "homeassistant__GetLiveContext", True),
+        # Exact match, both spellings.
+        ("HassTurnOff", "HassTurnOff", True),
+        ("intent__HassTurnOff", "intent__HassTurnOff", True),
+        # A stored entry that ALREADY carries a namespace is never stripped, so
+        # it cannot silently widen to a same-suffix tool from another domain.
+        ("intent__HassTurnOff", "lock__HassTurnOff", False),
+        # No false positives.
+        ("HassTurnOff", "intent__HassTurnOn", False),
+        ("HassTurnOff", "get_entity_history", False),
+    ],
+)
+def test_is_tool_excluded_across_the_rename(
+    stored: str, live: str, *, expected: bool
+) -> None:
+    """
+    A deny-list entry must survive Home Assistant renaming the tool under it.
+
+    HA 2026.9 moved the built-in tools to `<domain>__<Name>`, so a stored
+    `HassTurnOff` stopped matching the live `intent__HassTurnOff` and the tool
+    the user switched off came back -- while the picker still showed it as
+    excluded. v3.41.1 fixed the additive control (always-included tools) and
+    left this subtractive one failing open.
+    """
+    assert is_tool_excluded(live, {stored}) is expected
+
+
+def test_filter_excluded_tools_honours_a_pre_rename_exclusion() -> None:
+    """The enforcement point itself must drop the renamed tool, not just match."""
+    api = _api_instance(
+        [_FakeTool("intent__HassTurnOff"), _FakeTool("intent__HassTurnOn")],
+        api_id="assist",
+    )
+
+    filtered, dropped = filter_excluded_tools(
+        "assist", api, {"assist": {"HassTurnOff"}}
+    )
+
+    assert [t.name for t in filtered.tools] == ["intent__HassTurnOn"]
+    # The LIVE name is reported, which is what the operator sees elsewhere.
+    assert dropped == ["intent__HassTurnOff"]
+
+
+def test_filter_excluded_tools_does_not_widen_a_namespaced_exclusion() -> None:
+    """Excluding one namespaced tool must not take out a same-suffix sibling."""
+    api = _api_instance(
+        [_FakeTool("intent__HassTurnOff"), _FakeTool("vendor__HassTurnOff")],
+        api_id="assist",
+    )
+
+    filtered, dropped = filter_excluded_tools(
+        "assist", api, {"assist": {"intent__HassTurnOff"}}
+    )
+
+    assert [t.name for t in filtered.tools] == ["vendor__HassTurnOff"]
+    assert dropped == ["intent__HassTurnOff"]

@@ -84,6 +84,7 @@ from .helpers import (
     format_tool,
     is_actuation_tool,
     is_on_off_intent,
+    is_tool_excluded,
     matches_critical_rule,
     maybe_fill_lock_entity,
     normalize_intent_for_alarm,
@@ -936,7 +937,7 @@ async def _get_rag_retrieved_tools(  # noqa: PLR0912, PLR0915
             # silently reduce (or, once the list empties into the keyword
             # fallback, entirely reshape) which OTHER tools reach the model on
             # unrelated queries.
-            if name in excluded_names.get(api_id, ()):
+            if is_tool_excluded(name, excluded_names.get(api_id, ())):
                 excluded_hits += 1
                 continue
             # Dead candidates are dropped HERE for the same reason excluded
@@ -2020,7 +2021,9 @@ async def _append_included_tools(
         )
         inclusions = inclusions[:TOOL_INCLUSIONS_MAX_PER_TURN]
     for api_id, name in inclusions:
-        if api_id not in allowed_api_ids or name in excluded_names.get(api_id, ()):
+        if api_id not in allowed_api_ids or is_tool_excluded(
+            name, excluded_names.get(api_id, ())
+        ):
             continue
         # Dedupe by bare name, not (api_id, name): _format_and_dedupe_tools
         # routes by name (first seen wins), so a same-named tool from another

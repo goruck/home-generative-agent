@@ -28,7 +28,7 @@ from custom_components.home_generative_agent.const import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Mapping, Sequence
+    from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 
     from homeassistant.core import HomeAssistant
 
@@ -246,6 +246,39 @@ def tool_inclusions(options: Mapping[str, Any]) -> list[tuple[str, str]]:
     )
 
 
+def is_tool_excluded(tool_name: str, excluded_names: Collection[str]) -> bool:
+    """
+    Return True when a live tool matches the user's stored exclusion list.
+
+    Exact match first. A stored name that carries no ``__`` is a *legacy* entry
+    -- saved before HA 2026.9 moved the built-in tools to ``<domain>__<Name>``
+    -- and is additionally matched against the live tool's base name, so an
+    exclusion of ``HassTurnOff`` keeps excluding the tool now published as
+    ``intent__HassTurnOff``. Without this the deny-list silently stopped
+    matching on upgrade: the tool the user switched off came back, while the
+    picker still showed it as excluded.
+
+    Deliberately asymmetric. A stored name that ALREADY carries a namespace is
+    matched exactly and never stripped, because stripping it would quietly
+    widen one specific exclusion (``intent__HassTurnOff``) to every same-suffix
+    tool. Widening only bare legacy entries can over-match in the other
+    direction -- one bare ``HassTurnOn`` would cover several namespaced tools
+    if HA ever published more than one -- and for a deny-list that is the
+    correct way to be wrong. (On HA 2026.9 it cannot happen: only
+    ``components/intent/llm.py`` registers HassTurnOn/HassTurnOff, there is no
+    ``lock/llm.py``, and ``light/llm.py`` exposes only HassLightSet.)
+    """
+    if tool_name in excluded_names:
+        return True
+    base = base_tool_name(tool_name)
+    if base == tool_name:
+        # Nothing was stripped, so the exact test above was the whole question.
+        return False
+    return any(
+        base == name for name in excluded_names if TOOL_NAMESPACE_SEP not in name
+    )
+
+
 def filter_excluded_tools(
     api_id: str,
     api: llm.APIInstance,
@@ -295,11 +328,17 @@ def filter_excluded_tools(
     kept = [
         tool
         for tool in tools
-        if not (isinstance(getattr(tool, "name", None), str) and tool.name in names)
+        if not (
+            isinstance(getattr(tool, "name", None), str)
+            and is_tool_excluded(tool.name, names)
+        )
     ]
     if len(kept) == len(tools):
         return api, []
-    dropped = sorted(set(live_names) & names)
+    # Report the LIVE names that were dropped, not the stored spellings: after
+    # HA's rename the two differ, and the live name is what the operator sees
+    # everywhere else in the log.
+    dropped = sorted(n for n in live_names if is_tool_excluded(n, names))
     # replace() rather than the constructor so a field added to APIInstance by a
     # future Home Assistant release is carried over instead of silently reset.
     return replace(api, tools=kept), dropped

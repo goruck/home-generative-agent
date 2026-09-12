@@ -210,44 +210,33 @@ are still open.
 
 ---
 
-### Stored tool exclusions and inclusions were voided by HA's tool rename
+### Stored tool exclusions/inclusions still display the pre-rename name
 
-**What:** `tool_exclusions` / `tool_inclusions` store `(api_id, name)` pairs
-picked from the tool index. A user who excluded `HassTurnOff` (or pinned
-`GetLiveContext`) before HA 2026.9 has the bare name saved; the live tool is
-now `intent__HassTurnOff` / `homeassistant__GetLiveContext`, so the stored
-entry matches nothing. A tool the user deliberately switched off is back in
-the model's hands, and a pinned tool is no longer pinned — silently, with the
-picker still showing the old selection.
+**What:** Enforcement is fixed (see Resolution below); what remains is
+cosmetic and optional. A stored exclusion saved before HA 2026.9 still holds
+the bare name (`HassTurnOff`), so `_tool_exclusion_choices` cannot find it in
+the live tool list and labels it `(not currently available)` even though it is
+actively excluding `intent__HassTurnOff`. The label is wrong, not the control.
 
-**Why:** Found while fixing the v3.41.1 retrieval breakage and deferred there
-on a premise the pre-landing review disproved. The deferral said matching by
-base name over-matches because one pre-rename `HassTurnOn` now corresponds to
-several namespaced tools (`intent__`, `light__`, `lock__`). That is false on
-HA 2026.9: only `components/intent/llm.py` registers HassTurnOn/HassTurnOff,
-`light/llm.py` exposes only `HassLightSet`, and there is no `lock/llm.py` at
-all. The mapping is 1:1, so the migration is unambiguous and cheap.
+**How to apply:** On entry setup, rewrite a stored exclusion/inclusion value
+whose name is absent from the live tool set but whose base name matches exactly
+one live tool; log anything ambiguous and leave it. Note the interaction with
+gap (4) of the tool-index hygiene TODO: any re-encoding of the composite key
+has to migrate these same stored values.
 
-**Raised to P1 by the v3.41.1 review (2026-09-12):** exclusions are a
-*security* control that now fails **open** — `filter_excluded_tools`
-(agent/helpers.py:298) matches `tool.name in names` exactly, so a stored
-`HassTurnOff` no longer matches live `intent__HassTurnOff` and a tool the user
-switched off is back in the model's hands while the picker still shows it as
-excluded. v3.41.1 made the *additive* control (inclusions) survive the rename
-via `_tool_lookup_targets`, and left the *subtractive* one broken — an
-asymmetry in the wrong direction. Three independent review passes flagged it.
+**Resolution (v3.41.1):** the fail-open is closed. `is_tool_excluded`
+(agent/helpers.py) matches a live tool against the stored deny-list by exact
+name first, then — only for stored entries carrying no `__`, i.e. legacy
+pre-rename ones — by base name, so `HassTurnOff` keeps excluding
+`intent__HassTurnOff`. A stored name that already carries a namespace is
+matched exactly and never stripped, so one specific exclusion can never widen
+to a same-suffix tool from another domain. All three enforcement sites route
+through it: `filter_excluded_tools`, the RAG leg of `_get_rag_retrieved_tools`,
+and `_append_included_tools`. The picker already merges stored-but-not-live
+values back on submit, so no exclusion is lost by opening and saving the form.
 
-**How to apply:** On entry setup, rewrite stored exclusion/inclusion values
-whose name is not in the live tool set but whose base name matches exactly one
-live tool; log anything ambiguous and leave it for the user. Stopgap if the
-migration slips: have `filter_excluded_tools` also drop any live tool whose
-base name matches a stored exclusion that itself contains no `__` — widening
-only legacy bare entries, which is the correct failure direction for a
-deny-list. Note the interaction with gap (4) of the tool-index hygiene TODO:
-any re-encoding of the composite key has to migrate these same stored values.
-
-**Effort:** M
-**Priority:** P1
+**Effort:** S
+**Priority:** P3
 **Depends on:** v3.41.1
 
 ---
@@ -322,6 +311,9 @@ against a page size of 100 so it never pages; the alarm carve-out test passes
 without the fix; and `test_namespaced_tool_names.py` parametrizes
 `lock__HassTurnOff` / `alarm_control_panel__HassTurnOn`, spellings HA never
 emits.
+
+**Note:** the exclusions fail-open that this review also found was fixed in
+v3.41.1 rather than deferred; see the TODO above.
 
 **Effort:** M
 **Priority:** P2 (item 1 is P1 if any user reports a stuck startup)
