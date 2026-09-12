@@ -1380,6 +1380,30 @@ AUTOMATION_ACTION_KEYWORDS_REGEX = (
     r"tell|text|warn)\b"
 )
 
+# Referential follow-up signals: a turn that points back at the previous one
+# instead of naming its target ("turn it off", "do that again", "the other
+# one"). Such a query carries no entity, domain, or action-target signal, so
+# its embedding lands wherever the phrasing happens to point -- field report
+# 2026-09-12: "Turn them off." right after "Turn on the garage lights." ranked
+# five media-player tools between 0.600 and 0.512 and never surfaced
+# intent__HassTurnOff at all, so the model's correct call was rejected as
+# un-retrieved. Used by graph._retrieval_query to widen the RAG query (only
+# the query -- never what the model is shown) with the previous user turn.
+#
+# Anchored at the start or after the action verb so an ordinary query that
+# merely contains one of these words ("set the temperature in this room")
+# does not trip it; the word must be standing in for the target.
+REFERENTIAL_FOLLOW_UP_REGEX = (
+    r"(?i)(?:^|\b)(?:it|them|they|that|those|these|the\s+(?:other|same)\s+"
+    r"(?:one|ones)?|again|same)\b"
+)
+
+# A referential query is only treated as a follow-up when it is also SHORT.
+# "Turn it off" is a follow-up; "turn off the kitchen light and tell me if
+# that fixed the humidity problem in the basement" names its own target and
+# must keep ranking on its own words.
+MAX_REFERENTIAL_FOLLOW_UP_WORDS = 8
+
 # Tool prefixes/names for actuation safety net
 ACTUATION_TOOL_PREFIXES = (
     "HassTurn",

@@ -21,11 +21,13 @@ from custom_components.home_generative_agent.agent.graph import (
     _get_actuation_safety_tools,
     _get_allowed_api_ids,
     _get_rag_retrieved_tools,
+    _is_referential_follow_up,
     _latest_open_state_query,
     _normalize_live_context_args_for_open_state,
     _query_needs_actuation_safety,
     _query_wants_automation,
     _query_wants_security_audit,
+    _retrieval_query,
     _retrieve_tools,
     _split_query_intents,
 )
@@ -2712,3 +2714,127 @@ async def test_rag_keeps_dead_rows_when_live_filtering_is_off() -> None:
 
     assert [t["name"] for t in tools] == ["HassTurnOff"]
     assert dropped == 0
+
+
+# ---------------------------------------------------------------------------
+# Referential follow-ups: rank tools on the previous turn too
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "query",
+    ["Turn them off.", "turn it off", "do that again", "the other one", "same again"],
+)
+def test_referential_follow_ups_are_detected(query: str) -> None:
+    """A turn that points back instead of naming a target."""
+    assert _is_referential_follow_up(query)
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Turn on the garage lights.",
+        "set the temperature in this room to 70",
+        "is the front door open?",
+        "turn off the kitchen light and tell me if that fixed the humidity problem",
+        "",
+    ],
+)
+def test_ordinary_queries_are_not_referential(query: str) -> None:
+    """A query that names its own target must keep ranking on its own words."""
+    assert not _is_referential_follow_up(query)
+
+
+def test_retrieval_query_widens_a_referential_follow_up() -> None:
+    """
+    The field case. "Turn them off." carries no target at all.
+
+    After the v3.41.1 index cleanup it still ranked five media-player tools
+    between 0.600 and 0.512 and never surfaced a light tool, so the model's
+    correct `intent__HassTurnOff(name="Garage Light", ...)` was rejected as a
+    tool it had not been given. `light__HassLightSet` scored 0.564 on the
+    PREVIOUS turn's words, which is enough to enter the top 5 once both turns
+    are searched.
+    """
+    messages = [
+        HumanMessage(content="Turn on the garage lights."),
+        AIMessage(content="The garage light is now on."),
+        HumanMessage(content="Turn them off."),
+    ]
+    assert _retrieval_query(messages) == "Turn on the garage lights. Turn them off."
+
+
+def test_retrieval_query_leaves_an_ordinary_turn_alone() -> None:
+    """No widening when the query names its own target."""
+    messages = [
+        HumanMessage(content="Is the front door open?"),
+        AIMessage(content="No."),
+        HumanMessage(content="Turn on the garage lights."),
+    ]
+    assert _retrieval_query(messages) == "Turn on the garage lights."
+
+
+def test_retrieval_query_skips_ai_turns_to_find_the_user_turn() -> None:
+    """The previous USER turn is the context, not the assistant's reply."""
+    messages = [
+        HumanMessage(content="Turn on the garage lights."),
+        AIMessage(content="I'll turn on the garage light for you."),
+        ToolMessage(content="{}", name="light__HassLightSet", tool_call_id="1"),
+        AIMessage(content="The garage light is now on."),
+        HumanMessage(content="Turn it off"),
+    ]
+    assert _retrieval_query(messages) == "Turn on the garage lights. Turn it off"
+
+
+def test_retrieval_query_handles_a_first_turn() -> None:
+    """A referential first turn has nothing to widen with."""
+    assert _retrieval_query([HumanMessage(content="turn it off")]) == "turn it off"
+    assert _retrieval_query([]) == ""
+
+
+@pytest.mark.asyncio
+async def test_widened_query_does_not_leak_into_the_intent_detectors() -> None:
+    """
+    Ranking on two turns must not make a behaviour gate fire on the older one.
+
+    "close it" after "is the garage door open?" is the trap: if the widened
+    query replaced the raw one, `_query_is_read_only_open_state` would match
+    the previous turn's words and step 3b would STRIP every actuation tool --
+    turning a close command into a state report. The widening is deliberately
+    confined to what ranks tools.
+    """
+    store = MagicMock()
+    turn_off = _indexed_item("intent__HassTurnOff")
+    turn_off.score = 0.9
+    store.asearch = AsyncMock(return_value=[turn_off])
+    store.aget = AsyncMock(return_value=None)
+
+    state: State = {
+        "messages": [
+            HumanMessage(content="is the garage door open?"),
+            AIMessage(content="Yes, it is open."),
+            HumanMessage(content="close it"),
+        ],
+        "summary": "",
+        "chat_model_usage_metadata": {},
+        "messages_to_remove": [],
+        "selected_tools": [],
+        "tool_routing_map": {},
+    }
+    config: RunnableConfig = {
+        "configurable": {
+            "options": {
+                "llm_hass_api": ["assist"],
+                "tool_relevance_threshold": 0.15,
+                "tool_retrieval_limit": 5,
+            },
+            "tool_index_ready": True,
+            "langchain_tools": {},
+            "ha_llm_api": _live_llm_api("intent__HassTurnOff"),
+        }
+    }
+
+    result = await _retrieve_tools(state, config, store=store)
+
+    # The actuation tool survives: step 3b never fired.
+    assert "intent__HassTurnOff" in result["tool_routing_map"]

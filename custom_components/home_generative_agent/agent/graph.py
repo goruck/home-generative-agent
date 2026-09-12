@@ -55,10 +55,12 @@ from custom_components.home_generative_agent.const import (
     CONF_TOOL_RELEVANCE_THRESHOLD,
     CONF_TOOL_RETRIEVAL_LIMIT,
     EMBEDDING_MODEL_PROMPT_TEMPLATE,
+    MAX_REFERENTIAL_FOLLOW_UP_WORDS,
     NON_OPEN_ACTUATION_KEYWORDS_REGEX,
     OPEN_AS_STATE_REGEX,
     OPEN_COMMAND_CLAUSE_REGEX,
     READ_ONLY_STATE_QUERY_REGEX,
+    REFERENTIAL_FOLLOW_UP_REGEX,
     SECURITY_AUDIT_INTENT_REGEX,
     SUMMARIZATION_INITIAL_PROMPT,
     SUMMARIZATION_PROMPT_TEMPLATE,
@@ -998,6 +1000,62 @@ async def _get_rag_retrieved_tools(  # noqa: PLR0912, PLR0915
         )
 
     return raw_tools, dead_hits
+
+
+def _is_referential_follow_up(query: str) -> bool:
+    """
+    Return True when a turn points back at the previous one, not at a target.
+
+    Two signals, both required: the query is short, and it leans on a
+    referential word ("it", "them", "that", "again"). Requiring both keeps an
+    ordinary query that merely contains one of those words -- "set the
+    temperature in this room" -- ranking on its own text.
+    """
+    query = query[:_MAX_INTENT_SCAN_CHARS].strip()
+    if not query or len(query.split()) > MAX_REFERENTIAL_FOLLOW_UP_WORDS:
+        return False
+    return bool(re.search(REFERENTIAL_FOLLOW_UP_REGEX, query))
+
+
+def _retrieval_query(messages: Sequence[BaseMessage]) -> str:
+    """
+    Build the query used to RANK tools, which is not always the user's words.
+
+    A referential follow-up ("turn it off") carries no entity, domain, or
+    action-target signal, so ranking tools on it alone is close to ranking them
+    on noise: after the v3.41.1 index cleanup, "Turn them off." still put five
+    media-player tools between 0.600 and 0.512 and never surfaced
+    intent__HassTurnOff, so the model's correct
+    ``intent__HassTurnOff(name="Garage Light", domain=["light"])`` was rejected
+    as a tool it had not been given.
+
+    Prepending the previous user turn restores the missing target. The two are
+    joined with ". " so ``_split_query_intents`` searches the combined text AND
+    each turn separately, and ``_get_rag_retrieved_tools`` keeps the best score
+    per tool across those passes -- a tool that only the current phrasing finds
+    is therefore never displaced by the added context.
+
+    This widens RETRIEVAL only. The caller keeps the raw last message for every
+    intent detector (automation, read-only open-state, security audit), because
+    those gate behaviour and must never fire on a previous turn's words.
+    """
+    if not messages:
+        return ""
+    current = _message_text(messages[-1])
+    if not _is_referential_follow_up(current):
+        return current
+    for msg in reversed(messages[:-1]):
+        if not isinstance(msg, HumanMessage):
+            continue
+        previous = _message_text(msg).strip()
+        if not previous:
+            break
+        LOGGER.debug(
+            "Referential follow-up: widening the retrieval query with the "
+            "previous user turn (model input unchanged)"
+        )
+        return f"{previous.rstrip('.!?')}. {current}"
+    return current
 
 
 _MAX_ACTION_ROUNDS = 3
@@ -2065,6 +2123,11 @@ async def _retrieve_tools(  # noqa: PLR0915
 ) -> dict[str, Any]:
     """Retrieve relevant tools from the vector store and merge with essentials."""
     query = _message_text(state["messages"][-1]) if state["messages"] else ""
+    # Tools are RANKED on this, which for a referential follow-up ("turn it
+    # off") is the previous user turn plus this one. `query` stays the raw last
+    # message everywhere below, because every intent detector past this point
+    # gates behaviour and must not fire on a previous turn's words.
+    ranking_query = _retrieval_query(state["messages"])
 
     allowed_api_ids = _get_allowed_api_ids(config)
     opts = config.get("configurable", {}).get("options", {})
@@ -2075,8 +2138,10 @@ async def _retrieve_tools(  # noqa: PLR0915
     # runs after that cut and cannot give a stolen slot back.
     live_tool_ids = _get_live_tool_ids(config)
     rag_result, safety_tools, pin_tools = await asyncio.gather(
-        _get_rag_retrieved_tools(store, config, query, allowed_api_ids, live_tool_ids),
-        _get_actuation_safety_tools(store, config, query, allowed_api_ids),
+        _get_rag_retrieved_tools(
+            store, config, ranking_query, allowed_api_ids, live_tool_ids
+        ),
+        _get_actuation_safety_tools(store, config, ranking_query, allowed_api_ids),
         _get_pending_pin_tools(state["messages"], store),
     )
     rag_tools, rag_dropped_not_live = rag_result

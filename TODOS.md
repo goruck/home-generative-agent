@@ -323,33 +323,36 @@ v3.41.1 rather than deferred; see the TODO above.
 
 ### Follow-up turns retrieve tools from a pronoun-only query
 
-**What:** `_retrieve_tools` builds its RAG query from the last message only
-(`_message_text(state["messages"][-1])`). A follow-up like "turn it off",
-"do that again", or "the other one" carries no entity, domain, or action
-signal, so the embedding lands wherever the phrasing happens to point —
-"Turn it off" ranked `HassMediaPlayerMute` at 0.645 and `HassTurnOff` at
-0.585, fifth of five. The turn that prompted the v3.41.1 fix only worked
-afterwards because the renamed-away rows stopped stealing the other four
-slots; the underlying query is still weak, and a limit of 3 would still miss.
+**What:** `_retrieve_tools` built its RAG query from the last message only, so
+"turn it off" / "do that again" ranked tools on text carrying no entity,
+domain, or action target.
 
-**Why:** The codebase already concedes this problem in one place —
-`_conversation_has_automation_context` exists precisely because a short
-continuation ("yes" to an offered automation) "produces a useless retrieval
-query". That reasoning generalizes: the fix was scoped to one tool instead of
-to the query.
+**Resolution (v3.41.1):** `_retrieval_query` (agent/graph.py) prepends the
+previous human turn when the current one is short AND matches
+`REFERENTIAL_FOLLOW_UP_REGEX`. Joined with ". " so `_split_query_intents`
+searches the combined text and each turn separately and the best score per
+tool wins, meaning added context can never displace a tool the new phrasing
+alone would have found. Deliberately confined to the RANKING query: `query`
+stays the raw last message for `_query_wants_automation`,
+`_query_is_read_only_open_state` and `_query_wants_security_audit`, because
+those gate behaviour — "close it" after "is the garage door open?" would
+otherwise read as a read-only state query and have its actuation tools
+stripped.
 
-**How to apply:** When the last human message is short and referential (no
-noun the static context knows, a leading pronoun, under N tokens), prepend the
-previous human message — or the entity names from the previous turn's
-successful tool call — to the retrieval query. Score the tools against the
-enriched query only; do not change what the model sees. Alternative: carry the
-previous turn's bound tool set forward as force-injections for one turn.
+**Field data it was built from (2026-09-12, after the index cleanup):**
+"Turn on the garage lights." scored `light__HassLightSet` at 0.564;
+"Turn them off." scored five media-player tools 0.600 / 0.553 / 0.541 / 0.516
+/ 0.512 and no light tool at all. Searching both turns puts the light tool
+second. Whether `intent__HassTurnOff` itself also enters the window was NOT
+predicted — the last such prediction was wrong — and is left to field
+validation.
 
 **Effort:** M
 **Priority:** P2
 **Depends on:** v3.41.1
 
 ---
+
 
 ### Provider-gated schema normalisation vs mixed-provider fallback chains
 
