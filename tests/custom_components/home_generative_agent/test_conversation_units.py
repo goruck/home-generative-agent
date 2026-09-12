@@ -902,9 +902,13 @@ async def test_index_tools_startup_path_still_backgrounds() -> None:
         _api_ids: Any,
         index_tasks: list[Any],
         new_hashes: dict[str, str],
+        seen_keys: set[str],
+        discovered_api_ids: set[str],
     ) -> None:
         index_tasks.append(MagicMock())
         new_hashes["assist::HassTurnOn"] = "h1"
+        seen_keys.add("assist::HassTurnOn")
+        discovered_api_ids.add("assist")
 
     with (
         patch.object(
@@ -913,6 +917,9 @@ async def test_index_tools_startup_path_still_backgrounds() -> None:
             new=AsyncMock(side_effect=fake_provider_discovery),
         ),
         patch.object(entity, "_async_discover_local_tools", new=AsyncMock()),
+        patch.object(
+            entity, "_async_evict_stale_tool_index_rows", new=AsyncMock()
+        ) as evict_mock,
         patch(f"{_CONV}.llm.async_get_apis", return_value=[]),
         patch(f"{_CONV}.async_dispatcher_send"),
     ):
@@ -921,6 +928,10 @@ async def test_index_tools_startup_path_still_backgrounds() -> None:
     entity.hass.async_create_task.assert_called_once()
     # The background task was not executed, so hashes are still pending.
     assert rd.tool_content_hashes == {}
+    # Eviction is wired into the full discovery pass, and sees what it found.
+    evict_mock.assert_awaited_once_with(
+        rd, {"assist::HassTurnOn"}, {"assist", "hga_local"}
+    )
 
 
 @pytest.mark.asyncio
@@ -1852,3 +1863,100 @@ def test_handle_message_passes_volatile_prompt_to_the_graph() -> None:
     src = inspect.getsource(HGAConversationEntity._async_handle_message_active)
     assert "prompt, volatile_prompt = self._async_render_system_prompt(" in src
     assert '"prompt_volatile": volatile_prompt,' in src
+
+
+# ---------------------------------------------------------------------------
+# Tool index eviction: rows for tools that no longer exist (HA 2026.9 rename)
+# ---------------------------------------------------------------------------
+
+
+def _index_row(key: str, api_id: str = "assist") -> Any:
+    """Build a stored tool-index row as `store.asearch` returns it."""
+    return types.SimpleNamespace(key=key, value={"api_id": api_id, "name": key})
+
+
+def _paging_store(rows: list[Any]) -> Any:
+    """Build a store whose asearch pages, as the real one does (limit 10)."""
+    store = MagicMock()
+
+    async def _asearch(_ns: tuple[str, ...], *, limit: int, offset: int) -> list[Any]:
+        return rows[offset : offset + limit]
+
+    store.asearch = AsyncMock(side_effect=_asearch)
+    store.adelete = AsyncMock()
+    return store
+
+
+@pytest.mark.asyncio
+async def test_eviction_removes_rows_for_tools_that_no_longer_exist() -> None:
+    """
+    The renamed-away rows must actually leave the store.
+
+    The indexer only ever `aput()`s, so HA 2026.9's rename of every built-in
+    tool to `<domain>__<Name>` left a complete shadow copy of the old names
+    behind. Those rows were assumed inert -- the bind-time live filter excludes
+    them -- but vector search ranks and truncates before that filter runs, so
+    they swept the top of every search and starved the model of real tools.
+    """
+    entity = _index_entity()
+    rd = _index_runtime_data(
+        tool_content_hashes={
+            "assist::HassTurnOff": "h1",
+            "assist::intent__HassTurnOff": "h2",
+        },
+        store=_paging_store(
+            [
+                _index_row("assist::HassTurnOff"),
+                _index_row("assist::intent__HassTurnOff"),
+            ]
+        ),
+    )
+
+    await entity._async_evict_stale_tool_index_rows(
+        rd, {"assist::intent__HassTurnOff"}, {"assist"}
+    )
+
+    rd.store.adelete.assert_awaited_once_with(
+        ("system", "tools"), "assist::HassTurnOff"
+    )
+    assert rd.tool_content_hashes == {"assist::intent__HassTurnOff": "h2"}
+
+
+@pytest.mark.asyncio
+async def test_eviction_spares_apis_that_failed_to_enumerate() -> None:
+    """A discovery that raised knows nothing about which of its tools still exist."""
+    entity = _index_entity()
+    rd = _index_runtime_data(
+        store=_paging_store(
+            [_index_row("mcp::gone", api_id="mcp"), _index_row("assist::gone")]
+        ),
+    )
+
+    await entity._async_evict_stale_tool_index_rows(rd, set(), {"assist"})
+
+    rd.store.adelete.assert_awaited_once_with(("system", "tools"), "assist::gone")
+
+
+@pytest.mark.asyncio
+async def test_eviction_pages_past_the_store_search_default_limit() -> None:
+    """`BaseStore.asearch` defaults to 10 rows; an unpaged sweep would miss most."""
+    entity = _index_entity()
+    rows = [_index_row(f"assist::stale{i}") for i in range(25)]
+    rd = _index_runtime_data(store=_paging_store(rows))
+
+    await entity._async_evict_stale_tool_index_rows(rd, set(), {"assist"})
+
+    assert rd.store.adelete.await_count == 25
+
+
+@pytest.mark.asyncio
+async def test_eviction_survives_a_store_that_cannot_be_listed() -> None:
+    """A listing failure must leave the index alone, not half-evict it."""
+    entity = _index_entity()
+    rd = _index_runtime_data(store=MagicMock())
+    rd.store.asearch = AsyncMock(side_effect=RuntimeError("boom"))
+    rd.store.adelete = AsyncMock()
+
+    await entity._async_evict_stale_tool_index_rows(rd, set(), {"assist"})
+
+    rd.store.adelete.assert_not_awaited()

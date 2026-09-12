@@ -397,7 +397,7 @@ async def test_retrieve_tools_store_is_none(caplog: pytest.LogCaptureFixture) ->
     allowed = {"assist"}
 
     # Test RAG retrieval
-    rag_tools = await _get_rag_retrieved_tools(None, config, "query", allowed)
+    rag_tools, _ = await _get_rag_retrieved_tools(None, config, "query", allowed)
     assert rag_tools == []
     assert "Store is None; skipping RAG tool retrieval" in caplog.text
 
@@ -425,7 +425,7 @@ async def test_retrieve_tools_specific_exceptions(
 
     # 1. Test psycopg.OperationalError
     store.asearch = AsyncMock(side_effect=psycopg.OperationalError("Conn lost"))
-    rag_tools = await _get_rag_retrieved_tools(store, config, "query", allowed)
+    rag_tools, _ = await _get_rag_retrieved_tools(store, config, "query", allowed)
     assert rag_tools == []
     assert "RAG tool retrieval search failed (known error): Conn lost" in caplog.text
 
@@ -442,7 +442,7 @@ async def test_retrieve_tools_specific_exceptions(
 
     # 3. Test unexpected Exception (last resort)
     store.asearch = AsyncMock(side_effect=RuntimeError("Boom"))
-    rag_tools = await _get_rag_retrieved_tools(store, config, "query", allowed)
+    rag_tools, _ = await _get_rag_retrieved_tools(store, config, "query", allowed)
     assert rag_tools == []
     assert "Unexpected RAG tool retrieval search failure" in caplog.text
 
@@ -463,7 +463,7 @@ async def test_retrieve_tools_vector_dimension_mismatch_is_known_error(
         }
     }
 
-    rag_tools = await _get_rag_retrieved_tools(store, config, "query", {"assist"})
+    rag_tools, _ = await _get_rag_retrieved_tools(store, config, "query", {"assist"})
 
     assert rag_tools == []
     assert "RAG tool retrieval search failed (known error)" in caplog.text
@@ -606,7 +606,7 @@ async def test_rag_retrieval_none_score_is_treated_as_zero() -> None:
     }
 
     # Must not raise; None score < threshold so tool is filtered out
-    result = await _get_rag_retrieved_tools(store, config, "query", {"hga_local"})
+    result, _ = await _get_rag_retrieved_tools(store, config, "query", {"hga_local"})
     assert result == []
 
 
@@ -2530,3 +2530,185 @@ async def test_retrieve_tools_does_not_bind_audit_when_sentinel_is_off() -> None
         store=_security_store(indexed=True),
     )
     assert "audit_home_security" not in result["tool_routing_map"]
+
+
+# ---------------------------------------------------------------------------
+# HA namespaced tool names (2026.9): `<domain>__<Name>` and index staleness
+# ---------------------------------------------------------------------------
+
+
+def _renamed_index() -> list[MagicMock]:
+    """
+    Reproduce the index of an install upgraded across HA's tool rename.
+
+    HA 2026.9 moved the built-in intent tools into per-integration `llm.py`
+    modules that name them `f"{DOMAIN}__{intent_type}"`. The indexer only ever
+    `aput()`s, so the pre-rename rows survive — and they embed almost
+    identically to their live twins while scoring slightly HIGHER, because
+    their text is the same minus the domain prefix. Field report (2026-09-12):
+    "turn it off" after a successful "turn on the garage lights" returned five
+    candidates, four of them renamed-away rows.
+    """
+    scores = {
+        "HassMediaPlayerMute": 0.645,
+        "media_player__HassMediaPlayerMute": 0.625,
+        "HassMediaPlayerUnmute": 0.598,
+        "HassMediaPause": 0.586,
+        "HassTurnOff": 0.585,
+        "media_player__HassMediaPlayerUnmute": 0.580,
+        "media_player__HassMediaPause": 0.570,
+        "intent__HassTurnOff": 0.565,
+        "intent__HassTurnOn": 0.560,
+    }
+    items = []
+    for name, score in scores.items():
+        item = _indexed_item(name)
+        item.score = score
+        items.append(item)
+    return items
+
+
+@pytest.mark.asyncio
+async def test_renamed_index_rows_do_not_consume_retrieval_slots(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """
+    A dead index row must not eat a retrieval slot and then vanish.
+
+    `sorted_items[:limit]` cuts to the user's retrieval limit BEFORE
+    `_filter_live_candidates` runs, so before the fix the five top-scoring rows
+    were four renamed-away names plus one live one: the model was handed a
+    single media-player tool and could not turn the light off. The live twins
+    are all present in the same index and rank just below.
+    """
+    store = MagicMock()
+    store.asearch = AsyncMock(return_value=_renamed_index())
+    store.aget = AsyncMock(return_value=None)
+
+    state: State = {
+        "messages": [HumanMessage(content="Turn it off")],
+        "summary": "",
+        "chat_model_usage_metadata": {},
+        "messages_to_remove": [],
+        "selected_tools": [],
+        "tool_routing_map": {},
+    }
+    config: RunnableConfig = {
+        "configurable": {
+            "options": {
+                "llm_hass_api": ["assist"],
+                "tool_relevance_threshold": 0.15,
+                "tool_retrieval_limit": 5,
+            },
+            "tool_index_ready": True,
+            "langchain_tools": {},
+            "ha_llm_api": _live_llm_api(
+                "media_player__HassMediaPlayerMute",
+                "media_player__HassMediaPlayerUnmute",
+                "media_player__HassMediaPause",
+                "intent__HassTurnOff",
+                "intent__HassTurnOn",
+            ),
+        }
+    }
+
+    with caplog.at_level("WARNING"):
+        result = await _retrieve_tools(state, config, store=store)
+
+    routed = result["tool_routing_map"]
+    # The whole point: the tool that turns the light off is bound.
+    assert "intent__HassTurnOff" in routed
+    # No renamed-away row reaches the model.
+    assert "HassTurnOff" not in routed
+    assert "HassMediaPlayerMute" not in routed
+    # Via RAG, not by the pass collapsing into the keyword fallback.
+    assert "keyword-filtered fallback" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_live_context_force_injection_survives_the_rename(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """
+    Force-injection keyed on the bare name must find HA's namespaced tool.
+
+    Step 3c injects `GetLiveContext` unconditionally, but HA publishes it as
+    `homeassistant__GetLiveContext`. The bare key still resolves — to the
+    pre-rename row — which the live check then rejects, so the injection
+    silently did nothing and the system prompt's primary instruction pointed at
+    a tool the model had never been given.
+    """
+    live_row = _indexed_item("homeassistant__GetLiveContext")
+    stale_row = _indexed_item("GetLiveContext")
+
+    async def _aget(_namespace: tuple[str, ...], key: str) -> MagicMock | None:
+        return {
+            "assist::homeassistant__GetLiveContext": live_row,
+            "assist::GetLiveContext": stale_row,
+        }.get(key)
+
+    store = MagicMock()
+    # RAG must return something: an empty candidate list drops the whole pass
+    # into the keyword fallback, which binds every live tool and would mask the
+    # force-injection leg entirely.
+    store.asearch = AsyncMock(return_value=[_indexed_item("intent__HassTurnOn")])
+    store.aget = AsyncMock(side_effect=_aget)
+
+    state: State = {
+        "messages": [HumanMessage(content="who won the world cup")],
+        "summary": "",
+        "chat_model_usage_metadata": {},
+        "messages_to_remove": [],
+        "selected_tools": [],
+        "tool_routing_map": {},
+    }
+    config: RunnableConfig = {
+        "configurable": {
+            "options": {
+                "llm_hass_api": ["assist"],
+                "tool_relevance_threshold": 0.15,
+                "tool_retrieval_limit": 5,
+            },
+            "tool_index_ready": True,
+            "langchain_tools": {},
+            "ha_llm_api": _live_llm_api(
+                "homeassistant__GetLiveContext", "intent__HassTurnOn"
+            ),
+        }
+    }
+
+    with caplog.at_level("WARNING"):
+        result = await _retrieve_tools(state, config, store=store)
+
+    assert "homeassistant__GetLiveContext" in result["tool_routing_map"]
+    assert "GetLiveContext" not in result["tool_routing_map"]
+    # Injected by step 3c, not by the whole pass collapsing into the fallback.
+    assert "keyword-filtered fallback" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_rag_keeps_dead_rows_when_live_filtering_is_off() -> None:
+    """
+    Fail-open contract: no `ha_llm_api` means no liveness filtering at all.
+
+    Callers that wire neither surface (tests, robot runs) must keep pre-filter
+    behavior — the new pre-limit drop must not become a second, silent filter.
+    """
+    store = MagicMock()
+    item = _indexed_item("HassTurnOff")
+    item.score = 0.9
+    store.asearch = AsyncMock(return_value=[item])
+
+    config: RunnableConfig = {
+        "configurable": {
+            "options": {"llm_hass_api": ["assist"], "tool_relevance_threshold": 0.15},
+            "tool_index_ready": True,
+        }
+    }
+
+    tools, dropped = await _get_rag_retrieved_tools(
+        store, config, "turn it off", {"assist"}, None
+    )
+
+    assert [t["name"] for t in tools] == ["HassTurnOff"]
+    assert dropped == 0

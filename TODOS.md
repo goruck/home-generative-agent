@@ -192,9 +192,170 @@ Two adjacent gaps from the same review, same disposition (document + defer): (5)
 
 And two writer-consistency gaps: (7) `_mark_tool_index_stale` (embedding-provider switch) clears hashes with no generation/epoch guard, so an in-flight index write that completes after the switch marks old-provider rows current (and the background leg re-latches `tool_index_ready`), silently mixing embedding spaces until restart — pre-existing on the startup leg, window widened by the per-turn delta writer; fix wants a generation counter checked before `update()`/`ready=True`. (8) a partially-failed delta write commits zero hashes, so already-written chunks are re-embedded next turn — converges, but a per-chunk `(task, key)` commit would stop burning embedding quota under a flaky provider.
 
+**Resolution of gap (3) (v3.41.1):** shipped. The full discovery pass now
+deletes index rows whose keys were not seen this pass, scoped to api_ids that
+enumerated cleanly (`_async_evict_stale_tool_index_rows`, conversation.py).
+The premise of the original disposition — that un-evicted rows are inert
+because the bind-time live filter excludes them — was wrong: vector search
+ranks and truncates to the retrieval limit BEFORE that filter runs, so a dead
+row consumes a retrieval slot and then vanishes. HA 2026.9's rename of every
+built-in tool to `<domain>__<Name>` turned that from a rare nuisance into a
+complete shadow index that outranked the live rows (same embedding text, one
+prefix shorter) and starved the model of real tools. Gaps (1), (2) and (4-8)
+are still open.
+
 **Effort:** M
 **Priority:** P3
 **Depends on:** v3.30.4
+
+---
+
+### Stored tool exclusions and inclusions were voided by HA's tool rename
+
+**What:** `tool_exclusions` / `tool_inclusions` store `(api_id, name)` pairs
+picked from the tool index. A user who excluded `HassTurnOff` (or pinned
+`GetLiveContext`) before HA 2026.9 has the bare name saved; the live tool is
+now `intent__HassTurnOff` / `homeassistant__GetLiveContext`, so the stored
+entry matches nothing. A tool the user deliberately switched off is back in
+the model's hands, and a pinned tool is no longer pinned — silently, with the
+picker still showing the old selection.
+
+**Why:** Found while fixing the v3.41.1 retrieval breakage and deferred there
+on a premise the pre-landing review disproved. The deferral said matching by
+base name over-matches because one pre-rename `HassTurnOn` now corresponds to
+several namespaced tools (`intent__`, `light__`, `lock__`). That is false on
+HA 2026.9: only `components/intent/llm.py` registers HassTurnOn/HassTurnOff,
+`light/llm.py` exposes only `HassLightSet`, and there is no `lock/llm.py` at
+all. The mapping is 1:1, so the migration is unambiguous and cheap.
+
+**Raised to P1 by the v3.41.1 review (2026-09-12):** exclusions are a
+*security* control that now fails **open** — `filter_excluded_tools`
+(agent/helpers.py:298) matches `tool.name in names` exactly, so a stored
+`HassTurnOff` no longer matches live `intent__HassTurnOff` and a tool the user
+switched off is back in the model's hands while the picker still shows it as
+excluded. v3.41.1 made the *additive* control (inclusions) survive the rename
+via `_tool_lookup_targets`, and left the *subtractive* one broken — an
+asymmetry in the wrong direction. Three independent review passes flagged it.
+
+**How to apply:** On entry setup, rewrite stored exclusion/inclusion values
+whose name is not in the live tool set but whose base name matches exactly one
+live tool; log anything ambiguous and leave it for the user. Stopgap if the
+migration slips: have `filter_excluded_tools` also drop any live tool whose
+base name matches a stored exclusion that itself contains no `__` — widening
+only legacy bare entries, which is the correct failure direction for a
+deny-list. Note the interaction with gap (4) of the tool-index hygiene TODO:
+any re-encoding of the composite key has to migrate these same stored values.
+
+**Effort:** M
+**Priority:** P1
+**Depends on:** v3.41.1
+
+---
+
+### v3.41.1 review findings left unfixed (eviction robustness, base-name over-match)
+
+**What:** The pre-landing review of v3.41.1 (5 specialists + Codex) confirmed
+five defects that were consciously not fixed in that release. Only the lock
+payload bug was fixed.
+
+1. **Eviction can stall or break startup.** `_async_evict_stale_tool_index_rows`
+   is awaited from `_async_index_tools` -> `async_added_to_hass`
+   (conversation.py:1848), i.e. on the path every index *write* is deliberately
+   backgrounded off. It has no `asyncio.timeout` (the delta writer has one), so
+   a hung postgres blocks entity setup indefinitely. Worse, the
+   `stale = [... item.value.get("api_id") ...]` comprehension sits OUTSIDE its
+   own `try`, so an index row whose `value` is `None` raises `AttributeError`,
+   propagates out of `_async_index_tools` (try/finally, no except) and leaves
+   `tool_index_ready` False — RAG retrieval off until restart.
+   *Fix:* move the sweep into `_run_tool_index_background`, wrap it in
+   `asyncio.timeout(_TOOL_INDEX_DELTA_TIMEOUT_S)`, and guard the comprehension
+   with an `isinstance(item.value, dict)` check.
+
+2. **An API that enumerates successfully but EMPTY loses all its rows.**
+   `discovered_api_ids.add(api_id)` (conversation.py:1587) fires on any
+   non-raising discovery. An MCP coordinator that completed a refresh against a
+   flaky server holds `data == []` — no exception, zero `seen_keys`, every one
+   of that server's rows deleted, and the per-turn delta path deliberately does
+   not evict, so they stay gone until restart.
+   *Fix:* only mark an api evictable once it recorded at least one seen key.
+
+3. **`base_tool_name` over-matches attacker-chosen names.** It strips
+   everything before the last `__` unconditionally, so a user-configured MCP
+   server advertising `foo__HassTurnOff` or `foo__GetLiveContext` is classified
+   as the HA intent: argument mutation by the lock/alarm normalizers, actuation
+   prioritisation, a spurious PIN challenge, and — for the live-context case —
+   `_extract_last_live_context` parsing that server's response as authoritative
+   home state. Confirmed independently by the security specialist, the testing
+   specialist and Codex. Dispatch is NOT affected (`_format_and_dedupe_tools`
+   dedupes on the full name and `MultiLLMAPI` routes by full name), and the
+   lock PIN case fails *closed*. Related to the existing "Tool routing is by
+   bare name" TODO, which this widens.
+   *Fix:* resolve aliases only for canonical HA identities (known bare HA tool
+   names, HA-owned api_ids) rather than for every provider name; reject
+   ambiguous alias matches instead of taking the lexicographically first.
+
+4. **`is_actuation_tool` got strictly weaker for `__`-containing names.**
+   Matching the prefix list against the base name instead of the full name
+   means an MCP tool named `HassTurnOff__helper` now classifies as
+   non-actuation, so it survives the actuation strip on read-only turns.
+   *Fix:* match the prefixes against BOTH the full name and the base name and
+   take the union — the change the rename needed was additive, not a
+   replacement. (Separately: the prefix list is incomplete against HA's real
+   intent set — `HassOpenCover`, `HassCloseCover`, `HassToggle`,
+   `HassSetPosition`, `HassStopMoving`, `HassSetVolume` match nothing.)
+
+5. **The pre-limit liveness filter still runs after the store's `limit * 4`
+   fetch window** (Codex, and missed by every Claude pass). Enough stale,
+   excluded, failed-API or disallowed rows can fill all 20 fetched rows and hide
+   every live candidate. The eviction sweep mitigates this in steady state but
+   not before the first restart after an upgrade.
+   *Fix:* over-fetch adaptively until enough live candidates are collected, or
+   push the filter into the store query.
+
+**Also noted, not filed separately:** `_Unset`/`_UNSET` in graph.py is dead
+machinery (one caller, always passes the value); the eviction failure log
+prints an unsanitized remote tool name while the line below it sanitizes;
+`_tool_lookup_targets` compares `base_tool_name(live_name) == name` while the
+fallback in the same lookup compares base-to-base; `dead_hits` counts repeated
+hits across sub-queries rather than unique rows; the paging test seeds 25 rows
+against a page size of 100 so it never pages; the alarm carve-out test passes
+without the fix; and `test_namespaced_tool_names.py` parametrizes
+`lock__HassTurnOff` / `alarm_control_panel__HassTurnOn`, spellings HA never
+emits.
+
+**Effort:** M
+**Priority:** P2 (item 1 is P1 if any user reports a stuck startup)
+**Depends on:** v3.41.1
+
+---
+
+### Follow-up turns retrieve tools from a pronoun-only query
+
+**What:** `_retrieve_tools` builds its RAG query from the last message only
+(`_message_text(state["messages"][-1])`). A follow-up like "turn it off",
+"do that again", or "the other one" carries no entity, domain, or action
+signal, so the embedding lands wherever the phrasing happens to point —
+"Turn it off" ranked `HassMediaPlayerMute` at 0.645 and `HassTurnOff` at
+0.585, fifth of five. The turn that prompted the v3.41.1 fix only worked
+afterwards because the renamed-away rows stopped stealing the other four
+slots; the underlying query is still weak, and a limit of 3 would still miss.
+
+**Why:** The codebase already concedes this problem in one place —
+`_conversation_has_automation_context` exists precisely because a short
+continuation ("yes" to an offered automation) "produces a useless retrieval
+query". That reasoning generalizes: the fix was scoped to one tool instead of
+to the query.
+
+**How to apply:** When the last human message is short and referential (no
+noun the static context knows, a leading pronoun, under N tokens), prepend the
+previous human message — or the entity names from the previous turn's
+successful tool call — to the retrieval query. Score the tools against the
+enriched query only; do not change what the model sees. Alternative: carry the
+previous turn's bound tool set forward as force-injections for one turn.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** v3.41.1
 
 ---
 

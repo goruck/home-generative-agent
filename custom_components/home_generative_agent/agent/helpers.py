@@ -569,11 +569,35 @@ def maybe_fill_lock_entity(
     return tool_args
 
 
+# Separator Home Assistant puts between a tool's namespace and its own name.
+# HA 2026.9 moved the built-in intent tools into per-integration `llm.py`
+# modules that name them `f"{DOMAIN}__{intent_type}"` (`intent__HassTurnOff`,
+# `light__HassLightSet`, `homeassistant__GetLiveContext`), and `MergedAPI`
+# wraps tools from multiple APIs in a `NamespacedTool` that prepends a second
+# prefix. Every comparison against a known tool name must therefore run on the
+# base name: a bare-name check silently stops matching after an HA upgrade,
+# which is how the critical-action PIN gate and the actuation classifier both
+# went dead without a single error in the log.
+TOOL_NAMESPACE_SEP = "__"
+
+
+def base_tool_name(name: str) -> str:
+    """Return a tool name with any Home Assistant namespace prefixes stripped."""
+    if not name:
+        return name
+    return name.rsplit(TOOL_NAMESPACE_SEP, 1)[-1]
+
+
+def is_on_off_intent(tool_name: str) -> bool:
+    """Return True for the HA turn-on/turn-off intent tools, namespaced or not."""
+    return base_tool_name(tool_name) in {"HassTurnOn", "HassTurnOff"}
+
+
 def normalize_intent_for_alarm(
     tool_name: str, tool_args: dict[str, Any]
 ) -> dict[str, Any]:
     """Heuristic to route alarm control panel intents to the proper service."""
-    if tool_name not in {"HassTurnOn", "HassTurnOff"}:
+    if not is_on_off_intent(tool_name):
         return tool_args
 
     domains = tool_args.get("domain") or []
@@ -586,7 +610,7 @@ def normalize_intent_for_alarm(
     if not any(str(d).lower() == "alarm_control_panel" for d in domains):
         return tool_args
 
-    is_arm = tool_name == "HassTurnOn"
+    is_arm = base_tool_name(tool_name) == "HassTurnOn"
     desired_service = "alarm_arm_home" if is_arm else "alarm_disarm"
     tool_args = {
         **tool_args,
@@ -603,7 +627,7 @@ def normalize_intent_for_lock(
     tool_name: str, tool_args: dict[str, Any]
 ) -> dict[str, Any]:
     """Normalize lock intents: set domain and service for lock/unlock."""
-    if tool_name not in {"HassTurnOn", "HassTurnOff"}:
+    if not is_on_off_intent(tool_name):
         return tool_args
 
     name = str(tool_args.get("name", "")).lower()
@@ -614,7 +638,7 @@ def normalize_intent_for_lock(
         return tool_args
 
     normalized = {**tool_args, "domain": ["lock"]}
-    if tool_name == "HassTurnOff":
+    if base_tool_name(tool_name) == "HassTurnOff":
         normalized.setdefault("service", "unlock")
     else:
         normalized.setdefault("service", "lock")
@@ -715,7 +739,10 @@ def format_tool(
 
 def is_actuation_tool(name: str) -> bool:
     """Check if a tool name indicates an actuation tool."""
-    name_lower = name.lower()
+    # The prefixes below name HA *intents* ("HassTurn...", "HassLight..."), so
+    # they must be matched against the base name -- HA's namespaced tool names
+    # ("light__HassLightSet") start with the domain, not the intent.
+    name_lower = base_tool_name(name).lower()
     # Check exact matches first (greedy check for specific tools)
     if name_lower in {t.lower() for t in ACTUATION_LANGCHAIN_TOOLS}:
         return True

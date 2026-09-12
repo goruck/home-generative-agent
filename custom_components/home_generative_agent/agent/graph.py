@@ -80,8 +80,10 @@ from ..core.prompt_cache import (  # noqa: TID252
 from ..core.utils import extract_final  # noqa: TID252
 from .helpers import (
     active_llm_api_ids,
+    base_tool_name,
     format_tool,
     is_actuation_tool,
+    is_on_off_intent,
     matches_critical_rule,
     maybe_fill_lock_entity,
     normalize_intent_for_alarm,
@@ -545,13 +547,24 @@ def _parse_tool_response(
     return content_str, status
 
 
+# Bare name of HA's live-state tool. HA exposes it namespaced
+# (`homeassistant__GetLiveContext`), so every comparison and every
+# force-injection must go through the base name -- see `base_tool_name`.
+LIVE_CONTEXT_TOOL = "GetLiveContext"
+
+
+def _is_live_context_tool(name: str) -> bool:
+    """Return True when `name` is HA's live-context tool, namespaced or not."""
+    return base_tool_name(name) == LIVE_CONTEXT_TOOL
+
+
 # ----- Alarm helpers -----
 
 
 def _extract_last_live_context(messages: list[AnyMessage]) -> str | None:
     """Return the most recent GetLiveContext payload content, if any."""
     for msg in reversed(messages):
-        if isinstance(msg, ToolMessage) and msg.name == "GetLiveContext":
+        if isinstance(msg, ToolMessage) and _is_live_context_tool(msg.name or ""):
             raw_content = msg.content
             if not isinstance(raw_content, str):
                 continue
@@ -677,7 +690,7 @@ def _maybe_filter_open_state_tool_response(
     """Filter broad live context before returning it to the model."""
     if (
         tool_call is not first_open_state_live_context_call
-        or tool_name != "GetLiveContext"
+        or not _is_live_context_tool(tool_name)
         or not isinstance(tool_response.content, str)
     ):
         return tool_response
@@ -767,10 +780,18 @@ def _get_live_tool_ids(config: RunnableConfig) -> set[tuple[str, str]] | None:
     return live
 
 
+class _Unset:
+    """Sentinel type: `None` is a meaningful live-tool value (fail open)."""
+
+
+_UNSET = _Unset()
+
+
 def _filter_live_candidates(
     config: RunnableConfig,
     rag_tools: list[RawTool],
     safety_tools: list[RawTool],
+    live_tool_ids: set[tuple[str, str]] | _Unset | None = _UNSET,
 ) -> tuple[list[RawTool], list[RawTool], set[tuple[str, str]] | None, int]:
     """
     Drop index candidates that are not live this turn.
@@ -779,8 +800,13 @@ def _filter_live_candidates(
     tools of a configured API that failed to load) are removed before the merge
     so they never consume merge slots. Returns the filtered lists, the live set
     (None = filtering disabled, fail open), and the dropped count.
+
+    Callers that already resolved the live set pass it in so it is computed once
+    per turn; omitting it resolves it here. ``None`` cannot serve as the "not
+    supplied" marker — it is the fail-open signal — hence the sentinel.
     """
-    live_tool_ids = _get_live_tool_ids(config)
+    if isinstance(live_tool_ids, _Unset):
+        live_tool_ids = _get_live_tool_ids(config)
     if live_tool_ids is None:
         return rag_tools, safety_tools, None, 0
     kept_rag = [t for t in rag_tools if (t["api_id"], t["name"]) in live_tool_ids]
@@ -824,7 +850,8 @@ async def _get_rag_retrieved_tools(  # noqa: PLR0912, PLR0915
     config: RunnableConfig,
     query: str,
     allowed_api_ids: set[str],
-) -> list[RawTool]:
+    live_tool_ids: set[tuple[str, str]] | None = None,
+) -> tuple[list[RawTool], int]:
     """
     Search for tools in the vector store and filter by score/API.
 
@@ -832,23 +859,29 @@ async def _get_rag_retrieved_tools(  # noqa: PLR0912, PLR0915
     runs a separate vector search for each.  Each tool's score is the maximum
     across all sub-query passes so that a tool highly relevant to *one* intent
     is not diluted by the blended embedding of the full query.
+
+    Returns the selected tools and how many hits were discarded as not live —
+    the caller reports that count, because "the vector search found nothing
+    usable" and "everything it found had been renamed away" are very different
+    problems and the operator only ever sees the log line.
     """
     if store is None:
         LOGGER.warning("Store is None; skipping RAG tool retrieval")
-        return []
+        return [], 0
 
     tool_index_ready, _tool_indexing_in_progress, _tool_index_failed = (
         _tool_index_state(config)
     )
     if not tool_index_ready:
         LOGGER.debug("Skipping RAG tool retrieval: tool index is not ready")
-        return []
+        return [], 0
 
     opts = config.get("configurable", {}).get("options", {})
     limit = int(opts.get(CONF_TOOL_RETRIEVAL_LIMIT, 5))
     threshold = float(opts.get(CONF_TOOL_RELEVANCE_THRESHOLD, 0.15))
     excluded_names = tool_exclusions(opts)
     excluded_hits = 0
+    dead_hits = 0
 
     sub_queries = _split_query_intents(query)
 
@@ -885,7 +918,7 @@ async def _get_rag_retrieved_tools(  # noqa: PLR0912, PLR0915
                 "Discarding RAG tool retrieval results because the tool index "
                 "became stale during vector search"
             )
-            return []
+            return [], dead_hits
 
         total_results += len(results)
         for item in results:
@@ -906,6 +939,21 @@ async def _get_rag_retrieved_tools(  # noqa: PLR0912, PLR0915
             if name in excluded_names.get(api_id, ()):
                 excluded_hits += 1
                 continue
+            # Dead candidates are dropped HERE for the same reason excluded
+            # ones are: `sorted_items[:limit]` below cuts to the user's
+            # retrieval limit *before* `_filter_live_candidates` downstream ever
+            # sees the list, so a row that is in the index but not live this
+            # turn eats a retrieval slot and then vanishes. That is normally a
+            # rare nuisance, but the index is never pruned, so a mass rename --
+            # HA 2026.9 renamed every built-in tool to `<domain>__<Name>` --
+            # leaves a full shadow copy of the old names behind, and those rows
+            # *outrank* their live twins (their embedding text is the same
+            # minus the prefix). Field report: "turn it off" retrieved 5
+            # candidates, 4 were renamed-away rows, and the model was left with
+            # one media-player tool and no way to turn the light off.
+            if live_tool_ids is not None and (api_id, name) not in live_tool_ids:
+                dead_hits += 1
+                continue
             allowed_results += 1
             # score is (1 - distance) for pgvector cosine; None when no embedding
             score = getattr(item, "score", None) or 0.0
@@ -920,12 +968,14 @@ async def _get_rag_retrieved_tools(  # noqa: PLR0912, PLR0915
         LOGGER.debug(
             "RAG tool retrieval produced no candidates: sub_queries=%d "
             "raw_results=%d allowed_results=%d below_threshold=%d "
-            "excluded=%d threshold=%.3f allowed_api_ids=%s top_scores=%s",
+            "excluded=%d not_live=%d threshold=%.3f allowed_api_ids=%s "
+            "top_scores=%s",
             len(sub_queries),
             total_results,
             allowed_results,
             below_threshold,
             excluded_hits,
+            dead_hits,
             threshold,
             sorted(allowed_api_ids),
             top_seen[:5],
@@ -946,7 +996,7 @@ async def _get_rag_retrieved_tools(  # noqa: PLR0912, PLR0915
             )
         )
 
-    return raw_tools
+    return raw_tools, dead_hits
 
 
 _MAX_ACTION_ROUNDS = 3
@@ -1119,7 +1169,7 @@ def _normalize_live_context_args_for_open_state(
     """Normalize brittle GetLiveContext calls for read-only open-state queries."""
     if (
         not force_broad
-        or tool_name != "GetLiveContext"
+        or not _is_live_context_tool(tool_name)
         or not _query_is_read_only_open_state(query)
     ):
         return tool_args
@@ -1134,7 +1184,7 @@ def _open_state_live_context_normalization_context(
     if not query:
         return "", None
     first_call = next(
-        (tc for tc in tool_calls if tc.get("name", "") == "GetLiveContext"),
+        (tc for tc in tool_calls if _is_live_context_tool(str(tc.get("name", "")))),
         None,
     )
     return query, first_call
@@ -1834,6 +1884,38 @@ async def _get_pending_pin_tools(
     ]
 
 
+def _tool_lookup_targets(
+    name: str,
+    allowed_api_ids: set[str],
+    live_tool_ids: set[tuple[str, str]] | None,
+) -> list[tuple[str, str]]:
+    """
+    Return the (api_id, tool_name) index keys to try for a caller-supplied name.
+
+    Force-injection sites name their tool the way it is written in the code
+    ("GetLiveContext"), but HA publishes it namespaced
+    ("homeassistant__GetLiveContext"). The bare key still resolves -- to the
+    pre-2026.9 index row, which the live check below then rejects -- so the
+    injection silently did nothing on an upgraded install. Appending every live
+    tool whose base name matches makes the lookup survive the rename in both
+    directions: the bare key still wins on an install that has not upgraded,
+    and the namespaced one is found on an install that has.
+    """
+    targets = [(api_id, name) for api_id in sorted(allowed_api_ids)]
+    if live_tool_ids is None:
+        return targets
+    return [
+        *targets,
+        *sorted(
+            (api_id, live_name)
+            for api_id, live_name in live_tool_ids
+            if api_id in allowed_api_ids
+            and live_name != name
+            and base_tool_name(live_name) == name
+        ),
+    ]
+
+
 async def _get_tool_by_name(
     store: BaseStore,
     config: RunnableConfig,
@@ -1842,10 +1924,12 @@ async def _get_tool_by_name(
     live_tool_ids: set[tuple[str, str]] | None = None,
 ) -> RawTool | None:
     """Fetch a specific tool by name from the index, falling back to config tools."""
-    for api_id in sorted(allowed_api_ids):
+    for api_id, lookup_name in _tool_lookup_targets(
+        name, allowed_api_ids, live_tool_ids
+    ):
         try:
             item = await store.aget(
-                ("system", "tools"), key=tool_index_key(api_id, name)
+                ("system", "tools"), key=tool_index_key(api_id, lookup_name)
             )
         except (
             InvalidNamespaceError,
@@ -1870,7 +1954,7 @@ async def _get_tool_by_name(
             continue
 
         val = item.value
-        if val.get("name") != name or val.get("api_id") not in allowed_api_ids:
+        if val.get("name") != lookup_name or val.get("api_id") not in allowed_api_ids:
             continue
 
         if (
@@ -1887,8 +1971,13 @@ async def _get_tool_by_name(
             is_actuation=val.get("is_actuation", False),
         )
 
+    # Base-name match: the fallback set is built from the tools live this turn,
+    # so it carries HA's namespaced spelling while callers pass the bare one.
     for tool in _get_fallback_tools(config, allowed_api_ids):
-        if tool["name"] == name and tool["api_id"] in allowed_api_ids:
+        if (
+            base_tool_name(tool["name"]) == base_tool_name(name)
+            and tool["api_id"] in allowed_api_ids
+        ):
             return tool
 
     return None
@@ -1978,19 +2067,26 @@ async def _retrieve_tools(  # noqa: PLR0915
     opts = config.get("configurable", {}).get("options", {})
     limit = int(opts.get(CONF_TOOL_RETRIEVAL_LIMIT, 5))
 
-    # 1. Gather candidates
-    rag_tools, safety_tools, pin_tools = await asyncio.gather(
-        _get_rag_retrieved_tools(store, config, query, allowed_api_ids),
+    # 1. Gather candidates. The live set is resolved first so the RAG pass can
+    # drop dead rows *before* it cuts to the retrieval limit — step 1b below
+    # runs after that cut and cannot give a stolen slot back.
+    live_tool_ids = _get_live_tool_ids(config)
+    rag_result, safety_tools, pin_tools = await asyncio.gather(
+        _get_rag_retrieved_tools(store, config, query, allowed_api_ids, live_tool_ids),
         _get_actuation_safety_tools(store, config, query, allowed_api_ids),
         _get_pending_pin_tools(state["messages"], store),
     )
+    rag_tools, rag_dropped_not_live = rag_result
 
     # 1b. Drop index candidates that are not live this turn (device-gated tools
     # indexed from another device's turn, tools of a failed API) before the
-    # merge, so dead candidates never consume merge slots.
+    # merge, so dead candidates never consume merge slots. The RAG leg already
+    # dropped its own; this catches the safety leg and any caller that resolved
+    # the live set differently.
     rag_tools, safety_tools, live_tool_ids, live_filter_dropped = (
-        _filter_live_candidates(config, rag_tools, safety_tools)
+        _filter_live_candidates(config, rag_tools, safety_tools, live_tool_ids)
     )
+    live_filter_dropped += rag_dropped_not_live
 
     # 2. Merge: safety tools take priority; RAG fills remaining slots.
     #
@@ -2050,11 +2146,11 @@ async def _retrieve_tools(  # noqa: PLR0915
             rest = [t for t in fallback if not t["is_actuation"]]
             fallback = actuation + rest
         else:
-            live_context = [t for t in fallback if t["name"] == "GetLiveContext"]
+            live_context = [t for t in fallback if _is_live_context_tool(t["name"])]
             non_actuation = [
                 t
                 for t in fallback
-                if not t["is_actuation"] and t["name"] != "GetLiveContext"
+                if not t["is_actuation"] and not _is_live_context_tool(t["name"])
             ]
             actuation = [t for t in fallback if t["is_actuation"]]
             fallback = live_context + non_actuation + actuation
@@ -2066,25 +2162,25 @@ async def _retrieve_tools(  # noqa: PLR0915
         all_candidates = [
             t
             for t in all_candidates
-            if not t["is_actuation"] or t["name"] == "GetLiveContext"
+            if not t["is_actuation"] or _is_live_context_tool(t["name"])
         ]
-        if not any(t["name"] == "GetLiveContext" for t in all_candidates):
+        if not any(_is_live_context_tool(t["name"]) for t in all_candidates):
             fetched_live_ctx = await _get_tool_by_name(
-                store, config, "GetLiveContext", allowed_api_ids, live_tool_ids
+                store, config, LIVE_CONTEXT_TOOL, allowed_api_ids, live_tool_ids
             )
             if fetched_live_ctx is not None:
                 all_candidates = [fetched_live_ctx, *all_candidates]
-        live_ctx = [t for t in all_candidates if t["name"] == "GetLiveContext"]
-        rest = [t for t in all_candidates if t["name"] != "GetLiveContext"]
+        live_ctx = [t for t in all_candidates if _is_live_context_tool(t["name"])]
+        rest = [t for t in all_candidates if not _is_live_context_tool(t["name"])]
         all_candidates = (live_ctx + rest)[: limit + 1]
 
     # 3c. Always inject GetLiveContext if not already present. This ensures the
     # model can evaluate any conditional clause, verify state before acting, and
     # respond accurately regardless of phrasing. Step 3b already injects it for
     # read-only open-state queries, so the deduplication check prevents doubling.
-    if not any(t["name"] == "GetLiveContext" for t in all_candidates):
+    if not any(_is_live_context_tool(t["name"]) for t in all_candidates):
         fetched_live_ctx = await _get_tool_by_name(
-            store, config, "GetLiveContext", allowed_api_ids, live_tool_ids
+            store, config, LIVE_CONTEXT_TOOL, allowed_api_ids, live_tool_ids
         )
         if fetched_live_ctx is not None:
             all_candidates = [*all_candidates, fetched_live_ctx]
@@ -2714,7 +2810,7 @@ def _is_critical_action(
             domain = ""
 
     # Treat HA intent tools on locks as critical even without a service arg.
-    if tool_name in {"HassTurnOn", "HassTurnOff"}:
+    if is_on_off_intent(tool_name):
         domains = tool_args.get("domain") or []
         domains = domains if isinstance(domains, list) else [domains]
         if any(str(d).lower() == "lock" for d in domains):
@@ -2748,13 +2844,23 @@ def _minimal_payload_for_domain(tool_args: dict[str, Any]) -> dict[str, Any]:
         return str(name).strip().lower().replace(" ", "_")
 
     if domain == "lock":
+        name = tool_args.get("name")
         entity_id = tool_args.get("entity_id")
-        if not entity_id and (name := tool_args.get("name")):
+        if not entity_id and name:
             entity_id = f"lock.{slugify(str(name))}"
         payload: dict[str, Any] = {
             "domain": ["lock"],
             "service": tool_args.get("service"),
         }
+        # The payload must carry a target NAME. HA's turn-on/turn-off intents
+        # resolve targets from name/area/floor and never read an `entity_id`
+        # slot (`helpers/intent.py` contains no such lookup), while `domains`
+        # alone already satisfies `MatchTargetsConstraints.has_constraints` --
+        # so domain+entity_id sails past the "cannot target all devices" guard
+        # and matches EVERY exposed lock. `_filter_by_name` accepts an entity
+        # id as the name value, so one key narrows both shapes to one entity.
+        if target := (name or entity_id):
+            payload["name"] = target
         if entity_id:
             payload["entity_id"] = entity_id
         if code := tool_args.get("code"):

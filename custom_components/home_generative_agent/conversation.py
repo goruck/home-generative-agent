@@ -123,6 +123,11 @@ _STREAM_ERROR_REASON_MAX_CHARS = 280
 # degrade to the retry-next-turn path instead of stalling the voice turn.
 _TOOL_INDEX_DELTA_TIMEOUT_S = 30.0
 
+# Page size for listing the tool index. `BaseStore.asearch` defaults to 10, so
+# the eviction sweep has to page explicitly or it would see a tenth of the
+# index and "evict" nothing.
+_TOOL_INDEX_PAGE_SIZE = 100
+
 
 def _recommit_final_assistant_content(chat_log: conversation.ChatLog) -> None:
     """
@@ -1554,13 +1559,15 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
 
         return conversation.async_get_result_from_chat_log(user_input, chat_log)
 
-    async def _async_discover_provider_tools(
+    async def _async_discover_provider_tools(  # noqa: PLR0913
         self,
         llm_context: llm.LLMContext,
         runtime_data: HGAData,
         all_available_api_ids: list[str],
         index_tasks: list[Any],
         new_hashes: dict[str, str],
+        seen_keys: set[str],
+        discovered_api_ids: set[str],
     ) -> None:
         """Discover and prepare provider tools for indexing."""
         for api_id in all_available_api_ids:
@@ -1568,18 +1575,28 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 # Isolate each provider discovery
                 api_instance = await llm.async_get_api(self.hass, api_id, llm_context)
                 self._queue_api_instance_tools(
-                    api_id, api_instance, runtime_data, index_tasks, new_hashes
+                    api_id,
+                    api_instance,
+                    runtime_data,
+                    index_tasks,
+                    new_hashes,
+                    seen_keys,
                 )
             except Exception as err:  # noqa: BLE001
                 _LOGGER.warning("Failed to index tool provider %s: %s", api_id, err)
+                continue
+            # Only an api that enumerated cleanly may have its rows evicted: a
+            # discovery that raised knows nothing about which tools still exist.
+            discovered_api_ids.add(api_id)
 
-    def _queue_api_instance_tools(
+    def _queue_api_instance_tools(  # noqa: PLR0913
         self,
         api_id: str,
         api_instance: llm.APIInstance,
         runtime_data: HGAData,
         index_tasks: list[Any],
         new_hashes: dict[str, str],
+        seen_keys: set[str] | None = None,
     ) -> None:
         """
         Queue index writes for an API instance's new or changed tools.
@@ -1590,6 +1607,11 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         every turn for the healthy neighbors too).
         """
         for tool in api_instance.tools:
+            # Recorded before the schema conversion below, which can raise: a
+            # tool whose schema fails to serialize is still LIVE, and the
+            # eviction sweep must not read its absence here as "gone".
+            if seen_keys is not None:
+                seen_keys.add(tool_index_key(api_id, tool.name))
             try:
                 # Composite hash: api_id + name + description + schema
                 schema_json = json.dumps(
@@ -1641,6 +1663,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         runtime_data: HGAData,
         index_tasks: list[Any],
         new_hashes: dict[str, str],
+        seen_keys: set[str],
     ) -> None:
         """Discover and prepare local tools for indexing."""
         local_tools = {
@@ -1660,6 +1683,9 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         if self._network_audit_available():
             local_tools["audit_home_security"] = audit_home_security
         for t_name, t_func in local_tools.items():
+            # Recorded up front for the same reason as the provider loop: a
+            # tool that fails to serialize is still live, not evictable.
+            seen_keys.add(tool_index_key("hga_local", t_name))
             try:
                 # Extract the JSON schema for local tools.
                 # Prefer tool_call_schema.model_json_schema() — it excludes
@@ -1728,7 +1754,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             except Exception as err:  # noqa: BLE001
                 _LOGGER.warning("Failed to index local tool %s: %s", t_name, err)
 
-    async def _async_index_tools(  # noqa: PLR0912
+    async def _async_index_tools(  # noqa: PLR0912, PLR0915
         self,
         llm_context: llm.LLMContext,
         runtime_data: HGAData,
@@ -1781,6 +1807,8 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
 
         index_tasks: list[Any] = []
         new_hashes: dict[str, str] = {}
+        seen_keys: set[str] = set()
+        discovered_api_ids: set[str] = set()
         handed_off = False
         try:
             if inline_delta and llm_api is not None:
@@ -1809,10 +1837,17 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                     all_available_api_ids,
                     index_tasks,
                     new_hashes,
+                    seen_keys,
+                    discovered_api_ids,
                 )
                 # 2. Index Local LangChain Tools (provider: hga_local)
                 await self._async_discover_local_tools(
-                    runtime_data, index_tasks, new_hashes
+                    runtime_data, index_tasks, new_hashes, seen_keys
+                )
+                discovered_api_ids.add("hga_local")
+                # 3. Drop rows for tools that no longer exist.
+                await self._async_evict_stale_tool_index_rows(
+                    runtime_data, seen_keys, discovered_api_ids
                 )
 
             if index_tasks:
@@ -1876,6 +1911,78 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                     if callable(close_fn):
                         with contextlib.suppress(Exception):
                             close_fn()
+
+    async def _async_evict_stale_tool_index_rows(
+        self,
+        runtime_data: HGAData,
+        seen_keys: set[str],
+        discovered_api_ids: set[str],
+    ) -> None:
+        """
+        Delete index rows for tools that no longer exist.
+
+        The indexer only ever ``aput()``s, so a renamed or removed tool leaves
+        its row behind forever. Those rows were assumed inert — the bind-time
+        live filter excludes them — but inert is not harmless: vector search
+        ranks and truncates *before* that filter runs, so a dead row consumes a
+        retrieval slot and then vanishes. HA 2026.9 renamed every built-in tool
+        to ``<domain>__<Name>``, which left a complete shadow copy of the old
+        index behind; the old rows embed almost identically to their live twins
+        and score slightly *higher* (same text, one prefix shorter), so they
+        swept the top of every search and the model was handed a near-empty
+        tool list.
+
+        Scoped to ``discovered_api_ids`` so an API that failed to enumerate
+        never loses its tools, and run only on the full discovery pass — the
+        per-turn delta sees one device's view of the world, not all of it.
+        Device-gated tools (timer intents, exposed only to a timer-capable
+        satellite) are absent from this device-less pass and are evicted here,
+        then re-added by the next such device's top-up; that round trip already
+        happens on every restart, so it costs nothing new.
+        """
+        try:
+            existing: list[Any] = []
+            offset = 0
+            while True:
+                page = await runtime_data.store.asearch(
+                    ("system", "tools"),
+                    limit=_TOOL_INDEX_PAGE_SIZE,
+                    offset=offset,
+                )
+                existing.extend(page)
+                if len(page) < _TOOL_INDEX_PAGE_SIZE:
+                    break
+                offset += _TOOL_INDEX_PAGE_SIZE
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning(
+                "Could not list the tool index to evict stale rows: %s", err
+            )
+            return
+
+        stale = [
+            item.key
+            for item in existing
+            if item.key not in seen_keys
+            and str(item.value.get("api_id", "")) in discovered_api_ids
+        ]
+        if not stale:
+            return
+
+        evicted = 0
+        for key in stale:
+            try:
+                await runtime_data.store.adelete(("system", "tools"), key)
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.warning("Failed to evict stale tool index row %s: %s", key, err)
+                continue
+            runtime_data.tool_content_hashes.pop(key, None)
+            evicted += 1
+        _LOGGER.info(
+            "Tool index eviction: removed %d stale row(s) of %d: %s.",
+            evicted,
+            len(stale),
+            _format_tool_keys_for_log(set(stale)),
+        )
 
     async def _async_write_tool_index_delta(
         self,
