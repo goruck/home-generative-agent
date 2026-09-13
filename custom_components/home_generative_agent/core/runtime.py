@@ -28,6 +28,9 @@ if TYPE_CHECKING:
         DiscoveryStore,
     )
     from custom_components.home_generative_agent.sentinel.engine import SentinelEngine
+    from custom_components.home_generative_agent.sentinel.network_inventory import (
+        NetworkInventory,
+    )
     from custom_components.home_generative_agent.sentinel.notifier import (
         SentinelNotifier,
     )
@@ -74,6 +77,8 @@ class HGAData:
     baseline_updater: SentinelBaselineUpdater | None = None
     # Network / HA-security audit: persistent, non-secret user+token inventory.
     auth_inventory: AuthInventory | None = None
+    # Radio devices known to this home (Zigbee, Z-Wave, Bluetooth, Matter).
+    network_inventory: NetworkInventory | None = None
     # Synchronous httpx client handed to the OpenAI provider instances. Held
     # here so async_unload_entry can close it: a fresh one is built on every
     # setup, so without an unload-time close a reload storm retains one client,

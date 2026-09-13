@@ -24,6 +24,9 @@ from custom_components.home_generative_agent.sentinel.auth_inventory import (
 )
 from custom_components.home_generative_agent.sentinel.engine import SentinelEngine
 from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
+from custom_components.home_generative_agent.sentinel.network_inventory import (
+    NetworkInventory,
+)
 from custom_components.home_generative_agent.sentinel.rules.network_common import (
     NETWORK_RULE_TYPES,
 )
@@ -46,6 +49,7 @@ if TYPE_CHECKING:
     )
     from custom_components.home_generative_agent.snapshot.schema import (
         FullStateSnapshot,
+        RadioDevice,
     )
 
 NOW = datetime(2026, 9, 7, 12, 0, tzinfo=UTC)
@@ -92,10 +96,18 @@ class DummyAudit:
 
 
 def _snapshot(
-    ha_security: dict[str, Any] | None = None, *, with_network: bool = True
+    ha_security: dict[str, Any] | None = None,
+    *,
+    with_network: bool = True,
+    radio: dict[str, Any] | None = None,
 ) -> FullStateSnapshot:
     ha = ha_security or {}
     caps = sorted(ha_cap(k) for k in ha)
+    if radio is not None:
+        caps = sorted(
+            [*caps, *(f"network.radio.{k}" for k in radio if k != "posture")]
+            + [f"network.radio.posture.{k}" for k in radio.get("posture", {})]
+        )
     payload: dict[str, Any] = {
         "schema_version": 2,
         "generated_at": NOW.isoformat(),
@@ -120,6 +132,13 @@ def _snapshot(
             "ha_security": ha,
             "counters": {},
         }
+        if radio is not None:
+            payload["network"]["radio"] = {
+                "capabilities": [],
+                "devices": [],
+                "posture": {},
+                **radio,
+            }
     return validate_snapshot(payload)
 
 
@@ -131,6 +150,7 @@ def _engine(  # noqa: PLR0913
     auth_inventory: AuthInventory | None = None,
     hass: Any = None,
     explainer: Any = None,
+    network_inventory: Any = None,
 ) -> tuple[SentinelEngine, list[NetworkBuildContext]]:
     contexts: list[NetworkBuildContext] = []
 
@@ -166,6 +186,7 @@ def _engine(  # noqa: PLR0913
         audit_store=cast("AuditStore", DummyAudit()),
         explainer=explainer,
         auth_inventory=auth_inventory,
+        network_inventory=network_inventory,
     )
     return engine, contexts
 
@@ -521,3 +542,180 @@ def test_correlator_keeps_posture_findings_out_of_compounds() -> None:
         "ha_sensitive_entity_exposed_without_pin",
         "unlocked_lock_at_night",
     }
+
+
+# ---------------------------------------------------------------------------
+# Radio device inventory and the permit-join wake-up
+# ---------------------------------------------------------------------------
+
+
+def _radio_device(device_id: str, name: str = "Sensor") -> RadioDevice:
+    return {
+        "device_id": device_id,
+        "protocol": "zigbee",
+        "platform": "zha",
+        "name": name,
+        "is_security_device": False,
+        "manufacturer": None,
+        "model": None,
+    }
+
+
+def _service_recorder() -> tuple[MagicMock, list[tuple[str, str, dict[str, Any]]]]:
+    hass = MagicMock()
+    calls: list[tuple[str, str, dict[str, Any]]] = []
+
+    async def _call(
+        domain: str, service: str, data: dict[str, Any], **_kw: Any
+    ) -> None:
+        calls.append((domain, service, data))
+
+    hass.services.async_call = _call
+    return hass, calls
+
+
+def _memory_inventory() -> NetworkInventory:
+    inventory = NetworkInventory(MagicMock())
+    store = MagicMock()
+
+    async def _save(_data: dict[str, Any]) -> None:
+        return None
+
+    store.async_save = _save
+    inventory._store = store  # type: ignore[assignment]
+    return inventory
+
+
+@pytest.mark.asyncio
+async def test_network_inventory_bootstrap_announces_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inventory = _memory_inventory()
+    hass, calls = _service_recorder()
+    devices = [_radio_device("a"), _radio_device("b")]
+    snapshot = _snapshot(
+        radio={"devices": devices, "new_devices": [], "present_sources": ["zigbee"]}
+    )
+    engine, contexts = _engine(
+        monkeypatch, snapshot, hass=hass, network_inventory=inventory
+    )
+    await engine._timed_run()
+    assert contexts[0].network_inventory is inventory
+    assert inventory.is_source_bootstrapped("zigbee")
+    assert len(calls) == 1
+    assert "2 Zigbee devices" in calls[0][2]["message"]
+    await engine._timed_run()
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_new_device_committed_after_delivery_and_held_back_when_snoozed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import timedelta as _td  # noqa: PLC0415
+
+    inventory = _memory_inventory()
+    await inventory.async_commit([_radio_device("a")], NOW)
+    devices = [_radio_device("a"), _radio_device("b", "New Plug")]
+    snapshot = _snapshot(
+        radio={
+            "devices": devices,
+            "new_devices": ["zigbee:b"],
+            "present_sources": ["zigbee"],
+        }
+    )
+    hass, _calls = _service_recorder()
+    engine, _ = _engine(monkeypatch, snapshot, hass=hass, network_inventory=inventory)
+    state = cast("Any", engine)._suppression.state
+    state.snoozed_until["radio_new_device_joined"] = {
+        "until": (NOW + _td(days=365)).isoformat()
+    }
+    await engine._timed_run()
+    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+    assert notifier.calls == []
+    # Not delivered: still new.
+    assert inventory.diff(devices, []).new_device_keys == ["zigbee:b"]
+
+    state.snoozed_until.clear()
+    await engine._timed_run()
+    assert [f.type for f in notifier.calls] == ["radio_new_device_joined"]
+    assert inventory.diff(devices, []).new_device_keys == []
+
+
+@pytest.mark.asyncio
+async def test_network_inventory_commit_failure_does_not_end_the_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inventory = MagicMock()
+
+    async def _commit(*_a: Any, **_k: Any) -> list[Any]:
+        msg = "corrupt"
+        raise KeyError(msg)
+
+    inventory.async_commit = _commit
+    snapshot = _snapshot(radio={"devices": [_radio_device("a")], "new_devices": []})
+    engine, _ = _engine(monkeypatch, snapshot, network_inventory=inventory)
+    await engine._timed_run()
+    assert engine.run_stats["last_run_end"]
+
+
+@pytest.mark.asyncio
+async def test_permit_join_switch_turning_on_wakes_the_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from homeassistant.core import State  # noqa: PLC0415
+
+    switch = "switch.zigbee2mqtt_bridge_permit_join"
+    snapshot = _snapshot(
+        radio={
+            "devices": [],
+            "posture": {
+                "zigbee_permit_join": False,
+                "zigbee_permit_join_entity_ids": [],
+                "zigbee_permit_join_switches": [switch],
+            },
+        }
+    )
+    engine, _ = _engine(monkeypatch, snapshot)
+    enqueued: list[str] = []
+    monkeypatch.setattr(
+        cast("Any", engine)._trigger_scheduler,
+        "enqueue",
+        lambda record: enqueued.append(record.anomaly_type),
+    )
+
+    def _event(entity_id: str, state: str) -> Any:
+        return MagicMock(
+            data={"entity_id": entity_id, "new_state": State(entity_id, state)}
+        )
+
+    # Before any run the switch is unknown: a plain switch never wakes.
+    engine._on_state_changed(_event(switch, "on"))
+    assert enqueued == []
+    await engine._timed_run()
+    engine._on_state_changed(_event(switch, "on"))
+    engine._on_state_changed(_event(switch, "off"))
+    engine._on_state_changed(_event("switch.kitchen", "on"))
+    assert enqueued == ["zigbee_permit_join_open"]
+
+
+@pytest.mark.asyncio
+async def test_on_demand_audit_reports_inventory_counts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inventory = _memory_inventory()
+    await inventory.async_commit([_radio_device("a")], NOW)
+    await inventory.async_commit([_radio_device("a"), _radio_device("b")], NOW)
+    engine, _ = _engine(
+        monkeypatch,
+        _snapshot(radio={"devices": [], "new_devices": []}),
+        network_inventory=inventory,
+    )
+    report = await engine.async_audit_network()
+    assert report["inventory"] == {
+        "trusted": 1,
+        "untrusted": 1,
+        "by_source": {"zigbee": {"trusted": 1, "untrusted": 1}},
+    }
+    # The audit never commits the inventory.
+    assert inventory.diff([_radio_device("c")], []).new_device_keys == ["zigbee:c"]

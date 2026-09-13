@@ -1246,6 +1246,8 @@ ACTION_PREFIX = "hga_sentinel_"
 
 # Snooze verb tokens embedded in HA action identifiers.
 ACT_SNOOZE_24H = "snooze24h"
+# Records the devices of a radio_new_device_joined finding as trusted.
+ACT_TRUST = "trust"
 ACT_SNOOZE_ALWAYS = "snoozealways"
 ACT_SNOOZE_CONFIRM = "snoozeconfirm"
 ACT_SNOOZE_CANCEL = "snoozecancel"

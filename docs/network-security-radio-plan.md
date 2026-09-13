@@ -1,6 +1,6 @@
 # Network Security Plan, Step 6: Radio Adapters and Device Inventory
 
-Status: proposed. This implements implementation-order step 6 of
+Status: implemented on `feat/network-radio-adapters`, with the three maintainer decisions below accepted as proposed; field validation on the maintainer's box pending. This implements implementation-order step 6 of
 `docs/network-security-plan.md`: the `radio_registry`, `zwave`, and `zigbee`
 adapters, their phase 1 rules, and the general device inventory. The parent
 plan still governs; this document records what the pinned Home Assistant
@@ -89,8 +89,10 @@ schema). Capability paths are `network.radio.<field>`.
   one log line.
 - **`zigbee`** (entity tier). The Zigbee2MQTT half matches the bridge's
   permit-join switch by `platform == "mqtt"` and the unique-id pattern, never
-  by name. It provides `zigbee_permit_join` and
-  `zigbee_permit_join_entity_id`. The ZHA half provides nothing (see above).
+  by name. It provides `zigbee_permit_join`,
+  `zigbee_permit_join_entity_ids` (the switches that are on), and
+  `zigbee_permit_join_switches` (every bridge switch, for the engine's
+  wake-up). The ZHA half provides nothing (see above).
 - **Coordinator updates** (in `radio_registry`) produce
   `coordinator_update_pending`: `update.*` entities in state `on` whose
   device is one of:
@@ -108,8 +110,8 @@ and gets `en`/`cs` labels. This matches the existing family.
 
 | rule_id | requires | severity | Notes |
 |---|---|---|---|
-| `radio_new_device_joined` | `network.radio.devices` | medium while away or at night, low otherwise; high if a new device is a security device while away | Alerts once per device, then held back until delivered. Evidence carries device ids, never addresses. |
-| `zwave_insecure_security_class` | `network.radio.devices.security_class` | high when a lock, alarm, or entry cover is on `s0` or `none`; low for others on `none` (most sensors legitimately run without security) | Standing condition with the 24 h posture floor. Suggested action: re-include with S2. |
+| `radio_new_device_joined` | `network.radio.devices`, `network.radio.new_devices` | medium while away or at night, low otherwise; high if a new device is a security device while away | Alerts once per device, then held back until delivered. Evidence carries device ids, never addresses. |
+| `zwave_insecure_security_class` | `network.radio.devices.security_class` | high when a lock, alarm, or entry cover is on `s0` or `none`; low for any other device on `s0`. Other devices on `none` are not reported, because most sensors legitimately run without security and a daily low alert for each would nag | Standing condition with the 24 h posture floor. Suggested action: re-include with S2. |
 | `zigbee_permit_join_open` | `network.radio.posture.zigbee_permit_join` | medium, high while away | Event-triggered (below). |
 | `zwave_inclusion_active` | `network.radio.posture.zwave_inclusion_active` | medium, high while away | New rule id; the parent plan lists the check but no rule. Poll-only, see limitations. |
 | `radio_coordinator_update_pending` | `network.radio.posture.coordinator_update_pending` | medium | Per-entity exclusions honored. |

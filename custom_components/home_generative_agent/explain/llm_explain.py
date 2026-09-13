@@ -150,6 +150,11 @@ _KNOWN_TYPE_LABELS = {
     "security_device_unavailable": "Security device unavailable",
     "network_unconfigured_discovered_device": "Unconfigured device discovered",
     "network_router_update_pending": "Router update available",
+    "radio_new_device_joined": "New radio device joined",
+    "zwave_insecure_security_class": "Z-Wave device without S2 security",
+    "zigbee_permit_join_open": "Zigbee pairing is open",
+    "zwave_inclusion_active": "Z-Wave inclusion is active",
+    "radio_coordinator_update_pending": "Radio coordinator update available",
 }
 
 

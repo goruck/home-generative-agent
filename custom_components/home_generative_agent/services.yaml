@@ -294,6 +294,50 @@ sentinel_reset_auth_inventory:
     values or raw IP addresses.
   fields: {}
 
+sentinel_get_network_inventory:
+  name: Get sentinel device inventory
+  description: >
+    Return the Zigbee, Z-Wave, Bluetooth, and Matter devices Sentinel knows
+    for this home, with when each was first seen and whether it is trusted.
+    The inventory holds device registry ids and names only, never radio
+    addresses.
+  fields: {}
+
+sentinel_trust_network_device:
+  name: Trust sentinel inventory device
+  description: >
+    Mark known radio devices as recognized. Admin only. Devices appear in the
+    inventory on the Sentinel run after they are paired.
+  fields:
+    device_id:
+      name: Device
+      description: The devices to mark as trusted.
+      required: true
+      selector:
+        device:
+          multiple: true
+
+sentinel_untrust_network_device:
+  name: Untrust sentinel inventory device
+  description: >
+    Mark known radio devices as not recognized. Admin only.
+  fields:
+    device_id:
+      name: Device
+      description: The devices to mark as untrusted.
+      required: true
+      selector:
+        device:
+          multiple: true
+
+sentinel_reset_network_inventory:
+  name: Reset sentinel device inventory
+  description: >
+    Clear the inventory of paired radio devices. Admin only. The next
+    Sentinel run records every paired device as known without alerting,
+    exactly like the first run after installation.
+  fields: {}
+
 run_network_audit:
   name: Run network security audit
   description: >

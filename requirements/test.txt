@@ -9,6 +9,9 @@ openai==2.45.0
 mutagen==1.48.1
 # ...and HA's ffmpeg component (imported by tts); pin to core's ffmpeg manifest.
 ha-ffmpeg==3.2.2
+# The network audit's zwave adapter reads Z-Wave JS node and controller objects;
+# its tests build the real ones. Pin to core's zwave_js manifest.
+zwave-js-server-python==0.73.1
 
 pytest==9.*
 pytest-asyncio==1.*

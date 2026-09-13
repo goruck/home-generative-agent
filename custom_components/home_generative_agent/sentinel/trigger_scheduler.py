@@ -49,6 +49,9 @@ _SECURITY_CRITICAL_TYPES: frozenset[str] = frozenset(
         "camera_entry_unsecured",
         "open_entry_while_away",
         "unlocked_lock_at_night",
+        # A Zigbee2MQTT join window closes within 254 s; a dropped trigger
+        # would leave it to a poll that usually lands after it closed.
+        "zigbee_permit_join_open",
     }
 )
 

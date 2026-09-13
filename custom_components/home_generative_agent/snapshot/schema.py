@@ -159,9 +159,10 @@ class RadioPosture(TypedDict, total=False):
     """Radio-protocol configuration facts."""
 
     zigbee_permit_join: bool
-    zigbee_permit_join_entity_id: str
+    zigbee_permit_join_entity_ids: list[str]  # bridge switches currently on
+    zigbee_permit_join_switches: list[str]  # every Zigbee2MQTT bridge switch
     zwave_inclusion_active: bool
-    coordinator_update_pending: list[str]
+    coordinator_update_pending: list[str]  # update.* in state on
     bluetooth_unknown_trackers: list[dict[str, Any]]
     thread_border_router_count: int
 
@@ -172,6 +173,10 @@ class RadioSnapshot(TypedDict):
     capabilities: list[str]
     devices: list[RadioDevice]
     posture: RadioPosture
+    # Inventory keys ("<protocol>:<device id>") not known before this run.
+    new_devices: NotRequired[list[str]]
+    # Protocols present on this home, devices or not (inventory bootstrap).
+    present_sources: NotRequired[list[str]]
 
 
 class NetworkSnapshot(TypedDict):

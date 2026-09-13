@@ -297,6 +297,7 @@ from .sentinel.discovery_store import DiscoveryStore
 from .sentinel.dynamic_rules import evaluate_dynamic_rule
 from .sentinel.engine import SentinelEngine
 from .sentinel.network_audit import empty_report as empty_network_audit_report
+from .sentinel.network_inventory import NetworkInventory
 from .sentinel.notifier import SentinelNotifier
 from .sentinel.proposal_store import ProposalStore
 from .sentinel.proposal_templates import explain_normalize_candidate
@@ -346,6 +347,13 @@ SERVICE_SENTINEL_GET_BASELINES = "sentinel_get_baselines"
 SERVICE_SENTINEL_RESET_BASELINE = "sentinel_reset_baseline"
 SERVICE_SENTINEL_RESET_AUTH_INVENTORY = "sentinel_reset_auth_inventory"
 SERVICE_RUN_NETWORK_AUDIT = "run_network_audit"
+SERVICE_SENTINEL_GET_NETWORK_INVENTORY = "sentinel_get_network_inventory"
+SERVICE_SENTINEL_TRUST_NETWORK_DEVICE = "sentinel_trust_network_device"
+SERVICE_SENTINEL_UNTRUST_NETWORK_DEVICE = "sentinel_untrust_network_device"
+SERVICE_SENTINEL_RESET_NETWORK_INVENTORY = "sentinel_reset_network_inventory"
+SENTINEL_NETWORK_DEVICE_SCHEMA = vol.Schema(
+    {vol.Required("device_id"): vol.All(cv.ensure_list, [cv.string])}
+)
 
 ENROLL_SCHEMA = vol.Schema(
     {
@@ -1426,6 +1434,107 @@ async def _async_require_admin(
         msg = f"{service} is restricted to admin users."
         raise HomeAssistantError(msg)
     return user
+
+
+def _register_network_inventory_services(
+    hass: HomeAssistant, entry: HGAConfigEntry
+) -> None:
+    """Register the device-inventory services (read, trust, untrust, reset)."""
+
+    def _inventory() -> NetworkInventory | None:
+        return entry.runtime_data.network_inventory
+
+    async def _handle_get(call: ServiceCall) -> dict[str, Any]:
+        """Return every known radio device with its trust flag."""
+        _ = call
+        inventory = _inventory()
+        if inventory is None:
+            return {"status": "unavailable", "summary": None, "devices": []}
+        return {
+            "status": "ok",
+            "summary": inventory.summary(),
+            "devices": inventory.list_devices(),
+        }
+
+    def _make_trust_handler(
+        service: str, *, trusted: bool
+    ) -> Callable[[ServiceCall], Any]:
+        async def _handle(call: ServiceCall) -> dict[str, Any]:
+            """
+            Set the trust flag on known devices.
+
+            Admin-only: the flag records what the owner recognizes, and the
+            audit report counts untrusted devices.
+            """
+            user = await _async_require_admin(hass, call, service)
+            inventory = _inventory()
+            if inventory is None:
+                return {"status": "unavailable", "changed": []}
+            changed = await inventory.async_set_trusted(
+                call.data["device_id"], trusted=trusted
+            )
+            LOGGER.info(
+                "Sentinel network inventory: user %s set trusted=%s on %d device(s).",
+                user.name,
+                trusted,
+                len(changed),
+            )
+            return {"status": "ok", "changed": changed}
+
+        return _handle
+
+    async def _handle_reset(call: ServiceCall) -> dict[str, Any]:
+        """
+        Clear the device inventory; the next run bootstraps every source.
+
+        Admin-only and logged, like the auth inventory reset: a reset makes
+        every paired device known without alerting.
+        """
+        user = await _async_require_admin(
+            hass, call, SERVICE_SENTINEL_RESET_NETWORK_INVENTORY
+        )
+        inventory = _inventory()
+        if inventory is None:
+            return {"status": "unavailable"}
+        before = inventory.summary()
+        LOGGER.warning(
+            "Sentinel network inventory reset by user %s (%s): %d device(s) "
+            "forgotten; the next run records paired devices without alerting.",
+            user.name,
+            user.id,
+            before["device_count"],
+        )
+        await inventory.async_reset()
+        return {"status": "ok", "cleared": before}
+
+    _register_entry_service(
+        hass,
+        entry,
+        SERVICE_SENTINEL_GET_NETWORK_INVENTORY,
+        _handle_get,
+        schema=vol.Schema({}),
+        supports_response=SupportsResponse.ONLY,
+    )
+    for service, trusted in (
+        (SERVICE_SENTINEL_TRUST_NETWORK_DEVICE, True),
+        (SERVICE_SENTINEL_UNTRUST_NETWORK_DEVICE, False),
+    ):
+        _register_entry_service(
+            hass,
+            entry,
+            service,
+            _make_trust_handler(service, trusted=trusted),
+            schema=SENTINEL_NETWORK_DEVICE_SCHEMA,
+            supports_response=SupportsResponse.OPTIONAL,
+        )
+    _register_entry_service(
+        hass,
+        entry,
+        SERVICE_SENTINEL_RESET_NETWORK_INVENTORY,
+        _handle_reset,
+        schema=vol.Schema({}),
+        supports_response=SupportsResponse.ONLY,
+    )
 
 
 def _register_entry_service(  # noqa: PLR0913
@@ -3072,10 +3181,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     # reload that follows.
     pseudonymizer = None
     auth_inventory = None
+    network_inventory = None
     if options.get(CONF_SENTINEL_ENABLED, RECOMMENDED_SENTINEL_ENABLED):
         pseudonymizer = await async_load_pseudonymizer(hass)
         auth_inventory = AuthInventory(hass)
         await auth_inventory.async_load()
+        network_inventory = NetworkInventory(hass)
+        await network_inventory.async_load()
     action_handler = ActionHandler(
         hass,
         suppression,
@@ -3083,6 +3195,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         entry_id=entry.entry_id,
         notify_service=options.get(CONF_NOTIFY_SERVICE),
     )
+    action_handler.network_inventory = network_inventory
     notifier = SentinelNotifier(
         hass, options, suppression, action_handler, audit_store=audit_store
     )
@@ -3146,6 +3259,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         run_stats=sentinel_run_stats,
         auth_inventory=auth_inventory,
         pseudonymizer=pseudonymizer,
+        network_inventory=network_inventory,
     )
     discovery_engine = SentinelDiscoveryEngine(
         hass=hass,
@@ -3197,6 +3311,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         rule_registry=rule_registry,
         baseline_updater=baseline_updater,
         auth_inventory=auth_inventory,
+        network_inventory=network_inventory,
         openai_http_client=openai_http_client,
     )
 
@@ -3824,6 +3939,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         supports_response=_SERVICE_RESPONSE_ONLY,
     )
 
+    _register_network_inventory_services(hass, entry)
+
     # Reload whenever a Sentinel subentry is added, updated, or removed so that
     # tasks started during setup are stopped or started to match the current
     # subentry configuration.
@@ -3874,6 +3991,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     await rd.sentinel.stop()
                 if rd.auth_inventory is not None:
                     await rd.auth_inventory.async_reset()
+                if rd.network_inventory is not None:
+                    await rd.network_inventory.async_reset()
                 await async_remove_pseudonymizer_salt(hass)
 
             cleanup = hass.async_create_task(_forget_network_audit())

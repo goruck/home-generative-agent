@@ -91,6 +91,7 @@ from .lock_enrichment import async_enrich_lock_last_changed
 from .logging_utils import RepeatingLogLimiter
 from .models import AnomalyFinding, CompoundFinding
 from .network_audit import NetworkAuditReport, build_report, empty_report
+from .network_inventory import SOURCE_LABELS
 from .notifier import is_security_copy
 from .power_enrichment import async_enrich_power_last_changed
 from .rules.alarm_disarmed_external_threat import AlarmDisarmedDuringExternalThreatRule
@@ -117,11 +118,16 @@ from .rules.network_unconfigured_discovered_device import (
 from .rules.open_entry_while_away import OpenEntryWhileAwayRule
 from .rules.pet_detected_at_night_no_occupancy import PetDetectedAtNightNoOccupancyRule
 from .rules.phone_battery_low_at_night import PhoneBatteryLowAtNightRule
+from .rules.radio_coordinator_update_pending import RadioCoordinatorUpdatePendingRule
+from .rules.radio_new_device_joined import RadioNewDeviceJoinedRule
 from .rules.security_device_unavailable import SecurityDeviceUnavailableRule
 from .rules.unknown_person_camera_night_home import UnknownPersonAtNightWhileHomeRule
 from .rules.unknown_person_camera_no_home import UnknownPersonCameraNoHomeRule
 from .rules.unlocked_lock_at_night import UnlockedLockAtNightRule
 from .rules.vehicle_detected_near_camera import VehicleDetectedNearCameraRule
+from .rules.zigbee_permit_join_open import ZigbeePermitJoinOpenRule
+from .rules.zwave_inclusion_active import ZwaveInclusionActiveRule
+from .rules.zwave_insecure_security_class import ZwaveInsecureSecurityClassRule
 from .suppression import (
     SUPPRESSION_REASON_NOT_SUPPRESSED,
     SUPPRESSION_REASON_POLICY_BLOCKED,
@@ -149,6 +155,7 @@ if TYPE_CHECKING:
 
     from .auth_inventory import AuthInventory, ObservedUser
     from .baseline import SentinelBaselineUpdater
+    from .network_inventory import NetworkInventory
     from .notifier import SentinelNotifier
     from .pseudonymizer import Pseudonymizer
     from .rule_registry import RuleRegistry
@@ -274,6 +281,7 @@ class SentinelEngine:
         run_stats: dict[str, Any] | None = None,
         auth_inventory: AuthInventory | None = None,
         pseudonymizer: Pseudonymizer | None = None,
+        network_inventory: NetworkInventory | None = None,
     ) -> None:
         """Initialize sentinel dependencies and runtime state."""
         self._hass = hass
@@ -281,6 +289,10 @@ class SentinelEngine:
         # Network / HA-security audit dependencies (docs/network-security-plan.md).
         self._auth_inventory = auth_inventory
         self._pseudonymizer = pseudonymizer
+        self._network_inventory = network_inventory
+        # Zigbee2MQTT permit-join switches seen by the last snapshot; a join
+        # window lasts at most 254 s, so turning one on wakes the engine.
+        self._permit_join_switches: frozenset[str] = frozenset()
         self._network_enabled = bool(
             options.get(
                 CONF_SENTINEL_NETWORK_ENABLED, RECOMMENDED_SENTINEL_NETWORK_ENABLED
@@ -372,6 +384,15 @@ class SentinelEngine:
                 ),
                 NetworkUnconfiguredDiscoveredDeviceRule(),
                 NetworkRouterUpdatePendingRule(
+                    is_entity_excluded=self._entity_excluded_for_type
+                ),
+                RadioNewDeviceJoinedRule(),
+                ZwaveInsecureSecurityClassRule(),
+                ZigbeePermitJoinOpenRule(
+                    is_entity_excluded=self._entity_excluded_for_type
+                ),
+                ZwaveInclusionActiveRule(),
+                RadioCoordinatorUpdatePendingRule(
                     is_entity_excluded=self._entity_excluded_for_type
                 ),
             ]
@@ -578,7 +599,12 @@ class SentinelEngine:
             # Entity was removed — ignore.
             return
 
-        anomaly_type = _anomaly_type_for_state(entity_id, new_state)
+        if entity_id in self._permit_join_switches:
+            if new_state.state != "on":
+                return
+            anomaly_type: str | None = ZigbeePermitJoinOpenRule.rule_id
+        else:
+            anomaly_type = _anomaly_type_for_state(entity_id, new_state)
         if anomaly_type is None:
             return
 
@@ -701,6 +727,7 @@ class SentinelEngine:
             pseudonymizer=self._pseudonymizer,
             auth_inventory=self._auth_inventory,
             auth_observation=observation,
+            network_inventory=self._network_inventory,
         )
 
     async def _commit_auth_inventory(
@@ -776,6 +803,84 @@ class SentinelEngine:
                 "notification_id": f"hga_sentinel_auth_inventory_{self._entry_id}",
             },
             blocking=False,
+        )
+
+    async def _commit_network_inventory(
+        self,
+        snapshot: FullStateSnapshot,
+        now: datetime,
+        *,
+        new_device_delivered: bool | None = None,
+    ) -> None:
+        """
+        Record this run's radio devices; announce each source's bootstrap once.
+
+        Runs after dispatch, like the auth inventory: the new-device rule
+        compared against the inventory as it stood before the run, and new
+        devices whose alert was not delivered are held back so they re-fire.
+        A failure here must not end the run loop.
+        """
+        inventory = self._network_inventory
+        radio = (snapshot.get("network") or {}).get("radio")
+        if inventory is None or not radio or "devices" not in radio:
+            return
+        devices = radio["devices"]
+        hold_back = (
+            set(radio.get("new_devices") or [])
+            if new_device_delivered is False
+            else set()
+        )
+        try:
+            announcements = await inventory.async_commit(
+                devices,
+                now,
+                present_sources=radio.get("present_sources") or [],
+                hold_back=hold_back,
+            )
+        except (ValueError, TypeError, KeyError, AttributeError):
+            self._log_limiter.warning(
+                "network_inventory_commit", "Network device inventory commit failed."
+            )
+            return
+        self._log_limiter.recovered(
+            "network_inventory_commit",
+            "Network device inventory commit recovered after %d failed cycle(s).",
+        )
+        if not announcements:
+            return
+        parts = [
+            f"{a.device_count} {SOURCE_LABELS.get(a.source, a.source)} "
+            f"device{'s' if a.device_count != 1 else ''}"
+            for a in announcements
+        ]
+        LOGGER.info("Sentinel device inventory established: %s.", ", ".join(parts))
+        await self._hass.services.async_call(
+            "persistent_notification",
+            "create",
+            {
+                "title": "Sentinel device inventory established",
+                "message": (
+                    "Sentinel recorded the devices already paired on your radio "
+                    f"networks as known: {', '.join(parts)}. From now on a newly "
+                    "paired Zigbee, Z-Wave, Bluetooth, or Matter device raises an "
+                    "alert. The inventory holds device registry ids and names "
+                    "only, no radio addresses."
+                ),
+                "notification_id": (
+                    "hga_sentinel_network_inventory_"
+                    f"{'_'.join(a.source for a in announcements)}_{self._entry_id}"
+                ),
+            },
+            blocking=False,
+        )
+
+    def _remember_permit_join_switches(self, snapshot: FullStateSnapshot) -> None:
+        """Keep the Zigbee2MQTT permit-join switches to wake on."""
+        posture = ((snapshot.get("network") or {}).get("radio") or {}).get(
+            "posture"
+        ) or {}
+        self._permit_join_switches = frozenset(
+            posture.get("zigbee_permit_join_switches") or []
         )
 
     def _evaluate_gated_rules(
@@ -876,6 +981,11 @@ class SentinelEngine:
             failed_rules=evaluation.failed_rules,
             capabilities=evaluation.capabilities,
             notes=section.get("notes", []),
+            inventory=(
+                self._network_inventory.summary()
+                if self._network_inventory is not None
+                else None
+            ),
         )
 
     async def _run_once(self, trigger_source: str = "poll") -> None:  # noqa: PLR0912, PLR0915
@@ -894,6 +1004,7 @@ class SentinelEngine:
             "snapshot_build",
             "Sentinel snapshot build recovered after %d failed cycle(s).",
         )
+        self._remember_permit_join_switches(snapshot)
         try:
             await async_enrich_alarm_last_changed(self._hass, snapshot)
             await async_enrich_lock_last_changed(self._hass, snapshot)
@@ -1026,6 +1137,7 @@ class SentinelEngine:
         # Whether this run's auth-change finding reached the user: None when
         # there was none, False when suppression/triage/policy stopped it.
         auth_change_delivered: bool | None = None
+        new_device_delivered: bool | None = None
         if all_findings:
             # Correlation pass: group related findings from this single cycle.
             # Each call to correlate() is stateless; no cross-run merging occurs.
@@ -1046,12 +1158,20 @@ class SentinelEngine:
                     and item.type == HaNewAdminOrTokenRule.rule_id
                 ):
                     auth_change_delivered = delivered
+                if (
+                    isinstance(item, AnomalyFinding)
+                    and item.type == RadioNewDeviceJoinedRule.rule_id
+                ):
+                    new_device_delivered = delivered
 
         # Commit after dispatch: the auth change rule compared this run's
         # observation against the inventory as it stood before the run, and a
         # change whose alert was not delivered is held back so it re-fires.
         await self._commit_auth_inventory(
             network_context, now, auth_change_delivered=auth_change_delivered
+        )
+        await self._commit_network_inventory(
+            snapshot, now, new_device_delivered=new_device_delivered
         )
 
     # ---------------------------------------------------------------------- #

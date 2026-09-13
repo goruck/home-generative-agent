@@ -52,8 +52,23 @@ from custom_components.home_generative_agent.sentinel.rules.network_router_updat
 from custom_components.home_generative_agent.sentinel.rules.network_unconfigured_discovered_device import (
     NetworkUnconfiguredDiscoveredDeviceRule,
 )
+from custom_components.home_generative_agent.sentinel.rules.radio_coordinator_update_pending import (
+    RadioCoordinatorUpdatePendingRule,
+)
+from custom_components.home_generative_agent.sentinel.rules.radio_new_device_joined import (
+    RadioNewDeviceJoinedRule,
+)
 from custom_components.home_generative_agent.sentinel.rules.security_device_unavailable import (
     SecurityDeviceUnavailableRule,
+)
+from custom_components.home_generative_agent.sentinel.rules.zigbee_permit_join_open import (
+    ZigbeePermitJoinOpenRule,
+)
+from custom_components.home_generative_agent.sentinel.rules.zwave_inclusion_active import (
+    ZwaveInclusionActiveRule,
+)
+from custom_components.home_generative_agent.sentinel.rules.zwave_insecure_security_class import (
+    ZwaveInsecureSecurityClassRule,
 )
 from custom_components.home_generative_agent.snapshot.network import ha_cap
 from custom_components.home_generative_agent.snapshot.schema import validate_snapshot
@@ -78,6 +93,11 @@ ALL_RULES = [
     SecurityDeviceUnavailableRule(offline_minutes=30),
     NetworkUnconfiguredDiscoveredDeviceRule(),
     NetworkRouterUpdatePendingRule(),
+    RadioNewDeviceJoinedRule(),
+    ZwaveInsecureSecurityClassRule(),
+    ZigbeePermitJoinOpenRule(),
+    ZwaveInclusionActiveRule(),
+    RadioCoordinatorUpdatePendingRule(),
 ]
 
 

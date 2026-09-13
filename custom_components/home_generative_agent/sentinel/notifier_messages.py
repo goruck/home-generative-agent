@@ -69,6 +69,11 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "type_security_device_unavailable": "Security device unavailable",
         "type_network_unconfigured_discovered_device": "Unconfigured device discovered",
         "type_network_router_update_pending": "Router update available",
+        "type_radio_new_device_joined": "New radio device joined",
+        "type_zwave_insecure_security_class": "Z-Wave device without S2 security",
+        "type_zigbee_permit_join_open": "Zigbee pairing is open",
+        "type_zwave_inclusion_active": "Z-Wave inclusion is active",
+        "type_radio_coordinator_update_pending": "Radio coordinator update available",
         "subtitle_appliance_finished": "{appliance} finished",
         "subtitle_appliance_cycle_complete": "Appliance cycle complete",
         "subtitle_entry_open_alarm_disarmed": "{entry_name} open, alarm disarmed",
@@ -134,6 +139,13 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "Nalezeno nenakonfigurované zařízení"
         ),
         "type_network_router_update_pending": "K dispozici aktualizace routeru",
+        "type_radio_new_device_joined": "Připojeno nové rádiové zařízení",
+        "type_zwave_insecure_security_class": "Zařízení Z-Wave bez zabezpečení S2",
+        "type_zigbee_permit_join_open": "Párování Zigbee je otevřené",
+        "type_zwave_inclusion_active": "Začleňování Z-Wave je aktivní",
+        "type_radio_coordinator_update_pending": (
+            "K dispozici aktualizace rádiového koordinátoru"
+        ),
         "subtitle_appliance_finished": "{appliance} dokončeno",
         "subtitle_appliance_cycle_complete": "Cyklus spotřebiče dokončen",
         "subtitle_entry_open_alarm_disarmed": "{entry_name} otevřeno, alarm vypnutý",

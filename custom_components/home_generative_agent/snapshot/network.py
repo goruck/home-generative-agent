@@ -54,6 +54,9 @@ if TYPE_CHECKING:
     from custom_components.home_generative_agent.sentinel.auth_inventory import (
         AuthInventory,
     )
+    from custom_components.home_generative_agent.sentinel.network_inventory import (
+        NetworkInventory,
+    )
     from custom_components.home_generative_agent.sentinel.pseudonymizer import (
         Pseudonymizer,
     )
@@ -67,6 +70,7 @@ LOGGER = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 CAP_CLIENTS = "network.clients"
+_CAP_RADIO_PREFIX = "network.radio."
 _CAP_POSTURE_PREFIX = "network.posture."
 _CAP_HA_PREFIX = "network.ha_security."
 
@@ -79,6 +83,11 @@ def posture_cap(key: str) -> str:
 def ha_cap(key: str) -> str:
     """Return the capability path for an ``ha_security`` field."""
     return f"{_CAP_HA_PREFIX}{key}"
+
+
+def radio_cap(key: str) -> str:
+    """Return the capability path for a radio field (``posture.<key>`` too)."""
+    return f"{_CAP_RADIO_PREFIX}{key}"
 
 
 # Integrations whose ``update.*`` entities describe router / gateway firmware.
@@ -167,6 +176,7 @@ class NetworkBuildContext:
     pseudonymizer: Pseudonymizer | None = None
     auth_inventory: AuthInventory | None = None
     auth_observation: list[ObservedUser] | None = None
+    network_inventory: NetworkInventory | None = None
 
 
 @dataclass
@@ -181,6 +191,17 @@ class AdapterResult:
     clients: list[NetworkClient] | None = None
     counters: dict[str, float] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
+    # Radio section fields (``devices``, ``new_devices``, ``present_sources``)
+    # and radio posture, merged into ``network.radio``.
+    radio: dict[str, Any] = field(default_factory=dict)
+    radio_posture: dict[str, Any] = field(default_factory=dict)
+    # Capability paths an adapter asserts that are not a field of its own
+    # (Z-Wave security classes live on the registry adapter's devices).
+    extra_capabilities: list[str] = field(default_factory=list)
+
+
+# Radio fields that are bookkeeping for the engine, not rule inputs.
+_RADIO_NON_CAPABILITY_KEYS: frozenset[str] = frozenset({"present_sources"})
 
 
 def merge_adapter_results(results: Iterable[AdapterResult]) -> NetworkSnapshot:
@@ -196,6 +217,9 @@ def merge_adapter_results(results: Iterable[AdapterResult]) -> NetworkSnapshot:
     counters: dict[str, float] = {}
     sources: dict[str, str] = {}
     notes: list[str] = []
+    radio: dict[str, Any] = {}
+    radio_posture: dict[str, Any] = {}
+    radio_caps: set[str] = set()
     for result in results:
         for key, value in result.posture.items():
             posture[key] = value
@@ -206,9 +230,23 @@ def merge_adapter_results(results: Iterable[AdapterResult]) -> NetworkSnapshot:
         if result.clients is not None:
             clients = [*(clients or []), *result.clients]
             sources[CAP_CLIENTS] = result.name
+        for key, value in result.radio.items():
+            radio[key] = value
+            if key not in _RADIO_NON_CAPABILITY_KEYS:
+                sources[f"{_CAP_RADIO_PREFIX}{key}"] = result.name
+                radio_caps.add(f"{_CAP_RADIO_PREFIX}{key}")
+        for key, value in result.radio_posture.items():
+            radio_posture[key] = value
+            path = f"{_CAP_RADIO_PREFIX}posture.{key}"
+            sources[path] = result.name
+            radio_caps.add(path)
+        for path in result.extra_capabilities:
+            sources[path] = result.name
+            if path.startswith(_CAP_RADIO_PREFIX):
+                radio_caps.add(path)
         counters.update(result.counters)
         notes.extend(result.notes)
-    return {
+    section: dict[str, Any] = {
         "capabilities": sorted(sources),
         "sources": sources,
         "clients": clients or [],
@@ -217,6 +255,14 @@ def merge_adapter_results(results: Iterable[AdapterResult]) -> NetworkSnapshot:
         "counters": counters,
         "notes": notes,
     }
+    if radio or radio_posture:
+        section["radio"] = {
+            "capabilities": sorted(radio_caps),
+            "devices": radio.get("devices", []),
+            "posture": radio_posture,
+            **{k: v for k, v in radio.items() if k != "devices"},
+        }
+    return section  # type: ignore[return-value]
 
 
 def empty_network_snapshot(note: str | None = None) -> NetworkSnapshot:
@@ -304,7 +350,8 @@ class HaNativeInputs:
     device_domains: Mapping[str, set[str]] = field(default_factory=dict)
 
 
-def _log_input_failure(name: str, err: Exception) -> None:
+def log_input_failure(name: str, err: Exception) -> None:
+    """Log a failed runtime read once per input and exception class."""
     key = f"{name}:{type(err).__name__}"
     if key in _LOGGED_INPUT_FAILURES:
         return
@@ -316,6 +363,9 @@ def _log_input_failure(name: str, err: Exception) -> None:
         type(err).__name__,
         err,
     )
+
+
+_log_input_failure = log_input_failure
 
 
 def _iso(value: Any) -> str | None:
@@ -1008,6 +1058,9 @@ async def async_build_network_snapshot(  # noqa: PLR0913
         return empty_network_snapshot("Network section not requested by caller.")
     if not context.enabled:
         return empty_network_snapshot("Network audit is disabled in Sentinel options.")
+    # Imported here: the radio adapters build on this module's helpers.
+    from .radio import collect_radio_inputs, radio_adapters  # noqa: PLC0415
+
     inputs = await async_collect_ha_native_inputs(
         hass,
         context,
@@ -1016,4 +1069,10 @@ async def async_build_network_snapshot(  # noqa: PLR0913
         entity_device=entity_device,
         device_domains=device_domains,
     )
-    return merge_adapter_results([ha_native_adapter(inputs, entities, context)])
+    radio_inputs = collect_radio_inputs(hass, entity_device=entity_device)
+    return merge_adapter_results(
+        [
+            ha_native_adapter(inputs, entities, context),
+            *radio_adapters(radio_inputs, entities, context.network_inventory),
+        ]
+    )
