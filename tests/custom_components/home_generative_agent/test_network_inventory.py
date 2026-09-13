@@ -72,7 +72,8 @@ async def test_new_device_on_bootstrapped_source_is_new_and_untrusted(
     rows = {r["key"]: r for r in inventory.list_devices()}
     assert rows["zigbee:b"]["trusted"] is False
     assert rows["zigbee:a"]["trusted"] is True
-    assert inventory.diff(devices, []).new_device_keys == []
+    # Recorded, but its alert is still owed until the engine settles it.
+    assert inventory.diff(devices, []).new_device_keys == ["zigbee:b"]
 
 
 @pytest.mark.asyncio
@@ -91,12 +92,44 @@ async def test_new_source_bootstraps_silently_later(hass: HomeAssistant) -> None
 
 
 @pytest.mark.asyncio
-async def test_hold_back_leaves_device_unrecorded(hass: HomeAssistant) -> None:
+async def test_unsettled_alert_stays_new_but_device_is_recorded(
+    hass: HomeAssistant,
+) -> None:
+    """A postponed alert is owed again; the device is trustable meanwhile."""
     inventory = NetworkInventory(hass)
     await inventory.async_commit([_device("a")], NOW)
     devices = [_device("a"), _device("b")]
-    await inventory.async_commit(devices, NOW, hold_back={"zigbee:b"})
+    await inventory.async_commit(devices, NOW)
     assert inventory.diff(devices, []).new_device_keys == ["zigbee:b"]
+    assert inventory.summary()["untrusted"] == 1
+    await inventory.async_commit(devices, NOW, alerted=["zigbee:b"])
+    assert inventory.diff(devices, []).new_device_keys == []
+
+
+@pytest.mark.asyncio
+async def test_trusting_settles_a_pending_alert(hass: HomeAssistant) -> None:
+    inventory = NetworkInventory(hass)
+    await inventory.async_commit([_device("a")], NOW)
+    devices = [_device("a"), _device("b")]
+    await inventory.async_commit(devices, NOW)
+    assert await inventory.async_set_trusted(["b"], trusted=True) == ["zigbee:b"]
+    assert inventory.diff(devices, []).new_device_keys == []
+
+
+@pytest.mark.asyncio
+async def test_trust_save_failure_raises_and_reset_reports_removal_failure(
+    hass: HomeAssistant,
+) -> None:
+    inventory = NetworkInventory(hass)
+    await inventory.async_commit([_device("a")], NOW)
+    with (
+        patch.object(inventory, "async_save", AsyncMock(return_value=False)),
+        pytest.raises(HomeAssistantError),
+    ):
+        await inventory.async_set_trusted(["a"], trusted=False)
+    with patch.object(inventory._store, "async_remove", AsyncMock(side_effect=OSError)):
+        assert await inventory.async_reset() is False
+    assert await inventory.async_reset() is True
 
 
 @pytest.mark.asyncio
@@ -185,6 +218,7 @@ async def test_persisted_json_holds_no_radio_addresses(
     (row,) = data["devices"].values()
     # Exactly the documented, address-free fields.
     assert set(row) == {
+        "alerted",
         "source",
         "platform",
         "ha_device_id",

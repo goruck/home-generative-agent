@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, cast
 from homeassistant.const import EVENT_STATE_CHANGED
 from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.util import dt as dt_util
 
@@ -78,6 +79,10 @@ from custom_components.home_generative_agent.snapshot.builder import (
 from custom_components.home_generative_agent.snapshot.network import (
     NetworkBuildContext,
     async_collect_auth_observation,
+    radio_cap,
+)
+from custom_components.home_generative_agent.snapshot.radio import (
+    is_z2m_permit_join_entry,
 )
 
 from .alarm_enrichment import async_enrich_alarm_last_changed
@@ -132,6 +137,9 @@ from .suppression import (
     SUPPRESSION_REASON_NOT_SUPPRESSED,
     SUPPRESSION_REASON_POLICY_BLOCKED,
     SUPPRESSION_REASON_TRIAGE_SUPPRESSED,
+    SUPPRESSION_REASON_USER_SNOOZE_7D,
+    SUPPRESSION_REASON_USER_SNOOZE_24H,
+    SUPPRESSION_REASON_USER_SNOOZE_PERMANENT,
     SuppressionManager,
     purge_expired_prompts,
     register_finding,
@@ -168,6 +176,20 @@ NETWORK_AUDIT_DISABLED_NOTE = (
     "The network and Home Assistant security audit is turned off in the "
     "Sentinel options (option 'Enable network and Home Assistant security "
     "audit'). Turn it on to run these checks."
+)
+
+
+# Why a finding was stopped, when that stop is the user's or triage's final
+# word rather than a timing matter: a new-device alert stopped this way is
+# settled, while a cooldown or quiet hours only postpone it.
+_FINAL_SUPPRESSION_REASONS: frozenset[str] = frozenset(
+    {
+        SUPPRESSION_REASON_USER_SNOOZE_24H,
+        SUPPRESSION_REASON_USER_SNOOZE_7D,
+        SUPPRESSION_REASON_USER_SNOOZE_PERMANENT,
+        SUPPRESSION_REASON_TRIAGE_SUPPRESSED,
+        SUPPRESSION_REASON_POLICY_BLOCKED,
+    }
 )
 
 
@@ -290,9 +312,10 @@ class SentinelEngine:
         self._auth_inventory = auth_inventory
         self._pseudonymizer = pseudonymizer
         self._network_inventory = network_inventory
-        # Zigbee2MQTT permit-join switches seen by the last snapshot; a join
-        # window lasts at most 254 s, so turning one on wakes the engine.
-        self._permit_join_switches: frozenset[str] = frozenset()
+        # Suppression reason of the last finding _dispatch_item stopped (None
+        # when it was delivered), read by callers that must tell a snooze from
+        # a cooldown (the device inventory's pending alerts).
+        self._last_dispatch_reason: str | None = None
         self._network_enabled = bool(
             options.get(
                 CONF_SENTINEL_NETWORK_ENABLED, RECOMMENDED_SENTINEL_NETWORK_ENABLED
@@ -599,9 +622,7 @@ class SentinelEngine:
             # Entity was removed — ignore.
             return
 
-        if entity_id in self._permit_join_switches:
-            if new_state.state != "on":
-                return
+        if self._is_permit_join_turning_on(entity_id, new_state):
             anomaly_type: str | None = ZigbeePermitJoinOpenRule.rule_id
         else:
             anomaly_type = _anomaly_type_for_state(entity_id, new_state)
@@ -630,6 +651,23 @@ class SentinelEngine:
             return
 
         self._trigger_scheduler.enqueue(TriggerRecord(anomaly_type=anomaly_type))
+
+    def _is_permit_join_turning_on(self, entity_id: str, new_state: State) -> bool:
+        """
+        Return True when a Zigbee2MQTT bridge's permit-join switch turns on.
+
+        Checked against the entity registry on the event itself (a switch
+        turning on is rare enough for one lookup) rather than a list from the
+        last snapshot, so a bridge added or renamed since then still wakes
+        the engine: a join window lasts at most 254 s, shorter than a poll.
+        """
+        if new_state.state != "on" or not entity_id.startswith("switch."):
+            return False
+        try:
+            entry = er.async_get(self._hass).async_get(entity_id)
+        except (KeyError, AttributeError, TypeError):
+            return False
+        return is_z2m_permit_join_entry(entry)
 
     def _entity_excluded_for_type(self, entity_id: str, anomaly_type: str) -> bool:
         """Return True when the entity is excluded for this anomaly type."""
@@ -810,32 +848,36 @@ class SentinelEngine:
         snapshot: FullStateSnapshot,
         now: datetime,
         *,
-        new_device_delivered: bool | None = None,
+        new_device_alert_settled: bool = False,
     ) -> None:
         """
         Record this run's radio devices; announce each source's bootstrap once.
 
         Runs after dispatch, like the auth inventory: the new-device rule
-        compared against the inventory as it stood before the run, and new
-        devices whose alert was not delivered are held back so they re-fire.
-        A failure here must not end the run loop.
+        compared against the inventory as it stood before the run. New devices
+        are recorded either way; their alert is marked settled only when it
+        was delivered or stopped for good, so a cooldown or quiet hours only
+        postpone it. Nothing is committed unless the snapshot actually read
+        the device registry: an empty list from a failed read would delete
+        every row. A failure here must not end the run loop.
         """
         inventory = self._network_inventory
-        radio = (snapshot.get("network") or {}).get("radio")
-        if inventory is None or not radio or "devices" not in radio:
+        network = snapshot.get("network") or {}
+        radio = network.get("radio")
+        if (
+            inventory is None
+            or not radio
+            or radio_cap("devices") not in network.get("capabilities", [])
+        ):
             return
-        devices = radio["devices"]
-        hold_back = (
-            set(radio.get("new_devices") or [])
-            if new_device_delivered is False
-            else set()
-        )
         try:
             announcements = await inventory.async_commit(
-                devices,
+                radio["devices"],
                 now,
                 present_sources=radio.get("present_sources") or [],
-                hold_back=hold_back,
+                alerted=(
+                    radio.get("new_devices") or [] if new_device_alert_settled else []
+                ),
             )
         except (ValueError, TypeError, KeyError, AttributeError):
             self._log_limiter.warning(
@@ -872,15 +914,6 @@ class SentinelEngine:
                 ),
             },
             blocking=False,
-        )
-
-    def _remember_permit_join_switches(self, snapshot: FullStateSnapshot) -> None:
-        """Keep the Zigbee2MQTT permit-join switches to wake on."""
-        posture = ((snapshot.get("network") or {}).get("radio") or {}).get(
-            "posture"
-        ) or {}
-        self._permit_join_switches = frozenset(
-            posture.get("zigbee_permit_join_switches") or []
         )
 
     def _evaluate_gated_rules(
@@ -1004,7 +1037,6 @@ class SentinelEngine:
             "snapshot_build",
             "Sentinel snapshot build recovered after %d failed cycle(s).",
         )
-        self._remember_permit_join_switches(snapshot)
         try:
             await async_enrich_alarm_last_changed(self._hass, snapshot)
             await async_enrich_lock_last_changed(self._hass, snapshot)
@@ -1137,7 +1169,7 @@ class SentinelEngine:
         # Whether this run's auth-change finding reached the user: None when
         # there was none, False when suppression/triage/policy stopped it.
         auth_change_delivered: bool | None = None
-        new_device_delivered: bool | None = None
+        new_device_alert_settled = False
         if all_findings:
             # Correlation pass: group related findings from this single cycle.
             # Each call to correlate() is stateless; no cross-run merging occurs.
@@ -1162,7 +1194,10 @@ class SentinelEngine:
                     isinstance(item, AnomalyFinding)
                     and item.type == RadioNewDeviceJoinedRule.rule_id
                 ):
-                    new_device_delivered = delivered
+                    new_device_alert_settled = (
+                        delivered
+                        or self._last_dispatch_reason in _FINAL_SUPPRESSION_REASONS
+                    )
 
         # Commit after dispatch: the auth change rule compared this run's
         # observation against the inventory as it stood before the run, and a
@@ -1171,7 +1206,7 @@ class SentinelEngine:
             network_context, now, auth_change_delivered=auth_change_delivered
         )
         await self._commit_network_inventory(
-            snapshot, now, new_device_delivered=new_device_delivered
+            snapshot, now, new_device_alert_settled=new_device_alert_settled
         )
 
     # ---------------------------------------------------------------------- #
@@ -1438,6 +1473,7 @@ class SentinelEngine:
 
         # Plain AnomalyFinding
         finding: AnomalyFinding = item
+        self._last_dispatch_reason = None
 
         # Posture rules (standing conditions such as a stale token) declare a
         # cooldown floor so they do not re-alert every type-cooldown.
@@ -1463,6 +1499,7 @@ class SentinelEngine:
                 suppression_decision.reason_code,
                 trigger_source=trigger_source,
             )
+            self._last_dispatch_reason = suppression_decision.reason_code
             return False
 
         # Suppression state is read-only → downgrade to Level 0.
@@ -1496,6 +1533,7 @@ class SentinelEngine:
                     autonomy_level_at_decision=effective_autonomy,
                     trigger_source=trigger_source,
                 )
+                self._last_dispatch_reason = SUPPRESSION_REASON_TRIAGE_SUPPRESSED
                 return False
 
         # Execution policy evaluation.
@@ -1555,6 +1593,7 @@ class SentinelEngine:
                 autonomy_level_at_decision=effective_autonomy,
                 trigger_source=trigger_source,
             )
+            self._last_dispatch_reason = SUPPRESSION_REASON_POLICY_BLOCKED
             return False
 
         register_prompt(self._suppression.state, finding, now)

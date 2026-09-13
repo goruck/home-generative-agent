@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 
@@ -148,7 +149,10 @@ class ActionHandler:
             for d in finding.evidence.get("device_ids") or []
             if isinstance(d, str)
         ]
-        trusted = await inventory.async_set_trusted(device_ids, trusted=True)
+        try:
+            trusted = await inventory.async_set_trusted(device_ids, trusted=True)
+        except HomeAssistantError:
+            return {"status": "save_failed"}
         LOGGER.info(
             "User %s trusted %d radio device(s) from a Sentinel notification.",
             user.name,

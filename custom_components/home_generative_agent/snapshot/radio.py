@@ -28,8 +28,9 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.helpers import device_registry as dr
@@ -45,7 +46,7 @@ from .network import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
 
     from homeassistant.core import HomeAssistant
 
@@ -69,6 +70,9 @@ PRESENT_SOURCE_DOMAINS: dict[str, str] = {
     "zha": "zigbee",
     "zwave_js": "zwave",
     "matter": "matter",
+    # The local adapter's entry: Bluetooth is present before the first device
+    # pairs, so that first device alerts like any later one.
+    "bluetooth": "bluetooth",
 }
 # Zigbee2MQTT publishes its devices through MQTT discovery with the
 # identifier ``zigbee2mqtt_<ieee>`` and its bridge as
@@ -142,6 +146,9 @@ class RadioInputs:
     # coordinators, Zigbee2MQTT bridges, and Bluetooth proxies.
     coordinator_device_ids: frozenset[str] = frozenset()
     entity_device: Mapping[str, str] = field(default_factory=dict)
+    # device id -> entity domains it owns, from the entity registry (disabled
+    # and not-yet-loaded entities included).
+    device_domains: Mapping[str, set[str]] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
 
 
@@ -160,28 +167,66 @@ def _z2m_identifier(device: dr.DeviceEntry) -> tuple[bool, bool]:
     return False, False
 
 
+def is_z2m_permit_join_entry(entry: er.RegistryEntry | None) -> bool:
+    """Return True for the Zigbee2MQTT bridge's permit-join switch entry."""
+    return (
+        entry is not None
+        and entry.platform == "mqtt"
+        and entry.domain == "switch"
+        and _Z2M_PERMIT_JOIN_RE.match(str(entry.unique_id)) is not None
+    )
+
+
+def _registry_devices(registry: dr.DeviceRegistry) -> list[dr.DeviceEntry]:
+    """
+    Return every device entry on either device-registry API.
+
+    Home Assistant 2026.9 made ``devices`` an iterable of entries (using it as
+    a mapping logs a deprecation); earlier versions return a mapping of id to
+    entry, whose plain iteration yields ids.
+    """
+    devices: Any = registry.devices
+    if isinstance(devices, Mapping):
+        return list(cast("Mapping[str, dr.DeviceEntry]", devices).values())
+    return list(devices)
+
+
+def _device_entry_ids(device: dr.DeviceEntry) -> set[str]:
+    """Return the config entries a device belongs to on either registry API."""
+    entry_id = getattr(device, "config_entry_id", None)
+    if isinstance(entry_id, str):
+        return {entry_id}
+    return {str(e) for e in getattr(device, "config_entries", ()) or ()}
+
+
 def _classify(
     device: dr.DeviceEntry, entry_domains: Mapping[str, str]
 ) -> tuple[str, str, bool] | None:
     """Return (protocol, platform, is coordinator-class) for a radio device."""
-    domain = entry_domains.get(device.config_entry_id or "", "")
-    if domain in _DOMAIN_PROTOCOL:
+    domains = {
+        entry_domains[entry_id]
+        for entry_id in _device_entry_ids(device)
+        if entry_id in entry_domains
+    }
+    for domain, protocol in _DOMAIN_PROTOCOL.items():
+        if domain not in domains:
+            continue
         if domain == "zwave_js" and any(
             d == "zwave_js" and str(i).startswith("provision_")
             for d, i in device.identifiers
         ):
             return None
         root = device.via_device_id is None and domain in {"zha", "zwave_js"}
-        return _DOMAIN_PROTOCOL[domain], domain, root
-    if domain == "mqtt":
+        return protocol, domain, root
+    if "mqtt" in domains:
         is_z2m, is_bridge = _z2m_identifier(device)
         if is_z2m:
             return "zigbee", "mqtt", is_bridge
-        return None
-    if domain != "bluetooth" and any(
+    if "bluetooth" not in domains and any(
         kind == dr.CONNECTION_BLUETOOTH for kind, _ in device.connections
     ):
-        return "bluetooth", domain, False
+        platform = min(domains) if domains else "bluetooth"
+        return "bluetooth", platform, False
     return None
 
 
@@ -189,19 +234,29 @@ def _collect_devices(
     hass: HomeAssistant, inputs: RadioInputs
 ) -> tuple[list[RadioDeviceInput], set[str]] | None:
     try:
-        entry_domains = {
-            entry.entry_id: entry.domain
-            for entry in hass.config_entries.async_entries(include_ignore=False)
-        }
+        entries = hass.config_entries.async_entries(include_ignore=False)
+        entry_domains = {entry.entry_id: entry.domain for entry in entries}
+        # A source is present once its integration finished setting up, so a
+        # run during the first ZHA setup does not bootstrap an empty network
+        # and then report every device it creates as new.
+        loaded = {e.domain for e in entries if e.state is ConfigEntryState.LOADED}
         present = {
-            PRESENT_SOURCE_DOMAINS[domain]
-            for domain in entry_domains.values()
-            if domain in PRESENT_SOURCE_DOMAINS
+            source
+            for domain, source in PRESENT_SOURCE_DOMAINS.items()
+            if domain in loaded
         }
         inputs.zha_present = "zha" in entry_domains.values()
-        coordinators: set[str] = set()
+        # Remote Bluetooth scanners (ESPHome and Shelly proxies) each get a
+        # ``bluetooth`` config entry naming the device that hosts them; the
+        # scanner address is the Bluetooth MAC, which is not the device's
+        # network MAC on an ESP32, so that is the reliable join.
+        coordinators: set[str] = {
+            str(entry.data["source_device_id"])
+            for entry in entries
+            if entry.domain == "bluetooth" and entry.data.get("source_device_id")
+        }
         devices: list[RadioDeviceInput] = []
-        for device in dr.async_get(hass).devices:
+        for device in _registry_devices(dr.async_get(hass)):
             classified = _classify(device, entry_domains)
             if classified is None:
                 continue
@@ -226,39 +281,24 @@ def _collect_devices(
     return devices, coordinators
 
 
-def _collect_bluetooth_proxies(hass: HomeAssistant) -> set[str]:
-    """Return device ids of remote Bluetooth scanners (ESPHome, Shelly proxies)."""
-    if "bluetooth" not in hass.config.components:
-        return set()
-    try:
-        from homeassistant.components.bluetooth import (  # noqa: PLC0415
-            async_current_scanners,
-        )
-
-        sources = {
-            str(scanner.source).lower() for scanner in async_current_scanners(hass)
-        }
-        registry = dr.async_get(hass)
-        entry_domains = {
-            entry.entry_id: entry.domain
-            for entry in hass.config_entries.async_entries(include_ignore=False)
-        }
-        return {
-            device.id
-            for device in registry.devices
-            if entry_domains.get(device.config_entry_id or "") != "bluetooth"
-            and any(
-                kind == dr.CONNECTION_NETWORK_MAC and value.lower() in sources
-                for kind, value in device.connections
-            )
-        }
-    except Exception as err:  # noqa: BLE001
-        log_input_failure("Bluetooth scanners", err)
-        return set()
+def _zwave_device(
+    registry: dr.DeviceRegistry, identifier: tuple[str, str], entry_id: str
+) -> dr.DeviceEntry | None:
+    """Look up a Z-Wave node's device on either device-registry API."""
+    lookup = getattr(registry, "async_get_device_by_identifier", None)
+    if lookup is not None:
+        return lookup(identifier, entry_id)
+    return registry.async_get_device(identifiers={identifier})
 
 
 def _collect_zwave(hass: HomeAssistant) -> ZwaveInput | None:
-    """Read security classes and inclusion state from loaded Z-Wave JS entries."""
+    """
+    Read security classes and inclusion state from loaded Z-Wave JS entries.
+
+    All-or-nothing: with two controllers, one that cannot be read would leave
+    its devices unclassified and its inclusion window unseen, so the checks
+    are reported as not run rather than as passed.
+    """
     try:
         entries = [
             entry
@@ -273,21 +313,20 @@ def _collect_zwave(hass: HomeAssistant) -> ZwaveInput | None:
     registry = dr.async_get(hass)
     classes: dict[str, int | None] = {}
     including = False
-    readable = False
     for entry in entries:
         try:
             driver = entry.runtime_data.client.driver
             if driver is None:
                 # Client not connected to the Z-Wave JS server yet.
-                continue
+                return None
             controller = driver.controller
             home_id = controller.home_id
             including = including or int(controller.inclusion_state) == _ZWAVE_INCLUDING
             for node in controller.nodes.values():
                 if node.is_controller_node:
                     continue
-                device = registry.async_get_device_by_identifier(
-                    ("zwave_js", f"{home_id}-{node.node_id}"), entry.entry_id
+                device = _zwave_device(
+                    registry, ("zwave_js", f"{home_id}-{node.node_id}"), entry.entry_id
                 )
                 if device is None:
                     continue
@@ -295,11 +334,9 @@ def _collect_zwave(hass: HomeAssistant) -> ZwaveInput | None:
                 classes[device.id] = (
                     None if security_class is None else int(security_class)
                 )
-            readable = True
         except Exception as err:  # noqa: BLE001 - runtime objects across versions
             log_input_failure("Z-Wave JS controller state", err)
-    if not readable:
-        return None
+            return None
     return ZwaveInput(security_classes=classes, inclusion_active=including)
 
 
@@ -308,9 +345,7 @@ def _collect_z2m_permit_join(hass: HomeAssistant) -> list[str] | None:
         return sorted(
             entry.entity_id
             for entry in er.async_get(hass).entities.values()
-            if entry.platform == "mqtt"
-            and entry.domain == "switch"
-            and _Z2M_PERMIT_JOIN_RE.match(str(entry.unique_id))
+            if is_z2m_permit_join_entry(entry)
         )
     except Exception as err:  # noqa: BLE001
         log_input_failure("Zigbee2MQTT permit-join switches", err)
@@ -318,17 +353,20 @@ def _collect_z2m_permit_join(hass: HomeAssistant) -> list[str] | None:
 
 
 def collect_radio_inputs(
-    hass: HomeAssistant, *, entity_device: Mapping[str, str]
+    hass: HomeAssistant,
+    *,
+    entity_device: Mapping[str, str],
+    device_domains: Mapping[str, set[str]] | None = None,
 ) -> RadioInputs:
     """Read every radio input, each guarded independently."""
-    inputs = RadioInputs(entity_device=entity_device)
+    inputs = RadioInputs(
+        entity_device=entity_device, device_domains=device_domains or {}
+    )
     collected = _collect_devices(hass, inputs)
     if collected is not None:
         devices, coordinators = collected
         inputs.devices = devices
-        inputs.coordinator_device_ids = frozenset(
-            coordinators | _collect_bluetooth_proxies(hass)
-        )
+        inputs.coordinator_device_ids = frozenset(coordinators)
     inputs.zwave = _collect_zwave(hass)
     inputs.z2m_permit_join_switches = _collect_z2m_permit_join(hass)
     return inputs
@@ -340,14 +378,25 @@ def collect_radio_inputs(
 
 
 def _security_device_ids(
-    entities: Sequence[SnapshotEntity], entity_device: Mapping[str, str]
+    entities: Sequence[SnapshotEntity],
+    entity_device: Mapping[str, str],
+    device_domains: Mapping[str, set[str]],
 ) -> set[str]:
-    ids: set[str] = set()
+    """
+    Return devices that own a lock, alarm panel, camera, or entry cover.
+
+    Domains come from the entity registry so a lock whose entity is disabled
+    or not loaded yet still counts; covers need their device class, which
+    only the state carries.
+    """
+    ids = {
+        device_id
+        for device_id, domains in device_domains.items()
+        if domains & SECURITY_DOMAINS
+    }
     for entity in entities:
         device_id = entity_device.get(entity["entity_id"])
-        if device_id is None:
-            continue
-        if entity["domain"] in SECURITY_DOMAINS or is_sensitive_entity(entity):
+        if device_id is not None and is_sensitive_entity(entity):
             ids.add(device_id)
     return ids
 
@@ -361,7 +410,9 @@ def radio_registry_adapter(
     result = AdapterResult(name="radio_registry")
     if inputs.devices is None:
         return result
-    security_ids = _security_device_ids(entities, inputs.entity_device)
+    security_ids = _security_device_ids(
+        entities, inputs.entity_device, inputs.device_domains
+    )
     classes = inputs.zwave.security_classes if inputs.zwave is not None else {}
     devices: list[RadioDevice] = []
     for device in inputs.devices:
@@ -397,6 +448,9 @@ def radio_registry_adapter(
             or (device_id is not None and device_id in inputs.coordinator_device_ids)
         ):
             continue
+        if entity["state"] not in {"on", "off"}:
+            # Update status unknown: never read as "nothing pending".
+            continue
         observed = True
         if entity["state"] == "on":
             pending.append(entity["entity_id"])
@@ -430,11 +484,7 @@ def zigbee_adapter(
         result.radio_posture["zigbee_permit_join_entity_ids"] = sorted(
             s for s in known if states[s] == "on"
         )
-    if switches:
-        # Every bridge switch, available or not, so the engine can wake on
-        # the moment one turns on (a join window lasts at most 254 s).
-        result.radio_posture["zigbee_permit_join_switches"] = list(switches)
-    elif inputs.zha_present:
+    if not switches and inputs.zha_present:
         result.notes.append(
             "ZHA does not expose whether it is accepting new devices on this "
             "Home Assistant version; Zigbee permit-join is not audited."

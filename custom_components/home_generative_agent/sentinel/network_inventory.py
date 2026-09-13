@@ -21,8 +21,12 @@ Lifecycle:
   device paired after that is new.
 * **Diff, then commit.** ``diff()`` is a pure comparison used while the
   snapshot is built; ``async_commit()`` records the observation after the
-  engine dispatched its findings, leaving out devices whose finding was not
-  delivered so they are reported again.
+  engine dispatched its findings. A device paired after its source's
+  bootstrap is recorded straight away as untrusted with its alert pending
+  (``alerted`` False), so it can be trusted and counted even while its
+  alert waits; the engine clears the pending flag once the alert was
+  delivered or was stopped for good (a snooze, triage, policy), and a
+  transient stop (cooldown, quiet hours) leaves it for a later run.
 * **Retention.** A row is deleted when its device leaves the device registry;
   re-pairing creates a new registry id and is reported as new.
 * **Writes only on change.** ``last_seen`` refreshes at most daily.
@@ -75,7 +79,8 @@ def device_key(device: RadioDevice) -> str:
 class InventoryDelta:
     """What changed since the inventory was last committed."""
 
-    # Keys of devices on an already-bootstrapped source that are not known.
+    # Keys of devices on an already-bootstrapped source whose alert is still
+    # owed: not recorded yet, or recorded with the alert pending.
     new_device_keys: list[str] = field(default_factory=list)
     # Sources present now that have never been recorded; their devices are
     # recorded as trusted by the next commit, without alerting.
@@ -146,15 +151,25 @@ class NetworkInventory:
             return False
         return True
 
-    async def async_reset(self) -> None:
-        """Clear the inventory; the next run bootstraps every source again."""
+    async def async_reset(self) -> bool:
+        """
+        Clear the inventory; the next run bootstraps every source again.
+
+        Returns False when the stored file could not be removed, so the caller
+        can say the old inventory would come back after a restart.
+        """
         self._data = _empty_data()
         self._dirty = False
         self._pending_announcements = []
         try:
             await self._store.async_remove()
         except (HomeAssistantError, OSError):
-            LOGGER.debug("Network inventory store removal failed; ignoring.")
+            LOGGER.warning(
+                "Network inventory file could not be removed; it will be "
+                "reloaded after a restart."
+            )
+            return False
+        return True
 
     # ------------------------------------------------------------------ #
     # Read access
@@ -211,7 +226,11 @@ class NetworkInventory:
         new_keys = sorted(
             device_key(d)
             for d in devices
-            if self.is_source_bootstrapped(d["protocol"]) and device_key(d) not in known
+            if self.is_source_bootstrapped(d["protocol"])
+            and (
+                device_key(d) not in known
+                or known[device_key(d)].get("alerted", True) is False
+            )
         )
         return InventoryDelta(new_device_keys=new_keys, bootstrap_sources=bootstrap)
 
@@ -221,20 +240,20 @@ class NetworkInventory:
         now: datetime,
         *,
         present_sources: Iterable[str] = (),
-        hold_back: Iterable[str] = (),
+        alerted: Iterable[str] = (),
     ) -> list[BootstrapSummary]:
         """
         Record *devices* as the known state and persist it when changed.
 
-        ``hold_back`` names device keys whose finding was not delivered; they
-        stay unrecorded so the next run reports them again. Returns the
-        sources whose bootstrap reached disk with this call (for the one-time
-        announcement), including announcements held from a failed save.
+        ``alerted`` names device keys whose pending alert is settled (delivered
+        or stopped for good). Returns the sources whose bootstrap reached disk
+        with this call (for the one-time announcement), including
+        announcements held from a failed save.
         """
         now_iso = dt_util.as_utc(now).isoformat()
         stored_devices: dict[str, Any] = self._data["devices"]
         sources: dict[str, str] = self._data["sources"]
-        held = set(hold_back)
+        settled = set(alerted)
         changed = False
 
         present = {d["protocol"] for d in devices} | set(present_sources)
@@ -249,8 +268,6 @@ class NetworkInventory:
         for device in devices:
             key = device_key(device)
             seen.add(key)
-            if key in held:
-                continue
             observed = {
                 "platform": device["platform"],
                 "ha_device_id": device["device_id"],
@@ -259,6 +276,7 @@ class NetworkInventory:
                 "model": device.get("model"),
             }
             row: dict[str, Any] | None = stored_devices.get(key)
+            bootstrap_row = device["protocol"] in bootstrapped_now
             if row is None:
                 stored_devices[key] = {
                     "source": device["protocol"],
@@ -267,10 +285,14 @@ class NetworkInventory:
                     "last_seen": now_iso,
                     # Devices recorded by their source's bootstrap predate the
                     # audit and are trusted; later ones wait for the user.
-                    "trusted": device["protocol"] in bootstrapped_now,
+                    "trusted": bootstrap_row,
+                    "alerted": bootstrap_row or key in settled,
                 }
                 changed = True
                 continue
+            if row.get("alerted", True) is False and key in settled:
+                row["alerted"] = True
+                changed = True
             if any(row.get(k) != observed[k] for k in _ROW_FIELDS):
                 row.update(observed)
                 changed = True
@@ -283,7 +305,7 @@ class NetworkInventory:
                 changed = True
 
         for key in list(stored_devices):
-            if key not in seen and key not in held:
+            if key not in seen:
                 del stored_devices[key]
                 changed = True
 
@@ -312,16 +334,25 @@ class NetworkInventory:
         Mark the rows for *device_ids* (registry ids or keys) trusted or not.
 
         Returns the keys whose flag changed. Unknown ids are ignored: a device
-        is recorded by the next Sentinel run, not by this call.
+        is recorded by the next Sentinel run, not by this call. Trusting a
+        device also settles its pending alert: the user has recognized it.
+        Raises ``HomeAssistantError`` when the change could not be saved (it
+        stays in memory and is retried by the next commit).
         """
         wanted = set(device_ids)
         changed: list[str] = []
+        dirty = False
         for key, row in self._data["devices"].items():
             if key not in wanted and row.get("ha_device_id") not in wanted:
                 continue
+            if trusted and row.get("alerted", True) is False:
+                row["alerted"] = True
+                dirty = True
             if bool(row.get("trusted")) != trusted:
                 row["trusted"] = trusted
                 changed.append(key)
-        if changed:
-            self._dirty = not await self.async_save()
+        if (changed or dirty) and not await self.async_save():
+            self._dirty = True
+            msg = "The device inventory could not be saved; try again."
+            raise HomeAssistantError(msg)
         return sorted(changed)

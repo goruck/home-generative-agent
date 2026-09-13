@@ -160,7 +160,6 @@ class RadioPosture(TypedDict, total=False):
 
     zigbee_permit_join: bool
     zigbee_permit_join_entity_ids: list[str]  # bridge switches currently on
-    zigbee_permit_join_switches: list[str]  # every Zigbee2MQTT bridge switch
     zwave_inclusion_active: bool
     coordinator_update_pending: list[str]  # update.* in state on
     bluetooth_unknown_trackers: list[dict[str, Any]]

@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import sys
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -30,7 +29,10 @@ from custom_components.home_generative_agent.snapshot.radio import (
     RadioDeviceInput,
     RadioInputs,
     ZwaveInput,
+    _device_entry_ids,
+    _registry_devices,
     collect_radio_inputs,
+    is_z2m_permit_join_entry,
     radio_adapters,
     radio_registry_adapter,
     zigbee_adapter,
@@ -150,6 +152,8 @@ async def test_registry_classifies_each_protocol(hass: HomeAssistant) -> None:
     switchbot = _entry(hass, "switchbot")
     bluetooth = _entry(hass, "bluetooth")
     shelly = _entry(hass, "shelly")
+    for loaded in (zha, zwave, bluetooth):
+        loaded.mock_state(hass, ConfigEntryState.LOADED)
 
     coordinator = registry.async_get_or_create(
         config_entry_id=zha.entry_id,
@@ -240,8 +244,12 @@ async def test_registry_classifies_each_protocol(hass: HomeAssistant) -> None:
     assert coordinator.id in inputs.coordinator_device_ids
     assert z2m_bridge.id in inputs.coordinator_device_ids
     assert lock.id not in inputs.coordinator_device_ids
-    assert inputs.present_sources == {"zigbee", "zwave", "matter"}
+    # Only integrations that finished setting up count (matter is not loaded).
+    assert inputs.present_sources == {"zigbee", "zwave", "bluetooth"}
     assert inputs.zha_present is True
+    # Unload without importing the real integrations at teardown.
+    for loaded in (zha, zwave, bluetooth):
+        loaded.mock_state(hass, ConfigEntryState.NOT_LOADED)
 
 
 @pytest.mark.asyncio
@@ -384,14 +392,15 @@ async def test_z2m_permit_join_matched_by_unique_id(hass: HomeAssistant) -> None
 
     closed = zigbee_adapter(inputs, [_entity(bridge.entity_id, "off")])
     assert closed.radio_posture["zigbee_permit_join"] is False
-    assert closed.radio_posture["zigbee_permit_join_switches"] == [bridge.entity_id]
+    assert is_z2m_permit_join_entry(entities.async_get(bridge.entity_id))
+    assert not is_z2m_permit_join_entry(entities.async_get("switch.permit_join"))
+    assert not is_z2m_permit_join_entry(None)
     opened = zigbee_adapter(inputs, [_entity(bridge.entity_id, "on")])
     assert opened.radio_posture["zigbee_permit_join"] is True
     assert opened.radio_posture["zigbee_permit_join_entity_ids"] == [bridge.entity_id]
     # Bridge offline: the fact is unknown, not "closed".
     offline = zigbee_adapter(inputs, [_entity(bridge.entity_id, "unavailable")])
     assert "zigbee_permit_join" not in offline.radio_posture
-    assert offline.radio_posture["zigbee_permit_join_switches"] == [bridge.entity_id]
 
 
 def test_zha_permit_join_is_named_not_guessed() -> None:
@@ -541,13 +550,12 @@ def test_zwave_adapter_without_input_asserts_nothing() -> None:
 
 
 @pytest.mark.asyncio
-async def test_bluetooth_proxies_are_coordinator_class(
-    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+async def test_bluetooth_proxies_come_from_remote_scanner_entries(
+    hass: HomeAssistant,
 ) -> None:
-    """A remote scanner's device (ESPHome, Shelly) counts; the local adapter not."""
+    """A remote scanner's bluetooth entry names its host device (ESPHome, Shelly)."""
     registry = dr.async_get(hass)
     esphome = _entry(hass, "esphome")
-    bluetooth = _entry(hass, "bluetooth")
     proxy = registry.async_get_or_create(
         config_entry_id=esphome.entry_id,
         connections={(dr.CONNECTION_NETWORK_MAC, "aa:bb:cc:00:11:22")},
@@ -558,24 +566,59 @@ async def test_bluetooth_proxies_are_coordinator_class(
         connections={(dr.CONNECTION_NETWORK_MAC, "aa:bb:cc:00:11:33")},
         name="Garage Sensor",
     )
-    adapter = registry.async_get_or_create(
-        config_entry_id=bluetooth.entry_id,
-        connections={(dr.CONNECTION_NETWORK_MAC, "dc:a6:32:00:00:01")},
-        name="hci0",
+    # The scanner address is the Bluetooth MAC, not the network MAC above.
+    _entry(
+        hass,
+        "bluetooth",
+        data={"source": "AA:BB:CC:00:11:24", "source_device_id": proxy.id},
     )
-    hass.config.components.add("bluetooth")
-    scanners = [
-        SimpleNamespace(source="AA:BB:CC:00:11:22"),
-        SimpleNamespace(source="DC:A6:32:00:00:01"),
-    ]
-    # The test venv's habluetooth does not match core's bluetooth component,
-    # so the module is stubbed with the one function the adapter calls.
-    monkeypatch.setitem(
-        sys.modules,
-        "homeassistant.components.bluetooth",
-        SimpleNamespace(async_current_scanners=lambda _hass: scanners),
-    )
+    _entry(hass, "bluetooth", data={})  # the local adapter
     inputs = collect_radio_inputs(hass, entity_device={})
     assert proxy.id in inputs.coordinator_device_ids
     assert plain.id not in inputs.coordinator_device_ids
-    assert adapter.id not in inputs.coordinator_device_ids
+
+
+def test_registry_helpers_accept_the_pre_2026_9_api() -> None:
+    """A mapping of devices and a config_entries set both work."""
+    old_device = SimpleNamespace(id="d1", config_entries={"e1", "e2"})
+    old_registry = SimpleNamespace(devices={"d1": old_device})
+    assert _registry_devices(old_registry) == [old_device]  # type: ignore[arg-type]
+    assert _device_entry_ids(old_device) == {"e1", "e2"}  # type: ignore[arg-type]
+    new_device = SimpleNamespace(id="d2", config_entry_id="e3")
+    assert _device_entry_ids(new_device) == {"e3"}  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_zwave_one_unreadable_controller_asserts_nothing(
+    hass: HomeAssistant,
+) -> None:
+    """Two sticks, one disconnected: the checks are not run, not half-passed."""
+    good = _entry(hass, "zwave_js")
+    good.mock_state(hass, ConfigEntryState.LOADED)
+    good.runtime_data = SimpleNamespace(
+        client=SimpleNamespace(driver=SimpleNamespace(controller=_controller()))
+    )
+    assert collect_radio_inputs(hass, entity_device={}).zwave is not None
+    bad = _entry(hass, "zwave_js")
+    bad.mock_state(hass, ConfigEntryState.LOADED)
+    bad.runtime_data = SimpleNamespace(client=SimpleNamespace(driver=None))
+    assert collect_radio_inputs(hass, entity_device={}).zwave is None
+
+
+def test_security_devices_include_registry_domains_without_state() -> None:
+    """A lock whose entity is disabled (no state) still makes a security device."""
+    inputs = _inputs(device_domains={"lock1": {"lock", "sensor"}, "bulb1": {"light"}})
+    result = radio_registry_adapter(inputs, [], None)
+    flags = {d["device_id"]: d["is_security_device"] for d in result.radio["devices"]}
+    assert flags == {"coord": False, "lock1": True, "bulb1": False}
+
+
+def test_unavailable_coordinator_update_is_not_an_observation() -> None:
+    inputs = _inputs(
+        coordinator_device_ids=frozenset({"coord"}),
+        entity_device={"update.coordinator": "coord"},
+    )
+    result = radio_registry_adapter(
+        inputs, [_entity("update.coordinator", "unavailable")], None
+    )
+    assert "coordinator_update_pending" not in result.radio_posture

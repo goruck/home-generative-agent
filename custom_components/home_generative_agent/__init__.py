@@ -1504,7 +1504,12 @@ def _register_network_inventory_services(
             user.id,
             before["device_count"],
         )
-        await inventory.async_reset()
+        if not await inventory.async_reset():
+            msg = (
+                "The device inventory was cleared in memory but its file could "
+                "not be removed; it will come back after a restart."
+            )
+            raise HomeAssistantError(msg)
         return {"status": "ok", "cleared": before}
 
     _register_entry_service(

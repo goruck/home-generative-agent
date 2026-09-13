@@ -800,6 +800,8 @@ validation.
 
 **Why:** Raised by the Codex adversarial pass on #613. The body-size half of that finding is fixed (`MAX_BATCH_BODY_CHARS` plus an "…and N more" line); the delivery half predates the branch and is shared with every other notification path, which also fire with `blocking=False` and no retry.
 
+Since step 6 this also covers `radio_new_device_joined`: a new-device alert that is batched counts as delivered, so the device's alert is settled even if the digest is lost, and the digest has no Trust button (the device remains recorded and trustable through `sentinel_trust_network_device`).
+
 **How to apply:** Either await the flush call and on failure fall back to `persistent_notification.create` with the same body, or record the failure in the audit rows so the daily digest can carry them. A single `_deliver(domain, service, data)` helper used by the direct and batched paths would let both get the same fallback.
 
 **Effort:** S

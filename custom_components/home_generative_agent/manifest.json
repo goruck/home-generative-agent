@@ -3,7 +3,6 @@
   "name": "Home Generative Agent",
   "after_dependencies": [
     "assist_pipeline",
-    "bluetooth",
     "hassio",
     "intent"
   ],

@@ -1069,7 +1069,9 @@ async def async_build_network_snapshot(  # noqa: PLR0913
         entity_device=entity_device,
         device_domains=device_domains,
     )
-    radio_inputs = collect_radio_inputs(hass, entity_device=entity_device)
+    radio_inputs = collect_radio_inputs(
+        hass, entity_device=entity_device, device_domains=device_domains
+    )
     return merge_adapter_results(
         [
             ha_native_adapter(inputs, entities, context),

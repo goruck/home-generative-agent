@@ -885,3 +885,17 @@ async def test_trust_action_without_inventory_or_finding() -> None:
     handler, _inventory, audit = _trust_setup()
     await handler.handle_action(f"{ACTION_PREFIX}trust_gone", {}, user_id="admin")
     assert audit.updates[0]["outcome"] == {"status": "missing_finding"}
+
+
+@pytest.mark.asyncio
+async def test_trust_action_reports_a_failed_save() -> None:
+    from homeassistant.exceptions import HomeAssistantError  # noqa: PLC0415
+
+    handler, inventory, audit = _trust_setup()
+
+    async def _fail(_ids: Any, **_kwargs: Any) -> list[str]:
+        raise HomeAssistantError
+
+    inventory.async_set_trusted = _fail  # type: ignore[method-assign]
+    await handler.handle_action(f"{ACTION_PREFIX}trust_new-1", {}, user_id="admin")
+    assert audit.updates[0]["outcome"] == {"status": "save_failed"}

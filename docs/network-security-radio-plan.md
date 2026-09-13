@@ -101,7 +101,8 @@ schema). Capability paths are `network.radio.<field>`.
   - a device from a hardware-firmware platform;
   - an ESPHome Bluetooth proxy.
 
-  The last join needs `bluetooth` in `after_dependencies`.
+  Proxies are read from the Bluetooth integration's per-scanner config
+  entries (see Review round changes).
 
 ### 3. Rules (in `sentinel/rules/`, all added to `NETWORK_RULE_TYPES`)
 
@@ -178,6 +179,52 @@ no Z-Wave, and no Z2M:
    on the next cycle.
 
 The Z-Wave and Z2M paths are fixture-tested only. The PR says so.
+
+## Review round changes
+
+A Claude `/code-review high` pass (5 findings) and a Codex adversarial pass
+(10 findings) ran on the first implementation. 13 were confirmed and fixed:
+
+- **No commit without the device list.** Z-Wave or Zigbee2MQTT posture alone
+  still built a `radio` section with `devices: []`, so a failed registry read
+  would have deleted every row and re-alerted every device. The engine now
+  commits only when `network.radio.devices` is a capability.
+- **Pending alerts instead of hold-back.** Holding a device out of the
+  inventory until its alert was delivered meant a "Snooze Always" or a triage
+  suppression kept it out forever: never trustable, never counted, a
+  suppressed audit row and a triage call every poll. A new device is now
+  recorded at once as untrusted with `alerted: false`; delivery, a snooze,
+  triage, a policy block, or trusting the device settles the alert, and a
+  cooldown, quiet hours, or presence grace only postpone it.
+- **Bluetooth proxies from the scanner's config entry.** A remote scanner
+  registers under its Bluetooth MAC, which is not the ESP32's network MAC, so
+  the MAC join missed ESPHome proxies. Home Assistant creates a `bluetooth`
+  config entry per remote scanner with `source_device_id`; that is read
+  instead, and the `bluetooth` `after_dependencies` entry is no longer needed.
+- **Registry API tolerance.** The collector accepts both the 2026.9 registry
+  (iterable `devices`, `config_entry_id`, `async_get_device_by_identifier`)
+  and the earlier mapping API with multi-entry `config_entries`, since the
+  HACS minimum is 2025.5.0; a device is classified by any of its entries.
+- **Present sources are loaded integrations**, and the Bluetooth adapter's
+  entry makes Bluetooth present, so a first ZHA setup does not report the
+  devices it creates as new and the first paired BLE device alerts.
+- **Z-Wave is all-or-nothing** across controllers; one unreadable stick
+  reports the checks as not run.
+- **Security devices from the entity registry** (disabled locks count).
+- **Permit-join wake-up checks the registry on the event**, so a bridge added
+  since the last snapshot is covered.
+- **Unavailable update entities are not observations.**
+- **Trust and reset surface storage failures** instead of reporting success.
+
+Not changed: an unbounded device count through a compromised MQTT broker (a
+broker that can forge devices can already command real ones; summaries are
+capped), and the read-only inventory service being open to non-admin users
+(consistent with `get_audit_records` and `run_network_audit`; device names
+are visible to every Home Assistant user). A new-device alert that lands in
+the notifier's burst batch counts as delivered; the batch digest carries no
+Trust button and is lost if Home Assistant stops within its 30-second flush
+window, which the existing *burst-batch digest* TODO covers. The device stays
+recorded and trustable through the services either way.
 
 ## Known limitations (stated in the docs, not hidden)
 
