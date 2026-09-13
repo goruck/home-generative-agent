@@ -138,9 +138,9 @@ async def test_row_deleted_when_device_leaves_registry(hass: HomeAssistant) -> N
     await inventory.async_commit([_device("a"), _device("b")], NOW)
     await inventory.async_commit([_device("a")], NOW)
     assert [r["key"] for r in inventory.list_devices()] == ["zigbee:a"]
-    # Re-pairing the same hardware gets a new registry id and is new.
-    assert inventory.diff([_device("a"), _device("b2")], []).new_device_keys == [
-        "zigbee:b2"
+    # A device whose row was dropped (a run saw it gone) is new when it returns.
+    assert inventory.diff([_device("a"), _device("b")], []).new_device_keys == [
+        "zigbee:b"
     ]
 
 

@@ -46,7 +46,10 @@ like `AuthInventory`.
   inventory's pattern. A device whose finding was not delivered stays out of
   the commit and is reported again on the next run.
 - **Retention.** A row is deleted when its device leaves the device registry.
-  Re-pairing creates a new device id and alerts again, which is correct.
+  Home Assistant restores a removed device's registry id when the same
+  hardware is added back, so a device removed and re-paired alerts again only
+  if a Sentinel run saw it gone in between; re-pairing a device that was never
+  removed changes nothing, since the registry entry is the same.
 - **Services:**
   - `sentinel_get_network_inventory` (read, response only).
   - `sentinel_trust_network_device` and `sentinel_untrust_network_device`
@@ -174,7 +177,8 @@ no Z-Wave, and no Z2M:
    coordinator) and no findings.
 2. `run_network_audit`: `radio_new_device_joined` ran; the Z-Wave rules and
    `zigbee_permit_join_open` are listed as not run, with reasons.
-3. Pair or re-pair one Zigbee device, then confirm a single
+3. Pair a Zigbee device the home has never had, or remove one from ZHA, wait
+   for a Sentinel run to drop its inventory row, and pair it again; then confirm a single
    `radio_new_device_joined` push with a working Trust button, and no repeat
    on the next cycle.
 

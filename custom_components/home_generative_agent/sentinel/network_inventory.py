@@ -28,7 +28,9 @@ Lifecycle:
   delivered or was stopped for good (a snooze, triage, policy), and a
   transient stop (cooldown, quiet hours) leaves it for a later run.
 * **Retention.** A row is deleted when its device leaves the device registry;
-  re-pairing creates a new registry id and is reported as new.
+  Home Assistant restores a removed device's registry id when the same
+  hardware returns, so a device removed and paired again is new only if a run
+  saw it gone in between.
 * **Writes only on change.** ``last_seen`` refreshes at most daily.
 """
 
