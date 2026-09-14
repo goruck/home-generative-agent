@@ -38,6 +38,7 @@ from custom_components.home_generative_agent.const import (
     ACT_SNOOZE_ALWAYS,
     ACT_SNOOZE_CANCEL,
     ACT_SNOOZE_CONFIRM,
+    ACT_TRUST,
     ACTION_PREFIX,
     CONF_NOTIFY_SERVICE,
     CONF_SENTINEL_AREA_NOTIFY_MAP,
@@ -111,6 +112,9 @@ _BATCH_FLUSH_DELAY_SECS = 30
 
 # Per-finding cooldown: suppress repeated notifications for the same anomaly.
 _FINDING_COOLDOWN_SECS = 1800  # 30 minutes
+
+# Findings whose primary button records their devices as trusted.
+_TRUST_DEVICE_TYPES = frozenset({"radio_new_device_joined"})
 
 _SNOOZE_VERBS = frozenset(
     {
@@ -365,7 +369,9 @@ class SentinelNotifier:
 
         # Non-snooze action — delegate to ActionHandler.
         self._hass.async_create_task(
-            self._action_handler.handle_action(action, dict(event.data))
+            self._action_handler.handle_action(
+                action, dict(event.data), user_id=event.context.user_id
+            )
         )
 
     async def _handle_snooze(self, verb: str, anomaly_id: str) -> None:
@@ -611,7 +617,16 @@ def _build_actions(finding: AnomalyFinding) -> list[dict[str, Any]]:
     """
     actions: list[dict[str, Any]] = []
 
-    if finding.suggested_actions:
+    if finding.type in _TRUST_DEVICE_TYPES:
+        # Android shows three buttons; for a newly paired device the useful
+        # primary action is recording it as recognized, not asking the agent.
+        actions.append(
+            {
+                "action": f"{ACTION_PREFIX}{ACT_TRUST}_{finding.anomaly_id}",
+                "title": "Trust device",
+            }
+        )
+    elif finding.suggested_actions:
         if finding.is_sensitive:
             actions.append(
                 {
@@ -769,6 +784,11 @@ _KNOWN_TYPE_LABEL_KEYS = {
         "type_network_unconfigured_discovered_device"
     ),
     "network_router_update_pending": "type_network_router_update_pending",
+    "radio_new_device_joined": "type_radio_new_device_joined",
+    "zwave_insecure_security_class": "type_zwave_insecure_security_class",
+    "zigbee_permit_join_open": "type_zigbee_permit_join_open",
+    "zwave_inclusion_active": "type_zwave_inclusion_active",
+    "radio_coordinator_update_pending": "type_radio_coordinator_update_pending",
     "appliance_power_duration": "type_appliance_power_duration",
 }
 

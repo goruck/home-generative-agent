@@ -5,10 +5,15 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 
-from custom_components.home_generative_agent.const import ACTION_PREFIX, DOMAIN
+from custom_components.home_generative_agent.const import (
+    ACT_TRUST,
+    ACTION_PREFIX,
+    DOMAIN,
+)
 from custom_components.home_generative_agent.core.utils import extract_final
 from custom_components.home_generative_agent.sentinel.suppression import (
     SuppressionManager,
@@ -21,6 +26,9 @@ if TYPE_CHECKING:
 
     from custom_components.home_generative_agent.audit.store import AuditStore
     from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
+    from custom_components.home_generative_agent.sentinel.network_inventory import (
+        NetworkInventory,
+    )
 
 LOGGER = logging.getLogger(__name__)
 
@@ -50,13 +58,26 @@ class ActionHandler:
         self._pending_findings: dict[str, AnomalyFinding] = {}
         # Allows tests to inject a known entity_id without a real entity registry.
         self._conversation_entity_id_override: str | None = None
+        # Set by setup when Sentinel keeps a device inventory (Trust button).
+        self.network_inventory: NetworkInventory | None = None
 
     def register_finding(self, finding: AnomalyFinding) -> None:
         """Register a finding for action callbacks."""
         self._pending_findings[finding.anomaly_id] = finding
 
-    async def handle_action(self, action_id: str, payload: dict[str, Any]) -> None:
-        """Handle a mobile app action."""
+    async def handle_action(
+        self,
+        action_id: str,
+        payload: dict[str, Any],
+        *,
+        user_id: str | None = None,
+    ) -> None:
+        """
+        Handle a mobile app action.
+
+        ``user_id`` is the Home Assistant user behind the mobile-app event, used
+        by actions that change what Sentinel treats as known.
+        """
         if not action_id.startswith(ACTION_PREFIX):
             return
         parts = action_id.removeprefix(ACTION_PREFIX).split("_", 1)
@@ -87,6 +108,8 @@ class ActionHandler:
                         self._suppression.state, _entity_id, finding.type
                     )
             outcome = {"status": "dismissed"}
+        elif action == ACT_TRUST:
+            outcome = await self._outcome_for_trust(finding, user_id)
 
         await self._suppression.async_save()
 
@@ -97,6 +120,45 @@ class ActionHandler:
                 response=response,
                 outcome=outcome,
             )
+
+    async def _outcome_for_trust(
+        self, finding: AnomalyFinding | None, user_id: str | None
+    ) -> dict[str, Any]:
+        """
+        Record the finding's devices as trusted in the device inventory.
+
+        Admin-only, like the trust service: the tap arrives from a phone, and a
+        non-admin household member should not decide what the audit treats as
+        recognized.
+        """
+        if finding is None:
+            return {"status": "missing_finding"}
+        inventory = self.network_inventory
+        if inventory is None:
+            return {"status": "unavailable"}
+        user = await self._hass.auth.async_get_user(user_id) if user_id else None
+        if user is None or not user.is_admin:
+            LOGGER.warning(
+                "Trust device ignored for %s: the action did not come from an "
+                "admin user.",
+                finding.anomaly_id,
+            )
+            return {"status": "not_admin"}
+        device_ids = [
+            str(d)
+            for d in finding.evidence.get("device_ids") or []
+            if isinstance(d, str)
+        ]
+        try:
+            trusted = await inventory.async_set_trusted(device_ids, trusted=True)
+        except HomeAssistantError:
+            return {"status": "save_failed"}
+        LOGGER.info(
+            "User %s trusted %d radio device(s) from a Sentinel notification.",
+            user.name,
+            len(trusted),
+        )
+        return {"status": "trusted", "device_keys": trusted}
 
     def _resolve_agent_entity_id(self) -> str | None:
         """Resolve the HGA conversation entity_id from the entity registry."""

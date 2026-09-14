@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- The Home Assistant security audit now covers the home's radio networks, step 6 of the [network security plan](docs/network-security-plan.md) ([radio plan](docs/network-security-radio-plan.md)). Five new rules: `radio_new_device_joined` alerts once when a Zigbee, Z-Wave, Bluetooth, or Matter device is paired (higher when a new lock or camera appears while nobody is home), with a **Trust device** button on the push; `zwave_insecure_security_class` flags Z-Wave locks, alarm panels, and entry covers included with S0 or no security; `zigbee_permit_join_open` catches Zigbee2MQTT accepting new devices, waking Sentinel the moment the bridge switch turns on because the window lasts at most 254 seconds; `zwave_inclusion_active` reports a controller in inclusion mode; `radio_coordinator_update_pending` lists firmware waiting for coordinators, Connect ZBT/Yellow radios, and Bluetooth proxies. New devices are judged against a persistent device inventory that records each protocol silently the first time it is present, so upgrading does not alert on devices you already had; it stores device registry ids and names only, never radio addresses. New services: `sentinel_get_network_inventory`, and the admin-only `sentinel_trust_network_device`, `sentinel_untrust_network_device`, and `sentinel_reset_network_inventory`. The on-demand audit reports trusted and untrusted device counts. ZHA's permit-join state is not readable on Home Assistant 2026.9 (its radio library keeps no record of an open join window), so that check is listed as not run on ZHA-only homes rather than guessed. Z-Wave inclusion is observed only when a Sentinel run lands inside the window.
+
 ## [3.41.2] - 2026-09-12
 
 ### Fixed

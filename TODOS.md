@@ -750,9 +750,9 @@ validation.
 
 ## Sentinel Network Audit
 
-### Network security plan steps 6–11 (radio and router adapters, redaction, audit tool)
+### Network security plan steps 7–11 (router adapters, redaction, audit tool)
 
-**What:** `docs/network-security-plan.md` implementation-order steps 6–8, 10, and 11 are unimplemented: zwave_js / zha / bluetooth / matter radio adapters, the router adapters (eero, UniFi, Fritz!Box, OpenWrt, AdGuard/Pi-hole), `redact_network_identifiers` in the explain path, the `network_audit` feature type, baseline counters, and discovery templates. Phase 1 (steps 1–5) shipped in v3.39.0 and passed its field-validation gate on 2026-09-08. Step 9 shipped in its HA-only form in v3.40.0 (`audit_home_security` tool + `run_network_audit` service); the tool's privacy digest and provider override are still owed once router client data exists.
+**What:** `docs/network-security-plan.md` implementation-order steps 7, 8, 10, and 11 are unimplemented (step 6, the radio adapters and device inventory, is implemented per `docs/network-security-radio-plan.md`; the phase 2 Bluetooth unknown-tracker and phase 3 Matter fabric adapters remain): the router adapters (eero, UniFi, Fritz!Box, OpenWrt, AdGuard/Pi-hole), `redact_network_identifiers` in the explain path, the `network_audit` feature type, baseline counters, and discovery templates. Phase 1 (steps 1–5) shipped in v3.39.0 and passed its field-validation gate on 2026-09-08. Step 9 shipped in its HA-only form in v3.40.0 (`audit_home_security` tool + `run_network_audit` service); the tool's privacy digest and provider override are still owed once router client data exists.
 
 **Why:** The plan deliberately sequenced the router work after the HA-only audit was validated on a plain install so the adapter framework (`AdapterResult`, `merge_adapter_results`, per-rule `requires`) was proven before it grew. That gate has passed. Runtime adapters for zwave_js and zha need `zwave-js-server-python==0.73.1` and `zha==2.2.0` (the HA 2026.9.0b4 pins) added to `requirements/test.txt`; neither is installed in the test venv today.
 
@@ -760,6 +760,17 @@ validation.
 
 **Effort:** L
 **Priority:** P2
+
+### Radio checks the pinned Home Assistant version cannot observe
+
+**What:** Two radio checks from step 6 are weaker than the plan wanted. ZHA permit-join is not readable at all (zigpy 2.1.0's `ControllerApplication.permit()` keeps no record of the join window, and the frontend's `zha/devices/permit` websocket command fires no event), so `zigbee_permit_join_open` covers Zigbee2MQTT only. `zwave_inclusion_active` is poll-only because the Z-Wave JS integration exposes no inclusion entity, so a window shorter than the detection interval is usually missed.
+
+**Why:** Recorded in `docs/network-security-radio-plan.md` under Known limitations. Both were accepted to ship rather than approximate the fact from entity state.
+
+**How to apply:** On each Home Assistant bump, re-check whether zha/zigpy exposes permit state (a `permit_until` on the application controller or a gateway event) and add it to `snapshot/radio.py`'s zigbee adapter behind the same capability. For Z-Wave, subscribing to the controller's `inclusion started` / `inclusion stopped` events through `entry.runtime_data.client.driver.controller.on(...)` would let the engine wake like it does for the Z2M switch; weigh that coupling against the client's event API stability first.
+
+**Effort:** S
+**Priority:** P3
 
 ### `audit_home_security` answers anyone the agent answers, including unauthenticated voice satellites
 
@@ -788,6 +799,8 @@ validation.
 **What:** `SentinelNotifier._async_flush_batch` clears `_held_batch` and schedules the notify service call with `async_create_task(..., blocking=False)`. If the mobile app service errors (provider limit, app offline, payload rejected) the task fails silently and the batched findings are gone; they were already charged their per-finding cooldown when they were held, so they do not re-fire either.
 
 **Why:** Raised by the Codex adversarial pass on #613. The body-size half of that finding is fixed (`MAX_BATCH_BODY_CHARS` plus an "…and N more" line); the delivery half predates the branch and is shared with every other notification path, which also fire with `blocking=False` and no retry.
+
+Since step 6 this also covers `radio_new_device_joined`: a new-device alert that is batched counts as delivered, so the device's alert is settled even if the digest is lost, and the digest has no Trust button (the device remains recorded and trustable through `sentinel_trust_network_device`).
 
 **How to apply:** Either await the flush call and on failure fall back to `persistent_notification.create` with the same body, or record the failure in the audit rows so the daily digest can carry them. A single `_deliver(domain, service, data)` helper used by the direct and batched paths would let both get the same fallback.
 

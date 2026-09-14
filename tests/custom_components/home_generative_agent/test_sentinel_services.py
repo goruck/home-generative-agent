@@ -5,9 +5,10 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from homeassistant.core import Context
 
 import custom_components.home_generative_agent as hga_component
 from custom_components.home_generative_agent.const import CONF_NOTIFY_SERVICE
@@ -1282,3 +1283,89 @@ async def test_require_admin_refuses_anonymous_and_non_admin_callers() -> None:
         await require(cast("Any", hass), _call("m1"), "svc")
     with pytest.raises(HomeAssistantError, match="admin"):
         await require(cast("Any", hass), _call("ghost"), "svc")
+
+
+# ---------------------------------------------------------------------------
+# Device inventory services
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_network_inventory_services(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Get is open; trust, untrust, and reset require an admin and act."""
+    from datetime import UTC, datetime  # noqa: PLC0415
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from custom_components.home_generative_agent.sentinel.network_inventory import (  # noqa: PLC0415
+        NetworkInventory,
+    )
+
+    inventory = NetworkInventory(hass)
+    device = {
+        "device_id": "dev-a",
+        "protocol": "zigbee",
+        "platform": "zha",
+        "name": "Plug",
+        "is_security_device": False,
+        "manufacturer": None,
+        "model": None,
+    }
+    now = datetime(2026, 9, 13, tzinfo=UTC)
+    await inventory.async_commit([device], now)  # type: ignore[list-item]
+    entry = MagicMock()
+    entry.runtime_data = SimpleNamespace(network_inventory=inventory)
+    handlers: dict[str, Any] = {}
+
+    def _register(_domain: str, service: str, handler: Any, **_kw: Any) -> None:
+        handlers[service] = handler
+
+    services = MagicMock()
+    services.async_register = _register
+    fake_hass = SimpleNamespace(services=services)
+    admin_calls: list[str] = []
+
+    async def _require_admin(_hass: Any, _call: Any, service: str) -> Any:
+        admin_calls.append(service)
+        return SimpleNamespace(name="Owner", id="u1")
+
+    monkeypatch.setattr(_hga_component, "_async_require_admin", _require_admin)
+    _hga_component._register_network_inventory_services(cast("Any", fake_hass), entry)
+    assert set(handlers) == {
+        "sentinel_get_network_inventory",
+        "sentinel_trust_network_device",
+        "sentinel_untrust_network_device",
+        "sentinel_reset_network_inventory",
+    }
+
+    def _call(data: dict[str, Any]) -> Any:
+        return SimpleNamespace(data=data, context=Context(user_id="u1"))
+
+    got = await handlers["sentinel_get_network_inventory"](_call({}))
+    assert got["status"] == "ok"
+    assert got["devices"][0]["key"] == "zigbee:dev-a"
+    assert admin_calls == []
+
+    untrusted = await handlers["sentinel_untrust_network_device"](
+        _call({"device_id": ["dev-a"]})
+    )
+    assert untrusted == {"status": "ok", "changed": ["zigbee:dev-a"]}
+    trusted = await handlers["sentinel_trust_network_device"](
+        _call({"device_id": ["dev-a"]})
+    )
+    assert trusted == {"status": "ok", "changed": ["zigbee:dev-a"]}
+    reset = await handlers["sentinel_reset_network_inventory"](_call({}))
+    assert reset["status"] == "ok"
+    assert reset["cleared"]["device_count"] == 1
+    assert inventory.summary()["device_count"] == 0
+    assert admin_calls == [
+        "sentinel_untrust_network_device",
+        "sentinel_trust_network_device",
+        "sentinel_reset_network_inventory",
+    ]
+
+    entry.runtime_data = SimpleNamespace(network_inventory=None)
+    assert (await handlers["sentinel_get_network_inventory"](_call({})))[
+        "status"
+    ] == "unavailable"

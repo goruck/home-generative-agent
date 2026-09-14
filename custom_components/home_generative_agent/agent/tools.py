@@ -1643,6 +1643,13 @@ async def audit_home_security(
         ],
         "privacy_notes": report["privacy_notes"],
     }
+    inventory = report.get("inventory")
+    if inventory is not None:
+        # Counts only: device names stay out of the model's context.
+        payload["device_inventory"] = {
+            "trusted": inventory["trusted"],
+            "untrusted": inventory["untrusted"],
+        }
     return yaml.dump(
         payload, default_flow_style=False, allow_unicode=True, sort_keys=False
     )

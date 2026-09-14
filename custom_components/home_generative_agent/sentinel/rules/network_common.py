@@ -49,6 +49,11 @@ NETWORK_RULE_TYPES: frozenset[str] = frozenset(
         "security_device_unavailable",
         "network_unconfigured_discovered_device",
         "network_router_update_pending",
+        "radio_new_device_joined",
+        "zwave_insecure_security_class",
+        "zigbee_permit_join_open",
+        "zwave_inclusion_active",
+        "radio_coordinator_update_pending",
     }
 )
 
@@ -70,6 +75,41 @@ def posture(snapshot: FullStateSnapshot) -> dict[str, Any]:
     """Return the ``posture`` mapping (empty when absent)."""
     section = network_section(snapshot)
     return dict(section.get("posture", {})) if section else {}
+
+
+def radio(snapshot: FullStateSnapshot) -> dict[str, Any]:
+    """Return the ``radio`` mapping (empty when absent)."""
+    section = network_section(snapshot)
+    return dict(section.get("radio") or {}) if section else {}
+
+
+def radio_posture(snapshot: FullStateSnapshot) -> dict[str, Any]:
+    """Return the radio ``posture`` mapping (empty when absent)."""
+    return dict(radio(snapshot).get("posture") or {})
+
+
+def is_night(snapshot: FullStateSnapshot) -> bool:
+    """Return the derived night flag."""
+    return bool(snapshot["derived"].get("is_night", False))
+
+
+PROTOCOL_LABELS: dict[str, str] = {
+    "zigbee": "Zigbee",
+    "zwave": "Z-Wave",
+    "bluetooth": "Bluetooth",
+    "matter": "Matter",
+}
+
+# Longest list of names spelled out in one summary before "and N more".
+MAX_LISTED_ITEMS = 10
+
+
+def listed(names: Sequence[str], limit: int = MAX_LISTED_ITEMS) -> str:
+    """Join *names*, capping the list with an "and N more" tail."""
+    shown = list(names[:limit])
+    if len(names) > limit:
+        shown.append(f"and {len(names) - limit} more")
+    return ", ".join(shown)
 
 
 def anyone_home(snapshot: FullStateSnapshot) -> bool:

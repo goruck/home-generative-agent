@@ -22,6 +22,7 @@ from custom_components.home_generative_agent.snapshot.network import (
     CAP_CLIENTS,
     ha_cap,
     posture_cap,
+    radio_cap,
 )
 
 if TYPE_CHECKING:
@@ -37,12 +38,18 @@ _SEVERITY_ORDER: dict[str, int] = {"high": 0, "medium": 1, "low": 2}
 PRIVACY_NOTES: tuple[str, ...] = (
     (
         "Every fact comes from Home Assistant itself (its auth store, registries, "
-        "config flows, Supervisor, and runtime settings); nothing scanned the "
-        "network."
+        "config flows, Supervisor, runtime settings, and the Zigbee, Z-Wave, and "
+        "Bluetooth integrations); nothing scanned the network."
     ),
     (
-        "Checks that need a router, DNS, or radio integration are not part of this "
-        "version and are listed as not run rather than assumed to pass."
+        "Checks that need a router or DNS integration are not part of this version "
+        "and are listed as not run rather than assumed to pass."
+    ),
+    (
+        "Radio checks cover configuration only. Attacks on the radio itself (key "
+        "sniffing while a device joins, Z-Wave S0 downgrade, Bluetooth pairing "
+        "exploits, jamming, or replay) need RF monitoring Home Assistant does not "
+        "do, and are not detected."
     ),
 )
 
@@ -85,6 +92,42 @@ _CAPABILITY_REASONS: tuple[tuple[str, str], ...] = (
         ),
     ),
     (
+        radio_cap("posture.zigbee_permit_join"),
+        (
+            "needs a Zigbee2MQTT bridge; ZHA does not report whether it is accepting "
+            "new devices (its radio library keeps no record of an open join window)"
+        ),
+    ),
+    (
+        radio_cap("posture.zwave_inclusion_active"),
+        "the Z-Wave JS integration is not loaded or not connected to its server",
+    ),
+    (
+        radio_cap("devices.security_class"),
+        "the Z-Wave JS integration is not loaded or not connected to its server",
+    ),
+    (
+        radio_cap("posture.coordinator_update_pending"),
+        (
+            "no Zigbee or Z-Wave coordinator, Home Assistant radio stick, or "
+            "Bluetooth proxy exposes a firmware update entity"
+        ),
+    ),
+    (
+        radio_cap("new_devices"),
+        (
+            "the device inventory is not available, so new devices cannot be "
+            "compared against a previous state"
+        ),
+    ),
+    (
+        radio_cap(""),
+        (
+            "Home Assistant did not return the radio device list; the log names "
+            "the read that failed"
+        ),
+    ),
+    (
         CAP_CLIENTS,
         "needs a router integration adapter, which this version does not include",
     ),
@@ -110,6 +153,9 @@ class NetworkAuditReport(TypedDict):
     missing_capabilities: dict[str, str]
     notes: list[str]
     privacy_notes: list[str]
+    # Device inventory counts (trusted / untrusted, by source); None when the
+    # inventory is not available.
+    inventory: dict[str, Any] | None
 
 
 def capability_reason(capability: str) -> str:
@@ -155,6 +201,7 @@ def build_report(  # noqa: PLR0913
     capabilities: Iterable[str],
     failed_rules: Iterable[str] = (),
     notes: Iterable[str] = (),
+    inventory: Mapping[str, Any] | None = None,
 ) -> NetworkAuditReport:
     """
     Assemble the report for one completed evaluation.
@@ -188,6 +235,18 @@ def build_report(  # noqa: PLR0913
         "missing_capabilities": missing,
         "notes": list(notes),
         "privacy_notes": list(PRIVACY_NOTES),
+        "inventory": _inventory_counts(inventory),
+    }
+
+
+def _inventory_counts(inventory: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Keep only counts: the report never lists device names."""
+    if inventory is None:
+        return None
+    return {
+        "trusted": int(inventory.get("trusted", 0)),
+        "untrusted": int(inventory.get("untrusted", 0)),
+        "by_source": dict(inventory.get("by_source") or {}),
     }
 
 
@@ -203,6 +262,7 @@ def empty_report(status: AuditStatus, now: datetime, note: str) -> NetworkAuditR
         "missing_capabilities": {},
         "notes": [note],
         "privacy_notes": list(PRIVACY_NOTES),
+        "inventory": None,
     }
 
 

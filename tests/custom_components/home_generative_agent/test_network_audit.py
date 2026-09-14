@@ -44,6 +44,7 @@ from custom_components.home_generative_agent.snapshot.network import (
     NetworkBuildContext,
     ha_cap,
     posture_cap,
+    radio_cap,
 )
 from custom_components.home_generative_agent.snapshot.schema import validate_snapshot
 
@@ -219,7 +220,16 @@ def test_capability_reasons_name_what_would_unlock_the_check() -> None:
     )
     assert "router integration adapter" in capability_reason(CAP_CLIENTS)
     assert "router or DNS" in capability_reason(posture_cap("upnp_enabled"))
-    assert "not provided" in capability_reason("network.radio.devices")
+    assert "Zigbee2MQTT" in capability_reason(radio_cap("posture.zigbee_permit_join"))
+    assert "ZHA" in capability_reason(radio_cap("posture.zigbee_permit_join"))
+    assert "Z-Wave JS" in capability_reason(radio_cap("devices.security_class"))
+    assert "Z-Wave JS" in capability_reason(radio_cap("posture.zwave_inclusion_active"))
+    assert "Bluetooth proxy" in capability_reason(
+        radio_cap("posture.coordinator_update_pending")
+    )
+    assert "inventory" in capability_reason(radio_cap("new_devices"))
+    assert "did not return" in capability_reason(radio_cap("devices"))
+    assert "not provided" in capability_reason("network.something_else")
 
 
 def test_build_report_orders_by_severity_and_explains_inactive_rules() -> None:
@@ -619,3 +629,34 @@ def test_run_network_audit_service_is_registered_with_a_response() -> None:
     services = yaml.safe_load((_COMPONENT_DIR / "services.yaml").read_text())
     assert "run_network_audit" in services
     assert services["run_network_audit"]["fields"] == {}
+
+
+@pytest.mark.asyncio
+async def test_tool_adds_device_inventory_counts_but_no_names() -> None:
+    report = build_report(
+        now=NOW,
+        findings=[],
+        checks_run=["radio_new_device_joined"],
+        inactive_rules={},
+        capabilities=[],
+        inventory={
+            "trusted": 10,
+            "untrusted": 1,
+            "by_source": {"zigbee": {"trusted": 10, "untrusted": 1}},
+            "sources": {"zigbee": "2026-09-13T00:00:00+00:00"},
+            "device_count": 11,
+        },
+    )
+    assert report["inventory"] == {
+        "trusted": 10,
+        "untrusted": 1,
+        "by_source": {"zigbee": {"trusted": 10, "untrusted": 1}},
+    }
+
+    async def _audit() -> Any:
+        return report
+
+    payload = yaml.safe_load(
+        await _run_tool(_tool_config(SimpleNamespace(async_audit_network=_audit)))
+    )
+    assert payload["device_inventory"] == {"trusted": 10, "untrusted": 1}

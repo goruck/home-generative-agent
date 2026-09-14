@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from homeassistant.core import Context
 
 import custom_components.home_generative_agent.sentinel.notifier as _notifier_mod
 from custom_components.home_generative_agent.const import (
@@ -117,20 +118,25 @@ class DummyActionHandler:
         self._pending_findings: dict[str, AnomalyFinding] = {}
         self.register_calls: list[AnomalyFinding] = []
         self.handle_calls: list[tuple[str, dict[str, Any]]] = []
+        self.user_ids: list[str | None] = []
 
     def register_finding(self, finding: AnomalyFinding) -> None:
         self._pending_findings[finding.anomaly_id] = finding
         self.register_calls.append(finding)
 
-    async def handle_action(self, action_id: str, payload: dict[str, Any]) -> None:
+    async def handle_action(
+        self, action_id: str, payload: dict[str, Any], *, user_id: str | None = None
+    ) -> None:
         self.handle_calls.append((action_id, payload))
+        self.user_ids.append(user_id)
 
 
 class DummyEvent:
     """Minimal HA Event stub."""
 
-    def __init__(self, data: dict[str, Any]) -> None:
+    def __init__(self, data: dict[str, Any], user_id: str | None = None) -> None:
         self._data = data
+        self.context = Context(user_id=user_id)
 
     @property
     def data(self) -> dict[str, Any]:
@@ -2616,3 +2622,34 @@ async def test_flush_batch_body_is_capped() -> None:
     assert "\u2026and " in message
     assert " more" in message
     assert "Finding number 0" in message
+
+
+def test_build_actions_trust_device_is_primary_for_new_radio_devices() -> None:
+    """A newly paired device offers Trust device instead of Ask Agent."""
+    finding = AnomalyFinding(
+        anomaly_id="nd1",
+        type="radio_new_device_joined",
+        severity="low",
+        confidence=0.9,
+        triggering_entities=[],
+        evidence={"device_ids": ["b"], "summary": "New radio device joined: Plug."},
+        suggested_actions=["Tap Trust device if you recognize it"],
+        is_sensitive=True,
+    )
+    actions = _build_actions(finding)
+    assert actions[0] == {
+        "action": f"{ACTION_PREFIX}trust_nd1",
+        "title": "Trust device",
+    }
+    assert all("handoff" not in a["action"] for a in actions)
+    assert len(actions) == 4
+
+
+@pytest.mark.asyncio
+async def test_action_event_passes_the_mobile_user_to_the_handler() -> None:
+    notifier, hass, _suppression, action_handler = _make_notifier()
+    notifier.start()
+    event = DummyEvent({"action": f"{ACTION_PREFIX}trust_nd1"}, user_id="u-admin")
+    notifier._handle_action_event(event)  # type: ignore[arg-type]
+    await hass.drain_tasks()
+    assert action_handler.user_ids == ["u-admin"]

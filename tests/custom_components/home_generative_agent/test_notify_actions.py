@@ -798,3 +798,104 @@ def test_ask_prompt_open_entry_cover_uses_close_action() -> None:
     assert "cover.garage_door" in prompt
     assert "Do NOT attempt to arm the alarm" not in prompt
     assert "home" not in prompt.lower() or "not_home" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# Trust device (radio_new_device_joined)
+# ---------------------------------------------------------------------------
+
+
+class _TrustInventory:
+    def __init__(self) -> None:
+        self.calls: list[tuple[list[str], bool]] = []
+
+    async def async_set_trusted(self, device_ids: Any, *, trusted: bool) -> list[str]:
+        ids = list(device_ids)
+        self.calls.append((ids, trusted))
+        return [f"zigbee:{d}" for d in ids]
+
+
+class _Auth:
+    def __init__(self, users: dict[str, Any]) -> None:
+        self._users = users
+
+    async def async_get_user(self, user_id: str) -> Any:
+        return self._users.get(user_id)
+
+
+def _trust_setup() -> tuple[ActionHandler, _TrustInventory, DummyAuditStore]:
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    hass = DummyHass()
+    hass.auth = _Auth(  # type: ignore[attr-defined]
+        {
+            "admin": SimpleNamespace(name="Owner", is_admin=True),
+            "guest": SimpleNamespace(name="Guest", is_admin=False),
+        }
+    )
+    audit = DummyAuditStore()
+    handler = ActionHandler(
+        hass=hass,  # type: ignore[arg-type]
+        suppression=DummySuppressionManager(),  # type: ignore[arg-type]
+        audit_store=audit,  # type: ignore[arg-type]
+    )
+    inventory = _TrustInventory()
+    handler.network_inventory = inventory  # type: ignore[assignment]
+    handler.register_finding(
+        AnomalyFinding(
+            anomaly_id="new-1",
+            type="radio_new_device_joined",
+            severity="low",
+            confidence=0.9,
+            triggering_entities=[],
+            evidence={"device_keys": ["zigbee:b"], "device_ids": ["b"]},
+            suggested_actions=["Tap Trust device if you recognize it"],
+            is_sensitive=True,
+        )
+    )
+    return handler, inventory, audit
+
+
+@pytest.mark.asyncio
+async def test_trust_action_marks_devices_trusted_for_admin() -> None:
+    handler, inventory, audit = _trust_setup()
+    await handler.handle_action(f"{ACTION_PREFIX}trust_new-1", {}, user_id="admin")
+    assert inventory.calls == [(["b"], True)]
+    assert audit.updates[0]["outcome"] == {
+        "status": "trusted",
+        "device_keys": ["zigbee:b"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_trust_action_ignored_for_non_admin_or_anonymous() -> None:
+    for user_id in ("guest", None, "ghost"):
+        handler, inventory, audit = _trust_setup()
+        await handler.handle_action(f"{ACTION_PREFIX}trust_new-1", {}, user_id=user_id)
+        assert inventory.calls == [], user_id
+        assert audit.updates[0]["outcome"] == {"status": "not_admin"}
+
+
+@pytest.mark.asyncio
+async def test_trust_action_without_inventory_or_finding() -> None:
+    handler, _inventory, audit = _trust_setup()
+    handler.network_inventory = None
+    await handler.handle_action(f"{ACTION_PREFIX}trust_new-1", {}, user_id="admin")
+    assert audit.updates[0]["outcome"] == {"status": "unavailable"}
+    handler, _inventory, audit = _trust_setup()
+    await handler.handle_action(f"{ACTION_PREFIX}trust_gone", {}, user_id="admin")
+    assert audit.updates[0]["outcome"] == {"status": "missing_finding"}
+
+
+@pytest.mark.asyncio
+async def test_trust_action_reports_a_failed_save() -> None:
+    from homeassistant.exceptions import HomeAssistantError  # noqa: PLC0415
+
+    handler, inventory, audit = _trust_setup()
+
+    async def _fail(_ids: Any, **_kwargs: Any) -> list[str]:
+        raise HomeAssistantError
+
+    inventory.async_set_trusted = _fail  # type: ignore[method-assign]
+    await handler.handle_action(f"{ACTION_PREFIX}trust_new-1", {}, user_id="admin")
+    assert audit.updates[0]["outcome"] == {"status": "save_failed"}
