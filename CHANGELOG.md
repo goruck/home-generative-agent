@@ -2,11 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [3.42.0] - 2026-09-14
 
 ### Added
 
-- The Home Assistant security audit now covers the home's radio networks, step 6 of the [network security plan](docs/network-security-plan.md) ([radio plan](docs/network-security-radio-plan.md)). Five new rules: `radio_new_device_joined` alerts once when a Zigbee, Z-Wave, Bluetooth, or Matter device is paired (higher when a new lock or camera appears while nobody is home), with a **Trust device** button on the push; `zwave_insecure_security_class` flags Z-Wave locks, alarm panels, and entry covers included with S0 or no security; `zigbee_permit_join_open` catches Zigbee2MQTT accepting new devices, waking Sentinel the moment the bridge switch turns on because the window lasts at most 254 seconds; `zwave_inclusion_active` reports a controller in inclusion mode; `radio_coordinator_update_pending` lists firmware waiting for coordinators, Connect ZBT/Yellow radios, and Bluetooth proxies. New devices are judged against a persistent device inventory that records each protocol silently the first time it is present, so upgrading does not alert on devices you already had; it stores device registry ids and names only, never radio addresses. New services: `sentinel_get_network_inventory`, and the admin-only `sentinel_trust_network_device`, `sentinel_untrust_network_device`, and `sentinel_reset_network_inventory`. The on-demand audit reports trusted and untrusted device counts. ZHA's permit-join state is not readable on Home Assistant 2026.9 (its radio library keeps no record of an open join window), so that check is listed as not run on ZHA-only homes rather than guessed. Z-Wave inclusion is observed only when a Sentinel run lands inside the window.
+- The Home Assistant security audit now covers the home's radio networks. This is step 6 of the [network security plan](docs/network-security-plan.md); the design and its decisions are in the [radio plan](docs/network-security-radio-plan.md). Five new Sentinel rules, all reading what Home Assistant already knows — nothing scans the network or the air: ([#634](https://github.com/goruck/home-generative-agent/pull/634))
+  - `radio_new_device_joined` alerts once when a Zigbee, Z-Wave, Bluetooth, or Matter device is paired. It is low severity by default, medium while nobody is home or at night, and high when the new device is a lock, alarm panel, camera, or entry cover and nobody is home. The push carries a **Trust device** button, which records that you recognize the device (admin users only).
+  - `zwave_insecure_security_class` flags Z-Wave locks, alarm panels, and door/gate/garage covers included with legacy S0 security or none (high), and any other Z-Wave device still on S0 (low). Devices without security that are not security devices are not reported, since most sensors run that way on purpose.
+  - `zigbee_permit_join_open` catches Zigbee2MQTT accepting new devices, higher while nobody is home. Sentinel wakes the moment the bridge's permit-join switch turns on, because a Zigbee2MQTT join window closes within 254 seconds.
+  - `zwave_inclusion_active` reports a Z-Wave controller in inclusion mode.
+  - `radio_coordinator_update_pending` lists firmware waiting for a Zigbee or Z-Wave coordinator, a Home Assistant Connect ZBT-1/ZBT-2 or Yellow radio, a Zigbee2MQTT bridge, or a Bluetooth proxy.
+- New devices are judged against a persistent device inventory that stores device registry ids and names only, never IEEE addresses, node ids, or MAC addresses. Each protocol is recorded silently the first time it is present, with one *Sentinel device inventory established* notification, so upgrading does not alert on the devices you already have. A new device is recorded straight away as untrusted: a cooldown or quiet hours postpone its alert, while delivery, a snooze, triage, or trusting the device settle it. New services: `sentinel_get_network_inventory`, and the admin-only `sentinel_trust_network_device`, `sentinel_untrust_network_device`, and `sentinel_reset_network_inventory`. Deleting the Sentinel subentry deletes the inventory.
+- `run_network_audit` and the agent's `audit_home_security` tool report trusted and untrusted device counts, and name the radio checks that could not run and why.
+
+### Notes
+
+- ZHA's permit-join state is not observable on Home Assistant 2026.9 (its radio library opens the join window without recording it anywhere Home Assistant can read), so `zigbee_permit_join_open` is listed as not run on ZHA-only homes rather than guessed. Z-Wave inclusion is observed only when a Sentinel run lands inside the inclusion window.
+- Home Assistant restores a removed device's registry id when the same hardware is added back, so removing and re-pairing a device alerts only if a Sentinel run saw it gone in between.
 
 ## [3.41.2] - 2026-09-12
 
