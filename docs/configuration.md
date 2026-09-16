@@ -290,6 +290,8 @@ Example: biasing OpenRouter's `microsoft/mai-transcribe-2` towards names its mod
 
 The key under `options` is the provider slug that actually serves the model, which you get from `https://openrouter.ai/api/v1/models/<model>/endpoints` (the `tag` field). Only the options for the provider serving the request are forwarded, and the field names are that provider's own — so check their transcription API reference, not OpenAI's. Providers differ in how they treat unknown fields: some drop them silently, others return an error.
 
+Expect biasing to *steer* recognition rather than guarantee a spelling. A name the model cannot spell may still come back approximated — what matters for a voice assistant is that it lands close enough for the conversation agent to match the entity, which is usually where a phrase list gets it. List the terms themselves (names, rooms, devices) rather than whole sentences, and add a term's common inflections if you use them out loud.
+
 > **Note:** the JSON format is offered on the **Local (OpenAI-compatible)** provider type only, because the OpenAI API itself accepts multipart alone. Configure OpenRouter as a Local provider with the server URL `https://openrouter.ai/api/v1` and your OpenRouter key.
 
 ### Running a local STT server
