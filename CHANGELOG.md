@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+Changes accumulate under **Unreleased** and ship in a scheduled bundle; urgent fixes release on
+their own. See [RELEASING.md](RELEASING.md).
+
+## [Unreleased]
+
+### Changed
+
+- Releases now bundle several changes instead of following every merge, so updates arrive on a
+  monthly cadence rather than most days. Fixes for anything broken in the wild — regressions,
+  Home Assistant compatibility breaks, security and safety failures — still ship the moment
+  they're ready. If you want to test a fix before it reaches a stable release, enable beta
+  versions for this repository in HACS. See
+  [RELEASING.md](https://github.com/goruck/home-generative-agent/blob/main/RELEASING.md).
+- Documentation on speech-to-text phrase biasing now says it steers recognition rather than
+  guaranteeing a spelling, since what matters for a voice assistant is landing close enough for
+  the conversation agent to match the entity. Field testing on OpenRouter's
+  `microsoft/mai-transcribe-2` returned an approximated spelling that Assist resolved correctly
+  every time. ([#610](https://github.com/goruck/home-generative-agent/issues/610))
+
 ## [3.42.0] - 2026-09-14
 
 ### Added

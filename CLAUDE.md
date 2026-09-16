@@ -39,6 +39,28 @@ Runtime dependencies are declared in `manifest.json` (the `requirements` array).
 
 After changing `manifest.json`: run `make runtimedeps` (or `python scripts/gen_manifest_requirements.py`).
 
+## Release Workflow
+
+**Do not cut a release after every merge.** Full policy in [RELEASING.md](RELEASING.md); the rule:
+
+- **Ship immediately, on its own** — regressions from a shipped release, Home Assistant
+  compatibility breaks, security/safety failures (a safety gate not actually operating, credential
+  exposure), data loss or failure to start, and **features silently doing nothing** (no error
+  logged, so users can't report it).
+- **Bundle everything else** into a monthly release cut about a week after HA's monthly stable —
+  features, enhancements, docs, refactors, dependency bumps, P2/P3 follow-ups.
+
+The test: *if this waits for the next bundle, does something broken stay broken, or does a user
+just not get a new thing yet?*
+
+Every PR with user-visible behavior adds its entry to the `## [Unreleased]` section of
+`CHANGELOG.md` — that is what the next release's notes are built from, so a PR without one is not
+finished. Use a GitHub **pre-release** when a reporter needs to field-validate on hardware or a
+service you can't reach; HACS only offers those to users who opted into betas.
+
+When closing an issue whose fix is bundled, tell the reporter it's merged, name the release it
+ships in, and offer the pre-release.
+
 ## Architecture
 
 ### Module Map

@@ -44,6 +44,19 @@ Runtime dependencies are sourced from
 - After changing `manifest.json`, run `scripts/gen_manifest_requirements.py`
   (or `make runtimedeps`).
 
+## Release workflow
+Do **not** cut a release after every merge. Policy: `RELEASING.md`.
+
+- Ship immediately, alone: regressions from a shipped release, Home Assistant compatibility
+  breaks, security/safety failures, data loss or failure to start, and features silently doing
+  nothing.
+- Bundle everything else (features, docs, refactors, dep bumps, follow-ups) into a monthly
+  release cut about a week after HA's monthly stable.
+
+Every PR with user-visible behavior adds an entry under `## [Unreleased]` in `CHANGELOG.md`.
+Version lives only in `custom_components/home_generative_agent/manifest.json`; the git tag must
+match it.
+
 ## Coding conventions
 - Formatting/linting: `ruff format` + `ruff check`
 - Type checking: `pyright` (standard mode)

@@ -15,9 +15,13 @@ Pull requests are the best way to propose changes to the codebase.
 
 1. Fork the repo and create your branch from `main`.
 2. If you've changed something, update the documentation.
-3. Make sure your code lints (using `make lint`).
-4. Test you contribution.
-5. Issue that pull request!
+3. If users would notice the change, add an entry under `## [Unreleased]` in `CHANGELOG.md`.
+4. Make sure your code lints (using `make lint`).
+5. Test you contribution.
+6. Issue that pull request!
+
+Merged changes ship in a scheduled release rather than immediately — urgent fixes are the
+exception. See [RELEASING.md](RELEASING.md) for what qualifies and when the next bundle lands.
 
 ## Any contributions you make will be under the MIT Software License
 
