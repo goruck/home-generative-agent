@@ -4,7 +4,8 @@
   "after_dependencies": [
     "assist_pipeline",
     "hassio",
-    "intent"
+    "intent",
+    "ssdp"
   ],
   "codeowners": [
     "@goruck"
