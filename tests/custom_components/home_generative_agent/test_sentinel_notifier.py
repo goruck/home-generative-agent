@@ -2572,10 +2572,28 @@ def test_network_finding_mobile_and_persistent_use_summary() -> None:
     """With no entity to name, the summary replaces the generic fallback copy."""
     finding = _network_finding()
     assert _mobile_message(None, finding) == finding.evidence["summary"]
-    assert (
-        _notifier_mod._persistent_message(None, finding) == finding.evidence["summary"]
-    )
+    assert _notifier_mod._persistent_message(
+        None, finding
+    ) == _notifier_mod.escape_markdown(finding.evidence["summary"])
     assert "Unknown entity" not in _mobile_message(None, finding)
+
+
+def test_network_summary_is_markdown_escaped_for_persistent_only() -> None:
+    """A LAN-advertised name shaped like a link reads as text in the HA UI."""
+    hostile = (
+        "Your router ([Fix router](https://attacker.example)) is advertising UPnP."
+    )
+    finding = _network_finding(summary=hostile)
+    persistent = _notifier_mod._persistent_message(None, finding)
+    assert "[Fix router](" not in persistent
+    assert persistent == (
+        "Your router (\\[Fix router\\](https://attacker.example)) is advertising UPnP."
+    )
+    # The push is plain text and keeps the summary verbatim.
+    assert _mobile_message(None, finding) == hostile
+    assert _notifier_mod.escape_markdown("<b>*x*</b> `y` a_b ~c~ |d|") == (
+        "\\<b\\>\\*x\\*\\</b\\> \\`y\\` a\\_b \\~c\\~ \\|d\\|"
+    )
 
 
 def test_network_finding_without_summary_falls_back() -> None:
@@ -2595,10 +2613,9 @@ def test_network_finding_summary_beats_explanation_and_language() -> None:
         _mobile_message("Někdo vytvořil token.", finding, response_language="cs")
         == finding.evidence["summary"]
     )
-    assert (
-        _notifier_mod._persistent_message("Someone made a token.", finding)
-        == finding.evidence["summary"]
-    )
+    assert _notifier_mod._persistent_message(
+        "Someone made a token.", finding
+    ) == _notifier_mod.escape_markdown(finding.evidence["summary"])
 
 
 @pytest.mark.asyncio

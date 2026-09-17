@@ -84,6 +84,9 @@ from custom_components.home_generative_agent.snapshot.network import (
 from custom_components.home_generative_agent.snapshot.radio import (
     is_z2m_permit_join_entry,
 )
+from custom_components.home_generative_agent.snapshot.upnp import (
+    POSTURE_MEMORY_KEYS,
+)
 
 from .alarm_enrichment import async_enrich_alarm_last_changed
 from .baseline import CYCLICAL_LOAD_HINTS
@@ -116,10 +119,13 @@ from .rules.ha_sensitive_entity_exposed_without_pin import (
 from .rules.ha_trusted_networks_bypass_login import HaTrustedNetworksBypassLoginRule
 from .rules.ha_webhook_automation_public import HaWebhookAutomationPublicRule
 from .rules.network_common import NETWORK_RULE_TYPES
+from .rules.network_public_ip_changed import NetworkPublicIpChangedRule
 from .rules.network_router_update_pending import NetworkRouterUpdatePendingRule
 from .rules.network_unconfigured_discovered_device import (
     NetworkUnconfiguredDiscoveredDeviceRule,
 )
+from .rules.network_upnp_enabled import NetworkUpnpEnabledRule
+from .rules.network_upnp_port_mapping_added import NetworkUpnpPortMappingAddedRule
 from .rules.open_entry_while_away import OpenEntryWhileAwayRule
 from .rules.pet_detected_at_night_no_occupancy import PetDetectedAtNightNoOccupancyRule
 from .rules.phone_battery_low_at_night import PhoneBatteryLowAtNightRule
@@ -191,6 +197,17 @@ _FINAL_SUPPRESSION_REASONS: frozenset[str] = frozenset(
         SUPPRESSION_REASON_POLICY_BLOCKED,
     }
 )
+
+# Change rules that compare against the engine's posture memory, mapped to
+# the memory keys they read: the value and the entity it was read from (see
+# snapshot/upnp.py), held back together.
+_POSTURE_MEMORY_RULES: dict[str, tuple[str, ...]] = {
+    NetworkPublicIpChangedRule.rule_id: ("public_ip_key", "public_ip_entity_id"),
+    NetworkUpnpPortMappingAddedRule.rule_id: (
+        "upnp_port_mapping_count",
+        "upnp_port_mapping_entity_id",
+    ),
+}
 
 
 @dataclass
@@ -312,6 +329,15 @@ class SentinelEngine:
         self._auth_inventory = auth_inventory
         self._pseudonymizer = pseudonymizer
         self._network_inventory = network_inventory
+        # Posture values remembered from the previous run for the change rules
+        # (public IP, UPnP port-mapping count, and the sensors they came from).
+        # Loaded from the device inventory store so a change across a restart
+        # is still seen; in-process only when there is no store.
+        self._network_posture_memory: dict[str, Any] = (
+            dict(network_inventory.posture_memory)
+            if network_inventory is not None
+            else {}
+        )
         # Suppression reason of the last finding _dispatch_item stopped (None
         # when it was delivered), read by callers that must tell a snooze from
         # a cooldown (the device inventory's pending alerts).
@@ -409,6 +435,9 @@ class SentinelEngine:
                 NetworkRouterUpdatePendingRule(
                     is_entity_excluded=self._entity_excluded_for_type
                 ),
+                NetworkUpnpEnabledRule(),
+                NetworkPublicIpChangedRule(),
+                NetworkUpnpPortMappingAddedRule(),
                 RadioNewDeviceJoinedRule(),
                 ZwaveInsecureSecurityClassRule(),
                 ZigbeePermitJoinOpenRule(
@@ -766,7 +795,39 @@ class SentinelEngine:
             auth_inventory=self._auth_inventory,
             auth_observation=observation,
             network_inventory=self._network_inventory,
+            previous_posture=dict(self._network_posture_memory) or None,
         )
+
+    async def _commit_posture_memory(
+        self, snapshot: FullStateSnapshot, *, held: Iterable[str] = ()
+    ) -> None:
+        """
+        Remember this run's posture values for the next run's change rules.
+
+        ``held`` names the change rules whose finding was produced but not
+        delivered or settled; their keys keep the previous values so the
+        change is reported again once the alert can go out, mirroring the auth
+        and device inventories. A value the snapshot did not carry (sensor
+        unavailable this cycle) is kept too, so a change across an outage is
+        still seen when the sensor returns. The memory is written to the
+        device inventory store when it changed; a failed write keeps the
+        in-process copy and is retried on the next run.
+        """
+        posture = (snapshot.get("network") or {}).get("posture") or {}
+        held_keys = {key for rule_id in held for key in _POSTURE_MEMORY_RULES[rule_id]}
+        for key in POSTURE_MEMORY_KEYS:
+            if key in held_keys or key not in posture:
+                continue
+            self._network_posture_memory[key] = posture[key]
+        inventory = self._network_inventory
+        if inventory is None:
+            return
+        try:
+            await inventory.async_set_posture_memory(self._network_posture_memory)
+        except (ValueError, TypeError, KeyError, AttributeError):
+            self._log_limiter.warning(
+                "posture_memory_commit", "Network posture memory commit failed."
+            )
 
     async def _commit_auth_inventory(
         self,
@@ -1170,6 +1231,8 @@ class SentinelEngine:
         # there was none, False when suppression/triage/policy stopped it.
         auth_change_delivered: bool | None = None
         new_device_alert_settled = False
+        # Change rules over the remembered posture whose alert did not go out.
+        posture_alerts_held: set[str] = set()
         if all_findings:
             # Correlation pass: group related findings from this single cycle.
             # Each call to correlate() is stateless; no cross-run merging occurs.
@@ -1198,6 +1261,13 @@ class SentinelEngine:
                         delivered
                         or self._last_dispatch_reason in _FINAL_SUPPRESSION_REASONS
                     )
+                if (
+                    isinstance(item, AnomalyFinding)
+                    and item.type in _POSTURE_MEMORY_RULES
+                    and not delivered
+                    and self._last_dispatch_reason not in _FINAL_SUPPRESSION_REASONS
+                ):
+                    posture_alerts_held.add(item.type)
 
         # Commit after dispatch: the auth change rule compared this run's
         # observation against the inventory as it stood before the run, and a
@@ -1208,6 +1278,7 @@ class SentinelEngine:
         await self._commit_network_inventory(
             snapshot, now, new_device_alert_settled=new_device_alert_settled
         )
+        await self._commit_posture_memory(snapshot, held=posture_alerts_held)
 
     # ---------------------------------------------------------------------- #
     # Per-rule entity exclusions (Issue #462)

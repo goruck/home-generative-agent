@@ -219,7 +219,12 @@ def test_capability_reasons_name_what_would_unlock_the_check() -> None:
         ha_cap("failed_login_notification_present")
     )
     assert "router integration adapter" in capability_reason(CAP_CLIENTS)
-    assert "router or DNS" in capability_reason(posture_cap("upnp_enabled"))
+    assert "router or DNS" in capability_reason(posture_cap("wpa3_enabled"))
+    assert "SSDP" in capability_reason(posture_cap("upnp_enabled"))
+    assert "port-mapping count sensor" in capability_reason(
+        posture_cap("upnp_port_mappings_added")
+    )
+    assert "external IP sensor" in capability_reason(posture_cap("public_ip_changed"))
     assert "Zigbee2MQTT" in capability_reason(radio_cap("posture.zigbee_permit_join"))
     assert "ZHA" in capability_reason(radio_cap("posture.zigbee_permit_join"))
     assert "Z-Wave JS" in capability_reason(radio_cap("devices.security_class"))

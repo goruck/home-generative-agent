@@ -12,6 +12,11 @@ ha-ffmpeg==3.2.2
 # The network audit's zwave adapter reads Z-Wave JS node and controller objects;
 # its tests build the real ones. Pin to core's zwave_js manifest.
 zwave-js-server-python==0.73.1
+# The UPnP/IGD adapter reads the ssdp component's discovery cache through its
+# public helper, and its tests hold a upnp config entry, so both core
+# components must import. Pin to core's ssdp and upnp manifests.
+async-upnp-client==0.48.1
+getmac==0.9.5
 
 pytest==9.*
 pytest-asyncio==1.*

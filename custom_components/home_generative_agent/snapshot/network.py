@@ -12,8 +12,9 @@ Phase 1 (HA-only MVP) ships the ``ha_native`` adapter, which audits Home
 Assistant's own attack surface: users and tokens, exposed sensitive entities,
 cloud remote access, pending updates, HTTP and auth-provider settings,
 Supervisor add-ons, public webhook automations, unavailable security devices,
-and discovered-but-unconfigured devices. Router, DNS, and radio adapters land
-in later phases and plug into the same merge.
+and discovered-but-unconfigured devices. The radio adapters (``radio.py``) and
+the UPnP/IGD adapter (``upnp.py``) plug into the same merge; the remaining
+router and DNS adapters land in later steps.
 
 Runtime reads (auth store, Supervisor add-on info, HTTP server settings, the
 automation entity component) are wrapped individually: a read that fails on
@@ -169,6 +170,8 @@ class NetworkBuildContext:
     reported as missing rather than guessed. ``auth_observation`` lets the
     Sentinel engine collect the auth state once, feed it into the build, and
     commit the same observation to the inventory afterwards.
+    ``previous_posture`` is the engine's memory of the last run's posture
+    values, for the checks that report a change.
     """
 
     enabled: bool = True
@@ -177,6 +180,10 @@ class NetworkBuildContext:
     auth_inventory: AuthInventory | None = None
     auth_observation: list[ObservedUser] | None = None
     network_inventory: NetworkInventory | None = None
+    # Posture values the engine kept from its previous run (see
+    # ``upnp.POSTURE_MEMORY_KEYS``): the change checks compare against these
+    # and stay inactive when there is nothing to compare with.
+    previous_posture: Mapping[str, Any] | None = None
 
 
 @dataclass
@@ -202,6 +209,16 @@ class AdapterResult:
 
 # Radio fields that are bookkeeping for the engine, not rule inputs.
 _RADIO_NON_CAPABILITY_KEYS: frozenset[str] = frozenset({"present_sources"})
+# Posture fields that only describe a fact for display (evidence source,
+# gateway names, the previous run's values) and never gate a rule.
+_POSTURE_NON_CAPABILITY_KEYS: frozenset[str] = frozenset(
+    {
+        "upnp_evidence",
+        "upnp_gateway_names",
+        "public_ip_previous_key",
+        "upnp_port_mapping_previous_count",
+    }
+)
 
 
 def merge_adapter_results(results: Iterable[AdapterResult]) -> NetworkSnapshot:
@@ -223,7 +240,8 @@ def merge_adapter_results(results: Iterable[AdapterResult]) -> NetworkSnapshot:
     for result in results:
         for key, value in result.posture.items():
             posture[key] = value
-            sources[posture_cap(key)] = result.name
+            if key not in _POSTURE_NON_CAPABILITY_KEYS:
+                sources[posture_cap(key)] = result.name
         for key, value in result.ha_security.items():
             ha_security[key] = value
             sources[ha_cap(key)] = result.name
@@ -1058,8 +1076,9 @@ async def async_build_network_snapshot(  # noqa: PLR0913
         return empty_network_snapshot("Network section not requested by caller.")
     if not context.enabled:
         return empty_network_snapshot("Network audit is disabled in Sentinel options.")
-    # Imported here: the radio adapters build on this module's helpers.
+    # Imported here: the radio and UPnP adapters build on this module's helpers.
     from .radio import collect_radio_inputs, radio_adapters  # noqa: PLC0415
+    from .upnp import async_collect_upnp_inputs, upnp_igd_adapter  # noqa: PLC0415
 
     inputs = await async_collect_ha_native_inputs(
         hass,
@@ -1072,9 +1091,11 @@ async def async_build_network_snapshot(  # noqa: PLR0913
     radio_inputs = collect_radio_inputs(
         hass, entity_device=entity_device, device_domains=device_domains
     )
+    upnp_inputs = await async_collect_upnp_inputs(hass)
     return merge_adapter_results(
         [
             ha_native_adapter(inputs, entities, context),
             *radio_adapters(radio_inputs, entities, context.network_inventory),
+            upnp_igd_adapter(upnp_inputs, entities, context),
         ]
     )
