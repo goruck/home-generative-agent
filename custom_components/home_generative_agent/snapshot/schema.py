@@ -96,6 +96,20 @@ class NetworkPosture(TypedDict, total=False):
     """Router / DNS posture facts. Every key carries a ``<key>_entity_id`` twin."""
 
     upnp_enabled: bool
+    # UPnP/IGD adapter (snapshot/upnp.py): what proved UPnP is on ("ssdp",
+    # "integration", "discovery_flow"), the gateways' advertised names, the
+    # HMAC-pseudonymized public IP and whether it differs from the previous
+    # run, and the router's UPnP port-mapping count with the delta since the
+    # previous run. Raw addresses never enter the section.
+    upnp_evidence: str
+    upnp_gateway_names: list[str]
+    public_ip_key: str
+    public_ip_entity_id: str
+    public_ip_previous_key: str
+    upnp_port_mapping_count: int
+    upnp_port_mapping_entity_id: str
+    upnp_port_mapping_previous_count: int
+    upnp_port_mappings_added: int
     wpa3_enabled: bool
     guest_network_enabled: bool
     guest_client_count: int

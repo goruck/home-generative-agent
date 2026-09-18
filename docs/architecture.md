@@ -163,7 +163,7 @@ snapshot/builder.py ──► snapshot/network.py (adapters) ──► snapshot[
                           sentinel/auth_inventory.py (persistent, non-secret)
 ```
 
-Phase 1 ships the `ha_native` adapter (Home Assistant's own attack surface). Router, DNS, and radio adapters are described in the [network security plan](network-security-plan.md). Identifiers that could single out a device or person (token last-used addresses today; MACs and Bluetooth addresses in later phases) are pseudonymized with a per-install HMAC salt (`sentinel/pseudonymizer.py`) before anything persists them.
+Phase 1 ships the `ha_native` adapter (Home Assistant's own attack surface); `snapshot/radio.py` adds the Zigbee, Z-Wave, Bluetooth, and Matter device adapters, and `snapshot/upnp.py` the UPnP/IGD adapter (the SSDP discovery cache and the core `upnp` integration's sensors). The remaining router and DNS adapters are described in the [network security plan](network-security-plan.md). Identifiers that could single out a device or person (token last-used addresses today; MACs and Bluetooth addresses in later phases) are pseudonymized with a per-install HMAC salt (`sentinel/pseudonymizer.py`) before anything persists them.
 
 ---
 

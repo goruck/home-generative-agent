@@ -46,11 +46,20 @@ from custom_components.home_generative_agent.sentinel.rules.network_common impor
     POSTURE_COOLDOWN_MINUTES,
     make_finding,
 )
+from custom_components.home_generative_agent.sentinel.rules.network_public_ip_changed import (
+    NetworkPublicIpChangedRule,
+)
 from custom_components.home_generative_agent.sentinel.rules.network_router_update_pending import (
     NetworkRouterUpdatePendingRule,
 )
 from custom_components.home_generative_agent.sentinel.rules.network_unconfigured_discovered_device import (
     NetworkUnconfiguredDiscoveredDeviceRule,
+)
+from custom_components.home_generative_agent.sentinel.rules.network_upnp_enabled import (
+    NetworkUpnpEnabledRule,
+)
+from custom_components.home_generative_agent.sentinel.rules.network_upnp_port_mapping_added import (
+    NetworkUpnpPortMappingAddedRule,
 )
 from custom_components.home_generative_agent.sentinel.rules.radio_coordinator_update_pending import (
     RadioCoordinatorUpdatePendingRule,
@@ -93,6 +102,9 @@ ALL_RULES = [
     SecurityDeviceUnavailableRule(offline_minutes=30),
     NetworkUnconfiguredDiscoveredDeviceRule(),
     NetworkRouterUpdatePendingRule(),
+    NetworkUpnpEnabledRule(),
+    NetworkPublicIpChangedRule(),
+    NetworkUpnpPortMappingAddedRule(),
     RadioNewDeviceJoinedRule(),
     ZwaveInsecureSecurityClassRule(),
     ZigbeePermitJoinOpenRule(),
@@ -574,6 +586,130 @@ def test_router_update_pending_aggregates_with_versions() -> None:
         is_entity_excluded=lambda entity_id, _t: entity_id == "update.fritz_fw"
     )
     assert _only(excluded.evaluate(snapshot)).triggering_entities == ["update.eero_fw"]
+
+
+def test_upnp_enabled_is_a_standing_finding_with_display_only_count() -> None:
+    """One medium finding while UPnP is on; the mapping count never changes the id."""
+    rule = NetworkUpnpEnabledRule()
+    plain = _only(
+        rule.evaluate(
+            _snapshot(
+                posture={
+                    "upnp_enabled": True,
+                    "upnp_evidence": "ssdp",
+                    "upnp_gateway_names": ["eero"],
+                }
+            )
+        )
+    )
+    assert plain.severity == "medium"
+    assert rule.cooldown_minutes == POSTURE_COOLDOWN_MINUTES
+    assert plain.evidence["summary"].startswith(
+        "Your router (eero) is advertising UPnP (Internet Gateway Device)"
+    )
+    assert "unless the router restricts it" in plain.evidence["summary"]
+    assert "port mapping" not in plain.evidence["summary"]
+    counted = _only(
+        rule.evaluate(
+            _snapshot(
+                posture={
+                    "upnp_enabled": True,
+                    "upnp_evidence": "integration",
+                    "upnp_gateway_names": [],
+                    "upnp_port_mapping_count": 3,
+                }
+            )
+        )
+    )
+    assert counted.anomaly_id == plain.anomaly_id
+    assert counted.evidence["port_mapping_count"] == 3
+    assert (
+        "Your router is answering the UPnP/IGD integration"
+        in (counted.evidence["summary"])
+    )
+    many = _only(
+        rule.evaluate(
+            _snapshot(
+                posture={"upnp_enabled": True, "upnp_gateway_names": ["a", "b", "c"]}
+            )
+        )
+    )
+    assert "Your router (a, b, and 1 more)" in many.evidence["summary"]
+    assert "3 port mappings are currently open" in counted.evidence["summary"]
+    one = _only(
+        rule.evaluate(
+            _snapshot(posture={"upnp_enabled": True, "upnp_port_mapping_count": 1})
+        )
+    )
+    assert "1 port mapping is currently open" in one.evidence["summary"]
+    assert rule.evaluate(_snapshot(posture={"upnp_enabled": False})) == []
+
+
+def test_public_ip_changed_is_identified_by_the_new_pseudonymized_key() -> None:
+    """Low, per new address, naming the sensor; the old key is display-only."""
+    rule = NetworkPublicIpChangedRule()
+    assert rule.cooldown_minutes == 0
+    base = {
+        "public_ip_changed": True,
+        "public_ip_key": "abcd1234",
+        "public_ip_previous_key": "00000000",
+        "public_ip_entity_id": "sensor.gw_external_ip",
+    }
+    finding = _only(rule.evaluate(_snapshot(posture=base)))
+    assert finding.severity == "low"
+    assert finding.triggering_entities == ["sensor.gw_external_ip"]
+    assert finding.evidence["public_ip_key"] == "abcd1234"
+    assert finding.evidence["previous_public_ip_key"] == "00000000"
+    assert "public IP address changed" in finding.evidence["summary"]
+    other = _only(
+        rule.evaluate(_snapshot(posture={**base, "public_ip_key": "ffff0000"}))
+    )
+    assert other.anomaly_id != finding.anomaly_id
+    same_ip = _only(
+        rule.evaluate(_snapshot(posture={**base, "public_ip_previous_key": "1111"}))
+    )
+    assert same_ip.anomaly_id == finding.anomaly_id
+    assert rule.evaluate(_snapshot(posture={**base, "public_ip_changed": False})) == []
+    assert rule.evaluate(_snapshot(posture={**base, "public_ip_key": ""})) == []
+
+
+def test_upnp_port_mapping_added_reports_the_increase_only() -> None:
+    """Medium on an increase with the total; no finding when nothing was added."""
+    rule = NetworkUpnpPortMappingAddedRule()
+    assert rule.cooldown_minutes == 0
+    sensor = "sensor.gw_port_mapping_number_of_entries"
+    finding = _only(
+        rule.evaluate(
+            _snapshot(
+                posture={
+                    "upnp_port_mappings_added": 2,
+                    "upnp_port_mapping_count": 5,
+                    "upnp_port_mapping_previous_count": 3,
+                    "upnp_port_mapping_entity_id": sensor,
+                }
+            )
+        )
+    )
+    assert finding.severity == "medium"
+    assert finding.triggering_entities == [sensor]
+    assert finding.evidence["added"] == 2
+    assert finding.evidence["count"] == 5
+    assert finding.evidence["previous_count"] == 3
+    assert (
+        "2 new port mappings were opened through UPnP since the last check "
+        "(5 mappings open in total)."
+    ) in finding.evidence["summary"]
+    single = _only(
+        rule.evaluate(
+            _snapshot(
+                posture={"upnp_port_mappings_added": 1, "upnp_port_mapping_count": 1}
+            )
+        )
+    )
+    assert "1 new port mapping was opened" in single.evidence["summary"]
+    assert "(1 mapping open in total)" in single.evidence["summary"]
+    assert rule.evaluate(_snapshot(posture={"upnp_port_mappings_added": 0})) == []
+    assert rule.evaluate(_snapshot(posture={"upnp_port_mappings_added": True})) == []
 
 
 def test_sensitive_exposed_pin_does_not_cover_other_pipeline_agents() -> None:

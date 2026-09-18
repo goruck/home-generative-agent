@@ -505,6 +505,140 @@ async def test_suppressed_auth_change_is_held_back_and_refires(
     assert commits[-1]["hold_back"] is None
 
 
+@pytest.mark.asyncio
+async def test_posture_memory_feeds_the_next_run_and_survives_a_missing_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The engine remembers the UPnP posture keys between runs, in process only."""
+    snapshot = _snapshot()
+    posture = cast("dict[str, Any]", snapshot.get("network", {}).get("posture"))
+    posture.update({"public_ip_key": "aaaa0000", "upnp_port_mapping_count": 2})
+    engine, contexts = _engine(monkeypatch, snapshot)
+    await engine._timed_run()
+    assert contexts[0].previous_posture is None
+    await engine._timed_run()
+    assert contexts[1].previous_posture == {
+        "public_ip_key": "aaaa0000",
+        "upnp_port_mapping_count": 2,
+    }
+    # A value the snapshot no longer carries (sensor unavailable) is kept.
+    posture.pop("upnp_port_mapping_count")
+    posture["public_ip_key"] = "bbbb0000"
+    await engine._timed_run()
+    await engine._timed_run()
+    assert contexts[3].previous_posture == {
+        "public_ip_key": "bbbb0000",
+        "upnp_port_mapping_count": 2,
+    }
+
+
+@pytest.mark.asyncio
+async def test_undelivered_public_ip_change_keeps_the_previous_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A change alert stopped by a cooldown is compared against again next run."""
+    from datetime import timedelta as _td  # noqa: PLC0415
+
+    from custom_components.home_generative_agent.snapshot.network import (  # noqa: PLC0415
+        posture_cap,
+    )
+
+    snapshot = _snapshot()
+    network = cast("dict[str, Any]", snapshot.get("network"))
+    network["capabilities"] = [posture_cap("public_ip_changed")]
+    posture = cast("dict[str, Any]", network["posture"])
+    posture.update(
+        {
+            "public_ip_changed": True,
+            "public_ip_key": "bbbb0000",
+            "public_ip_previous_key": "aaaa0000",
+            "public_ip_entity_id": "sensor.gw_ip",
+        }
+    )
+    engine, contexts = _engine(
+        monkeypatch, snapshot, options={"sentinel_cooldown_minutes": 60}
+    )
+    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+    await engine._timed_run()
+    assert [f.type for f in notifier.calls] == ["network_public_ip_changed"]
+    # Delivered: the new key is remembered.
+    await engine._timed_run()
+    remembered = {"public_ip_key": "bbbb0000", "public_ip_entity_id": "sensor.gw_ip"}
+    assert contexts[1].previous_posture == remembered
+    # Second change inside the type cooldown: produced, not delivered, so the
+    # remembered key stays and the change is re-detected on a later run.
+    posture["public_ip_key"] = "cccc0000"
+    await engine._timed_run()
+    assert len(notifier.calls) == 1
+    await engine._timed_run()
+    assert contexts[3].previous_posture == remembered
+    # A snooze settles it: the user chose not to hear it, so it is baselined.
+    state = cast("Any", engine)._suppression.state
+    state.snoozed_until["network_public_ip_changed"] = {
+        "until": (NOW + _td(days=365)).isoformat()
+    }
+    await engine._timed_run()
+    await engine._timed_run()
+    assert contexts[5].previous_posture == {**remembered, "public_ip_key": "cccc0000"}
+
+
+@pytest.mark.asyncio
+async def test_posture_memory_survives_a_restart_through_the_inventory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A new engine over the same inventory store starts with the last baseline."""
+    inventory = _memory_inventory()
+    snapshot = _snapshot()
+    posture = cast("dict[str, Any]", snapshot.get("network", {}).get("posture"))
+    posture.update({"public_ip_key": "aaaa0000", "public_ip_entity_id": "sensor.gw_ip"})
+    engine, _ = _engine(monkeypatch, snapshot, network_inventory=inventory)
+    await engine._timed_run()
+    assert inventory.posture_memory == {
+        "public_ip_key": "aaaa0000",
+        "public_ip_entity_id": "sensor.gw_ip",
+    }
+    restarted, contexts = _engine(monkeypatch, snapshot, network_inventory=inventory)
+    await restarted._timed_run()
+    assert contexts[0].previous_posture == inventory.posture_memory
+
+
+@pytest.mark.asyncio
+async def test_undelivered_port_mapping_increase_keeps_count_and_entity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The count and the entity it came from are held back together."""
+    from custom_components.home_generative_agent.snapshot.network import (  # noqa: PLC0415
+        posture_cap,
+    )
+
+    snapshot = _snapshot()
+    network = cast("dict[str, Any]", snapshot.get("network"))
+    network["capabilities"] = [posture_cap("upnp_port_mappings_added")]
+    posture = cast("dict[str, Any]", network["posture"])
+    posture.update(
+        {
+            "upnp_port_mappings_added": 1,
+            "upnp_port_mapping_count": 4,
+            "upnp_port_mapping_entity_id": "sensor.gw_pm",
+        }
+    )
+    engine, contexts = _engine(
+        monkeypatch, snapshot, options={"sentinel_cooldown_minutes": 60}
+    )
+    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+    await engine._timed_run()
+    assert [f.type for f in notifier.calls] == ["network_upnp_port_mapping_added"]
+    posture["upnp_port_mapping_count"] = 5
+    posture["upnp_port_mapping_entity_id"] = "sensor.gw2_pm"
+    await engine._timed_run()  # inside the cooldown: held
+    assert len(notifier.calls) == 1
+    await engine._timed_run()
+    assert contexts[2].previous_posture == {
+        "upnp_port_mapping_count": 4,
+        "upnp_port_mapping_entity_id": "sensor.gw_pm",
+    }
+
+
 def test_correlator_keeps_posture_findings_out_of_compounds() -> None:
     """A posture finding on lock.front never swallows a live event on lock.front."""
     from custom_components.home_generative_agent.sentinel.correlator import (  # noqa: PLC0415

@@ -7,6 +7,15 @@ their own. See [RELEASING.md](RELEASING.md).
 
 ## [Unreleased]
 
+### Added
+
+- The Home Assistant security audit now reads the router's UPnP posture, the first router-class adapter of the [network security plan](docs/network-security-plan.md) (step 7). No router integration is needed: Home Assistant already listens for UPnP gateway announcements on every install, and that announcement is the proof. Three new Sentinel rules:
+  - `network_upnp_enabled` (medium, once a day) reports a router that advertises UPnP, which lets any device on the LAN open ports to the internet unasked unless the router restricts it. Evidence is the SSDP discovery cache, a set-up [UPnP/IGD integration](https://www.home-assistant.io/integrations/upnp) with live entities, or (only when the cache cannot be read) a pending UPnP/IGD discovery; when none is seen the check is listed as not run rather than read as "UPnP is off", since Home Assistant may be on another network segment.
+  - `network_public_ip_changed` (low) notes when the home's public IP address changed since the previous run, for anyone who relies on dynamic DNS, a VPN endpoint, or a port forward by address. Needs the UPnP/IGD integration. The address is pseudonymized before it enters the snapshot.
+  - `network_upnp_port_mapping_added` (medium) reports that the router has more UPnP port mappings open than on the previous run, meaning a device asked to be reachable from the internet. Needs the UPnP/IGD integration's port-mapping count sensor, which is disabled by default; the audit names the sensor to enable.
+- The two change checks compare against the previous run's values, which are kept in the Sentinel device inventory file together with the sensor they were read from, so a change across a Home Assistant restart is still seen and a value from one gateway is never compared with another's. A change whose alert a cooldown or quiet hours held back is reported once the alert can go out.
+- Sentinel persistent notifications for the Home Assistant & network security family now escape Markdown in their text, so a device name advertised on the LAN that is shaped like a link or HTML renders as plain text in the Home Assistant UI. Mobile pushes were already plain text.
+
 ### Changed
 
 - Releases now bundle several changes instead of following every merge, so updates arrive on a

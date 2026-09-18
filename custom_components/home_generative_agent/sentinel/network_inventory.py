@@ -46,7 +46,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
     from datetime import datetime
 
     from homeassistant.core import HomeAssistant
@@ -98,7 +98,16 @@ class BootstrapSummary:
 
 
 def _empty_data() -> dict[str, Any]:
-    return {"sources": {}, "devices": {}}
+    return {"sources": {}, "devices": {}, "posture": {}}
+
+
+def _valid_posture(raw: Any) -> dict[str, str | int]:
+    """Keep only the scalar posture values the change rules compare against."""
+    return {
+        str(k): v
+        for k, v in _valid_mapping(raw).items()
+        if isinstance(v, (str, int)) and not isinstance(v, bool)
+    }
 
 
 def _valid_mapping(raw: Any) -> dict[str, Any]:
@@ -142,7 +151,11 @@ class NetworkInventory:
             for key, value in _valid_mapping(data.get("devices")).items()
             if isinstance(value, dict) and isinstance(value.get("source"), str)
         }
-        self._data = {"sources": sources, "devices": devices}
+        self._data = {
+            "sources": sources,
+            "devices": devices,
+            "posture": _valid_posture(data.get("posture")),
+        }
 
     async def async_save(self) -> bool:
         """Persist the inventory; return False when the write failed."""
@@ -202,6 +215,32 @@ class NetworkInventory:
             "by_source": dict(sorted(by_source.items())),
             "sources": dict(sorted(self._data["sources"].items())),
         }
+
+    @property
+    def posture_memory(self) -> dict[str, str | int]:
+        """
+        Posture values remembered from the last run (see ``snapshot/upnp.py``).
+
+        The pseudonymized public IP, the UPnP port-mapping count, and the
+        sensors they were read from: what the change rules compare against.
+        Persisted so a change across a Home Assistant restart is still seen.
+        """
+        return dict(self._data["posture"])
+
+    async def async_set_posture_memory(self, values: Mapping[str, Any]) -> bool:
+        """
+        Replace the remembered posture; save only when it changed.
+
+        Returns False when the write failed; memory is ahead of disk and the
+        next call retries even if nothing changed.
+        """
+        cleaned = _valid_posture(values)
+        if cleaned == self._data["posture"] and not self._dirty:
+            return True
+        self._data["posture"] = cleaned
+        saved = await self.async_save()
+        self._dirty = not saved
+        return saved
 
     def list_devices(self) -> list[dict[str, Any]]:
         """Return every row with its key, ordered by source then name."""

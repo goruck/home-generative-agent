@@ -38,12 +38,14 @@ _SEVERITY_ORDER: dict[str, int] = {"high": 0, "medium": 1, "low": 2}
 PRIVACY_NOTES: tuple[str, ...] = (
     (
         "Every fact comes from Home Assistant itself (its auth store, registries, "
-        "config flows, Supervisor, runtime settings, and the Zigbee, Z-Wave, and "
-        "Bluetooth integrations); nothing scanned the network."
+        "config flows, Supervisor, runtime settings, its SSDP discovery cache, "
+        "and the Zigbee, Z-Wave, Bluetooth, and UPnP/IGD integrations); nothing "
+        "scanned the network."
     ),
     (
-        "Checks that need a router or DNS integration are not part of this version "
-        "and are listed as not run rather than assumed to pass."
+        "Checks that need a router or DNS integration other than UPnP/IGD are not "
+        "part of this version and are listed as not run rather than assumed to "
+        "pass."
     ),
     (
         "Radio checks cover configuration only. Attacks on the radio itself (key "
@@ -125,6 +127,28 @@ _CAPABILITY_REASONS: tuple[tuple[str, str], ...] = (
         (
             "Home Assistant did not return the radio device list; the log names "
             "the read that failed"
+        ),
+    ),
+    (
+        posture_cap("upnp_enabled"),
+        (
+            "no UPnP gateway has announced itself to Home Assistant's SSDP discovery "
+            "and no UPnP/IGD integration is answering; UPnP is off on the router, "
+            "or Home Assistant cannot see the router's network segment"
+        ),
+    ),
+    (
+        posture_cap("upnp_port_mappings_added"),
+        (
+            "needs the UPnP/IGD integration's port-mapping count sensor (disabled "
+            "by default) and a previous Sentinel run to compare with"
+        ),
+    ),
+    (
+        posture_cap("public_ip_changed"),
+        (
+            "needs the UPnP/IGD integration's external IP sensor and a previous "
+            "Sentinel run to compare with"
         ),
     ),
     (

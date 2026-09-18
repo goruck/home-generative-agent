@@ -208,13 +208,59 @@ async def test_reset_forgets_everything(hass: HomeAssistant) -> None:
 
 
 @pytest.mark.asyncio
+async def test_posture_memory_round_trips_and_saves_only_on_change(
+    hass: HomeAssistant, hass_storage: dict[str, Any]
+) -> None:
+    """The change rules' baseline survives a restart; non-scalars are dropped."""
+    inventory = NetworkInventory(hass)
+    assert inventory.posture_memory == {}
+    memory = {
+        "public_ip_key": "abcd1234",
+        "public_ip_entity_id": "sensor.gw_ip",
+        "upnp_port_mapping_count": 3,
+        "upnp_port_mapping_entity_id": "sensor.gw_pm",
+        "junk": ["not", "scalar"],
+        "flag": True,
+    }
+    assert await inventory.async_set_posture_memory(memory) is True
+    expected = {k: v for k, v in memory.items() if k not in {"junk", "flag"}}
+    assert inventory.posture_memory == expected
+    assert hass_storage[STORE_KEY]["data"]["posture"] == expected
+    reloaded = NetworkInventory(hass)
+    await reloaded.async_load()
+    assert reloaded.posture_memory == expected
+    # An unchanged memory does not rewrite the file.
+    with patch.object(inventory, "async_save", AsyncMock(return_value=True)) as save:
+        assert await inventory.async_set_posture_memory(expected) is True
+    save.assert_not_called()
+    # A failed write is retried on the next call even if nothing changed.
+    with patch.object(inventory, "async_save", AsyncMock(return_value=False)):
+        assert (
+            await inventory.async_set_posture_memory(
+                {**expected, "upnp_port_mapping_count": 4}
+            )
+            is False
+        )
+    with patch.object(inventory, "async_save", AsyncMock(return_value=True)) as save:
+        assert (
+            await inventory.async_set_posture_memory(
+                {**expected, "upnp_port_mapping_count": 4}
+            )
+            is True
+        )
+    save.assert_called_once()
+    await inventory.async_reset()
+    assert inventory.posture_memory == {}
+
+
+@pytest.mark.asyncio
 async def test_persisted_json_holds_no_radio_addresses(
     hass: HomeAssistant, hass_storage: dict[str, Any]
 ) -> None:
     inventory = NetworkInventory(hass)
     await inventory.async_commit([_device("dev123")], NOW)
     data = hass_storage[STORE_KEY]["data"]
-    assert set(data) == {"sources", "devices"}
+    assert set(data) == {"sources", "devices", "posture"}
     (row,) = data["devices"].values()
     # Exactly the documented, address-free fields.
     assert set(row) == {

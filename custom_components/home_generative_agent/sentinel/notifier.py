@@ -784,6 +784,9 @@ _KNOWN_TYPE_LABEL_KEYS = {
         "type_network_unconfigured_discovered_device"
     ),
     "network_router_update_pending": "type_network_router_update_pending",
+    "network_upnp_enabled": "type_network_upnp_enabled",
+    "network_public_ip_changed": "type_network_public_ip_changed",
+    "network_upnp_port_mapping_added": "type_network_upnp_port_mapping_added",
     "radio_new_device_joined": "type_radio_new_device_joined",
     "zwave_insecure_security_class": "type_zwave_insecure_security_class",
     "zigbee_permit_join_open": "type_zigbee_permit_join_open",
@@ -1192,6 +1195,19 @@ _SECURITY_MESSAGE_TYPES = frozenset(
 _SECURITY_MESSAGE_TEMPLATE_IDS = frozenset({"alarm_disarmed_open_entry"})
 
 
+# Characters that start Markdown links, images, emphasis, code, raw HTML, or
+# tables. Persistent notifications render Markdown, and parts of a network
+# summary come from the LAN (SSDP friendly names, mDNS titles) or from
+# third-party add-on repositories, so a name shaped like a link must read as
+# text there. Mobile pushes are plain text and stay unescaped.
+_MARKDOWN_ESCAPE_RE = re.compile(r"([\\`*_\[\]<>~|])")
+
+
+def escape_markdown(text: str) -> str:
+    """Return *text* with Markdown syntax characters backslash-escaped."""
+    return _MARKDOWN_ESCAPE_RE.sub(r"\\\1", text)
+
+
 def _network_summary(finding: AnomalyFinding) -> str | None:
     """
     Return the pre-rendered summary of a network / HA-security finding.
@@ -1329,7 +1345,7 @@ def _persistent_message(
     # the summary names the token, port, or account, and a paraphrase built
     # from attacker-influenced evidence could drop or reshape it.
     if (summary := _network_summary(finding)) is not None:
-        return summary
+        return escape_markdown(summary)
     if explanation:
         text = _normalize_text(explanation)
         if text:
