@@ -75,6 +75,7 @@ from ..core.utils import extract_final, verify_pin  # noqa: TID252
 from ..sentinel.network_audit import (  # noqa: TID252
     summarize as summarize_network_audit,
 )
+from ..sentinel.redaction import redact_network_identifiers  # noqa: TID252
 from .automation_pin import find_critical_automation_calls
 from .camera_activity import get_camera_last_events_from_states
 from .helpers import (
@@ -1611,6 +1612,12 @@ async def audit_home_security(
     if report["status"] != "ok":
         # The engine owns the wording for both "disabled" and "unavailable".
         return "The security audit could not run: " + "; ".join(report["notes"])
+    # Summaries and notes carry text from the LAN (gateway names, discovery
+    # titles) and, once a router adapter lands, client addresses: strip
+    # every MAC, IP, and hostname before the conversation model sees them.
+    # Redaction runs before clipping so a cut cannot leave an address
+    # fragment the patterns no longer recognise.
+    report = redact_network_identifiers(report)
     payload: dict[str, Any] = {
         "generated_at": report["generated_at"],
         "summary": summarize_network_audit(report),

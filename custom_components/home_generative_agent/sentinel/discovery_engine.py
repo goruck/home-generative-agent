@@ -47,6 +47,7 @@ from .discovery_semantic import (
 )
 from .evidence_paths import is_derived_path
 from .logging_utils import RepeatingLogLimiter
+from .redaction import redact_network_identifiers
 from .rules.network_common import NETWORK_RULE_TYPES
 
 if TYPE_CHECKING:
@@ -395,7 +396,11 @@ class SentinelDiscoveryEngine:
             ready_ids = await self._baseline_updater.async_fetch_ready_entity_ids()
             snapshot["derived"]["baseline_ready_entities"] = ready_ids
 
-        reduced_snapshot = reduce_snapshot_for_discovery(snapshot)
+        # The reducer keeps no network section today; the gate holds once the
+        # plan's discovery templates add one (network-security-plan.md).
+        reduced_snapshot = redact_network_identifiers(
+            reduce_snapshot_for_discovery(snapshot)
+        )
         compact_snapshot = json.dumps(
             reduced_snapshot, default=str, separators=(",", ":")
         )
@@ -485,11 +490,17 @@ class SentinelDiscoveryEngine:
         unmonitored_json = json.dumps(unmonitored, separators=(",", ":"))
 
         now = dt_util.utcnow().isoformat()
-        prompt = USER_PROMPT_TEMPLATE.format(
-            snapshot=compact_snapshot,
-            active_rule_ids=json.dumps(sorted(active_rule_ids), separators=(",", ":")),
-            existing_semantic_keys=json.dumps(capped_keys, separators=(",", ":")),
-            unmonitored_baseline_entities=unmonitored_json,
+        # Rule ids and stored semantic keys join the prompt after the
+        # snapshot, so the rendered prompt passes the gate as a whole.
+        prompt = redact_network_identifiers(
+            USER_PROMPT_TEMPLATE.format(
+                snapshot=compact_snapshot,
+                active_rule_ids=json.dumps(
+                    sorted(active_rule_ids), separators=(",", ":")
+                ),
+                existing_semantic_keys=json.dumps(capped_keys, separators=(",", ":")),
+                unmonitored_baseline_entities=unmonitored_json,
+            )
         )
         messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
 

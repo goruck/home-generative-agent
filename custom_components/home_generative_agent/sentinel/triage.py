@@ -48,6 +48,9 @@ from custom_components.home_generative_agent.sentinel.models import (
     enrolled_people,
     has_unknown_person,
 )
+from custom_components.home_generative_agent.sentinel.redaction import (
+    redact_network_identifiers,
+)
 
 if TYPE_CHECKING:
     from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
@@ -284,7 +287,7 @@ def _build_prompt(
     if evidence_items:
         evidence_block = "\n  evidence:\n    " + "\n    ".join(evidence_items)
 
-    return _USER_PROMPT_TEMPLATE.format(
+    prompt = _USER_PROMPT_TEMPLATE.format(
         type=finding.type,
         severity=finding.severity,
         confidence=finding.confidence,
@@ -293,6 +296,9 @@ def _build_prompt(
         suggested_actions_count=suggested_actions_count,
         evidence_block=evidence_block,
     )
+    # The allowlist admits no identifier today; the gate keeps that true if
+    # it ever grows (docs/network-security-plan.md, Privacy of the Audit).
+    return redact_network_identifiers(prompt)
 
 
 # ---------------------------------------------------------------------------

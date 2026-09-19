@@ -16,6 +16,9 @@ from custom_components.home_generative_agent.core.utils import (
     run_sentinel_model_call,
 )
 from custom_components.home_generative_agent.sentinel.models import enrolled_people
+from custom_components.home_generative_agent.sentinel.redaction import (
+    redact_network_identifiers,
+)
 
 from .prompts import LANGUAGE_INSTRUCTION_TEMPLATE, SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
 
@@ -49,7 +52,9 @@ class LLMExplainer:
         if self._model is None:
             return None
 
-        evidence = finding.evidence
+        # No MAC, IP, or hostname reaches the model, whichever rule built the
+        # evidence (docs/network-security-plan.md, Privacy of the Audit).
+        evidence = redact_network_identifiers(finding.evidence)
         if self._response_language and finding.is_sensitive:
             # Deterministic privacy boundary for translated explanations:
             # notifier._redact_if_sensitive matches recognized_people names
@@ -65,11 +70,17 @@ class LLMExplainer:
             # any inflection; the prompt's nominative instruction remains
             # only as defense in depth.
             evidence = _redact_person_names(evidence)
-        prompt = USER_PROMPT_TEMPLATE.format(
-            anomaly_type=_display_type(finding),
-            severity=finding.severity,
-            evidence=_relativize_timestamps(evidence),
-            suggested_actions=finding.suggested_actions,
+        # Suggested actions and the type label are rendered from outside the
+        # evidence, so the rendered prompt passes the gate as well; the
+        # network tokens cannot collide with template text the way a short
+        # person name can, which is why this one may run post-render.
+        prompt = redact_network_identifiers(
+            USER_PROMPT_TEMPLATE.format(
+                anomaly_type=_display_type(finding),
+                severity=finding.severity,
+                evidence=_relativize_timestamps(evidence),
+                suggested_actions=finding.suggested_actions,
+            )
         )
         system_prompt = SYSTEM_PROMPT
         if self._response_language:
