@@ -53,6 +53,7 @@ NETWORK_RULE_TYPES: frozenset[str] = frozenset(
         "network_public_ip_changed",
         "network_upnp_port_mapping_added",
         "radio_new_device_joined",
+        "network_unknown_device_joined",
         "zwave_insecure_security_class",
         "zigbee_permit_join_open",
         "zwave_inclusion_active",
@@ -78,6 +79,18 @@ def posture(snapshot: FullStateSnapshot) -> dict[str, Any]:
     """Return the ``posture`` mapping (empty when absent)."""
     section = network_section(snapshot)
     return dict(section.get("posture", {})) if section else {}
+
+
+def clients(snapshot: FullStateSnapshot) -> list[dict[str, Any]]:
+    """Return the router client list (empty when absent)."""
+    section = network_section(snapshot)
+    return [dict(c) for c in (section.get("clients") or [])] if section else []
+
+
+def new_clients(snapshot: FullStateSnapshot) -> set[str]:
+    """Return the client keys the device inventory did not know before this run."""
+    section = network_section(snapshot)
+    return set(section.get("new_clients") or []) if section else set()
 
 
 def radio(snapshot: FullStateSnapshot) -> dict[str, Any]:

@@ -310,6 +310,33 @@ def _previous_value(
     return previous.get(value_key)
 
 
+def public_ip_posture(
+    context: NetworkBuildContext, entity_id: str, ip: str
+) -> dict[str, Any]:
+    """
+    Return the public-IP posture keys for *ip* read from *entity_id*.
+
+    Shared by every adapter with a public-IP sensor (UPnP/IGD, eero): the
+    pseudonymized key, the entity it came from, and, when the engine's memory
+    holds a value read from the same entity, whether it changed.
+    """
+    if context.pseudonymizer is None:
+        return {}
+    previous: Mapping[str, Any] = context.previous_posture or {}
+    key = context.pseudonymizer.ip_key(ip)
+    posture: dict[str, Any] = {
+        "public_ip_key": key,
+        "public_ip_entity_id": entity_id,
+    }
+    previous_key = _previous_value(
+        previous, "public_ip_key", "public_ip_entity_id", entity_id
+    )
+    if isinstance(previous_key, str) and previous_key:
+        posture["public_ip_changed"] = key != previous_key
+        posture["public_ip_previous_key"] = previous_key
+    return posture
+
+
 def upnp_igd_adapter(
     inputs: UpnpInputs,
     entities: Sequence[SnapshotEntity],
@@ -332,16 +359,7 @@ def upnp_igd_adapter(
     ip_sensor = _live_sensor(inputs, by_id, SENSOR_KEY_EXTERNAL_IP)
     ip = public_ip_value(ip_sensor[1]) if ip_sensor else None
     if ip_sensor is not None and ip is not None and context.pseudonymizer is not None:
-        entity_id = ip_sensor[0]
-        key = context.pseudonymizer.ip_key(ip)
-        posture["public_ip_key"] = key
-        posture["public_ip_entity_id"] = entity_id
-        previous_key = _previous_value(
-            previous, "public_ip_key", "public_ip_entity_id", entity_id
-        )
-        if isinstance(previous_key, str) and previous_key:
-            posture["public_ip_changed"] = key != previous_key
-            posture["public_ip_previous_key"] = previous_key
+        posture.update(public_ip_posture(context, ip_sensor[0], ip))
 
     count_sensor = _live_sensor(inputs, by_id, SENSOR_KEY_PORT_MAPPINGS)
     count = port_mapping_count(count_sensor[1]) if count_sensor else None

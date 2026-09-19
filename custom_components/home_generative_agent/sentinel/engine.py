@@ -40,6 +40,7 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT,
     CONF_SENTINEL_NETWORK_ENABLED,
     CONF_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN,
+    CONF_SENTINEL_NETWORK_UNKNOWN_DEVICE_GRACE_MIN,
     CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
     CONF_SENTINEL_PRESENCE_GRACE_MINUTES,
     CONF_SENTINEL_QUIET_HOURS_END,
@@ -60,6 +61,7 @@ from custom_components.home_generative_agent.const import (
     RECOMMENDED_SENTINEL_HA_TOKEN_STALE_DAYS,
     RECOMMENDED_SENTINEL_NETWORK_ENABLED,
     RECOMMENDED_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN,
+    RECOMMENDED_SENTINEL_NETWORK_UNKNOWN_DEVICE_GRACE_MIN,
     RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
     RECOMMENDED_SENTINEL_PRESENCE_GRACE_MINUTES,
     RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES,
@@ -77,6 +79,7 @@ from custom_components.home_generative_agent.snapshot.builder import (
     async_build_full_state_snapshot,
 )
 from custom_components.home_generative_agent.snapshot.network import (
+    CAP_CLIENTS,
     NetworkBuildContext,
     async_collect_auth_observation,
     radio_cap,
@@ -99,7 +102,12 @@ from .lock_enrichment import async_enrich_lock_last_changed
 from .logging_utils import RepeatingLogLimiter
 from .models import AnomalyFinding, CompoundFinding
 from .network_audit import NetworkAuditReport, build_report, empty_report
-from .network_inventory import SOURCE_LABELS
+from .network_inventory import (
+    ROUTER_SOURCE,
+    SOURCE_LABELS,
+    client_key,
+    client_observation,
+)
 from .notifier import is_security_copy
 from .power_enrichment import async_enrich_power_last_changed
 from .rules.alarm_disarmed_external_threat import AlarmDisarmedDuringExternalThreatRule
@@ -124,6 +132,7 @@ from .rules.network_router_update_pending import NetworkRouterUpdatePendingRule
 from .rules.network_unconfigured_discovered_device import (
     NetworkUnconfiguredDiscoveredDeviceRule,
 )
+from .rules.network_unknown_device_joined import NetworkUnknownDeviceJoinedRule
 from .rules.network_upnp_enabled import NetworkUpnpEnabledRule
 from .rules.network_upnp_port_mapping_added import NetworkUpnpPortMappingAddedRule
 from .rules.open_entry_while_away import OpenEntryWhileAwayRule
@@ -157,7 +166,7 @@ from .triage import TRIAGE_SUPPRESS, SentinelTriageService
 from .trigger_scheduler import SentinelTriggerScheduler, TriggerRecord
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable, Iterable, Mapping
 
     from homeassistant.core import Event, EventStateChangedData, HomeAssistant, State
 
@@ -439,6 +448,13 @@ class SentinelEngine:
                 NetworkPublicIpChangedRule(),
                 NetworkUpnpPortMappingAddedRule(),
                 RadioNewDeviceJoinedRule(),
+                NetworkUnknownDeviceJoinedRule(
+                    grace_minutes=_coerce_int(
+                        options.get(CONF_SENTINEL_NETWORK_UNKNOWN_DEVICE_GRACE_MIN),
+                        default=RECOMMENDED_SENTINEL_NETWORK_UNKNOWN_DEVICE_GRACE_MIN,
+                    ),
+                    is_entity_excluded=self._entity_excluded_for_type,
+                ),
                 ZwaveInsecureSecurityClassRule(),
                 ZigbeePermitJoinOpenRule(
                     is_entity_excluded=self._entity_excluded_for_type
@@ -910,35 +926,46 @@ class SentinelEngine:
         now: datetime,
         *,
         new_device_alert_settled: bool = False,
+        settled_client_keys: Iterable[str] = (),
     ) -> None:
         """
-        Record this run's radio devices; announce each source's bootstrap once.
+        Record this run's radio devices and router clients; announce bootstraps.
 
-        Runs after dispatch, like the auth inventory: the new-device rule
-        compared against the inventory as it stood before the run. New devices
-        are recorded either way; their alert is marked settled only when it
-        was delivered or stopped for good, so a cooldown or quiet hours only
-        postpone it. Nothing is committed unless the snapshot actually read
-        the device registry: an empty list from a failed read would delete
-        every row. A failure here must not end the run loop.
+        Runs after dispatch, like the auth inventory: the new-device rules
+        compared against the inventory as it stood before the run. New
+        devices are recorded either way; their alert is marked settled only
+        when it was delivered or stopped for good, so a cooldown or quiet
+        hours only postpone it. Only sources the snapshot actually read are
+        committed: an empty list from a failed registry read would delete
+        every row of that source, and the inventory reconciles one source
+        without touching the others. A failure here must not end the run
+        loop.
         """
         inventory = self._network_inventory
+        if inventory is None:
+            return
         network = snapshot.get("network") or {}
+        capabilities = set(network.get("capabilities", []))
         radio = network.get("radio")
-        if (
-            inventory is None
-            or not radio
-            or radio_cap("devices") not in network.get("capabilities", [])
-        ):
+        observations: list[Mapping[str, Any]] = []
+        present: list[str] = []
+        settled: list[str] = []
+        if radio and radio_cap("devices") in capabilities:
+            observations.extend(radio["devices"])
+            present.extend(radio.get("present_sources") or [])
+            if new_device_alert_settled:
+                settled.extend(radio.get("new_devices") or [])
+        if CAP_CLIENTS in capabilities:
+            observations.extend(
+                client_observation(c) for c in network.get("clients") or []
+            )
+            present.append(ROUTER_SOURCE)
+            settled.extend(client_key(key) for key in settled_client_keys)
+        if not observations and not present:
             return
         try:
             announcements = await inventory.async_commit(
-                radio["devices"],
-                now,
-                present_sources=radio.get("present_sources") or [],
-                alerted=(
-                    radio.get("new_devices") or [] if new_device_alert_settled else []
-                ),
+                observations, now, present_sources=present, alerted=settled
             )
         except (ValueError, TypeError, KeyError, AttributeError):
             self._log_limiter.warning(
@@ -951,24 +978,40 @@ class SentinelEngine:
         )
         if not announcements:
             return
-        parts = [
-            f"{a.device_count} {SOURCE_LABELS.get(a.source, a.source)} "
-            f"device{'s' if a.device_count != 1 else ''}"
+        parts = {
+            a.source: (
+                f"{a.device_count} {SOURCE_LABELS.get(a.source, a.source)} "
+                f"device{'s' if a.device_count != 1 else ''}"
+            )
             for a in announcements
-        ]
-        LOGGER.info("Sentinel device inventory established: %s.", ", ".join(parts))
+        }
+        LOGGER.info(
+            "Sentinel device inventory established: %s.", ", ".join(parts.values())
+        )
+        radio_parts = [p for source, p in parts.items() if source != ROUTER_SOURCE]
+        sentences: list[str] = []
+        if radio_parts:
+            sentences.append(
+                "Sentinel recorded the devices already paired on your radio "
+                f"networks as known: {', '.join(radio_parts)}. From now on a newly "
+                "paired Zigbee, Z-Wave, Bluetooth, or Matter device raises an "
+                "alert. The inventory holds device registry ids and names only, "
+                "no radio addresses."
+            )
+        if ROUTER_SOURCE in parts:
+            sentences.append(
+                "Sentinel recorded the devices your router currently knows as "
+                f"trusted: {parts[ROUTER_SOURCE]}. From now on a device that "
+                "joins your network for the first time raises an alert. The "
+                "inventory holds pseudonymized keys and names only, never MAC or "
+                "IP addresses."
+            )
         await self._hass.services.async_call(
             "persistent_notification",
             "create",
             {
                 "title": "Sentinel device inventory established",
-                "message": (
-                    "Sentinel recorded the devices already paired on your radio "
-                    f"networks as known: {', '.join(parts)}. From now on a newly "
-                    "paired Zigbee, Z-Wave, Bluetooth, or Matter device raises an "
-                    "alert. The inventory holds device registry ids and names "
-                    "only, no radio addresses."
-                ),
+                "message": " ".join(sentences),
                 "notification_id": (
                     "hga_sentinel_network_inventory_"
                     f"{'_'.join(a.source for a in announcements)}_{self._entry_id}"
@@ -1231,6 +1274,7 @@ class SentinelEngine:
         # there was none, False when suppression/triage/policy stopped it.
         auth_change_delivered: bool | None = None
         new_device_alert_settled = False
+        settled_client_keys: list[str] = []
         # Change rules over the remembered posture whose alert did not go out.
         posture_alerts_held: set[str] = set()
         if all_findings:
@@ -1263,6 +1307,20 @@ class SentinelEngine:
                     )
                 if (
                     isinstance(item, AnomalyFinding)
+                    and item.type == NetworkUnknownDeviceJoinedRule.rule_id
+                    and (
+                        delivered
+                        or self._last_dispatch_reason in _FINAL_SUPPRESSION_REASONS
+                    )
+                ):
+                    # Only the clients this finding named are settled: the
+                    # rule withholds clients inside their grace period,
+                    # disconnected, or excluded, and those stay owed.
+                    settled_client_keys.extend(
+                        str(k) for k in item.evidence.get("client_keys") or []
+                    )
+                if (
+                    isinstance(item, AnomalyFinding)
                     and item.type in _POSTURE_MEMORY_RULES
                     and not delivered
                     and self._last_dispatch_reason not in _FINAL_SUPPRESSION_REASONS
@@ -1276,7 +1334,10 @@ class SentinelEngine:
             network_context, now, auth_change_delivered=auth_change_delivered
         )
         await self._commit_network_inventory(
-            snapshot, now, new_device_alert_settled=new_device_alert_settled
+            snapshot,
+            now,
+            new_device_alert_settled=new_device_alert_settled,
+            settled_client_keys=settled_client_keys,
         )
         await self._commit_posture_memory(snapshot, held=posture_alerts_held)
 

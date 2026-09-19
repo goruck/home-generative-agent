@@ -297,45 +297,64 @@ sentinel_reset_auth_inventory:
 sentinel_get_network_inventory:
   name: Get sentinel device inventory
   description: >
-    Return the Zigbee, Z-Wave, Bluetooth, and Matter devices Sentinel knows
-    for this home, with when each was first seen and whether it is trusted.
-    The inventory holds device registry ids and names only, never radio
+    Return the Zigbee, Z-Wave, Bluetooth, and Matter devices and the router
+    clients Sentinel knows for this home, with when each was first seen and
+    whether it is trusted. The inventory holds device registry ids,
+    pseudonymized client keys, and names only, never radio, MAC, or IP
     addresses.
   fields: {}
 
 sentinel_trust_network_device:
   name: Trust sentinel inventory device
   description: >
-    Mark known radio devices as recognized. Admin only. Devices appear in the
-    inventory on the Sentinel run after they are paired.
+    Mark known devices as recognized. Admin only. Devices appear in the
+    inventory on the Sentinel run after they are paired or first seen by
+    the router. A router client with no Home Assistant device is named by
+    its inventory key (from Get sentinel device inventory).
   fields:
     device_id:
       name: Device
-      description: The devices to mark as trusted.
-      required: true
+      description: The Home Assistant devices to mark as trusted.
+      required: false
       selector:
         device:
+          multiple: true
+    device_key:
+      name: Inventory key
+      description: >
+        Inventory keys to mark as trusted, such as router:3fa2c1b0, for
+        clients that have no Home Assistant device.
+      required: false
+      selector:
+        text:
           multiple: true
 
 sentinel_untrust_network_device:
   name: Untrust sentinel inventory device
   description: >
-    Mark known radio devices as not recognized. Admin only.
+    Mark known devices as not recognized. Admin only.
   fields:
     device_id:
       name: Device
-      description: The devices to mark as untrusted.
-      required: true
+      description: The Home Assistant devices to mark as untrusted.
+      required: false
       selector:
         device:
+          multiple: true
+    device_key:
+      name: Inventory key
+      description: Inventory keys to mark as untrusted, such as router:3fa2c1b0.
+      required: false
+      selector:
+        text:
           multiple: true
 
 sentinel_reset_network_inventory:
   name: Reset sentinel device inventory
   description: >
-    Clear the inventory of paired radio devices. Admin only. The next
-    Sentinel run records every paired device as known without alerting,
-    exactly like the first run after installation.
+    Clear the inventory of paired radio devices and router clients. Admin
+    only. The next Sentinel run records every device it sees as known
+    without alerting, exactly like the first run after installation.
   fields: {}
 
 run_network_audit:

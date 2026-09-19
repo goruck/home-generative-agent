@@ -71,17 +71,25 @@ class DerivedContext(TypedDict):
 
 
 class NetworkClient(TypedDict):
-    """A client seen on the IP network by a router-class integration."""
+    """
+    A client seen on the IP network by a router-class integration.
 
-    key: str  # stable pseudonymized id (HMAC of the MAC), see snapshot/network.py
+    The raw MAC never enters the section: ``key`` is its per-install HMAC
+    (snapshot/router.py) and ``mac_randomized`` the one fact derived from it.
+    Everything a model could see is still passed through
+    ``sentinel/redaction.py`` before any prompt.
+    """
+
+    key: str  # stable pseudonymized id (HMAC of the MAC), see snapshot/router.py
     connected: bool
-    mac: NotRequired[str | None]  # raw; stripped before any LLM call
+    name: NotRequired[str | None]  # the tracker entity's name, as the user knows it
     ip: NotRequired[str | None]
     hostname: NotRequired[str | None]
     manufacturer: NotRequired[str | None]
     connection_type: NotRequired[str | None]  # "wired" | "wireless" | None
     network_name: NotRequired[str | None]
     last_seen: NotRequired[str | None]
+    first_seen: NotRequired[str | None]  # from the device inventory, once recorded
     ha_device_id: NotRequired[str | None]
     ha_integration: NotRequired[str | None]
     tracker_entity_id: NotRequired[str | None]
@@ -90,6 +98,14 @@ class NetworkClient(TypedDict):
     blocked_day: NotRequired[int | None]
     is_guest: NotRequired[bool | None]
     vlan: NotRequired[int | None]
+    # Locally administered MAC (a phone's per-network random address).
+    mac_randomized: NotRequired[bool]
+    # A trusted inventory row already carries this client's name: a rotated
+    # address on a known device, reported once at low severity.
+    hostname_trusted: NotRequired[bool]
+    # Joined a registry device that a non-router integration set up (a Shelly
+    # plug, a printer): recorded as trusted without an alert.
+    auto_trust: NotRequired[bool]
 
 
 class NetworkPosture(TypedDict, total=False):
@@ -202,6 +218,8 @@ class NetworkSnapshot(TypedDict):
     ha_security: HaSecurityPosture
     counters: dict[str, float]
     radio: NotRequired[RadioSnapshot]
+    # Client keys not known to the device inventory before this run.
+    new_clients: NotRequired[list[str]]
     # Human-readable provenance / privacy statements ("network audit disabled",
     # "Supervisor add-on data unavailable on this install type").
     notes: NotRequired[list[str]]
@@ -267,6 +285,7 @@ SNAPSHOT_SCHEMA = vol.Schema(
             vol.Required("ha_security"): dict,
             vol.Required("counters"): dict,
             vol.Optional("radio"): dict,
+            vol.Optional("new_clients"): [str],
             vol.Optional("notes"): [str],
         },
     }

@@ -114,7 +114,9 @@ _BATCH_FLUSH_DELAY_SECS = 30
 _FINDING_COOLDOWN_SECS = 1800  # 30 minutes
 
 # Findings whose primary button records their devices as trusted.
-_TRUST_DEVICE_TYPES = frozenset({"radio_new_device_joined"})
+_TRUST_DEVICE_TYPES = frozenset(
+    {"radio_new_device_joined", "network_unknown_device_joined"}
+)
 
 _SNOOZE_VERBS = frozenset(
     {
@@ -788,6 +790,7 @@ _KNOWN_TYPE_LABEL_KEYS = {
     "network_public_ip_changed": "type_network_public_ip_changed",
     "network_upnp_port_mapping_added": "type_network_upnp_port_mapping_added",
     "radio_new_device_joined": "type_radio_new_device_joined",
+    "network_unknown_device_joined": "type_network_unknown_device_joined",
     "zwave_insecure_security_class": "type_zwave_insecure_security_class",
     "zigbee_permit_join_open": "type_zigbee_permit_join_open",
     "zwave_inclusion_active": "type_zwave_inclusion_active",

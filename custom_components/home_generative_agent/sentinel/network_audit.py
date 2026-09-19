@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
 from custom_components.home_generative_agent.snapshot.network import (
     CAP_CLIENTS,
+    CAP_NEW_CLIENTS,
     ha_cap,
     posture_cap,
     radio_cap,
@@ -39,13 +40,17 @@ PRIVACY_NOTES: tuple[str, ...] = (
     (
         "Every fact comes from Home Assistant itself (its auth store, registries, "
         "config flows, Supervisor, runtime settings, its SSDP discovery cache, "
-        "and the Zigbee, Z-Wave, Bluetooth, and UPnP/IGD integrations); nothing "
-        "scanned the network."
+        "the Zigbee, Z-Wave, Bluetooth, and UPnP/IGD integrations, and the "
+        "device trackers and settings of a router integration when one is set "
+        "up); nothing scanned the network."
     ),
     (
-        "Checks that need a router or DNS integration other than UPnP/IGD are not "
-        "part of this version and are listed as not run rather than assumed to "
-        "pass."
+        "Router clients are identified by a per-install pseudonym of their MAC "
+        "address; no MAC or IP address reaches a language model, a client's "
+        "DHCP hostname is never used in a summary, and the device inventory "
+        "stores the pseudonym and the tracker's display name only. "
+        "Router settings are read from eero in this version; checks other "
+        "routers would provide are listed as not run rather than assumed to pass."
     ),
     (
         "Radio checks cover configuration only. Attacks on the radio itself (key "
@@ -152,14 +157,25 @@ _CAPABILITY_REASONS: tuple[tuple[str, str], ...] = (
         ),
     ),
     (
+        CAP_NEW_CLIENTS,
+        (
+            "needs the Sentinel device inventory to have compared this run's "
+            "router clients"
+        ),
+    ),
+    (
         CAP_CLIENTS,
-        "needs a router integration adapter, which this version does not include",
+        (
+            "needs a router integration whose device trackers report "
+            "source_type router (FRITZ!Box, UniFi, eero, ASUSWRT, Nmap, ...); "
+            "none is set up"
+        ),
     ),
     (
         posture_cap(""),
         (
-            "needs a router or DNS integration adapter, which this version does not "
-            "include"
+            "needs a router or DNS integration that exposes this setting; this "
+            "version reads it from eero, and other routers follow"
         ),
     ),
 )
