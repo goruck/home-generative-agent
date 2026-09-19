@@ -395,7 +395,13 @@ unofficial API and polls on an interval, so freshness is minutes, not seconds.
 
 Not available from eero and therefore never asserted by the adapter: per-client
 guest flag, per-client blocked flag, port forwards, DHCP reservations, band or
-SSID, device type. The entity is matched by `platform` plus the integration's
+SSID, device type. The integration registers a client's tracker only when it is
+set up or reloaded (each platform builds a static list in its setup; nothing
+adds entities for clients that join later), so a device that joins afterwards
+is invisible to the audit until the integration is reloaded; the adapter
+says so in its notes. Its Resources step also defaults to tracking no clients
+(wired and wireless filters `include` with an empty list); set both to
+`exclude` to track every client. The entity is matched by `platform` plus the integration's
 translation key or unique-id suffix, never by friendly name.
 
 #### Auth inventory store

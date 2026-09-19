@@ -30,6 +30,7 @@ from custom_components.home_generative_agent.snapshot.network import (
 from custom_components.home_generative_agent.snapshot.router import (
     COUNTER_CLIENT_COUNT,
     COUNTER_THREATS_DAY,
+    EERO_RELOAD_NOTE,
     RouterInputs,
     async_collect_router_inputs,
     eero_adapter,
@@ -513,6 +514,8 @@ def test_eero_posture_from_switches_and_sensors() -> None:
     assert posture["public_ip_entity_id"] == "sensor.eero_public_ip"
     assert "public_ip_changed" not in posture  # nothing to compare with
     assert result.counters[COUNTER_THREATS_DAY] == 17.0
+    # The audit tells the user what eero cannot show it.
+    assert EERO_RELOAD_NOTE in result.notes
 
 
 def test_eero_public_ip_change_uses_the_shared_memory() -> None:
@@ -538,6 +541,7 @@ def test_eero_absent_asserts_nothing() -> None:
     )
     assert result.posture == {}
     assert result.counters == {}
+    assert result.notes == []
 
 
 # ---------------------------------------------------------------------------

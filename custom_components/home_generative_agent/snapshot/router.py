@@ -96,6 +96,15 @@ _NON_QUALIFYING_DOMAINS: frozenset[str] = frozenset(
 _MAC_OCTETS = 6
 _OCTET_HEX_CHARS = 2
 _BARE_MAC_CHARS = 12
+# The community eero integration registers a client's tracker only when it is
+# set up or reloaded (a static list built in each platform's setup; nothing
+# adds entities for clients that join later), so the audit says so instead of
+# staying quiet about devices it cannot see. Verified on eero 1.8.1.
+EERO_RELOAD_NOTE = (
+    "The eero integration registers a device tracker for a client only when it "
+    "is set up or reloaded, so a device that joins the network later is not "
+    "seen, and not reported as new, until the integration is reloaded."
+)
 COUNTER_CLIENT_COUNT = "network.client_count"
 COUNTER_THREATS_DAY = "network.threats_day"
 
@@ -522,6 +531,7 @@ def eero_adapter(
     result = AdapterResult(name="eero")
     if not inputs.eero_present:
         return result
+    result.notes.append(EERO_RELOAD_NOTE)
     by_id = {e["entity_id"]: e for e in entities}
     posture = result.posture
     _eero_switch_posture(inputs, by_id, posture)
