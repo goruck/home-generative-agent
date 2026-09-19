@@ -75,6 +75,7 @@ from ..core.utils import extract_final, verify_pin  # noqa: TID252
 from ..sentinel.network_audit import (  # noqa: TID252
     summarize as summarize_network_audit,
 )
+from ..sentinel.redaction import redact_network_identifiers  # noqa: TID252
 from .automation_pin import find_critical_automation_calls
 from .camera_activity import get_camera_last_events_from_states
 from .helpers import (
@@ -1650,6 +1651,12 @@ async def audit_home_security(
             "trusted": inventory["trusted"],
             "untrusted": inventory["untrusted"],
         }
+    # Summaries and notes carry text from the LAN (gateway names, discovery
+    # titles) and, once a router adapter lands, client addresses: strip
+    # every MAC, IP, and hostname before the conversation model sees them.
     return yaml.dump(
-        payload, default_flow_style=False, allow_unicode=True, sort_keys=False
+        redact_network_identifiers(payload),
+        default_flow_style=False,
+        allow_unicode=True,
+        sort_keys=False,
     )

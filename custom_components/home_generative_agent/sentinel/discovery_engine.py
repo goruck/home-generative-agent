@@ -47,6 +47,7 @@ from .discovery_semantic import (
 )
 from .evidence_paths import is_derived_path
 from .logging_utils import RepeatingLogLimiter
+from .redaction import redact_network_identifiers
 from .rules.network_common import NETWORK_RULE_TYPES
 
 if TYPE_CHECKING:
@@ -395,7 +396,11 @@ class SentinelDiscoveryEngine:
             ready_ids = await self._baseline_updater.async_fetch_ready_entity_ids()
             snapshot["derived"]["baseline_ready_entities"] = ready_ids
 
-        reduced_snapshot = reduce_snapshot_for_discovery(snapshot)
+        # The reducer keeps no network section today; the gate holds once the
+        # plan's discovery templates add one (network-security-plan.md).
+        reduced_snapshot = redact_network_identifiers(
+            reduce_snapshot_for_discovery(snapshot)
+        )
         compact_snapshot = json.dumps(
             reduced_snapshot, default=str, separators=(",", ":")
         )
