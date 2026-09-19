@@ -359,6 +359,13 @@ RECOMMENDED_SENTINEL_NETWORK_ENABLED: bool = True
 # ``security_device_unavailable`` fires.
 CONF_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN = "sentinel_network_offline_device_min"
 RECOMMENDED_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN: int = 30
+# Minutes a client new to the device inventory must stay on the network
+# before ``network_unknown_device_joined`` fires: a device seen by one poll
+# and gone by the next is not reported. 0 alerts on first sight.
+CONF_SENTINEL_NETWORK_UNKNOWN_DEVICE_GRACE_MIN = (
+    "sentinel_network_unknown_device_grace_min"
+)
+RECOMMENDED_SENTINEL_NETWORK_UNKNOWN_DEVICE_GRACE_MIN: int = 5
 # Days a long-lived access token may go unused before it is reported stale.
 CONF_SENTINEL_HA_TOKEN_STALE_DAYS = "sentinel_ha_token_stale_days"  # noqa: S105
 RECOMMENDED_SENTINEL_HA_TOKEN_STALE_DAYS: int = 90

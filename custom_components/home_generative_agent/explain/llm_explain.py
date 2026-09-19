@@ -165,6 +165,7 @@ _KNOWN_TYPE_LABELS = {
     "network_public_ip_changed": "Public IP address changed",
     "network_upnp_port_mapping_added": "New UPnP port mapping",
     "radio_new_device_joined": "New radio device joined",
+    "network_unknown_device_joined": "New device on the network",
     "zwave_insecure_security_class": "Z-Wave device without S2 security",
     "zigbee_permit_join_open": "Zigbee pairing is open",
     "zwave_inclusion_active": "Z-Wave inclusion is active",

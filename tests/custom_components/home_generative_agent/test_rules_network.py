@@ -55,6 +55,9 @@ from custom_components.home_generative_agent.sentinel.rules.network_router_updat
 from custom_components.home_generative_agent.sentinel.rules.network_unconfigured_discovered_device import (
     NetworkUnconfiguredDiscoveredDeviceRule,
 )
+from custom_components.home_generative_agent.sentinel.rules.network_unknown_device_joined import (
+    NetworkUnknownDeviceJoinedRule,
+)
 from custom_components.home_generative_agent.sentinel.rules.network_upnp_enabled import (
     NetworkUpnpEnabledRule,
 )
@@ -106,6 +109,7 @@ ALL_RULES = [
     NetworkPublicIpChangedRule(),
     NetworkUpnpPortMappingAddedRule(),
     RadioNewDeviceJoinedRule(),
+    NetworkUnknownDeviceJoinedRule(),
     ZwaveInsecureSecurityClassRule(),
     ZigbeePermitJoinOpenRule(),
     ZwaveInclusionActiveRule(),

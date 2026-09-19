@@ -1,0 +1,159 @@
+"""Rule: a client the device inventory does not know joined the network."""
+
+from __future__ import annotations
+
+from datetime import timedelta
+from typing import TYPE_CHECKING
+
+from homeassistant.util import dt as dt_util
+
+from custom_components.home_generative_agent.const import (
+    RECOMMENDED_SENTINEL_NETWORK_UNKNOWN_DEVICE_GRACE_MIN,
+)
+from custom_components.home_generative_agent.sentinel.network_inventory import (
+    ROUTER_SOURCE,
+)
+from custom_components.home_generative_agent.snapshot.network import (
+    CAP_CLIENTS,
+    CAP_NEW_CLIENTS,
+)
+
+from .network_common import (
+    anyone_home,
+    clients,
+    is_night,
+    listed,
+    make_finding,
+    new_clients,
+    noun,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
+    from typing import Any
+
+    from custom_components.home_generative_agent.sentinel.models import (
+        AnomalyFinding,
+        Severity,
+    )
+    from custom_components.home_generative_agent.snapshot.schema import (
+        FullStateSnapshot,
+    )
+
+
+def describe_client(client: Mapping[str, Any]) -> str:
+    """Return ``Name (Apple, wireless, 192.168.1.23)`` for a client."""
+    name = client.get("name") or client.get("hostname") or "Unnamed device"
+    details = [
+        part
+        for part in (
+            client.get("manufacturer"),
+            client.get("connection_type"),
+            client.get("ip"),
+        )
+        if part
+    ]
+    return f"{name} ({', '.join(details)})" if details else str(name)
+
+
+class NetworkUnknownDeviceJoinedRule:
+    """
+    Clients on the router that the device inventory had not recorded.
+
+    Compares against the inventory as it stood before the run (the adapter
+    asks it which keys are new); the engine commits after dispatch and holds
+    back clients whose finding was not delivered, so a suppressed alert is
+    repeated on a later run. A client is reported only once it has stayed on
+    the network for the grace period: its inventory row's ``first_seen`` must
+    be old enough, so a device seen by one poll and gone by the next never
+    alerts (docs/network-security-plan.md, configuration). A client the
+    inventory auto-trusted (a registry device set up by a non-router
+    integration) is never new. A rotated random address on a device whose
+    name a trusted row already carries is reported once, at low severity.
+    """
+
+    rule_id = "network_unknown_device_joined"
+    requires = frozenset({CAP_CLIENTS, CAP_NEW_CLIENTS})
+    cooldown_minutes = 0
+
+    def __init__(
+        self,
+        *,
+        grace_minutes: int = RECOMMENDED_SENTINEL_NETWORK_UNKNOWN_DEVICE_GRACE_MIN,
+        is_entity_excluded: Callable[[str, str], bool] | None = None,
+    ) -> None:
+        """Initialize with the grace period and the per-rule entity exclusions."""
+        self._grace = timedelta(minutes=max(0, grace_minutes))
+        self._is_entity_excluded = is_entity_excluded
+
+    def _excluded(self, client: Mapping[str, Any]) -> bool:
+        entity_id = client.get("tracker_entity_id")
+        if not entity_id or self._is_entity_excluded is None:
+            return False
+        return self._is_entity_excluded(self.rule_id, str(entity_id))
+
+    def _past_grace(self, client: Mapping[str, Any], now: Any) -> bool:
+        if not self._grace:
+            return True
+        first_seen = dt_util.parse_datetime(str(client.get("first_seen") or ""))
+        if first_seen is None:
+            # Not recorded yet: the commit after this run records it, and
+            # the grace period runs from there.
+            return False
+        return dt_util.as_utc(now) - dt_util.as_utc(first_seen) >= self._grace
+
+    def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:
+        """Return one finding naming every new client past its grace period."""
+        keys = new_clients(snapshot)
+        if not keys:
+            return []
+        now = dt_util.parse_datetime(snapshot["generated_at"]) or dt_util.utcnow()
+        joined = [
+            c
+            for c in clients(snapshot)
+            if c.get("key") in keys
+            and c.get("connected")
+            and not self._excluded(c)
+            and self._past_grace(c, now)
+        ]
+        if not joined:
+            return []
+        away = not anyone_home(snapshot)
+        night = is_night(snapshot)
+        severity: Severity = "high" if away or night else "medium"
+        if all(c.get("hostname_trusted") for c in joined):
+            severity = "low"
+        count = len(joined)
+        head = f"New {noun(count, 'device')} on the network"
+        context = " while nobody is home" if away else (" at night" if night else "")
+        return [
+            make_finding(
+                self.rule_id,
+                severity=severity,
+                evidence={"client_keys": sorted(c["key"] for c in joined)},
+                display={
+                    # Inventory keys, so the Trust button and the trust
+                    # service resolve them without a registry device.
+                    "device_ids": sorted(f"{ROUTER_SOURCE}:{c['key']}" for c in joined),
+                    "names": [describe_client(c) for c in joined],
+                    "randomized_known": sorted(
+                        c["key"] for c in joined if c.get("hostname_trusted")
+                    ),
+                },
+                summary=(
+                    f"{head}{context}: {listed([describe_client(c) for c in joined])}."
+                ),
+                suggested_actions=[
+                    (
+                        "If you do not recognize it, block it in your router app "
+                        "and change your Wi-Fi password"
+                    ),
+                    "Tap Trust device if you recognize it",
+                ],
+                triggering_entities=sorted(
+                    str(c["tracker_entity_id"])
+                    for c in joined
+                    if c.get("tracker_entity_id")
+                ),
+            )
+        ]

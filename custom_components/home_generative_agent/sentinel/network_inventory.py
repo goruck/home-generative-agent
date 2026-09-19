@@ -37,6 +37,7 @@ Lifecycle:
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
@@ -46,23 +47,24 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping, Sequence
+    from collections.abc import Iterable, Sequence
     from datetime import datetime
 
     from homeassistant.core import HomeAssistant
-
-    from custom_components.home_generative_agent.snapshot.schema import RadioDevice
 
 LOGGER = logging.getLogger(__name__)
 
 STORE_VERSION = 1
 STORE_KEY = "home_generative_agent_sentinel_network_inventory"
 
+ROUTER_SOURCE = "router"
+
 SOURCE_LABELS: dict[str, str] = {
     "zigbee": "Zigbee",
     "zwave": "Z-Wave",
     "bluetooth": "Bluetooth",
     "matter": "Matter",
+    ROUTER_SOURCE: "network",
 }
 
 # A known device's last_seen stamp is refreshed at most this often, so a
@@ -72,9 +74,31 @@ LAST_SEEN_REFRESH = timedelta(days=1)
 _ROW_FIELDS = ("platform", "ha_device_id", "name", "manufacturer", "model")
 
 
-def device_key(device: RadioDevice) -> str:
-    """Return the inventory key of a snapshot radio device."""
+# An observation the inventory records: a snapshot ``RadioDevice`` as is, or
+# a router client through :func:`client_observation`. ``protocol`` is the
+# source, ``device_id`` the source-local identity (registry id, pseudonymized
+# MAC), ``ha_device_id`` the registry device when it differs, ``auto_trust``
+# whether the source vouches for the device (recorded trusted, no alert).
+Observation = Mapping[str, Any]
+
+
+def device_key(device: Observation) -> str:
+    """Return the inventory key of an observation (``<source>:<id>``)."""
     return f"{device['protocol']}:{device['device_id']}"
+
+
+def client_observation(client: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the inventory observation for a snapshot router client."""
+    return {
+        "protocol": ROUTER_SOURCE,
+        "device_id": client["key"],
+        "platform": client.get("ha_integration") or "device_tracker",
+        "ha_device_id": client.get("ha_device_id"),
+        "name": client.get("name") or client.get("hostname"),
+        "manufacturer": client.get("manufacturer"),
+        "model": None,
+        "auto_trust": bool(client.get("auto_trust")),
+    }
 
 
 @dataclass(frozen=True)
@@ -252,14 +276,28 @@ class NetworkInventory:
     # Diff / commit
     # ------------------------------------------------------------------ #
 
+    def row(self, key: str) -> Mapping[str, Any] | None:
+        """Return the stored row for an inventory key, or None."""
+        row = self._data["devices"].get(key)
+        return dict(row) if isinstance(row, dict) else None
+
+    def trusted_names(self, source: str) -> set[str]:
+        """Return the lower-cased names of trusted rows from *source*."""
+        return {
+            str(row["name"]).lower()
+            for row in self._data["devices"].values()
+            if row.get("source") == source and row.get("trusted") and row.get("name")
+        }
+
     def diff(
-        self, devices: Sequence[RadioDevice], present_sources: Iterable[str]
+        self, devices: Sequence[Observation], present_sources: Iterable[str]
     ) -> InventoryDelta:
         """
         Compare *devices* against the stored inventory.
 
         Pure. ``present_sources`` names sources whose integration exists even
-        when it has no devices yet, so a new stick bootstraps on its own.
+        when it has no devices yet, so a new stick bootstraps on its own. A
+        device its source vouches for (``auto_trust``) is never new.
         """
         known: dict[str, Any] = self._data["devices"]
         sources = {d["protocol"] for d in devices} | set(present_sources)
@@ -269,15 +307,15 @@ class NetworkInventory:
             for d in devices
             if self.is_source_bootstrapped(d["protocol"])
             and (
-                device_key(d) not in known
-                or known[device_key(d)].get("alerted", True) is False
+                (device_key(d) not in known and not d.get("auto_trust"))
+                or known.get(device_key(d), {}).get("alerted", True) is False
             )
         )
         return InventoryDelta(new_device_keys=new_keys, bootstrap_sources=bootstrap)
 
     async def async_commit(
         self,
-        devices: Sequence[RadioDevice],
+        devices: Sequence[Observation],
         now: datetime,
         *,
         present_sources: Iterable[str] = (),
@@ -287,9 +325,13 @@ class NetworkInventory:
         Record *devices* as the known state and persist it when changed.
 
         ``alerted`` names device keys whose pending alert is settled (delivered
-        or stopped for good). Returns the sources whose bootstrap reached disk
-        with this call (for the one-time announcement), including
-        announcements held from a failed save.
+        or stopped for good). Only the sources observed by this call (those
+        with a device in *devices* or named in ``present_sources``) are
+        reconciled: a row from a source this run did not read is kept, so a
+        radio-only commit never deletes router clients and vice versa.
+        Returns the sources whose bootstrap reached disk with this call (for
+        the one-time announcement), including announcements held from a
+        failed save.
         """
         now_iso = dt_util.as_utc(now).isoformat()
         stored_devices: dict[str, Any] = self._data["devices"]
@@ -311,7 +353,7 @@ class NetworkInventory:
             seen.add(key)
             observed = {
                 "platform": device["platform"],
-                "ha_device_id": device["device_id"],
+                "ha_device_id": device.get("ha_device_id", device["device_id"]),
                 "name": device.get("name"),
                 "manufacturer": device.get("manufacturer"),
                 "model": device.get("model"),
@@ -319,15 +361,17 @@ class NetworkInventory:
             row: dict[str, Any] | None = stored_devices.get(key)
             bootstrap_row = device["protocol"] in bootstrapped_now
             if row is None:
+                vouched = bootstrap_row or bool(device.get("auto_trust"))
                 stored_devices[key] = {
                     "source": device["protocol"],
                     **observed,
                     "first_seen": now_iso,
                     "last_seen": now_iso,
                     # Devices recorded by their source's bootstrap predate the
-                    # audit and are trusted; later ones wait for the user.
-                    "trusted": bootstrap_row,
-                    "alerted": bootstrap_row or key in settled,
+                    # audit and are trusted, as are those the source vouches
+                    # for; later ones wait for the user.
+                    "trusted": vouched,
+                    "alerted": vouched or key in settled,
                 }
                 changed = True
                 continue
@@ -346,7 +390,7 @@ class NetworkInventory:
                 changed = True
 
         for key in list(stored_devices):
-            if key not in seen:
+            if key not in seen and stored_devices[key].get("source") in present:
                 del stored_devices[key]
                 changed = True
 
