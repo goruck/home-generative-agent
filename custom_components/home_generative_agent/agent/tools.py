@@ -1612,6 +1612,12 @@ async def audit_home_security(
     if report["status"] != "ok":
         # The engine owns the wording for both "disabled" and "unavailable".
         return "The security audit could not run: " + "; ".join(report["notes"])
+    # Summaries and notes carry text from the LAN (gateway names, discovery
+    # titles) and, once a router adapter lands, client addresses: strip
+    # every MAC, IP, and hostname before the conversation model sees them.
+    # Redaction runs before clipping so a cut cannot leave an address
+    # fragment the patterns no longer recognise.
+    report = redact_network_identifiers(report)
     payload: dict[str, Any] = {
         "generated_at": report["generated_at"],
         "summary": summarize_network_audit(report),
@@ -1651,12 +1657,6 @@ async def audit_home_security(
             "trusted": inventory["trusted"],
             "untrusted": inventory["untrusted"],
         }
-    # Summaries and notes carry text from the LAN (gateway names, discovery
-    # titles) and, once a router adapter lands, client addresses: strip
-    # every MAC, IP, and hostname before the conversation model sees them.
     return yaml.dump(
-        redact_network_identifiers(payload),
-        default_flow_style=False,
-        allow_unicode=True,
-        sort_keys=False,
+        payload, default_flow_style=False, allow_unicode=True, sort_keys=False
     )

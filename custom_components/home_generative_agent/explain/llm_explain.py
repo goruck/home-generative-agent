@@ -70,11 +70,17 @@ class LLMExplainer:
             # any inflection; the prompt's nominative instruction remains
             # only as defense in depth.
             evidence = _redact_person_names(evidence)
-        prompt = USER_PROMPT_TEMPLATE.format(
-            anomaly_type=_display_type(finding),
-            severity=finding.severity,
-            evidence=_relativize_timestamps(evidence),
-            suggested_actions=finding.suggested_actions,
+        # Suggested actions and the type label are rendered from outside the
+        # evidence, so the rendered prompt passes the gate as well; the
+        # network tokens cannot collide with template text the way a short
+        # person name can, which is why this one may run post-render.
+        prompt = redact_network_identifiers(
+            USER_PROMPT_TEMPLATE.format(
+                anomaly_type=_display_type(finding),
+                severity=finding.severity,
+                evidence=_relativize_timestamps(evidence),
+                suggested_actions=finding.suggested_actions,
+            )
         )
         system_prompt = SYSTEM_PROMPT
         if self._response_language:

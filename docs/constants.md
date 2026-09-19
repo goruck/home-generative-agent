@@ -421,7 +421,8 @@ This document covers the named constants that affect integration behaviour, orga
 | `MAX_LABEL_CHARS` | `snapshot/network.py` | `64` | Cap on labels copied from untrusted sources (mDNS names, add-on titles, token client names) into evidence and notifications |
 | `ROUTER_PLATFORMS` | `snapshot/network.py` | `fritz, unifi, eero, asuswrt, tplink_omada, keenetic_ndms2, mikrotik, netgear, freebox, upnp` | Entity-registry platforms whose `update.*` entities count as router firmware |
 | `KEY_LENGTH` | `sentinel/pseudonymizer.py` | `8` | Hex characters of the HMAC-SHA256 kept as a pseudonymized identifier |
-| `MAC_REDACTED`, `LAN_IP_REDACTED`, `PUBLIC_IP_REDACTED` | `sentinel/redaction.py` | `[mac]`, `[lan ip]`, `[public ip]` | Tokens that replace MAC/Bluetooth/IEEE and IP addresses in anything rendered into a model prompt; an IP keeps only its subnet class |
+| `MAC_REDACTED`, `LAN_IP_REDACTED`, `PUBLIC_IP_REDACTED`, `HOSTNAME_REDACTED` | `sentinel/redaction.py` | `[mac]`, `[lan ip]`, `[public ip]`, `[hostname]` | Tokens that replace MAC/Bluetooth/IEEE addresses (separated or bare 12/16-hex), IP addresses (subnet class kept), and local-suffix hostnames in anything rendered into a model prompt |
+| `MAX_DEPTH` | `sentinel/redaction.py` | `64` | Nesting depth beyond which the redaction walk cuts a structure with a marker instead of recursing |
 | `IGD_SEARCH_TARGETS` | `snapshot/upnp.py` | IGD:1, IGD:2 URNs | SSDP search targets whose presence in Home Assistant's discovery cache proves the router accepts UPnP |
 | `POSTURE_MEMORY_KEYS` | `snapshot/upnp.py` | `public_ip_key, public_ip_entity_id, upnp_port_mapping_count, upnp_port_mapping_entity_id` | Posture values the Sentinel engine remembers between runs (in the device inventory file) for `network_public_ip_changed` and `network_upnp_port_mapping_added`, each with the sensor it was read from |
 

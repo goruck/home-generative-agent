@@ -490,11 +490,17 @@ class SentinelDiscoveryEngine:
         unmonitored_json = json.dumps(unmonitored, separators=(",", ":"))
 
         now = dt_util.utcnow().isoformat()
-        prompt = USER_PROMPT_TEMPLATE.format(
-            snapshot=compact_snapshot,
-            active_rule_ids=json.dumps(sorted(active_rule_ids), separators=(",", ":")),
-            existing_semantic_keys=json.dumps(capped_keys, separators=(",", ":")),
-            unmonitored_baseline_entities=unmonitored_json,
+        # Rule ids and stored semantic keys join the prompt after the
+        # snapshot, so the rendered prompt passes the gate as a whole.
+        prompt = redact_network_identifiers(
+            USER_PROMPT_TEMPLATE.format(
+                snapshot=compact_snapshot,
+                active_rule_ids=json.dumps(
+                    sorted(active_rule_ids), separators=(",", ":")
+                ),
+                existing_semantic_keys=json.dumps(capped_keys, separators=(",", ":")),
+                unmonitored_baseline_entities=unmonitored_json,
+            )
         )
         messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
 

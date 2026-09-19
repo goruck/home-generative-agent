@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import json
+from collections import namedtuple
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -13,6 +15,9 @@ import pytest
 import yaml
 
 from custom_components.home_generative_agent.agent.tools import audit_home_security
+from custom_components.home_generative_agent.const import (
+    NETWORK_AUDIT_TOOL_MAX_SUMMARY_CHARS,
+)
 from custom_components.home_generative_agent.explain.llm_explain import LLMExplainer
 from custom_components.home_generative_agent.sentinel.discovery_engine import (
     SentinelDiscoveryEngine,
@@ -21,8 +26,12 @@ from custom_components.home_generative_agent.sentinel.network_audit import (
     build_report,
 )
 from custom_components.home_generative_agent.sentinel.redaction import (
+    CYCLE_MARKER,
+    DEPTH_MARKER,
+    HOSTNAME_REDACTED,
     LAN_IP_REDACTED,
     MAC_REDACTED,
+    MAX_DEPTH,
     PUBLIC_IP_REDACTED,
     client_display_name,
     redact_network_identifiers,
@@ -97,6 +106,26 @@ def _assert_clean(text: str) -> None:
         # An EUI-64 (Zigbee IEEE) address is one token, not two halves.
         ("ieee 00:0d:6f:00:0a:bb:cc:dd", f"ieee {MAC_REDACTED}"),
         ("bt F4:5C:89:AB:CD:EF", f"bt {MAC_REDACTED}"),
+        # Punctuation on either side does not shelter the address.
+        ("seen from aa:bb:cc:dd:ee:ff.", f"seen from {MAC_REDACTED}."),
+        ("mac:aa:bb:cc:dd:ee:ff", f"m{MAC_REDACTED}"),
+        ("(aa:bb:cc:dd:ee:ff)", f"({MAC_REDACTED})"),
+        # A longer chain is nothing legitimate and goes with it.
+        ("seven aa:bb:cc:dd:ee:ff:00", f"seven {MAC_REDACTED}"),
+        # Bare addresses the way mDNS/SSDP names carry them.
+        ("shellyplug-s-3494547A1B2C", f"shellyplug-s-{MAC_REDACTED}"),
+        ("Sonos-7828CA123456", f"Sonos-{MAC_REDACTED}"),
+        ("Philips-hue-001788FFFE123456", f"Philips-hue-{MAC_REDACTED}"),
+        # Letters next to an address do not shelter it either.
+        ("host192.168.1.10", f"host{LAN_IP_REDACTED}"),
+        ("prefix_fe80::1", f"prefix_{LAN_IP_REDACTED}"),
+        # Local-suffix hostnames.
+        ("nas.local", HOSTNAME_REDACTED),
+        (
+            "printer.home.arpa and router.lan",
+            f"{HOSTNAME_REDACTED} and {HOSTNAME_REDACTED}",
+        ),
+        ("NAS.LOCAL.", f"{HOSTNAME_REDACTED}."),
     ],
 )
 def test_addresses_in_text_are_replaced_by_class(text: str, expected: str) -> None:
@@ -111,10 +140,20 @@ def test_addresses_in_text_are_replaced_by_class(text: str, expected: str) -> No
         "five groups 1.2.3.4.5",
         "entity sensor.eero_192_168_1_1",
         "clock 12:30:45",
-        "hash 3fa2c1b0aabbccdd",
-        "seven octets aa:bb:cc:dd:ee:ff:00",
+        # Pseudonymized keys are eight hex characters.
+        "key 3fa2c1b0",
+        # A bare run needs a digit and a letter: hex-only words and serial
+        # numbers are not claimed.
         "bare hex aabbccddeeff",
-        "prefixed v1.2.3.4",
+        "serial 123456789012",
+        # Entity ids keep their address run so the model can name them.
+        "sensor.shellyplug_s_3494547a1b2c_power",
+        # Hex-looking words around '::' are not addresses.
+        "cafe::babe",
+        "std::vector<int>",
+        "bare ::",
+        # A public domain is left, or a URL in a suggested action would go.
+        "https://www.home-assistant.io/integrations/upnp",
     ],
 )
 def test_lookalikes_are_left_alone(text: str) -> None:
@@ -126,6 +165,12 @@ def test_four_part_version_is_redacted_by_design() -> None:
     assert redact_network_identifiers("firmware 1.2.3.4") == (
         f"firmware {PUBLIC_IP_REDACTED}"
     )
+    assert redact_network_identifiers("v1.2.3.4") == f"v{PUBLIC_IP_REDACTED}"
+
+
+def test_sixteen_hex_run_is_read_as_an_address_by_design() -> None:
+    """A 12/16-hex run with letters and digits is claimed even if it is a hash."""
+    assert redact_network_identifiers("hash 3fa2c1b0aabbccdd") == f"hash {MAC_REDACTED}"
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +235,79 @@ def test_walk_covers_keys_containers_and_nesting() -> None:
     assert isinstance(redacted["tags"], frozenset)
 
 
+def test_hostname_replacement_is_itself_redacted() -> None:
+    """A manufacturer or key that carries an address cannot smuggle it back."""
+    value = {
+        "key": "192.168.1.10",
+        "manufacturer": "aa:bb:cc:dd:ee:ff",
+        "hostname": "h",
+    }
+    redacted = redact_network_identifiers(value)
+    assert redacted["hostname"] == f"{MAC_REDACTED} {LAN_IP_REDACTED}"
+    assert redacted["key"] == LAN_IP_REDACTED
+
+
+def test_colliding_dict_keys_are_kept_apart() -> None:
+    """Two addresses that redact to one token do not collapse to one entry."""
+    value = {"192.168.1.2": "unsafe", "192.168.1.3": "safe", "10.0.0.9": "x"}
+    assert redact_network_identifiers(value) == {
+        LAN_IP_REDACTED: "unsafe",
+        f"{LAN_IP_REDACTED} #2": "safe",
+        f"{LAN_IP_REDACTED} #3": "x",
+    }
+    # A key that was already the token is not renamed.
+    assert redact_network_identifiers({LAN_IP_REDACTED: 1}) == {LAN_IP_REDACTED: 1}
+
+
+def test_walk_is_total_over_non_json_objects() -> None:
+    """Objects the prompt would render with str() are rendered and redacted."""
+    point = namedtuple("Point", "host port")  # noqa: PYI024
+
+    @dataclass
+    class Client:
+        ip: str
+
+    class Custom(dict[str, Any]):
+        pass
+
+    value = {
+        "nt": point("192.168.1.1", 80),
+        "dc": Client("10.0.0.1"),
+        "raw": b"192.168.1.10",
+        "custom": Custom(ip="1.1.1.1", name="aa:bb:cc:dd:ee:ff"),
+        "obj": SimpleNamespace(ip="8.8.8.8"),
+    }
+    redacted = redact_network_identifiers(value)
+    assert redacted["nt"] == (LAN_IP_REDACTED, 80)
+    assert type(redacted["nt"]) is tuple
+    assert redacted["dc"].endswith(f"Client(ip='{LAN_IP_REDACTED}')")
+    assert redacted["raw"] == LAN_IP_REDACTED
+    assert redacted["custom"] == {"name": MAC_REDACTED}
+    assert type(redacted["custom"]) is dict
+    assert redacted["obj"] == f"namespace(ip='{PUBLIC_IP_REDACTED}')"
+
+
+def test_walk_survives_cycles_shared_containers_and_depth() -> None:
+    cycle: list[Any] = ["192.168.1.1"]
+    cycle.append(cycle)
+    assert redact_network_identifiers(cycle) == [LAN_IP_REDACTED, CYCLE_MARKER]
+
+    # A container shared 2**18 ways is walked once, not 262,144 times.
+    shared: Any = ("192.168.1.1",)
+    for _ in range(18):
+        shared = (shared, shared)
+    redacted = redact_network_identifiers(shared)
+    assert redacted[0] is redacted[1]
+
+    deep: Any = "10.0.0.1"
+    for _ in range(MAX_DEPTH + 5):
+        deep = [deep]
+    redacted = redact_network_identifiers(deep)
+    for _ in range(MAX_DEPTH):
+        redacted = redacted[0]
+    assert redacted == DEPTH_MARKER
+
+
 def test_redaction_never_mutates_its_input() -> None:
     client = {"key": "k", "mac": "aa:bb:cc:dd:ee:ff", "nested": ["192.168.1.1"]}
     before = json.dumps(client, sort_keys=True)
@@ -248,7 +366,7 @@ def _network_finding() -> AnomalyFinding:
         },
         display={"gateways": ["eero (8.8.8.8)"]},
         summary=RAW,
-        suggested_actions=["Trust or block the device"],
+        suggested_actions=["Block aa:bb:cc:dd:ee:ff at the router"],
         triggering_entities=["device_tracker.lindos_iphone"],
     )
 
@@ -328,7 +446,7 @@ async def test_discovery_prompt_carries_no_identifier(hass: HomeAssistant) -> No
             engine,
             "_existing_semantic_context",
             new_callable=AsyncMock,
-            return_value=(set(), set(), set()),
+            return_value=(set(), {"network_unknown_device_aa:bb:cc:dd:ee:ff"}, set()),
         ),
         patch(
             f"{engine_module}.async_build_full_state_snapshot",
@@ -354,9 +472,23 @@ async def test_discovery_prompt_carries_no_identifier(hass: HomeAssistant) -> No
 
 @pytest.mark.asyncio
 async def test_audit_tool_payload_carries_no_identifier() -> None:
+    finding = _network_finding()
+    # A summary long enough to be clipped, with an address astride the cut:
+    # redaction runs first, so no fragment of it survives.
+    long_summary = (
+        "x" * (NETWORK_AUDIT_TOOL_MAX_SUMMARY_CHARS - 6) + " 192.168.1.77 tail"
+    )
+    clipped = make_finding(
+        "network_unknown_device",
+        severity="low",
+        evidence={"count": 1},
+        summary=long_summary,
+        suggested_actions=["Look"],
+        triggering_entities=[],
+    )
     report = build_report(
         now=NOW,
-        findings=[_network_finding()],
+        findings=[finding, clipped],
         checks_run=["network_unknown_device"],
         inactive_rules={},
         capabilities=[],
@@ -376,9 +508,13 @@ async def test_audit_tool_payload_carries_no_identifier() -> None:
     text = await audit_home_security.coroutine(config=config)  # type: ignore[misc]
 
     _assert_clean(text)
+    assert "192.168.1" not in text
     payload = yaml.safe_load(text)
     assert LAN_IP_REDACTED in payload["findings"][0]["summary"]
     assert MAC_REDACTED in payload["findings"][0]["summary"]
     assert LAN_IP_REDACTED in payload["notes"][1]
+    assert (
+        len(payload["findings"][1]["summary"]) == NETWORK_AUDIT_TOOL_MAX_SUMMARY_CHARS
+    )
     # The service-side report the tool was built from is not touched.
     assert "192.168.1.1" in report["notes"][0]
