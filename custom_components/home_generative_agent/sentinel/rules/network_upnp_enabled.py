@@ -24,6 +24,7 @@ _EVIDENCE_TEXT: dict[str, str] = {
     "ssdp": "is advertising UPnP (Internet Gateway Device) on your network",
     "integration": "is answering the UPnP/IGD integration",
     "discovery_flow": "was discovered by Home Assistant as a UPnP gateway",
+    "eero": "has UPnP turned on in its settings",
 }
 
 

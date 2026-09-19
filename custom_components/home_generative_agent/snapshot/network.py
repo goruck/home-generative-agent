@@ -227,6 +227,18 @@ _POSTURE_NON_CAPABILITY_KEYS: frozenset[str] = frozenset(
     }
 )
 _ENTITY_TWIN_SUFFIX = "_entity_id"
+# Posture keys that only mean something together. When a later adapter
+# provides the group's lead key, the earlier adapter's other members are
+# dropped first, so a change flag computed against one gateway's sensor never
+# survives next to another gateway's current value.
+_POSTURE_GROUPS: dict[str, tuple[str, ...]] = {
+    "public_ip_key": (
+        "public_ip_key",
+        "public_ip_entity_id",
+        "public_ip_changed",
+        "public_ip_previous_key",
+    ),
+}
 
 
 def posture_is_capability(key: str) -> bool:
@@ -256,6 +268,11 @@ def merge_adapter_results(results: Iterable[AdapterResult]) -> NetworkSnapshot: 
     radio_posture: dict[str, Any] = {}
     radio_caps: set[str] = set()
     for result in results:
+        for lead, members in _POSTURE_GROUPS.items():
+            if lead in result.posture:
+                for member in members:
+                    posture.pop(member, None)
+                    sources.pop(posture_cap(member), None)
         for key, value in result.posture.items():
             posture[key] = value
             if posture_is_capability(key):

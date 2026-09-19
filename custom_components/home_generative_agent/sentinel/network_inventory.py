@@ -87,6 +87,20 @@ def device_key(device: Observation) -> str:
     return f"{device['protocol']}:{device['device_id']}"
 
 
+def client_key(key: str) -> str:
+    """Return the inventory key of a router client from its pseudonymized key."""
+    return f"{ROUTER_SOURCE}:{key}"
+
+
+# A router client absent from a run is kept this long before its row goes:
+# every router integration shares the ``router`` source, so one integration
+# reloading (its trackers leave the state machine for a moment) or a tracker
+# briefly without its MAC attribute must not delete rows that would then
+# come back as new devices. Radio rows follow the device registry and are
+# dropped as soon as the registry no longer has them.
+ROUTER_ROW_RETENTION = timedelta(days=30)
+
+
 def client_observation(client: Mapping[str, Any]) -> dict[str, Any]:
     """Return the inventory observation for a snapshot router client."""
     return {
@@ -119,6 +133,32 @@ class BootstrapSummary:
 
     source: str
     device_count: int
+
+
+def _prune_unseen(
+    stored_devices: dict[str, Any], seen: set[str], present: set[str], now: datetime
+) -> bool:
+    """
+    Drop rows of observed sources this run did not see; return whether any went.
+
+    A router row is kept for :data:`ROUTER_ROW_RETENTION` after it was last
+    seen, a radio row goes at once (see the constant's comment).
+    """
+    changed = False
+    for key in list(stored_devices):
+        stored = stored_devices[key]
+        if key in seen or stored.get("source") not in present:
+            continue
+        if stored.get("source") == ROUTER_SOURCE:
+            last = dt_util.parse_datetime(str(stored.get("last_seen") or ""))
+            if (
+                last is not None
+                and dt_util.as_utc(now) - dt_util.as_utc(last) < ROUTER_ROW_RETENTION
+            ):
+                continue
+        del stored_devices[key]
+        changed = True
+    return changed
 
 
 def _empty_data() -> dict[str, Any]:
@@ -306,9 +346,10 @@ class NetworkInventory:
             device_key(d)
             for d in devices
             if self.is_source_bootstrapped(d["protocol"])
+            and not d.get("auto_trust")
             and (
-                (device_key(d) not in known and not d.get("auto_trust"))
-                or known.get(device_key(d), {}).get("alerted", True) is False
+                device_key(d) not in known
+                or known[device_key(d)].get("alerted", True) is False
             )
         )
         return InventoryDelta(new_device_keys=new_keys, bootstrap_sources=bootstrap)
@@ -378,6 +419,12 @@ class NetworkInventory:
             if row.get("alerted", True) is False and key in settled:
                 row["alerted"] = True
                 changed = True
+            if device.get("auto_trust") and not row.get("trusted"):
+                # The vouching integration finished setting up after the
+                # client was first seen: recognized now, alert withdrawn.
+                row["trusted"] = True
+                row["alerted"] = True
+                changed = True
             if any(row.get(k) != observed[k] for k in _ROW_FIELDS):
                 row.update(observed)
                 changed = True
@@ -389,10 +436,7 @@ class NetworkInventory:
                 row["last_seen"] = now_iso
                 changed = True
 
-        for key in list(stored_devices):
-            if key not in seen and stored_devices[key].get("source") in present:
-                del stored_devices[key]
-                changed = True
+        changed = _prune_unseen(stored_devices, seen, present, now) or changed
 
         announcements = [
             BootstrapSummary(

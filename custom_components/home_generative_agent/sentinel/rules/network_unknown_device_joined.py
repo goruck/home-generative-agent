@@ -11,7 +11,10 @@ from custom_components.home_generative_agent.const import (
     RECOMMENDED_SENTINEL_NETWORK_UNKNOWN_DEVICE_GRACE_MIN,
 )
 from custom_components.home_generative_agent.sentinel.network_inventory import (
-    ROUTER_SOURCE,
+    client_key,
+)
+from custom_components.home_generative_agent.sentinel.redaction import (
+    client_display_name,
 )
 from custom_components.home_generative_agent.snapshot.network import (
     CAP_CLIENTS,
@@ -42,8 +45,15 @@ if TYPE_CHECKING:
 
 
 def describe_client(client: Mapping[str, Any]) -> str:
-    """Return ``Name (Apple, wireless, 192.168.1.23)`` for a client."""
-    name = client.get("name") or client.get("hostname") or "Unnamed device"
+    """
+    Return ``Name (Apple, wireless, 192.168.1.23)`` for a client.
+
+    The name is the tracker entity's, the label the user already sees in
+    Home Assistant; a client without one is named by manufacturer and key.
+    The DHCP hostname is never used here: the summary reaches the audit
+    tool's model, and a hostname in free text cannot be redacted.
+    """
+    name = client.get("name") or client_display_name(client)
     details = [
         part
         for part in (
@@ -90,7 +100,7 @@ class NetworkUnknownDeviceJoinedRule:
         entity_id = client.get("tracker_entity_id")
         if not entity_id or self._is_entity_excluded is None:
             return False
-        return self._is_entity_excluded(self.rule_id, str(entity_id))
+        return self._is_entity_excluded(str(entity_id), self.rule_id)
 
     def _past_grace(self, client: Mapping[str, Any], now: Any) -> bool:
         if not self._grace:
@@ -134,7 +144,7 @@ class NetworkUnknownDeviceJoinedRule:
                 display={
                     # Inventory keys, so the Trust button and the trust
                     # service resolve them without a registry device.
-                    "device_ids": sorted(f"{ROUTER_SOURCE}:{c['key']}" for c in joined),
+                    "device_ids": sorted(client_key(c["key"]) for c in joined),
                     "names": [describe_client(c) for c in joined],
                     "randomized_known": sorted(
                         c["key"] for c in joined if c.get("hostname_trusted")

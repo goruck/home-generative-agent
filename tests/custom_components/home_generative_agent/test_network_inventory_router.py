@@ -127,11 +127,44 @@ async def test_commit_reconciles_only_the_sources_it_observed() -> None:
     # A radio-only commit (router capability absent this run) keeps the client.
     await inventory.async_commit([_radio("z1")], NOW, present_sources=["zigbee"])
     assert {r["key"] for r in inventory.list_devices()} == {"zigbee:z1", "router:k1"}
-    # A router-only commit keeps the radio device, and drops the client gone.
+    # A router-only commit keeps the radio device and, for 30 days, the client
+    # it did not see (an integration reload must not turn it into a new one).
     await inventory.async_commit(
         [client_observation(_client("k2"))], NOW, present_sources=[ROUTER_SOURCE]
     )
+    assert {r["key"] for r in inventory.list_devices()} == {
+        "zigbee:z1",
+        "router:k1",
+        "router:k2",
+    }
+    await inventory.async_commit(
+        [client_observation(_client("k2"))],
+        NOW + timedelta(days=31),
+        present_sources=[ROUTER_SOURCE],
+    )
     assert {r["key"] for r in inventory.list_devices()} == {"zigbee:z1", "router:k2"}
+
+
+@pytest.mark.asyncio
+async def test_late_auto_trust_withdraws_a_pending_alert() -> None:
+    inventory, _ = _memory_inventory()
+    await inventory.async_commit(
+        [client_observation(_client("k1"))], NOW, present_sources=[ROUTER_SOURCE]
+    )
+    pending = [client_observation(_client("k1")), client_observation(_client("k2"))]
+    await inventory.async_commit(pending, NOW, present_sources=[ROUTER_SOURCE])
+    assert inventory.diff(pending, [ROUTER_SOURCE]).new_device_keys == ["router:k2"]
+    # The Shelly entry finished setting up: its device now vouches for k2.
+    vouched = [
+        client_observation(_client("k1")),
+        client_observation(_client("k2", auto_trust=True)),
+    ]
+    assert inventory.diff(vouched, [ROUTER_SOURCE]).new_device_keys == []
+    await inventory.async_commit(vouched, NOW, present_sources=[ROUTER_SOURCE])
+    row = inventory.row("router:k2")
+    assert row is not None
+    assert row["trusted"] is True
+    assert row["alerted"] is True
 
 
 @pytest.mark.asyncio
@@ -354,6 +387,31 @@ async def test_engine_delivers_and_settles_a_new_client(
     assert row is not None
     assert row["alerted"] is True
     assert row["trusted"] is False
+
+
+@pytest.mark.asyncio
+async def test_engine_settles_only_the_clients_the_finding_named(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client still inside its grace period stays owed after another is reported."""
+    inventory, _ = _memory_inventory()
+    await inventory.async_commit(
+        [client_observation(_client("k1"))], NOW, present_sources=[ROUTER_SOURCE]
+    )
+    old = _client("k2", first_seen=(NOW - timedelta(minutes=10)).isoformat())
+    fresh = _client("k3")  # no first_seen: not recorded yet
+    engine, notifier, _ = _engine(
+        monkeypatch,
+        _snapshot([_client("k1"), old, fresh], ["k2", "k3"]),
+        inventory,
+        options={CONF_SENTINEL_NETWORK_UNKNOWN_DEVICE_GRACE_MIN: 5},
+    )
+    await engine._timed_run()
+    assert [f.evidence["client_keys"] for f in notifier.calls] == [["k2"]]
+    k2 = inventory.row("router:k2")
+    k3 = inventory.row("router:k3")
+    assert k2 is not None and k2["alerted"] is True  # noqa: PT018
+    assert k3 is not None and k3["alerted"] is False  # noqa: PT018
 
 
 @pytest.mark.asyncio

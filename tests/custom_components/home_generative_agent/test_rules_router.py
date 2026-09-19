@@ -122,7 +122,9 @@ def test_grace_period_waits_for_the_inventory_row() -> None:
 def test_only_connected_and_unexcluded_clients_are_reported() -> None:
     rule = NetworkUnknownDeviceJoinedRule(
         grace_minutes=0,
-        is_entity_excluded=lambda _rule, entity_id: entity_id.endswith(".c"),
+        is_entity_excluded=lambda entity_id, rule: (
+            rule == "network_unknown_device_joined" and entity_id.endswith(".c")
+        ),
     )
     clients = [_client("a"), _client("b", connected=False), _client("c")]
     finding = _only(rule.evaluate(_snapshot(clients, ["a", "b", "c"])))
@@ -173,7 +175,11 @@ def test_identity_display_and_actions() -> None:
     assert first.triggering_entities == ["device_tracker.a", "device_tracker.b"]
 
 
-def test_describe_client_falls_back_gracefully() -> None:
-    assert describe_client({"hostname": "nas"}) == "nas"
-    assert describe_client({"manufacturer": "Acme"}) == "Unnamed device (Acme)"
+def test_describe_client_never_uses_the_hostname() -> None:
+    # The DHCP hostname cannot be redacted from free text, so a client without
+    # a tracker name is named by manufacturer and pseudonymized key.
+    assert describe_client({"hostname": "Johns-MacBook", "key": "3fa2c1b0"}) == (
+        "device 3fa2c1b0"
+    )
+    assert describe_client({"manufacturer": "Acme", "key": "k"}) == "Acme k (Acme)"
     assert describe_client({"name": "TV", "ip": "10.0.0.2"}) == "TV (10.0.0.2)"

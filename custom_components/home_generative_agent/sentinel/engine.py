@@ -102,7 +102,12 @@ from .lock_enrichment import async_enrich_lock_last_changed
 from .logging_utils import RepeatingLogLimiter
 from .models import AnomalyFinding, CompoundFinding
 from .network_audit import NetworkAuditReport, build_report, empty_report
-from .network_inventory import ROUTER_SOURCE, SOURCE_LABELS, client_observation
+from .network_inventory import (
+    ROUTER_SOURCE,
+    SOURCE_LABELS,
+    client_key,
+    client_observation,
+)
 from .notifier import is_security_copy
 from .power_enrichment import async_enrich_power_last_changed
 from .rules.alarm_disarmed_external_threat import AlarmDisarmedDuringExternalThreatRule
@@ -921,7 +926,7 @@ class SentinelEngine:
         now: datetime,
         *,
         new_device_alert_settled: bool = False,
-        new_client_alert_settled: bool = False,
+        settled_client_keys: Iterable[str] = (),
     ) -> None:
         """
         Record this run's radio devices and router clients; announce bootstraps.
@@ -955,10 +960,7 @@ class SentinelEngine:
                 client_observation(c) for c in network.get("clients") or []
             )
             present.append(ROUTER_SOURCE)
-            if new_client_alert_settled:
-                settled.extend(
-                    f"{ROUTER_SOURCE}:{key}" for key in network.get("new_clients") or []
-                )
+            settled.extend(client_key(key) for key in settled_client_keys)
         if not observations and not present:
             return
         try:
@@ -976,22 +978,17 @@ class SentinelEngine:
         )
         if not announcements:
             return
-        parts = [
-            f"{a.device_count} {SOURCE_LABELS.get(a.source, a.source)} "
-            f"device{'s' if a.device_count != 1 else ''}"
+        parts = {
+            a.source: (
+                f"{a.device_count} {SOURCE_LABELS.get(a.source, a.source)} "
+                f"device{'s' if a.device_count != 1 else ''}"
+            )
             for a in announcements
-        ]
-        LOGGER.info("Sentinel device inventory established: %s.", ", ".join(parts))
-        radio_parts = [
-            p
-            for a, p in zip(announcements, parts, strict=True)
-            if a.source != ROUTER_SOURCE
-        ]
-        router_parts = [
-            p
-            for a, p in zip(announcements, parts, strict=True)
-            if a.source == ROUTER_SOURCE
-        ]
+        }
+        LOGGER.info(
+            "Sentinel device inventory established: %s.", ", ".join(parts.values())
+        )
+        radio_parts = [p for source, p in parts.items() if source != ROUTER_SOURCE]
         sentences: list[str] = []
         if radio_parts:
             sentences.append(
@@ -1001,10 +998,10 @@ class SentinelEngine:
                 "alert. The inventory holds device registry ids and names only, "
                 "no radio addresses."
             )
-        if router_parts:
+        if ROUTER_SOURCE in parts:
             sentences.append(
                 "Sentinel recorded the devices your router currently knows as "
-                f"trusted: {', '.join(router_parts)}. From now on a device that "
+                f"trusted: {parts[ROUTER_SOURCE]}. From now on a device that "
                 "joins your network for the first time raises an alert. The "
                 "inventory holds pseudonymized keys and names only, never MAC or "
                 "IP addresses."
@@ -1277,7 +1274,7 @@ class SentinelEngine:
         # there was none, False when suppression/triage/policy stopped it.
         auth_change_delivered: bool | None = None
         new_device_alert_settled = False
-        new_client_alert_settled = False
+        settled_client_keys: list[str] = []
         # Change rules over the remembered posture whose alert did not go out.
         posture_alerts_held: set[str] = set()
         if all_findings:
@@ -1311,10 +1308,16 @@ class SentinelEngine:
                 if (
                     isinstance(item, AnomalyFinding)
                     and item.type == NetworkUnknownDeviceJoinedRule.rule_id
-                ):
-                    new_client_alert_settled = (
+                    and (
                         delivered
                         or self._last_dispatch_reason in _FINAL_SUPPRESSION_REASONS
+                    )
+                ):
+                    # Only the clients this finding named are settled: the
+                    # rule withholds clients inside their grace period,
+                    # disconnected, or excluded, and those stay owed.
+                    settled_client_keys.extend(
+                        str(k) for k in item.evidence.get("client_keys") or []
                     )
                 if (
                     isinstance(item, AnomalyFinding)
@@ -1334,7 +1337,7 @@ class SentinelEngine:
             snapshot,
             now,
             new_device_alert_settled=new_device_alert_settled,
-            new_client_alert_settled=new_client_alert_settled,
+            settled_client_keys=settled_client_keys,
         )
         await self._commit_posture_memory(snapshot, held=posture_alerts_held)
 

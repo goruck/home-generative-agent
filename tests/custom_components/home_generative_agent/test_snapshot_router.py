@@ -275,14 +275,14 @@ def test_registry_join_sets_device_integration_and_auto_trust() -> None:
 @pytest.mark.asyncio
 async def test_inventory_marks_new_clients_first_seen_and_known_names() -> None:
     inventory = _memory_inventory()
-    # Bootstrap the router source with one trusted client named "NAS".
+    # Bootstrap the router source with one trusted client named "Media NAS".
     await inventory.async_commit(
         [
             {
                 "protocol": "router",
                 "device_id": KEY_B,
                 "platform": "eero",
-                "name": "NAS",
+                "name": "Media NAS",
                 "manufacturer": None,
                 "model": None,
             }
@@ -293,8 +293,13 @@ async def test_inventory_marks_new_clients_first_seen_and_known_names() -> None:
     random_key = PSEUDONYMIZER.mac_key(RANDOM_MAC)
     entities = [
         _tracker("device_tracker.iphone"),  # new
-        _tracker("device_tracker.nas", mac=MAC_B, name="NAS"),  # known
-        _tracker("device_tracker.nas_random", mac=RANDOM_MAC, name="nas"),  # rotated
+        _tracker("device_tracker.nas", mac=MAC_B, name="Media NAS"),  # known
+        _tracker(
+            "device_tracker.nas_random",
+            mac=RANDOM_MAC,
+            name="Unknown",
+            host_name="media nas",
+        ),  # rotated: the placeholder name is ignored, the hostname matches
     ]
     result = generic_router_tracker_adapter(
         RouterInputs(), entities, _context(inventory=inventory)
@@ -367,8 +372,10 @@ async def test_collector_indexes_macs_and_eero_entities(hass: HomeAssistant) -> 
     assert inputs.mac_index[MAC_B].integration == "shelly"
     assert inputs.mac_index[MAC_B].device_id == plug.id
     assert inputs.eero_present is True
-    assert inputs.eero_switches == {"upnp": ["switch.eero_net1_upnp"]}
-    assert inputs.eero_sensors == {"public_ip": ["sensor.eero_net1_public_ip"]}
+    assert inputs.eero_switches == {"upnp": [("net1", "switch.eero_net1_upnp")]}
+    assert inputs.eero_sensors == {
+        "public_ip": [("net1", "sensor.eero_net1_public_ip")]
+    }
     assert set(inputs.tracker_platforms.values()) == {"fritz"}
 
 
@@ -383,8 +390,16 @@ async def test_collector_failure_leaves_inputs_empty(
     monkeypatch.setattr(
         "custom_components.home_generative_agent.snapshot.router.er.async_get", _boom
     )
-    assert async_collect_router_inputs(hass) == RouterInputs()
+    inputs = async_collect_router_inputs(hass)
+    assert inputs == RouterInputs(registry_failed=True)
     assert "router entity registry" in caplog.text
+    # The tracker adapter then withholds clients rather than commit
+    # rows joined to nothing.
+    result = generic_router_tracker_adapter(
+        inputs, [_tracker("device_tracker.iphone")], _context()
+    )
+    assert result.clients is None
+    assert any("registry" in note for note in result.notes)
 
 
 # ---------------------------------------------------------------------------
@@ -396,17 +411,84 @@ def _eero_inputs() -> RouterInputs:
     return RouterInputs(
         eero_present=True,
         eero_switches={
-            "upnp": ["switch.eero_upnp"],
-            "wpa3": ["switch.eero_wpa3"],
-            "guest_network_enabled": ["switch.eero_guest"],
-            "ddns_enabled": ["switch.eero_ddns"],
+            "upnp": [("n1", "switch.eero_upnp")],
+            "wpa3": [("n1", "switch.eero_wpa3")],
+            "guest_network_enabled": [("n1", "switch.eero_guest")],
+            "ddns_enabled": [("n1", "switch.eero_ddns")],
         },
         eero_sensors={
-            "public_ip": ["sensor.eero_public_ip"],
-            "connected_guest_clients_count": ["sensor.eero_guests"],
-            "blocked_day": ["sensor.eero_blocked"],
+            "public_ip": [("n1", "sensor.eero_public_ip")],
+            "connected_guest_clients_count": [("n1", "sensor.eero_guests")],
+            "blocked_day": [("n1", "sensor.eero_blocked")],
         },
     )
+
+
+def test_eero_posture_is_judged_across_networks() -> None:
+    """Several eero networks: a weakening setting counts if any has it on."""
+    inputs = RouterInputs(
+        eero_present=True,
+        eero_switches={
+            "upnp": [("n1", "switch.n1_upnp"), ("n2", "switch.n2_upnp")],
+            "wpa3": [("n1", "switch.n1_wpa3"), ("n2", "switch.n2_wpa3")],
+        },
+        eero_sensors={
+            "connected_guest_clients_count": [
+                ("n1", "sensor.n1_guests"),
+                ("n2", "sensor.n2_guests"),
+            ],
+        },
+    )
+    entities = [
+        _entity("switch.n1_upnp", "off"),
+        _entity("switch.n2_upnp", "on"),
+        _entity("switch.n1_wpa3", "on"),
+        _entity("switch.n2_wpa3", "off"),
+        _entity("sensor.n1_guests", "1"),
+        _entity("sensor.n2_guests", "2"),
+    ]
+    posture = eero_adapter(inputs, entities, _context()).posture
+    assert posture["upnp_enabled"] is True
+    assert posture["upnp_enabled_entity_id"] == "switch.n2_upnp"
+    assert posture["wpa3_enabled"] is False
+    assert posture["wpa3_enabled_entity_id"] == "switch.n2_wpa3"
+    assert posture["guest_client_count"] == 3
+
+
+def test_labels_that_are_addresses_are_tokenized() -> None:
+    """A router that names an unresolved client by its address leaks nothing."""
+    entities = [
+        _tracker("device_tracker.a", name="a8:bb:cc:dd:ee:01", host_name="192.168.1.9"),
+    ]
+    client = _plain(
+        generic_router_tracker_adapter(RouterInputs(), entities, _context()).clients
+    )[0]
+    assert client["name"] == "[mac]"
+    assert client["hostname"] == "[lan ip]"
+
+
+@pytest.mark.asyncio
+async def test_unlisted_router_integration_cannot_vouch(hass: HomeAssistant) -> None:
+    """A domain that provides trackers is a router, listed or not."""
+    registry = er.async_get(hass)
+    devices = dr.async_get(hass)
+    router = _entry(hass, "some_new_router")
+    client = devices.async_get_or_create(
+        config_entry_id=router.entry_id,
+        connections={(dr.CONNECTION_NETWORK_MAC, MAC_A)},
+    )
+    registry.async_get_or_create(
+        "device_tracker",
+        "some_new_router",
+        "t1",
+        config_entry=router,
+        device_id=client.id,
+    )
+    registry.async_get_or_create(
+        "sensor", "some_new_router", "s1", config_entry=router, device_id=client.id
+    )
+    inputs = async_collect_router_inputs(hass)
+    assert inputs.mac_index[MAC_A].qualifying is False
 
 
 def test_eero_posture_from_switches_and_sensors() -> None:

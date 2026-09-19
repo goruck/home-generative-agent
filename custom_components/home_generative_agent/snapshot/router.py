@@ -40,7 +40,11 @@ from homeassistant.helpers import entity_registry as er
 
 from custom_components.home_generative_agent.sentinel.network_inventory import (
     ROUTER_SOURCE,
+    client_key,
     client_observation,
+)
+from custom_components.home_generative_agent.sentinel.redaction import (
+    redact_network_identifiers,
 )
 
 from .network import (
@@ -111,6 +115,9 @@ class MacIndexEntry:
 class RouterInputs:
     """What the adapters read from the registries, each field guarded."""
 
+    # The registry read raised: nothing below can be trusted, and the tracker
+    # adapter withholds clients rather than commit degraded rows.
+    registry_failed: bool = False
     # Tracker entity id -> registry platform (only trackers in the registry).
     tracker_platforms: dict[str, str] = field(default_factory=dict)
     # Tracker entity id -> registry device id.
@@ -118,9 +125,11 @@ class RouterInputs:
     # Normalized MAC -> registry device, for the auto-trust rule.
     mac_index: dict[str, MacIndexEntry] = field(default_factory=dict)
     eero_present: bool = False
-    # eero network-level entities: key -> entity ids (registry order).
-    eero_switches: dict[str, list[str]] = field(default_factory=dict)
-    eero_sensors: dict[str, list[str]] = field(default_factory=dict)
+    # eero network-level entities: key -> (network id, entity id), registry
+    # order. The network id is kept so a home with several eero networks is
+    # judged per network rather than by whichever entity comes first.
+    eero_switches: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
+    eero_sensors: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -149,23 +158,32 @@ def mac_is_randomized(mac: str) -> bool:
     return bool(int(mac[:2], 16) & 0x02)
 
 
-def _eero_network_key(entry: er.RegistryEntry) -> str | None:
-    """Return the eero key of a network-level entity (unique id ``<net>-<key>``)."""
-    parts = str(entry.unique_id or "").split("-")
-    if len(parts) != 2:  # noqa: PLR2004 - resource entities have three parts
+def _eero_network_key(entry: er.RegistryEntry) -> tuple[str, str] | None:
+    """
+    Return (network id, key) of a network-level eero entity.
+
+    The unique id is ``<network id>-<key>`` at network level and
+    ``<network id>-<resource id>-<key>`` for an eero, profile, or client; the
+    key itself never contains a dash, so the split is by the last dash and
+    the network id by the first.
+    """
+    unique_id = str(entry.unique_id or "")
+    network_id, _, rest = unique_id.partition("-")
+    if not network_id or not rest or "-" in rest:
         return None
-    return parts[1]
+    return network_id, rest
 
 
 def _record_eero_entity(inputs: RouterInputs, entry: er.RegistryEntry) -> None:
     inputs.eero_present = True
-    key = _eero_network_key(entry)
-    if key is None:
+    parsed = _eero_network_key(entry)
+    if parsed is None:
         return
+    network_id, key = parsed
     if entry.domain == "switch" and key in EERO_SWITCHES:
-        inputs.eero_switches.setdefault(key, []).append(entry.entity_id)
+        inputs.eero_switches.setdefault(key, []).append((network_id, entry.entity_id))
     elif entry.domain == "sensor" and key in EERO_SENSORS:
-        inputs.eero_sensors.setdefault(key, []).append(entry.entity_id)
+        inputs.eero_sensors.setdefault(key, []).append((network_id, entry.entity_id))
 
 
 def _collect_entities(inputs: RouterInputs, hass: HomeAssistant) -> None:
@@ -193,7 +211,17 @@ def _index_macs(
     hass: HomeAssistant,
     owned: Mapping[str, Mapping[str, set[str]]],
 ) -> None:
+    """
+    Map each registry MAC to its device and decide whether it vouches.
+
+    A device vouches for a client only through a config entry whose domain
+    provides no ``device_tracker`` anywhere in this home (positive evidence of
+    a non-router integration: the router and tracker integrations create a
+    registry device for every client they see, and so would an unlisted
+    one) and whose entry owns a non-tracker entity on the device.
+    """
     device_registry = dr.async_get(hass)
+    tracker_domains = set(inputs.tracker_platforms.values())
     for device_id, entries in owned.items():
         device = device_registry.async_get(device_id)
         if device is None:
@@ -217,7 +245,11 @@ def _index_macs(
             if domain is None:
                 continue
             integration = integration or domain
-            if domain not in _NON_QUALIFYING_DOMAINS and domains - {TRACKER_DOMAIN}:
+            if (
+                domain not in _NON_QUALIFYING_DOMAINS
+                and domain not in tracker_domains
+                and domains - {TRACKER_DOMAIN}
+            ):
                 integration = domain
                 qualifying = True
         index = MacIndexEntry(
@@ -234,7 +266,7 @@ def async_collect_router_inputs(hass: HomeAssistant) -> RouterInputs:
         _collect_entities(inputs, hass)
     except Exception as err:  # noqa: BLE001
         log_input_failure("router entity registry", err)
-        return RouterInputs()
+        return RouterInputs(registry_failed=True)
     return inputs
 
 
@@ -244,8 +276,18 @@ def async_collect_router_inputs(hass: HomeAssistant) -> RouterInputs:
 
 
 def _label(value: Any) -> str | None:
+    """
+    Return *value* as a safe display label, or None.
+
+    Some routers name a client they cannot resolve by its MAC or IP address;
+    the label is passed through the same redaction as a model prompt so an
+    address never rides into the snapshot, the inventory, or a notification
+    inside a name.
+    """
     text = sanitize_label(value)
-    return text or None
+    if not text:
+        return None
+    return str(redact_network_identifiers(text))
 
 
 def _ip_value(value: Any) -> str | None:
@@ -332,6 +374,15 @@ def generic_router_tracker_adapter(
             "available, so client addresses cannot be tokenized."
         )
         return result
+    if inputs.registry_failed:
+        # Without the registries a client cannot be joined to its device, so
+        # auto-trust and the stored ids would all degrade; skip this run
+        # rather than rewrite the inventory with worse data.
+        result.notes.append(
+            "Router clients are not audited this run: the entity registry "
+            "could not be read."
+        )
+        return result
     clients: dict[str, NetworkClient] = {}
     for entity in sorted(trackers, key=lambda e: e["entity_id"]):
         client = _client_from_tracker(entity, inputs, context)
@@ -342,6 +393,15 @@ def generic_router_tracker_adapter(
         existing = clients.get(client["key"])
         if existing is None or (client["connected"] and not existing["connected"]):
             clients[client["key"]] = client
+    if not clients:
+        # Trackers that report no MAC (ping, nmap without ARP access) cannot
+        # be told apart, so the capability is absent rather than empty: an
+        # empty list would tell the inventory every client left.
+        result.notes.append(
+            "Router clients are not audited: no router device tracker reports "
+            "a MAC address."
+        )
+        return result
     result.clients = list(clients.values())
     result.counters[COUNTER_CLIENT_COUNT] = float(
         sum(1 for c in result.clients if c["connected"])
@@ -352,15 +412,11 @@ def generic_router_tracker_adapter(
     trusted_names = inventory.trusted_names(ROUTER_SOURCE)
     observations = []
     for client in result.clients:
-        row = inventory.row(client_observation_key(client["key"]))
+        row = inventory.row(client_key(client["key"]))
         if row is not None and isinstance(row.get("first_seen"), str):
             client["first_seen"] = row["first_seen"]
         if client.get("mac_randomized"):
-            names = {
-                (client.get("name") or "").lower(),
-                (client.get("hostname") or "").lower(),
-            } - {""}
-            client["hostname_trusted"] = bool(names & trusted_names)
+            client["hostname_trusted"] = bool(_matchable_names(client) & trusted_names)
         observations.append(client_observation(client))
     delta = inventory.diff(observations, [ROUTER_SOURCE])
     # The inventory keys are source-qualified; the section carries client keys.
@@ -371,9 +427,23 @@ def generic_router_tracker_adapter(
     return result
 
 
-def client_observation_key(key: str) -> str:
-    """Return the inventory key of a router client."""
-    return f"{ROUTER_SOURCE}:{key}"
+# Names a router gives a client it cannot resolve; matching one of these
+# against a trusted row would call a stranger "a known device".
+_PLACEHOLDER_NAME_WORDS: tuple[str, ...] = ("unknown", "unnamed", "device", "[")
+_MIN_MATCHABLE_NAME_CHARS = 4
+
+
+def _matchable_names(client: Mapping[str, Any]) -> set[str]:
+    """Return the client's names that are specific enough to identify it."""
+    names = set()
+    for value in (client.get("hostname"), client.get("name")):
+        text = str(value or "").strip().lower()
+        if len(text) < _MIN_MATCHABLE_NAME_CHARS or any(
+            word in text for word in _PLACEHOLDER_NAME_WORDS
+        ):
+            continue
+        names.add(text)
+    return names
 
 
 # ---------------------------------------------------------------------------
@@ -390,13 +460,21 @@ def _known_state(by_id: Mapping[str, SnapshotEntity], entity_id: str) -> str | N
 
 
 def _live(
-    ids: Mapping[str, list[str]], by_id: Mapping[str, SnapshotEntity], key: str
-) -> tuple[str, str] | None:
-    for entity_id in ids.get(key, []):
+    ids: Mapping[str, list[tuple[str, str]]],
+    by_id: Mapping[str, SnapshotEntity],
+    key: str,
+) -> list[tuple[str, str, str]]:
+    """Return (network id, entity id, state) per network with a known state."""
+    seen: set[str] = set()
+    out: list[tuple[str, str, str]] = []
+    for network_id, entity_id in ids.get(key, []):
+        if network_id in seen:
+            continue
         state = _known_state(by_id, entity_id)
         if state is not None:
-            return entity_id, state
-    return None
+            seen.add(network_id)
+            out.append((network_id, entity_id, state))
+    return out
 
 
 def _count(state: str) -> int | None:
@@ -407,6 +485,32 @@ def _count(state: str) -> int | None:
     if value != value or value < 0 or value > 1e9:  # noqa: PLR0124,PLR2004 - NaN/garbage
         return None
     return int(value)
+
+
+# Posture facts a home with several eero networks is judged on: a setting
+# that weakens the home when ON is reported on if any network has it on; a
+# protection is reported on only when every network has it on. The entity
+# twin names the network that decided the value.
+_EERO_ANY_ON: frozenset[str] = frozenset(
+    {"upnp_enabled", "guest_network_enabled", "ipv6_enabled", "ddns_enabled"}
+)
+
+
+def _eero_switch_posture(
+    inputs: RouterInputs, by_id: Mapping[str, SnapshotEntity], posture: dict[str, Any]
+) -> None:
+    for key, field_name in EERO_SWITCHES.items():
+        live = _live(inputs.eero_switches, by_id, key)
+        if not live:
+            continue
+        states = [(entity_id, state == "on") for _net, entity_id, state in live]
+        if field_name in _EERO_ANY_ON:
+            decided = next((e for e, on in states if on), states[0][0])
+            posture[field_name] = any(on for _e, on in states)
+        else:
+            decided = next((e for e, on in states if not on), states[0][0])
+            posture[field_name] = all(on for _e, on in states)
+        posture[f"{field_name}_entity_id"] = decided
 
 
 def eero_adapter(
@@ -420,32 +524,33 @@ def eero_adapter(
         return result
     by_id = {e["entity_id"]: e for e in entities}
     posture = result.posture
-    for key, field_name in EERO_SWITCHES.items():
-        live = _live(inputs.eero_switches, by_id, key)
-        if live is None:
-            continue
-        posture[field_name] = live[1] == "on"
-        posture[f"{field_name}_entity_id"] = live[0]
+    _eero_switch_posture(inputs, by_id, posture)
     if "upnp_enabled" in posture:
         posture["upnp_evidence"] = "eero"
 
     guests = _live(inputs.eero_sensors, by_id, EERO_SENSOR_GUEST_CLIENTS)
-    count = _count(guests[1]) if guests else None
-    if guests is not None and count is not None:
-        posture["guest_client_count"] = count
-        posture["guest_client_count_entity_id"] = guests[0]
+    counts = [(e, _count(state)) for _n, e, state in guests]
+    if counts and all(c is not None for _e, c in counts):
+        posture["guest_client_count"] = sum(c for _e, c in counts if c is not None)
+        posture["guest_client_count_entity_id"] = counts[0][0]
 
     threats = _live(inputs.eero_sensors, by_id, EERO_SENSOR_THREATS_DAY)
-    count = _count(threats[1]) if threats else None
-    if threats is not None and count is not None:
-        result.counters[COUNTER_THREATS_DAY] = float(count)
+    counts = [(e, _count(state)) for _n, e, state in threats]
+    if counts and all(c is not None for _e, c in counts):
+        result.counters[COUNTER_THREATS_DAY] = float(
+            sum(c for _e, c in counts if c is not None)
+        )
 
-    ip_sensor = _live(inputs.eero_sensors, by_id, EERO_SENSOR_PUBLIC_IP)
-    ip = public_ip_value(ip_sensor[1]) if ip_sensor else None
-    if ip_sensor is not None and ip is not None and context.pseudonymizer is not None:
-        # Same posture keys and memory as the UPnP/IGD adapter: the change
-        # check compares only values read from the same entity.
-        posture.update(public_ip_posture(context, ip_sensor[0], ip))
+    # One public address per home: the first network's WAN feeds the change
+    # check (a second WAN would need a per-network memory, not built).
+    ip_sensors = _live(inputs.eero_sensors, by_id, EERO_SENSOR_PUBLIC_IP)
+    if ip_sensors and context.pseudonymizer is not None:
+        _net, entity_id, state = ip_sensors[0]
+        ip = public_ip_value(state)
+        if ip is not None:
+            # Same posture keys and memory as the UPnP/IGD adapter: the
+            # change check compares only values read from the same entity.
+            posture.update(public_ip_posture(context, entity_id, ip))
     return result
 
 

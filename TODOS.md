@@ -800,9 +800,20 @@ validation.
 
 **Why:** Raised by the Codex adversarial pass on #613. The body-size half of that finding is fixed (`MAX_BATCH_BODY_CHARS` plus an "…and N more" line); the delivery half predates the branch and is shared with every other notification path, which also fire with `blocking=False` and no retry.
 
-Since step 6 this also covers `radio_new_device_joined`: a new-device alert that is batched counts as delivered, so the device's alert is settled even if the digest is lost, and the digest has no Trust button (the device remains recorded and trustable through `sentinel_trust_network_device`).
+Since step 6 this also covers `radio_new_device_joined`, and since step 7 `network_unknown_device_joined`: a new-device alert that is batched counts as delivered, so the device's alert is settled even if the digest is lost, and the digest has no Trust button (the device remains recorded and trustable through `sentinel_trust_network_device`).
 
 **How to apply:** Either await the flush call and on failure fall back to `persistent_notification.create` with the same body, or record the failure in the audit rows so the daily digest can carry them. A single `_deliver(domain, service, data)` helper used by the direct and batched paths would let both get the same fallback.
+
+**Effort:** S
+**Priority:** P3
+
+### A new router client that leaves before its alert is delivered is not reported until it returns
+
+**What:** `network_unknown_device_joined` reports a client only while it is connected. A client that passes the grace period, has its finding postponed by a cooldown or quiet hours, and then disconnects produces no finding on later runs even though its inventory row keeps `alerted: False`; if it never returns, nobody hears it was on the network. The grace period also counts from the router's first sighting rather than continuous connection, so a client the router listed while offline alerts on its first connected poll.
+
+**Why:** Raised by the Codex adversarial pass on the step 7 router PR. The connected gate exists so a device seen by one poll and gone by the next (the plan's stated reason for the grace period) is not reported; dropping it would report every transient tracker the router ever created. Chosen as the lesser noise for the first release; the row stays owed, so a returning device is still reported.
+
+**How to apply:** Record on the inventory row when a client first qualified (past grace while connected); the rule then reports a qualified client once regardless of current connectivity, wording it "was on the network". A `connected_since` kept by the adapter from consecutive connected polls would let the grace period measure continuous connection instead of row age.
 
 **Effort:** S
 **Priority:** P3

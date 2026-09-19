@@ -46,8 +46,9 @@ PRIVACY_NOTES: tuple[str, ...] = (
     ),
     (
         "Router clients are identified by a per-install pseudonym of their MAC "
-        "address; no MAC, IP address, or hostname reaches a language model, and "
-        "the device inventory stores the pseudonym and the device's name only. "
+        "address; no MAC or IP address reaches a language model, a client's "
+        "DHCP hostname is never used in a summary, and the device inventory "
+        "stores the pseudonym and the tracker's display name only. "
         "Router settings are read from eero in this version; checks other "
         "routers would provide are listed as not run rather than assumed to pass."
     ),
