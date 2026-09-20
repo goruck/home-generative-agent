@@ -46,7 +46,7 @@ if TYPE_CHECKING:
 
 def describe_client(client: Mapping[str, Any]) -> str:
     """
-    Return ``Name (Apple, wireless, 192.168.1.23)`` for a client.
+    Return ``Name (Apple, wireless, guest Wi-Fi, 192.168.1.23)`` for a client.
 
     The name is the tracker entity's, the label the user already sees in
     Home Assistant; a client without one is named by manufacturer and key.
@@ -59,6 +59,7 @@ def describe_client(client: Mapping[str, Any]) -> str:
         for part in (
             client.get("manufacturer"),
             client.get("connection_type"),
+            "guest Wi-Fi" if client.get("is_guest") is True else None,
             client.get("ip"),
         )
         if part

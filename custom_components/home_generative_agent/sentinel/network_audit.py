@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
 from custom_components.home_generative_agent.snapshot.network import (
     CAP_CLIENTS,
+    CAP_GUEST_CLIENTS,
     CAP_NEW_CLIENTS,
     ha_cap,
     posture_cap,
@@ -175,6 +176,13 @@ _CAPABILITY_REASONS: tuple[tuple[str, str], ...] = (
         (
             "needs a router integration that reports the guest network and its "
             "connected guests, and a previous Sentinel run to measure from"
+        ),
+    ),
+    (
+        CAP_GUEST_CLIENTS,
+        (
+            "needs a router integration that says which clients are on the guest "
+            "network (eero, UniFi) for every connected client"
         ),
     ),
     (

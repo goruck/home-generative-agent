@@ -32,6 +32,7 @@ from custom_components.home_generative_agent.snapshot.eero import (
 )
 from custom_components.home_generative_agent.snapshot.network import (
     CAP_CLIENTS,
+    CAP_GUEST_CLIENTS,
     CAP_NEW_CLIENTS,
     COUNTER_CLIENT_COUNT,
     AdapterResult,
@@ -567,6 +568,33 @@ def test_runtime_clients_win_the_merge_but_keep_what_the_tracker_knew() -> None:
     )  # the runtime knew no IP; the tracker's stands
     assert section["sources"][CAP_CLIENTS] == "eero_runtime"
     assert section["counters"][COUNTER_CLIENT_COUNT] == 1.0
+
+
+def test_runtime_guest_flag_survives_the_merge_and_publishes_the_capability() -> None:
+    # The tracker twin knows nothing about the guest network; the runtime
+    # read does, and the merged client is what the capability is judged on.
+    trackers = generic_router_tracker_adapter(
+        RouterInputs(), [cast("Any", _tracker(state="home"))], _context()
+    )
+    runtime = eero_runtime_adapter(
+        _inputs(
+            FakeNetwork(
+                clients=[
+                    FakeClient(mac=MAC_A, connected=True, is_guest=True),
+                    FakeClient(mac=MAC_B, connected=True, is_guest=False),
+                ]
+            )
+        ),
+        RouterInputs(),
+        _context(),
+    )
+    section = merge_adapter_results([trackers, runtime])
+    assert CAP_GUEST_CLIENTS in section["capabilities"]
+    assert section["sources"][CAP_GUEST_CLIENTS] == "eero_runtime"
+    guests = [c["key"] for c in section["clients"] if c.get("is_guest")]
+    assert guests == [PSEUDONYMIZER.mac_key(MAC_A)]
+    # Trackers alone (the runtime read failed) cannot tell a guest apart.
+    assert CAP_GUEST_CLIENTS not in merge_adapter_results([trackers])["capabilities"]
 
 
 def test_runtime_posture_clears_the_entity_tiers_stale_twin() -> None:

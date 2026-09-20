@@ -129,6 +129,7 @@ from .rules.ha_sensitive_entity_exposed_without_pin import (
 from .rules.ha_trusted_networks_bypass_login import HaTrustedNetworksBypassLoginRule
 from .rules.ha_webhook_automation_public import HaWebhookAutomationPublicRule
 from .rules.network_common import NETWORK_RULE_TYPES
+from .rules.network_guest_client_present import NetworkGuestClientPresentRule
 from .rules.network_public_ip_changed import NetworkPublicIpChangedRule
 from .rules.network_router_posture import (
     NetworkDdnsEnabledRule,
@@ -471,6 +472,9 @@ class SentinelEngine:
                         default=RECOMMENDED_SENTINEL_NETWORK_UNKNOWN_DEVICE_GRACE_MIN,
                     ),
                     is_entity_excluded=self._entity_excluded_for_type,
+                ),
+                NetworkGuestClientPresentRule(
+                    is_entity_excluded=self._entity_excluded_for_type
                 ),
                 ZwaveInsecureSecurityClassRule(),
                 ZigbeePermitJoinOpenRule(
