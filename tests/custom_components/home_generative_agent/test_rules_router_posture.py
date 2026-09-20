@@ -143,16 +143,13 @@ def test_wpa3_protection_and_ddns_fire_on_the_weak_value_only() -> None:
     assert "Dynamic DNS is on" in ddns.evidence["summary"]
 
 
-def test_an_excluded_source_entity_silences_the_rule() -> None:
-    rule = NetworkWpa3DisabledRule(
-        is_entity_excluded=lambda entity_id, rule_id: (
-            rule_id == "network_wpa3_disabled" and entity_id == "switch.kro_wpa3"
-        )
-    )
+def test_the_settings_switch_is_the_triggering_entity() -> None:
+    """The engine's exclusion filter works on triggering entities; the rule adds none of its own."""
     posture = {"wpa3_enabled": False, "wpa3_enabled_entity_id": "switch.kro_wpa3"}
-    assert rule.evaluate(_snapshot(posture)) == []
-    # Without a source entity (the runtime read) there is nothing to exclude.
-    assert len(rule.evaluate(_snapshot({"wpa3_enabled": False}))) == 1
+    finding = _only(NetworkWpa3DisabledRule().evaluate(_snapshot(posture)))
+    assert finding.triggering_entities == ["switch.kro_wpa3"]
+    bare = _only(NetworkWpa3DisabledRule().evaluate(_snapshot({"wpa3_enabled": False})))
+    assert bare.triggering_entities == []
 
 
 # ---------------------------------------------------------------------------
@@ -160,33 +157,56 @@ def test_an_excluded_source_entity_silences_the_rule() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _derive(posture: dict[str, Any], previous: dict[str, Any] | None) -> dict[str, Any]:
-    section = merge_adapter_results(
-        [AdapterResult(name="eero_runtime", posture=posture)]
-    )
+TODAY = NOW.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _memory(active_days_ago: int, observed_days_ago: int = 0) -> dict[str, Any]:
+    return {
+        "guest_network_last_active": (
+            TODAY - timedelta(days=active_days_ago)
+        ).isoformat(),
+        "guest_network_last_observed": (
+            TODAY - timedelta(days=observed_days_ago)
+        ).isoformat(),
+    }
+
+
+def _derive(
+    posture: dict[str, Any],
+    previous: dict[str, Any] | None,
+    *,
+    second: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    results = [AdapterResult(name="eero_runtime", posture=posture)]
+    if second is not None:
+        results.insert(0, AdapterResult(name="eero", posture=second))
+    section = merge_adapter_results(results)
     derive_guest_idle(section, NetworkBuildContext(previous_posture=previous), NOW)
     out = cast("dict[str, Any]", section["posture"])
     out["_caps"] = section["capabilities"]
     return out
 
 
+IDLE = {"guest_network_enabled": True, "guest_client_count": 0}
+
+
 def test_first_observation_starts_the_clock_and_judges_nothing() -> None:
-    out = _derive({"guest_network_enabled": True, "guest_client_count": 0}, None)
-    assert out["guest_network_last_active"] == NOW.isoformat()
+    out = _derive(IDLE, None)
+    # Days, not instants: the memory changes (and is written) at most daily.
+    assert out["guest_network_last_active"] == TODAY.isoformat()
+    assert out["guest_network_last_observed"] == TODAY.isoformat()
     assert "guest_network_idle_days" not in out
     assert posture_cap("guest_network_idle_days") not in out["_caps"]
-    # The memory key is never a capability.
+    # The memory keys are never capabilities.
     assert posture_cap("guest_network_last_active") not in out["_caps"]
+    assert posture_cap("guest_network_last_observed") not in out["_caps"]
 
 
-def test_idle_days_count_from_the_remembered_time() -> None:
-    remembered = (NOW - timedelta(days=9, hours=3)).isoformat()
-    out = _derive(
-        {"guest_network_enabled": True, "guest_client_count": 0},
-        {"guest_network_last_active": remembered},
-    )
+def test_idle_days_count_from_the_remembered_day_while_watched() -> None:
+    out = _derive(IDLE, _memory(9, 1))
     assert out["guest_network_idle_days"] == 9
-    assert out["guest_network_last_active"] == remembered
+    assert out["guest_network_last_active"] == (TODAY - timedelta(days=9)).isoformat()
+    assert out["guest_network_last_observed"] == TODAY.isoformat()
     assert posture_cap("guest_network_idle_days") in out["_caps"]
 
 
@@ -195,26 +215,58 @@ def test_idle_days_count_from_the_remembered_time() -> None:
     [
         {"guest_network_enabled": True, "guest_client_count": 2},  # a guest is on
         {"guest_network_enabled": False, "guest_client_count": 0},  # network is off
-        {"guest_network_enabled": True},  # on, but no guest count to go by
     ],
 )
-def test_the_clock_restarts_when_in_use_off_or_uncounted(
-    posture: dict[str, Any],
-) -> None:
-    remembered = (NOW - timedelta(days=30)).isoformat()
-    out = _derive(posture, {"guest_network_last_active": remembered})
-    assert out["guest_network_last_active"] == NOW.isoformat()
+def test_the_clock_restarts_when_in_use_or_off(posture: dict[str, Any]) -> None:
+    out = _derive(posture, _memory(30, 1))
+    assert out["guest_network_last_active"] == TODAY.isoformat()
     assert out.get("guest_network_idle_days", 0) == 0
 
 
-def test_no_guest_network_state_means_no_derivation() -> None:
-    out = _derive({"upnp_enabled": True}, {"guest_network_last_active": "garbage"})
-    assert "guest_network_last_active" not in out
+def test_an_unwatched_stretch_is_not_idle_time() -> None:
+    """Ten days with no observation proves nothing about the guests in between."""
+    out = _derive(IDLE, _memory(30, 10))
+    assert out["guest_network_last_active"] == TODAY.isoformat()
     assert "guest_network_idle_days" not in out
-    # An unparseable memory is treated as no memory.
+    # A short gap (one missed day) keeps the clock.
+    assert _derive(IDLE, _memory(30, 2))["guest_network_idle_days"] == 30
+
+
+def test_a_run_without_an_observation_leaves_the_memory_alone() -> None:
+    """A read gap neither restarts the clock nor advances it."""
+    for posture in (
+        {"upnp_enabled": True},  # no guest network state at all
+        {"guest_network_enabled": True},  # on, but no guest count to go by
+    ):
+        out = _derive(posture, _memory(6, 0))
+        assert "guest_network_last_active" not in out
+        assert "guest_network_last_observed" not in out
+        assert "guest_network_idle_days" not in out
+
+
+def test_state_and_count_from_different_sources_are_not_an_observation() -> None:
+    """Two sources can cover different networks; mixing them fabricates idleness."""
     out = _derive(
-        {"guest_network_enabled": True, "guest_client_count": 0},
-        {"guest_network_last_active": "garbage"},
+        {"guest_network_enabled": True},  # runtime: enabled, count withheld
+        _memory(10, 0),
+        second={"guest_client_count": 0},  # entity tier: another network's zero
     )
     assert "guest_network_idle_days" not in out
-    assert out["guest_network_last_active"] == NOW.isoformat()
+    assert "guest_network_last_active" not in out
+
+
+def test_a_future_or_garbled_memory_restarts_the_clock() -> None:
+    future = {
+        "guest_network_last_active": "2099-01-01T00:00:00+00:00",
+        "guest_network_last_observed": TODAY.isoformat(),
+    }
+    out = _derive(IDLE, future)
+    assert out["guest_network_last_active"] == TODAY.isoformat()
+    assert "guest_network_idle_days" not in out
+    garbled = {
+        "guest_network_last_active": "garbage",
+        "guest_network_last_observed": "x",
+    }
+    out = _derive(IDLE, garbled)
+    assert out["guest_network_last_active"] == TODAY.isoformat()
+    assert "guest_network_idle_days" not in out

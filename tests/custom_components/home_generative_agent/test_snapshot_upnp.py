@@ -20,6 +20,7 @@ from custom_components.home_generative_agent.sentinel.pseudonymizer import (
 )
 from custom_components.home_generative_agent.snapshot import network as network_mod
 from custom_components.home_generative_agent.snapshot.network import (
+    POSTURE_DISPLAY_KEYS,
     NetworkBuildContext,
     async_build_network_snapshot,
     merge_adapter_results,
@@ -27,7 +28,6 @@ from custom_components.home_generative_agent.snapshot.network import (
 )
 from custom_components.home_generative_agent.snapshot.upnp import (
     IGD_SEARCH_TARGETS,
-    POSTURE_DISPLAY_KEYS,
     POSTURE_MEMORY_KEYS,
     UpnpInputs,
     async_collect_upnp_inputs,
@@ -375,6 +375,8 @@ def test_port_mapping_count_delta_and_disabled_sensor_note() -> None:
         "public_ip_entity_id",
         "upnp_port_mapping_count",
         "upnp_port_mapping_entity_id",
+        "guest_network_last_active",
+        "guest_network_last_observed",
     }
 
 

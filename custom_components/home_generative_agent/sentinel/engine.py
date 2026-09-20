@@ -460,17 +460,10 @@ class SentinelEngine:
                         options.get(CONF_SENTINEL_NETWORK_GUEST_IDLE_DAYS),
                         default=RECOMMENDED_SENTINEL_NETWORK_GUEST_IDLE_DAYS,
                     ),
-                    is_entity_excluded=self._entity_excluded_for_type,
                 ),
-                NetworkWpa3DisabledRule(
-                    is_entity_excluded=self._entity_excluded_for_type
-                ),
-                NetworkProtectionDisabledRule(
-                    is_entity_excluded=self._entity_excluded_for_type
-                ),
-                NetworkDdnsEnabledRule(
-                    is_entity_excluded=self._entity_excluded_for_type
-                ),
+                NetworkWpa3DisabledRule(),
+                NetworkProtectionDisabledRule(),
+                NetworkDdnsEnabledRule(),
                 RadioNewDeviceJoinedRule(),
                 NetworkUnknownDeviceJoinedRule(
                     grace_minutes=_coerce_int(

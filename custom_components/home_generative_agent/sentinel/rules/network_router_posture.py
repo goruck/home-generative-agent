@@ -16,8 +16,10 @@ any adapter that publishes the same posture keys feeds them):
 
 Each is a standing condition, so each carries the posture cooldown floor
 (one alert a day at most) and one stable identity, like
-``network_upnp_enabled``. The entity a setting was read from, when an entity
-adapter supplied it, is the triggering entity, so per-rule exclusions work.
+``network_upnp_enabled``. The switch a setting belongs to is the triggering
+entity on both eero tiers, so the engine's per-rule entity exclusions apply
+(``SentinelEngine._filter_excluded_findings``) without the rules checking
+them again.
 """
 
 from __future__ import annotations
@@ -32,7 +34,6 @@ from custom_components.home_generative_agent.snapshot.network import posture_cap
 from .network_common import POSTURE_COOLDOWN_MINUTES, make_finding, plural, posture
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from typing import Any
 
     from custom_components.home_generative_agent.sentinel.models import (
@@ -43,44 +44,25 @@ if TYPE_CHECKING:
     )
 
 
-class _PostureRule:
-    """Shared plumbing: exclusions and the setting's source entity."""
-
-    rule_id: str
-    cooldown_minutes = POSTURE_COOLDOWN_MINUTES
-
-    def __init__(
-        self, *, is_entity_excluded: Callable[[str, str], bool] | None = None
-    ) -> None:
-        """Initialize with the engine's per-rule entity exclusion check."""
-        self._is_entity_excluded = is_entity_excluded
-
-    def _source_entity(self, section: dict[str, Any], key: str) -> list[str]:
-        entity_id = section.get(f"{key}_entity_id")
-        return [str(entity_id)] if isinstance(entity_id, str) and entity_id else []
-
-    def _excluded(self, entities: list[str]) -> bool:
-        if self._is_entity_excluded is None:
-            return False
-        return any(self._is_entity_excluded(e, self.rule_id) for e in entities)
+def _source_entity(section: dict[str, Any], key: str) -> list[str]:
+    """Return the entity a setting was read from, as the triggering entity."""
+    entity_id = section.get(f"{key}_entity_id")
+    return [str(entity_id)] if isinstance(entity_id, str) and entity_id else []
 
 
-class NetworkGuestNetworkIdleRule(_PostureRule):
+class NetworkGuestNetworkIdleRule:
     """The guest network is on and nobody has used it for the configured days."""
 
     rule_id = "network_guest_network_idle"
+    cooldown_minutes = POSTURE_COOLDOWN_MINUTES
     requires = frozenset(
         {posture_cap("guest_network_enabled"), posture_cap("guest_network_idle_days")}
     )
 
     def __init__(
-        self,
-        *,
-        idle_days: int = RECOMMENDED_SENTINEL_NETWORK_GUEST_IDLE_DAYS,
-        is_entity_excluded: Callable[[str, str], bool] | None = None,
+        self, *, idle_days: int = RECOMMENDED_SENTINEL_NETWORK_GUEST_IDLE_DAYS
     ) -> None:
         """Initialize with the idle threshold in days."""
-        super().__init__(is_entity_excluded=is_entity_excluded)
         self._idle_days = max(1, idle_days)
 
     def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:
@@ -94,9 +76,7 @@ class NetworkGuestNetworkIdleRule(_PostureRule):
             or idle < self._idle_days
         ):
             return []
-        entities = self._source_entity(section, "guest_network_enabled")
-        if self._excluded(entities):
-            return []
+        entities = _source_entity(section, "guest_network_enabled")
         return [
             make_finding(
                 self.rule_id,
@@ -116,10 +96,11 @@ class NetworkGuestNetworkIdleRule(_PostureRule):
         ]
 
 
-class NetworkWpa3DisabledRule(_PostureRule):
+class NetworkWpa3DisabledRule:
     """WPA3 is off: an advisory nudge, since older devices may need WPA2."""
 
     rule_id = "network_wpa3_disabled"
+    cooldown_minutes = POSTURE_COOLDOWN_MINUTES
     requires = frozenset({posture_cap("wpa3_enabled")})
 
     def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:
@@ -127,9 +108,7 @@ class NetworkWpa3DisabledRule(_PostureRule):
         section = posture(snapshot)
         if section.get("wpa3_enabled") is not False:
             return []
-        entities = self._source_entity(section, "wpa3_enabled")
-        if self._excluded(entities):
-            return []
+        entities = _source_entity(section, "wpa3_enabled")
         return [
             make_finding(
                 self.rule_id,
@@ -151,10 +130,11 @@ class NetworkWpa3DisabledRule(_PostureRule):
         ]
 
 
-class NetworkProtectionDisabledRule(_PostureRule):
+class NetworkProtectionDisabledRule:
     """The router's malware and threat blocking is available but switched off."""
 
     rule_id = "network_protection_disabled"
+    cooldown_minutes = POSTURE_COOLDOWN_MINUTES
     requires = frozenset({posture_cap("malware_blocking_enabled")})
 
     def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:
@@ -169,9 +149,7 @@ class NetworkProtectionDisabledRule(_PostureRule):
         )
         if ad_blocking is False:
             summary += " Ad blocking is off as well."
-        entities = self._source_entity(section, "malware_blocking_enabled")
-        if self._excluded(entities):
-            return []
+        entities = _source_entity(section, "malware_blocking_enabled")
         return [
             make_finding(
                 self.rule_id,
@@ -185,10 +163,11 @@ class NetworkProtectionDisabledRule(_PostureRule):
         ]
 
 
-class NetworkDdnsEnabledRule(_PostureRule):
+class NetworkDdnsEnabledRule:
     """Dynamic DNS gives the home a fixed public hostname."""
 
     rule_id = "network_ddns_enabled"
+    cooldown_minutes = POSTURE_COOLDOWN_MINUTES
     requires = frozenset({posture_cap("ddns_enabled")})
 
     def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:
@@ -196,9 +175,7 @@ class NetworkDdnsEnabledRule(_PostureRule):
         section = posture(snapshot)
         if section.get("ddns_enabled") is not True:
             return []
-        entities = self._source_entity(section, "ddns_enabled")
-        if self._excluded(entities):
-            return []
+        entities = _source_entity(section, "ddns_enabled")
         return [
             make_finding(
                 self.rule_id,
