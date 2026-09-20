@@ -807,17 +807,6 @@ Since step 6 this also covers `radio_new_device_joined`, and since step 7 `netwo
 **Effort:** S
 **Priority:** P3
 
-### A new router client that leaves before its alert is delivered is not reported until it returns
-
-**What:** `network_unknown_device_joined` reports a client only while it is connected. A client that passes the grace period, has its finding postponed by a cooldown or quiet hours, and then disconnects produces no finding on later runs even though its inventory row keeps `alerted: False`; if it never returns, nobody hears it was on the network. The grace period also counts from the router's first sighting rather than continuous connection, so a client the router listed while offline alerts on its first connected poll.
-
-**Why:** Raised by the Codex adversarial pass on the step 7 router PR. The connected gate exists so a device seen by one poll and gone by the next (the plan's stated reason for the grace period) is not reported; dropping it would report every transient tracker the router ever created. Chosen as the lesser noise for the first release; the row stays owed, so a returning device is still reported.
-
-**How to apply:** Record on the inventory row when a client first qualified (past grace while connected); the rule then reports a qualified client once regardless of current connectivity, wording it "was on the network". A `connected_since` kept by the adapter from consecutive connected polls would let the grace period measure continuous connection instead of row age.
-
-**Effort:** S
-**Priority:** P3
-
 ### Audit store runs at capacity on a live install; posture findings add steady rows
 
 **What:** The live box logs `Audit store at capacity (500 records) with no evictable records; evicting oldest not_suppressed record` on most cycles (observed 2026-09-08, before and after the network audit landed). The thirteen posture rules add up to one row per rule per day on top of the existing motion, camera, and power findings, so the store is permanently full and the oldest delivered findings are evicted first.

@@ -66,6 +66,12 @@ def describe_client(client: Mapping[str, Any]) -> str:
     return f"{name} ({', '.join(details)})" if details else str(name)
 
 
+def describe_joined(client: Mapping[str, Any]) -> str:
+    """Return the client's description, marked when it has since gone offline."""
+    text = describe_client(client)
+    return text if client.get("connected") else f"{text}, not connected now"
+
+
 class NetworkUnknownDeviceJoinedRule:
     """
     Clients on the router that the device inventory had not recorded.
@@ -73,13 +79,15 @@ class NetworkUnknownDeviceJoinedRule:
     Compares against the inventory as it stood before the run (the adapter
     asks it which keys are new); the engine commits after dispatch and holds
     back clients whose finding was not delivered, so a suppressed alert is
-    repeated on a later run. A client is reported only once it has stayed on
-    the network for the grace period: its inventory row's ``first_seen`` must
-    be old enough, so a device seen by one poll and gone by the next never
-    alerts (docs/network-security-plan.md, configuration). A client the
-    inventory auto-trusted (a registry device set up by a non-router
-    integration) is never new. A rotated random address on a device whose
-    name a trusted row already carries is reported once, at low severity.
+    repeated on a later run. A client is reported once its inventory row is
+    older than the grace period, whether or not it is still connected: a
+    device that was on the network and left is exactly what the owner wants
+    to hear about, so an offline client is named with "not connected now"
+    rather than withheld (a field test lost a two-hour visitor to the gate
+    this replaced). A client the inventory auto-trusted (a registry device
+    set up by a non-router integration) is never new. A rotated random
+    address on a device whose name a trusted row already carries is reported
+    once, at low severity.
     """
 
     rule_id = "network_unknown_device_joined"
@@ -122,7 +130,6 @@ class NetworkUnknownDeviceJoinedRule:
             c
             for c in clients(snapshot)
             if c.get("key") in keys
-            and c.get("connected")
             and not self._excluded(c)
             and self._past_grace(c, now)
         ]
@@ -145,13 +152,16 @@ class NetworkUnknownDeviceJoinedRule:
                     # Inventory keys, so the Trust button and the trust
                     # service resolve them without a registry device.
                     "device_ids": sorted(client_key(c["key"]) for c in joined),
-                    "names": [describe_client(c) for c in joined],
+                    "names": [describe_joined(c) for c in joined],
+                    "offline": sorted(
+                        c["key"] for c in joined if not c.get("connected")
+                    ),
                     "randomized_known": sorted(
                         c["key"] for c in joined if c.get("hostname_trusted")
                     ),
                 },
                 summary=(
-                    f"{head}{context}: {listed([describe_client(c) for c in joined])}."
+                    f"{head}{context}: {listed([describe_joined(c) for c in joined])}."
                 ),
                 suggested_actions=[
                     (

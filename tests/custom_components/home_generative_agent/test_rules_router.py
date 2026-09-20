@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 from custom_components.home_generative_agent.sentinel.rules.network_unknown_device_joined import (
     NetworkUnknownDeviceJoinedRule,
     describe_client,
+    describe_joined,
 )
 from custom_components.home_generative_agent.snapshot.network import (
     CAP_CLIENTS,
@@ -119,7 +120,7 @@ def test_grace_period_waits_for_the_inventory_row() -> None:
     assert len(zero.evaluate(_snapshot([_client("a", first_seen=None)], ["a"]))) == 1
 
 
-def test_only_connected_and_unexcluded_clients_are_reported() -> None:
+def test_offline_clients_are_reported_and_marked_excluded_ones_are_not() -> None:
     rule = NetworkUnknownDeviceJoinedRule(
         grace_minutes=0,
         is_entity_excluded=lambda entity_id, rule: (
@@ -128,8 +129,18 @@ def test_only_connected_and_unexcluded_clients_are_reported() -> None:
     )
     clients = [_client("a"), _client("b", connected=False), _client("c")]
     finding = _only(rule.evaluate(_snapshot(clients, ["a", "b", "c"])))
-    assert finding.evidence["client_keys"] == ["a"]
-    assert finding.triggering_entities == ["device_tracker.a"]
+    # A device that was on the network and left is still reported, once.
+    assert finding.evidence["client_keys"] == ["a", "b"]
+    assert finding.evidence["offline"] == ["b"]
+    assert finding.evidence["names"] == [
+        "Device a (Apple, wireless, 192.168.1.23)",
+        "Device b (Apple, wireless, 192.168.1.23), not connected now",
+    ]
+    assert (
+        "Device b (Apple, wireless, 192.168.1.23), not connected now"
+        in (finding.evidence["summary"])
+    )
+    assert finding.triggering_entities == ["device_tracker.a", "device_tracker.b"]
 
 
 def test_severity_by_occupancy_night_and_known_random_address() -> None:
@@ -173,6 +184,14 @@ def test_identity_display_and_actions() -> None:
     assert first.suggested_actions[-1] == "Tap Trust device if you recognize it"
     assert all("." not in action for action in first.suggested_actions)
     assert first.triggering_entities == ["device_tracker.a", "device_tracker.b"]
+
+
+def test_describe_joined_marks_offline_clients() -> None:
+    assert describe_joined({"name": "TV", "connected": True}) == "TV"
+    assert (
+        describe_joined({"name": "TV", "connected": False}) == "TV, not connected now"
+    )
+    assert describe_joined({"name": "TV"}) == "TV, not connected now"
 
 
 def test_describe_client_never_uses_the_hostname() -> None:
