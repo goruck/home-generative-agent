@@ -71,6 +71,8 @@ LOGGER = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 CAP_CLIENTS = "network.clients"
+# Present once the device inventory has compared this run's clients.
+CAP_NEW_CLIENTS = "network.new_clients"
 _CAP_RADIO_PREFIX = "network.radio."
 _CAP_POSTURE_PREFIX = "network.posture."
 _CAP_HA_PREFIX = "network.ha_security."
@@ -196,6 +198,9 @@ class AdapterResult:
     # None means the adapter cannot see clients at all (capability absent);
     # an empty list means it can and there are none.
     clients: list[NetworkClient] | None = None
+    # Client keys the device inventory did not know before this run; None
+    # when no inventory compared them.
+    new_clients: list[str] | None = None
     counters: dict[str, float] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
     # Radio section fields (``devices``, ``new_devices``, ``present_sources``)
@@ -210,7 +215,9 @@ class AdapterResult:
 # Radio fields that are bookkeeping for the engine, not rule inputs.
 _RADIO_NON_CAPABILITY_KEYS: frozenset[str] = frozenset({"present_sources"})
 # Posture fields that only describe a fact for display (evidence source,
-# gateway names, the previous run's values) and never gate a rule.
+# gateway names, the previous run's values) and never gate a rule. A key's
+# ``<key>_entity_id`` twin (the entity a posture fact was read from) is
+# display-only as well.
 _POSTURE_NON_CAPABILITY_KEYS: frozenset[str] = frozenset(
     {
         "upnp_evidence",
@@ -219,18 +226,41 @@ _POSTURE_NON_CAPABILITY_KEYS: frozenset[str] = frozenset(
         "upnp_port_mapping_previous_count",
     }
 )
+_ENTITY_TWIN_SUFFIX = "_entity_id"
+# Posture keys that only mean something together. When a later adapter
+# provides the group's lead key, the earlier adapter's other members are
+# dropped first, so a change flag computed against one gateway's sensor never
+# survives next to another gateway's current value.
+_POSTURE_GROUPS: dict[str, tuple[str, ...]] = {
+    "public_ip_key": (
+        "public_ip_key",
+        "public_ip_entity_id",
+        "public_ip_changed",
+        "public_ip_previous_key",
+    ),
+}
 
 
-def merge_adapter_results(results: Iterable[AdapterResult]) -> NetworkSnapshot:
+def posture_is_capability(key: str) -> bool:
+    """Return whether a posture key gates rules (vs. describing a fact)."""
+    return key not in _POSTURE_NON_CAPABILITY_KEYS and not key.endswith(
+        _ENTITY_TWIN_SUFFIX
+    )
+
+
+def merge_adapter_results(results: Iterable[AdapterResult]) -> NetworkSnapshot:  # noqa: PLR0912 - one branch per section, kept flat on purpose
     """
     Merge adapter outputs into one section and derive the capability list.
 
     Later adapters override earlier ones for the same key, so callers order
-    generic adapters before router-specific ones.
+    generic adapters before router-specific ones. Clients are merged by
+    ``key``: a router-specific adapter that sees a client the generic tracker
+    adapter also saw replaces that client rather than duplicating it.
     """
     posture: dict[str, Any] = {}
     ha_security: dict[str, Any] = {}
-    clients: list[NetworkClient] | None = None
+    clients: dict[str, NetworkClient] | None = None
+    new_clients: list[str] | None = None
     counters: dict[str, float] = {}
     sources: dict[str, str] = {}
     notes: list[str] = []
@@ -238,16 +268,26 @@ def merge_adapter_results(results: Iterable[AdapterResult]) -> NetworkSnapshot:
     radio_posture: dict[str, Any] = {}
     radio_caps: set[str] = set()
     for result in results:
+        for lead, members in _POSTURE_GROUPS.items():
+            if lead in result.posture:
+                for member in members:
+                    posture.pop(member, None)
+                    sources.pop(posture_cap(member), None)
         for key, value in result.posture.items():
             posture[key] = value
-            if key not in _POSTURE_NON_CAPABILITY_KEYS:
+            if posture_is_capability(key):
                 sources[posture_cap(key)] = result.name
         for key, value in result.ha_security.items():
             ha_security[key] = value
             sources[ha_cap(key)] = result.name
         if result.clients is not None:
-            clients = [*(clients or []), *result.clients]
+            clients = clients or {}
+            for client in result.clients:
+                clients[client["key"]] = client
             sources[CAP_CLIENTS] = result.name
+        if result.new_clients is not None:
+            new_clients = sorted({*(new_clients or []), *result.new_clients})
+            sources[CAP_NEW_CLIENTS] = result.name
         for key, value in result.radio.items():
             radio[key] = value
             if key not in _RADIO_NON_CAPABILITY_KEYS:
@@ -267,12 +307,14 @@ def merge_adapter_results(results: Iterable[AdapterResult]) -> NetworkSnapshot:
     section: dict[str, Any] = {
         "capabilities": sorted(sources),
         "sources": sources,
-        "clients": clients or [],
+        "clients": list(clients.values()) if clients else [],
         "posture": posture,  # type: ignore[typeddict-item]
         "ha_security": ha_security,  # type: ignore[typeddict-item]
         "counters": counters,
         "notes": notes,
     }
+    if new_clients is not None:
+        section["new_clients"] = new_clients
     if radio or radio_posture:
         section["radio"] = {
             "capabilities": sorted(radio_caps),
@@ -1076,8 +1118,10 @@ async def async_build_network_snapshot(  # noqa: PLR0913
         return empty_network_snapshot("Network section not requested by caller.")
     if not context.enabled:
         return empty_network_snapshot("Network audit is disabled in Sentinel options.")
-    # Imported here: the radio and UPnP adapters build on this module's helpers.
+    # Imported here: the radio, UPnP, and router adapters build on this
+    # module's helpers.
     from .radio import collect_radio_inputs, radio_adapters  # noqa: PLC0415
+    from .router import async_collect_router_inputs, router_adapters  # noqa: PLC0415
     from .upnp import async_collect_upnp_inputs, upnp_igd_adapter  # noqa: PLC0415
 
     inputs = await async_collect_ha_native_inputs(
@@ -1092,10 +1136,14 @@ async def async_build_network_snapshot(  # noqa: PLR0913
         hass, entity_device=entity_device, device_domains=device_domains
     )
     upnp_inputs = await async_collect_upnp_inputs(hass)
+    router_inputs = async_collect_router_inputs(hass)
+    # Router adapters come last: a router's own UPnP switch outranks the
+    # IGD inference, and its public-IP sensor the gateway's.
     return merge_adapter_results(
         [
             ha_native_adapter(inputs, entities, context),
             *radio_adapters(radio_inputs, entities, context.network_inventory),
             upnp_igd_adapter(upnp_inputs, entities, context),
+            *router_adapters(router_inputs, entities, context),
         ]
     )

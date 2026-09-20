@@ -41,6 +41,7 @@ from custom_components.home_generative_agent.sentinel.suppression import (
 )
 from custom_components.home_generative_agent.snapshot.network import (
     CAP_CLIENTS,
+    CAP_NEW_CLIENTS,
     NetworkBuildContext,
     ha_cap,
     posture_cap,
@@ -218,7 +219,8 @@ def test_capability_reasons_name_what_would_unlock_the_check() -> None:
     assert "did not return" in capability_reason(
         ha_cap("failed_login_notification_present")
     )
-    assert "router integration adapter" in capability_reason(CAP_CLIENTS)
+    assert "source_type router" in capability_reason(CAP_CLIENTS)
+    assert "device inventory" in capability_reason(CAP_NEW_CLIENTS)
     assert "router or DNS" in capability_reason(posture_cap("wpa3_enabled"))
     assert "SSDP" in capability_reason(posture_cap("upnp_enabled"))
     assert "port-mapping count sensor" in capability_reason(

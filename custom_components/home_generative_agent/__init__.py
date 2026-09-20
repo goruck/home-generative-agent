@@ -352,7 +352,18 @@ SERVICE_SENTINEL_TRUST_NETWORK_DEVICE = "sentinel_trust_network_device"
 SERVICE_SENTINEL_UNTRUST_NETWORK_DEVICE = "sentinel_untrust_network_device"
 SERVICE_SENTINEL_RESET_NETWORK_INVENTORY = "sentinel_reset_network_inventory"
 SENTINEL_NETWORK_DEVICE_SCHEMA = vol.Schema(
-    {vol.Required("device_id"): vol.All(cv.ensure_list, [cv.string])}
+    vol.All(
+        vol.Schema(
+            {
+                # Registry devices (radio devices, and router clients joined
+                # to one) or inventory keys (``router:<key>``) from
+                # ``sentinel_get_network_inventory``; at least one of the two.
+                vol.Optional("device_id"): vol.All(cv.ensure_list, [cv.string]),
+                vol.Optional("device_key"): vol.All(cv.ensure_list, [cv.string]),
+            }
+        ),
+        cv.has_at_least_one_key("device_id", "device_key"),
+    )
 )
 
 ENROLL_SCHEMA = vol.Schema(
@@ -1471,7 +1482,8 @@ def _register_network_inventory_services(
             if inventory is None:
                 return {"status": "unavailable", "changed": []}
             changed = await inventory.async_set_trusted(
-                call.data["device_id"], trusted=trusted
+                [*call.data.get("device_id", []), *call.data.get("device_key", [])],
+                trusted=trusted,
             )
             LOGGER.info(
                 "Sentinel network inventory: user %s set trusted=%s on %d device(s).",

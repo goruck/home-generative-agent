@@ -408,6 +408,7 @@ This document covers the named constants that affect integration behaviour, orga
 |---|---|---|---|
 | `RECOMMENDED_SENTINEL_NETWORK_ENABLED` | `sentinel_network_enabled` | `True` | Master switch for the snapshot's `network` section and the Home Assistant & network security rules. Off = the rules are reported as inactive on the health sensor. |
 | `RECOMMENDED_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN` | `sentinel_network_offline_device_min` | `30` | Minutes a lock, alarm panel, or camera may be `unavailable` before `security_device_unavailable` fires |
+| `RECOMMENDED_SENTINEL_NETWORK_UNKNOWN_DEVICE_GRACE_MIN` | `sentinel_network_unknown_device_grace_min` | `5` | Minutes a router client new to the device inventory must stay on the network before `network_unknown_device_joined` fires; `0` alerts on first sight |
 | `RECOMMENDED_SENTINEL_HA_TOKEN_STALE_DAYS` | `sentinel_ha_token_stale_days` | `90` | Age in days past which `ha_long_lived_token_stale` reports a long-lived access token (Home Assistant does not record long-lived token use, so age is the only observable fact) |
 | `RECOMMENDED_SENTINEL_AUTH_IP_RETENTION_DAYS` | `sentinel_auth_ip_retention_days` | `90` | How long a pseudonymized token address stays in the auth inventory |
 
@@ -424,6 +425,9 @@ This document covers the named constants that affect integration behaviour, orga
 | `MAC_REDACTED`, `LAN_IP_REDACTED`, `PUBLIC_IP_REDACTED`, `HOSTNAME_REDACTED` | `sentinel/redaction.py` | `[mac]`, `[lan ip]`, `[public ip]`, `[hostname]` | Tokens that replace MAC/Bluetooth/IEEE addresses (separated or bare 12/16-hex), IP addresses (subnet class kept), and local-suffix hostnames in anything rendered into a model prompt |
 | `MAX_DEPTH` | `sentinel/redaction.py` | `64` | Nesting depth beyond which the redaction walk cuts a structure with a marker instead of recursing |
 | `IGD_SEARCH_TARGETS` | `snapshot/upnp.py` | IGD:1, IGD:2 URNs | SSDP search targets whose presence in Home Assistant's discovery cache proves the router accepts UPnP |
+| `EERO_SWITCHES` | `snapshot/router.py` | `upnp, wpa3, guest_network_enabled, ipv6_upstream, ddns_enabled, block_malware, ad_block` → posture keys | eero network-level switch keys (entity unique id `<network id>-<key>`) read as router posture; each posture key gets a `<key>_entity_id` twin |
+| `EERO_SENSORS` | `snapshot/router.py` | `public_ip, connected_guest_clients_count, blocked_day` | eero network-level sensors feeding the public-IP change check, `guest_client_count`, and the `network.threats_day` counter |
+| `COUNTER_CLIENT_COUNT`, `COUNTER_THREATS_DAY` | `snapshot/router.py` | `network.client_count`, `network.threats_day` | Baseline-input counters: connected router clients, and threats the router blocked today |
 | `POSTURE_MEMORY_KEYS` | `snapshot/upnp.py` | `public_ip_key, public_ip_entity_id, upnp_port_mapping_count, upnp_port_mapping_entity_id` | Posture values the Sentinel engine remembers between runs (in the device inventory file) for `network_public_ip_changed` and `network_upnp_port_mapping_added`, each with the sensor it was read from |
 
 ---
