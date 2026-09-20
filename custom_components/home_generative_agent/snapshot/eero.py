@@ -51,6 +51,7 @@ key.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Final
@@ -75,6 +76,8 @@ if TYPE_CHECKING:
 
     from .network import NetworkBuildContext
     from .schema import NetworkClient
+
+LOGGER = logging.getLogger(__name__)
 
 EERO_INTEGRATION_VERSION: Final = "1.8.1"
 DATA_COORDINATOR: Final = "coordinator"
@@ -326,6 +329,14 @@ def eero_runtime_adapter(
         return result
     _aggregate_posture(inputs, result)
     blocker = _clients_blocker(inputs, router_inputs, context)
+    LOGGER.debug(
+        "eero runtime read: %d network(s), %d client(s), stale=%s, complete=%s%s",
+        len(inputs.networks),
+        sum(len(n.clients) for n in inputs.networks),
+        inputs.stale,
+        inputs.clients_complete,
+        f"; clients withheld: {blocker}" if blocker else "",
+    )
     if blocker is not None:
         result.notes.append(blocker)
         return result
