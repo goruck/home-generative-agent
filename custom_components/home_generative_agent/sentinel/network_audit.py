@@ -157,6 +157,27 @@ _CAPABILITY_REASONS: tuple[tuple[str, str], ...] = (
         ),
     ),
     (
+        posture_cap("malware_blocking_enabled"),
+        (
+            "needs a router integration that reports threat blocking; with eero "
+            "it is an eero Plus feature and is audited only when Plus is active"
+        ),
+    ),
+    (
+        posture_cap("ddns_enabled"),
+        (
+            "needs a router integration that reports dynamic DNS; with eero it is "
+            "an eero Plus feature and is audited only when Plus is active"
+        ),
+    ),
+    (
+        posture_cap("guest_network_idle_days"),
+        (
+            "needs a router integration that reports the guest network and its "
+            "connected guests, and a previous Sentinel run to measure from"
+        ),
+    ),
+    (
         CAP_NEW_CLIENTS,
         (
             "needs the Sentinel device inventory to have compared this run's "

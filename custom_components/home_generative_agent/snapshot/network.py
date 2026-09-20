@@ -28,6 +28,7 @@ import logging
 import re
 import unicodedata
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any, cast
 
 from homeassistant.util import dt as dt_util
@@ -198,6 +199,10 @@ class AdapterResult:
     # None means the adapter cannot see clients at all (capability absent);
     # an empty list means it can and there are none.
     clients: list[NetworkClient] | None = None
+    # Posture keys an earlier source may have published that this source
+    # knows must not stand (a feature the account does not have): the merge
+    # removes them, their entity twins, and their capabilities.
+    posture_withdrawn: set[str] = field(default_factory=set)
     # Client keys the device inventory did not know before this run; None
     # when no inventory compared them.
     new_clients: list[str] | None = None
@@ -224,8 +229,12 @@ _POSTURE_NON_CAPABILITY_KEYS: frozenset[str] = frozenset(
         "upnp_gateway_names",
         "public_ip_previous_key",
         "upnp_port_mapping_previous_count",
+        "guest_network_last_active",
+        "guest_network_last_observed",
     }
 )
+# The one definition; snapshot/upnp.py re-exports it for its callers.
+POSTURE_DISPLAY_KEYS = _POSTURE_NON_CAPABILITY_KEYS
 _ENTITY_TWIN_SUFFIX = "_entity_id"
 # Posture keys that only mean something together. When a later adapter
 # provides the group's lead key, the earlier adapter's other members are
@@ -282,6 +291,30 @@ def _merge_client(earlier: NetworkClient, incoming: NetworkClient) -> NetworkCli
     return cast("NetworkClient", merged)
 
 
+def _merge_posture(
+    result: AdapterResult, posture: dict[str, Any], sources: dict[str, str]
+) -> None:
+    """Fold one adapter's posture into the merged posture and its sources."""
+    for lead, members in _POSTURE_GROUPS.items():
+        if lead in result.posture:
+            for member in members:
+                posture.pop(member, None)
+                sources.pop(posture_cap(member), None)
+    for key in result.posture_withdrawn:
+        posture.pop(key, None)
+        posture.pop(f"{key}{_ENTITY_TWIN_SUFFIX}", None)
+        sources.pop(posture_cap(key), None)
+    for key, value in result.posture.items():
+        posture[key] = value
+        if posture_is_capability(key):
+            sources[posture_cap(key)] = result.name
+            twin = f"{key}{_ENTITY_TWIN_SUFFIX}"
+            if twin not in result.posture:
+                # The earlier source's entity no longer describes this
+                # value; a stale twin would name the wrong evidence.
+                posture.pop(twin, None)
+
+
 def merge_adapter_results(results: Iterable[AdapterResult]) -> NetworkSnapshot:  # noqa: PLR0912 - one branch per section, kept flat on purpose
     """
     Merge adapter outputs into one section and derive the capability list.
@@ -302,20 +335,7 @@ def merge_adapter_results(results: Iterable[AdapterResult]) -> NetworkSnapshot: 
     radio_posture: dict[str, Any] = {}
     radio_caps: set[str] = set()
     for result in results:
-        for lead, members in _POSTURE_GROUPS.items():
-            if lead in result.posture:
-                for member in members:
-                    posture.pop(member, None)
-                    sources.pop(posture_cap(member), None)
-        for key, value in result.posture.items():
-            posture[key] = value
-            if posture_is_capability(key):
-                sources[posture_cap(key)] = result.name
-                twin = f"{key}{_ENTITY_TWIN_SUFFIX}"
-                if twin not in result.posture:
-                    # The earlier source's entity no longer describes this
-                    # value; a stale twin would name the wrong evidence.
-                    posture.pop(twin, None)
+        _merge_posture(result, posture, sources)
         for key, value in result.ha_security.items():
             ha_security[key] = value
             sources[ha_cap(key)] = result.name
@@ -423,8 +443,7 @@ def attach_inventory(section: NetworkSnapshot, context: NetworkBuildContext) -> 
     section["new_clients"] = [
         k.removeprefix(prefix) for k in delta.new_device_keys if k.startswith(prefix)
     ]
-    section["sources"][CAP_NEW_CLIENTS] = "inventory"
-    section["capabilities"] = sorted(section["sources"])
+    _publish_capability(section, CAP_NEW_CLIENTS, "inventory")
     LOGGER.debug(
         "Network clients: %d from %s, %d connected, %d new to the inventory.",
         len(section["clients"]),
@@ -432,6 +451,94 @@ def attach_inventory(section: NetworkSnapshot, context: NetworkBuildContext) -> 
         sum(1 for c in section["clients"] if c.get("connected")),
         len(section["new_clients"]),
     )
+
+
+# The idle clock trusts its memory only across gaps this short: a longer
+# stretch with no observation (the router integration removed, Home Assistant
+# down) is time nobody watched, not time the guest network sat idle.
+GUEST_OBSERVATION_GAP = timedelta(days=2)
+
+
+def _day(moment: datetime) -> datetime:
+    """Return *moment* in UTC truncated to its day."""
+    return dt_util.as_utc(moment).replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _remembered_day(
+    previous: Mapping[str, Any], key: str, today: datetime
+) -> datetime | None:
+    """Return a remembered day, or None when absent, garbled, or in the future."""
+    parsed = dt_util.parse_datetime(str(previous.get(key) or ""))
+    if parsed is None:
+        return None
+    day = _day(parsed)
+    # A clock that once ran ahead must not pin the idle time at zero forever.
+    return day if day <= today + timedelta(days=1) else None
+
+
+def derive_guest_idle(
+    section: NetworkSnapshot, context: NetworkBuildContext, now: datetime
+) -> None:
+    """
+    Work out how long the guest Wi-Fi has sat unused, once per run.
+
+    Runs after the merge. An *observation* needs the guest network's state
+    and its connected-guest count from the same source (two sources can cover
+    different networks, and mixing them would fabricate an idle network); a
+    run without one leaves the engine's posture memory untouched, so a read
+    gap neither restarts the clock nor counts as idle time.
+
+    The memory holds two days, truncated to the day so it changes (and is
+    written) at most daily: ``guest_network_last_active``, when a guest was
+    last connected or the clock was restarted, and
+    ``guest_network_last_observed``, when the network was last observed at
+    all. A guest connected now, a network that is off, no usable memory, or
+    more than :data:`GUEST_OBSERVATION_GAP` since the last observation all
+    restart the clock; otherwise the remembered day stands and
+    ``guest_network_idle_days`` is published. The first observation only
+    starts the clock, so the rule is listed as not run rather than guessing.
+    """
+    posture: dict[str, Any] = section["posture"]  # type: ignore[assignment]
+    enabled = posture.get("guest_network_enabled")
+    count = posture.get("guest_client_count")
+    sources = section["sources"]
+    if (
+        not isinstance(enabled, bool)
+        or not isinstance(count, int)
+        or isinstance(count, bool)
+        or sources.get(posture_cap("guest_network_enabled"))
+        != sources.get(posture_cap("guest_client_count"))
+    ):
+        return
+    today = _day(now)
+    previous = context.previous_posture or {}
+    last_active = _remembered_day(previous, "guest_network_last_active", today)
+    last_observed = _remembered_day(previous, "guest_network_last_observed", today)
+    watched = (
+        last_active is not None
+        and last_observed is not None
+        and today - last_observed <= GUEST_OBSERVATION_GAP
+    )
+    posture["guest_network_last_observed"] = today.isoformat()
+    if not enabled or count > 0 or not watched or last_active is None:
+        posture["guest_network_last_active"] = today.isoformat()
+        if enabled and count > 0:
+            posture["guest_network_idle_days"] = 0
+            _publish_capability(
+                section, posture_cap("guest_network_idle_days"), "posture_memory"
+            )
+        return
+    posture["guest_network_last_active"] = last_active.isoformat()
+    posture["guest_network_idle_days"] = max(0, (today - last_active).days)
+    _publish_capability(
+        section, posture_cap("guest_network_idle_days"), "posture_memory"
+    )
+
+
+def _publish_capability(section: NetworkSnapshot, path: str, source: str) -> None:
+    """Record a capability a post-merge step established, and who supplied it."""
+    section["sources"][path] = source
+    section["capabilities"] = sorted(section["sources"])
 
 
 def empty_network_snapshot(note: str | None = None) -> NetworkSnapshot:
@@ -1264,4 +1371,5 @@ async def async_build_network_snapshot(  # noqa: PLR0913
         ]
     )
     attach_inventory(section, context)
+    derive_guest_idle(section, context, now)
     return section

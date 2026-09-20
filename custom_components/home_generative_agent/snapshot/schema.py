@@ -129,6 +129,12 @@ class NetworkPosture(TypedDict, total=False):
     wpa3_enabled: bool
     guest_network_enabled: bool
     guest_client_count: int
+    # Derived once per run from the engine's posture memory (see
+    # ``snapshot/network.py`` ``derive_guest_idle``): whole days the guest
+    # network has been on with no guest, and the two remembered days.
+    guest_network_idle_days: int
+    guest_network_last_active: str
+    guest_network_last_observed: str
     ipv6_enabled: bool
     ddns_enabled: bool
     malware_blocking_enabled: bool

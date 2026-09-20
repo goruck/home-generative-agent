@@ -125,6 +125,11 @@ FORBIDDEN_ATTRS: Final[frozenset[str]] = frozenset(
     }
 )
 
+# Settings that exist only with an eero Plus subscription.
+_PLUS_ONLY: Final[frozenset[str]] = frozenset(
+    {"ddns_enabled", "malware_blocking_enabled", "ad_blocking_enabled"}
+)
+
 RUNTIME_FAILED_NOTE: Final = (
     "The eero integration's client list could not be read completely from the "
     "integration, so this run used its device trackers, which list a device "
@@ -133,6 +138,11 @@ RUNTIME_FAILED_NOTE: Final = (
 STALE_POLL_NOTE: Final = (
     "The eero integration's last poll failed, so its client list is stale; "
     "this run used its device trackers."
+)
+PLUS_UNKNOWN_NOTE: Final = (
+    "Whether eero Plus is active could not be read, so the dynamic DNS, "
+    "advanced security, and ad-blocking settings are audited only where eero's "
+    "own switches report them."
 )
 NO_PLUS_NOTE: Final = (
     "eero Plus is not active on this account, so the dynamic DNS, advanced "
@@ -327,7 +337,11 @@ def eero_runtime_adapter(
     if inputs.failed:
         result.notes.append(RUNTIME_FAILED_NOTE)
         return result
-    _aggregate_posture(inputs, result)
+    if not inputs.stale:
+        # A failed poll leaves the previous poll's values in the coordinator;
+        # a cached guest count would keep resetting (or advancing) the guest
+        # idle clock through an outage, so stale settings are not published.
+        _aggregate_posture(inputs, router_inputs, result)
     blocker = _clients_blocker(inputs, router_inputs, context)
     LOGGER.debug(
         "eero runtime read: %d network(s), %d client(s), stale=%s, complete=%s%s",
@@ -375,23 +389,53 @@ def _clients_blocker(
     return None
 
 
-def _aggregate_posture(inputs: EeroRuntimeInputs, result: AdapterResult) -> None:
+def _deciding_network(
+    states: list[tuple[str, bool]], *, any_on: bool
+) -> tuple[bool, str]:
+    """Return (value, id of the network that decided it) for one setting."""
+    value = any(on for _n, on in states) if any_on else all(on for _n, on in states)
+    decider = next((n for n, on in states if on is (value if any_on else False)), None)
+    return value, decider or states[0][0]
+
+
+def _aggregate_posture(
+    inputs: EeroRuntimeInputs, router_inputs: RouterInputs, result: AdapterResult
+) -> None:
     """
     Judge the settings across every configured network.
 
-    A setting is published only when every network reports it: judging the
-    networks that happen to be readable could turn a known "UPnP on" into
-    "off" and silence a standing finding. A weakening setting is on if any
-    network has it on; a protection only if every network has it on.
+    A setting is published only when every network it applies to reports it:
+    judging the networks that happen to be readable could turn a known "UPnP
+    on" into "off" and silence a standing finding. A weakening setting is on
+    if any network has it on; a protection only if every network has it on.
+
+    The eero Plus settings apply only to networks where Plus is active. When
+    Plus is known to be off everywhere they are withdrawn from the merge too,
+    so a switch left over from a lapsed subscription cannot tell someone to
+    turn on a feature they no longer have; when Plus cannot be read they are
+    left to the entity tier and the gap is noted.
+
+    The entity twin names the switch of the network that decided the value
+    (from the registry read in ``snapshot/router.py``), so per-rule entity
+    exclusions and the finding's identity are the same on both tiers.
     """
     posture = result.posture
     if not inputs.networks:
         return
+    switch_key = {posture_key: key for key, posture_key in EERO_SWITCHES.items()}
+    plus_networks = [n for n in inputs.networks if n.premium_enabled is True]
     for key in EERO_SWITCHES.values():
-        states = [n.settings.get(key) for n in inputs.networks]
-        if any(state is None for state in states):
+        networks = plus_networks if key in _PLUS_ONLY else inputs.networks
+        if not networks or any(key not in n.settings for n in networks):
             continue
-        posture[key] = any(states) if key in EERO_ANY_ON else all(states)
+        value, decider = _deciding_network(
+            [(n.id, n.settings[key]) for n in networks], any_on=key in EERO_ANY_ON
+        )
+        posture[key] = value
+        switches = router_inputs.eero_switches.get(switch_key[key], [])
+        entity_id = next((e for net, e in switches if net == decider), None)
+        if entity_id:
+            posture[f"{key}_entity_id"] = entity_id
     if "upnp_enabled" in posture:
         posture["upnp_evidence"] = "eero"
     guests = [n.guest_client_count for n in inputs.networks]
@@ -399,4 +443,7 @@ def _aggregate_posture(inputs: EeroRuntimeInputs, result: AdapterResult) -> None
         posture["guest_client_count"] = sum(g for g in guests if g is not None)
     plus = [n.premium_enabled for n in inputs.networks]
     if all(p is False for p in plus):
+        result.posture_withdrawn |= set(_PLUS_ONLY)
         result.notes.append(NO_PLUS_NOTE)
+    elif not plus_networks:
+        result.notes.append(PLUS_UNKNOWN_NOTE)

@@ -39,6 +39,7 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH,
     CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT,
     CONF_SENTINEL_NETWORK_ENABLED,
+    CONF_SENTINEL_NETWORK_GUEST_IDLE_DAYS,
     CONF_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN,
     CONF_SENTINEL_NETWORK_UNKNOWN_DEVICE_GRACE_MIN,
     CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
@@ -60,6 +61,7 @@ from custom_components.home_generative_agent.const import (
     RECOMMENDED_SENTINEL_BASELINE_WEEKLY_PATTERNS,
     RECOMMENDED_SENTINEL_HA_TOKEN_STALE_DAYS,
     RECOMMENDED_SENTINEL_NETWORK_ENABLED,
+    RECOMMENDED_SENTINEL_NETWORK_GUEST_IDLE_DAYS,
     RECOMMENDED_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN,
     RECOMMENDED_SENTINEL_NETWORK_UNKNOWN_DEVICE_GRACE_MIN,
     RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
@@ -128,6 +130,12 @@ from .rules.ha_trusted_networks_bypass_login import HaTrustedNetworksBypassLogin
 from .rules.ha_webhook_automation_public import HaWebhookAutomationPublicRule
 from .rules.network_common import NETWORK_RULE_TYPES
 from .rules.network_public_ip_changed import NetworkPublicIpChangedRule
+from .rules.network_router_posture import (
+    NetworkDdnsEnabledRule,
+    NetworkGuestNetworkIdleRule,
+    NetworkProtectionDisabledRule,
+    NetworkWpa3DisabledRule,
+)
 from .rules.network_router_update_pending import NetworkRouterUpdatePendingRule
 from .rules.network_unconfigured_discovered_device import (
     NetworkUnconfiguredDiscoveredDeviceRule,
@@ -447,6 +455,15 @@ class SentinelEngine:
                 NetworkUpnpEnabledRule(),
                 NetworkPublicIpChangedRule(),
                 NetworkUpnpPortMappingAddedRule(),
+                NetworkGuestNetworkIdleRule(
+                    idle_days=_coerce_int(
+                        options.get(CONF_SENTINEL_NETWORK_GUEST_IDLE_DAYS),
+                        default=RECOMMENDED_SENTINEL_NETWORK_GUEST_IDLE_DAYS,
+                    ),
+                ),
+                NetworkWpa3DisabledRule(),
+                NetworkProtectionDisabledRule(),
+                NetworkDdnsEnabledRule(),
                 RadioNewDeviceJoinedRule(),
                 NetworkUnknownDeviceJoinedRule(
                     grace_minutes=_coerce_int(

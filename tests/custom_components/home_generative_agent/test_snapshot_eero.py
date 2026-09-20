@@ -23,6 +23,7 @@ from custom_components.home_generative_agent.snapshot.eero import (
     FORBIDDEN_ATTRS,
     NETWORK_ATTRS,
     NO_PLUS_NOTE,
+    PLUS_UNKNOWN_NOTE,
     RUNTIME_FAILED_NOTE,
     STALE_POLL_NOTE,
     EeroRuntimeInputs,
@@ -363,6 +364,112 @@ def test_adapter_judges_several_networks_together_only_when_all_report() -> None
     assert "wpa3_enabled" not in posture
 
 
+PLUS_KEYS = {"ddns_enabled", "malware_blocking_enabled", "ad_blocking_enabled"}
+PLUS_SETTINGS: dict[str, Any] = {
+    "upnp": True,
+    "ddns_enabled": True,
+    "block_malware": False,
+    "ad_block": False,
+}
+
+
+def test_plus_only_settings_follow_the_networks_that_have_plus() -> None:
+    free = eero_runtime_adapter(
+        _inputs(FakeNetwork(premium_enabled=False, **PLUS_SETTINGS)),
+        RouterInputs(),
+        _context(),
+    )
+    assert free.posture["upnp_enabled"] is True
+    assert not PLUS_KEYS & set(free.posture)
+    # Known off everywhere: withdrawn from the merge too, so a switch left
+    # over from a lapsed subscription cannot raise the finding.
+    assert free.posture_withdrawn == PLUS_KEYS
+    assert NO_PLUS_NOTE in free.notes
+    entity_tier = AdapterResult(
+        name="eero",
+        posture={
+            "malware_blocking_enabled": False,
+            "malware_blocking_enabled_entity_id": "switch.x",
+        },
+    )
+    merged = cast(
+        "dict[str, Any]", merge_adapter_results([entity_tier, free])["posture"]
+    )
+    assert "malware_blocking_enabled" not in merged
+    assert "malware_blocking_enabled_entity_id" not in merged
+
+    plus = eero_runtime_adapter(
+        _inputs(FakeNetwork(premium_enabled=True, **PLUS_SETTINGS)),
+        RouterInputs(),
+        _context(),
+    )
+    assert plus.posture["malware_blocking_enabled"] is False
+    assert plus.posture["ddns_enabled"] is True
+    assert plus.posture_withdrawn == set()
+
+    # One network with Plus, one without: the Plus network is still judged.
+    mixed = eero_runtime_adapter(
+        _inputs(
+            FakeNetwork("1", premium_enabled=True, **PLUS_SETTINGS),
+            FakeNetwork("2", premium_enabled=False, upnp=False),
+        ),
+        RouterInputs(),
+        _context(),
+    )
+    assert mixed.posture["ddns_enabled"] is True
+    assert mixed.posture_withdrawn == set()
+
+    # Unknown Plus state: left to the entity tier, and the gap is noted.
+    unknown = eero_runtime_adapter(
+        _inputs(FakeNetwork(premium_enabled=None, **PLUS_SETTINGS)),
+        RouterInputs(),
+        _context(),
+    )
+    assert not PLUS_KEYS & set(unknown.posture)
+    assert unknown.posture_withdrawn == set()
+    assert PLUS_UNKNOWN_NOTE in unknown.notes
+
+
+def test_the_deciding_networks_switch_is_the_entity_twin() -> None:
+    """Same triggering entity on both tiers, so exclusions and identity agree."""
+    router_inputs = RouterInputs(
+        eero_switches={
+            "upnp": [("1", "switch.home_upnp"), ("2", "switch.cabin_upnp")],
+            "wpa3": [("1", "switch.home_wpa3")],
+        }
+    )
+    posture = eero_runtime_adapter(
+        _inputs(
+            FakeNetwork("1", upnp=False, wpa3=False),
+            FakeNetwork("2", upnp=True, wpa3=True),
+        ),
+        router_inputs,
+        _context(),
+    ).posture
+    assert posture["upnp_enabled"] is True
+    assert (
+        posture["upnp_enabled_entity_id"] == "switch.cabin_upnp"
+    )  # the one that is on
+    assert posture["wpa3_enabled"] is False
+    assert (
+        posture["wpa3_enabled_entity_id"] == "switch.home_wpa3"
+    )  # the one that is off
+
+
+def test_a_stale_poll_publishes_no_settings() -> None:
+    """Cached values would keep resetting, or advancing, the guest idle clock."""
+    stale = eero_runtime_adapter(
+        _inputs(
+            FakeNetwork(upnp=True, connected_guest_clients_count=1),
+            last_update_success=False,
+        ),
+        RouterInputs(),
+        _context(),
+    )
+    assert stale.posture == {}
+    assert STALE_POLL_NOTE in stale.notes
+
+
 def test_adapter_withholds_clients_and_says_why() -> None:
     plain = FakeNetwork(
         premium_enabled=False, clients=[FakeClient(mac=MAC_A, connected=True)]
@@ -385,7 +492,7 @@ def test_adapter_withholds_clients_and_says_why() -> None:
         _inputs(plain, last_update_success=False), RouterInputs(), _context()
     )
     assert stale.clients is None and STALE_POLL_NOTE in stale.notes  # noqa: PT018
-    assert stale.posture == {"guest_client_count": 0}  # settings still published
+    assert stale.posture == {}  # a failed poll's cached settings are not published
 
     class NoClients(FakeNetwork):
         @property

@@ -366,6 +366,10 @@ CONF_SENTINEL_NETWORK_UNKNOWN_DEVICE_GRACE_MIN = (
     "sentinel_network_unknown_device_grace_min"
 )
 RECOMMENDED_SENTINEL_NETWORK_UNKNOWN_DEVICE_GRACE_MIN: int = 5
+# Days the guest Wi-Fi may sit enabled with no guest connected before
+# ``network_guest_network_idle`` fires.
+CONF_SENTINEL_NETWORK_GUEST_IDLE_DAYS = "sentinel_network_guest_idle_days"
+RECOMMENDED_SENTINEL_NETWORK_GUEST_IDLE_DAYS: int = 7
 # Days a long-lived access token may go unused before it is reported stale.
 CONF_SENTINEL_HA_TOKEN_STALE_DAYS = "sentinel_ha_token_stale_days"  # noqa: S105
 RECOMMENDED_SENTINEL_HA_TOKEN_STALE_DAYS: int = 90

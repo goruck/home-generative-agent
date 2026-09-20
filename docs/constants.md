@@ -408,6 +408,7 @@ This document covers the named constants that affect integration behaviour, orga
 |---|---|---|---|
 | `RECOMMENDED_SENTINEL_NETWORK_ENABLED` | `sentinel_network_enabled` | `True` | Master switch for the snapshot's `network` section and the Home Assistant & network security rules. Off = the rules are reported as inactive on the health sensor. |
 | `RECOMMENDED_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN` | `sentinel_network_offline_device_min` | `30` | Minutes a lock, alarm panel, or camera may be `unavailable` before `security_device_unavailable` fires |
+| `RECOMMENDED_SENTINEL_NETWORK_GUEST_IDLE_DAYS` | `sentinel_network_guest_idle_days` | `7` | Days the guest Wi-Fi may sit enabled with no guest connected before `network_guest_network_idle` fires |
 | `RECOMMENDED_SENTINEL_NETWORK_UNKNOWN_DEVICE_GRACE_MIN` | `sentinel_network_unknown_device_grace_min` | `5` | Minutes a router client new to the device inventory must stay on the network before `network_unknown_device_joined` fires; `0` alerts on first sight |
 | `RECOMMENDED_SENTINEL_HA_TOKEN_STALE_DAYS` | `sentinel_ha_token_stale_days` | `90` | Age in days past which `ha_long_lived_token_stale` reports a long-lived access token (Home Assistant does not record long-lived token use, so age is the only observable fact) |
 | `RECOMMENDED_SENTINEL_AUTH_IP_RETENTION_DAYS` | `sentinel_auth_ip_retention_days` | `90` | How long a pseudonymized token address stays in the auth inventory |
