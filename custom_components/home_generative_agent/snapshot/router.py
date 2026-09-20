@@ -38,11 +38,6 @@ from typing import TYPE_CHECKING, Any
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 
-from custom_components.home_generative_agent.sentinel.network_inventory import (
-    ROUTER_SOURCE,
-    client_key,
-    client_observation,
-)
 from custom_components.home_generative_agent.sentinel.redaction import (
     redact_network_identifiers,
 )
@@ -105,7 +100,13 @@ EERO_RELOAD_NOTE = (
     "is set up or reloaded, so a device that joins the network later is not "
     "seen, and not reported as new, until the integration is reloaded."
 )
-COUNTER_CLIENT_COUNT = "network.client_count"
+NO_SALT_NOTE = (
+    "Router clients are not audited: the pseudonymization salt is not "
+    "available, so client addresses cannot be tokenized."
+)
+REGISTRY_FAILED_NOTE = (
+    "Router clients are not audited this run: the entity registry could not be read."
+)
 COUNTER_THREATS_DAY = "network.threats_day"
 
 
@@ -118,6 +119,9 @@ class MacIndexEntry:
     # At least one config entry from a non-router integration owns a
     # non-tracker entity on this device (a Shelly plug, a printer).
     qualifying: bool
+    # The registry device's name, the user's own first: the name every
+    # source shows for this client, whatever the source calls it.
+    device_name: str | None = None
 
 
 @dataclass
@@ -274,7 +278,15 @@ def _index_macs(
                 integration = domain
                 qualifying = True
         index = MacIndexEntry(
-            device_id=device_id, integration=integration, qualifying=qualifying
+            device_id=device_id,
+            integration=integration,
+            qualifying=qualifying,
+            device_name=str(
+                getattr(device, "name_by_user", None)
+                or getattr(device, "name", None)
+                or ""
+            )
+            or None,
         )
         for mac in macs:
             inputs.mac_index.setdefault(mac, index)
@@ -361,7 +373,7 @@ def build_client(
     client: NetworkClient = {
         "key": context.pseudonymizer.mac_key(mac),
         "connected": read.connected,
-        "name": _label(read.name),
+        "name": _first_label(index.device_name if index else None, read.name),
         "ip": _ip_value(read.ip),
         "hostname": _label(read.hostname),
         "manufacturer": _label(read.manufacturer),
@@ -383,42 +395,6 @@ def build_client(
     return client
 
 
-def finalize_clients(
-    result: AdapterResult,
-    clients: Sequence[NetworkClient],
-    context: NetworkBuildContext,
-) -> None:
-    """
-    Publish *clients* on *result* and ask the device inventory which are new.
-
-    Attaches each recorded client's ``first_seen`` (the rule applies the grace
-    period from it), marks a rotated random address whose name a trusted row
-    carries, and sets ``new_clients`` from the inventory diff.
-    """
-    result.clients = list(clients)
-    result.counters[COUNTER_CLIENT_COUNT] = float(
-        sum(1 for c in result.clients if c["connected"])
-    )
-    inventory = context.network_inventory
-    if inventory is None:
-        return
-    trusted_names = inventory.trusted_names(ROUTER_SOURCE)
-    observations = []
-    for client in result.clients:
-        row = inventory.row(client_key(client["key"]))
-        if row is not None and isinstance(row.get("first_seen"), str):
-            client["first_seen"] = row["first_seen"]
-        if client.get("mac_randomized"):
-            client["hostname_trusted"] = bool(_matchable_names(client) & trusted_names)
-        observations.append(client_observation(client))
-    delta = inventory.diff(observations, [ROUTER_SOURCE])
-    # The inventory keys are source-qualified; the section carries client keys.
-    prefix = f"{ROUTER_SOURCE}:"
-    result.new_clients = [
-        k.removeprefix(prefix) for k in delta.new_device_keys if k.startswith(prefix)
-    ]
-
-
 def _client_from_tracker(
     entity: SnapshotEntity,
     inputs: RouterInputs,
@@ -436,7 +412,7 @@ def _client_from_tracker(
         ip=attrs.get("ip"),
         hostname=attrs.get("host_name") or attrs.get("hostname"),
         manufacturer=attrs.get("manufacturer") or attrs.get("oui"),
-        connection_type=_connection_type(attrs),
+        connection_type=connection_type_from(attrs),
         network_name=next(
             (attrs[a] for a in _NETWORK_NAME_ATTRS if attrs.get(a)), None
         ),
@@ -451,7 +427,8 @@ def _client_from_tracker(
     return build_client(read, inputs, context)
 
 
-def _connection_type(attrs: Mapping[str, Any]) -> str | None:
+def connection_type_from(attrs: Mapping[str, Any]) -> str | None:
+    """Return ``wired`` / ``wireless`` from tracker attributes, else the raw value."""
     value = attrs.get("connection_type")
     if isinstance(value, str) and value:
         text = value.strip().lower()
@@ -480,19 +457,13 @@ def generic_router_tracker_adapter(
     if not trackers:
         return result
     if context.pseudonymizer is None:
-        result.notes.append(
-            "Router clients are not audited: the pseudonymization salt is not "
-            "available, so client addresses cannot be tokenized."
-        )
+        result.notes.append(NO_SALT_NOTE)
         return result
     if inputs.registry_failed:
         # Without the registries a client cannot be joined to its device, so
         # auto-trust and the stored ids would all degrade; skip this run
         # rather than rewrite the inventory with worse data.
-        result.notes.append(
-            "Router clients are not audited this run: the entity registry "
-            "could not be read."
-        )
+        result.notes.append(REGISTRY_FAILED_NOTE)
         return result
     clients: dict[str, NetworkClient] = {}
     for entity in sorted(trackers, key=lambda e: e["entity_id"]):
@@ -513,27 +484,8 @@ def generic_router_tracker_adapter(
             "a MAC address."
         )
         return result
-    finalize_clients(result, list(clients.values()), context)
+    result.clients = list(clients.values())
     return result
-
-
-# Names a router gives a client it cannot resolve; matching one of these
-# against a trusted row would call a stranger "a known device".
-_PLACEHOLDER_NAME_WORDS: tuple[str, ...] = ("unknown", "unnamed", "device", "[")
-_MIN_MATCHABLE_NAME_CHARS = 4
-
-
-def _matchable_names(client: Mapping[str, Any]) -> set[str]:
-    """Return the client's names that are specific enough to identify it."""
-    names = set()
-    for value in (client.get("hostname"), client.get("name")):
-        text = str(value or "").strip().lower()
-        if len(text) < _MIN_MATCHABLE_NAME_CHARS or any(
-            word in text for word in _PLACEHOLDER_NAME_WORDS
-        ):
-            continue
-        names.add(text)
-    return names
 
 
 # ---------------------------------------------------------------------------
@@ -581,7 +533,7 @@ def _count(state: str) -> int | None:
 # that weakens the home when ON is reported on if any network has it on; a
 # protection is reported on only when every network has it on. The entity
 # twin names the network that decided the value.
-_EERO_ANY_ON: frozenset[str] = frozenset(
+EERO_ANY_ON: frozenset[str] = frozenset(
     {"upnp_enabled", "guest_network_enabled", "ipv6_enabled", "ddns_enabled"}
 )
 
@@ -594,7 +546,7 @@ def _eero_switch_posture(
         if not live:
             continue
         states = [(entity_id, state == "on") for _net, entity_id, state in live]
-        if field_name in _EERO_ANY_ON:
+        if field_name in EERO_ANY_ON:
             decided = next((e for e, on in states if on), states[0][0])
             posture[field_name] = any(on for _e, on in states)
         else:

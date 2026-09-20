@@ -404,7 +404,17 @@ keeps at `hass.data["eero"][<entry id>]["coordinator"]` (its `data.networks`,
 each network's allowlisted settings and `clients` list) under the runtime
 rules above, with the integration's passwords and Thread keys listed as
 forbidden and a test proving they are never read; the tracker adapter stays
-as the fallback and says so in its notes when the runtime read fails. Its Resources step also defaults to tracking no clients
+as the fallback and says so in its notes when the runtime read fails. The
+review round (Codex 10 findings, Claude 8, converging) made the read strict:
+only the entry's configured networks are read, a failed last poll or an
+unreadable client list withholds the client list rather than publishing a
+partial one, a complete empty read publishes an empty list so the router
+source bootstraps, settings are judged only when every network reports
+them, the registry-failure guard applies to this path too, and the
+inventory diff moved out of the adapters into one post-merge step
+(`attach_inventory`) so two sources never diff separately; the merge fills
+a later source's unknown fields (tracker entity id, VLAN, device link) from
+the earlier one and drops a stale `<key>_entity_id` twin. Its Resources step also defaults to tracking no clients
 (wired and wireless filters `include` with an empty list); set both to
 `exclude` to track every client. The entity is matched by `platform` plus the integration's
 translation key or unique-id suffix, never by friendly name.

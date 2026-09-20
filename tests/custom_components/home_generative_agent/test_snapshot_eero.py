@@ -22,7 +22,9 @@ from custom_components.home_generative_agent.snapshot.eero import (
     CLIENT_ATTRS,
     FORBIDDEN_ATTRS,
     NETWORK_ATTRS,
+    NO_PLUS_NOTE,
     RUNTIME_FAILED_NOTE,
+    STALE_POLL_NOTE,
     EeroRuntimeInputs,
     collect_eero_runtime_inputs,
     eero_runtime_adapter,
@@ -30,6 +32,8 @@ from custom_components.home_generative_agent.snapshot.eero import (
 from custom_components.home_generative_agent.snapshot.network import (
     CAP_CLIENTS,
     CAP_NEW_CLIENTS,
+    COUNTER_CLIENT_COUNT,
+    AdapterResult,
     NetworkBuildContext,
     async_build_network_snapshot,
     merge_adapter_results,
@@ -37,9 +41,12 @@ from custom_components.home_generative_agent.snapshot.network import (
 )
 from custom_components.home_generative_agent.snapshot.router import (
     EERO_RELOAD_NOTE,
+    NO_SALT_NOTE,
+    REGISTRY_FAILED_NOTE,
     MacIndexEntry,
     RouterInputs,
     generic_router_tracker_adapter,
+    router_adapters,
 )
 
 if TYPE_CHECKING:
@@ -52,18 +59,25 @@ MAC_B = "a8:bb:cc:dd:ee:02"
 KEY_A = PSEUDONYMIZER.mac_key(MAC_A)
 KEY_B = PSEUDONYMIZER.mac_key(MAC_B)
 
+# Every secret attribute access on a fake object lands here.
+SECRET_ACCESSES: list[str] = []
+
 
 @pytest.fixture(autouse=True)
-def _reset_logged_failures() -> None:
+def _reset() -> None:
     network_mod._LOGGED_INPUT_FAILURES.clear()
+    SECRET_ACCESSES.clear()
 
 
 class _Secret:
-    """A property that fails the test if anything reads it."""
+    """A property that records every read; the adapter must never trigger it."""
+
+    def __set_name__(self, owner: Any, name: str) -> None:
+        self._name = name
 
     def __get__(self, obj: Any, owner: Any = None) -> Any:
-        msg = "a secret attribute was read"
-        raise AssertionError(msg)
+        SECRET_ACCESSES.append(self._name)
+        return "s3cret"
 
 
 class FakeClient:
@@ -110,7 +124,11 @@ class FakeNetwork:
 
 
 def _hass_with(
-    networks: list[Any], *, state: ConfigEntryState = ConfigEntryState.LOADED
+    networks: list[Any],
+    *,
+    state: ConfigEntryState = ConfigEntryState.LOADED,
+    configured: list[str] | None = None,
+    last_update_success: bool = True,
 ) -> Any:
     hass = MagicMock()
     entry = MagicMock()
@@ -118,19 +136,31 @@ def _hass_with(
     hass.config_entries.async_get_entry.return_value = entry
     coordinator = MagicMock()
     coordinator.data = type("Account", (), {"networks": networks})()
-    hass.data = {"eero": {"entry-1": {"coordinator": coordinator}}}
+    coordinator.last_update_success = last_update_success
+    data: dict[str, Any] = {"coordinator": coordinator}
+    if configured is not None:
+        data["networks"] = configured
+    hass.data = {"eero": {"entry-1": data}}
     return hass
 
 
-def _context(inventory: NetworkInventory | None = None) -> NetworkBuildContext:
+def _context(
+    inventory: NetworkInventory | None = None, *, salt: bool = True
+) -> NetworkBuildContext:
     return NetworkBuildContext(
-        enabled=True, pseudonymizer=PSEUDONYMIZER, network_inventory=inventory
+        enabled=True,
+        pseudonymizer=PSEUDONYMIZER if salt else None,
+        network_inventory=inventory,
     )
 
 
 def _plain(clients: list[Any] | None) -> list[dict[str, Any]]:
     assert clients is not None
     return [cast("dict[str, Any]", c) for c in clients]
+
+
+def _inputs(*networks: Any, **kw: Any) -> EeroRuntimeInputs:
+    return collect_eero_runtime_inputs(_hass_with(list(networks), **kw))
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +188,7 @@ def test_collector_reads_allowlisted_fields_and_never_a_secret() -> None:
         mac=MAC_B, connection_type="Wireless", connected=True, is_guest=True
     )
     no_mac = FakeClient(mac=None, name="ghost", connected=True)
+    unknown_state = FakeClient(mac="a8:bb:cc:dd:ee:03", connected="yes")
     network = FakeNetwork(
         upnp=True,
         wpa3=False,
@@ -165,11 +196,11 @@ def test_collector_reads_allowlisted_fields_and_never_a_secret() -> None:
         ddns_enabled=None,  # eero Plus only: absent
         premium_enabled=False,
         connected_guest_clients_count=1,
-        clients=[laptop, guest, no_mac],
+        clients=[laptop, guest, no_mac, unknown_state],
     )
     inputs = collect_eero_runtime_inputs(_hass_with([network]))
-    assert inputs.present and not inputs.failed  # noqa: PT018
-    assert len(inputs.networks) == 1
+    assert inputs.present and not inputs.failed and not inputs.stale  # noqa: PT018
+    assert inputs.clients_complete
     read = inputs.networks[0]
     assert read.id == "558654"
     assert read.name == "Kro"
@@ -180,6 +211,7 @@ def test_collector_reads_allowlisted_fields_and_never_a_secret() -> None:
     }
     assert read.guest_client_count == 1
     assert read.premium_enabled is False
+    # A client whose MAC or connection state cannot be read is skipped.
     assert [c.mac for c in read.clients] == [MAC_A, MAC_B]
     assert read.clients[0].name == "Nico's laptop"
     assert read.clients[0].hostname == "Nicos-MacBook"
@@ -188,24 +220,32 @@ def test_collector_reads_allowlisted_fields_and_never_a_secret() -> None:
     assert read.clients[0].network_name == "Kro"
     assert read.clients[1].connection_type == "wireless"
     assert read.clients[1].is_guest is True
+    assert SECRET_ACCESSES == []
 
 
-def test_collector_skips_entries_that_are_not_loaded() -> None:
-    inputs = collect_eero_runtime_inputs(
-        _hass_with([FakeNetwork()], state=ConfigEntryState.SETUP_RETRY)
+def test_collector_reads_only_the_configured_networks() -> None:
+    home = FakeNetwork("1", upnp=False, clients=[FakeClient(mac=MAC_A, connected=True)])
+    cabin = FakeNetwork("2", upnp=True, clients=[FakeClient(mac=MAC_B, connected=True)])
+    inputs = _inputs(home, cabin, configured=["1"])
+    assert [n.id for n in inputs.networks] == ["1"]
+    # No selection recorded means every network on the account.
+    assert [n.id for n in _inputs(home, cabin).networks] == ["1", "2"]
+
+
+def test_collector_flags_a_failed_poll_and_skips_unloaded_entries() -> None:
+    assert _inputs(FakeNetwork(), last_update_success=False).stale is True
+    assert (
+        _inputs(FakeNetwork(), state=ConfigEntryState.SETUP_RETRY)
+        == EeroRuntimeInputs()
     )
-    assert inputs == EeroRuntimeInputs()
-
-
-def test_collector_without_eero_is_absent() -> None:
     hass = MagicMock()
     hass.data = {}
     assert collect_eero_runtime_inputs(hass) == EeroRuntimeInputs()
 
 
-def test_collector_tolerates_a_renamed_property() -> None:
-    """A property that raises or is missing degrades to a missing field."""
-
+def test_collector_tolerates_a_renamed_property_but_not_an_unreadable_client_list() -> (
+    None
+):
     class Drifted(FakeNetwork):
         @property
         def upnp(self) -> bool:  # type: ignore[override]
@@ -215,9 +255,22 @@ def test_collector_tolerates_a_renamed_property() -> None:
     network = FakeNetwork(wpa3=True, clients=[FakeClient(mac=MAC_A, connected=True)])
     network.__class__ = Drifted  # the class property now shadows the instance value
     del network.ad_block
-    inputs = collect_eero_runtime_inputs(_hass_with([network]))
+    inputs = _inputs(network)
     assert inputs.networks[0].settings == {"wpa3_enabled": True}
     assert len(inputs.networks[0].clients) == 1
+    assert inputs.clients_complete
+
+    class NoClients(FakeNetwork):
+        @property
+        def clients(self) -> list[Any]:  # type: ignore[override]
+            msg = "gone"
+            raise RuntimeError(msg)
+
+    broken = FakeNetwork()
+    broken.__class__ = NoClients
+    inputs = _inputs(FakeNetwork("1"), broken)
+    assert inputs.networks[1].clients_unreadable is True
+    assert not inputs.clients_complete
 
 
 def test_collector_failure_is_logged_once_and_flagged(caplog: Any) -> None:
@@ -234,12 +287,7 @@ def test_collector_failure_is_logged_once_and_flagged(caplog: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _inputs(*networks: Any) -> EeroRuntimeInputs:
-    return collect_eero_runtime_inputs(_hass_with(list(networks)))
-
-
 def test_adapter_publishes_clients_and_posture() -> None:
-    inventory = NetworkInventory(MagicMock())
     network = FakeNetwork(
         upnp=True,
         wpa3=True,
@@ -260,9 +308,13 @@ def test_adapter_publishes_clients_and_posture() -> None:
         ],
     )
     router_inputs = RouterInputs(
-        mac_index={MAC_B: MacIndexEntry("dev-p", "ipp", qualifying=True)}
+        mac_index={
+            MAC_B: MacIndexEntry(
+                "dev-p", "ipp", qualifying=True, device_name="Office printer"
+            )
+        }
     )
-    result = eero_runtime_adapter(_inputs(network), router_inputs, _context(inventory))
+    result = eero_runtime_adapter(_inputs(network), router_inputs, _context())
     assert result.name == "eero_runtime"
     clients = _plain(result.clients)
     assert [c["key"] for c in clients] == [KEY_A, KEY_B]
@@ -272,11 +324,13 @@ def test_adapter_publishes_clients_and_posture() -> None:
     assert clients[0]["network_name"] == "Kro"
     assert clients[0]["ha_integration"] == "eero"
     assert clients[0]["tracker_entity_id"] is None
+    # The registry device's name wins over eero's for a client joined to one.
+    assert clients[1]["name"] == "Office printer"
     assert clients[1]["connected"] is False
     assert clients[1]["connection_type"] == "wired"
     assert clients[1]["auto_trust"] is True
     assert clients[1]["ha_device_id"] == "dev-p"
-    assert result.new_clients == []  # router source not bootstrapped yet
+    assert result.new_clients is None  # the inventory diff runs once, after the merge
     assert result.posture == {
         "upnp_enabled": True,
         "upnp_evidence": "eero",
@@ -290,7 +344,7 @@ def test_adapter_publishes_clients_and_posture() -> None:
     assert result.notes == []
 
 
-def test_adapter_judges_several_networks_together() -> None:
+def test_adapter_judges_several_networks_together_only_when_all_report() -> None:
     main = FakeNetwork("1", upnp=False, wpa3=True, connected_guest_clients_count=2)
     cabin = FakeNetwork("2", upnp=True, wpa3=False, connected_guest_clients_count=1)
     posture = eero_runtime_adapter(
@@ -299,39 +353,92 @@ def test_adapter_judges_several_networks_together() -> None:
     assert posture["upnp_enabled"] is True
     assert posture["wpa3_enabled"] is False
     assert posture["guest_client_count"] == 3
+    # A network that does not report a setting keeps the runtime silent on
+    # it, so the entity tier's value (and a standing finding) survives.
+    silent = FakeNetwork("2", upnp=None, wpa3=None)
+    posture = eero_runtime_adapter(
+        _inputs(main, silent), RouterInputs(), _context()
+    ).posture
+    assert "upnp_enabled" not in posture
+    assert "wpa3_enabled" not in posture
 
 
-def test_adapter_notes_missing_plus_and_failed_reads() -> None:
-    result = eero_runtime_adapter(
-        _inputs(FakeNetwork(premium_enabled=False)), RouterInputs(), _context()
+def test_adapter_withholds_clients_and_says_why() -> None:
+    plain = FakeNetwork(
+        premium_enabled=False, clients=[FakeClient(mac=MAC_A, connected=True)]
     )
-    assert any("eero Plus" in n for n in result.notes)
+    # eero Plus absent (known false) is noted; unknown is not.
+    result = eero_runtime_adapter(_inputs(plain), RouterInputs(), _context())
+    assert NO_PLUS_NOTE in result.notes
+    unknown = FakeNetwork(premium_enabled=None)
+    assert (
+        NO_PLUS_NOTE
+        not in eero_runtime_adapter(_inputs(unknown), RouterInputs(), _context()).notes
+    )
+    # Blockers, in order: structural failure, stale poll, partial read, no
+    # salt, registry failure. Posture is still published where it can be.
     failed = eero_runtime_adapter(
         EeroRuntimeInputs(present=True, failed=True), RouterInputs(), _context()
     )
-    assert failed.clients is None
-    assert failed.notes == [RUNTIME_FAILED_NOTE]
+    assert failed.clients is None and failed.notes == [RUNTIME_FAILED_NOTE]  # noqa: PT018
+    stale = eero_runtime_adapter(
+        _inputs(plain, last_update_success=False), RouterInputs(), _context()
+    )
+    assert stale.clients is None and STALE_POLL_NOTE in stale.notes  # noqa: PT018
+    assert stale.posture == {"guest_client_count": 0}  # settings still published
+
+    class NoClients(FakeNetwork):
+        @property
+        def clients(self) -> list[Any]:  # type: ignore[override]
+            msg = "gone"
+            raise RuntimeError(msg)
+
+    broken = FakeNetwork()
+    broken.__class__ = NoClients
+    partial = eero_runtime_adapter(_inputs(plain, broken), RouterInputs(), _context())
+    assert partial.clients is None and RUNTIME_FAILED_NOTE in partial.notes  # noqa: PT018
+    no_salt = eero_runtime_adapter(_inputs(plain), RouterInputs(), _context(salt=False))
+    assert no_salt.clients is None and NO_SALT_NOTE in no_salt.notes  # noqa: PT018
+    no_registry = eero_runtime_adapter(
+        _inputs(plain), RouterInputs(registry_failed=True), _context()
+    )
+    assert no_registry.clients is None and REGISTRY_FAILED_NOTE in no_registry.notes  # noqa: PT018
     absent = eero_runtime_adapter(EeroRuntimeInputs(), RouterInputs(), _context())
-    assert absent.clients is None
-    assert absent.posture == {}
-    assert absent.notes == []
+    assert absent.clients is None and absent.posture == {} and absent.notes == []  # noqa: PT018
 
 
-def test_runtime_clients_win_the_merge_but_keep_the_tracker_link() -> None:
-    entities: list[Any] = [
-        {
-            "entity_id": "device_tracker.laptop",
-            "domain": "device_tracker",
-            "state": "not_home",  # eero's tracker is stale
-            "friendly_name": "Nico's laptop (Wireless) kro Nico's laptop (Wireless)",
-            "area": None,
-            "attributes": {"source_type": "router", "mac": MAC_A},
-            "last_changed": NOW.isoformat(),
-            "last_updated": NOW.isoformat(),
-            "platform": "eero",
-        }
-    ]
-    trackers = generic_router_tracker_adapter(RouterInputs(), entities, _context())
+def test_a_complete_empty_read_publishes_an_empty_client_list() -> None:
+    """So the router source bootstraps instead of trusting the first client silently."""
+    result = eero_runtime_adapter(
+        _inputs(FakeNetwork(clients=[])), RouterInputs(), _context()
+    )
+    assert result.clients == []
+    section = merge_adapter_results([result])
+    assert CAP_CLIENTS in section["capabilities"]
+    assert section["clients"] == []
+    assert section["counters"][COUNTER_CLIENT_COUNT] == 0.0
+
+
+def _tracker(state: str = "not_home", **attrs: Any) -> dict[str, Any]:
+    return {
+        "entity_id": "device_tracker.laptop",
+        "domain": "device_tracker",
+        "state": state,
+        "friendly_name": "Nico's laptop (Wireless) kro Nico's laptop (Wireless)",
+        "area": None,
+        "attributes": {"source_type": "router", "mac": MAC_A, **attrs},
+        "last_changed": NOW.isoformat(),
+        "last_updated": NOW.isoformat(),
+        "platform": "eero",
+    }
+
+
+def test_runtime_clients_win_the_merge_but_keep_what_the_tracker_knew() -> None:
+    trackers = generic_router_tracker_adapter(
+        RouterInputs(tracker_devices={"device_tracker.laptop": "dev-t"}),
+        [cast("Any", _tracker(vlan=20, ip="192.168.1.23"))],
+        _context(),
+    )
     runtime = eero_runtime_adapter(
         _inputs(
             FakeNetwork(
@@ -346,7 +453,45 @@ def test_runtime_clients_win_the_merge_but_keep_the_tracker_link() -> None:
     assert client["connected"] is True  # the runtime read is fresher
     assert client["name"] == "Nico's laptop"
     assert client["tracker_entity_id"] == "device_tracker.laptop"
+    assert client["ha_device_id"] == "dev-t"  # the tracker's device link survives
+    assert client["vlan"] == 20
+    assert (
+        client["ip"] == "192.168.1.23"
+    )  # the runtime knew no IP; the tracker's stands
     assert section["sources"][CAP_CLIENTS] == "eero_runtime"
+    assert section["counters"][COUNTER_CLIENT_COUNT] == 1.0
+
+
+def test_runtime_posture_clears_the_entity_tiers_stale_twin() -> None:
+    entity_tier = AdapterResult(
+        name="eero",
+        posture={"upnp_enabled": True, "upnp_enabled_entity_id": "switch.kro_upnp"},
+    )
+    runtime = AdapterResult(name="eero_runtime", posture={"upnp_enabled": False})
+    posture = cast(
+        "dict[str, Any]", merge_adapter_results([entity_tier, runtime])["posture"]
+    )
+    assert posture["upnp_enabled"] is False
+    assert "upnp_enabled_entity_id" not in posture
+
+
+def test_reload_note_only_when_the_runtime_supplied_no_clients() -> None:
+    inputs = RouterInputs(eero_present=True)
+    with_clients = AdapterResult(name="eero_runtime", clients=[])
+    without = AdapterResult(name="eero_runtime", notes=[STALE_POLL_NOTE])
+    notes = [
+        n
+        for r in router_adapters(inputs, [], _context(), eero_runtime=with_clients)
+        for n in r.notes
+    ]
+    assert EERO_RELOAD_NOTE not in notes
+    notes = [
+        n
+        for r in router_adapters(inputs, [], _context(), eero_runtime=without)
+        for n in r.notes
+    ]
+    assert EERO_RELOAD_NOTE in notes
+    assert STALE_POLL_NOTE in notes
 
 
 @pytest.mark.asyncio
@@ -358,6 +503,7 @@ async def test_build_network_snapshot_sees_a_client_with_no_tracker(
     entry.add_to_hass(hass)
     entry.mock_state(hass, ConfigEntryState.LOADED)
     coordinator = MagicMock()
+    coordinator.last_update_success = True
     coordinator.data = type(
         "Account",
         (),
@@ -377,7 +523,9 @@ async def test_build_network_snapshot_sees_a_client_with_no_tracker(
             ]
         },
     )()
-    hass.data["eero"] = {entry.entry_id: {"coordinator": coordinator}}
+    hass.data["eero"] = {
+        entry.entry_id: {"coordinator": coordinator, "networks": ["558654"]}
+    }
     inventory = NetworkInventory(MagicMock())
     store = MagicMock()
 
@@ -409,3 +557,4 @@ async def test_build_network_snapshot_sees_a_client_with_no_tracker(
     assert section["sources"][posture_cap("upnp_enabled")] == "eero_runtime"
     # The reload caveat is for the tracker path; the runtime path replaces it.
     assert EERO_RELOAD_NOTE not in section.get("notes", [])
+    assert SECRET_ACCESSES == []

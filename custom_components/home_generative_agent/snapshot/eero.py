@@ -18,21 +18,35 @@ adapter reads that object, following the plan's rules for the tier
   carries the Wi-Fi and guest passwords and the Thread master key; those
   names are listed here as forbidden and a test proves they are never
   touched;
-- the docstring names what is read: on ``coordinator.data`` (``EeroAccount``)
-  the ``networks`` list; on each ``EeroNetwork`` the ``id``, ``name``,
-  ``upnp``, ``wpa3``, ``guest_network_enabled``, ``ipv6_upstream``,
-  ``ddns_enabled``, ``block_malware``, ``ad_block``, ``premium_enabled``,
+- the docstring names what is read: on the coordinator ``data`` (an
+  ``EeroAccount``) and ``last_update_success``; on ``data`` the ``networks``
+  list; on each ``EeroNetwork`` the ``id``, ``name``, ``upnp``, ``wpa3``,
+  ``guest_network_enabled``, ``ipv6_upstream``, ``ddns_enabled``,
+  ``block_malware``, ``ad_block``, ``premium_enabled``,
   ``connected_guest_clients_count`` properties and the ``clients`` list; on
   each ``EeroClient`` ``mac``, ``ip``, ``hostname``, ``name``,
   ``manufacturer``, ``connection_type``, ``wireless``, ``connected``,
-  ``last_active``, ``is_guest``, and ``device_type``.
+  ``last_active``, ``is_guest``, and ``device_type``. Only the networks the
+  entry is configured for (the ``networks`` list beside the coordinator)
+  are read, as the integration's own platforms do.
 
-The result runs last in the merge, so its client list and settings win over
-the tracker adapter and the entity-tier eero adapter; the public-IP change
-check and the threat counter stay with the entity adapter, whose sensors
-exist whenever eero is loaded and keep the change memory on a stable
-entity id. Clients from here carry no tracker entity id; the merge keeps
-the one the tracker adapter found for the same key.
+What counts as a usable read is strict, because the result replaces the
+tracker adapter's client list in the merge and the inventory reconciles
+the router source against it: the coordinator's last poll must have
+succeeded, and every configured network's client list must have been read
+without a fault. A partial read withholds the client list (the tracker
+adapter and its reload caveat stand in) and says so in a note. A complete
+read with no clients publishes an empty list, so the router source
+bootstraps on a home whose eero knows no clients yet instead of trusting
+the first one silently.
+
+Settings are judged across the configured networks only when every one of
+them reports the setting: a weakening setting is on if any network has it
+on, a protection only if every network has it. The public-IP change check
+and the threat counter stay with the entity adapter, whose sensors keep the
+change memory on a stable entity id. Clients from here carry no tracker
+entity id; the merge fills it from the tracker adapter's row for the same
+key.
 """
 
 from __future__ import annotations
@@ -45,11 +59,15 @@ from homeassistant.config_entries import ConfigEntryState
 
 from .network import AdapterResult, log_input_failure
 from .router import (
+    EERO_ANY_ON,
     EERO_DOMAIN,
+    EERO_SWITCHES,
+    NO_SALT_NOTE,
+    REGISTRY_FAILED_NOTE,
     ClientRead,
     RouterInputs,
     build_client,
-    finalize_clients,
+    connection_type_from,
 )
 
 if TYPE_CHECKING:
@@ -60,6 +78,7 @@ if TYPE_CHECKING:
 
 EERO_INTEGRATION_VERSION: Final = "1.8.1"
 DATA_COORDINATOR: Final = "coordinator"
+DATA_NETWORKS: Final = "networks"
 
 # Every attribute this module reads, and nothing else.
 NETWORK_ATTRS: Final[tuple[str, ...]] = (
@@ -103,26 +122,29 @@ FORBIDDEN_ATTRS: Final[frozenset[str]] = frozenset(
     }
 )
 
-# Network settings that weaken the home when ON count if any network has
-# them on; protections count only when every network has them on.
-_ANY_ON: Final[frozenset[str]] = frozenset(
-    {"upnp_enabled", "guest_network_enabled", "ipv6_enabled", "ddns_enabled"}
-)
-_SWITCH_TO_POSTURE: Final[dict[str, str]] = {
-    "upnp": "upnp_enabled",
-    "wpa3": "wpa3_enabled",
-    "guest_network_enabled": "guest_network_enabled",
-    "ipv6_upstream": "ipv6_enabled",
-    "ddns_enabled": "ddns_enabled",
-    "block_malware": "malware_blocking_enabled",
-    "ad_block": "ad_blocking_enabled",
-}
-
 RUNTIME_FAILED_NOTE: Final = (
-    "The eero integration's client list could not be read from the "
+    "The eero integration's client list could not be read completely from the "
     "integration, so this run used its device trackers, which list a device "
     "only after the integration is reloaded."
 )
+STALE_POLL_NOTE: Final = (
+    "The eero integration's last poll failed, so its client list is stale; "
+    "this run used its device trackers."
+)
+NO_PLUS_NOTE: Final = (
+    "eero Plus is not active on this account, so the dynamic DNS, advanced "
+    "security, and ad-blocking settings are not audited."
+)
+
+
+class _Missing:
+    """Sentinel for an attribute that could not be read (vs. a legitimate None)."""
+
+    def __repr__(self) -> str:
+        return "MISSING"
+
+
+MISSING: Final = _Missing()
 
 
 @dataclass
@@ -135,6 +157,9 @@ class EeroNetworkRead:
     premium_enabled: bool | None = None
     guest_client_count: int | None = None
     clients: list[ClientRead] = field(default_factory=list)
+    # The clients list itself could not be read; the network's clients are
+    # unknown, not absent.
+    clients_unreadable: bool = False
 
 
 @dataclass
@@ -142,36 +167,58 @@ class EeroRuntimeInputs:
     """What the adapter reads, collected from ``hass.data`` with every read guarded."""
 
     present: bool = False
+    # The read raised somewhere structural (the hass.data layout, the
+    # networks list): nothing below can be trusted.
     failed: bool = False
+    # The coordinator's last poll failed: its data is the previous poll's.
+    stale: bool = False
     networks: list[EeroNetworkRead] = field(default_factory=list)
+
+    @property
+    def clients_complete(self) -> bool:
+        """Return whether every configured network's client list was read."""
+        return (
+            self.present
+            and not self.failed
+            and not self.stale
+            and all(not n.clients_unreadable for n in self.networks)
+        )
 
 
 def _read(obj: Any, attr: str) -> Any:
-    """Return ``obj.<attr>``, or None when the attribute is missing or raises."""
+    """Return ``obj.<attr>``, or :data:`MISSING` when it cannot be read."""
     if attr in FORBIDDEN_ATTRS:  # pragma: no cover - guarded by the allowlist test
-        return None
+        return MISSING
     try:
         return getattr(obj, attr)
     except Exception:  # noqa: BLE001 - runtime objects across versions
-        return None
+        return MISSING
+
+
+def _value(obj: Any, attr: str) -> Any:
+    """Return ``obj.<attr>``, with an unreadable attribute read as None."""
+    value = _read(obj, attr)
+    return None if value is MISSING else value
 
 
 def _read_client(client: Any, network_name: str | None) -> ClientRead | None:
-    values = {attr: _read(client, attr) for attr in CLIENT_ATTRS}
-    if not values["mac"]:
+    values = {attr: _value(client, attr) for attr in CLIENT_ATTRS}
+    connected = values["connected"]
+    # A client whose MAC or connection state cannot be read is not a
+    # client the audit can place; the tracker adapter's row, if any, stands.
+    if not values["mac"] or not isinstance(connected, bool):
         return None
     wireless = values["wireless"]
-    connection = values["connection_type"]
-    if isinstance(connection, str) and connection:
-        connection = connection.strip().lower()
-    elif isinstance(wireless, bool):
-        connection = "wireless" if wireless else "wired"
-    else:
-        connection = None
+    connection = connection_type_from(
+        {
+            "connection_type": values["connection_type"],
+            "is_wired": (not wireless) if isinstance(wireless, bool) else None,
+        }
+    )
     last_active = values["last_active"]
     return ClientRead(
         mac=values["mac"],
-        connected=bool(values["connected"]),
+        connected=connected,
         platform=EERO_DOMAIN,
         name=values["name"],
         ip=values["ip"],
@@ -187,7 +234,7 @@ def _read_client(client: Any, network_name: str | None) -> ClientRead | None:
 
 
 def _read_network(network: Any) -> EeroNetworkRead | None:
-    values = {attr: _read(network, attr) for attr in NETWORK_ATTRS}
+    values = {attr: _value(network, attr) for attr in NETWORK_ATTRS}
     network_id = values["id"]
     if not network_id:
         return None
@@ -201,18 +248,32 @@ def _read_network(network: Any) -> EeroNetworkRead | None:
             else None
         ),
     )
-    for attr, posture_key in _SWITCH_TO_POSTURE.items():
+    for attr, posture_key in EERO_SWITCHES.items():
         if isinstance(values[attr], bool):
             read.settings[posture_key] = values[attr]
     guests = values["connected_guest_clients_count"]
     if isinstance(guests, int) and not isinstance(guests, bool) and guests >= 0:
         read.guest_client_count = guests
-    clients = _read(network, "clients") or []
-    for client in clients:
-        client_read = _read_client(client, read.name)
-        if client_read is not None:
-            read.clients.append(client_read)
+    clients = _read(network, "clients")
+    if clients is MISSING or clients is None:
+        read.clients_unreadable = True
+        return read
+    try:
+        for client in clients:
+            client_read = _read_client(client, read.name)
+            if client_read is not None:
+                read.clients.append(client_read)
+    except Exception:  # noqa: BLE001 - the list itself is the integration's object
+        read.clients_unreadable = True
     return read
+
+
+def _configured_networks(data: Any) -> set[str] | None:
+    """Return the network ids the entry is configured for, or None for all."""
+    configured = data.get(DATA_NETWORKS) if isinstance(data, dict) else None
+    if isinstance(configured, list | tuple | set) and configured:
+        return {str(n) for n in configured}
+    return None
 
 
 def collect_eero_runtime_inputs(hass: HomeAssistant) -> EeroRuntimeInputs:
@@ -226,16 +287,28 @@ def collect_eero_runtime_inputs(hass: HomeAssistant) -> EeroRuntimeInputs:
                 continue
             coordinator = data.get(DATA_COORDINATOR) if isinstance(data, dict) else None
             account = getattr(coordinator, "data", None)
-            if account is None:
+            if coordinator is None or account is None:
                 continue
             inputs.present = True
-            for network in _read(account, "networks") or []:
+            if getattr(coordinator, "last_update_success", True) is False:
+                inputs.stale = True
+            configured = _configured_networks(data)
+            networks = _read(account, "networks")
+            if networks is MISSING or networks is None:
+                inputs.failed = True
+                continue
+            for network in networks:
                 read = _read_network(network)
-                if read is not None:
-                    inputs.networks.append(read)
+                if read is None:
+                    continue
+                if configured is not None and read.id not in configured:
+                    continue
+                inputs.networks.append(read)
     except Exception as err:  # noqa: BLE001 - hass.data layout across versions
         log_input_failure("eero coordinator", err)
         return EeroRuntimeInputs(present=inputs.present, failed=True)
+    if inputs.failed:
+        log_input_failure("eero networks", RuntimeError("networks list unreadable"))
     return inputs
 
 
@@ -251,7 +324,10 @@ def eero_runtime_adapter(
     if inputs.failed:
         result.notes.append(RUNTIME_FAILED_NOTE)
         return result
-    if context.pseudonymizer is None:
+    _aggregate_posture(inputs, result)
+    blocker = _clients_blocker(inputs, router_inputs, context)
+    if blocker is not None:
+        result.notes.append(blocker)
         return result
 
     clients: dict[str, NetworkClient] = {}
@@ -263,31 +339,53 @@ def eero_runtime_adapter(
             existing = clients.get(client["key"])
             if existing is None or (client["connected"] and not existing["connected"]):
                 clients[client["key"]] = client
-    if clients:
-        finalize_clients(result, list(clients.values()), context)
-    _aggregate_posture(inputs, result)
+    # A complete read with nothing in it is still a read: publish the empty
+    # list so the router source bootstraps rather than trusting the first
+    # client that appears later.
+    result.clients = list(clients.values())
     return result
 
 
+def _clients_blocker(
+    inputs: EeroRuntimeInputs, router_inputs: RouterInputs, context: NetworkBuildContext
+) -> str | None:
+    """Return the note explaining why no client list is published, or None."""
+    if inputs.stale:
+        return STALE_POLL_NOTE
+    if not inputs.clients_complete:
+        return RUNTIME_FAILED_NOTE
+    if context.pseudonymizer is None:
+        return NO_SALT_NOTE
+    if router_inputs.registry_failed:
+        # Same rule as the tracker adapter: without the registries a client
+        # cannot be joined to its device, and committing rows without their
+        # device ids and auto-trust verdicts would make the inventory worse.
+        return REGISTRY_FAILED_NOTE
+    return None
+
+
 def _aggregate_posture(inputs: EeroRuntimeInputs, result: AdapterResult) -> None:
-    """Judge the settings across every network (any-on weakens, all-on protects)."""
+    """
+    Judge the settings across every configured network.
+
+    A setting is published only when every network reports it: judging the
+    networks that happen to be readable could turn a known "UPnP on" into
+    "off" and silence a standing finding. A weakening setting is on if any
+    network has it on; a protection only if every network has it on.
+    """
     posture = result.posture
-    for key in _SWITCH_TO_POSTURE.values():
-        states = [n.settings[key] for n in inputs.networks if key in n.settings]
-        if not states:
+    if not inputs.networks:
+        return
+    for key in EERO_SWITCHES.values():
+        states = [n.settings.get(key) for n in inputs.networks]
+        if any(state is None for state in states):
             continue
-        posture[key] = any(states) if key in _ANY_ON else all(states)
+        posture[key] = any(states) if key in EERO_ANY_ON else all(states)
     if "upnp_enabled" in posture:
         posture["upnp_evidence"] = "eero"
-    guests = [
-        n.guest_client_count
-        for n in inputs.networks
-        if n.guest_client_count is not None
-    ]
-    if guests:
-        posture["guest_client_count"] = sum(guests)
-    if inputs.networks and not any(n.premium_enabled for n in inputs.networks):
-        result.notes.append(
-            "eero Plus is not active on this account, so the dynamic DNS, "
-            "advanced security, and ad-blocking settings are not audited."
-        )
+    guests = [n.guest_client_count for n in inputs.networks]
+    if all(g is not None for g in guests):
+        posture["guest_client_count"] = sum(g for g in guests if g is not None)
+    plus = [n.premium_enabled for n in inputs.networks]
+    if all(p is False for p in plus):
+        result.notes.append(NO_PLUS_NOTE)

@@ -22,15 +22,17 @@ from custom_components.home_generative_agent.snapshot import network as network_
 from custom_components.home_generative_agent.snapshot.network import (
     CAP_CLIENTS,
     CAP_NEW_CLIENTS,
+    COUNTER_CLIENT_COUNT,
     NetworkBuildContext,
     async_build_network_snapshot,
+    attach_inventory,
     merge_adapter_results,
     posture_cap,
 )
 from custom_components.home_generative_agent.snapshot.router import (
-    COUNTER_CLIENT_COUNT,
     COUNTER_THREATS_DAY,
     EERO_RELOAD_NOTE,
+    MacIndexEntry,
     RouterInputs,
     async_collect_router_inputs,
     eero_adapter,
@@ -221,8 +223,10 @@ def test_router_trackers_become_clients_without_their_mac() -> None:
     assert nas["network_name"] == "Home"
     assert nas["vlan"] == 20
     assert nas["is_guest"] is False
-    assert result.counters[COUNTER_CLIENT_COUNT] == 1.0
-    assert result.new_clients is None  # no inventory compared them
+    # The counter and the inventory diff happen once, after the merge.
+    assert result.counters == {}
+    assert merge_adapter_results([result])["counters"][COUNTER_CLIENT_COUNT] == 1.0
+    assert result.new_clients is None
     assert result.clients is not None and len(result.clients) == 2  # noqa: PT018
 
 
@@ -256,10 +260,6 @@ def test_missing_pseudonymizer_withholds_clients_with_a_note() -> None:
 
 
 def test_registry_join_sets_device_integration_and_auto_trust() -> None:
-    from custom_components.home_generative_agent.snapshot.router import (  # noqa: PLC0415
-        MacIndexEntry,
-    )
-
     inputs = RouterInputs(
         mac_index={MAC_A: MacIndexEntry("dev-1", "shelly", qualifying=True)},
         tracker_platforms={"device_tracker.plug": "fritz"},
@@ -274,7 +274,7 @@ def test_registry_join_sets_device_integration_and_auto_trust() -> None:
 
 
 @pytest.mark.asyncio
-async def test_inventory_marks_new_clients_first_seen_and_known_names() -> None:
+async def test_attach_inventory_marks_new_clients_first_seen_and_known_names() -> None:
     inventory = _memory_inventory()
     # Bootstrap the router source with one trusted client named "Media NAS".
     await inventory.async_commit(
@@ -302,11 +302,14 @@ async def test_inventory_marks_new_clients_first_seen_and_known_names() -> None:
             host_name="media nas",
         ),  # rotated: the placeholder name is ignored, the hostname matches
     ]
-    result = generic_router_tracker_adapter(
-        RouterInputs(), entities, _context(inventory=inventory)
+    context = _context(inventory=inventory)
+    section = merge_adapter_results(
+        [generic_router_tracker_adapter(RouterInputs(), entities, context)]
     )
-    by_key = {c["key"]: c for c in _plain(result.clients)}
-    assert result.new_clients == sorted([KEY_A, random_key])
+    attach_inventory(section, context)
+    by_key = {c["key"]: c for c in _plain(list(section["clients"]))}
+    assert section.get("new_clients") == sorted([KEY_A, random_key])
+    assert CAP_NEW_CLIENTS in section["capabilities"]
     assert by_key[KEY_B]["first_seen"] == NOW.isoformat()
     assert "first_seen" not in by_key[KEY_A]
     assert by_key[random_key]["mac_randomized"] is True
@@ -481,6 +484,14 @@ def test_registry_device_name_beats_the_composed_friendly_name() -> None:
     inputs = RouterInputs(
         tracker_device_names={"device_tracker.laptop": "Nico's laptop (Wireless)"}
     )
+    # Through the MAC index the same name reaches every source for this MAC.
+    indexed = RouterInputs(
+        mac_index={
+            MAC_A: MacIndexEntry(
+                "dev", "eero", qualifying=False, device_name="Nico's laptop (Wireless)"
+            )
+        }
+    )
     entities = [
         _tracker(
             "device_tracker.laptop",
@@ -489,6 +500,10 @@ def test_registry_device_name_beats_the_composed_friendly_name() -> None:
     ]
     client = _plain(
         generic_router_tracker_adapter(inputs, entities, _context()).clients
+    )[0]
+    assert client["name"] == "Nico's laptop (Wireless)"
+    client = _plain(
+        generic_router_tracker_adapter(indexed, entities, _context()).clients
     )[0]
     assert client["name"] == "Nico's laptop (Wireless)"
 

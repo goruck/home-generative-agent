@@ -248,6 +248,40 @@ def posture_is_capability(key: str) -> bool:
     )
 
 
+# Client fields a later source may leave unset while an earlier one knew them.
+_CLIENT_FILL_FIELDS: tuple[str, ...] = (
+    "name",
+    "ip",
+    "hostname",
+    "manufacturer",
+    "connection_type",
+    "network_name",
+    "last_seen",
+    "ha_device_id",
+    "ha_integration",
+    "tracker_entity_id",
+    "is_guest",
+    "vlan",
+)
+COUNTER_CLIENT_COUNT = "network.client_count"
+
+
+def _merge_client(earlier: NetworkClient, incoming: NetworkClient) -> NetworkClient:
+    """
+    Return *incoming* over *earlier* for one client key.
+
+    The later source is fresher, so its ``connected`` and every value it
+    supplies win; a field it does not know (a runtime source has no tracker
+    entity id, a tracker has no eero nickname) keeps the earlier source's
+    value rather than going blank.
+    """
+    merged: dict[str, Any] = {**earlier, **incoming}
+    for field_name in _CLIENT_FILL_FIELDS:
+        if incoming.get(field_name) is None and earlier.get(field_name) is not None:
+            merged[field_name] = earlier[field_name]
+    return cast("NetworkClient", merged)
+
+
 def merge_adapter_results(results: Iterable[AdapterResult]) -> NetworkSnapshot:  # noqa: PLR0912 - one branch per section, kept flat on purpose
     """
     Merge adapter outputs into one section and derive the capability list.
@@ -277,29 +311,21 @@ def merge_adapter_results(results: Iterable[AdapterResult]) -> NetworkSnapshot: 
             posture[key] = value
             if posture_is_capability(key):
                 sources[posture_cap(key)] = result.name
+                twin = f"{key}{_ENTITY_TWIN_SUFFIX}"
+                if twin not in result.posture:
+                    # The earlier source's entity no longer describes this
+                    # value; a stale twin would name the wrong evidence.
+                    posture.pop(twin, None)
         for key, value in result.ha_security.items():
             ha_security[key] = value
             sources[ha_cap(key)] = result.name
         if result.clients is not None:
             clients = clients or {}
             for incoming in result.clients:
-                merged = incoming
                 earlier = clients.get(incoming["key"])
-                if (
-                    earlier is not None
-                    and not incoming.get("tracker_entity_id")
-                    and earlier.get("tracker_entity_id")
-                ):
-                    # A runtime source knows no entity; keep the tracker the
-                    # entity source found so exclusions and snoozes still work.
-                    merged = cast(
-                        "NetworkClient",
-                        {
-                            **incoming,
-                            "tracker_entity_id": earlier.get("tracker_entity_id"),
-                        },
-                    )
-                clients[merged["key"]] = merged
+                clients[incoming["key"]] = (
+                    _merge_client(earlier, incoming) if earlier else incoming
+                )
             sources[CAP_CLIENTS] = result.name
         if result.new_clients is not None:
             new_clients = sorted({*(new_clients or []), *result.new_clients})
@@ -320,6 +346,10 @@ def merge_adapter_results(results: Iterable[AdapterResult]) -> NetworkSnapshot: 
                 radio_caps.add(path)
         counters.update(result.counters)
         notes.extend(result.notes)
+    if clients is not None:
+        counters[COUNTER_CLIENT_COUNT] = float(
+            sum(1 for c in clients.values() if c.get("connected"))
+        )
     section: dict[str, Any] = {
         "capabilities": sorted(sources),
         "sources": sources,
@@ -339,6 +369,62 @@ def merge_adapter_results(results: Iterable[AdapterResult]) -> NetworkSnapshot: 
             **{k: v for k, v in radio.items() if k != "devices"},
         }
     return section  # type: ignore[return-value]
+
+
+# Names a router gives a client it cannot resolve; matching one of these
+# against a trusted row would call a stranger "a known device".
+_PLACEHOLDER_NAME_WORDS: tuple[str, ...] = ("unknown", "unnamed", "device", "[")
+_MIN_MATCHABLE_NAME_CHARS = 4
+
+
+def _matchable_names(client: Mapping[str, Any]) -> set[str]:
+    """Return the client's names that are specific enough to identify it."""
+    names = set()
+    for value in (client.get("hostname"), client.get("name")):
+        text = str(value or "").strip().lower()
+        if len(text) < _MIN_MATCHABLE_NAME_CHARS or any(
+            word in text for word in _PLACEHOLDER_NAME_WORDS
+        ):
+            continue
+        names.add(text)
+    return names
+
+
+def attach_inventory(section: NetworkSnapshot, context: NetworkBuildContext) -> None:
+    """
+    Compare the merged client list with the device inventory, once per run.
+
+    Runs after the merge so every source's clients are diffed together:
+    attaches each recorded client's ``first_seen`` (the rule applies the
+    grace period from it), marks a rotated random address whose name a
+    trusted row carries, and publishes ``new_clients`` with its capability.
+    A section without the clients capability is left alone.
+    """
+    from custom_components.home_generative_agent.sentinel.network_inventory import (  # noqa: PLC0415
+        ROUTER_SOURCE,
+        client_key,
+        client_observation,
+    )
+
+    inventory = context.network_inventory
+    if inventory is None or CAP_CLIENTS not in section["capabilities"]:
+        return
+    trusted_names = inventory.trusted_names(ROUTER_SOURCE)
+    observations = []
+    for client in section["clients"]:
+        row = inventory.row(client_key(client["key"]))
+        if row is not None and isinstance(row.get("first_seen"), str):
+            client["first_seen"] = row["first_seen"]
+        if client.get("mac_randomized"):
+            client["hostname_trusted"] = bool(_matchable_names(client) & trusted_names)
+        observations.append(client_observation(client))
+    delta = inventory.diff(observations, [ROUTER_SOURCE])
+    prefix = f"{ROUTER_SOURCE}:"
+    section["new_clients"] = [
+        k.removeprefix(prefix) for k in delta.new_device_keys if k.startswith(prefix)
+    ]
+    section["sources"][CAP_NEW_CLIENTS] = "inventory"
+    section["capabilities"] = sorted(section["sources"])
 
 
 def empty_network_snapshot(note: str | None = None) -> NetworkSnapshot:
@@ -1157,7 +1243,7 @@ async def async_build_network_snapshot(  # noqa: PLR0913
     eero_inputs = collect_eero_runtime_inputs(hass)
     # Router adapters come last: a router's own UPnP switch outranks the
     # IGD inference, and its public-IP sensor the gateway's.
-    return merge_adapter_results(
+    section = merge_adapter_results(
         [
             ha_native_adapter(inputs, entities, context),
             *radio_adapters(radio_inputs, entities, context.network_inventory),
@@ -1170,3 +1256,5 @@ async def async_build_network_snapshot(  # noqa: PLR0913
             ),
         ]
     )
+    attach_inventory(section, context)
+    return section
