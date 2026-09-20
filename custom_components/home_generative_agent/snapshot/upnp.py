@@ -86,6 +86,10 @@ POSTURE_MEMORY_KEYS: tuple[str, ...] = (
     "public_ip_entity_id",
     "upnp_port_mapping_count",
     "upnp_port_mapping_entity_id",
+    # When a guest was last connected to the guest Wi-Fi (or when the idle
+    # clock started), for ``network_guest_network_idle``; see
+    # ``snapshot/network.py`` ``derive_guest_idle``.
+    "guest_network_last_active",
 )
 # Posture keys that describe a fact for display and never gate a rule; the
 # merge step does not publish them as capabilities.
@@ -95,6 +99,7 @@ POSTURE_DISPLAY_KEYS: frozenset[str] = frozenset(
         "upnp_gateway_names",
         "public_ip_previous_key",
         "upnp_port_mapping_previous_count",
+        "guest_network_last_active",
     }
 )
 

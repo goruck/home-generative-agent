@@ -224,6 +224,7 @@ _POSTURE_NON_CAPABILITY_KEYS: frozenset[str] = frozenset(
         "upnp_gateway_names",
         "public_ip_previous_key",
         "upnp_port_mapping_previous_count",
+        "guest_network_last_active",
     }
 )
 _ENTITY_TWIN_SUFFIX = "_entity_id"
@@ -432,6 +433,54 @@ def attach_inventory(section: NetworkSnapshot, context: NetworkBuildContext) -> 
         sum(1 for c in section["clients"] if c.get("connected")),
         len(section["new_clients"]),
     )
+
+
+def derive_guest_idle(
+    section: NetworkSnapshot, context: NetworkBuildContext, now: datetime
+) -> None:
+    """
+    Work out how long the guest Wi-Fi has sat unused, once per run.
+
+    Runs after the merge, on whichever source supplied the guest network's
+    state and its connected-guest count. The engine remembers
+    ``guest_network_last_active`` between runs (posture memory): a guest
+    connected now, a network that is off, or no memory yet all set it to now,
+    which starts the idle clock; otherwise the remembered time stands and
+    ``guest_network_idle_days`` is published for the rule. On the first
+    observation the idle days are absent, so the rule is listed as not run
+    rather than guessing, like the other change checks.
+    """
+    posture: dict[str, Any] = section["posture"]  # type: ignore[assignment]
+    enabled = posture.get("guest_network_enabled")
+    count = posture.get("guest_client_count")
+    if not isinstance(enabled, bool):
+        return
+    guests = count if isinstance(count, int) and not isinstance(count, bool) else None
+    now_utc = dt_util.as_utc(now)
+    previous = (context.previous_posture or {}).get("guest_network_last_active")
+    last_active = dt_util.parse_datetime(str(previous)) if previous else None
+    if not enabled or guests is None:
+        # Off, or on with no guest count to go by: the idle clock restarts.
+        posture["guest_network_last_active"] = now_utc.isoformat()
+        return
+    if guests > 0:
+        posture["guest_network_last_active"] = now_utc.isoformat()
+        posture["guest_network_idle_days"] = 0
+    elif last_active is None:
+        # First observation: start the clock, judge nothing yet.
+        posture["guest_network_last_active"] = now_utc.isoformat()
+        return
+    else:
+        posture["guest_network_last_active"] = dt_util.as_utc(last_active).isoformat()
+        posture["guest_network_idle_days"] = max(
+            0, (now_utc - dt_util.as_utc(last_active)).days
+        )
+    _publish_capability(section, "guest_network_idle_days", "posture_memory")
+
+
+def _publish_capability(section: NetworkSnapshot, key: str, source: str) -> None:
+    section["sources"][posture_cap(key)] = source
+    section["capabilities"] = sorted(section["sources"])
 
 
 def empty_network_snapshot(note: str | None = None) -> NetworkSnapshot:
@@ -1264,4 +1313,5 @@ async def async_build_network_snapshot(  # noqa: PLR0913
         ]
     )
     attach_inventory(section, context)
+    derive_guest_idle(section, context, now)
     return section

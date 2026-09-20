@@ -58,6 +58,7 @@ from ..const import (  # noqa: TID252
     CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH,
     CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT,
     CONF_SENTINEL_NETWORK_ENABLED,
+    CONF_SENTINEL_NETWORK_GUEST_IDLE_DAYS,
     CONF_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN,
     CONF_SENTINEL_NETWORK_UNKNOWN_DEVICE_GRACE_MIN,
     CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
@@ -92,6 +93,7 @@ from ..const import (  # noqa: TID252
     RECOMMENDED_SENTINEL_HA_TOKEN_STALE_DAYS,
     RECOMMENDED_SENTINEL_INTERVAL_SECONDS,
     RECOMMENDED_SENTINEL_NETWORK_ENABLED,
+    RECOMMENDED_SENTINEL_NETWORK_GUEST_IDLE_DAYS,
     RECOMMENDED_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN,
     RECOMMENDED_SENTINEL_NETWORK_UNKNOWN_DEVICE_GRACE_MIN,
     RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
@@ -418,6 +420,9 @@ def _default_payload() -> dict[str, Any]:
         CONF_SENTINEL_NETWORK_UNKNOWN_DEVICE_GRACE_MIN: (
             RECOMMENDED_SENTINEL_NETWORK_UNKNOWN_DEVICE_GRACE_MIN
         ),
+        CONF_SENTINEL_NETWORK_GUEST_IDLE_DAYS: (
+            RECOMMENDED_SENTINEL_NETWORK_GUEST_IDLE_DAYS
+        ),
         CONF_SENTINEL_HA_TOKEN_STALE_DAYS: RECOMMENDED_SENTINEL_HA_TOKEN_STALE_DAYS,
         CONF_SENTINEL_AUTH_IP_RETENTION_DAYS: (
             RECOMMENDED_SENTINEL_AUTH_IP_RETENTION_DAYS
@@ -633,6 +638,15 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                     )
                 ),
             ): NumberSelector(NumberSelectorConfig(min=0, max=1440, step=1)),
+            vol.Required(
+                CONF_SENTINEL_NETWORK_GUEST_IDLE_DAYS,
+                default=int(
+                    payload.get(
+                        CONF_SENTINEL_NETWORK_GUEST_IDLE_DAYS,
+                        RECOMMENDED_SENTINEL_NETWORK_GUEST_IDLE_DAYS,
+                    )
+                ),
+            ): NumberSelector(NumberSelectorConfig(min=1, max=365, step=1)),
             vol.Required(
                 CONF_SENTINEL_HA_TOKEN_STALE_DAYS,
                 default=int(

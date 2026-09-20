@@ -363,6 +363,41 @@ def test_adapter_judges_several_networks_together_only_when_all_report() -> None
     assert "wpa3_enabled" not in posture
 
 
+def test_plus_only_settings_are_published_only_with_eero_plus() -> None:
+    """Without Plus they read as off; reporting that would nag about a paid feature."""
+    settings = {
+        "upnp": True,
+        "ddns_enabled": False,
+        "block_malware": False,
+        "ad_block": False,
+    }
+    free = eero_runtime_adapter(
+        _inputs(FakeNetwork(premium_enabled=False, **settings)),
+        RouterInputs(),
+        _context(),
+    ).posture
+    assert free["upnp_enabled"] is True
+    assert not {
+        "ddns_enabled",
+        "malware_blocking_enabled",
+        "ad_blocking_enabled",
+    } & set(free)
+    plus = eero_runtime_adapter(
+        _inputs(FakeNetwork(premium_enabled=True, **settings)),
+        RouterInputs(),
+        _context(),
+    ).posture
+    assert plus["malware_blocking_enabled"] is False
+    assert plus["ddns_enabled"] is False
+    # Unknown Plus state is not proof of Plus.
+    unknown = eero_runtime_adapter(
+        _inputs(FakeNetwork(premium_enabled=None, **settings)),
+        RouterInputs(),
+        _context(),
+    ).posture
+    assert "malware_blocking_enabled" not in unknown
+
+
 def test_adapter_withholds_clients_and_says_why() -> None:
     plain = FakeNetwork(
         premium_enabled=False, clients=[FakeClient(mac=MAC_A, connected=True)]

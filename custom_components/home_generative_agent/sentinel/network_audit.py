@@ -157,6 +157,13 @@ _CAPABILITY_REASONS: tuple[tuple[str, str], ...] = (
         ),
     ),
     (
+        posture_cap("guest_network_idle_days"),
+        (
+            "needs a router integration that reports the guest network and its "
+            "connected guests, and a previous Sentinel run to measure from"
+        ),
+    ),
+    (
         CAP_NEW_CLIENTS,
         (
             "needs the Sentinel device inventory to have compared this run's "

@@ -125,6 +125,11 @@ FORBIDDEN_ATTRS: Final[frozenset[str]] = frozenset(
     }
 )
 
+# Settings that exist only with an eero Plus subscription.
+_PLUS_ONLY: Final[frozenset[str]] = frozenset(
+    {"ddns_enabled", "malware_blocking_enabled", "ad_blocking_enabled"}
+)
+
 RUNTIME_FAILED_NOTE: Final = (
     "The eero integration's client list could not be read completely from the "
     "integration, so this run used its device trackers, which list a device "
@@ -387,7 +392,12 @@ def _aggregate_posture(inputs: EeroRuntimeInputs, result: AdapterResult) -> None
     posture = result.posture
     if not inputs.networks:
         return
+    plus_active = all(n.premium_enabled is True for n in inputs.networks)
     for key in EERO_SWITCHES.values():
+        if key in _PLUS_ONLY and not plus_active:
+            # Without eero Plus these read as off; reporting "protection is
+            # off" to someone who cannot turn it on would be noise.
+            continue
         states = [n.settings.get(key) for n in inputs.networks]
         if any(state is None for state in states):
             continue

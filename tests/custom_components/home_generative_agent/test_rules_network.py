@@ -49,6 +49,12 @@ from custom_components.home_generative_agent.sentinel.rules.network_common impor
 from custom_components.home_generative_agent.sentinel.rules.network_public_ip_changed import (
     NetworkPublicIpChangedRule,
 )
+from custom_components.home_generative_agent.sentinel.rules.network_router_posture import (
+    NetworkDdnsEnabledRule,
+    NetworkGuestNetworkIdleRule,
+    NetworkProtectionDisabledRule,
+    NetworkWpa3DisabledRule,
+)
 from custom_components.home_generative_agent.sentinel.rules.network_router_update_pending import (
     NetworkRouterUpdatePendingRule,
 )
@@ -110,6 +116,10 @@ ALL_RULES = [
     NetworkUpnpPortMappingAddedRule(),
     RadioNewDeviceJoinedRule(),
     NetworkUnknownDeviceJoinedRule(),
+    NetworkGuestNetworkIdleRule(),
+    NetworkWpa3DisabledRule(),
+    NetworkProtectionDisabledRule(),
+    NetworkDdnsEnabledRule(),
     ZwaveInsecureSecurityClassRule(),
     ZigbeePermitJoinOpenRule(),
     ZwaveInclusionActiveRule(),
