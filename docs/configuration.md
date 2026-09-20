@@ -223,6 +223,7 @@ The **Control Home Assistant** option in the Options flow is a multi-select that
 
 - **Assist** (`assist`) — the built-in HA Assist API. Grants entity-control intents and the full entity list. Select this for standard voice-assistant control.
 - **MCP server integrations** — any [Model Context Protocol](https://www.home-assistant.io/integrations/mcp_server/) integration you have configured registers its own LLM API (e.g. `mcp-<entry_id>`). Those entries appear in the list once added.
+- **Any other integration that registers an LLM API** — the list is every LLM API Home Assistant knows about, not a fixed set, so tools added by a third-party integration show up here too. This is how the agent gets [internet search](#internet-search).
 
 You can select any combination. Selecting both Assist and one or more MCP APIs merges all their tools into a single combined API. Note that deselecting everything does **not** disable HA control: an empty selection is stored as "unset", which the agent reads as the Assist default, so Assist is silently re-enabled on the next save. Running with no LLM API at all is currently not expressible through the form (tracked in `TODOS.md`).
 
@@ -235,6 +236,22 @@ You can select any combination. Selecting both Assist and one or more MCP APIs m
 5. Select the new entry in **Control Home Assistant** and save.
 
 **Removing an MCP server:** if a selected server's integration is removed (or is temporarily unavailable), its entry stays selected and is shown as `<id> (no longer available)` so the form remains saveable and your selection is never dropped behind your back. Deselect the dead entry and save to clean it up. While it stays selected, a warning is logged when the options form is built and each time the agent loads its APIs; other selected APIs keep working, but if the unavailable entry is the *only* selection, conversations fail with "No LLM APIs could be loaded" until the server returns or you deselect it.
+
+### Internet search
+
+The agent has no web search of its own; it uses whichever search tool you give it through an LLM API, so you choose the search provider and nothing leaves your network unless you pick a hosted one. Two ways to add one:
+
+- **[Tools for Assist](https://github.com/skye-harris/llm_intents)** (HACS custom integration) — web search backed by [Brave](https://brave.com/search/api/) or a self-hosted [SearXNG](https://docs.searxng.org/) instance, plus Wikipedia, weather, and places tools. It registers each tool group as its own LLM API; the web search one is named **Search Services**.
+- **A search MCP server** — add it as described under **Adding an MCP server** above.
+
+Then:
+
+1. Install and configure the integration or MCP server.
+2. Open **Settings → Devices & Services → Home Generative Agent → Configure**.
+3. Select the new entry in **Control Home Assistant**, keeping **Assist** selected, and save.
+4. If [Tool Retrieval (RAG)](#tool-retrieval-rag) is on, tick the search tool under [Always-included tools](#always-included-tools). A general-knowledge question shares almost no vocabulary with a search tool's description, so retrieval alone rarely selects it.
+
+Ask something the model cannot know ("who won the match last night?") to check it. If a server exposes several near-identical search tools, use [Excluded tools](#excluded-tools) to leave only the one you want.
 
 ---
 

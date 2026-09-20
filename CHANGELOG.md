@@ -40,6 +40,10 @@ their own. See [RELEASING.md](RELEASING.md).
   `microsoft/mai-transcribe-2` returned an approximated spelling that Assist resolved correctly
   every time. ([#610](https://github.com/goruck/home-generative-agent/issues/610))
 
+### Documentation
+
+- Documented how to give the agent internet search: the **Control Home Assistant** picker lists every LLM API Home Assistant knows about, not only Assist and MCP servers, so a search tool from [Tools for Assist](https://github.com/skye-harris/llm_intents) (Brave or self-hosted SearXNG) or a search MCP server can be selected there and pinned with Always-included tools. See [Internet search](docs/configuration.md#internet-search). ([#642](https://github.com/goruck/home-generative-agent/issues/642))
+
 ## [3.42.0] - 2026-09-14
 
 ### Added
