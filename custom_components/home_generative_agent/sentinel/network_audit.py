@@ -182,7 +182,7 @@ _CAPABILITY_REASONS: tuple[tuple[str, str], ...] = (
         CAP_GUEST_CLIENTS,
         (
             "needs a router integration that says which clients are on the guest "
-            "network (eero, UniFi) for every connected client"
+            "network (eero, UniFi)"
         ),
     ),
     (

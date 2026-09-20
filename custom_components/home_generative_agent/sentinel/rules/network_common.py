@@ -14,6 +14,8 @@ from __future__ import annotations
 import unicodedata
 from typing import TYPE_CHECKING, Any
 
+from homeassistant.util import dt as dt_util
+
 from custom_components.home_generative_agent.const import (
     SENTINEL_POSTURE_RULE_COOLDOWN_MINUTES,
 )
@@ -25,7 +27,8 @@ from custom_components.home_generative_agent.sentinel.models import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
+    from datetime import datetime, timedelta
 
     from custom_components.home_generative_agent.snapshot.schema import (
         FullStateSnapshot,
@@ -136,6 +139,42 @@ def listed(names: Sequence[str], limit: int = MAX_LISTED_ITEMS) -> str:
 def anyone_home(snapshot: FullStateSnapshot) -> bool:
     """Return the derived occupancy flag."""
     return bool(snapshot["derived"].get("anyone_home", False))
+
+
+def occupancy_known(snapshot: FullStateSnapshot) -> bool:
+    """
+    Return True when the home tracks at least one person.
+
+    ``anyone_home`` is False on an install with no ``person`` entities, so a
+    rule whose whole trigger is "nobody is home" must check this first.
+    """
+    derived = snapshot["derived"]
+    return bool(derived.get("people_home") or derived.get("people_away"))
+
+
+def client_excluded(
+    client: Mapping[str, Any],
+    rule_id: str,
+    is_entity_excluded: Callable[[str, str], bool] | None,
+) -> bool:
+    """Return True when the client's tracker entity is excluded for *rule_id*."""
+    entity_id = client.get("tracker_entity_id")
+    if not entity_id or is_entity_excluded is None:
+        return False
+    return is_entity_excluded(str(entity_id), rule_id)
+
+
+def client_known_for(client: Mapping[str, Any], now: datetime, age: timedelta) -> bool:
+    """
+    Return True when the client's inventory row is at least *age* old.
+
+    A client without a readable ``first_seen`` is not recorded yet: the
+    commit after this run records it, and its age runs from there.
+    """
+    first_seen = dt_util.parse_datetime(str(client.get("first_seen") or ""))
+    if first_seen is None:
+        return False
+    return dt_util.as_utc(now) - dt_util.as_utc(first_seen) >= age
 
 
 def noun(count: int, singular: str, plural_form: str | None = None) -> str:

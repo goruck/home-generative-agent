@@ -74,9 +74,9 @@ LOGGER = logging.getLogger(__name__)
 CAP_CLIENTS = "network.clients"
 # Present once the device inventory has compared this run's clients.
 CAP_NEW_CLIENTS = "network.new_clients"
-# Every connected client says whether it is on the guest network: without
-# that a missing flag would read as "not a guest" and the rule would pass
-# in silence. Published by the merge (``_publish_guest_flag``).
+# Some source says which clients are on the guest network. Published by the
+# merge (``_publish_guest_flag``), which also names the connected clients no
+# such source covers, so they are a stated gap rather than a silent pass.
 CAP_GUEST_CLIENTS = "network.clients.is_guest"
 _CAP_RADIO_PREFIX = "network.radio."
 _CAP_POSTURE_PREFIX = "network.posture."
@@ -273,7 +273,6 @@ _CLIENT_FILL_FIELDS: tuple[str, ...] = (
     "ha_device_id",
     "ha_integration",
     "tracker_entity_id",
-    "is_guest",
     "vlan",
 )
 COUNTER_CLIENT_COUNT = "network.client_count"
@@ -292,6 +291,11 @@ def _merge_client(earlier: NetworkClient, incoming: NetworkClient) -> NetworkCli
     for field_name in _CLIENT_FILL_FIELDS:
         if incoming.get(field_name) is None and earlier.get(field_name) is not None:
             merged[field_name] = earlier[field_name]
+    # Which network a client is on belongs to the observation that says it is
+    # connected: an older source's guest flag (a tracker attribute from the
+    # last reload) must not describe the fresher source's connection.
+    if not isinstance(incoming.get("is_guest"), bool):
+        merged.pop("is_guest", None)
     return cast("NetworkClient", merged)
 
 
@@ -397,8 +401,8 @@ def merge_adapter_results(results: Iterable[AdapterResult]) -> NetworkSnapshot: 
 
 
 GUEST_FLAG_PARTIAL_NOTE = (
-    "Guest Wi-Fi clients are not audited: some connected clients come from a "
-    "router integration that does not say which network they are on."
+    "Guest Wi-Fi: {count} connected client(s) come from a router integration "
+    "that does not say which network they are on, so they are not checked."
 )
 
 
@@ -408,18 +412,23 @@ def _publish_guest_flag(
     """
     Publish the guest-flag capability for the merged client list.
 
-    Decided after the merge because the list mixes sources: the rule judges
-    connected clients, so every one of them must say whether it is a guest,
-    or a client from a source without the flag would pass as "not a guest".
-    A list where no client carries the flag has no source that reports it.
+    Decided after the merge because the list mixes sources. A client flagged
+    as a guest is one whatever the others say, so one source reporting the
+    flag is enough for the rule to run; connected clients without the flag
+    (a second router integration's trackers) are counted in a note, since
+    for them "not reported" does not mean "not a guest".
     """
     merged = list(clients)
     if not any(isinstance(c.get("is_guest"), bool) for c in merged):
         return
-    if all(isinstance(c.get("is_guest"), bool) for c in merged if c.get("connected")):
-        sources[CAP_GUEST_CLIENTS] = sources[CAP_CLIENTS]
-    else:
-        notes.append(GUEST_FLAG_PARTIAL_NOTE)
+    sources[CAP_GUEST_CLIENTS] = sources[CAP_CLIENTS]
+    uncovered = sum(
+        1
+        for c in merged
+        if c.get("connected") and not isinstance(c.get("is_guest"), bool)
+    )
+    if uncovered:
+        notes.append(GUEST_FLAG_PARTIAL_NOTE.format(count=uncovered))
 
 
 # Names a router gives a client it cannot resolve; matching one of these

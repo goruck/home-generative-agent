@@ -154,7 +154,7 @@ class ActionHandler:
         except HomeAssistantError:
             return {"status": "save_failed"}
         LOGGER.info(
-            "User %s trusted %d radio device(s) from a Sentinel notification.",
+            "User %s trusted %d device(s) from a Sentinel notification.",
             user.name,
             len(trusted),
         )

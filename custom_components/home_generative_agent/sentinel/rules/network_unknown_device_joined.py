@@ -23,6 +23,8 @@ from custom_components.home_generative_agent.snapshot.network import (
 
 from .network_common import (
     anyone_home,
+    client_excluded,
+    client_known_for,
     clients,
     is_night,
     listed,
@@ -106,20 +108,10 @@ class NetworkUnknownDeviceJoinedRule:
         self._is_entity_excluded = is_entity_excluded
 
     def _excluded(self, client: Mapping[str, Any]) -> bool:
-        entity_id = client.get("tracker_entity_id")
-        if not entity_id or self._is_entity_excluded is None:
-            return False
-        return self._is_entity_excluded(str(entity_id), self.rule_id)
+        return client_excluded(client, self.rule_id, self._is_entity_excluded)
 
     def _past_grace(self, client: Mapping[str, Any], now: Any) -> bool:
-        if not self._grace:
-            return True
-        first_seen = dt_util.parse_datetime(str(client.get("first_seen") or ""))
-        if first_seen is None:
-            # Not recorded yet: the commit after this run records it, and
-            # the grace period runs from there.
-            return False
-        return dt_util.as_utc(now) - dt_util.as_utc(first_seen) >= self._grace
+        return not self._grace or client_known_for(client, now, self._grace)
 
     def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:
         """Return one finding naming every new client past its grace period."""

@@ -52,10 +52,14 @@ def _guest(key: str, **extra: Any) -> dict[str, Any]:
 def _snapshot(
     clients: list[dict[str, Any]],
     *,
-    new_clients: list[str] | None = None,
-    anyone_home: bool = False,
+    people_home: list[str] | None = None,
+    people_away: list[str] | None = None,
     is_night: bool = False,
+    new_clients: list[str] | None = None,
 ) -> FullStateSnapshot:
+    """Return a snapshot; by default one tracked person, away."""
+    home = people_home or []
+    away = ["person.sam"] if people_away is None else people_away
     caps = [CAP_CLIENTS, CAP_NEW_CLIENTS, CAP_GUEST_CLIENTS]
     return validate_snapshot(
         {
@@ -67,9 +71,9 @@ def _snapshot(
                 "now": NOW.isoformat(),
                 "timezone": "UTC",
                 "is_night": is_night,
-                "anyone_home": anyone_home,
-                "people_home": [],
-                "people_away": [],
+                "anyone_home": bool(home),
+                "people_home": home,
+                "people_away": away,
                 "last_motion_by_area": {},
             },
             "network": {
@@ -99,9 +103,19 @@ def test_rule_declares_its_capabilities_and_the_daily_floor() -> None:
     assert NetworkGuestClientPresentRule.cooldown_minutes == POSTURE_COOLDOWN_MINUTES
 
 
-def test_a_guest_while_someone_is_home_in_daytime_is_what_the_network_is_for() -> None:
+def test_a_guest_while_someone_is_home_is_what_the_network_is_for() -> None:
     rule = NetworkGuestClientPresentRule()
-    assert rule.evaluate(_snapshot([_guest("a")], anyone_home=True)) == []
+    home = {"people_home": ["person.sam"], "people_away": []}
+    assert rule.evaluate(_snapshot([_guest("a")], **home)) == []
+    # Night is not a trigger: the derived flag follows the sun, and an
+    # evening or overnight visitor is the ordinary case.
+    assert rule.evaluate(_snapshot([_guest("a")], is_night=True, **home)) == []
+
+
+def test_an_install_without_person_tracking_is_never_away() -> None:
+    # ``anyone_home`` is False there, which must not read as "nobody is home".
+    rule = NetworkGuestClientPresentRule()
+    assert rule.evaluate(_snapshot([_guest("a")], people_away=[])) == []
 
 
 def test_untrusted_guest_while_nobody_is_home_is_medium() -> None:
@@ -119,26 +133,19 @@ def test_untrusted_guest_while_nobody_is_home_is_medium() -> None:
     )
 
 
-def test_at_night_with_someone_home_is_low() -> None:
+def test_names_and_keys_line_up_whatever_the_client_order() -> None:
     finding = _only(
-        NetworkGuestClientPresentRule().evaluate(
-            _snapshot([_guest("a"), _guest("b")], anyone_home=True, is_night=True)
-        )
+        NetworkGuestClientPresentRule().evaluate(_snapshot([_guest("b"), _guest("a")]))
     )
-    assert finding.severity == "low"
+    assert finding.evidence["client_keys"] == ["a", "b"]
+    assert finding.evidence["device_ids"] == ["router:a", "router:b"]
+    assert [n.split(" (")[0] for n in finding.evidence["names"]] == [
+        "Phone a",
+        "Phone b",
+    ]
     assert finding.evidence["summary"].startswith(
-        "2 guest Wi-Fi devices you have not trusted are connected at night: "
+        "2 guest Wi-Fi devices you have not trusted are connected while nobody"
     )
-
-
-def test_away_outranks_night() -> None:
-    finding = _only(
-        NetworkGuestClientPresentRule().evaluate(
-            _snapshot([_guest("a")], is_night=True)
-        )
-    )
-    assert finding.severity == "medium"
-    assert "while nobody is home" in finding.evidence["summary"]
 
 
 def test_only_connected_untrusted_guests_are_reported() -> None:
@@ -151,6 +158,10 @@ def test_only_connected_untrusted_guests_are_reported() -> None:
         _guest("trusted", trusted=True),
         # No inventory verdict yet: the unknown-device rule's business.
         _guest("no_row", trusted=None),
+        # The registry vouches for it this run; the row catches up after it.
+        _guest("auto", auto_trust=True),
+        # A rotated random address on a device a trusted row already names.
+        _guest("rotated", mac_randomized=True, hostname_trusted=True),
         _guest("stranger"),
     ]
     finding = _only(NetworkGuestClientPresentRule().evaluate(_snapshot(clients)))
@@ -159,8 +170,6 @@ def test_only_connected_untrusted_guests_are_reported() -> None:
 
 def test_the_first_day_belongs_to_the_unknown_device_rule() -> None:
     rule = NetworkGuestClientPresentRule()
-    # Still owed its new-device alert.
-    assert rule.evaluate(_snapshot([_guest("a")], new_clients=["a"])) == []
     # Announced earlier today: a second push would be noise.
     fresh = _guest("a", first_seen=(NOW - timedelta(hours=23)).isoformat())
     assert rule.evaluate(_snapshot([fresh])) == []
@@ -171,15 +180,24 @@ def test_the_first_day_belongs_to_the_unknown_device_rule() -> None:
     assert rule.evaluate(_snapshot([_guest("a", first_seen="garbled")])) == []
 
 
-def test_identity_is_the_client_set_not_the_context() -> None:
-    rule = NetworkGuestClientPresentRule()
-    away = _only(rule.evaluate(_snapshot([_guest("a")])))
-    night = _only(
-        rule.evaluate(_snapshot([_guest("a")], anyone_home=True, is_night=True))
+def test_an_unsettled_new_device_alert_does_not_hide_the_client_forever() -> None:
+    # Excluded from the unknown-device rule only, or held by quiet hours for
+    # days: the key stays in new_clients, and after a day this rule judges it.
+    finding = _only(
+        NetworkGuestClientPresentRule().evaluate(
+            _snapshot([_guest("a")], new_clients=["a"])
+        )
     )
+    assert finding.evidence["client_keys"] == ["a"]
+
+
+def test_identity_is_the_client_set() -> None:
+    rule = NetworkGuestClientPresentRule()
+    first = _only(rule.evaluate(_snapshot([_guest("a")])))
+    again = _only(rule.evaluate(_snapshot([_guest("a", ip="192.168.4.9")])))
     other = _only(rule.evaluate(_snapshot([_guest("b")])))
-    assert away.anomaly_id == night.anomaly_id
-    assert away.anomaly_id != other.anomaly_id
+    assert first.anomaly_id == again.anomaly_id
+    assert first.anomaly_id != other.anomaly_id
 
 
 def test_excluded_tracker_is_skipped() -> None:
