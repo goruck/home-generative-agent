@@ -761,6 +761,28 @@ validation.
 **Effort:** L
 **Priority:** P2
 
+### The Trust device button trusts every device in a multi-device finding
+
+**What:** `radio_new_device_joined` and `network_unknown_device_joined` aggregate every new device into one finding, and the push's **Trust device** button (`notify/actions.py` `_outcome_for_trust`) trusts every id in `device_ids` at once. The summary lists at most 10 names (`listed()`) and the mobile push is cut at 220 characters (`MAX_MOBILE_MESSAGE_CHARS`), so one tap can trust a device the user never saw named. Seen in the field on 2026-09-19: one tap trusted a visitor's laptop together with an unidentified `[mac]` client. `network_guest_client_present` already offers the button only for a single-device finding (`notifier._TRUST_ONE_DEVICE_TYPES`); the two shipped rules were left as they are because changing them alters released behavior.
+
+**Why:** Trust is permanent and silences both client rules for that device. Surfaced by the Codex pass on PR #646.
+
+**How to apply:** Decide between (a) the single-device gate for all three types, (b) one finding per device for the join rules (needs a per-identity cooldown so siblings are not starved), or (c) a confirm step that lists what will be trusted. Whatever is chosen, the handler should refuse ids the delivered message did not name.
+
+**Effort:** M
+**Priority:** P2
+
+### `network_guest_client_present`: per-type daily floor and sub-daily MAC rotation
+
+**What:** Two accepted limits of the guest client rule. (1) Its 24 h cooldown floor is per type (`suppression.should_suppress` step 5), so after an alert about guest A, a different untrusted guest B that connects and leaves within the day is not reported by this rule. (2) A client is judged only once its inventory row is a day old (`FIRST_DAY_HOLDOFF`), so a device that rotates its MAC more often than daily (Windows "change daily", a deliberate attacker) never qualifies.
+
+**Why:** Both were accepted because `network_unknown_device_joined` (cooldown 0, per-key) announces B when it first joins and announces every rotated address as a new device, so the owner is still told; this rule adds the *standing presence* signal only. Surfaced by the Codex pass on PR #646.
+
+**How to apply:** (1) needs a per-identity (or "newly implicated client") cooldown in `suppression.py`, which the multi-device Trust item above also wants. (2) would need the holdoff to be based on the unknown-device alert's delivery time per client rather than the row's age.
+
+**Effort:** M
+**Priority:** P3
+
 ### Radio checks the pinned Home Assistant version cannot observe
 
 **What:** Two radio checks from step 6 are weaker than the plan wanted. ZHA permit-join is not readable at all (zigpy 2.1.0's `ControllerApplication.permit()` keeps no record of the join window, and the frontend's `zha/devices/permit` websocket command fires no event), so `zigbee_permit_join_open` covers Zigbee2MQTT only. `zwave_inclusion_active` is poll-only because the Z-Wave JS integration exposes no inclusion entity, so a window shorter than the detection interval is usually missed.

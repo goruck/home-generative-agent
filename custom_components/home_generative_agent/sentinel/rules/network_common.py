@@ -141,15 +141,35 @@ def anyone_home(snapshot: FullStateSnapshot) -> bool:
     return bool(snapshot["derived"].get("anyone_home", False))
 
 
-def occupancy_known(snapshot: FullStateSnapshot) -> bool:
-    """
-    Return True when the home tracks at least one person.
+_INDETERMINATE_STATES = frozenset({"unknown", "unavailable"})
 
-    ``anyone_home`` is False on an install with no ``person`` entities, so a
-    rule whose whole trigger is "nobody is home" must check this first.
+
+def nobody_home_for_sure(snapshot: FullStateSnapshot) -> bool:
     """
-    derived = snapshot["derived"]
-    return bool(derived.get("people_home") or derived.get("people_away"))
+    Return True only when tracked people exist and every one of them is away.
+
+    For a rule whose whole trigger is "nobody is home". The derived
+    ``anyone_home`` cannot carry that: it is False on an install with no
+    ``person`` entities, and it counts a person whose state is ``unknown`` or
+    ``unavailable`` as away, so a presence outage with everyone at home reads
+    as an empty house. Here a person with device trackers and no readable
+    state makes the answer "not sure"; a person with no trackers at all (the
+    default onboarding user) can never be located and is ignored; and at
+    least one person must be positively away.
+    """
+    away = 0
+    for entity in snapshot["entities"]:
+        if entity["domain"] != "person":
+            continue
+        state = entity["state"]
+        if state == "home":
+            return False
+        if state in _INDETERMINATE_STATES:
+            if (entity.get("attributes") or {}).get("device_trackers"):
+                return False
+            continue
+        away += 1
+    return away > 0
 
 
 def client_excluded(

@@ -52,20 +52,36 @@ def _guest(key: str, **extra: Any) -> dict[str, Any]:
 def _snapshot(
     clients: list[dict[str, Any]],
     *,
-    people_home: list[str] | None = None,
-    people_away: list[str] | None = None,
+    people: dict[str, str] | None = None,
+    untracked: tuple[str, ...] = (),
     is_night: bool = False,
     new_clients: list[str] | None = None,
 ) -> FullStateSnapshot:
     """Return a snapshot; by default one tracked person, away."""
-    home = people_home or []
-    away = ["person.sam"] if people_away is None else people_away
+    states = {"person.sam": "not_home"} if people is None else people
+    home = sorted(p for p, state in states.items() if state == "home")
+    away = sorted(p for p, state in states.items() if state != "home")
+    entities = [
+        {
+            "entity_id": person,
+            "domain": "person",
+            "state": state,
+            "friendly_name": None,
+            "area": None,
+            "attributes": (
+                {} if person in untracked else {"device_trackers": ["device_tracker.p"]}
+            ),
+            "last_changed": NOW.isoformat(),
+            "last_updated": NOW.isoformat(),
+        }
+        for person, state in states.items()
+    ]
     caps = [CAP_CLIENTS, CAP_NEW_CLIENTS, CAP_GUEST_CLIENTS]
     return validate_snapshot(
         {
             "schema_version": 2,
             "generated_at": NOW.isoformat(),
-            "entities": [],
+            "entities": entities,
             "camera_activity": [],
             "derived": {
                 "now": NOW.isoformat(),
@@ -105,17 +121,35 @@ def test_rule_declares_its_capabilities_and_the_daily_floor() -> None:
 
 def test_a_guest_while_someone_is_home_is_what_the_network_is_for() -> None:
     rule = NetworkGuestClientPresentRule()
-    home = {"people_home": ["person.sam"], "people_away": []}
-    assert rule.evaluate(_snapshot([_guest("a")], **home)) == []
+    home = {"person.sam": "home", "person.kim": "not_home"}
+    assert rule.evaluate(_snapshot([_guest("a")], people=home)) == []
     # Night is not a trigger: the derived flag follows the sun, and an
     # evening or overnight visitor is the ordinary case.
-    assert rule.evaluate(_snapshot([_guest("a")], is_night=True, **home)) == []
+    assert rule.evaluate(_snapshot([_guest("a")], people=home, is_night=True)) == []
 
 
-def test_an_install_without_person_tracking_is_never_away() -> None:
-    # ``anyone_home`` is False there, which must not read as "nobody is home".
+def test_away_needs_every_tracked_person_positively_away() -> None:
     rule = NetworkGuestClientPresentRule()
-    assert rule.evaluate(_snapshot([_guest("a")], people_away=[])) == []
+
+    def fires(people: dict[str, str], untracked: tuple[str, ...] = ()) -> bool:
+        snapshot = _snapshot([_guest("a")], people=people, untracked=untracked)
+        return bool(rule.evaluate(snapshot))
+
+    # No person entities: ``anyone_home`` is False, which is not "away".
+    assert not fires({})
+    # A presence outage reads as away in the derived context; someone may
+    # well be home.
+    assert not fires({"person.sam": "unknown"})
+    assert not fires({"person.sam": "not_home", "person.kim": "unavailable"})
+    # A person with no trackers (the default onboarding user) can never be
+    # located: ignored, but not enough on its own.
+    assert not fires({"person.admin": "unknown"}, untracked=("person.admin",))
+    assert fires(
+        {"person.admin": "unknown", "person.sam": "not_home"},
+        untracked=("person.admin",),
+    )
+    # A named zone is away too.
+    assert fires({"person.sam": "Work"})
 
 
 def test_untrusted_guest_while_nobody_is_home_is_medium() -> None:
@@ -160,12 +194,29 @@ def test_only_connected_untrusted_guests_are_reported() -> None:
         _guest("no_row", trusted=None),
         # The registry vouches for it this run; the row catches up after it.
         _guest("auto", auto_trust=True),
-        # A rotated random address on a device a trusted row already names.
-        _guest("rotated", mac_randomized=True, hostname_trusted=True),
         _guest("stranger"),
     ]
     finding = _only(NetworkGuestClientPresentRule().evaluate(_snapshot(clients)))
     assert finding.evidence["client_keys"] == ["stranger"]
+
+
+def test_a_name_that_matches_a_trusted_device_is_a_hint_not_a_pass() -> None:
+    # The name is whatever the device advertises: skipping it would let
+    # anyone hide by naming a device after a trusted one.
+    rotated = _guest("a", mac_randomized=True, hostname_trusted=True)
+    finding = _only(NetworkGuestClientPresentRule().evaluate(_snapshot([rotated])))
+    assert finding.severity == "medium"
+    assert finding.evidence["randomized_known"] == ["a"]
+    assert "its name matches a device you trust" in finding.evidence["summary"]
+
+
+def test_trust_is_offered_by_tap_only_for_a_single_device() -> None:
+    rule = NetworkGuestClientPresentRule()
+    one = _only(rule.evaluate(_snapshot([_guest("a")])))
+    assert "Tap Trust device" in one.suggested_actions[1]
+    two = _only(rule.evaluate(_snapshot([_guest("a"), _guest("b")])))
+    assert "Tap Trust device" not in " ".join(two.suggested_actions)
+    assert "trust device service" in two.suggested_actions[1]
 
 
 def test_the_first_day_belongs_to_the_unknown_device_rule() -> None:

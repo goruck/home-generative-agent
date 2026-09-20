@@ -2662,6 +2662,28 @@ def test_build_actions_trust_device_is_primary_for_new_radio_devices() -> None:
     assert len(actions) == 4
 
 
+def test_guest_client_trust_button_only_when_one_device_is_named() -> None:
+    """One tap trusts every device in the finding; the push shows 220 chars."""
+
+    def guest_finding(device_ids: list[str]) -> AnomalyFinding:
+        return AnomalyFinding(
+            anomaly_id="g1",
+            type="network_guest_client_present",
+            severity="medium",
+            confidence=0.9,
+            triggering_entities=[],
+            evidence={"device_ids": device_ids, "summary": "Guest devices."},
+            suggested_actions=["Change the guest Wi-Fi password"],
+            is_sensitive=True,
+        )
+
+    one = _build_actions(guest_finding(["router:a"]))
+    assert one[0] == {"action": f"{ACTION_PREFIX}trust_g1", "title": "Trust device"}
+    several = _build_actions(guest_finding(["router:a", "router:b"]))
+    assert all("trust" not in a["action"] for a in several)
+    assert several[0]["title"] == "Ask Agent"
+
+
 @pytest.mark.asyncio
 async def test_action_event_passes_the_mobile_user_to_the_handler() -> None:
     notifier, hass, _suppression, action_handler = _make_notifier()

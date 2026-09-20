@@ -122,6 +122,21 @@ _TRUST_DEVICE_TYPES = frozenset(
     }
 )
 
+# Of those, the types that aggregate standing clients: one tap trusts every
+# device the finding carries, and the push shows 220 characters, so the button
+# is offered only when the finding names exactly one device.
+_TRUST_ONE_DEVICE_TYPES = frozenset({"network_guest_client_present"})
+
+
+def _offers_trust(finding: AnomalyFinding) -> bool:
+    """Return True when the finding's primary button is Trust device."""
+    if finding.type not in _TRUST_DEVICE_TYPES:
+        return False
+    if finding.type in _TRUST_ONE_DEVICE_TYPES:
+        return len(finding.evidence.get("device_ids") or []) == 1
+    return True
+
+
 _SNOOZE_VERBS = frozenset(
     {
         ACT_SNOOZE_24H,
@@ -623,7 +638,7 @@ def _build_actions(finding: AnomalyFinding) -> list[dict[str, Any]]:
     """
     actions: list[dict[str, Any]] = []
 
-    if finding.type in _TRUST_DEVICE_TYPES:
+    if _offers_trust(finding):
         # Android shows three buttons; for a newly paired device the useful
         # primary action is recording it as recognized, not asking the agent.
         actions.append(
