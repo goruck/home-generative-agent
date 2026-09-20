@@ -131,6 +131,11 @@ class RouterInputs:
     tracker_platforms: dict[str, str] = field(default_factory=dict)
     # Tracker entity id -> registry device id.
     tracker_devices: dict[str, str] = field(default_factory=dict)
+    # Tracker entity id -> the registry device's name (the user's own name
+    # first). Preferred over the entity's friendly name, which Home Assistant
+    # composes from device and entity names and some integrations (eero)
+    # fill with the same text twice.
+    tracker_device_names: dict[str, str] = field(default_factory=dict)
     # Normalized MAC -> registry device, for the auto-trust rule.
     mac_index: dict[str, MacIndexEntry] = field(default_factory=dict)
     eero_present: bool = False
@@ -197,6 +202,7 @@ def _record_eero_entity(inputs: RouterInputs, entry: er.RegistryEntry) -> None:
 
 def _collect_entities(inputs: RouterInputs, hass: HomeAssistant) -> None:
     registry = er.async_get(hass)
+    device_registry = dr.async_get(hass)
     # device id -> {config entry id -> entity domains it owns on the device}
     owned: dict[str, dict[str, set[str]]] = {}
     for entry in registry.entities.values():
@@ -206,6 +212,12 @@ def _collect_entities(inputs: RouterInputs, hass: HomeAssistant) -> None:
             inputs.tracker_platforms[entry.entity_id] = entry.platform
             if entry.device_id:
                 inputs.tracker_devices[entry.entity_id] = entry.device_id
+                device = device_registry.async_get(entry.device_id)
+                name = getattr(device, "name_by_user", None) or getattr(
+                    device, "name", None
+                )
+                if name:
+                    inputs.tracker_device_names[entry.entity_id] = str(name)
         if entry.platform == EERO_DOMAIN:
             _record_eero_entity(inputs, entry)
         if entry.device_id and entry.config_entry_id:
@@ -288,15 +300,17 @@ def _label(value: Any) -> str | None:
     """
     Return *value* as a safe display label, or None.
 
-    Some routers name a client they cannot resolve by its MAC or IP address;
-    the label is passed through the same redaction as a model prompt so an
-    address never rides into the snapshot, the inventory, or a notification
-    inside a name.
+    Some routers name a client they cannot resolve by its MAC or IP address.
+    A label that carries an address is not a name at all: it is dropped
+    rather than tokenized, so the client is shown by manufacturer and
+    pseudonymized key ("device 3fa2c1b0") instead of as "[mac]", and no
+    address rides into the snapshot, the inventory, or a notification.
     """
     text = sanitize_label(value)
     if not text:
         return None
-    return str(redact_network_identifiers(text))
+    redacted = str(redact_network_identifiers(text))
+    return text if redacted == text else None
 
 
 def _ip_value(value: Any) -> str | None:
@@ -318,7 +332,10 @@ def _client_from_tracker(
     client: NetworkClient = {
         "key": context.pseudonymizer.mac_key(mac),
         "connected": entity["state"] == "home",
-        "name": _label(entity.get("friendly_name")),
+        "name": (
+            _label(inputs.tracker_device_names.get(entity["entity_id"]))
+            or _label(entity.get("friendly_name"))
+        ),
         "ip": _ip_value(ip),
         "hostname": _label(attrs.get("host_name") or attrs.get("hostname")),
         "manufacturer": _label(attrs.get("manufacturer") or attrs.get("oui")),

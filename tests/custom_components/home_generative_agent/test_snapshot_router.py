@@ -336,6 +336,7 @@ async def test_collector_indexes_macs_and_eero_entities(hass: HomeAssistant) -> 
     tracked = devices.async_get_or_create(
         config_entry_id=fritz.entry_id,
         connections={(dr.CONNECTION_NETWORK_MAC, "A8:BB:CC:DD:EE:01")},
+        name="Guest phone",
     )
     registry.async_get_or_create(
         "device_tracker", "fritz", "t1", config_entry=fritz, device_id=tracked.id
@@ -378,6 +379,7 @@ async def test_collector_indexes_macs_and_eero_entities(hass: HomeAssistant) -> 
         "public_ip": [("net1", "sensor.eero_net1_public_ip")]
     }
     assert set(inputs.tracker_platforms.values()) == {"fritz"}
+    assert "Guest phone" in inputs.tracker_device_names.values()
 
 
 @pytest.mark.asyncio
@@ -456,16 +458,39 @@ def test_eero_posture_is_judged_across_networks() -> None:
     assert posture["guest_client_count"] == 3
 
 
-def test_labels_that_are_addresses_are_tokenized() -> None:
+def test_labels_that_are_addresses_are_dropped() -> None:
     """A router that names an unresolved client by its address leaks nothing."""
     entities = [
-        _tracker("device_tracker.a", name="a8:bb:cc:dd:ee:01", host_name="192.168.1.9"),
+        _tracker(
+            "device_tracker.a",
+            name="a8:bb:cc:dd:ee:01 (Wireless)",
+            host_name="192.168.1.9",
+            manufacturer=None,
+        ),
     ]
     client = _plain(
         generic_router_tracker_adapter(RouterInputs(), entities, _context()).clients
     )[0]
-    assert client["name"] == "[mac]"
-    assert client["hostname"] == "[lan ip]"
+    # Not "[mac]": no name at all, so the client is shown by its key.
+    assert client["name"] is None
+    assert client["hostname"] is None
+
+
+def test_registry_device_name_beats_the_composed_friendly_name() -> None:
+    """Eero's friendly name repeats the device name; the registry name is clean."""
+    inputs = RouterInputs(
+        tracker_device_names={"device_tracker.laptop": "Nico's laptop (Wireless)"}
+    )
+    entities = [
+        _tracker(
+            "device_tracker.laptop",
+            name="Nico's laptop (Wireless) kro Nico's laptop (Wireless)",
+        )
+    ]
+    client = _plain(
+        generic_router_tracker_adapter(inputs, entities, _context()).clients
+    )[0]
+    assert client["name"] == "Nico's laptop (Wireless)"
 
 
 @pytest.mark.asyncio
