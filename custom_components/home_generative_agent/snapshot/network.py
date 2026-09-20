@@ -425,6 +425,13 @@ def attach_inventory(section: NetworkSnapshot, context: NetworkBuildContext) -> 
     ]
     section["sources"][CAP_NEW_CLIENTS] = "inventory"
     section["capabilities"] = sorted(section["sources"])
+    LOGGER.debug(
+        "Network clients: %d from %s, %d connected, %d new to the inventory.",
+        len(section["clients"]),
+        section["sources"].get(CAP_CLIENTS),
+        sum(1 for c in section["clients"] if c.get("connected")),
+        len(section["new_clients"]),
+    )
 
 
 def empty_network_snapshot(note: str | None = None) -> NetworkSnapshot:
