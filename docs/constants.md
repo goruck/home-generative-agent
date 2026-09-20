@@ -427,6 +427,9 @@ This document covers the named constants that affect integration behaviour, orga
 | `IGD_SEARCH_TARGETS` | `snapshot/upnp.py` | IGD:1, IGD:2 URNs | SSDP search targets whose presence in Home Assistant's discovery cache proves the router accepts UPnP |
 | `EERO_SWITCHES` | `snapshot/router.py` | `upnp, wpa3, guest_network_enabled, ipv6_upstream, ddns_enabled, block_malware, ad_block` → posture keys | eero network-level switch keys (entity unique id `<network id>-<key>`) read as router posture; each posture key gets a `<key>_entity_id` twin |
 | `EERO_SENSORS` | `snapshot/router.py` | `public_ip, connected_guest_clients_count, blocked_day` | eero network-level sensors feeding the public-IP change check, `guest_client_count`, and the `network.threats_day` counter |
+| `NETWORK_ATTRS`, `CLIENT_ATTRS` | `snapshot/eero.py` | allowlists of eero object attributes | The only attributes the eero runtime adapter reads from the integration's network and client objects |
+| `FORBIDDEN_ATTRS` | `snapshot/eero.py` | `password, guest_network_password, thread_master_key, …` | eero object attributes the adapter must never read; asserted disjoint from the allowlists |
+| `EERO_INTEGRATION_VERSION` | `snapshot/eero.py` | `1.8.1` | The eero integration version whose objects the runtime adapter was written against |
 | `COUNTER_CLIENT_COUNT`, `COUNTER_THREATS_DAY` | `snapshot/router.py` | `network.client_count`, `network.threats_day` | Baseline-input counters: connected router clients, and threats the router blocked today |
 | `POSTURE_MEMORY_KEYS` | `snapshot/upnp.py` | `public_ip_key, public_ip_entity_id, upnp_port_mapping_count, upnp_port_mapping_entity_id` | Posture values the Sentinel engine remembers between runs (in the device inventory file) for `network_public_ip_changed` and `network_upnp_port_mapping_added`, each with the sensor it was read from |
 

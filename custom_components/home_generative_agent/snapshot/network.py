@@ -28,7 +28,7 @@ import logging
 import re
 import unicodedata
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from homeassistant.util import dt as dt_util
 
@@ -282,8 +282,24 @@ def merge_adapter_results(results: Iterable[AdapterResult]) -> NetworkSnapshot: 
             sources[ha_cap(key)] = result.name
         if result.clients is not None:
             clients = clients or {}
-            for client in result.clients:
-                clients[client["key"]] = client
+            for incoming in result.clients:
+                merged = incoming
+                earlier = clients.get(incoming["key"])
+                if (
+                    earlier is not None
+                    and not incoming.get("tracker_entity_id")
+                    and earlier.get("tracker_entity_id")
+                ):
+                    # A runtime source knows no entity; keep the tracker the
+                    # entity source found so exclusions and snoozes still work.
+                    merged = cast(
+                        "NetworkClient",
+                        {
+                            **incoming,
+                            "tracker_entity_id": earlier.get("tracker_entity_id"),
+                        },
+                    )
+                clients[merged["key"]] = merged
             sources[CAP_CLIENTS] = result.name
         if result.new_clients is not None:
             new_clients = sorted({*(new_clients or []), *result.new_clients})
@@ -1120,6 +1136,7 @@ async def async_build_network_snapshot(  # noqa: PLR0913
         return empty_network_snapshot("Network audit is disabled in Sentinel options.")
     # Imported here: the radio, UPnP, and router adapters build on this
     # module's helpers.
+    from .eero import collect_eero_runtime_inputs, eero_runtime_adapter  # noqa: PLC0415
     from .radio import collect_radio_inputs, radio_adapters  # noqa: PLC0415
     from .router import async_collect_router_inputs, router_adapters  # noqa: PLC0415
     from .upnp import async_collect_upnp_inputs, upnp_igd_adapter  # noqa: PLC0415
@@ -1137,6 +1154,7 @@ async def async_build_network_snapshot(  # noqa: PLR0913
     )
     upnp_inputs = await async_collect_upnp_inputs(hass)
     router_inputs = async_collect_router_inputs(hass)
+    eero_inputs = collect_eero_runtime_inputs(hass)
     # Router adapters come last: a router's own UPnP switch outranks the
     # IGD inference, and its public-IP sensor the gateway's.
     return merge_adapter_results(
@@ -1144,6 +1162,11 @@ async def async_build_network_snapshot(  # noqa: PLR0913
             ha_native_adapter(inputs, entities, context),
             *radio_adapters(radio_inputs, entities, context.network_inventory),
             upnp_igd_adapter(upnp_inputs, entities, context),
-            *router_adapters(router_inputs, entities, context),
+            *router_adapters(
+                router_inputs,
+                entities,
+                context,
+                eero_runtime=eero_runtime_adapter(eero_inputs, router_inputs, context),
+            ),
         ]
     )
