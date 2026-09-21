@@ -18,6 +18,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
+from custom_components.home_generative_agent.const import (
+    NETWORK_AUDIT_TOOL_DIGEST_COVERAGE_NOTE,
+)
 from custom_components.home_generative_agent.snapshot.network import (
     CAP_CLIENTS,
     CAP_GUEST_CLIENTS,
@@ -341,7 +344,7 @@ def empty_report(status: AuditStatus, now: datetime, note: str) -> NetworkAuditR
 
 def finding_title(finding_type: str, hass: HomeAssistant | None = None) -> str:
     """
-    Return the fixed title of a finding type ("UPnP is on at the router").
+    Return the fixed title of a finding type ("UPnP enabled on router").
 
     The notification label, which is written per rule and never carries a
     name from the home. English when *hass* is None (what a model is given).
@@ -359,7 +362,7 @@ def digest(report: NetworkAuditReport, note: str) -> dict[str, Any]:
     and fixed title, the rule ids that ran, the static reasons others could
     not, the inventory counts, and the static privacy notes. Nothing here is
     copied from the home: no summary, suggested action, entity id, or note
-    (notes carry gateway and discovery names).
+    (notes carry gateway and discovery names; only their number is given).
     """
     payload: dict[str, Any] = {
         "generated_at": report["generated_at"],
@@ -378,6 +381,14 @@ def digest(report: NetworkAuditReport, note: str) -> dict[str, Any]:
         "notes": [note],
         "privacy_notes": list(report["privacy_notes"]),
     }
+    if report["notes"]:
+        # A note is how a check says it ran on incomplete data (an add-on
+        # whose details the Supervisor has not fetched reads as "no exposed
+        # ports"). Without this the digest would say "No findings" flatly.
+        payload["coverage_notes_withheld"] = len(report["notes"])
+        payload["notes"].append(
+            NETWORK_AUDIT_TOOL_DIGEST_COVERAGE_NOTE.format(count=len(report["notes"]))
+        )
     inventory = report.get("inventory")
     if inventory is not None:
         payload["device_inventory"] = {
@@ -404,17 +415,34 @@ def render_report_markdown(
     summary come from the LAN and the notification renders Markdown.
     """
     lines: list[str] = [escape(summarize(report)), ""]
-    for severity in _SEVERITY_HEADINGS:
-        group = [f for f in report["findings"] if f.get("severity") == severity]
+    groups: list[tuple[str, list[dict[str, Any]]]] = [
+        (
+            notif_msg(hass, f"severity_word_{severity}").capitalize(),
+            [f for f in report["findings"] if f.get("severity") == severity],
+        )
+        for severity in _SEVERITY_HEADINGS
+    ]
+    # A severity this renderer does not know must not drop the finding: in
+    # digest mode this notification is the only place its details appear.
+    groups.append(
+        (
+            notif_msg(hass, "audit_report_other"),
+            [
+                f
+                for f in report["findings"]
+                if f.get("severity") not in _SEVERITY_HEADINGS
+            ],
+        )
+    )
+    for heading, group in groups:
         if not group:
             continue
-        word = notif_msg(hass, f"severity_word_{severity}")
-        lines.append(f"**{word.capitalize()}**")
+        lines.append(f"**{heading}**")
         for finding in group:
             title = escape(finding_title(str(finding["type"]), hass))
-            lines.append(f"- **{title}.** {escape(str(finding['summary']))}")
+            lines.append(f"- **{title}.** {escape(_one_line(finding['summary']))}")
             lines.extend(
-                f"  - {escape(str(action))}"
+                f"  - {escape(_one_line(action))}"
                 for action in finding.get("suggested_actions") or []
             )
         lines.append("")
@@ -425,12 +453,26 @@ def render_report_markdown(
             for rule_id, reason in report["checks_not_run"].items()
         )
         lines.append("")
-    lines.extend(escape(str(note)) for note in report["notes"])
-    text = "\n".join(lines).strip()
-    if len(text) > max_chars:
-        tail = "\n\n… truncated; run the run_network_audit service for the rest."
-        text = text[: max_chars - len(tail)].rstrip() + tail
-    return text
+    if report["notes"]:
+        lines.append(f"**{notif_msg(hass, 'audit_report_notes')}**")
+        lines.extend(f"- {escape(_one_line(note))}" for note in report["notes"])
+    tail = f"… {notif_msg(hass, 'audit_report_truncated')}"
+    kept: list[str] = []
+    used = 0
+    for index, line in enumerate(lines):
+        # Cut between lines, never inside one: a slice could split ``**`` or
+        # separate a backslash from the character it escapes.
+        if used + len(line) + 1 > max_chars - len(tail) - 2 and index:
+            kept.extend(["", tail])
+            break
+        kept.append(line)
+        used += len(line) + 1
+    return "\n".join(kept).strip()[:max_chars]
+
+
+def _one_line(value: Any) -> str:
+    """Collapse whitespace so text from the LAN cannot open a new Markdown block."""
+    return " ".join(str(value).split())
 
 
 def summarize(report: NetworkAuditReport) -> str:

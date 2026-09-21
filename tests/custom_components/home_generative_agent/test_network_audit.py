@@ -20,7 +20,9 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_NETWORK_ENABLED,
     CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS,
     NETWORK_AUDIT_REPORT_NOTIFICATION_ID,
+    NETWORK_AUDIT_TOOL_DIGEST_COVERAGE_NOTE,
     NETWORK_AUDIT_TOOL_DIGEST_NOTE,
+    NETWORK_AUDIT_TOOL_DIGEST_NOTE_NOT_ADMIN,
     NETWORK_AUDIT_TOOL_DIGEST_NOTE_UNDELIVERED,
     NETWORK_AUDIT_TOOL_LABEL_NOTE,
     NETWORK_AUDIT_TOOL_MAX_ENTITIES,
@@ -32,6 +34,7 @@ from custom_components.home_generative_agent.sentinel.network_audit import (
     PRIVACY_NOTES,
     build_report,
     capability_reason,
+    digest,
     empty_report,
     finding_title,
     render_report_markdown,
@@ -596,7 +599,10 @@ async def test_tool_caps_what_reaches_the_model_and_labels_names_as_data() -> No
     async def _audit() -> Any:
         return report
 
-    text = await _run_tool(_tool_config(SimpleNamespace(async_audit_network=_audit)))
+    sentinel = SimpleNamespace(
+        async_audit_network=_audit, network_audit_share_details=True
+    )
+    text = await _run_tool(_tool_config(sentinel))
     payload = yaml.safe_load(text)
     rendered = payload["findings"][0]
     assert len(rendered["summary"]) == NETWORK_AUDIT_TOOL_MAX_SUMMARY_CHARS
@@ -673,7 +679,13 @@ async def test_tool_adds_device_inventory_counts_but_no_names() -> None:
         return report
 
     payload = yaml.safe_load(
-        await _run_tool(_tool_config(SimpleNamespace(async_audit_network=_audit)))
+        await _run_tool(
+            _tool_config(
+                SimpleNamespace(
+                    async_audit_network=_audit, network_audit_share_details=True
+                )
+            )
+        )
     )
     assert payload["device_inventory"] == {"trusted": 10, "untrusted": 1}
 
@@ -697,12 +709,15 @@ class _FakeServices:
         self.calls.append((domain, service, data))
 
 
-def _digest_config(sentinel: Any, services: _FakeServices | None) -> Any:
+def _digest_config(
+    sentinel: Any, services: _FakeServices | None, *, admin: bool = True
+) -> Any:
     hass = SimpleNamespace(services=services) if services is not None else None
     return {
         "configurable": {
             "hga_runtime_data": SimpleNamespace(sentinel=sentinel),
             "hass": hass,
+            "requester_is_admin": admin,
         }
     }
 
@@ -752,6 +767,84 @@ async def test_digest_mode_gives_the_model_nothing_copied_from_the_home(
     assert "Terminal & SSH" in data["message"].replace("\\", "")
     assert "**High**" in data["message"]
     assert "Checks that could not run" in data["message"]
+
+
+@pytest.mark.asyncio
+async def test_digest_mode_posts_the_report_only_for_an_administrator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Persistent notifications reach every signed-in user, and a guest at a
+    # voice satellite must not be able to publish or overwrite the report.
+    engine, _, _, _ = _engine(
+        monkeypatch,
+        _snapshot(_LEAKY_SNAPSHOT_FIELDS),
+        options={CONF_SENTINEL_NETWORK_AUDIT_SHARE_DETAILS: False},
+    )
+    services = _FakeServices()
+    config = _digest_config(engine, services, admin=False)
+    payload = yaml.safe_load(await _run_tool(config))
+    assert services.calls == []
+    assert payload["notes"][0] == NETWORK_AUDIT_TOOL_DIGEST_NOTE_NOT_ADMIN
+    assert payload["details"] == "withheld"
+    # No identity at all (the key missing) is not an administrator either.
+    del config["configurable"]["requester_is_admin"]
+    await _run_tool(config)
+    assert services.calls == []
+
+
+@pytest.mark.asyncio
+async def test_the_privacy_gate_fails_closed() -> None:
+    # A sentinel object that cannot say details may be shared gets the digest.
+    finding = make_finding(
+        "ha_addon_unprotected",
+        severity="high",
+        evidence={"addons": ["ssh"]},
+        summary="Terminal & SSH runs unprotected.",
+        suggested_actions=["Turn protection mode on"],
+    )
+
+    async def _audit() -> Any:
+        return build_report(
+            now=NOW,
+            findings=[finding],
+            checks_run=["ha_addon_unprotected"],
+            inactive_rules={},
+            capabilities=[],
+        )
+
+    for sentinel in (
+        SimpleNamespace(async_audit_network=_audit),
+        SimpleNamespace(async_audit_network=_audit, network_audit_share_details="yes"),
+    ):
+        text = await _run_tool(_digest_config(sentinel, _FakeServices()))
+        assert yaml.safe_load(text)["details"] == "withheld"
+        assert "Terminal" not in text
+
+
+def test_digest_counts_coverage_notes_without_repeating_them() -> None:
+    # A check that ran on incomplete data says so in a note; the note names
+    # things from the home, so the model is told how many there are, and not
+    # to call the home fully checked.
+    report = build_report(
+        now=NOW,
+        findings=[],
+        checks_run=["ha_addon_unprotected", "ha_addon_exposed_port"],
+        inactive_rules={},
+        capabilities=[],
+        notes=["Add-on 'Secret Vault' details were not fetched; not audited."],
+    )
+    payload = digest(report, NETWORK_AUDIT_TOOL_DIGEST_NOTE)
+    assert payload["summary"].startswith("No findings")
+    assert payload["coverage_notes_withheld"] == 1
+    assert payload["notes"] == [
+        NETWORK_AUDIT_TOOL_DIGEST_NOTE,
+        NETWORK_AUDIT_TOOL_DIGEST_COVERAGE_NOTE.format(count=1),
+    ]
+    assert "Secret Vault" not in yaml.dump(payload)
+    clean = build_report(
+        now=NOW, findings=[], checks_run=["a"], inactive_rules={}, capabilities=[]
+    )
+    assert "coverage_notes_withheld" not in digest(clean, "n")
 
 
 @pytest.mark.asyncio
@@ -815,10 +908,37 @@ def test_report_markdown_escapes_names_from_the_lan_and_is_capped() -> None:
     assert "\\<b\\>cam\\</b\\>" in text
     assert "Gateway \\*Evil\\* seen" in text
     assert "  - Configure or ignore it" in text
+    assert "**Notes**\n- Gateway" in text
     # The chrome follows Home Assistant's language; the facts stay as written.
     czech = SimpleNamespace(config=SimpleNamespace(language="cs"))
     text_cs = render_report_markdown(report, cast("Any", czech), escape_markdown, 12000)
     assert "**Nízká**" in text_cs
+    # Cut between lines, so no bold or escape pair is left half open.
     short = render_report_markdown(report, None, escape_markdown, 120)
     assert len(short) <= 120
     assert short.endswith("run the run_network_audit service for the rest.")
+    assert short.count("**") % 2 == 0
+    assert "[click" not in short
+
+
+def test_report_markdown_keeps_a_finding_whose_severity_it_does_not_know() -> None:
+    report = build_report(
+        now=NOW,
+        findings=[
+            make_finding(
+                "ha_failed_logins",
+                severity=cast("Any", "critical"),
+                evidence={},
+                summary="Someone failed to log in.",
+                suggested_actions=[],
+            )
+        ],
+        checks_run=["ha_failed_logins"],
+        inactive_rules={},
+        capabilities=[],
+        notes=["Gateway seen\n# Not a heading"],
+    )
+    text = render_report_markdown(report, None, escape_markdown, 12000)
+    assert "**Other**\n- **Failed login attempts.** Someone failed to log in." in text
+    # Text from the home cannot open a new Markdown block.
+    assert "- Gateway seen # Not a heading" in text

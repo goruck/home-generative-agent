@@ -1086,12 +1086,29 @@ NETWORK_AUDIT_TOOL_DIGEST_NOTE = (
     "tell the user the full report, with names and what to do, is in their "
     "Home Assistant notifications. Do not guess at the details."
 )
+# The asker is not a signed-in administrator (a voice satellite, a household
+# account): nothing is posted, so a guest cannot publish or overwrite the report.
+NETWORK_AUDIT_TOOL_DIGEST_NOTE_NOT_ADMIN = (
+    "Details are withheld from this conversation by the owner's privacy "
+    "setting, and the full report is only posted for an administrator. "
+    "Report the counts and each finding's severity and title, and say that "
+    "an administrator can get the details by asking from the Home Assistant "
+    "app or by running the run_network_audit service. Do not guess at the "
+    "details."
+)
 NETWORK_AUDIT_TOOL_DIGEST_NOTE_UNDELIVERED = (
     "Details are withheld from this conversation by the owner's privacy "
     "setting, and the full report could not be posted to Home Assistant's "
     "notifications. Report the counts and each finding's severity and title, "
     "and tell the user to run the run_network_audit service for the details. "
     "Do not guess at the details."
+)
+# Added to the digest when the report carries notes (a fact that could not
+# be read, clients a source does not cover): the note text names things from
+# the home, so only their number reaches the model.
+NETWORK_AUDIT_TOOL_DIGEST_COVERAGE_NOTE = (
+    "{count} note(s) in the full report say that some checks ran on "
+    "incomplete data. Do not describe the home as fully checked."
 )
 NETWORK_AUDIT_REPORT_NOTIFICATION_ID = "hga_network_audit_report"
 # Ceiling for the notification body; the service response stays uncapped.

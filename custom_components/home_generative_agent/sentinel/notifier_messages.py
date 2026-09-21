@@ -104,6 +104,11 @@ _MESSAGES: dict[str, dict[str, str]] = {
         ),
         "audit_report_title": "Security audit report",
         "audit_report_not_run": "Checks that could not run",
+        "audit_report_notes": "Notes",
+        "audit_report_other": "Other",
+        "audit_report_truncated": (
+            "truncated; run the run_network_audit service for the rest."
+        ),
         "severity_word_high": "high",
         "severity_word_medium": "medium",
         "severity_word_low": "low",
@@ -191,6 +196,11 @@ _MESSAGES: dict[str, dict[str, str]] = {
         ),
         "audit_report_title": "Zpráva z bezpečnostního auditu",
         "audit_report_not_run": "Kontroly, které nebylo možné provést",
+        "audit_report_notes": "Poznámky",
+        "audit_report_other": "Ostatní",
+        "audit_report_truncated": (
+            "zkráceno; zbytek získáte službou run_network_audit."
+        ),
         "severity_word_high": "vysoká",
         "severity_word_medium": "střední",
         "severity_word_low": "nízká",

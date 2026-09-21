@@ -1432,12 +1432,15 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
 
         # Resolve user name (None means automation)
         user_name = None
+        # A voice satellite or an automation carries no user: not an admin.
+        requester_is_admin = False
         if (
             user_input.context
             and user_input.context.user_id
             and (user := await hass.auth.async_get_user(user_input.context.user_id))
         ):
             user_name = user.name
+            requester_is_admin = bool(user.is_admin)
 
         prompt, volatile_prompt = self._async_render_system_prompt(
             llm_context, user_name, llm_api, has_tools=bool(tools)
@@ -1482,6 +1485,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             "configurable": {
                 "thread_id": conversation_id,
                 "user_id": clean_user_name,
+                "requester_is_admin": requester_is_admin,
                 "chat_model": base_llm,
                 "chat_model_options": runtime_data.chat_model_options,
                 "prompt": prompt,

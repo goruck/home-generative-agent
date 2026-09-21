@@ -783,6 +783,17 @@ validation.
 **Effort:** M
 **Priority:** P3
 
+### Audit details already in a conversation survive turning sharing off
+
+**What:** `sentinel_network_audit_share_details` governs what `audit_home_security` returns from the moment it is off. A thread that already holds a detailed tool result (checkpointed in PostgreSQL) keeps re-sending it, and the assistant's own paraphrase of it, to the chat model on every turn (`agent/graph.py` restores the messages; trimming is by token count only), including to a newly selected cloud provider. Documented in `docs/sentinel.md` and the CHANGELOG as "start a new conversation".
+
+**Why:** Replacing only the old tool messages would leave the assistant's paraphrases, which carry the same names, so a partial scrub would promise more than it delivers. Surfaced by both the Codex and Claude passes on the digest PR.
+
+**How to apply:** Either end the thread at the privacy transition (bump a per-entry "privacy epoch" that the conversation id is derived from, so old checkpoints are never restored), or tag turns that followed a detailed audit and drop the whole span when the option is off.
+
+**Effort:** M
+**Priority:** P3
+
 ### Radio checks the pinned Home Assistant version cannot observe
 
 **What:** Two radio checks from step 6 are weaker than the plan wanted. ZHA permit-join is not readable at all (zigpy 2.1.0's `ControllerApplication.permit()` keeps no record of the join window, and the frontend's `zha/devices/permit` websocket command fires no event), so `zigbee_permit_join_open` covers Zigbee2MQTT only. `zwave_inclusion_active` is poll-only because the Z-Wave JS integration exposes no inclusion entity, so a window shorter than the detection interval is usually missed.

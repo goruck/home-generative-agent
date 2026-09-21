@@ -60,6 +60,7 @@ from ..const import (  # noqa: TID252
     NETWORK_AUDIT_REPORT_MAX_CHARS,
     NETWORK_AUDIT_REPORT_NOTIFICATION_ID,
     NETWORK_AUDIT_TOOL_DIGEST_NOTE,
+    NETWORK_AUDIT_TOOL_DIGEST_NOTE_NOT_ADMIN,
     NETWORK_AUDIT_TOOL_DIGEST_NOTE_UNDELIVERED,
     NETWORK_AUDIT_TOOL_LABEL_NOTE,
     NETWORK_AUDIT_TOOL_MAX_ENTITIES,
@@ -1597,6 +1598,9 @@ async def _post_network_audit_report(hass: Any, report: NetworkAuditReport) -> b
     One fixed notification id, so a repeated audit replaces the previous
     report instead of stacking. The text is for the owner, so it is neither
     redacted nor clipped per finding, only Markdown-escaped and capped.
+    Persistent notifications are visible to every signed-in Home Assistant
+    user, exactly like the alerts Sentinel already posts there with the same
+    names; the caller posts only when an administrator asked.
     """
     if hass is None:
         return False
@@ -1656,17 +1660,19 @@ async def audit_home_security(
     if report["status"] != "ok":
         # The engine owns the wording for both "disabled" and "unavailable".
         return "The security audit could not run: " + "; ".join(report["notes"])
-    if not getattr(sentinel, "network_audit_share_details", True):
+    # Fails closed: a sentinel object that cannot say details may be shared
+    # (a wrapper, a renamed property) gets the digest, never the details.
+    if getattr(sentinel, "network_audit_share_details", False) is not True:
         # The owner keeps audit details out of the conversation: the model
-        # gets a deterministic digest, the owner gets the report itself.
-        delivered = await _post_network_audit_report(configurable.get("hass"), report)
+        # gets a deterministic digest, an administrator gets the report.
+        if configurable.get("requester_is_admin") is not True:
+            note = NETWORK_AUDIT_TOOL_DIGEST_NOTE_NOT_ADMIN
+        elif await _post_network_audit_report(configurable.get("hass"), report):
+            note = NETWORK_AUDIT_TOOL_DIGEST_NOTE
+        else:
+            note = NETWORK_AUDIT_TOOL_DIGEST_NOTE_UNDELIVERED
         return yaml.dump(
-            network_audit_digest(
-                report,
-                NETWORK_AUDIT_TOOL_DIGEST_NOTE
-                if delivered
-                else NETWORK_AUDIT_TOOL_DIGEST_NOTE_UNDELIVERED,
-            ),
+            network_audit_digest(report, note),
             default_flow_style=False,
             allow_unicode=True,
             sort_keys=False,
