@@ -55,11 +55,15 @@ def describe_client(client: Mapping[str, Any]) -> str:
     The DHCP hostname is never used here: the summary reaches the audit
     tool's model, and a hostname in free text cannot be redacted.
     """
-    name = client.get("name") or client_display_name(client)
+    name = client.get("name")
+    # A client without a name is called by manufacturer and key, so the
+    # details must not say the manufacturer a second time.
+    manufacturer = client.get("manufacturer") if name else None
+    name = name or client_display_name(client)
     details = [
         part
         for part in (
-            client.get("manufacturer"),
+            manufacturer,
             client.get("connection_type"),
             "guest Wi-Fi" if client.get("is_guest") is True else None,
             client.get("ip"),

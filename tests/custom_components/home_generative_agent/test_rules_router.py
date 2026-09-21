@@ -200,5 +200,11 @@ def test_describe_client_never_uses_the_hostname() -> None:
     assert describe_client({"hostname": "Johns-MacBook", "key": "3fa2c1b0"}) == (
         "device 3fa2c1b0"
     )
-    assert describe_client({"manufacturer": "Acme", "key": "k"}) == "Acme k (Acme)"
+    # The fallback name carries the manufacturer, so the details do not repeat
+    # it (seen in the field as "Amazon ... d6c1971e (Amazon ..., wireless)").
+    assert describe_client({"manufacturer": "Acme", "key": "k"}) == "Acme k"
+    assert (
+        describe_client({"name": "TV", "manufacturer": "Acme", "key": "k"})
+        == "TV (Acme)"
+    )
     assert describe_client({"name": "TV", "ip": "10.0.0.2"}) == "TV (10.0.0.2)"

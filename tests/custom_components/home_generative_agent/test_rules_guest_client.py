@@ -269,6 +269,7 @@ def test_no_dhcp_hostname_or_key_leaks_into_the_summary() -> None:
     finding = _only(NetworkGuestClientPresentRule().evaluate(_snapshot([client])))
     assert "Annas" not in finding.evidence["summary"]
     assert "Apple a" in finding.evidence["summary"]
+    assert finding.evidence["names"] == ["Apple a (wireless, guest Wi-Fi)"]
 
 
 def test_unknown_device_copy_names_the_guest_network() -> None:
